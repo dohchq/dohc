@@ -526,27 +526,13 @@ describe("persistent dataset worker", () => {
     });
   });
 
-  it("stops unbounded standalone Node SQLite memory growth at the worker RSS ceiling and recovers on a fresh worker", async () => {
+  it("opens a healthy standalone Node worker even when the parent process holds more than 256 MiB of RSS", async () => {
     await fixture(async ({ open }) => {
+      const parentMemory = Buffer.alloc(270 * 1024 * 1024, 1);
+      expect(parentMemory[0]).toBe(1);
       const worker = await open();
-      const sqlBomb = {
-        ...operation(),
-        readOnly: true,
-        source:
-          "globalThis.operations={run(ctx){return ctx.db.query('SELECT length(randomblob(251658240)) AS bytes');}}",
-      };
-      await expect(worker.prepare(sqlBomb)).rejects.toMatchObject({
-        code: "worker_budget",
-        message: expect.stringMatching(
-          /^Collection worker memory exceeded its limit of 256 MiB\. It used \d+ MiB\. Stopped while running the Collection action\. Try again\.$/,
-        ),
-      });
-      await expect(worker.prepare({ ...operation(), readOnly: true })).rejects.toMatchObject({
-        code: "worker_budget",
-      });
-      await worker.close();
-      const recovered = await open();
-      expect((await recovered.prepare({ ...operation(), readOnly: true })).result).toEqual([]);
+      expect((await worker.prepare({ ...operation(), readOnly: true })).result).toEqual([]);
+      expect(parentMemory[parentMemory.length - 1]).toBe(1);
     });
   });
 

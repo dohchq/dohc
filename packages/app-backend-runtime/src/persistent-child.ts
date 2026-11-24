@@ -4,6 +4,7 @@ import {
   lstatSync,
   openSync,
   closeSync,
+  readFileSync,
   statSync,
   unlinkSync,
 } from "node:fs";
@@ -46,6 +47,7 @@ import {
   disarmBudget,
   memoryBudgetMarkerName,
   MEMORY_BUDGET_MARKER_PREFIX,
+  processPeakMemoryBytes,
   sqliteEnforcesHardHeapLimit,
   watchBudget,
 } from "./budget-watch.js";
@@ -137,14 +139,16 @@ const [APP_CODE, DATASET_CHECK] = [1n, 2n];
 let workerMemoryLimitBytes = 0n;
 const budgetWatchSource = `
 const {workerData}=require("node:worker_threads");
+const {readFileSync}=require("node:fs");
 const {writeFile}=require("node:fs/promises");
 const {join}=require("node:path");
 const CPU_BUDGET_MARKER_PREFIX=${JSON.stringify(CPU_BUDGET_MARKER_PREFIX)};
 const MEMORY_BUDGET_MARKER_PREFIX=${JSON.stringify(MEMORY_BUDGET_MARKER_PREFIX)};
 const budgetMarkerName=(${budgetMarkerName.toString()});
 const memoryBudgetMarkerName=(${memoryBudgetMarkerName.toString()});
+const processPeakMemoryBytes=(${processPeakMemoryBytes.toString()});
 (${watchBudget.toString()})(new BigInt64Array(workerData.state),()=>{const used=process.cpuUsage();return BigInt(used.user+used.system);},
-  ()=>BigInt(Math.max(process.memoryUsage.rss(),process.resourceUsage().maxRSS*1024)),
+  ()=>processPeakMemoryBytes(process.platform,()=>process.memoryUsage.rss(),()=>process.resourceUsage().maxRSS,()=>readFileSync("/proc/self/status","utf8")),
   (exceeded)=>writeFile(join(workerData.directory,exceeded.resource==="cpu"?budgetMarkerName(exceeded.kind,exceeded.budgetMs):memoryBudgetMarkerName(exceeded.limitBytes,exceeded.usedBytes)),"",{flag:"wx"}),()=>process.kill(process.pid,"SIGKILL"),25,250);`;
 let budgetWatch: Worker | undefined;
 let exiting = false;
@@ -156,7 +160,12 @@ const cpuMicros = () => {
   return BigInt(used.user + used.system);
 };
 const peakMemoryBytes = () =>
-  BigInt(Math.max(process.memoryUsage.rss(), process.resourceUsage().maxRSS * 1024));
+  processPeakMemoryBytes(
+    process.platform,
+    () => process.memoryUsage.rss(),
+    () => process.resourceUsage().maxRSS,
+    () => readFileSync("/proc/self/status", "utf8"),
+  );
 function startBudgetWatch(): void {
   if (budgetWatch) return;
   budgetWatch = new Worker(budgetWatchSource, {
@@ -540,7 +549,7 @@ async function handle(command: PersistentCommand): Promise<PersistentResult> {
         typeof value === "number" ? datasetNumberText(value) : null,
       );
       copy.exec(
-        "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; PRAGMA hard_heap_limit=67108864; PRAGMA foreign_keys=OFF;",
+        "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; PRAGMA foreign_keys=OFF;",
       );
       const pageSize = Number(copy.prepare("PRAGMA page_size").get()!.page_size);
       copy.exec(`PRAGMA max_page_count=${Math.floor(config.limits.databaseBytes / pageSize)}`);

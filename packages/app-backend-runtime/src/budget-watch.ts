@@ -58,6 +58,31 @@ export function parseBudgetMarkerName(name: string): BudgetMarker | undefined {
 export function sqliteEnforcesHardHeapLimit(compileOptions: readonly string[]): boolean {
   return !compileOptions.includes("DEFAULT_MEMSTATUS=0");
 }
+// On Linux, getrusage().ru_maxrss inherits the forked parent's high-water mark across execve.
+// /proc/self/status VmHWM belongs to the child's post-exec address space.
+// Sent to the watch thread as source text, so it uses only its parameters and globals.
+export function processPeakMemoryBytes(
+  platform: NodeJS.Platform,
+  rssBytes: () => number,
+  maxRssKiB: () => number,
+  readProcStatus: () => string,
+): bigint {
+  const rss = BigInt(rssBytes());
+  if (platform === "linux") {
+    try {
+      const match = /^VmHWM:\s+(\d+)\s+kB$/m.exec(readProcStatus());
+      if (match) {
+        const hwm = BigInt(match[1]!) * 1024n;
+        return hwm > rss ? hwm : rss;
+      }
+    } catch {
+      return rss;
+    }
+    return rss;
+  }
+  const maxRss = BigInt(maxRssKiB()) * 1024n;
+  return maxRss > rss ? maxRss : rss;
+}
 
 /** Starts a budgeted step and returns its section. */
 export function armBudget(

@@ -6,6 +6,7 @@ import {
   disarmBudget,
   memoryBudgetMarkerName,
   parseBudgetMarkerName,
+  processPeakMemoryBytes,
   sqliteEnforcesHardHeapLimit,
   watchBudget,
 } from "./budget-watch.ts";
@@ -43,6 +44,46 @@ it.each([
 it("detects whether SQLite compile options enforce hard_heap_limit", () => {
   expect(sqliteEnforcesHardHeapLimit(["THREADSAFE=1", "DEFAULT_MEMSTATUS=0"])).toBe(false);
   expect(sqliteEnforcesHardHeapLimit(["THREADSAFE=1", "ENABLE_SESSION"])).toBe(true);
+});
+
+it("uses /proc/self/status VmHWM on Linux instead of inherited parent maxRSS", () => {
+  const pollutedParentMaxRssKiB = 350_000;
+  expect(
+    processPeakMemoryBytes(
+      "linux",
+      () => 42 * 1024 * 1024,
+      () => pollutedParentMaxRssKiB,
+      () => "Name:\tnode\nVmHWM:\t   48000 kB\nVmRSS:\t   43008 kB\n",
+    ),
+  ).toBe(48_000n * 1024n);
+  expect(
+    processPeakMemoryBytes(
+      "linux",
+      () => 60 * 1024 * 1024,
+      () => pollutedParentMaxRssKiB,
+      () => "VmHWM:\t   48000 kB\n",
+    ),
+  ).toBe(60n * 1024n * 1024n);
+  expect(
+    processPeakMemoryBytes(
+      "linux",
+      () => 42 * 1024 * 1024,
+      () => pollutedParentMaxRssKiB,
+      () => {
+        throw new Error("EACCES");
+      },
+    ),
+  ).toBe(42n * 1024n * 1024n);
+  expect(
+    processPeakMemoryBytes(
+      "win32",
+      () => 42 * 1024 * 1024,
+      () => 120_000,
+      () => {
+        throw new Error("should not read procfs");
+      },
+    ),
+  ).toBe(120_000n * 1024n);
 });
 
 it("arms the kill guard before a stalled marker create and ends the step within its grace period", () => {
@@ -123,32 +164,36 @@ it("condemns a budgeted step when worker memory crosses its limit and leaves una
   const used = 300n * 1024n * 1024n;
   const reasons: string[] = [];
   let killed = false;
+  vi.useFakeTimers();
   const stop = watchBudget(
     state,
     () => 100n,
     () => used,
-    async (exceeded) => {
+    (exceeded) => {
       reasons.push(
         exceeded.resource === "memory"
           ? memoryBudgetMarkerName(exceeded.limitBytes, exceeded.usedBytes)
           : budgetMarkerName(exceeded.kind, exceeded.budgetMs),
       );
+      return Promise.resolve();
     },
     () => {
       killed = true;
     },
-    1,
+    25,
     60_000,
   );
   try {
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await vi.advanceTimersByTimeAsync(100);
     expect(killed).toBe(false);
     const section = armBudget(state, 1n, 0n, 5_000_000n, limit);
     expect(disarmBudget(state, section, 100n, used)).toBe(false);
-    await vi.waitFor(() => expect(killed).toBe(true), { timeout: 10_000 });
+    await vi.advanceTimersByTimeAsync(25);
+    expect(killed).toBe(true);
     expect(reasons).toEqual([memoryBudgetMarkerName(Number(limit), Number(used))]);
   } finally {
     stop();
+    vi.useRealTimers();
   }
 });
 
