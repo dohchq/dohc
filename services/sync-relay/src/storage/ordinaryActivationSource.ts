@@ -88,7 +88,7 @@ function currentCut(storage: StorageContext, source: NativeOwnerActivationSource
  * Accepts a validated capture in the transaction that registers it. The capture stands when the relay's cursor, epoch
  * and stream are the ones it was taken at, and the row at its base position began this lineage, as its base state or
  * as the conflict resolve that installed it, at the capture's origin coordinates, with the baseline's bytes. That row
- * may name a path the note has since left; registration checks that the note is now at the capture's path.
+ * may name a path the note has since left; registration checks where the note is now.
  * Anything else refuses it, so the transaction never registers evidence for another cut.
  */
 export function verifyOrdinaryActivationCut(
