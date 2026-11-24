@@ -1007,7 +1007,8 @@ describe("prefetching pages", () => {
     );
   });
 
-  it("drops a prefetched page's text when a change touches it before a screen opens it", async () => {
+  it("keeps a prefetched page's text, stale, through a change, and none as its last if no screen showed it before it went", async () => {
+    const gone = ops({ ok: false, reason: "dohc: No document.", refusal: "missing" }, "0.2.1");
     const reread = deferred<Answer>();
     const server = serve("ws-prefetch-changed", page("Old text"), () => reread.promise);
     const change = deferred<Answer>();
@@ -1017,14 +1018,57 @@ describe("prefetching pages", () => {
     data.prefetchPages(["a.md"]);
     await vi.waitFor(() => expect(data.state(views.page("a.md")).value).not.toBeNull());
     change.resolve(feed({ cursor: "0.2.1", changed: { files: ["object-a"] } }));
-    await vi.waitFor(() => expect(data.state(views.page("a.md")).value).toBeNull());
+    await vi.waitFor(() => expect(count(server, feedPath("ws-prefetch-changed", "0.2.1"))).toBe(1));
+    expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "Old text" });
 
     data.subscribe(views.page("a.md"), () => {});
-    expect(data.state(views.page("a.md"))).toMatchObject({ value: null, loading: true });
-    reread.resolve(page("New text"));
+    expect(data.state(views.page("a.md"))).toMatchObject({
+      value: { kind: "page", markdown: "Old text" },
+      loading: true,
+    });
+    reread.resolve(gone);
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({ kind: "missing" }),
+    );
+  });
+
+  it("keeps a page's last text once a screen's own read of it has landed", async () => {
+    const gone = ops({ ok: false, reason: "dohc: No document.", refusal: "missing" }, "0.2.1");
+    const server = serve("ws-prefetch-reread", page("Old text"), page("New text"), gone);
+    const change = deferred<Answer>();
+    server.on("GET", feedPath("ws-prefetch-reread", "0.1.1"), () => change.promise);
+    server.on("GET", feedPath("ws-prefetch-reread", "0.2.1"), held);
+    const { data } = open(server, "ws-prefetch-reread");
+    data.prefetchPages(["a.md"]);
+    await vi.waitFor(() => expect(data.state(views.page("a.md")).value).not.toBeNull());
+    change.resolve(feed({ cursor: "0.2.1", changed: { files: ["object-a"] } }));
+    await vi.waitFor(() => expect(count(server, feedPath("ws-prefetch-reread", "0.2.1"))).toBe(1));
+    data.subscribe(views.page("a.md"), () => {});
     await vi.waitFor(() =>
       expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "New text" }),
     );
+    data.retry(views.page("a.md"));
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({ kind: "missing", last: "New text" }),
+    );
+  });
+
+  it("keeps ten prefetched pages through a file change, and reads none of them again until opened", async () => {
+    const server = serve("ws-prefetch-ten", page("Read ahead"));
+    const change = deferred<Answer>();
+    server.on("GET", feedPath("ws-prefetch-ten", "0.1.1"), () => change.promise);
+    server.on("GET", feedPath("ws-prefetch-ten", "0.2.1"), held);
+    const { data } = open(server, "ws-prefetch-ten");
+    data.prefetchPages(paths(PREFETCH_MAX));
+    await vi.waitFor(() => expect(reads(server)).toBe(PREFETCH_MAX));
+    await settled();
+    change.resolve(feed({ cursor: "0.2.1", changed: { files: ["object-z"] } }));
+    await vi.waitFor(() => expect(count(server, feedPath("ws-prefetch-ten", "0.2.1"))).toBe(1));
+    data.prefetchPages(paths(PREFETCH_MAX));
+    await settled();
+    expect(reads(server)).toBe(PREFETCH_MAX);
+    for (const path of paths(PREFETCH_MAX))
+      expect(data.state(views.page(path)).value).toEqual({ kind: "page", markdown: "Read ahead" });
   });
 
   it("reads a page once when Home lists it again while it's queued or reading", async () => {
@@ -1035,9 +1079,14 @@ describe("prefetching pages", () => {
       return answer.promise;
     });
     const { data } = open(server, "ws-prefetch-twice");
-    data.prefetchPages(["a.md"]);
+    data.prefetchPages(["a.md", "b.md"]);
     await settled();
     data.prefetchPages(["a.md", "b.md", "c.md"]);
+    waiting.shift()!.resolve({
+      status: 503,
+      body: { ok: false, error: "busy", code: "server_busy" },
+    });
+    await settled();
     while (waiting.length > 0) {
       waiting.shift()!.resolve(page("Read ahead"));
       await settled();

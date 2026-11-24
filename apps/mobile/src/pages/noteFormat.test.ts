@@ -205,7 +205,7 @@ describe("a newer read of the page", () => {
     expect(hoisted.copied).toEqual(["Packing list and passports\n"]);
   });
 
-  it("binds no editor to a newer read in format 2, and tells the app", () => {
+  it("binds no editor to a newer read in format 2, leaves no copy or edit bound, and tells the app", () => {
     hoisted.readDoc = note(1);
     mountDocument(page);
     hoisted.readDoc = note(2);
@@ -213,5 +213,7 @@ describe("a newer read of the page", () => {
     expect(hoisted.mounted).toHaveLength(1);
     expect(hoisted.mounted[0]?.destroy).toHaveBeenCalledOnce();
     expect(hoisted.posted).toContain("unsupportedFormat");
+    expect(app().__dohcCopyMarkdown).toBeUndefined();
+    expect(app().__dohcSetEditable).toBeUndefined();
   });
 });

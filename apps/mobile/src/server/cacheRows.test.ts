@@ -420,7 +420,8 @@ describe("a relaunch", () => {
       status: 200,
       body: { ok: true, cursor: "0.7.1", changed: { files: ["object-a"] } },
     });
-    await vi.waitFor(() => expect(before.state(views.page("a.md")).value).toBeNull());
+    const scope = cacheScope(signInTo(server), "ws-a");
+    await vi.waitFor(() => expect(first.cache.get(scope, "page:a.md")?.stale).toBe(true));
     await first.files.flush();
     before.stop();
 
@@ -431,6 +432,39 @@ describe("a relaunch", () => {
     reread.resolve(ops({ ok: true, path: "a.md", markdown: "# New" }, "0.7.1"));
     await vi.waitFor(() =>
       expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "# New" }),
+    );
+  });
+
+  it("keeps a prefetched page's text as its last once the relaunch shows it on an open screen", async () => {
+    const server = serverWithA();
+    server.on(
+      "POST",
+      "/sync/ws-a/ops/documentRead",
+      ops({ ok: true, path: "a.md", markdown: "# A" }, "0.6.2"),
+      ops({ ok: false, reason: "dohc: No document at a.md.", refusal: "missing" }, "0.6.2"),
+    );
+    server.on("GET", feedPath("ws-a", "0.6.2"), held);
+    const disk = keptDisk();
+    const first = launch(disk);
+    const before = open(server, first.cache);
+    before.prefetchPages(["a.md"]);
+    await vi.waitFor(() => expect(before.state(views.page("a.md")).value).not.toBeNull());
+    await first.files.flush();
+    before.stop();
+
+    const { cache } = launch(disk);
+    const data = open(server, cache);
+    data.subscribe(views.page("a.md"), () => {});
+    expect(data.state(views.page("a.md"))).toMatchObject({ value: null, loading: true });
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "# A" }),
+    );
+    expect(
+      cache.get(cacheScope(signInTo(server), "ws-a"), "page:a.md")?.prefetched,
+    ).toBeUndefined();
+    data.retry(views.page("a.md"));
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({ kind: "missing", last: "# A" }),
     );
   });
 
