@@ -12,10 +12,7 @@ import type {
   OrdinaryActivationValidation,
   OrdinaryActivationValidator,
   OrdinaryActivationWork,
-  OrdinaryFoldResult,
-  OrdinaryFoldWork,
 } from "./storage/ordinaryActivationValidation.js";
-import { checkpointPolicySha256 } from "./storage/ordinaryActivationCheckpoint.js";
 import type { LiveJournalValidation } from "./storage/types.js";
 import { WORKER_LIVE_VALIDATION_POLICY } from "@dohc/ydoc-projection/live-journal-validation";
 import {
@@ -53,7 +50,7 @@ export type SettlementNormalizationResult =
 export type LiveValidationWork = { policy: OrderedLiveUpdateCutPolicy } & (
   | { kind: "journal"; input: Parameters<OwnerOutboxAdmission["validate"]>[0] }
   | { kind: "settlement"; input: SettlementNormalizationInput }
-  | { kind: "activation"; input: OrdinaryActivationWork | OrdinaryFoldWork }
+  | { kind: "activation"; input: OrdinaryActivationWork }
   | { kind: "restore"; input: LiveRestoreWork }
 );
 /** What the worker adds to a journal verdict about its own time. */
@@ -84,8 +81,8 @@ const MAX_LOGGED_VALIDATOR_FAILURES = 1024;
  * How long one edit or settlement check may run once its child can read it, several times the
  * slowest ordinary note. A busy host can slow an ordinary check, so an edit's or settlement's
  * first overrun is tried again, and only a second one started within the retry window refuses
- * it as too large. Activation and restore read a note's history, which ordinary use can make
- * long, so they have no limit.
+ * it as too large. Restore reads a note's history, which ordinary use can make long, and
+ * activation checks a whole note, so they have no limit.
  */
 export const LIVE_CHECK_TIME_LIMIT_MS = 10_000;
 const LIVE_CHECK_RETRY_WINDOW_MS = 5 * 60_000;
@@ -394,8 +391,8 @@ export function createLiveValidationExecutor(
   function ordinaryActivation(policy: OrderedLiveUpdateCutPolicy): OrdinaryActivationValidator {
     const ownedPolicy = Object.freeze({ ...policy });
     return Object.assign(
-      (input: OrdinaryActivationWork | OrdinaryFoldWork, signal?: AbortSignal) =>
-        submit<OrdinaryActivationValidation | OrdinaryFoldResult>(
+      (input: OrdinaryActivationWork, signal?: AbortSignal) =>
+        submit<OrdinaryActivationValidation>(
           { kind: "activation", policy: ownedPolicy, input },
           { kind: "capacity-refused" },
           signal,
@@ -403,7 +400,6 @@ export function createLiveValidationExecutor(
       {
         hasCapacity: () => hasCapacity(true),
         waitForCapacity: (signal?: AbortSignal) => waitForCapacity(signal, true),
-        policySha256: checkpointPolicySha256(ownedPolicy),
       },
     );
   }
