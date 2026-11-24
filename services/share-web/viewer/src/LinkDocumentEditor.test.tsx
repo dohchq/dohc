@@ -221,13 +221,41 @@ it("shows the draft panel when access ends while a change is still saving", asyn
   expect(unloadWarns()).toBe(true);
 });
 it("shows the grant-scoped refusal with its next step", async () => {
-  vi.mocked(openLinkDocument).mockRejectedValue(new Error(LINK_REFUSALS.link_comment_access.error));
+  vi.mocked(openLinkDocument).mockRejectedValue(
+    new Error(LINK_REFUSALS.link_comment_access.error, { cause: "link_comment_access" }),
+  );
   await render(true);
   await settle(
     () => container.textContent?.includes(LINK_REFUSALS.link_comment_access.error) === true,
   );
   expect(container.textContent).toContain("Try again");
 });
+it("says live editing is off by the refusal's code, and that the page can still be read", async () => {
+  vi.mocked(openLinkDocument).mockRejectedValue(
+    new Error(LINK_REFUSALS.link_live_stopped.error, { cause: "link_live_stopped" }),
+  );
+  await render(true);
+  await settle(() => container.querySelector(".edit-notice p") !== null);
+  expect(container.querySelector(".edit-notice p")!.textContent).toBe(
+    "Live editing of this file is off. Only its owner can start it again.",
+  );
+  expect(container.textContent).toContain("You can still read and comment here.");
+});
+it.each([
+  ["live-starting", "Live editing is starting."],
+  [
+    "live-stopped",
+    "Live editing of this file is off. Only its owner can start it again. You can still read and comment here.",
+  ],
+])(
+  "tells an open page why editing is not live, with no retry button; %s",
+  async (reason, words) => {
+    const f = await opened();
+    await act(async () => f.update({ status: "disconnected", reason }));
+    expect(status()).toBe(words);
+    expect(container.textContent).not.toMatch(/Try again|Retry connection/);
+  },
+);
 it("asks a link holder to retry, not to ask for access, when the file could not open for another reason", async () => {
   const onClose = vi.fn();
   vi.mocked(openLinkDocument).mockRejectedValue(new TypeError("Failed to fetch"));
@@ -379,4 +407,31 @@ it("shows the text on the host's early state, says typed words are not sent, and
   await act(async () => f.update({ status: "live", reason: null, typingAhead: false }));
   expect(status()).toBe("Saving changes…");
   expect(panel()).toBeNull();
+});
+it("says the file moved or was removed when the shared files lose it, and keeps the draft for review", async () => {
+  const f = await opened();
+  await act(async () =>
+    f.update({
+      status: "disconnected",
+      reason: "live-stopped",
+      pendingUpdates: 1,
+      typingStopped: true,
+    }),
+  );
+  await act(async () =>
+    root.render(
+      <LinkDocumentEditor
+        discriminator="abcdefghijkl"
+        path="docs/a.md"
+        available={false}
+        gone
+        onClose={f.onClose}
+      />,
+    ),
+  );
+  expect(f.session.close).toHaveBeenCalled();
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+    "This file moved or was removed. Ask its owner for a new link.",
+  );
+  expect(panel()).not.toBeNull();
 });

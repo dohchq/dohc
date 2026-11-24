@@ -289,6 +289,43 @@ it("tells a link holder a held note whose file moved stopped, not to try again",
   expect(await ask()).toEqual([503, linkRefusalBody("link_live_stopped")]);
 });
 
+// A note with no binding answers from its record: starting tells the page to wait, off that only the owner can start it.
+it.each([true, false])(
+  "tells a caller who reaches a note with no binding whether it is starting or off; link=%s",
+  async (link) => {
+    const f = await fixture(limits, link);
+    const select = f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?");
+    select.run(JSON.stringify({ paths: ["docs"], versionId: null }));
+    f.raw
+      .prepare(
+        `INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, blob_sha256, content_kind, byte_length, recorded_at_ms)
+        VALUES (?, ?, 99, 'moved', 'main', 'docs/moved.md', ?, 'text', 1, 2)`,
+      )
+      .run(binding.workspaceId, binding.objectId, "b".repeat(64));
+    const ask = async () => {
+      const response = await f.post(`/sync/live/${link ? "link" : "named"}-tickets`, {
+        discriminator: f.discriminator,
+        objectId: binding.objectId,
+      });
+      return [response.status, await response.json()];
+    };
+    const stopped = link ? [503, linkRefusalBody("link_live_stopped")] : [404, NAMED_LIVE_STOPPED];
+    f.liveNote.mockReturnValue("starting");
+    expect(await ask()).toEqual([503, linkRefusalBody("link_live_starting")]);
+    expect(f.liveNote).toHaveBeenCalledWith({
+      workspaceId: binding.workspaceId,
+      objectId: binding.objectId,
+    });
+    f.sessionHostBlocked.mockReturnValue("held");
+    expect(await ask()).toEqual(stopped);
+    f.sessionHostBlocked.mockReturnValue(undefined);
+    f.liveNote.mockReturnValue("off");
+    expect(await ask()).toEqual(stopped);
+    select.run(JSON.stringify({ paths: ["other.md"], versionId: null }));
+    expect(await ask()).toEqual([404, { ok: false, error: "not found" }]);
+  },
+);
+
 it("says in the server log why a link holder was told to try again, once for each reason and with no id of the note, workspace or link", async () => {
   const f = await fixture(limits, true);
   const logged = vi.spyOn(console, "error").mockImplementation(() => {});

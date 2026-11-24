@@ -18,6 +18,10 @@ export const LINK_REFUSALS = {
     status: 503,
     error: "Live editing of this file stopped on the server. Only its owner can start it again.",
   },
+  link_live_starting: {
+    status: 503,
+    error: "Live editing of this file is starting. Try again in a moment.",
+  },
   link_unavailable: {
     status: 503,
     error: "This link can't be reached right now. Try again in a moment.",

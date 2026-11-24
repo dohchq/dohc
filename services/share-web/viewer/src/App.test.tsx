@@ -656,6 +656,98 @@ describe("App", () => {
     expect(container.querySelector("article.markdown")?.textContent).toContain("Shared content");
   });
 
+  const GONE = "This file moved or was removed. Ask its owner for a new link.";
+  it.each([
+    [
+      "renamed",
+      ["rename"],
+      "Editing is no longer available. Copy any unsynced changes before closing this file.",
+    ],
+    ["removed", ["delete"], GONE],
+    ["replaced by another file at its path", ["delete", "replace"], GONE],
+  ] as const)(
+    "says a file open for editing moved or was removed only when the shared files lose it: %s",
+    async (_, changes, words) => {
+      const objectId = "share-object:v1:" + "a".repeat(64);
+      const meta: ViewMeta = {
+        ...DEFAULT_META,
+        access: "edit",
+        effectiveSelector: { access: "edit", versionId: null, paths: ["docs"] },
+      };
+      const file: SharedFile = {
+        path: "docs/doc.md",
+        objectId,
+        blobSha256: "a".repeat(64),
+        contentKind: "text",
+      };
+      const fallback = viewerFetch(() => {
+        throw new Error("Unexpected handoff");
+      });
+      let deliver: ((response: Response) => void) | undefined;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input, init) => {
+          const route = requestPath(input);
+          if (route === "/api/view/meta") return jsonResponse(meta);
+          if (route === "/api/view/current") return currentPage([file], 7, 0, meta);
+          if (route.startsWith("/api/view/log")) {
+            if (!fullRequestPath(input).includes("hold=")) return logOpsPage([], 7);
+            return new Promise<Response>((resolve) => {
+              deliver = resolve;
+            });
+          }
+          if (route.startsWith("/api/view/blob/")) return new Response("Shared content");
+          if (route === "/api/live/link-document-state") return new Response(null, { status: 204 });
+          if (route === "/api/live/link-document")
+            return jsonResponse(
+              linkRefusalBody("link_live_unavailable"),
+              LINK_REFUSALS.link_live_unavailable.status,
+            );
+          return fallback(input, init);
+        }),
+      );
+      await renderApp();
+      await settle(() => container.querySelector("article.markdown") !== null);
+      await act(async () => buttonNamed("Edit file")!.click());
+      await settle(() => container.querySelector(".edit-notice") !== null && deliver !== undefined);
+      await act(async () =>
+        deliver?.(
+          logOpsPage(
+            changes.map((change, index) => ({
+              relaySeq: 8 + index,
+              recordedAtMs: 1,
+              opKind: "moment.append",
+              payload:
+                change === "replace"
+                  ? {
+                      objectId: "share-object:v1:" + "b".repeat(64),
+                      operation: "write",
+                      payloadAfterPath: file.path,
+                      payloadAfterBlobSha256: "b".repeat(64),
+                      payloadAfterContentKind: "text",
+                    }
+                  : {
+                      objectId,
+                      operation: change,
+                      payloadBeforePath: file.path,
+                      payloadBeforeBlobSha256: file.blobSha256,
+                      ...(change === "rename" && {
+                        payloadAfterPath: "docs/renamed.md",
+                        payloadAfterBlobSha256: file.blobSha256,
+                        payloadAfterContentKind: "text",
+                      }),
+                    },
+            })),
+            7 + changes.length,
+          ),
+        ),
+      );
+      await settle(() => container.querySelector(".edit-alert") !== null);
+      expect(container.querySelector(".edit-alert")?.textContent).toBe(words);
+      expect(container.querySelector(".edit-notice") === null).toBe(words === GONE);
+    },
+  );
+
   it("keeps comments closed until asked for, with their count on the button", async () => {
     const fallback = viewerFetch(() => {
       throw new Error("Unexpected handoff");

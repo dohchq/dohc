@@ -3,7 +3,7 @@ import { decodeLiveFrameSync } from "@dohc/live-session-contract/live-frame";
 import { createLinkLiveHttp } from "./linkLiveHttp";
 import type { AwakeLiveState } from "./liveAwakeState";
 import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
-import type { SessionHostBlock } from "./linkRefusal";
+import type { LiveNoteStanding, SessionHostBlock } from "./linkRefusal";
 import { createLiveTickets } from "./liveTickets";
 import { hashLinkBearer, hashLinkProfileSecret } from "./linkSecurity";
 import {
@@ -53,7 +53,7 @@ async function fixture(
     workspaceId: string;
     objectId: string;
   }) => SessionHostBlock | undefined,
-  state?: Pick<Parameters<typeof createLinkLiveHttp>[0], "readAwakeState" | "nowMs">,
+  state?: Pick<Parameters<typeof createLinkLiveHttp>[0], "readAwakeState" | "nowMs" | "liveNote">,
 ) {
   const f = await ticketFixture();
   cleanups.push(f.close);
@@ -301,6 +301,42 @@ it("tells a holder a held note whose file moved stopped, not to try again", asyn
   blocked = "held";
   for (const route of ["/sync/live/link-document", "/sync/live/link-document-state"])
     expect(await ask(route)).toEqual([503, linkRefusalBody("link_live_stopped")]);
+});
+
+// A starting note opens for the holder, who waits on its tickets. An off note only its owner can start again.
+it("opens a starting or off note with no state, so its ticket gives the answer", async () => {
+  let blocked: SessionHostBlock | undefined,
+    note: LiveNoteStanding | undefined = "starting";
+  const f = await fixture(() => blocked, {
+    readAwakeState: async () => undefined,
+    liveNote: () => note,
+  });
+  f.raw
+    .prepare(
+      `INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, blob_sha256, content_kind, byte_length, recorded_at_ms)
+      VALUES (?, ?, 99, 'moved', 'main', 'docs/moved.md', ?, 'text', 1, 2)`,
+    )
+    .run(scope.workspaceId, binding.objectId, "b".repeat(64));
+  const ask = (route?: string) =>
+    f.handle(request({ discriminator, path: "docs/moved.md" }, route));
+  for (const [standing, block] of [
+    ["starting", undefined],
+    ["starting", "held"],
+    ["off", undefined],
+  ] as const) {
+    note = standing;
+    blocked = block;
+    const opened = await ask();
+    expect([opened.status, await opened.json()]).toEqual([200, { objectId: binding.objectId }]);
+    expect((await ask("/sync/live/link-document-state")).status).toBe(204);
+  }
+  note = undefined;
+  blocked = "held";
+  const refused = await ask();
+  expect([refused.status, await refused.json()]).toEqual([
+    503,
+    linkRefusalBody("link_live_stopped"),
+  ]);
 });
 
 // A link reader's page asks for a note's state before it opens a socket, so it can show the note at once.

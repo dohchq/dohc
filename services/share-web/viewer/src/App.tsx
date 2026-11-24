@@ -455,6 +455,7 @@ export function App() {
     discriminator: string;
     path: string;
     blobSha256: string;
+    objectId: string | undefined;
   } | null>(null);
   // The bar's place for an editor's Done, Save and saved state, and whether the live editor has the file.
   const [barSlot, setBarSlot] = useState<HTMLElement | null>(null);
@@ -899,13 +900,16 @@ export function App() {
     setEditorLoadFailed(false);
   };
   const editingCollectionFile = editing !== null && isCollectionOwnFile(editing.path);
-  const available =
+  const editable =
     editing !== null &&
     ready !== null &&
     ready.session === editing.discriminator &&
     ready.meta.access === "edit" &&
-    ready.meta.effectiveSelector.versionId === null &&
-    selected !== undefined;
+    ready.meta.effectiveSelector.versionId === null;
+  const available =
+    editable &&
+    selected !== undefined &&
+    (editing.objectId === undefined || selected.objectId === editing.objectId);
   // The editor mounts once the bar has its place, so Done never shows anywhere else first.
   const editor =
     !editing || !barSlot ? null : editingCollectionFile ? (
@@ -924,6 +928,11 @@ export function App() {
         discriminator={editing.discriminator}
         path={editing.path}
         available={available}
+        gone={
+          editable &&
+          editing.objectId !== undefined &&
+          !files.some((file) => file.objectId === editing.objectId)
+        }
         onClose={stopEditing}
         barSlot={barSlot}
         onOpenChange={setEditorOpen}
@@ -1115,6 +1124,7 @@ export function App() {
                       discriminator: ready.session,
                       path: selected.path,
                       blobSha256: selected.blobSha256,
+                      objectId: selected.objectId,
                     });
                   }}
                 >

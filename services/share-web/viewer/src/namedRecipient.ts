@@ -5,12 +5,17 @@ import {
   LiveAuthorityUnavailableError,
   LiveHostUnavailableError,
   LiveLinkFullError,
+  LiveStartingError,
   LiveStoppedError,
   parseNamedLiveBrowserLimits,
   type NamedLiveBrowserLimits,
 } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { RETRY_BUDGET_MS } from "./retry";
-import { LINK_REFUSALS, parseLinkRefusal } from "@dohc/security-contract/link-refusal";
+import {
+  LINK_REFUSALS,
+  parseLinkRefusal,
+  type LinkRefusalCode,
+} from "@dohc/security-contract/link-refusal";
 
 // The existing share-web authenticated metadata ceiling also bounds invitation and account responses.
 const RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -36,6 +41,14 @@ export class AccountSetupRequiredError extends Error {
   constructor() {
     super("Account setup required");
   }
+}
+/** The link refusal a request failed with, by its code. */
+export function linkRefusalCode(error: unknown): LinkRefusalCode | null {
+  return error instanceof Error &&
+    typeof error.cause === "string" &&
+    Object.hasOwn(LINK_REFUSALS, error.cause)
+    ? (error.cause as LinkRefusalCode)
+    : null;
 }
 export async function namedRequest(
   path: string,
@@ -107,11 +120,13 @@ export async function namedRequest(
       }
       if (linkRefused) {
         const code = parseLinkRefusal(value, response.status);
-        const message = code ? LINK_REFUSALS[code].error : "Unavailable";
-        if (code === "link_live_stopped") throw new LiveStoppedError(message);
-        if (response.status === 503) throw new LiveHostUnavailableError(message);
-        if (code === "link_full") throw new LiveLinkFullError(message);
-        throw new LiveAuthorityUnavailableError(message);
+        const message = code ? LINK_REFUSALS[code].error : "Unavailable",
+          options = { cause: code };
+        if (code === "link_live_stopped") throw new LiveStoppedError(message, options);
+        if (code === "link_live_starting") throw new LiveStartingError(message, options);
+        if (response.status === 503) throw new LiveHostUnavailableError(message, options);
+        if (code === "link_full") throw new LiveLinkFullError(message, options);
+        throw new LiveAuthorityUnavailableError(message, options);
       }
       return value;
     } finally {

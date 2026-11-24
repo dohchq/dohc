@@ -172,32 +172,36 @@ it("reports a refused link ticket as unavailable, not as a failed connection", a
     session.close();
   }
 });
-// Neither answer changes until someone else acts: the owner makes a new link, or starts live editing again.
-it.each([
-  ["link_full", "link-full"],
-  ["link_live_stopped", "live-stopped"],
-] as const)("stops on %s without trying again", async (code, reason) => {
-  vi.useFakeTimers();
-  vi.stubGlobal("location", { origin: "https://share.example.test" });
-  const fetch = vi.fn(async (url: RequestInfo | URL) =>
-    url === "/api/live/link-document"
-      ? Response.json({ objectId: "object-a", limits })
-      : Response.json(linkRefusalBody(code), { status: LINK_REFUSALS[code].status }),
-  );
-  vi.stubGlobal("fetch", fetch);
-  const session = await openLinkDocument("abcdefghijkl", "docs/a.md", new AbortController().signal);
-  try {
-    await session.reconnect();
-    expect(session.state()).toMatchObject({ status: "disconnected", reason });
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(fetch).toHaveBeenCalledTimes(3);
-  } finally {
-    session.close();
-    vi.useRealTimers();
-  }
-});
-// Try again asks once. It works only after the owner starts live editing again.
-it("asks once on Try again while live editing is stopped, and opens the file once it started again", async () => {
+// The answer doesn't change until the owner makes a new link.
+it.each([["link_full", "link-full"]] as const)(
+  "stops on %s without trying again",
+  async (code, reason) => {
+    vi.useFakeTimers();
+    vi.stubGlobal("location", { origin: "https://share.example.test" });
+    const fetch = vi.fn(async (url: RequestInfo | URL) =>
+      url === "/api/live/link-document"
+        ? Response.json({ objectId: "object-a", limits })
+        : Response.json(linkRefusalBody(code), { status: LINK_REFUSALS[code].status }),
+    );
+    vi.stubGlobal("fetch", fetch);
+    const session = await openLinkDocument(
+      "abcdefghijkl",
+      "docs/a.md",
+      new AbortController().signal,
+    );
+    try {
+      await session.reconnect();
+      expect(session.state()).toMatchObject({ status: "disconnected", reason });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(fetch).toHaveBeenCalledTimes(3);
+    } finally {
+      session.close();
+      vi.useRealTimers();
+    }
+  },
+);
+// Only the owner can start live editing again, so the page asks every 30 seconds and opens the file once it started.
+it("asks every 30 seconds while live editing is stopped, and opens the file once it started again", async () => {
   vi.useFakeTimers();
   class Socket extends EventTarget {
     readyState = 1;
@@ -233,14 +237,15 @@ it("asks once on Try again while live editing is stopped, and opens the file onc
   try {
     await session.reconnect();
     expect(session.state()).toMatchObject({ status: "disconnected", reason: "live-stopped" });
-    await session.reconnect();
-    expect(session.state()).toMatchObject({ status: "disconnected", reason: "live-stopped" });
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(fetch).toHaveBeenCalledTimes(4);
-    stopped = false;
-    await session.reconnect();
-    expect(session.state().status).toBe("connecting");
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(30_001);
     expect(fetch).toHaveBeenCalledTimes(5);
+    expect(session.state()).toMatchObject({ status: "disconnected", reason: "live-stopped" });
+    stopped = false;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(session.state().status).toBe("connecting");
+    expect(fetch).toHaveBeenCalledTimes(6);
   } finally {
     session.close();
     vi.useRealTimers();

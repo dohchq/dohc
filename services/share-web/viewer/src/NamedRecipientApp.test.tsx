@@ -12,6 +12,7 @@ import {
   SHARE_WEB_API_VERSION_HEADER,
 } from "@dohc/workspace-contracts/relay-values";
 import NamedRecipientApp from "./NamedRecipientApp";
+import { LIVE_OFF } from "./NamedDocumentEditor";
 import { jsonResponse, settle, setControlValue } from "./testing";
 
 const sessions: {
@@ -199,6 +200,45 @@ it("signs in through the account endpoint, opens current files, and waits for li
   });
   expect(container.querySelector('[role="textbox"]')?.getAttribute("contenteditable")).toBe("true");
   expect(fetch.mock.calls.every(([, init]) => init?.credentials === "same-origin")).toBe(true);
+});
+it("shows only the status words, not an empty note, until a file first opens live, and keeps the text once it was live", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/account/session")
+        return jsonResponse({ user: { id: "alice", name: "Alice" } });
+      if (path === "/api/live/named-documents") return jsonResponse(files());
+      throw Error(path);
+    }),
+  );
+  await render();
+  const body = () => container.querySelector<HTMLElement>(".named-body-editor")!;
+  const status = () => container.querySelector('section[aria-label="Shared file"] [role="status"]');
+  const off = async () =>
+    act(async () => {
+      sessions.at(-1)!.state = {
+        ...sessions.at(-1)!.state,
+        status: "disconnected",
+        reason: "live-stopped",
+      };
+      sessions.at(-1)!.notify();
+    });
+  await click("docs/a.md");
+  await off();
+  expect(body().hidden).toBe(true);
+  expect(status()?.textContent).toBe(LIVE_OFF);
+  await click("docs/b.md");
+  expect(body().hidden).toBe(true);
+  await act(async () => {
+    sessions.at(-1)!.state = { ...sessions.at(-1)!.state, status: "live" };
+    sessions.at(-1)!.notify();
+  });
+  expect(body().hidden).toBe(false);
+  await off();
+  expect(body().hidden).toBe(false);
+  expect(body().textContent).toContain("Draft b");
+  expect(status()?.textContent).toBe(LIVE_OFF);
 });
 it("stamps the compiled share-web version on every request, including live admission", async () => {
   const transport = await vi.importActual<

@@ -2,9 +2,12 @@ import { readBoundedJson } from "@dohc/service-http";
 import { parseLiveTicketToken } from "@dohc/live-session-contract/live-ticket";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import {
+  LINK_REFUSALS,
   NAMED_LIVE_STOPPED,
   NAMED_LIVE_STOPPED_STATUS,
   isNamedLiveStopped,
+  linkRefusalBody,
+  parseLinkRefusal,
 } from "@dohc/security-contract/link-refusal";
 import { namedAccountCookie } from "./namedAccountCookie";
 import {
@@ -86,24 +89,26 @@ export function createNamedLiveTicketClient(options: {
         }),
       );
       if (
-        ![200, NAMED_LIVE_STOPPED_STATUS].includes(response.status) ||
+        ![200, NAMED_LIVE_STOPPED_STATUS, LINK_REFUSALS.link_live_starting.status].includes(
+          response.status,
+        ) ||
         response.redirected ||
         response.headers.has("location") ||
         response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !==
           "application/json"
       )
         return refusal();
-      // Only the exact answer that live editing stopped on the server passes, rebuilt here.
-      if (response.status !== 200)
-        return isNamedLiveStopped(
-          await readBoundedJson(response, limits.maxResponseBytes, signal).catch(() => null),
-          response.status,
-        )
-          ? Response.json(NAMED_LIVE_STOPPED, {
-              status: NAMED_LIVE_STOPPED_STATUS,
-              headers: { "cache-control": "private, no-store" },
-            })
+      if (response.status !== 200) {
+        const value = await readBoundedJson(response, limits.maxResponseBytes, signal).catch(
+          () => null,
+        );
+        const headers = { "cache-control": "private, no-store" };
+        if (isNamedLiveStopped(value, response.status))
+          return Response.json(NAMED_LIVE_STOPPED, { status: NAMED_LIVE_STOPPED_STATUS, headers });
+        return parseLinkRefusal(value, response.status) === "link_live_starting"
+          ? Response.json(linkRefusalBody("link_live_starting"), { status: 503, headers })
           : refusal();
+      }
       const parsed = await readBoundedJson(response, limits.maxResponseBytes, signal);
       if (
         !parsed ||

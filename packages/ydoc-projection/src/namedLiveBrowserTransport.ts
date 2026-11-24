@@ -5,7 +5,7 @@ import {
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveTicketToken } from "@dohc/live-session-contract/live-ticket";
 import type { LiveAuthorContext } from "@dohc/live-session-contract";
-import { isNamedLiveStopped } from "@dohc/security-contract/link-refusal";
+import { isNamedLiveStopped, parseLinkRefusal } from "@dohc/security-contract/link-refusal";
 import {
   createNamedLiveProvider,
   type NamedLiveProviderState,
@@ -37,7 +37,10 @@ export const NAMED_LIVE_NO_AUTOMATIC_RETRY: readonly string[] = [
   "link-full",
   "paused",
   "live-stopped",
+  "document-gone",
 ];
+/** How often a page whose note is off checks, while it is visible, whether its owner started it again. */
+export const NAMED_LIVE_OFF_CHECK_MS = 30_000;
 /**
  * Whether the page takes edits: live, holding the host's early state while it first opens, or reconnecting by
  * itself after it was live. The edits wait in the page until it is live again. A page whose first opening stopped
@@ -91,6 +94,8 @@ export class LiveAuthorityUnavailableError extends Error {}
 export class LiveHostUnavailableError extends Error {}
 /** The server answered that live editing of the document stopped until its owner starts it again. */
 export class LiveStoppedError extends Error {}
+/** The server answered that live editing of the document is starting. The page tries again by itself. */
+export class LiveStartingError extends Error {}
 /** The server answered that the link can take no more people. Trying again cannot help. */
 export class LiveLinkFullError extends Error {}
 /** The server answered that the owner removed this account's access. */
@@ -153,7 +158,8 @@ export function createNamedLiveBrowserTransport<
     // took typing again would show the editor for each attempt and let words join a draft that may never be sent.
     let attempted = false,
       typingStopped = false,
-      everLive = false;
+      everLive = false,
+      waitingForResume = false;
     // Automatic retries keep the page's session. A refusal of it may mean the server lost it, so
     // the page asks for a new one on its own once in an outage, and again only in an outage that
     // began PASSING_REFUSAL_MS after that request. Each request counts when it is sent.
@@ -165,15 +171,24 @@ export function createNamedLiveBrowserTransport<
       (accessStoodAt !== undefined && accessStoodAt - replacedAt >= PASSING_REFUSAL_MS);
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     function scheduleReconnect() {
-      const value = state();
+      const value = state(),
+        off = value.reason === "live-stopped";
       if (
         !automatic ||
         closed ||
         reconnectTimer !== undefined ||
         value.status !== "disconnected" ||
-        NAMED_LIVE_NO_AUTOMATIC_RETRY.includes(value.reason ?? "")
+        (!off && NAMED_LIVE_NO_AUTOMATIC_RETRY.includes(value.reason ?? ""))
       )
         return;
+      if (off) {
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = undefined;
+          if (globalThis.document?.visibilityState === "hidden") scheduleReconnect();
+          else void connect();
+        }, NAMED_LIVE_OFF_CHECK_MS);
+        return;
+      }
       reconnectTimer = setTimeout(() => {
         reconnectTimer = undefined;
         // A server that restarts is back within seconds. For a minute after the page was last live it waits
@@ -227,6 +242,12 @@ export function createNamedLiveBrowserTransport<
     function fail(held: Attempt, status: Override["status"], reason: string) {
       if (!current(held)) return;
       if (state().status === "live") accessStoodAt = Date.now();
+      if (reason === "live-stopped") {
+        waitingForResume = true;
+        typingStopped = true;
+      } else if (reason === "live-starting" || NAMED_LIVE_NO_AUTOMATIC_RETRY.includes(reason))
+        waitingForResume = false;
+      else if (waitingForResume) reason = "live-stopped";
       override = { status, reason };
       stop();
       notify();
@@ -236,6 +257,7 @@ export function createNamedLiveBrowserTransport<
       if (value.status === "live") {
         everLive = true;
         typingStopped = false;
+        waitingForResume = false;
         clearTimeout(attempt?.timer);
         reconnectDelayMs = 250;
         accessStoodAt = Date.now();
@@ -263,10 +285,10 @@ export function createNamedLiveBrowserTransport<
           });
           signal.throwIfAborted();
           if ([401, 403].includes(response.status)) throw new LiveAuthorityUnavailableError();
-          // Only a 404's body can say the owner removed this account's access.
-          const refused = response.status === 404;
+          const refused = response.status === 404,
+            starting = response.status === 503;
           if (
-            (response.status !== 200 && !refused) ||
+            (response.status !== 200 && !refused && !starting) ||
             response.redirected ||
             !response.body ||
             response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !==
@@ -293,6 +315,10 @@ export function createNamedLiveBrowserTransport<
               text += decoder.decode(chunk.value, { stream: true });
             }
             const value = JSON.parse(text + decoder.decode()) as unknown;
+            if (starting)
+              throw parseLinkRefusal(value, response.status) === "link_live_starting"
+                ? new LiveStartingError()
+                : new Error("Invalid response.");
             if (refused)
               throw record(value) && value.code === "share_access_removed"
                 ? new AccessRemoved()
@@ -437,7 +463,7 @@ export function createNamedLiveBrowserTransport<
       });
     }
     /** Reads the invitation again after a refusal that a passing server state also gives. */
-    async function recheck(held: Attempt, grantId: string): Promise<string> {
+    async function recheck(held: Attempt, grantId: string, checking: boolean): Promise<string> {
       held.refused = true;
       try {
         const listing = await json(held, "/api/live/named-documents", { grantId });
@@ -445,14 +471,17 @@ export function createNamedLiveBrowserTransport<
           !record(listing) ||
           listing.access !== "edit" ||
           listing.grantId !== grantId ||
-          !Array.isArray(listing.files) ||
-          !listing.files.some((file) => record(file) && file.objectId === target.objectId)
+          !Array.isArray(listing.files)
         )
           return "authority-unavailable";
+        if (!listing.files.some((file) => record(file) && file.objectId === target.objectId))
+          return "document-gone";
       } catch (error) {
         if (error instanceof AccessRemoved) return "access-removed";
       }
-      return passingRefusal();
+      if (!checking) return passingRefusal();
+      kept = undefined;
+      return "live-stopped";
     }
     /** Whether the invitation says the owner removed this account's access. */
     async function accessRemoved(held: Attempt, grantId: string): Promise<boolean> {
@@ -478,10 +507,13 @@ export function createNamedLiveBrowserTransport<
       if (closed || ["quarantined", "refused"].includes(state().status)) return;
       automatic = true;
       attempted = true;
+      const reason = state().reason,
+        checking = reason === "live-stopped";
       stop();
       const held: Attempt = { controller: new AbortController(), writes: new Set() };
       attempt = held;
-      override = { status: "authorizing", reason: null };
+      if (!checking && reason !== "live-starting")
+        override = { status: "authorizing", reason: null };
       notify();
       held.timer = setTimeout(
         // A busy live host holds the ticket and the socket's upgrade until it has woken the file, so an
@@ -493,7 +525,9 @@ export function createNamedLiveBrowserTransport<
             held.spent
               ? "authority-unavailable"
               : held.refused
-                ? passingRefusal()
+                ? checking
+                  ? "live-stopped"
+                  : passingRefusal()
                 : !held.route && (held.socket || held.admitting)
                   ? "host-unavailable"
                   : "connect-timeout",
@@ -521,7 +555,7 @@ export function createNamedLiveBrowserTransport<
           if (kept && kept.expiresAtMs > Date.now()) held.kept = true;
           else {
             kept = undefined;
-            if (!fresh) {
+            if (!fresh && !checking) {
               // Without a session, no retry in this outage can open the file.
               if (!mayReplace()) throw new SessionSpent();
               replacedAt = Date.now();
@@ -607,13 +641,15 @@ export function createNamedLiveBrowserTransport<
                     : "authority-unavailable"
                   : error instanceof LiveAuthorityUnavailableError
                     ? !options.authorize && "grantId" in target
-                      ? await recheck(held, String(target.grantId))
+                      ? await recheck(held, String(target.grantId), checking)
                       : "authority-unavailable"
                     : error instanceof LiveStoppedError
                       ? "live-stopped"
-                      : error instanceof LiveHostUnavailableError
-                        ? "host-unavailable"
-                        : "connection-failed",
+                      : error instanceof LiveStartingError
+                        ? "live-starting"
+                        : error instanceof LiveHostUnavailableError
+                          ? "host-unavailable"
+                          : "connection-failed",
         );
       }
     }

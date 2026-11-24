@@ -20,6 +20,7 @@ import {
   linkRefusal,
   opaqueLinkRefusal,
   sessionHostRefusal,
+  type LiveNoteStanding,
   type SessionHostBlock,
 } from "./linkRefusal";
 
@@ -48,6 +49,8 @@ export function createLinkLiveHttp(options: {
     workspaceId: string;
     objectId: string;
   }) => SessionHostBlock | undefined;
+  /** Where the note stands while it is not live, when its record answers. */
+  liveNote?: (document: { workspaceId: string; objectId: string }) => LiveNoteStanding | undefined;
   /** Authenticates a connected agent, as the link's other routes do. */
   linkAuthority: Pick<LinkAuthorityResolver, "resolve">;
   /**
@@ -179,8 +182,11 @@ export function createLinkLiveHttp(options: {
           if (
             current.kind === "refused" &&
             (current.reason === "host-unavailable" || current.reason === "stale-document")
-          )
-            return sessionHostRefusal(block ?? "stopped");
+          ) {
+            return options.liveNote?.({ workspaceId: context.workspaceId, objectId })
+              ? { objectId }
+              : sessionHostRefusal(block ?? "stopped");
+          }
           if (current.kind !== "current" || current.binding.currentPath !== path) return null;
           if (block) return sessionHostRefusal(block);
           // The state comes only where a ticket would: a link that takes no more browsers refuses this one.
@@ -214,7 +220,8 @@ export function createLinkLiveHttp(options: {
       signal.throwIfAborted();
       if (!body) return refused();
       if (body instanceof Response) return body;
-      if (state && body.current) {
+      if (state && "objectId" in body) {
+        if (!body.current) return asleep();
         if (stateReads >= STATE_READS_AT_ONCE || !admitStateRead(context.grantId)) return asleep();
         stateReads++;
         try {
@@ -223,7 +230,7 @@ export function createLinkLiveHttp(options: {
           stateReads--;
         }
       }
-      const encoded = JSON.stringify(body.current ? { objectId: body.objectId } : body);
+      const encoded = JSON.stringify("objectId" in body ? { objectId: body.objectId } : body);
       if (Buffer.byteLength(encoded) > limits.maxResponseBytes) return refused();
       return new Response(encoded, {
         headers: { "content-type": "application/json", "cache-control": "private, no-store" },
