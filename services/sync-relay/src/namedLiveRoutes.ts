@@ -382,7 +382,6 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
   // Whether the caller's scope reaches a current binding of the document, as a ticket for it needs.
   const reaches = (scope: LiveTicketScope, objectId: string) =>
     storage.resolveLiveObjectHostBinding(scope, objectId).kind === "current";
-  // Whether an invited editor's share shows the note where it is now, with or without a binding.
   const namedReaches = (
     context: NamedLiveBrowserContext,
     document: { workspaceId: string; objectId: string },

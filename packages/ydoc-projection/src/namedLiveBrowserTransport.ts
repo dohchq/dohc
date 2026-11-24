@@ -158,7 +158,8 @@ export function createNamedLiveBrowserTransport<
     // took typing again would show the editor for each attempt and let words join a draft that may never be sent.
     let attempted = false,
       typingStopped = false,
-      everLive = false;
+      everLive = false,
+      waitingForResume = false;
     // Automatic retries keep the page's session. A refusal of it may mean the server lost it, so
     // the page asks for a new one on its own once in an outage, and again only in an outage that
     // began PASSING_REFUSAL_MS after that request. Each request counts when it is sent.
@@ -241,7 +242,12 @@ export function createNamedLiveBrowserTransport<
     function fail(held: Attempt, status: Override["status"], reason: string) {
       if (!current(held)) return;
       if (state().status === "live") accessStoodAt = Date.now();
-      if (reason === "live-stopped") typingStopped = true;
+      if (reason === "live-stopped") {
+        waitingForResume = true;
+        typingStopped = true;
+      } else if (reason === "live-starting" || NAMED_LIVE_NO_AUTOMATIC_RETRY.includes(reason))
+        waitingForResume = false;
+      else if (waitingForResume) reason = "live-stopped";
       override = { status, reason };
       stop();
       notify();
@@ -251,6 +257,7 @@ export function createNamedLiveBrowserTransport<
       if (value.status === "live") {
         everLive = true;
         typingStopped = false;
+        waitingForResume = false;
         clearTimeout(attempt?.timer);
         reconnectDelayMs = 250;
         accessStoodAt = Date.now();
@@ -278,7 +285,6 @@ export function createNamedLiveBrowserTransport<
           });
           signal.throwIfAborted();
           if ([401, 403].includes(response.status)) throw new LiveAuthorityUnavailableError();
-          // Only a 404's body can say the owner removed this account's access, and only a 503's that live editing is starting.
           const refused = response.status === 404,
             starting = response.status === 503;
           if (

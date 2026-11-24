@@ -98,7 +98,6 @@ export function createNamedLiveTicketClient(options: {
           "application/json"
       )
         return refusal();
-      // Only the exact answers that live editing stopped or is starting pass, rebuilt here.
       if (response.status !== 200) {
         const value = await readBoundedJson(response, limits.maxResponseBytes, signal).catch(
           () => null,

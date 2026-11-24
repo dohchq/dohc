@@ -71,7 +71,6 @@ export async function normalizeLinkRefusal(
 ): Promise<Response> {
   if (!isLinkEndpointPath(path)) return response;
   if (response.status >= 500) {
-    // A live route's own answer that the note is starting or off goes through. Every other outage reads the same.
     const code =
       liveEditing && response.status === 503
         ? parseLinkRefusal(await response.json().catch(() => null), response.status)

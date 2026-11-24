@@ -1358,6 +1358,37 @@ it.each([
     expect(tickets()).toBe(asked + 1);
   },
 );
+it("keeps an invited editor's off page checking through a network failure, after the server forgot its session", async () => {
+  const f = await live();
+  vi.useFakeTimers();
+  let ticket: "stopped" | "network" | "forgot" | "live" = "stopped";
+  f.intercept((path) => {
+    if (path !== "/api/live/named-ticket" || ticket === "live") return undefined;
+    if (ticket === "network") {
+      ticket = "forgot";
+      throw new TypeError("Failed to fetch");
+    }
+    return ticket === "forgot"
+      ? new Response(null, { status: 404 })
+      : Response.json(NAMED_LIVE_STOPPED, { status: 404 });
+  });
+  const tickets = () => f.requests.filter(({ path }) => path === "/api/live/named-ticket").length;
+  f.socket.close();
+  await vi.advanceTimersByTimeAsync(250);
+  await vi.advanceTimersByTimeAsync(6 * 60_000);
+  expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "live-stopped" });
+  ticket = "network";
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "live-stopped" });
+  await vi.advanceTimersByTimeAsync(2 * 30_000);
+  expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "live-stopped" });
+  const asked = tickets();
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(tickets()).toBe(asked + 1);
+  ticket = "live";
+  await vi.advanceTimersByTimeAsync(30_000);
+  await f.socketAt(1);
+});
 it("waits while live editing of the file is starting, takes no typing, and joins by itself once it is live", async () => {
   vi.useFakeTimers();
   const f = fixture();

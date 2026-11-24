@@ -27,7 +27,6 @@ const IS_MAC =
 const MOD_KEY = IS_MAC ? "⌘" : "Ctrl+";
 const MOD_ALT_KEY = IS_MAC ? "⌘⌥" : "Ctrl+Alt+";
 const MOD_SHIFT_KEY = IS_MAC ? "⌘⇧" : "Ctrl+Shift+";
-// Trying again can't change these, or the page tries by itself, so the page offers no Try again.
 const FINAL = ["access-removed", "link-full", "live-starting", "live-stopped", "document-gone"];
 export const LIVE_OFF = "Live editing of this file is off. Only its owner can start it again.";
 /** Editing stopped with a change the page will not send again by itself. */
