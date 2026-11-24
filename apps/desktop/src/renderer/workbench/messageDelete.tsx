@@ -55,7 +55,7 @@ export function MessageDeleteRole(props: {
     load: () => bridge().workspaceMembers({ workspaceId, request: { action: "list" } }),
     manual: !admitted,
   });
-  const { retry } = members;
+  const { retry, retryIfFailed } = members;
   // A new workspace starts its own read.
   const readFor = useRef({ workspaceId, refreshKey, admitted });
   useEffect(() => {
@@ -64,13 +64,12 @@ export function MessageDeleteRole(props: {
     if (previous.workspaceId !== workspaceId || !admitted) return;
     if (!previous.admitted || previous.refreshKey !== refreshKey) void retry();
   }, [workspaceId, refreshKey, admitted, retry]);
-  const failed = members.error !== null;
   useEffect(() => {
-    if (!failed || !shareAccessCurrent) return;
-    const tryAgain = () => void retry();
+    if (!admitted || !shareAccessCurrent) return;
+    const tryAgain = () => void retryIfFailed();
     shareAccessCurrent.addEventListener("current", tryAgain);
     return () => shareAccessCurrent.removeEventListener("current", tryAgain);
-  }, [failed, shareAccessCurrent, retry]);
+  }, [admitted, shareAccessCurrent, retryIfFailed]);
   const role = members.value?.status === "ready" ? members.value.view.viewer.role : null;
   return <DeleteRole.Provider value={role}>{props.children}</DeleteRole.Provider>;
 }

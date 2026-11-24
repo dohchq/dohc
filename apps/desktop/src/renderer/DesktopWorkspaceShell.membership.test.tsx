@@ -457,44 +457,67 @@ describe("a joined workspace", () => {
   // and its sync status can read "synced" while the Members read failed.
   it("reads the Delete role again when the access check answers after a failed read", async () => {
     const bridge = makeShareBridge();
-    bridge.workspaceMembers.mockRejectedValue(new Error("offline"));
+    type MembersAnswer = Awaited<ReturnType<typeof bridge.workspaceMembers>>;
+    type AccessAnswer = Awaited<ReturnType<typeof bridge.checkSharedViewAccess>>;
+    const firstRead = Promise.withResolvers<MembersAnswer>();
+    const secondRead = Promise.withResolvers<MembersAnswer>();
+    const access = Promise.withResolvers<AccessAnswer>();
+    const current = { status: "current", access: "comment", role: "member" } as const;
+    bridge.workspaceMembers.mockReturnValueOnce(firstRead.promise);
+    bridge.workspaceMembers.mockReturnValue(secondRead.promise);
     vi.stubGlobal("dohcDesktop", bridge);
     render(shell(bridge, { ...JOINED, shareView: { ...JOINED.shareView!, role: "member" } }));
     await waitFor(() => expect(bridge.workspaceMembers).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(bridge.checkSharedViewAccess).toHaveBeenCalled());
-    const checks = bridge.checkSharedViewAccess.mock.calls.length;
-    bridge.workspaceMembers.mockResolvedValue({
-      status: "ready",
-      view: {
-        workspaceId: "relay-ws",
-        workspaceName: "Community",
-        viewer: { memberId: "member-me", role: "member" },
-        memberLevel: "comment",
-        inviteLink: null,
-        groupRules: null,
-        folderRules: null,
-        people: [],
-      },
+
+    const recoveryStarted = Promise.withResolvers<void>();
+    bridge.checkSharedViewAccess.mockImplementationOnce(() => {
+      recoveryStarted.resolve();
+      return access.promise;
     });
-    bridge.checkSharedViewAccess.mockResolvedValue({
-      status: "current",
-      access: "comment",
-      role: "member",
-    });
-    fireEvent(window, new Event("online"));
-    await waitFor(() =>
-      expect(bridge.checkSharedViewAccess.mock.calls.length).toBeGreaterThan(checks),
-    );
-    await waitFor(() => expect(bridge.workspaceMembers).toHaveBeenCalledTimes(2));
-    // A read that answered is not repeated by the next check.
-    const answered = bridge.checkSharedViewAccess.mock.calls.length;
-    fireEvent(window, new Event("online"));
-    await waitFor(() =>
-      expect(bridge.checkSharedViewAccess.mock.calls.length).toBeGreaterThan(answered),
-    );
     await act(async () => {
-      await bridge.checkSharedViewAccess.mock.results.at(-1)!.value;
+      fireEvent(window, new Event("online"));
+      await recoveryStarted.promise;
     });
+    await act(async () => {
+      firstRead.reject(new Error("offline"));
+      await firstRead.promise.catch(() => undefined);
+      access.resolve(current);
+      await access.promise;
+    });
+    expect(bridge.workspaceMembers).toHaveBeenCalledTimes(2);
+
+    async function checkAgain() {
+      const started = Promise.withResolvers<void>();
+      bridge.checkSharedViewAccess.mockImplementationOnce(async () => {
+        started.resolve();
+        return current;
+      });
+      await act(async () => {
+        fireEvent(window, new Event("online"));
+        await started.promise;
+      });
+    }
+
+    await checkAgain();
+    expect(bridge.workspaceMembers).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      secondRead.resolve({
+        status: "ready",
+        view: {
+          workspaceId: "relay-ws",
+          workspaceName: "Community",
+          viewer: { memberId: "member-me", role: "member" },
+          memberLevel: "comment",
+          inviteLink: null,
+          groupRules: null,
+          folderRules: null,
+          people: [],
+        },
+      });
+      await secondRead.promise;
+    });
+    await checkAgain();
     expect(bridge.workspaceMembers).toHaveBeenCalledTimes(2);
   });
 
