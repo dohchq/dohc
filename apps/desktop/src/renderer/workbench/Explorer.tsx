@@ -120,7 +120,6 @@ import {
 } from "../../ipc/errorWords";
 import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
-import { preloadCollectionView, preloadViewForPath } from "../viewPreloads";
 
 // One Explorer disk operation, as the shell's onBeginChanges opens it.
 // `settle` is the deferred draft settlement runChanges awaits before it
@@ -140,6 +139,8 @@ export type LivePageRefused =
 
 export interface ExplorerProps {
   workspaceId: string;
+  // A row someone points at or focuses, so its view can load before the click.
+  onRowPointed?: (path: string, collection: boolean) => void;
   mode: ExplorerMode;
   onModeChange: (mode: ExplorerMode) => void;
   // Whether the workspace's first listing has landed. Home waits for it.
@@ -483,6 +484,7 @@ export const TreeRow = memo(function TreeRow(props: {
   movable?: boolean;
   registerRef: (path: string, el: HTMLButtonElement | null) => void;
   onRowFocus: (path: string) => void;
+  onRowPointed?: (path: string, collection: boolean) => void;
   onRowClick: (path: string, event: MouseEvent) => void;
   onRowChevronClick: (path: string, event: MouseEvent) => void;
   onRowContextMenu: (path: string, event: MouseEvent) => void;
@@ -510,8 +512,7 @@ export const TreeRow = memo(function TreeRow(props: {
   const openEdge = !props.dropPreview && props.picked && props.active;
   // The view's code loads while the pointer travels to the click.
   const preloadView = () => {
-    if (props.collection) preloadCollectionView();
-    else if (!row.isFolder) preloadViewForPath(row.fullPath);
+    if (props.collection || !row.isFolder) props.onRowPointed?.(row.fullPath, props.collection);
   };
   const dropClass = blocked
     ? target
@@ -2642,6 +2643,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           dropPreview={dropPreviewFor(row.fullPath)}
           registerRef={registerRef}
           onRowFocus={setFocusedPath}
+          onRowPointed={props.onRowPointed}
           onRowClick={onRowClick}
           onRowChevronClick={onRowChevronClick}
           onRowContextMenu={onRowContextMenu}

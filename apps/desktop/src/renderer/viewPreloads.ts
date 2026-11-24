@@ -34,8 +34,10 @@ export function preloadViewForPath(path: string): void {
   }
 }
 
-export function preloadCollectionView(): void {
-  void LazyCollectionPage.preload();
+/** Starts loading the view for an Explorer row someone points at or focuses. */
+export function preloadRowView(path: string, collection: boolean): void {
+  if (collection) void LazyCollectionPage.preload();
+  else preloadViewForPath(path);
 }
 
 // Small views people open soon after launch, in order. Each starts in an

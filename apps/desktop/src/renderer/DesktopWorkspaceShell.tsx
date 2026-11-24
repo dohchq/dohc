@@ -232,7 +232,7 @@ import { FileInspector } from "./FileInspector";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import type { HeadingTarget, ScrollTarget } from "./MarkdownView";
 import { preloadMarkdownEditor } from "./editor/LazyMarkdownEditor";
-import { preloadViewForPath, scheduleIdleViewPreloads } from "./viewPreloads";
+import { preloadRowView, preloadViewForPath, scheduleIdleViewPreloads } from "./viewPreloads";
 import { sendToFocusedEditor } from "./editor/editorMenuCommands";
 import { NewFileDialog } from "./NewFileDialog";
 import { NewPage, type NewPageFile } from "./NewPage";
@@ -7787,6 +7787,7 @@ function WorkspaceShell(props: {
       <NotVersionedMarks.Provider value={notVersionedMarks}>
         <Explorer
           workspaceId={workspaceId}
+          onRowPointed={preloadRowView}
           mode={wb.explorerMode}
           onModeChange={setExplorerModeInWb}
           listed={fileListingCommit !== null}
