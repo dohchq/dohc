@@ -602,7 +602,7 @@ export function decodeLiveDocumentAuthorityStructure(
     authorityIntegrity(
       source &&
         typeof source.payload_json === "string" &&
-        beginsLineage(source.op_kind, source.payload_json, storedDocument, binding.currentPath),
+        beginsLineage(source.op_kind, source.payload_json, storedDocument),
     );
     const blob = db
       .prepare(

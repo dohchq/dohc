@@ -87,7 +87,8 @@ function currentCut(storage: StorageContext, source: NativeOwnerActivationSource
 /**
  * Accepts a validated capture in the transaction that registers it. The capture stands when the relay's cursor, epoch
  * and stream are the ones it was taken at, and the row at its base position began this lineage, as its base state or
- * as the conflict resolve that installed it, at the capture's origin coordinates and path, with the baseline's bytes.
+ * as the conflict resolve that installed it, at the capture's origin coordinates, with the baseline's bytes. That row
+ * may name a path the note has since left; registration checks that the note is now at the capture's path.
  * Anything else refuses it, so the transaction never registers evidence for another cut.
  */
 export function verifyOrdinaryActivationCut(
@@ -118,13 +119,7 @@ export function verifyOrdinaryActivationCut(
   requireValue(
     base.origin_id === source.baseOriginId &&
       base.origin_seq === source.baseOriginSeq &&
-      beginsLineage(
-        base.op_kind,
-        base.payload_json,
-        document,
-        source.currentPath,
-        baseline.lineageEpoch,
-      ),
+      beginsLineage(base.op_kind, base.payload_json, document, baseline.lineageEpoch),
     "Native activation base coordinate differs from ordinary history.",
   );
   requireValue(
