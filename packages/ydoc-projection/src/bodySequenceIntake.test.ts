@@ -62,13 +62,39 @@ const register = createLiveMarkdownRegistrationValidator(POLICY);
 const admit = createLiveMarkdownJournalValidator(POLICY);
 const engineReaderAdmit = createLiveMarkdownJournalValidator(POLICY, true);
 const activate = createLiveMarkdownHistoryValidator(POLICY);
-const SEEDS = Number(process.env.BODY_SEQUENCE_CHECK_SEEDS ?? 3);
+const seedsAsked = process.env.BODY_SEQUENCE_CHECK_SEEDS;
+/** How many seeds the random runs go by: 3, or the whole number `BODY_SEQUENCE_CHECK_SEEDS` asks for. */
+const SEEDS = seedsAsked === undefined ? 3 : Number(seedsAsked);
+if (!Number.isSafeInteger(SEEDS) || SEEDS < 1)
+  throw new Error(
+    `BODY_SEQUENCE_CHECK_SEEDS must be a whole number of seeds, 1 or more. It is ${JSON.stringify(seedsAsked)}.`,
+  );
 
-const honest = { histories: 0, changes: 0 };
+/** Whether `BODY_SEQUENCE_INTAKE_FULL=1` asks for every random run, not the sample. */
+const FULL = process.env.BODY_SEQUENCE_INTAKE_FULL === "1";
+const RUNS = FULL
+  ? "every run"
+  : "every third run, and one at least (BODY_SEQUENCE_INTAKE_FULL=1 makes every run)";
+
+/**
+ * Which of `count` random runs a test makes: every one in a full run, else every third, starting
+ * at a place that differs from one `group` of runs to the next, the same places each time, and
+ * one at least.
+ */
+function sampled(count: number, group: number): number[] {
+  const all = Array.from({ length: count }, (_, run) => run);
+  if (FULL) return all;
+  const picked = all.filter((run) => (run + group) % 3 === 0);
+  return picked.length > 0 ? picked : [group % count];
+}
+
+const honest = { histories: 0, changes: 0, kinds: new Set<string>() };
 beforeAll(() => admitBodySequenceNotes(true));
 afterAll(() => {
   admitBodySequenceNotes(false);
-  console.log(`people's changes: ${JSON.stringify(honest)}`);
+  console.log(
+    `people's changes: ${JSON.stringify({ ...honest, kinds: [...honest.kinds].sort() })}`,
+  );
 });
 
 const documentFor = (checkpoint: Uint8Array) => ({
@@ -266,7 +292,10 @@ describe("the names intake goes by", () => {
   });
 });
 
-describe("a format-2 note that people edit as section 4 says, on a relay that admits such notes", () => {
+const inDeclaredOrder = { shuffle: false };
+const asPeopleEdit =
+  "a format-2 note that people edit as section 4 says, on a relay that admits such notes";
+describe(asPeopleEdit, inDeclaredOrder, () => {
   it("is registered, and reads as the document it was seeded with", () => {
     const baseline = seededNote();
     const result = register({
@@ -303,10 +332,12 @@ describe("a format-2 note that people edit as section 4 says, on a relay that ad
   });
 
   it.each([2, 3, 4].flatMap((people) => ARRIVALS.map((arrive) => [people, arrive] as const)))(
-    "%i people, changes arriving %s: intake takes every change, and no later check refuses one",
+    `%i people, changes arriving %s, in ${RUNS}: intake takes every change, and no later check refuses one`,
     (people, arrive) => {
+      const made = new Set(sampled(2 * SEEDS, 3 * (people - 2) + ARRIVALS.indexOf(arrive)));
       for (let seed = 1; seed <= SEEDS; seed++)
         for (const gc of [true, false]) {
+          if (!made.has(2 * (seed - 1) + (gc ? 0 : 1))) continue;
           const baseline = seededNote();
           const held = room(baseline);
           const next = random(seed * 7919 + people);
@@ -318,6 +349,7 @@ describe("a format-2 note that people edit as section 4 says, on a relay that ad
               const kept = held.offer(change.bytes);
               expect(kept, `the room's check: ${where}`).toBeDefined();
               honest.changes++;
+              honest.kinds.add(change.kind);
               expect(held.laterChecks(kept!), where).toEqual(ACCEPTED);
               return kept!;
             },
@@ -342,6 +374,26 @@ describe("a format-2 note that people edit as section 4 says, on a relay that ad
     },
     600_000,
   );
+
+  it("those runs took a change of each kind people's changes are of there, in the sample as in a full run", () => {
+    expect([...honest.kinds].sort()).toEqual([
+      "container made",
+      "inline item",
+      "join",
+      "kind of line",
+      "letters deleted",
+      "line removed",
+      "mark",
+      "merged changes",
+      "property",
+      "reconnect",
+      "record",
+      "redo",
+      "split",
+      "typing",
+      "undo",
+    ]);
+  });
 
   it("is read, and written as Markdown, without its sequence or its records being declared", () => {
     const note = new Y.Doc({ gc: false });
@@ -1229,31 +1281,41 @@ describe("single changes no editor would send, on a relay that admits format-2 n
     expect(() => yDocToMarkdown(held.note)).not.toThrow();
   });
 
-  it("whatever intake takes of them, in any order and on top of each other, no later check refuses", () => {
-    const counts = { offered: 0, taken: 0 };
-    for (let seed = 1; seed <= 10 * SEEDS; seed++) {
-      const baseline = seededNote();
-      const held = room(baseline);
-      const next = random(seed * 2053);
-      const all = [...REFUSED, ...TAKEN].filter(({ name }) => name !== LONG_PATH);
-      for (let step = 0; step < 14; step++) {
-        const picked = all[Math.floor(next() * all.length)]!;
+  it(`whatever intake takes of them, in any order and on top of each other, no later check refuses: ${RUNS}, and each of them picked once at least`, () => {
+    const counts = { notes: 0, picks: 0, offered: 0, taken: 0 };
+    const all = [...REFUSED, ...TAKEN].filter(({ name }) => name !== LONG_PATH);
+    const neverPicked = new Set(all);
+    const onOneNote = (run: string, picks: readonly Case[]) => {
+      const held = room(seededNote());
+      for (const [step, picked] of picks.entries()) {
         const { name } = picked;
+        neverPicked.delete(picked);
+        counts.picks++;
         const bytes = changeIfItApplies(picked, Y.encodeStateAsUpdate(held.note), 100 + step);
         if (!bytes) continue;
         counts.offered++;
         const kept = held.offer(bytes);
         if (!kept) continue;
         counts.taken++;
-        expect(
-          held.laterChecks(kept),
-          `seed ${String(seed)}, step ${String(step)}: ${name}`,
-        ).toEqual(ACCEPTED);
+        expect(held.laterChecks(kept), `${run}, step ${String(step)}: ${name}`).toEqual(ACCEPTED);
       }
-      if (held.taken.length > 0) expect(held.activation(), `seed ${String(seed)}`).toBe("accepted");
+      if (held.taken.length > 0) expect(held.activation(), run).toBe("accepted");
       held.note.destroy();
+      counts.notes++;
+    };
+    for (const run of sampled(10 * SEEDS, 0)) {
+      const next = random((run + 1) * 2053);
+      onOneNote(
+        `seed ${String(run + 1)}`,
+        Array.from({ length: 14 }, () => all[Math.floor(next() * all.length)]!),
+      );
     }
-    console.log(`changes no editor would send: ${JSON.stringify(counts)}`);
+    const leftOut = [...neverPicked];
+    for (let from = 0; from < leftOut.length; from += 14)
+      onOneNote(`the ones no seed picked, from ${String(from)}`, leftOut.slice(from, from + 14));
+    console.log(
+      `changes no editor would send: ${JSON.stringify({ ...counts, cases: all.length, noSeedPicked: leftOut.length })}`,
+    );
     expect(counts.taken).toBeGreaterThan(0);
     expect(counts.offered).toBeGreaterThan(counts.taken);
   }, 600_000);
