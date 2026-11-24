@@ -1768,15 +1768,20 @@ impl Ydoc {
                     } else {
                         (0, 0)
                     };
-                    let len = frag.len(txn);
-                    if len > start + end {
-                        frag.remove_range(txn, start, len - start - end);
+                    let changed = &blocks[start as usize..blocks.len() - end as usize];
+                    let removed = frag.len(txn) - start - end;
+                    let paired = if file_fold {
+                        edit_blocks_in_place::<WIRE_SEED>(
+                            txn, &frag, start, removed, changed, inline,
+                        )
+                    } else {
+                        0
+                    };
+                    if removed > paired {
+                        frag.remove_range(txn, start + paired, removed - paired);
                     }
-                    for block in blocks[start as usize..blocks.len() - end as usize]
-                        .iter()
-                        .rev()
-                    {
-                        insert_md_block::<_, WIRE_SEED>(txn, &frag, start, block, inline);
+                    for block in changed[paired as usize..].iter().rev() {
+                        insert_md_block::<_, WIRE_SEED>(txn, &frag, start + paired, block, inline);
                     }
                 };
                 if WIRE_SEED {
@@ -5322,18 +5327,7 @@ fn same_xml<A: ReadTxn, B: ReadTxn>(old_txn: &A, old: &XmlOut, new_txn: &B, new:
     count_fold_work!(compared);
     match (old, new) {
         (XmlOut::Element(old), XmlOut::Element(new)) => {
-            if old.tag() != new.tag() {
-                return false;
-            }
-            let mut attributes = 0;
-            for (key, value) in old.attributes(old_txn) {
-                attributes += 1;
-                match (value, new.get_attribute(new_txn, key)) {
-                    (Out::Any(value), Some(Out::Any(other))) if value == other => {}
-                    _ => return false,
-                }
-            }
-            if attributes != new.attributes(new_txn).count() {
+            if !same_element(old_txn, old, new_txn, new) {
                 return false;
             }
             // An empty text piece shows nothing, so a line holding one is the
@@ -5360,18 +5354,151 @@ fn same_xml<A: ReadTxn, B: ReadTxn>(old_txn: &A, old: &XmlOut, new_txn: &B, new:
             drop((olds, news));
             old_seen == old_len && new_seen == new_len
         }
-        (XmlOut::Text(old), XmlOut::Text(new)) => {
-            let old = old.diff(old_txn, YChange::identity);
-            let new = new.diff(new_txn, YChange::identity);
-            old.len() == new.len()
-                && old.iter().zip(&new).all(|(old, new)| {
-                    matches!(old.insert, Out::Any(_))
-                        && old.insert == new.insert
-                        && old.attributes == new.attributes
-                })
-        }
+        (XmlOut::Text(old), XmlOut::Text(new)) => same_text(old_txn, old, new_txn, new),
         _ => false,
     }
+}
+
+fn same_element<A: ReadTxn, B: ReadTxn>(
+    old_txn: &A,
+    old: &yrs::XmlElementRef,
+    new_txn: &B,
+    new: &yrs::XmlElementRef,
+) -> bool {
+    let mut attributes = 0;
+    old.tag() == new.tag()
+        && old.attributes(old_txn).all(|(key, value)| {
+            attributes += 1;
+            matches!(
+                (value, new.get_attribute(new_txn, key)),
+                (Out::Any(value), Some(Out::Any(other))) if value == other
+            )
+        })
+        && attributes == new.attributes(new_txn).count()
+}
+
+fn same_text<A: ReadTxn, B: ReadTxn>(
+    old_txn: &A,
+    old: &yrs::XmlTextRef,
+    new_txn: &B,
+    new: &yrs::XmlTextRef,
+) -> bool {
+    let old = old.diff(old_txn, YChange::identity);
+    let new = new.diff(new_txn, YChange::identity);
+    old.len() == new.len()
+        && old.iter().zip(&new).all(|(old, new)| {
+            matches!(old.insert, Out::Any(_))
+                && old.insert == new.insert
+                && old.attributes == new.attributes
+        })
+}
+
+fn edit_blocks_in_place<const WIRE_DEFAULTS: bool>(
+    txn: &mut yrs::TransactionMut<'_>,
+    body: &yrs::XmlFragmentRef,
+    start: u32,
+    count: u32,
+    blocks: &[MdBlock<'_>],
+    inline: bool,
+) -> u32 {
+    let paired = count.min(blocks.len() as u32);
+    let old: Vec<XmlOut> = body.children(&*txn).collect();
+    let utf16 = txn.doc().offset_kind() == yrs::OffsetKind::Utf16;
+    if paired == 0 || !utf16 || old.len() as u32 != body.len(&*txn) {
+        return 0;
+    }
+    let scratch = yrs::Doc::new();
+    let fresh = scratch.get_or_insert_xml_fragment(ROOT_BODY);
+    let mut scratch_txn = scratch.transact_mut();
+    for block in blocks[..paired as usize].iter().rev() {
+        insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &fresh, 0, block, inline);
+    }
+    let new: Vec<XmlOut> = fresh.children(&scratch_txn).collect();
+    if new.len() as u32 != paired {
+        return 0;
+    }
+    for (offset, (old, new)) in old[start as usize..].iter().zip(&new).enumerate() {
+        if !edit_in_place(txn, old, &scratch_txn, new) {
+            let index = start + offset as u32;
+            body.remove_range(txn, index, 1);
+            insert_md_block::<_, WIRE_DEFAULTS>(txn, body, index, &blocks[offset], inline);
+        }
+    }
+    paired
+}
+
+fn edit_in_place<T: ReadTxn>(
+    txn: &mut yrs::TransactionMut<'_>,
+    old: &XmlOut,
+    new_txn: &T,
+    new: &XmlOut,
+) -> bool {
+    match (old, new) {
+        (XmlOut::Element(old), XmlOut::Element(new)) => {
+            let olds: Vec<XmlOut> = old.children(&*txn).collect();
+            let news: Vec<XmlOut> = new.children(new_txn).collect();
+            same_element(&*txn, old, new_txn, new)
+                && olds.len() as u32 == old.len(&*txn)
+                && olds.len() == news.len()
+                && olds
+                    .iter()
+                    .zip(&news)
+                    .all(|(old, new)| edit_in_place(txn, old, new_txn, new))
+        }
+        (XmlOut::Text(old), XmlOut::Text(new)) => edit_text_in_place(txn, old, new_txn, new),
+        _ => false,
+    }
+}
+
+fn edit_text_in_place<T: ReadTxn>(
+    txn: &mut yrs::TransactionMut<'_>,
+    old: &yrs::XmlTextRef,
+    new_txn: &T,
+    new: &yrs::XmlTextRef,
+) -> bool {
+    let old_runs = old.diff(&*txn, YChange::identity);
+    let new_runs = new.diff(new_txn, YChange::identity);
+    let (Some(before), Some(after)) = (characters(&old_runs), characters(&new_runs)) else {
+        return false;
+    };
+    let same = |(old, new): (&(char, usize), &(char, usize))| {
+        old.0 == new.0 && old_runs[old.1].attributes == new_runs[new.1].attributes
+    };
+    let prefix = before
+        .iter()
+        .zip(&after)
+        .take_while(|&pair| same(pair))
+        .count();
+    let suffix = before[prefix..]
+        .iter()
+        .rev()
+        .zip(after[prefix..].iter().rev())
+        .take_while(|&pair| same(pair))
+        .count();
+    let units = |run: &[(char, usize)]| run.iter().map(|(c, _)| c.len_utf16() as u32).sum::<u32>();
+    let mut at = units(&before[..prefix]);
+    let removed = units(&before[prefix..before.len() - suffix]);
+    if removed > 0 {
+        old.remove_range(txn, at, removed);
+    }
+    for run in after[prefix..after.len() - suffix].chunk_by(|left, right| left.1 == right.1) {
+        let text: String = run.iter().map(|(character, _)| character).collect();
+        let marks = new_runs[run[0].1].attributes.as_deref().cloned();
+        old.insert_with_attributes(txn, at, &text, marks.unwrap_or_default());
+        at += units(run);
+    }
+    same_text(&*txn, old, new_txn, new)
+}
+
+fn characters(runs: &[yrs::types::text::Diff<YChange>]) -> Option<Vec<(char, usize)>> {
+    let mut characters = Vec::new();
+    for (index, run) in runs.iter().enumerate() {
+        let Out::Any(Any::String(text)) = &run.insert else {
+            return None;
+        };
+        characters.extend(text.chars().map(|character| (character, index)));
+    }
+    Some(characters)
 }
 
 fn is_empty_text<T: ReadTxn>(txn: &T, node: &XmlOut) -> bool {

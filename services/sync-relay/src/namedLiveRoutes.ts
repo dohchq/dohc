@@ -26,6 +26,7 @@ import { hiddenFile } from "./accountFeed";
 import {
   createLiveFrameSession,
   LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES,
+  LiveFrameError,
   type LiveFrameSessionPolicy,
 } from "@dohc/live-session-contract/live-frame";
 import {
@@ -1397,6 +1398,12 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           membership,
           reserveBytes,
           failed(error) {
+            if (error instanceof LiveFrameError && error.limit) {
+              const { name, unit, limit, actual } = error.limit;
+              console.error(
+                `[sync-relay] live frame refused: ${name} is ${String(limit)} ${unit}, the frame needed ${String(actual)} ${unit}`,
+              );
+            }
             refuseRetryable(error);
           },
           transport: {

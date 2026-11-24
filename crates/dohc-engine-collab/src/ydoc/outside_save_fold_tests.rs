@@ -635,3 +635,99 @@ fn the_direct_comparison_never_keeps_a_block_holding_a_shared_type_or_value() {
         assert!(!same_xml(&txn, &same_block, &txn, &same_block));
     }
 }
+
+fn lines_of(doc: &Ydoc) -> Vec<yrs::XmlElementRef> {
+    blocks_of(doc)
+        .into_iter()
+        .map(|line| match line {
+            XmlOut::Element(line) => line,
+            other => panic!("{other:?}"),
+        })
+        .collect()
+}
+
+fn edited_in_place(before: &str, after: &str) {
+    let doc = folded(before);
+    let base = Ydoc::wire();
+    base.apply(&doc.encode_full_state()).unwrap();
+    let lines = lines_of(&doc);
+    let update = doc
+        .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, after)
+        .expect(after);
+    crate::validate_replay_parity(&base, &update)
+        .unwrap_or_else(|error| panic!("{before:?} -> {after:?}: {error}"));
+    assert_eq!(doc.project_richdoc().unwrap(), after, "{before:?}");
+    assert_eq!(
+        body_json(&doc),
+        body_json(&folded(after)),
+        "{before:?} -> {after:?}"
+    );
+    assert_eq!(lines_of(&doc), lines, "{before:?} -> {after:?}");
+}
+
+#[test]
+fn a_paragraph_saved_from_outside_line_by_line_grows_by_its_lines() {
+    let doc = folded("# Long history\n\nTyped by the owner.\n");
+    let mut file = "# Long history\n\nTyped by the owner.\n".to_owned();
+    for save in 1..=300 {
+        file.push_str(&format!("Line {save} saved on its own.\n"));
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &file)
+            .expect(&file);
+        if save % 100 == 0 {
+            let state = doc.encode_full_state().len();
+            assert!(
+                state < 2 * file.len() + 4096,
+                "{save} saves: {state} bytes of state for a {}-byte file",
+                file.len()
+            );
+        }
+    }
+    assert_eq!(doc.project_richdoc().unwrap(), file);
+}
+
+#[test]
+fn an_outside_edit_beside_an_emoji_passes_replay_parity_and_reads_back_exactly() {
+    for (before, after) in [
+        ("😀 middle 😀\n", "😁 middle 😁\n"),
+        ("😀 middle 😀\n", "😀😀 middle 😀😀\n"),
+        ("😀 middle 😀\n", "middle 😀 more\n"),
+        ("a😀b\n", "a😁b\n"),
+        ("😀\n", "😁\n"),
+        ("x😀\n", "x\n"),
+        ("**😀 bold** 😀\n", "**😁 bold** 😁\n"),
+    ] {
+        edited_in_place(before, after);
+    }
+}
+
+#[test]
+fn an_outside_edit_inside_a_line_keeps_the_marks_around_it() {
+    for (before, after) in [
+        (
+            "Plain **bold** and *italic* end.\n",
+            "Plain **bolder** and *italic* end.\n",
+        ),
+        ("**Bold**\n", "**Bolder** still\n"),
+        (
+            "Start [link](https://a.example) end.\n",
+            "Start [link](https://a.example) end. More.\n",
+        ),
+        ("`code` and text\n", "`code` and more text\n"),
+        ("~~gone~~ kept\n", "~~gone~~ kept, more\n"),
+        ("Line one  \nline two\n", "Line one  \nline two and three\n"),
+        ("# Title\n", "# Title two\n"),
+        ("- one\n- two\n", "- one\n- two more\n"),
+        ("> Quoted.\n", "> Quoted, still.\n"),
+    ] {
+        edited_in_place(before, after);
+    }
+    for (before, after) in [
+        ("**Bold** text\n", "Bold text\n"),
+        ("Bold text\n", "**Bold** text\n"),
+        ("- one\n", "- one\n- two\n"),
+        ("Text\n", "# Text\n"),
+        ("![a](a.png) text\n", "text ![a](a.png)\n"),
+    ] {
+        fold_over(before, after);
+    }
+}
