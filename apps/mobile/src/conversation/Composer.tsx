@@ -4,7 +4,7 @@ import type { PhoneMentionCandidate } from "@dohc/workspace-contracts/chat-wakes
 import * as Haptics from "expo-haptics";
 import { SymbolView } from "expo-symbols";
 import { ArrowUp, SquarePen, X } from "lucide-react-native";
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useContext, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AccessibilityInfo,
   Platform,
@@ -37,6 +37,7 @@ import {
   type SubmitOutcome,
 } from "./conversationWrites";
 import { MentionMenu } from "./MentionMenu";
+import { ComposerBar } from "./revealAboveComposer";
 import {
   acceptsReport,
   activeMention,
@@ -392,12 +393,14 @@ function Dock({
 }) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  const bar = useContext(ComposerBar);
   return (
     <KeyboardStickyView
       offset={{ closed: 0, opened: insets.bottom - 6 + LIFT }}
       style={styles.sticky}
     >
       <View
+        ref={bar}
         onLayout={(event) => onLayoutHeight?.(event.nativeEvent.layout.height)}
         style={[
           styles.bar,
