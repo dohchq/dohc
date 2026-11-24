@@ -12,14 +12,14 @@ export function copyText(text: string) {
 
 /**
  * Whether a copy just happened: for 1.5 s a check stands in for the control that copied, as the desktop's menu row says
- * "Copied". The second item marks a copy.
+ * "Copied". The second item marks a copy, and each copy starts the 1.5 s again.
  */
 export function useCopiedMark(): readonly [boolean, () => void] {
-  const [copied, setCopied] = useState(false);
+  const [copies, setCopies] = useState(0);
   useEffect(() => {
-    if (!copied) return;
-    const timer = setTimeout(() => setCopied(false), 1500);
+    if (copies === 0) return;
+    const timer = setTimeout(() => setCopies(0), 1500);
     return () => clearTimeout(timer);
-  }, [copied]);
-  return [copied, useCallback(() => setCopied(true), [])];
+  }, [copies]);
+  return [copies > 0, useCallback(() => setCopies((count) => count + 1), [])];
 }
