@@ -99,6 +99,9 @@ function inHiddenFolder(path: string): boolean {
     .some((segment) => segment.startsWith("."));
 }
 
+const TABLE_VIEWS_PATH =
+  /^collection-views\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/i;
+
 // One pass over the listing. A dataset's folder holds its dataset.json, except
 // one in `unclaimed`, whose dataset.json names no Collection on this computer.
 // Drawings and other files are never sorted whole: Home shows only the first few.
@@ -118,6 +121,7 @@ export function classifyFiles(
   const others: FirstFiles = { shown: [], count: 0 };
   for (const file of files) {
     if (ownedBy(file.path, owners) || inHiddenFolder(file.path)) continue;
+    if (file.kind === "file" && TABLE_VIEWS_PATH.test(file.path)) continue;
     const kind = file.kind === "file" ? fileKindForPath(file.path).displayKind : null;
     if (kind === "markdown") pages.push(file);
     else keepFirst(kind === "drawing" ? sketches : others, file);

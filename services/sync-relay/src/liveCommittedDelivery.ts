@@ -12,13 +12,6 @@ import {
 } from "./storage/liveJournalHistory";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
 import { snapshotHostCoordinate } from "./liveTicketInputs";
-import {
-  cancelStopRestore,
-  deliverStopRestore,
-  snapshotStopRestoreLookup,
-} from "./liveRestoreDelivery";
-import type { StopRestoreLookup } from "./storage/liveRestoreOperation";
-import type { LiveRestorePreparation } from "./liveRestorePreparation";
 import { LiveHostRegistrations, sameLiveHostDocument } from "./liveHostRegistration";
 import { settlementResponse, settlementPending, type SettlementOutcome } from "./liveSettlement";
 import { asRelayWrite } from "./relayMainThreadTiming";
@@ -39,7 +32,6 @@ export class LiveCommittedDelivery {
     readonly host: LiveHostConnectionCoordinate;
     readonly deadlineMs: number;
     readonly nextRequestId: () => number;
-    readonly restore?: LiveRestorePreparation;
   };
   constructor(
     storage: SyncRelayStorage,
@@ -50,7 +42,6 @@ export class LiveCommittedDelivery {
       host: LiveHostConnectionCoordinate;
       deadlineMs: number;
       nextRequestId(): number;
-      restore?: LiveRestorePreparation;
     },
   ) {
     if (
@@ -66,7 +57,6 @@ export class LiveCommittedDelivery {
       host: Object.freeze(snapshotHostCoordinate(connection.host)),
       deadlineMs: connection.deadlineMs,
       nextRequestId: connection.nextRequestId.bind(connection),
-      restore: connection.restore,
     });
     this.#store = storage.createLiveCommittedDeliveryStore(history);
     this.#registrations = new LiveHostRegistrations(this.#connection);
@@ -185,175 +175,6 @@ export class LiveCommittedDelivery {
       }
     } finally {
       if (drain) this.#store.close(drain);
-      this.#active.delete(key);
-    }
-  }
-
-  documentForRestore(value: StopRestoreLookup): LiveDocumentKey {
-    const lookup = snapshotStopRestoreLookup(value);
-    return parseLiveDocumentKey(
-      this.#store.stopRestoreDocument({ ...lookup, host: this.#connection.host }),
-    );
-  }
-  async stopRestore(value: StopRestoreLookup, signal?: AbortSignal) {
-    const lookup = snapshotStopRestoreLookup(value),
-      document = this.documentForRestore(lookup);
-    const key = JSON.stringify([
-      document.workspaceId,
-      document.mainVersionId,
-      document.objectId,
-      document.lineageClaimId,
-    ]);
-    if (this.#active.has(key))
-      throw new Error("A committed delivery operation already owns this document.");
-    this.#active.add(key);
-    this.#registrations.invalidate(document.objectId);
-    try {
-      return await deliverStopRestore({
-        store: this.#store,
-        lookup,
-        connection: this.#connection,
-        deliveryKind: "bootstrap",
-        signal,
-      });
-    } finally {
-      this.#active.delete(key);
-    }
-  }
-
-  async prepareRestore(value: StopRestoreLookup, signal?: AbortSignal) {
-    const restore = this.#connection.restore;
-    if (!restore) throw new Error("Restore preparation is not configured on this host.");
-    const lookup = snapshotStopRestoreLookup(value),
-      document = this.documentForRestore(lookup);
-    const key = JSON.stringify([
-      document.workspaceId,
-      document.mainVersionId,
-      document.objectId,
-      document.lineageClaimId,
-    ]);
-    if (this.#active.has(key))
-      throw new Error("A committed delivery operation already owns this document.");
-    this.#active.add(key);
-    this.#registrations.invalidate(document.objectId);
-    try {
-      return await restore.prepare({
-        store: this.#store,
-        lookup,
-        connection: this.#connection,
-        deliveryKind: "bootstrap",
-        signal,
-      });
-    } finally {
-      this.#active.delete(key);
-    }
-  }
-
-  async reviewRestore(value: StopRestoreLookup, signal?: AbortSignal) {
-    const restore = this.#connection.restore;
-    if (!restore) throw new Error("Restore preparation is not configured on this host.");
-    const lookup = snapshotStopRestoreLookup(value),
-      document = this.documentForRestore(lookup);
-    const key = JSON.stringify([
-      document.workspaceId,
-      document.mainVersionId,
-      document.objectId,
-      document.lineageClaimId,
-    ]);
-    if (this.#active.has(key)) throw new Error("A restore operation already owns this document.");
-    this.#active.add(key);
-    try {
-      return await restore.review({
-        store: this.#store,
-        lookup,
-        connection: this.#connection,
-        deliveryKind: "bootstrap",
-        signal,
-      });
-    } finally {
-      this.#active.delete(key);
-    }
-  }
-
-  async confirmRestore(value: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
-    const restore = this.#connection.restore;
-    if (!restore) throw new Error("Restore preparation is not configured on this host.");
-    const lookup = snapshotStopRestoreLookup(value),
-      document = this.documentForRestore(lookup);
-    const key = JSON.stringify([
-      document.workspaceId,
-      document.mainVersionId,
-      document.objectId,
-      document.lineageClaimId,
-    ]);
-    if (this.#active.has(key)) throw new Error("A restore operation already owns this document.");
-    this.#active.add(key);
-    try {
-      return await restore.confirm(
-        {
-          store: this.#store,
-          lookup,
-          connection: this.#connection,
-          deliveryKind: "bootstrap",
-          signal,
-        },
-        proposalDigest,
-      );
-    } finally {
-      this.#active.delete(key);
-    }
-  }
-
-  async declineRestore(value: StopRestoreLookup, signal?: AbortSignal) {
-    const lookup = snapshotStopRestoreLookup(value),
-      document = this.documentForRestore(lookup);
-    const key = JSON.stringify([
-      document.workspaceId,
-      document.mainVersionId,
-      document.objectId,
-      document.lineageClaimId,
-    ]);
-    if (this.#active.has(key)) throw new Error("A restore operation already owns this document.");
-    this.#active.add(key);
-    try {
-      return await cancelStopRestore({
-        store: this.#store,
-        lookup,
-        connection: this.#connection,
-        signal,
-      });
-    } finally {
-      this.#active.delete(key);
-    }
-  }
-
-  async completeRestore(value: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
-    const restore = this.#connection.restore;
-    if (!restore) throw new Error("Restore preparation is not configured on this host.");
-    const lookup = snapshotStopRestoreLookup(value),
-      document = this.documentForRestore(lookup);
-    const key = JSON.stringify([
-      document.workspaceId,
-      document.mainVersionId,
-      document.objectId,
-      document.lineageClaimId,
-    ]);
-    if (this.#active.has(key))
-      throw new Error("A committed delivery operation already owns this document.");
-    this.#active.add(key);
-    this.#registrations.invalidate(document.objectId);
-    try {
-      return await restore.complete(
-        {
-          store: this.#store,
-          lookup,
-          connection: this.#connection,
-          deliveryKind: "bootstrap",
-          signal,
-        },
-        proposalDigest,
-      );
-    } finally {
       this.#active.delete(key);
     }
   }

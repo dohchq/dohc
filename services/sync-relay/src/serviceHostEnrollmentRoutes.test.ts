@@ -694,6 +694,16 @@ it("reports ready only with completed retained activation and the current native
   retainServiceActivation(f.raw, namespace);
   expect((await state()).status).toBe("preparing");
   f.raw.exec("UPDATE sync_relay_service_activations SET completion_json='{}'");
+  expect((await state()).status).toBe("preparing");
+  expect(
+    f.storage.moveLiveNote({
+      workspaceId: scope.workspaceId,
+      objectId: binding.objectId,
+      generation: enrolled.note.generation,
+      nowMs: 30,
+      move: "started",
+    }).moved,
+  ).toBe(true);
   f.host.ready.mockReturnValue(false);
   expect((await state()).status).toBe("preparing");
   f.host.ready.mockReturnValue(true);
@@ -1487,4 +1497,49 @@ it("waits to stop a retained activation that no running host can prepare", async
   });
   expect(readServiceActivationRetirement(f.storage as StorageContext, enrolled)).toBeNull();
   expect(f.storage.serviceHostDocumentEnabled(enrolled)).toBe(true);
+});
+
+it("answers a note whose start failed with why, keeps it off on the owner's open, and starts it again on Resume", async () => {
+  for (const [cause, reason] of [
+    ["refused", "session-host-refused"],
+    ["failing", "session-host-refused"],
+  ] as const) {
+    const f = await fixture(),
+      enrolled = f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input });
+    expect(
+      f.storage.moveLiveNote({
+        workspaceId: scope.workspaceId,
+        objectId: binding.objectId,
+        generation: enrolled.note.generation,
+        nowMs: 30,
+        move: "start-failed",
+        cause,
+      }).moved,
+    ).toBe(true);
+    const base = { path: binding.currentPath, objectId: binding.objectId };
+    const open = await f.handle(f.request("POST", { path: binding.currentPath, open: true }));
+    expect(await open.json()).toEqual({
+      ok: true,
+      ...base,
+      status: "unavailable",
+      reason,
+      changed: false,
+    });
+    expect(
+      f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath),
+    ).toMatchObject({
+      retired: true,
+      note: { state: "off", reason: "start-failed", cause, generation: 1 },
+    });
+    expect(await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).toEqual({
+      ok: true,
+      documents: [{ ...base, status: "retired", stopped: false, reason }],
+      nextCursor: null,
+    });
+    const resumed = await f.handle(f.request("POST", { path: binding.currentPath }));
+    expect(await resumed.json()).toEqual({ ok: true, ...base, status: "preparing", changed: true });
+    expect(
+      f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath),
+    ).toMatchObject({ retired: false, note: { state: "starting", reason: null, generation: 2 } });
+  }
 });

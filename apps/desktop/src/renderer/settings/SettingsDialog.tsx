@@ -47,6 +47,8 @@ import { KeyboardSettings } from "./KeyboardSettings";
 import { MembersSettings } from "./MembersSettings";
 import { ProfileHeader } from "./ProfileHeader";
 import { ScheduleHostRow } from "./ScheduleHostRow";
+import { WorkspaceSecretsSettings } from "./WorkspaceSecretsSettings";
+import { WorkspaceWebhooksSettings } from "./WorkspaceWebhooksSettings";
 import {
   ColorControl,
   HueControl,
@@ -345,19 +347,21 @@ export function SettingsDialog(props: {
     };
   }, [props.workspaceId, props.workspaceIsReady]);
 
-  // A shared view lists no Members: the workspace it came from does. A
-  // joined workspace lists the owner's.
+  // A shared view lists no Members or Secrets: the workspace it came from does.
+  // A joined workspace lists the owner's Members.
   const listsMembers = !props.sharedView || !!props.membership;
-  const sections = useMemo(
+  const availableSections = useMemo(
     () =>
-      listsMembers
-        ? SETTINGS_SECTIONS
-        : SETTINGS_SECTIONS.filter((section) => section.id !== "members"),
-    [listsMembers],
+      SETTINGS_SECTIONS.filter(
+        (section) =>
+          (listsMembers || section.id !== "members") &&
+          (!props.sharedView || section.id !== "secrets"),
+      ),
+    [listsMembers, props.sharedView],
   );
   const filteredSections = useMemo(
-    () => sections.filter((section) => sectionMatches(section, query)),
-    [query, sections],
+    () => availableSections.filter((section) => sectionMatches(section, query)),
+    [availableSections, query],
   );
   const sharingResults = useSharingSearch(
     props.workspaceId,
@@ -367,13 +371,20 @@ export function SettingsDialog(props: {
 
   useEffect(() => {
     if (
+      !availableSections.some((section) => section.id === activeSection) &&
+      availableSections[0]
+    ) {
+      setActiveSection(availableSections[0].id);
+      return;
+    }
+    if (
       query.trim() &&
       !filteredSections.some((section) => section.id === activeSection) &&
       filteredSections[0]
     ) {
       setActiveSection(filteredSections[0].id);
     }
-  }, [activeSection, filteredSections, query]);
+  }, [activeSection, availableSections, filteredSections, query]);
 
   // Answers with what main saved, or null. A failed save reports why and puts back what the file holds.
   const saveUserSettings = useCallback(
@@ -1137,6 +1148,19 @@ export function SettingsDialog(props: {
             <UsageRecordSettings onError={props.onError} />
           </div>
         );
+      case "secrets":
+        return (
+          <div data-testid={settingsSectionPin("secrets")} className="flex flex-col gap-10">
+            <WorkspaceSecretsSettings
+              workspaceId={props.workspaceId}
+              {...(props.onError ? { onError: props.onError } : {})}
+            />
+            <WorkspaceWebhooksSettings
+              workspaceId={props.workspaceId}
+              {...(props.onError ? { onError: props.onError } : {})}
+            />
+          </div>
+        );
       case "advanced":
         return (
           <div data-testid={settingsSectionPin("advanced")}>
@@ -1335,7 +1359,7 @@ export function SettingsDialog(props: {
     }
   };
 
-  const visibleSections = query.trim() ? filteredSections : sections;
+  const visibleSections = query.trim() ? filteredSections : availableSections;
 
   // Toasts don't move Settings. The panel gives back the room Overlay leaves
   // for them, and its content leaves that room instead, so the last controls

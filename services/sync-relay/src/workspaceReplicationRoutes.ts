@@ -224,12 +224,21 @@ export function createWorkspaceReplicationRoutes(
       if (result.inserted > 0) {
         discussionActivity.wakeLog(route.workspaceId);
       }
-      const refusals = ops.flatMap((op) => {
-        const refusal = readRefusal(op);
-        return refusal
-          ? [{ originId, originSeq: op.originSeq, opKind: refusal.opKind, reason: refusal.reason }]
-          : [];
-      });
+      const refusals = route.serviceHost
+        ? ops.flatMap((op) => {
+            const refusal = readRefusal(op);
+            return refusal
+              ? [
+                  {
+                    originId,
+                    originSeq: op.originSeq,
+                    opKind: refusal.opKind,
+                    reason: refusal.reason,
+                  },
+                ]
+              : [];
+          })
+        : [];
       return jsonResponse({
         ok: true,
         accepted: ops.length,

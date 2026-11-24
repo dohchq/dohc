@@ -104,7 +104,7 @@ it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")(
             "b".repeat(64),
           );
           db.prepare(`INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,enabled,
-          created_at_ms,updated_at_ms,owner_demand,demand_at_ms,accounted_bytes) VALUES (?,?,?,?,NULL,'epoch','stream',1,1,1,1,1,64)`).run(
+          created_at_ms,updated_at_ms,owner_demand,demand_at_ms,accounted_bytes,generation,state,since_ms,changed_by) VALUES (?,?,?,?,NULL,'epoch','stream',1,1,1,1,1,64,1,'live',1,'server')`).run(
             other,
             objectId,
             documentPath,

@@ -149,7 +149,7 @@ export async function fixture(
   workspaceId = defaultScope.workspaceId,
   shareId = defaultScope.shareId,
   population?: { people: number; documents: number },
-  ownerRooms?: LiveRooms,
+  rooms?: LiveRooms,
 ) {
   const liveProfile = selfHostLiveProfile();
   const frames = production ? liveProfile.frames : defaultFrames,
@@ -336,6 +336,7 @@ export async function fixture(
         hosts: new Set([relayHost]),
         tickets,
         changes,
+        blocked: sessionHostBlocked,
         limits: {
           maxSessions: 32,
           retentionMs: 60000,
@@ -365,7 +366,7 @@ export async function fixture(
         resolveAccountSession: accountSession,
         accountSessions: { read: readSessions },
         tickets,
-        ...(ownerRooms ? { rooms: ownerRooms } : {}),
+        ...(rooms ? { rooms } : {}),
         hosts: new Set([relayHost]),
         publicOrigin: audience,
         exchangeKey,
@@ -380,6 +381,7 @@ export async function fixture(
     : createNamedLiveRoutes({
         kind: link ? "link" : "named",
         desktopBearer: desktop,
+        ...(rooms ? { rooms } : {}),
         membership: memberships,
         storage: state.storage,
         hosts: new Set([relayHost]),

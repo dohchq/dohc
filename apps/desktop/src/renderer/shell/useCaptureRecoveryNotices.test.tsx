@@ -480,7 +480,6 @@ describe("useCaptureRecoveryNotices", () => {
     expect(shared.message).toBe(
       'The file "notes/rich.md" changed outside dohc. Your text is saved in History. Because this file is shared live, copy your text from the recovery change into the file.',
     );
-    expect(shared.message).not.toContain("Restore shared file");
     expect(shared.title).toBe(CAPTURE_RECOVERY_TITLE);
     expect(shared.tone).toBe("warning");
     expect(shared.action?.label).toBe("Open History");

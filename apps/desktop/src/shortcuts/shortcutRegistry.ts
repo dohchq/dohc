@@ -87,6 +87,7 @@ export const SHORTCUTS = {
   },
   "quick-open": { owner: "shell", accelerators: ["CommandOrControl+P"] },
   "new-file": { owner: "shell", accelerators: ["CommandOrControl+N"] },
+  "quick-capture": { owner: "shell", accelerators: ["CommandOrControl+Shift+N"] },
   settings: { owner: "shell", accelerators: ["CommandOrControl+,"] },
   "toggle-sidebar": { owner: "shell", accelerators: ["CommandOrControl+B"] },
   "toggle-about": {

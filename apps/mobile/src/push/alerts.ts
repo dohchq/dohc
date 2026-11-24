@@ -182,6 +182,12 @@ export function createAlerts(options: {
   };
 }
 
+export function tapData(request: { content: { data?: unknown }; trigger: unknown }): unknown {
+  const { content, trigger } = request;
+  if (isFields(content.data)) return content.data;
+  return isFields(trigger) && trigger.type === "push" ? trigger.payload : content.data;
+}
+
 const id = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && value.length <= 256;
 
