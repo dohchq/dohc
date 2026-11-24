@@ -75,7 +75,8 @@ function statusText(state: NamedLiveBrowserState, link: boolean, band: boolean):
     return "This link cannot take more people. Ask the owner for a new link.";
   if (state.reason === "authority-unavailable") return "dohc could not open the file for editing.";
   if (state.reason === "live-starting") return "Live editing is starting.";
-  if (state.reason === "live-stopped") return LIVE_OFF;
+  if (state.reason === "live-stopped")
+    return link ? `${LIVE_OFF} You can still read and comment here.` : LIVE_OFF;
   if (state.reason === "document-gone")
     return link
       ? LINK_FILE_GONE

@@ -184,7 +184,7 @@ it("says live editing is off and only the owner can start it again, with no Try 
     ),
   );
   expect(container.querySelector('[role="status"]')?.textContent).toBe(
-    "Live editing of this file is off. Only its owner can start it again.",
+    "Live editing of this file is off. Only its owner can start it again. You can still read and comment here.",
   );
   expect(container.querySelector("button")).toBeNull();
 });

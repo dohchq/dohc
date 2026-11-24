@@ -1297,6 +1297,30 @@ it("keeps checking an invited editor's off page after the server forgot its sess
   expect(f.urls[1]).toContain("session=000000000002");
   socket.open();
 });
+it("keeps an invited editor's off page checking when reading the invitation again times out", async () => {
+  const f = await live();
+  vi.useFakeTimers();
+  let forgot = false;
+  f.intercept((path) =>
+    path === "/api/live/named-documents"
+      ? new Promise<Response>(() => {})
+      : path !== "/api/live/named-ticket"
+        ? undefined
+        : forgot
+          ? new Response(null, { status: 404 })
+          : Response.json(NAMED_LIVE_STOPPED, { status: 404 }),
+  );
+  const tickets = () => f.requests.filter(({ path }) => path === "/api/live/named-ticket").length;
+  f.socket.close();
+  await vi.advanceTimersByTimeAsync(250);
+  expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "live-stopped" });
+  forgot = true;
+  await vi.advanceTimersByTimeAsync(30_000 + limits().connectTimeoutMs);
+  expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "live-stopped" });
+  const asked = tickets();
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(tickets()).toBe(asked + 1);
+});
 it("waits while live editing of the file is starting, takes no typing, and joins by itself once it is live", async () => {
   vi.useFakeTimers();
   const f = fixture();

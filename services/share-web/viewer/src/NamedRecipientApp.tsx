@@ -45,7 +45,8 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
   const [busy, setBusy] = useState(true),
     [error, setError] = useState<string | null>(null);
   const [selection, setSelection] = useState<Selection | null>(null),
-    [sessionState, setSessionState] = useState<NamedLiveBrowserState | null>(null);
+    [sessionState, setSessionState] = useState<NamedLiveBrowserState | null>(null),
+    [synced, setSynced] = useState<Selection | null>(null);
   const [filesOpen, setFilesOpen] = useState(true);
   const [leaving, setLeaving] = useState<(() => void) | null>(null);
   const request = useRef<AbortController | null>(null),
@@ -56,7 +57,10 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
   const hadAccount = useRef(false);
   const filesToggleRef = useRef<HTMLButtonElement | null>(null);
   const focusFilesToggle = useRef(false);
-  const receiveState = useCallback((state: NamedLiveBrowserState) => setSessionState(state), []);
+  const receiveState = useCallback((state: NamedLiveBrowserState) => {
+    setSessionState(state);
+    if (state.status === "live") setSynced(currentSelection.current);
+  }, []);
   const clearSelection = () => {
     transport.current?.close();
     transport.current = null;
@@ -305,6 +309,7 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
               key={selection.session.doc.guid}
               session={selection.session}
               path={selection.path}
+              bodyHidden={synced !== selection}
               onState={receiveState}
             />
           ) : (

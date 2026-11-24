@@ -521,7 +521,9 @@ export function createNamedLiveBrowserTransport<
             held.spent
               ? "authority-unavailable"
               : held.refused
-                ? passingRefusal()
+                ? checking
+                  ? "live-stopped"
+                  : passingRefusal()
                 : !held.route && (held.socket || held.admitting)
                   ? "host-unavailable"
                   : "connect-timeout",
