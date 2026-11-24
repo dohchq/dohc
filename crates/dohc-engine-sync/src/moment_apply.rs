@@ -800,12 +800,17 @@ fn apply_moment_append(
     let recorded_preimage = local.as_ref().map_or(Ok(false), |snapshot| {
         recorded_preimage_matches(tx, &envelope.workspace_id, payload, snapshot)
     })?;
+    let equivalent_preimage = !origin_saw_absent
+        && local.as_ref().is_some_and(|snapshot| {
+            Some(snapshot.latest_moment_id.as_str()) != payload.before_latest_moment_id.as_deref()
+                && equivalent_ydoc_settlement_preimage(snapshot, payload)
+        });
     let mut head_fast_forward = if origin_saw_absent {
         local.is_none() && conflicting_occupant.is_none()
     } else {
         local.as_ref().is_some_and(|snapshot| {
             Some(snapshot.latest_moment_id.as_str()) == payload.before_latest_moment_id.as_deref()
-                || equivalent_ydoc_settlement_preimage(snapshot, payload)
+                || equivalent_preimage
                 || recorded_preimage
         }) && conflicting_occupant.is_none()
     };
@@ -1193,7 +1198,10 @@ fn apply_moment_append(
 
     if head_fast_forward || content_fast_forward {
         let active = is_active_version(tx, &envelope.workspace_id, &payload.version_id)?;
-        let adopted_before = if recorded_preimage || (content_fast_forward && !head_fast_forward) {
+        let adopted_before = if recorded_preimage
+            || equivalent_preimage
+            || (content_fast_forward && !head_fast_forward)
+        {
             local.as_ref().map_or(remote_before.clone(), |snapshot| {
                 MomentBefore::Present(Box::new(snapshot.clone()))
             })

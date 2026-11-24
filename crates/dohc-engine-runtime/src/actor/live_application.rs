@@ -1482,10 +1482,12 @@ fn settle_audited(
         conversion_consent,
     )?;
     let settled = outcome.into_settlement_for_internal_caller()?;
-    let id = if audit.is_empty() {
-        None
+    let (id, moment_id) = if audit.is_empty() {
+        (None, settled.moment_id)
     } else {
-        Some(audit.stored_id(store, &settled.moment_id, &settled.sha256)?)
+        let (id, moment_id) =
+            audit.stored_settlement(store, &settled.moment_id, &settled.sha256)?;
+        (Some(id), moment_id)
     };
     match store.write_with(faults, |tx| {
         dohc_engine_collab::markdown_write_obligations::complete_covered_audited_in(
@@ -1497,7 +1499,7 @@ fn settle_audited(
             return Err(RuntimeError::OperationCrashed);
         }
     }
-    let mut result = audit.result(id, settled.moment_id, settled.sha256, settled.materialized);
+    let mut result = audit.result(id, moment_id, settled.sha256, settled.materialized);
     result.collection_reconcile_required = settled.collection_reconcile_required;
     Ok(result)
 }

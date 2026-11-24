@@ -241,3 +241,16 @@ fn a_successor_proof_and_its_carried_replay_share_one_budget() {
     assert!(matches!(proof(largest), Err(ApplicationError::ConfiguredByteBudgetExceeded)));
     proof(reconstruction + replay).unwrap();
 }
+
+#[test]
+fn released_capture_accepts_a_text_preserving_rename_back_head() {
+    let mut f = released_without_carried();
+    let edited = edited_on_disk(&f);
+    let local = local_doc(&f);
+    rename(&mut f, "moved.md", "rename-out");
+    rename(&mut f, "owner.md", "rename-back");
+    assert_eq!(
+        disk_capture(&f, &edited, &local).unwrap(),
+        ReleasedCapture::Ordinary
+    );
+}

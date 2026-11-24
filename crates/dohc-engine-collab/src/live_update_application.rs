@@ -90,7 +90,7 @@ pub use restore_fence::{
     current_generation as restore_generation, require_generation as require_restore_generation,
 };
 pub use settlement::{
-    with_retirement_settlement, with_settlement, LiveSettlementAudit,
+    moment_renames_from_in, with_retirement_settlement, with_settlement, LiveSettlementAudit,
     LiveSettlementPublicationState, LiveSettlementResult,
 };
 
