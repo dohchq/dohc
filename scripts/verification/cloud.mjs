@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { assertPrepared, hashFile, prepare, stagedEnginePath } from "./build.mjs";
 import {
   desktopProofCommand,
@@ -364,7 +365,20 @@ export async function cloudJavascript(part, index = 0) {
       process.env.DOHC_QA_OUTPUT = output;
       // The desktop's unit tests ask for the binary too, in their own process.
       if (shard.some((group) => group.kind === "desktop" || group.pkg === "@dohc/desktop"))
-        await step("electron binary", async () => void electronBinary());
+        await step("electron binary", async () => {
+          try {
+            electronBinary();
+          } catch (error) {
+            if (
+              !(error instanceof Error) ||
+              !error.message.startsWith("Electron failed to install correctly.")
+            )
+              throw error;
+            console.log("Retrying the Electron binary download after the installer failed.");
+            await delay(2_000);
+            electronBinary();
+          }
+        });
       let nativeReady = !shard.some((group) => group.native);
       const preparation = nativeReady
         ? Promise.resolve()

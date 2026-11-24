@@ -104,7 +104,7 @@ export function cloudApi({
       }
       throw failed();
     },
-    async download(id, headersTimeoutMs, remainingMs) {
+    async download(id, headersTimeoutMs, remainingMs, transferTimeoutMs = 60_000) {
       const headersDeadline = new AbortController();
       const timer = setTimeout(
         () => headersDeadline.abort(new Error("Artifact download readiness timed out.")),
@@ -121,7 +121,7 @@ export function cloudApi({
             },
             signal: AbortSignal.any([
               headersDeadline.signal,
-              AbortSignal.timeout(Math.min(60_000, remainingMs)),
+              AbortSignal.timeout(Math.min(transferTimeoutMs, remainingMs)),
             ]),
           },
         );

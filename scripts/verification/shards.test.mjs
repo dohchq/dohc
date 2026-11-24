@@ -9,6 +9,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -57,6 +58,67 @@ import { runVitestGroup } from "./vitest-group.mjs";
 // A successful group wait records when it ended. These tests keep that record out of the checkout.
 const waitOutput = mkdtempSync(join(tmpdir(), "gate-wait-"));
 process.on("exit", () => rmSync(waitOutput, { recursive: true, force: true }));
+
+test("JS workers retry the Electron installer once and propagate other errors", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "cloud-electron-retry-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  t.mock.property(process, "argv", [...process.argv.slice(0, 2), directory, "0"]);
+  t.mock.property(process, "env", {
+    ...process.env,
+    GITHUB_ACTIONS: "true",
+    GITHUB_EVENT_NAME: "merge_group",
+  });
+  t.mock.method(console, "log", () => {});
+  const asModule = (source) => `data:text/javascript,${encodeURIComponent(source)}`;
+  const installer = asModule(`
+    export * from ${JSON.stringify(new URL("./verify.mjs", import.meta.url).href)};
+    export const state = {};
+    export function electronBinary() {
+      const error = state.errors[state.calls++];
+      if (error) throw error;
+    }
+    export async function setTimeout(ms) { state.delays.push(ms); }
+  `);
+  const shards = new URL("./shards.mjs", import.meta.url).href;
+  const inventory = asModule(`
+    export * from ${JSON.stringify(shards)};
+    import { javascriptGroups as groupTasks } from ${JSON.stringify(shards)};
+    export const javascriptTasks = () => [
+      { id: "fixture", kind: "command", command: "node", args: ["-e", ""], cwd: ".", weight: 1 },
+    ];
+    export const javascriptGroups = (tasks) =>
+      groupTasks(tasks).map(group => ({ ...group, pkg: "@dohc/desktop" }));
+  `);
+  const workerUrl = new URL("./cloud.mjs?electron-retry", import.meta.url);
+  const modules = new Map([
+    ["./verify.mjs", installer],
+    ["node:timers/promises", installer],
+    ["./shards.mjs", inventory],
+  ]);
+  const hook = registerHooks({
+    resolve(specifier, context, next) {
+      const url = context.parentURL === workerUrl.href && modules.get(specifier);
+      return url ? { url, shortCircuit: true } : next(specifier, context);
+    },
+  });
+  t.after(() => hook.deregister());
+  const { cloudJavascript } = await import(workerUrl.href);
+  const { state } = await import(installer);
+  const first = new Error("Electron failed to install correctly. First download failed.");
+  const second = new Error("Electron failed to install correctly. Second download failed.");
+  const missing = new Error("Cannot find module 'electron'");
+  const attempts = [];
+  for (const errors of [[first], [first, second], [missing]]) {
+    Object.assign(state, { errors, calls: 0, delays: [] });
+    const error = await cloudJavascript("worker").catch((failure) => failure);
+    attempts.push({ error, calls: state.calls, delays: state.delays });
+  }
+  assert.deepEqual(attempts, [
+    { error: undefined, calls: 2, delays: [2_000] },
+    { error: second, calls: 2, delays: [2_000] },
+    { error: missing, calls: 1, delays: [] },
+  ]);
+});
 
 test("native results retain declared opt-in skips but reject runtime skips and missing engines", async (t) => {
   const parent = resolve(".agent-artifacts/verification/native-report-tests");
@@ -1200,6 +1262,56 @@ test("prepared artifact body aborts get one fresh transfer inside the preparatio
   );
   assert.equal(downloads, 1, "the preparation deadline must prevent a second transfer");
 });
+
+for (const [name, bodyMs, recovers] of [
+  ["a slow second body completes", 75_000, true],
+  ["two stalled bodies exhaust both transfers", 180_000, false],
+]) {
+  test(`prepared artifact body timeout: ${name}`, async (t) => {
+    t.mock.method(console, "log", () => {});
+    let clock = 0,
+      timeout;
+    const attempts = [];
+    t.mock.method(AbortSignal, "timeout", (ms) => {
+      const controller = new AbortController();
+      timeout = { ms, controller };
+      return controller.signal;
+    });
+    const result = waitForPreparation("js", {
+      env: apiEnv,
+      now: () => clock,
+      pause: async () => assert.fail("no readiness pause for body timeouts"),
+      download: (response) => response.text(),
+      request: async (url, { signal }) => {
+        if (url.includes("/artifacts?"))
+          return apiResponse({ artifacts: [{ id: 42, name: "javascript-prepared-1" }] });
+        assert.match(url, /\/artifacts\/42\/zip$/u);
+        const { ms, controller } = timeout;
+        attempts.push(ms);
+        return new Response(
+          new ReadableStream(
+            {
+              pull(body) {
+                clock += Math.min(ms, bodyMs);
+                if (ms < bodyMs) {
+                  controller.abort(new DOMException("body timed out", "TimeoutError"));
+                  body.error(signal.reason);
+                } else {
+                  body.enqueue(Buffer.from("complete archive"));
+                  body.close();
+                }
+              },
+            },
+            { highWaterMark: 0 },
+          ),
+        );
+      },
+    });
+    if (recovers) assert.equal((await result).value, "complete archive");
+    else await assert.rejects(result, /body transfer failed after 180s \(2 attempts\)/u);
+    assert.deepEqual(attempts, [60_000, 120_000]);
+  });
+}
 
 test("workflow reads retry transient responses and request errors within their caller's deadline", async (t) => {
   for (const first of [

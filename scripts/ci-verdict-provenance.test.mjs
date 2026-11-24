@@ -472,6 +472,39 @@ test("shared Rust archive downloads retry once under bounded step timeouts", () 
   }
 });
 
+test("together downloads retry once before unpacking the prepared archive", () => {
+  const { jobs } = load(workflow);
+  const steps = jobs.together.steps;
+  const wait = steps.findIndex((step) => step.id === "prepared");
+  assert.ok(wait >= 0);
+  const action = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333";
+  const inputs = {
+    name: "${{ steps.prepared.outputs.name }}",
+    path: "${{ runner.temp }}",
+    "run-id": "${{ github.run_id }}",
+    "github-token": "${{ github.token }}",
+  };
+  assert.deepEqual(steps[wait + 1], {
+    id: "prepared-download",
+    uses: action,
+    "timeout-minutes": 2,
+    "continue-on-error": true,
+    with: inputs,
+  });
+  assert.equal(steps[wait + 2].if, "steps.prepared-download.outcome == 'failure'");
+  assert.equal(steps[wait + 2].run, "sleep 2");
+  assert.deepEqual(steps[wait + 3], {
+    name: "Download the prepared engine and share page again",
+    if: "steps.prepared-download.outcome == 'failure'",
+    uses: action,
+    "timeout-minutes": 3,
+    with: inputs,
+  });
+  assert.equal(steps.filter((step) => step.with?.name === inputs.name).length, 2);
+  assert.equal(steps[wait + 4].run, 'tar -I zstd -xf "$RUNNER_TEMP/javascript-prepared.tar.zst"');
+  assert.equal(steps[wait + 4].if, undefined);
+});
+
 // These cases use string/boolean comparisons shared by JavaScript and Actions.
 // Actionlint checks syntax; this helper does not model all Actions coercions.
 // Read the actual expressions so a removed switch or dependency breaks the test.

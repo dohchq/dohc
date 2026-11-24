@@ -849,7 +849,22 @@ jobs:
       - name: Wait for the prepared engine and share page
         id: prepared
         run: node scripts/verification/wait-preparation.mjs js
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+      - id: prepared-download
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        timeout-minutes: 2
+        continue-on-error: true
+        with:
+          name: ${{ steps.prepared.outputs.name }}
+          path: ${{ runner.temp }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Wait before retrying the prepared download
+        if: steps.prepared-download.outcome == 'failure'
+        run: sleep 2
+      - name: Download the prepared engine and share page again
+        if: steps.prepared-download.outcome == 'failure'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        timeout-minutes: 3
         with:
           name: ${{ steps.prepared.outputs.name }}
           path: ${{ runner.temp }}
