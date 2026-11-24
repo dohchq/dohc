@@ -2,7 +2,7 @@
 // then dark, and fails when the app dies, logs a crash or a JavaScript error, or a screen never shows its label.
 // Usage, from the repository root, with one emulator on adb: node scripts/verification/android-ui.mjs <apk> <out dir>
 import { execFileSync } from "node:child_process";
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 
 const app = "app.dohc.mobile";
 // Each screen's link and an attribute only that screen shows. The page's is a line of the sample note, so its editor ran.
@@ -23,9 +23,21 @@ const screenText = () => {
   shell("uiautomator dump /sdcard/ui.xml > /dev/null");
   return shell("cat /sdcard/ui.xml");
 };
-// Crashes and the app's own JavaScript errors since the log was last cleared.
-const problems = () =>
-  adb("logcat", "-d", "-v", "brief", "AndroidRuntime:E", "ReactNativeJS:E", "*:S")
+const now = () => shell("date +'%m-%d %H:%M:%S.000'").trim();
+// The app's crashes and JavaScript errors logged since a device time. Other processes, such as uiautomator, don't count.
+const problems = (since, uid) =>
+  adb(
+    "logcat",
+    "-d",
+    "-T",
+    since,
+    `--uid=${uid}`,
+    "-v",
+    "brief",
+    "AndroidRuntime:E",
+    "ReactNativeJS:E",
+    "*:S",
+  )
     .split("\n")
     .filter((line) => /^E\/(AndroidRuntime|ReactNativeJS)/u.test(line));
 
@@ -47,29 +59,31 @@ const [apk, out] = process.argv.slice(2);
 if (!apk || !out) throw new Error("usage: android-ui.mjs <apk> <out dir>");
 mkdirSync(out, { recursive: true });
 adb("install", "-r", apk);
+const uid = shell(`pm list packages -U ${app}`).match(/uid:(\d+)/u)[1];
 let failed = 0;
+let since = now();
 for (const mode of ["light", "dark"]) {
   shell(`cmd uimode night ${mode === "dark" ? "yes" : "no"}`);
   shell(`am force-stop ${app}`);
-  adb("logcat", "-c");
   for (const [name, link, label] of screens) {
     shell(`am start -W -a android.intent.action.VIEW -d '${link}' ${app} > /dev/null`);
     const missing = await waitFor(label);
-    const logged = problems();
     writeFileSync(
       `${out}/${name}-${mode}.png`,
-      execFileSync("adb", ["exec-out", "screencap", "-p"]),
+      execFileSync("adb", ["exec-out", "screencap", "-p"], { maxBuffer: 64 << 20 }),
     );
-    const verdict = [missing, ...logged].filter(Boolean);
+    // The next screen reads from this read's start, so a crash between screens counts.
+    const read = now();
+    const verdict = [missing, ...problems(since, uid)].filter(Boolean);
+    since = read;
     console.log(
       `${verdict.length ? "FAIL" : "PASS"} ${name} ${mode}${verdict.map((line) => `\n  ${line}`).join("")}`,
     );
     if (verdict.length) failed += 1;
-    appendFileSync(`${out}/logcat.txt`, `== ${name} ${mode}\n${adb("logcat", "-d")}`);
-    adb("logcat", "-c");
     if (!alive()) shell(`am start -W -n ${app}/.MainActivity > /dev/null`);
   }
 }
+writeFileSync(`${out}/logcat.txt`, adb("logcat", "-d"));
 if (failed) {
   console.error(`${failed} of ${screens.length * 2} screens failed.`);
   process.exit(1);
