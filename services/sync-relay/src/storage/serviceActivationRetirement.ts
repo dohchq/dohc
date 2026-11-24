@@ -250,59 +250,6 @@ export function openServiceActivationRetirement(
   return retirement(recorded);
 }
 
-type LineageDocument = { workspaceId: string; objectId: string; lineageClaimId: string };
-
-/**
- * Inside the transaction that moves the lineage's restore generation from
- * `from` to `to`, a restore fence or a native cancellation proving that fence
- * absent, moves its open obligation with it. Only the generation changes: an
- * open obligation fences admission, so its accepted-through is still
- * `acceptedThrough`, the journal cursor the fence closed at.
- */
-export function moveServiceActivationRetirement(
-  storage: StorageContext,
-  document: LineageDocument,
-  from: number,
-  to: number,
-  acceptedThrough: number,
-): void {
-  const where = `workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=? AND retire_restore_generation=? AND ${OPEN_RETIREMENT}`;
-  const params = [document.workspaceId, document.objectId, document.lineageClaimId, integer(from)];
-  const open = storage.db
-    .prepare(`SELECT retire_accepted_cursor FROM ${SERVICE_ACTIVATIONS} WHERE ${where}`)
-    .all(...params);
-  if (open.some((row) => row.retire_accepted_cursor !== integer(acceptedThrough)))
-    throw new Error("Service activation retirement is damaged.");
-  storage.db
-    .prepare(`UPDATE ${SERVICE_ACTIVATIONS} SET retire_restore_generation=? WHERE ${where}`)
-    .run(integer(to), ...params);
-}
-
-/**
- * Inside the transaction that admits a restore at `generation`, names the
- * restore's own accepted journal cursor as the open obligation's
- * accepted-through. An admitted restore always finishes, and its output up to
- * that cursor is then publishable under the retirement before it resumes. The
- * obligation keeps its activation, generation and request time.
- */
-export function carryServiceActivationRetirement(
-  storage: StorageContext,
-  document: LineageDocument,
-  generation: number,
-  acceptedThrough: number,
-): void {
-  storage.db
-    .prepare(`UPDATE ${SERVICE_ACTIVATIONS} SET retire_accepted_cursor=?
-    WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=? AND retire_restore_generation=? AND ${OPEN_RETIREMENT}`)
-    .run(
-      integer(acceptedThrough),
-      document.workspaceId,
-      document.objectId,
-      document.lineageClaimId,
-      integer(generation),
-    );
-}
-
 // A retired activation that no other activation continues. Its accepted cursor no longer moves.
 const RETIRED_TAIL = `a.retired_at_ms IS NOT NULL AND NOT EXISTS(SELECT 1 FROM ${SERVICE_ACTIVATIONS} s
   WHERE s.relay_database_namespace=a.relay_database_namespace AND s.predecessor_activation_id=a.activation_id)`;

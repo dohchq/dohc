@@ -365,8 +365,7 @@ A longer arm keeps the same per-key cost, so 60-key arms report their rate and t
 | Achieved edit rate | >=456 edits/min over the soak and >=7.6 updates/s per separate relay session. 60-key arms report their rate. CPU and recorded writes normalize to 480 edits/min. |
 | Renderer private bytes | <=435 MB at ten minutes; <=477 MB at sixty minutes and sampled peak. |
 | Relay update | CPU p50/p95 <=50/100 ms; wait/slot/backlog <=100 ms; two-worker occupancy <=80%. Shared latency is reported. |
-| Relay memory | Worker sampled heap <=384 MiB; 512 MiB hard limit. Relay PID private plus restore reservation <=1 GiB. |
-| Restore reservation | Actual framed R; native reservation <=512 MiB. Read event count/reserves from the profile and header bytes from Rust. Memory takes precedence over the 20 MiB state ceiling. |
+| Relay memory | Worker sampled heap <=384 MiB; 512 MiB hard limit. Relay PID private <=1 GiB. |
 | Join; settle/compaction | Join p95 <=2 s; settle/observed compaction <=1 s. |
 | State/transfer | State <=20 MiB; initial framed transfer <=3S+64 KiB; steady framed socket bytes <=2 KiB/edit. Payload bytes reported separately. |
 | Retained history | Post-compaction referenced bytes excluding the current snapshot/vector; net growth <=2 MiB over the first compaction. Trend is diagnostic. |

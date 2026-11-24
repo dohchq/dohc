@@ -20,7 +20,6 @@ import {
   documentControlFiles,
   documentMatrix,
   MiB,
-  restoreReservation,
   runtimeEstimate,
 } from "./document-size-fixtures.mjs";
 import { parseOptions } from "./packaged-benchmark-options.mjs";
@@ -46,13 +45,6 @@ const args = [
 const baselineArgs = args
   .filter((value, index, all) => value !== "--baseline" && all[index - 1] !== "--baseline")
   .map((value, index, all) => (all[index - 1] === "--label" ? "baseline" : value));
-const bounds = {
-  maxEvents: 64,
-  headerBytes: 643576,
-  reserveBytes: 8 * MiB,
-  relayAggregateBytes: 40 * MiB,
-  nativeAggregateBytes: 512 * MiB,
-};
 const stats = (value, count = 20) => ({ count, p50: value, p95: value, min: value, max: value });
 const soak = (mib) => ({
   mib,
@@ -135,7 +127,6 @@ export function passingDocumentSummary() {
         backlogGrowthMs: stats(0, 1),
         initialTransferPerDocumentBytes: stats(state, 1),
         largestStateBytes: state,
-        reservation: restoreReservation(state, bounds),
         maximumNodes: 60000,
         maximumDepth: 3,
         checkpointCount: 1,
@@ -221,14 +212,6 @@ test("all fixtures have exact UTF-8 sizes, stable hashes, multilingual text and 
       assert.equal(value.text.includes("# retained source"), value.retained);
     }
   assert.ok(documentFixture(10, "formatted", { structural: true }).paragraphBytes < 150);
-});
-
-test("restore reservation follows native header and String-vector bounds, with memory taking precedence", () => {
-  const at20 = restoreReservation(20 * MiB, bounds);
-  assert.equal(at20.relayBytes, 328 * MiB);
-  assert.equal(at20.fitsCurrentRelay, false);
-  assert.equal(at20.fitsNative, false);
-  assert.ok(restoreReservation(10 * MiB, bounds).fitsNative);
 });
 
 test("40-run p95 is the third-slowest, while five-run p95 is the slowest", () => {
