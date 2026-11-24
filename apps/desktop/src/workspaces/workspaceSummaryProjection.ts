@@ -1,4 +1,5 @@
 import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
+import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import { ShareSkippedOpsSummary, WorkspaceSummary } from "../ipc/bridgeContract";
 import type { RegistryEntry } from "./registryStore";
 import { usableShareMountRecord } from "./shareMounts";
@@ -103,7 +104,7 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
             ...(boundedString(raw.membersWorkspaceId, 1, 200) !== null
               ? { membersWorkspaceId: raw.membersWorkspaceId }
               : {}),
-            ...storedGroupLevels(raw),
+            ...storedGroupLevels(raw, pinned, level),
           }
         : {}),
       ...(!damaged && level !== "edit" && raw.editingNotReady === true
@@ -178,10 +179,18 @@ export function workspaceSummariesFrom(entries: readonly RegistryEntry[]): Works
 // The recovery folder a rebuild saved into, when the record names one inside
 // the copy's recovery root.
 // A membership's Group levels from the reach stored with it. Without a
-// stored reach, Chats gives every Group the member level. A stored reach it
-// can't read gives every Group View, since the write gate takes no post then.
-function storedGroupLevels(raw: Record<string, unknown>) {
-  if (raw.reach === undefined) return {};
+// stored reach, Chats gives every Group the member level, which is the
+// pinned one when the copy shows View while it waits to send. A stored reach
+// it can't read gives every Group View, since the write gate takes no post then.
+function storedGroupLevels(
+  raw: Record<string, unknown>,
+  pinned: ShareAccess | null,
+  shown: ShareAccess | null,
+) {
+  if (raw.reach === undefined)
+    return pinned !== null && pinned !== shown
+      ? { groupLevels: { groupDefault: pinned, groups: [] } }
+      : {};
   const reach = storedShareViewReach(raw);
   return {
     groupLevels:
