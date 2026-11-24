@@ -18,6 +18,10 @@ const loadMarkdownReadView: MarkdownReadViewLoader = () =>
     return mod;
   });
 
+export async function preloadMarkdownReadView(): Promise<void> {
+  if (!loadedReadView) await loadMarkdownReadView().catch(() => undefined);
+}
+
 export function LazyMarkdownReadView(
   props: MarkdownReadViewProps & {
     loader?: MarkdownReadViewLoader;

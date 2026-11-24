@@ -78,6 +78,11 @@ vi.mock("./workbench/EngineMomentDiffPage", () => ({
     <div data-testid="engine-moment-diff-page" data-path={props.tabPath} />
   ),
 }));
+const idleViewPreloads = vi.hoisted(() => vi.fn());
+vi.mock("./viewPreloads", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./viewPreloads")>()),
+  scheduleIdleViewPreloads: idleViewPreloads,
+}));
 vi.mock("./SitePreviewPage", () => ({
   SitePreviewPage: (props: { siteRoot: string }) => (
     <div data-testid="site-preview-page" data-root={props.siteRoot} />
@@ -354,6 +359,26 @@ describe("shell tab surfaces", () => {
     await waitFor(() => expect(pane.queryByTestId("file-inspector")).toBeNull());
     expect(screen.getByTestId("site-preview-page")).toBe(app);
     expect(shownAppPage("primary")).toBe(app);
+  });
+
+  it("loads idle views once another file replaces a restored file that never showed", async () => {
+    idleViewPreloads.mockClear();
+    // The mocked inspector never reports the restored file as shown.
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["notes.txt"])));
+    bridge.listWorkspaceFiles.mockResolvedValue({
+      visibility: { status: "ready", rules: [] },
+      files: ["notes.txt", "other.txt"].map((path) => ({ path, kind: "file" as const })),
+      folders: [],
+    });
+    renderShell(bridge);
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    expect(await screen.findByTestId("file-inspector")).toBeTruthy();
+    expect(idleViewPreloads).not.toHaveBeenCalled();
+
+    requested.path = "other.txt";
+    fireEvent.click(screen.getByRole("button", { name: "Open test tab" }));
+
+    await waitFor(() => expect(idleViewPreloads).toHaveBeenCalled());
   });
 
   it("keeps the empty editor state when no tab is open", async () => {

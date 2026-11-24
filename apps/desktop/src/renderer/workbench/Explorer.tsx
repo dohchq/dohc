@@ -139,6 +139,8 @@ export type LivePageRefused =
 
 export interface ExplorerProps {
   workspaceId: string;
+  // A row someone points at or focuses, so its view can load before the click.
+  onRowPointed?: (path: string, collection: boolean) => void;
   mode: ExplorerMode;
   onModeChange: (mode: ExplorerMode) => void;
   // Whether the workspace's first listing has landed. Home waits for it.
@@ -482,6 +484,7 @@ export const TreeRow = memo(function TreeRow(props: {
   movable?: boolean;
   registerRef: (path: string, el: HTMLButtonElement | null) => void;
   onRowFocus: (path: string) => void;
+  onRowPointed?: (path: string, collection: boolean) => void;
   onRowClick: (path: string, event: MouseEvent) => void;
   onRowChevronClick: (path: string, event: MouseEvent) => void;
   onRowContextMenu: (path: string, event: MouseEvent) => void;
@@ -507,6 +510,10 @@ export const TreeRow = memo(function TreeRow(props: {
       : ""
     : glyphTone(props.picked || props.active);
   const openEdge = !props.dropPreview && props.picked && props.active;
+  // The view's code loads while the pointer travels to the click.
+  const preloadView = () => {
+    if (props.collection || !row.isFolder) props.onRowPointed?.(row.fullPath, props.collection);
+  };
   const dropClass = blocked
     ? target
       ? "bg-danger/10 text-danger ring-1 ring-inset ring-danger/30"
@@ -551,7 +558,11 @@ export const TreeRow = memo(function TreeRow(props: {
         tabIndex={props.tabbable ? 0 : -1}
         ref={(el) => props.registerRef(row.fullPath, el)}
         draggable={props.movable !== false}
-        onFocus={() => props.onRowFocus(row.fullPath)}
+        onPointerEnter={preloadView}
+        onFocus={() => {
+          preloadView();
+          props.onRowFocus(row.fullPath);
+        }}
         onClick={(event) => props.onRowClick(row.fullPath, event)}
         onContextMenu={(event) => props.onRowContextMenu(row.fullPath, event)}
         onDragStart={(event) => props.onRowDragStart(row.fullPath, event)}
@@ -2632,6 +2643,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           dropPreview={dropPreviewFor(row.fullPath)}
           registerRef={registerRef}
           onRowFocus={setFocusedPath}
+          onRowPointed={props.onRowPointed}
           onRowClick={onRowClick}
           onRowChevronClick={onRowChevronClick}
           onRowContextMenu={onRowContextMenu}

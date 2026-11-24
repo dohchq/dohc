@@ -95,7 +95,12 @@ import {
 import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import { hasUnacknowledgedShareSkips, shareSkipNoticeLines } from "./shareSkipNotice";
 import { useChatEditorTabs } from "./shell/useChatEditorTabs";
-import { LazyChatsView, LazyGraphView, LazySitePreviewPage } from "./shell/lazyViews";
+import {
+  LazyChatsView,
+  LazyCollectionPage,
+  LazyGraphView,
+  LazySitePreviewPage,
+} from "./shell/lazyViews";
 import type { AppViewNotices } from "./AppView";
 import { ShellAboutRail, type AboutSearchHit } from "./shell/ShellAboutRail";
 import { SIDE_PANEL_VIEWS } from "./shell/sidePanelViews";
@@ -227,6 +232,7 @@ import { FileInspector } from "./FileInspector";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import type { HeadingTarget, ScrollTarget } from "./MarkdownView";
 import { preloadMarkdownEditor } from "./editor/LazyMarkdownEditor";
+import { preloadRowView, preloadViewForPath, scheduleIdleViewPreloads } from "./viewPreloads";
 import { sendToFocusedEditor } from "./editor/editorMenuCommands";
 import { NewFileDialog } from "./NewFileDialog";
 import { NewPage, type NewPageFile } from "./NewPage";
@@ -600,9 +606,6 @@ function scheduleMarkdownEditorPreload(): () => void {
     }
   };
 }
-const LazyCollectionPage = lazy(() =>
-  import("./CollectionPage").then((mod) => ({ default: mod.CollectionPage })),
-);
 const LazyTransactionalCollection = lazy(() =>
   import("./ConnectedTransactionalCollection").then((mod) => ({
     default: mod.ConnectedTransactionalCollection,
@@ -774,6 +777,14 @@ export function DesktopWorkspaceShell(props: Parameters<typeof WorkspaceShell>[0
       <WorkspaceShell {...props} />
     </WorkspaceSessionProvider>
   );
+}
+
+// Each split shows its active tab, so its view loads with the file.
+function preloadActiveFileViews(state: WorkbenchState): void {
+  for (const group of state.editorGroups) {
+    if (group.activeTab !== null && !TAB_KINDS[parseTab(group.activeTab).kind].virtual)
+      preloadViewForPath(group.activeTab);
+  }
 }
 
 function WorkspaceShell(props: {
@@ -2059,6 +2070,8 @@ function WorkspaceShell(props: {
   // wait for a later read to apply the saved tabs, and a default-state write
   // can never clobber the stored one.
   const uiStateLoaded = useRef(false);
+  // The first restored view showed, so the workspace finished opening.
+  const [openingSettled, setOpeningSettled] = useState(false);
   const restoredActiveFileSurface = useRef<{
     selectionGeneration: number;
     groupId: string;
@@ -2267,6 +2280,7 @@ function WorkspaceShell(props: {
       markCurrentSwitchPhase("restored-active-surface-ready")
     ) {
       restoredActiveFileSurface.current = null;
+      setOpeningSettled(true);
     }
   };
 
@@ -2291,6 +2305,7 @@ function WorkspaceShell(props: {
         if (stored) {
           const parsed = parseUiState(stored);
           const restoredGroup = activeGroup(parsed);
+          preloadActiveFileViews(parsed);
           if (
             restoredGroup.activeTab !== null &&
             !TAB_KINDS[parseTab(restoredGroup.activeTab).kind].virtual
@@ -2343,6 +2358,7 @@ function WorkspaceShell(props: {
       if (stored) {
         const saved = parseUiState(stored);
         const merged = mergeSavedTabs(saved, shown);
+        preloadActiveFileViews(merged);
         writeWb(fitWorkbenchSidebars(merged, merged, workbenchWidthRef.current));
         setRestoredTabPaths(new Set(allTabs(saved).map((tab) => tab.path)));
       } else {
@@ -2376,6 +2392,7 @@ function WorkspaceShell(props: {
       return;
     }
     markCurrentSwitchPhase("restored-active-surface-ready");
+    setOpeningSettled(true);
   }, [markCurrentSwitchPhase, restoredSurfaceCommit, workspaceSelectionGeneration]);
   const onRestoredFileSurfaceReady = useCallback(
     (path: string, groupId: string) => {
@@ -2387,12 +2404,20 @@ function WorkspaceShell(props: {
       ) {
         return;
       }
+      setOpeningSettled(true);
       if (markCurrentSwitchPhase("restored-active-surface-ready")) {
         restoredActiveFileSurface.current = null;
       }
     },
     [markCurrentSwitchPhase, workspaceSelectionGeneration],
   );
+  // A restored file that another tab replaced before it showed never reports ready.
+  useEffect(() => {
+    const target = restoredActiveFileSurface.current;
+    if (openingSettled || target === null) return;
+    const group = wb.editorGroups.find((candidate) => candidate.id === target.groupId);
+    if (group?.activeTab !== target.path) setOpeningSettled(true);
+  }, [openingSettled, wb]);
 
   // Debounced persist (500ms): tabs, view, panel visibility/width, rail.
   useEffect(() => {
@@ -4105,7 +4130,7 @@ function WorkspaceShell(props: {
       setSearchScrollTarget(
         scrollTarget ? { ...scrollTarget, path, groupId: targetGroupId } : null,
       );
-      if (/\.(md|markdown)$/i.test(path)) preloadMarkdownEditor();
+      preloadViewForPath(path);
       const commitOpen = () => {
         if (!isCurrentRequest()) return;
         const current = wbRef.current;
@@ -5314,7 +5339,7 @@ function WorkspaceShell(props: {
         return;
       }
       setHeadingTarget(null);
-      if (/\.(md|markdown)$/i.test(path)) preloadMarkdownEditor();
+      preloadViewForPath(path);
       if (group.activeTab !== path) {
         rendererMarks.mark(fileOpenStartMark(groupId));
       }
@@ -6411,7 +6436,8 @@ function WorkspaceShell(props: {
     return scheduleMarkdownEditorPreload();
   }, [files, hasMarkdownPath]);
   useEffect(() => {
-    if (syncStatus) rendererMarks.markOnce("workspace-shell-interactive");
+    if (!syncStatus) return;
+    rendererMarks.markOnce("workspace-shell-interactive");
   }, [syncStatus]);
 
   // Open the workspace for this renderer selection. Main admits the exact
@@ -7768,6 +7794,7 @@ function WorkspaceShell(props: {
       <NotVersionedMarks.Provider value={notVersionedMarks}>
         <Explorer
           workspaceId={workspaceId}
+          onRowPointed={preloadRowView}
           mode={wb.explorerMode}
           onModeChange={setExplorerModeInWb}
           listed={fileListingCommit !== null}
@@ -8004,6 +8031,12 @@ function WorkspaceShell(props: {
   const oldWindow = props.oldWindow ?? null;
   // The workspace also stops in a window Forget left showing it.
   const workspaceStopped = storeUpdateRefusal !== null || oldWindow !== null;
+  // Code for views nobody opened yet loads only once the first restored view
+  // shows, so it does not compete with opening the workspace.
+  useEffect(() => {
+    if (syncStatus && workbenchRestored && openingSettled && !workspaceStopped)
+      scheduleIdleViewPreloads();
+  }, [syncStatus, workbenchRestored, openingSettled, workspaceStopped]);
   // The rows filed before the stop began. Their Try again would ask the
   // stopped workspace again, which cannot succeed. Main marks a call that
   // fails on it later, so a row filed during the stop keeps its own.
