@@ -2087,35 +2087,75 @@ describe.each(["bare", "hosted"] as const)(
       expect(a.sent).toEqual([]);
     });
 
+    it("keeps the letter someone else types at that paragraph's start, and the heading they make it, when they have that Enter and it is then undone", () => {
+      const a = person(noteOfLines(UNDER_CODE), 10, shape);
+      const b = person(noteOfLines(UNDER_CODE), 20, shape);
+      a.select([0, 1], [2, 0]);
+      expect(a.press("Enter")).toBe(true);
+      exchange(a, b);
+      b.typeAt(1, 0, "P");
+      b.select([1, 0]);
+      expect(b.retype("heading", { level: 3 })).toBe(true);
+      exchange(a, b);
+      expect(a.undo()).toBe(true);
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.view.state.doc.toString()).toBe(
+          'doc(paragraph("ab"), codeBlock("cd"), heading("P", wikilink, "ef"), paragraph("gh"))',
+        );
+      }
+    });
+
     it.each([
       [
-        "has that Enter",
-        true,
-        'doc(paragraph("ab"), codeBlock("cd"), heading("P", wikilink, "ef"), paragraph("gh"))',
-      ],
-      [
-        "has not, so both gave that paragraph its boundary and an empty paragraph stays above (a known behaviour)",
-        false,
+        10,
+        20,
+        "P",
+        'doc(paragraph("a"), paragraph, heading("P", wikilink, "ef"), paragraph("gh"))',
         'doc(paragraph("ab"), codeBlock("cd"), paragraph, heading("P", wikilink, "ef"), paragraph("gh"))',
       ],
-    ])(
-      "keeps the letter someone else types at that paragraph's start, and the heading they make it, when that Enter is undone and the other %s",
-      (_name, received, read) => {
-        const a = person(noteOfLines(UNDER_CODE), 10, shape);
-        const b = person(noteOfLines(UNDER_CODE), 20, shape);
+      [
+        10,
+        20,
+        "",
+        'doc(paragraph("a"), paragraph, heading(wikilink, "ef"), paragraph("gh"))',
+        'doc(paragraph("ab"), codeBlock("cd"), paragraph, heading(wikilink, "ef"), paragraph("gh"))',
+      ],
+      [
+        20,
+        10,
+        "P",
+        'doc(paragraph("a"), heading("P"), paragraph(wikilink, "ef"), paragraph("gh"))',
+        'doc(paragraph("ab"), codeBlock("cd"), heading("P"), paragraph(wikilink, "ef"), paragraph("gh"))',
+      ],
+      [
+        20,
+        10,
+        "",
+        'doc(paragraph("a"), heading, paragraph(wikilink, "ef"), paragraph("gh"))',
+        'doc(paragraph("ab"), codeBlock("cd"), heading, paragraph(wikilink, "ef"), paragraph("gh"))',
+      ],
+    ] as const)(
+      "leaves two blocks where that paragraph was when client %i presses that Enter and client %i, who has not got it, types %j at the paragraph's start and makes it a heading: every letter is there once, and the heading is the block whose boundary comes first (a known behaviour)",
+      (enters, other, typed, merged, undone) => {
+        const a = person(noteOfLines(UNDER_CODE), enters, shape);
+        const b = person(noteOfLines(UNDER_CODE), other, shape);
         a.select([0, 1], [2, 0]);
         expect(a.press("Enter")).toBe(true);
-        if (received) exchange(a, b);
-        const line = received ? 1 : 2;
-        b.typeAt(line, 0, "P");
-        b.select([line, 0]);
+        if (typed) b.typeAt(2, 0, typed);
+        b.select([2, 0]);
         expect(b.retype("heading", { level: 3 })).toBe(true);
         exchange(a, b);
+        for (const each of [a, b]) {
+          each.expectMirror();
+          expect(each.view.state.doc.toString()).toBe(merged);
+        }
         expect(a.undo()).toBe(true);
         exchange(a, b);
         for (const each of [a, b]) {
           each.expectMirror();
-          expect(each.view.state.doc.toString()).toBe(read);
+          expect(each.view.state.doc.toString()).toBe(undone);
         }
       },
     );
