@@ -208,6 +208,30 @@ environment. [App compiler containment](app-compiler.md) states what each
 platform bounds. Arbitrary build scripts need a separate, credential-free sandbox before
 they can run.
 
+## A phone runs an app in a locked web view
+
+The phone posts a one-use handoff to the app's bootstrap on a random host under
+the app domain. The app runs in the bootstrap's sandboxed `srcdoc` frame, with
+no top navigation and no same-origin access. The server's CSPs allow no frames
+in the app, no form posts and no workers. Its permissions policy allows no
+camera, microphone or location. These hold in any browser that opens the app.
+
+The phone's web view adds its own refusals. It loads nothing after the
+bootstrap except the app's frame, hands no address to the system, saves no
+download, grants no camera, microphone or location, and turns a new window into
+a link the person tapped. The phone asks before that link leaves dohc, and only
+for HTTPS outside the dohc server and the app domain (`apps/mobile/src/apps/`).
+
+- iOS uses react-native-webview: incognito, a navigation rule for every frame,
+  and a separate web content process.
+- Android uses dohc's own view (`apps/mobile/modules/app-web-view`), which
+  decides in native code and refuses by default. Android doesn't report HTTP(S)
+  frame loads or POSTs to it, so those rules rest on the sandbox and CSP.
+- On Android, an app shares the web renderer process with dohc's page editor.
+  Browser rules separate them, but a Chromium exploit would not be contained.
+- On Android, the launch cookie lives in the app's shared cookie jar until the
+  launch expires. Each launch has its own host and needs the launch's proof.
+
 ## Dataset hosts commit authority
 
 A transactional dataset's checkpoint and committed journal are authoritative.

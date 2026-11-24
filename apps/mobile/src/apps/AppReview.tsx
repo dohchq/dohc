@@ -19,7 +19,7 @@ import type { WorkspaceApps } from "./appStore";
 import { canOpenApps } from "./canOpenApps";
 
 // An app's review, from Home: its version, who published it, what it can reach, its declared source, and Approve, Open
-// and Revoke. Approve and Open need phone writes, and Open an iPhone (canOpenApps.ts). Revoke shows on every phone, as
+// and Revoke. Approve and Open need phone writes (canOpenApps.ts). Revoke shows on every phone, as
 // an account-wide approval's way back. Answers land only while their request is the latest and their sign-in and
 // workspace are still open. Errors show in place, as on any screen outside the tabs.
 

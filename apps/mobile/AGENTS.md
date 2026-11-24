@@ -52,7 +52,7 @@ Search shows "Not built yet".
 Phone writes are off by default, so a signed-in build stays read-only (`src/server/phoneWrites.ts`). Off, the outbox sends nothing, not even records an earlier build kept.
 Keep every write control behind `phoneWrites`: the composer, New post, Reply, reactions, a question's or poll's answers, Send and Discard on outbox messages and reactions, an app's Approve and Open, editing a page, a Collection record's field editors and Undo (`collectionEdit`, `src/collections/FieldEditor.tsx`), and a Collection's New record and Delete (`collectionCreate`, `collectionDelete`).
 An app's Revoke is the one exception: an approval holds on every phone of the account, so every phone shows its way back (`src/apps/AppReview.tsx`).
-Apps open only on iOS (`src/apps/canOpenApps.ts`): on Android, react-native-webview doesn't ask about every frame's loads and saves downloads, so the runner's rules don't hold.
+An app runs in react-native-webview on iOS and in `modules/app-web-view` on Android, where react-native-webview lets a load through when JS answers late and saves downloads. The Android view decides in Kotlin and refuses by default; keep its rules in step with `src/apps/appNavigation.ts` and `src/apps/AppRunner.tsx`.
 A build made with `EXPO_PUBLIC_DOHC_PHONE_WRITES=1` turns writes on.
 Then a chat's stream and a thread have the composer, messages have Reply and reactions, questions and polls take answers, and Settings links to Messages on this phone (`src/conversation/OutboxRecovery.tsx`).
 An answer is a reply with `resolves`, placed as the desktop's chat places it (`src/conversation/decisionAnswers.ts`). Any other reply never carries `resolves`.
