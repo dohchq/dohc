@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type * as Y from "yjs";
 import { Editor, Extension } from "@tiptap/core";
+import { dropPoint } from "@tiptap/pm/transform";
 import { StarterKit } from "@tiptap/starter-kit";
 import { TableKit } from "@tiptap/extension-table";
 import {
@@ -504,6 +505,46 @@ describe("the desktop's commands next to a line with no boundary of its own", ()
       }
     },
   );
+
+  it("writes nothing when text dragged from the line above across a code block to the start of the paragraph after it is dropped in the line above, where that paragraph would be joined away and split off again under a boundary undo takes away; it is still the heading someone else then makes it", () => {
+    const underCode = () =>
+      noteOf(({ sequence }) => {
+        sequence.insertEmbed(0, boundary(), {});
+        sequence.insert(1, "ab", {});
+        sequence.insertEmbed(3, boundary({ type: "codeBlock", language: null }), {});
+        sequence.insert(4, "cd", {});
+        sequence.insertEmbed(6, WIKILINK(), {});
+        sequence.insert(7, "ef", {});
+        sequence.insertEmbed(9, boundary(), {});
+        sequence.insert(10, "gh", {});
+      });
+    const a = desktop(underCode(), 10);
+    const b = person(underCode(), 20);
+    const read =
+      'doc(paragraph("ab"), codeBlock("cd"), paragraph(wikilink, "ef"), paragraph("gh"))';
+    expect(a.view.state.doc.toString()).toBe(read);
+    a.select([0, 2], [2, 0]);
+    const { state } = a.view;
+    const slice = state.selection.content();
+    const dropped = state.tr.deleteSelection();
+    const at = dropped.mapping.map(dropPoint(state.doc, 2, slice) ?? 2);
+    a.view.dispatch(dropped.replaceRange(at, at, slice));
+    expect(a.sent).toEqual([]);
+    expect(a.view.state.doc.toString()).toBe(read);
+    a.expectMirror();
+    b.typeAt(2, 0, "P");
+    b.select([2, 0]);
+    expect(b.retype("heading", { level: 3 })).toBe(true);
+    exchange(b, a);
+    a.undo();
+    exchange(a, b);
+    for (const each of [a, b]) {
+      each.expectMirror();
+      expect(each.view.state.doc.toString()).toBe(
+        'doc(paragraph("ab"), codeBlock("cd"), heading("P", wikilink, "ef"), paragraph("gh"))',
+      );
+    }
+  });
 
   it("gives setHorizontalRule's divider a boundary of its own when the selection runs to the end of the next line, so it is still a divider when someone else makes that line a heading at the same moment", () => {
     const a = desktop(note(...LINES), 10);

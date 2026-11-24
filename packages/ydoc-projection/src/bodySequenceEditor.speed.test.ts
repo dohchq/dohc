@@ -2,6 +2,7 @@
 import { afterEach, it } from "vitest";
 import * as Y from "yjs";
 import { EditorState, TextSelection } from "@tiptap/pm/state";
+import { dropPoint } from "@tiptap/pm/transform";
 import type { EditorView } from "@tiptap/pm/view";
 import { bodySequencePlugin } from "./bodySequenceEditor.js";
 import { createBodyReader } from "./bodySequenceReading.js";
@@ -280,6 +281,28 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)(
       (view) => view.dispatch(view.state.tr.split(below - 1)),
       (view) => view.dispatch(view.state.tr.join(below)),
     );
+    const drag = (from: number, to: number, at: number) => (view: EditorView) => {
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, from, to)));
+      const { state } = view;
+      const slice = state.selection.content();
+      const dropped = state.tr.deleteSelection();
+      const pos = dropped.mapping.map(dropPoint(state.doc, at, slice) ?? at);
+      view.dispatch(dropped.replaceRange(pos, pos, slice));
+    };
+    const dragged = timedOn(underCode, drag(under + 3, under + 9, below + 5));
+    const underAParagraph = noteOf(({ sequence }) => {
+      sequence.insertEmbed(0, boundary(), {});
+      sequence.insert(sequence.length, LINE, {});
+      sequence.insertEmbed(sequence.length, boundary({ type: "codeBlock", language: null }), {});
+      sequence.insert(sequence.length, LINE, {});
+      sequence.insertEmbed(sequence.length, element("wikilink", { target: "Page" }), {});
+      sequence.insert(sequence.length, "tail", {});
+      for (let line = 2; line < 10_000; line++) {
+        sequence.insertEmbed(sequence.length, boundary(), {});
+        sequence.insert(sequence.length, LINE, {});
+      }
+    });
+    const refused = timedOn(underAParagraph, drag(30, 2 * (LETTERS + 2) + 1, 10));
     const spill = "10,000 paragraphs under a code block whose paragraph after it has no boundary";
     report.push(
       `${spill}: the first letter typed at the code block's end: ${inCode[0]!}`,
@@ -293,6 +316,8 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)(
       `${spill}: a divider put above the code block, which gives that paragraph its boundary first: ${divided[0]!}`,
       `${spill}: a second divider put above it: ${divided[1]!}`,
       `${spill}: the two paragraphs under that paragraph joined, which leaves it as it is, then split and joined again: ${apart.join(", ")}`,
+      `${spill}: text dragged within the paragraph under that paragraph into the next one: ${dragged[0]!}`,
+      `10,000 paragraphs, the second a code block whose paragraph after it has no boundary: text dragged from the first paragraph across the code block to that paragraph's start and dropped in the first paragraph, which is refused: ${refused[0]!}`,
     );
     console.log(report.join("\n"));
   },

@@ -776,7 +776,8 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
  *
  * Returns false when it stopped at a step after which the sequence does not read as the editor's
  * document: two containers that share an id became neighbours and read as one.
- * `afterEachStep` is called with the editor's document once each step is written.
+ * `afterEachStep` is called with the editor's document once for each step that replaces, when
+ * it is written, and once more for formatting steps that end the transaction.
  */
 export function writeTransaction(
   writing: BodyWriting,
@@ -801,7 +802,8 @@ export function writeTransaction(
     if (!writeBlockStartsThatDiffer(writing, after)) return false;
     afterEachStep?.(after);
   }
-  if (formatted >= 0) writeFormatting(writing, docs[formatted]!, transaction.doc);
+  if (formatted < 0) return true;
+  writeFormatting(writing, docs[formatted]!, transaction.doc);
   afterEachStep?.(transaction.doc);
   return true;
 }
@@ -885,7 +887,11 @@ function whatStepsTouch(reading: BodyReading, transactions: readonly Transform[]
         const started = blockStartingAt(reading, pos);
         near(pos, pos);
         edits.add(started >= 0 ? started : blockHolding(reading, pos));
-      } else
+      } else {
+        step.getMap().forEach((oldStart, oldEnd) => {
+          touched.from = Math.min(touched.from, back(oldStart, -1));
+          touched.to = Math.max(touched.to, back(oldEnd, 1));
+        });
         for (const [oldStart, oldEnd, newStart, newEnd] of rangesOf(
           was,
           now,
@@ -967,6 +973,7 @@ function whatStepsTouch(reading: BodyReading, transactions: readonly Transform[]
             if (isTypedInto) edits.add(block);
           }
         }
+      }
       maps.push(step.getMap());
     });
   return touched;
@@ -1085,31 +1092,6 @@ const boundaryIn = (item: Y.Item | null) => {
 };
 
 /**
- * Whether a change left each boundary that stood before it at the head of its own text: it wrote
- * no boundary between such a boundary and the first item of its line that still stands. A
- * boundary with one written there would head another block than it did. `state` is the note's
- * state vector from before the change.
- */
-export function keepsBoundariesWithTheirText(
-  sequence: Y.Text,
-  state: ReadonlyMap<number, number>,
-): boolean {
-  let stood = false;
-  let parted = false;
-  for (let item = sequence._start; item !== null; item = item.right) {
-    const isNew = item.id.clock >= (state.get(item.id.client) ?? 0);
-    if (boundaryIn(item)) {
-      if (!isNew) stood = !item.deleted;
-      parted = isNew && (parted || !item.deleted);
-    } else if (!isNew && !item.deleted && item.countable) {
-      if (stood && parted) return false;
-      stood = false;
-    }
-  }
-  return true;
-}
-
-/**
  * The lines with no boundary of their own that a change brought into being: those of `now` with
  * no counterpart in `before`, both from `linesWithNoBoundary`. A line's counterpart holds one of
  * its items. Text before the first boundary has the earlier such text for its counterpart, and
@@ -1141,7 +1123,10 @@ const sameIds = (one: readonly Y.ID[], other: readonly Y.ID[]) =>
  * split or changed the kind of the block the line depends on; and when the line now stands under
  * a boundary that was another line's, which got a new one. Another language, TeX or heading level
  * for a block is no other kind. `linesGiven`, the rule the reference writer asks, says which
- * lines that makes.
+ * lines that makes: `wanting`. `now` is `linesWithNoBoundary` taken after the change.
+ *
+ * `isHeaded` says whether a boundary the change made is the nearest one in front of items that
+ * some such line held and that still stand, or stands for a list item's added paragraph.
  *
  * When the change is known not to have ended as the editor's document (`isUnsettled`), a list
  * item's added paragraph that something was written in front of is wanting too. A line whose
@@ -1152,11 +1137,11 @@ const sameIds = (one: readonly Y.ID[], other: readonly Y.ID[]) =>
 export function linesLeftWanting(
   before: readonly LineWithNoBoundary[],
   state: ReadonlyMap<number, number>,
+  now: readonly LineWithNoBoundary[],
   writing: BodyWriting,
   isUnsettled = false,
-): number[] {
+): { wanting: number[]; isHeaded: boolean } {
   const store = writing.sequence.doc!.store;
-  const now = linesWithNoBoundary(writing);
   const nameOf = (id: Y.ID) => `${String(id.client)}:${String(id.clock)}`;
   const keyOf = (line: LineWithNoBoundary) =>
     line.owner ? `${line.bare} ${nameOf(line.owner)}` : line.bare;
@@ -1184,6 +1169,11 @@ export function linesLeftWanting(
   const standsBefore = (item: Y.Item, butWhatTheChangeTyped = false) =>
     standsNextTo(item, "left", butWhatTheChangeTyped);
   const edits: Line[] = [];
+  let isHeaded = false;
+  const headed = (line: Line) => {
+    isHeaded = true;
+    edits.push(line);
+  };
   const dependOnAChangedBlock: Line[] = [];
   const readInAnotherLine: Line[] = [];
   const lostTheirBlock: Line[] = [];
@@ -1194,13 +1184,9 @@ export function linesLeftWanting(
       (own.owner ? dependOnAChangedBlock : edits).push(own.owner ?? own);
     const still = stands.get(keyOf(line));
     const depended = line.owner ? Y.getItem(store, line.owner) : null;
-    if (still) {
-      const otherBlock =
-        still.ownerKind !== line.ownerKind ||
-        (still.owner !== null && line.owner !== null && !Y.compareIDs(still.owner, line.owner));
-      if (otherBlock) dependsOnAChangedBlock();
-      else if (!sameIds(still.items, line.items) || !still.node.eq(line.node)) edits.push(own);
-    }
+    if (still && still.ownerKind !== line.ownerKind) dependsOnAChangedBlock();
+    else if (still && (!sameIds(still.items, line.items) || !still.node.eq(line.node)))
+      edits.push(own);
     if (line.bare === "item") {
       if (!depended) return;
       const isItsBoundary = (item: Y.Item | null) => {
@@ -1211,10 +1197,10 @@ export function linesLeftWanting(
           String(storedValue(made, "path")) === line.path
         );
       };
-      const isHeaded =
+      const hasItsOwn =
         isItsBoundary(standsBefore(depended, true)) ||
         (depended.deleted && isItsBoundary(standsNextTo(depended, "right", true)));
-      if (isHeaded) edits.push(own);
+      if (hasItsOwn) headed(own);
       else if (!isUnsettled) return;
       else if (depended.deleted) lostTheirBlock.push(own);
       else if (isMadeByTheChange(standsBefore(depended))) edits.push(own);
@@ -1237,7 +1223,9 @@ export function linesLeftWanting(
       (storedValue(boundary ?? undefined, "type") ?? "paragraph") === line.ownerKind;
     const tookAnothersBoundary =
       boundary !== null && !joinedItsBlock && boundaryTheChangeMade(standsBefore(under!)) !== null;
-    if (boundaryTheChangeMade(standsBefore(head.item, true))) edits.push(own);
+    let heading: Y.Item | null = head.item.left;
+    while (heading !== null && (heading.deleted || !boundaryIn(heading))) heading = heading.left;
+    if (isMadeByTheChange(heading)) headed(own);
     else if (tookAnothersBoundary) dependsOnAChangedBlock();
     else if (isUnsettled && depended?.deleted) readInAnotherLine.push(own);
   });
@@ -1249,7 +1237,8 @@ export function linesLeftWanting(
       above: dependOnAChangedBlock,
     }),
   );
-  return before.filter((_, at) => given.has(lines[at]!)).map((line) => line.block);
+  const wanting = before.filter((_, at) => given.has(lines[at]!)).map((line) => line.block);
+  return { wanting, isHeaded };
 }
 
 function readsAlike(one: ProseMirrorNode, other: ProseMirrorNode): boolean {
@@ -1271,22 +1260,25 @@ const TRIES = 3;
 /**
  * Writes some editor transactions to a note, a copy of the real one or a test's, and says which
  * of the blocks that had no boundary of their own should have had one first, by their index
- * before the write. `linesLeftWanting` is asked after each step, so a line a step joins away is
- * not taken for one a later step starts. `isSettled` says whether the note then reads as the
- * editor's document, marks aside, and the last step kept each boundary with its text and
- * brought no line into being with no boundary of its own.
+ * before the write. `linesLeftWanting` is asked after each step, and once more for the whole
+ * write against the note as it was before. `isRead` says whether the note read as the
+ * editor's document after every step, marks aside. `isSettled` says that it did, that no step
+ * brought a line into being with no boundary of its own, and that no boundary the write made
+ * is left in front of what a line with none held.
  */
 export function linesAWriteLeavesWanting(
   writing: BodyWriting,
   transactions: readonly Transform[],
-): { wanting: number[]; isSettled: boolean } {
+): { wanting: number[]; isSettled: boolean; isRead: boolean } {
   const note = writing.sequence.doc!;
   const stateOf = () => Y.decodeStateVector(Y.encodeStateVector(note));
   const first = linesWithNoBoundary(writing);
+  const begun = stateOf();
   const wanting = new Set<number>();
   let before = first;
-  let state = stateOf();
-  let isSettled = true;
+  let state = begun;
+  let isRead = true;
+  let bringsNone = true;
   const isTheSameLine = (one: LineWithNoBoundary, other: LineWithNoBoundary) =>
     one.bare === other.bare &&
     (one.owner === null
@@ -1298,15 +1290,13 @@ export function linesAWriteLeavesWanting(
   const look = (shown: ProseMirrorNode | null) => {
     const now = linesWithNoBoundary(writing);
     const reads = shown !== null && readsAlike(writing.reader.reading().doc, shown);
-    for (const block of linesLeftWanting(before, state, writing, !reads)) {
+    for (const block of linesLeftWanting(before, state, now, writing, !reads).wanting) {
       const line = before.find((each) => each.block === block)!;
       const was = first.find((each) => isTheSameLine(each, line));
       if (was) wanting.add(was.block);
     }
-    isSettled =
-      reads &&
-      keepsBoundariesWithTheirText(writing.sequence, state) &&
-      linesBroughtIntoBeing(before, now).length === 0;
+    isRead &&= reads;
+    bringsNone &&= linesBroughtIntoBeing(before, now).length === 0;
     before = now;
     state = stateOf();
   };
@@ -1314,7 +1304,9 @@ export function linesAWriteLeavesWanting(
     const wrote = transactions.every((transaction) => writeTransaction(writing, transaction, look));
     if (!wrote) look(null);
   });
-  return { wanting: [...wanting], isSettled };
+  const whole = linesLeftWanting(first, begun, before, writing);
+  for (const block of whole.wanting) wanting.add(block);
+  return { wanting: [...wanting], isSettled: isRead && bringsNone && !whole.isHeaded, isRead };
 }
 
 type Copy = { writing: BodyWriting; transactions: readonly Transform[]; first: number };
@@ -1381,10 +1373,14 @@ function copyOfWindow(
   let fits = writing.reader.reading().doc.eq(doc);
   for (const transaction of transactions) {
     const transform = new Transform(doc);
-    for (const step of transaction.steps) {
-      const moved = fits ? step.map(shift) : null;
-      fits = moved !== null && !transform.maybeStep(moved).failed;
-    }
+    for (const step of transaction.steps)
+      try {
+        const moved = fits ? step.map(shift) : null;
+        fits = moved !== null && !transform.maybeStep(moved).failed;
+      } catch (error) {
+        if (!(error instanceof RangeError)) throw error;
+        fits = false;
+      }
     windowed.push(transform);
     doc = transform.doc;
   }
@@ -1396,26 +1392,26 @@ function copyOfWindow(
 function linesATrialGives(
   open: (given: readonly number[]) => Copy | null,
   guessed: readonly number[],
-): number[] | null {
+): number[] | null | undefined {
   const never = new Set<number>();
   let given = [...guessed];
   for (let tries = 0; tries < TRIES; tries++) {
     const copy = open(given);
-    if (!copy) return null;
+    if (!copy) return undefined;
     const { writing: trial, transactions, first } = copy;
     const note = trial.sequence.doc!;
     const there = given.map((block) => block - first);
     note.transact(() => giveBoundaries(trial, there));
     const gave = there.map((block) => trial.reader.reading().lines[block]!.item!);
-    const { wanting, isSettled } = linesAWriteLeavesWanting(trial, transactions);
+    const { wanting, isSettled, isRead } = linesAWriteLeavesWanting(trial, transactions);
     const taken = given.filter((_, at) => gave[at]!.deleted);
     for (const block of taken) never.add(block);
     const more = wanting.map((block) => block + first).filter((block) => !never.has(block));
     note.destroy();
-    if (taken.length + more.length === 0) return isSettled ? given : null;
+    if (taken.length + more.length === 0) return isSettled ? given : isRead ? null : undefined;
     given = [...given.filter((block) => !never.has(block)), ...more];
   }
-  return null;
+  return undefined;
 }
 
 /**
@@ -1448,10 +1444,15 @@ function linesATrialGives(
  * The copy is a window of the note: the top-level blocks the steps touch and one more on each
  * side, with whole lines, their live items only, the formatting in force where they start, and
  * the steps moved to start there. It reads the note's own container records. When the window
- * does not read as that part of the editor's document, before or after a step, or leaves no line
- * wanting and still does not settle, the whole note is copied instead, which costs a read of the
- * note; `trial` `"note"` asks for that copy at once. The dispatch is refused when the whole
- * note takes more than three copies, or then does not read as the editor's document, marks aside.
+ * does not read as that part of the editor's document, before or after a step, or takes more
+ * than three copies, the whole note is copied instead, which costs a read of the note; `trial`
+ * `"note"` asks for that copy at once.
+ *
+ * The dispatch is refused when a copy that read as the editor's document after every step is
+ * still not settled once no more lines can be given: a boundary the dispatch makes would stand
+ * in front of what a line with none held, which undo would take away with whatever someone else
+ * made of that line. It is refused too when the whole note takes more than three copies or does
+ * not read as the editor's document.
  */
 export function linesToGiveFirst(
   writing: BodyWriting,
@@ -1465,8 +1466,9 @@ export function linesToGiveFirst(
   const inWindow =
     trial === "window"
       ? linesATrialGives((given) => copyOfWindow(writing, transactions, touched, given), guessed)
-      : null;
-  return inWindow ?? linesATrialGives(() => copyOfNote(writing, transactions), guessed);
+      : undefined;
+  if (inWindow !== undefined) return inWindow;
+  return linesATrialGives(() => copyOfNote(writing, transactions), guessed) ?? null;
 }
 
 /**

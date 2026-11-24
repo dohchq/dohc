@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { StepMap, Transform } from "@tiptap/pm/transform";
+import { dropPoint, StepMap, Transform } from "@tiptap/pm/transform";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { setBlockType } from "@tiptap/pm/commands";
@@ -44,7 +44,6 @@ import {
 } from "./bodySequenceWriter.js";
 import {
   giveBoundaries,
-  keepsBoundariesWithTheirText,
   keepsContainers,
   linesAWriteLeavesWanting,
   linesBroughtIntoBeing,
@@ -1997,6 +1996,97 @@ describe.each(["bare", "hosted"] as const)(
   },
 );
 
+describe.each(["bare", "hosted"] as const)(
+  "on a %s page, a dispatch of several steps next to a paragraph with no boundary",
+  (shape) => {
+    it.each([
+      [
+        "a code block and an item",
+        [stored({}, "ab"), stored(CODE, "cd", WIKILINK, "ef"), stored({}, "gh")],
+        'doc(paragraph("ab"), codeBlock("cd"), heading("P", wikilink, "ef"), paragraph("gh"))',
+      ],
+      [
+        "a divider",
+        [stored({}, "ab"), stored(RULE, "ef"), stored({}, "gh")],
+        'doc(paragraph("ab"), horizontalRule, heading("Pef"), paragraph("gh"))',
+      ],
+      [
+        "a code block and a line break",
+        [stored({}, "ab"), stored(CODE, "cd", HARD_BREAK, "ef"), stored({}, "gh")],
+        'doc(paragraph("ab"), codeBlock("cd"), heading("P", hardBreak, "ef"), paragraph("gh"))',
+      ],
+    ] as const)(
+      "writes nothing when text dragged from the line above across %s to the start of that paragraph is dropped in the line above, where the paragraph would be joined away and split off again under a boundary undo takes away; the paragraph is still the heading someone else then makes it",
+      (_name, lines, read) => {
+        const a = person(noteOfLines(lines), 10, shape);
+        const b = person(noteOfLines(lines), 20, shape);
+        const before = a.view.state.doc.toJSON();
+        const paragraph = a.view.state.doc.child(0).nodeSize + a.view.state.doc.child(1).nodeSize;
+        a.view.dispatch(
+          a.view.state.tr.setSelection(TextSelection.create(a.view.state.doc, 3, paragraph + 1)),
+        );
+        const shown = a.shown.count;
+        a.view.dispatch(dropOfSelection(a.view.state, 2));
+        expect(a.sent).toEqual([]);
+        expect(a.view.state.doc.toJSON()).toEqual(before);
+        expect(a.shown.count).toBe(shown + 1);
+        a.expectMirror();
+        b.typeAt(2, 0, "P");
+        b.select([2, 0]);
+        expect(b.retype("heading", { level: 3 })).toBe(true);
+        exchange(b, a);
+        a.undo();
+        exchange(a, b);
+        for (const each of [a, b]) {
+          each.expectMirror();
+          expect(each.view.state.doc.toString()).toBe(read);
+        }
+      },
+    );
+
+    it("writes a block dragged to the top of the note when the drag's first step changes nothing, in a list item's added paragraph further down", () => {
+      const lines = [
+        stored({}, "ab"),
+        stored({ type: "heading", level: 2, ...IN_ITEM }, "cd"),
+        stored({}, "ef"),
+      ];
+      const a = person(noteOfLines(lines), 10, shape);
+      const before = a.view.state.doc.toJSON();
+      a.view.dispatch(a.view.state.tr.setSelection(NodeSelection.create(a.view.state.doc, 6)));
+      a.view.dispatch(dropOfSelection(a.view.state, 0));
+      expect(a.view.state.doc.toString()).toBe(
+        'doc(paragraph, paragraph("ab"), bulletList(listItem(paragraph, heading("cd"))), paragraph("ef"))',
+      );
+      a.expectMirror();
+      expect(a.undo()).toBe(true);
+      expect(a.view.state.doc.toJSON()).toEqual(before);
+      a.expectMirror();
+    });
+
+    it.each([
+      ["with the first open", 1, 'doc(codeBlock("X"), paragraph("Yb"), paragraph(wikilink, "cd"))'],
+      [
+        "with the first whole",
+        0,
+        'doc(codeBlock, paragraph("X"), paragraph("Yb"), paragraph(wikilink, "cd"))',
+      ],
+    ] as const)(
+      "writes two paragraphs pasted over the first letter of a code block %s, which leave the code block's boundary an empty line or split its text off",
+      (_name, openStart, read) => {
+        const a = person(noteOfLines([stored(CODE, "ab", WIKILINK, "cd")]), 10, shape);
+        const before = a.view.state.doc.toJSON();
+        a.view.dispatch(a.view.state.tr.replaceRange(1, 2, twoParagraphs(openStart)));
+        expect(a.sent.length).toBeGreaterThan(0);
+        expect(a.view.state.doc.toString()).toBe(read);
+        a.expectMirror();
+        expect(a.undo()).toBe(true);
+        expect(a.view.state.doc.toJSON()).toEqual(before);
+        a.expectMirror();
+      },
+    );
+  },
+);
+
 const ORACLE_NOTES: [string, StoredLine[]][] = [
   ["two paragraphs", [stored({}, "ab"), stored({}, "cd")]],
   ["code, then an item and text", [stored(CODE, "ab", WIKILINK, "cd")]],
@@ -2118,19 +2208,31 @@ ORACLE_NOTES.push(
 
 const ORACLE_COUNTS = {
   outcomes: {
-    applied: 24129,
-    "filtered by keepsContainers": 6958,
+    applied: 29397,
+    "filtered by keepsContainers": 9332,
+    "refused, as no trial settles": 618,
     "not offered": 1069,
     "range error": 0,
   },
-  undone: 23610,
-  given: 14807,
-  typedInBySomeoneElse: 25678,
-  retypedBySomeoneElse: 18795,
+  undone: 28878,
+  given: 18256,
+  typedInBySomeoneElse: 30734,
+  retypedBySomeoneElse: 22962,
   excepted: {
     "a mark on an inline item": 560,
-    "formatting stored under a code block's letters": 18,
+    "formatting stored under a code block's letters": 33,
   },
+  unsettled: {
+    "Enter over N-N": 237,
+    "a delete and a split over N-N": 237,
+    "a text drag of N-N to N": 144,
+  } as Record<string, number>,
+  drags: {
+    "text, applied": 5018,
+    "block, applied": 724,
+    "text, refused, as no trial settles": 144,
+    "text, filtered by keepsContainers": 2374,
+  } as Record<string, number>,
 };
 
 const ORACLE_KINDS: [string, Record<string, unknown> | undefined][] = [
@@ -2199,9 +2301,9 @@ const writingOf = (note: { sequence: Y.Text; containers: Y.Map<unknown> }): Body
 
 const agreement = { compared: 0, trials: 0, inTheWindow: 0, onTheWholeNote: 0 };
 const AGREEMENT_COUNTS = {
-  compared: 33011,
-  trials: 18631,
-  inTheWindow: 18631,
+  compared: 38799,
+  trials: 22464,
+  inTheWindow: 22464,
   onTheWholeNote: 0,
 };
 
@@ -2270,7 +2372,7 @@ function expectNoLineLeftWanting(
     );
   if (!again.isSettled)
     throw new Error(
-      `${label}: the recorded change does not read as the editor's document when written again, or parted a boundary from its text`,
+      `${label}: the recorded change does not read as the editor's document after each step when written again, or leaves a boundary it made in front of what a line with none held`,
     );
   if (again.wanting.length === 0) return;
   const given = asGiven();
@@ -2288,15 +2390,28 @@ function expectNoLineLeftWanting(
 
 const TWO_STEP_COUNTS = {
   pairs: 2600,
-  firstWroteNothing: 519,
-  secondWroteNothing: 358,
-  undone: 1723,
+  firstWroteNothing: 575,
+  secondWroteNothing: 346,
+  undone: 1679,
 };
 
-type Outcome = "applied" | "filtered by keepsContainers" | "not offered" | "range error";
+type Outcome =
+  | "applied"
+  | "filtered by keepsContainers"
+  | "refused, as no trial settles"
+  | "not offered"
+  | "range error";
 const oracle = {
   notes: 0,
-  outcomes: { applied: 0, "filtered by keepsContainers": 0, "not offered": 0, "range error": 0 },
+  outcomes: {
+    applied: 0,
+    "filtered by keepsContainers": 0,
+    "refused, as no trial settles": 0,
+    "not offered": 0,
+    "range error": 0,
+  },
+  unsettled: new Map<string, number>(),
+  drags: new Map<string, number>(),
   excepted: new Map<string, number>(),
   undone: 0,
   given: 0,
@@ -2338,7 +2453,25 @@ describe("the note reads as the document ProseMirror computed", () => {
       }
       const wrote = applied as Transaction | null;
       const refused = filtered as Transaction | null;
-      if (wrote) {
+      let unsettled = false;
+      if (wrote && a.sent.length === 0 && a.view.state.doc.eq(before) && !wrote.doc.eq(before)) {
+        const fresh = declared(94);
+        Y.applyUpdate(fresh.doc, baseline);
+        unsettled = linesToGiveFirst(writingOf(fresh), [wrote], "note") === null;
+        const left = linesAWriteLeavesWanting(writingOf(fresh), [wrote]);
+        fresh.doc.destroy();
+        if (unsettled && (left.isSettled || left.wanting.length === 0))
+          throw new Error(
+            `${label} in ${before.toString()} was refused, and not because a boundary it makes would stand in front of what a line with none held`,
+          );
+      }
+      if (wrote && unsettled) {
+        a.expectMirror();
+        expectTheWindowToAgree(longer, [wrote], `${label} in ${before.toString()}`);
+        outcome = "refused, as no trial settles";
+        const kind = label.replaceAll(/\d+/g, "N");
+        oracle.unsettled.set(kind, (oracle.unsettled.get(kind) ?? 0) + 1);
+      } else if (wrote) {
         outcome = "applied";
         a.expectMirror();
         const read = readBodySequence(schema, a.doc);
@@ -2381,6 +2514,9 @@ describe("the note reads as the document ProseMirror computed", () => {
         outcome = "filtered by keepsContainers";
       }
       oracle.outcomes[outcome] += 1;
+      const drag = /^a (text|block) drag/.exec(label)?.[1];
+      if (drag)
+        oracle.drags.set(`${drag}, ${outcome}`, (oracle.drags.get(`${drag}, ${outcome}`) ?? 0) + 1);
       stopEveryone();
       if (outcome === "applied") withASecondPerson(label, act);
     };
@@ -2422,6 +2558,7 @@ describe("the note reads as the document ProseMirror computed", () => {
         }
         const did = a.view.state.doc;
         const idOf = (id: Y.ID) => `${String(id.client)}:${String(id.clock)}`;
+        const recorded = a.sent.length > 0 ? boundariesMadeIn(a.sent.at(-1)!) : [];
         const headed = line.bare === "item" ? line.owner : line.items[0];
         const givenIt =
           a.sent.length < 2 || !headed
@@ -2439,6 +2576,12 @@ describe("the note reads as the document ProseMirror computed", () => {
           there.block < 0 || boundaryAt(there.reading, there.block) < 0
             ? null
             : there.reading.lines[there.block]!.item!.id;
+        const standing = new Set(tokensOf(b.sequence).map((token) => token.id));
+        const hasItsOwn = givenIt.some((id) => standing.has(id));
+        if (own !== null && recorded.includes(idOf(own)) && !hasItsOwn)
+          throw new Error(
+            `${label} in ${was.toString()}, which gave ${did.toString()}: what block ${String(line.block)} held, which had no boundary and was given none that still stands, is under a boundary the recorded change wrote`,
+          );
         if (there.block >= 0 && (own === null || givenIt.includes(idOf(own)))) {
           const keptItsKind = there.reading.blocks[there.block]!.node.sameMarkup(line.node);
           b.view.dispatch(b.view.state.tr.insertText(SECOND_PERSONS_LETTER, there.at));
@@ -2573,8 +2716,30 @@ describe("the note reads as the document ProseMirror computed", () => {
         check(`a delete and a split ${over}`, (a) =>
           a.view.dispatch(a.view.state.tr.delete(pos, to).split(pos)),
         );
+        const acrossBlocks = !start.resolve(pos).sameParent(start.resolve(to));
+        const outside = inText.filter((at) => at < pos || at > to);
+        const targets = acrossBlocks ? outside : [outside[0], outside.at(-1)];
+        for (const at of new Set(targets))
+          if (at !== undefined)
+            check(`a text drag of ${String(pos)}-${String(to)} to ${String(at)}`, (a) => {
+              select(a, pos, to);
+              a.view.dispatch(dropOfSelection(a.view.state, at));
+            });
       }
     }
+    const blocks: number[] = [];
+    start.descendants((node, pos) => {
+      if (node.isBlock && (node.isTextblock || node.isLeaf)) blocks.push(pos);
+    });
+    for (const pos of blocks)
+      for (const at of [...blocks, size])
+        if (at !== pos)
+          check(`a block drag of ${String(pos)} to ${String(at)}`, (a) => {
+            a.view.dispatch(
+              a.view.state.tr.setSelection(NodeSelection.create(a.view.state.doc, pos)),
+            );
+            a.view.dispatch(dropOfSelection(a.view.state, at));
+          });
     start.descendants((node, pos) => {
       const attribute = anotherAttribute(node);
       if (attribute)
@@ -2596,7 +2761,10 @@ describe("the note reads as the document ProseMirror computed", () => {
         )}; undone and read as before ${String(oracle.undone)}; a line given its boundary first ${String(oracle.given)}; someone else typed at the start of a line that had no boundary, and it was undone ${String(oracle.typedInBySomeoneElse)}, of which they also made the line a heading ${String(oracle.retypedBySomeoneElse)}; exceptions: ${
         [...oracle.excepted].map(([name, count]) => `${name} (${String(count)})`).join("; ") ||
         "none"
-      }`,
+      }; refused: ${
+        [...oracle.unsettled].map(([kind, count]) => `${kind} (${String(count)})`).join("; ") ||
+        "none"
+      }; drags: ${[...oracle.drags].map(([kind, count]) => `${kind} (${String(count)})`).join("; ")}`,
     );
     if (oracle.notes !== ORACLE_NOTES.length) return;
     expect(oracle.outcomes).toEqual(ORACLE_COUNTS.outcomes);
@@ -2605,6 +2773,8 @@ describe("the note reads as the document ProseMirror computed", () => {
     expect(oracle.typedInBySomeoneElse).toBe(ORACLE_COUNTS.typedInBySomeoneElse);
     expect(oracle.retypedBySomeoneElse).toBe(ORACLE_COUNTS.retypedBySomeoneElse);
     expect(Object.fromEntries(oracle.excepted)).toEqual(ORACLE_COUNTS.excepted);
+    expect(Object.fromEntries(oracle.unsettled)).toEqual(ORACLE_COUNTS.unsettled);
+    expect(Object.fromEntries(oracle.drags)).toEqual(ORACLE_COUNTS.drags);
   });
 
   it("reads as before two steps picked at random once both are undone, in every note", () => {
@@ -2712,7 +2882,30 @@ describe("the note reads as the document ProseMirror computed", () => {
           `a delete and a split ${over}`,
           (a) => a.view.dispatch(a.view.state.tr.delete(from, to).split(from)),
         ],
+        [
+          `a text drag of ${String(from)}-${String(to)} to ${String(anywhere[0])}`,
+          (a) => {
+            select(a, from, to);
+            a.view.dispatch(dropOfSelection(a.view.state, anywhere[0]!));
+          },
+        ],
       ];
+      const blocks: number[] = [];
+      doc.descendants((node, pos) => {
+        if (node.isBlock && (node.isTextblock || node.isLeaf)) blocks.push(pos);
+      });
+      if (blocks.length > 0) {
+        const pos = pick(blocks);
+        steps.push([
+          `a block drag of ${String(pos)} to ${String(anywhere[1])}`,
+          (a) => {
+            a.view.dispatch(
+              a.view.state.tr.setSelection(NodeSelection.create(a.view.state.doc, pos)),
+            );
+            a.view.dispatch(dropOfSelection(a.view.state, anywhere[1]!));
+          },
+        ]);
+      }
       if (nodes.length > 0) {
         const [pos, node] = pick(nodes);
         steps.push([
@@ -4609,8 +4802,8 @@ const withNoReason = (counts: Differential) =>
   );
 
 const DIFFERENTIAL_COUNTS: Differential = {
-  compared: 8062,
-  onlyOne: 1888,
+  compared: 7964,
+  onlyOne: 1986,
   neither: 398,
   givenDifferently: {
     "Enter over a selection across blocks, from the note's start": 18,
@@ -4748,6 +4941,17 @@ function tiptapInsertContentAt(
   if (from === to && isEmpty) return tr.replaceWith(from - 1, to + 1, node);
   const atItsStart = parent.isTextblock && $from.parentOffset === 0 && parent.content.size > 0;
   return tr.replaceWith(atItsStart ? from - 1 : from, to, node);
+}
+
+function dropOfSelection(state: EditorState, at: number): Transaction {
+  const slice = state.selection.content();
+  const point = dropPoint(state.doc, at, slice) ?? at;
+  const tr = state.tr.deleteSelection();
+  const pos = tr.mapping.map(point);
+  const isNode = slice.openStart === 0 && slice.openEnd === 0 && slice.content.childCount === 1;
+  return isNode
+    ? tr.replaceRangeWith(pos, pos, slice.content.firstChild!)
+    : tr.replaceRange(pos, pos, slice);
 }
 
 function twoParagraphs(openStart = 1): Slice {
@@ -5386,22 +5590,6 @@ describe("the editor and the reference writer, for the same edit of the same not
     expect(linesToGiveFirst(writingOf(a), [quoted], "note")).toBeNull();
     expect(Y.encodeStateAsUpdate(a.doc)).toEqual(held);
     expect(a.sent).toEqual([]);
-  });
-
-  it("say that a boundary lost its text when a change writes another boundary between the two, and not when it writes one in front", () => {
-    const made = declared(98);
-    Y.applyUpdate(made.doc, note("ab", "cd"));
-    const stateOf = () => Y.decodeStateVector(Y.encodeStateVector(made.doc));
-    const before = stateOf();
-    made.sequence.insertEmbed(3, boundary(), {});
-    expect(keepsBoundariesWithTheirText(made.sequence, before)).toBe(true);
-    const then = stateOf();
-    made.sequence.insertEmbed(5, boundary({ type: "heading", level: 1 }), {});
-    expect(readBodySequence(schema, made.doc).toString()).toBe(
-      'doc(paragraph("ab"), paragraph, paragraph, heading("cd"))',
-    );
-    expect(keepsBoundariesWithTheirText(made.sequence, then)).toBe(false);
-    made.doc.destroy();
   });
 
   it("say which lines with no boundary a change brought into being, by what they hold and not by where they stand", () => {
