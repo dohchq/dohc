@@ -80,13 +80,20 @@ pub(super) fn settled_base(
         .map_err(|_| ApplicationError::Corrupt)?;
     if matches!(at, Settlement::LatestAt(cursor) if cursor != terminal)
         || kind != "ordinary"
-        || settled_moment != moment
         || markdown != source_digest
         || binding.workspace_id != key.workspace_id
         || binding.main_version_id != key.version_id
         || binding.object_id != key.object_id
         || binding.lineage_claim_id != lineage
         || binding.current_path != path
+        || !super::settlement::moment_renames_from_in(
+            conn,
+            key,
+            path,
+            source_digest,
+            moment,
+            &settled_moment,
+        )?
     {
         return Err(unexplained());
     }

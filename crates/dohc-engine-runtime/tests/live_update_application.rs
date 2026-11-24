@@ -1523,3 +1523,526 @@ async fn worker_panic_retires_owner_and_rolls_back_before_restart() {
     );
     supervisor.close(&db).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rename_back_replays_predecessor_settlement_and_settles_later_edits() {
+    use dohc_engine_collab::live_update_application::{
+        AdmittedNativeHistoryReconstruction, NativeHistoryReconstruction, RetainedPrefix,
+        RetainedPrefixBody,
+    };
+    use dohc_engine_domain::{RenameTextFile, VersionedTextStore, WriteText};
+
+    #[derive(Clone, Copy)]
+    enum Mode {
+        LocalRoundTrip,
+        LocalMultiHop,
+        SyncedExact,
+        SyncedEquivalentSettlement,
+        PreUpgradePersistedEquivalentSettlement,
+    }
+
+    for mode in [
+        Mode::LocalRoundTrip,
+        Mode::LocalMultiHop,
+        Mode::SyncedExact,
+        Mode::SyncedEquivalentSettlement,
+        Mode::PreUpgradePersistedEquivalentSettlement,
+    ] {
+        let root = ScratchDir::new().unwrap();
+        let db = engine_db_path(&root).unwrap();
+        let source = "# Initial\n";
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
+            .unwrap();
+        let key = DocKey::new("workspace", "main", "one").unwrap();
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("workspace", "main", 1, &NoFaults)
+            .unwrap();
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "workspace".into(),
+                    version_id: "main".into(),
+                    object_id: "one".into(),
+                    path: "one.md".into(),
+                    text: source.into(),
+                    moment_id: "source".into(),
+                    request_id: None,
+                    metadata_origin: "test".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        dohc_engine_collab::claim_base(
+            &mut store,
+            &key,
+            ContentKind::Richdoc,
+            &doc.encode_full_state(),
+            &NoFaults,
+            3,
+        )
+        .unwrap();
+        let claim = dohc_engine_collab::read_marker(&store, &key)
+            .unwrap()
+            .unwrap()
+            .lineage_claim_id
+            .unwrap();
+        let binding = LiveObjectBinding {
+            lineage_claim_id: claim.clone(),
+            restore_fence_generation: 0,
+            ..binding("one")
+        };
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("UPDATE ydoc_docs SET path='one.md' WHERE object_id='one'", [])
+                    .map_err(StorageError::persist_public)?;
+                tx.execute(
+                    "INSERT INTO ydoc_owner_base_sources(workspace_id,version_id,object_id,\
+                     lineage_claim_id,path,source_moment_id,source_blob_sha256,source_byte_length) \
+                     VALUES('workspace','main','one',?1,'one.md','source',?2,?3)",
+                    rusqlite::params![claim, hex_sha256(source.as_bytes()), source.len() as i64],
+                )
+                .map_err(StorageError::persist_public)?;
+                tx.execute(
+                    "INSERT INTO live_owner_adoptions(relay_database_namespace,adoption_id,\
+                     workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,\
+                     source_moment_id,source_digest,source_byte_length,\
+                     baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,\
+                     coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,\
+                     terminal_receipt_json,host_coordinate_json,max_pending_bytes,\
+                     max_pending_age_ms) VALUES('relay-A','adoption','workspace','main','one',?1,\
+                     ?2,'source',?3,?4,0,0,?3,?3,0,0,0,'null',\
+                     '{\"hostId\":\"host\",\"hostEpoch\":2,\"instanceId\":\"instance\",\
+                     \"connectionId\":\"connection\"}',1000000,1000000)",
+                    rusqlite::params![
+                        claim,
+                        serde_json::to_string(&binding).unwrap(),
+                        hex_sha256(source.as_bytes()),
+                        source.len() as i64,
+                    ],
+                )
+                .map_err(StorageError::persist_public)?;
+                tx.execute(
+                    dohc_engine_collab::live_update_application::owner_activations::ACTIVATE_ADOPTION,
+                    rusqlite::params!["relay-A", "adoption", None::<String>],
+                )
+                .map_err(StorageError::persist_public)?;
+                dohc_engine_collab::live_update_application::initialize_adopted_history_for_test(
+                    tx, "relay-A", &binding,
+                )
+                .map_err(StorageError::persist_public)
+            })
+            .unwrap();
+        drop(store);
+        std::fs::write(root.path().join("one.md"), source).unwrap();
+
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 4).unwrap().actor;
+        let owner = actor
+            .live_application_owner("workspace".into())
+            .await
+            .unwrap();
+        let handle = owner
+            .register("relay-A".into(), coordinate("connection"), binding.clone())
+            .await
+            .unwrap();
+        let reconstruction = || AdmittedNativeHistoryReconstruction {
+            policy: NativeHistoryReconstruction {
+                working_reserve_bytes: 8 * 1024 * 1024,
+            },
+            reservation: Arc::new(()),
+        };
+
+        let mut first_event = event(
+            "edit-1",
+            1,
+            "one",
+            doc.richdoc_append_paragraph("Before stop"),
+        );
+        first_event.metadata.accepted.binding = binding.clone();
+        ack(handle
+            .apply(first_event.clone(), Arc::new(NoFaults), 100_000_000)
+            .await
+            .unwrap());
+        let first_terminal = first_event.metadata.accepted.receipt.clone();
+        let first = handle
+            .settle(
+                Some(first_terminal.clone()),
+                16,
+                root.path().to_owned(),
+                10,
+                Arc::new(NoFaults),
+                tokio_util::sync::CancellationToken::new(),
+                reconstruction(),
+            )
+            .await
+            .unwrap();
+        assert!(first.materialized);
+        owner.retire();
+        supervisor.close(&db).unwrap();
+
+        let settled_text = std::fs::read_to_string(root.path().join("one.md")).unwrap();
+        let settled_sha = hex_sha256(settled_text.as_bytes());
+        assert_eq!(settled_sha, first.markdown_digest);
+
+        let mut store = EngineStore::open(&db, 20).unwrap();
+        let history_evidence_digest: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT evidence_digest FROM live_accepted_updates WHERE journal_cursor=1",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        let boundary = RetainedPrefixBody {
+            terminal_receipt: Some(first_terminal.clone()),
+            event_count: 1,
+            history_evidence_digest: history_evidence_digest.clone(),
+        };
+        let prefix = RetainedPrefix {
+            terminal_receipt: Some(first_terminal.clone()),
+            event_count: 1,
+            history_evidence_digest,
+            predecessor_activation_id: "adoption".into(),
+        };
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "DELETE FROM live_device_application_bindings WHERE object_id='one'",
+                    [],
+                )
+                .map_err(StorageError::persist_public)?;
+                tx.execute(
+                    "UPDATE live_owner_activations SET released_at_ms=19,\
+                     released_restore_generation=0,released_accepted_cursor=1,\
+                     carried_manifest_json='[]',released_boundary_json=?1 \
+                     WHERE activation_id='adoption'",
+                    [serde_json::to_string(&boundary).unwrap()],
+                )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        let local_rename =
+            |store: &mut EngineStore, from: &str, to: &str, moment_id: &str, now: i64| {
+                VersionedTextStore::new(store)
+                    .rename_text_file_with(
+                        &RenameTextFile {
+                            workspace_id: "workspace".into(),
+                            version_id: "main".into(),
+                            from_path: from.into(),
+                            to_path: to.into(),
+                            moment_id: moment_id.into(),
+                            request_id: None,
+                            metadata_origin: "user".into(),
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            author_json: None,
+                            now_ms: now,
+                        },
+                        &NoFaults,
+                        |tx, _| {
+                            tx.execute("UPDATE ydoc_docs SET path=?1 WHERE object_id='one'", [to])
+                                .map_err(StorageError::persist_public)?;
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+            };
+        let synced_rename = |store: &mut EngineStore,
+                             seq: i64,
+                             from: &str,
+                             to: &str,
+                             moment_id: &str,
+                             before_moment: &str| {
+            let envelope = dohc_engine_sync::ReplicationEnvelope {
+                workspace_id: "workspace".into(),
+                origin_id: "desktop".into(),
+                origin_seq: seq,
+                relay_seq: Some(seq),
+                op_kind: "moment.append".into(),
+                payload: serde_json::json!({
+                    "momentId": moment_id,
+                    "versionId": "main",
+                    "objectId": "one",
+                    "objectCreatedAtMs": 1,
+                    "path": to,
+                    "recordedAtMs": 20 + seq,
+                    "operation": "rename",
+                    "payloadBeforeBlobSha256": settled_sha,
+                    "payloadBeforePath": from,
+                    "payloadAfterBlobSha256": settled_sha,
+                    "payloadAfterPath": to,
+                    "metadata": {"origin": "sync"},
+                    "beforePresent": "present",
+                    "beforeObjectId": "one",
+                    "beforeVersionId": "main",
+                    "beforePath": from,
+                    "beforeBlobSha256": settled_sha,
+                    "beforeContentKind": "text",
+                    "beforeUpdatedAtMs": 10,
+                    "beforeLatestMomentId": before_moment,
+                    "beforeMetadata": {"origin": "sync"}
+                }),
+                recorded_at_ms: 20 + seq,
+                settlement_admission: None,
+                admitted_author_snapshot: None,
+            };
+            let outcome = dohc_engine_sync::apply_moment_envelope(
+                store,
+                &envelope,
+                &NoFaults,
+                &dohc_engine_sync::NoLiveLeases,
+                &dohc_engine_collab::live_update_application::ReleasedTails::uncached(),
+            )
+            .unwrap();
+            assert!(
+                matches!(
+                    outcome.primary,
+                    dohc_engine_sync::ApplyDisposition::Applied(0)
+                ),
+                "{outcome:?}"
+            );
+        };
+
+        let expected_head_moment = match mode {
+            Mode::LocalRoundTrip => {
+                local_rename(&mut store, "one.md", "moved.md", "rename-1", 21);
+                local_rename(&mut store, "moved.md", "one.md", "rename-2", 22);
+                "rename-2"
+            }
+            Mode::LocalMultiHop => {
+                local_rename(&mut store, "one.md", "moved.md", "rename-1", 21);
+                local_rename(&mut store, "moved.md", "third.md", "rename-2", 22);
+                local_rename(&mut store, "third.md", "one.md", "rename-3", 23);
+                "rename-3"
+            }
+            Mode::SyncedExact => {
+                synced_rename(
+                    &mut store,
+                    0,
+                    "one.md",
+                    "moved.md",
+                    "rename-1",
+                    &first.moment_id,
+                );
+                synced_rename(&mut store, 1, "moved.md", "one.md", "rename-2", "rename-1");
+                "rename-2"
+            }
+            Mode::SyncedEquivalentSettlement => {
+                let desktop_settlement = format!("moment-ydoc-{}", "e".repeat(64));
+                assert_ne!(desktop_settlement, first.moment_id);
+                synced_rename(
+                    &mut store,
+                    0,
+                    "one.md",
+                    "moved.md",
+                    "rename-1",
+                    &desktop_settlement,
+                );
+                synced_rename(&mut store, 1, "moved.md", "one.md", "rename-2", "rename-1");
+                "rename-2"
+            }
+            Mode::PreUpgradePersistedEquivalentSettlement => {
+                let desktop_settlement = format!("moment-ydoc-{}", "e".repeat(64));
+                assert_ne!(desktop_settlement, first.moment_id);
+                synced_rename(
+                    &mut store,
+                    0,
+                    "one.md",
+                    "moved.md",
+                    "rename-1",
+                    &first.moment_id,
+                );
+                synced_rename(&mut store, 1, "moved.md", "one.md", "rename-2", "rename-1");
+                store
+                    .write_with(&NoFaults, |tx| {
+                        tx.execute(
+                            "UPDATE moments SET before_latest_moment_id=?1 WHERE moment_id='rename-1'",
+                            [&desktop_settlement],
+                        )
+                        .map_err(StorageError::persist_public)?;
+                        Ok::<_, StorageError>(())
+                    })
+                    .unwrap();
+                "rename-2"
+            }
+        };
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE ydoc_owner_base_sources SET source_moment_id=?1,\
+                     source_blob_sha256=?2,source_byte_length=?3 WHERE object_id='one'",
+                    rusqlite::params![expected_head_moment, settled_sha, settled_text.len() as i64],
+                )
+                .map_err(StorageError::persist_public)?;
+                tx.execute(
+                    "INSERT INTO live_owner_activations(relay_database_namespace,activation_id,\
+                     workspace_id,main_version_id,object_id,lineage_claim_id,origin_adoption_id,\
+                     predecessor_activation_id,binding_json,source_moment_id,source_digest,\
+                     source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,\
+                     host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,\
+                     local_ydoc_sequence,terminal_cursor,terminal_receipt_json,max_pending_bytes,\
+                     max_pending_age_ms,boundary_json) VALUES('relay-A','resumed','workspace',\
+                     'main','one',?1,'adoption','adoption',?2,?3,?4,?5,0,0,\
+                     '{\"hostId\":\"host\",\"hostEpoch\":2,\"instanceId\":\"instance\",\
+                     \"connectionId\":\"connection-2\"}',?4,?4,0,1,1,?6,1000000,1000000,?7)",
+                    rusqlite::params![
+                        claim,
+                        serde_json::to_string(&binding).unwrap(),
+                        expected_head_moment,
+                        settled_sha,
+                        settled_text.len() as i64,
+                        serde_json::to_string(&first_terminal).unwrap(),
+                        serde_json::to_string(&prefix).unwrap(),
+                    ],
+                )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        let moments_before_replay: i64 = store
+            .read_with(|conn| conn.query_row("SELECT count(*) FROM moments", [], |r| r.get(0)))
+            .unwrap();
+        let settlements_before_replay: i64 = store
+            .read_with(|conn| {
+                conn.query_row("SELECT count(*) FROM live_device_settlements", [], |r| {
+                    r.get(0)
+                })
+            })
+            .unwrap();
+        drop(store);
+
+        let actor = supervisor.open(&db, 30).unwrap().actor;
+        let owner = actor
+            .live_application_owner("workspace".into())
+            .await
+            .unwrap();
+        let handle = owner
+            .register(
+                "relay-A".into(),
+                coordinate("connection-2"),
+                binding.clone(),
+            )
+            .await
+            .unwrap();
+
+        let replayed = handle
+            .settle(
+                Some(first_terminal.clone()),
+                16,
+                root.path().to_owned(),
+                31,
+                Arc::new(NoFaults),
+                tokio_util::sync::CancellationToken::new(),
+                reconstruction(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replayed.settlement_id, first.settlement_id);
+        assert_eq!(replayed.moment_id, first.moment_id);
+        assert_eq!(replayed.markdown_digest, first.markdown_digest);
+        assert_eq!(replayed.terminal_cursor, 1);
+        assert!(replayed.materialized);
+
+        let store = EngineStore::open_read_only(&db).unwrap();
+        let (head_moment, moment_count, settlement_count): (String, i64, i64) = store
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row(
+                        "SELECT latest_moment_id FROM snapshots WHERE path='one.md'",
+                        [],
+                        |r| r.get(0),
+                    )?,
+                    conn.query_row("SELECT count(*) FROM moments", [], |r| r.get(0))?,
+                    conn.query_row("SELECT count(*) FROM live_device_settlements", [], |r| {
+                        r.get(0)
+                    })?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(head_moment, expected_head_moment);
+        assert_eq!(moment_count, moments_before_replay);
+        assert_eq!(settlement_count, settlements_before_replay);
+        drop(store);
+
+        let mut same_text = event(
+            "edit-2-same-text",
+            2,
+            "one",
+            Ydoc::wire().encode_full_state(),
+        );
+        same_text.metadata.accepted.binding = binding.clone();
+        ack(handle
+            .apply(same_text.clone(), Arc::new(NoFaults), 100_000_000)
+            .await
+            .unwrap());
+        let second = handle
+            .settle(
+                Some(same_text.metadata.accepted.receipt.clone()),
+                16,
+                root.path().to_owned(),
+                32,
+                Arc::new(NoFaults),
+                tokio_util::sync::CancellationToken::new(),
+                reconstruction(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.previous_cursor, 1);
+        assert_eq!(second.terminal_cursor, 2);
+        assert_ne!(second.moment_id, expected_head_moment);
+        let store = EngineStore::open_read_only(&db).unwrap();
+        let second_op: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT operation FROM moments WHERE moment_id=?1",
+                    [&second.moment_id],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(second_op, "write");
+        drop(store);
+
+        let mut changed = event(
+            "edit-3-changed",
+            3,
+            "one",
+            doc.richdoc_append_paragraph("After resume"),
+        );
+        changed.metadata.accepted.binding = binding.clone();
+        ack(handle
+            .apply(changed.clone(), Arc::new(NoFaults), 100_000_000)
+            .await
+            .unwrap());
+        let third = handle
+            .settle(
+                Some(changed.metadata.accepted.receipt.clone()),
+                16,
+                root.path().to_owned(),
+                33,
+                Arc::new(NoFaults),
+                tokio_util::sync::CancellationToken::new(),
+                reconstruction(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(third.previous_cursor, 2);
+        assert_eq!(third.terminal_cursor, 3);
+        assert!(third.materialized);
+        assert!(
+            std::fs::read_to_string(root.path().join("one.md"))
+                .unwrap()
+                .contains("After resume")
+        );
+        owner.retire();
+        supervisor.close(&db).unwrap();
+    }
+}

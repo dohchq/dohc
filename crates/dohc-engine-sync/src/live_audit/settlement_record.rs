@@ -407,10 +407,10 @@ fn publication_source_before_in_tx(
         return Ok(None);
     }
     // The adopted activation whose cut this settlement follows, released or
-    // not. Activations that adopted the same cut from different sources
-    // cannot name one before-image.
+    // not. Activations at cursor 0 must share one source, or a text-preserving
+    // rename-back chain between their sources.
     let mut statement = tx.prepare(
-        concat!("SELECT DISTINCT m.moment_id,m.version_id,m.object_id,m.path,a.source_digest,a.source_byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
+        concat!("SELECT DISTINCT m.moment_id,m.version_id,m.object_id,m.path,a.source_digest,a.source_byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id,m.moment_order
          FROM live_owner_activations a
          JOIN moments m ON ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=a.workspace_id AND m.version_id=a.main_version_id AND m.object_id=a.object_id AND m.moment_id=a.source_moment_id
            AND m.path=?7 AND m.after_content_kind='text' AND m.after_blob_sha256=a.source_digest
@@ -418,7 +418,7 @@ fn publication_source_before_in_tx(
          WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 AND a.object_id=?4 AND a.lineage_claim_id=?5
            AND a.evidence_digest IS NOT NULL AND a.binding_json=?6 AND a.terminal_cursor=?8
            AND (?10 OR NOT EXISTS(SELECT 1 FROM live_device_settlements s WHERE s.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor<?9))
-         LIMIT 2"),
+         ORDER BY m.moment_order ASC"),
     ).map_err(SyncError::corrupt)?;
     let mut before = statement
         .query_map(
@@ -434,17 +434,38 @@ fn publication_source_before_in_tx(
                 record.terminal_cursor,
                 skipped
             ],
-            portable_before_from_row,
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(4)?,
+                    portable_before_from_row(row)?,
+                ))
+            },
         )
         .map_err(SyncError::corrupt)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(SyncError::corrupt)?;
     if before.len() > 1 {
-        return Err(invalid(
-            "settlement follows activations with different sources",
-        ));
+        let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)
+            .map_err(SyncError::corrupt)?;
+        for pair in before.windows(2) {
+            let (prev_moment, _, _) = &pair[0];
+            let (next_moment, next_digest, _) = &pair[1];
+            if !dohc_engine_collab::live_update_application::moment_renames_from_in(
+                tx,
+                &key,
+                &b.current_path,
+                next_digest,
+                next_moment,
+                prev_moment,
+            )? {
+                return Err(invalid(
+                    "settlement follows activations with different sources",
+                ));
+            }
+        }
     }
-    Ok(before.pop())
+    Ok(before.pop().map(|(_, _, portable)| portable))
 }
 
 /// Ordinary activation can adopt an edited replica. Event zero still names
@@ -609,12 +630,12 @@ mod tests {
         ("third-source", "Third source."),
     ];
 
-    /// The digest the settlement after `previous` names as its before-image.
-    fn before(
+    /// The before-image payload the settlement after `previous` emits.
+    fn before_payload(
         store: &mut EngineStore,
         binding: &LiveObjectBinding,
         previous: i64,
-    ) -> Result<Option<String>, SyncError> {
+    ) -> Result<Option<serde_json::Value>, SyncError> {
         let record = SettlementRecord {
             settlement_id: "settlement".into(),
             relay_database_namespace: "relay".into(),
@@ -644,16 +665,27 @@ mod tests {
             Ok::<_, SyncError>(publication_source_before_in_tx(tx, &record)?.map(|before| {
                 let mut payload = serde_json::json!({});
                 before.apply_to(&mut payload);
-                payload["payloadBeforeBlobSha256"]
-                    .as_str()
-                    .unwrap()
-                    .to_owned()
+                payload
             }))
         })?;
         match outcome {
-            TxnOutcome::Committed(digest) => Ok(digest),
+            TxnOutcome::Committed(payload) => Ok(payload),
             TxnOutcome::Crashed { .. } => panic!("no fault was injected"),
         }
+    }
+
+    /// The digest the settlement after `previous` names as its before-image.
+    fn before(
+        store: &mut EngineStore,
+        binding: &LiveObjectBinding,
+        previous: i64,
+    ) -> Result<Option<String>, SyncError> {
+        Ok(before_payload(store, binding, previous)?.map(|payload| {
+            payload["payloadBeforeBlobSha256"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }))
     }
 
     #[test]
@@ -1029,6 +1061,113 @@ mod tests {
         let (_scratch, mut store, binding) = cursor_zero_store(&[0, 1]);
         assert!(matches!(
             before(&mut store, &binding, 0),
+            Err(SyncError::InvalidInput {
+                reason: "settlement follows activations with different sources",
+            })
+        ));
+    }
+
+    #[test]
+    fn a_cursor_zero_settlement_follows_rename_back_activations() {
+        use dohc_engine_domain::RenameTextFile;
+
+        let (_scratch, mut store, binding) = cursor_zero_store(&[2]);
+        let body = SOURCES[2].1;
+        let digest = hex_sha256(body.as_bytes());
+        for (from, to, id, now) in [
+            ("note.md", "moved.md", "rename-out", 10),
+            ("moved.md", "note.md", "rename-back", 11),
+        ] {
+            VersionedTextStore::new(&mut store)
+                .rename_text_file(
+                    &RenameTextFile {
+                        workspace_id: "ws".into(),
+                        version_id: "main".into(),
+                        from_path: from.into(),
+                        to_path: to.into(),
+                        moment_id: id.into(),
+                        request_id: None,
+                        metadata_origin: "user".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: now,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        let binding_json = serde_json::to_string(&binding).unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE live_owner_activations SET released_at_ms=20,released_restore_generation=0,\
+                     released_accepted_cursor=terminal_cursor,carried_manifest_json='[]',\
+                     released_boundary_json=json_object('terminalReceipt',json(terminal_receipt_json),\
+                     'eventCount',0,'historyEvidenceDigest',evidence_digest) \
+                     WHERE activation_id='activation-0'",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "INSERT INTO live_owner_activations (relay_database_namespace,activation_id,\
+                     workspace_id,main_version_id,object_id,lineage_claim_id,origin_adoption_id,\
+                     predecessor_activation_id,binding_json,source_moment_id,source_digest,\
+                     source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,\
+                     host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,\
+                     local_ydoc_sequence,terminal_cursor,terminal_receipt_json,max_pending_bytes,\
+                     max_pending_age_ms) VALUES ('relay','activation-1','ws','main','object',?1,\
+                     'activation-0','activation-0',?2,'rename-back',?3,?4,1,1,'{}',\
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',\
+                     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',0,1,0,\
+                     'null',1,1)",
+                    params![
+                        binding.lineage_claim_id,
+                        binding_json,
+                        digest,
+                        body.len() as i64
+                    ],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        let emitted = before_payload(&mut store, &binding, 0).unwrap().unwrap();
+        assert_eq!(emitted["beforeLatestMomentId"], "rename-back");
+        assert_eq!(emitted["payloadBeforeBlobSha256"], digest);
+
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    object_id: "object".into(),
+                    path: "note.md".into(),
+                    text: body.into(),
+                    moment_id: "same-digest-write".into(),
+                    request_id: None,
+                    metadata_origin: "user".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 12,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE live_owner_activations SET source_moment_id='same-digest-write' \
+                     WHERE activation_id='activation-1'",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        assert!(matches!(
+            before_payload(&mut store, &binding, 0),
             Err(SyncError::InvalidInput {
                 reason: "settlement follows activations with different sources",
             })

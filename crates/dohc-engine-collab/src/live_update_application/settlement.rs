@@ -54,6 +54,137 @@ pub struct LiveSettlementAudit {
     empty: bool,
 }
 
+fn is_ydoc_settlement_moment_id(moment_id: &str) -> bool {
+    moment_id
+        .strip_prefix("moment-ydoc-apply-")
+        .or_else(|| moment_id.strip_prefix("moment-ydoc-"))
+        .is_some_and(|digest| {
+            digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+}
+
+pub fn moment_renames_from_in(
+    conn: &Connection,
+    key: &DocKey,
+    path: &str,
+    digest: &str,
+    head_moment: &str,
+    target_moment: &str,
+) -> Result<bool, StorageError> {
+    if head_moment == target_moment {
+        return Ok(true);
+    }
+    let mut step = conn
+        .prepare(concat!(
+            "SELECT moment_order,before_latest_moment_id,COALESCE(before_path,payload_before_path) \
+             FROM moments WHERE workspace_id=?1 AND moment_id=?2 AND version_id=?3 AND object_id=?4 \
+             AND COALESCE(sync_record_only,0)=0 AND ",
+            dohc_engine_domain::exclude_capture_recovery_sql!(),
+            " AND operation='rename' AND path=?5 AND COALESCE(payload_after_path,path)=?5 \
+             AND before_present=2 AND before_content_kind='text' AND after_content_kind='text' \
+             AND before_blob_sha256=?6 AND after_blob_sha256=?6 \
+             AND before_latest_moment_id IS NOT NULL \
+             AND COALESCE(before_path,payload_before_path) IS NOT NULL"
+        ))
+        .map_err(StorageError::persist_public)?;
+    let mut current_moment = head_moment.to_owned();
+    let mut current_path = path.to_owned();
+    let mut prev_order: Option<i64> = None;
+    loop {
+        let next: Option<(i64, String, String)> = step
+            .query_row(
+                params![
+                    key.workspace_id,
+                    current_moment,
+                    key.version_id,
+                    key.object_id,
+                    current_path,
+                    digest,
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(StorageError::persist_public)?;
+        let Some((order, before_moment, before_path)) = next else {
+            return Ok(false);
+        };
+        if prev_order.is_some_and(|prev| order >= prev) {
+            return Ok(false);
+        }
+        if before_moment == target_moment {
+            if before_path != path {
+                return Ok(false);
+            }
+            let target_matches: bool = conn
+                .query_row(
+                    concat!(
+                        "SELECT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND moment_id=?2 \
+                         AND version_id=?3 AND object_id=?4 AND COALESCE(sync_record_only,0)=0 AND ",
+                        dohc_engine_domain::exclude_capture_recovery_sql!(),
+                        " AND operation<>'delete' AND path=?5 AND COALESCE(payload_after_path,path)=?5 \
+                         AND after_content_kind='text' AND after_blob_sha256=?6 AND moment_order<?7)"
+                    ),
+                    params![
+                        key.workspace_id,
+                        target_moment,
+                        key.version_id,
+                        key.object_id,
+                        path,
+                        digest,
+                        order,
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::persist_public)?;
+            return Ok(target_matches);
+        }
+        if before_path == path
+            && is_ydoc_settlement_moment_id(&before_moment)
+            && is_ydoc_settlement_moment_id(target_moment)
+        {
+            let prior: Option<(String, String, String, String, String, Option<String>)> = conn
+                .query_row(
+                    concat!(
+                        "SELECT moment_id,operation,path,COALESCE(payload_after_path,path),\
+                         after_content_kind,after_blob_sha256 FROM moments \
+                         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+                           AND COALESCE(sync_record_only,0)=0 AND ",
+                        dohc_engine_domain::exclude_capture_recovery_sql!(),
+                        " AND moment_order<?4 ORDER BY moment_order DESC LIMIT 1"
+                    ),
+                    params![key.workspace_id, key.version_id, key.object_id, order],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(StorageError::persist_public)?;
+            if prior.is_some_and(
+                |(prior_id, op, prior_path, prior_after_path, kind, prior_digest)| {
+                    prior_id == target_moment
+                        && op != "delete"
+                        && prior_path == path
+                        && prior_after_path == path
+                        && kind == "text"
+                        && prior_digest.as_deref() == Some(digest)
+                },
+            ) {
+                return Ok(true);
+            }
+        }
+        prev_order = Some(order);
+        current_moment = before_moment;
+        current_path = before_path;
+    }
+}
+
 fn audit_error(error: ApplicationError) -> ApplicationError {
     match error {
         ApplicationError::Storage(_)
@@ -124,15 +255,55 @@ impl LiveSettlementAudit {
         {
             return Err(StorageError::StateCorrupt { source: None }.into());
         }
-        let saved:Option<(String,String,i64,String)>=conn.query_row("SELECT moment_id,markdown_digest,local_ydoc_sequence,binding_json FROM (SELECT moment_id,markdown_digest,local_ydoc_sequence,binding_json,terminal_cursor FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 UNION ALL SELECT moment_id,markdown_digest,local_ydoc_sequence,binding_json,-1 FROM live_empty_settlements WHERE ?6 AND relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5) ORDER BY terminal_cursor DESC LIMIT 1",
-            params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,empty],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(StorageError::persist_public)?;
-        let Some((saved_moment, saved_markdown, sequence, binding)) = saved else {
+        type SavedProjection = (String, String, i64, String, i64, String, Option<String>);
+        let saved: Option<SavedProjection> = conn
+            .query_row(
+                "SELECT moment_id,markdown_digest,local_ydoc_sequence,binding_json,terminal_cursor,settlement_kind,restore_operation_id FROM (SELECT moment_id,markdown_digest,local_ydoc_sequence,binding_json,terminal_cursor,settlement_kind,restore_operation_id FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 UNION ALL SELECT moment_id,markdown_digest,local_ydoc_sequence,binding_json,-1,'ordinary',NULL FROM live_empty_settlements WHERE ?6 AND relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5) ORDER BY terminal_cursor DESC LIMIT 1",
+                params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,empty],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?)),
+            )
+            .optional()
+            .map_err(StorageError::persist_public)?;
+        let Some((
+            saved_moment,
+            saved_markdown,
+            sequence,
+            binding,
+            saved_terminal,
+            saved_kind,
+            saved_restore_op,
+        )) = saved
+        else {
             return Ok(false);
         };
         let binding: LiveObjectBinding =
             serde_json::from_str(&binding).map_err(StorageError::persist_public)?;
         validate_historical_binding(&binding, b).map_err(audit_error)?;
-        Ok(saved_moment == moment && saved_markdown == markdown && sequence <= self.sequence)
+        if saved_markdown != markdown || sequence > self.sequence {
+            return Ok(false);
+        }
+        if saved_moment == moment {
+            return Ok(true);
+        }
+        if !empty
+            && saved_terminal == self.terminal_cursor
+            && saved_kind == "ordinary"
+            && saved_restore_op.is_none()
+            && binding == *b
+        {
+            let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)
+                .map_err(|_| StorageError::StateCorrupt { source: None })?;
+            return moment_renames_from_in(
+                conn,
+                &key,
+                &b.current_path,
+                markdown,
+                moment,
+                &saved_moment,
+            )
+            .map_err(ApplicationError::Storage);
+        }
+        Ok(false)
     }
     /// An unchanged projection may name the current head moment only when that
     /// moment is already this document's latest audited settlement. Any other
@@ -174,15 +345,51 @@ impl LiveSettlementAudit {
     pub fn expected_head(&self) -> &str {
         &self.bootstrap_digest
     }
-    pub fn stored_id(
+    pub fn stored_settlement(
         &self,
         store: &EngineStore,
         moment: &str,
         markdown: &str,
-    ) -> Result<String, StorageError> {
+    ) -> Result<(String, String), StorageError> {
         let b = &self.binding;
-        store.read_with(|conn| conn.query_row("SELECT settlement_id FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND terminal_cursor=?6 AND moment_id=?7 AND markdown_digest=?8",
-            params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.terminal_cursor,moment,markdown],|row| row.get(0))).map_err(StorageError::persist_public)
+        let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)
+            .map_err(|_| StorageError::StateCorrupt { source: None })?;
+        let binding_json = serde_json::to_string(b).map_err(StorageError::persist_public)?;
+        store.read_with(|conn| {
+            let (id, saved_moment): (String, String) = conn
+                .query_row(
+                    "SELECT settlement_id,moment_id FROM live_device_settlements \
+                     WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 \
+                       AND object_id=?4 AND lineage_claim_id=?5 AND terminal_cursor=?6 \
+                       AND markdown_digest=?7 AND restore_operation_id IS NULL \
+                       AND settlement_kind='ordinary' AND binding_json=?8",
+                    params![
+                        self.namespace,
+                        b.workspace_id,
+                        b.main_version_id,
+                        b.object_id,
+                        b.lineage_claim_id,
+                        self.terminal_cursor,
+                        markdown,
+                        binding_json,
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(StorageError::persist_public)?;
+            if saved_moment != moment
+                && !moment_renames_from_in(
+                    conn,
+                    &key,
+                    &b.current_path,
+                    markdown,
+                    moment,
+                    &saved_moment,
+                )?
+            {
+                return Err(StorageError::StateCorrupt { source: None });
+            }
+            Ok((id, saved_moment))
+        })
     }
     /// An empty settlement publishes nothing, but its lineage keeps the
     /// projection it committed, so a conflicted file write can be restored.
@@ -263,20 +470,22 @@ impl LiveSettlementAudit {
         if !matches_projection {
             return Err(corrupt());
         }
-        let identities = serde_json::to_vec(&(
-            &self.namespace,
-            b,
-            self.previous_cursor,
-            self.terminal_cursor,
-            self.previous_sequence,
-            self.sequence,
-            &self.interval_digest,
-            moment,
-            markdown,
-            vector,
-        ))
-        .map_err(StorageError::persist_public)?;
-        let id = format!("live-settlement-{}", hex_sha256(&identities));
+        let settlement_id_for = |recorded_moment: &str| -> Result<String, ApplicationError> {
+            let identities = serde_json::to_vec(&(
+                &self.namespace,
+                b,
+                self.previous_cursor,
+                self.terminal_cursor,
+                self.previous_sequence,
+                self.sequence,
+                &self.interval_digest,
+                recorded_moment,
+                markdown,
+                vector,
+            ))
+            .map_err(StorageError::persist_public)?;
+            Ok(format!("live-settlement-{}", hex_sha256(&identities)))
+        };
         let existing: Option<(String,String,String,String,i64,i64)> = tx.query_row(
             "SELECT settlement_id,moment_id,markdown_digest,interval_digest,application_count,local_ydoc_sequence FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND terminal_cursor=?6 AND restore_operation_id IS NULL AND settlement_kind='ordinary' AND binding_json=?7 AND source_state_vector_digest=?8",
             params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.terminal_cursor,serde_json::to_string(b).map_err(StorageError::persist_public)?,vector],
@@ -284,8 +493,22 @@ impl LiveSettlementAudit {
         if let Some((saved, saved_moment, saved_markdown, saved_interval, count, sequence)) =
             existing
         {
-            if saved != id
-                || saved_moment != moment
+            let same_moment = saved_moment == moment
+                || (saved_markdown == markdown && {
+                    let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)
+                        .map_err(|_| corrupt())?;
+                    moment_renames_from_in(
+                        tx,
+                        &key,
+                        &b.current_path,
+                        markdown,
+                        moment,
+                        &saved_moment,
+                    )?
+                });
+            let expected_id = settlement_id_for(&saved_moment)?;
+            if !same_moment
+                || saved != expected_id
                 || saved_markdown != markdown
                 || saved_interval != self.interval_digest
                 || count != self.application_count as i64
@@ -293,8 +516,9 @@ impl LiveSettlementAudit {
             {
                 return Err(corrupt());
             }
-            return Ok(id);
+            return Ok(saved);
         }
+        let id = settlement_id_for(moment)?;
         // Stored settlements may start where they end. A new one must not.
         if self.previous_cursor >= self.terminal_cursor {
             return Err(invalid("a new settlement must cover an accepted edit"));
@@ -1254,5 +1478,173 @@ mod publication_state_tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn moment_renames_from_proves_text_preserving_round_trips_and_refuses_breaks() {
+        use dohc_engine_domain::{RenameTextFile, VersionedTextStore, WriteText};
+
+        let dir = ScratchDir::new_named("moment-renames-from").unwrap();
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let m1 = format!("moment-ydoc-{}", "a".repeat(64));
+        let seed = |name: &str| {
+            let mut store = dohc_engine_testkit::open_empty_store(&dir.join(name), 0);
+            VersionedTextStore::new(&mut store)
+                .ensure_main_version("workspace", "main", 0, &NoFaults)
+                .unwrap();
+            let written = VersionedTextStore::new(&mut store)
+                .write_text(
+                    &WriteText {
+                        workspace_id: "workspace".into(),
+                        version_id: "main".into(),
+                        object_id: "object".into(),
+                        path: "a.md".into(),
+                        text: "hello\n".into(),
+                        moment_id: m1.clone(),
+                        request_id: None,
+                        metadata_origin: "ydoc".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 1,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+            for (from, to, id, now) in [
+                ("a.md", "b.md", "m2", 2),
+                ("b.md", "c.md", "m3", 3),
+                ("c.md", "a.md", "m4", 4),
+            ] {
+                VersionedTextStore::new(&mut store)
+                    .rename_text_file(
+                        &RenameTextFile {
+                            workspace_id: "workspace".into(),
+                            version_id: "main".into(),
+                            from_path: from.into(),
+                            to_path: to.into(),
+                            moment_id: id.into(),
+                            request_id: None,
+                            metadata_origin: "user".into(),
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            author_json: None,
+                            now_ms: now,
+                        },
+                        &NoFaults,
+                    )
+                    .unwrap();
+            }
+            (store, written.snapshot.blob_sha256)
+        };
+        let (mut store, digest) = seed("engine.db");
+        let check = |store: &EngineStore, head: &str, target: &str| {
+            store
+                .read_with(|conn| moment_renames_from_in(conn, &key, "a.md", &digest, head, target))
+                .unwrap()
+        };
+        assert!(check(&store, &m1, &m1));
+        assert!(check(&store, "m4", &m1));
+        assert!(!check(&store, "m3", &m1));
+        assert!(!store
+            .read_with(|conn| moment_renames_from_in(conn, &key, "b.md", &digest, "m4", &m1))
+            .unwrap());
+        assert!(!store
+            .read_with(|conn| {
+                moment_renames_from_in(conn, &key, "a.md", &hex_sha256(b"other"), "m4", &m1)
+            })
+            .unwrap());
+
+        for (case, sql) in [
+            (
+                "write in chain",
+                "UPDATE moments SET operation='write' WHERE moment_id='m3'",
+            ),
+            (
+                "sync_record_only",
+                "UPDATE moments SET sync_record_only=1 WHERE moment_id='m3'",
+            ),
+            (
+                "capture-recovery",
+                "UPDATE moments SET metadata_origin='capture-recovery' WHERE moment_id='m3'",
+            ),
+            (
+                "payload_after_path mismatch",
+                "UPDATE moments SET payload_after_path='elsewhere.md' WHERE moment_id='m4'",
+            ),
+            (
+                "deleted predecessor",
+                "DELETE FROM moments WHERE moment_id='m2'",
+            ),
+            (
+                "cycle",
+                "UPDATE moments SET before_latest_moment_id='m4' WHERE moment_id='m2'",
+            ),
+            (
+                "wrong target path",
+                &format!("UPDATE moments SET path='other.md' WHERE moment_id='{m1}'"),
+            ),
+        ] {
+            let (mut copy, _) = seed(&format!("{}.db", case.replace(' ', "-")));
+            copy.write_with(&NoFaults, |tx| {
+                tx.execute(sql, []).map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+            assert!(!check(&copy, "m4", &m1), "{case}");
+        }
+
+        let desktop_settlement = format!("moment-ydoc-{}", "b".repeat(64));
+        let (mut pre_upgrade, _) = seed("pre-upgrade.db");
+        pre_upgrade
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE moments SET before_latest_moment_id=?1 WHERE moment_id='m2'",
+                    [&desktop_settlement],
+                )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        assert!(
+            check(&pre_upgrade, "m4", &m1),
+            "pre-upgrade persisted equivalent settlement link"
+        );
+        pre_upgrade
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE moments SET moment_order=moment_order+10 WHERE moment_id IN ('m2','m3','m4')",
+                    [],
+                )
+                .map_err(StorageError::persist_public)?;
+                tx.execute(
+                    "INSERT INTO moments(workspace_id,moment_order,moment_id,version_id,object_id,\
+                     path,recorded_at_ms,operation,after_blob_sha256,before_present,\
+                     before_blob_sha256,metadata_origin,after_content_kind,before_content_kind,\
+                     payload_after_path) VALUES('workspace',5,'intervening','main','object',\
+                     'a.md',2,'write',?1,2,?1,'user','text','text','a.md')",
+                    [&digest],
+                )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        assert!(
+            !check(&pre_upgrade, "m4", &m1),
+            "intervening write breaks pre-upgrade equivalent settlement proof"
+        );
+
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE moments SET before_latest_moment_id=?1, before_path='a.md', \
+                     payload_before_path='c.md' WHERE moment_id='m4'",
+                    [&m1],
+                )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        assert!(check(&store, "m4", &m1), "content fast-forward rename");
     }
 }
