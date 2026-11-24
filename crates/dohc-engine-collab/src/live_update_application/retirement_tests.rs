@@ -166,7 +166,7 @@ fn imported_source(f: &Fixture, full: &[u8]) -> ImportedOwnerSource {
         committed_cursor: 9,
         base_origin_id: "remote".into(),
         base_origin_seq: 7,
-        base_relay_seq: 9,
+        base_relay_seq: Some(9),
         source_moment_id: f.cut.source_moment_id.clone(),
         source_digest: f.cut.source_digest.clone(),
         source_byte_length: f.cut.source_byte_length,
