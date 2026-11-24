@@ -45,6 +45,8 @@ import {
   stored,
   noteOfLines,
   PADDING,
+  FULL,
+  sampleOf,
   ORACLE_NOTES,
   type Agreement,
   AGREEMENT_IN_THE_DIFFERENTIAL,
@@ -145,7 +147,7 @@ const withNoReason = (counts: Differential) =>
     (edit) => !WHY_THEY_DIFFER.some((each) => each.edits.includes(edit)),
   );
 
-const DIFFERENTIAL_COUNTS: Differential = {
+const EVERY_EDIT: Differential = {
   compared: 7964,
   onlyOne: 1986,
   neither: 398,
@@ -193,7 +195,7 @@ const DIFFERENTIAL_COUNTS: Differential = {
     "a block put right under another": 2,
   },
 };
-const DIFFERENTIAL_COUNTS_AT_RANDOM: Differential = {
+const EVERY_EDIT_AT_RANDOM: Differential = {
   compared: 558,
   onlyOne: 227,
   neither: 48,
@@ -231,6 +233,63 @@ const DIFFERENTIAL_COUNTS_AT_RANDOM: Differential = {
     "a divider over a selection, as a delete and a block put in": 2,
   },
 };
+
+const EVERY_EIGHTH_EDIT: Differential = {
+  compared: 997,
+  onlyOne: 235,
+  neither: 48,
+  givenDifferently: {
+    "a divider over a selection across blocks": 1,
+    "Enter over a selection across blocks, from the note's start": 3,
+  },
+  readDifferently: {
+    "Enter over a selection across blocks, from the note's start": 5,
+    "a change of kind to codeBlock": 4,
+  },
+  bothDifferently: {
+    "a delete across blocks": 1,
+    "a letter typed over a selection across blocks": 1,
+    "Enter over a selection across blocks": 1,
+    "Enter over a selection across blocks, from the note's start": 2,
+  },
+  keptDifferently: {
+    "Enter over a selection across blocks, from the note's start": 9,
+    "two paragraphs pasted over a selection across blocks, the first whole": 5,
+    "a divider over a selection across blocks": 3,
+  },
+  recordedDifferently: {
+    "Enter over a selection across blocks, from the note's start": 6,
+    "two paragraphs pasted over a selection across blocks, the first whole": 5,
+    "a delete across blocks": 1,
+    "a letter typed over a selection across blocks": 1,
+    "Enter over a selection across blocks": 1,
+    "a change of kind to codeBlock": 4,
+    "a divider over a selection across blocks": 1,
+  },
+};
+const EVERY_EIGHTH_EDIT_AT_RANDOM: Differential = {
+  compared: 57,
+  onlyOne: 27,
+  neither: 3,
+  givenDifferently: {},
+  readDifferently: {
+    "a divider": 1,
+    "two paragraphs pasted over a selection, the first whole": 1,
+    "a change of kind to codeBlock": 1,
+  },
+  bothDifferently: {},
+  keptDifferently: {
+    "a divider over a selection": 1,
+    "a divider over a selection, as a delete and a block put in": 1,
+  },
+  recordedDifferently: {
+    "a divider over a selection": 1,
+    "a divider over a selection, as a delete and a block put in": 1,
+    "a change of kind to codeBlock": 1,
+  },
+};
+const DIFFERENTIAL_COUNTS = FULL ? EVERY_EDIT : EVERY_EIGHTH_EDIT;
+const DIFFERENTIAL_COUNTS_AT_RANDOM = FULL ? EVERY_EDIT_AT_RANDOM : EVERY_EIGHTH_EDIT_AT_RANDOM;
 
 function placesOf(
   sequence: Y.Text,
@@ -276,7 +335,8 @@ function boundariesRecorded(
 type Make = (plan: (doc: Y.Doc) => BodyChange | null) => boolean;
 type Said = (make: Make) => unknown;
 
-function compareWithReference(lines: readonly StoredLine[], counted: Tally): void {
+function compareWithReference(lines: readonly StoredLine[], counted: Tally, note: number): void {
+  const isTried = sampleOf(note);
   const baseline = noteOfLines(lines);
   const longer = amongMoreLines(lines);
   const start = declared(92);
@@ -335,6 +395,7 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
     byEditor: (a: Person) => void,
     startsInLineAbove = -1,
   ) => {
+    if (!isTried(edit)) return;
     const taken = [byReference]
       .flat()
       .map(asSaid)
@@ -854,8 +915,12 @@ function noteAtRandom(next: () => number): StoredLine[] {
 
 describe("the editor and the reference writer, for the same edit of the same note", () => {
   const inOracleNotes = tally();
-  it.each(ORACLE_NOTES)("give boundaries to the same lines in %s", (_name, lines) => {
-    compareWithReference(lines, inOracleNotes);
+  const edits = FULL
+    ? "every edit"
+    : "every eighth edit of each kind (BODY_SEQUENCE_EDITOR_FULL=1 compares every edit)";
+  it.each(ORACLE_NOTES)(`give boundaries to the same lines for ${edits} in %s`, (_name, lines) => {
+    const note = ORACLE_NOTES.findIndex(([, each]) => each === lines);
+    compareWithReference(lines, inOracleNotes, note);
   });
 
   it("compares as many edits as counted", () => {
@@ -869,14 +934,12 @@ describe("the editor and the reference writer, for the same edit of the same not
   it("give boundaries to the same lines in notes made at random", () => {
     const atRandom = tally();
     for (let seed = 1; seed <= Math.ceil(SEEDS / 4); seed++)
-      compareWithReference(noteAtRandom(random(seed)), atRandom);
+      compareWithReference(noteAtRandom(random(seed)), atRandom, seed);
     console.log(sayTally("in notes made at random", atRandom));
     const { notes: _notes, examples: _examples, ...counts } = atRandom;
     expect(withNoReason(counts)).toEqual([]);
     expect(
-      Object.keys(counts.givenDifferently).filter(
-        (edit) => !(edit in DIFFERENTIAL_COUNTS.givenDifferently),
-      ),
+      Object.keys(counts.givenDifferently).filter((edit) => !(edit in EVERY_EDIT.givenDifferently)),
     ).toEqual([]);
     if (SEEDS === 40) expect(counts).toEqual(DIFFERENTIAL_COUNTS_AT_RANDOM);
   });
@@ -951,7 +1014,7 @@ describe("the editor and the reference writer, for the same edit of the same not
       `a trial on the blocks around the edit against one on the whole note, for each edit above, in the note with three paragraphs more on each side: compared ${String(agreement.compared)}, of which a trial ran ${String(agreement.trials)}: settled on the blocks around the edit ${String(agreement.inTheWindow)}, went on to the whole note ${String(agreement.onTheWholeNote)}; both gave the same lines every time`,
     );
     if (inOracleNotes.notes === ORACLE_NOTES.length && SEEDS === 40)
-      expect(agreement).toEqual(AGREEMENT_IN_THE_DIFFERENTIAL);
+      expect(agreement).toEqual(AGREEMENT_IN_THE_DIFFERENTIAL[FULL ? "full" : "sample"]);
   });
 
   it.each([

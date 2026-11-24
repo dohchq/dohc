@@ -2089,11 +2089,13 @@ describe("the note reads as the document ProseMirror computed", () => {
         ORACLE_PARTS[at + 1]?.from ?? ORACLE_NOTES.length,
       ]),
     );
-    expect(ORACLE_PARTS.reduce((sum, part) => add(sum, part.counts), {})).toEqual(ORACLE_COUNTS);
+    expect(ORACLE_PARTS.reduce((sum, part) => add(sum, part.full.counts), {})).toEqual(
+      ORACLE_COUNTS,
+    );
     expect(
       ORACLE_PARTS.reduce(
-        (sum, part) => add(sum, part.agreed),
-        add({}, AGREEMENT_IN_THE_DIFFERENTIAL),
+        (sum, part) => add(sum, part.full.agreed),
+        add({}, AGREEMENT_IN_THE_DIFFERENTIAL.full),
       ),
     ).toEqual(AGREEMENT_COUNTS);
   });

@@ -241,168 +241,171 @@ export const AGREEMENT_COUNTS: Agreement = {
   inTheWindow: 22464,
   onTheWholeNote: 0,
 };
-export const AGREEMENT_IN_THE_DIFFERENTIAL: Agreement = {
-  compared: 8784,
-  trials: 4807,
-  inTheWindow: 4807,
-  onTheWholeNote: 0,
+export const AGREEMENT_IN_THE_DIFFERENTIAL: { sample: Agreement; full: Agreement } = {
+  sample: { compared: 1089, trials: 585, inTheWindow: 585, onTheWholeNote: 0 },
+  full: { compared: 8784, trials: 4807, inTheWindow: 4807, onTheWholeNote: 0 },
 };
 
 type OracleCounts = typeof ORACLE_COUNTS;
-type OracleShare = Omit<OracleCounts, "excepted" | "unsettled" | "drags"> &
+type OracleShares = Omit<OracleCounts, "excepted" | "unsettled" | "drags"> &
   Record<"excepted" | "unsettled" | "drags", Record<string, number>>;
+type OracleShare = { counts: OracleShares; agreed: Agreement };
 /**
- * The every-step oracle runs in four files so that none runs long. Each file tries the notes
- * from `from` up to `to` and pins its share of the counts; the shares add up to
- * `ORACLE_COUNTS`, and `agreed` with the differential's share to `AGREEMENT_COUNTS`.
+ * The every-step oracle runs in two files so that neither runs long. Each file tries the notes
+ * from `from` up to `to` and pins its share of the counts: `sample` for the steps tried by
+ * default, `full` for every step. The full shares add up to `ORACLE_COUNTS`, and their
+ * `agreed` with the differential's full share to `AGREEMENT_COUNTS`.
  */
 export const ORACLE_PARTS: readonly {
   from: number;
   to: number;
-  counts: OracleShare;
-  agreed: Agreement;
+  sample: OracleShare;
+  full: OracleShare;
 }[] = [
   {
     from: 0,
-    to: 21,
-    counts: {
-      outcomes: {
-        applied: 8375,
-        "filtered by keepsContainers": 2126,
-        "refused, as no trial settles": 85,
-        "not offered": 293,
-        "range error": 0,
-      },
-      undone: 8215,
-      given: 4555,
-      typedInBySomeoneElse: 5780,
-      retypedBySomeoneElse: 4712,
-      excepted: { "a mark on an inline item": 175 },
-      unsettled: {
-        "Enter over N-N": 34,
-        "a delete and a split over N-N": 34,
-        "a text drag of N-N to N": 17,
-      },
-      drags: {
-        "text, applied": 1413,
-        "block, applied": 181,
-        "text, refused, as no trial settles": 17,
-        "text, filtered by keepsContainers": 530,
-      },
-    },
-    agreed: {
-      compared: 8460,
-      trials: 5090,
-      inTheWindow: 5090,
-      onTheWholeNote: 0,
-    },
-  },
-  {
-    from: 21,
     to: 40,
-    counts: {
-      outcomes: {
-        applied: 6723,
-        "filtered by keepsContainers": 2854,
-        "refused, as no trial settles": 147,
-        "not offered": 300,
-        "range error": 0,
+    sample: {
+      counts: {
+        outcomes: {
+          applied: 1884,
+          "filtered by keepsContainers": 603,
+          "refused, as no trial settles": 21,
+          "not offered": 80,
+          "range error": 0,
+        },
+        undone: 1847,
+        given: 1087,
+        typedInBySomeoneElse: 1818,
+        retypedBySomeoneElse: 1380,
+        excepted: {
+          "a mark on an inline item": 31,
+          "formatting stored under a code block's letters": 7,
+        },
+        unsettled: {
+          "a text drag of N-N to N": 7,
+          "Enter over N-N": 7,
+          "a delete and a split over N-N": 7,
+        },
+        drags: {
+          "text, applied": 285,
+          "block, applied": 45,
+          "text, refused, as no trial settles": 7,
+          "text, filtered by keepsContainers": 158,
+        },
       },
-      undone: 6584,
-      given: 4673,
-      typedInBySomeoneElse: 8767,
-      retypedBySomeoneElse: 6416,
-      excepted: {
-        "a mark on an inline item": 117,
-        "formatting stored under a code block's letters": 33,
-      },
-      unsettled: {
-        "Enter over N-N": 57,
-        "a delete and a split over N-N": 57,
-        "a text drag of N-N to N": 33,
-      },
-      drags: {
-        "text, applied": 871,
-        "text, filtered by keepsContainers": 703,
-        "block, applied": 186,
-        "text, refused, as no trial settles": 33,
+      agreed: {
+        compared: 1905,
+        trials: 1135,
+        inTheWindow: 1135,
+        onTheWholeNote: 0,
       },
     },
-    agreed: {
-      compared: 6870,
-      trials: 4036,
-      inTheWindow: 4036,
-      onTheWholeNote: 0,
+    full: {
+      counts: {
+        outcomes: {
+          applied: 15098,
+          "filtered by keepsContainers": 4980,
+          "refused, as no trial settles": 232,
+          "not offered": 593,
+          "range error": 0,
+        },
+        undone: 14799,
+        given: 9228,
+        typedInBySomeoneElse: 14547,
+        retypedBySomeoneElse: 11128,
+        excepted: {
+          "a mark on an inline item": 292,
+          "formatting stored under a code block's letters": 33,
+        },
+        unsettled: {
+          "Enter over N-N": 91,
+          "a delete and a split over N-N": 91,
+          "a text drag of N-N to N": 50,
+        },
+        drags: {
+          "text, applied": 2284,
+          "block, applied": 367,
+          "text, refused, as no trial settles": 50,
+          "text, filtered by keepsContainers": 1233,
+        },
+      },
+      agreed: {
+        compared: 15330,
+        trials: 9126,
+        inTheWindow: 9126,
+        onTheWholeNote: 0,
+      },
     },
   },
   {
     from: 40,
-    to: 55,
-    counts: {
-      outcomes: {
-        applied: 6669,
-        "filtered by keepsContainers": 2106,
-        "refused, as no trial settles": 188,
-        "not offered": 233,
-        "range error": 0,
-      },
-      undone: 6552,
-      given: 4927,
-      typedInBySomeoneElse: 8639,
-      retypedBySomeoneElse: 6334,
-      excepted: { "a mark on an inline item": 132 },
-      unsettled: {
-        "Enter over N-N": 71,
-        "a delete and a split over N-N": 71,
-        "a text drag of N-N to N": 46,
-      },
-      drags: {
-        "text, applied": 1040,
-        "text, refused, as no trial settles": 46,
-        "block, applied": 223,
-        "text, filtered by keepsContainers": 544,
-      },
-    },
-    agreed: {
-      compared: 6857,
-      trials: 4487,
-      inTheWindow: 4487,
-      onTheWholeNote: 0,
-    },
-  },
-  {
-    from: 55,
     to: 65,
-    counts: {
-      outcomes: {
-        applied: 7630,
-        "filtered by keepsContainers": 2246,
-        "refused, as no trial settles": 198,
-        "not offered": 243,
-        "range error": 0,
+    sample: {
+      counts: {
+        outcomes: {
+          applied: 1841,
+          "filtered by keepsContainers": 528,
+          "refused, as no trial settles": 42,
+          "not offered": 66,
+          "range error": 0,
+        },
+        undone: 1820,
+        given: 1156,
+        typedInBySomeoneElse: 2112,
+        retypedBySomeoneElse: 1564,
+        excepted: { "a mark on an inline item": 30 },
+        unsettled: {
+          "Enter over N-N": 16,
+          "a delete and a split over N-N": 16,
+          "a text drag of N-N to N": 10,
+        },
+        drags: {
+          "text, applied": 346,
+          "block, applied": 46,
+          "text, filtered by keepsContainers": 141,
+          "text, refused, as no trial settles": 10,
+        },
       },
-      undone: 7527,
-      given: 4101,
-      typedInBySomeoneElse: 7548,
-      retypedBySomeoneElse: 5500,
-      excepted: { "a mark on an inline item": 136 },
-      unsettled: {
-        "Enter over N-N": 75,
-        "a delete and a split over N-N": 75,
-        "a text drag of N-N to N": 48,
-      },
-      drags: {
-        "text, applied": 1694,
-        "text, filtered by keepsContainers": 597,
-        "text, refused, as no trial settles": 48,
-        "block, applied": 134,
+      agreed: {
+        compared: 1883,
+        trials: 1051,
+        inTheWindow: 1051,
+        onTheWholeNote: 0,
       },
     },
-    agreed: {
-      compared: 7828,
-      trials: 4044,
-      inTheWindow: 4044,
-      onTheWholeNote: 0,
+    full: {
+      counts: {
+        outcomes: {
+          applied: 14299,
+          "filtered by keepsContainers": 4352,
+          "refused, as no trial settles": 386,
+          "not offered": 476,
+          "range error": 0,
+        },
+        undone: 14079,
+        given: 9028,
+        typedInBySomeoneElse: 16187,
+        retypedBySomeoneElse: 11834,
+        excepted: { "a mark on an inline item": 268 },
+        unsettled: {
+          "Enter over N-N": 146,
+          "a delete and a split over N-N": 146,
+          "a text drag of N-N to N": 94,
+        },
+        drags: {
+          "text, applied": 2734,
+          "text, refused, as no trial settles": 94,
+          "block, applied": 357,
+          "text, filtered by keepsContainers": 1141,
+        },
+      },
+      agreed: {
+        compared: 14685,
+        trials: 8531,
+        inTheWindow: 8531,
+        onTheWholeNote: 0,
+      },
     },
   },
 ];
@@ -564,6 +567,23 @@ export function expectNoLineLeftWanting(
     );
 }
 
+/** Whether `BODY_SEQUENCE_EDITOR_FULL=1` asks for every step and edit, not the sample. */
+export const FULL = process.env.BODY_SEQUENCE_EDITOR_FULL === "1";
+
+/**
+ * Says for each step or edit in turn whether to try it, by its kind: every one in a full run,
+ * else every eighth of its kind, starting at a place that differs from note to note. So every
+ * kind is tried, in the same places each time.
+ */
+export function sampleOf(note: number): (kind: string) => boolean {
+  const seen = new Map<string, number>();
+  return (kind) => {
+    const nth = seen.get(kind) ?? 0;
+    seen.set(kind, nth + 1);
+    return FULL || (nth + note) % 8 === 0;
+  };
+}
+
 type Outcome =
   | "applied"
   | "filtered by keepsContainers"
@@ -572,12 +592,14 @@ type Outcome =
   | "range error";
 
 /**
- * Registers the every-step oracle for one of `ORACLE_PARTS`: in each of its notes, every step
- * the generators make is dispatched, and the note must read as the document ProseMirror
- * computed, undo must read as before, and a second person's letter and kind must stay.
+ * Registers the every-step oracle for one of `ORACLE_PARTS`: in each of its notes, each step
+ * the generators make that `sampleOf` picks is dispatched, and the note must read as the
+ * document ProseMirror computed, undo must read as before, and a second person's letter and
+ * kind must stay.
  */
 export function everyStepOracle(part: number): void {
-  const { from, to, counts, agreed } = ORACLE_PARTS[part]!;
+  const { from, to } = ORACLE_PARTS[part]!;
+  const { counts, agreed } = ORACLE_PARTS[part]![FULL ? "full" : "sample"];
   const notes = ORACLE_NOTES.slice(from, to);
   const agreement: Agreement = { compared: 0, trials: 0, inTheWindow: 0, onTheWholeNote: 0 };
   const oracle = {
@@ -599,7 +621,10 @@ export function everyStepOracle(part: number): void {
   };
 
   describe("the note reads as the document ProseMirror computed", () => {
-    it.each(notes)("for every step tried in %s", (_name, lines) => {
+    const steps = FULL
+      ? "every step"
+      : "every eighth step of each kind (BODY_SEQUENCE_EDITOR_FULL=1 tries every step)";
+    it.each(notes)(`for ${steps} tried in %s`, (_name, lines) => {
       const baseline = noteOfLines(lines);
       const longer = amongMoreLines(lines);
       const start = readBodySequence(schema, person(baseline, 10).doc);
@@ -609,7 +634,9 @@ export function everyStepOracle(part: number): void {
       for (let pos = 0; pos <= size; pos++)
         if (start.resolve(pos).parent.isTextblock) inText.push(pos);
 
+      const isTried = sampleOf(ORACLE_NOTES.findIndex(([, each]) => each === lines));
       const check = (label: string, act: (a: Person) => void) => {
+        if (!isTried(label.replaceAll(/\d+/g, "N"))) return;
         const a = person(baseline, 10);
         const before = a.view.state.doc;
         let applied: Transaction | null = null;
