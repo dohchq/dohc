@@ -874,6 +874,149 @@ const FIXED_INVENTORY_ACTIONS = `globalThis.operations = {
 };
 `;
 
+export function gradeBookingFrontend(run: RunRecord): Check[] {
+  const checks: Check[] = [];
+  checks.push(
+    (() => {
+      const checkName =
+        "apps/booking frontend provides booking controls wired to dohc-app-channel bookSeat";
+      const rawManifest = run.files["apps/booking/app.publish.json"];
+      if (!rawManifest) return { name: checkName, pass: false, detail: "missing app.publish.json" };
+      let entryPath: string;
+      let inputs: string[];
+      try {
+        const manifest = JSON.parse(rawManifest) as {
+          entryPath?: unknown;
+          inputs?: unknown;
+        };
+        entryPath = typeof manifest.entryPath === "string" ? manifest.entryPath : "";
+        inputs = Array.isArray(manifest.inputs)
+          ? manifest.inputs.filter((item): item is string => typeof item === "string")
+          : [];
+      } catch {
+        return { name: checkName, pass: false, detail: "invalid app.publish.json" };
+      }
+      const problems: string[] = [];
+      if (!entryPath || !inputs.includes(entryPath)) {
+        problems.push("entryPath must be listed in inputs");
+      }
+      for (const item of inputs) {
+        const rel = `apps/booking/${item.replace(/^\.\//, "")}`;
+        if (run.files[rel] === undefined) problems.push(`missing listed input ${item}`);
+      }
+      const entryHtml = run.files[`apps/booking/${entryPath.replace(/^\.\//, "")}`] ?? "";
+      const hasSubmitControl =
+        /<form\b/i.test(entryHtml) ||
+        /<button\b/i.test(entryHtml) ||
+        /type\s*=\s*["']submit["']/i.test(entryHtml);
+      const inputControlCount = (entryHtml.match(/<(?:input|select|textarea)\b/gi) ?? []).length;
+      if (!hasSubmitControl) problems.push("entry HTML has no form or submit button");
+      if (inputControlCount < 2) {
+        problems.push(`entry HTML needs name and seats inputs (found ${inputControlCount})`);
+      }
+      if (!/\bname\b/i.test(entryHtml) || !/\bseats?\b/i.test(entryHtml)) {
+        problems.push("entry HTML controls do not reference guest name and seats");
+      }
+      const normalizedInputs = new Set(inputs.map((item) => item.replace(/^\.\//, "")));
+      const scriptParts: string[] = [];
+      for (const match of entryHtml.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+        const attrs = match[1] ?? "";
+        const body = match[2] ?? "";
+        if (!isEvalExecutableScriptTag(attrs)) continue;
+        const srcMatch = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(attrs);
+        if (srcMatch?.[1]) {
+          const rawSrc = srcMatch[1].trim();
+          if (!/^(?:https?:|data:|blob:)/i.test(rawSrc)) {
+            const cleanSrc = rawSrc.replace(/[?#].*$/, "").replace(/^\.\//, "");
+            if (!normalizedInputs.has(cleanSrc)) {
+              problems.push(`script src "${rawSrc}" is not listed in app.publish.json inputs`);
+            } else {
+              const scriptFile = run.files[`apps/booking/${cleanSrc}`];
+              if (scriptFile) scriptParts.push(scriptFile);
+            }
+          }
+        } else if (body.trim()) {
+          const syntaxErr = checkEvalScriptSyntax(body, entryPath);
+          if (syntaxErr) problems.push(`syntax error in apps/booking/${entryPath}: ${syntaxErr}`);
+          scriptParts.push(body);
+        }
+      }
+      for (const item of normalizedInputs) {
+        if (/\.(?:c|m)?[jt]sx?$/i.test(item)) {
+          const content = run.files[`apps/booking/${item}`];
+          if (content) {
+            const syntaxErr = checkEvalScriptSyntax(content, item);
+            if (syntaxErr) problems.push(`syntax error in apps/booking/${item}: ${syntaxErr}`);
+            if (!scriptParts.includes(content)) scriptParts.push(content);
+          }
+        }
+      }
+      const scriptText = stripJsComments(scriptParts.join("\n"));
+      if (!scriptText.trim()) {
+        problems.push("no published frontend script found");
+      } else {
+        if (!scriptText.includes("dohc-app-channel") || !/\bports\b/.test(scriptText)) {
+          problems.push("frontend script does not receive dohc-app-channel MessagePort");
+        }
+        if (!scriptText.includes("backend.invoke") || !scriptText.includes("bookSeat")) {
+          problems.push("frontend script does not call backend.invoke for bookSeat");
+        }
+        if (!scriptText.includes("idempotencyKey")) {
+          problems.push("frontend script omits idempotencyKey on backend.invoke");
+        }
+        if (!/(?:addEventListener|onsubmit|onclick)/i.test(scriptText)) {
+          problems.push("frontend script wires no submit or click handler");
+        }
+        if (
+          !/\.onmessage\b|addEventListener\s*\(\s*["']message["']/i.test(
+            scriptText.replace(/window\.addEventListener\s*\(\s*["']message["']/gi, ""),
+          )
+        ) {
+          problems.push("frontend script does not handle dohc-app-channel responses");
+        }
+        if (!/\bname\b/.test(scriptText) || !/\bseats\b/.test(scriptText)) {
+          problems.push("frontend script does not pass name and seats inputs");
+        }
+        if (scriptText.includes("listBookings")) {
+          problems.push("public booking frontend must not call owner-only listBookings");
+        }
+      }
+      return {
+        name: checkName,
+        pass: problems.length === 0,
+        ...(problems.length > 0 ? { detail: problems.join("; ") } : {}),
+      };
+    })(),
+  );
+  checks.push(
+    checkFrontendVerifiedForFinalSource(run, "apps/booking", (record) => {
+      if (record.mode === "observed") {
+        const observedBook = record.brokerCalls.some(
+          (c) => c.op === "backend.invoke" && c.operation === "bookSeat" && c.ok,
+        );
+        const observedUi = (record.steps ?? []).some((s) => s.kind === "waitFor" && s.ok);
+        if (!observedBook || !observedUi) {
+          return "observed verifyFrontend must record a passing bookSeat call and waitFor step";
+        }
+        return null;
+      }
+      const steps = (record.requestedSteps ?? []) as Array<{
+        kind?: string;
+        expectBackend?: { operation?: string };
+      }>;
+      const clickedBackend = steps.some(
+        (s) => s.kind === "click" && s.expectBackend?.operation === "bookSeat",
+      );
+      const waitedUi = steps.some((s) => s.kind === "waitFor");
+      if (!clickedBackend || !waitedUi) {
+        return "verifyFrontend must submit bookSeat via click.expectBackend and verify UI with waitFor";
+      }
+      return null;
+    }),
+  );
+  return checks;
+}
+
 export const EVERYDAY_CASES: readonly EvalCase[] = [
   {
     id: "everyday-finance-health-tracker",
@@ -1495,147 +1638,7 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
           },
         ),
       );
-      checks.push(
-        (() => {
-          const checkName =
-            "apps/booking frontend provides booking controls wired to dohc-app-channel bookSeat";
-          const rawManifest = run.files["apps/booking/app.publish.json"];
-          if (!rawManifest)
-            return { name: checkName, pass: false, detail: "missing app.publish.json" };
-          let entryPath: string;
-          let inputs: string[];
-          try {
-            const manifest = JSON.parse(rawManifest) as {
-              entryPath?: unknown;
-              inputs?: unknown;
-            };
-            entryPath = typeof manifest.entryPath === "string" ? manifest.entryPath : "";
-            inputs = Array.isArray(manifest.inputs)
-              ? manifest.inputs.filter((item): item is string => typeof item === "string")
-              : [];
-          } catch {
-            return { name: checkName, pass: false, detail: "invalid app.publish.json" };
-          }
-          const problems: string[] = [];
-          if (!entryPath || !inputs.includes(entryPath)) {
-            problems.push("entryPath must be listed in inputs");
-          }
-          for (const item of inputs) {
-            const rel = `apps/booking/${item.replace(/^\.\//, "")}`;
-            if (run.files[rel] === undefined) problems.push(`missing listed input ${item}`);
-          }
-          const entryHtml = run.files[`apps/booking/${entryPath.replace(/^\.\//, "")}`] ?? "";
-          const hasSubmitControl =
-            /<form\b/i.test(entryHtml) ||
-            /<button\b/i.test(entryHtml) ||
-            /type\s*=\s*["']submit["']/i.test(entryHtml);
-          const inputControlCount = (entryHtml.match(/<(?:input|select|textarea)\b/gi) ?? [])
-            .length;
-          if (!hasSubmitControl) problems.push("entry HTML has no form or submit button");
-          if (inputControlCount < 2) {
-            problems.push(`entry HTML needs name and seats inputs (found ${inputControlCount})`);
-          }
-          if (!/\bname\b/i.test(entryHtml) || !/\bseats?\b/i.test(entryHtml)) {
-            problems.push("entry HTML controls do not reference guest name and seats");
-          }
-          const normalizedInputs = new Set(inputs.map((item) => item.replace(/^\.\//, "")));
-          const scriptParts: string[] = [];
-          for (const match of entryHtml.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
-            const attrs = match[1] ?? "";
-            const body = match[2] ?? "";
-            if (!isEvalExecutableScriptTag(attrs)) continue;
-            const srcMatch = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(attrs);
-            if (srcMatch?.[1]) {
-              const rawSrc = srcMatch[1].trim();
-              if (!/^(?:https?:|data:|blob:)/i.test(rawSrc)) {
-                const cleanSrc = rawSrc.replace(/[?#].*$/, "").replace(/^\.\//, "");
-                if (!normalizedInputs.has(cleanSrc)) {
-                  problems.push(`script src "${rawSrc}" is not listed in app.publish.json inputs`);
-                } else {
-                  const scriptFile = run.files[`apps/booking/${cleanSrc}`];
-                  if (scriptFile) scriptParts.push(scriptFile);
-                }
-              }
-            } else if (body.trim()) {
-              const syntaxErr = checkEvalScriptSyntax(body, entryPath);
-              if (syntaxErr)
-                problems.push(`syntax error in apps/booking/${entryPath}: ${syntaxErr}`);
-              scriptParts.push(body);
-            }
-          }
-          for (const item of normalizedInputs) {
-            if (/\.(?:c|m)?[jt]sx?$/i.test(item)) {
-              const content = run.files[`apps/booking/${item}`];
-              if (content) {
-                const syntaxErr = checkEvalScriptSyntax(content, item);
-                if (syntaxErr) problems.push(`syntax error in apps/booking/${item}: ${syntaxErr}`);
-                if (!scriptParts.includes(content)) scriptParts.push(content);
-              }
-            }
-          }
-          const scriptText = stripJsComments(scriptParts.join("\n"));
-          if (!scriptText.trim()) {
-            problems.push("no published frontend script found");
-          } else {
-            if (!scriptText.includes("dohc-app-channel") || !/\bports\b/.test(scriptText)) {
-              problems.push("frontend script does not receive dohc-app-channel MessagePort");
-            }
-            if (!scriptText.includes("backend.invoke") || !scriptText.includes("bookSeat")) {
-              problems.push("frontend script does not call backend.invoke for bookSeat");
-            }
-            if (!scriptText.includes("idempotencyKey")) {
-              problems.push("frontend script omits idempotencyKey on backend.invoke");
-            }
-            if (!/(?:addEventListener|onsubmit|onclick)/i.test(scriptText)) {
-              problems.push("frontend script wires no submit or click handler");
-            }
-            if (
-              !/\.onmessage\b|addEventListener\s*\(\s*["']message["']/i.test(
-                scriptText.replace(/window\.addEventListener\s*\(\s*["']message["']/gi, ""),
-              )
-            ) {
-              problems.push("frontend script does not handle dohc-app-channel responses");
-            }
-            if (!/\bname\b/.test(scriptText) || !/\bseats\b/.test(scriptText)) {
-              problems.push("frontend script does not pass name and seats inputs");
-            }
-            if (scriptText.includes("listBookings")) {
-              problems.push("public booking frontend must not call owner-only listBookings");
-            }
-          }
-          return {
-            name: checkName,
-            pass: problems.length === 0,
-            ...(problems.length > 0 ? { detail: problems.join("; ") } : {}),
-          };
-        })(),
-      );
-      checks.push(
-        checkFrontendVerifiedForFinalSource(run, "apps/booking", (record) => {
-          if (record.mode === "observed") {
-            const observedBook = record.brokerCalls.some(
-              (c) => c.op === "backend.invoke" && c.operation === "bookSeat" && c.ok,
-            );
-            const observedUi = (record.steps ?? []).some((s) => s.kind === "waitFor" && s.ok);
-            if (!observedBook || !observedUi) {
-              return "observed verifyFrontend must record a passing bookSeat call and waitFor step";
-            }
-            return null;
-          }
-          const steps = (record.requestedSteps ?? []) as Array<{
-            kind?: string;
-            expectBackend?: { operation?: string };
-          }>;
-          const clickedBackend = steps.some(
-            (s) => s.kind === "click" && s.expectBackend?.operation === "bookSeat",
-          );
-          const waitedUi = steps.some((s) => s.kind === "waitFor");
-          if (!clickedBackend || !waitedUi) {
-            return "verifyFrontend must submit bookSeat via click.expectBackend and verify UI with waitFor";
-          }
-          return null;
-        }),
-      );
+      checks.push(...gradeBookingFrontend(run));
       return checks;
     },
     solution: {
