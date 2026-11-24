@@ -178,6 +178,46 @@ it("finishes a desktop open started during reconnect after one host readiness wa
   expect(f.changes.listenerCount()).toBe(0);
 });
 
+it("edits an invited desktop's note in the note's room", async () => {
+  const join = vi.fn((captured: NamedFrameRoomHost) => captured);
+  const f = await fixture(
+    limits,
+    false,
+    undefined,
+    false,
+    true,
+    undefined,
+    0,
+    0,
+    false,
+    undefined,
+    undefined,
+    undefined,
+    { join } as unknown as LiveRooms,
+  );
+  const client = f.connect((await f.mint()).token);
+  expect(await client.status).toBe(101);
+  await client.until(() => client.received.some((frame) => frame.kind === "welcome"));
+  expect(join).toHaveBeenCalledOnce();
+});
+
+it.each(["held", "stopped"] as const)(
+  "opens no invited desktop on a %s note, and opens it once it stands again",
+  async (block) => {
+    const f = await fixture(limits, false, undefined, false, true);
+    const body = { shareId: scope.shareId, path: binding.currentPath };
+    const mint = vi.spyOn(f.tickets, "mint");
+    f.sessionHostBlocked.mockReturnValue(block);
+    expect((await f.post("/sync/live/desktop-open", body)).status).toBe(404);
+    expect(await (await f.desktopAdmission!.handle(readinessRequest())).text()).toBe(
+      "waiting\nunavailable\n",
+    );
+    expect(mint).not.toHaveBeenCalled();
+    f.sessionHostBlocked.mockReturnValue(undefined);
+    expect((await f.post("/sync/live/desktop-open", body)).status).toBe(200);
+  },
+);
+
 function readinessRequest(user = "reader", path = binding.currentPath) {
   return new Request(`https://${relayHost}/sync/live/desktop-ready`, {
     method: "POST",
@@ -275,7 +315,7 @@ async function fixture(
   workspaceId = defaultScope.workspaceId,
   shareId = defaultScope.shareId,
   population?: { people: number; documents: number },
-  ownerRooms?: LiveRooms,
+  rooms?: LiveRooms,
 ) {
   const liveProfile = selfHostLiveProfile();
   const frames = production ? liveProfile.frames : defaultFrames,
@@ -461,6 +501,7 @@ async function fixture(
         hosts: new Set([relayHost]),
         tickets,
         changes,
+        blocked: sessionHostBlocked,
         limits: {
           maxSessions: 32,
           retentionMs: 60000,
@@ -490,7 +531,7 @@ async function fixture(
         resolveAccountSession: accountSession,
         accountSessions: { read: readSessions },
         tickets,
-        ...(ownerRooms ? { rooms: ownerRooms } : {}),
+        ...(rooms ? { rooms } : {}),
         hosts: new Set([relayHost]),
         publicOrigin: audience,
         exchangeKey,
@@ -505,6 +546,7 @@ async function fixture(
     : createNamedLiveRoutes({
         kind: link ? "link" : "named",
         desktopBearer: desktop,
+        ...(rooms ? { rooms } : {}),
         membership: memberships,
         storage: state.storage,
         hosts: new Set([relayHost]),

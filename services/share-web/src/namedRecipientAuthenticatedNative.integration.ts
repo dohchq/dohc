@@ -1,7 +1,3 @@
-import {
-  OwnerRestoreActionResponse,
-  OwnerRestoreRelayReview,
-} from "../../../apps/desktop/src/ipc/ownerRestoreContract.js";
 import { createServer as createHttpsServer } from "node:https";
 import {
   chromium,
@@ -38,8 +34,6 @@ import { createNamedFrameChanges } from "../../sync-relay/src/liveHostChanges.js
 import { createShareWebApplication } from "./server.js";
 import { createLiveGateway } from "./liveGateway.js";
 import { createNamedLiveRelayRoute, namedLiveGatewayRequest } from "./namedLiveRelayRoute.js";
-import { prepareHostileRestoreProof } from "./hostileRestoreProof.integration-helper.js";
-import { createNamedBrowserQuarantineProof } from "./namedBrowserQuarantineProof.integration-helper.js";
 import { ensureLocalhostTls } from "./testing/device-control/localhostTls.js";
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -92,777 +86,636 @@ const routeLimits = {
 };
 const exchangeKey = "native-network-exchange-".repeat(2),
   ticketKey = "native-network-tickets-".repeat(2);
-const hostileMode = process.env.DOHC_HOSTILE_RESTORE_PROOF === "1";
-const quarantineMode = process.env.DOHC_BROWSER_QUARANTINE_PROOF === "1";
 // Opt-in integration filename. The pinned serial harness must select this file explicitly.
-it(
-  "edits through real Chromium invitations, BetterAuth and the native daemon over HTTPS and WSS",
-  async () => {
-    if (hostileMode && quarantineMode)
-      throw new Error("Run hostile restore and browser quarantine in separate proof invocations.");
-    const executable = process.env.DOHC_SERVICE_HOST_PROOF_BINARY
-      ? resolve(process.env.DOHC_SERVICE_HOST_PROOF_BINARY)
-      : undefined;
-    const expectedHash = process.env.DOHC_SERVICE_HOST_PROOF_SHA256?.toLowerCase(),
-      output = process.env.DOHC_SERVICE_HOST_PROOF_OUTPUT;
-    if (!executable || !expectedHash || !output)
-      throw new Error("Pinned named network proof binary, digest, and output are required.");
-    const connectionString = process.env.POSTGRES_URL;
-    if (!connectionString || process.env.DOHC_REQUIRE_POSTGRES !== "1")
-      throw new Error("Explicit POSTGRES_URL and DOHC_REQUIRE_POSTGRES=1 are required.");
-    expect(hash(readFileSync(executable))).toBe(expectedHash);
-    mkdirSync(output, { recursive: true });
-    const root = mkdtempSync(join(resolve(output), "named-network-")),
-      workspace = join(root, "workspace");
-    mkdirSync(workspace);
-    const schema = `share_web_native_${randomUUID().replaceAll("-", "")}`;
-    const admin = new Client({ connectionString, connectionTimeoutMillis: 5000 });
-    const pool = new Pool({
-      connectionString,
-      options: `-c search_path=${schema}`,
-      connectionTimeoutMillis: 5000,
-    });
-    let schemaCreated = false;
-    const tls = await ensureLocalhostTls();
-    const publicHttps = createHttpsServer({
-      key: readFileSync(tls.key),
-      cert: readFileSync(tls.certificate),
-    });
-    publicHttps.listen(0, "127.0.0.1");
-    await once(publicHttps, "listening");
-    const audience = `https://127.0.0.1:${(publicHttps.address() as { port: number }).port}`;
-    try {
-      await admin.connect();
-      await admin.query(`CREATE SCHEMA "${schema}"`);
-      schemaCreated = true;
-      for (const migration of ["0001_better_auth.sql", "0007_session_client_kind.sql"])
-        await pool.query(
-          readFileSync(
-            new URL(
-              `../../../packages/workspace-postgres/src/db/migrations/${migration}`,
-              import.meta.url,
-            ),
-            "utf8",
+it("edits through real Chromium invitations, BetterAuth and the native daemon over HTTPS and WSS", async () => {
+  const executable = process.env.DOHC_SERVICE_HOST_PROOF_BINARY
+    ? resolve(process.env.DOHC_SERVICE_HOST_PROOF_BINARY)
+    : undefined;
+  const expectedHash = process.env.DOHC_SERVICE_HOST_PROOF_SHA256?.toLowerCase(),
+    output = process.env.DOHC_SERVICE_HOST_PROOF_OUTPUT;
+  if (!executable || !expectedHash || !output)
+    throw new Error("Pinned named network proof binary, digest, and output are required.");
+  const connectionString = process.env.POSTGRES_URL;
+  if (!connectionString || process.env.DOHC_REQUIRE_POSTGRES !== "1")
+    throw new Error("Explicit POSTGRES_URL and DOHC_REQUIRE_POSTGRES=1 are required.");
+  expect(hash(readFileSync(executable))).toBe(expectedHash);
+  mkdirSync(output, { recursive: true });
+  const root = mkdtempSync(join(resolve(output), "named-network-")),
+    workspace = join(root, "workspace");
+  mkdirSync(workspace);
+  const schema = `share_web_native_${randomUUID().replaceAll("-", "")}`;
+  const admin = new Client({ connectionString, connectionTimeoutMillis: 5000 });
+  const pool = new Pool({
+    connectionString,
+    options: `-c search_path=${schema}`,
+    connectionTimeoutMillis: 5000,
+  });
+  let schemaCreated = false;
+  const tls = await ensureLocalhostTls();
+  const publicHttps = createHttpsServer({
+    key: readFileSync(tls.key),
+    cert: readFileSync(tls.certificate),
+  });
+  publicHttps.listen(0, "127.0.0.1");
+  await once(publicHttps, "listening");
+  const audience = `https://127.0.0.1:${(publicHttps.address() as { port: number }).port}`;
+  try {
+    await admin.connect();
+    await admin.query(`CREATE SCHEMA "${schema}"`);
+    schemaCreated = true;
+    for (const migration of ["0001_better_auth.sql", "0007_session_client_kind.sql"])
+      await pool.query(
+        readFileSync(
+          new URL(
+            `../../../packages/workspace-postgres/src/db/migrations/${migration}`,
+            import.meta.url,
           ),
-        );
-      const authOptions = {
-        pool,
-        baseURL: "https://auth.example.test",
-        secret: "native-auth-proof-secret-at-least-32-characters",
-        trustedOrigins: [audience],
-        sendEmail: async () => undefined,
-      };
-      const auth = createWorkspaceAuth(authOptions),
-        relayAuth = createWorkspaceAuth(authOptions);
-      const password = "native-auth-proof-password-123";
-      const users: { id: string; name: string; email: string }[] = [];
-      for (const name of ["Alice", "Bob"]) {
-        users.push(
-          (
-            await auth.api.signUpEmail({
-              body: { email: `${name.toLowerCase()}@example.test`, password, name },
-            })
-          ).user,
-        );
-      }
-      const ownerUser = (
-        await auth.api.signUpEmail({
-          body: { email: "owner@example.test", password, name: "Owner" },
-        })
-      ).user;
-      const seed = await createEngineClient({
-        command: executable,
-        authToken: "named-proof-seed",
-        protocolVersion: 2,
-        capabilities: ["core"],
-        connectTimeoutMs: 30000,
-      });
-      let mainVersionId: string;
-      try {
-        const opened = await seed.sendRequest({
-          id: 1,
-          method: "workspace.open",
-          params: { rootDir: workspace, workspaceId: "workspace", captureMode: "none" },
-          deadlineMs: 30000,
-        });
-        const handle = (opened.result as { workspace: string }).workspace;
-        const main = await seed.sendRequest({
-          id: 2,
-          method: "versions.ensureMain",
-          workspace: handle,
-          params: {},
-          deadlineMs: 30000,
-        });
-        mainVersionId = (main.result as { id: string }).id;
-      } finally {
-        seed.close();
-        await seed.waitForExit();
-      }
-      const configPath = join(root, "deployment.json");
-      initializeRelayDeployment({
-        configPath,
-        relayPath: join(root, "relay", "relay.sqlite"),
-        continuityDirectory: join(root, "continuity"),
-      });
-      const deployment = openRelayDeployment(configPath, {
-        liveTickets: {
-          retainedTicketsPerPrincipalGrant: hostileMode ? 8 : 4,
-          expiredTicketCleanupBatchSize: 2,
-          now: Date.now,
-        },
-      });
-      const serviceConfig = join(root, "service.json");
-      writeFileSync(
-        serviceConfig,
-        JSON.stringify({
-          version: 1,
-          engineExecutable: executable,
-          hostId: "service",
-          instanceId: "instance",
-          workspaces: [{ root: workspace, workspaceId: "workspace", maxRegistrations: 8 }],
-          settlement: { maxApplicationsPerSettlement: 8 },
-          restore: {
-            maxBytes: 1000000,
-            maxEvents: 100,
-            aggregateBytes: 20000000,
-            workingReserveBytes: 1000000,
-            maxOperations: 1,
-            validation: validationPolicy,
-          },
-          sync: {
-            policy: {
-              maxClientVectorBytes: 100000,
-              maxHostVectorBytes: 100000,
-              maxOutputBytes: 1000000,
-              maxReadBytes: 4000000,
-            },
-            workingReserveBytes: 4000000,
-          },
-          ingress: {
-            aggregateBytes: 512 * 1024 * 1024,
-            applicationWorkingReserveBytes: 8 * 1024 * 1024,
-            maxUploads: 4,
-            uploadDeadlineMs: 30000,
-          },
-          client: {
-            aggregateBytes: 200000000,
-            maxUploads: 4,
-            connectTimeoutMs: 30000,
-            requestDeadlineMs: 30000,
-          },
-        }),
+          "utf8",
+        ),
       );
-      const ownerDoc = markdownToYDoc("Hello"),
-        sharedChanges = createNamedFrameChanges(16);
-      let released!: () => void;
-      const noListeners = new Promise<void>((resolve) => {
-        released = resolve;
+    const authOptions = {
+      pool,
+      baseURL: "https://auth.example.test",
+      secret: "native-auth-proof-secret-at-least-32-characters",
+      trustedOrigins: [audience],
+      sendEmail: async () => undefined,
+    };
+    const auth = createWorkspaceAuth(authOptions),
+      relayAuth = createWorkspaceAuth(authOptions);
+    const password = "native-auth-proof-password-123";
+    const users: { id: string; name: string; email: string }[] = [];
+    for (const name of ["Alice", "Bob"]) {
+      users.push(
+        (
+          await auth.api.signUpEmail({
+            body: { email: `${name.toLowerCase()}@example.test`, password, name },
+          })
+        ).user,
+      );
+    }
+    const ownerUser = (
+      await auth.api.signUpEmail({
+        body: { email: "owner@example.test", password, name: "Owner" },
+      })
+    ).user;
+    const seed = await createEngineClient({
+      command: executable,
+      authToken: "named-proof-seed",
+      protocolVersion: 2,
+      capabilities: ["core"],
+      connectTimeoutMs: 30000,
+    });
+    let mainVersionId: string;
+    try {
+      const opened = await seed.sendRequest({
+        id: 1,
+        method: "workspace.open",
+        params: { rootDir: workspace, workspaceId: "workspace", captureMode: "none" },
+        deadlineMs: 30000,
       });
-      const frameChanges = {
-        ...sharedChanges,
-        subscribe(...args: Parameters<typeof sharedChanges.subscribe>) {
-          const remove = sharedChanges.subscribe(...args);
-          return () => {
-            remove();
-            if (sharedChanges.listenerCount() === 0) released();
-          };
+      const handle = (opened.result as { workspace: string }).workspace;
+      const main = await seed.sendRequest({
+        id: 2,
+        method: "versions.ensureMain",
+        workspace: handle,
+        params: {},
+        deadlineMs: 30000,
+      });
+      mainVersionId = (main.result as { id: string }).id;
+    } finally {
+      seed.close();
+      await seed.waitForExit();
+    }
+    const configPath = join(root, "deployment.json");
+    initializeRelayDeployment({
+      configPath,
+      relayPath: join(root, "relay", "relay.sqlite"),
+      continuityDirectory: join(root, "continuity"),
+    });
+    const deployment = openRelayDeployment(configPath, {
+      liveTickets: {
+        retainedTicketsPerPrincipalGrant: 4,
+        expiredTicketCleanupBatchSize: 2,
+        now: Date.now,
+      },
+    });
+    const serviceConfig = join(root, "service.json");
+    writeFileSync(
+      serviceConfig,
+      JSON.stringify({
+        version: 1,
+        engineExecutable: executable,
+        hostId: "service",
+        instanceId: "instance",
+        workspaces: [{ root: workspace, workspaceId: "workspace", maxRegistrations: 8 }],
+        settlement: { maxApplicationsPerSettlement: 8 },
+        sync: {
+          policy: {
+            maxClientVectorBytes: 100000,
+            maxHostVectorBytes: 100000,
+            maxOutputBytes: 1000000,
+            maxReadBytes: 4000000,
+          },
+          workingReserveBytes: 4000000,
         },
-      };
-      let active: Awaited<ReturnType<typeof startServiceLiveHost>> | undefined;
-      const closes: (() => Promise<void>)[] = [],
-        contexts: BrowserContext[] = [],
-        upgrades: Promise<void>[] = [];
-      let browser: Browser | undefined;
-      const browserErrors: string[] = [];
-      const requests: { accountId: string; path: string; status: number }[] = [];
-      const results: Record<string, unknown> = {};
-      let hostile: Awaited<ReturnType<typeof prepareHostileRestoreProof>> | undefined;
-      let quarantine: Awaited<ReturnType<typeof createNamedBrowserQuarantineProof>> | undefined;
-      try {
-        const validationExecutor = createLiveValidationExecutor();
-        closes.push(() => validationExecutor.close());
-        const validate = validationExecutor.validator(validationPolicy);
-        const authHttp = serveFetchHandler({
-          handler: (request) => auth.handler(request),
-          maxBodyBytes: () => 8192,
-          oversized: () => new Response(null, { status: 404 }),
-          failure: () => new Response(null, { status: 500 }),
-        });
-        authHttp.listen(0, "127.0.0.1");
-        await once(authHttp, "listening");
-        closes.push(() => new Promise<void>((done) => authHttp.close(() => done())));
-        const authUrl = `http://127.0.0.1:${(authHttp.address() as { port: number }).port}`;
-        const { storage } = deployment;
-        expect(
-          storage.claimWorkspace({
-            workspaceId: "workspace",
-            ownerUserId: ownerUser.id,
-            createdAtMs: 1,
-          }),
-        ).toBe("created");
-        expect(
-          storage.provisionLiveHostControl({
-            mode: "service",
-            hostId: "service",
-            updatedAtMs: 1,
-            guard: storage.captureStanding(),
-          }).ok,
-        ).toBe(true);
-        active = await startServiceLiveHost({
-          trustedAccount: (accountId: string) => ({ accountId, name: accountId }),
-          configPath: serviceConfig,
-          ...deployment,
-          frameChanges,
-        });
-        const baseline = Y.encodeStateAsUpdate(ownerDoc),
-          document = {
-            workspaceId: "workspace",
-            mainVersionId: mainVersionId!,
-            objectId: "object",
-            lineageClaimId: hash(baseline),
-          };
-        const registration = createLiveMarkdownRegistrationValidator(validationPolicy)({
-          document,
-          currentPath: "docs/a.md",
-          checkpoint: baseline,
-        });
-        if (registration.kind !== "accepted") throw new Error(JSON.stringify(registration));
-        const evidence = registration.evidence,
-          markdown = Buffer.from("Hello\n");
-        expect(hash(markdown)).toBe(evidence.projectedMarkdownSha256);
-        storage.putBlob({
+        ingress: {
+          aggregateBytes: 512 * 1024 * 1024,
+          applicationWorkingReserveBytes: 8 * 1024 * 1024,
+          maxUploads: 4,
+          uploadDeadlineMs: 30000,
+        },
+        client: {
+          aggregateBytes: 200000000,
+          maxUploads: 4,
+          connectTimeoutMs: 30000,
+          requestDeadlineMs: 30000,
+        },
+      }),
+    );
+    const ownerDoc = markdownToYDoc("Hello"),
+      sharedChanges = createNamedFrameChanges(16);
+    let released!: () => void;
+    const noListeners = new Promise<void>((resolve) => {
+      released = resolve;
+    });
+    const frameChanges = {
+      ...sharedChanges,
+      subscribe(...args: Parameters<typeof sharedChanges.subscribe>) {
+        const remove = sharedChanges.subscribe(...args);
+        return () => {
+          remove();
+          if (sharedChanges.listenerCount() === 0) released();
+        };
+      },
+    };
+    let active: Awaited<ReturnType<typeof startServiceLiveHost>> | undefined;
+    const closes: (() => Promise<void>)[] = [],
+      contexts: BrowserContext[] = [],
+      upgrades: Promise<void>[] = [];
+    let browser: Browser | undefined;
+    const browserErrors: string[] = [];
+    const requests: { accountId: string; path: string; status: number }[] = [];
+    const results: Record<string, unknown> = {};
+    try {
+      const validationExecutor = createLiveValidationExecutor();
+      closes.push(() => validationExecutor.close());
+      const validate = validationExecutor.validator(validationPolicy);
+      const authHttp = serveFetchHandler({
+        handler: (request) => auth.handler(request),
+        maxBodyBytes: () => 8192,
+        oversized: () => new Response(null, { status: 404 }),
+        failure: () => new Response(null, { status: 500 }),
+      });
+      authHttp.listen(0, "127.0.0.1");
+      await once(authHttp, "listening");
+      closes.push(() => new Promise<void>((done) => authHttp.close(() => done())));
+      const authUrl = `http://127.0.0.1:${(authHttp.address() as { port: number }).port}`;
+      const { storage } = deployment;
+      expect(
+        storage.claimWorkspace({
           workspaceId: "workspace",
-          sha256: hash(markdown),
-          content: markdown,
-          createdAtMs: 2,
-        });
-        storage.appendLogBatch({
+          ownerUserId: ownerUser.id,
+          createdAtMs: 1,
+        }),
+      ).toBe("created");
+      expect(
+        storage.provisionLiveHostControl({
+          mode: "service",
+          hostId: "service",
+          updatedAtMs: 1,
+          guard: storage.captureStanding(),
+        }).ok,
+      ).toBe(true);
+      active = await startServiceLiveHost({
+        trustedAccount: (accountId: string) => ({ accountId, name: accountId }),
+        configPath: serviceConfig,
+        ...deployment,
+        frameChanges,
+      });
+      const baseline = Y.encodeStateAsUpdate(ownerDoc),
+        document = {
           workspaceId: "workspace",
-          originId: "owner",
-          ops: [
-            {
-              originSeq: 0,
-              opKind: "moment.append",
+          mainVersionId: mainVersionId!,
+          objectId: "object",
+          lineageClaimId: hash(baseline),
+        };
+      const registration = createLiveMarkdownRegistrationValidator(validationPolicy)({
+        document,
+        currentPath: "docs/a.md",
+        checkpoint: baseline,
+      });
+      if (registration.kind !== "accepted") throw new Error(JSON.stringify(registration));
+      const evidence = registration.evidence,
+        markdown = Buffer.from("Hello\n");
+      expect(hash(markdown)).toBe(evidence.projectedMarkdownSha256);
+      storage.putBlob({
+        workspaceId: "workspace",
+        sha256: hash(markdown),
+        content: markdown,
+        createdAtMs: 2,
+      });
+      storage.appendLogBatch({
+        workspaceId: "workspace",
+        originId: "owner",
+        ops: [
+          {
+            originSeq: 0,
+            opKind: "moment.append",
+            recordedAtMs: 2,
+            payloadJson: JSON.stringify({
+              objectId: "object",
+              momentId: "baseline",
+              versionId: mainVersionId!,
               recordedAtMs: 2,
-              payloadJson: JSON.stringify({
-                objectId: "object",
-                momentId: "baseline",
-                versionId: mainVersionId!,
-                recordedAtMs: 2,
-                operation: "write",
-                path: "docs/a.md",
-                payloadAfterPath: "docs/a.md",
-                payloadAfterBlobSha256: evidence.projectedMarkdownSha256,
-                payloadAfterContentKind: "text",
-                payloadAfterByteLength: evidence.projectedMarkdownByteLength,
-              }),
-            },
-          ],
+              operation: "write",
+              path: "docs/a.md",
+              payloadAfterPath: "docs/a.md",
+              payloadAfterBlobSha256: evidence.projectedMarkdownSha256,
+              payloadAfterContentKind: "text",
+              payloadAfterByteLength: evidence.projectedMarkdownByteLength,
+            }),
+          },
+        ],
+      });
+      expect(
+        storage.registerLiveDocumentBaseline({
+          host: active.coordinate,
+          evidence,
+          baselineBytes: baseline,
+          registeredAtMs: 3,
+        }).kind,
+      ).toBe("registered");
+      for (const [index, user] of users.entries())
+        storage.createShare({
+          share: {
+            shareId: `share-${index}`,
+            workspaceId: "workspace",
+            granterUserId: ownerUser.id,
+            selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }),
+            createdAtMs: 3,
+          },
+          grant: {
+            grantId: `grant-${index}`,
+            shareId: `share-${index}`,
+            principalKind: "user",
+            principalUserId: user.id,
+            principalEmail: null,
+            access: "edit",
+            generation: 1,
+            status: "active",
+            createdAtMs: 3,
+            revokedAtMs: null,
+            parentGrantId: null,
+          },
         });
-        expect(
-          storage.registerLiveDocumentBaseline({
-            host: active.coordinate,
-            evidence,
-            baselineBytes: baseline,
-            registeredAtMs: 3,
-          }).kind,
-        ).toBe("registered");
-        for (const [index, user] of users.entries())
-          storage.createShare({
-            share: {
-              shareId: `share-${index}`,
-              workspaceId: "workspace",
-              granterUserId: ownerUser.id,
-              selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }),
-              createdAtMs: 3,
-            },
-            grant: {
-              grantId: `grant-${index}`,
-              shareId: `share-${index}`,
-              principalKind: "user",
-              principalUserId: user.id,
-              principalEmail: null,
-              access: "edit",
-              generation: 1,
-              status: "active",
-              createdAtMs: 3,
-              revokedAtMs: null,
-              parentGrantId: null,
-            },
-          });
-        const relayApp = createSyncRelayHandler({
-          storage,
-          shareWebOrigin: audience,
-          relayExchangeKey: exchangeKey,
-          namedBrowserSessionLimits: { ...browserLimits, maxSessions: 8, retentionMs: 120000 },
-          resolveActor: createSessionActorResolver(relayAuth),
-          ownerRestoreHost: () => active,
-        });
-        let routes!: ReturnType<typeof createNamedLiveRoutes>;
-        const relayHttp = serveFetchHandler({
-          handler: (request) =>
-            new URL(request.url).pathname === "/sync/live/named-tickets"
-              ? routes.handle(request)
-              : relayApp(request),
-          maxBodyBytes: () => 8192,
-          oversized: () => new Response(null, { status: 404 }),
-          failure: () => new Response(null, { status: 500 }),
-        });
-        relayHttp.listen(0, "127.0.0.1");
-        await once(relayHttp, "listening");
-        closes.push(() => new Promise<void>((done) => relayHttp.close(() => done())));
-        const relayUrl = `http://127.0.0.1:${(relayHttp.address() as { port: number }).port}`;
-        const captureNative = active.captureNative.bind(active);
-        const tickets = createLiveTickets({
-          storage,
-          audience,
-          key: ticketKey,
-          hostReports: createLiveHostReports({ storage, captureNative }),
-        });
-        routes = createNamedLiveRoutes({
-          kind: "named",
-          storage,
-          hosts: new Set([new URL(relayUrl).host]),
+      const relayApp = createSyncRelayHandler({
+        storage,
+        shareWebOrigin: audience,
+        relayExchangeKey: exchangeKey,
+        namedBrowserSessionLimits: { ...browserLimits, maxSessions: 8, retentionMs: 120000 },
+        resolveActor: createSessionActorResolver(relayAuth),
+      });
+      let routes!: ReturnType<typeof createNamedLiveRoutes>;
+      const relayHttp = serveFetchHandler({
+        handler: (request) =>
+          new URL(request.url).pathname === "/sync/live/named-tickets"
+            ? routes.handle(request)
+            : relayApp(request),
+        maxBodyBytes: () => 8192,
+        oversized: () => new Response(null, { status: 404 }),
+        failure: () => new Response(null, { status: 500 }),
+      });
+      relayHttp.listen(0, "127.0.0.1");
+      await once(relayHttp, "listening");
+      closes.push(() => new Promise<void>((done) => relayHttp.close(() => done())));
+      const relayUrl = `http://127.0.0.1:${(relayHttp.address() as { port: number }).port}`;
+      const captureNative = active.captureNative.bind(active);
+      const tickets = createLiveTickets({
+        storage,
+        audience,
+        key: ticketKey,
+        hostReports: createLiveHostReports({ storage, captureNative }),
+      });
+      routes = createNamedLiveRoutes({
+        kind: "named",
+        storage,
+        hosts: new Set([new URL(relayUrl).host]),
+        publicOrigin: audience,
+        exchangeKey,
+        frames,
+        limits: routeLimits,
+        bounds: {
+          maxClientVectorBytes: 100000,
+          maxSyncOutputBytes: 1000000,
+          maxAppliedUpdateBytes: 1000000,
+          maxSubmissionBytes: 1000000,
+          maxAdmissionBytes: 4000000,
+        },
+        validate,
+        sessions: { resolve: relayApp.resolveNamedBrowserSession },
+        tickets,
+        captureNative,
+      });
+      closes.push(async () => routes.close());
+      relayHttp.on("upgrade", (request, socket, head) => {
+        upgrades.push(routes.handleUpgrade(request, socket, head));
+      });
+      const application = createShareWebApplication({
+        relayUrl,
+        publicRelayUrl: audience,
+        relayExchangeKey: exchangeKey,
+        publicHosts: new Set([new URL(audience).host]),
+        accountAuth: { publicOrigin: audience, upstreamUrl: authUrl },
+        namedBrowserSessionLimits: browserLimits,
+        namedLiveTickets: true,
+        viewerAssetsDir: resolve(
+          new URL("../viewer/dist", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"),
+        ),
+        namedRecipientBrowserLimits: {
+          provider: {
+            frames,
+            maxPendingUpdateBytes: 2000000,
+            maxPendingUpdates: 4,
+            maxDeliveryAttempts: 3,
+          },
+          maxHttpResponseBytes: 8192,
+          maxSocketBufferedBytes: 2000000,
+          connectTimeoutMs: 30000,
+          sendTimeoutMs: 30000,
+          drainPollMs: 10,
+        },
+      });
+      const gateway = createLiveGateway({
+        publicOrigin: audience,
+        publicHosts: new Set([new URL(audience).host]),
+        limits: {
+          maxConnections: 4,
+          maxConnectionsPerWorkspace: 96,
+          reservedOwnerConnections: 0,
+          maxConnectionsPerSession: 3,
+          maxConnectionsPerPrincipal: 3,
+          maxConnectionsPerGrant: 4,
+          maxBufferedBytes: 134217728,
+          maxFrameBytes: 65536,
+          maxPendingBytes: 4 * 1024 * 1024,
+          maxPendingFrames: 64,
+          maxFragments: 8,
+          maxBufferedChunks: 64,
+          upgradeTimeoutMs: 30000,
+          idleTimeoutMs: 60000,
+          drainTimeoutMs: 1000,
+        },
+        resolveSession: async (request, discriminator, signal) => {
+          const authenticated = namedLiveGatewayRequest(request, audience, signal);
+          return authenticated
+            ? application.resolveNamedBrowserSession(authenticated, discriminator)
+            : null;
+        },
+        openHostRoute: createNamedLiveRelayRoute({
+          relayUrl,
           publicOrigin: audience,
           exchangeKey,
-          frames,
-          limits: routeLimits,
-          bounds: {
-            maxClientVectorBytes: 100000,
-            maxSyncOutputBytes: 1000000,
-            maxAppliedUpdateBytes: 1000000,
-            maxSubmissionBytes: 1000000,
-            maxAdmissionBytes: 4000000,
-          },
-          validate,
-          sessions: { resolve: relayApp.resolveNamedBrowserSession },
-          tickets,
-          captureNative,
+          handshakeTimeoutMs: 30000,
+        }),
+      });
+      const publicHttp = serveFetchHandler({
+        handler: application.handle,
+        maxBodyBytes: () => 8192,
+        oversized: () => new Response(null, { status: 404 }),
+        failure: () => new Response(null, { status: 500 }),
+      });
+      publicHttps.on("request", (request, response) =>
+        publicHttp.emit("request", request, response),
+      );
+      publicHttps.on("upgrade", (request, socket, head) => {
+        upgrades.push(gateway.handleUpgrade(request, socket, head));
+      });
+      closes.push(async () => gateway.close());
+      browser = await chromium.launch({ headless: true });
+      async function openInvitation(user: (typeof users)[number], grantId: string) {
+        const context = await browser!.newContext({
+          ignoreHTTPSErrors: true,
+          viewport: { width: 1280, height: 860 },
         });
-        closes.push(async () => routes.close());
-        relayHttp.on("upgrade", (request, socket, head) => {
-          upgrades.push(routes.handleUpgrade(request, socket, head));
+        contexts.push(context);
+        await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
+        const page = await context.newPage();
+        let resolveDiscriminator!: (value: string) => void;
+        const discriminator = new Promise<string>((resolve) => {
+          resolveDiscriminator = resolve;
         });
-        const application = createShareWebApplication({
-          relayUrl,
-          publicRelayUrl: audience,
-          relayExchangeKey: exchangeKey,
-          publicHosts: new Set([new URL(audience).host]),
-          accountAuth: { publicOrigin: audience, upstreamUrl: authUrl },
-          namedBrowserSessionLimits: browserLimits,
-          namedLiveTickets: true,
-          viewerAssetsDir: resolve(
-            new URL("../viewer/dist", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"),
-          ),
-          namedRecipientBrowserLimits: {
-            provider: {
-              frames,
-              maxPendingUpdateBytes: 2000000,
-              maxPendingUpdates: 4,
-              maxDeliveryAttempts: 3,
-            },
-            maxHttpResponseBytes: 8192,
-            maxSocketBufferedBytes: 2000000,
-            connectTimeoutMs: 30000,
-            sendTimeoutMs: 30000,
-            drainPollMs: 10,
-          },
+        // The socket's URL names the session. Chromium does not keep every response body for a later read.
+        page.on("websocket", (socket) => {
+          const url = new URL(socket.url()),
+            session = url.searchParams.get("session");
+          if (url.pathname === "/api/live" && session) resolveDiscriminator(session);
         });
-        if (quarantineMode) {
-          quarantine = await createNamedBrowserQuarantineProof({
-            relayUrl,
-            root,
-            workspace,
-            frames,
-            timeoutMs: browserLimits.timeoutMs,
-          });
-          closes.push(() => quarantine!.close());
-        }
-        const gateway = createLiveGateway({
-          publicOrigin: audience,
-          publicHosts: new Set([new URL(audience).host]),
-          limits: {
-            maxConnections: 4,
-            maxConnectionsPerWorkspace: 96,
-            reservedOwnerConnections: 0,
-            maxConnectionsPerSession: 3,
-            maxConnectionsPerPrincipal: 3,
-            maxConnectionsPerGrant: 4,
-            maxBufferedBytes: 134217728,
-            maxFrameBytes: 65536,
-            maxPendingBytes: 4 * 1024 * 1024,
-            maxPendingFrames: 64,
-            maxFragments: 8,
-            maxBufferedChunks: 64,
-            upgradeTimeoutMs: 30000,
-            idleTimeoutMs: 60000,
-            drainTimeoutMs: 1000,
-          },
-          resolveSession: async (request, discriminator, signal) => {
-            const authenticated = namedLiveGatewayRequest(request, audience, signal);
-            return authenticated
-              ? application.resolveNamedBrowserSession(authenticated, discriminator)
-              : null;
-          },
-          openHostRoute: createNamedLiveRelayRoute({
-            relayUrl: quarantine?.relayProxyUrl ?? relayUrl,
-            publicOrigin: audience,
-            exchangeKey,
-            handshakeTimeoutMs: 30000,
-          }),
+        page.on("pageerror", (error) => browserErrors.push(String(error)));
+        page.on("response", (response) => {
+          const url = new URL(response.url());
+          if (url.pathname.startsWith("/api/"))
+            requests.push({ accountId: user.id, path: url.pathname, status: response.status() });
         });
-        const publicHttp = serveFetchHandler({
-          handler: application.handle,
-          maxBodyBytes: () => 8192,
-          oversized: () => new Response(null, { status: 404 }),
-          failure: () => new Response(null, { status: 500 }),
-        });
-        publicHttps.on("request", (request, response) =>
-          publicHttp.emit("request", request, response),
-        );
-        publicHttps.on("upgrade", (request, socket, head) => {
-          upgrades.push(gateway.handleUpgrade(request, socket, head));
-        });
-        closes.push(async () => gateway.close());
-        browser = await chromium.launch({ headless: true });
-        async function openInvitation(user: (typeof users)[number], grantId: string) {
-          const context = await browser!.newContext({
-            ignoreHTTPSErrors: true,
-            viewport: { width: 1280, height: 860 },
-          });
-          contexts.push(context);
-          await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
-          const page = await context.newPage();
-          let resolveDiscriminator!: (value: string) => void;
-          const discriminator = new Promise<string>((resolve) => {
-            resolveDiscriminator = resolve;
-          });
-          // The socket's URL names the session. Chromium does not keep every response body for a later read.
-          page.on("websocket", (socket) => {
-            const url = new URL(socket.url()),
-              session = url.searchParams.get("session");
-            if (url.pathname === "/api/live" && session) resolveDiscriminator(session);
-          });
-          page.on("pageerror", (error) => browserErrors.push(String(error)));
-          page.on("response", (response) => {
-            const url = new URL(response.url());
-            if (url.pathname.startsWith("/api/"))
-              requests.push({ accountId: user.id, path: url.pathname, status: response.status() });
-          });
-          await page.goto(`${audience}/s/edit/${encodeURIComponent(grantId)}`);
-          await page.getByLabel("Email", { exact: true }).fill(user.email);
-          await page.getByLabel("Password", { exact: true }).fill(password);
-          await page.getByRole("button", { name: "Sign in", exact: true }).click();
-          await browserExpect(
-            page.getByRole("button", { name: "Sign out", exact: true }),
-          ).toBeVisible();
-          const cookieName = getCookies({ baseURL: audience }).sessionToken.name;
-          const cookie = (await context.cookies()).find((row) => row.name === cookieName);
-          expect(cookie).toMatchObject({
-            secure: true,
-            httpOnly: true,
-            sameSite: "Lax",
-            path: "/",
-            domain: "127.0.0.1",
-          });
-          const editor = page.getByRole("textbox", { name: "Shared file editor" });
-          return { context, page, editor, discriminator };
-        }
-        const first = await openInvitation(users[0]!, "grant-0"),
-          peer = await openInvitation(users[1]!, "grant-1");
-        for (const recipient of [first, peer]) {
-          await recipient.page.getByRole("button", { name: "docs/a.md", exact: true }).click();
-          await browserExpect(recipient.editor).toHaveAttribute("contenteditable", "true", {
-            timeout: browserLimits.timeoutMs,
-          });
-          await browserExpect(recipient.editor).toHaveText("Hello");
-          await browserExpect(recipient.page.getByRole("status")).toContainText("Ready to edit");
-          await browserExpect(recipient.page.getByRole("status")).not.toContainText(
-            "Changes saved",
-          );
-        }
-        for (const user of users)
-          for (const path of [
-            "/api/account/session",
-            "/api/account/sign-in",
-            "/api/live/named-documents",
-            "/api/live/named-session",
-            "/api/live/named-ticket",
-          ]) {
-            // Playwright may report a response after the page has used it.
-            await vi.waitFor(() =>
-              expect(requests).toContainEqual({ accountId: user.id, path, status: 200 }),
-            );
-          }
-        const wrongGrant = await openInvitation(users[1]!, "grant-0");
-        await browserExpect(wrongGrant.page.getByRole("alert")).toBeVisible();
+        await page.goto(`${audience}/s/edit/${encodeURIComponent(grantId)}`);
+        await page.getByLabel("Email", { exact: true }).fill(user.email);
+        await page.getByLabel("Password", { exact: true }).fill(password);
+        await page.getByRole("button", { name: "Sign in", exact: true }).click();
         await browserExpect(
-          wrongGrant.page.getByRole("button", { name: "docs/a.md", exact: true }),
-        ).toHaveCount(0);
-        await vi.waitFor(() =>
-          expect(requests).toContainEqual({
-            accountId: users[1]!.id,
-            path: "/api/live/named-documents",
-            status: 404,
-          }),
-        );
-        results.authentication = {
-          accountIds: users.map((user) => user.id),
-          requests,
-          wrongGrantRefused: true,
-        };
-        const actor = { kind: "owner", userId: ownerUser.id } as const;
-        const current = storage.resolveCurrentLiveDocumentBinding({ document, actor });
-        if (current.kind !== "current") throw Error("Current binding unavailable.");
-        const capture = await active.captureNative(current.binding);
-        results.registrationId = capture.registrationId;
-        const nativeRequest = () => ({
-          id: capture.nextRequestId(),
-          workspace: capture.workspace,
-          registrationId: capture.registrationId,
-          deadlineMs: capture.deadlineMs,
+          page.getByRole("button", { name: "Sign out", exact: true }),
+        ).toBeVisible();
+        const cookieName = getCookies({ baseURL: audience }).sessionToken.name;
+        const cookie = (await context.cookies()).find((row) => row.name === cookieName);
+        expect(cookie).toMatchObject({
+          secure: true,
+          httpOnly: true,
+          sameSite: "Lax",
+          path: "/",
+          domain: "127.0.0.1",
         });
-        const nativeAck = async () => {
-          const cut = storage.readLiveUpdateJournalCut({ document });
-          if (cut.kind !== "cut") throw Error("Journal cut unavailable.");
-          const metadata = cut.cut.suffix.at(-1)?.metadata ?? cut.cut.checkpoint.metadata;
-          if (!metadata) throw Error("Accepted browser update missing.");
-          const receipt = metadata.accepted.receipt;
-          const ack = await capture.client.readLiveApplicationAck(nativeRequest(), {
-            deliveryId: receipt.deliveryId,
-            updateDigest: receipt.updateDigest,
-          });
-          expect(ack).toMatchObject(receipt);
-          return ack;
-        };
-        await first.editor.click();
-        await first.page.keyboard.press("Control+End");
-        await first.page.keyboard.insertText(" From Alice in Chromium.");
-        await browserExpect(first.page.getByRole("status")).toContainText("Changes saved");
-        await browserExpect(peer.editor).toContainText("From Alice in Chromium.");
-        const browserAck = await nativeAck();
-        results.browserAck = browserAck;
-        const firstSettlement = await active.settle(document);
-        expect(firstSettlement).toMatchObject({ materialized: true });
-        const firstMarkdown = readFileSync(join(workspace, "docs/a.md"), "utf8");
-        expect(firstMarkdown).toContain("From Alice in Chromium.");
-        results.firstSettlement = firstSettlement;
-        expect((await active.captureNative(current.binding)).registrationId).toBe(
-          capture.registrationId,
-        );
-        await peer.editor.click();
-        await peer.page.keyboard.press("Control+End");
-        await peer.page.keyboard.insertText(" From Bob after settlement.");
-        await browserExpect(peer.page.getByRole("status")).toContainText("Changes saved");
-        await browserExpect(first.editor).toContainText("From Bob after settlement.");
-        const afterAck = await nativeAck();
-        results.afterSettlementAck = afterAck;
-        expect(afterAck!.journalCursor).toBeGreaterThan(browserAck!.journalCursor);
-        const secondSettlement = await active.settle(document);
-        expect(secondSettlement).toMatchObject({ materialized: true });
-        const settledMarkdown = readFileSync(join(workspace, "docs/a.md"), "utf8");
-        expect(settledMarkdown).toContain("From Alice in Chromium.");
-        expect(settledMarkdown).toContain("From Bob after settlement.");
-        results.secondSettlement = secondSettlement;
-        results.settledMarkdown = settledMarkdown;
-        await first.page.screenshot({ path: join(root, "alice-edited.png"), fullPage: true });
-        await peer.page.screenshot({ path: join(root, "bob-edited.png"), fullPage: true });
-        const owner = await openInvitation(ownerUser, "grant-0");
-        const ownerCookies = await owner.context.cookies();
-        const cookieHeader = ownerCookies.map((row) => `${row.name}=${row.value}`).join("; ");
-        const ownerRequest = async (suffix: string, body?: unknown) => {
-          const response = await fetch(`${relayUrl}/sync/workspace/live-restores${suffix}`, {
-            method: body === undefined ? "GET" : "POST",
-            headers: { cookie: cookieHeader, "content-type": "application/json" },
-            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-          });
-          const data = await response.json();
-          expect(response.status, JSON.stringify(data)).toBe(200);
-          return data;
-        };
-        const choices = OwnerRestoreActionResponse.options.parse(
-          await ownerRequest("/options", { path: "docs/a.md" }),
-        );
-        const point = choices.points.find((row) => row.cursor === 0)!;
-        expect(point).toBeDefined();
-        const planned = OwnerRestoreActionResponse.plan.parse(
-          await ownerRequest("/plan", {
-            document: choices.document,
-            shareId: "share-0",
-            grantId: "grant-0",
-            restorePointCursor: point.cursor,
-            restorePointReceiptDigest: point.receiptDigest,
-          }),
-        );
-        expect(planned.recipients.map((row) => row.userId)).toEqual([users[0]!.id]);
-        expect(storage.getShareGrant("grant-0")?.status).toBe("active");
-        expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(settledMarkdown);
-        if (hostileMode)
-          hostile = await prepareHostileRestoreProof({
-            audience,
-            root,
-            workspace,
-            frames,
-            stoppedContext: first.context,
-            allowedContext: peer.context,
-          });
-        if (quarantine) await quarantine.interrupt(peer, await peer.discriminator);
-        const stopped = OwnerRestoreActionResponse.begin.parse(
-          await ownerRequest("", { intent: planned.intent }),
-        );
-        expect(stopped.phase).toBe("authority-invalidated");
-        expect(storage.getShareGrant("grant-0")?.status).toBe("revoked");
-        expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(settledMarkdown);
-        await hostile?.stopped();
-        await browserExpect(first.editor).toHaveAttribute("contenteditable", "false");
-        const prefix = `/${stopped.operationId}`;
-        const prepared = OwnerRestoreActionResponse.prepare.parse(
-          await ownerRequest(`${prefix}/prepare`, {}),
-        );
-        expect(prepared.result.kind).toBe("prepared");
-        const reviewed = OwnerRestoreRelayReview.parse(await ownerRequest(`${prefix}/review`, {}));
-        if (!reviewed.result || "kind" in reviewed.result)
-          throw Error("Full loss review unavailable.");
-        expect(reviewed.result.content.frozenMarkdown).toBe(settledMarkdown);
-        expect(reviewed.result.content.restoredMarkdown).toBe("Hello\n");
-        expect(reviewed.result.acceptedEvents).toHaveLength(2);
-        expect(
-          reviewed.result.acceptedEvents.map((row) => row.metadata.accepted.authority.principalId),
-        ).toEqual(users.map((row) => row.id));
-        expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(settledMarkdown);
-        const restored = OwnerRestoreActionResponse.confirm.parse(
-          await ownerRequest(`${prefix}/confirm`, {
-            proposalDigest: reviewed.result.proposalDigest,
-          }),
-        );
-        expect(restored.result.kind).toBe("resumed");
-        expect(restored.status.phase).toBe("resumed");
-        expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe("Hello\n");
-        const repeated = OwnerRestoreActionResponse.confirm.parse(
-          await ownerRequest(`${prefix}/confirm`, {
-            proposalDigest: reviewed.result.proposalDigest,
-          }),
-        );
-        expect(repeated.result.kind).toBe("resumed");
-        expect(storage.getShareGrant("grant-0")?.status).toBe("revoked");
-        const recovered = OwnerRestoreActionResponse.status.parse(await ownerRequest(prefix));
-        expect(recovered.proposalDigest).toBe(reviewed.result.proposalDigest);
-        expect(recovered.phase).toBe("resumed");
-        results.ownerRestore = {
-          operationId: stopped.operationId,
-          proposalDigest: reviewed.result.proposalDigest,
-          acceptedEvents: reviewed.result.acceptedEvents.length,
-          exactBefore: reviewed.result.content.frozenMarkdown,
-          exactAfter: reviewed.result.content.restoredMarkdown,
-          separateConsents: true,
-          resumed: true,
-          replayed: true,
-        };
-        if (hostile) {
-          results.hostileRestore = await hostile.restored(() => active!.settle(document));
-          expect(results.hostileRestore).toMatchObject({
-            verdict: "PASS",
-            novelOfflineRequiresRootAnalysis: true,
-            staleClientQuarantineProven: false,
-          });
-        }
-        if (quarantine)
-          results.browserQuarantine = await quarantine.recover(peer, () =>
-            active!.settle(document),
+        const editor = page.getByRole("textbox", { name: "Shared file editor" });
+        return { context, page, editor, discriminator };
+      }
+      const first = await openInvitation(users[0]!, "grant-0"),
+        peer = await openInvitation(users[1]!, "grant-1");
+      for (const recipient of [first, peer]) {
+        await recipient.page.getByRole("button", { name: "docs/a.md", exact: true }).click();
+        await browserExpect(recipient.editor).toHaveAttribute("contenteditable", "true", {
+          timeout: browserLimits.timeoutMs,
+        });
+        await browserExpect(recipient.editor).toHaveText("Hello");
+        await browserExpect(recipient.page.getByRole("status")).toContainText("Ready to edit");
+        await browserExpect(recipient.page.getByRole("status")).not.toContainText("Changes saved");
+      }
+      for (const user of users)
+        for (const path of [
+          "/api/account/session",
+          "/api/account/sign-in",
+          "/api/live/named-documents",
+          "/api/live/named-session",
+          "/api/live/named-ticket",
+        ]) {
+          // Playwright may report a response after the page has used it.
+          await vi.waitFor(() =>
+            expect(requests).toContainEqual({ accountId: user.id, path, status: 200 }),
           );
+        }
+      const wrongGrant = await openInvitation(users[1]!, "grant-0");
+      await browserExpect(wrongGrant.page.getByRole("alert")).toBeVisible();
+      await browserExpect(
+        wrongGrant.page.getByRole("button", { name: "docs/a.md", exact: true }),
+      ).toHaveCount(0);
+      await vi.waitFor(() =>
+        expect(requests).toContainEqual({
+          accountId: users[1]!.id,
+          path: "/api/live/named-documents",
+          status: 404,
+        }),
+      );
+      results.authentication = {
+        accountIds: users.map((user) => user.id),
+        requests,
+        wrongGrantRefused: true,
+      };
+      const actor = { kind: "owner", userId: ownerUser.id } as const;
+      const current = storage.resolveCurrentLiveDocumentBinding({ document, actor });
+      if (current.kind !== "current") throw Error("Current binding unavailable.");
+      const capture = await active.captureNative(current.binding);
+      results.registrationId = capture.registrationId;
+      const nativeRequest = () => ({
+        id: capture.nextRequestId(),
+        workspace: capture.workspace,
+        registrationId: capture.registrationId,
+        deadlineMs: capture.deadlineMs,
+      });
+      const nativeAck = async () => {
+        const cut = storage.readLiveUpdateJournalCut({ document });
+        if (cut.kind !== "cut") throw Error("Journal cut unavailable.");
+        const metadata = cut.cut.suffix.at(-1)?.metadata ?? cut.cut.checkpoint.metadata;
+        if (!metadata) throw Error("Accepted browser update missing.");
+        const receipt = metadata.accepted.receipt;
+        const ack = await capture.client.readLiveApplicationAck(nativeRequest(), {
+          deliveryId: receipt.deliveryId,
+          updateDigest: receipt.updateDigest,
+        });
+        expect(ack).toMatchObject(receipt);
+        return ack;
+      };
+      await first.editor.click();
+      await first.page.keyboard.press("Control+End");
+      await first.page.keyboard.insertText(" From Alice in Chromium.");
+      await browserExpect(first.page.getByRole("status")).toContainText("Changes saved");
+      await browserExpect(peer.editor).toContainText("From Alice in Chromium.");
+      const browserAck = await nativeAck();
+      results.browserAck = browserAck;
+      const firstSettlement = await active.settle(document);
+      expect(firstSettlement).toMatchObject({ materialized: true });
+      const firstMarkdown = readFileSync(join(workspace, "docs/a.md"), "utf8");
+      expect(firstMarkdown).toContain("From Alice in Chromium.");
+      results.firstSettlement = firstSettlement;
+      expect((await active.captureNative(current.binding)).registrationId).toBe(
+        capture.registrationId,
+      );
+      await peer.editor.click();
+      await peer.page.keyboard.press("Control+End");
+      await peer.page.keyboard.insertText(" From Bob after settlement.");
+      await browserExpect(peer.page.getByRole("status")).toContainText("Changes saved");
+      await browserExpect(first.editor).toContainText("From Bob after settlement.");
+      const afterAck = await nativeAck();
+      results.afterSettlementAck = afterAck;
+      expect(afterAck!.journalCursor).toBeGreaterThan(browserAck!.journalCursor);
+      const secondSettlement = await active.settle(document);
+      expect(secondSettlement).toMatchObject({ materialized: true });
+      const settledMarkdown = readFileSync(join(workspace, "docs/a.md"), "utf8");
+      expect(settledMarkdown).toContain("From Alice in Chromium.");
+      expect(settledMarkdown).toContain("From Bob after settlement.");
+      results.secondSettlement = secondSettlement;
+      results.settledMarkdown = settledMarkdown;
+      await first.page.screenshot({ path: join(root, "alice-edited.png"), fullPage: true });
+      await peer.page.screenshot({ path: join(root, "bob-edited.png"), fullPage: true });
+      for (const index of [0, 1])
         expect(
           storage.revokeShareGrant({
-            shareId: "share-1",
-            grantId: "grant-1",
+            shareId: `share-${index}`,
+            grantId: `grant-${index}`,
             revokedAtMs: Date.now(),
             expectedDependentGrantIds: [],
             guard: storage.captureStanding(),
           }).ok,
         ).toBe(true);
-        await noListeners;
-        for (const recipient of [first, peer])
-          await browserExpect(recipient.editor).toHaveAttribute("contenteditable", "false");
-        expect(frameChanges.listenerCount()).toBe(0);
-        results.grantRetired = true;
-        await first.page.getByRole("button", { name: "Refresh files", exact: true }).click();
-        await browserExpect(first.page.getByRole("alert")).toContainText(
-          "The owner removed your access.",
-        );
-        await browserExpect(
-          first.page.getByRole("button", { name: "docs/a.md", exact: true }),
-        ).toHaveCount(0);
-        await first.page.screenshot({ path: join(root, "revoked.png"), fullPage: true });
-        expect(browserErrors).toEqual([]);
-        await active.close();
-        active = undefined;
-        const engine = new DatabaseSync(join(workspace, ".dohc", "engine", "engine.db"), {
-          readOnly: true,
+      await noListeners;
+      for (const recipient of [first, peer])
+        await browserExpect(recipient.editor).toHaveAttribute("contenteditable", "false");
+      expect(frameChanges.listenerCount()).toBe(0);
+      results.grantRetired = true;
+      await first.page.getByRole("button", { name: "Refresh files", exact: true }).click();
+      await browserExpect(first.page.getByRole("alert")).toContainText(
+        "The owner removed your access.",
+      );
+      await browserExpect(
+        first.page.getByRole("button", { name: "docs/a.md", exact: true }),
+      ).toHaveCount(0);
+      await first.page.screenshot({ path: join(root, "revoked.png"), fullPage: true });
+      expect(browserErrors).toEqual([]);
+      await active.close();
+      active = undefined;
+      const engine = new DatabaseSync(join(workspace, ".dohc", "engine", "engine.db"), {
+        readOnly: true,
+      });
+      try {
+        const applications = engine
+          .prepare(
+            "SELECT delivery_id, update_digest FROM live_device_update_applications ORDER BY journal_cursor",
+          )
+          .all();
+        expect(applications.length).toBeGreaterThanOrEqual(2);
+        expect(applications[0]).toEqual({
+          delivery_id: browserAck!.deliveryId,
+          update_digest: browserAck!.updateDigest,
         });
-        try {
-          const applications = engine
-            .prepare(
-              "SELECT delivery_id, update_digest FROM live_device_update_applications ORDER BY journal_cursor",
-            )
-            .all();
-          expect(applications.length).toBeGreaterThanOrEqual(2);
-          expect(applications[0]).toEqual({
-            delivery_id: browserAck!.deliveryId,
-            update_digest: browserAck!.updateDigest,
-          });
-          expect(applications[1]).toEqual({
-            delivery_id: afterAck!.deliveryId,
-            update_digest: afterAck!.updateDigest,
-          });
-          results.persistedApplications = applications;
-        } finally {
-          engine.close();
-        }
-        expect(hash(readFileSync(executable))).toBe(expectedHash);
-        await hostile?.close();
-        hostile = undefined;
-        await quarantine?.close();
-        writeFileSync(
-          join(root, "result.json"),
-          JSON.stringify(
-            {
-              verdict: "PASS",
-              executable,
-              sha256: expectedHash,
-              proofMode: hostileMode
-                ? "hostile-restore"
-                : quarantineMode
-                  ? "browser-quarantine"
-                  : "authenticated-native",
-              scope:
-                "Owner authenticated HTTP stop/prepare/full review/confirm/recovery against live Chromium recipients and native daemon; real Chromium invitation UI over HTTPS/WSS, BetterAuth/Postgres sign-in, integrated selected-grant navigation, native daemon ACKs and persisted applications, two named principals, peer updates, settlement and revocation. Test TLS certificate trusted only by isolated browser contexts.",
-              results,
-            },
-            null,
-            2,
-          ),
-        );
+        expect(applications[1]).toEqual({
+          delivery_id: afterAck!.deliveryId,
+          update_digest: afterAck!.updateDigest,
+        });
+        results.persistedApplications = applications;
       } finally {
-        await hostile?.close();
-        for (const [index, context] of contexts.entries()) {
-          try {
-            await context.tracing.stop({ path: join(root, `browser-${index}.zip`) });
-          } finally {
-            await context.close();
-          }
-        }
-        await browser?.close();
-        for (const close of closes.reverse()) await close();
-        await Promise.allSettled(upgrades);
-        await active?.close();
-        deployment.storage.close();
-        ownerDoc.destroy();
+        engine.close();
       }
+      expect(hash(readFileSync(executable))).toBe(expectedHash);
+      writeFileSync(
+        join(root, "result.json"),
+        JSON.stringify(
+          {
+            verdict: "PASS",
+            executable,
+            sha256: expectedHash,
+            proofMode: "authenticated-native",
+            scope:
+              "Real Chromium invitation UI over HTTPS/WSS, BetterAuth/Postgres sign-in, integrated selected-grant navigation, native daemon ACKs and persisted applications, two named principals, peer updates, settlement and revocation. Test TLS certificate trusted only by isolated browser contexts.",
+            results,
+          },
+          null,
+          2,
+        ),
+      );
     } finally {
-      await new Promise<void>((done) => publicHttps.close(() => done()));
-      await pool.end();
-      if (schemaCreated) await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
-      await admin.end();
+      for (const [index, context] of contexts.entries()) {
+        try {
+          await context.tracing.stop({ path: join(root, `browser-${index}.zip`) });
+        } finally {
+          await context.close();
+        }
+      }
+      await browser?.close();
+      for (const close of closes.reverse()) await close();
+      await Promise.allSettled(upgrades);
+      await active?.close();
+      deployment.storage.close();
+      ownerDoc.destroy();
     }
-  },
-  hostileMode || quarantineMode ? 180000 : 120000,
-);
+  } finally {
+    await new Promise<void>((done) => publicHttps.close(() => done()));
+    await pool.end();
+    if (schemaCreated) await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
+    await admin.end();
+  }
+}, 120000);

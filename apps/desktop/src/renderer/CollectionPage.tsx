@@ -1,7 +1,26 @@
 import { useRequestSequence } from "./useRequestSequence";
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { History, LayoutList, PanelsTopLeft, SlidersHorizontal, Zap } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type DragEvent,
+  type ReactNode,
+} from "react";
+import {
+  Archive,
+  FolderInput,
+  History,
+  LayoutList,
+  PanelsTopLeft,
+  Plus,
+  SlidersHorizontal,
+  Zap,
+} from "lucide-react";
+import { INBOX_COLLECTION_PATH } from "@dohc/workspace-contracts/inbox";
+import { MoveInboxDialog } from "./MoveInboxDialog";
 import {
   BoardView,
   CalendarView,
@@ -247,6 +266,8 @@ export interface CollectionPageProps extends RecordPanelHost {
   // The page reports when it has taken the ask.
   automationFocus: AutomationFocus | null;
   onAutomationFocused: () => void;
+  onQuickCapture?: () => void;
+  onDropToInbox?: (files: File[]) => void;
 }
 
 const openCellLink = (url: string) => void openLink(url);
@@ -270,6 +291,8 @@ export function CollectionPage({
   onNotice,
   automationFocus,
   onAutomationFocused,
+  onQuickCapture,
+  onDropToInbox,
   initialOpenRecord,
   onOpenRecordChange,
   initialRecordPanelWidth,
@@ -405,6 +428,14 @@ export function CollectionPage({
   const automations = useCollectionAutomations(workspaceId, collectionPath, onError);
   const [automationsOpen, setAutomationsOpen] = useState(false);
   const [customizing, setCustomizing] = useState(false);
+  const [movingInboxRecord, setMovingInboxRecord] = useState<{
+    id: string;
+    path: string;
+    title: string;
+  } | null>(null);
+  const [inboxArchiving, setInboxArchiving] = useState(false);
+  const [inboxDragOver, setInboxDragOver] = useState(false);
+  const isInboxCollection = collectionPath === INBOX_COLLECTION_PATH;
   const [panelFocus, setPanelFocus] = useState<AutomationFocus | null>(null);
   // A button nothing uses opens the builder with its trigger filled in.
   const [panelStart, setPanelStart] = useState<{ automation: Automation; seq: number } | null>(
@@ -1408,8 +1439,72 @@ export function CollectionPage({
         ? candidate
         : undefined;
     const storedText = typeof stored === "string" ? stored : "";
-    const commands: RecordPanelCommand[] =
-      record !== null && onOpenRecordHistory
+    const archiveInboxRecord = (target: CollectionRecord) => {
+      if (inboxArchiving) return;
+      setInboxArchiving(true);
+      const label = recordLabel(target);
+      void bridge()
+        .inboxArchive({ workspaceId, item: target.path })
+        .then((result) => {
+          if (!pageOpen.current) return;
+          void store.refresh();
+          onNotice(
+            `Archived "${label}"`,
+            result.changed
+              ? () => {
+                  void bridge()
+                    .inboxUndoArchive({
+                      workspaceId,
+                      item: target.path,
+                      previousStatus: result.previousStatus,
+                    })
+                    .then(() => {
+                      if (pageOpen.current) void store.refresh();
+                    })
+                    .catch((error) => {
+                      onError("dohc could not undo archiving this Inbox item.", error);
+                    });
+                }
+              : undefined,
+          );
+        })
+        .catch((error) => {
+          if (!pageOpen.current) return;
+          onError("dohc could not archive this Inbox item.", error);
+        })
+        .finally(() => {
+          if (pageOpen.current) setInboxArchiving(false);
+        });
+    };
+    const inboxTriageEnabled =
+      isInboxCollection && !readOnly && onQuickCapture !== undefined && record !== null;
+    const commands: RecordPanelCommand[] = [
+      ...(inboxTriageEnabled
+        ? [
+            {
+              id: "inbox-move",
+              label: "Move to folder…",
+              icon: <FolderInput size={14} strokeWidth={1.9} aria-hidden />,
+              disabled: writesPaused,
+              onSelect: () =>
+                afterBodySaved(() =>
+                  setMovingInboxRecord({
+                    id: record.id,
+                    path: record.path,
+                    title: recordLabel(record),
+                  }),
+                ),
+            },
+            {
+              id: "inbox-archive",
+              label: "Archive",
+              icon: <Archive size={14} strokeWidth={1.9} aria-hidden />,
+              disabled: writesPaused || inboxArchiving,
+              onSelect: () => afterBodySaved(() => archiveInboxRecord(record)),
+            },
+          ]
+        : []),
+      ...(record !== null && onOpenRecordHistory
         ? [
             {
               id: "history",
@@ -1423,7 +1518,38 @@ export function CollectionPage({
                 }),
             },
           ]
-        : [];
+        : []),
+    ];
+    const inboxTriageActions = inboxTriageEnabled ? (
+      <div className="flex items-center gap-2" data-testid="inbox-triage-actions">
+        <SecondaryButton
+          type="button"
+          disabled={writesPaused}
+          className="inline-flex items-center gap-1.5"
+          onClick={() =>
+            afterBodySaved(() =>
+              setMovingInboxRecord({
+                id: record.id,
+                path: record.path,
+                title: recordLabel(record),
+              }),
+            )
+          }
+        >
+          <FolderInput size={13} strokeWidth={1.9} aria-hidden />
+          Move to folder…
+        </SecondaryButton>
+        <SecondaryButton
+          type="button"
+          disabled={writesPaused || inboxArchiving}
+          className="inline-flex items-center gap-1.5"
+          onClick={() => afterBodySaved(() => archiveInboxRecord(record))}
+        >
+          <Archive size={13} strokeWidth={1.9} aria-hidden />
+          {inboxArchiving ? "Archiving…" : "Archive"}
+        </SecondaryButton>
+      </div>
+    ) : undefined;
     return (
       <RecordPanel
         key={openRecordId}
@@ -1509,6 +1635,7 @@ export function CollectionPage({
           )
         }
         body={record === null ? undefined : renderRecordBody?.(record.path)}
+        actions={inboxTriageActions}
       />
     );
   })();
@@ -1550,6 +1677,19 @@ export function CollectionPage({
       }}
       views={frameViews}
       activeQuery={activeQuery}
+      actions={
+        isInboxCollection && !readOnly && onQuickCapture
+          ? [
+              {
+                id: "inbox-capture",
+                label: "Capture",
+                icon: <Plus size={14} strokeWidth={1.9} aria-hidden />,
+                onClick: onQuickCapture,
+                disabled: writesPaused,
+              },
+            ]
+          : undefined
+      }
       automations={{
         open: automationsOpen,
         count: automationCount(automations.file),
@@ -1651,7 +1791,37 @@ export function CollectionPage({
           ))}
         </div>
       ) : null}
-      <div className="min-h-0 min-w-0 flex-1 overflow-auto">
+      <div
+        className={`min-h-0 min-w-0 flex-1 overflow-auto transition-shadow ${
+          inboxDragOver ? "ring-2 ring-inset ring-accent/60" : ""
+        }`}
+        onDragOver={
+          isInboxCollection && !readOnly && onDropToInbox
+            ? (event: DragEvent<HTMLDivElement>) => {
+                if (!event.dataTransfer.types.includes("Files")) return;
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "copy";
+                setInboxDragOver(true);
+              }
+            : undefined
+        }
+        onDragLeave={
+          isInboxCollection && !readOnly && onDropToInbox
+            ? () => setInboxDragOver(false)
+            : undefined
+        }
+        onDrop={
+          isInboxCollection && !readOnly && onDropToInbox
+            ? (event: DragEvent<HTMLDivElement>) => {
+                setInboxDragOver(false);
+                const files = Array.from(event.dataTransfer.files);
+                if (files.length === 0) return;
+                event.preventDefault();
+                onDropToInbox(files);
+              }
+            : undefined
+        }
+      >
         {boardReady ? (
           <BoardView
             schema={schema}
@@ -1710,6 +1880,36 @@ export function CollectionPage({
       </div>
       {fieldsDialog}
       {customizeDialog}
+      {movingInboxRecord && !readOnly ? (
+        <MoveInboxDialog
+          workspaceId={workspaceId}
+          recordPath={movingInboxRecord.path}
+          recordTitle={movingInboxRecord.title}
+          onClose={() => setMovingInboxRecord(null)}
+          onMoved={(moved, targetFolder) => {
+            setMovingInboxRecord(null);
+            recordPanel.close("opener");
+            void store.refresh();
+            const destination = targetFolder || "Workspace root";
+            onNotice(`Moved to ${destination}`, () => {
+              void bridge()
+                .inboxUndoMove({
+                  workspaceId,
+                  fromPath: moved.fromPath,
+                  toPath: moved.toPath,
+                  ...(moved.operationId ? { operationId: moved.operationId } : {}),
+                  attachments: moved.attachments,
+                })
+                .then(() => {
+                  if (pageOpen.current) void store.refresh();
+                })
+                .catch((error) => {
+                  onError("dohc could not undo this move.", error);
+                });
+            });
+          }}
+        />
+      ) : null}
       {viewsOpen && !readOnly ? (
         <ViewsDialog
           schema={schema}

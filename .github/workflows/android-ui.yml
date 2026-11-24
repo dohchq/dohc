@@ -1,0 +1,81 @@
+# Builds the phone app's sample for Android and opens its main screens on an emulator, advisory: no merge waits on
+# this workflow, and PR checks doesn't read it. A newer push cancels the running job. Drafts and forks start nothing.
+name: Android sample check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'apps/mobile/**'
+      - 'packages/interface-words/**'
+      - 'packages/brand/**'
+      - 'patches/**'
+      - 'scripts/verification/android-ui.mjs'
+      - '.github/workflows/android-ui.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: android-ui-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ubuntu-24.04 is GitHub's free standard runner for public repositories and has KVM; never use a larger,
+  # Blacksmith, or custom runner, which bill.
+  android:
+    name: Android sample check
+    if: >-
+      github.event.repository.private == false &&
+      (github.event_name == 'workflow_dispatch' ||
+      (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      EXPO_NO_TELEMETRY: '1'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+      # A release build bundles the JavaScript, so the app runs without a development server. Phone writes stay off.
+      - name: Build the sample app
+        run: |
+          pnpm --filter @dohc/mobile... install --frozen-lockfile
+          cd apps/mobile
+          pnpm exec expo prebuild --platform android --no-install --template ./node_modules/expo/template.tgz
+          node scripts/build-editor.mjs
+          cd android
+          EXPO_PUBLIC_DOHC_SAMPLE=1 ./gradlew assembleRelease -PreactNativeArchitectures=x86_64 --no-daemon --console=plain
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: node scripts/verification/android-ui.mjs apps/mobile/android/app/build/outputs/apk/release/app-release.apk ${{ runner.temp }}/android-ui
+      # Screenshots of each screen in light and dark, and the device log.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: android-ui-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/android-ui
+          if-no-files-found: warn
+          retention-days: 7

@@ -31,6 +31,7 @@ export type CommandIconId =
   | "file-plus"
   | "pen-tool"
   | "folder-plus"
+  | "inbox"
   | "table"
   | "search"
   | "folder-open"
@@ -108,6 +109,13 @@ export const COMMAND_ROWS = {
     group: "Create",
     icon: "table",
     keywords: ["database", "table", "dataset", "records"],
+  },
+  "quick-capture": {
+    label: "Capture to Inbox",
+    availability: "localWorkspace",
+    group: "Create",
+    icon: "inbox",
+    keywords: ["inbox", "capture", "quick capture", "drop", "triage", "clip"],
   },
   "quick-open": {
     label: "Go to",

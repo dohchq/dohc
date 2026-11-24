@@ -21,7 +21,6 @@ import {
 } from "./deviceLiveHostConfig.js";
 import { createDeviceLiveDelivery } from "./deviceLiveDelivery.js";
 import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
-import type { StopRestoreLookup } from "./storage/liveRestoreOperation.js";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { LiveHostChanges } from "./relayWriteChanges.js";
 
@@ -290,33 +289,6 @@ export function createDeviceControl(options: {
     /** What the owner's computer applied of a note it holds, if it is connected and holds it. */
     async readAwakeState(binding: LiveObjectBinding, maxOutputBytes: number, signal: AbortSignal) {
       return currentDelivery?.readAwakeState(binding, maxOutputBytes, signal);
-    },
-    get restoreConfigured() {
-      return options.delivery?.config.restore !== undefined;
-    },
-    async prepareRestore(lookup: StopRestoreLookup, signal?: AbortSignal) {
-      if (!currentDelivery) throw new Error("Device delivery is unavailable.");
-      return currentDelivery.prepareRestore(lookup, signal);
-    },
-    async reviewRestore(lookup: StopRestoreLookup, signal?: AbortSignal) {
-      if (!currentDelivery) throw new Error("Device delivery is unavailable.");
-      return currentDelivery.reviewRestore(lookup, signal);
-    },
-    async confirmRestore(lookup: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
-      if (!currentDelivery) throw new Error("Device delivery is unavailable.");
-      return currentDelivery.confirmRestore(lookup, proposalDigest, signal);
-    },
-    async completeRestore(lookup: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
-      if (!currentDelivery) throw new Error("Device delivery is unavailable.");
-      return currentDelivery.completeRestore(lookup, proposalDigest, signal);
-    },
-    async declineRestore(lookup: StopRestoreLookup, signal?: AbortSignal) {
-      if (!currentDelivery) throw new Error("Device delivery is unavailable.");
-      return currentDelivery.declineRestore(lookup, signal);
-    },
-    async stopRestore(lookup: StopRestoreLookup, signal?: AbortSignal) {
-      if (!currentDelivery) throw new Error("Device delivery is unavailable.");
-      return currentDelivery.stopRestore(lookup, signal);
     },
     async settle(document: LiveDocumentKey, signal?: AbortSignal) {
       if (!currentDelivery) throw new Error("Device delivery is unavailable.");

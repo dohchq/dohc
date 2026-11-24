@@ -8,6 +8,8 @@ name: PR checks
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
     inputs:
       gate:
@@ -32,7 +34,7 @@ on:
         default: "4"
 
 concurrency:
-  group: pr-checks-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.gate || 'selected' }}
+  group: pr-checks-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}-${{ inputs.gate || 'selected' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -51,6 +53,7 @@ jobs:
     name: what changed
     if: >-
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'merge_group' ||
       (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && '["blacksmith-2vcpu-ubuntu-2404"]' || '["ubuntu-24.04"]') }}
     timeout-minutes: 10
@@ -62,21 +65,30 @@ jobs:
       windows: ${{ steps.filter.outputs.windows }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 2
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
           persist-credentials: false
 
       - name: Resolve the tested merge base
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         id: merge-base
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
-          git rev-parse --verify HEAD^2 >/dev/null || { echo '::error::Pull request selection requires HEAD to be a merge commit with both parents available.'; exit 1; }
-          echo "sha=$(git rev-parse HEAD^1)" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "merge_group" ]; then
+            [ -n "$MERGE_GROUP_BASE_SHA" ] || { echo '::error::Merge group selection requires github.event.merge_group.base_sha.'; exit 1; }
+            git merge-base --is-ancestor "$MERGE_GROUP_BASE_SHA" HEAD || { echo '::error::Merge group base commit is not an ancestor of HEAD.'; exit 1; }
+            echo "sha=$(git rev-parse "$MERGE_GROUP_BASE_SHA^{commit}")" >> "$GITHUB_OUTPUT"
+          else
+            git rev-parse --verify HEAD^2 >/dev/null || { echo '::error::Pull request selection requires HEAD to be a merge commit with both parents available.'; exit 1; }
+            echo "sha=$(git rev-parse HEAD^1)" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         id: filter
         with:
           # Compare the tested merge with its first parent, like the cloud workers.
@@ -926,7 +938,7 @@ jobs:
             --label candidate --runs 1 --idle-seconds 1 --keystrokes 5 --switches 1
 
   verification:
-    name: ${{ github.event_name == 'pull_request' && 'PR verification' || 'Manual verification' }}
+    name: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'PR verification' || 'Manual verification' }}
     needs: [changes, javascript, rust, javascript-prepare, android, together, windows]
     if: ${{ always() && !cancelled() && needs.changes.result != 'skipped' }}
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && '["blacksmith-2vcpu-ubuntu-2404"]' || '["ubuntu-24.04"]') }}
@@ -964,7 +976,7 @@ jobs:
           const jobs = JSON.parse(process.env.JOBS);
           assert.equal(jobs.changes.result, 'success', 'Gate selection failed');
           const verdicts = await Promise.allSettled([['js', 'javascript'], ['rust', 'rust'], ['android', 'android'], ['together', 'together'], ['windows', 'windows']].map(async ([gate, job]) => {
-            if (process.env.EVENT_NAME === 'pull_request') {
+            if (process.env.EVENT_NAME === 'pull_request' || process.env.EVENT_NAME === 'merge_group') {
               assert.ok(['true', 'false'].includes(jobs.changes.outputs[gate]), `${gate} selection is missing`);
             }
             const selected = process.env.EVENT_NAME === 'workflow_dispatch'

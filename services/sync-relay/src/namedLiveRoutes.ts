@@ -1181,8 +1181,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           reserveBytes,
           validationBudget,
         });
-        // A browser editor of a shared note edits in the note's room. A desktop keeps its own capture.
-        host = options.rooms && !desktop ? options.rooms.join(captured) : captured;
+        host = options.rooms ? options.rooms.join(captured) : captured;
         host.assertCurrent();
         membership = options.membership?.join({
           ticket,

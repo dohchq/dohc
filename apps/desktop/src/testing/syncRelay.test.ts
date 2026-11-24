@@ -26,14 +26,9 @@ function relayChild() {
   });
 }
 
-const restoreList = vi.fn(
-  async (_url: string, _init?: RequestInit) => new Response("{}", { status: 200 }),
-);
-
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(existsSync).mockReturnValue(false);
-  vi.stubGlobal("fetch", restoreList);
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -189,30 +184,10 @@ it("runs a relay without Edit links from a deployment, with no live host", async
   expect(env?.DOHC_SELF_HOST_LIVE).toBeUndefined();
   child.stdout.write("SYNC_RELAY_LISTENING host=127.0.0.1 port=1234\n");
   const relay = await starting;
-  const [claim, restores] = restoreList.mock.calls;
-  const workspaceId = JSON.parse(String(claim?.[1]?.body)).workspaceId;
-  expect(claim?.[0]).toBe("http://127.0.0.1:1234/sync/workspaces");
-  expect(restores?.[0]).toBe(`http://127.0.0.1:1234/sync/${workspaceId}/live-restores/unfinished`);
   const stopping = relay.stop();
   child.exitCode = 0;
   child.emit("close", 0, null);
   await stopping;
-});
-
-it("stops a relay that cannot list an owner's unfinished restores", async () => {
-  const child = relayChild();
-  vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
-  restoreList
-    .mockResolvedValueOnce(new Response("{}", { status: 200 }))
-    .mockResolvedValueOnce(new Response("internal_error", { status: 500 }));
-  const result = spawnSyncRelay(restart()).catch((error: unknown) => error);
-  child.stdout.write("SYNC_RELAY_LISTENING host=127.0.0.1 port=1234\n");
-  await vi.waitFor(() => expect(child.send).toHaveBeenCalledWith("SIGTERM", expect.any(Function)));
-  child.emit("close", 0, null);
-  expect(await result).toMatchObject({
-    message: expect.stringContaining("failed its startup check"),
-    cause: { message: "Unfinished restores answered 500: internal_error" },
-  });
 });
 
 it("reports initializer diagnostics only after its failed child closes", async () => {

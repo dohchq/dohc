@@ -68,17 +68,6 @@ async function open(detail: WorkspaceEngineMomentDetail) {
   return { moment };
 }
 
-// A restore that stops a note's last Edit access can leave it and other
-// shared notes stuck, so More offers no Restore shared file, even on a
-// Markdown change. Open file still works.
-it("does not offer Restore shared file on a Markdown change", async () => {
-  const { moment } = await open(textDetail);
-  expect(moment.contentKind).toBeUndefined();
-  expect(screen.queryByTestId("engine-diff-shared-restore")).toBeNull();
-  expect(screen.queryByText("Restore shared file…")).toBeNull();
-  expect(screen.getByTestId("engine-diff-open-file")).toBeTruthy();
-});
-
 it("offers Copy your version on a recovery change only, and copies the kept file whole", async () => {
   await open(textDetail);
   expect(screen.queryByRole("button", { name: "Copy your version" })).toBeNull();
@@ -142,8 +131,8 @@ it("offers Stop and restore only for a change a person the owner shared with, or
 });
 
 // A live document's settlement names the collaborator whose edit it holds.
-// The direct-write ledger has nothing of it, so the page names them, and
-// offers neither Stop and restore nor Restore shared file.
+// The direct-write ledger has nothing of it, so the page names them without
+// offering Stop and restore.
 it("names a live document's collaborator without offering Stop and restore", async () => {
   for (const author of [
     { kind: "named" as const, userId: "user_ana", grantId: "grant-1", grantGeneration: 1 },
@@ -154,7 +143,6 @@ it("names a live document's collaborator without offering Stop and restore", asy
       moment: { ...base, authors: [author], payload: { before: null, after: text } },
     });
     expect(screen.queryByTestId("engine-diff-stop-and-restore")).toBeNull();
-    expect(screen.queryByTestId("engine-diff-shared-restore")).toBeNull();
     cleanup();
   }
 });

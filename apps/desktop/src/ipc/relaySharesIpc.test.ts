@@ -1004,131 +1004,6 @@ describe("Stop on a note whose file changed outside dohc", () => {
   });
 });
 
-describe("registered owner restore handler", () => {
-  const document = {
-    workspaceId,
-    mainVersionId: "main",
-    objectId: "object",
-    lineageClaimId: "lineage",
-  };
-  const intent = {
-    deliveryKind: "owner",
-    operationId: "restore",
-    document,
-    shareId: "share",
-    grantId: "grant",
-    expectedGrantGeneration: 4,
-    expectedDependentGrantIds: [],
-    expectedFence: 1,
-    restorePointCursor: 0,
-    restorePointReceiptDigest: "a".repeat(64),
-  };
-  const status = {
-    operationId: "restore",
-    document,
-    path: "notes.md",
-    phase: "authority-invalidated",
-    intent,
-    proposalDigest: null,
-  };
-  const statusInput = { workspaceId, action: "status", operationId: "restore" };
-
-  it("keeps owner restore bound to the sender's original workspace", async () => {
-    const h = harness();
-    await expect(
-      h.invoke(relayShareOperations.ownerRestore.channel, { ...statusInput, workspaceId: "other" }),
-    ).rejects.toThrow("Sharing stopped because this window changed workspaces.");
-    h.workspace.shareView = {};
-    await expect(h.invoke(relayShareOperations.ownerRestore.channel, statusInput)).rejects.toThrow(
-      "original workspace",
-    );
-    expect(h.remote).not.toHaveBeenCalled();
-    expect(h.request).not.toHaveBeenCalled();
-  });
-
-  it.each(["retireRenderer", "retirePhysical", "rotateCredentials"] as const)(
-    "rejects %s before request and before response parsing",
-    async (invalidate) => {
-      const loading = harness(),
-        loaded = deferred<{ credentials: CloudCredentials; credentialGeneration: number }>(),
-        started = deferred();
-      loading.remote.mockImplementation(() => {
-        started.resolve();
-        return loaded.promise;
-      });
-      const pending = loading.invoke(relayShareOperations.ownerRestore.channel, statusInput);
-      await started.promise;
-      loading[invalidate]();
-      loaded.resolve({ credentials: loading.credentials, credentialGeneration: 1 });
-      await expect(pending).rejects.toThrow();
-      expect(loading.request).not.toHaveBeenCalled();
-
-      const h = harness(),
-        response = deferred<unknown>(),
-        requested = deferred();
-      h.request.mockImplementation(() => {
-        requested.resolve();
-        return response.promise;
-      });
-      const result = h.invoke(relayShareOperations.ownerRestore.channel, statusInput);
-      await requested.promise;
-      h[invalidate]();
-      const read = vi.fn(() => "restore");
-      response.resolve({
-        ...status,
-        get operationId() {
-          return read();
-        },
-      });
-      await expect(result).rejects.toThrow();
-      expect(read).not.toHaveBeenCalled();
-    },
-  );
-
-  it.each(["workspace", "point"])("rejects substituted %s coordinates", async (substitution) => {
-    const h = harness();
-    let input: unknown = statusInput,
-      response: unknown = structuredClone(status);
-    if (substitution === "workspace")
-      response = {
-        ...status,
-        intent: { ...intent, document: { ...document, workspaceId: "other" } },
-      };
-    if (substitution === "operation")
-      response = { ...status, intent: { ...intent, operationId: "other" } };
-    if (substitution === "top-operation") response = { ...status, operationId: "other" };
-    if (substitution === "top-document")
-      response = { ...status, document: { ...document, objectId: "other" } };
-    if (substitution === "point") {
-      input = {
-        workspaceId,
-        action: "plan",
-        document,
-        shareId: "share",
-        grantId: "grant",
-        restorePointCursor: 0,
-        restorePointReceiptDigest: "a".repeat(64),
-      };
-      response = { intent: { ...intent, restorePointCursor: 1 }, path: "notes.md", recipients: [] };
-    }
-    if (substitution === "path") {
-      input = { workspaceId, action: "options", path: "notes.md" };
-      response = {
-        document,
-        path: "other.md",
-        grants: [],
-        points: [],
-        authors: [],
-        nextBeforeCursor: null,
-        nextGrantCursor: null,
-        pendingOperation: null,
-      };
-    }
-    h.request.mockResolvedValue(response);
-    await expect(h.invoke(relayShareOperations.ownerRestore.channel, input)).rejects.toThrow();
-  });
-});
-
 describe("registered relay share handlers", () => {
   it.each([
     { ok: true, access: "view" },
@@ -1222,7 +1097,6 @@ describe("registered relay share handlers", () => {
   it("registers only this family and authenticates every channel before parsing or work", async () => {
     const h = harness();
     expect([...h.handlers.keys()]).toEqual([
-      relayShareOperations.ownerRestore.channel,
       relayShareOperations.listOwnerLiveDocuments.channel,
       relayShareOperations.listOwnerLiveRefusals.channel,
       relayShareOperations.retryOwnerLiveShare.channel,
@@ -1259,7 +1133,7 @@ describe("registered relay share handlers", () => {
       relayShareOperations.resendRelayShareInvitation.channel,
       relayShareOperations.revokeRelayShareGrant.channel,
     ]);
-    expect(h.handlers.size).toBe(36);
+    expect(h.handlers.size).toBe(35);
     for (const channel of h.handlers.keys()) {
       await expect(h.invoke(channel, null, -1)).rejects.toThrow("untrusted sender");
     }
@@ -1584,7 +1458,6 @@ describe("registered discussion poll lifetime", () => {
 });
 
 const ownerInputs = {
-  ownerRestore: { workspaceId, action: "options", path: "notes.md" },
   listOwnerLiveDocuments: { workspaceId },
   listOwnerLiveRefusals: { workspaceId },
   retryOwnerLiveShare: { workspaceId, shareId: "share" },

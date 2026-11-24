@@ -10,6 +10,8 @@ import { ACCOUNT_OPERATIONS } from "./operationRecords";
 import { revokeShareInTransaction } from "./shares";
 import { dropEndedWorkspaceInvitesInTransaction } from "./workspaceMembers";
 import {
+  ACCESS_ENDED,
+  SERVICE_HOST_ENROLLMENTS,
   retireUncoveredServiceActivations,
   serviceHostEnrollmentsCoveredByShare,
 } from "./serviceHostEnrollment";
@@ -208,9 +210,9 @@ export function fenceAccount(
       .run(userId);
     storage.db
       .prepare(
-        "UPDATE sync_relay_service_host_enrollments SET enabled=0,retired=1 WHERE owner_user_id=?",
+        `UPDATE ${SERVICE_HOST_ENROLLMENTS} SET enabled=0,retired=1,${ACCESS_ENDED} WHERE owner_user_id=?`,
       )
-      .run(userId);
+      .run(Date.now(), userId);
     storage.db
       .prepare(
         "DELETE FROM sync_relay_live_session_tickets WHERE principal_id=? OR workspace_id IN (SELECT workspace_id FROM sync_relay_workspaces WHERE owner_user_id=?)",

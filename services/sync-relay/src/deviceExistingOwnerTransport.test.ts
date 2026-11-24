@@ -11,7 +11,6 @@ import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { DeviceControlLimits } from "@dohc/live-session-contract/device-control";
 import { DeviceEngineConnection } from "./deviceEngineConnection.js";
 import { startExistingOwnerDeviceTransport } from "./deviceExistingOwnerTransport.js";
-import type { NativeRestoreFence } from "./liveRestoreFence.js";
 
 it("releases cancelled owner-state capacity while its response is still backpressured", async () => {
   const deferred = () => {
@@ -493,83 +492,6 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     ).toEqual({ registrationId: 9 });
     expect(owner.prepareHandoff).toHaveBeenCalledTimes(handoffs);
     expect(singleton.forwardLiveOwnerAdoption).toHaveBeenCalledTimes(1);
-    const operation: NativeRestoreFence = {
-      point: { journalCursor: 0, receiptDigest: binding.lineageClaimId },
-      operationId: "stop",
-      relayDatabaseNamespace: "namespace",
-      oldBinding: binding,
-      hostId: "host",
-      newFence: 2,
-      origin: { kind: "owner", id: "adoption" },
-      terminal: null,
-      appliedSequence: 0,
-    };
-    const receipt = { operation, localHeadSequence: 4, recordedAtMs: 10 };
-    const calls = singleton.sendRequest.mock.calls.length;
-    await expect(
-      peer!.sendRequest({
-        id: 11,
-        method: "liveApplication.fenceRestore",
-        workspace: "ws-ordinary",
-        params: { operation: { ...operation, hostId: "foreign" } as never },
-      }),
-    ).rejects.toThrow();
-    expect(singleton.sendRequest).toHaveBeenCalledTimes(calls);
-    singleton.sendRequest.mockResolvedValueOnce({ result: { status: "fenced", receipt } });
-    expect(
-      (
-        await peer!.sendRequest({
-          id: 12,
-          method: "liveApplication.fenceRestore",
-          workspace: "ws-ordinary",
-          params: { operation: operation as never },
-        })
-      ).result,
-    ).toEqual({ status: "fenced", receipt });
-    const acquired = ownerFor.mock.calls.length;
-    ownerFor.mockImplementationOnce(async () => {
-      throw new Error("renderer session is closed");
-    });
-    singleton.sendRequest.mockResolvedValueOnce({ result: { status: "fenced", receipt } });
-    expect(
-      (
-        await peer!.sendRequest({
-          id: 13,
-          method: "liveApplication.fenceRestore",
-          workspace: "ws-ordinary",
-          params: { operation: operation as never },
-        })
-      ).result,
-    ).toEqual({ status: "fenced", receipt });
-    expect(ownerFor).toHaveBeenCalledTimes(acquired);
-    const cancellation = {
-      operationId: "stop",
-      objectId: "object",
-      lineageClaimId: "a".repeat(64),
-      hostId: "host",
-      newFence: 2,
-    };
-    const cancelled = { status: "cancelled", hostId: "host", generation: 1, binding };
-    const cancel = (id: number, params: object) =>
-      peer!.sendRequest({
-        id,
-        method: "liveApplication.cancelRestoreFence",
-        workspace: "ws-ordinary",
-        params: params as never,
-      });
-    const beforeCancel = singleton.sendRequest.mock.calls.length;
-    await expect(cancel(40, { ...cancellation, hostId: "foreign" })).rejects.toThrow();
-    expect(singleton.sendRequest).toHaveBeenCalledTimes(beforeCancel);
-    singleton.sendRequest.mockResolvedValueOnce({
-      result: { ...cancelled, binding: { ...binding, objectId: "other" } },
-    });
-    await expect(cancel(41, cancellation)).rejects.toThrow();
-    singleton.sendRequest.mockResolvedValueOnce({ result: cancelled });
-    expect((await cancel(42, cancellation)).result).toEqual(cancelled);
-    expect(singleton.sendRequest.mock.lastCall?.[0]).toMatchObject({
-      method: "liveApplication.cancelRestoreFence",
-      params: cancellation,
-    });
     const pending = await peer!.sendRequest({
       id: 14,
       method: "liveApplication.register",
@@ -706,30 +628,6 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
       workspace: "ws-ordinary",
       params: { registrationId: 9 },
     });
-    const beforeFence = owner.finishHandoff.mock.calls.length;
-    singleton.sendRequest.mockResolvedValueOnce({
-      result: { status: "pending", reason: "publication-pending" },
-    });
-    expect(
-      (
-        await peer!.sendRequest({
-          id: 25,
-          method: "liveApplication.fenceRestore",
-          workspace: "ws-ordinary",
-          params: { operation: operation as never },
-        })
-      ).result,
-    ).toEqual({ status: "pending", reason: "publication-pending" });
-    expect(owner.finishHandoff).toHaveBeenCalledTimes(beforeFence);
-    singleton.sendRequest.mockResolvedValueOnce({ result: { status: "fenced", receipt } });
-    await peer!.sendRequest({
-      id: 23,
-      method: "liveApplication.fenceRestore",
-      workspace: "ws-ordinary",
-      params: { operation: operation as never },
-    });
-    expect(owner.finishHandoff).toHaveBeenCalledTimes(beforeFence + 1);
-    expect(owner.finishHandoff).toHaveBeenLastCalledWith(false);
     await expect(
       peer!.sendRequest({
         id: 24,

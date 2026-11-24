@@ -30,7 +30,11 @@ Every transactional Collection is defined by `dataset.json`, a SQLite schema (`s
 
 ### Choosing between `create`, `prepare` + `approve`, and `app stage`
 
-- **Generated CRUD Collection**: Call `dohc_dataset` with `{ request: { action: "create", workspaceId, definition } }`, where `definition` is a `dataset.json` descriptor object (`formatVersion: 1` or `2`, `name`, `schemaPath`, `operationsPath`, `tables`, `operations`, plus `datasetId` for `formatVersion: 1`). dohc generates `dataset.json`, `schema.sql`, and `operations.js` and approves revision 1 in one step. Generated `create` operations take `input: { values: { "<fieldId>": value } }`; generated `edit` operations take `input: { id, expectedVersion, values: { "<fieldId>": value } }` (keyed by field UUIDs from `describe`).
+- **Generated CRUD Collection**: Call `dohc_dataset` with `{ request: { action: "create", workspaceId, definition } }`, where `definition` is a `dataset.json` descriptor object (`formatVersion: 1` or `2`, `name`, `schemaPath`, `operationsPath`, `tables`, `operations`, plus `datasetId` for `formatVersion: 1`). dohc generates `dataset.json`, `schema.sql`, and `operations.js` and approves revision 1 in one step. Generated operations reject unknown keys with `invalid_input` and use these exact input shapes (keyed by field UUIDs from `describe`):
+  - `read`: `{}` (all fields optional: `limit` 1–100 default 50, `after: { id, value } | null`, `search`, `filters: [{ fieldId, value }]` up to 20 AND-combined, `sort: { fieldId, direction: "asc" | "desc" }`, `range: { fieldId, start, end }`, `group: { fieldId, value }`; for distinct groups pass `groupBy: fieldId` with an explicit `limit` of 1–8, optional `groupAfter: { value }` only with `groupBy`, and no `after` or `sort`).
+  - `create`: `{ values: { "<fieldId>": value } }`.
+  - `edit`: `{ id, expectedVersion, values: { "<fieldId>": value } }` (`expectedVersion` is `row.version` from `read`).
+  - `delete`: `{ id, expectedVersion }` (no `values`).
 - **Custom business rules (`backend.ts` or `operations.js`)**: Write `dataset.json`, `schema.sql`, and `backend.ts` with `dohc_write_file`, then call `prepare` followed by `approve`.
 - **App + Collection created or changed together**: Use `dohc_publish_app` `stage` -> `approveStaged` to review and apply the Collection changes and activate the local app in one approval. Staging activates only the local app and does not update live share-link publications; share-link apps still require `prepare` + `approve`.
 

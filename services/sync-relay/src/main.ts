@@ -66,7 +66,6 @@ import {
   streamsRequestBody,
 } from "./server";
 import { DiscussionActivityHub } from "./discussionActivity";
-import type { OwnerRestoreHost } from "./ownerRestoreRoutes";
 import type { HeldDocumentHost } from "./heldDocumentRoutes";
 import { automationHostMaxBodyBytes } from "./automationHostRoutes";
 import { AUTOMATION_SERVER_MAX_BODY_BYTES, isAutomationServerPath } from "./automationServerRoutes";
@@ -697,13 +696,11 @@ if (testAuthSeam) {
 // (by design — presence is not durable).
 const presence = new PresenceHub();
 
-let ownerRestoreHost: (() => OwnerRestoreHost | undefined) | undefined;
 let liveRooms: LiveRooms | undefined;
 let phonePages: PhonePages | undefined;
 let heldDocumentHost: (() => HeldDocumentHost | undefined) | undefined;
 const relayApplication = createSyncRelayHandler({
   discussionActivity,
-  ownerRestoreHost: () => ownerRestoreHost?.(),
   liveRooms: () => liveRooms,
   heldDocumentHost: () => heldDocumentHost?.(),
   storage,
@@ -1047,6 +1044,11 @@ setInterval(() => {
   } catch (error) {
     console.error("[sync-relay] phone alert sweep failed:", serverLogLine(error));
   }
+  try {
+    storage.pruneExpiredIncomingWebhookDeliveries(Date.now());
+  } catch (error) {
+    console.error("[sync-relay] incoming webhook delivery prune failed:", serverLogLine(error));
+  }
   pruneAutomationPresses(storage, Date.now()).catch((error: unknown) => {
     console.error("[sync-relay] automation press prune failed:", serverLogLine(error));
   });
@@ -1283,10 +1285,6 @@ personalLiveDocument = createPersonalLiveDocumentRoute({
       }
     : {}),
 });
-ownerRestoreHost = () => {
-  const mode = storage.getLiveHostControl()?.configuredMode;
-  return mode === "service" ? serviceHost() : mode === "device" ? deviceControl : undefined;
-};
 // Only a session service keeps hosted replicas, so only it holds documents for released retained work.
 heldDocumentHost = () =>
   storage.getLiveHostControl()?.configuredMode === "service" ? serviceHost() : undefined;
@@ -1457,7 +1455,7 @@ if (namedLiveConfig) {
       tickets,
       captureNative,
       admission,
-      sessionHostBlocked,
+      sessionHostBlocked: editorsBlocked,
       linkAuthority: relayApplication.linkAuthority,
       personalAgents: relayApplication.personalAgents,
       limiter: relayApplication.personalLimiter,
@@ -1482,8 +1480,10 @@ if (namedLiveConfig) {
       tickets,
       changes: frameChanges!,
       readinessLimits: selfHostLiveProfile().desktopReadiness,
+      blocked: editorsBlocked,
     });
     desktopLive = createNamedLiveRoutes({
+      rooms,
       kind: "named",
       desktopBearer: true,
       storage,
@@ -1612,6 +1612,7 @@ automations =
         datasetHost,
         replicas: copyReplicas,
         readOwnerShares: relayApplication.readOwnerShares,
+        executeOutboundWebhook: relayApplication.executeOutboundWebhook,
         lookupUserDisplayName: (userId) => lookupUserDisplayName(userId),
         noticeLimiter: noticePostRateLimiter,
         ...(deployment && namedLiveConfig

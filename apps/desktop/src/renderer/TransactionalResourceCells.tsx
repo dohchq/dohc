@@ -19,11 +19,22 @@ import type {
 // kind of value, so the page draws them and their editor here, with the
 // inputs that upload a file or search the related table.
 
+function relationDisplay(
+  value: AppBackendJson | undefined,
+  labels: ReadonlyMap<string, string> | undefined,
+): string {
+  if (!labels || value === undefined || value === null) return display(value);
+  if (Array.isArray(value))
+    return value.map((entry) => labels.get(JSON.stringify(entry)) ?? display(entry)).join(", ");
+  return labels.get(JSON.stringify(value)) ?? display(value);
+}
+
 /** A file or relation cell: its value, a download where the file can be read, and a way in where it can change. */
 export function ResourceCell(props: {
   scope: CollectionResourceScope;
   field: TransactionalField;
   value: AppBackendJson | undefined;
+  relationLabels?: ReadonlyMap<string, string>;
   /** The value is a change the host has not confirmed, so a file has nothing to download yet. */
   unconfirmed: boolean;
   editable: boolean;
@@ -38,13 +49,14 @@ export function ResourceCell(props: {
   const stop = props.tabStop ? undefined : -1,
     target = props.tabStop ? " dohc-row-open-target" : "";
   if (field.type !== "attachment") {
-    const text = <span className="truncate">{display(value)}</span>;
+    const shown = relationDisplay(value, props.relationLabels);
+    const text = <span className="truncate">{shown}</span>;
     // A button, so assistive technology hears that the cell opens. In the table the grid is the Tab stop.
     return editable ? (
       <button
         type="button"
         tabIndex={stop}
-        aria-label={display(value) === "" ? `Edit ${field.name}` : undefined}
+        aria-label={shown === "" ? `Edit ${field.name}` : undefined}
         className={`flex min-h-5 w-full min-w-0 items-center text-left text-[13px]${target}`}
       >
         {text}
@@ -100,6 +112,7 @@ export function ResourceCellEditor(props: {
   scope: CollectionResourceScope;
   field: TransactionalField;
   initial: AppBackendJson;
+  relationLabels?: ReadonlyMap<string, string>;
   upload?: CollectionResources["uploadFile"];
   resolve?: CollectionResources["resolveRelation"];
   onError: CollectionResourceError;
@@ -145,7 +158,11 @@ export function ResourceCellEditor(props: {
           }}
         />
       ) : props.resolve ? (
-        <CollectionRelationInput {...input} resolve={props.resolve} />
+        <CollectionRelationInput
+          {...input}
+          resolve={props.resolve}
+          initialLabels={props.relationLabels}
+        />
       ) : null}
       <div className="flex justify-end gap-2">
         <SecondaryButton size="compact" onClick={props.onClose}>

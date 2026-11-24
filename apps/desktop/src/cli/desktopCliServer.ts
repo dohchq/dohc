@@ -7,6 +7,12 @@ import {
   undoWorkspaceHistoryOperation,
 } from "../workspaces/workspaceHistoryOperations";
 import { writeWorkspaceFilesAs } from "../workspaces/workspaceFileWrites";
+import {
+  addInboxItem,
+  archiveInboxItem,
+  moveInboxItem,
+  type WorkspaceInboxHost,
+} from "../workspaces/workspaceInbox";
 import { createGroup } from "../workspaces/groupCreate";
 import { createFolder } from "../workspaces/workspaceFiles";
 import {
@@ -232,6 +238,8 @@ interface DesktopCliServerDependencies<State> {
   automations(workspace: RegistryEntry): CliAutomationsPort;
   /** A window's press path, for one workspace. */
   buttons(workspace: RegistryEntry): CliButtonsPort;
+  /** Shared Inbox host for one physical workspace operation. */
+  inboxHostFor?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>): WorkspaceInboxHost;
   findWorkspace(workspaceId: string): RegistryEntry | null;
   /** The agent you run with this id in this computer's settings, or null. */
   agentYouRun(agentId: string): Promise<{ name: string } | null>;
@@ -1042,6 +1050,47 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
               return result;
             },
             heldNoteChange: (input) => capture.heldNoteChange(input),
+            ...(dependencies.inboxHostFor
+              ? {
+                  inbox: {
+                    add: (input, source, origin) =>
+                      withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) => {
+                        const person = await dependencies.localPerson();
+                        const author = origin ? agentWriteAuthor(origin) : person;
+                        return addInboxItem(
+                          operation,
+                          input,
+                          author,
+                          source,
+                          dependencies.inboxHostFor!(operation),
+                        );
+                      }),
+                    archive: (input, origin) =>
+                      withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) => {
+                        const person = await dependencies.localPerson();
+                        const author = origin ? agentWriteAuthor(origin) : person;
+                        return archiveInboxItem(
+                          operation,
+                          input,
+                          author,
+                          person,
+                          dependencies.inboxHostFor!(operation),
+                        );
+                      }),
+                    move: (input, origin) =>
+                      withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) => {
+                        const person = await dependencies.localPerson();
+                        const author = origin ? agentWriteAuthor(origin) : person;
+                        return moveInboxItem(
+                          operation,
+                          input,
+                          author,
+                          dependencies.inboxHostFor!(operation),
+                        );
+                      }),
+                  },
+                }
+              : {}),
             retainedCopies: {
               list: () => capture.listRetainedCopies(),
               delete: (copies) => capture.deleteRetainedCopies(copies),

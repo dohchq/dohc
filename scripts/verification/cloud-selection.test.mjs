@@ -125,12 +125,12 @@ test("PR selection rejects a checkout without a merge commit", (t) => {
   );
 });
 
-test("manual cloud selection keeps the full inventory without reading a PR base", () => {
-  assert.equal(
-    cloudChangedFiles(
-      { GITHUB_EVENT_NAME: "workflow_dispatch", PR_BASE_SHA: "unavailable" },
-      "not-a-checkout",
-    ),
-    null,
-  );
+test("manual and merge-group cloud selection keep the full inventory without reading a PR base", () => {
+  for (const event of ["workflow_dispatch", "merge_group"]) {
+    assert.equal(
+      cloudChangedFiles({ GITHUB_EVENT_NAME: event, PR_BASE_SHA: "unavailable" }, "not-a-checkout"),
+      null,
+      event,
+    );
+  }
 });

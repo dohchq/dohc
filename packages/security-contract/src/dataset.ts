@@ -136,6 +136,7 @@ export interface AppDatasetOperationDisplay {
   kind: DatasetOperationKind;
   label: string;
   fields: string[];
+  table?: string;
 }
 /** Public dispatch metadata, derived from the approved revision rather than app source. */
 export interface AppDatasetCapability extends AppDatasetBinding {
@@ -1401,7 +1402,7 @@ function parseBindingFields(row: Record<string, unknown>): Omit<AppDatasetBindin
   return result;
 }
 function operationDisplay(value: unknown, path = "display"): AppDatasetOperationDisplay {
-  const row = record(value, ["kind", "label", "fields"], [], path);
+  const row = record(value, ["kind", "label", "fields"], ["table"], path);
   if (!operationKinds.has(row.kind as DatasetOperationKind))
     fail(`${path}.kind must be one of: read, create, edit, delete, action.`);
   return {
@@ -1410,6 +1411,7 @@ function operationDisplay(value: unknown, path = "display"): AppDatasetOperation
     fields: boundedArray(row.fields, DATASET_MAX_FIELDS, 0, `${path}.fields`).map((entry, index) =>
       text(entry, 128, `${path}.fields[${index}]`),
     ),
+    ...(row.table === undefined ? {} : { table: text(row.table, 128, `${path}.table`) }),
   };
 }
 export function parseDatasetAlias(value: unknown): string {

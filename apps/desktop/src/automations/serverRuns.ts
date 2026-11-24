@@ -85,7 +85,11 @@ const Run = z.object({
 });
 const Retry = z.discriminatedUnion("status", [
   z.object({ status: z.literal("queued"), press: z.boolean() }),
-  z.object({ status: z.literal("definition-changed"), repeatsMessages: z.boolean() }),
+  z.object({
+    status: z.literal("definition-changed"),
+    repeatsMessages: z.boolean(),
+    repeatsWebhooks: z.boolean().optional(),
+  }),
   z.object({ status: z.literal("switched-off"), target: AutomationControlsTargetShape }),
   z.object({ status: z.literal("refused"), reason: z.string() }),
 ]);
@@ -105,6 +109,7 @@ const Undo = z.discriminatedUnion("status", [
     deleted: Count,
     keptChanged: Count,
     gone: Count,
+    webhooksSent: Count.optional(),
   }),
   z.object({
     status: z.literal("confirm"),
@@ -140,7 +145,7 @@ const Hold = z.object({
   seq: z.number().int().nonnegative(),
   collection: z.string(),
   target: z.string(),
-  action: z.enum(["change", "find", "post", "notify", "wake", "read"]),
+  action: z.enum(["change", "find", "post", "notify", "wake", "read", "send-http"]),
   recipient: z.string().optional(),
   stoppedFor: z.string().nullable(),
   fileUnread: z.boolean(),
