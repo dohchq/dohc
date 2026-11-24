@@ -2217,7 +2217,14 @@ export function streamsRequestBody(url: URL, method: string): boolean {
   try {
     const route = parseRoute({ url: url.href });
     return (
-      (route.route === "dataset" && route.action === "import" && method === "POST") ||
+      (route.route === "dataset" &&
+        (route.action === "import" || route.action === "invoke") &&
+        method === "POST") ||
+      (route.route === "app-backend" &&
+        route.workspaceId !== undefined &&
+        route.action === "invoke" &&
+        method === "POST") ||
+      (route.route === "dataset-replica" && route.action === "blob" && method === "POST") ||
       (route.route === "incoming-webhook" && method === "POST") ||
       route.route === "share-collection-writes" ||
       route.route === "link-collection-writes" ||

@@ -1,6 +1,6 @@
 import { readBoundedJson } from "@dohc/service-http";
 import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-host";
-import { JournalError } from "@dohc/app-backend-runtime/journal";
+import { JOURNAL_RECORD_BYTES, JournalError } from "@dohc/app-backend-runtime/journal";
 import type { DatasetCursor, JournalExportRecord } from "@dohc/app-backend-runtime/journal";
 import type { RelayDatasetHost } from "./datasetHost";
 import type { AppBackendAuth } from "./appBackendAuthority";
@@ -51,8 +51,11 @@ export function createDatasetReplicaRoutes(
       if (request.headers.get("content-type")?.split(";")[0] !== "application/json")
         throw badRequest("Collection copy requests require JSON.");
       try {
-        body = await readBoundedJson(request, DATASET_REPLICA_REQUEST_BYTES, signal);
-      } catch {
+        const max =
+          route.action === "blob" ? JOURNAL_RECORD_BYTES + 4096 : DATASET_REPLICA_REQUEST_BYTES;
+        body = await readBoundedJson(request, max, signal);
+      } catch (error) {
+        if (error instanceof RangeError) throw relayError("payload_too_large", error.message);
         throw badRequest("Invalid Collection copy request.");
       }
     }

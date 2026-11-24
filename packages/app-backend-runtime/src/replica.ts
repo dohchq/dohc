@@ -450,6 +450,7 @@ export async function createDatasetReplica(options: {
             expected: state.cursor,
             source: state.checkpoint.source,
             operation: operation.name,
+            profile: operation.profile,
             caller: { kind: "owner" },
             input: input.input,
             nowMs: Date.now(),
@@ -458,6 +459,7 @@ export async function createDatasetReplica(options: {
           });
           authorize(input.signal);
           return {
+            ...(operation.profile === "bulk" ? { profile: operation.profile } : {}),
             result: value.result,
             revision: state.cursor.revision,
             replayed: false as const,

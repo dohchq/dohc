@@ -21,6 +21,7 @@ import { encodeRecoveryManifest } from "@dohc/app-backend-runtime/recovery";
 
 import { ClientClosedRequest, serveFetchHandler } from "@dohc/service-http";
 import { guardRelayResponses } from "./relayResponseStanding";
+import { APP_BACKEND_PROFILE_HEADER } from "@dohc/security-contract/app-backend";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -197,6 +198,64 @@ const schemaSql =
   "CREATE TABLE requests(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL,receipt TEXT);";
 const operationSource = `globalThis.operations={submit(ctx,input){if(input.fileId)ctx.files.attach(input.fileId);if(!input.name)ctx.refuse('missing_name','A name is required.');ctx.db.execute('INSERT INTO requests VALUES(?,?,?)',[ctx.requestId,input.name,input.fileId??null]);return {accepted:true};},read(ctx){return ctx.db.query('SELECT * FROM requests ORDER BY id');},receipt(ctx,input){const row=ctx.db.query('SELECT receipt FROM requests WHERE receipt=?',[input.fileId])[0];if(!row)ctx.refuse('missing_receipt','Receipt unavailable.');return {fileId:row.receipt};}};`;
 const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource });
+
+it("serves a bulk result and journal blob only for an approved owner operation", async () => {
+  const f = await httpFixture();
+  const operationSource = `globalThis.operations = { read(ctx, input) { ctx.db.execute('INSERT INTO requests(id,name) VALUES(?,?)',[ctx.requestId,'Bulk']); return input.value.repeat(6); } };`;
+  const revision = describeDatasetRevision({
+    definition: {
+      ...definition,
+      operations: definition.operations.map((op) =>
+        op.name === "read"
+          ? { ...op, kind: "action", readOnly: false, access: "owner", profile: "bulk" }
+          : op,
+      ),
+    },
+    revision: 1,
+    schemaSql,
+    operationSource,
+  });
+  expect(
+    (await f.http(`${f.path}/activate`, { revision, schemaSql, operationSource })).status,
+  ).toBe(200);
+  const body = {
+    revision: 1,
+    revisionSha256: revision.revisionSha256,
+    operationId: id(6),
+    input: { value: "x".repeat(400_000) },
+    idempotencyKey: "bulk",
+  };
+  const { head: after } = await (await f.http(`${f.path}/replica/capture`)).json();
+  const success = await f.http(`${f.path}/invoke`, body);
+  expect(success.status).toBe(200);
+  expect(success.headers.get(APP_BACKEND_PROFILE_HEADER)).toBe("bulk");
+  expect(await success.json()).toEqual({
+    result: "x".repeat(2_400_000),
+    revision: 1,
+    replayed: false,
+  });
+  const standard = await f.http(`${f.path}/invoke`, { ...body, operationId: id(5) });
+  expect(standard.status).toBe(413);
+  expect(await standard.json()).toMatchObject({
+    error: expect.stringMatching(/131072 bytes.*400\d+ bytes/),
+  });
+  const helper = await f.http(`${f.path}/invoke`, body, { authorization: "Bearer helper" });
+  expect([404, 413]).toContain(helper.status);
+  expect(helper.headers.get(APP_BACKEND_PROFILE_HEADER)).toBeNull();
+  const { head: through } = await (await f.http(`${f.path}/replica/capture`)).json();
+  const page = await f.http(`${f.path}/replica/page`, { through, after, limit: 32 });
+  expect(page.status).toBe(200);
+  const {
+    records: [record],
+  } = await page.json();
+  const blob = await f.http(`${f.path}/replica/blob`, {
+    record,
+    offset: 0,
+    length: record.byteLength,
+  });
+  expect(blob.status).toBe(200);
+  expect((await blob.arrayBuffer()).byteLength).toBe(record.byteLength);
+});
 
 async function httpFixture(
   maxParticipantsPerGrant?: number,

@@ -3,6 +3,7 @@ import {
   type ApprovalAgent,
 } from "@dohc/security-contract/approval-provenance";
 import { createHash } from "node:crypto";
+import { APP_BACKEND_BULK_LIMITS, appBackendLimit } from "@dohc/security-contract/app-backend";
 import {
   createCheckpointStorage,
   type CheckpointStage,
@@ -104,6 +105,7 @@ export interface InitializeDatasetInput {
   ) => unknown;
 }
 export interface CommitOperationInput {
+  profile?: "bulk";
   expected: DatasetCursor;
   proposalId: string;
   operation: string;
@@ -410,9 +412,12 @@ function checkpointHash(
     ]),
   );
 }
-function resultText(value: string): string {
-  if (typeof value !== "string" || Buffer.byteLength(value) > 256 * 1024)
-    invalid("The Collection action's result is too large.");
+export const JOURNAL_RECORD_BYTES = 2 * APP_BACKEND_BULK_LIMITS.resultBytes + 64 * 1024;
+
+function resultText(value: string, limit = 256 * 1024): string {
+  if (typeof value !== "string") invalid("A Collection action must return JSON.");
+  const used = Buffer.byteLength(value);
+  if (used > limit) invalid(appBackendLimit("Collection action result", limit, used, "bytes"));
   try {
     JSON.parse(value);
   } catch {
@@ -594,7 +599,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         callerKey: text(String(row.caller_key), 1024),
         idempotencyKey: text(String(row.idempotency_key), 128),
         payloadSha256: digest(String(row.payload_sha256)),
-        resultJson: resultText(String(row.result_json)),
+        resultJson: resultText(String(row.result_json), APP_BACKEND_BULK_LIMITS.resultBytes),
         changeset: copyBytes(row.changeset as Uint8Array, maxEvent),
         changesetSha256: digest(String(row.changeset_sha256)),
         attachedFileIds: fileIds(JSON.parse(String(row.attached_file_ids))),
@@ -782,7 +787,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       callerKey: text(String(row.caller_key), 1024),
       idempotencyKey: text(String(row.idempotency_key), 128),
       payloadSha256: digest(String(row.payload_sha256)),
-      resultJson: resultText(String(row.result_json)),
+      resultJson: resultText(String(row.result_json), APP_BACKEND_BULK_LIMITS.resultBytes),
       changesetSha256: digest(String(row.changeset_sha256)),
       attachedFileIds: fileIds(JSON.parse(String(row.attached_file_ids))),
       recordedAtMs: integer(Number(row.recorded_at_ms)),
@@ -1058,9 +1063,11 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
           revision++
         ) {
           const record = exportRecord(key, revision),
-            size = Buffer.byteLength(JSON.stringify(record));
-          if (size > 1024 * 1024) invalid("Part of this Collection is too large to export.");
-          if (bytes + size > 1024 * 1024) break;
+            size = Buffer.byteLength(JSON.stringify(record)),
+            limit = record.kind === "event" ? JOURNAL_RECORD_BYTES : 1024 * 1024;
+          if (size > limit)
+            invalid(appBackendLimit("Recovery history record", limit, size, "bytes"));
+          if (records.length > 0 && bytes + size > 1024 * 1024) break;
           records.push(record);
           bytes += size;
         }
@@ -1518,7 +1525,10 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         callerKey = text(input.callerKey, 1024),
         idempotencyKey = text(input.idempotencyKey, 128);
       const payloadSha256 = digest(input.payloadSha256),
-        resultJson = resultText(input.resultJson),
+        resultJson = resultText(
+          input.resultJson,
+          input.profile === "bulk" ? APP_BACKEND_BULK_LIMITS.resultBytes : undefined,
+        ),
         changeset = copyBytes(input.changeset, maxEvent),
         changesetSha256 = digest(input.changesetSha256);
       const attachedFileIds = fileIds(input.attachedFileIds),

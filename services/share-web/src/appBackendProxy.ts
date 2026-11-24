@@ -9,6 +9,8 @@ import {
   APP_BACKEND_RESULT_BYTES,
   APP_BACKEND_UPLOAD_REQUEST_BYTES,
   APP_BACKEND_REFUSAL_BYTES,
+  AppBackendLimitError,
+  appBackendLimit,
   parseAppBackendFile,
   parseAppBackendInvokeRequest,
   parseAppBackendJson,
@@ -44,12 +46,16 @@ export async function forwardAppBackend(input: {
   fetchRelay(request: Request): Promise<Response>;
 }): Promise<Response> {
   const error = input.capability ? (_status: number) => opaqueLinkRefusal() : appError;
+  const tooLarge = (message: string) =>
+    input.capability
+      ? opaqueLinkRefusal()
+      : Response.json({ error: message }, { status: 413, headers: responseHeaders });
   if (input.request.headers.get("content-type") !== "application/json") return error(400);
   let body: unknown;
   try {
     body = await readBoundedJson(input.request, APP_BACKEND_UPLOAD_REQUEST_BYTES, input.signal);
   } catch (cause) {
-    return error(cause instanceof RangeError ? 413 : 400);
+    return cause instanceof RangeError ? tooLarge(cause.message) : error(400);
   }
   if (
     !record(body) ||
@@ -60,11 +66,13 @@ export async function forwardAppBackend(input: {
     return error(400);
   let action: "invoke" | "upload" | "file" | "attempt", payload: unknown;
   try {
-    if (
-      body.op !== "backend.upload" &&
-      new TextEncoder().encode(JSON.stringify(body)).byteLength > APP_BACKEND_REQUEST_BYTES
-    )
-      return error(413);
+    if (body.op !== "backend.upload") {
+      const used = new TextEncoder().encode(JSON.stringify(body)).byteLength;
+      if (used > APP_BACKEND_REQUEST_BYTES)
+        return tooLarge(
+          appBackendLimit("Collection action request", APP_BACKEND_REQUEST_BYTES, used, "bytes"),
+        );
+    }
     const datasetField = Object.hasOwn(body, "dataset") ? { dataset: body.dataset } : {};
     if (body.op === "backend.invoke") {
       if (!exact(body, ["id", "op", "operation", "idempotencyKey", "input"], ["dataset"]))
@@ -135,8 +143,8 @@ export async function forwardAppBackend(input: {
         ...(checked.dataset === undefined ? {} : { dataset: checked.dataset }),
       };
     } else return error(400);
-  } catch {
-    return error(400);
+  } catch (cause) {
+    return cause instanceof AppBackendLimitError ? tooLarge(cause.message) : error(400);
   }
 
   const url = new URL(

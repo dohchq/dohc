@@ -4,9 +4,12 @@ import { PublicationAgent } from "./appPublication";
 import { z } from "zod";
 import { CreationPartial } from "./creation";
 import {
+  APP_BACKEND_BULK_LIMITS,
+  APP_BACKEND_INPUT_BYTES,
   APP_BACKEND_UPLOAD_BYTES,
   parseAppBackendFile,
   parseAppBackendJson,
+  type AppBackendJson,
 } from "@dohc/security-contract/app-backend";
 import {
   DATASET_MAX_FIELDS,
@@ -70,17 +73,23 @@ const file = z.unknown().transform((value, context) => {
   }
 });
 const fileBytes = z.string().max(Math.ceil(APP_BACKEND_UPLOAD_BYTES / 3) * 4);
-const json = z.unknown().transform((value, context) => {
-  try {
-    return parseAppBackendJson(value, 64 * 1024);
-  } catch (error) {
-    context.addIssue({
-      code: "custom",
-      message: error instanceof Error ? error.message : "Invalid Collection input.",
-    });
-    return z.NEVER;
-  }
-});
+const inputJson = (profile?: "bulk") =>
+  z.unknown().transform((value, context) => {
+    try {
+      return parseAppBackendJson(
+        value,
+        profile === "bulk" ? APP_BACKEND_BULK_LIMITS.inputBytes : APP_BACKEND_INPUT_BYTES,
+        profile,
+      );
+    } catch (error) {
+      context.addIssue({
+        code: "custom",
+        message: error instanceof Error ? error.message : "Invalid Collection input.",
+      });
+      return z.NEVER;
+    }
+  });
+const json = inputJson();
 const definition = z.unknown().transform((value, context) => {
   try {
     if (
@@ -615,7 +624,7 @@ const DATASET_REQUEST_OPTIONS = [
     operationId: identity,
     revision: z.number().int().positive(),
     revisionSha256: sha256,
-    input: json,
+    input: inputJson("bulk"),
     idempotencyKey: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
     invocationId: identity
       .describe(
@@ -696,19 +705,28 @@ export const DatasetCopyStatus = z
 export type DatasetCopyStatus = z.infer<typeof DatasetCopyStatus>;
 export const DatasetInvocationResult = z
   .object({
-    result: z.unknown().transform((value, context) => {
-      try {
-        return parseAppBackendJson(value, 256 * 1024);
-      } catch {
-        context.addIssue({ code: "custom", message: "Invalid Collection result." });
-        return z.NEVER;
-      }
-    }),
+    result: z.custom<AppBackendJson>((value) => value !== undefined),
+    profile: z.literal("bulk").optional(),
     revision: z.number().int().nonnegative(),
     replayed: z.boolean(),
     copy: DatasetCopyStatus.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine(({ result, profile }, context) => {
+    try {
+      parseAppBackendJson(
+        result,
+        profile === "bulk" ? APP_BACKEND_BULK_LIMITS.resultBytes : 256 * 1024,
+        profile,
+      );
+    } catch (error) {
+      context.addIssue({
+        code: "custom",
+        path: ["result"],
+        message: error instanceof Error ? error.message : "Invalid Collection result.",
+      });
+    }
+  });
 export type DatasetInvocationResult = z.infer<typeof DatasetInvocationResult>;
 const DatasetHistoryUndo = z
   .object({
@@ -893,7 +911,7 @@ export const DatasetResult = z.discriminatedUnion("kind", [
     .strict(),
   DatasetPreparation.extend({ kind: z.literal("prepared") }).strict(),
   z.object({ kind: z.literal("approved"), revision }).strict(),
-  DatasetInvocationResult.extend({ kind: z.literal("invoked") }).strict(),
+  DatasetInvocationResult.safeExtend({ kind: z.literal("invoked") }).strict(),
   z
     .object({
       kind: z.literal("refused"),

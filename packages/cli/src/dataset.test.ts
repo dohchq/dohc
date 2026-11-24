@@ -119,6 +119,15 @@ const requests: unknown[] = [
   },
 ];
 describe("dataset CLI", () => {
+  it("leaves bulk admission to the host and uses its result profile", () => {
+    const bulkInput = "x".repeat(400_000);
+    const call = { ...(requests.at(-1) as object), input: bulkInput };
+    expect(DatasetRequest.parse(call)).toMatchObject({ input: bulkInput });
+    expect(DatasetRequest.safeParse({ ...call, profile: "bulk" }).success).toBe(false);
+    const result = { kind: "invoked", result: bulkInput, revision: 1, replayed: false };
+    expect(DatasetResult.safeParse(result).success).toBe(false);
+    expect(DatasetResult.parse({ ...result, profile: "bulk" })).toMatchObject(result);
+  });
   it("accepts caller-relative result addresses without accepting request traversal", () => {
     const dataset = {
       datasetId: id(1),

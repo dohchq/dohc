@@ -718,6 +718,7 @@ export async function createOwnerDatasetCopy(
           const result = await replica.read(input);
           authorize(signal);
           return {
+            ...(result.profile === "bulk" ? { profile: result.profile } : {}),
             result: result.result,
             revision: result.revision,
             replayed: false,
