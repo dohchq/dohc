@@ -19,7 +19,6 @@ import {
 } from "./bodySequenceGrammar.js";
 import {
   blockHolding,
-  changes,
   createBodyReader,
   indexAt,
   positionAt,
@@ -154,8 +153,8 @@ export function keepBodySequenceFormatting(sequence: Y.Text): () => void {
   const doc = sequence.doc;
   if (!doc) throw new Error("The body sequence must be part of a Yjs document.");
   const keep = (transaction: Y.Transaction) => {
-    if (changes(transaction.changedParentTypes, sequence))
-      transaction._needFormattingCleanup = false;
+    const changed: ReadonlyMap<unknown, unknown> = transaction.changedParentTypes;
+    if (changed.has(sequence)) transaction._needFormattingCleanup = false;
   };
   doc.on("afterTransaction", keep);
   return () => doc.off("afterTransaction", keep);
@@ -168,7 +167,6 @@ function boundOf(state: EditorState): Bound | null {
   return read?.() ?? null;
 }
 
-/** Whether Yjs has a transaction open on a document, or has not told of every finished one yet. */
 function isBusy(doc: Y.Doc): boolean {
   return doc._transaction !== null || doc._transactionCleanups.length > 0;
 }

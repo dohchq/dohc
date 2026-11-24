@@ -290,10 +290,6 @@ function placeForBoundaryOf(reading: BodyReading, block: number): number {
   return reading.bases[block]! + (reading.blocks[block]!.shown[0]?.index ?? 0);
 }
 
-/**
- * Gives a block with no boundary of its own a paragraph boundary, in front of what it holds. The
- * note reads the same after, and the block has the same index.
- */
 function giveBoundary(writing: BodyWriting, reading: BodyReading, block: number): void {
   const index = placeForBoundaryOf(reading, block);
   const paragraph = reading.doc.type.schema.nodes.paragraph!.create();
@@ -306,11 +302,37 @@ function isParagraphAfterItsLeaf(reading: BodyReading, block: number): boolean {
   );
 }
 
-/**
- * The blocks with no boundary of their own that a replaced range gives one first: the block the
- * range writes into, and the block whose start it replaces with another block's start. A later
- * block the range only runs into gets none.
- */
+function staysTheAddedParagraph(
+  reading: BodyReading,
+  opened: number,
+  tokens: readonly Token[],
+): boolean {
+  const [first, second] = tokens;
+  return (
+    isAddedParagraph(reading, opened) &&
+    first !== undefined &&
+    "block" in first &&
+    first.block.type.name === "paragraph" &&
+    first.block.content.size === 0 &&
+    second !== undefined &&
+    "block" in second &&
+    second.block.type !== first.block.type
+  );
+}
+
+function keepsTheStartItReplaces(
+  reading: BodyReading,
+  opened: number,
+  endsIn: number,
+  tokens: readonly Token[],
+): boolean {
+  const first = tokens[0];
+  if (first === undefined || !("block" in first)) return false;
+  if (endsIn <= opened) return true;
+  const startsMoreBlocks = tokens.findLastIndex((token) => "block" in token) > 0;
+  return startsMoreBlocks && !staysTheAddedParagraph(reading, opened, tokens);
+}
+
 function linesARangeEdits(
   reading: BodyReading,
   oldStart: number,
@@ -324,12 +346,9 @@ function linesARangeEdits(
   const holder = blockHolding(reading, oldStart);
   edits(holder);
   if (oldEnd === oldStart) return [...lines];
+  const opened = blockStartingAt(reading, oldStart);
   const endsIn = blockHolding(reading, oldEnd);
-  const first = tokens[0];
-  if (first !== undefined && "block" in first) {
-    const opened = blockStartingAt(reading, oldStart);
-    if (opened >= 0 && endsIn <= opened) edits(opened);
-  }
+  if (opened >= 0 && keepsTheStartItReplaces(reading, opened, endsIn, tokens)) edits(opened);
   return [...lines];
 }
 
@@ -411,19 +430,20 @@ function writeRange(
     const continued = tokens.findLastIndex((token) => "block" in token);
     const path = pathAt(reading, oldStart);
     const behind = formattingInForceAfter(sequence, kept + 1);
-    const itsOwnStart = startsWithBlock && opened >= 0 && boundaryAt(reading, opened) < 0 ? 1 : 0;
+    const own = continuesLaterBlock && opened >= 0 ? boundaryElement(reading, opened) : null;
+    const keepsItsOwn =
+      own !== null && startsWithBlock && keepsTheStartItReplaces(reading, opened, ends, tokens);
+    const taken = keepsItsOwn || staysTheAddedParagraph(reading, opened, tokens) ? 1 : 0;
+    const at = keepsItsOwn ? index + 1 : index;
     apply(sequence, [
-      ...retain(index),
-      ...inserts(
-        tokens.slice(itsOwnStart, continued),
-        path,
-        formattingInForceAfter(sequence, index),
-      ),
-      ...(kept > index ? [{ delete: kept - index }] : []),
+      ...retain(at),
+      ...inserts(tokens.slice(taken, continued), path, formattingInForceAfter(sequence, at)),
+      ...(kept > at ? [{ delete: kept - at }] : []),
       { retain: 1 },
       ...inserts(tokens.slice(continued + 1), path, behind),
       ...(last.index > kept ? [{ delete: last.index - kept }] : []),
     ]);
+    if (keepsItsOwn) setBoundary(own, reading.blocks[opened]!.node, start.block, null);
     const block = tokens[continued]!;
     if ("block" in block)
       setBoundary(boundaryElement(reading, ends)!, reading.blocks[ends]!.node, block.block, null);
@@ -720,7 +740,11 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
  *
  * A step that deletes a block and keeps text that followed it never reuses that block's boundary:
  * the text keeps its own boundary. So does the text of a later block that a range starting
- * inside an earlier block runs into, when the range starts a block.
+ * inside an earlier block runs into, when the range starts a block. A range that replaces one
+ * block's start and runs into a later block keeps both boundaries when it starts a block besides
+ * the one it ends in: the first is the first new block's, with its kind. When all it starts is
+ * the block it ends in, the first block goes. A list item's added paragraph that is still one
+ * after the step gets no boundary.
  *
  * A block with no boundary of its own can come or go when its neighbours change: the paragraph
  * for what stands before the first boundary, the one the reader adds in front of a list item's
@@ -791,11 +815,19 @@ function marksOfLetters(block: ProseMirrorNode): string {
  * in a container or in a list item's stored content splits the block under it at its start, and
  * so do blocks put in front of a block whose start the range replaces and whose text it keeps.
  * A block whose start a range replaces with a start of another kind changes kind; with a start
- * of its own kind it only changes an attribute. A block whose start a range takes away goes. A
- * block that is split, changes kind or goes can alter the paragraph after it, and one that goes,
- * changes kind or is split at its start its list item's added first paragraph. `linesGiven`,
- * the rule the reference writer asks too, turns that into the blocks to give. A block whose own
- * start the dispatch takes away gets none, as a paragraph that Backspace joins away.
+ * of its own kind it only changes an attribute. That holds for the first block of a range that
+ * runs into a later block too, when the range starts a block besides the one it ends in. A block
+ * whose start a range takes away goes. A block that is split, changes kind or goes can alter
+ * the paragraph after it, and one that goes, changes kind or is split at its start its list
+ * item's added first paragraph. `linesGiven`, the rule the reference writer asks too, turns
+ * that into the blocks to give. A block whose own start the dispatch takes away gets none, as a
+ * paragraph that Backspace joins away.
+ *
+ * A block a range runs into and starts again is still a line when the range puts blocks above
+ * it, types into it, or begins at a block's start, and then it is edited when the range types
+ * into it. In a delete that starts inside an earlier block it joins that block, as the
+ * reference writer's delete has it, and gets none, unless it is that block's own paragraph and
+ * the delete stops at its start.
  */
 export function linesGivenBoundaries(
   writing: BodyWriting,
@@ -882,20 +914,30 @@ export function linesGivenBoundaries(
           ) {
             const kind = reading.blocks[block]!.node.type;
             const keepsItsStart =
-              startsWithBlock && reading.starts[block] === from && endsIn <= block;
+              reading.starts[block] === from &&
+              keepsTheStartItReplaces(reading, block, endsIn, tokens);
             if (keepsItsStart) {
               const putInFront = endsIn === block && started.length > 1;
               const own = putInFront ? last : first;
+              const startsALaterBlockAgain = endsIn > block ? 1 : 0;
               edits.add(block);
-              if (started.length > 1) after.add(block);
+              if (started.length > 1 + startsALaterBlockAgain) after.add(block);
               if (putInFront) above.add(block);
               if (own !== undefined && "block" in own && own.block.type !== kind) touch(block);
               continue;
             }
-            gone.add(block);
             const startsAgain = block === endsIn && started.length > 0;
-            const asAnotherKind = last !== undefined && "block" in last && last.block.type !== kind;
-            if (!startsAgain || asAnotherKind) touch(block);
+            if (!startsAgain) {
+              gone.add(block);
+              touch(block);
+              continue;
+            }
+            const isTypedInto = tokens.at(-1) !== last;
+            const staysItsParagraph = block - 1 === holder && to === reading.starts[block]! + 1;
+            if (holder >= 0 && started.length === 1 && !isTypedInto && !staysItsParagraph)
+              gone.add(block);
+            if (last !== undefined && "block" in last && last.block.type !== kind) touch(block);
+            if (isTypedInto) edits.add(block);
           }
         });
       }

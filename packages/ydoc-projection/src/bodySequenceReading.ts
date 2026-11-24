@@ -75,10 +75,6 @@ export type BodyReader = ReturnType<typeof createBodyReader>;
 
 const NO_MARKS: Marks = new Map();
 
-/** Whether a Yjs transaction's record of what it changed names one shared type. */
-export function changes(changed: ReadonlyMap<unknown, unknown>, type: unknown): boolean {
-  return changed.has(type);
-}
 const NO_CHANGE: SequenceChange = {};
 
 function sameMarks(one: Marks, other: Marks): boolean {
@@ -469,7 +465,6 @@ export function createBodyReader(schema: Schema, sequence: Y.Text, containers: Y
     return true;
   };
 
-  /** Marks the lines some Yjs transactions changed, to be read again. */
   const note = (transactions: readonly Y.Transaction[]): void => {
     const first = transactions[0];
     if (!first) return;
@@ -590,7 +585,6 @@ export function createBodyReader(schema: Schema, sequence: Y.Text, containers: Y
     reading = null;
   };
 
-  /** Reads the sequence again. Returns where each followed position went. */
   const read = (change: SequenceChange = NO_CHANGE): Followed[] => {
     const transactions = change.transactions ?? [];
     const follow = transactions.length > 0 && change.follow?.length ? change.follow : null;
@@ -606,6 +600,7 @@ export function createBodyReader(schema: Schema, sequence: Y.Text, containers: Y
   };
 
   return {
+    /** Reads the sequence again. Returns where each followed position went. */
     read,
     /** What the sequence reads as now. */
     reading(): BodyReading {

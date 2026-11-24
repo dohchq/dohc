@@ -1700,6 +1700,7 @@ const HARD_BREAK: Part = ["hardBreak", {}];
 const WIKILINK: Part = ["wikilink", { target: "Page", label: null }];
 const CODE = { type: "codeBlock", language: null };
 const RULE = { type: "horizontalRule" };
+const PARAGRAPH = { type: "paragraph" };
 const MATH = { type: "mathBlock", tex: "x" };
 const RAW = { type: "rawBlock", source: "<hr>" };
 const IN_ITEM = { path: ["L", "I"] };
@@ -1962,16 +1963,16 @@ ORACLE_NOTES.push(
 
 const ORACLE_COUNTS = {
   outcomes: {
-    applied: 13726,
-    "filtered by keepsContainers": 4282,
+    applied: 16721,
+    "filtered by keepsContainers": 5205,
     "not offered": 609,
     "range error": 0,
   },
-  undone: 13265,
-  given: 6898,
+  undone: 16260,
+  given: 10232,
   excepted: {
     "a mark on an inline item": 511,
-    "formatting stored under a code block's letters": 12,
+    "formatting stored under a code block's letters": 15,
   },
 };
 
@@ -2033,11 +2034,6 @@ const ORACLE_EXCEPTIONS: {
   },
 ];
 
-/**
- * Each block with no boundary of its own: its path, the ids of the items it shows, in order, and
- * for a block that shows nothing, as a list item's added paragraph does, the id of the item its
- * boundary would stand in front of.
- */
 function linesWithNoBoundary(a: Person): { path: string; items: string[]; next?: string }[] {
   const reading = createBodyReader(schema, a.sequence, a.containers).reading();
   const tokens = tokensOf(a.sequence);
@@ -2259,7 +2255,7 @@ describe("the note reads as the document ProseMirror computed", () => {
         a.view.dispatch(a.view.state.tr.insertText("x", pos)),
       );
       check(`a divider at ${String(pos)}`, (a) =>
-        a.view.dispatch(putBlock(a.view.state.tr, pos, pos, rule())),
+        a.view.dispatch(tiptapInsertContentAt(a.view.state.tr, pos, pos, rule())),
       );
       for (const to of inText) {
         if (to <= pos) continue;
@@ -2273,10 +2269,21 @@ describe("the note reads as the document ProseMirror computed", () => {
           a.press("Enter");
         });
         check(`a divider ${over}`, (a) =>
-          a.view.dispatch(putBlock(a.view.state.tr, pos, to, rule())),
+          a.view.dispatch(tiptapInsertContentAt(a.view.state.tr, pos, to, rule())),
         );
         check(`two paragraphs pasted ${over}`, (a) =>
           a.view.dispatch(a.view.state.tr.replaceRange(pos, to, twoParagraphs())),
+        );
+        check(`two paragraphs pasted ${over}, the first whole`, (a) =>
+          a.view.dispatch(a.view.state.tr.replaceRange(pos, to, twoParagraphs(0))),
+        );
+        check(`a heading and a paragraph put ${over}`, (a) =>
+          a.view.dispatch(
+            tiptapInsertContentAt(a.view.state.tr, pos, to, [
+              schema.nodes.heading!.create({ level: 2 }, schema.text("X")),
+              schema.nodes.paragraph!.create(null, schema.text("Y")),
+            ]),
+          ),
         );
         check(`a delete and a split ${over}`, (a) =>
           a.view.dispatch(a.view.state.tr.delete(pos, to).split(pos)),
@@ -3605,7 +3612,6 @@ describe.each(["bare", "hosted"] as const)(
 const REFERENCE = Symbol("the reference writer");
 const idOfStruct = (id: Y.ID) => `${String(id.client)}:${String(id.clock)}`;
 
-/** Where in the note as it was each boundary an editor gave in its first, unrecorded change went. */
 function givenByEditor(a: Person, was: readonly { id: string }[]): number[] {
   if (a.sent.length < 2) return [];
   return Y.decodeUpdate(a.sent[0]!)
@@ -3768,7 +3774,7 @@ describe.each(["bare", "hosted"] as const)(
     it.each([
       [
         "a divider",
-        (a: Person) => a.view.dispatch(putBlock(a.view.state.tr, 2, 3, rule())),
+        (a: Person) => a.view.dispatch(tiptapInsertContentAt(a.view.state.tr, 2, 3, rule())),
         'doc(codeBlock("a"), horizontalRule, paragraph(wikilink, "cd"))',
       ],
       [
@@ -3826,11 +3832,97 @@ describe.each(["bare", "hosted"] as const)(
       reference.doc.destroy();
     });
 
+    it.each([
+      [
+        "a divider",
+        (a: Person) => a.view.dispatch(tiptapInsertContentAt(a.view.state.tr, 2, 5, rule())),
+        'doc(codeBlock("a"), horizontalRule, paragraph(wikilink, "cd"))',
+      ],
+      [
+        "Enter",
+        (a: Person) => {
+          a.select([0, 1], [1, 0]);
+          a.press("Enter");
+        },
+        'doc(codeBlock("a"), paragraph, paragraph(wikilink, "cd"))',
+      ],
+    ] as const)(
+      "gives the paragraph after a code block its boundary first when %s replaces a selection that runs from the code to that paragraph's start, so a letter typed there stays there when the change is undone",
+      (_name, replace, shown) => {
+        const lines = [stored(CODE, "ab", WIKILINK, "cd")];
+        const a = person(noteOfLines(lines), 10, shape);
+        const b = person(noteOfLines(lines), 20, shape);
+        replace(a);
+        expect(a.view.state.doc.toString()).toBe(shown);
+        expect(a.sent).toHaveLength(2);
+        expect(boundariesMadeIn(a.sent[0]!)).toHaveLength(1);
+        exchange(a, b);
+        b.typeAt(2, 0, "P");
+        exchange(b, a);
+        expect(a.undo()).toBe(true);
+        exchange(a, b);
+        for (const each of [a, b]) {
+          each.expectMirror();
+          expect(each.view.state.doc.toString()).toBe(
+            'doc(codeBlock("ab"), paragraph("P", wikilink, "cd"))',
+          );
+        }
+      },
+    );
+
+    it.each([
+      [
+        "text before the first boundary",
+        [stored(null, "ab"), stored({}, "cd")],
+        0,
+        'doc(heading("X"), paragraph("Y"), paragraph("d"))',
+      ],
+      [
+        "the paragraph after a math block",
+        [stored(MATH, "ab"), stored({}, "cd")],
+        1,
+        'doc(mathBlock, heading("X"), paragraph("Y"), paragraph("d"))',
+      ],
+    ] as const)(
+      "stores a heading put over %s and into the next line as a heading, and gives that line its boundary first",
+      (_name, lines, from, shown) => {
+        const a = person(noteOfLines(lines), 10, shape);
+        const before = a.view.state.doc.toJSON();
+        const heading = schema.nodes.heading!.create({ level: 2 }, schema.text("X"));
+        const paragraph = schema.nodes.paragraph!.create(null, schema.text("Y"));
+        a.view.dispatch(a.view.state.tr.replaceWith(from, from + 6, [heading, paragraph]));
+        expect(a.view.state.doc.toString()).toBe(shown);
+        a.expectMirror();
+        expect(a.sent).toHaveLength(2);
+        expect(boundariesMadeIn(a.sent[0]!)).toHaveLength(1);
+        expect(a.undo()).toBe(true);
+        expect(a.view.state.doc.toJSON()).toEqual(before);
+        a.expectMirror();
+      },
+    );
+
+    it("keeps a paragraph pasted over a list item's added paragraph and into the heading under it in the list item", () => {
+      const lines = [stored({ type: "heading", level: 1, ...IN_ITEM }, "cd")];
+      const a = person(noteOfLines(lines), 10, shape);
+      const before = a.view.state.doc.toJSON();
+      a.view.dispatch(a.view.state.tr.replaceRange(3, 6, twoParagraphs(0)));
+      expect(a.view.state.doc.toString()).toBe(
+        'doc(bulletList(listItem(paragraph("X"), paragraph("Yd"))))',
+      );
+      a.expectMirror();
+      expect(a.sent).toHaveLength(2);
+      expect(a.undo()).toBe(true);
+      expect(a.view.state.doc.toJSON()).toEqual(before);
+      a.expectMirror();
+    });
+
     it("puts a divider in front of a line's own boundary, so the line is still the heading someone else made it at the same moment", () => {
       const a = person(note(...LINES), 10, shape);
       const b = person(note(...LINES), 20, shape);
       const [first, second, third] = a.boundaryIds();
-      const effects = a.effects(() => a.view.dispatch(putBlock(a.view.state.tr, 10, 10, rule())));
+      const effects = a.effects(() =>
+        a.view.dispatch(tiptapInsertContentAt(a.view.state.tr, 10, 10, rule())),
+      );
       expect(effects.goneBoundaries).toEqual([]);
       expect(effects.madeBoundaries).toHaveLength(1);
       expect(a.boundaryIds()).toEqual([first, effects.madeBoundaries[0], second, third]);
@@ -3905,70 +3997,105 @@ const tally = (): Tally => ({
 const sayTally = (name: string, { notes, examples, ...counts }: Tally) =>
   `the editor against the reference writer, ${name}: ${String(notes)} notes; compared ${String(counts.compared)}; read the same and gave boundaries to other lines ${JSON.stringify(counts.givenDifferently)}; gave the same and read differently ${JSON.stringify(counts.readDifferently)}; made another edit, so read and gave differently ${JSON.stringify(counts.bothDifferently)}; gave and read the same and kept other boundaries ${JSON.stringify(counts.keptDifferently)}; only one of the two took the edit ${String(counts.onlyOne)}, neither ${String(counts.neither)}\n${examples.join("\n")}`;
 
-/**
- * What the comparison counts in the oracle's notes, and under it in ten notes made at random. No
- * edit that reads the same from both writers gives a boundary to other lines. Where the two read
- * differently, they made another edit:
- * - to a code block, ProseMirror turns hard breaks into newlines and drops what code cannot hold,
- *   and the reference writer leaves all of it in a paragraph after the code;
- * - in a list item, the reference writer's split of the item's first block starts a new item and
- *   gives the lines that move there, and a block the editor puts in stays in the item;
- * - a quote or a list whose only block is deleted stays in the editor, with an empty paragraph,
- *   and goes with its line for the reference writer;
- * - a delete that runs from one block into another that holds what the first cannot leaves two
- *   blocks in ProseMirror, and the reference writer joins what fits;
- * - Backspace in an empty line under a block that holds no text takes the line away in
- *   ProseMirror, and the block above for the reference writer.
- * A divider put where a list item's first paragraph is empty or selected whole keeps other
- * boundaries: ProseMirror keeps the paragraph the item needs and puts the divider under it, and
- * the reference writer turns that paragraph's boundary into the divider's.
- */
+const BUCKETS = [
+  "givenDifferently",
+  "readDifferently",
+  "bothDifferently",
+  "keptDifferently",
+] as const;
+const WHY_THEY_DIFFER: { why: string; edits: readonly string[] }[] = [
+  {
+    why: "To a code block, ProseMirror turns hard breaks into newlines and drops what code cannot hold. The reference writer leaves all of it in a paragraph after the code.",
+    edits: ["a change of kind to codeBlock"],
+  },
+  {
+    why: "In a list item, the reference writer's split of the item's first block starts a new item and gives the lines that move there. A block the editor puts in stays in the item, and ProseMirror keeps the paragraph the item needs where the reference writer turns its boundary into the new block's. A paste over whole blocks of an item can only be said as those lines retyped and typed into, which keeps their boundaries and gives one to a line that has none, where ProseMirror puts new blocks in their place.",
+    edits: [
+      "a block put first in its container",
+      "a block put right under another",
+      "a divider",
+      "a divider over a selection",
+      "a divider over a selection, as a delete and a block put in",
+      "a divider over a selection across blocks",
+      "two paragraphs pasted over a selection, the first whole",
+      "two paragraphs pasted over a selection across blocks, the first whole",
+    ],
+  },
+  {
+    why: "A quote or a list whose only block is deleted stays in the editor, with an empty paragraph, and goes with its line for the reference writer.",
+    edits: ["a delete of a whole block"],
+  },
+  {
+    why: "A delete that runs from one block into another that holds what the first cannot leaves two blocks in ProseMirror. The reference writer joins what fits.",
+    edits: ["a delete across blocks"],
+  },
+  {
+    why: "Backspace in an empty line under a block that holds no text takes the line away in ProseMirror, and the block above for the reference writer.",
+    edits: ["a join"],
+  },
+  {
+    why: "From a line's start, ProseMirror takes the selection's whole blocks away and splits the block it ends in. The reference writer cannot take a note's first line away: its delete keeps that line, gives it a boundary when it has none, and joins the last line to it.",
+    edits: ["Enter over a selection across blocks, from the note's start"],
+  },
+];
+const withNoReason = (counts: Differential) =>
+  BUCKETS.flatMap((bucket) => Object.keys(counts[bucket])).filter(
+    (edit) => !WHY_THEY_DIFFER.some((each) => each.edits.includes(edit)),
+  );
+
 const DIFFERENTIAL_COUNTS: Differential = {
-  compared: 5185,
-  onlyOne: 713,
-  neither: 310,
-  givenDifferently: {},
+  compared: 7042,
+  onlyOne: 1655,
+  neither: 373,
+  givenDifferently: { "Enter over a selection across blocks, from the note's start": 18 },
   readDifferently: {
+    "Enter over a selection across blocks, from the note's start": 21,
     "a change of kind to codeBlock": 20,
     "a block put first in its container": 2,
     "a divider": 2,
     "a divider over a selection": 2,
     "a divider over a selection, as a delete and a block put in": 2,
+    "two paragraphs pasted over a selection, the first whole": 3,
     "a block put right under another": 1,
     "a delete of a whole block": 1,
   },
-  bothDifferently: { "a block put right under another": 1 },
+  bothDifferently: {
+    "Enter over a selection across blocks, from the note's start": 18,
+    "two paragraphs pasted over a selection, the first whole": 1,
+    "a block put right under another": 1,
+  },
   keptDifferently: {
+    "Enter over a selection across blocks, from the note's start": 4,
+    "two paragraphs pasted over a selection across blocks, the first whole": 11,
+    "a divider over a selection across blocks": 6,
     "a divider over a selection": 2,
     "a divider over a selection, as a delete and a block put in": 2,
   },
 };
 const DIFFERENTIAL_COUNTS_AT_RANDOM: Differential = {
-  compared: 439,
-  onlyOne: 113,
-  neither: 42,
+  compared: 536,
+  onlyOne: 203,
+  neither: 46,
   givenDifferently: {},
   readDifferently: {
     "a delete across blocks": 2,
     "a change of kind to codeBlock": 6,
     "a block put first in its container": 2,
     "a divider": 2,
+    "two paragraphs pasted over a selection, the first whole": 3,
     "a delete of a whole block": 1,
     "a divider over a selection": 1,
     "a divider over a selection, as a delete and a block put in": 1,
     "a join": 1,
   },
-  bothDifferently: {},
+  bothDifferently: { "Enter over a selection across blocks, from the note's start": 4 },
   keptDifferently: {
+    "two paragraphs pasted over a selection across blocks, the first whole": 3,
     "a divider over a selection": 2,
     "a divider over a selection, as a delete and a block put in": 2,
   },
 };
 
-/**
- * Where in the note as it was each of some boundaries stands: the place of the first item after
- * it that the note already had. A boundary that no longer stands has no place.
- */
 function placesOf(
   sequence: Y.Text,
   boundaries: readonly string[],
@@ -3983,7 +4110,6 @@ function placesOf(
   });
 }
 
-/** Each boundary the note had that still stands, by its place in the note as it was, with its kind now. */
 function boundariesKept(sequence: Y.Text, was: readonly { id: string }[]): string[] {
   const before = new Map(was.map((token, index) => [token.id, index]));
   return tokensOf(sequence).flatMap((token) => {
@@ -3994,11 +4120,12 @@ function boundariesKept(sequence: Y.Text, was: readonly { id: string }[]): strin
   });
 }
 
-/**
- * The step the desktop's insert command makes for one block: in place of an empty paragraph, in
- * front of a line when the caret or the selection starts at its start, and else at the caret.
- */
-function putBlock(tr: Transaction, from: number, to: number, node: ProseMirrorNode): Transaction {
+function tiptapInsertContentAt(
+  tr: Transaction,
+  from: number,
+  to: number,
+  node: ProseMirrorNode | readonly ProseMirrorNode[],
+): Transaction {
   const $from = tr.doc.resolve(from);
   const parent = $from.parent;
   const isEmpty = parent.isTextblock && !parent.type.spec.code && parent.childCount === 0;
@@ -4007,15 +4134,13 @@ function putBlock(tr: Transaction, from: number, to: number, node: ProseMirrorNo
   return tr.replaceWith(atItsStart ? from - 1 : from, to, node);
 }
 
-/** Two paragraphs as a paste gives them: the first open at its start, the second at its end. */
-function twoParagraphs(): Slice {
+function twoParagraphs(openStart = 1): Slice {
   const paragraphs = ["X", "Y"].map((text) =>
     schema.nodes.paragraph!.create(null, schema.text(text)),
   );
-  return new Slice(Fragment.from(paragraphs), 1, 1);
+  return new Slice(Fragment.from(paragraphs), openStart, 1);
 }
 
-/** Another value for the attribute a block's own kind has: a heading's level, a code block's language, a math block's TeX. */
 function anotherAttribute(node: ProseMirrorNode): Record<string, unknown> | null {
   if (node.type.name === "heading") return { level: (Number(node.attrs.level) % 3) + 1 };
   if (node.type.name === "codeBlock") return { language: "js" };
@@ -4026,14 +4151,6 @@ function anotherAttribute(node: ProseMirrorNode): Record<string, unknown> | null
 type Make = (plan: (doc: Y.Doc) => BodyChange | null) => boolean;
 type Said = (make: Make) => unknown;
 
-/**
- * Makes every edit both writers take on every block of one note, once through an editor and once
- * through the reference writer, and counts where they give a boundary to different lines, read
- * differently after, or keep different boundaries of the note. An edit the reference writer has
- * no one operation for is made there as the operations it is made of, one change after the
- * other. An edit it can say in two ways is made both ways, and the editor is held to the lines
- * either gives.
- */
 function compareWithReference(lines: readonly StoredLine[], counted: Tally): void {
   const baseline = noteOfLines(lines);
   const start = declared(92);
@@ -4089,7 +4206,7 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
     byEditor: (a: Person) => void,
     startsInLineAbove = -1,
   ) => {
-    const references = [byReference]
+    const taken = [byReference]
       .flat()
       .map(asSaid)
       .filter((said) => said.took);
@@ -4100,6 +4217,8 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
       if (!(error instanceof RangeError)) throw error;
     }
     const wrote = a.sent.length > 0;
+    const readTheSame = taken.filter((said) => a.view.state.doc.eq(said.read));
+    const references = readTheSame.length > 0 ? readTheSame : taken;
     if (references.length === 0 || !wrote) {
       if (references.length === 0 && !wrote) counted.neither += 1;
       else counted.onlyOne += 1;
@@ -4117,18 +4236,17 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
         butTheLineAbove,
       );
       afterTheGive.doc.destroy();
-      const byTheReference = inOrder(references.flatMap((said) => said.given)).filter(
-        butTheLineAbove,
-      );
+      const givenBy = (said: (typeof references)[number]) =>
+        JSON.stringify(inOrder(said.given).filter(butTheLineAbove));
       const kept = boundariesKept(a.sequence, was).join();
       a.expectMirror();
       const count = (counts: Record<string, number>, why: string) => {
         counts[edit] = (counts[edit] ?? 0) + 1;
         if (counts[edit] <= 2) counted.examples.push(`${why}: ${where}`);
       };
-      const gaveTheSame = JSON.stringify(byTheEditor) === JSON.stringify(byTheReference);
-      const readsTheSame = references.some((said) => a.view.state.doc.eq(said.read));
-      const gave = `the editor gave ${JSON.stringify(byTheEditor)}, the reference ${JSON.stringify(byTheReference)}`;
+      const gaveTheSame = references.some((said) => givenBy(said) === JSON.stringify(byTheEditor));
+      const readsTheSame = readTheSame.length > 0;
+      const gave = `the editor gave ${JSON.stringify(byTheEditor)}, the reference ${givenBy(references[0]!)}`;
       const reads = `the editor reads ${a.view.state.doc.toString()}, the reference ${references[0]!.read.toString()}`;
       if (!gaveTheSame && !readsTheSame) count(counted.bothDifferently, `${gave}; ${reads}`);
       else if (!gaveTheSame) count(counted.givenDifferently, gave);
@@ -4208,7 +4326,16 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
     );
     if (!own.isTextblock) return;
     const isCode = own.type.spec.code === true;
-    /** A divider at an offset of this block when it holds `length`, as the reference writer says what `putBlock` does. */
+    const underNewLine = (make: Make, line: number, offset: number) =>
+      make((doc) => splitLine(schema, doc, line, offset, freshId, PARAGRAPH));
+    const sizeOf = (index: number) => {
+      const node = reading.blocks[index]!.node;
+      return node.isTextblock ? node.content.size : 0;
+    };
+    const asParagraph = (make: Make, line: number, node: ProseMirrorNode) =>
+      node.type.name === "paragraph" || make((doc) => setLineKind(schema, doc, line, PARAGRAPH));
+    const letter = (make: Make, line: number, offset: number, text: string) =>
+      make((doc) => typeLetters(schema, doc, line, offset, text, {}));
     const divide = (make: Make, offset: number, length: number) => {
       if (length === 0 && !isCode) return make((doc) => setLineKind(schema, doc, at, RULE));
       if (offset === 0 || offset === length)
@@ -4222,16 +4349,133 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
       const last = reading.blocks[toAt]!.node;
       if (!last.isTextblock) continue;
       for (const offset of offsetsIn(size))
-        for (const toOffset of offsetsIn(last.content.size))
-          compare(
-            "a delete across blocks",
-            `from ${String(offset)} of block ${String(at)} to ${String(toOffset)} of block ${String(toAt)}`,
-            (make) => make((doc) => deleteRange(schema, doc, at, offset, toAt, toOffset, freshId)),
-            (a) =>
-              a.view.dispatch(
-                a.view.state.tr.delete(from + offset, reading.starts[toAt]! + 1 + toOffset),
-              ),
+        for (const toOffset of offsetsIn(last.content.size)) {
+          const across = `from ${String(offset)} of block ${String(at)} to ${String(toOffset)} of block ${String(toAt)}`;
+          const to = reading.starts[toAt]! + 1 + toOffset;
+          const cutAcross = (make: Make) =>
+            make((doc) => deleteRange(schema, doc, at, offset, toAt, toOffset, freshId));
+          const cutUpToTheLast = (make: Make) =>
+            (toAt - 1 === at && offset === size) ||
+            make((doc) =>
+              deleteRange(schema, doc, at, offset, toAt - 1, sizeOf(toAt - 1), freshId),
+            );
+          const cutTheLastsStart = (make: Make, line = at + 1) =>
+            toOffset === 0 ||
+            make((doc) => deleteRange(schema, doc, line, 0, line, toOffset, freshId));
+          const cutTheWholeBlocks = (make: Make) =>
+            offset === 0 &&
+            at > 0 &&
+            make((doc) =>
+              deleteRange(schema, doc, at - 1, sizeOf(at - 1), toAt - 1, sizeOf(toAt - 1), freshId),
+            );
+          const divideTheFirst = (make: Make) =>
+            make((doc) =>
+              offset === 0 && size > 0
+                ? setLineKind(schema, doc, at, RULE)
+                : splitLine(schema, doc, at, offset, freshId, RULE),
+            );
+          compare("a delete across blocks", across, cutAcross, (a) =>
+            a.view.dispatch(a.view.state.tr.delete(from + offset, to)),
           );
+          compare(
+            "a divider over a selection across blocks",
+            across,
+            [
+              (make) => cutUpToTheLast(make) && cutTheLastsStart(make) && divideTheFirst(make),
+              (make) => cutAcross(make) && divideTheFirst(make),
+            ],
+            (a) =>
+              a.view.dispatch(tiptapInsertContentAt(a.view.state.tr, from + offset, to, rule())),
+          );
+          const asEnterSplits =
+            toOffset === last.content.size || offset === 0 ? PARAGRAPH : undefined;
+          compare(
+            offset > 0
+              ? "Enter over a selection across blocks"
+              : at > 0
+                ? "Enter over a selection across blocks, from a line's start"
+                : "Enter over a selection across blocks, from the note's start",
+            across,
+            [
+              (make) =>
+                cutAcross(make) &&
+                make((doc) => splitLine(schema, doc, at, offset, freshId, asEnterSplits)),
+              (make) =>
+                cutAcross(make) && make((doc) => splitLine(schema, doc, at + 1, 0, freshId)),
+              (make) =>
+                cutAcross(make) &&
+                make((doc) => splitLine(schema, doc, at + 1, 0, freshId, PARAGRAPH)),
+              (make) =>
+                cutTheWholeBlocks(make) &&
+                cutTheLastsStart(make, at) &&
+                make((doc) => splitLine(schema, doc, at, 0, freshId)),
+              (make) =>
+                cutTheWholeBlocks(make) &&
+                cutTheLastsStart(make, at) &&
+                make((doc) => splitLine(schema, doc, at, 0, freshId, PARAGRAPH)),
+            ],
+            (a) => {
+              a.select([at, offset], [toAt, toOffset]);
+              a.press("Enter");
+            },
+            offset === 0 ? at - 1 : -1,
+          );
+          compare(
+            "two paragraphs pasted over a selection across blocks",
+            across,
+            (make) =>
+              cutUpToTheLast(make) &&
+              letter(make, at, offset, "X") &&
+              cutTheLastsStart(make) &&
+              asParagraph(make, at + 1, last) &&
+              letter(make, at + 1, 0, "Y"),
+            (a) =>
+              a.view.dispatch(a.view.state.tr.replaceRange(from + offset, to, twoParagraphs())),
+          );
+          if (offset === 0)
+            compare(
+              "two paragraphs pasted over a selection across blocks, the first whole",
+              across,
+              [
+                (make) =>
+                  cutUpToTheLast(make) &&
+                  asParagraph(make, at, own) &&
+                  letter(make, at, 0, "X") &&
+                  cutTheLastsStart(make) &&
+                  asParagraph(make, at + 1, last) &&
+                  letter(make, at + 1, 0, "Y"),
+                (make) =>
+                  cutAcross(make) &&
+                  asParagraph(make, at, own) &&
+                  letter(make, at, 0, "X") &&
+                  underNewLine(make, at, 1) &&
+                  letter(make, at + 1, 0, "Y"),
+                (make) =>
+                  cutUpToTheLast(make) &&
+                  underNewLine(make, at, 0) &&
+                  letter(make, at + 1, 0, "X") &&
+                  cutTheLastsStart(make, at + 2) &&
+                  asParagraph(make, at + 2, last) &&
+                  letter(make, at + 2, 0, "Y"),
+                (make) =>
+                  cutAcross(make) &&
+                  underNewLine(make, at, 0) &&
+                  letter(make, at + 1, 0, "X") &&
+                  underNewLine(make, at + 1, 1) &&
+                  letter(make, at + 2, 0, "Y"),
+                (make) =>
+                  toAt > at + 1 &&
+                  (size === 0 ||
+                    make((doc) => deleteRange(schema, doc, at, 0, at, size, freshId))) &&
+                  asParagraph(make, at, own) &&
+                  letter(make, at, 0, "X") &&
+                  make((doc) => deleteRange(schema, doc, at + 1, 0, toAt, toOffset, freshId)) &&
+                  asParagraph(make, at + 1, reading.blocks[at + 1]!.node) &&
+                  letter(make, at + 1, 0, "Y"),
+              ],
+              (a) => a.view.dispatch(a.view.state.tr.replaceRange(from, to, twoParagraphs(0))),
+            );
+        }
     }
     if (size > 0)
       compare(
@@ -4273,7 +4517,7 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
         "a divider",
         `at ${String(offset)} of block ${String(at)}`,
         (make) => divide(make, offset, size),
-        (a) => a.view.dispatch(putBlock(a.view.state.tr, pos, pos, rule())),
+        (a) => a.view.dispatch(tiptapInsertContentAt(a.view.state.tr, pos, pos, rule())),
       );
       if (offset < size)
         compare(
@@ -4302,7 +4546,7 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
         (make) => cut(make) && make((doc) => splitLine(schema, doc, at, one, freshId)),
         (a) => a.view.dispatch(a.view.state.tr.delete(from + one, from + other).split(from + one)),
       );
-      const asParagraph = other === size || one === 0 ? { type: "paragraph" } : undefined;
+      const asEnterSplits = other === size || one === 0 ? PARAGRAPH : undefined;
       compare(
         "Enter over a selection",
         over,
@@ -4311,7 +4555,7 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
           make((doc) =>
             isCode
               ? typeLetters(schema, doc, at, one, "\n", {})
-              : splitLine(schema, doc, at, one, freshId, asParagraph),
+              : splitLine(schema, doc, at, one, freshId, asEnterSplits),
           ),
         (a) => {
           a.select([at, one], [at, other]);
@@ -4326,7 +4570,8 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
           (left === 0
             ? make((doc) => setLineKind(schema, doc, at, RULE))
             : divide(make, one, left)),
-        (a) => a.view.dispatch(putBlock(a.view.state.tr, from + one, from + other, rule())),
+        (a) =>
+          a.view.dispatch(tiptapInsertContentAt(a.view.state.tr, from + one, from + other, rule())),
       );
       compare(
         "a divider over a selection, as a delete and a block put in",
@@ -4334,7 +4579,7 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
         (make) => cut(make) && divide(make, one, left),
         (a) =>
           a.view.dispatch(
-            putBlock(
+            tiptapInsertContentAt(
               a.view.state.tr.delete(from + one, from + other),
               from + one,
               from + one,
@@ -4342,13 +4587,49 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
             ),
           ),
       );
+      if (one === 0)
+        compare(
+          "two paragraphs pasted over a selection, the first whole",
+          over,
+          other === size
+            ? [
+                (make) =>
+                  cut(make) &&
+                  asParagraph(make, at, own) &&
+                  letter(make, at, 0, "X") &&
+                  underNewLine(make, at, 1) &&
+                  letter(make, at + 1, 0, "Y"),
+                (make) =>
+                  cut(make) &&
+                  underNewLine(make, at, 0) &&
+                  letter(make, at + 1, 0, "X") &&
+                  underNewLine(make, at + 1, 1) &&
+                  letter(make, at + 2, 0, "Y"),
+              ]
+            : [
+                (make) =>
+                  cut(make) &&
+                  asParagraph(make, at, own) &&
+                  letter(make, at, 0, "Y") &&
+                  underNewLine(make, at, 0) &&
+                  letter(make, at, 0, "X"),
+                (make) =>
+                  underNewLine(make, at, other) &&
+                  cut(make) &&
+                  letter(make, at + 1, 0, "Y") &&
+                  underNewLine(make, at, 0) &&
+                  letter(make, at + 1, 0, "X"),
+              ],
+          (a) =>
+            a.view.dispatch(a.view.state.tr.replaceRange(from, from + other, twoParagraphs(0))),
+        );
       compare(
         "two paragraphs pasted over a selection",
         over,
         (make) =>
           cut(make) &&
           make((doc) => typeLetters(schema, doc, at, one, "X", {})) &&
-          make((doc) => splitLine(schema, doc, at, one + 1, freshId, { type: "paragraph" })) &&
+          make((doc) => splitLine(schema, doc, at, one + 1, freshId, PARAGRAPH)) &&
           make((doc) => typeLetters(schema, doc, at + 1, 0, "Y", {})),
         (a) =>
           a.view.dispatch(a.view.state.tr.replaceRange(from + one, from + other, twoParagraphs())),
@@ -4369,7 +4650,6 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
   counted.notes += 1;
 }
 
-/** A note of two to four lines made at random: any kind, some in one list item, the first perhaps with no boundary. */
 function noteAtRandom(next: () => number): StoredLine[] {
   const pick = <Option>(options: readonly Option[]) =>
     options[Math.floor(next() * options.length)]!;
@@ -4404,6 +4684,7 @@ describe("the editor and the reference writer, for the same edit of the same not
   it("compares as many edits as counted", () => {
     console.log(sayTally("in the oracle's notes", inOracleNotes));
     const { notes, examples: _examples, ...counts } = inOracleNotes;
+    expect(withNoReason(counts)).toEqual([]);
     if (notes !== ORACLE_NOTES.length) return;
     expect(counts).toEqual(DIFFERENTIAL_COUNTS);
   });
@@ -4414,7 +4695,12 @@ describe("the editor and the reference writer, for the same edit of the same not
       compareWithReference(noteAtRandom(random(seed)), atRandom);
     console.log(sayTally("in notes made at random", atRandom));
     const { notes: _notes, examples: _examples, ...counts } = atRandom;
-    expect(counts.givenDifferently).toEqual(DIFFERENTIAL_COUNTS_AT_RANDOM.givenDifferently);
+    expect(withNoReason(counts)).toEqual([]);
+    expect(
+      Object.keys(counts.givenDifferently).filter(
+        (edit) => !(edit in DIFFERENTIAL_COUNTS.givenDifferently),
+      ),
+    ).toEqual([]);
     if (SEEDS === 40) expect(counts).toEqual(DIFFERENTIAL_COUNTS_AT_RANDOM);
   });
 });
