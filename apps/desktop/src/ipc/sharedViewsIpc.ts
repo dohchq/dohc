@@ -1671,14 +1671,22 @@ export function registerSharedViewsIpcHandlers<
               ) {
                 Object.assign(pulling, membershipLevel(committedPin));
               }
+              // A membership that waits to send answers View where it is pinned
+              // at Edit, as its write gates and summary do.
+              const answered =
+                committedPin.wholeWorkspace === true &&
+                committedPin.access === "edit" &&
+                committed.editingNotReady === true
+                  ? "view"
+                  : committedPin.access;
               const statesMore =
-                shareAccessRank(statedAccess) > shareAccessRank(committedPin.access)
+                shareAccessRank(statedAccess) > shareAccessRank(answered)
                   ? { relayStatesMore: true as const }
                   : {};
               return committedPin.wholeWorkspace === true
                 ? {
                     status: "current",
-                    access: committedPin.access,
+                    access: answered,
                     ...(stated.role ? { role: stated.role } : {}),
                     ...(committedPin.access !== levelAtRead
                       ? {
