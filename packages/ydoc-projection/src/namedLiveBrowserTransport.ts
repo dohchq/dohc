@@ -459,7 +459,7 @@ export function createNamedLiveBrowserTransport<
       });
     }
     /** Reads the invitation again after a refusal that a passing server state also gives. */
-    async function recheck(held: Attempt, grantId: string): Promise<string> {
+    async function recheck(held: Attempt, grantId: string, checking: boolean): Promise<string> {
       held.refused = true;
       try {
         const listing = await json(held, "/api/live/named-documents", { grantId });
@@ -472,6 +472,10 @@ export function createNamedLiveBrowserTransport<
           return "authority-unavailable";
         if (!listing.files.some((file) => record(file) && file.objectId === target.objectId))
           return "document-gone";
+        if (checking) {
+          kept = undefined;
+          return "live-stopped";
+        }
       } catch (error) {
         if (error instanceof AccessRemoved) return "access-removed";
       }
@@ -545,7 +549,7 @@ export function createNamedLiveBrowserTransport<
           if (kept && kept.expiresAtMs > Date.now()) held.kept = true;
           else {
             kept = undefined;
-            if (!fresh) {
+            if (!fresh && !checking) {
               // Without a session, no retry in this outage can open the file.
               if (!mayReplace()) throw new SessionSpent();
               replacedAt = Date.now();
@@ -631,7 +635,7 @@ export function createNamedLiveBrowserTransport<
                     : "authority-unavailable"
                   : error instanceof LiveAuthorityUnavailableError
                     ? !options.authorize && "grantId" in target
-                      ? await recheck(held, String(target.grantId))
+                      ? await recheck(held, String(target.grantId), checking)
                       : "authority-unavailable"
                     : error instanceof LiveStoppedError
                       ? "live-stopped"

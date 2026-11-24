@@ -899,13 +899,13 @@ export function App() {
     setEditorLoadFailed(false);
   };
   const editingCollectionFile = editing !== null && isCollectionOwnFile(editing.path);
-  const available =
+  const editable =
     editing !== null &&
     ready !== null &&
     ready.session === editing.discriminator &&
     ready.meta.access === "edit" &&
-    ready.meta.effectiveSelector.versionId === null &&
-    selected !== undefined;
+    ready.meta.effectiveSelector.versionId === null;
+  const available = editable && selected !== undefined;
   // The editor mounts once the bar has its place, so Done never shows anywhere else first.
   const editor =
     !editing || !barSlot ? null : editingCollectionFile ? (
@@ -924,6 +924,7 @@ export function App() {
         discriminator={editing.discriminator}
         path={editing.path}
         available={available}
+        gone={editable && selected === undefined}
         onClose={stopEditing}
         barSlot={barSlot}
         onOpenChange={setEditorOpen}

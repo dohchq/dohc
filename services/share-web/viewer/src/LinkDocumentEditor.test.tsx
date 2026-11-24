@@ -406,3 +406,30 @@ it("shows the text on the host's early state, says typed words are not sent, and
   expect(status()).toBe("Saving changes…");
   expect(panel()).toBeNull();
 });
+it("says the file moved or was removed when the shared files lose it, and keeps the draft for review", async () => {
+  const f = await opened();
+  await act(async () =>
+    f.update({
+      status: "disconnected",
+      reason: "live-stopped",
+      pendingUpdates: 1,
+      typingStopped: true,
+    }),
+  );
+  await act(async () =>
+    root.render(
+      <LinkDocumentEditor
+        discriminator="abcdefghijkl"
+        path="docs/a.md"
+        available={false}
+        gone
+        onClose={f.onClose}
+      />,
+    ),
+  );
+  expect(f.session.close).toHaveBeenCalled();
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+    "This file moved or was removed. Ask its owner for a new link.",
+  );
+  expect(panel()).not.toBeNull();
+});

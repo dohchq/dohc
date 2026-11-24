@@ -1262,6 +1262,41 @@ it("keeps an invited editor's page read-only while live editing is off, checks e
   const retry = await peer.submitted();
   expect(retry.bytes).toEqual(first.bytes);
 });
+it("keeps checking an invited editor's off page after the server forgot its session while the tab was hidden, and joins once the file is live", async () => {
+  const f = await live();
+  vi.useFakeTimers();
+  let stopped = true,
+    forgot = false;
+  f.intercept((path, init) =>
+    path !== "/api/live/named-ticket"
+      ? undefined
+      : forgot && String(init.body).includes('"000000000001"')
+        ? new Response(null, { status: 404 })
+        : stopped
+          ? Response.json(NAMED_LIVE_STOPPED, { status: 404 })
+          : undefined,
+  );
+  f.socket.close();
+  await vi.advanceTimersByTimeAsync(250);
+  expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "live-stopped" });
+  vi.stubGlobal("document", { visibilityState: "hidden" });
+  try {
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+  forgot = true;
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "live-stopped" });
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(f.issued()).toBe(2);
+  expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "live-stopped" });
+  stopped = false;
+  await vi.advanceTimersByTimeAsync(30_000);
+  const socket = await f.socketAt(1);
+  expect(f.urls[1]).toContain("session=000000000002");
+  socket.open();
+});
 it("waits while live editing of the file is starting, takes no typing, and joins by itself once it is live", async () => {
   vi.useFakeTimers();
   const f = fixture();

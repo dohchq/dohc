@@ -4,6 +4,7 @@ import type { NamedLiveBrowserState } from "@dohc/ydoc-projection/named-live-bro
 import {
   draftNeedsReview,
   DraftReview,
+  LINK_FILE_GONE,
   LIVE_OFF,
   NamedDocumentEditor,
   type NamedDocumentSession,
@@ -21,12 +22,13 @@ const COULD_NOT_OPEN =
  * Keep this mounted after access changes so the local draft remains recoverable.
  * `barSlot` is the page's bar, where Done and the saved state go. `onOpenChange` hears when the
  * file is first live in the editor, so the page shows its read-only text until then. `otherWay` is offered
- * beside Try again when editing could not start.
+ * beside Try again when editing could not start. `gone` says the shared files no longer list it.
  */
 export function LinkDocumentEditor({
   discriminator,
   path,
   available,
+  gone,
   onClose,
   barSlot,
   onOpenChange,
@@ -36,6 +38,7 @@ export function LinkDocumentEditor({
   discriminator: string;
   path: string;
   available: boolean;
+  gone?: boolean;
   onClose(): void;
   barSlot?: HTMLElement | null;
   onOpenChange?(open: boolean): void;
@@ -153,7 +156,9 @@ export function LinkDocumentEditor({
       {barSlot ? createPortal(bar, barSlot) : <div className="header-actions">{bar}</div>}
       {!available && (
         <p className="edit-alert" role="alert">
-          Editing is no longer available. Copy any unsynced changes before closing this file.
+          {gone
+            ? LINK_FILE_GONE
+            : "Editing is no longer available. Copy any unsynced changes before closing this file."}
         </p>
       )}
       {error && (

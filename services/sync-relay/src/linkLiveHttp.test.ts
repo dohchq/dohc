@@ -304,7 +304,7 @@ it("tells a holder a held note whose file moved stopped, not to try again", asyn
 });
 
 // A starting note opens for the holder, who waits on its tickets. An off note only its owner can start again.
-it("opens a starting note with no state, and tells a holder an off note stopped", async () => {
+it("opens a starting or off note with no state, so its ticket gives the answer", async () => {
   let blocked: SessionHostBlock | undefined,
     note: LiveNoteStanding | undefined = "starting";
   const f = await fixture(() => blocked, {
@@ -319,20 +319,24 @@ it("opens a starting note with no state, and tells a holder an off note stopped"
     .run(scope.workspaceId, binding.objectId, "b".repeat(64));
   const ask = (route?: string) =>
     f.handle(request({ discriminator, path: "docs/moved.md" }, route));
-  const opened = await ask();
-  expect([opened.status, await opened.json()]).toEqual([200, { objectId: binding.objectId }]);
-  expect((await ask("/sync/live/link-document-state")).status).toBe(204);
-  blocked = "held";
-  expect(await (await ask()).json()).toEqual(linkRefusalBody("link_live_stopped"));
-  blocked = undefined;
-  note = "off";
-  for (const route of ["/sync/live/link-document", "/sync/live/link-document-state"]) {
-    const refused = await ask(route);
-    expect([refused.status, await refused.json()]).toEqual([
-      503,
-      linkRefusalBody("link_live_stopped"),
-    ]);
+  for (const [standing, block] of [
+    ["starting", undefined],
+    ["starting", "held"],
+    ["off", undefined],
+  ] as const) {
+    note = standing;
+    blocked = block;
+    const opened = await ask();
+    expect([opened.status, await opened.json()]).toEqual([200, { objectId: binding.objectId }]);
+    expect((await ask("/sync/live/link-document-state")).status).toBe(204);
   }
+  note = undefined;
+  blocked = "held";
+  const refused = await ask();
+  expect([refused.status, await refused.json()]).toEqual([
+    503,
+    linkRefusalBody("link_live_stopped"),
+  ]);
 });
 
 // A link reader's page asks for a note's state before it opens a socket, so it can show the note at once.

@@ -20,7 +20,6 @@ import {
   linkRefusal,
   opaqueLinkRefusal,
   sessionHostRefusal,
-  unboundLinkRefusal,
   type LiveNoteStanding,
   type SessionHostBlock,
 } from "./linkRefusal";
@@ -184,10 +183,9 @@ export function createLinkLiveHttp(options: {
             current.kind === "refused" &&
             (current.reason === "host-unavailable" || current.reason === "stale-document")
           ) {
-            const note = options.liveNote?.({ workspaceId: context.workspaceId, objectId });
-            return note === "starting" && block !== "held"
+            return options.liveNote?.({ workspaceId: context.workspaceId, objectId })
               ? { objectId }
-              : unboundLinkRefusal(note, block);
+              : sessionHostRefusal(block ?? "stopped");
           }
           if (current.kind !== "current" || current.binding.currentPath !== path) return null;
           if (block) return sessionHostRefusal(block);
