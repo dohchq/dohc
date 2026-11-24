@@ -1005,9 +1005,10 @@ const table = (page: { sequence: Y.Text; records: Y.Map<unknown> }, client: numb
 
 const firstLine = (sequence: Y.Text) => firstOf(sequence, "block")!;
 
+const LONG_PATH = "a path of 90,000 ids";
 const TAKEN: readonly Case[] = [
   {
-    name: "a path of 90,000 ids",
+    name: LONG_PATH,
     change: made(({ sequence }) =>
       firstLine(sequence).setAttribute(
         "path",
@@ -1234,7 +1235,7 @@ describe("single changes no editor would send, on a relay that admits format-2 n
       const baseline = seededNote();
       const held = room(baseline);
       const next = random(seed * 2053);
-      const all = [...REFUSED, ...TAKEN].filter(({ name }) => !name.includes("300,000"));
+      const all = [...REFUSED, ...TAKEN].filter(({ name }) => name !== LONG_PATH);
       for (let step = 0; step < 14; step++) {
         const picked = all[Math.floor(next() * all.length)]!;
         const { name } = picked;
