@@ -860,7 +860,7 @@ jobs:
           github-token: ${{ github.token }}
       - name: Wait before retrying the prepared download
         if: steps.prepared-download.outcome == 'failure'
-        run: sleep 2
+        run: sleep 20
       - name: Download the prepared engine and share page again
         if: steps.prepared-download.outcome == 'failure'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333

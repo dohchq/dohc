@@ -492,7 +492,7 @@ test("together downloads retry once before unpacking the prepared archive", () =
     with: inputs,
   });
   assert.equal(steps[wait + 2].if, "steps.prepared-download.outcome == 'failure'");
-  assert.equal(steps[wait + 2].run, "sleep 2");
+  assert.equal(steps[wait + 2].run, "sleep 20");
   assert.deepEqual(steps[wait + 3], {
     name: "Download the prepared engine and share page again",
     if: "steps.prepared-download.outcome == 'failure'",
