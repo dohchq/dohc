@@ -927,3 +927,46 @@ it.each([
     }
   },
 );
+
+it("keeps a hosted note's current file on the accepted line after the host resends a refused settlement as a plain save", async () => {
+  const f = registered({ deployment: true });
+  try {
+    const first = publication(f, "first");
+    await prepare(f, [first.op]);
+    expect(append(f, [first.op]).inserted).toBe(1);
+    const path = first.record.binding.currentPath;
+    const current = () =>
+      f.storage.currentFileBlobSha256({ workspaceId: "workspace", versionId: "main", path });
+    expect(current()).toBe(first.markdownSha);
+
+    const refused = publication(f, "refused", first.receipt.journalCursor, first.markdownSha, 1);
+    refused.op.payloadJson = stableJsonStringify({ ...refused.payload, authors: [] });
+    await prepare(f, [refused.op]);
+    expect(append(f, [refused.op]).settlementRefusals).toEqual([
+      expect.objectContaining({ momentId: "refused" }),
+    ]);
+    const { settlementReference: _proof, ...unattributed } = refused.payload;
+    const resend = {
+      originSeq: 2,
+      opKind: "moment.append",
+      recordedAtMs: 1,
+      payloadJson: stableJsonStringify({
+        ...unattributed,
+        attributionUnavailable: {
+          settlementId: refused.record.settlementId,
+          reason: "authorship-mismatch",
+        },
+      }),
+    };
+    await prepare(f, [resend]);
+    expect(append(f, [resend]).inserted).toBe(1);
+    expect(current()).toBe(refused.markdownSha);
+
+    const next = publication(f, "next", first.receipt.journalCursor, first.markdownSha, 3);
+    await prepare(f, [next.op]);
+    expect(append(f, [next.op]).settlementRefusals).toBeUndefined();
+    expect(current()).toBe(next.markdownSha);
+  } finally {
+    f.close();
+  }
+});
