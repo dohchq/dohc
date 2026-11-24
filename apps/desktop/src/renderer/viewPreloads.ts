@@ -4,7 +4,7 @@ import { LazySourceCodeEditor } from "./LazySourceCodeEditor";
 import { preloadMarkdownEditor } from "./editor/LazyMarkdownEditor";
 import { preloadMarkdownReadView } from "./markdown/LazyMarkdownReadView";
 import { preloadDesktopSettings } from "./settings/LazyDesktopSettings";
-import { LazyChatsView, LazyCollectionPage } from "./shell/lazyViews";
+import { LazyCollectionPage } from "./shell/lazyViews";
 
 /** Starts loading the code that shows a file, for a file someone is about to
  *  open: one they point at, or one a tab opens. */
@@ -38,15 +38,14 @@ export function preloadCollectionView(): void {
   void LazyCollectionPage.preload();
 }
 
-// Views people open soon after launch, in order. Each starts in an idle
-// period after the one before it has loaded, so a key press waits behind at
-// most one of them.
+// Small views people open soon after launch, in order. Each starts in an
+// idle period after the one before it has loaded, so a key press waits behind
+// at most one of them. Larger views (Chats, Collections, the source editor)
+// slowed launch by about 300 ms in packaged runs, so they load on hover,
+// focus, or open instead.
 const IDLE_PRELOADS: readonly (() => Promise<void>)[] = [
   preloadDesktopSettings,
   preloadMarkdownReadView,
-  LazyChatsView.preload,
-  LazyCollectionPage.preload,
-  LazySourceCodeEditor.preload,
 ];
 let idlePreloadsStarted = false;
 
