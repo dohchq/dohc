@@ -61,8 +61,8 @@ export function EmptyLine({ text }: { text: string }) {
 
 /** Why no workspace is open, once the account's list says (workspaceGap); null while it loads or one is open. */
 export function useWorkspaceGap(): WorkspaceGap | null {
-  const { workspaces, currentWorkspaceId } = useAccount();
-  return workspaceGap(workspaces, currentWorkspaceId);
+  const { workspaces, currentWorkspaceId, choosingWorkspace } = useAccount();
+  return workspaceGap(workspaces, { currentWorkspaceId, choosing: choosingWorkspace });
 }
 
 /**

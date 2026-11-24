@@ -64,7 +64,7 @@ function setup(...lists: Answer[]) {
   open.resume();
   list.reload();
   /** Why no workspace is open, as every screen, Home and Chats and a page or chat alike, shows it. */
-  const gap = () => workspaceGap(list.state(), open.state().currentWorkspaceId);
+  const gap = () => workspaceGap(list.state(), open.state());
   return {
     server,
     cache,
@@ -121,7 +121,11 @@ describe("a workspace hidden from the phone elsewhere", () => {
       ).toHaveLength(2),
     );
     await vi.waitFor(() =>
-      expect(context.open.state()).toEqual({ currentWorkspaceId: null, data: null }),
+      expect(context.open.state()).toEqual({
+        currentWorkspaceId: null,
+        data: null,
+        choosing: false,
+      }),
     );
     // A page or chat open over the tabs shows why, as Home and Chats do, instead of waiting on a store that's gone.
     expect(context.gap()).toEqual({ kind: "none-shown" });
@@ -172,7 +176,7 @@ describe("a workspace the server can't open yet", () => {
     const alone = setup(listed(unsynced));
     await vi.waitFor(() => expect(alone.server.paths()).toContain("GET /sync/account/workspaces"));
     await settledList();
-    expect(alone.open.state()).toEqual({ currentWorkspaceId: null, data: null });
+    expect(alone.open.state()).toEqual({ currentWorkspaceId: null, data: null, choosing: false });
     expect(alone.gap()).toEqual({ kind: "none-synced" });
     expect(alone.server.paths().some((path) => path.startsWith("POST /sync/ws-a/"))).toBe(false);
   });

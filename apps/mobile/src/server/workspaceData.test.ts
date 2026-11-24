@@ -865,3 +865,57 @@ describe("a read mark the server couldn't send", () => {
     expect(count(server, path)).toBe(1);
   });
 });
+
+describe("a chat read before it opens", () => {
+  const stream = (group: string): Answer =>
+    ops(
+      {
+        ok: true,
+        stream: {
+          group: { id: group, name: group, kind: "group" },
+          items: [],
+          nextBefore: null,
+          readPosition: null,
+        },
+      },
+      "0.5.2",
+    );
+
+  it("reads once, and the screen that opens it reads nothing more", async () => {
+    const server = testServer();
+    const answer = deferred<Answer>();
+    server.on("POST", "/sync/ws-a/ops/chat", () => answer.promise);
+    server.on("GET", feedPath("ws-a", "0.5.2"), held);
+    const { data } = open(server);
+    const view = views.stream("channel-1");
+    data.prefetch(view);
+    data.prefetch(view);
+    data.subscribe(view, () => {});
+    answer.resolve(stream("channel-1"));
+    await vi.waitFor(() => expect(data.state(view).value).toMatchObject({ kind: "stream" }));
+    data.prefetch(view);
+    await settled();
+    expect(count(server, "/sync/ws-a/ops/chat")).toBe(1);
+  });
+
+  it("reads again only once a change makes it stale", async () => {
+    const server = testServer();
+    server.on("POST", "/sync/ws-a/ops/chat", stream("channel-1"));
+    server.on("POST", "/sync/ws-a/ops/groupsFull", ops(groups(), "0.5.2"));
+    const changed = deferred<Answer>();
+    server.on("GET", feedPath("ws-a", "0.5.2"), () => changed.promise);
+    server.on("GET", feedPath("ws-a", "0.6.2"), held);
+    const { data } = open(server);
+    const view = views.stream("channel-1");
+    data.prefetch(view);
+    await vi.waitFor(() => expect(data.state(view).value).toMatchObject({ kind: "stream" }));
+    data.prefetch(view);
+    await settled();
+    expect(count(server, "/sync/ws-a/ops/chat")).toBe(1);
+
+    changed.resolve(feed({ cursor: "0.6.2", changed: { chats: [] } }));
+    await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.6.2"))).toBe(1));
+    data.prefetch(view);
+    await vi.waitFor(() => expect(count(server, "/sync/ws-a/ops/chat")).toBe(2));
+  });
+});
