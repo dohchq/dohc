@@ -103,6 +103,14 @@ describe("workspace summary projection", () => {
     });
     // Before the relay lists a reach, Chats gives every Group the member level.
     expect(levels({})).toBeUndefined();
+    // A copy that waits to send shows View, but its Groups keep the pinned level.
+    expect(
+      workspaceSummaryFor(
+        entry({
+          shareView: { ...shareView({ ...whole, access: "edit" }), editingNotReady: true },
+        }),
+      ).shareView,
+    ).toMatchObject({ access: "view", groupLevels: { groupDefault: "edit", groups: [] } });
     expect(levels({ reach: { ...reach, groupDefault: "owner" } })).toEqual({
       groupDefault: "view",
       groups: [],

@@ -517,6 +517,8 @@ describe("metadata-only access checks", () => {
       visibilitySignature: "v1",
       rootLevel: "edit" as const,
       folders: [],
+      groupDefault: "edit" as const,
+      groups: [],
     };
     Object.assign(h.workspace.shareView!, {
       grantedSelector: { paths: [], versionId: null, access: "edit", wholeWorkspace: true },
