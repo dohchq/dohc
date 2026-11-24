@@ -3433,19 +3433,43 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             / held.len().max(1))
         .clamp(1, crate::MAX_PULL_OPS);
         for (object_id, from) in &held {
-            let Some(response) = self.hosted_page(
-                store,
+            let read = |client: &Self, store: &mut EngineStore, from| {
+                client.hosted_page(
+                    store,
+                    workspace_id,
+                    &identity,
+                    &replica,
+                    Some(object_id),
+                    from,
+                    per_held,
+                    faults,
+                )
+            };
+            let Some(mut response) = read(self, store, *from)? else {
+                return Ok(None);
+            };
+            if let Some(parent_seq) = self.served_conflict_parent(
                 workspace_id,
                 &identity,
                 &replica,
-                Some(object_id),
+                object_id,
                 *from,
-                per_held,
+                &response.ops,
+            )? && crate::hosted::rewind_to_conflict_parent(
+                store,
+                workspace_id,
+                object_id,
+                *from,
+                parent_seq,
                 faults,
-            )?
-            else {
-                return Ok(None);
-            };
+            )
+            .map_err(local)?
+            {
+                let Some(rewound) = read(self, store, parent_seq - 1)? else {
+                    return Ok(None);
+                };
+                response = rewound;
+            }
             fetched = fetched
                 .checked_add(response.ops.len())
                 .ok_or(RelayError::InvalidResponse)?;
@@ -3744,6 +3768,57 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 error => local(error),
             }
         })
+    }
+
+    /// The relay position of the `conflict.resolve` that a document held for
+    /// its withheld conflict parent waits for, when the feed now serves it at
+    /// or below `from`, where the document's read is. It is the parent the
+    /// held read's conflict child names.
+    fn served_conflict_parent(
+        &self,
+        workspace_id: &str,
+        identity: &crate::SyncIdentity,
+        replica: &crate::HostedReplicaState,
+        object_id: &str,
+        from: i64,
+        ops: &[ReplicationEnvelope],
+    ) -> Result<Option<i64>, RelayError> {
+        let Some(crate::HostedDocumentStatus::Held(crate::HostedHold::ConflictParentWithheld {
+            conflict_id,
+        })) = replica
+            .documents
+            .get(object_id)
+            .map(|document| &document.status)
+        else {
+            return Ok(None);
+        };
+        let Some((origin_id, origin_seq)) = ops
+            .iter()
+            .filter(|op| crate::hosted::hosted_document(op) == Some(object_id))
+            .find_map(|op| {
+                crate::conflict_resolve_v1::conflict_parent(op)
+                    .filter(|(id, _)| id == conflict_id)
+                    .map(|(_, seq)| (op.origin_id.clone(), seq))
+            })
+        else {
+            return Ok(None);
+        };
+        let LogCoordinateResponse::Present(parent) =
+            self.transport.lookup_log_coordinate(LogCoordinateRequest {
+                workspace_id: workspace_id.to_owned(),
+                replication_epoch: identity.replication_epoch.clone(),
+                stream_identity: identity.stream_identity.clone(),
+                origin_id,
+                origin_seq,
+            })?
+        else {
+            return Ok(None);
+        };
+        Ok(parent.relay_seq.filter(|seq| {
+            parent.op_kind == "conflict.resolve"
+                && crate::hosted::hosted_document(&parent) == Some(object_id)
+                && (1..=from).contains(seq)
+        }))
     }
 
     /// One page of the hosted feed under the stored scope: `workspace.init`

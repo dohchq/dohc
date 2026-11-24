@@ -1862,6 +1862,17 @@ fn conflict_parent_seq(
         .ok_or(SyncError::CoordinateDiverged)
 }
 
+/// The conflict a conflict child resolves, and the origin sequence it names
+/// its `conflict.resolve` at. `None` for any other op.
+pub(crate) fn conflict_parent(envelope: &ReplicationEnvelope) -> Option<(String, i64)> {
+    if envelope.op_kind != "moment.append" {
+        return None;
+    }
+    let owner = crate::moment_apply::validate_tagged_shadow_payload(&envelope.payload).ok()?;
+    let parent_seq = conflict_parent_seq(envelope, owner.effect_index).ok()?;
+    Some((owner.conflict_id, parent_seq))
+}
+
 /// The conflict a conflict child on a hosted replica resolves, when no
 /// imported `conflict.resolve` stands where the child names its parent: the
 /// feed withheld it. `None` for any other op.
@@ -1869,13 +1880,7 @@ pub(crate) fn withheld_parent_conflict(
     conn: &rusqlite::Connection,
     envelope: &ReplicationEnvelope,
 ) -> Result<Option<String>, SyncError> {
-    if envelope.op_kind != "moment.append" {
-        return Ok(None);
-    }
-    let Ok(owner) = crate::moment_apply::validate_tagged_shadow_payload(&envelope.payload) else {
-        return Ok(None);
-    };
-    let Ok(parent_seq) = conflict_parent_seq(envelope, owner.effect_index) else {
+    let Some((conflict_id, parent_seq)) = conflict_parent(envelope) else {
         return Ok(None);
     };
     let parent_present: bool = conn
@@ -1887,7 +1892,7 @@ pub(crate) fn withheld_parent_conflict(
             |row| row.get(0),
         )
         .map_err(SyncError::corrupt)?;
-    Ok((!parent_present).then_some(owner.conflict_id))
+    Ok((!parent_present).then_some(conflict_id))
 }
 
 pub(crate) fn verify_imported_conflict_effect_in_tx(
