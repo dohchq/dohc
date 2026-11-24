@@ -1301,8 +1301,10 @@ describe("eval cases", () => {
     ).toBe(true);
 
     const leakedSnapshot = structuredClone(driftSolved.run.datasetSnapshots!);
+    // The older publication is also listed, as needs-refresh; leak into the current one.
     const linkEntry = leakedSnapshot["fundraiser/dataset.json"]!.boundApps!.find(
-      (app) => app.scope === "link" && app.appRoot === "apps/pledge-form",
+      (app) =>
+        app.scope === "link" && app.appRoot === "apps/pledge-form" && app.status === "compatible",
     )!;
     linkEntry.operationIds = [
       "f5000000-0000-4000-8000-000000000006",

@@ -2423,6 +2423,45 @@ fn native_origin_details_survive_import_and_forged_source_is_rejected() {
     assert_eq!(count(&receiver, "live_owner_adoptions"), 0);
 }
 
+#[test]
+fn a_historical_audit_imports_on_a_device_that_refused_its_base_update() {
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    let mut base = published(&f);
+    let record = serde_json::from_value::<BasePayload>(base.payload.clone())
+        .unwrap()
+        .record;
+    let (_scratch, _path, mut receiver) = receiver_with_blobs(&f);
+    let earlier: Vec<_> = operations(&f.store)
+        .into_iter()
+        .filter(|op| op.origin_seq < base.origin_seq)
+        .collect();
+    import_all(&mut receiver, &earlier);
+    receiver
+        .write_with(&NoFaults, |tx| {
+            let refused = tx
+                .execute(
+                    "UPDATE replication_log SET apply_disposition='refused' WHERE origin_id=?1 AND origin_seq=?2",
+                    params![
+                        record.base_coordinate.origin_id,
+                        record.base_coordinate.origin_seq
+                    ],
+                )
+                .map_err(SyncError::persist)?;
+            assert_eq!(refused, 1);
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    base.relay_seq = Some(base.origin_seq + 1);
+    let applied = apply_base_envelope(&mut receiver, &base, &NoFaults)
+        .unwrap()
+        .primary;
+    assert!(
+        matches!(applied, ApplyDisposition::Applied(_)),
+        "{applied:?}"
+    );
+}
+
 fn accept_authored(
     f: &mut Fixture,
     cursor: i64,
@@ -3062,6 +3101,40 @@ fn settle_bootstrap_publication(
 #[test]
 fn first_imported_activation_settlement_rejects_another_objects_baseline() {
     imported_activation_publication(true, false);
+}
+
+#[test]
+fn first_settlement_of_a_lineage_a_resolve_began_reads_the_resolved_path() {
+    let (mut f, _, baseline, _) = imported_owner(false, true);
+    let b = f.binding.clone();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            let resolve = json!({
+                "targetVersionId": b.main_version_id,
+                "paths": [b.current_path],
+                "transition": {"result": {"objectId": b.object_id, "pathRef": 0}},
+                "lineageTransition": {"successor": {
+                    "lineageClaimId": b.lineage_claim_id,
+                    "updateBlobSha256": b.lineage_claim_id,
+                    "contentKind": "richdoc",
+                }},
+            });
+            tx.execute(
+                "UPDATE replication_log SET op_kind='conflict.resolve',payload_json=?1
+                 WHERE (origin_id,origin_seq)=(SELECT json_extract(record_json,'$.baseCoordinate.originId'),json_extract(record_json,'$.baseCoordinate.originSeq') FROM live_audit_base_publications)",
+                [resolve.to_string()],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    settle_bootstrap_publication(&mut f, 1, "service-first-settlement").unwrap();
+    let first = crate::list_replication_ops(&f.store, "ws", "service-origin", -1, 500)
+        .unwrap()
+        .into_iter()
+        .find(|op| op.payload["momentId"] == "service-first-settlement")
+        .unwrap();
+    assert_eq!(first.payload["payloadBeforeBlobSha256"], baseline);
 }
 
 /// An owner lineage adopted on a store that replicates as `service-origin`,

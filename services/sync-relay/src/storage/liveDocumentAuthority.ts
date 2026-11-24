@@ -17,7 +17,7 @@ import {
 import { SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
 import { LIVE_ROOM_EDITS } from "./liveRoomEdits";
 import { LIVE_ROOM_PAUSES } from "./liveRoomPauses";
-import { readOrdinaryActivationBasis } from "./ordinaryActivationBasis";
+import { beginsLineage, readOrdinaryActivationBasis } from "./ordinaryActivationBasis";
 import {
   allowsServiceActivation,
   readServiceActivation,
@@ -591,7 +591,7 @@ export function decodeLiveDocumentAuthorityStructure(
     }
     const source = db
       .prepare(
-        `SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND relay_seq=? AND origin_id=? AND origin_seq=? AND op_kind='ydoc.update'`,
+        `SELECT op_kind,payload_json FROM sync_relay_log WHERE workspace_id=? AND relay_seq=? AND origin_id=? AND origin_seq=?`,
       )
       .get(
         document.workspaceId,
@@ -599,16 +599,10 @@ export function decodeLiveDocumentAuthorityStructure(
         ordinary.base_origin_id,
         ordinary.base_origin_seq,
       );
-    authorityIntegrity(source && typeof source.payload_json === "string");
-    const payload = JSON.parse(source.payload_json) as Record<string, unknown>;
     authorityIntegrity(
-      payload.versionId === storedDocument.mainVersionId &&
-        payload.objectId === storedDocument.objectId &&
-        payload.path === binding.currentPath &&
-        payload.contentKind === "richdoc" &&
-        payload.isBaseState === true &&
-        payload.lineageClaimId === baselineDigest &&
-        payload.updateBlobSha256 === baselineDigest,
+      source &&
+        typeof source.payload_json === "string" &&
+        beginsLineage(source.op_kind, source.payload_json, storedDocument, binding.currentPath),
     );
     const blob = db
       .prepare(
