@@ -764,7 +764,9 @@ export function createWorkspaceData(options: {
         options.reopen?.();
         return Promise.resolve();
       }
-      return live() ? read(entry(view)) : Promise.resolve();
+      const target = entry(view);
+      const start = () => (live() ? read(target) : Promise.resolve());
+      return restoring && restored ? restored.then(start) : start();
     },
     feed: () => feedState,
     subscribeFeed(listener) {

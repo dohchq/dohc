@@ -487,6 +487,33 @@ describe("a relaunch", () => {
     expect(painted).toHaveBeenCalled();
   });
 
+  it("waits with a pull's refresh until the row is read, so the row keeps the views it restores", async () => {
+    const server = serverWithA();
+    const disk = keptDisk();
+    await readBeforeRelaunch(server, disk);
+    const calls = server.calls.length;
+    const release = disk.cache.holdCommits();
+
+    const relaunched = launch(disk);
+    const data = open(server, relaunched.cache);
+    data.subscribe(views.files, () => {});
+    const refreshed = data.refresh(views.files);
+    expect(server.calls).toHaveLength(calls);
+    release();
+    await refreshed;
+    expect(server.calls.length).toBeGreaterThan(calls);
+    await relaunched.files.flush();
+    data.stop();
+
+    const reads = server.calls.filter((call) => call.method === "POST").length;
+    const again = open(server, launch(disk).cache);
+    again.subscribe(views.page("a.md"), () => {});
+    await vi.waitFor(() =>
+      expect(again.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "# A" }),
+    );
+    expect(server.calls.filter((call) => call.method === "POST")).toHaveLength(reads);
+  });
+
   it("reads a stale view again on open, and everything again when the server can't continue from the cursor", async () => {
     const server = serverWithA();
     const disk = keptDisk();
