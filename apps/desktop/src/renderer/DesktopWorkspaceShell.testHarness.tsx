@@ -690,6 +690,27 @@ function makeBaseBridge(
       imported: ["imported.md"],
       skipped: 0,
     })),
+    inboxList: vi.fn(async () => ({ exists: false, items: [], hasMore: false })),
+    inboxAdd: vi.fn(async () => ({
+      path: "Inbox/2026-11-23-item.md",
+      recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      title: "Item",
+      createdInbox: true,
+    })),
+    inboxArchive: vi.fn(async () => ({
+      path: "Inbox/2026-11-23-item.md",
+      previousStatus: "New",
+    })),
+    inboxMove: vi.fn(async () => ({
+      fromPath: "Inbox/2026-11-23-item.md",
+      toPath: "Projects/2026-11-23-item.md",
+    })),
+    inboxCaptureFiles: vi.fn(async () => ({
+      items: [],
+      skipped: 0,
+      skippedSources: [],
+      createdInbox: false,
+    })),
     exportWorkspaceZip: vi.fn(async () => ({ path: "/tmp/workspace.zip" })),
     readExplorerMenu: vi.fn(async (): Promise<ExplorerMenuEntry[]> => []),
     revealExplorerPath: vi.fn(async () => undefined),

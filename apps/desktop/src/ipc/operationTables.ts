@@ -66,6 +66,11 @@ import { shareCopyOperations } from "./shareCopyOperations";
 import { accessOperations } from "./accessOperations";
 import { workspaceFileOperations } from "./workspaceFileOperations";
 import { workspaceSecretsOperations } from "./workspaceSecretsOperations";
+import {
+  inboxDesktopOperations,
+  inboxReadOperations,
+  inboxWriteOperations,
+} from "./inboxOperations";
 import { explorerMenuOperations } from "./explorerMenuOperations";
 
 export const OPERATION_TABLES = [
@@ -122,6 +127,9 @@ export const OPERATION_TABLES = [
   personalAgentsOperations,
   scheduleHostOperations,
   workspaceSecretsOperations,
+  inboxReadOperations,
+  inboxWriteOperations,
+  inboxDesktopOperations,
   noticeOperations,
   sharedViewAccessOperations,
   shareDirectWriteDeliveryOperations,

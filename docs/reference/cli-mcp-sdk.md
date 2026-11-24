@@ -32,7 +32,7 @@ New to building in dohc with an agent? Start with [Build with agents](../how-to/
 
 | Category | Tools |
 | --- | --- |
-| **Core everyday building** | [`dohc_list_workspaces`](#dohc_list_workspaces), [`dohc_workspace_status`](#dohc_workspace_status), [`dohc_search_workspace`](#dohc_search_workspace), [`dohc_read_document`](#dohc_read_document), [`dohc_create_document`](#dohc_create_document), [`dohc_edit_document`](#dohc_edit_document), [`dohc_query_collection`](#dohc_query_collection), [`dohc_read_record`](#dohc_read_record), [`dohc_create_record`](#dohc_create_record), [`dohc_set_record_fields`](#dohc_set_record_fields), [`dohc_dataset`](#dohc_dataset), [`dohc_detect_apps`](#dohc_detect_apps), [`dohc_create_app`](#dohc_create_app), [`dohc_test_app`](#dohc_test_app), [`dohc_publish_app`](#dohc_publish_app), [`dohc_import_data`](#dohc_import_data), [`dohc_query_database`](#dohc_query_database), [`dohc_list_notices`](#dohc_list_notices) |
+| **Core everyday building** | [`dohc_list_workspaces`](#dohc_list_workspaces), [`dohc_workspace_status`](#dohc_workspace_status), [`dohc_search_workspace`](#dohc_search_workspace), [`dohc_read_document`](#dohc_read_document), [`dohc_create_document`](#dohc_create_document), [`dohc_edit_document`](#dohc_edit_document), [`dohc_query_collection`](#dohc_query_collection), [`dohc_read_record`](#dohc_read_record), [`dohc_create_record`](#dohc_create_record), [`dohc_set_record_fields`](#dohc_set_record_fields), [`dohc_dataset`](#dohc_dataset), [`dohc_detect_apps`](#dohc_detect_apps), [`dohc_create_app`](#dohc_create_app), [`dohc_test_app`](#dohc_test_app), [`dohc_publish_app`](#dohc_publish_app), [`dohc_import_data`](#dohc_import_data), [`dohc_query_database`](#dohc_query_database), [`dohc_list_notices`](#dohc_list_notices), [`dohc_inbox_list`](#dohc_inbox_list), [`dohc_inbox_add`](#dohc_inbox_add), [`dohc_inbox_archive`](#dohc_inbox_archive), [`dohc_inbox_move`](#dohc_inbox_move) |
 | **Workspace files and links** | [`dohc_list_files`](#dohc_list_files), [`dohc_read_file`](#dohc_read_file), [`dohc_search_files`](#dohc_search_files), [`dohc_write_file`](#dohc_write_file), [`dohc_create_directory`](#dohc_create_directory), [`dohc_duplicate_file`](#dohc_duplicate_file), [`dohc_move_path`](#dohc_move_path), [`dohc_delete_path`](#dohc_delete_path), [`dohc_link`](#dohc_link), [`dohc_links_edges`](#dohc_links_edges), [`dohc_links_in`](#dohc_links_in), [`dohc_links_resolve`](#dohc_links_resolve) |
 | **Chat and Groups** | [`dohc_list_groups`](#dohc_list_groups), [`dohc_create_group`](#dohc_create_group), [`dohc_read_chat`](#dohc_read_chat), [`dohc_start_group_chat`](#dohc_start_group_chat), [`dohc_reply_to_chat`](#dohc_reply_to_chat), [`dohc_list_file_chats`](#dohc_list_file_chats), [`dohc_start_file_chat`](#dohc_start_file_chat), [`dohc_wait_for_messages`](#dohc_wait_for_messages), [`dohc_retry_chat_run`](#dohc_retry_chat_run), [`dohc_chat_links`](#dohc_chat_links), [`dohc_chat_file_mentions`](#dohc_chat_file_mentions) |
 | **Automations and Buttons** | [`dohc_list_automations`](#dohc_list_automations), [`dohc_switch_automation`](#dohc_switch_automation), [`dohc_inspect_buttons`](#dohc_inspect_buttons), [`dohc_press_button`](#dohc_press_button), [`dohc_list_automation_runs`](#dohc_list_automation_runs), [`dohc_read_automation_run`](#dohc_read_automation_run), [`dohc_retry_automation_run`](#dohc_retry_automation_run) |
@@ -234,6 +234,51 @@ List the Notices rows for this workspace, newest first. Each row has its title, 
 No arguments.
 
 Returns `{ notices: { kind, id, title, body, sender, createdAtMs, read, opens, note? }[] }`.
+
+### `dohc_inbox_list`
+
+List items in the workspace's Inbox Collection (Inbox/). Returns exists: false without creating Inbox/ when none exists yet. Optionally filter by status (New, Filed, Archived).
+
+The workspace Inbox belongs to the owning workspace. Shared profiles do not offer this read.
+
+- `status`: `"New" | "Filed" | "Archived"`
+- `limit`: `integer`
+
+Returns `{ exists, items: { kind, id, path, title, status, source, received, url?, attachment?, filedTo? }[], hasMore }`.
+
+### `dohc_inbox_add`
+
+Capture a note or link into the owning workspace's Inbox Collection (Inbox/). Creates Inbox/collection.yaml lazily on first capture and writes a Markdown record with safe YAML frontmatter.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `title`: `string`
+- `body`: `string`
+- `url`: `string`
+- `kind`: `"note" | "file" | "image" | "link" | "webhook"`
+
+Returns `{ ok: true, path, recordId, title, createdInbox } | { ok: false, reason }`.
+
+### `dohc_inbox_archive`
+
+Mark a record in Inbox/ as Archived by updating its Status field through its live document session. Returns the previous Status so the change can be reversed.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `item`: `string`. Required.
+
+Returns `{ ok: true, path, previousStatus, changed } | { ok: false, reason }`.
+
+### `dohc_inbox_move`
+
+Move an Inbox Markdown record (and any linked attachments under Inbox/files/) into an owned workspace folder outside Inbox/. Rewrites workspace links and returns History operation id(s) that can be undone.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `item`: `string`. Required.
+- `targetFolder`: `string`. Required.
+
+Returns `{ ok: true, fromPath, toPath, operationId?, attachments: { fromPath, toPath, operationId? }[] } | { ok: false, reason }`.
 
 ---
 
@@ -1021,6 +1066,65 @@ dohc notices list [options]
 List this workspace's Notices, newest first: each row's title, text, sender, time, whether you have read it, and where it opens.
 
 With `--json`, prints `{ schemaVersion, notices: { kind, id, title, body, sender, createdAtMs, read, opens, note? }[] }`.
+
+### `dohc inbox`
+
+Capture notes and links into the workspace Inbox and triage them.
+
+Creates Inbox/ lazily on first capture. Listing does not create Inbox/.
+
+#### `dohc inbox add`
+
+```sh
+dohc inbox add [body] [options]
+```
+
+Capture a note or link into the workspace Inbox.
+
+Creates Inbox/ lazily on first capture.
+
+- `--title <<text>>`: Title for the Inbox item.
+- `--url <<https://...>>`: Optional http or https link to capture.
+- `--kind <<note|file|image|link|webhook>>`: Item kind (defaults to link when --url is set, otherwise note).
+
+With `--json`, prints `{ schemaVersion, ok: true, path, recordId, title, createdInbox }` or `{ schemaVersion, ok: false, reason }`.
+
+#### `dohc inbox archive`
+
+```sh
+dohc inbox archive <path> [options]
+```
+
+Mark an Inbox item as Archived.
+
+Updates Status to Archived through the item's live document session.
+
+With `--json`, prints `{ schemaVersion, ok: true, path, previousStatus, changed }` or `{ schemaVersion, ok: false, reason }`.
+
+#### `dohc inbox move`
+
+```sh
+dohc inbox move <path> <folder> [options]
+```
+
+Move an Inbox item (and any linked Inbox attachments) into an owned folder.
+
+Rewrites workspace links and returns History operation id(s) for Undo. Use "" or "." as <folder> to move into the workspace root.
+
+With `--json`, prints `{ schemaVersion, ok: true, fromPath, toPath, operationId?, attachments: { fromPath, toPath, operationId? }[] }` or `{ schemaVersion, ok: false, reason }`.
+
+#### `dohc inbox list`
+
+```sh
+dohc inbox list [options]
+```
+
+List items waiting in the workspace Inbox.
+
+- `--status <<New|Filed|Archived>>`: Filter items by status.
+- `--limit <<n>>`: Show at most this many items (default 50, max 100).
+
+With `--json`, prints `{ schemaVersion, exists, items: { kind, id, path, title, status, source, received, url?, attachment?, filedTo? }[], hasMore }`.
 
 ### `dohc sync`
 

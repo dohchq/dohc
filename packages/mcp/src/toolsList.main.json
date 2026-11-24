@@ -2420,6 +2420,118 @@
       }
     },
     {
+      "name": "dohc_inbox_add",
+      "description": "Capture a note or link into the owning workspace's Inbox Collection (Inbox/). Creates Inbox/collection.yaml lazily on first capture and writes a Markdown record with safe YAML frontmatter.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 480
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 262144
+          },
+          "url": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "note",
+              "file",
+              "image",
+              "link",
+              "webhook"
+            ]
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_inbox_archive",
+      "description": "Mark a record in Inbox/ as Archived by updating its Status field through its live document session. Returns the previous Status so the change can be reversed.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "item": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "item"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_inbox_list",
+      "description": "List items in the workspace's Inbox Collection (Inbox/). Returns exists: false without creating Inbox/ when none exists yet. Optionally filter by status (New, Filed, Archived).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "New",
+              "Filed",
+              "Archived"
+            ]
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_inbox_move",
+      "description": "Move an Inbox Markdown record (and any linked attachments under Inbox/files/) into an owned workspace folder outside Inbox/. Rewrites workspace links and returns History operation id(s) that can be undone.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "item": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "targetFolder": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "item",
+          "targetFolder"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_inspect_buttons",
       "description": "Inspect a Collection's Button fields, their current access, and any actions that need confirmation. Shared Collection buttons are checked on the owner's host.",
       "inputSchema": {
