@@ -163,6 +163,7 @@ jobs:
               - 'examples/trip-poll/**'
               - 'examples/fundraiser/**'
               - 'examples/stock-orders/**'
+              - 'examples/accounting/**'
               # The desktop daemon prebuild reads Cargo configuration.
               - '.cargo/**'
               # build-artifacts.test.mjs reads the desktop ignore rules.
@@ -240,6 +241,7 @@ jobs:
               - 'examples/trip-poll/**'
               - 'examples/fundraiser/**'
               - 'examples/stock-orders/**'
+              - 'examples/accounting/**'
               # The viewer's build reads this, and one share page test builds the viewer itself.
               - 'tools/single-react.ts'
               - 'scripts/verification/**'

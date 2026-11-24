@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "entryPath": "books.tsx",
+  "inputs": [
+    "books.tsx",
+    "shared.tsx",
+    "statement.ts",
+    "books.css"
+  ],
+  "dataset": {
+    "kind": "dataset",
+    "datasetPath": "accounting/dataset.json",
+    "operations": [
+      "overview",
+      "booksInfo",
+      "trialBalance",
+      "incomeStatement",
+      "balanceSheet",
+      "accountLedger",
+      "listAccounts",
+      "addAccount",
+      "updateAccount",
+      "listPeriods",
+      "addFiscalYear",
+      "lockPeriod",
+      "listEntries",
+      "getEntry",
+      "postJournalEntry",
+      "postJournalEntries",
+      "reverseJournalEntry",
+      "attachReceipt",
+      "receiptAccess",
+      "stageBankRows",
+      "listBankRows",
+      "postBankRows",
+      "setBankRowsIgnored",
+      "keepDuplicateBankRow",
+      "listClients",
+      "saveClient",
+      "listInvoices",
+      "getInvoice",
+      "saveDraftInvoice",
+      "deleteDraftInvoice",
+      "issueInvoice",
+      "recordPayment",
+      "voidInvoice"
+    ]
+  }
+}
