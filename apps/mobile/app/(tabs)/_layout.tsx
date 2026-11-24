@@ -62,6 +62,10 @@ export default function TabsLayout() {
   );
 }
 
+const useServerChatsUnread = () =>
+  (useView(views.chats).state.value ?? []).reduce((sum, group) => sum + group.unreadCount, 0);
+const useChatsUnread = sampleBuild ? () => 0 : useServerChatsUnread;
+
 function Tabs({ toast, onCloseToast }: { toast: ToastMessage | null; onCloseToast(): void }) {
   // Design review only: the time the first usable screen is drawn, for launch timings.
   useEffect(() => {
@@ -73,12 +77,10 @@ function Tabs({ toast, onCloseToast }: { toast: ToastMessage | null; onCloseToas
   const theme = useTheme();
   const { unread } = useNotices();
   const { current } = useWorkspaces();
-  const chats = useView(views.chats).state.value;
   const unreadCount =
     (current?.sections ?? [])
       .flatMap((section) => section.rows)
-      .reduce((sum, row) => sum + (row.count ?? 0), 0) +
-    (chats ?? []).reduce((sum, group) => sum + group.unreadCount, 0);
+      .reduce((sum, row) => sum + (row.count ?? 0), 0) + useChatsUnread();
   const pathname = usePathname();
   return (
     <View style={{ flex: 1 }}>
