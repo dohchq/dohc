@@ -677,8 +677,8 @@ mod tests {
     use super::*;
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     use std::sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering},
+        Arc,
     };
 
     fn count_reads(conn: &mut Connection) -> Arc<AtomicUsize> {
