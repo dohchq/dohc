@@ -24,16 +24,7 @@ pub struct OwnerEnrollmentInput {
     pub recovery: bool,
 }
 
-/// The same observed document at a strictly later restore generation.
-pub fn restore_successor(current: &LiveObjectBinding, next: &LiveObjectBinding) -> bool {
-    next.restore_fence_generation > current.restore_fence_generation
-        && LiveObjectBinding {
-            restore_fence_generation: current.restore_fence_generation,
-            ..next.clone()
-        } == *current
-}
-
-/// A restore successor already holds an observed binding; first enrollment must not.
+/// A recovery already holds an observed binding; first enrollment must not.
 /// A lineage an owner adopted is never enrolled, even once its activation is
 /// released: its native log may still hold the deliveries a release carried.
 fn native_state(
@@ -130,13 +121,6 @@ pub fn prepare_in(
     if let Some(draft) = super::draft::descriptor_for_key_in(conn, &key(binding)?)? {
         if draft.relay_database_namespace != namespace {
             return Err(OwnerOutboxError::ParentMismatch);
-        }
-        // A later restore generation only captures here. Its authenticated host
-        // cut commits the transition in `enroll_in_tx`.
-        if restore_successor(&draft.binding, binding) {
-            return Ok(OwnerEnrollmentPreparation::Capture {
-                captured: capture(conn, binding, true)?,
-            });
         }
         if draft.binding != *binding {
             return Err(OwnerOutboxError::ParentMismatch);
@@ -236,28 +220,17 @@ pub fn enroll_in_tx(
             "invalid owner enrollment cut",
         ));
     }
-    let recovery = if input.recovery {
+    let previous = if input.recovery {
         recovery_previous(tx, &input.binding)?
     } else {
         None
     };
-    let recovering = recovery.is_some();
-    let previous = if let Some(previous) = recovery {
-        if previous.relay_database_namespace != input.relay_database_namespace {
-            return Err(OwnerOutboxError::ParentMismatch);
-        }
-        Some(previous)
-    } else {
-        match super::draft::descriptor_for_key_in(tx, &key(&input.binding)?)? {
-            Some(draft) if restore_successor(&draft.binding, &input.binding) => {
-                if draft.relay_database_namespace != input.relay_database_namespace {
-                    return Err(OwnerOutboxError::ParentMismatch);
-                }
-                Some(super::accepted::current(tx, &draft.binding)?)
-            }
-            _ => None,
-        }
-    };
+    if previous
+        .as_ref()
+        .is_some_and(|previous| previous.relay_database_namespace != input.relay_database_namespace)
+    {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
     let (marker, local_bytes) = native_state(tx, &input.binding, previous.is_some())?;
     if marker.head_update_seq != input.captured.native_head_sequence
         || hex_sha256(&local_bytes) != input.captured.local_state_digest
@@ -266,19 +239,20 @@ pub fn enroll_in_tx(
     }
     let host = Ydoc::wire();
     host.apply(&input.checkpoint).map_err(collab)?;
-    host.validate_public_baseline(&input.checkpoint)
+    let original = Ydoc::wire();
+    original
+        .apply(&bounded_blob(tx, &input.binding.lineage_claim_id)?)
+        .map_err(collab)?;
+    let epoch = original.lineage_epoch_tag();
+    if host.lineage_epoch_tag() != epoch {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
+    host.validate_lineage_baseline(&input.checkpoint, false, epoch.as_deref())
         .map_err(collab)?;
     crate::replay_parity::prevalidate_state_vector_bytes(&input.host_vector).map_err(collab)?;
     let host_vector = yrs::StateVector::decode_v1(&input.host_vector)
         .map_err(|_| OwnerOutboxError::ParentMismatch)?;
     if host.has_pending_dependencies() || host.state_vector() != host_vector {
-        return Err(OwnerOutboxError::ParentMismatch);
-    }
-    let original = Ydoc::wire();
-    original
-        .apply(&bounded_blob(tx, &input.binding.lineage_claim_id)?)
-        .map_err(collab)?;
-    if host.lineage_epoch_tag() != original.lineage_epoch_tag() {
         return Err(OwnerOutboxError::ParentMismatch);
     }
     let checkpoint = bounded(&host)?;
@@ -287,28 +261,14 @@ pub fn enroll_in_tx(
         return Err(OwnerOutboxError::ParentMismatch);
     }
     if let Some(previous) = previous {
-        if recovering {
-            let draft = recover_in_tx(
-                tx,
-                workspace,
-                input,
-                previous,
-                &marker,
-                &local_bytes,
-                &checkpoint,
-                now_ms,
-            )?;
-            index_frontmatter_in_tx(tx, &input.binding, &host, None, None, now_ms)?;
-            return Ok(draft);
-        }
-        let draft = advance_generation_in_tx(
+        let draft = recover_in_tx(
             tx,
             workspace,
             input,
             previous,
             &marker,
-            local_bytes,
-            checkpoint,
+            &local_bytes,
+            &checkpoint,
             now_ms,
         )?;
         index_frontmatter_in_tx(tx, &input.binding, &host, None, None, now_ms)?;
@@ -425,122 +385,6 @@ fn recover_in_tx(
         delete_binary_blob_if_unreferenced(tx, &previous.checkpoint_digest)?;
     }
     super::draft::descriptor_for_key_in(tx, &key(&input.binding)?)?.ok_or(OwnerOutboxError::Corrupt)
-}
-
-/// A later restore generation of an observed owner. The authenticated host cut
-/// becomes canonical as it is; old-generation work stays quarantined for
-/// recovery, and none of it is merged into or queued for the new generation.
-#[allow(clippy::too_many_arguments)]
-fn advance_generation_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    workspace: &str,
-    input: &OwnerEnrollmentInput,
-    previous: ObservedOwnerBinding,
-    marker: &crate::Marker,
-    local_bytes: Vec<u8>,
-    checkpoint: Vec<u8>,
-    now_ms: i64,
-) -> Result<OwnerDraftDescriptor, OwnerOutboxError> {
-    let old = &previous.binding;
-    if input.journal_cursor < previous.accepted_cursor {
-        return Err(OwnerOutboxError::ParentMismatch);
-    }
-    // Native state past the old accepted checkpoint is private work its pending
-    // rows may not hold. Retain it in the old generation before quarantine. A
-    // queue that takes no more edits, such as one already refused, keeps it
-    // without reopening: its refusal stays.
-    if local_bytes != bounded_blob(tx, &previous.checkpoint_digest)? {
-        let append_key = format!("owner-restore-fenced:{}", input.captured.local_state_digest);
-        match find_parent_for_binding(tx, old)? {
-            Some(parent) if parent.state != OwnerOutboxState::Active => super::retain_fenced_in_tx(
-                tx,
-                &parent,
-                previous.revision,
-                &append_key,
-                &local_bytes,
-                now_ms,
-            )?,
-            _ => {
-                super::draft::append_draft_in_tx(
-                    tx,
-                    workspace,
-                    old,
-                    previous.revision,
-                    append_key,
-                    local_bytes.clone(),
-                    now_ms,
-                )?;
-            }
-        }
-    }
-    let outboxes = {
-        let mut stmt = tx.prepare(
-            "SELECT outbox_id FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND state!='quarantined'",
-        ).map_err(read_sql)?;
-        let rows = stmt
-            .query_map(
-                params![
-                    old.workspace_id,
-                    old.main_version_id,
-                    old.object_id,
-                    old.lineage_claim_id,
-                    old.restore_fence_generation
-                ],
-                |row| row.get::<_, String>(0),
-            )
-            .map_err(read_sql)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(read_sql)?
-    };
-    for outbox_id in outboxes {
-        quarantine_in_tx(
-            tx,
-            workspace,
-            &OwnerOutboxQuarantineInput {
-                outbox_id,
-                reason: "restore-fenced".into(),
-                observed_binding: Some(input.binding.clone()),
-            },
-            now_ms,
-        )?;
-    }
-    let key = key(&input.binding)?;
-    let checkpoint_digest = hex_sha256(&checkpoint);
-    put_binary_blob_with_sha(tx, &checkpoint, &checkpoint_digest)?;
-    if checkpoint != local_bytes {
-        dohc_engine_storage::count_remote_change_in_tx(tx, workspace)?;
-    }
-    let head = install_native_checkpoint_in_tx(
-        tx,
-        &key,
-        marker,
-        &local_bytes,
-        &checkpoint,
-        &checkpoint_digest,
-        &input.host_vector,
-        now_ms,
-    )?;
-    let revision = previous
-        .revision
-        .checked_add(1)
-        .filter(|n| *n < 9_007_199_254_740_991)
-        .ok_or(OwnerOutboxError::Frozen)?;
-    let changed = tx.execute(
-        "UPDATE ydoc_owner_bindings SET binding_json=?5,binding_revision=?6,accepted_cursor=?7,native_head_sequence=?8,checkpoint_digest=?9 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND binding_json=?10 AND binding_revision=?11",
-        params![old.workspace_id,old.main_version_id,old.object_id,old.lineage_claim_id,binding_json(&input.binding)?,revision,input.journal_cursor,head,checkpoint_digest,binding_json(old)?,previous.revision],
-    ).map_err(write_sql)?;
-    if changed != 1 {
-        return Err(OwnerOutboxError::ParentMismatch);
-    }
-    // Old-generation work can build on accepted updates only the old checkpoint
-    // holds, so each queue still waiting keeps it, and its blob stays referenced.
-    tx.execute(
-        "UPDATE owner_ydoc_outboxes SET kept_checkpoint_digest=?6 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND pending_bytes>0",
-        params![old.workspace_id,old.main_version_id,old.object_id,old.lineage_claim_id,old.restore_fence_generation,previous.checkpoint_digest],
-    ).map_err(write_sql)?;
-    if previous.checkpoint_digest != checkpoint_digest {
-        delete_binary_blob_if_unreferenced(tx, &previous.checkpoint_digest)?;
-    }
-    super::draft::descriptor_for_key_in(tx, &key)?.ok_or(OwnerOutboxError::Corrupt)
 }
 
 /// Keep the original seq-0 snapshot and its exact claimed source. The new

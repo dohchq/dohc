@@ -427,36 +427,6 @@ fn historical_readers_prove_each_activations_own_source() {
         })
         .unwrap();
     add_activation(&mut f, "successor", "adoption", false, 99);
-    let recorded = |f: &Fixture, id: &str| -> (String, i64, i64) {
-        f.store
-            .read_with(|conn| {
-                conn.query_row(
-                    "SELECT source_digest,terminal_cursor,local_ydoc_sequence FROM live_owner_activations WHERE activation_id=?1",
-                    [id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-            })
-            .unwrap()
-    };
-    let head = |f: &Fixture, id: &str| {
-        let held = f.handle.registration.lock().unwrap();
-        f.store.read_with(|conn| {
-            restore_resume::origin_head(
-                conn,
-                &held,
-                &RestoreDeliveryOrigin::Owner { id: id.into() },
-                &mut restore_content::Budget {
-                    remaining: 1_000_000,
-                },
-            )
-        })
-    };
-    assert_eq!(head(&f, "adoption").unwrap(), recorded(&f, "adoption"));
-    assert_eq!(head(&f, "successor").unwrap(), recorded(&f, "successor"));
-    assert_ne!(recorded(&f, "adoption"), recorded(&f, "successor"));
-    release_unadopted(&mut f, "namespace", "object", "unadopted", None);
-    assert!(head(&f, "unadopted").is_err(), "a fence origin is an adopted activation");
-
     let proof = |f: &Fixture, digest: &str| {
         f.store
             .read_with(|conn| {

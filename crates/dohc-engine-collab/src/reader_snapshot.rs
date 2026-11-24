@@ -118,39 +118,3 @@ fn artifact_source(
     }
     Ok(source)
 }
-
-/// Validate the current E prefix before an explicit restore to a native point.
-/// An expired source is evidence about that prefix, never permission to rewrite it.
-pub(crate) fn verify_restore_prefix(
-    conn: &Connection,
-    key: &DocKey,
-    doc: &Ydoc,
-    history: &HistoryIdentity<'_>,
-    resolver: Option<&ReaderResolver>,
-    max_source_bytes: usize,
-) -> Result<usize, CollabError> {
-    let resolver = resolver.ok_or(CollabError::MarkdownReaderUnavailable)?;
-    let reference = doc
-        .markdown_source_reference()
-        .ok_or(CollabError::MarkdownReaderUnavailable)?;
-    let digest = reference.source_sha256;
-    let (moment, _) = history_artifact(conn, key, history.path, &digest, max_source_bytes)?;
-    let snapshot = SnapshotIdentity {
-        moment: &moment,
-        digest: &digest,
-        path: history.path,
-        lineage: history.lineage,
-        authority: history.authority,
-        restore_fence: history.restore_fence,
-    };
-    let source = artifact_source(conn, key, doc, &snapshot)?;
-    resolver.verify_snapshot(
-        conn,
-        key,
-        doc,
-        &doc.project(crate::ContentKind::Richdoc)?.content,
-        &snapshot,
-        &source,
-    )?;
-    Ok(source.len())
-}

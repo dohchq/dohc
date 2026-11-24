@@ -18,6 +18,7 @@ export type OrdinaryActivationBaseline = Pick<
   LiveMarkdownRegistrationEvidence,
   "projectedMarkdownSha256" | "projectedMarkdownByteLength"
 > & {
+  readonly lineageEpoch: string | null;
   readonly checkpoint: Pick<
     LiveMarkdownRegistrationEvidence["checkpoint"],
     "updateDigest" | "ranges"
@@ -40,10 +41,28 @@ export type OrdinaryActivationValidator = ((
   readonly hasCapacity?: () => boolean;
   readonly waitForCapacity?: (signal?: AbortSignal) => Promise<void>;
 };
-function applyingLeavesUnchanged(whole: Uint8Array, part: Uint8Array): boolean {
+function lineageEpochOf(doc: Y.Doc): string | null {
+  const tag = doc.getMap("meta").get("dohcLineageEpoch");
+  return typeof tag === "string" ? tag : null;
+}
+function lineageEpochIn(bytes: Uint8Array): string | null {
+  const doc = new Y.Doc();
+  try {
+    Y.applyUpdate(doc, bytes);
+    return lineageEpochOf(doc);
+  } finally {
+    doc.destroy();
+  }
+}
+function applyingLeavesUnchanged(
+  whole: Uint8Array,
+  part: Uint8Array,
+  lineageEpoch: string | null,
+): boolean {
   const doc = new Y.Doc();
   try {
     Y.applyUpdate(doc, whole);
+    if (lineageEpochOf(doc) !== lineageEpoch) return false;
     const before = Y.snapshot(doc);
     Y.applyUpdate(doc, part);
     return (
@@ -72,6 +91,7 @@ export function validateOrdinaryActivation(
       message: "Native activation does not match the ordinary source.",
     };
   const baseline = {
+    lineageEpoch: lineageEpochIn(baselineBytes),
     checkpoint: {
       updateDigest: base.evidence.checkpoint.updateDigest,
       ranges: base.evidence.checkpoint.ranges,
@@ -85,7 +105,7 @@ export function validateOrdinaryActivation(
       kind: "refused",
       message: "Native activation is not a complete standalone CRDT state.",
     };
-  if (!applyingLeavesUnchanged(fullState, baselineBytes))
+  if (!applyingLeavesUnchanged(fullState, baselineBytes, baseline.lineageEpoch))
     return { kind: "refused", message: "Native activation does not contain its baseline." };
   return { kind: "accepted", baseline };
 }

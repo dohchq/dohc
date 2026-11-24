@@ -924,6 +924,38 @@ fn enrollment_exports_durable_history_across_crash_new_edits_and_reopen() {
     );
 }
 
+#[test]
+fn enrollment_holds_the_history_of_a_note_an_old_restore_stopped() {
+    let mut f = fixture(false);
+    bootstrap(&mut f, false).unwrap();
+    accept_enrollment_event(&mut f, 1);
+    contact(&mut f.store);
+    assert_eq!(count(&f.store, "live_audit_pending_exports"), 1);
+    let binding = serde_json::to_string(&f.binding).unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('ws','main','object','old-relay','old-restore',json_object('oldBinding',json(?1),'newFence',2),'{}')",
+                [binding],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    enrollment::prepare_exports(
+        &mut f.store,
+        "ws",
+        &NoFaults,
+        &crate::NoLiveLeases,
+        201,
+        &mut false,
+    )
+    .unwrap();
+    assert_eq!(count(&f.store, "live_audit_event_publications"), 0);
+    assert_eq!(count(&f.store, "live_audit_pending_exports"), 1);
+    assert_eq!(count(&f.store, "live_audit_held_exports"), 1);
+}
+
 fn import_source(f: &Fixture) -> (ScratchDir, std::path::PathBuf, EngineStore) {
     let (scratch, path, mut store) = open_store();
     store
@@ -2423,6 +2455,45 @@ fn native_origin_details_survive_import_and_forged_source_is_rejected() {
     assert_eq!(count(&receiver, "live_owner_adoptions"), 0);
 }
 
+#[test]
+fn a_historical_audit_imports_on_a_device_that_refused_its_base_update() {
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    let mut base = published(&f);
+    let record = serde_json::from_value::<BasePayload>(base.payload.clone())
+        .unwrap()
+        .record;
+    let (_scratch, _path, mut receiver) = receiver_with_blobs(&f);
+    let earlier: Vec<_> = operations(&f.store)
+        .into_iter()
+        .filter(|op| op.origin_seq < base.origin_seq)
+        .collect();
+    import_all(&mut receiver, &earlier);
+    receiver
+        .write_with(&NoFaults, |tx| {
+            let refused = tx
+                .execute(
+                    "UPDATE replication_log SET apply_disposition='refused' WHERE origin_id=?1 AND origin_seq=?2",
+                    params![
+                        record.base_coordinate.origin_id,
+                        record.base_coordinate.origin_seq
+                    ],
+                )
+                .map_err(SyncError::persist)?;
+            assert_eq!(refused, 1);
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    base.relay_seq = Some(base.origin_seq + 1);
+    let applied = apply_base_envelope(&mut receiver, &base, &NoFaults)
+        .unwrap()
+        .primary;
+    assert!(
+        matches!(applied, ApplyDisposition::Applied(_)),
+        "{applied:?}"
+    );
+}
+
 fn accept_authored(
     f: &mut Fixture,
     cursor: i64,
@@ -3062,6 +3133,40 @@ fn settle_bootstrap_publication(
 #[test]
 fn first_imported_activation_settlement_rejects_another_objects_baseline() {
     imported_activation_publication(true, false);
+}
+
+#[test]
+fn first_settlement_of_a_lineage_a_resolve_began_reads_the_resolved_path() {
+    let (mut f, _, baseline, _) = imported_owner(false, true);
+    let b = f.binding.clone();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            let resolve = json!({
+                "targetVersionId": b.main_version_id,
+                "paths": [b.current_path],
+                "transition": {"result": {"objectId": b.object_id, "pathRef": 0}},
+                "lineageTransition": {"successor": {
+                    "lineageClaimId": b.lineage_claim_id,
+                    "updateBlobSha256": b.lineage_claim_id,
+                    "contentKind": "richdoc",
+                }},
+            });
+            tx.execute(
+                "UPDATE replication_log SET op_kind='conflict.resolve',payload_json=?1
+                 WHERE (origin_id,origin_seq)=(SELECT json_extract(record_json,'$.baseCoordinate.originId'),json_extract(record_json,'$.baseCoordinate.originSeq') FROM live_audit_base_publications)",
+                [resolve.to_string()],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    settle_bootstrap_publication(&mut f, 1, "service-first-settlement").unwrap();
+    let first = crate::list_replication_ops(&f.store, "ws", "service-origin", -1, 500)
+        .unwrap()
+        .into_iter()
+        .find(|op| op.payload["momentId"] == "service-first-settlement")
+        .unwrap();
+    assert_eq!(first.payload["payloadBeforeBlobSha256"], baseline);
 }
 
 /// An owner lineage adopted on a store that replicates as `service-origin`,
@@ -3844,7 +3949,8 @@ fn copy_audit_blobs(source: &EngineStore, target: &mut EngineStore) {
         .unwrap();
 }
 
-fn malformed_restore_receipt_pull(field: &str, value: serde_json::Value) {
+#[test]
+fn a_record_carrying_a_restore_refuses_without_stalling_pull() {
     use dohc_engine_collab::live_update_application::AdmittedLiveUpdateMetadata;
     let mut f = fixture(true);
     bootstrap(&mut f, false).unwrap();
@@ -3886,31 +3992,16 @@ fn malformed_restore_receipt_pull(field: &str, value: serde_json::Value) {
         .unwrap();
     let mut metadata: AdmittedLiveUpdateMetadata =
         serde_json::from_value(record["metadata"].clone()).unwrap();
-    metadata.accepted.binding.restore_fence_generation = 1;
     metadata.accepted.receipt.journal_cursor = 2;
     let base: BasePayload = serde_json::from_value(published(&f).payload).unwrap();
     let previous = &base.record.checkpoint.evidence_digest;
     let evidence =
         hex_sha256(&serde_json::to_vec(&("accepted-event-v1", previous, 1, &metadata)).unwrap());
-    let mut terminal = json!({"deliveryId":"earlier", "updateDigest": f.binding.lineage_claim_id,
-        "journalCursor":1, "acceptingHostEpoch":1});
-    terminal[field] = value;
-    let restore: restore_record::RestoreSource = serde_json::from_value(json!({
-        "operationId":"restore", "oldGeneration":0, "origin":{"kind":"bootstrap","id":"bootstrap"},
-        "hostId":"host", "appliedSequence":1, "fenceHeadSequence":1, "fencedAtMs":100,
-        "point":{"journalCursor":0,"receiptDigest":f.binding.lineage_claim_id,
-            "markdownDigest":f.input.projected_markdown_digest,"projectionDigest":f.input.projected_markdown_digest},
-        "selected":{"eventCount":0,"terminal":null,"evidenceDigest":previous},
-        "accepted":{"eventCount":0,"terminal":terminal,"evidenceDigest":previous},
-        "originEvidenceDigest":hex_sha256(&serde_json::to_vec(&f.input).unwrap()),
-        "nativeSourceManifestDigest":f.binding.lineage_claim_id,"frozenStateDigest":f.binding.lineage_claim_id,
-        "pointStateDigest":f.binding.lineage_claim_id,"finalContentDigest":f.input.projected_markdown_digest
-    })).unwrap();
     let bytes = format!(
         "{{\"kind\":\"application\",\"relayDatabaseNamespace\":\"relay\",\"eventCount\":1,\"evidenceDigest\":\"{evidence}\",\"updateByteLength\":{},\"metadata\":{},\"sourceApplication\":{{\"localYDocSequence\":2,\"hostCoordinate\":{{\"hostId\":\"host\",\"hostEpoch\":1,\"instanceId\":\"instance\",\"connectionId\":\"connection\"}}}},\"sourceRestore\":{},\"cancelledRestores\":[],\"contentCoordinate\":{}}}",
         f.bytes.len(),
         serde_json::to_string(&metadata).unwrap(),
-        serde_json::to_string(&restore).unwrap(),
+        json!({"operationId":"restore"}),
         record["contentCoordinate"]
     );
     let dohc_engine_storage::TxnOutcome::Committed(manifest) = receiver
@@ -3975,11 +4066,6 @@ fn pull_refused_audit(receiver: &mut EngineStore, mut audit: ReplicationEnvelope
         1
     );
     assert_eq!(count(receiver, "live_audit_events"), 0);
-}
-
-#[test]
-fn malformed_restore_receipt_epoch_does_not_stall_pull() {
-    malformed_restore_receipt_pull("acceptingHostEpoch", json!(0));
 }
 
 /// An event audited before events kept their generation leaves the next
