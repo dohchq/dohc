@@ -20,16 +20,19 @@ export type WorkspaceQuery<T> = {
   error: unknown;
   // Reads again. Resolves when that read settles or is dropped; never rejects.
   retry: () => Promise<void>;
+  // Reads again only if the newest read has failed by the time it is called.
+  retryIfFailed: () => Promise<void>;
 };
 
 type Owner<T> = {
   session: WorkspaceSession;
   key: string;
   options: WorkspaceQueryOptions<T>;
-  state: Omit<WorkspaceQuery<T>, "retry">;
+  state: Omit<WorkspaceQuery<T>, "retry" | "retryIfFailed">;
   start: () => void;
   retire: () => void;
   retry: () => Promise<void>;
+  retryIfFailed: () => Promise<void>;
 };
 
 function createOwner<T>(
@@ -81,6 +84,9 @@ function createOwner<T>(
         publish({ error: answer.error, pending: false });
       }
     },
+    retryIfFailed: async () => {
+      if (owner.state.error !== null) await owner.retry();
+    },
   };
   return owner;
 }
@@ -108,5 +114,5 @@ export function useWorkspaceQuery<T>(
     owner.start();
     return owner.retire;
   }, [owner]);
-  return { ...owner.state, retry: owner.retry };
+  return { ...owner.state, retry: owner.retry, retryIfFailed: owner.retryIfFailed };
 }
