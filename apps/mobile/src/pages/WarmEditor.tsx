@@ -15,10 +15,14 @@ export function WarmEditor() {
   const [gone, setGone] = useState(false);
   useEffect(() => {
     if (!gone) return;
+    // The editor's files may have been cleared meanwhile; asking for them again puts them back.
     const again = () => {
       setGone(false);
       setLoaded(false);
-      setLives((count) => count + 1);
+      void editorHtmlUri().then((next) => {
+        setUri(next);
+        setLives((count) => count + 1);
+      });
     };
     if (AppState.currentState === "active") return again();
     const subscription = AppState.addEventListener("change", (next) => {
