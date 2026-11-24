@@ -3,6 +3,14 @@ import { createRequire } from "node:module";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const disk = vi.hoisted(() => ({ paths: new Set<string>(), failing: false, noFolder: false }));
+const prepared = vi.hoisted(() => [] as [string, string, boolean][]);
+vi.mock("../../modules/editor-pool", () => ({
+  editorPool: {
+    prepare: async (page: string, folder: string, rewritten: boolean) =>
+      void prepared.push([page, folder, rewritten]),
+  },
+}));
+vi.mock("../demo", () => ({ demoMode: null }));
 vi.mock("expo-file-system", () => {
   class Directory {
     readonly uri: string;
@@ -43,6 +51,7 @@ beforeEach(() => {
   disk.paths.clear();
   disk.failing = false;
   disk.noFolder = false;
+  prepared.length = 0;
   vi.resetModules();
 });
 
@@ -90,6 +99,23 @@ describe("the editor files", () => {
         name,
       ).toBe(true);
     }
+  });
+
+  it("tell the editor pool after each check whether any were written", async () => {
+    const { editorHtmlUri } = await import("./editorFile");
+    const page = await editorHtmlUri();
+    await editorHtmlUri();
+    disk.paths.delete([...disk.paths].find((path) => path.endsWith("page.js")) ?? "");
+    await editorHtmlUri();
+    disk.failing = true;
+    disk.paths.clear();
+    await expect(editorHtmlUri()).rejects.toThrow();
+    const folder = page.replace(/\/page\.html$/, "");
+    expect(prepared).toEqual([
+      [page, folder, true],
+      [page, folder, false],
+      [page, folder, true],
+    ]);
   });
 
   it("are written again after the folder itself can't be made", async () => {

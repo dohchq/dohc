@@ -1,12 +1,12 @@
 import { documentWords } from "@dohc/interface-words/documents";
 import { Stack, useIsFocused, useLocalSearchParams, useRouter } from "expo-router";
 import { AlertTriangle, Check, EllipsisVertical } from "lucide-react-native";
-import { useEffect, useMemo, useRef, useState, type ComponentRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { PixelRatio, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { useReducedMotion } from "react-native-reanimated";
 import { Directory, File, Paths } from "expo-file-system";
 import { useKeyboardState } from "react-native-keyboard-controller";
-import { WebView } from "react-native-webview";
+import { editorPool, type EditorClaim } from "../../modules/editor-pool";
 import { PageScrollTop } from "../../modules/page-scroll-top";
 import { HeaderButton } from "../AndroidHeader";
 import { confirm } from "../confirm";
@@ -17,6 +17,7 @@ import { ActionPill } from "../notices/ActionPill";
 import { SyncBand } from "../notices/SyncBand";
 import { documentActions } from "./documentActions";
 import { editorFolderUri, editorFontFiles, editorHtmlUri, isOutOfSpace } from "./editorFile";
+import { PageEditor, type PageEditorHandle } from "./PageEditor";
 import {
   editAnywayMessage,
   pageFailureAction,
@@ -130,6 +131,9 @@ export function SamplePage() {
   const mountAt = useRef(Date.now());
   // When the page's Inter faces had loaded, just before it drew: the part of the first text that waits for the font.
   const fontsAt = useRef<number | null>(null);
+  const claim = useRef<EditorClaim | null>(null);
+  // Design review only: "page-pool" names how the page got its editor and when it drew, for the speed test.
+  const [opened, setOpened] = useState<string | null>(null);
   const reduceMotion = useReducedMotion();
   const focused = useIsFocused();
 
@@ -146,9 +150,9 @@ export function SamplePage() {
   // A live note is always editable, as on the desktop, unless something holds it read-only.
   const couldNotOpen = demo.couldNotOpen && !retried;
   const editable = page !== undefined && !page.large && !lossy && markKey === null && !couldNotOpen;
-  const web = useRef<ComponentRef<typeof WebView>>(null);
+  const web = useRef<PageEditorHandle>(null);
   useEffect(() => {
-    web.current?.injectJavaScript(`window.__dohcSetEditable?.(${editable}); true;`);
+    web.current?.inject(`window.__dohcSetEditable?.(${editable}); true;`);
   }, [editable]);
   // "Done" is the system's word for closing the keyboard (a platform difference): it shows only while typing.
   const typing = useKeyboardState((state) => state.isVisible);
@@ -156,9 +160,9 @@ export function SamplePage() {
   // keyboard covers and keeps the caret above it.
   const keyboardHeight = useKeyboardState((state) => (state.isVisible ? state.height : 0));
   useEffect(() => {
-    web.current?.injectJavaScript(`window.__dohcKeyboard?.(${keyboardHeight}); true;`);
+    web.current?.inject(`window.__dohcKeyboard?.(${keyboardHeight}); true;`);
   }, [keyboardHeight]);
-  const endEditing = () => web.current?.injectJavaScript("window.__dohcEndEditing?.(); true;");
+  const endEditing = () => web.current?.inject("window.__dohcEndEditing?.(); true;");
   // A large file has no editor, and a page that didn't load has no web view: both copy the text as it was read.
   const [copied, markCopied] = useCopiedMark();
   const copyShown = (text: string) => {
@@ -171,7 +175,7 @@ export function SamplePage() {
       copyShown(page.markdown);
       return;
     }
-    web.current.injectJavaScript(
+    web.current.inject(
       `(window.__dohcCopyMarkdown ?? (() => window.ReactNativeWebView?.postMessage('{"kind":"markdownUnavailable"}')))(); true;`,
     );
   };
@@ -259,18 +263,27 @@ export function SamplePage() {
           ms: Math.round(data.at - startedAt),
           mountMs: Math.round(mountAt.current - startedAt),
           fontsMs: fontsAt.current === null ? null : Math.round(fontsAt.current - startedAt),
+          editor: claim.current,
         }),
       );
-      // Design review only: "page-warm" opens the page again three times in the same run, for warm timings.
-      if (demoMode === "page-warm" && Number(run) < 4) {
-        setTimeout(
-          () =>
-            router.replace({
-              pathname: "/page",
-              params: { path, t0: String(Date.now()), run: String(Number(run) + 1) },
-            }),
-          800,
+      if (demoMode === "page-pool")
+        setOpened(
+          `Opened ${claim.current ?? "unpooled"}, ${Math.round(data.at - mountAt.current)} ms after mount, ${Math.round(data.at - startedAt)} ms after tap`,
         );
+      // Design review only: "page-warm" opens the page again three times in the same run, for warm timings, each once
+      // the next spare editor has loaded.
+      if (demoMode === "page-warm" && Number(run) < 4) {
+        const again = () =>
+          router.replace({
+            pathname: "/page",
+            params: { path, t0: String(Date.now()), run: String(Number(run) + 1) },
+          });
+        const spare = editorPool?.addListener("spareReady", ({ ready }) => {
+          if (!ready) return;
+          spare?.remove();
+          again();
+        });
+        if (!spare) setTimeout(again, 800);
       }
     }
   };
@@ -406,31 +419,19 @@ export function SamplePage() {
               ready={painted}
               style={styles.web}
             >
-              <WebView
+              <PageEditor
                 ref={web}
-                originWhitelist={["file://*"]}
-                source={{ uri }}
-                // Read access to the editor's folder only: the page never reads the rest of the app's files.
-                allowingReadAccessToURL={editorFolderUri}
-                allowFileAccess
-                injectedJavaScriptBeforeContentLoaded={injected}
-                onMessage={(event) => handleMessage(event.nativeEvent.data)}
-                onError={() => setLostPage("failed")}
-                onContentProcessDidTerminate={() => setLostPage("failed")}
-                onRenderProcessGone={() => setLostPage("failed")}
-                keyboardDisplayRequiresUserAction={false}
-                // WebKit's own bar above the keyboard repeats Done; the header's system Done is the one way out.
-                hideKeyboardAccessoryView
-                removeIosKeyboardObserver
-                // The page scrolls inside its own container; the web view itself never scrolls.
-                scrollEnabled={false}
-                // The page scales its text by the system's size (`textScale`); Android's web view would scale it again.
-                textZoom={100}
+                uri={uri}
+                startScript={injected}
+                onMessage={handleMessage}
+                onLost={() => setLostPage("failed")}
+                onClaim={(kind) => (claim.current = kind)}
                 style={[styles.web, { backgroundColor: theme.bg }]}
               />
             </PageScrollTop>
           )}
           {painted ? null : <LoadingLines theme={theme} reduceMotion={reduceMotion} />}
+          {opened ? <Text style={styles.probe}>{opened}</Text> : null}
         </>
       ) : null}
       {explaining && markKey ? (
@@ -453,4 +454,9 @@ export function SamplePage() {
   );
 }
 
-const styles = pageStyles;
+const styles = {
+  ...pageStyles,
+  ...StyleSheet.create({
+    probe: { position: "absolute", width: 1, height: 1, color: "transparent" },
+  }),
+};

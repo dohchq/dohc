@@ -3,8 +3,8 @@ import { appWords } from "@dohc/interface-words/apps";
 import { chatWords } from "@dohc/interface-words/notices";
 import { DarkTheme, DefaultTheme, Stack, ThemeProvider, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import { useEffect, useMemo } from "react";
-import { Platform, useColorScheme } from "react-native";
+import { useEffect, useMemo, useState } from "react";
+import { Platform, StyleSheet, Text, useColorScheme } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { AccountGate, AccountProvider } from "../src/account/AccountProvider";
@@ -12,6 +12,8 @@ import { demoMode } from "../src/demo";
 import { AlertTaps } from "../src/push/AlertTaps";
 import { ChoiceSheetHost } from "../src/ChoiceSheet";
 import { sampleBuild } from "../src/sampleBuild";
+import { editorPool } from "../modules/editor-pool";
+import { editorHtmlUri } from "../src/pages/editorFile";
 import { WarmEditor } from "../src/pages/WarmEditor";
 import { useTheme } from "../src/theme";
 
@@ -92,9 +94,12 @@ export default function RootLayout() {
               }}
             />
           </Stack>
-          {/* Design review only: page-fonts-missing opens a page whose font files are gone, so no warm web view may have
-              loaded them first. launch-plain-cold times a launch without the warm web view. */}
-          {demoMode === "page-fonts-missing" || demoMode === "launch-plain-cold" ? null : (
+          {/* Design review only: page-fonts-missing opens a page whose font files are gone, so no warm web view or spare
+              editor may have loaded them first. launch-plain-cold times a launch without either. */}
+          {demoMode === "page-fonts-missing" ||
+          demoMode === "launch-plain-cold" ? null : editorPool ? (
+            <SpareEditor />
+          ) : (
             <WarmEditor />
           )}
         </KeyboardProvider>
@@ -119,3 +124,20 @@ export default function RootLayout() {
     </>
   );
 }
+
+/** On iPhone, names the editor files to the pool, which loads a spare editor from them. */
+function SpareEditor() {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    void editorHtmlUri().catch(() => undefined);
+    // Design review only: "page-pool" shows that a spare has loaded, for the speed test.
+    if (demoMode !== "page-pool") return;
+    const spare = editorPool?.addListener("spareReady", (event) => setReady(event.ready));
+    return () => spare?.remove();
+  }, []);
+  return ready ? <Text style={styles.probe}>Editor ready</Text> : null;
+}
+
+const styles = StyleSheet.create({
+  probe: { position: "absolute", width: 1, height: 1, color: "transparent" },
+});

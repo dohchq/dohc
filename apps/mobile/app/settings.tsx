@@ -389,7 +389,7 @@ function SettingsScreen() {
             <Row
               key={index}
               title={open.name}
-              detail={`read ${open.read ?? "-"}, editor ${open.started ?? "-"}, painted ${open.painted ?? "-"} ms`}
+              detail={`read ${open.read ?? "-"}, editor ${open.started ?? "-"} (${open.claim ?? "-"}), painted ${open.painted ?? "-"} ms`}
             />
           ))}
         </Section>

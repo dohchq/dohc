@@ -2,19 +2,11 @@ import type { ServerProblemKind } from "@dohc/interface-words/account";
 import { confirmWords } from "@dohc/interface-words/confirmations";
 import { documentWords } from "@dohc/interface-words/documents";
 import { Stack, useIsFocused, useLocalSearchParams, usePreventRemove } from "expo-router";
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  useSyncExternalStore,
-  type ComponentRef,
-} from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Check, EllipsisVertical } from "lucide-react-native";
 import { Alert, PixelRatio, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { useKeyboardState } from "react-native-keyboard-controller";
 import { useReducedMotion } from "react-native-reanimated";
-import { WebView } from "react-native-webview";
 import { PageScrollTop } from "../../modules/page-scroll-top";
 import { useAccount, useSignIn } from "../account/AccountProvider";
 import { HeaderButton } from "../AndroidHeader";
@@ -26,7 +18,8 @@ import { useTheme } from "../theme";
 import { NoWorkspace, ScreenFailure, useWorkspaceGap } from "../workspace/ListStates";
 import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
 import { documentActions } from "./documentActions";
-import { editorFolderUri, editorHtmlUri, isOutOfSpace } from "./editorFile";
+import { editorHtmlUri, isOutOfSpace } from "./editorFile";
+import { PageEditor, type PageEditorHandle } from "./PageEditor";
 import { createPageHost } from "./pageHost";
 import { createPageLive, holdsPage, holdsUnsent, liveMark, type PageLiveState } from "./pageLive";
 import { pageTimings, timingOwner } from "./pageTimings";
@@ -103,7 +96,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
   const focused = useIsFocused();
   const { data, livePages } = useAccount();
   const signIn = useSignIn();
-  const web = useRef<ComponentRef<typeof WebView>>(null);
+  const web = useRef<PageEditorHandle>(null);
 
   // A page deleted while open keeps the last text its workspace's store read of it.
   const deleted = state.value?.kind === "missing" && state.value.last !== undefined;
@@ -120,7 +113,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
   const [needsNewer, setNeedsNewer] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [host] = useState(() =>
-    createPageHost({ inject: (script) => web.current?.injectJavaScript(script) }),
+    createPageHost({ inject: (script) => web.current?.inject(script) }),
   );
   const { mount, painted, live, stopped } = useSyncExternalStore(host.subscribe, host.state);
   const [timing] = useState(() => pageTimings?.open(name, timingOwner(signIn), tap));
@@ -219,7 +212,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
     if (sent !== null && live) return host.gone();
     if (sent !== null && !painted) return;
     given.current = { mount, markdown };
-    web.current?.injectJavaScript(
+    web.current?.inject(
       sent === null
         ? pageScript(path, markdown)
         : `window.__dohcReplaceRead?.(${JSON.stringify(markdown)}); true;`,
@@ -237,7 +230,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
     };
     if (web.current && live && liveState.phase !== "ended" && liveState.shown) {
       copying.current = done;
-      web.current.injectJavaScript(
+      web.current.inject(
         `(window.__dohcCopyMarkdown ?? (() => window.ReactNativeWebView?.postMessage('{"kind":"markdownUnavailable"}')))(); true;`,
       );
     } else if (markdown !== null) done(markdown);
@@ -260,9 +253,9 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
   const typing = useKeyboardState((keyboard) => keyboard.isVisible);
   const keyboardHeight = useKeyboardState((keyboard) => (keyboard.isVisible ? keyboard.height : 0));
   useEffect(() => {
-    web.current?.injectJavaScript(`window.__dohcKeyboard?.(${keyboardHeight}); true;`);
+    web.current?.inject(`window.__dohcKeyboard?.(${keyboardHeight}); true;`);
   }, [keyboardHeight]);
-  const endEditing = () => web.current?.injectJavaScript("window.__dohcEndEditing?.(); true;");
+  const endEditing = () => web.current?.inject("window.__dohcEndEditing?.(); true;");
 
   // No workspace open, as when another device hid the last one: the page says why, as Home and Chats do.
   const gap = useWorkspaceGap();
@@ -402,27 +395,13 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
           {liveStrip}
           {webShown ? (
             <PageScrollTop key={mount} active={focused} ready={painted} style={styles.web}>
-              <WebView
+              <PageEditor
                 ref={web}
-                originWhitelist={["file://*"]}
-                source={{ uri }}
-                // Read access to the editor's folder only: the page never reads the rest of the app's files.
-                allowingReadAccessToURL={editorFolderUri}
-                allowFileAccess
-                injectedJavaScriptBeforeContentLoaded={
-                  early?.mount === mount ? early.script : undefined
-                }
-                onMessage={(event) => handleMessage(event.nativeEvent.data, mount)}
-                onError={() => setLostPage("failed")}
-                onContentProcessDidTerminate={() => setLostPage("failed")}
-                onRenderProcessGone={() => setLostPage("failed")}
-                keyboardDisplayRequiresUserAction={false}
-                // WebKit's own bar above the keyboard repeats Done; the header's system Done is the one way out.
-                hideKeyboardAccessoryView
-                removeIosKeyboardObserver
-                scrollEnabled={false}
-                // The page scales its text by the system's size (`textScale`); Android's web view would scale it again.
-                textZoom={100}
+                uri={uri}
+                startScript={early?.mount === mount ? early.script : undefined}
+                onMessage={(data) => handleMessage(data, mount)}
+                onLost={() => setLostPage("failed")}
+                onClaim={(claim) => timing?.(claim)}
                 style={[styles.web, { backgroundColor: theme.bg }]}
               />
             </PageScrollTop>

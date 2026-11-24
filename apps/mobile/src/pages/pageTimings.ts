@@ -1,3 +1,4 @@
+import type { EditorClaim } from "../../modules/editor-pool";
 import type { AccountState, SignIn } from "../server/account";
 
 export interface PageOpen {
@@ -6,7 +7,10 @@ export interface PageOpen {
   read?: number;
   started?: number;
   painted?: number;
+  claim?: EditorClaim;
 }
+
+type Step = "read" | "started" | "painted";
 
 export const timingOwner = (signIn: Pick<SignIn, "origin" | "userId">) =>
   JSON.stringify([signIn.origin, signIn.userId]);
@@ -21,7 +25,11 @@ export function createPageTimings(now: () => number = Date.now, keep = 10) {
       const open: PageOpen = { name, tap };
       opens.unshift(open);
       opens.splice(keep);
-      return (step: "read" | "started" | "painted") => void (open[step] ??= now() - open.tap);
+      return (step: Step | EditorClaim) => {
+        if (step === "read" || step === "started" || step === "painted")
+          open[step] ??= now() - open.tap;
+        else open.claim ??= step;
+      };
     },
     opens: (signIn: string): readonly PageOpen[] => (signIn === owner ? opens : []),
     follow: (account: { state(): AccountState; subscribe(listener: () => void): () => void }) =>
