@@ -395,8 +395,7 @@ export interface WorkspaceData {
    * Marks the account's place in a thread at a message a screen shows. A mark the server took, or one on its way, is
    * not sent again; one that failed, including the server's "Couldn't send", says nothing, and the next showing sends
    * it again. A 404 that still counts means the workspace may be gone, as for a read. Resolves once the mark settles,
-   * at once for one it doesn't send; it never rejects. The chats view shows the thread read at once, unless it's a
-   * post's, whose replies the mark leaves; a mark that fails reads the chats again.
+   * at once for one it doesn't send; it never rejects.
    */
   markRead(threadId: string, messageId: string): Promise<void>;
 }
@@ -673,35 +672,6 @@ export function createWorkspaceData(options: {
     }
   }
 
-  function clearUnread(threadId: string): boolean {
-    const target = entries.get(views.chats.id);
-    const chats = target?.state.value as readonly ChatGroup[] | null | undefined;
-    if (!target || !chats) return false;
-    let cleared = false;
-    const value = chats.map((group) => {
-      if (!group.unreadThreadIds.includes(threadId) || group.postThreadIds?.includes(threadId))
-        return group;
-      cleared = true;
-      const unreadThreadIds = group.unreadThreadIds.filter((id) => id !== threadId);
-      return {
-        ...group,
-        unreadThreadIds,
-        unreadCount: unreadThreadIds.length === 0 ? 0 : group.unreadCount,
-      };
-    });
-    if (!cleared) return false;
-    set(target, { ...target.state, value });
-    const cached = cache.get(scope, views.chats.id);
-    if (cached) cache.set(scope, { ...cached, value });
-    return true;
-  }
-
-  function readChatsAgain() {
-    const target = entry(views.chats);
-    if (target.listeners.size === 0) target.stale = true;
-    else if (!target.state.loading) read(target);
-  }
-
   const store: WorkspaceData = {
     workspaceId,
     instance: ++instances,
@@ -749,17 +719,14 @@ export function createWorkspaceData(options: {
       if (!live() || sending.get(threadId) === messageId || marked.get(threadId) === messageId)
         return Promise.resolve();
       sending.set(threadId, messageId);
-      const cleared = clearUnread(threadId);
       return markThreadRead(signIn.client, workspaceId, threadId, messageId, everything.signal)
         .then(
           () => {
             marked.set(threadId, messageId);
           },
           (error: unknown) => {
-            if (!live()) return;
             // As a read's 404 does, one that still counts says the workspace may be gone from this phone.
-            if (isGone(error)) return gone();
-            if (cleared) readChatsAgain();
+            if (live() && isGone(error)) gone();
           },
         )
         .finally(() => {

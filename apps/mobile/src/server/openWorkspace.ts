@@ -11,6 +11,8 @@ import type { WorkspaceListStore } from "./workspaceList";
 export interface OpenWorkspaceState {
   readonly currentWorkspaceId: string | null;
   readonly data: WorkspaceData | null;
+  /** The choice saved last is still being read, so nothing is open yet and the list can't say why. */
+  readonly choosing: boolean;
 }
 
 export interface OpenWorkspace {
@@ -38,10 +40,13 @@ export function createOpenWorkspace(options: {
   const listeners = new Set<() => void>();
   const saved = cache.savedList(signIn);
   let chosen: string | null = null;
-  let loadingChoice = saved !== null;
   let active = false;
   let stopped = false;
-  let state: OpenWorkspaceState = { currentWorkspaceId: null, data: null };
+  let state: OpenWorkspaceState = {
+    currentWorkspaceId: null,
+    data: null,
+    choosing: saved !== null,
+  };
   let unsubscribe: (() => void) | null = null;
 
   function open(workspaceId: string): WorkspaceData {
@@ -65,12 +70,19 @@ export function createOpenWorkspace(options: {
     state.data?.stop();
     const data = workspaceId === null ? null : open(workspaceId);
     if (active) data?.resume();
-    state = { currentWorkspaceId: workspaceId, data };
+    state = { currentWorkspaceId: workspaceId, data, choosing: false };
     for (const listener of listeners) listener();
   }
 
+  function endChoosing() {
+    if (!state.choosing) return update();
+    state = { ...state, choosing: false };
+    update();
+    if (state.currentWorkspaceId === null) for (const listener of listeners) listener();
+  }
+
   function update() {
-    if (stopped || loadingChoice) return;
+    if (stopped || state.choosing) return;
     const listed = list.state();
     const openable =
       listed.status === "ready"
@@ -91,10 +103,9 @@ export function createOpenWorkspace(options: {
       if (!unsubscribe) {
         unsubscribe = list.subscribe(update);
         void saved?.loadChosen().then((found) => {
-          loadingChoice = false;
-          if (!signIn.isCurrent()) return;
+          if (stopped || !signIn.isCurrent()) return;
           chosen ??= found;
-          update();
+          endChoosing();
         });
         update();
       }
@@ -103,7 +114,7 @@ export function createOpenWorkspace(options: {
     choose(workspaceId) {
       chosen = workspaceId;
       if (!stopped && signIn.isCurrent()) saved?.chose(workspaceId);
-      update();
+      endChoosing();
     },
     setShowOnPhone(workspaceId, showOnPhone) {
       list.setShowOnPhone(workspaceId, showOnPhone);

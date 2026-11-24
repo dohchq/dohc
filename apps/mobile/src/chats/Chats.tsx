@@ -2,23 +2,16 @@ import { workspaceWords } from "@dohc/interface-words/workspace";
 import { LegendList, type LegendListRef } from "@legendapp/list/react-native";
 import * as Haptics from "expo-haptics";
 import { Stack, useRouter } from "expo-router";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-  type RefObject,
-} from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode, type RefObject } from "react";
 import { View } from "react-native";
 import { useAccount } from "../account/AccountProvider";
 import { phoneWrites } from "../server/phoneWrites";
-import { views, type WorkspaceData } from "../server/workspaceData";
+import { views } from "../server/workspaceData";
 import type { ChatGroup } from "../server/workspaceReads";
 import { useTheme, workspaceMarkFills } from "../theme";
 import { EmptyLine, HoldRow, NoWorkspace, RetryRow } from "../workspace/ListStates";
 import { useFailureNotice, useView } from "../workspace/useView";
+import { prefetchChat, unreadPrefetch } from "./chatPrefetch";
 import { ChatRow } from "./ChatRow";
 import { ChatsHeader } from "./ChatsHeader";
 import { SectionHeader } from "./SectionHeader";
@@ -80,8 +73,6 @@ function chatRow(group: ChatGroup): ChatRowData {
   };
 }
 
-const PREFETCHED_UNREAD = 3;
-
 function ServerChatList({ workspace }: { workspace: PhoneWorkspace }) {
   const { data } = useAccount();
   const { state, retry } = useView(views.chats);
@@ -99,18 +90,14 @@ function ServerChatList({ workspace }: { workspace: PhoneWorkspace }) {
   );
   const prefetch = useCallback(
     (row: ChatRowData) => {
-      data?.prefetch(views.stream(row.id));
-      if (phoneWrites) data?.prefetch(views.lanes(row.id));
+      if (data) prefetchChat(data, row, phoneWrites);
     },
     [data],
   );
-  const prefetchedFor = useRef<WorkspaceData | null>(null);
+  const [warmUnread] = useState(() => unreadPrefetch(phoneWrites));
   useEffect(() => {
-    if (!sections || !data || prefetchedFor.current === data) return;
-    prefetchedFor.current = data;
-    const unread = sections.flatMap((section) => section.rows).filter((row) => row.unread);
-    for (const row of unread.slice(0, PREFETCHED_UNREAD)) prefetch(row);
-  }, [sections, data, prefetch]);
+    if (sections && data) warmUnread(data, sections);
+  }, [sections, data, warmUnread]);
   return (
     <ChatsScreen
       current={workspace}

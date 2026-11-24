@@ -23,7 +23,7 @@ import {
   views,
   type ReadCache,
 } from "./workspaceData";
-import { createWorkspaceList } from "./workspaceList";
+import { createWorkspaceList, workspaceGap } from "./workspaceList";
 import { FEED_HOLD_MS } from "./workspaceReads";
 
 // The read cache on cache.db, through Node's SQLite (testKeptDisk.ts). Each launch is one run of the app over the same
@@ -916,10 +916,61 @@ describe("the saved workspace list", () => {
     signIn = signInTo(server),
   ) {
     const launched = launchAccount(server, disk, signIn);
-    const opened: (string | null)[] = [];
-    launched.workspace.subscribe(() => opened.push(launched.workspace.state().currentWorkspaceId));
+    const opened: string[] = [];
+    launched.workspace.subscribe(() => {
+      const current = launched.workspace.state().currentWorkspaceId;
+      if (current !== null && opened.at(-1) !== current) opened.push(current);
+    });
     return { ...launched, opened };
   }
+
+  /** A relaunch whose read of the choice saved last waits for `choice`, after the list has landed. */
+  async function slowChoice(server: ReturnType<typeof testServer>, disk: KeptDisk) {
+    await chooseB(server, disk);
+    server.on("GET", "/sync/account/workspaces", listAnswer(entry("ws-a"), entry("ws-b")));
+    const { files } = launch(disk);
+    const choice = deferred<void>();
+    const cache = createReadCache({
+      ...files,
+      readList: (scope) =>
+        scope.endsWith(',"chosen"]')
+          ? choice.promise.then(() => files.readList(scope))
+          : files.readList(scope),
+    });
+    const signIn = signInTo(server);
+    const list = createWorkspaceList(signIn, cache.savedList(signIn));
+    const workspace = createOpenWorkspace({ signIn, list, cache });
+    workspace.subscribe(() => {});
+    list.reload();
+    await vi.waitFor(() =>
+      expect(list.state()).toMatchObject({ status: "ready", pending: new Set() }),
+    );
+    await vi.waitFor(() => expect(count(server, "/sync/account/workspaces")).toBeGreaterThan(0));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    return { list, workspace, choice };
+  }
+
+  it("shows no reason for an empty phone while the choice saved last is read after the list", async () => {
+    const server = serverWithA();
+    const { list, workspace, choice } = await slowChoice(server, keptDisk());
+    expect(workspace.state()).toMatchObject({ currentWorkspaceId: null, choosing: true });
+    expect(workspaceGap(list.state(), workspace.state())).toBeNull();
+    choice.resolve();
+    await vi.waitFor(() => expect(workspace.state().currentWorkspaceId).toBe("ws-b"));
+    expect(workspace.state().choosing).toBe(false);
+    workspace.stop();
+  });
+
+  it("opens a workspace the person chooses while the choice saved last is read, and keeps it after", async () => {
+    const server = serverWithA();
+    const { workspace, choice } = await slowChoice(server, keptDisk());
+    workspace.choose("ws-a");
+    expect(workspace.state()).toMatchObject({ currentWorkspaceId: "ws-a", choosing: false });
+    choice.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(workspace.state().currentWorkspaceId).toBe("ws-a");
+    workspace.stop();
+  });
 
   it("reopens the workspace chosen last, without opening another first, until it no longer shows", async () => {
     const server = serverWithA();

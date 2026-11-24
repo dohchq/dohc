@@ -68,8 +68,7 @@ function Review({ apps, publicationId }: { apps: WorkspaceApps; publicationId: s
     (app) => app.publicationId === publicationId,
   );
   const review = state.value;
-  const shown = review ?? listed;
-  const name = shown ? appName(shown) : "";
+  const name = review ? appName(review) : listed ? appName(listed) : "";
 
   // One action at a time. Its failure's Try again repeats it; a changed app's reads the review again.
   const act = async (failed: string, run: (app: AppReview) => Promise<unknown>) => {
@@ -117,40 +116,20 @@ function Review({ apps, publicationId }: { apps: WorkspaceApps; publicationId: s
       void act(appWords.revokeFailed, (app) => apps.revoke(app.publicationId));
   };
 
-  if (!review && state.problem)
-    return (
+  if (!review)
+    return state.problem ? (
       <ScreenFailure
         text={appWords.reviewFailed}
         cause={problemText(state.problem)}
         onRetry={load}
       />
-    );
-  if (!shown) return <HoldRow />;
-  const Mark = shown.approved ? ShieldCheck : ShieldQuestion;
-  const status = (
-    <View style={styles.status}>
-      <Mark size={20} color={shown.approved ? theme.accent : theme.muted} strokeWidth={1.9} />
-      <Text style={[styles.body, { color: theme.ink }]}>
-        {shown.approved
-          ? appWords.approvedOnPhones
-          : phoneWrites
-            ? appWords.approveToOpen
-            : appWords.notApproved}
-      </Text>
-    </View>
-  );
-  if (!review)
-    return (
-      <ScrollView
-        contentInsetAdjustmentBehavior="automatic"
-        style={{ backgroundColor: theme.bg }}
-        contentContainerStyle={styles.content}
-      >
-        <Stack.Screen options={{ title: name }} />
-        {status}
+    ) : (
+      <>
+        {name ? <Stack.Screen options={{ title: name }} /> : null}
         <HoldRow />
-      </ScrollView>
+      </>
     );
+  const Mark = review.approved ? ShieldCheck : ShieldQuestion;
   return (
     <ScrollView
       contentInsetAdjustmentBehavior="automatic"
@@ -164,7 +143,16 @@ function Review({ apps, publicationId }: { apps: WorkspaceApps; publicationId: s
           onRetry={load}
         />
       ) : null}
-      {status}
+      <View style={styles.status}>
+        <Mark size={20} color={review.approved ? theme.accent : theme.muted} strokeWidth={1.9} />
+        <Text style={[styles.body, { color: theme.ink }]}>
+          {review.approved
+            ? appWords.approvedOnPhones
+            : phoneWrites
+              ? appWords.approveToOpen
+              : appWords.notApproved}
+        </Text>
+      </View>
       <Text style={[styles.note, { color: theme.muted }]}>
         {appWords.published(shortVersion(review), publishedOn(review.createdAtMs))}
       </Text>
