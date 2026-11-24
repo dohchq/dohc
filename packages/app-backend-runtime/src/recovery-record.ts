@@ -1,5 +1,7 @@
 import { parseApprovalAgent } from "@dohc/security-contract/approval-provenance";
 import { createHash } from "node:crypto";
+import { APP_BACKEND_BULK_LIMITS, appBackendLimit } from "@dohc/security-contract/app-backend";
+import { journalEventStorageBytes } from "./journal.js";
 import type { DatasetCursor, JournalExportRecord } from "./journal.js";
 
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -161,7 +163,7 @@ export function parseRecoveryJournalRecord(
     callerKey = recoveryText(r.callerKey, 1024),
     idempotencyKey = recoveryText(r.idempotencyKey, 128),
     payloadSha256 = recoveryDigest(r.payloadSha256),
-    resultJson = recoveryText(r.resultJson, 256 * 1024),
+    resultJson = recoveryText(r.resultJson, APP_BACKEND_BULK_LIMITS.resultBytes),
     changesetSha256 = recoveryDigest(r.changesetSha256),
     recordedAtMs = recoveryInteger(r.recordedAtMs),
     byteLength = recoveryInteger(r.byteLength, 0, maxEventBytes);
@@ -197,10 +199,7 @@ export function parseRecoveryJournalRecord(
     ) !== c.digest
   )
     return invalidRecovery("event digest differs.");
-  return {
-    kind,
-    cursor: c,
-    previousDigest,
+  const metadata = {
     proposalId,
     operation,
     callerKey,
@@ -210,6 +209,15 @@ export function parseRecoveryJournalRecord(
     changesetSha256,
     attachedFileIds,
     recordedAtMs,
-    byteLength,
   };
+  const storageBytes = journalEventStorageBytes(
+    { ...c, revision: c.revision - 1, digest: previousDigest },
+    metadata,
+    byteLength,
+  );
+  if (storageBytes > maxEventBytes)
+    return invalidRecovery(
+      appBackendLimit("Collection change", maxEventBytes, storageBytes, "bytes"),
+    );
+  return { kind, cursor: c, previousDigest, ...metadata, byteLength };
 }

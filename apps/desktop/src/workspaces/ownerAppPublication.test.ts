@@ -420,6 +420,21 @@ describe("app without app.publish.json", () => {
     expect(candidate.dependencies).toEqual(["app/data.json", "app/index.html", "app/main.ts"]);
   });
 
+  it("leaves generated Collection types out of the app's sources", async () => {
+    const h = harness();
+    const types = 'export interface Tables { "expenses": { "id": string } }';
+    page(h, {
+      "app/index.html": '<!doctype html><script type="module" src="main.ts"></script>',
+      "app/main.ts":
+        'import type { Tables } from "../.dohc/types/expenses"; const row: Tables["expenses"] = { id: "a" }; document.title = row.id;',
+      ".dohc/types/expenses.d.ts": types,
+      "app/.dohc/types/expenses.d.ts": types,
+    });
+    const { candidate } = await h.prepare();
+    expect(h.capturePaths).toEqual([["app/index.html", "app/main.ts"]]);
+    expect(candidate.dependencies).toEqual(["app/index.html", "app/main.ts"]);
+  });
+
   it("names a linked file of a type the compiler does not take", async () => {
     const h = harness();
     page(h, {

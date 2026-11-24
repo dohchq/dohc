@@ -9,6 +9,7 @@ import {
   type DatasetPendingAttempt,
 } from "@dohc/security-contract/dataset-attempts";
 import { assertDatasetAttemptsCommitted, initializeDatasetAttempts } from "./dataset-attempts.js";
+import { JOURNAL_RECORD_BYTES } from "./journal.js";
 import type {
   DatasetCursor,
   DatasetJournal,
@@ -86,7 +87,7 @@ function sync<T>(run: () => T): T {
 /** Each history record is u32 metadata length, UTF-8 JSON, then its declared raw blob bytes. */
 export function encodeDatasetRecoveryRecord(record: DatasetRecoveryRecord): Uint8Array {
   const json = Buffer.from(JSON.stringify(record));
-  if (json.byteLength > RECOVERY_CHUNK_BYTES)
+  if (json.byteLength > (record.kind === "event" ? JOURNAL_RECORD_BYTES : RECOVERY_CHUNK_BYTES))
     throw new Error("Part of this Collection is too large to export.");
   const prefix = Buffer.allocUnsafe(4);
   prefix.writeUInt32BE(json.byteLength);
@@ -354,7 +355,7 @@ export async function prepareDatasetRecoveryExport(options: DatasetExportOptions
         if (record.cursor.revision > through) return;
         if (record.kind === "event")
           for (const fileId of record.attachedFileIds) attachedReferences.add(fileId);
-        yield encodeDatasetRecoveryRecord(record);
+        yield* bytes(encodeDatasetRecoveryRecord(record));
         yield* blob(record);
         previous = record.cursor.revision;
       }

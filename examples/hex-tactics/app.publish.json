@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "entryPath": "index.tsx",
+  "dataset": {
+    "kind": "dataset",
+    "datasetPath": "hex-tactics/dataset.json",
+    "operations": [
+      "listGames",
+      "createGame",
+      "joinGame",
+      "startDemoMatch",
+      "getVisibleState",
+      "submitMove",
+      "replayGame"
+    ]
+  }
+}

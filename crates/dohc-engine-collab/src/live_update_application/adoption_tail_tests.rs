@@ -1,0 +1,1327 @@
+fn agents(authors: &crate::author_coverage::Authors) -> Vec<Value> {
+    let authors: Value = serde_json::from_str(&authors.json()).unwrap();
+    authors
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|author| author["kind"] == "agent")
+        .map(|author| serde_json::json!([author["agentId"], author["onBehalfOf"]]))
+        .collect()
+}
+
+#[test]
+fn adopted_agent_edit_accepted_into_a_full_interval_settles_before_its_agent_enters() {
+    let person = LiveAuthorEntry::Human {
+        human_id: "owner".into(),
+        human_name: "Owner".into(),
+    };
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let accepted = accepted_copy(&f.doc);
+    let edit = native_tail_edit_for(&mut f, "agent edit", 11, Some("installation-person"));
+    let full: Vec<Value> = std::iter::once(serde_json::to_value(&person).unwrap())
+        .chain((1..crate::author_coverage::MAX_INTERVAL_AUTHORS).map(
+            |index| serde_json::json!({"kind": "human", "humanId": format!("person-{index}")}),
+        ))
+        .collect();
+    let key = f.key.clone();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_docs SET pending_authors_json=?1 \
+                 WHERE workspace_id=?2 AND version_id=?3 AND object_id=?4",
+                rusqlite::params![
+                    Value::Array(full).to_string(),
+                    key.workspace_id,
+                    key.version_id,
+                    key.object_id
+                ],
+            )
+            .map_err(write_sql)
+        })
+        .unwrap();
+    let mut event = native_tail_event(&f, edit.update, edit.delivery_id, 7);
+    event.metadata.author_snapshot = Some(vec![person]);
+    relay_sees(&mut event, &accepted);
+    let interval = |f: &Fixture| {
+        f.store
+            .read_with(|conn| crate::author_coverage::interval_in(conn, &f.key, i64::MAX))
+            .unwrap()
+    };
+    let apply = |f: &mut Fixture, event: AdmittedLiveUpdate| {
+        apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            event,
+            &NoFaults,
+            100_000_000,
+            |_, _, _, _| Ok(()),
+        )
+        .unwrap()
+    };
+    let refused = apply(&mut f, event.clone());
+    assert!(
+        matches!(
+            refused,
+            ApplicationResult::Pending(ApplicationPending::SettlementRequired)
+        ),
+        "{refused:?}"
+    );
+    let held = interval(&f);
+    assert_eq!(held.len(), crate::author_coverage::MAX_INTERVAL_AUTHORS);
+    assert!(agents(&held).is_empty());
+    f.store
+        .write_with(&NoFaults, |tx| {
+            crate::author_coverage::advance_accepted_prefix_in(tx, &f.key, false)
+        })
+        .unwrap();
+    let applied = apply(&mut f, event);
+    assert!(
+        matches!(applied, ApplicationResult::Applied(..)),
+        "{applied:?}"
+    );
+    let settled = interval(&f);
+    assert_eq!(
+        agents(&settled),
+        [serde_json::json!(["native-agent", "installation-person"])]
+    );
+    assert_eq!(settled.len(), 2);
+}
+
+fn agent_run_edit(
+    f: &mut Fixture,
+    cache: &mut WriterDocCache,
+    run: usize,
+) -> Result<(), crate::CollabError> {
+    agent_edit(f, cache, run, &agent_run(format!("run-{run}"), None))
+}
+
+fn agent_run(
+    agent_run_id: String,
+    on_behalf_of: Option<String>,
+) -> dohc_engine_domain::ChangeAttribution {
+    dohc_engine_domain::ChangeAttribution {
+        actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
+        on_behalf_of,
+        depth: 0,
+        run: None,
+        agent_run_id: Some(agent_run_id),
+    }
+}
+
+fn agent_edit(
+    f: &mut Fixture,
+    cache: &mut WriterDocCache,
+    edit: usize,
+    attribution: &dohc_engine_domain::ChangeAttribution,
+) -> Result<(), crate::CollabError> {
+    let key = f.key.clone();
+    let path = f.binding.current_path.clone();
+    let update = f
+        .doc
+        .richdoc_append_paragraph(&format!("Private run {edit}."));
+    let now = 20 + edit as i64;
+    crate::record_local_update(
+        &mut f.store,
+        cache,
+        &key,
+        &update,
+        crate::LocalAppend {
+            actor_origin_id: Some("agent"),
+            attribution: Some(attribution),
+            ..Default::default()
+        },
+        &NoFaults,
+        now,
+        |tx, outcome, _| {
+            owner_outbox::append_adopted_local_update_in_tx(
+                tx,
+                &key,
+                &path,
+                outcome.seq,
+                &update,
+                &Default::default(),
+                now,
+            )
+        },
+    )
+    .map(|_| ())
+}
+
+fn agent_runs(json: &str) -> Vec<String> {
+    let authors: Value = serde_json::from_str(json).unwrap();
+    let mut runs: Vec<String> = authors
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|author| author["agentRunId"].as_str().map(str::to_owned))
+        .collect();
+    runs.sort();
+    runs
+}
+
+/// Adopts the document, and the relay accepts and settles one edit, so a
+/// release has an accepted state to return the Y.Doc to. No author is
+/// reserved.
+fn adopt_with_settled_edit(f: &mut Fixture) {
+    f.adopt().unwrap();
+    let covered = native_tail_edit(f, "# Covered\n", 11);
+    native_tail_apply(f, covered.update.clone(), covered.delivery_id.clone(), 3);
+    let covered = receipt_of(&covered.delivery_id, &covered.update_digest, 3);
+    acknowledge_entry(f, &covered);
+    settled(f, Some(covered), "covered").unwrap();
+    assert!(f
+        .store
+        .read_with(|conn| crate::author_coverage::reserved_in(conn, &f.key))
+        .unwrap()
+        .is_empty());
+}
+
+fn settle_accepted_prefix(f: &mut Fixture) {
+    f.store
+        .write_with(&NoFaults, |tx| {
+            crate::author_coverage::advance_accepted_prefix_in(tx, &f.key, false)
+        })
+        .unwrap();
+}
+
+const PRIVATE_EDIT_WRITES: [&str; 4] = [
+    "ydoc_docs",
+    "ydoc_updates",
+    "ydoc_native_authors",
+    "owner_ydoc_outbox_entries",
+];
+
+/// Agent runs with the longest identifiers each make a private edit on a
+/// held lineage. The run whose author would pass the bytes one moment can
+/// hold is refused and writes nothing, while a run with a private edit keeps
+/// editing.
+#[test]
+fn a_held_lineage_refuses_the_agent_run_one_moment_has_no_bytes_for() {
+    let mut f = Fixture::new();
+    adopt_with_settled_edit(&mut f);
+    // Each quote doubles when escaped.
+    let long_run = |index: usize| {
+        let id = dohc_engine_storage::MAX_IDENTIFIER_BYTES;
+        agent_run(
+            format!("{index:04}{}", "\"".repeat(id - 4)),
+            Some("\"".repeat(id)),
+        )
+    };
+    let entry = dohc_engine_domain::moment_author_json(Some("agent"), Some(&long_run(0)))
+        .unwrap()
+        .len()
+        - "[]".len()
+        + r#","depth":64"#.len();
+    // The list adds its brackets and a comma between entries, and the
+    // release reserves the unknown-author marker.
+    let marker = r#"{"kind":"unattributed"}"#.len() + 1;
+    let list = |runs: usize| 1 + runs * (entry + 1) + marker;
+    let admitted = (crate::author_coverage::MAX_INTERVAL_AUTHOR_BYTES - 1 - marker) / (entry + 1);
+    assert!(admitted < crate::author_coverage::MAX_INTERVAL_AUTHORS);
+    assert!(list(admitted) <= crate::author_coverage::MAX_INTERVAL_AUTHOR_BYTES);
+    assert!(list(admitted + 1) > crate::author_coverage::MAX_INTERVAL_AUTHOR_BYTES);
+    let mut cache = WriterDocCache::new();
+    for index in 0..admitted {
+        agent_edit(&mut f, &mut cache, index, &long_run(index)).unwrap();
+    }
+    agent_edit(&mut f, &mut cache, admitted, &long_run(0)).unwrap();
+    let before = rows(&f, &PRIVATE_EDIT_WRITES);
+    let refused = agent_edit(
+        &mut f,
+        &mut WriterDocCache::new(),
+        admitted + 1,
+        &long_run(admitted),
+    );
+    assert!(
+        matches!(refused, Err(crate::CollabError::AuthorCapacity)),
+        "the run past one moment's bytes is refused"
+    );
+    assert_eq!(
+        rows(&f, &PRIVATE_EDIT_WRITES),
+        before,
+        "a refused edit writes nothing"
+    );
+}
+
+fn people(count: usize) -> String {
+    Value::Array(
+        (0..count)
+            .map(|index| serde_json::json!({"kind": "human", "humanId": format!("person-{index}")}))
+            .collect(),
+    )
+    .to_string()
+}
+
+fn set_pending(f: &mut Fixture, authors: &str) {
+    let key = f.key.clone();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_docs SET pending_authors_json=?1 \
+                 WHERE workspace_id=?2 AND version_id=?3 AND object_id=?4",
+                rusqlite::params![authors, key.workspace_id, key.version_id, key.object_id],
+            )
+            .map_err(write_sql)
+        })
+        .unwrap();
+}
+
+fn interval_of(f: &Fixture) -> crate::author_coverage::Authors {
+    f.store
+        .read_with(|conn| crate::author_coverage::interval_in(conn, &f.key, i64::MAX))
+        .unwrap()
+}
+
+fn relay_settlement(
+    store: &mut EngineStore,
+    audit: &LiveSettlementAudit,
+    key: &DocKey,
+    first: bool,
+) -> Result<String, ApplicationError> {
+    let doc = audit.accepted_prefix().ok_or(ApplicationError::Corrupt)?;
+    let text = doc.project(ContentKind::Richdoc)?.content;
+    let vector = hex_sha256(&doc.encode_state_vector());
+    let TxnOutcome::Committed(id) =
+        store.write_with(&NoFaults, |tx| -> Result<_, ApplicationError> {
+            let authors = crate::author_coverage::interval_in(tx, key, i64::MAX)?;
+            let written = dohc_engine_domain::write_projected_text_in_tx(
+                tx,
+                dohc_engine_domain::ProjectedWriteText {
+                    workspace_id: "workspace",
+                    version_id: "main",
+                    object_id: "object",
+                    path: std::borrow::Cow::Borrowed("owner.md"),
+                    text: std::borrow::Cow::Borrowed(&text),
+                    moment_id: "relay-settlement",
+                    metadata_origin: "ydoc",
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: authors.moment_json().as_deref(),
+                    now_ms: 20,
+                    request_id: None,
+                },
+            )
+            .map_err(|_| ApplicationError::Corrupt)?;
+            crate::author_coverage::advance_accepted_prefix_in(tx, key, first)?;
+            tx.execute(
+                "UPDATE ydoc_docs SET settle_seq=?1, last_settled_sha=?2 WHERE object_id='object'",
+                rusqlite::params![written.moment.moment_order, written.snapshot.blob_sha256],
+            )
+            .map_err(write_sql)?;
+            audit.record_in_tx(
+                tx,
+                "relay-settlement",
+                &written.snapshot.blob_sha256,
+                &vector,
+                20,
+            )
+        })?
+    else {
+        return Err(ApplicationError::Interrupted);
+    };
+    Ok(id)
+}
+
+/// The relay's settlement of a held lineage names the people it accepted.
+/// New agent runs edit privately while its file write is unresolved. The
+/// write fails, so those people return to the interval, and the document
+/// parks only once a settlement takes them in again. However few they are,
+/// reconciling the retirement asks the relay to settle, and its settlement
+/// replays the failed one. Then the document parks, and the release brings
+/// in only the runs.
+#[test]
+fn a_held_release_waits_while_a_failed_settlement_returns_its_authors() {
+    for (returned, runs) in [(10, 10)] {
+        let case = format!("{returned} returned authors and {runs} runs");
+        let mut f = Fixture::new();
+        f.adopt().unwrap();
+        let covered = native_tail_edit(&mut f, "# Covered\n", 11);
+        native_tail_apply(
+            &mut f,
+            covered.update.clone(),
+            covered.delivery_id.clone(),
+            3,
+        );
+        let covered = receipt_of(&covered.delivery_id, &covered.update_digest, 3);
+        acknowledge_entry(&mut f, &covered);
+        set_pending(&mut f, &people(returned));
+        let named = interval_of(&f);
+        let mut cache = WriterDocCache::new();
+        agent_run_edit(&mut f, &mut cache, 0).unwrap();
+        let key = f.key.clone();
+        let reconstruction = NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
+        };
+        with_settlement(
+            &mut f.store,
+            &f.handle,
+            Some(covered.clone()),
+            128,
+            reconstruction,
+            |store, audit| relay_settlement(store, audit, &key, true),
+        )
+        .unwrap();
+        assert!(interval_of(&f).is_empty(), "{case}");
+        for run in 1..runs {
+            agent_run_edit(&mut f, &mut cache, run).unwrap();
+        }
+        f.store
+            .write_with(&NoFaults, |tx| {
+                crate::author_coverage::compensate_in(tx, &key, Some("relay-settlement"), 30)
+            })
+            .unwrap();
+        assert_eq!(interval_of(&f).json(), named.json(), "{case}");
+        let deliveries: Vec<String> = f
+            .store
+            .read_with(|conn| {
+                conn.prepare(
+                    "SELECT delivery_id FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence",
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap();
+        refuse_head(&mut f, &deliveries[0], "delivery-conflict");
+        let absent = JournalEvidence {
+            receipts: vec![],
+            absent: deliveries.clone(),
+        };
+        let scope = RetirementScope {
+            max_deliveries: deliveries.len(),
+            ..retirement_scope()
+        };
+        let retiring = retirement_key(&f, 10);
+        let reconciled = reconcile_activation(
+            &mut f.store,
+            &scope,
+            &retiring,
+            None,
+            Some(&absent),
+            &NoFaults,
+        )
+        .unwrap();
+        assert!(
+            matches!(reconciled, Reconciliation::Reconciled { settle: true, .. }),
+            "{case}: the relay settles the returned authors first: {reconciled:?}"
+        );
+        with_retirement_settlement(
+            &mut f.store,
+            &scope,
+            &retiring,
+            &retirement_host(),
+            Some(covered),
+            128,
+            reconstruction,
+            |store, audit| relay_settlement(store, audit, &key, false),
+        )
+        .unwrap();
+        assert!(interval_of(&f).is_empty(), "{case}");
+        assert!(
+            !f.store
+                .read_with(|conn| crate::author_coverage::unresolved_in(conn, &key))
+                .unwrap(),
+            "{case}"
+        );
+        release_parked(&mut f);
+        let released = interval_of(&f);
+        assert_eq!(released.len(), runs, "{case}");
+        let mut expected: Vec<String> = (0..runs).map(|run| format!("run-{run}")).collect();
+        expected.sort();
+        assert_eq!(agent_runs(&released.json()), expected, "{case}");
+        let moment_authors: String = f
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT author_json FROM moments WHERE moment_id='relay-settlement'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(moment_authors, named.json(), "{case}");
+    }
+}
+
+fn native_tail_edit(f: &mut Fixture, source: &str, now: i64) -> owner_outbox::OwnerOutboxEntry {
+    native_tail_edit_for(f, source, now, Some("owner"))
+}
+
+fn native_tail_edit_for(
+    f: &mut Fixture,
+    source: &str,
+    now: i64,
+    local_person: Option<&str>,
+) -> owner_outbox::OwnerOutboxEntry {
+    let update = f
+        .doc
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source)
+        .unwrap();
+    native_tail_record_at_depth(f, update, now, local_person, 1)
+}
+
+fn native_tail_record_at_depth(
+    f: &mut Fixture,
+    update: Vec<u8>,
+    now: i64,
+    local_person: Option<&str>,
+    depth: u32,
+) -> owner_outbox::OwnerOutboxEntry {
+    let key = f.key.clone();
+    let path = f.binding.current_path.clone();
+    let attribution = dohc_engine_domain::ChangeAttribution {
+        actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
+        on_behalf_of: local_person.map(str::to_owned),
+        depth,
+        run: None,
+        agent_run_id: None,
+    };
+    crate::record_local_update(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &f.key,
+        &update,
+        crate::LocalAppend {
+            restore_generation: (f.binding.restore_fence_generation > 0)
+                .then_some(f.binding.restore_fence_generation),
+            actor_origin_id: Some("native-agent"),
+            attribution: Some(&attribution),
+            ..Default::default()
+        },
+        &NoFaults,
+        now,
+        |tx, outcome, _| {
+            owner_outbox::append_adopted_local_update_in_tx(
+                tx,
+                &key,
+                &path,
+                outcome.seq,
+                &update,
+                &Default::default(),
+                now,
+            )
+        },
+    )
+    .unwrap();
+    let outbox: String = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id FROM owner_ydoc_outboxes WHERE restore_fence_generation=?1 AND current_path=?2",
+                rusqlite::params![f.binding.restore_fence_generation, f.binding.current_path],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    owner_outbox::read_pending(&f.store, "workspace", &outbox)
+        .unwrap()
+        .entries
+        .last()
+        .unwrap()
+        .clone()
+}
+
+fn native_tail_event(
+    f: &Fixture,
+    bytes: Vec<u8>,
+    delivery: String,
+    cursor: i64,
+) -> AdmittedLiveUpdate {
+    let declared: Option<Option<String>> = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT agent_declaration_json FROM owner_ydoc_outbox_entries WHERE delivery_id=?1",
+                [&delivery],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+        .unwrap();
+    let agent_declaration: Option<AgentDeclaration> = declared
+        .flatten()
+        .map(|json| serde_json::from_str(&json).unwrap());
+    AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: delivery,
+                    update_digest: hex_sha256(&bytes),
+                    journal_cursor: cursor,
+                    accepting_host_epoch: 1,
+                },
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                },
+                received_at_ms: cursor,
+            },
+            first_seen: vec![],
+            canonical_version: Some(2),
+            author_snapshot: Some(
+                (agent_declaration)
+                    .into_iter()
+                    .map(|declaration| {
+                        crate::live_update_application::LiveAuthorEntry::from(AgentDeclaration {
+                            on_behalf_of: Some("owner".into()),
+                            ..declaration
+                        })
+                    })
+                    .collect(),
+            ),
+            first_seen_deletes: Some(vec![]),
+            checkpoint_coverage: None,
+        },
+        update_bytes: bytes.clone(),
+    }
+}
+
+fn accepted_copy(doc: &Ydoc) -> Ydoc {
+    let copy = Ydoc::wire();
+    copy.apply(&doc.encode_full_state()).unwrap();
+    copy
+}
+
+fn relay_sees(event: &mut AdmittedLiveUpdate, accepted: &Ydoc) {
+    let (structs, deletes) =
+        crate::live_update_application::first_seen_for_test(accepted, &event.update_bytes);
+    event.metadata.first_seen = structs;
+    event.metadata.first_seen_deletes = Some(deletes);
+}
+
+fn native_tail_apply(
+    f: &mut Fixture,
+    bytes: Vec<u8>,
+    delivery: String,
+    cursor: i64,
+) -> LiveUpdateHostApplicationAck {
+    let event = native_tail_event(f, bytes.clone(), delivery, cursor);
+    let ApplicationResult::Applied(ack, _) = apply_committed(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &f.handle,
+        event,
+        &NoFaults,
+        100_000_000,
+        |_, _, _, _| Ok(()),
+    )
+    .unwrap() else {
+        panic!("application refused")
+    };
+    f.doc.apply(&bytes).unwrap();
+    ack
+}
+
+fn native_tail_inventory(store: &EngineStore) -> Value {
+    store.read_with(|conn| {
+        let mut q=conn.prepare("SELECT outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,pending,native_source_json FROM owner_ydoc_outbox_entries ORDER BY outbox_id,sequence").unwrap();
+        let entries=q.query_map([],|r|Ok(serde_json::json!([r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,i64>(6)?,r.get::<_,i64>(7)?,r.get::<_,i64>(8)?,r.get::<_,Option<String>>(9)?]))).unwrap().collect::<Result<Vec<_>,_>>()?;
+        Ok::<_,rusqlite::Error>(serde_json::json!(entries))
+    }).unwrap()
+}
+
+#[test]
+fn relay_bound_owner_agent_draft_applies_after_same_client_depth_change() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let baseline = f.doc.state_vector();
+    let update = f.doc.richdoc_append_paragraph("first agent edit");
+    let first = native_tail_record_at_depth(&mut f, update, 11, Some("owner"), 1);
+    let first_vector = f.doc.state_vector();
+    let clients: Vec<_> = first_vector
+        .iter()
+        .filter_map(|(&client, &clock)| (clock > baseline.get(&client)).then_some(client))
+        .collect();
+    assert_eq!(clients.len(), 1);
+    let client = clients[0];
+    let first_event = native_tail_event(&f, first.update, first.delivery_id, 7);
+    let stored_snapshot = first_event.metadata.author_snapshot.clone();
+    assert!(matches!(
+        apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            first_event,
+            &NoFaults,
+            100_000_000,
+            |_, _, _, _| Ok(())
+        ),
+        Ok(ApplicationResult::Applied(..))
+    ));
+
+    let update = f.doc.richdoc_append_paragraph("next agent edit");
+    let second = native_tail_record_at_depth(&mut f, update, 12, Some("owner"), 2);
+    let second_vector = f.doc.state_vector();
+    assert_eq!(second_vector.len(), first_vector.len());
+    assert!(second_vector.get(&client) > first_vector.get(&client));
+    assert!(second_vector
+        .iter()
+        .all(|(&id, &clock)| id == client || clock == first_vector.get(&id)));
+    let mut event = native_tail_event(&f, second.update, second.delivery_id, 8);
+    assert_eq!(event.metadata.admitted_declaration().unwrap().depth, 2);
+    event.metadata.author_snapshot = stored_snapshot;
+    assert_eq!(event.metadata.admitted_declaration().unwrap().depth, 1);
+    let before = native_tail_inventory(&f.store);
+    for authority in [
+        ServerDerivedLiveUpdateAuthority::Named {
+            principal_id: "recipient".into(),
+            grant_id: "grant".into(),
+            grant_generation: 1,
+        },
+        ServerDerivedLiveUpdateAuthority::Link {
+            principal_id: "recipient-link".into(),
+            grant_id: "grant".into(),
+            grant_generation: 1,
+        },
+    ] {
+        let mut other = event.clone();
+        other.metadata.accepted.authority = authority;
+        let LiveAuthorEntry::Agent { on_behalf_of, .. } =
+            &mut other.metadata.author_snapshot.as_mut().unwrap()[0]
+        else {
+            panic!("expected agent")
+        };
+        *on_behalf_of = Some("recipient".into());
+        assert!(matches!(
+            apply_committed(
+                &mut f.store,
+                &mut WriterDocCache::new(),
+                &f.handle,
+                other,
+                &NoFaults,
+                100_000_000,
+                |_, _, _, _| Ok(())
+            ),
+            Err(ApplicationError::Conflict)
+        ));
+        assert_eq!(native_tail_inventory(&f.store), before);
+        assert_eq!(
+            f.store
+                .table_row_count("live_device_update_applications")
+                .unwrap(),
+            1
+        );
+    }
+    let ApplicationResult::Applied(ack, _) = apply_committed(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &f.handle,
+        event,
+        &NoFaults,
+        100_000_000,
+        |_, _, _, _| Ok(()),
+    )
+    .unwrap() else {
+        panic!("application refused")
+    };
+    assert_eq!(ack.local_ydoc_sequence, 2);
+}
+
+#[test]
+fn relay_bound_owner_agent_draft_refuses_other_principals_and_changed_agents() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let source = native_tail_edit_for(&mut f, "agent edit", 11, Some("installation-person"));
+    let original = native_tail_event(&f, source.update, source.delivery_id, 7);
+    let before = native_tail_inventory(&f.store);
+    for variant in ["named", "link", "wrong-person", "missing-person", "agent"] {
+        let mut event = original.clone();
+        let LiveAuthorEntry::Agent {
+            agent_id,
+            on_behalf_of,
+            ..
+        } = &mut event.metadata.author_snapshot.as_mut().unwrap()[0]
+        else {
+            panic!("expected agent")
+        };
+        match variant {
+            "named" => {
+                event.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Named {
+                    principal_id: "recipient".into(),
+                    grant_id: "grant".into(),
+                    grant_generation: 1,
+                };
+                *on_behalf_of = Some("recipient".into());
+            }
+            "link" => {
+                event.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Link {
+                    principal_id: "private-link".into(),
+                    grant_id: "grant".into(),
+                    grant_generation: 1,
+                };
+                *on_behalf_of = Some("public-link".into());
+            }
+            "wrong-person" => *on_behalf_of = Some("recipient".into()),
+            "missing-person" => *on_behalf_of = None,
+            "agent" => *agent_id = "other-agent".into(),
+            _ => unreachable!(),
+        }
+        assert!(
+            matches!(
+                apply_committed(
+                    &mut f.store,
+                    &mut WriterDocCache::new(),
+                    &f.handle,
+                    event,
+                    &NoFaults,
+                    100_000_000,
+                    |_, _, _, _| Ok(())
+                ),
+                Err(ApplicationError::Conflict)
+            ),
+            "{variant}"
+        );
+        assert_eq!(native_tail_inventory(&f.store), before);
+        assert_eq!(
+            f.store
+                .table_row_count("live_device_update_applications")
+                .unwrap(),
+            0
+        );
+    }
+}
+
+/// An adopted owner's native agent edit declares the agent its journal row
+/// recorded, as an editor's draft declares it, with no draft proof. A retry
+/// reads back the same entry.
+/// A person's or an automation's edit declares none.
+#[test]
+fn adopted_native_agent_edit_declares_its_recorded_agent() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let entry = native_tail_edit(&mut f, "Agent pending", 11);
+    let expected = dohc_engine_domain::AgentDeclaration {
+        agent_id: "native-agent".into(),
+        on_behalf_of: Some("owner".into()),
+        depth: 1,
+    };
+    assert_eq!(entry.agent_declaration, Some(expected.clone()));
+    let stored = |f: &Fixture| -> (Option<String>, Option<i64>, i64) {
+        f.store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT agent_declaration_json,draft_binding_revision,json_extract(native_source_json,'$.nativeSequence') FROM owner_ydoc_outbox_entries WHERE delivery_id=?1",
+                    [&entry.delivery_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+            })
+            .unwrap()
+    };
+    let (declaration, revision, native_sequence) = stored(&f);
+    assert_eq!(declaration, Some(serde_json::to_string(&expected).unwrap()));
+    assert_eq!(revision, None);
+    let key = f.key.clone();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            owner_outbox::append_adopted_local_update_in_tx(
+                tx,
+                &key,
+                "owner.md",
+                native_sequence,
+                &entry.update,
+                &Default::default(),
+                99,
+            )
+        })
+        .unwrap();
+    assert_eq!(stored(&f), (declaration, None, native_sequence));
+    assert_eq!(
+        f.store
+            .table_row_count("owner_ydoc_outbox_entries")
+            .unwrap(),
+        1
+    );
+
+    for kind in [
+        dohc_engine_domain::ChangeActorKind::Human,
+        dohc_engine_domain::ChangeActorKind::Automation,
+    ] {
+        let mut f = Fixture::new();
+        f.adopt().unwrap();
+        let update = f
+            .doc
+            .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "Not an agent")
+            .unwrap();
+        let key = f.key.clone();
+        let attribution = dohc_engine_domain::ChangeAttribution {
+            actor_kind: kind,
+            on_behalf_of: Some("owner".into()),
+            depth: 0,
+            run: None,
+            agent_run_id: None,
+        };
+        crate::record_local_update(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.key,
+            &update,
+            crate::LocalAppend {
+                actor_origin_id: Some("someone"),
+                attribution: Some(&attribution),
+                ..Default::default()
+            },
+            &NoFaults,
+            11,
+            |tx, outcome, _| {
+                owner_outbox::append_adopted_local_update_in_tx(
+                    tx,
+                    &key,
+                    "owner.md",
+                    outcome.seq,
+                    &update,
+                    &Default::default(),
+                    11,
+                )
+            },
+        )
+        .unwrap();
+        let declared: Option<String> = f
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT agent_declaration_json FROM owner_ydoc_outbox_entries",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(declared, None);
+    }
+}
+
+fn apply_recipient_edit(f: &mut Fixture, other: &Ydoc, cursor: i64, text: &str) -> ApplicationResult {
+    apply_recipient_update(f, other, cursor, text, false)
+}
+
+fn apply_recipient_update(
+    f: &mut Fixture,
+    other: &Ydoc,
+    cursor: i64,
+    text: &str,
+    full_state: bool,
+) -> ApplicationResult {
+    let event = recipient_update(f, other, cursor, text, full_state);
+    apply_committed(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &f.handle,
+        event,
+        &NoFaults,
+        100_000_000,
+        |_, _, _, _| Ok(()),
+    )
+    .unwrap()
+}
+
+fn recipient_update(
+    f: &Fixture,
+    other: &Ydoc,
+    cursor: i64,
+    text: &str,
+    full_state: bool,
+) -> AdmittedLiveUpdate {
+    let before = other.state_vector();
+    let edit = other.richdoc_append_paragraph(text);
+    let bytes = if full_state { other.encode_full_state() } else { edit };
+    let mut first_seen: Vec<_> = other
+        .state_vector()
+        .iter()
+        .filter_map(|(client, clock)| {
+            let start = before.get(client);
+            (*clock > start).then_some(LiveUpdateStructRange {
+                client_id: client.get() as i64,
+                start_clock: i64::from(start),
+                end_clock: i64::from(*clock),
+            })
+        })
+        .collect();
+    first_seen.sort_by_key(|range| range.client_id);
+    AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: if cursor == 1 {
+                        "recipient-edit".into()
+                    } else {
+                        format!("recipient-edit-{cursor}")
+                    },
+                    update_digest: hex_sha256(&bytes),
+                    journal_cursor: cursor,
+                    accepting_host_epoch: 1,
+                },
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Named {
+                    principal_id: "recipient".into(),
+                    grant_id: "grant".into(),
+                    grant_generation: 1,
+                },
+                received_at_ms: cursor,
+            },
+            first_seen,
+            canonical_version: Some(2),
+            author_snapshot: Some(vec![LiveAuthorEntry::Human {
+                human_id: "recipient".into(),
+                human_name: "Recipient".into(),
+            }]),
+            first_seen_deletes: Some(vec![]),
+            checkpoint_coverage: None,
+        },
+        update_bytes: bytes,
+    }
+}
+
+fn seed_outbox(f: &Fixture) -> String {
+    f.store
+        .read_with(|conn| conn.query_row("SELECT outbox_id FROM owner_ydoc_outboxes", [], |r| r.get(0)))
+        .unwrap()
+}
+
+fn refuse_seed(f: &mut Fixture, outbox: &str) {
+    owner_outbox::quarantine(
+        &mut f.store,
+        "workspace",
+        owner_outbox::OwnerOutboxQuarantineInput {
+            outbox_id: outbox.to_owned(),
+            reason: "invalid-update".into(),
+            observed_binding: None,
+        },
+        8,
+    )
+    .unwrap();
+}
+
+fn read_recovery_checkpoint(
+    f: &Fixture,
+    outbox: &str,
+    page: usize,
+) -> Option<(serde_json::Value, Vec<u8>)> {
+    let read = |cursor| {
+        owner_outbox::read_pending_page(&f.store, "workspace", outbox, cursor, page)
+            .unwrap_or_else(|error| panic!("recovery read failed: {error}"))
+    };
+    let mut header = Vec::new();
+    let mut cursor = None;
+    loop {
+        let owner_outbox::OwnerOutboxPageResult::Page(part) = read(cursor) else {
+            return None;
+        };
+        header.extend(part.bytes);
+        match part.next_cursor {
+            Some(next) if next.part == owner_outbox::OwnerOutboxReadPart::Header => cursor = Some(next),
+            next => {
+                cursor = next;
+                break;
+            }
+        }
+    }
+    let header: serde_json::Value = serde_json::from_slice(&header).unwrap();
+    let mut checkpoint = Vec::new();
+    let mut cursor = Some(owner_outbox::OwnerOutboxReadCursor {
+        snapshot: cursor.unwrap().snapshot,
+        part: owner_outbox::OwnerOutboxReadPart::Checkpoint,
+        sequence: 0,
+        offset: 0,
+    });
+    while let Some(at) = cursor {
+        let owner_outbox::OwnerOutboxPageResult::Page(part) = read(Some(at)) else {
+            return None;
+        };
+        assert_eq!(Some(part.digest.as_str()), header["checkpointDigest"].as_str());
+        checkpoint.extend(part.bytes);
+        cursor = part.next_cursor;
+    }
+    assert_eq!(Some(hex_sha256(&checkpoint).as_str()), header["checkpointDigest"].as_str());
+    Some((header, checkpoint))
+}
+
+fn checkpoint_text(bytes: &[u8]) -> String {
+    let doc = Ydoc::wire();
+    doc.apply(bytes).unwrap();
+    doc.project(ContentKind::Richdoc).unwrap().content
+}
+
+#[test]
+fn a_recovery_copy_of_a_refused_seed_holds_every_accepted_edit_after_it() {
+    let mut f = Fixture::new();
+    f.local_edit_before_adoption();
+    f.adopt().unwrap();
+    let outbox = seed_outbox(&f);
+    let other = Ydoc::wire();
+    other.apply(&f.cut.baseline_bytes).unwrap();
+    assert!(matches!(
+        apply_recipient_edit(&mut f, &other, 1, "Recipient text"),
+        ApplicationResult::Applied(..)
+    ));
+    refuse_seed(&mut f, &outbox);
+    let prepare = |f: &mut Fixture| owner_outbox::prepare_recovery_checkpoint(&mut f.store, "workspace", &outbox);
+    let recorded = |f: &Fixture| -> (Option<String>, Option<i64>) {
+        f.store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT recovery_checkpoint_digest,recovery_checkpoint_cursor FROM owner_ydoc_outboxes WHERE outbox_id=?1",
+                    [&outbox],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .unwrap()
+    };
+    assert!(matches!(
+        owner_outbox::read_pending_page(&f.store, "workspace", &outbox, None, 4096),
+        Err(owner_outbox::OwnerOutboxError::RecoveryCheckpointOutdated)
+    ));
+    prepare(&mut f).unwrap();
+    let (header, checkpoint) = read_recovery_checkpoint(&f, &outbox, 16).unwrap();
+    let text = checkpoint_text(&checkpoint);
+    assert!(text.contains("Recipient text"), "{text}");
+    assert!(!text.contains("edited before connecting"), "{text}");
+    assert_eq!(header["frozenAtRefusedSeed"], serde_json::json!(true));
+    assert!(checkpoint.len() > 16, "the checkpoint spans pages");
+    let first = recorded(&f);
+    assert_eq!(first.1, Some(1));
+    assert_eq!(first.0.as_deref(), header["checkpointDigest"].as_str());
+    prepare(&mut f).unwrap();
+    assert_eq!(recorded(&f), first);
+    let header_cursor = owner_outbox::OwnerOutboxReadCursor {
+        snapshot: {
+            let owner_outbox::OwnerOutboxPageResult::Page(page) =
+                owner_outbox::read_pending_page(&f.store, "workspace", &outbox, None, 4096).unwrap()
+            else {
+                panic!("unchanged queue");
+            };
+            page.cursor.snapshot
+        },
+        part: owner_outbox::OwnerOutboxReadPart::Checkpoint,
+        sequence: 0,
+        offset: 0,
+    };
+    assert!(matches!(
+        apply_recipient_edit(&mut f, &other, 2, "Second recipient text"),
+        ApplicationResult::Applied(..)
+    ));
+    assert!(matches!(
+        owner_outbox::read_pending_page(&f.store, "workspace", &outbox, Some(header_cursor), 4096),
+        Ok(owner_outbox::OwnerOutboxPageResult::ReadChanged)
+    ));
+    assert!(matches!(
+        owner_outbox::read_pending_page(&f.store, "workspace", &outbox, None, 4096),
+        Err(owner_outbox::OwnerOutboxError::RecoveryCheckpointOutdated)
+    ));
+    prepare(&mut f).unwrap();
+    let (header, checkpoint) = read_recovery_checkpoint(&f, &outbox, 4096).unwrap();
+    let second = recorded(&f);
+    assert_eq!(second.1, Some(2));
+    assert_ne!(second.0, first.0);
+    assert_eq!(second.0.as_deref(), header["checkpointDigest"].as_str());
+    let text = checkpoint_text(&checkpoint);
+    assert!(text.contains("Recipient text") && text.contains("Second recipient text"), "{text}");
+    let replaced: i64 = f
+        .store
+        .read_with(|conn| {
+            conn.query_row("SELECT count(*) FROM binary_blobs WHERE sha256=?1", [first.0.as_deref().unwrap()], |r| r.get(0))
+        })
+        .unwrap();
+    assert_eq!(replaced, 0, "the older checkpoint's bytes go once nothing names them");
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO ydoc_deferred_updates(workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms) \
+                 VALUES('workspace','main','object','recipient-origin',1,30)",
+                [],
+            )
+            .map_err(write_sql)
+        })
+        .unwrap();
+    assert!(matches!(
+        owner_outbox::read_pending_page(&f.store, "workspace", &outbox, None, 4096),
+        Err(owner_outbox::OwnerOutboxError::AcceptedStateIncomplete)
+    ));
+    assert!(matches!(prepare(&mut f), Err(owner_outbox::OwnerOutboxError::AcceptedStateIncomplete)));
+    assert_eq!(recorded(&f), second);
+    // An update the owner holds for its service host is never applied, so the
+    // copy proceeds past it and the row stays held for the binding's end.
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_deferred_updates SET origin_id='service-host:host',deferred_while_bound=1",
+                [],
+            )
+            .map_err(write_sql)
+        })
+        .unwrap();
+    prepare(&mut f).unwrap();
+    let (header, checkpoint) = read_recovery_checkpoint(&f, &outbox, 4096).unwrap();
+    assert_eq!(second.0.as_deref(), header["checkpointDigest"].as_str());
+    assert!(checkpoint_text(&checkpoint).contains("Second recipient text"));
+    let held: i64 = f
+        .store
+        .read_with(|conn| conn.query_row("SELECT count(*) FROM ydoc_deferred_updates WHERE deferred_while_bound=1", [], |r| r.get(0)))
+        .unwrap();
+    assert_eq!(held, 1);
+}
+
+#[test]
+fn a_recovery_copy_rebuilds_an_accepted_history_longer_than_one_update() {
+    let mut f = Fixture::new();
+    f.local_edit_before_adoption();
+    f.adopt().unwrap();
+    let outbox = seed_outbox(&f);
+    let other = Ydoc::wire();
+    other.apply(&f.cut.baseline_bytes).unwrap();
+    let large = "x".repeat(1_800_000);
+    assert!(matches!(
+        apply_recipient_edit(&mut f, &other, 1, &large),
+        ApplicationResult::Applied(..)
+    ));
+    let history = |f: &Fixture| -> (i64, i64, i64) {
+        f.store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT count(*) FROM live_accepted_checkpoints),
+                        (SELECT b.byte_length FROM live_accepted_checkpoints c JOIN binary_blobs b ON b.sha256=c.state_sha256 ORDER BY c.event_count DESC LIMIT 1),
+                        coalesce((SELECT u.suffix_bytes FROM live_accepted_updates u WHERE u.event_count>(SELECT max(event_count) FROM live_accepted_checkpoints) ORDER BY u.event_count DESC LIMIT 1),0)",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+            })
+            .unwrap()
+    };
+    let (adopted, _, _) = history(&f);
+    let mut cursor = 1;
+    loop {
+        cursor += 1;
+        assert!(cursor < 64, "the history never outgrew one update");
+        assert!(matches!(
+            apply_recipient_update(&mut f, &other, cursor, &format!("Edit {cursor}"), true),
+            ApplicationResult::Applied(..)
+        ));
+        let (checkpoints, state, suffix) = history(&f);
+        if checkpoints > adopted && state + suffix > crate::limits::MAX_YDOC_UPDATE_BYTES as i64 {
+            break;
+        }
+    }
+    refuse_seed(&mut f, &outbox);
+    let (_, checkpoint) = prepare_and_read_recovery(&mut f, &outbox, 1 << 20);
+    assert!(checkpoint.len() < crate::limits::MAX_YDOC_UPDATE_BYTES);
+    let text = checkpoint_text(&checkpoint);
+    assert!(text.contains(&large) && text.contains(&format!("Edit {cursor}")));
+}
+
+#[test]
+fn a_storage_failure_keeps_the_binding_until_the_earlier_seeds_final_state_is_kept() {
+    let mut f = Fixture::new();
+    f.local_edit_before_adoption();
+    f.adopt().unwrap();
+    let outbox = seed_outbox(&f);
+    let other = Ydoc::wire();
+    other.apply(&f.cut.baseline_bytes).unwrap();
+    assert!(matches!(
+        apply_recipient_edit(&mut f, &other, 1, "Recipient text"),
+        ApplicationResult::Applied(..)
+    ));
+    refuse_seed(&mut f, &outbox);
+    let digest: String = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT state_sha256 FROM live_accepted_checkpoints ORDER BY event_count DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    let kept = f.store.get_binary_blob(&digest).unwrap().unwrap();
+    let store_bytes = |f: &mut Fixture, bytes: &[u8]| {
+        f.store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("UPDATE binary_blobs SET bytes=?1 WHERE sha256=?2", params![bytes, digest])
+                    .map_err(write_sql)
+            })
+            .unwrap();
+    };
+    store_bytes(&mut f, &vec![0; kept.len()]);
+    let (namespace, coordinate) = {
+        let held = f.handle.registration.lock().unwrap();
+        (held.namespace.clone(), held.coordinate.clone())
+    };
+    let mut moved = f.binding.clone();
+    moved.lineage_claim_id = "c".repeat(64);
+    let lineage = |f: &Fixture| -> String {
+        f.store
+            .read_with(|conn| {
+                conn.query_row("SELECT lineage_claim_id FROM live_device_application_bindings", [], |r| r.get(0))
+            })
+            .unwrap()
+    };
+    let refused = f
+        ._owner
+        .register(&mut f.store, namespace.clone(), coordinate.clone(), moved.clone())
+        .err();
+    assert!(
+        matches!(
+            refused,
+            Some(ApplicationError::Storage(dohc_engine_storage::StorageError::BlobIntegrity { .. }))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(lineage(&f), f.binding.lineage_claim_id);
+    store_bytes(&mut f, &kept);
+    f._owner
+        .register(&mut f.store, namespace, coordinate, moved)
+        .unwrap();
+    assert_eq!(lineage(&f), "c".repeat(64));
+    let (header, checkpoint) = read_recovery_checkpoint(&f, &outbox, 4096).unwrap();
+    assert_eq!(header["frozenAtRefusedSeed"], serde_json::json!(false));
+    assert_eq!(header["recoveryCheckpointDigest"], header["checkpointDigest"]);
+    let text = checkpoint_text(&checkpoint);
+    assert!(text.contains("Recipient text"), "{text}");
+    assert!(!text.contains("edited before connecting"), "{text}");
+}
+
+#[test]
+fn a_new_settlement_refuses_an_equal_cursor_interval() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let result = with_settlement(
+        &mut f.store,
+        &f.handle,
+        None,
+        128,
+        NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
+        },
+        |store, audit| {
+            assert!(audit.is_empty());
+            let doc = store.read_with(|conn| durable::load_doc_in(conn, &f.key))?;
+            let text = doc.project(ContentKind::Richdoc)?.content;
+            let vector = hex_sha256(&doc.encode_state_vector());
+            store.write_with(&NoFaults, |tx| -> Result<_, ApplicationError> {
+                let written = dohc_engine_domain::write_projected_text_in_tx(
+                    tx,
+                    dohc_engine_domain::ProjectedWriteText {
+                        workspace_id: "workspace", version_id: "main", object_id: "object",
+                        path: std::borrow::Cow::Borrowed("owner.md"),
+                        text: std::borrow::Cow::Borrowed(&text), moment_id: "empty-settlement",
+                        metadata_origin: "ydoc", metadata_summary: None,
+                        metadata_correlation_id: None, author_json: None, now_ms: 30, request_id: None,
+                    },
+                ).map_err(|_| ApplicationError::Corrupt)?;
+                tx.execute("UPDATE ydoc_docs SET last_settled_sha=?1 WHERE workspace_id='workspace' AND version_id='main' AND object_id='object'", [&written.snapshot.blob_sha256]).map_err(write_sql)?;
+                audit.record_in_tx(tx, "empty-settlement", &written.snapshot.blob_sha256, &vector, 30)
+            })
+        },
+    );
+    assert!(
+        matches!(result, Err(ApplicationError::InvalidInput(message)) if message == "a new settlement must cover an accepted edit")
+    );
+    assert_eq!(
+        f.store.table_row_count("live_device_settlements").unwrap(),
+        0
+    );
+    assert_eq!(f.store.table_row_count("moments").unwrap(), 1);
+}
+
+fn prepare_and_read_recovery(f: &mut Fixture, outbox: &str, page: usize) -> (serde_json::Value, Vec<u8>) {
+    owner_outbox::prepare_recovery_checkpoint(&mut f.store, "workspace", outbox).unwrap();
+    read_recovery_checkpoint(f, outbox, page).expect("unchanged queue")
+}

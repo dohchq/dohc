@@ -641,6 +641,27 @@ test("@dataset-collection bound app drift appears in migration review and unpinn
     });
     expect(pub1.kind).toBe("published");
 
+    const writeTypes = async () => {
+      const out = await runDohcCli(workspace, [
+        "dataset",
+        "types",
+        JSON.stringify({ workspaceId, datasetPath }),
+        "--json",
+      ]);
+      expect(out.stderr).toBe("");
+      const result = JSON.parse(out.stdout);
+      expect(result).toMatchObject({ kind: "types-written" });
+      expect(result.path).toMatch(/^\.dohc\/types\/[a-z0-9-]+\.d\.ts$/);
+      return { ...result, text: await readFile(join(workspace.rootPath, result.path), "utf8") };
+    };
+    const checked = await cliApp("checkLocal", { workspaceId, appRoot: "apps/signup" });
+    const types1 = await writeTypes();
+    expect(types1.revision).toBe(1);
+    expect(types1.text).toContain("export interface Tables {");
+    expect(types1.text).toContain(`  ${JSON.stringify(createOp.name)}: {\n    kind: "create";`);
+    expect(types1.text).toContain(JSON.stringify(createOp.fieldIds[0]));
+    expect(await cliApp("checkLocal", { workspaceId, appRoot: "apps/signup" })).toEqual(checked);
+
     await (await collectionCommand(collection, "Fields and names")).click();
     const fields = page.getByRole("dialog", { name: "Fields and names" });
     await fields.getByLabel("Name", { exact: true }).fill("Notes");
@@ -658,6 +679,9 @@ test("@dataset-collection bound app drift appears in migration review and unpinn
       .check();
     await review.getByRole("button", { name: "Approve change" }).click();
     await expect(review).toBeHidden();
+    const types2 = await writeTypes();
+    expect(types2).toMatchObject({ path: types1.path, revision: 2 });
+    expect(types2.text).toContain("from revision 2 of");
 
     const cliPerms = async () => {
       const out = await runDohcCli(workspace, [

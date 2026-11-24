@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "entryPath": "portal.tsx",
+  "inputs": [
+    "portal.tsx",
+    "api.ts",
+    "gallery.tsx",
+    "inspector.tsx",
+    "photo.tsx",
+    "scenes.ts",
+    "toast.tsx",
+    "lightbox.css"
+  ],
+  "dataset": {
+    "kind": "dataset",
+    "datasetPath": "lightbox/proofing/dataset.json",
+    "operations": ["listPublishedAssets", "assetFileAccess", "listAnnotations", "toggleClientPick", "addPinnedAnnotation"]
+  }
+}

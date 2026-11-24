@@ -159,7 +159,7 @@ Returns `{ ok: true, recordPath } | { ok: false, reason }`.
 
 ### `dohc_dataset`
 
-Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its dataset.json path relative to the MCP server folder. List and describe return this path; datasetId is internal identity. After a move, update path references. For action create, definition is a dataset.json descriptor object (formatVersion 1 or 2, name, schemaPath, operationsPath, tables, operations; plus datasetId for formatVersion 1). Generated create operations take input: { values: { "<fieldId>": value } }; generated edit operations take input: { id, expectedVersion, values: { "<fieldId>": value } } (keyed by field UUIDs from describe). Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. savePath must be absolute and outside the workspace. A relative sourcePath is read only and resolves from the MCP server folder; an absolute sourcePath is also supported. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.
+Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its dataset.json path relative to the MCP server folder. List and describe return this path; datasetId is internal identity. After a move, update path references. For action create, definition is a dataset.json descriptor object (formatVersion 1 or 2, name, schemaPath, operationsPath, tables, operations; plus datasetId for formatVersion 1). Generated create operations take input: { values: { "<fieldId>": value } }; generated edit operations take input: { id, expectedVersion, values: { "<fieldId>": value } } (keyed by field UUIDs from describe). Apps bind to these same datasets; they have no separate private app store. Action types writes .dohc/types/<name>.d.ts with TypeScript types for the approved tables and operations; an app imports them with import type. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. savePath must be absolute and outside the workspace. A relative sourcePath is read only and resolves from the MCP server folder; an absolute sourcePath is also supported. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -1897,6 +1897,18 @@ Use describe to find approved operation IDs.
 
 Returns `{ kind: "description", dataset, copy?: { offline, savedAtMs, coverage?: "saved-pages", host?, signedOut?: true, updateFailed?: true } }`.
 
+#### `dohc dataset types`
+
+Write TypeScript types for a Collection's tables and operations.
+
+Writes .dohc/types/<name>.d.ts from the approved revision. Import it with import type. Run it again after a change is approved.
+
+- `workspaceId`: `string`. Required.
+- `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
+
+Returns `{ kind: "types-written", path, revision }`.
+
 #### `dohc dataset history`
 
 List saved operations, with values to undo edits.
@@ -2340,7 +2352,7 @@ Use describe to find approved operation IDs. Generated create operations take in
 - `idempotencyKey`: `string`. Required.
 - `invocationId`: `UUID`
 
-Returns `{ kind: "invoked", result, revision, replayed, copy?: { offline, savedAtMs, coverage?: "saved-pages", host?, signedOut?: true, updateFailed?: true } }` or `{ kind: "refused", code, message }`.
+Returns `{ kind: "invoked", result, profile?: "bulk", revision, replayed, copy?: { offline, savedAtMs, coverage?: "saved-pages", host?, signedOut?: true, updateFailed?: true } }` or `{ kind: "refused", code, message }`.
 
 ### `dohc app`
 

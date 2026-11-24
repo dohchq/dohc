@@ -23,7 +23,7 @@ function fixture() {
     committedCursor: 10,
     baseOriginId: "peer",
     baseOriginSeq: 2,
-    baseRelaySeq: 8,
+    baseRelaySeq: 8 as number | null,
     sourceMomentId: "source",
     sourceDigest: digest(Buffer.from("source")),
     sourceByteLength: 6,
@@ -109,6 +109,16 @@ describe("native imported owner activation", () => {
     const { row, bytes } = fixture();
     change(row);
     expect(() => parseNativeOwnerActivation(row, bytes, "notes.md", 1000)).toThrow();
+  });
+
+  it("keeps a null base position, which native writes for a lineage a resolve began", () => {
+    const { row } = fixture();
+    row.source.baseRelaySeq = null;
+    expect(
+      JSON.stringify(parseNativeOwnerActivationSource(row.source, "notes.md", 1000)),
+    ).toContain('"baseOriginSeq":2,"baseRelaySeq":null,"sourceMomentId"');
+    const { baseRelaySeq: _, ...missing } = row.source;
+    expect(() => parseNativeOwnerActivationSource(missing, "notes.md", 1000)).toThrow();
   });
 
   it("returns the source in native field order whatever order it arrives in", () => {

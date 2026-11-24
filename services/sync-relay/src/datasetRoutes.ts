@@ -1,5 +1,5 @@
 import { parseApprovalAgent } from "@dohc/security-contract/approval-provenance";
-import { readBoundedJson } from "@dohc/service-http";
+import { readBoundedBytes } from "@dohc/service-http";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import { JournalError, type DatasetCursor } from "@dohc/app-backend-runtime/journal";
 import {
@@ -15,6 +15,10 @@ import { APP_PUBLICATION_MAX_METADATA_BYTES } from "@dohc/security-contract/app-
 import { parseDatasetRevision } from "@dohc/security-contract/dataset";
 import { parseDatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 import {
+  APP_BACKEND_BULK_LIMITS,
+  APP_BACKEND_PROFILE_HEADER,
+  APP_BACKEND_REQUEST_BYTES,
+  AppBackendLimitError,
   APP_BACKEND_CATCH_UP_BYTES,
   APP_BACKEND_CATCH_UP_HEADER,
   APP_BACKEND_UPLOAD_REQUEST_BYTES,
@@ -34,7 +38,8 @@ import { badRequest, notFound, relayError } from "./errors";
 import type { SyncRelayStorage } from "./storage";
 
 /** The largest JSON body a dataset action reads. */
-export function datasetRequestBytes(action: DatasetRoute["action"]): number {
+export function datasetRequestBytes(action: DatasetRoute["action"], owner = false): number {
+  if (action === "invoke" && owner) return APP_BACKEND_BULK_LIMITS.requestBytes;
   return action === "upload"
     ? APP_BACKEND_UPLOAD_REQUEST_BYTES
     : action === "activate" || action === "prepare-migration"
@@ -42,7 +47,7 @@ export function datasetRequestBytes(action: DatasetRoute["action"]): number {
       : // An app candidate up to its bound, inside the `localApp` wrapper.
         action === "binding" || action === "local-app"
         ? APP_PUBLICATION_MAX_METADATA_BYTES + 1024
-        : 128 * 1024;
+        : APP_BACKEND_REQUEST_BYTES;
 }
 
 /**
@@ -199,24 +204,38 @@ function input(value: unknown) {
     throw badRequest("Invalid operation input.");
   }
 }
-async function json(request: Request, signal: AbortSignal, maximum: number): Promise<unknown> {
+async function json(
+  request: Request,
+  signal: AbortSignal,
+  maximum: number,
+): Promise<{ raw: unknown; requestBytes: number }> {
   if (
     request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !==
     "application/json"
   )
     throw badRequest("Dataset requests require JSON.");
   try {
-    return await readBoundedJson(request, maximum, signal);
+    const bytes = await readBoundedBytes(request, maximum, signal);
+    return {
+      raw: JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown,
+      requestBytes: bytes.byteLength,
+    };
   } catch (error) {
     signal.throwIfAborted();
-    if (error instanceof RangeError) throw relayError("payload_too_large");
+    if (error instanceof RangeError) throw relayError("payload_too_large", error.message);
     throw badRequest("Invalid dataset JSON.");
   }
 }
 async function response(run: () => unknown): Promise<Response> {
   try {
-    return Response.json(await run(), { headers });
+    const value = await run();
+    return value instanceof Response ? value : Response.json(value, { headers });
   } catch (error) {
+    if (
+      error instanceof AppBackendLimitError ||
+      (error instanceof Error && error.name === "AppBackendLimitError")
+    )
+      throw relayError("payload_too_large", error.message);
     if (isAppBackendRuntimeError(error))
       return Response.json(
         { code: error.refusal.code, message: error.refusal.message },
@@ -252,6 +271,17 @@ async function response(run: () => unknown): Promise<Response> {
       );
     throw error;
   }
+}
+
+function invocationResponse({
+  profile,
+  ...result
+}: Awaited<ReturnType<RelayDatasetHost["invoke"]>> & {
+  catchUp?: ReturnType<typeof journalAfter>;
+}): Response {
+  return Response.json(result, {
+    headers: profile === "bulk" ? { ...headers, [APP_BACKEND_PROFILE_HEADER]: profile } : headers,
+  });
 }
 
 export function createDatasetRoutes(
@@ -427,7 +457,10 @@ export function createDatasetRoutes(
     ]);
     const scope = { workspaceId: route.workspaceId, datasetId: route.datasetId! };
     // Read before admission, so a slow sender holds no slot.
-    const raw = read ? undefined : await json(request, signal, datasetRequestBytes(route.action));
+    const owner = !auth.grantId && storage.workspaceIsOwnedBy(scope.workspaceId, auth.userId);
+    const { raw, requestBytes } = read
+      ? { raw: undefined, requestBytes: undefined }
+      : await json(request, signal, datasetRequestBytes(route.action, owner));
     const release = admit(
       {
         dataset: JSON.stringify([route.workspaceId, route.datasetId ?? "catalog"]),
@@ -765,7 +798,8 @@ export function createDatasetRoutes(
             revision: positive(body.revision),
             revisionSha256: digest(body.revisionSha256),
             operationId: datasetId(text(body.operationId)),
-            input: input(body.input),
+            input: body.input,
+            requestBytes,
             idempotencyKey: text(body.idempotencyKey, 128),
             signal,
           });
@@ -776,9 +810,9 @@ export function createDatasetRoutes(
             !storage.workspaceIsOwnedBy(scope.workspaceId, auth.userId) ||
             auth.grantId
           )
-            return result;
+            return invocationResponse(result);
           const catchUp = journalAfter(host, auth, scope, after);
-          return catchUp ? { ...result, catchUp } : result;
+          return invocationResponse(catchUp ? { ...result, catchUp } : result);
         }
         if (route.action === "local-app") {
           if (auth.grantId) throw notFound();
@@ -910,19 +944,24 @@ export function createDatasetAppRoutes(
     )
       throw notFound();
     const { authority, workspaceId, authorityRevision, capabilities } = published;
+    const owner = authority.caller.kind === "owner";
     const signal = AbortSignal.any([
       request.signal,
       storage.unavailable,
       AbortSignal.timeout(30_000),
     ]);
     // Read before admission, so a slow sender holds no slot.
-    const raw =
+    const { raw, requestBytes } =
       get || request.method !== "POST"
-        ? undefined
+        ? { raw: undefined, requestBytes: undefined }
         : await json(
             request,
             signal,
-            route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : 128 * 1024,
+            route.action === "upload"
+              ? APP_BACKEND_UPLOAD_REQUEST_BYTES
+              : route.action === "invoke" && owner
+                ? APP_BACKEND_BULK_LIMITS.requestBytes
+                : APP_BACKEND_REQUEST_BYTES,
           );
     // A phone launch's reach may have ended while its body arrived.
     if (raw !== undefined && auth.kind === "named") await auth.launch?.recheck();
@@ -1101,34 +1140,45 @@ export function createDatasetAppRoutes(
         if (route.action !== "invoke") throw notFound();
         // The owner's computer names the agent that drives an app the owner approved there.
         let agent: ReturnType<typeof owningAgent>,
+          readOnly = false,
           request: unknown = raw;
         if (published.local && raw && typeof raw === "object" && Object.hasOwn(raw, "agent")) {
           const { agent: named, ...rest } = raw as Record<string, unknown>;
           agent = owningAgent(named);
           request = rest;
         }
+        if (request && typeof request === "object" && Object.hasOwn(request, "readOnly")) {
+          const { readOnly: flag, ...rest } = request as Record<string, unknown>;
+          if (flag !== true) throw badRequest("Invalid app operation.");
+          readOnly = true;
+          request = rest;
+        }
         let body;
         try {
-          body = parseAppBackendInvokeRequest(request);
-        } catch {
+          body = parseAppBackendInvokeRequest(request, owner ? "bulk" : undefined);
+        } catch (error) {
+          if (error instanceof AppBackendLimitError && auth.kind !== "link") throw error;
           throw badRequest("Invalid app operation.");
         }
         if (body.authorityRevision !== authorityRevision) throw notFound();
         const operation = targetCapability.operations.find(
-          (operation) => operation.name === body.operation,
+          (operation) => operation.name === body.operation && (!readOnly || operation.readOnly),
         );
         if (!operation) throw notFound();
-        return host.invoke(agent && auth.kind === "named" ? { ...auth, agent } : auth, {
-          workspaceId,
-          datasetId: targetDatasetId,
-          revision: targetCapability.revision,
-          revisionSha256: targetCapability.revisionSha256,
-          operationId: operation.operationId,
-          input: body.input,
-          idempotencyKey: body.idempotencyKey,
-          access: { kind: "app", appId: route.publicationId },
-          signal,
-        });
+        return invocationResponse(
+          await host.invoke(agent && auth.kind === "named" ? { ...auth, agent } : auth, {
+            workspaceId,
+            datasetId: targetDatasetId,
+            revision: targetCapability.revision,
+            revisionSha256: targetCapability.revisionSha256,
+            operationId: operation.operationId,
+            input: body.input,
+            requestBytes,
+            idempotencyKey: body.idempotencyKey,
+            access: { kind: "app", appId: route.publicationId },
+            signal,
+          }),
+        );
       });
     } finally {
       release();

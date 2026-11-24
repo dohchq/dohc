@@ -1,8 +1,7 @@
 use super::*;
 use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::{
-    ApplicationHostCoordinate, ApplicationOwner, LiveApplicationBootstrap, NativeRestoreFence,
-    RestoreDeliveryOrigin, bootstrap_committed,
+    ApplicationHostCoordinate, ApplicationOwner, LiveApplicationBootstrap, bootstrap_committed,
 };
 use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};
 use dohc_engine_storage::hex_sha256;
@@ -67,32 +66,14 @@ fn stopped_remote_update_retains_bytes_and_advances_with_classified_refusal() {
         |_, _, _, _| Ok(()),
     )
     .unwrap();
-    let operation = NativeRestoreFence {
-        point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
-            journal_cursor: 0,
-            receipt_digest: binding.lineage_claim_id.clone(),
-        },
-        operation_id: "restore".into(),
-        relay_database_namespace: "relay".into(),
-        old_binding: binding.clone(),
-        host_id: "host".into(),
-        new_fence: 1,
-        origin: RestoreDeliveryOrigin::Bootstrap {
-            id: "bootstrap".into(),
-        },
-        terminal: None,
-        applied_sequence: 0,
-    };
-    let receipt = owner
-        .fence_restore(
-            &mut store,
-            None,
-            operation.clone(),
-            coordinate.clone(),
-            200,
-            &NoFaults,
-            |_, _| Ok(()),
-        )
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('ws','main','object','relay','restore',?1,'{}')",
+                [json!({"oldBinding":binding,"newFence":1}).to_string()],
+            )
+            .map_err(SyncError::persist)
+        })
         .unwrap();
     let peer = Ydoc::wire();
     peer.apply(&bytes).unwrap();
@@ -164,20 +145,6 @@ fn stopped_remote_update_retains_bytes_and_advances_with_classified_refusal() {
         assert_eq!(
             canonical.doc.project(ContentKind::Richdoc).unwrap().content,
             markdown
-        );
-        assert_eq!(
-            owner
-                .fence_restore(
-                    &mut store,
-                    None,
-                    operation.clone(),
-                    coordinate.clone(),
-                    201,
-                    &NoFaults,
-                    |_, _| Ok(()),
-                )
-                .unwrap(),
-            receipt
         );
     }
     store.read_with(|conn| {

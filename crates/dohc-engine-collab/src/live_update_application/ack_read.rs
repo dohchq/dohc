@@ -47,7 +47,7 @@ pub fn read_application_ack(
             available && binding == *b && coordinate == held.coordinate) {
             return Err(ApplicationError::Interrupted);
         }
-        restore_fence::require_registration(conn, &key, &held.namespace, b)?;
+        restore_fence::require_open(conn, &key)?;
         let Some(marker) = durable::read_marker_in(conn, &key)? else { return Ok(None); };
         if marker.regime != Regime::Replicated || marker.lineage_claim_status != durable::LineageClaimStatus::Exact
             || marker.lineage_claim_id.as_deref() != Some(&b.lineage_claim_id)

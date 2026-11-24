@@ -1,8 +1,6 @@
 use super::*;
 use std::collections::BTreeSet;
 
-pub(super) mod restore;
-
 /// Immutable projection coverage. Filesystem status belongs to its materialization job.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,8 +49,6 @@ pub struct LiveSettlementAudit {
     bootstrap_moment: String,
     bootstrap_digest: String,
     first: bool,
-    restore: Option<Box<restore::RestoreAudit>>,
-    replay_anchor: Option<restore::PriorAnchor>,
     /// No settlement is stored and the relay accepted nothing since the
     /// owner's handover or the first baseline.
     empty: bool,
@@ -110,11 +106,6 @@ impl LiveSettlementAudit {
         markdown: &str,
         empty: bool,
     ) -> Result<bool, ApplicationError> {
-        if let Some(restore) = &self.restore {
-            return restore
-                .covers_projection(conn, self, moment, markdown)
-                .map_err(audit_error);
-        }
         let b = &self.binding;
         let registration = Registration {
             workspace_id: b.workspace_id.clone(),
@@ -140,15 +131,13 @@ impl LiveSettlementAudit {
         };
         let binding: LiveObjectBinding =
             serde_json::from_str(&binding).map_err(StorageError::persist_public)?;
-        validate_crossed_binding(conn, &self.namespace, &binding, b).map_err(audit_error)?;
+        validate_historical_binding(&binding, b).map_err(audit_error)?;
         Ok(saved_moment == moment && saved_markdown == markdown && sequence <= self.sequence)
     }
     /// An unchanged projection may name the current head moment only when that
     /// moment is already this document's latest audited settlement. Any other
     /// head, such as a pre-live imported projection, would publish its own
-    /// historical before-image. A restore reuses only its own saved settlement,
-    /// so its first settlement records the restore transition. Replay keeps its
-    /// exact record-time checks. An empty settlement publishes nothing, so any
+    /// historical before-image. An empty settlement publishes nothing, so any
     /// head holding its projection stands.
     pub fn reuses_head_in(
         &self,
@@ -161,17 +150,6 @@ impl LiveSettlementAudit {
         }
         if self.terminal_source {
             return Ok(false);
-        }
-        if let Some(restore) = &self.restore {
-            let b = &self.binding;
-            return conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND terminal_cursor=?6 AND settlement_kind='restore' AND restore_operation_id=?7 AND moment_id=?8 AND markdown_digest=?9 AND binding_json=?10)",
-                params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.terminal_cursor,restore.operation_id(),moment,markdown,serde_json::to_string(b).map_err(StorageError::persist_public)?],
-                |row| row.get(0),
-            ).map_err(|error| ApplicationError::Storage(StorageError::persist_public(error)));
-        }
-        if self.replay_anchor.is_some() {
-            return Ok(true);
         }
         self.saved_projection_in(conn, moment, markdown, false)
     }
@@ -235,11 +213,7 @@ impl LiveSettlementAudit {
         vector: &str,
         now_ms: i64,
     ) -> Result<String, ApplicationError> {
-        if let Some(restore) = &self.restore {
-            restore
-                .verify(tx, self, markdown, vector)
-                .map_err(audit_error)?;
-        } else {
+        {
             let corrupt = || ApplicationError::Storage(StorageError::StateCorrupt { source: None });
             let b = &self.binding;
             let registration = Registration {
@@ -289,27 +263,6 @@ impl LiveSettlementAudit {
         if !matches_projection {
             return Err(corrupt());
         }
-        if let Some(anchor) = &self.replay_anchor {
-            let held = Registration {
-                workspace_id: b.workspace_id.clone(),
-                namespace: self.namespace.clone(),
-                coordinate: self.coordinate.clone(),
-                binding: b.clone(),
-                activation_id: None,
-                live: true,
-            };
-            if restore::restored_origin(tx, &held)
-                .map_err(audit_error)?
-                .as_ref()
-                != Some(anchor)
-                || anchor.moment != moment
-                || anchor.markdown != markdown
-                || anchor.vector != vector
-            {
-                return Err(corrupt());
-            }
-            return Ok(anchor.id.clone());
-        }
         let identities = serde_json::to_vec(&(
             &self.namespace,
             b,
@@ -324,10 +277,9 @@ impl LiveSettlementAudit {
         ))
         .map_err(StorageError::persist_public)?;
         let id = format!("live-settlement-{}", hex_sha256(&identities));
-        let operation = self.restore.as_ref().map(|restore| restore.operation_id());
         let existing: Option<(String,String,String,String,i64,i64)> = tx.query_row(
-            "SELECT settlement_id,moment_id,markdown_digest,interval_digest,application_count,local_ydoc_sequence FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND terminal_cursor=?6 AND restore_operation_id IS ?7 AND settlement_kind=?8 AND binding_json=?9 AND source_state_vector_digest=?10",
-            params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.terminal_cursor,operation,if operation.is_some() {"restore"} else {"ordinary"},serde_json::to_string(b).map_err(StorageError::persist_public)?,vector],
+            "SELECT settlement_id,moment_id,markdown_digest,interval_digest,application_count,local_ydoc_sequence FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND terminal_cursor=?6 AND restore_operation_id IS NULL AND settlement_kind='ordinary' AND binding_json=?7 AND source_state_vector_digest=?8",
+            params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.terminal_cursor,serde_json::to_string(b).map_err(StorageError::persist_public)?,vector],
             |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?))).optional().map_err(StorageError::persist_public)?;
         if let Some((saved, saved_moment, saved_markdown, saved_interval, count, sequence)) =
             existing
@@ -347,9 +299,9 @@ impl LiveSettlementAudit {
         if self.previous_cursor >= self.terminal_cursor {
             return Err(invalid("a new settlement must cover an accepted edit"));
         }
-        tx.execute("INSERT INTO live_device_settlements VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+        tx.execute("INSERT INTO live_device_settlements VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,'ordinary',NULL)",
             params![id,self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.previous_cursor,self.terminal_cursor,self.previous_sequence,self.sequence,self.application_count as i64,self.interval_digest,moment,markdown,vector,
-                serde_json::to_string(b).map_err(StorageError::persist_public)?,serde_json::to_string(&self.coordinate).map_err(StorageError::persist_public)?,now_ms,if operation.is_some() {"restore"} else {"ordinary"},operation]).map_err(StorageError::persist_public)?;
+                serde_json::to_string(b).map_err(StorageError::persist_public)?,serde_json::to_string(&self.coordinate).map_err(StorageError::persist_public)?,now_ms]).map_err(StorageError::persist_public)?;
         if self.terminal_source {
             tx.execute("INSERT INTO live_settlement_attribution_unavailable(workspace_id,moment_id,settlement_id,reason) VALUES (?1,?2,?3,'terminal-owner-source') ON CONFLICT(workspace_id,moment_id) DO NOTHING",params![b.workspace_id,moment,id]).map_err(StorageError::persist_public)?;
         }
@@ -482,15 +434,9 @@ impl LiveSettlementAudit {
     ) -> LiveSettlementResult {
         LiveSettlementResult {
             settlement_id,
-            previous_cursor: self
-                .replay_anchor
-                .as_ref()
-                .map_or(self.previous_cursor, |anchor| anchor.previous_cursor),
+            previous_cursor: self.previous_cursor,
             terminal_cursor: self.terminal_cursor,
-            application_count: self
-                .replay_anchor
-                .as_ref()
-                .map_or(self.application_count, |anchor| anchor.application_count),
+            application_count: self.application_count,
             local_ydoc_sequence: self.sequence,
             moment_id,
             markdown_digest,
@@ -590,20 +536,18 @@ where
         let b = &held.binding;
         validate_historical_binding(b,b)?;
         let key = DocKey::new(&b.workspace_id,&b.main_version_id,&b.object_id)?;
+        restore_fence::require_open(conn,&key)?;
         let marker = durable::read_marker_in(conn,&key)?.ok_or(ApplicationError::Corrupt)?;
         if marker.regime != Regime::Replicated || marker.lineage_claim_status != durable::LineageClaimStatus::Exact || marker.content_kind != crate::ContentKind::Richdoc || marker.lineage_claim_id.as_deref()!=Some(b.lineage_claim_id.as_str()) || marker.path.as_deref()!=Some(b.current_path.as_str()) { return Err(ApplicationError::Conflict); }
         let owner_origin = adoption::read_origin(conn,held)?;
-        let restored_origin = restore::restored_origin(conn,held)?;
-        let (original_binding,origin_moment,origin_digest,origin_cursor,origin_sequence) = if let Some(origin) = &restored_origin {
-            (origin.binding.clone(),origin.moment.clone(),origin.markdown.clone(),origin.cursor,origin.sequence)
-        } else if let Some(origin) = &owner_origin {
+        let (original_binding,origin_moment,origin_digest,origin_cursor,origin_sequence) = if let Some(origin) = &owner_origin {
             (origin.binding.clone(),origin.source_moment.clone(),origin.source_digest.clone(),origin.terminal.as_ref().map_or(0,|r|r.journal_cursor),origin.sequence)
         } else {
             let (bootstrap,original_binding,_,_) = bootstrap::read_bootstrap(conn,held)?.ok_or(ApplicationError::Corrupt)?;
             let written = bootstrap::written_markdown_digest(conn,held)?;
             (original_binding,bootstrap.bootstrap_moment_id,written,0,0)
         };
-        validate_crossed_binding(conn,&held.namespace,&original_binding,b)?;
+        validate_historical_binding(&original_binding,b)?;
         let latest = latest_receipt(conn,held)?;
         if latest != terminal { return Err(invalid("settlement terminal is not current")); }
         let terminal_cursor = terminal.as_ref().map_or(0,|r|r.journal_cursor);
@@ -631,7 +575,6 @@ where
         // but never this settlement's identity.
         let head = marker.head_update_seq;
         let (previous_cursor,previous_sequence,replayed) = match previous {
-            Some((_,end,_,end_sequence,_)) if end == terminal_cursor && restored_origin.as_ref().is_some_and(|anchor|anchor.cursor == end) => (end,end_sequence,None),
             Some((start,end,start_sequence,end_sequence,_)) if end == terminal_cursor => (start,start_sequence,Some(end_sequence)),
             Some((_,end,_,end_sequence,refused_start)) if end < terminal_cursor => {
                 let cursor = if let Some(start) = refused_start { verified_previous_cursor(conn,held,start,origin_cursor)? } else {end};
@@ -697,10 +640,9 @@ where
         let (application_count,interval_digest) = interval.finish();
         let last_settled: Option<String> = conn.query_row("SELECT last_settled_sha FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![b.workspace_id,b.main_version_id,b.object_id],|row|row.get(0)).map_err(read_sql)?;
         // With nothing stored, the next settlement again starts at the origin.
-        let empty = previous.is_none() && restored_origin.is_none() && previous_cursor == terminal_cursor;
+        let empty = previous.is_none() && previous_cursor == terminal_cursor;
         Ok(LiveSettlementAudit { namespace:held.namespace.clone(),binding:b.clone(),coordinate:held.coordinate.clone(),previous_cursor,terminal_cursor,previous_sequence,sequence:replayed.unwrap_or(covered_sequence),observed_head:head,accepted,terminal_source:replayed.is_none() && tail.terminal,application_count,interval_digest,
-            bootstrap_moment:origin_moment,bootstrap_digest:origin_digest,first:owner_origin.is_none() && previous.is_none() && last_settled.is_none(),restore:None,
-            replay_anchor:restored_origin.filter(|anchor|anchor.cursor == terminal_cursor),empty })
+            bootstrap_moment:origin_moment,bootstrap_digest:origin_digest,first:owner_origin.is_none() && previous.is_none() && last_settled.is_none(),empty })
     }).map_err(E::from)?;
     settle(store, &audit)
 }
@@ -953,28 +895,6 @@ pub(super) fn validate_historical_binding(
     Ok(())
 }
 
-/// [`validate_historical_binding`] across restores cancelled after their
-/// fences: `historical` may name an earlier generation than `current` when
-/// only cancellations of its lineage lie between. A cancellation is not a
-/// restore, so the history before it, and its origin, stay `current`'s.
-fn validate_crossed_binding(
-    conn: &Connection,
-    namespace: &str,
-    historical: &LiveObjectBinding,
-    current: &LiveObjectBinding,
-) -> Result<(), ApplicationError> {
-    let from = historical.restore_fence_generation;
-    let same = LiveObjectBinding {
-        restore_fence_generation: current.restore_fence_generation,
-        ..historical.clone()
-    };
-    validate_historical_binding(&same, current)?;
-    if from > current.restore_fence_generation {
-        return Err(ApplicationError::Conflict);
-    }
-    restore_fence::require_crossed_since(conn, namespace, current, from)
-}
-
 pub(super) fn latest_receipt(
     conn: &Connection,
     registration: &Registration,
@@ -986,7 +906,7 @@ pub(super) fn latest_receipt(
 pub(super) fn latest_receipt_in(
     conn: &Connection,
     registration: &Registration,
-    budget: &mut restore_content::Budget,
+    budget: &mut budget::Budget,
 ) -> Result<Option<LiveUpdateReceipt>, ApplicationError> {
     latest_receipt_with(conn, registration, Some(budget))
 }
@@ -994,7 +914,7 @@ pub(super) fn latest_receipt_in(
 fn latest_receipt_with(
     conn: &Connection,
     registration: &Registration,
-    mut budget: Option<&mut restore_content::Budget>,
+    mut budget: Option<&mut budget::Budget>,
 ) -> Result<Option<LiveUpdateReceipt>, ApplicationError> {
     let b = &registration.binding;
     if let Some(budget) = budget.as_deref_mut() {
@@ -1014,28 +934,6 @@ fn latest_receipt_with(
         (Some(applied), _) => Ok(Some(applied)),
         (None, adopted) => Ok(adopted),
     }
-}
-
-fn read_interval(
-    conn: &Connection,
-    registration: &Registration,
-    previous: i64,
-    terminal: i64,
-    max: usize,
-) -> Result<Vec<ReceiptIdentity>, ApplicationError> {
-    let mut receipts = Vec::new();
-    visit_interval(
-        conn,
-        registration,
-        previous,
-        terminal,
-        Some(max),
-        |receipt| {
-            receipts.push(receipt);
-            Ok(())
-        },
-    )?;
-    Ok(receipts)
 }
 
 /// Passes each application in `(previous, terminal]` to `visit` in journal
@@ -1063,10 +961,6 @@ fn visit_interval(
         ])
         .map_err(read_sql)?;
     let mut count = 0;
-    // An interval can hold applications from before restores cancelled after
-    // their fences. Each step between applications, and from the last to the
-    // binding, crosses only cancellations; fence admission bounds each step.
-    let mut previous_generation: Option<i64> = None;
     while let Some(row) = rows.next().map_err(read_sql)? {
         if Some(count) == max {
             return Err(invalid("settlement application limit exceeded"));
@@ -1076,31 +970,13 @@ fn visit_interval(
         let selectors: String = row.get(6).map_err(read_sql)?;
         let selectors: Vec<String> =
             serde_json::from_str(&selectors).map_err(|_| ApplicationError::Corrupt)?;
-        let generation: i64 = row.get(7).map_err(read_sql)?;
-        let same = LiveObjectBinding {
+        let historical = LiveObjectBinding {
             current_path: path,
             selector_paths: selectors,
+            restore_fence_generation: row.get(7).map_err(read_sql)?,
             ..b.clone()
         };
-        validate_historical_binding(&same, b)?;
-        if generation > b.restore_fence_generation {
-            return Err(ApplicationError::Conflict);
-        }
-        let historical = LiveObjectBinding {
-            restore_fence_generation: generation,
-            ..same
-        };
-        match previous_generation {
-            Some(previous) if previous > generation => return Err(ApplicationError::Conflict),
-            Some(previous) if previous < generation => restore_fence::require_crossed(
-                conn,
-                &registration.namespace,
-                &historical,
-                previous,
-            )?,
-            _ => {}
-        }
-        previous_generation = Some(generation);
+        validate_historical_binding(&historical, b)?;
         let binding_digest =
             hex_sha256(&serde_json::to_vec(&historical).map_err(|_| ApplicationError::Corrupt)?);
         visit((
@@ -1111,9 +987,6 @@ fn visit_interval(
             row.get(4).map_err(read_sql)?,
             binding_digest,
         ))?;
-    }
-    if let Some(last) = previous_generation.filter(|last| *last != b.restore_fence_generation) {
-        restore_fence::require_crossed(conn, &registration.namespace, b, last)?;
     }
     Ok(())
 }
@@ -1265,8 +1138,6 @@ mod publication_state_tests {
             bootstrap_moment: "moment".into(),
             bootstrap_digest: digest,
             first: false,
-            restore: None,
-            replay_anchor: None,
             empty: false,
         };
         (dir, store, audit)

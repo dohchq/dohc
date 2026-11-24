@@ -609,11 +609,7 @@ where
                                     | "ydoc.ownerDelivery.putCommittedRow"
                                     | "liveApplication.bootstrap"
                                     | "liveApplication.adoptOwner"
-                                    | "liveApplication.prepareRestore"
                                     | "liveApplication.syncOpen"
-                                    | "liveApplication.applyRestore"
-                                    | "liveApplication.settleRestore"
-                                    | "liveApplication.resumeRestore"
                             ) =>
                         {
                             let id = request.id;

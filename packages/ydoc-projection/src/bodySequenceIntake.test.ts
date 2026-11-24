@@ -2476,3 +2476,51 @@ describe("which root a note that says its body is one sequence is read from", ()
     doc.destroy();
   });
 });
+
+describe("a note a conflict resolve began, which holds its lineage tag in both formats", () => {
+  const TAG = "e".repeat(64);
+  const typing = {
+    first: (doc: Y.Doc) =>
+      ((doc.getXmlFragment("body").get(0) as Y.XmlElement).get(0) as Y.XmlText).insert(4, "!"),
+    second: (doc: Y.Doc) => {
+      const sequence = doc.getText(BODY_SEQUENCE_FIELD);
+      sequence.insert(sequence.length, "!", {});
+    },
+  };
+  for (const format of ["first", "second"] as const) {
+    const note = inBothFormats([[{ type: "paragraph" }, "text"]], { dohcLineageEpoch: TAG })[
+      format
+    ];
+
+    it(`registers it and saves typing into it (${format} format)`, () => {
+      expect(registered(note)).toBe("accepted");
+      const held = room(note);
+      const kept = held.offer(changeMadeBy(note, 77, ({ doc }) => typing[format](doc))!);
+      expect(kept, "the room's check").toBeDefined();
+      expect(held.journal(kept!)).toBe("accepted");
+    });
+
+    it(`refuses an edit that writes or removes the tag (${format} format)`, () => {
+      const held = room(note);
+      for (const change of [
+        (doc: Y.Doc) => doc.getMap("meta").set("dohcLineageEpoch", "d".repeat(64)),
+        (doc: Y.Doc) => doc.getMap("meta").set("dohcLineageEpoch", TAG),
+        (doc: Y.Doc) => doc.getMap("meta").delete("dohcLineageEpoch"),
+      ]) {
+        const sent = changeMadeBy(note, 77, ({ doc }) => change(doc))!;
+        expect(held.fitsAsSent(sent), "the room's check").toBe(false);
+        expect(held.journal(sent)).toMatch(/^refused/);
+      }
+    });
+  }
+
+  it("refuses a tag that is not a lineage digest", () => {
+    for (const tag of ["epoch", "E".repeat(64), 1])
+      for (const format of ["first", "second"] as const)
+        expect(
+          registered(
+            inBothFormats([[{ type: "paragraph" }, "text"]], { dohcLineageEpoch: tag })[format],
+          ),
+        ).toBe(REFUSED_AT_REGISTRATION);
+  });
+});

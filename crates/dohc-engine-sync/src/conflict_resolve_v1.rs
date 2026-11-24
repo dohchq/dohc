@@ -2962,6 +2962,44 @@ fn close_imported_conflict(
             crate::refusal_notices::clear_conflict_in_tx(tx, &payload.workspace_id, &conflict_id)?;
         }
     }
+    close_reviews_of_the_same_merge(tx, payload)
+}
+
+fn close_reviews_of_the_same_merge(
+    tx: &Transaction<'_>,
+    payload: &ConflictResolveV1,
+) -> Result<(), SyncError> {
+    let (Some(transition), Some(result), Some(merged)) = (
+        payload.lineage_transition.as_ref(),
+        payload.result.present(),
+        payload.current.present(),
+    ) else {
+        return Ok(());
+    };
+    let closed = tx
+        .prepare(
+            "UPDATE conflicts SET status='resolved',updated_at_ms=?5,              chosen_from=CASE WHEN current_blob_sha256=?4 THEN 'current'                WHEN incoming_blob_sha256=?4 THEN 'incoming' ELSE 'merged' END,              resolution=CASE WHEN current_blob_sha256=?4 THEN 'kept-current'                WHEN incoming_blob_sha256=?4 THEN 'applied-incoming' ELSE 'applied-merged' END              WHERE workspace_id=?1 AND target_version_id=?2 AND status='open' AND metadata_origin='sync'                AND current_object_id=?3 AND incoming_object_id=?3 AND current_path=?7 AND incoming_path=?7                AND current_blob_sha256=?6                AND EXISTS(SELECT 1 FROM replication_log m JOIN replication_log u ON u.workspace_id=m.workspace_id AND u.origin_id=m.origin_id AND u.origin_seq<m.origin_seq                  WHERE m.workspace_id=?1 AND m.op_kind='moment.append' AND m.apply_disposition='applied'                    AND json_extract(m.payload_json,'$.momentId')=conflicts.incoming_latest_moment_id                    AND u.op_kind='ydoc.update' AND u.apply_disposition='applied'                    AND json_extract(u.payload_json,'$.momentId')=conflicts.incoming_latest_moment_id                    AND json_extract(u.payload_json,'$.lineageClaimId')=?8                    AND json_extract(u.payload_json,'$.versionId')=?2 AND json_extract(u.payload_json,'$.objectId')=?3)              RETURNING conflict_id",
+        )
+        .map_err(SyncError::corrupt)?
+        .query_map(
+            params![
+                payload.workspace_id,
+                payload.target_version_id,
+                result.object_id,
+                result.blob_sha256,
+                payload.effect_context.recorded_at_ms,
+                merged.blob_sha256,
+                payload.paths[merged.path_ref],
+                transition.predecessor_claim_id
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(SyncError::persist)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(SyncError::persist)?;
+    for conflict_id in closed {
+        crate::refusal_notices::clear_conflict_in_tx(tx, &payload.workspace_id, &conflict_id)?;
+    }
     Ok(())
 }
 
@@ -5240,6 +5278,129 @@ mod tests {
             panic!("the lookup did not commit");
         };
         assert_eq!(reviews, vec![("own-review".to_owned(), true)]);
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum OtherReview {
+        SameMerge,
+        AnotherMerge,
+        PlainNote,
+        AnotherFile,
+        DiskEdit,
+        DiskAfterLive,
+        RefusedSettlement,
+        OtherLineage,
+    }
+
+    fn review_after_decision(case: OtherReview) -> Vec<(String, String, String, Option<String>)> {
+        let (_scratch, mut store, built) = text_keep_receiver_fixture();
+        let mut payload = built.validated.payload;
+        let incoming = format!("moment-{}", "e".repeat(64));
+        if case != OtherReview::PlainNote {
+            payload.lineage_transition = Some(LineageTransitionV1 {
+                predecessor_claim_id: "a".repeat(64),
+                predecessor_state_vector_sha256: "a".repeat(64),
+                predecessor_delete_set_sha256: "a".repeat(64),
+                artifact_preimage_sha256: "a".repeat(64),
+                successor: None,
+            });
+        }
+        store
+            .write_with(&NoFaults, |tx| {
+                let mut merged = conflict_state_from_head(tx, &payload, &payload.current)?;
+                let mut other_side = merged.clone();
+                if let (Some(merged), Some(other)) =
+                    (merged.snapshot.as_mut(), other_side.snapshot.as_mut())
+                {
+                    merged.latest_moment_id = "merged-here".to_owned();
+                    match case {
+                        OtherReview::AnotherMerge => merged.blob_sha256 = "c".repeat(64),
+                        OtherReview::AnotherFile => merged.object_id = "occupant".to_owned(),
+                        _ => {}
+                    }
+                    other.latest_moment_id = incoming.clone();
+                    other.blob_sha256 = "b".repeat(64);
+                }
+                let settle = |moment: &str, lineage: String, disposition| {
+                    let write = json!({"lineageClaimId": lineage, "momentId": moment});
+                    ("ydoc.update", write, disposition)
+                };
+                let moment = |moment: &str| ("moment.append", json!({"momentId": moment}), "applied");
+                let live = "a".repeat(64);
+                let writes = match case {
+                    OtherReview::DiskEdit => vec![
+                        settle("settled-before", live, "applied"),
+                        moment("settled-before"),
+                        moment(&incoming),
+                    ],
+                    OtherReview::DiskAfterLive => vec![
+                        ("ydoc.update", json!({"lineageClaimId": live}), "applied"),
+                        moment(&incoming),
+                    ],
+                    OtherReview::RefusedSettlement => {
+                        vec![settle(&incoming, live, "refused"), moment(&incoming)]
+                    }
+                    OtherReview::OtherLineage => {
+                        vec![settle(&incoming, "d".repeat(64), "applied"), moment(&incoming)]
+                    }
+                    _ => vec![settle(&incoming, live, "applied"), moment(&incoming)],
+                };
+                for (seq, (kind, mut write, disposition)) in writes.into_iter().enumerate() {
+                    write["versionId"] = json!(payload.target_version_id);
+                    write["objectId"] = json!(payload.result.present().unwrap().object_id);
+                    tx.execute(
+                        "INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported,apply_disposition) VALUES (?1,'other-computer',?2,?3,?4,0,1,?5)",
+                        params![payload.workspace_id, seq as i64, kind, write.to_string(), disposition],
+                    )
+                    .map_err(SyncError::persist)?;
+                }
+                open_review(tx, "other-review", merged, other_side)?;
+                close_imported_conflict(tx, &payload, false)
+            })
+            .unwrap();
+        store
+            .read_with(|conn| {
+                conn.prepare(
+                    "SELECT conflict_id,status,chosen_from,resolution FROM conflicts WHERE conflict_id='other-review'",
+                )?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+                .collect()
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn a_decision_closes_another_computers_review_of_the_same_merge() {
+        assert_eq!(
+            review_after_decision(OtherReview::SameMerge),
+            vec![(
+                "other-review".to_owned(),
+                "resolved".to_owned(),
+                "current".to_owned(),
+                Some("kept-current".to_owned())
+            )]
+        );
+    }
+
+    #[test]
+    fn a_decision_leaves_open_a_review_it_did_not_decide() {
+        for case in [
+            OtherReview::AnotherMerge,
+            OtherReview::PlainNote,
+            OtherReview::AnotherFile,
+            OtherReview::DiskEdit,
+            OtherReview::DiskAfterLive,
+            OtherReview::RefusedSettlement,
+            OtherReview::OtherLineage,
+        ] {
+            assert_eq!(
+                review_after_decision(case)
+                    .into_iter()
+                    .map(|row| row.1)
+                    .collect::<Vec<_>>(),
+                vec!["open".to_owned()]
+            );
+        }
     }
 
     #[test]

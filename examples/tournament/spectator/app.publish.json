@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "entryPath": "index.tsx",
+  "dataset": {
+    "kind": "dataset",
+    "datasetPath": "tournament/dataset.json",
+    "operations": ["liveSnapshot"]
+  }
+}

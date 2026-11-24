@@ -6,6 +6,7 @@ import {
 } from "@dohc/live-session-contract/live-update-admission";
 import type { StorageContext } from "./context";
 import { readServiceActivation } from "./serviceActivationAccess";
+import { sourceBaseRelaySeq } from "./ordinaryActivationSource";
 
 function requireOrigin(condition: unknown): asserts condition {
   if (!condition) throw new Error("Retained service activation origin differs.");
@@ -57,7 +58,7 @@ export function readServiceActivationOrigin(
   requireOrigin(
     baseline &&
       baseline.baseline_digest === source.lineageClaimId &&
-      baseline.baseline_moment_relay_seq === source.baseRelaySeq,
+      baseline.baseline_moment_relay_seq === sourceBaseRelaySeq(storage.db, source),
   );
   return {
     source,

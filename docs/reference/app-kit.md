@@ -11,6 +11,9 @@ dohc's closed app compiler provides a pinned set of browser modules so apps can 
 | `dohc/app` | MessageChannel backend client and hooks (`AppProvider`, `useApp`, `useDatasetQuery`, `useDatasetMutation`, `createAppClient`, `mutationKey`, `AppBackendError`) |
 | `dohc/ui` | Light and dark themed layout, data, and form components (`AppShell`, `PageHeader`, `Grid`, `Stack`, `Card`, `StatCard`, `Tabs`, `DataTable`, `Badge`, `ProgressBar`, `Callout`, `EmptyState`, `Skeleton`, `Button`, `Field`, `Input`, `Select`, `Textarea`, `Checkbox`, `Modal`, plus currency/number/percent/date formatters) |
 | `dohc/charts` | Responsive SVG charts with light and dark tokens: interactive `LineChart`, `BarChart`, and `DonutChart` (single-tab-stop arrow-key navigation), plus non-interactive `Sparkline` |
+| `dohc/icons` | A curated set of [Lucide](https://lucide.dev) icons as React components (for example `Plus`, `Trash2`, `Receipt`, `Wallet`, `Plane`, `CalendarDays`). Only the icons an app imports end up in its bundle |
+| `dohc/money` | Exact money in whole minor units (cents): `formatCents(123400, { currency: "EUR", locale: "de-DE" })` gives `1.234,00 €` without floating-point rounding, and `parseCents("$1,234.50")` gives `123450`, or `null` for text that isn't an exact amount |
+| `dohc/csv` | RFC 4180 `parseCsv(text)` for quoted fields, embedded line breaks, and a leading byte order mark, and `toCsv(rows)`, which prefixes text cells that start with `=`, `+`, `-`, `@`, tab, or carriage return with `'` so spreadsheets don't run them as formulas. Pass amounts as numbers so negative values stay numeric |
 
 The prefixes `react`, `react-dom`, `scheduler`, and `dohc` are reserved. Do not map them in `app.publish.json`'s `packageMap`.
 
@@ -148,6 +151,45 @@ Collection definitions can use `formatVersion: 2` to declare tables, fields, and
   ]
 }
 ```
+
+## Typed rows and operations
+
+`dohc dataset types` writes TypeScript declarations for a Collection's approved revision to `.dohc/types/<name>-<datasetId>.d.ts` at the workspace root and returns the exact `path`. `<name>` comes from the Collection's folder, for example `.dohc/types/expenses-11111111-1111-4111-8111-111111111101.d.ts` for `expenses/dataset.json`.
+
+```bash
+dohc dataset types '{"workspaceId":"<workspaceId>","datasetPath":"expenses/dataset.json"}'
+```
+
+The file exports:
+
+- `Tables`: each table's row, keyed by SQL column, with values as dohc's generated operations read and write them. A checkbox is `boolean`, a select is a union of its options, a multi-select or a many relation is an array, and a field that isn't required can be `null`.
+- `Row<"table">`: one table's row.
+- `FieldIds`: each column's `fieldId`, the key generated operations use in `values`.
+- `Operations`: each operation's `kind`, `table`, `access`, `readOnly`, and `fields`, the row columns it declares.
+- `OperationName`: the operation names.
+
+Import them with `import type`, so the app bundle and its approval never include the file. Generated row-list reads (without `groupBy`) return `{ rows, nextCursor }` with each row's `values` keyed by `FieldIds`:
+
+```tsx
+import type {
+  FieldIds,
+  Operations,
+  Row,
+} from "../.dohc/types/expenses-11111111-1111-4111-8111-111111111101";
+
+type ExpenseFields = Operations["listExpenses"]["fields"];
+type ExpenseValues = {
+  [Column in keyof ExpenseFields as FieldIds["expenses"][Column]]: ExpenseFields[Column];
+};
+type ExpensePage = {
+  rows: Array<{ id: Row<"expenses">["id"]; version: number; values: ExpenseValues }>;
+  nextCursor: { id: Row<"expenses">["id"]; value: unknown } | null;
+};
+
+const { data } = useDatasetQuery<ExpensePage>("listExpenses");
+```
+
+Types describe the approved revision, not a draft. Run the command again after you approve a change. Operations you write yourself return whatever their code returns, so type their results with `Row`, `fields`, or your own types.
 
 ## Staging an app and its Collections together
 

@@ -53,7 +53,7 @@ pub(super) fn settled_base(
     lineage: &str,
     (moment, source_digest, source_length): (&str, &str, i64),
     at: Settlement,
-    budget: &mut restore_content::Budget,
+    budget: &mut budget::Budget,
     resolver: Option<&crate::reader_resolver::ReaderResolver>,
 ) -> Result<(Ydoc, SettledBaseEvidence), ApplicationError> {
     type Settled = (i64, String, String, String, String, String, String);
@@ -272,7 +272,7 @@ pub fn released_capture(
     if hex_sha256(text.as_bytes()) == digest {
         return Ok(ReleasedCapture::Unchanged);
     }
-    let mut budget = restore_content::Budget {
+    let mut budget = budget::Budget {
         remaining: max_bytes,
     };
     let mut refused = None;

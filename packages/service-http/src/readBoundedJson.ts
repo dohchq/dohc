@@ -19,8 +19,11 @@ export async function readBoundedBytes(
       const next = await reader.read();
       signal.throwIfAborted();
       if (next.done) break;
-      if (next.value.byteLength > maxBytes - size) throw new RangeError("Body exceeds limit.");
       size += next.value.byteLength;
+      if (size > maxBytes)
+        throw new RangeError(
+          `Body exceeded its limit of ${maxBytes} bytes. It used at least ${size} bytes.`,
+        );
       chunks.push(next.value);
     }
     return Buffer.concat(chunks, size);

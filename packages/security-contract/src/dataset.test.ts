@@ -1356,6 +1356,14 @@ it("normalizes formatVersion 2 slug-based dataset definitions deterministically"
   };
 
   const canonical = parseDatasetDefinition(v2, { descriptorPath: "budget/expenses/dataset.json" });
+  for (const access of ["owner", "link", "helper"]) {
+    const input = { ...v2, operations: [{ ...v2.operations[0], profile: "bulk", access }] };
+    if (access === "owner") {
+      expect(parseDatasetDefinition(input).operations[0]!.profile).toBe("bulk");
+    } else {
+      expect(() => parseDatasetDefinition(input)).toThrow(/bulk.*owner/i);
+    }
+  }
   expect(canonical.formatVersion).toBe(1);
   expect(canonical.schemaPath).toBe("budget/expenses/schema.sql");
   expect(canonical.operationsPath).toBe("budget/expenses/operations.js");

@@ -6,7 +6,7 @@ import {
   parseRecoveryJournalRecord,
   type DatasetReplicaSource,
 } from "@dohc/app-backend-runtime/replica";
-import type { DatasetCursor } from "@dohc/app-backend-runtime/journal";
+import { JOURNAL_RECORD_BYTES, type DatasetCursor } from "@dohc/app-backend-runtime/journal";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import { credentialScopedOperation } from "./credentialScopedOperation";
 
@@ -126,8 +126,8 @@ export function createRemoteDatasetReplicaSource(input: {
       }
     });
   }
-  const json = (path: string, body: unknown, signal: AbortSignal) =>
-    request(path, body, signal, (response) => readBoundedJson(response, MAX_BYTES, signal));
+  const json = (path: string, body: unknown, signal: AbortSignal, max = MAX_BYTES) =>
+    request(path, body, signal, (response) => readBoundedJson(response, max, signal));
   return {
     async capture(abort) {
       const signal = signalFor(abort),
@@ -155,7 +155,12 @@ export function createRemoteDatasetReplicaSource(input: {
         })
         .strict()
         .parse(
-          await json(`${base}/page`, { through: page.through, after: page.after, limit }, signal),
+          await json(
+            `${base}/page`,
+            { through: page.through, after: page.after, limit },
+            signal,
+            JOURNAL_RECORD_BYTES + 4096,
+          ),
         );
       const through = scoped(parseRecoveryCursor(value.through)),
         after = scoped(parseRecoveryCursor(value.after));

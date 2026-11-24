@@ -403,7 +403,7 @@ describe("guest memory", () => {
           }),
           persistent,
         ),
-      ).rejects.toThrow(/^Operation result exceeds the app runtime limit\.$/);
+      ).rejects.toThrow(/^Operation result exceeded its limit of 10 bytes\. It used 102 bytes\.$/);
       await expect(
         evaluate(db, request(`${fill} throw new Error('later');`), persistent),
       ).rejects.toThrow(

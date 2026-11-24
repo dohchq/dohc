@@ -14,8 +14,6 @@ const BOTH_BUILDS: Readonly<Record<string, string>> = {
   "(tabs)/home/index.tsx": "sampleBuild ?",
   "chat/[id].tsx": `export default ${SAMPLE_TEST} ?`,
   "page.tsx": `export default ${SAMPLE_TEST} ?`,
-  // Search reads no data in either build yet.
-  "(tabs)/search/index.tsx": "<NotYet",
 };
 
 // The rules below name paths with "/". This turns Windows' "\" into "/", and changes nothing where "/" is the separator.

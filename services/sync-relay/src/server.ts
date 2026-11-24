@@ -12,8 +12,11 @@ import {
 import type { AppBackendAdmissionLimits } from "./appBackendAdmission";
 import { createDatasetAppRoutes, createDatasetRoutes, datasetRequestBytes } from "./datasetRoutes";
 import { MAX_BLOB_BYTES } from "./wireLimits";
-import { APP_BACKEND_UPLOAD_REQUEST_BYTES } from "@dohc/security-contract/app-backend";
-import { createDatasetReplicaRoutes, DATASET_REPLICA_REQUEST_BYTES } from "./datasetReplicaRoutes";
+import {
+  APP_BACKEND_BULK_LIMITS,
+  APP_BACKEND_UPLOAD_REQUEST_BYTES,
+} from "@dohc/security-contract/app-backend";
+import { createDatasetReplicaRoutes, datasetReplicaRequestBytes } from "./datasetReplicaRoutes";
 import { createDatasetRecoveryExport } from "./datasetRecoveryExport";
 import type { RelayDatasetHost } from "./datasetHost";
 import { hashLinkProfileSecret } from "./linkSecurity";
@@ -2146,12 +2149,18 @@ export function maxRequestBodyBytes(url: URL): number {
     case "share-proposals":
       return MAX_BODY_BYTES;
     case "dataset":
-      return Math.max(datasetRequestBytes(route.action), DEFAULT_BODY_BYTES);
+      return Math.max(datasetRequestBytes(route.action, true), DEFAULT_BODY_BYTES);
     case "named-dataset":
     case "app-backend":
+      if (
+        route.route === "app-backend" &&
+        route.workspaceId !== undefined &&
+        route.action === "invoke"
+      )
+        return APP_BACKEND_BULK_LIMITS.requestBytes;
       return route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : DEFAULT_BODY_BYTES;
     case "dataset-replica":
-      return DATASET_REPLICA_REQUEST_BYTES;
+      return datasetReplicaRequestBytes(route.action);
     // Its handler reserves the link's bytes before reading, so the body arrives first.
     case "link-app-collection":
       return APP_COLLECTION_REQUEST_BYTES;

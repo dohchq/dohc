@@ -818,15 +818,29 @@ impl Ydoc {
     }
 
     pub(crate) fn validate_public_baseline(&self, bytes: &[u8]) -> Result<(), CollabError> {
-        self.validate_public_baseline_as(bytes, false)
+        self.validate_lineage_baseline(bytes, false, None)
     }
 
     /// Schema/budget checks only. Exact output also requires the strict reader proof.
     pub(crate) fn validate_reader_baseline(&self, bytes: &[u8]) -> Result<(), CollabError> {
-        self.validate_public_baseline_as(bytes, true)
+        self.validate_lineage_baseline(bytes, true, None)
     }
 
-    fn validate_public_baseline_as(&self, bytes: &[u8], reader: bool) -> Result<(), CollabError> {
+    pub(crate) fn validate_lineage_baseline(
+        &self,
+        bytes: &[u8],
+        reader: bool,
+        epoch: Option<&str>,
+    ) -> Result<(), CollabError> {
+        if let Some(expected) = epoch {
+            let observed = self.lineage_epoch_tag().unwrap_or_default();
+            if observed != expected {
+                return Err(CollabError::LineageEpochChanged {
+                    expected: expected.to_owned(),
+                    observed,
+                });
+            }
+        }
         let meta = self.doc.get_or_insert_map(ROOT_META);
         self.doc.get_or_insert_map(ROOT_FRONTMATTER);
         let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
@@ -876,7 +890,9 @@ impl Ydoc {
                     (MARKDOWN_SOURCE_READER_META_KEY, Out::Any(Any::Number(1.0)))
                 );
             let sequence_version = sequence_note && key == "schemaVersion";
-            if !valid && !item_record && !reader_meta && !sequence_version {
+            let lineage_epoch = key == LINEAGE_EPOCH_META_KEY
+                && matches!(&value, Out::Any(Any::String(tag)) if epoch == Some(tag.as_ref()));
+            if !valid && !item_record && !reader_meta && !sequence_version && !lineage_epoch {
                 return Err(invalid());
             }
         }
@@ -1581,15 +1597,12 @@ impl Ydoc {
             return Err(CollabError::MarkdownNotRepresentable);
         }
         drop(txn);
-        // Public schema validation excludes the engine's private lineage tag.
-        let public = Ydoc::wire();
-        public.apply(&candidate.encode_full_state())?;
-        public
-            .doc
-            .get_or_insert_map(ROOT_META)
-            .remove(&mut public.doc.transact_mut(), LINEAGE_EPOCH_META_KEY);
-        public.validate_public_baseline(&public.encode_full_state())?;
-        public.project(ContentKind::Richdoc)?;
+        candidate.validate_lineage_baseline(
+            &candidate.encode_full_state(),
+            false,
+            epoch.as_deref(),
+        )?;
+        candidate.project(ContentKind::Richdoc)?;
         Ok(candidate)
     }
 
@@ -1617,7 +1630,7 @@ impl Ydoc {
     /// retained XML before journaling the returned update.
     pub fn replace_frontmatter_for_fold(&self, markdown: &str) -> Result<Vec<u8>, CollabError> {
         let (frontmatter, _, _) = split_markdown_frontmatter(markdown);
-        self.stage_source_preserving_edit_bounded(markdown, None, false, false, None, |staged| {
+        self.stage_source_preserving_edit_bounded(markdown, None, false, false, |staged| {
             let map = staged.doc.get_or_insert_map(ROOT_FRONTMATTER);
             let meta = staged.doc.get_or_insert_map(ROOT_META);
             let mut transaction = staged.doc.transact_mut();
@@ -1913,7 +1926,7 @@ impl Ydoc {
             .ok_or(CollabError::FrontmatterEditRefused)?
             .insert(key.to_owned(), value.clone());
         self.validate_frontmatter_edit(&current, &[key], Some(markdown))?;
-        self.stage_source_preserving_edit_bounded(markdown, None, true, true, None, |staged| {
+        self.stage_source_preserving_edit_bounded(markdown, None, true, true, |staged| {
             let _ = staged.write_frontmatter_value(key, &value);
             Ok(())
         })
@@ -1969,7 +1982,6 @@ impl Ydoc {
             Some(crate::limits::MAX_YDOC_UPDATE_BYTES * 3),
             true,
             true,
-            None,
             |staged| {
                 staged.doc.get_or_insert_map(ROOT_META).remove(
                     &mut staged.doc.transact_mut(),
@@ -2036,23 +2048,6 @@ impl Ydoc {
         Ydoc::validate_update(&delta)?;
         self.apply(&delta)?;
         Ok(delta)
-    }
-
-    pub(crate) fn rewrite_richdoc_preserving_source_bounded(
-        &self,
-        markdown: &str,
-        point: &Ydoc,
-        max_bytes: usize,
-        reader_client: Option<u64>,
-    ) -> Result<Vec<u8>, CollabError> {
-        self.stage_source_preserving_edit_bounded(
-            markdown,
-            Some(max_bytes),
-            true,
-            true,
-            reader_client,
-            |staged| restore_copy::copy(point, staged, max_bytes),
-        )
     }
 
     /// Remove one target from a relation field. A single relation removes the
@@ -2178,7 +2173,7 @@ impl Ydoc {
         markdown: &str,
         edit: impl FnOnce(&Ydoc) -> Result<(), CollabError>,
     ) -> Result<Vec<u8>, CollabError> {
-        self.stage_source_preserving_edit_bounded(markdown, None, true, false, None, edit)
+        self.stage_source_preserving_edit_bounded(markdown, None, true, false, edit)
     }
 
     fn stage_source_preserving_edit_bounded(
@@ -2187,7 +2182,6 @@ impl Ydoc {
         budget: Option<usize>,
         retain_matching_source: bool,
         reader_edit: bool,
-        reader_client: Option<u64>,
         edit: impl FnOnce(&Ydoc) -> Result<(), CollabError>,
     ) -> Result<Vec<u8>, CollabError> {
         if self.has_reader_source() && retain_matching_source && !reader_edit {
@@ -2201,7 +2195,7 @@ impl Ydoc {
         }
 
         let before = self.doc.transact().state_vector();
-        let staged = reader_client.map_or_else(Ydoc::wire, Ydoc::with_client_id);
+        let staged = Ydoc::wire();
         let capacity_error = || CollabError::ConfiguredByteBudgetExceeded;
         let encoder_error = |remaining: usize| {
             if remaining < crate::limits::MAX_YDOC_UPDATE_BYTES {
@@ -2229,9 +2223,7 @@ impl Ydoc {
         edit(&staged)?;
         staged.keep_frontmatter_source_of(markdown)?;
         let projection = staged.project_richdoc()?;
-        if reader_client.is_some() && staged.has_reader_source() {
-            // Restore proves the copied witness against its selected stored artifact.
-        } else if !retain_matching_source && projection == markdown {
+        if !retain_matching_source && projection == markdown {
             let meta = staged.doc.get_or_insert_map(ROOT_META);
             let mut txn = staged.doc.transact_mut();
             for key in [

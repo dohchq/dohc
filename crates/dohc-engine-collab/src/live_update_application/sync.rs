@@ -76,7 +76,7 @@ pub(super) fn current(
         return Err(ApplicationError::Interrupted);
     }
     let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
-    restore_fence::require_registration(conn, &key, &held.namespace, b)?;
+    restore_fence::require_open(conn, &key)?;
     let marker = durable::read_marker_in(conn, &key)?.ok_or(ApplicationError::Conflict)?;
     if marker.regime != Regime::Replicated
         || marker.content_kind != crate::ContentKind::Richdoc
@@ -119,7 +119,7 @@ pub fn read_applied_sync(
         let marker = current(conn, &held)?;
         let terminal = settlement::latest_receipt(conn, &held)?;
         let through = terminal.as_ref().map_or(0, |r| r.journal_cursor);
-        let mut budget = restore_content::Budget {
+        let mut budget = budget::Budget {
             remaining: policy.max_read_bytes,
         };
         budget.charge(client_vector.len())?;
@@ -129,7 +129,6 @@ pub fn read_applied_sync(
             through,
             &mut budget,
             accepted_history::CHECKPOINT_EVENTS as usize,
-            accepted_history::HistoryPurpose::Native,
         )?;
         check_cancel(&is_current)?;
         let host_vector = history
@@ -199,7 +198,7 @@ pub fn read_next_applied(
             return Ok(None)
         };
         if count != after.event_count.checked_add(1).ok_or(ApplicationError::Corrupt)? || cursor <= after.journal_cursor {return Err(ApplicationError::Corrupt)}
-        let mut budget = restore_content::Budget {remaining:policy.max_read_bytes};
+        let mut budget = budget::Budget {remaining:policy.max_read_bytes};
         let metadata = accepted_history::accepted_source(conn,&held,&delivery,&mut budget)?.ok_or(ApplicationError::Corrupt)?;
         settlement::validate_historical_binding(&metadata.accepted.binding,&held.binding)?;
         if metadata.accepted.receipt.journal_cursor != cursor {return Err(ApplicationError::Corrupt)}

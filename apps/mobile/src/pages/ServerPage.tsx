@@ -29,6 +29,7 @@ import { documentActions } from "./documentActions";
 import { editorFolderUri, editorHtmlUri, isOutOfSpace } from "./editorFile";
 import { createPageHost } from "./pageHost";
 import { createPageLive, holdsPage, holdsUnsent, liveMark, type PageLiveState } from "./pageLive";
+import { pageTimings, timingOwner } from "./pageTimings";
 import {
   explanationOf,
   labelOf,
@@ -39,13 +40,27 @@ import {
   type MarkKey,
 } from "./pageParts";
 
+type PageParams = { path?: string; workspace?: string; t0?: string };
+const pageScript = (path: string, markdown: string) =>
+  `window.__dohcPage = ${JSON.stringify({
+    title: pageTitle(path),
+    properties: [],
+    markdown,
+    large: false,
+    editable: false,
+    live: phoneWrites,
+    textScale: PixelRatio.getFontScale(),
+  })}; true;`;
+
 // A page opened from a Notice names its workspace. It shows only while that workspace is the one open, so it never
 // reads the page from another.
 export function ServerPage() {
   const { data } = useAccount();
-  const { path = "", workspace } = useLocalSearchParams<{ path?: string; workspace?: string }>();
+  const { path = "", workspace, t0 } = useLocalSearchParams<PageParams>();
   if (workspace !== undefined && data?.workspaceId !== workspace) return <ElsewherePage />;
-  return <PageScreen key={`${data?.instance ?? 0}:${path}`} path={path} />;
+  return (
+    <PageScreen key={`${data?.instance ?? 0}:${path}`} path={path} tap={Number(t0) || undefined} />
+  );
 }
 
 /** A page whose workspace is no longer the one open, as when another device hid it. */
@@ -77,7 +92,7 @@ const openProblem = (reason: string): ServerProblemKind | null =>
       ? reason
       : null;
 
-function PageScreen({ path }: { path: string }) {
+function PageScreen({ path, tap }: { path: string; tap?: number }) {
   const theme = useTheme();
   const name = path.split("/").pop() ?? path;
   const view = useMemo(() => views.page(path), [path]);
@@ -108,6 +123,20 @@ function PageScreen({ path }: { path: string }) {
     createPageHost({ inject: (script) => web.current?.injectJavaScript(script) }),
   );
   const { mount, painted, live, stopped } = useSyncExternalStore(host.subscribe, host.state);
+  const [timing] = useState(() => pageTimings?.open(name, timingOwner(signIn), tap));
+  const [started, setStarted] = useState<number | null>(null);
+  const [early, setEarly] = useState<{
+    mount: number;
+    markdown: string | null;
+    script?: string;
+  } | null>(null);
+  const given = useRef<{ mount: number; markdown: string } | null>(null);
+  const sentTo = (to: number) =>
+    given.current?.mount === to
+      ? given.current.markdown
+      : early?.mount === to
+        ? early.markdown
+        : null;
   useEffect(() => () => host.gone(), [host]);
   // The account's teardown reaches the page from the start, before any session opens.
   const workspaceId = data?.workspaceId;
@@ -138,18 +167,12 @@ function PageScreen({ path }: { path: string }) {
   );
   const holding = live !== null && holdsPage(liveState);
 
-  // Text that changes after the first mounts a fresh editor, which covers itself with the loading lines until it paints.
-  const shown = useRef(read);
-  useEffect(() => {
-    if (holding || shown.current === read) return;
-    const first = shown.current === null;
-    shown.current = read;
-    if (first || read === null) return;
-    host.gone();
-  }, [read, holding]);
   // A page a live session holds keeps the text its editor mounted with. A later read the phone can't show (too large,
   // missing) never takes the editor away, with edits only its provider has.
-  const markdown = holding ? shown.current : read;
+  const markdown = holding ? (sentTo(mount) ?? read) : read;
+  useEffect(() => {
+    if (markdown !== null) timing?.("read");
+  }, [markdown, timing]);
   const reopen = () => {
     setLostPage(false);
     setUri(null);
@@ -174,7 +197,10 @@ function PageScreen({ path }: { path: string }) {
     }
     if (typeof data !== "object" || data === null || !("kind" in data)) return;
     if (data.kind === "live") live?.receive(data);
+    const current = from === host.state().mount;
+    if (current && data.kind === "started") setStarted(from);
     if (data.kind === "painted") host.painted(from);
+    if (current && (data.kind === "started" || data.kind === "painted")) timing?.(data.kind);
     // The page's fonts didn't load, so it didn't draw: Try again mounts a fresh page.
     if (data.kind === "fontsFailed") setLostPage("failed");
     if (data.kind === "unsupportedFormat") setNeedsNewer(true);
@@ -187,18 +213,18 @@ function PageScreen({ path }: { path: string }) {
       if (text !== null) done?.(text);
     }
   };
-  const injected =
-    markdown === null
-      ? undefined
-      : `window.__dohcPage = ${JSON.stringify({
-          title: pageTitle(path),
-          properties: [],
-          markdown,
-          large: false,
-          editable: false,
-          live: editsLive,
-          textScale: PixelRatio.getFontScale(),
-        })}; true;`;
+  useEffect(() => {
+    const sent = sentTo(mount);
+    if (started !== mount || markdown === null || sent === markdown) return;
+    if (sent !== null && live) return host.gone();
+    if (sent !== null && !painted) return;
+    given.current = { mount, markdown };
+    web.current?.injectJavaScript(
+      sent === null
+        ? pageScript(path, markdown)
+        : `window.__dohcReplaceRead?.(${JSON.stringify(markdown)}); true;`,
+    );
+  }, [started, mount, markdown, painted, live, path, host, early]);
 
   // Copy as Markdown copies the live document once the page shows it, edits included; otherwise the text as it was read.
   const copying = useRef<((text: string) => void) | null>(null);
@@ -260,7 +286,13 @@ function PageScreen({ path }: { path: string }) {
     />
   ) : null;
   // A session whose web view is gone has no provider left: it ends, and the next web view to draw opens the page again.
-  const webShown = failure === null && uri !== null && injected !== undefined;
+  const webShown = failure === null && uri !== null;
+  if (webShown && early?.mount !== mount)
+    setEarly({
+      mount,
+      markdown,
+      script: markdown === null ? undefined : pageScript(path, markdown),
+    });
   useEffect(() => {
     if (!webShown) host.gone();
   }, [webShown]);
@@ -375,10 +407,13 @@ function PageScreen({ path }: { path: string }) {
                 // Read access to the editor's folder only: the page never reads the rest of the app's files.
                 allowingReadAccessToURL={editorFolderUri}
                 allowFileAccess
-                injectedJavaScriptBeforeContentLoaded={injected}
+                injectedJavaScriptBeforeContentLoaded={
+                  early?.mount === mount ? early.script : undefined
+                }
                 onMessage={(event) => handleMessage(event.nativeEvent.data, mount)}
                 onError={() => setLostPage("failed")}
                 onContentProcessDidTerminate={() => setLostPage("failed")}
+                onRenderProcessGone={() => setLostPage("failed")}
                 keyboardDisplayRequiresUserAction={false}
                 // WebKit's own bar above the keyboard repeats Done; the header's system Done is the one way out.
                 hideKeyboardAccessoryView

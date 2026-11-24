@@ -67,16 +67,24 @@ export async function forwardAppBackend(input: {
       return error(413);
     const datasetField = Object.hasOwn(body, "dataset") ? { dataset: body.dataset } : {};
     if (body.op === "backend.invoke") {
-      if (!exact(body, ["id", "op", "operation", "idempotencyKey", "input"], ["dataset"]))
+      if (
+        !exact(
+          body,
+          ["id", "op", "operation", "idempotencyKey", "input"],
+          ["dataset", "readOnly"],
+        ) ||
+        (Object.hasOwn(body, "readOnly") && body.readOnly !== true)
+      )
         return error(400);
       action = "invoke";
-      payload = parseAppBackendInvokeRequest({
+      const parsed = parseAppBackendInvokeRequest({
         authorityRevision: input.authorityRevision,
         operation: body.operation,
         idempotencyKey: body.idempotencyKey,
         input: body.input,
         ...datasetField,
       });
+      payload = body.readOnly === true ? { ...parsed, readOnly: true } : parsed;
     } else if (body.op === "backend.attempt") {
       if (!exact(body, ["id", "op", "operation", "request"], ["dataset"])) return error(400);
       action = "attempt";

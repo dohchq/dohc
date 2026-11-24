@@ -1,6 +1,6 @@
 import { readBoundedJson } from "@dohc/service-http";
 import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-host";
-import { JournalError } from "@dohc/app-backend-runtime/journal";
+import { JOURNAL_RECORD_BYTES, JournalError } from "@dohc/app-backend-runtime/journal";
 import type { DatasetCursor, JournalExportRecord } from "@dohc/app-backend-runtime/journal";
 import type { RelayDatasetHost } from "./datasetHost";
 import type { AppBackendAuth } from "./appBackendAuthority";
@@ -8,8 +8,9 @@ import type { SyncRelayStorage } from "./storage";
 import { createAppBackendAdmission, type AppBackendAdmissionLimits } from "./appBackendAdmission";
 import { badRequest, notFound, relayError, RelayError } from "./errors";
 
-/** A page cursor, or a checkpoint record with its source and schema. */
-export const DATASET_REPLICA_REQUEST_BYTES = 1024 * 1024;
+export function datasetReplicaRequestBytes(action: DatasetReplicaRoute["action"]): number {
+  return action === "blob" ? JOURNAL_RECORD_BYTES + 4096 : 1024 * 1024;
+}
 
 export interface DatasetReplicaRoute {
   route: "dataset-replica";
@@ -51,8 +52,9 @@ export function createDatasetReplicaRoutes(
       if (request.headers.get("content-type")?.split(";")[0] !== "application/json")
         throw badRequest("Collection copy requests require JSON.");
       try {
-        body = await readBoundedJson(request, DATASET_REPLICA_REQUEST_BYTES, signal);
-      } catch {
+        body = await readBoundedJson(request, datasetReplicaRequestBytes(route.action), signal);
+      } catch (error) {
+        if (error instanceof RangeError) throw relayError("payload_too_large", error.message);
         throw badRequest("Invalid Collection copy request.");
       }
     }

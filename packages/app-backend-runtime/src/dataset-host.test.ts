@@ -12,6 +12,9 @@ import { createDatasetJournal } from "./journal.ts";
 import { createDatasetSupervisor } from "./supervisor.ts";
 import { createDatasetHost, type DatasetHostOptions } from "./dataset-host.ts";
 import { createDatasetAttempts, assertDatasetAttemptsCommitted } from "./dataset-attempts.ts";
+import { bulkFixture, importInput, schemaSql as bulkSchema } from "../scripts/bulk-fixture.mjs";
+import { parseDatasetDefinition } from "@dohc/security-contract/dataset";
+import { recoveryManifestSha256 } from "./recovery.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -210,6 +213,11 @@ async function fixture(overrides: Partial<DatasetHostOptions<Context>> = {}) {
     accountCreation(_context, allocation) {
       db.prepare("UPDATE accounting SET bytes=bytes+?").run(allocation.bytes);
     },
+    recovery: {
+      directory: privateFolder(join(directory, "recovery")),
+      limits: { maxTotalBytes: 16 * 1024 * 1024 },
+      install: { allowOwnerRecoveryClaim: true },
+    },
     ...overrides,
   });
   const activate = () => host.activate("owner", { workspaceId: scope.workspaceId, ...prepared });
@@ -232,6 +240,139 @@ async function fixture(overrides: Partial<DatasetHostOptions<Context>> = {}) {
     });
   return { host, db, journal, supervisor, activate, invoke, binding, transaction };
 }
+
+it("commits an owner bulk import and restores its receipts and 10,000 journal lines", async () => {
+  const f = await fixture();
+  const bulkDefinition = {
+    formatVersion: 2,
+    datasetId: scope.datasetId,
+    name: "Accounting",
+    tables: [
+      {
+        sqlName: "journal_lines",
+        primaryKey: "id",
+        fields: [
+          { sqlColumn: "id", type: "number" },
+          ...["account", "posted", "memo"].map((sqlColumn) => ({
+            sqlColumn,
+            type: "text",
+            required: true,
+          })),
+          ...["debit", "credit"].map((sqlColumn) => ({
+            sqlColumn,
+            type: "number",
+            required: true,
+          })),
+        ],
+      },
+    ],
+    operations: [
+      { name: "importStatement", kind: "action", profile: "bulk" },
+      { name: "trialBalance", kind: "read", profile: "bulk" },
+      { name: "archiveReport", kind: "action", profile: "bulk" },
+      { name: "archiveQuotes", kind: "action", profile: "bulk" },
+      { name: "standardReport", kind: "read" },
+      { name: "standardImport", kind: "action" },
+    ].map((op) => ({ ...op, table: "journal_lines" })),
+  };
+  for (const access of ["link", "helper"]) {
+    const invalid = {
+      ...bulkDefinition,
+      operations: [{ ...bulkDefinition.operations[0], access }],
+    };
+    expect(() => parseDatasetDefinition(invalid)).toThrow(/bulk.*owner/i);
+  }
+  const definition = parseDatasetDefinition(bulkDefinition);
+  const source = `${bulkFixture}; Object.assign(globalThis.operations, {
+    archiveReport: globalThis.operations.trialBalance,
+    archiveQuotes() { return '"'.repeat(2096800); },
+    standardReport: globalThis.operations.trialBalance,
+    standardImport: globalThis.operations.importStatement,
+  });`;
+  const revision = describeDatasetRevision({
+    definition,
+    revision: 1,
+    schemaSql: bulkSchema,
+    operationSource: source,
+  });
+  await f.host.activate("owner", {
+    workspaceId: scope.workspaceId,
+    revision,
+    schemaSql: bulkSchema,
+    operationSource: source,
+  });
+  const request = (name: string, input: JsonValue = null) => ({
+    ...scope,
+    revision: revision.revision,
+    revisionSha256: revision.revisionSha256,
+    operationId: definition.operations.find((op) => op.name === name)!.operationId,
+    idempotencyKey: name,
+    input,
+  });
+  const submission = request("importStatement", importInput);
+  for (const caller of ["helper", "friend"] as const)
+    await expect(f.host.invoke(caller, submission)).rejects.toThrow(/access/i);
+  await expect(f.host.invoke("owner", request("standardImport", importInput))).rejects.toThrow(
+    /65536 bytes.*65\d+ bytes/,
+  );
+  await expect(
+    f.host.invoke("owner", request("standardImport", { rows: importInput.rows.slice(0, 129) })),
+  ).rejects.toThrow(/128 SQL statements.*129 SQL statements/);
+  await expect(f.host.invoke("owner", request("trialBalance"))).resolves.toMatchObject({
+    result: [],
+  });
+  const imported = await f.host.invoke("owner", submission);
+  expect(imported.result).toHaveLength(2500);
+  await expect(f.host.invoke("owner", request("standardReport"))).rejects.toThrow(
+    /1000 rows.*1001 rows/,
+  );
+  const report = await f.host.invoke("owner", request("trialBalance"));
+  expect(report.result).toHaveLength(10000);
+  const lines = report.result as { debit: number; credit: number }[];
+  expect(lines.reduce((sum, line) => sum + line.debit - line.credit, 0)).toBe(0);
+  const archived = await f.host.invoke("owner", request("archiveReport"));
+  expect(archived.result).toEqual(report.result);
+  const quoted = await f.host.invoke("owner", request("archiveQuotes"));
+  expect(Buffer.byteLength(JSON.stringify(quoted.result))).toBe(4_193_602);
+  const recovery = await f.host.exportRecovery("owner", scope);
+  try {
+    const restored = await fixture();
+    const transfer = {
+      ...scope,
+      transferId: "bulk-recovery",
+      manifestSha256: recoveryManifestSha256(recovery.manifest, {
+        maxTotalBytes: 16 * 1024 * 1024,
+      }),
+    };
+    await restored.host.importRecovery("owner", {
+      ...transfer,
+      sourceCursor: recovery.manifest.cursor,
+      stream: recovery.stream(),
+    });
+    await restored.host.claimRecovery("owner", {
+      ...transfer,
+      sourceCursor: recovery.manifest.cursor,
+      oldHostStopped: true,
+    });
+    await expect(restored.host.invoke("owner", submission)).resolves.toMatchObject({
+      result: imported.result,
+      replayed: true,
+    });
+    await expect(restored.host.invoke("owner", request("archiveReport"))).resolves.toMatchObject({
+      result: report.result,
+      replayed: true,
+    });
+    await expect(restored.host.invoke("owner", request("archiveQuotes"))).resolves.toMatchObject({
+      result: quoted.result,
+      replayed: true,
+    });
+    await expect(restored.host.invoke("owner", request("trialBalance"))).resolves.toMatchObject({
+      result: report.result,
+    });
+  } finally {
+    await recovery.dispose();
+  }
+}, 20_000);
 
 it("requires an archived Collection and current owner review of both data and affected apps before permanent deletion", async () => {
   const f = await fixture();

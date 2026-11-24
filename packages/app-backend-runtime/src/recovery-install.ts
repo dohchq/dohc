@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import type {
-  DatasetCursor,
-  DatasetJournal,
-  DatasetScope,
-  JournalDb,
-  JournalExportRecord,
-  CheckpointStage,
+import {
+  journalEventStorageBytes,
+  type DatasetCursor,
+  type DatasetJournal,
+  type DatasetScope,
+  type JournalDb,
+  type JournalExportRecord,
+  type CheckpointStage,
 } from "./journal.js";
 import {
   readValidatedBlob,
@@ -378,9 +379,28 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
               offset += bytes.byteLength;
             }
           }
-          const storageBytes = Buffer.byteLength(body) * 2 + (blob?.byteLength ?? 0) + 2048;
-          if (record.kind === "event" && storageBytes > 16 * 1024 * 1024)
-            throw new Error("Recovery event metadata exceeds its limit.");
+          const storageBytes =
+            record.kind === "event"
+              ? journalEventStorageBytes(
+                  {
+                    ...record.cursor,
+                    revision: record.cursor.revision - 1,
+                    digest: record.previousDigest,
+                  },
+                  {
+                    proposalId: record.proposalId,
+                    operation: record.operation,
+                    callerKey: record.callerKey,
+                    idempotencyKey: record.idempotencyKey,
+                    payloadSha256: record.payloadSha256,
+                    resultJson: record.resultJson,
+                    changesetSha256: record.changesetSha256,
+                    attachedFileIds: record.attachedFileIds,
+                    recordedAtMs: record.recordedAtMs,
+                  },
+                  blob?.byteLength ?? 0,
+                )
+              : Buffer.byteLength(body) * 2 + 2048;
           tx(() => {
             authorize();
             retain(storageBytes);

@@ -42,7 +42,10 @@ export const appWords = {
   approveFailed: "dohc could not approve this app.",
   revokeFailed: "dohc could not revoke this app.",
   openFailed: "dohc could not open this app.",
+  // Its web process died, from a crash or the phone running short of memory.
+  stopped: "This app stopped.",
 
   // A link the person tapped in an app, before it leaves dohc. The message is the link's host.
-  openOutside: "Open in Safari?",
+  // Android may hand the link to an installed app that owns the site, as Chrome does.
+  openOutside: { ios: "Open in Safari?", android: "Open link?" },
 } as const;
