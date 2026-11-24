@@ -215,7 +215,7 @@ describe("what one Tiptap change does to the items of the sequence", () => {
     a.expectMirror();
   });
 
-  it("undoes and redoes through the Tiptap commands, with one transaction each", () => {
+  it("undoes and redoes through the Tiptap commands, with one transaction each, also chained after focus as the app's paste offer chains it", () => {
     const a = desktop(note(...LINES), 10);
     const b = person(note(...LINES), 20);
     a.typeAt(0, 7, "!");
@@ -238,6 +238,11 @@ describe("what one Tiptap change does to the items of the sequence", () => {
     expect(a.press("z", { ctrlKey: true })).toBe(true);
     expect(a.press("y", { ctrlKey: true })).toBe(true);
     expect(a.lines()).toEqual(["One one!", "Two two two", "Three?"]);
+    expect(a.editor.chain().focus().undo().run()).toBe(true);
+    expect(seen).toHaveLength(5);
+    expect(seen.every((shows) => shows)).toBe(true);
+    exchange(a, b);
+    expect(b.lines()).toEqual(["One one", "Two two two", "Three?"]);
     a.expectMirror();
     b.expectMirror();
   });

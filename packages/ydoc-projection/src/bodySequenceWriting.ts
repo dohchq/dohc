@@ -3,6 +3,8 @@ import {
   AddMarkStep,
   AttrStep,
   RemoveMarkStep,
+  ReplaceAroundStep,
+  ReplaceStep,
   StepMap,
   Transform,
   type Step,
@@ -13,7 +15,7 @@ import {
   BODY_CONTAINERS_FIELD,
   BODY_SEQUENCE_FIELD,
 } from "./bodySequenceGrammar.js";
-import { linesGiven } from "./bodySequenceWriter.js";
+import { linesGiven, LONE_HALF } from "./bodySequenceWriter.js";
 import { storedValue, visitPieces } from "./bodySequenceYjs.js";
 import {
   blockHolding,
@@ -145,7 +147,9 @@ function splitsPair(doc: ProseMirrorNode, pos: number): boolean {
 
 /**
  * Whether a step leaves every surrogate pair whole: it inserts, deletes, splits and formats
- * nowhere between the two units of one. A step that does not is refused.
+ * nowhere between the two units of one, and each run of letters it puts in under one set of
+ * marks holds whole pairs only, as the reference writer's `typeLetters` asks. Yjs sends half a
+ * pair as another letter, so a peer would read a different note. A step that does not is refused.
  */
 export function keepsPairs(step: Step, before: ProseMirrorNode): boolean {
   let kept = true;
@@ -154,6 +158,10 @@ export function keepsPairs(step: Step, before: ProseMirrorNode): boolean {
   });
   if (step instanceof AddMarkStep || step instanceof RemoveMarkStep)
     kept = !splitsPair(before, step.from) && !splitsPair(before, step.to);
+  if (step instanceof ReplaceStep || step instanceof ReplaceAroundStep)
+    step.slice.content.descendants((node) => {
+      if (node.isText && LONE_HALF.test(node.text!)) kept = false;
+    });
   return kept;
 }
 
@@ -1366,7 +1374,7 @@ function copyOfWindow(
   );
   const copy = new Y.Doc();
   const copied = copy.getText(BODY_SEQUENCE_FIELD);
-  copied.applyDelta(changes, { sanitize: false });
+  copied.applyDelta(changes);
   const records = sequence.doc!.getMap(BODY_CONTAINERS_FIELD);
   const writing = { sequence: copied, reader: createBodyReader(base.type.schema, copied, records) };
   const start = posOf(child);

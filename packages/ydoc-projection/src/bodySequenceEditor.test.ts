@@ -1194,6 +1194,7 @@ describe("a note that has lists, a callout and a table, written by someone else"
       const b = person(baseline, 20);
       a.expectMirror();
       expect(a.sent).toEqual([]);
+      const asStored = a.view.state.doc.toJSON();
       let typed = 0;
       for (;;) {
         const places = textPlaces(a.view.state.doc);
@@ -1221,7 +1222,8 @@ describe("a note that has lists, a callout and a table, written by someone else"
       while (a.undo());
       a.expectMirror();
       exchange(a, b);
-      expect(readBodySequence(schema, b.doc).textContent).not.toMatch(/[xy]{2}/u);
+      b.expectMirror();
+      expect(b.view.state.doc.toJSON()).toEqual(asStored);
     },
   );
 });
@@ -1465,6 +1467,29 @@ describe("letters that are two units long", () => {
     expect(whole.goneLetters).toBe(FACE);
     expect(a.lines()).toEqual(["ab"]);
     a.expectMirror();
+  });
+
+  it("refuses to put in half of one, or its two halves with a mark between them, which a peer would read as other letters, and puts in a whole one", () => {
+    const a = person(note("ab"), 10);
+    const b = person(note("ab"), 20);
+    const before = a.view.state.doc;
+    const [high, low] = [FACE[0]!, FACE[1]!];
+    a.view.dispatch(a.view.state.tr.insertText(high, 2));
+    a.view.dispatch(a.view.state.tr.insertText(low, 2));
+    a.view.dispatch(
+      a.view.state.tr.replaceWith(2, 2, [
+        schema.text(high, [schema.marks.bold!.create()]),
+        schema.text(low),
+      ]),
+    );
+    expect(a.view.state.doc).toBe(before);
+    expect(a.sent).toEqual([]);
+    a.view.dispatch(a.view.state.tr.insertText(FACE, 2));
+    exchange(a, b);
+    for (const each of [a, b]) {
+      each.expectMirror();
+      expect(each.lines()).toEqual([`a${FACE}b`]);
+    }
   });
 });
 
@@ -2191,6 +2216,25 @@ describe.each(["bare", "hosted"] as const)("one dispatch of the editor on a %s p
     expect(a.undo()).toBe(true);
     expect(a.lines()).toEqual(["ab", "cd"]);
     a.expectMirror();
+  });
+
+  it("gives a line with no boundary its boundary for an attribute step that sets the value already there: the note reads the same, and undo has no step", () => {
+    const lines = [stored(CODE, "ab", WIKILINK, "cd")];
+    const a = person(noteOfLines(lines), 10, shape);
+    const b = person(noteOfLines(lines), 20, shape);
+    const before = a.view.state.doc;
+    const link = textPlaces(before)[1]!.pos;
+    expect(before.nodeAt(link)!.attrs.target).toBe("Page");
+    a.view.dispatch(a.view.state.tr.setNodeAttribute(link, "target", "Page"));
+    expect(a.boundaryIds()).toHaveLength(2);
+    expect(a.sent).toHaveLength(1);
+    expect(a.history.undoStack).toHaveLength(0);
+    expect(a.undo()).toBe(false);
+    exchange(a, b);
+    for (const each of [a, b]) {
+      each.expectMirror();
+      expect(each.view.state.doc.eq(before)).toBe(true);
+    }
   });
 });
 
@@ -3062,12 +3106,32 @@ describe.each(["bare", "hosted"] as const)("on a %s page, two editors on one doc
     }
   });
 
-  it("takes no history that createBodySequenceHistory did not make", () => {
-    const base = page(note("ab"), 10, shape);
-    const history = new Y.UndoManager(base.sequence);
-    onStop(() => history.destroy());
-    expect(() => editorOn(base, shape, [], [], { history })).toThrow("createBodySequenceHistory");
-  });
+  it.each([
+    [
+      "that createBodySequenceHistory did not make",
+      (base: Page) => new Y.UndoManager(base.sequence),
+      "createBodySequenceHistory",
+    ],
+    [
+      "of another note",
+      () => createBodySequenceHistory(page(note("cd"), 20, shape).doc),
+      "of this note",
+    ],
+  ])(
+    "takes no history %s, and leaves nothing listening to the note and no mount on the page",
+    (_name, make, message) => {
+      const mounts = window.document.body.childElementCount;
+      const base = page(note("ab"), 10, shape);
+      const history = make(base);
+      onStop(() => history.destroy());
+      const listening = () => base.doc._observers.get("afterTransaction")?.size ?? 0;
+      const before = listening();
+      expect(() => editorOn(base, shape, [], [], { history })).toThrow(message);
+      expect(listening()).toBe(before);
+      stopEveryone();
+      expect(window.document.body.childElementCount).toBe(mounts);
+    },
+  );
 });
 
 describe.each(["bare", "hosted"] as const)(
@@ -3124,7 +3188,7 @@ describe.each(["bare", "hosted"] as const)(
         'doc(paragraph("ab", hardBreak, hardBreak, "cd"))',
       ],
     ])(
-      "double a line break when one joins %s that starts with it into the code block, the other makes the code block a paragraph, and the first undoes",
+      "double a line break when one joins %s that starts with it into the code block, the other receives that and then makes the code block a paragraph, and the first undoes",
       (_name, lines, undone) => {
         const a = person(noteOfLines(lines), 10, shape);
         const b = person(noteOfLines(lines), 20, shape);

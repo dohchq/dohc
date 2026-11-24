@@ -71,9 +71,9 @@ export type BodySequenceOptions = {
    */
   edit?: (change: () => void) => boolean;
   /**
-   * A history that outlives this editor, made with `createBodySequenceHistory`. Without one the
-   * plugin makes its own and destroys it with the view. Editors given one history share its undo
-   * steps, as two panes on one note do.
+   * A history that outlives this editor, made with `createBodySequenceHistory` for this note's
+   * document. Without one the plugin makes its own and destroys it with the view. Editors given
+   * one history share its undo steps, as two panes on one note do.
    */
   history?: Y.UndoManager;
 };
@@ -319,10 +319,10 @@ function holdSelection(
  *
  * A transaction that would start, change or cut a list, quote, callout or table is refused, also
  * one that would remove the last line between two of them that share an id. So is one that would
- * write between the two units of a surrogate pair, and one dispatched while a Yjs transaction is
- * open, while Yjs has not told of every finished one, or before the editor shows a change the
- * note's document holds: its offsets may be of a document the sequence no longer reads as. So is
- * what a plugin adds to a transaction that shows the note.
+ * write between the two units of a surrogate pair or put in half of one, and one dispatched while
+ * a Yjs transaction is open, while Yjs has not told of every finished one, or before the editor
+ * shows a change the note's document holds: its offsets may be of a document the sequence no
+ * longer reads as. So is what a plugin adds to a transaction that shows the note.
  *
  * What the editor has not shown is counted from Yjs's `beforeTransaction`. When a listener of the
  * host throws from `afterTransaction` before the editor's own is called, the editor shows what it
@@ -391,15 +391,13 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
     view(view) {
       const doc = sequence.doc;
       if (!doc) throw new Error("The body sequence must be part of a Yjs document.");
+      const history = options.history ?? createBodySequenceHistory(doc);
+      const origin = originOfHistory.get(history);
+      if (!origin) throw new Error("The history must be one createBodySequenceHistory made.");
+      if (!history.scope.includes(sequence)) throw new Error("The history must be of this note.");
       const releaseFormatting = keepBodySequenceFormatting(sequence);
       const reader = createBodyReader(view.state.schema, sequence, containers);
-      const here: Bound = {
-        sequence,
-        reader,
-        history: options.history ?? createBodySequenceHistory(doc),
-      };
-      const origin = originOfHistory.get(here.history);
-      if (!origin) throw new Error("The history must be one createBodySequenceHistory made.");
+      const here: Bound = { sequence, reader, history };
       bound = here;
       const unread: Y.Transaction[] = [];
       let shown: ProseMirrorNode | null = null;
@@ -449,7 +447,7 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
       const showUnread = () => {
         const told = unread.splice(0);
         if (told.length === 0) return show();
-        const undone = told.length === 1 && told[0]!.origin === here.history;
+        const undone = told.length === 1 && told[0]!.origin === history;
         const before = reader.reading();
         const held =
           undone || before.doc !== view.state.doc
@@ -545,7 +543,7 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
           doc.off("afterTransaction", onTransaction);
           doc.off("afterAllTransactions", onSettled);
           releaseFormatting();
-          if (!options.history) here.history.destroy();
+          if (!options.history) history.destroy();
           if (bound === here) {
             bound = null;
             showsWhatStands = null;

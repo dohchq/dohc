@@ -142,7 +142,8 @@ function same(left: unknown, right: unknown): boolean {
 const INLINE_ITEM = "\uFFFC";
 const HIGH_HALF = /[\uD800-\uDBFF]/;
 const LOW_HALF = /[\uDC00-\uDFFF]/;
-const LONE_HALF = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+/** Matches letters that hold half of a surrogate pair. No writer puts such letters in. */
+export const LONE_HALF = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 const splitsALetter = (text: string, offset: number) =>
   HIGH_HALF.test(text.charAt(offset - 1)) && LOW_HALF.test(text.charAt(offset));
 

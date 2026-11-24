@@ -233,12 +233,14 @@ export function editorOn(
 ) {
   const mount = window.document.createElement("div");
   window.document.body.append(mount);
+  stops.push(() => mount.remove());
   const hosted = (change: () => void) => {
     base.doc.transact(change);
     return true;
   };
   const edit = options.edit ?? (shape === "hosted" ? hosted : undefined);
   const history = options.history ?? createBodySequenceHistory(base.doc, { captureTimeout: 0 });
+  if (!options.history) stops.push(() => history.destroy());
   const shown = { count: 0 };
   const view = new EditorView(mount, {
     state: EditorState.create({
@@ -260,11 +262,7 @@ export function editorOn(
       this.updateState(this.state.apply(transaction));
     },
   });
-  stops.push(() => {
-    view.destroy();
-    if (!options.history) history.destroy();
-    mount.remove();
-  });
+  stops.push(() => view.destroy());
   return withEditor({ ...base, history, view, shown });
 }
 

@@ -236,14 +236,14 @@ export type Agreement = {
   onTheWholeNote: number;
 };
 export const AGREEMENT_COUNTS: Agreement = {
-  compared: 38799,
-  trials: 22464,
-  inTheWindow: 22464,
+  compared: 39646,
+  trials: 22885,
+  inTheWindow: 22885,
   onTheWholeNote: 0,
 };
 export const AGREEMENT_IN_THE_DIFFERENTIAL: { sample: Agreement; full: Agreement } = {
-  sample: { compared: 1089, trials: 585, inTheWindow: 585, onTheWholeNote: 0 },
-  full: { compared: 8784, trials: 4807, inTheWindow: 4807, onTheWholeNote: 0 },
+  sample: { compared: 1878, trials: 1017, inTheWindow: 1017, onTheWholeNote: 0 },
+  full: { compared: 9631, trials: 5228, inTheWindow: 5228, onTheWholeNote: 0 },
 };
 
 type OracleCounts = typeof ORACLE_COUNTS;
@@ -268,19 +268,19 @@ export const ORACLE_PARTS: readonly {
     sample: {
       counts: {
         outcomes: {
-          applied: 1884,
-          "filtered by keepsContainers": 603,
+          applied: 2011,
+          "filtered by keepsContainers": 604,
           "refused, as no trial settles": 21,
-          "not offered": 80,
+          "not offered": 111,
           "range error": 0,
         },
-        undone: 1847,
-        given: 1087,
-        typedInBySomeoneElse: 1818,
-        retypedBySomeoneElse: 1380,
+        undone: 1974,
+        given: 1188,
+        typedInBySomeoneElse: 1962,
+        retypedBySomeoneElse: 1474,
         excepted: {
           "a mark on an inline item": 31,
-          "formatting stored under a code block's letters": 7,
+          "formatting stored under a code block's letters": 8,
         },
         unsettled: {
           "a text drag of N-N to N": 7,
@@ -289,17 +289,12 @@ export const ORACLE_PARTS: readonly {
         },
         drags: {
           "text, applied": 285,
-          "block, applied": 45,
+          "block, applied": 52,
           "text, refused, as no trial settles": 7,
           "text, filtered by keepsContainers": 158,
         },
       },
-      agreed: {
-        compared: 1905,
-        trials: 1135,
-        inTheWindow: 1135,
-        onTheWholeNote: 0,
-      },
+      agreed: { compared: 2032, trials: 1210, inTheWindow: 1210, onTheWholeNote: 0 },
     },
     full: {
       counts: {
@@ -344,16 +339,16 @@ export const ORACLE_PARTS: readonly {
     sample: {
       counts: {
         outcomes: {
-          applied: 1841,
+          applied: 1893,
           "filtered by keepsContainers": 528,
           "refused, as no trial settles": 42,
-          "not offered": 66,
+          "not offered": 80,
           "range error": 0,
         },
-        undone: 1820,
-        given: 1156,
-        typedInBySomeoneElse: 2112,
-        retypedBySomeoneElse: 1564,
+        undone: 1872,
+        given: 1173,
+        typedInBySomeoneElse: 2197,
+        retypedBySomeoneElse: 1617,
         excepted: { "a mark on an inline item": 30 },
         unsettled: {
           "Enter over N-N": 16,
@@ -367,12 +362,7 @@ export const ORACLE_PARTS: readonly {
           "text, refused, as no trial settles": 10,
         },
       },
-      agreed: {
-        compared: 1883,
-        trials: 1051,
-        inTheWindow: 1051,
-        onTheWholeNote: 0,
-      },
+      agreed: { compared: 1935, trials: 1084, inTheWindow: 1084, onTheWholeNote: 0 },
     },
     full: {
       counts: {
@@ -505,13 +495,20 @@ export function expectTheWindowToAgree(
     return transform;
   });
   const asked = vi.spyOn(Y.Doc.prototype, "getMap");
-  const onTheWholeNote = linesToGiveFirst(writing, moved, "note");
-  const ranATrial = asked.mock.calls.length > 0;
-  asked.mockClear();
-  const inTheWindow = linesToGiveFirst(writing, moved);
-  const copiedTheNote = asked.mock.contexts.some((doc) => doc !== fresh.doc);
-  asked.mockRestore();
-  fresh.doc.destroy();
+  let onTheWholeNote: number[] | null;
+  let inTheWindow: number[] | null;
+  let ranATrial: boolean;
+  let copiedTheNote: boolean;
+  try {
+    onTheWholeNote = linesToGiveFirst(writing, moved, "note");
+    ranATrial = asked.mock.calls.length > 0;
+    asked.mockClear();
+    inTheWindow = linesToGiveFirst(writing, moved);
+    copiedTheNote = asked.mock.contexts.some((doc) => doc !== fresh.doc);
+  } finally {
+    asked.mockRestore();
+    fresh.doc.destroy();
+  }
   agreement.compared += 1;
   if (ranATrial) agreement.trials += 1;
   if (ranATrial && copiedTheNote) agreement.onTheWholeNote += 1;
@@ -571,16 +568,32 @@ export function expectNoLineLeftWanting(
 export const FULL = process.env.BODY_SEQUENCE_EDITOR_FULL === "1";
 
 /**
- * Says for each step or edit in turn whether to try it, by its kind: every one in a full run,
- * else every eighth of its kind, starting at a place that differs from note to note. So every
- * kind is tried, in the same places each time.
+ * The kind of a step or an edit, from the label that names it: what stands in braces stays, a
+ * heading's level for one, and every other number, a place in the note, reads as N.
  */
-export function sampleOf(note: number): (kind: string) => boolean {
+export const kindOf = (label: string) => label.replaceAll(/\d+(?![^{]*\})/g, "N");
+
+/**
+ * Tries the steps or edits of one note as they are offered, by kind: every one in a full run,
+ * else every eighth of its kind, starting at a place that differs from note to note, the same
+ * places each time. `finish` then tries the first one of each kind that the eighths left out, so
+ * every kind a note offers is tried in it.
+ */
+export function sampleOf(note: number) {
   const seen = new Map<string, number>();
-  return (kind) => {
-    const nth = seen.get(kind) ?? 0;
-    seen.set(kind, nth + 1);
-    return FULL || (nth + note) % 8 === 0;
+  const firstLeftOut = new Map<string, (() => void) | null>();
+  return {
+    offer(kind: string, run: () => void): void {
+      const nth = seen.get(kind) ?? 0;
+      seen.set(kind, nth + 1);
+      if (FULL || (nth + note) % 8 === 0) {
+        firstLeftOut.set(kind, null);
+        run();
+      } else if (!firstLeftOut.has(kind)) firstLeftOut.set(kind, run);
+    },
+    finish(): void {
+      for (const run of firstLeftOut.values()) run?.();
+    },
   };
 }
 
@@ -623,7 +636,7 @@ export function everyStepOracle(part: number): void {
   describe("the note reads as the document ProseMirror computed", () => {
     const steps = FULL
       ? "every step"
-      : "every eighth step of each kind (BODY_SEQUENCE_EDITOR_FULL=1 tries every step)";
+      : "every eighth step of each kind, and one of each kind at least (BODY_SEQUENCE_EDITOR_FULL=1 tries every step)";
     it.each(notes)(`for ${steps} tried in %s`, (_name, lines) => {
       const baseline = noteOfLines(lines);
       const longer = amongMoreLines(lines);
@@ -634,9 +647,10 @@ export function everyStepOracle(part: number): void {
       for (let pos = 0; pos <= size; pos++)
         if (start.resolve(pos).parent.isTextblock) inText.push(pos);
 
-      const isTried = sampleOf(ORACLE_NOTES.findIndex(([, each]) => each === lines));
-      const check = (label: string, act: (a: Person) => void) => {
-        if (!isTried(label.replaceAll(/\d+/g, "N"))) return;
+      const sample = sampleOf(ORACLE_NOTES.findIndex(([, each]) => each === lines));
+      const check = (label: string, act: (a: Person) => void) =>
+        sample.offer(kindOf(label), () => tryIt(label, act));
+      const tryIt = (label: string, act: (a: Person) => void) => {
         const a = person(baseline, 10);
         const before = a.view.state.doc;
         let applied: Transaction | null = null;
@@ -675,7 +689,7 @@ export function everyStepOracle(part: number): void {
           a.expectMirror();
           expectTheWindowToAgree(agreement, longer, [wrote], `${label} in ${before.toString()}`);
           outcome = "refused, as no trial settles";
-          const kind = label.replaceAll(/\d+/g, "N");
+          const kind = kindOf(label);
           oracle.unsettled.set(kind, (oracle.unsettled.get(kind) ?? 0) + 1);
         } else if (wrote) {
           outcome = "applied";
@@ -959,6 +973,7 @@ export function everyStepOracle(part: number): void {
             ),
           );
       });
+      sample.finish();
       oracle.notes += 1;
     });
 
@@ -978,7 +993,7 @@ export function everyStepOracle(part: number): void {
           "none"
         }; drags: ${[...oracle.drags].map(([kind, count]) => `${kind} (${String(count)})`).join("; ")}; a trial on the blocks around each step against one on the whole note, in the note with three paragraphs more on each side: compared ${String(agreement.compared)}, of which a trial ran ${String(agreement.trials)}: settled on the blocks around the edit ${String(agreement.inTheWindow)}, went on to the whole note ${String(agreement.onTheWholeNote)}`,
       );
-      if (oracle.notes !== notes.length) return;
+      expect(oracle.notes).toBe(notes.length);
       expect(oracle.outcomes).toEqual(counts.outcomes);
       expect(oracle.undone).toBe(counts.undone);
       expect(oracle.given).toBe(counts.given);
@@ -1073,4 +1088,10 @@ export function textPlaces(doc: ProseMirrorNode): { pos: number; size: number }[
   return places;
 }
 
-export const SEEDS = Number(process.env.BODY_SEQUENCE_EDITOR_SEEDS ?? 40);
+const seedsAsked = process.env.BODY_SEQUENCE_EDITOR_SEEDS;
+/** How many runs the random tests make: 40, or the whole number `BODY_SEQUENCE_EDITOR_SEEDS` asks for. */
+export const SEEDS = seedsAsked === undefined ? 40 : Number(seedsAsked);
+if (!Number.isSafeInteger(SEEDS) || SEEDS < 1)
+  throw new Error(
+    `BODY_SEQUENCE_EDITOR_SEEDS must be a whole number of runs, 1 or more. It is ${JSON.stringify(seedsAsked)}.`,
+  );

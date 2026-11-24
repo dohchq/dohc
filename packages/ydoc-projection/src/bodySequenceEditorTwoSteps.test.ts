@@ -211,18 +211,23 @@ describe("the note reads as the document ProseMirror computed", () => {
         };
         counted.pairs += 1;
         const wroteTheFirst = take();
+        const afterTheFirst = a.view.state.doc;
         const wroteBoth = wroteTheFirst && take();
         if (!wroteTheFirst) counted.firstWroteNothing += 1;
         else if (!wroteBoth) counted.secondWroteNothing += 1;
         else {
-          expect(a.undo(), said.join(", then ")).toBe(true);
-          expect(a.undo(), said.join(", then ")).toBe(true);
-          a.expectMirror();
-          const undone = readBodySequence(schema, a.doc);
-          if (!undone.eq(before))
-            throw new Error(
-              `${said.join(", then ")}\n  after both are undone the note reads as ${undone.toString()}`,
-            );
+          for (const [which, was] of [
+            ["the second is", afterTheFirst],
+            ["both are", before],
+          ] as const) {
+            expect(a.undo(), said.join(", then ")).toBe(true);
+            a.expectMirror();
+            const undone = readBodySequence(schema, a.doc);
+            if (!undone.eq(was))
+              throw new Error(
+                `${said.join(", then ")}\n  after ${which} undone the note reads as ${undone.toString()}`,
+              );
+          }
           counted.undone += 1;
         }
         stopEveryone();

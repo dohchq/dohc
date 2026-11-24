@@ -4,7 +4,7 @@ import * as Y from "yjs";
 import { EditorState, TextSelection } from "@tiptap/pm/state";
 import { dropPoint } from "@tiptap/pm/transform";
 import type { EditorView } from "@tiptap/pm/view";
-import { bodySequencePlugin } from "./bodySequenceEditor.js";
+import { bodySequenceAnchor, bodySequencePlugin } from "./bodySequenceEditor.js";
 import { createBodyReader } from "./bodySequenceReading.js";
 import {
   boundary,
@@ -12,10 +12,12 @@ import {
   element,
   note,
   noteOf,
+  onStop,
   page,
   person,
   schema,
   stopEveryone,
+  type Page,
 } from "./bodySequenceTestSupport.js";
 import { readBodySequence } from "./bodySequenceYjs.js";
 
@@ -41,8 +43,7 @@ function median(
   return `${times[Math.floor(times.length / 2)]!.toFixed(3)} ms`;
 }
 
-function editorWithNoPage(baseline: Uint8Array, clientID: number) {
-  const base = page(baseline, clientID);
+function editorWithNoPage(base: { sequence: Y.Text; containers: Y.Map<unknown> }) {
   const plugin = bodySequencePlugin({ sequence: base.sequence, containers: base.containers });
   let state = EditorState.create({ schema, plugins: [plugin] });
   let bound: ReturnType<NonNullable<typeof plugin.spec.view>> | undefined;
@@ -57,7 +58,7 @@ function editorWithNoPage(baseline: Uint8Array, clientID: number) {
     },
   } as unknown as EditorView;
   bound = plugin.spec.view!(view);
-  return { ...base, view };
+  return { view, release: () => bound?.destroy?.() };
 }
 
 function noteWithHistory(lines: number, edits: number): Uint8Array {
@@ -111,9 +112,12 @@ function measure(name: string, baseline: Uint8Array, drawn: boolean): string[] {
   );
   reader.doc.destroy();
 
-  const seats: [string, ReturnType<typeof editorWithNoPage>][] = [];
+  const seats: [string, Page & { view: EditorView }][] = [];
   const mounted = performance.now();
-  seats.push(["no page drawn", editorWithNoPage(baseline, 20)]);
+  const bare = page(baseline, 20);
+  const mount = editorWithNoPage(bare);
+  onStop(mount.release);
+  seats.push(["no page drawn", { ...bare, view: mount.view }]);
   report.push(
     `${name}: mount the editor state and the plugin, once: ${(performance.now() - mounted).toFixed(0)} ms`,
   );
@@ -138,16 +142,15 @@ function measure(name: string, baseline: Uint8Array, drawn: boolean): string[] {
       ["middle line", Math.floor(blocks / 2)],
       ["last line", blocks - 1],
     ] as const) {
-      const caret = (offset: number) => {
+      const inIt = (offset: number) => {
         let pos = 0;
         for (let block = 0; block < at; block++) pos += view.state.doc.child(block).nodeSize;
-        const size = view.state.doc.child(at).content.size;
-        view.dispatch(
-          view.state.tr.setSelection(
-            TextSelection.create(view.state.doc, pos + 1 + Math.min(offset, size)),
-          ),
-        );
+        return pos + 1 + Math.min(offset, view.state.doc.child(at).content.size);
       };
+      const caret = (offset: number) =>
+        view.dispatch(
+          view.state.tr.setSelection(TextSelection.create(view.state.doc, inIt(offset))),
+        );
       const label = `${name}, ${seat}, ${where}`;
       caret(30);
       report.push(
@@ -157,14 +160,22 @@ function measure(name: string, baseline: Uint8Array, drawn: boolean): string[] {
       );
       sync();
       let update: Uint8Array = new Uint8Array();
+      let size = 0;
       report.push(
         `${label}: one letter from elsewhere, update to editor: ${median(
           () => each.receive(update),
           {
             before() {
-              const index = Math.round((other.sequence.length * at) / blocks);
-              other.sequence.insert(index, "y", {});
+              size = view.state.doc.child(at).content.size;
+              const anchor = bodySequenceAnchor(view.state, inIt(30))!;
+              const there = Y.createAbsolutePositionFromRelativePosition(anchor, other.doc)!;
+              other.sequence.insert(there.index, "y", {});
               update = Y.mergeUpdates(other.sent.splice(0));
+            },
+            after() {
+              const { doc } = view.state;
+              if (doc.childCount !== blocks || doc.child(at).content.size !== size + 1)
+                throw new Error(`${label}: the letter from elsewhere is not in that line`);
             },
           },
         )}`,
@@ -203,27 +214,36 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)(
         sequence.insert(sequence.length, LINE, {});
       }
     });
-    const underCode = noteOf(({ sequence }) => {
-      sequence.insertEmbed(0, boundary({ type: "codeBlock", language: null }), {});
-      sequence.insert(sequence.length, LINE, {});
-      sequence.insertEmbed(sequence.length, element("wikilink", { target: "Page" }), {});
-      sequence.insert(sequence.length, "tail", {});
-      for (let line = 1; line < 10_000; line++) {
-        sequence.insertEmbed(sequence.length, boundary(), {});
+    const code = () => boundary({ type: "codeBlock", language: null });
+    const underCodeWith = (third: [Y.XmlElement, string]) =>
+      noteOf(({ sequence }) => {
+        sequence.insertEmbed(0, code(), {});
         sequence.insert(sequence.length, LINE, {});
-      }
-    });
+        sequence.insertEmbed(sequence.length, element("wikilink", { target: "Page" }), {});
+        sequence.insert(sequence.length, "tail", {});
+        for (let line = 1; line < 10_000; line++) {
+          const [start, text] = line === 2 ? third : [boundary(), LINE];
+          sequence.insertEmbed(sequence.length, start, {});
+          sequence.insert(sequence.length, text, {});
+        }
+      });
+    const underCode = underCodeWith([boundary(), LINE]);
     const timed = (...acts: ((view: EditorView) => void)[]): string[] => timedOn(headed, ...acts);
     const timedOn = (baseline: Uint8Array, ...acts: ((view: EditorView) => void)[]) => {
       const runs = Array.from({ length: 5 }, () => {
-        const { view, doc } = editorWithNoPage(baseline, 40);
-        const times = acts.map((act) => {
-          const start = performance.now();
-          act(view);
-          return performance.now() - start;
-        });
-        doc.destroy();
-        return times;
+        const base = declared(40);
+        Y.applyUpdate(base.doc, baseline);
+        const { view, release } = editorWithNoPage(base);
+        try {
+          return acts.map((act) => {
+            const start = performance.now();
+            act(view);
+            return performance.now() - start;
+          });
+        } finally {
+          release();
+          base.doc.destroy();
+        }
       });
       return acts.map((_, act) => {
         const times = runs.map((run) => run[act]!).toSorted((a, b) => a - b);
@@ -261,6 +281,14 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)(
       (view) => view.dispatch(view.state.tr.join(under)),
       (view) => view.dispatch(view.state.tr.insertText("x", paragraph + 3)),
     );
+    const joinedAboveCode = timedOn(
+      underCodeWith([
+        code(),
+        `${LINE}
+`,
+      ]),
+      (view) => view.dispatch(view.state.tr.join(under)),
+    );
     const cut = timedOn(
       underCode,
       (view) => view.dispatch(view.state.tr.delete(codeEnd - 1, paragraph + 2)),
@@ -293,7 +321,7 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)(
     const underAParagraph = noteOf(({ sequence }) => {
       sequence.insertEmbed(0, boundary(), {});
       sequence.insert(sequence.length, LINE, {});
-      sequence.insertEmbed(sequence.length, boundary({ type: "codeBlock", language: null }), {});
+      sequence.insertEmbed(sequence.length, code(), {});
       sequence.insert(sequence.length, LINE, {});
       sequence.insertEmbed(sequence.length, element("wikilink", { target: "Page" }), {});
       sequence.insert(sequence.length, "tail", {});
@@ -311,6 +339,7 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)(
       `${spill}: its language changed again: ${language[1]!}`,
       `${spill}: the paragraph under that paragraph joined into it, which gives it its boundary first: ${joined[0]!}`,
       `${spill}: the next letter typed in it: ${joined[1]!}`,
+      `${spill}: the same join when the block under the two is a code block that ends in a line feed: ${joinedAboveCode[0]!}`,
       `${spill}: a selection from the code into that paragraph deleted, which gives it its boundary first: ${cut[0]!}`,
       `${spill}: the next letter typed at the code block's end: ${cut[1]!}`,
       `${spill}: a divider put above the code block, which gives that paragraph its boundary first: ${divided[0]!}`,
