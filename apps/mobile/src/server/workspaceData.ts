@@ -563,10 +563,13 @@ export function createWorkspaceData(options: {
       (answer) => {
         if (!live() || !target.reads.isLatest(request)) return;
         target.stale = false;
-        target.prefetched =
-          unseen && target.listeners.size === 0 && target.view.carry !== undefined;
         const previous = unseen ? null : target.state.value;
         const value = target.view.carry ? target.view.carry(previous, answer.value) : answer.value;
+        // With no screen open, text a read brings is unseen; text it keeps from before stays as it was.
+        target.prefetched =
+          target.listeners.size === 0 &&
+          target.view.carry !== undefined &&
+          (value === answer.value || unseen);
         const saved = { view: target.view, value, cursor: answer.cursor, stale: false };
         cache.set(scope, { ...saved, prefetched: target.prefetched || undefined });
         set(target, { value, loading: false, problem: null, failures: target.state.failures });

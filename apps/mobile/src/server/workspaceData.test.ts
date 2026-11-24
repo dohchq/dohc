@@ -1101,6 +1101,45 @@ describe("prefetching pages", () => {
     expect(data.state(views.page("a.md")).value).toEqual({ kind: "missing", last: "Seen text" });
   });
 
+  it("keeps no last text from a refresh that landed after the screen closed", async () => {
+    const refresh = deferred<Answer>();
+    const server = serve(
+      "ws-prefetch-refreshed",
+      page("Seen text"),
+      () => refresh.promise,
+      ops({ ok: false, reason: "dohc: No document.", refusal: "missing" }, "0.3.1"),
+    );
+    const first = deferred<Answer>();
+    const second = deferred<Answer>();
+    server.on("GET", feedPath("ws-prefetch-refreshed", "0.1.1"), () => first.promise);
+    server.on("GET", feedPath("ws-prefetch-refreshed", "0.2.1"), () => second.promise);
+    server.on("GET", feedPath("ws-prefetch-refreshed", "0.3.1"), held);
+    const { data } = open(server, "ws-prefetch-refreshed");
+    const close = data.subscribe(views.page("a.md"), () => {});
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "Seen text" }),
+    );
+    first.resolve(feed({ cursor: "0.2.1", changed: { files: ["object-a"] } }));
+    await vi.waitFor(() => expect(reads(server)).toBe(2));
+    close();
+    refresh.resolve(ops({ ok: true, path: "a.md", markdown: "Never shown" }, "0.2.1"));
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({
+        kind: "page",
+        markdown: "Never shown",
+      }),
+    );
+    second.resolve(feed({ cursor: "0.3.1", changed: { files: ["object-a"] } }));
+    await vi.waitFor(() =>
+      expect(count(server, feedPath("ws-prefetch-refreshed", "0.3.1"))).toBe(1),
+    );
+
+    data.subscribe(views.page("a.md"), () => {});
+    await vi.waitFor(() => expect(reads(server)).toBe(3));
+    await settled();
+    expect(data.state(views.page("a.md")).value).toEqual({ kind: "missing" });
+  });
+
   it("keeps ten prefetched pages through a file change, and reads none of them again until opened", async () => {
     const server = serve("ws-prefetch-ten", page("Read ahead"));
     const change = deferred<Answer>();
