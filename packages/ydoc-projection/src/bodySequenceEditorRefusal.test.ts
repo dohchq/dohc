@@ -4,7 +4,7 @@ import { LINES, note, person, stopEveryone } from "./bodySequenceTestSupport.js"
 
 vi.mock("./bodySequenceWriting.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./bodySequenceWriting.js")>()),
-  linesToGiveFirst: () => null,
+  howToWrite: () => null,
 }));
 
 afterEach(stopEveryone);

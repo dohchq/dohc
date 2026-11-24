@@ -1365,7 +1365,7 @@
   "packages/ydoc-projection/src/bodySequenceEditorDifferential.test.ts": 12.8,
   "packages/ydoc-projection/src/bodySequenceEditorOracle1.test.ts": 42.6,
   "packages/ydoc-projection/src/bodySequenceEditorOracle2.test.ts": 41,
-  "packages/ydoc-projection/src/bodySequenceEditorTwoSteps.test.ts": 11,
+  "packages/ydoc-projection/src/bodySequenceEditorTwoSteps.test.ts": 12,
   "packages/ydoc-projection/src/concurrentLiveDeletes.test.ts": 1.409,
   "packages/ydoc-projection/src/document-edit.test.ts": 0.339,
   "packages/ydoc-projection/src/dohc-markdown-extensions.test.ts": 0.166,
