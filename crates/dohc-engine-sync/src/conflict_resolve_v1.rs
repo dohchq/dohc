@@ -2969,7 +2969,7 @@ fn close_reviews_of_the_same_merge(
     tx: &Transaction<'_>,
     payload: &ConflictResolveV1,
 ) -> Result<(), SyncError> {
-    let (Some(_), Some(result), Some(merged)) = (
+    let (Some(transition), Some(result), Some(merged)) = (
         payload.lineage_transition.as_ref(),
         payload.result.present(),
         payload.current.present(),
@@ -2978,7 +2978,7 @@ fn close_reviews_of_the_same_merge(
     };
     let closed = tx
         .prepare(
-            "UPDATE conflicts SET status='resolved',updated_at_ms=?5,              chosen_from=CASE WHEN current_blob_sha256=?4 THEN 'current'                WHEN incoming_blob_sha256=?4 THEN 'incoming' ELSE 'merged' END,              resolution=CASE WHEN current_blob_sha256=?4 THEN 'kept-current'                WHEN incoming_blob_sha256=?4 THEN 'applied-incoming' ELSE 'applied-merged' END              WHERE workspace_id=?1 AND target_version_id=?2 AND status='open' AND metadata_origin='sync'                AND current_object_id=?3 AND incoming_object_id=?3 AND current_path=?7 AND incoming_path=?7                AND current_blob_sha256=?6              RETURNING conflict_id",
+            "UPDATE conflicts SET status='resolved',updated_at_ms=?5,              chosen_from=CASE WHEN current_blob_sha256=?4 THEN 'current'                WHEN incoming_blob_sha256=?4 THEN 'incoming' ELSE 'merged' END,              resolution=CASE WHEN current_blob_sha256=?4 THEN 'kept-current'                WHEN incoming_blob_sha256=?4 THEN 'applied-incoming' ELSE 'applied-merged' END              WHERE workspace_id=?1 AND target_version_id=?2 AND status='open' AND metadata_origin='sync'                AND current_object_id=?3 AND incoming_object_id=?3 AND current_path=?7 AND incoming_path=?7                AND current_blob_sha256=?6                AND EXISTS(SELECT 1 FROM replication_log m WHERE m.workspace_id=?1 AND m.op_kind='moment.append'                  AND json_extract(m.payload_json,'$.momentId')=conflicts.incoming_latest_moment_id                  AND ?8=(SELECT CASE u.op_kind WHEN 'ydoc.update' THEN json_extract(u.payload_json,'$.lineageClaimId') END                    FROM replication_log u WHERE u.workspace_id=m.workspace_id AND u.origin_id=m.origin_id AND u.origin_seq<m.origin_seq                      AND u.op_kind IN ('ydoc.update','moment.append') AND u.apply_disposition='applied'                      AND json_extract(u.payload_json,'$.versionId')=?2 AND json_extract(u.payload_json,'$.objectId')=?3                    ORDER BY u.origin_seq DESC LIMIT 1))              RETURNING conflict_id",
         )
         .map_err(SyncError::corrupt)?
         .query_map(
@@ -2989,7 +2989,8 @@ fn close_reviews_of_the_same_merge(
                 result.blob_sha256,
                 payload.effect_context.recorded_at_ms,
                 merged.blob_sha256,
-                payload.paths[merged.path_ref]
+                payload.paths[merged.path_ref],
+                transition.predecessor_claim_id
             ],
             |row| row.get::<_, String>(0),
         )
@@ -5285,6 +5286,7 @@ mod tests {
         AnotherMerge,
         PlainNote,
         AnotherFile,
+        DiskEdit,
     }
 
     fn review_after_decision(case: OtherReview) -> Vec<(String, String, String, Option<String>)> {
@@ -5310,10 +5312,26 @@ mod tests {
                     match case {
                         OtherReview::AnotherMerge => merged.blob_sha256 = "c".repeat(64),
                         OtherReview::AnotherFile => merged.object_id = "occupant".to_owned(),
-                        OtherReview::SameMerge | OtherReview::PlainNote => {}
+                        OtherReview::SameMerge | OtherReview::PlainNote | OtherReview::DiskEdit => {}
                     }
                     other.latest_moment_id = "other-side".to_owned();
                     other.blob_sha256 = "b".repeat(64);
+                }
+                let mut writes = vec![
+                    ("ydoc.update", json!({"lineageClaimId": "a".repeat(64)})),
+                    ("moment.append", json!({"momentId": "other-side"})),
+                ];
+                if case == OtherReview::DiskEdit {
+                    writes.insert(1, ("moment.append", json!({"momentId": "settled-before"})));
+                }
+                for (seq, (kind, mut write)) in writes.into_iter().enumerate() {
+                    write["versionId"] = json!(payload.target_version_id);
+                    write["objectId"] = json!(payload.result.present().unwrap().object_id);
+                    tx.execute(
+                        "INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES (?1,'other-computer',?2,?3,?4,0,1)",
+                        params![payload.workspace_id, seq as i64, kind, write.to_string()],
+                    )
+                    .map_err(SyncError::persist)?;
                 }
                 open_review(tx, "other-review", merged, other_side)?;
                 close_imported_conflict(tx, &payload, false)
@@ -5349,6 +5367,7 @@ mod tests {
             OtherReview::AnotherMerge,
             OtherReview::PlainNote,
             OtherReview::AnotherFile,
+            OtherReview::DiskEdit,
         ] {
             assert_eq!(
                 review_after_decision(case)
