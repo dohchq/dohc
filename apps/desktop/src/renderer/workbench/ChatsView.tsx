@@ -877,6 +877,7 @@ export function ChatsView(props: {
   // request sequence separate from the workspace/navigation liveness token so
   // an older activity response can never overwrite a newer one.
   const threadRefreshSeq = useRef(0);
+  const markedRead = useRef(new Map<string, number>());
   const channelRefreshSeq = useRef(0);
   const dmRefreshSeq = useRef(0);
   const paintedDmRevision = useRef<{
@@ -2098,6 +2099,10 @@ export function ChatsView(props: {
         setChannelThreads((current) =>
           current.map((entry) => (entry.id === threadId ? { ...entry, unreadCount: 0 } : entry)),
         );
+        const marked = markedRead.current;
+        const key = `${workspaceId}\u0000${threadId}`;
+        if ((marked.get(key) ?? -1) >= upToSequence) return;
+        marked.set(key, upToSequence);
         void bridge()
           .markChatThreadRead({ workspaceId, threadId, upToSequence })
           .then(
@@ -2107,6 +2112,7 @@ export function ChatsView(props: {
             () => {
               // Mark-read is best-effort; the badge re-appears on next refresh
               // if the cursor write did not land.
+              if (marked.get(key) === upToSequence) marked.delete(key);
             },
           );
       }
