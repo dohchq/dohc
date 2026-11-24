@@ -162,33 +162,39 @@ fn require_base_coordinate(conn: &Connection, record: &BaseRecord) -> Result<(),
         &binding.object_id,
     )
     .map_err(SyncError::corrupt)?;
-    let known: bool = conn
+    let base_state: Option<bool> = conn
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3)",
+            "SELECT COALESCE(op_kind='ydoc.update' AND json_extract(payload_json,'$.versionId')=?4 AND json_extract(payload_json,'$.objectId')=?5 AND json_extract(payload_json,'$.lineageClaimId')=?6 AND json_extract(payload_json,'$.updateBlobSha256')=?6 AND json_extract(payload_json,'$.contentKind')='richdoc' AND json_extract(payload_json,'$.isBaseState')=1,0)
+             FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
             params![
                 binding.workspace_id,
                 record.base_coordinate.origin_id,
-                record.base_coordinate.origin_seq
+                record.base_coordinate.origin_seq,
+                binding.main_version_id,
+                binding.object_id,
+                binding.lineage_claim_id
             ],
             |row| row.get(0),
         )
+        .optional()
         .map_err(SyncError::corrupt)?;
-    if !known {
+    let Some(base_state) = base_state else {
         return Err(SyncError::RetryableState {
             reason: "native audit base coordinate is unavailable",
         });
-    }
+    };
     if record.checkpoint.state_digest != binding.lineage_claim_id
-        || !dohc_engine_collab::is_lineage_origin_in(
-            conn,
-            &key,
-            false,
-            ContentKind::Richdoc,
-            &binding.lineage_claim_id,
-            &record.base_coordinate.origin_id,
-            record.base_coordinate.origin_seq,
-        )
-        .map_err(SyncError::corrupt)?
+        || (!base_state
+            && !dohc_engine_collab::is_lineage_origin_in(
+                conn,
+                &key,
+                false,
+                ContentKind::Richdoc,
+                &binding.lineage_claim_id,
+                &record.base_coordinate.origin_id,
+                record.base_coordinate.origin_seq,
+            )
+            .map_err(SyncError::corrupt)?)
     {
         return Err(invalid("native audit base coordinate differs"));
     }

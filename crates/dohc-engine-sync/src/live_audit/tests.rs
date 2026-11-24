@@ -2423,6 +2423,45 @@ fn native_origin_details_survive_import_and_forged_source_is_rejected() {
     assert_eq!(count(&receiver, "live_owner_adoptions"), 0);
 }
 
+#[test]
+fn a_historical_audit_imports_on_a_device_that_refused_its_base_update() {
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    let mut base = published(&f);
+    let record = serde_json::from_value::<BasePayload>(base.payload.clone())
+        .unwrap()
+        .record;
+    let (_scratch, _path, mut receiver) = receiver_with_blobs(&f);
+    let earlier: Vec<_> = operations(&f.store)
+        .into_iter()
+        .filter(|op| op.origin_seq < base.origin_seq)
+        .collect();
+    import_all(&mut receiver, &earlier);
+    receiver
+        .write_with(&NoFaults, |tx| {
+            let refused = tx
+                .execute(
+                    "UPDATE replication_log SET apply_disposition='refused' WHERE origin_id=?1 AND origin_seq=?2",
+                    params![
+                        record.base_coordinate.origin_id,
+                        record.base_coordinate.origin_seq
+                    ],
+                )
+                .map_err(SyncError::persist)?;
+            assert_eq!(refused, 1);
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    base.relay_seq = Some(base.origin_seq + 1);
+    let applied = apply_base_envelope(&mut receiver, &base, &NoFaults)
+        .unwrap()
+        .primary;
+    assert!(
+        matches!(applied, ApplyDisposition::Applied(_)),
+        "{applied:?}"
+    );
+}
+
 fn accept_authored(
     f: &mut Fixture,
     cursor: i64,
