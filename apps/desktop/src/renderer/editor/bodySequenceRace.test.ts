@@ -505,6 +505,25 @@ describe("the desktop's commands next to a line with no boundary of its own", ()
     },
   );
 
+  it("gives setHorizontalRule's divider a boundary of its own when the selection runs to the end of the next line, so it is still a divider when someone else makes that line a heading at the same moment", () => {
+    const a = desktop(note(...LINES), 10);
+    const b = person(note(...LINES), 20);
+    const [, second] = a.boundaryIds();
+    a.select([0, LINES[0]!.length], [1, LINES[1]!.length]);
+    const effects = a.effects(() => a.editor.commands.setHorizontalRule());
+    expect(a.blocks()).toEqual(["paragraph", "horizontalRule", "paragraph"]);
+    expect(effects.goneBoundaries).toEqual([second]);
+    expect(effects.madeBoundaries).toHaveLength(1);
+    b.select([1, 0]);
+    b.retype("heading", { level: 2 });
+    exchange(a, b);
+    for (const each of [a, b]) {
+      each.expectMirror();
+      expect(each.blocks()).toEqual(["paragraph", "horizontalRule", "paragraph"]);
+      expect(each.lines()).toEqual(["One one", "", "Three"]);
+    }
+  });
+
   it("puts setHorizontalRule's divider in front of a line's own boundary when the caret is at the line's start, so the line is still the heading someone else made it at the same moment", () => {
     const a = desktop(note(...LINES), 10);
     const b = person(note(...LINES), 20);

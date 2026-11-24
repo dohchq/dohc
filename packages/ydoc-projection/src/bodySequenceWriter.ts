@@ -752,9 +752,10 @@ export function setMarks(
  * inline items between, and the boundary of each line after the first, so what is left of the
  * last line joins the first. When the first line cannot hold what is left of the last, the last
  * line keeps its boundary and stays a line, as does a last line read with no boundary that the
- * delete only runs up to. When the delete takes the block such a line stands after, and the first
- * line cannot hold what the line starts with, the line gets its boundary first: it then stands
- * after another block. A line the delete takes away gets no boundary first. Refused where it
+ * delete only runs up to. When the delete runs into such a line, or takes the block it stands
+ * after, and the first line cannot hold what is left of it, the line gets its boundary first: the
+ * delete edits it and leaves it a line. A line the delete takes away gets no boundary first.
+ * Refused where it
  * would cut a surrogate pair, and where all it would delete is the empty first paragraph a list
  * item needs.
  */
@@ -781,16 +782,16 @@ export function deleteRange(
       const isLeft = apart && last.boundary && toOffset >= 0 && toOffset < last.text.length;
       const held =
         !isLeft || !first || holdsIt(schema, first.type, unitAt(doc, last.start + toOffset));
-      const isOnlyReached =
+      const staysWithNoBoundary =
         apart &&
         last.bare === "spill" &&
-        toOffset === 0 &&
         !afterFirst &&
+        toOffset < last.text.length &&
         first !== undefined &&
-        !holdsIt(schema, first.type, unitAt(doc, last.start));
-      joins = !stays && held && !isOnlyReached;
+        !holdsIt(schema, first.type, unitAt(doc, last.start + toOffset));
+      joins = !stays && held && !staysWithNoBoundary;
       return {
-        edits: [first, ...(isOnlyReached ? [last] : [])],
+        edits: [first, ...(staysWithNoBoundary ? [last] : [])],
         after: apart && joins ? [last] : [],
       };
     },

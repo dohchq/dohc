@@ -3899,7 +3899,7 @@ it("gives no boundary to a line a join would take away again, and refuses the jo
   expect(view(doc)).toBe(stored);
 });
 
-it("gives no boundary to a line a delete runs into, and leaves what cannot join as a line", () => {
+it("gives no boundary to a line a delete runs into and joins away, gives one first to a line it runs into and leaves standing, and leaves what cannot join as a line", () => {
   const intoAfter = open(codeNote(), 10);
   const change = deleteRange(schema, intoAfter, 1, 1, 2, 1, String)!;
   expect(change.given).toEqual([]);
@@ -3934,12 +3934,12 @@ it("gives no boundary to a line a delete runs into, and leaves what cannot join 
   const history = bodyHistory(part, LOCAL, NEVER_ELAPSES);
   const first = readOf(part);
   const partly = deleteRange(schema, part, 0, 1, 1, 1, String)!;
-  expect(partly.given).toEqual([]);
+  expect(partly.given).toHaveLength(1);
   expect(written(part, partly)).toBe(true);
   expect(rowsRead(part)).toEqual(["codeBlock :c", `paragraph :${OBJECT}de`]);
   history.undo();
   expect(readOf(part)).toBe(first);
-  expect(linesRead(part)).toEqual(["line codeBlock:co", `spill paragraph:${OBJECT}${OBJECT}de`]);
+  expect(linesRead(part)).toEqual(["line codeBlock:co", `line paragraph:${OBJECT}${OBJECT}de`]);
 
   const below = [[IMAGE, MATH, "x"], PARAGRAPH, []] as Written;
   const apart = open(note([], [["ab", { type: "codeBlock", language: null }, []], below]), 40);

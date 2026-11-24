@@ -1,11 +1,11 @@
 import { Mark, type Fragment, type Node as ProseMirrorNode } from "@tiptap/pm/model";
-import type { Transaction } from "@tiptap/pm/state";
 import {
   AddMarkStep,
   AttrStep,
   RemoveMarkStep,
+  StepMap,
+  Transform,
   type Step,
-  type StepMap,
 } from "@tiptap/pm/transform";
 import * as Y from "yjs";
 import {
@@ -14,7 +14,7 @@ import {
   BODY_SEQUENCE_FIELD,
 } from "./bodySequenceGrammar.js";
 import { linesGiven } from "./bodySequenceWriter.js";
-import { storedValue } from "./bodySequenceYjs.js";
+import { storedValue, visitPieces } from "./bodySequenceYjs.js";
 import {
   blockHolding,
   blockStartingAt,
@@ -165,7 +165,9 @@ function trimRange(before: ProseMirrorNode, after: ProseMirrorNode, range: Range
   const ends = before.content.findDiffEnd(after.content);
   if (differs === null || !ends) return range;
   const shortest = Math.min(oldEnd - oldStart, newEnd - newStart);
-  let head = Math.max(0, Math.min(differs - oldStart, shortest));
+  const $start = before.resolve(oldStart);
+  const inItsBlock = $start.depth > 0 ? $start.end() - oldStart : shortest;
+  let head = Math.max(0, Math.min(differs - oldStart, shortest, inItsBlock));
   if (head > 0) {
     const $old = before.resolve(oldStart + head);
     const $new = after.resolve(newStart + head);
@@ -738,7 +740,9 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
 /**
  * Writes one editor transaction to the sequence, each step by its own step map. A step that
  * replaces one range is written without what it leaves as it was at either end of that range:
- * the same block starts and ends, equal inline items, and equal letters with their marks.
+ * the same block starts and ends, equal inline items, and equal letters with their marks. At the
+ * range's start that stops at the end of the block the range starts in, so a selection that runs
+ * out of a block is still written as one, and no later block's boundary becomes a new block's.
  *
  * What a map keeps, keeps its items. A replaced range that starts with a block's start, replaced
  * by one that starts with a block's start, keeps that boundary and sets its attributes, and so
@@ -776,7 +780,7 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
  */
 export function writeTransaction(
   writing: BodyWriting,
-  transaction: Transaction,
+  transaction: Transform,
   afterEachStep?: (shown: ProseMirrorNode) => void,
 ): boolean {
   const docs = [...transaction.docs, transaction.doc];
@@ -817,11 +821,13 @@ type Touched = {
   after: Set<number>;
   above: Set<number>;
   gone: Set<number>;
+  from: number;
+  to: number;
   isSure: boolean;
   isNearALineWithNoBoundary: boolean;
 };
 
-function whatStepsTouch(reading: BodyReading, transactions: readonly Transaction[]): Touched {
+function whatStepsTouch(reading: BodyReading, transactions: readonly Transform[]): Touched {
   const edits = new Set<number>();
   const after = new Set<number>();
   const above = new Set<number>();
@@ -831,6 +837,8 @@ function whatStepsTouch(reading: BodyReading, transactions: readonly Transaction
     after,
     above,
     gone,
+    from: reading.doc.content.size,
+    to: 0,
     isSure: true,
     isNearALineWithNoBoundary: false,
   };
@@ -842,6 +850,8 @@ function whatStepsTouch(reading: BodyReading, transactions: readonly Transaction
     return mapped;
   };
   const near = (from: number, to: number) => {
+    touched.from = Math.min(touched.from, from);
+    touched.to = Math.max(touched.to, to);
     let block = Math.max(0, countBelow(reading.starts, from + 1) - 2);
     while (block > 0 && isAddedParagraph(reading, block - 1)) block--;
     const last = Math.min(reading.blocks.length - 1, countBelow(reading.starts, to + 1));
@@ -1069,6 +1079,36 @@ export function linesWithNoBoundary({ sequence, reader }: BodyWriting): LineWith
   }));
 }
 
+const boundaryIn = (item: Y.Item | null) => {
+  const type = item?.content instanceof Y.ContentType ? item.content.type : null;
+  return type instanceof Y.XmlElement && type.nodeName === BLOCK_ELEMENT ? type : null;
+};
+
+/**
+ * Whether a change left each boundary that stood before it at the head of its own text: it wrote
+ * no boundary between such a boundary and the first item of its line that still stands. A
+ * boundary with one written there would head another block than it did. `state` is the note's
+ * state vector from before the change.
+ */
+export function keepsBoundariesWithTheirText(
+  sequence: Y.Text,
+  state: ReadonlyMap<number, number>,
+): boolean {
+  let stood = false;
+  let parted = false;
+  for (let item = sequence._start; item !== null; item = item.right) {
+    const isNew = item.id.clock >= (state.get(item.id.client) ?? 0);
+    if (boundaryIn(item)) {
+      if (!isNew) stood = !item.deleted;
+      parted = isNew && (parted || !item.deleted);
+    } else if (!isNew && !item.deleted && item.countable) {
+      if (stood && parted) return false;
+      stood = false;
+    }
+  }
+  return true;
+}
+
 const sameIds = (one: readonly Y.ID[], other: readonly Y.ID[]) =>
   one.length === other.length && one.every((id, at) => Y.compareIDs(id, other[at]!));
 
@@ -1112,10 +1152,6 @@ export function linesLeftWanting(
   });
   const isMadeByTheChange = (item: Y.Item | null) =>
     item !== null && item.id.clock >= (state.get(item.id.client) ?? 0);
-  const boundaryIn = (item: Y.Item | null) => {
-    const type = item?.content instanceof Y.ContentType ? item.content.type : null;
-    return type instanceof Y.XmlElement && type.nodeName === BLOCK_ELEMENT ? type : null;
-  };
   const boundaryTheChangeMade = (item: Y.Item | null) =>
     isMadeByTheChange(item) ? boundaryIn(item) : null;
   const standsNextTo = (item: Y.Item, side: "left" | "right", butWhatTheChangeTyped = false) => {
@@ -1219,11 +1255,11 @@ const TRIES = 3;
  * of the blocks that had no boundary of their own should have had one first, by their index
  * before the write. `linesLeftWanting` is asked after each step, so a line a step joins away is
  * not taken for one a later step starts. `isSettled` says whether the note then reads as the
- * editor's document, marks aside.
+ * editor's document, marks aside, and the last step kept each boundary with its text.
  */
 export function linesAWriteLeavesWanting(
   writing: BodyWriting,
-  transactions: readonly Transaction[],
+  transactions: readonly Transform[],
 ): { wanting: number[]; isSettled: boolean } {
   const note = writing.sequence.doc!;
   const stateOf = () => Y.decodeStateVector(Y.encodeStateVector(note));
@@ -1241,7 +1277,10 @@ export function linesAWriteLeavesWanting(
       ? other.items[0] === undefined
       : other.items[0] !== undefined && Y.compareIDs(one.items[0], other.items[0]));
   const look = (shown: ProseMirrorNode | null) => {
-    isSettled = shown !== null && readsAlike(writing.reader.reading().doc, shown);
+    isSettled =
+      shown !== null &&
+      readsAlike(writing.reader.reading().doc, shown) &&
+      keepsBoundariesWithTheirText(writing.sequence, state);
     for (const block of linesLeftWanting(before, state, writing, !isSettled)) {
       const line = before.find((each) => each.block === block)!;
       const was = first.find((each) => isTheSameLine(each, line));
@@ -1257,31 +1296,101 @@ export function linesAWriteLeavesWanting(
   return { wanting: [...wanting], isSettled };
 }
 
+type Copy = { writing: BodyWriting; transactions: readonly Transform[]; first: number };
+
+function copyOfNote({ sequence, reader }: BodyWriting, transactions: readonly Transform[]): Copy {
+  const copy = new Y.Doc();
+  Y.applyUpdate(copy, Y.encodeStateAsUpdate(sequence.doc!));
+  const copied = copy.getText(BODY_SEQUENCE_FIELD);
+  const records = copy.getMap(BODY_CONTAINERS_FIELD);
+  const schema = reader.reading().doc.type.schema;
+  const writing = { sequence: copied, reader: createBodyReader(schema, copied, records) };
+  return { writing, transactions, first: 0 };
+}
+
+function copyOfWindow(
+  { sequence, reader }: BodyWriting,
+  transactions: readonly Transform[],
+  { from, to }: Touched,
+  given: readonly number[],
+): Copy | null {
+  const reading = reader.reading();
+  const base = reading.doc;
+  const posOf = (child: number) => base.resolve(0).posAtIndex(child, 0);
+  let child = Math.max(0, base.resolve(from).index(0) - 1);
+  let lastChild = Math.min(base.childCount - 1, base.resolve(to).indexAfter(0));
+  let first = 0;
+  let last = 0;
+  for (;;) {
+    first = countBelow(reading.starts, posOf(child));
+    last = countBelow(reading.starts, posOf(lastChild + 1)) - 1;
+    if (first > 0 && reading.lines[first] === reading.lines[first - 1]) child--;
+    else if (reading.lines[last + 1] && reading.lines[last + 1] === reading.lines[last])
+      lastChild++;
+    else break;
+  }
+  const line = reading.lines[first];
+  if (!line || given.some((block) => block < first || block > last)) return null;
+  const head = line.item ?? sequence._start;
+  const marks = new Map<string, unknown>();
+  for (let item = sequence._start; item !== null && item !== head; item = item.right)
+    if (!item.deleted && item.content instanceof Y.ContentFormat)
+      marks.set(item.content.key, item.content.value);
+  const changes: Change[] = [];
+  visitPieces(head, reading.lines[last + 1]?.item ?? null, marks, undefined, (piece) =>
+    changes.push({
+      insert:
+        "text" in piece
+          ? piece.text
+          : "atom" in piece
+            ? elementFor(piece.atom, piece.attrs)
+            : elementFor(BLOCK_ELEMENT, piece.boundary),
+      attributes: Object.fromEntries([...marks].filter(([, value]) => value !== null)),
+    }),
+  );
+  const copy = new Y.Doc();
+  const copied = copy.getText(BODY_SEQUENCE_FIELD);
+  copied.applyDelta(changes, { sanitize: false });
+  const records = sequence.doc!.getMap(BODY_CONTAINERS_FIELD);
+  const writing = { sequence: copied, reader: createBodyReader(base.type.schema, copied, records) };
+  const start = posOf(child);
+  const shift = StepMap.offset(-start);
+  const windowed: Transform[] = [];
+  let doc = base.cut(start, posOf(lastChild + 1));
+  let fits = writing.reader.reading().doc.eq(doc);
+  for (const transaction of transactions) {
+    const transform = new Transform(doc);
+    for (const step of transaction.steps) {
+      const moved = fits ? step.map(shift) : null;
+      fits = moved !== null && !transform.maybeStep(moved).failed;
+    }
+    windowed.push(transform);
+    doc = transform.doc;
+  }
+  if (fits) return { writing, transactions: windowed, first };
+  copy.destroy();
+  return null;
+}
+
 function linesATrialGives(
-  writing: BodyWriting,
-  transactions: readonly Transaction[],
-  edited: readonly number[],
+  open: (given: readonly number[]) => Copy | null,
+  guessed: readonly number[],
 ): number[] | null {
-  const note = writing.sequence.doc!;
-  const schema = writing.reader.reading().doc.type.schema;
-  const stored = Y.encodeStateAsUpdate(note);
   const never = new Set<number>();
-  let given = [...edited];
+  let given = [...guessed];
   for (let tries = 0; tries < TRIES; tries++) {
-    const copy = new Y.Doc();
-    Y.applyUpdate(copy, stored);
-    const sequence = copy.getText(BODY_SEQUENCE_FIELD);
-    const trial: BodyWriting = {
-      sequence,
-      reader: createBodyReader(schema, sequence, copy.getMap(BODY_CONTAINERS_FIELD)),
-    };
-    copy.transact(() => giveBoundaries(trial, given));
-    const gave = given.map((block) => trial.reader.reading().lines[block]!.item!);
+    const copy = open(given);
+    if (!copy) return null;
+    const { writing: trial, transactions, first } = copy;
+    const note = trial.sequence.doc!;
+    const there = given.map((block) => block - first);
+    note.transact(() => giveBoundaries(trial, there));
+    const gave = there.map((block) => trial.reader.reading().lines[block]!.item!);
     const { wanting, isSettled } = linesAWriteLeavesWanting(trial, transactions);
     const taken = given.filter((_, at) => gave[at]!.deleted);
     for (const block of taken) never.add(block);
-    const more = wanting.filter((block) => !never.has(block));
-    copy.destroy();
+    const more = wanting.map((block) => block + first).filter((block) => !never.has(block));
+    note.destroy();
     if (taken.length + more.length === 0) return isSettled ? given : null;
     given = [...given.filter((block) => !never.has(block)), ...more];
   }
@@ -1310,22 +1419,33 @@ function linesATrialGives(
  *
  * The guess is the answer when every range stays inside one block or only gives a block's start
  * another attribute, and when the dispatch comes within a block of no line with no boundary. Any
- * other dispatch is written to a copy of the whole note with the guessed lines given, which
- * costs a read of the note, and `linesAWriteLeavesWanting` says from what the writer did there
- * which more lines to give. Those are given on a new copy and the dispatch is written again,
- * until it leaves no line wanting. A line whose given boundary the dispatch deletes is given
- * none. The dispatch is refused when that takes more than three copies, or when the copy then
- * does not read as the editor's document, marks aside.
+ * other dispatch is written to a copy with the guessed lines given, and
+ * `linesAWriteLeavesWanting` says from what the writer did there which more lines to give. Those
+ * are given on a new copy and the dispatch is written again, until it leaves no line wanting. A
+ * line whose given boundary the dispatch deletes is given none.
+ *
+ * The copy is a window of the note: the top-level blocks the steps touch and one more on each
+ * side, with whole lines, their live items only, the formatting in force where they start, and
+ * the steps moved to start there. It reads the note's own container records. When the window
+ * does not read as that part of the editor's document, before or after a step, or leaves no line
+ * wanting and still does not settle, the whole note is copied instead, which costs a read of the
+ * note; `trial` `"note"` asks for that copy at once. The dispatch is refused when the whole
+ * note takes more than three copies, or then does not read as the editor's document, marks aside.
  */
 export function linesToGiveFirst(
   writing: BodyWriting,
-  transactions: readonly Transaction[],
+  transactions: readonly Transform[],
+  trial: "window" | "note" = "window",
 ): number[] | null {
   const reading = writing.reader.reading();
   const touched = whatStepsTouch(reading, transactions);
   const guessed = linesTouched(reading, touched);
   if (touched.isSure || !touched.isNearALineWithNoBoundary) return guessed;
-  return linesATrialGives(writing, transactions, guessed);
+  const inWindow =
+    trial === "window"
+      ? linesATrialGives((given) => copyOfWindow(writing, transactions, touched, given), guessed)
+      : null;
+  return inWindow ?? linesATrialGives(() => copyOfNote(writing, transactions), guessed);
 }
 
 /**

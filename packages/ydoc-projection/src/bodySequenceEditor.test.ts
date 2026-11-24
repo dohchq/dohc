@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import { StepMap, Transform } from "@tiptap/pm/transform";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { setBlockType } from "@tiptap/pm/commands";
@@ -42,8 +43,10 @@ import {
   type BodyChange,
 } from "./bodySequenceWriter.js";
 import {
+  keepsBoundariesWithTheirText,
   keepsContainers,
   linesAWriteLeavesWanting,
+  linesToGiveFirst,
   linesWithNoBoundary,
   type BodyWriting,
   type LineWithNoBoundary,
@@ -2192,6 +2195,55 @@ const writingOf = (note: { sequence: Y.Text; containers: Y.Map<unknown> }): Body
   reader: createBodyReader(schema, note.sequence, note.containers),
 });
 
+const agreement = { compared: 0, trials: 0, inTheWindow: 0, onTheWholeNote: 0 };
+const AGREEMENT_COUNTS = {
+  compared: 32921,
+  trials: 18548,
+  inTheWindow: 18548,
+  onTheWholeNote: 0,
+};
+
+const PADDING = Array.from({ length: 3 }, () => stored({}, "pad"));
+type Longer = { baseline: Uint8Array; shift: number };
+
+function amongMoreLines(lines: readonly StoredLine[]): Longer {
+  const above = lines[0]?.boundary ? PADDING : [];
+  return { baseline: noteOfLines([...above, ...lines, ...PADDING]), shift: above.length * 5 };
+}
+
+function expectTheWindowToAgree(
+  longer: Longer,
+  transactions: readonly Transaction[],
+  label: string,
+): void {
+  const fresh = declared(97);
+  Y.applyUpdate(fresh.doc, longer.baseline);
+  const writing = writingOf(fresh);
+  let doc = writing.reader.reading().doc;
+  const moved = transactions.map((transaction) => {
+    const transform = new Transform(doc);
+    for (const step of transaction.steps) transform.step(step.map(StepMap.offset(longer.shift))!);
+    doc = transform.doc;
+    return transform;
+  });
+  const asked = vi.spyOn(Y.Doc.prototype, "getMap");
+  const onTheWholeNote = linesToGiveFirst(writing, moved, "note");
+  const ranATrial = asked.mock.calls.length > 0;
+  asked.mockClear();
+  const inTheWindow = linesToGiveFirst(writing, moved);
+  const copiedTheNote = asked.mock.contexts.some((doc) => doc !== fresh.doc);
+  asked.mockRestore();
+  fresh.doc.destroy();
+  agreement.compared += 1;
+  if (ranATrial) agreement.trials += 1;
+  if (ranATrial && copiedTheNote) agreement.onTheWholeNote += 1;
+  else if (ranATrial) agreement.inTheWindow += 1;
+  if (JSON.stringify(inTheWindow) !== JSON.stringify(onTheWholeNote))
+    throw new Error(
+      `${label}, with three paragraphs more on each side: a trial on the blocks around the edit gives ${JSON.stringify(inTheWindow)}, one on the whole note ${JSON.stringify(onTheWholeNote)}`,
+    );
+}
+
 type Outcome = "applied" | "filtered by keepsContainers" | "not offered" | "range error";
 const oracle = {
   notes: 0,
@@ -2206,6 +2258,7 @@ const oracle = {
 describe("the note reads as the document ProseMirror computed", () => {
   it.each(ORACLE_NOTES)("for every step tried in %s", (_name, lines) => {
     const baseline = noteOfLines(lines);
+    const longer = amongMoreLines(lines);
     const start = readBodySequence(schema, person(baseline, 10).doc);
     stopEveryone();
     const size = start.content.size;
@@ -2258,6 +2311,7 @@ describe("the note reads as the document ProseMirror computed", () => {
         }
         expect(a.sent.length, label).toBeLessThanOrEqual(2);
         if (a.sent.length === 2) oracle.given += 1;
+        expectTheWindowToAgree(longer, [wrote], `${label} in ${before.toString()}`);
         const settled = declared(95);
         Y.applyUpdate(settled.doc, baseline);
         if (a.sent.length === 2) Y.applyUpdate(settled.doc, a.sent[0]!);
@@ -4103,6 +4157,31 @@ describe.each(["bare", "hosted"] as const)(
       a.expectMirror();
     });
 
+    it("gives a divider put over a selection that runs to the end of the next line a boundary of its own, so it is still a divider when someone else makes that line a heading at the same moment", () => {
+      const a = person(note(...LINES), 10, shape);
+      const b = person(note(...LINES), 20, shape);
+      const [, second] = a.boundaryIds();
+      a.select([0, LINES[0]!.length], [1, LINES[1]!.length]);
+      const { from, to } = a.view.state.selection;
+      const effects = a.effects(() =>
+        a.view.dispatch(tiptapInsertContentAt(a.view.state.tr, from, to, rule())),
+      );
+      expect(a.view.state.doc.toString()).toBe(
+        'doc(paragraph("One one"), horizontalRule, paragraph("Three"))',
+      );
+      expect(effects.goneBoundaries).toEqual([second]);
+      expect(effects.madeBoundaries).toHaveLength(1);
+      b.select([1, 0]);
+      b.retype("heading", { level: 2 });
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.view.state.doc.toString()).toBe(
+          'doc(paragraph("One one"), horizontalRule, paragraph("Three"))',
+        );
+      }
+    });
+
     it("puts a divider in front of a line's own boundary, so the line is still the heading someone else made it at the same moment", () => {
       const a = person(note(...LINES), 10, shape);
       const b = person(note(...LINES), 20, shape);
@@ -4277,7 +4356,7 @@ const WHY_THEY_DIFFER: { why: string; edits: readonly string[] }[] = [
     edits: ["a delete of a whole block"],
   },
   {
-    why: "A delete that runs from one block into another that holds what the first cannot leaves two blocks in ProseMirror, also under a typed letter or Enter. The reference writer joins what fits. Where the second block is a paragraph with no boundary and stays one, the editor gives it its boundary first, as a line the change edits; the reference writer's delete gives none to a line it runs into.",
+    why: "A delete that runs from one block into another that holds what the first cannot leaves two blocks in ProseMirror, also under a typed letter or Enter. The reference writer joins what fits, and gives the second block no boundary where the editor, which keeps it a paragraph, gives it one first.",
     edits: [
       "a delete across blocks",
       "a letter typed over a selection across blocks",
@@ -4285,7 +4364,7 @@ const WHY_THEY_DIFFER: { why: string; edits: readonly string[] }[] = [
     ],
   },
   {
-    why: "The editor writes a divider over a selection that ends in another block as that block's start replaced, so that block's boundary becomes the divider's, and it gives no boundary to a line the selection takes away whole. The reference writer joins that block away, gives the first line a boundary, and makes that line the divider or writes the divider a new boundary.",
+    why: "A selection that takes a divider and ends right after it, with a divider put over it, leaves the document that divider where it stood. The editor writes what changed and keeps its boundary; the reference writer deletes it and writes the new divider a boundary, or makes the first line the divider. The editor gives no boundary to a line the selection takes away whole, where the reference writer gives it one and makes it the divider.",
     edits: ["a divider over a selection across blocks"],
   },
   {
@@ -4308,13 +4387,10 @@ const DIFFERENTIAL_COUNTS: Differential = {
   neither: 398,
   givenDifferently: {
     "Enter over a selection across blocks, from the note's start": 18,
-    "a delete across blocks": 3,
-    "a letter typed over a selection across blocks": 3,
-    "Enter over a selection across blocks": 2,
     "a divider over a selection across blocks": 2,
   },
   readDifferently: {
-    "Enter over a selection across blocks, from the note's start": 28,
+    "Enter over a selection across blocks, from the note's start": 29,
     "a change of kind to codeBlock": 23,
     "a block put first in its container": 2,
     "a divider": 2,
@@ -4325,7 +4401,7 @@ const DIFFERENTIAL_COUNTS: Differential = {
     "a delete of a whole block": 1,
   },
   bothDifferently: {
-    "Enter over a selection across blocks, from the note's start": 17,
+    "Enter over a selection across blocks, from the note's start": 16,
     "a delete across blocks": 9,
     "a letter typed over a selection across blocks": 9,
     "Enter over a selection across blocks": 6,
@@ -4334,20 +4410,20 @@ const DIFFERENTIAL_COUNTS: Differential = {
   },
   keptDifferently: {
     "Enter over a selection across blocks, from the note's start": 61,
-    "a divider over a selection across blocks": 84,
     "two paragraphs pasted over a selection across blocks, the first whole": 44,
+    "a divider over a selection across blocks": 18,
     "a divider over a selection": 2,
     "a divider over a selection, as a delete and a block put in": 2,
     "a delete of a whole block": 1,
   },
   recordedDifferently: {
-    "Enter over a selection across blocks, from the note's start": 46,
-    "a divider over a selection across blocks": 78,
+    "Enter over a selection across blocks, from the note's start": 45,
     "two paragraphs pasted over a selection across blocks, the first whole": 44,
     "a change of kind to codeBlock": 23,
-    "a delete across blocks": 12,
-    "a letter typed over a selection across blocks": 12,
-    "Enter over a selection across blocks": 8,
+    "a delete across blocks": 9,
+    "a letter typed over a selection across blocks": 9,
+    "Enter over a selection across blocks": 6,
+    "a divider over a selection across blocks": 12,
     "a divider over a selection": 2,
     "a divider over a selection, as a delete and a block put in": 2,
     "a block put right under another": 2,
@@ -4374,8 +4450,7 @@ const DIFFERENTIAL_COUNTS_AT_RANDOM: Differential = {
     "Enter over a selection across blocks, from the note's start": 4,
   },
   keptDifferently: {
-    "two paragraphs pasted over a selection across blocks, the first whole": 7,
-    "a divider over a selection across blocks": 4,
+    "two paragraphs pasted over a selection across blocks, the first whole": 4,
     "Enter over a selection across blocks, from the note's start": 2,
     "a divider over a selection": 2,
     "a divider over a selection, as a delete and a block put in": 2,
@@ -4383,10 +4458,9 @@ const DIFFERENTIAL_COUNTS_AT_RANDOM: Differential = {
     "a join": 1,
   },
   recordedDifferently: {
-    "two paragraphs pasted over a selection across blocks, the first whole": 7,
+    "two paragraphs pasted over a selection across blocks, the first whole": 4,
     "a letter typed over a selection across blocks": 2,
     "a delete across blocks": 1,
-    "a divider over a selection across blocks": 4,
     "a change of kind to codeBlock": 6,
     "Enter over a selection across blocks, from the note's start": 3,
     "a divider over a selection": 2,
@@ -4468,6 +4542,7 @@ type Said = (make: Make) => unknown;
 
 function compareWithReference(lines: readonly StoredLine[], counted: Tally): void {
   const baseline = noteOfLines(lines);
+  const longer = amongMoreLines(lines);
   const start = declared(92);
   Y.applyUpdate(start.doc, baseline);
   const reading = createBodyReader(schema, start.sequence, start.containers).reading();
@@ -4529,12 +4604,22 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
       .map(asSaid)
       .filter((said) => said.took);
     const a = person(baseline, 10);
+    const applied: Transaction[] = [];
+    const dispatch = a.view.dispatch.bind(a.view);
+    a.view.dispatch = (transaction) => {
+      const changes = transaction.docChanged && !isBodySequenceChange(transaction);
+      if (changes && a.view.state.applyTransaction(transaction).transactions.length > 0)
+        applied.push(transaction);
+      dispatch(transaction);
+    };
     try {
       byEditor(a);
     } catch (error) {
       if (!(error instanceof RangeError)) throw error;
     }
     const wrote = a.sent.length > 0;
+    if (wrote && applied.length === 1)
+      expectTheWindowToAgree(longer, applied, `${edit} ${label} in ${reading.doc.toString()}`);
     const readTheSame = taken.filter((said) => a.view.state.doc.eq(said.read));
     const references = readTheSame.length > 0 ? readTheSame : taken;
     if (references.length === 0 || !wrote) {
@@ -5054,6 +5139,111 @@ describe("the editor and the reference writer, for the same edit of the same not
     ).toEqual([]);
     if (SEEDS === 40) expect(counts).toEqual(DIFFERENTIAL_COUNTS_AT_RANDOM);
   });
+
+  it("refuse a dispatch the note cannot be written to read as, on the blocks around it and on the whole note, and write nothing", () => {
+    const a = person(noteOfLines([stored(CODE, "ab", WIKILINK, "cd"), stored({}, "ef")]), 10);
+    const { doc, tr } = a.view.state;
+    expect(doc.toString()).toBe('doc(codeBlock("ab"), paragraph(wikilink, "cd"), paragraph("ef"))');
+    const quoted = tr.wrap(doc.resolve(doc.content.size - 1).blockRange()!, [
+      { type: schema.nodes.blockquote! },
+    ]);
+    expect(quoted.doc.toString()).toBe(
+      'doc(codeBlock("ab"), paragraph(wikilink, "cd"), blockquote(paragraph("ef")))',
+    );
+    const held = Y.encodeStateAsUpdate(a.doc);
+    const asked = vi.spyOn(Y.Doc.prototype, "getMap");
+    expect(linesToGiveFirst(writingOf(a), [quoted])).toBeNull();
+    const copies = asked.mock.contexts.map((from) => from !== a.doc);
+    asked.mockRestore();
+    expect(copies).toEqual([false, true]);
+    expect(linesToGiveFirst(writingOf(a), [quoted], "note")).toBeNull();
+    expect(Y.encodeStateAsUpdate(a.doc)).toEqual(held);
+    expect(a.sent).toEqual([]);
+  });
+
+  it("say that a boundary lost its text when a change writes another boundary between the two, and not when it writes one in front", () => {
+    const made = declared(98);
+    Y.applyUpdate(made.doc, note("ab", "cd"));
+    const stateOf = () => Y.decodeStateVector(Y.encodeStateVector(made.doc));
+    const before = stateOf();
+    made.sequence.insertEmbed(3, boundary(), {});
+    expect(keepsBoundariesWithTheirText(made.sequence, before)).toBe(true);
+    const then = stateOf();
+    made.sequence.insertEmbed(5, boundary({ type: "heading", level: 1 }), {});
+    expect(readBodySequence(schema, made.doc).toString()).toBe(
+      'doc(paragraph("ab"), paragraph, paragraph, heading("cd"))',
+    );
+    expect(keepsBoundariesWithTheirText(made.sequence, then)).toBe(false);
+    made.doc.destroy();
+  });
+
+  it("give the same lines from a trial on the blocks around each edit as from one on the whole note", () => {
+    console.log(
+      `a trial on the blocks around the edit against one on the whole note, for each step of the oracle and each edit above, in the note with three paragraphs more on each side: compared ${String(agreement.compared)}, of which a trial ran ${String(agreement.trials)}: settled on the blocks around the edit ${String(agreement.inTheWindow)}, went on to the whole note ${String(agreement.onTheWholeNote)}; both gave the same lines every time`,
+    );
+    const ranEverything =
+      oracle.notes === ORACLE_NOTES.length && inOracleNotes.notes === ORACLE_NOTES.length;
+    if (ranEverything && SEEDS === 40) expect(agreement).toEqual(AGREEMENT_COUNTS);
+  });
+
+  it.each([
+    [
+      "the paragraph under it joined into it",
+      (a: Person) => {
+        a.select([5, 0]);
+        a.press("Backspace");
+      },
+    ],
+    [
+      "a selection from the code into it deleted",
+      (a: Person) => {
+        a.select([3, 1], [4, 1]);
+        a.press("Backspace");
+      },
+    ],
+    [
+      "the two paragraphs under it joined",
+      (a: Person) => {
+        a.select([6, 0]);
+        a.press("Backspace");
+      },
+    ],
+  ] as const)(
+    "give the same lines from the blocks around the edit as from the whole note, with %s, when formatting runs across those blocks and letters there were deleted",
+    (name, act) => {
+      const lines = [
+        ...PADDING,
+        stored(CODE, "ab", WIKILINK, "cd"),
+        stored({}, "ef"),
+        stored({}, "gh"),
+        ...PADDING,
+      ];
+      const writer = person(noteOfLines(lines), 30);
+      writer.sequence.format(0, writer.sequence.length, { bold: {} });
+      for (const block of [3, 5, 6]) {
+        writer.typeAt(block, 1, "xyz");
+        const typed = writer.view.state.selection.from;
+        writer.view.dispatch(writer.view.state.tr.delete(typed - 3, typed));
+      }
+      const baseline = Y.encodeStateAsUpdate(writer.doc);
+      const a = person(baseline, 10);
+      expect(a.view.state.doc.toString()).toContain(
+        'codeBlock("ab"), paragraph(wikilink, bold("cd")), paragraph(bold("ef"))',
+      );
+      const applied: Transaction[] = [];
+      const dispatch = a.view.dispatch.bind(a.view);
+      a.view.dispatch = (transaction) => {
+        if (transaction.docChanged && !isBodySequenceChange(transaction)) applied.push(transaction);
+        dispatch(transaction);
+      };
+      const settled = agreement.inTheWindow;
+      act(a);
+      expect(applied).toHaveLength(1);
+      expectTheWindowToAgree({ baseline, shift: 0 }, applied, name);
+      expect(agreement.inTheWindow).toBe(settled + 1);
+      a.expectMirror();
+    },
+  );
 });
 
 describe("two plain editors racing", () => {

@@ -214,11 +214,19 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)(
     });
     const timed = (...acts: ((view: EditorView) => void)[]): string[] => timedOn(headed, ...acts);
     const timedOn = (baseline: Uint8Array, ...acts: ((view: EditorView) => void)[]) => {
-      const { view } = editorWithNoPage(baseline, 40);
-      return acts.map((act) => {
-        const start = performance.now();
-        act(view);
-        return `${(performance.now() - start).toFixed(1)} ms`;
+      const runs = Array.from({ length: 5 }, () => {
+        const { view, doc } = editorWithNoPage(baseline, 40);
+        const times = acts.map((act) => {
+          const start = performance.now();
+          act(view);
+          return performance.now() - start;
+        });
+        doc.destroy();
+        return times;
+      });
+      return acts.map((_, act) => {
+        const times = runs.map((run) => run[act]!).toSorted((a, b) => a - b);
+        return `${times[2]!.toFixed(1)} ms`;
       });
     };
     const typed = timed(
@@ -226,11 +234,12 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)(
       (view) => view.dispatch(view.state.tr.insertText("x", 31)),
     );
     const edits = "10,000 paragraphs, the first with no boundary";
+    report.push("each time below is the median of five editors mounted anew on the note");
     report.push(
-      `${edits}: the first letter typed in its middle, which gives it its boundary first, once: ${typed[0]!}`,
+      `${edits}: the first letter typed in its middle, which gives it its boundary first: ${typed[0]!}`,
       `${edits}: the next letter typed there, once the line has its boundary: ${typed[1]!}`,
-      `${edits}: one Enter in its middle, once: ${timed((view) => view.dispatch(view.state.tr.split(30)))[0]!}`,
-      `${edits}: one Enter at its start, once: ${timed((view) => view.dispatch(view.state.tr.split(1)))[0]!}`,
+      `${edits}: one Enter in its middle: ${timed((view) => view.dispatch(view.state.tr.split(30)))[0]!}`,
+      `${edits}: one Enter at its start: ${timed((view) => view.dispatch(view.state.tr.split(1)))[0]!}`,
     );
     const codeEnd = 1 + LETTERS;
     const paragraph = codeEnd + 1;
@@ -277,11 +286,11 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)(
       `${spill}: the second letter typed there: ${inCode[1]!}`,
       `${spill}: the code block's language changed: ${language[0]!}`,
       `${spill}: its language changed again: ${language[1]!}`,
-      `${spill}: the paragraph under that paragraph joined into it, which gives it its boundary first, once: ${joined[0]!}`,
+      `${spill}: the paragraph under that paragraph joined into it, which gives it its boundary first: ${joined[0]!}`,
       `${spill}: the next letter typed in it: ${joined[1]!}`,
-      `${spill}: a selection from the code into that paragraph deleted, which gives it its boundary first, once: ${cut[0]!}`,
+      `${spill}: a selection from the code into that paragraph deleted, which gives it its boundary first: ${cut[0]!}`,
       `${spill}: the next letter typed at the code block's end: ${cut[1]!}`,
-      `${spill}: a divider put above the code block, which gives that paragraph its boundary first, once: ${divided[0]!}`,
+      `${spill}: a divider put above the code block, which gives that paragraph its boundary first: ${divided[0]!}`,
       `${spill}: a second divider put above it: ${divided[1]!}`,
       `${spill}: the two paragraphs under that paragraph joined, which leaves it as it is, then split and joined again: ${apart.join(", ")}`,
     );

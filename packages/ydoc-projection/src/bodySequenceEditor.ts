@@ -306,8 +306,9 @@ function holdSelection(
  * its own, or needs such a line to have one, that boundary is written first, in a transaction and
  * an update of its own that the history does not follow. The change the history follows gives no
  * such line a boundary. To find the lines, a dispatch that reaches past one block next to such a
- * line is first written to a copy of the note. When the copy does not come to read as the
- * editor's document, nothing is written and the editor shows the note again.
+ * line is first written to a copy of the blocks around it, and to a copy of the whole note when
+ * that one does not settle. When the copy of the note does not come to read as the editor's
+ * document, nothing is written and the editor shows the note again.
  *
  * A change of the sequence from elsewhere, and an undo or redo, is shown as one transaction that
  * replaces what differs, keeps the nodes of the blocks it does not touch, and keeps the selection
