@@ -922,4 +922,82 @@ describe("SitePreviewPage", () => {
 
     expect(screen.getByTestId("site-preview-frame")).toBe(replacementFrame);
   });
+
+  it("runs a governed index.html + app.publish.json app in AppView instead of static preview", async () => {
+    const appViewBridge = {
+      ...bridgeMock,
+      appView: vi.fn(async (request: { viewId: string }) => ({
+        kind: "unapproved" as const,
+        viewId: request.viewId,
+      })),
+      onAppViewEvent: vi.fn(() => () => undefined),
+      publishOwnerApp: vi.fn(async () => ({ kind: "localListed" as const, publications: [] })),
+    };
+    vi.stubGlobal("dohcDesktop", appViewBridge);
+    appViewBridge.getSitePackage.mockResolvedValueOnce({
+      ...site,
+      root: "weekly-goals",
+      title: "Weekly Goals",
+      entryPath: "weekly-goals/index.html",
+      sourceFiles: [
+        "weekly-goals/index.html",
+        "weekly-goals/frontend.js",
+        "weekly-goals/app.publish.json",
+      ],
+    });
+
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="weekly-goals" />);
+
+    expect(await screen.findByTestId("app-view-review")).toBeTruthy();
+    expect(await screen.findByText("Review this app to open it here.")).toBeTruthy();
+    expect(screen.queryByTestId("site-preview-frame")).toBeNull();
+    expect(screen.queryByTestId("site-preview-options")).toBeNull();
+    expect(appViewBridge.startSitePreview).not.toHaveBeenCalled();
+  });
+
+  it("keeps dev preview when a package app also has app.publish.json", async () => {
+    bridgeMock.getSitePackage.mockResolvedValueOnce({
+      ...site,
+      kind: "package",
+      packagePath: "report/package.json",
+      scripts: { dev: "vite" },
+      sourceFiles: ["report/index.html", "report/package.json", "report/app.publish.json"],
+    });
+    bridgeMock.startSitePreview.mockResolvedValueOnce({
+      siteRoot: "report",
+      mode: "dev",
+      url: "http://127.0.0.1:49152/",
+      logs: [],
+      exited: false,
+      generation: 1,
+    });
+
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByTestId("site-preview-frame");
+    expect(screen.getByTestId("site-preview-review")).toBeTruthy();
+    expect(screen.queryByTestId("app-view-review")).toBeNull();
+  });
+
+  it("keeps static preview for a workspace-root site even if app.publish.json exists at root", async () => {
+    bridgeMock.getSitePackage.mockResolvedValueOnce({
+      ...site,
+      root: ".",
+      entryPath: "index.html",
+      sourceFiles: ["index.html", "app.publish.json"],
+    });
+    bridgeMock.startSitePreview.mockResolvedValueOnce({
+      siteRoot: ".",
+      mode: "static",
+      url: "http://127.0.0.1:49152/",
+      logs: [],
+      exited: false,
+      generation: 1,
+    });
+
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="." />);
+
+    await screen.findByTestId("site-preview-frame");
+    expect(screen.queryByTestId("app-view-review")).toBeNull();
+  });
 });

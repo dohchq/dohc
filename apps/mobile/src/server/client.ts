@@ -25,7 +25,7 @@ export type ServerProblem =
   | "cancelled";
 
 export class ServerError extends Error {
-  /** `code` is the error code a refusal's answer named, such as `restore-in-progress`. */
+  /** `code` is the error code a refusal's answer named, such as `conflict`. */
   constructor(
     readonly problem: ServerProblem,
     readonly status: number | null = null,

@@ -8,6 +8,7 @@ export const RESERVED_WORKSPACE_IDS: readonly string[] = Object.freeze([
   "account",
   "wakes",
   "direct",
+  "hooks",
 ]);
 
 export const RESERVED_WORKSPACE_ID_TITLE = "dohc can't open this folder";

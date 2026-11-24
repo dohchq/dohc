@@ -1078,6 +1078,31 @@ describe("sync relay handler", () => {
     expect(absentBody).not.toContain("blob_not_found");
   });
 
+  it("answers the owner's old shared restore paths as an unknown route", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const unknown = await h(request("a", "/sync/workspace-a/no-such-route", { method: "GET" }));
+    expect(unknown.status).toBe(404);
+    const unknownBody = await unknown.text();
+    for (const [method, path] of [
+      ["POST", ""],
+      ["GET", "/options"],
+      ["GET", "/unfinished"],
+      ["GET", "/operation-1"],
+      ["POST", "/operation-1/confirm"],
+    ] as const) {
+      const response = await h(
+        request("a", `/sync/workspace-a/live-restores${path}`, {
+          method,
+          ...(method === "POST" ? { body: "{}" } : {}),
+        }),
+      );
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe(unknownBody);
+    }
+  });
+
   it.each([
     "link-lane-owner",
     "linkx",

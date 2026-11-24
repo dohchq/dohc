@@ -11,7 +11,7 @@ import {
   type LiveUpdateReceipt,
 } from "@dohc/live-session-contract/live-update-admission";
 
-export interface NativeRestoreFence {
+interface NativeRestoreFence {
   point: { journalCursor: number; receiptDigest: string };
   operationId: string;
   relayDatabaseNamespace: string;
@@ -22,21 +22,10 @@ export interface NativeRestoreFence {
   terminal: LiveUpdateReceipt | null;
   appliedSequence: number;
 }
-export interface NativeRestoreFenceReceipt {
+interface NativeRestoreFenceReceipt {
   operation: NativeRestoreFence;
   localHeadSequence: number;
   recordedAtMs: number;
-}
-const refusalReasons = [
-  "binding-changed",
-  "reader-unavailable",
-  "source-unavailable",
-  "source-too-large",
-  "incomplete-witness",
-] as const;
-export interface NativeRestoreRefusal {
-  operation: NativeRestoreFence;
-  reason: (typeof refusalReasons)[number];
 }
 function record(value: unknown, keys: string[]): Record<string, unknown> {
   if (
@@ -55,7 +44,7 @@ function integer(value: unknown): number {
     throw new TypeError("Invalid native restore integer.");
   return value;
 }
-export function parseNativeRestoreFence(value: unknown): NativeRestoreFence {
+function parseNativeRestoreFence(value: unknown): NativeRestoreFence {
   const row = record(value, [
     "point",
     "operationId",
@@ -92,7 +81,7 @@ export function parseNativeRestoreFence(value: unknown): NativeRestoreFence {
     appliedSequence: integer(row.appliedSequence),
   };
 }
-export function parseNativeRestoreFenceReceipt(value: unknown): NativeRestoreFenceReceipt {
+function parseNativeRestoreFenceReceipt(value: unknown): NativeRestoreFenceReceipt {
   const row = record(value, ["operation", "localHeadSequence", "recordedAtMs"]),
     operation = parseNativeRestoreFence(row.operation);
   const localHeadSequence = integer(row.localHeadSequence);
@@ -101,14 +90,6 @@ export function parseNativeRestoreFenceReceipt(value: unknown): NativeRestoreFen
   return { operation, localHeadSequence, recordedAtMs: integer(row.recordedAtMs) };
 }
 
-/** The params of `liveApplication.cancelRestoreFence`. The host fixes namespace and workspace. */
-export interface NativeRestoreCancellation {
-  operationId: string;
-  objectId: string;
-  lineageClaimId: string;
-  hostId: string;
-  newFence: number;
-}
 /**
  * The host's terminal end of a restore cancelled after its fence committed:
  * the fence, its stopped binding at the new generation, and the accepted
@@ -124,16 +105,6 @@ export interface NativeRestoreCancellationReceipt {
   };
   recordedAtMs: number;
 }
-export type NativeRestoreCancellationAnswer =
-  | { status: "cancelled"; hostId: string; generation: number; binding: LiveObjectBinding | null }
-  | {
-      status: "fenceCancelled";
-      hostId: string;
-      generation: number;
-      binding: LiveObjectBinding;
-      receipt: NativeRestoreCancellationReceipt;
-    };
-
 export function parseNativeRestoreCancellationReceipt(
   value: unknown,
 ): NativeRestoreCancellationReceipt {
@@ -167,49 +138,4 @@ export function parseNativeRestoreCancellationReceipt(
     },
     recordedAtMs: integer(row.recordedAtMs),
   };
-}
-export function parseNativeRestoreCancellationAnswer(
-  value: unknown,
-): NativeRestoreCancellationAnswer {
-  const status =
-    value !== null && typeof value === "object"
-      ? (value as { status?: unknown }).status
-      : undefined;
-  if (status === "cancelled") {
-    const row = record(value, ["status", "hostId", "generation", "binding"]);
-    return {
-      status,
-      hostId: parseHostControlIdentifier(row.hostId),
-      generation: integer(row.generation),
-      binding: row.binding === null ? null : parseLiveObjectBinding(row.binding),
-    };
-  }
-  const row = record(value, ["status", "hostId", "generation", "binding", "receipt"]),
-    receipt = parseNativeRestoreCancellationReceipt(row.receipt);
-  if (
-    status !== "fenceCancelled" ||
-    row.generation !== receipt.binding.restoreFenceGeneration ||
-    !isDeepStrictEqual(parseLiveObjectBinding(row.binding), receipt.binding)
-  ) {
-    throw new TypeError("Invalid native restore cancellation.");
-  }
-  return {
-    status,
-    hostId: parseHostControlIdentifier(row.hostId),
-    generation: receipt.binding.restoreFenceGeneration,
-    binding: receipt.binding,
-    receipt,
-  };
-}
-export function parseNativeRestoreRefusal(
-  value: unknown,
-  expectedOperation: NativeRestoreFence,
-): NativeRestoreRefusal {
-  const row = record(value, ["operation", "reason"]);
-  if (!refusalReasons.some((reason) => reason === row.reason))
-    throw new TypeError("Invalid native restore refusal.");
-  const operation = parseNativeRestoreFence(row.operation);
-  if (!isDeepStrictEqual(row.operation, expectedOperation))
-    throw new TypeError("Native restore refusal names a different operation.");
-  return { operation, reason: row.reason as NativeRestoreRefusal["reason"] };
 }

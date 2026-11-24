@@ -112,7 +112,7 @@ export function selectHostedDocuments(
   const matching = (row: ServiceHostEnrollment) =>
     storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) &&
     storage.verifyWorkspaceIdentity(row) === "matched";
-  // A release applies to the document: it was stopped, paused, or no Edit grant, recorded demand or owner's restore that kept it live covers it.
+  // A release applies to the document: it was stopped, paused, or no Edit grant or recorded demand covers it.
   // A Resume before its activation retires leaves it departing until a successor can follow.
   const departs = (row: ServiceHostEnrollment, covered: boolean) =>
     row.retired ||
@@ -126,7 +126,7 @@ export function selectHostedDocuments(
     away: ServiceHostEnrollment[] = [];
   for (const row of page.documents) {
     const holds = storage.serviceHostEnrollmentCovered(row);
-    // A live session the owner's restore kept has no retirement once that no longer holds. Its retirement
+    // A live session nothing covers any longer may have no retirement yet. Its retirement
     // opens here, before any update lets the document go, so the host retires its activation.
     if (!holds) storage.endLapsedServiceHostRun(row, Date.now());
     if (departs(row, holds)) (matching(row) ? departing : obsolete).push(row);
@@ -134,9 +134,7 @@ export function selectHostedDocuments(
   }
   const still = new Set(away.map(movedKey));
   for (const key of moved) if (!still.has(key)) moved.delete(key);
-  departing.push(
-    ...away.filter((row) => !moved.has(movedKey(row)) || storage.serviceRestoreInProgress(row)),
-  );
+  departing.push(...away.filter((row) => !moved.has(movedKey(row))));
   return { targets, departing, obsolete, nextCursor: page.nextCursor };
 }
 
@@ -155,6 +153,8 @@ export async function startSelfHostedLiveHost(options: {
   reconcileIntervalMs?: number;
   /** Called as each reconciliation ends, so a test can wait on reconciliations rather than on their interval. */
   onReconcile?: () => void;
+  /** The clock a note's start time is read against, for a test with its own. */
+  nowMs?: () => number;
   onError?(error: unknown): void;
 }) {
   const { storage, history } = options,
@@ -471,6 +471,11 @@ export async function startSelfHostedLiveHost(options: {
         signature = "";
         replacing = true;
       }
+      storage.failLapsedLiveNoteStarts(options.nowMs?.() ?? Date.now(), (row) => {
+        const block = current?.blocked(row);
+        if (block === "refused") return "refused";
+        return storage.mainLiveLineageExists(row) ? "failing" : "no-lineage";
+      });
       selected = selection();
       const { targets, departing } = selected,
         next = selectionSignature(selected);
@@ -508,6 +513,19 @@ export async function startSelfHostedLiveHost(options: {
           refused.delete(key);
           continue;
         }
+        if (
+          block === "refused" &&
+          row.note.state === "starting" &&
+          storage.serviceHostEnrollmentCovered(row)
+        )
+          storage.moveLiveNote({
+            workspaceId: row.workspaceId,
+            objectId: row.objectId,
+            generation: row.note.generation,
+            nowMs: options.nowMs?.() ?? Date.now(),
+            move: "start-failed",
+            cause: "refused",
+          });
         if (refused.has(key)) continue;
         refused.add(key);
         const document = `Live editing of object ${row.objectId} in workspace ${row.workspaceId}`,
@@ -676,7 +694,7 @@ export async function startSelfHostedLiveHost(options: {
     holdReason(document: { workspaceId: string; objectId: string }) {
       return current?.holdReason(document);
     },
-    /** Why the running daemon keeps failing to start the document, once its owner sees it. It keeps trying. */
+    /** Why the running daemon keeps failing to start the document, once its owner sees it, until its start clock runs out. */
     failing(document: { workspaceId: string; objectId: string }) {
       return current?.failing(document);
     },

@@ -30,9 +30,6 @@ import {
 import type { LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
 import { OwnerCommittedDelivery } from "./ownerCommittedDelivery.js";
 import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
-import { snapshotStopRestoreLookup } from "./liveRestoreDelivery.js";
-import type { StopRestoreLookup } from "./storage/liveRestoreOperation.js";
-import { LiveRestorePreparation } from "./liveRestorePreparation.js";
 import { LiveDocumentWork } from "./liveDocumentWork.js";
 import { readAppliedState } from "./liveAwakeState.js";
 import { OwnerOutboxWake } from "./ownerOutboxWake.js";
@@ -65,7 +62,6 @@ export function createDeviceLiveDelivery(options: {
       lineageClaimId: binding.lineageClaimId,
     });
   const consumers = new Map<string, LiveCommittedDelivery | OwnerCommittedDelivery>();
-  const restore = config.restore ? new LiveRestorePreparation(config.restore) : undefined;
   const authToken = randomBytes(32).toString("base64url");
   let connection: DeviceEngineConnection | undefined, client: EngineClient | undefined;
   let ready = false,
@@ -230,7 +226,6 @@ export function createDeviceLiveDelivery(options: {
         host,
         deadlineMs: config.client.requestDeadlineMs,
         nextRequestId,
-        restore,
       };
       if (ownerBounds && !options.ownerAdmission)
         throw new Error("Owner admission is not configured.");
@@ -409,63 +404,6 @@ export function createDeviceLiveDelivery(options: {
         },
         maxOutputBytes,
         AbortSignal.any([invalidated.signal, signal]),
-      );
-    },
-    get restoreConfigured() {
-      return config.restore !== undefined;
-    },
-    async prepareRestore(value: StopRestoreLookup, signal?: AbortSignal) {
-      requireReady();
-      const lookup = snapshotStopRestoreLookup(value),
-        consumer = consumers.get(lookup.workspaceId);
-      if (!consumer) throw new Error("Workspace is not configured on this device host.");
-      return runDocument(consumer.documentForRestore(lookup), signal, (joined) =>
-        consumer.prepareRestore(lookup, joined),
-      );
-    },
-    async reviewRestore(value: StopRestoreLookup, signal?: AbortSignal) {
-      requireReady();
-      const lookup = snapshotStopRestoreLookup(value),
-        consumer = consumers.get(lookup.workspaceId);
-      if (!consumer) throw new Error("Workspace is not configured on this device host.");
-      return runDocument(consumer.documentForRestore(lookup), signal, (joined) =>
-        consumer.reviewRestore(lookup, joined),
-      );
-    },
-    async confirmRestore(value: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
-      requireReady();
-      const lookup = snapshotStopRestoreLookup(value),
-        consumer = consumers.get(lookup.workspaceId);
-      if (!consumer) throw new Error("Workspace is not configured on this device host.");
-      return runDocument(consumer.documentForRestore(lookup), signal, (joined) =>
-        consumer.confirmRestore(lookup, proposalDigest, joined),
-      );
-    },
-    async completeRestore(value: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
-      requireReady();
-      const lookup = snapshotStopRestoreLookup(value),
-        consumer = consumers.get(lookup.workspaceId);
-      if (!consumer) throw new Error("Workspace is not configured on this device host.");
-      return runDocument(consumer.documentForRestore(lookup), signal, (joined) =>
-        consumer.completeRestore(lookup, proposalDigest, joined),
-      );
-    },
-    async declineRestore(value: StopRestoreLookup, signal?: AbortSignal) {
-      requireReady();
-      const lookup = snapshotStopRestoreLookup(value),
-        consumer = consumers.get(lookup.workspaceId);
-      if (!consumer) throw new Error("Workspace is not configured on this device host.");
-      return runDocument(consumer.documentForRestore(lookup), signal, (joined) =>
-        consumer.declineRestore(lookup, joined),
-      );
-    },
-    async stopRestore(value: StopRestoreLookup, signal?: AbortSignal) {
-      requireReady();
-      const lookup = snapshotStopRestoreLookup(value),
-        consumer = consumers.get(lookup.workspaceId);
-      if (!consumer) throw new Error("Workspace is not configured on this device host.");
-      return runDocument(consumer.documentForRestore(lookup), signal, (joined) =>
-        consumer.stopRestore(lookup, joined),
       );
     },
     async settle(value: LiveDocumentKey, signal?: AbortSignal) {

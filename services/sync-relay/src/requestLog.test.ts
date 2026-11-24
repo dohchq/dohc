@@ -59,10 +59,13 @@ it("logs a matched route as its pattern, never the ids in its path or its query"
   const link = await read(
     fetch(`${base}/sync/link/share`, { headers: { authorization: `LinkCapability ${SECRET}` } }),
   );
+  const hook = await read(fetch(`${base}/sync/hooks/${SECRET}`, { method: "POST" }));
   expect(lines).toEqual([
     `[sync-relay] request ${AT} GET /sync/:workspaceId/log ${log.status}`,
     `[sync-relay] request ${AT} GET /sync/link/share ${link.status}`,
+    `[sync-relay] request ${AT} POST /sync/hooks/:token ${hook.status}`,
   ]);
+  expect(lines.join("\n")).not.toContain(SECRET);
 });
 
 it("logs a path no route matches as one fixed word", async () => {

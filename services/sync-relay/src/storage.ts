@@ -26,8 +26,6 @@ import * as serviceHostFeedStorage from "./storage/serviceHostFeed";
 import * as serviceHostUploadStorage from "./storage/serviceHostUploads";
 import * as serviceKeptEditsStorage from "./storage/serviceKeptEdits";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
-import * as liveRestoreOperationStorage from "./storage/liveRestoreOperation";
-import * as ownerRestoreOptionsStorage from "./storage/ownerRestoreOptions";
 import { RelayWriteOwner } from "./storage/writeOwner";
 import { isAsyncFunction } from "node:util/types";
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
@@ -162,6 +160,9 @@ import * as automationPressStorage from "./storage/automationPresses";
 import { createRelayDatasetHost, type RelayDatasetHostOptions } from "./datasetHost";
 import * as appCollectionModeration from "./storage/appCollectionModeration";
 import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
+import * as workspaceSecretStorage from "./storage/workspaceSecrets";
+import * as outboundWebhookStorage from "./storage/outboundWebhooks";
+import * as incomingWebhookStorage from "./storage/incomingWebhooks";
 import * as logStorage from "./storage/log";
 import * as linkChatStorage from "./storage/linkChat";
 import * as agentConnectionStorage from "./storage/agentConnections";
@@ -481,6 +482,22 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   renewPersonalSessionDemand(input: { workspaceId: string; objectId: string; nowMs: number }) {
     return serviceHostEnrollmentStorage.renewPersonalSessionDemand(this, input);
   }
+  moveLiveNote(input: serviceHostEnrollmentStorage.MoveLiveNoteInput) {
+    const result = serviceHostEnrollmentStorage.moveLiveNote(this, input),
+      moved = result.moved
+        ? this.readServiceHostEnrollmentByObjectId(input.workspaceId, input.objectId)
+        : null;
+    if (moved) notifyDesktopReadiness(this, { workspaceId: moved.workspaceId, path: moved.path });
+    return result;
+  }
+  failLapsedLiveNoteStarts(
+    nowMs: number,
+    cause: (
+      enrollment: serviceHostEnrollmentStorage.ServiceHostEnrollment,
+    ) => serviceHostEnrollmentStorage.LiveNoteStartFailure,
+  ) {
+    return serviceHostEnrollmentStorage.failLapsedLiveNoteStarts(this, nowMs, cause);
+  }
   reclaimIdleLiveDocuments(nowMs: number) {
     const result = serviceHostEnrollmentStorage.reclaimIdleLiveDocuments(this, nowMs);
     for (const enrollment of result)
@@ -669,30 +686,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   ) {
     return serviceHostEnrollmentStorage.serviceHostEnrollmentCovered(this, enrollment, nowMs);
   }
-  serviceHostDocumentEnabled(
-    document: { workspaceId: string; objectId: string },
-    owner?: { userId: string },
-    restoring?: boolean,
-  ) {
-    return serviceHostEnrollmentStorage.serviceHostDocumentEnabled(
-      this,
-      document,
-      owner,
-      restoring,
-    );
+  serviceHostDocumentEnabled(document: { workspaceId: string; objectId: string }) {
+    return serviceHostEnrollmentStorage.serviceHostDocumentEnabled(this, document);
   }
   serviceActivationRetirement(document: { workspaceId: string; objectId: string }) {
     return serviceActivationRetirementStorage.readServiceActivationRetirement(this, document);
   }
   serviceActivationRetirements(workspaceId: string) {
     return serviceActivationRetirementStorage.listServiceActivationRetirements(this, workspaceId);
-  }
-  serviceRestoreInProgress(document: { workspaceId: string; objectId: string }) {
-    return serviceHostEnrollmentStorage.restoreInProgress(
-      this,
-      document.workspaceId,
-      document.objectId,
-    );
   }
   serviceActivationRetirementDecision(
     document: { workspaceId: string; objectId: string },
@@ -728,48 +729,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     if (result)
       notifyDesktopReadiness(this, { workspaceId: result.workspaceId, path: result.path });
     return result;
-  }
-
-  readStopRestorePlan(
-    input: Parameters<typeof liveRestoreOperationStorage.readStopRestorePlan>[1],
-  ) {
-    return liveRestoreOperationStorage.readStopRestorePlan(this, input);
-  }
-  readOwnerRestoreOptions(
-    input: Parameters<typeof ownerRestoreOptionsStorage.readOwnerRestoreOptions>[1],
-  ) {
-    return ownerRestoreOptionsStorage.readOwnerRestoreOptions(this, input);
-  }
-  readOwnerRestoreStatus(
-    input: Parameters<typeof ownerRestoreOptionsStorage.readOwnerRestoreStatus>[1],
-  ) {
-    return ownerRestoreOptionsStorage.readOwnerRestoreStatus(this, input);
-  }
-  readOwnerUnfinishedRestores(
-    input: Parameters<typeof ownerRestoreOptionsStorage.readOwnerUnfinishedRestores>[1],
-  ) {
-    return ownerRestoreOptionsStorage.readOwnerUnfinishedRestores(this, input);
-  }
-  beginStopRestore(
-    input: Parameters<typeof liveRestoreOperationStorage.beginStopRestore>[1],
-    now: number,
-  ) {
-    return liveRestoreOperationStorage.beginStopRestore(this, input, now);
-  }
-  advanceStopRestoreFence(
-    input: Parameters<typeof liveRestoreOperationStorage.advanceStopRestoreFence>[1],
-    now: number,
-  ) {
-    return liveRestoreOperationStorage.advanceStopRestoreFence(this, input, now);
-  }
-  declineStopRestore(
-    input: Parameters<typeof liveRestoreOperationStorage.declineStopRestore>[1],
-    now: number,
-  ) {
-    return liveRestoreOperationStorage.declineStopRestore(this, input, now);
-  }
-  readStopRestore(input: Parameters<typeof liveRestoreOperationStorage.readStopRestore>[1]) {
-    return liveRestoreOperationStorage.readStopRestore(this, input);
   }
 
   resolveCurrentLiveDocumentBinding(
@@ -809,10 +768,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     const document = liveDocumentAuthorityStorage.currentLiveDocument(this, workspaceId, path);
     if (document === null) return { kind: "none" };
     const read = this.readLiveUpdateJournalCut({ document });
-    if (read.kind === "cut") return read.cut.currentPath === path ? read : { kind: "none" };
-    return serviceHostEnrollmentStorage.restoreInProgress(this, workspaceId, document.objectId)
-      ? { kind: "restoring" }
-      : { kind: "none" };
+    return read.kind === "cut" && read.cut.currentPath === path ? read : { kind: "none" };
   }
 
   /** Internal replica refresh hint; accepted bytes still pass the journal's validated sync path. */
@@ -2800,6 +2756,185 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     updatedAtMs: number;
   }): DeviceHostCredentialResult {
     return hostControlStorage.revokeDeviceHostCredential(this, input);
+  }
+
+  listWorkspaceSecrets(workspaceId: string) {
+    return workspaceSecretStorage.listWorkspaceSecrets(this, workspaceId);
+  }
+
+  readWorkspaceSecretForExecution(workspaceId: string, name: string) {
+    return workspaceSecretStorage.readWorkspaceSecretForExecution(this, workspaceId, name);
+  }
+
+  upsertWorkspaceSecret(input: Parameters<typeof workspaceSecretStorage.upsertWorkspaceSecret>[1]) {
+    return workspaceSecretStorage.upsertWorkspaceSecret(this, input);
+  }
+
+  deleteWorkspaceSecret(workspaceId: string, ownerUserId: string, name: string) {
+    return workspaceSecretStorage.deleteWorkspaceSecret(this, workspaceId, ownerUserId, name);
+  }
+
+  listWorkspaceHttpStepApprovals(workspaceId: string) {
+    return outboundWebhookStorage.listWorkspaceHttpStepApprovals(this, workspaceId);
+  }
+
+  hasWorkspaceHttpStepApproval(workspaceId: string, approvalDigest: string) {
+    return outboundWebhookStorage.hasWorkspaceHttpStepApproval(this, workspaceId, approvalDigest);
+  }
+
+  approveWorkspaceHttpStep(
+    input: Parameters<typeof outboundWebhookStorage.approveWorkspaceHttpStep>[1],
+  ) {
+    return outboundWebhookStorage.approveWorkspaceHttpStep(this, input);
+  }
+
+  reserveWorkspaceHttpDispatch<Refusal = never>(input: {
+    readonly workspaceId: string;
+    readonly ownerUserId: string;
+    readonly deliveryId: string;
+    readonly nowMs: number;
+    readonly beforeReserve?: () => Refusal | null;
+  }): outboundWebhookStorage.ReserveWorkspaceHttpDispatchResult<Refusal> {
+    return outboundWebhookStorage.reserveWorkspaceHttpDispatch(this, input);
+  }
+
+  listActiveWorkspaceShareGrants(workspaceId: string) {
+    return outboundWebhookStorage.listActiveWorkspaceShareGrants(this, workspaceId);
+  }
+
+  finalizeWorkspaceHttpDispatch(
+    input: Parameters<typeof outboundWebhookStorage.finalizeWorkspaceHttpDispatch>[1],
+  ) {
+    return outboundWebhookStorage.finalizeWorkspaceHttpDispatch(this, input);
+  }
+
+  readCommittedWorkspaceTextFile(
+    workspaceId: string,
+    versionId: string,
+    path: string,
+    maxBytes: number,
+  ) {
+    return outboundWebhookStorage.readCommittedWorkspaceTextFile(
+      this,
+      workspaceId,
+      versionId,
+      path,
+      maxBytes,
+    );
+  }
+
+  committedWorkspaceFileExists(workspaceId: string, versionId: string, path: string) {
+    return outboundWebhookStorage.committedWorkspaceFileExists(this, workspaceId, versionId, path);
+  }
+
+  listIncomingWebhooks(workspaceId: string) {
+    return incomingWebhookStorage.listIncomingWebhooks(this, workspaceId);
+  }
+
+  createIncomingWebhook(input: Parameters<typeof incomingWebhookStorage.createIncomingWebhook>[1]) {
+    return incomingWebhookStorage.createIncomingWebhook(this, input);
+  }
+
+  updateIncomingWebhook(input: Parameters<typeof incomingWebhookStorage.updateIncomingWebhook>[1]) {
+    return incomingWebhookStorage.updateIncomingWebhook(this, input);
+  }
+
+  rotateIncomingWebhookToken(
+    input: Parameters<typeof incomingWebhookStorage.rotateIncomingWebhookToken>[1],
+  ) {
+    return incomingWebhookStorage.rotateIncomingWebhookToken(this, input);
+  }
+
+  deleteIncomingWebhook(workspaceId: string, ownerUserId: string, webhookId: string) {
+    return incomingWebhookStorage.deleteIncomingWebhook(this, workspaceId, ownerUserId, webhookId);
+  }
+
+  lookupActiveIncomingWebhookByToken(linkKey: string | Uint8Array, token: string) {
+    return incomingWebhookStorage.lookupActiveIncomingWebhookByToken(this, linkKey, token);
+  }
+
+  precheckIncomingWebhookBudgets(
+    webhookId: string,
+    workspaceId: string,
+    nowMs: number,
+    deliveryKey?: string | null,
+  ) {
+    return incomingWebhookStorage.precheckIncomingWebhookBudgets(
+      this,
+      webhookId,
+      workspaceId,
+      nowMs,
+      deliveryKey,
+    );
+  }
+
+  enqueueIncomingWebhookDelivery(
+    input: Parameters<typeof incomingWebhookStorage.enqueueIncomingWebhookDelivery>[1],
+  ) {
+    return incomingWebhookStorage.enqueueIncomingWebhookDelivery(this, input);
+  }
+
+  recoverAcceptedIncomingWebhookDeliveries(
+    input: Parameters<typeof incomingWebhookStorage.recoverAcceptedIncomingWebhookDeliveries>[1],
+  ) {
+    return incomingWebhookStorage.recoverAcceptedIncomingWebhookDeliveries(this, input);
+  }
+
+  claimNextIncomingWebhookDelivery(
+    input: Parameters<typeof incomingWebhookStorage.claimNextIncomingWebhookDelivery>[1],
+  ) {
+    return incomingWebhookStorage.claimNextIncomingWebhookDelivery(this, input);
+  }
+
+  verifyIncomingWebhookPublicationAuthority(
+    input: Parameters<typeof incomingWebhookStorage.verifyIncomingWebhookPublicationAuthority>[1],
+  ) {
+    return incomingWebhookStorage.verifyIncomingWebhookPublicationAuthority(this, input);
+  }
+
+  settleIncomingWebhookDelivery(
+    input: Parameters<typeof incomingWebhookStorage.settleIncomingWebhookDelivery>[1],
+  ) {
+    return incomingWebhookStorage.settleIncomingWebhookDelivery(this, input);
+  }
+
+  releaseAcceptedIncomingWebhookDelivery(
+    input: Parameters<typeof incomingWebhookStorage.releaseAcceptedIncomingWebhookDelivery>[1],
+  ) {
+    return incomingWebhookStorage.releaseAcceptedIncomingWebhookDelivery(this, input);
+  }
+
+  recordFailedIncomingWebhookAttempt(
+    input: Parameters<typeof incomingWebhookStorage.recordFailedIncomingWebhookAttempt>[1],
+  ) {
+    return incomingWebhookStorage.recordFailedIncomingWebhookAttempt(this, input);
+  }
+
+  hasPendingIncomingWebhookDeliveries(
+    workspaceId: string,
+    nowMs?: number,
+    ownerUserId?: string,
+    leaseId?: string,
+  ) {
+    return incomingWebhookStorage.hasPendingIncomingWebhookDeliveries(
+      this,
+      workspaceId,
+      nowMs,
+      ownerUserId,
+      leaseId,
+    );
+  }
+
+  nextIncomingWebhookRetryAtMs(workspaceId: string, ownerUserId?: string) {
+    return incomingWebhookStorage.nextIncomingWebhookRetryAtMs(this, workspaceId, ownerUserId);
+  }
+
+  workspacesWithIncomingWebhooks() {
+    return incomingWebhookStorage.workspacesWithIncomingWebhooks(this);
+  }
+
+  pruneExpiredIncomingWebhookDeliveries(nowMs: number, workspaceId?: string) {
+    return incomingWebhookStorage.pruneExpiredIncomingWebhookDeliveries(this, nowMs, workspaceId);
   }
 }
 import {

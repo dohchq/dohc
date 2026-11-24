@@ -339,7 +339,6 @@ try {
             "tools/perf-profiling/document-size-runner.mjs",
             "tools/perf-profiling/document-size-summary.mjs",
             "tools/perf-profiling/document-size-generator.mjs",
-            "tools/perf-profiling/document-size-reservation.mjs",
             "tools/perf-profiling/packaged-document-peer.mjs",
           ]),
           relaySourceSha256: await sha256Tree(options.relayCheckout, [

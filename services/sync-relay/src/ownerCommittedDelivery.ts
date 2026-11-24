@@ -23,13 +23,6 @@ import {
 } from "./liveSettlement.js";
 import { isDeepStrictEqual } from "node:util";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import {
-  cancelStopRestore,
-  deliverStopRestore,
-  snapshotStopRestoreLookup,
-} from "./liveRestoreDelivery";
-import type { StopRestoreLookup } from "./storage/liveRestoreOperation";
-import type { LiveRestorePreparation } from "./liveRestorePreparation";
 import { LiveHostRegistrations } from "./liveHostRegistration";
 import type { ServiceSeedDelivery } from "./serviceOwnerTransport";
 import { asRelayWrite } from "./relayMainThreadTiming.js";
@@ -73,7 +66,6 @@ export class OwnerCommittedDelivery {
       nextRequestId(): number;
       bounds: { maxBytes: number; maxEvents: number };
       ownerAdmission: OwnerOutboxAdmission;
-      restore?: LiveRestorePreparation;
       publish?(signal?: AbortSignal): Promise<unknown>;
       /** A native service transport's permission to acknowledge its adoption seed before applying it. */
       seedDelivery?(): ServiceSeedDelivery | undefined;
@@ -592,32 +584,6 @@ export class OwnerCommittedDelivery {
   drain(document: LiveDocumentKey, signal?: AbortSignal) {
     return this.#run(document, false, signal);
   }
-  documentForRestore(value: StopRestoreLookup): LiveDocumentKey {
-    const lookup = snapshotStopRestoreLookup(value);
-    return parseLiveDocumentKey(
-      this.#store.stopRestoreDocument({ ...lookup, host: this.connection.host }),
-    );
-  }
-  async stopRestore(value: StopRestoreLookup, signal?: AbortSignal) {
-    const lookup = snapshotStopRestoreLookup(value),
-      document = parseLiveDocumentKey(this.documentForRestore(lookup));
-    const key = JSON.stringify(document);
-    if (this.#active.has(key)) throw new Error("An owner delivery already holds this document.");
-    this.#active.add(key);
-    this.#registrations.invalidate(document.objectId);
-    this.#forget(key);
-    try {
-      return await deliverStopRestore({
-        store: this.#store,
-        lookup,
-        connection: this.connection,
-        deliveryKind: "owner",
-        signal,
-      });
-    } finally {
-      this.#active.delete(key);
-    }
-  }
   settle(document: LiveDocumentKey, signal?: AbortSignal) {
     return this.#run(document, true, signal);
   }
@@ -631,103 +597,5 @@ export class OwnerCommittedDelivery {
   /** Settles past the settlement this connection has of the same terminal, as its owner wants after consenting to a held write. */
   settleWanted(document: LiveDocumentKey, signal?: AbortSignal) {
     return this.#run(document, true, signal, true);
-  }
-  async prepareRestore(value: StopRestoreLookup, signal?: AbortSignal) {
-    const restore = this.connection.restore;
-    if (!restore) throw new Error("Restore preparation is not configured on this host.");
-    const lookup = snapshotStopRestoreLookup(value),
-      document = parseLiveDocumentKey(this.documentForRestore(lookup));
-    const key = JSON.stringify(document);
-    if (this.#active.has(key)) throw new Error("An owner delivery already holds this document.");
-    this.#active.add(key);
-    this.#registrations.invalidate(document.objectId);
-    this.#forget(key);
-    try {
-      return await restore.prepare({
-        store: this.#store,
-        lookup,
-        connection: this.connection,
-        deliveryKind: "owner",
-        signal,
-      });
-    } finally {
-      this.#active.delete(key);
-    }
-  }
-  async reviewRestore(value: StopRestoreLookup, signal?: AbortSignal) {
-    const restore = this.connection.restore;
-    if (!restore) throw new Error("Restore preparation is not configured on this host.");
-    const lookup = snapshotStopRestoreLookup(value),
-      document = this.documentForRestore(lookup);
-    const key = JSON.stringify(document);
-    if (this.#active.has(key)) throw new Error("A restore operation already owns this document.");
-    this.#active.add(key);
-    try {
-      return await restore.review({
-        store: this.#store,
-        lookup,
-        connection: this.connection,
-        deliveryKind: "owner",
-        signal,
-      });
-    } finally {
-      this.#active.delete(key);
-    }
-  }
-
-  async confirmRestore(value: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
-    const restore = this.connection.restore;
-    if (!restore) throw new Error("Restore preparation is not configured on this host.");
-    const lookup = snapshotStopRestoreLookup(value),
-      document = this.documentForRestore(lookup);
-    const key = JSON.stringify(document);
-    if (this.#active.has(key)) throw new Error("A restore operation already owns this document.");
-    this.#active.add(key);
-    try {
-      return await restore.confirm(
-        { store: this.#store, lookup, connection: this.connection, deliveryKind: "owner", signal },
-        proposalDigest,
-      );
-    } finally {
-      this.#active.delete(key);
-    }
-  }
-
-  async declineRestore(value: StopRestoreLookup, signal?: AbortSignal) {
-    const lookup = snapshotStopRestoreLookup(value),
-      document = this.documentForRestore(lookup);
-    const key = JSON.stringify(document);
-    if (this.#active.has(key)) throw new Error("A restore operation already owns this document.");
-    this.#active.add(key);
-    try {
-      return await cancelStopRestore({
-        store: this.#store,
-        lookup,
-        connection: this.connection,
-        signal,
-      });
-    } finally {
-      this.#active.delete(key);
-    }
-  }
-
-  async completeRestore(value: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
-    const restore = this.connection.restore;
-    if (!restore) throw new Error("Restore preparation is not configured on this host.");
-    const lookup = snapshotStopRestoreLookup(value),
-      document = parseLiveDocumentKey(this.documentForRestore(lookup));
-    const key = JSON.stringify(document);
-    if (this.#active.has(key)) throw new Error("An owner delivery already holds this document.");
-    this.#active.add(key);
-    this.#registrations.invalidate(document.objectId);
-    this.#forget(key);
-    try {
-      return await restore.complete(
-        { store: this.#store, lookup, connection: this.connection, deliveryKind: "owner", signal },
-        proposalDigest,
-      );
-    } finally {
-      this.#active.delete(key);
-    }
   }
 }

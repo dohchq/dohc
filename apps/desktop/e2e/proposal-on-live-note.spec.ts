@@ -61,6 +61,29 @@ function call<K extends Method>(
   ) as Promise<Awaited<ReturnType<Api[K]>>>;
 }
 
+function typeNumberedWordsUntilStopped(page: Page, prefix: string) {
+  const words: string[] = [];
+  let typing = true;
+  const done = (async () => {
+    for (let index = 0; typing; index += 1) {
+      const word = ` ${prefix}${index}`;
+      try {
+        await page.keyboard.type(word, { delay: 40 });
+      } catch {
+        return;
+      }
+      words.push(word.trim());
+    }
+  })();
+  return {
+    words,
+    async stop() {
+      typing = false;
+      await done;
+    },
+  };
+}
+
 test("@proposal-on-live-note changes accepted on a live note wait for Stop, then reach the note, the owner's file and the link", async ({
   browser,
 }, testInfo) => {
@@ -379,6 +402,57 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
           intervals: [1000],
         })
         .toContain(BUDGET_CHANGE);
+      expect(liveRefusals()).toEqual([]);
+    });
+
+    await test.step("after the accept, Resume with the owner typing through it makes the note live again, and an Edit link's edit reaches the owner's file", async () => {
+      await revealExplorerPath(page, BUDGET);
+      await explorerRow(page, BUDGET).click();
+      const editor = page.getByTestId("markdown-editor");
+      await expect(editor).toContainText(BUDGET_CHANGE, { timeout: 30_000 });
+      await editor.click();
+      await page.keyboard.press("ControlOrMeta+End");
+      const typist = typeNumberedWordsUntilStopped(page, "resumed");
+      await expect.poll(async () => typist.words.length, { timeout: 30_000 }).toBeGreaterThan(5);
+      await call(page, "resumeOwnerLiveDocument", { workspaceId, path: BUDGET });
+      const resumedAt = typist.words.length;
+      await expect
+        .poll(async () => typist.words.length, { timeout: 30_000 })
+        .toBeGreaterThan(resumedAt + 5);
+      await typist.stop();
+      await expect
+        .poll(async () => (await ownerFile(BUDGET)).includes(typist.words.join(" ")), {
+          message: "every word the owner typed through the Resume is in the owner's file",
+          timeout: 60_000,
+        })
+        .toBe(true);
+      await page.keyboard.press("ControlOrMeta+w");
+      await expect(editor).toHaveCount(0);
+      await live(BUDGET);
+      const linkEditor = await shared!.browser.newPage();
+      linkEditor.on("pageerror", (error) => shared!.failures.push(error.message));
+      await linkEditor.goto(`${sharedDatasetViewerOrigin}/s${new URL(edit.url).hash}`);
+      await linkEditor
+        .getByRole("button", { name: "budget.md", exact: true })
+        .click({ timeout: 15_000 });
+      await linkEditor
+        .getByRole("button", { name: "Edit file", exact: true })
+        .click({ timeout: 15_000 });
+      const box = linkEditor.getByRole("textbox", { name: "Shared file editor", exact: true });
+      await expect(box).toBeEditable({ timeout: 120_000 });
+      await expect(box).toContainText(typist.words.at(-1)!, { timeout: 60_000 });
+      await box.getByText(typist.words.at(-1)!, { exact: false }).click({ timeout: 15_000 });
+      await linkEditor.keyboard.press("End");
+      const marker = ` resumed-${randomBytes(6).toString("hex")}`;
+      await linkEditor.keyboard.insertText(marker);
+      await expect
+        .poll(async () => (await ownerFile(BUDGET)).includes(marker.trim()), {
+          message: "after Resume, the link editor's edit reaches the owner's file",
+          timeout: 120_000,
+          intervals: [1000],
+        })
+        .toBe(true);
+      expect(await ownerFile(BUDGET)).toContain(BUDGET_CHANGE);
       expect(liveRefusals()).toEqual([]);
     });
 

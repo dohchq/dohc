@@ -1,6 +1,6 @@
 import { workspaceIsDeleted, accountIsFenced } from "./storage/accountDeletion";
 import { isDeepStrictEqual } from "node:util";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { posix } from "node:path";
 import {
   AutomationScheduler,
@@ -92,7 +92,14 @@ import type { OwnerScope, ServerRuns } from "./automationServerRoutes";
 import type { RelayDatasetHost } from "./datasetHost";
 import type { DatasetServerPress } from "./datasetAutomations";
 import type { AppBackendAuth } from "./appBackendAuthority";
-import { notFound, RelayError } from "./errors";
+import type {
+  OutboundWebhookDispatchRequest,
+  OutboundWebhookDispatchResponse,
+} from "@dohc/workspace-contracts/http-step-approvals";
+import { drainIncomingWebhooksForWorkspace } from "./incomingWebhookDrain";
+import { MAIN_VERSION_ID } from "./shareFilter";
+import { badRequest, notFound, relayError, RelayError } from "./errors";
+import { SyncRelayQuotaExceededError } from "./storage/errors";
 import { observeRelayWrites } from "./relayWriteChanges";
 import type { SyncRelayStorage } from "./storage";
 import type {
@@ -206,6 +213,13 @@ export interface AutomationServerOptions {
   >;
   /** A GET of the owner's share listings, answered in process (createSyncRelayHandler's readOwnerShares). */
   readOwnerShares(ownerUserId: string, path: string): Promise<{ status: number; body: unknown }>;
+  /** Executes a verified outbound HTTP webhook step in process for server-hosted automations. */
+  executeOutboundWebhook?(input: {
+    readonly workspaceId: string;
+    readonly ownerUserId: string;
+    readonly request: OutboundWebhookDispatchRequest;
+    readonly signal?: AbortSignal;
+  }): Promise<{ httpStatus: number; body: OutboundWebhookDispatchResponse }>;
   lookupUserDisplayName(userId: string): Promise<string | null> | string | null;
   /** The notice route's limiter, so the server and the owner's computers share one limit per person. */
   noticeLimiter: TokenBucketLimiter;
@@ -258,6 +272,9 @@ interface WorkspaceState {
   lostToReport: boolean;
   readonly names: Map<string, string>;
   datasetMetadata?: string;
+  drainingWebhooks?: boolean;
+  webhookLeaseId: string;
+  webhookRetryTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
 interface Hosted extends WorkspaceState {
@@ -265,6 +282,7 @@ interface Hosted extends WorkspaceState {
   /** The executor's saved runs. Only this copy saved them: each copy starts with empty host data. */
   readonly runStore: AutomationRunStore;
   readonly presses: RelayedPressHost;
+  drainIncomingWebhooks(): void;
 }
 
 const runsOn = (host: RelayAutomationHost | null): host is RelayAutomationHost =>
@@ -411,7 +429,24 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         ws.pendingStart = { generation: host.generation, releasedThroughMs: released };
       }
     }
-    if (runsOn(host)) ws.presses.start();
+    if (runsOn(host)) {
+      ws.presses.start();
+      if (
+        storage.hasPendingIncomingWebhookDeliveries(
+          workspaceId,
+          nowMs(),
+          ws.replica.ownerUserId,
+          ws.webhookLeaseId,
+        )
+      ) {
+        ws.drainIncomingWebhooks();
+      } else {
+        scheduleWebhookRetry(ws);
+      }
+    } else {
+      clearTimeout(ws.webhookRetryTimer);
+      ws.webhookRetryTimer = undefined;
+    }
     if (host?.handoverFrom === AUTOMATION_SERVER_INSTALL_ID && nowMs() >= ws.retryAtMs)
       void handOver(ws, host);
     if (JSON.stringify(before) !== JSON.stringify(host)) {
@@ -1132,6 +1167,63 @@ export async function startAutomationServer(options: AutomationServerOptions) {
           options.datasetHost.automations.workspace(workspaceId, ownerUserId, replica.signal),
         );
       },
+      httpApprovals: {
+        isApproved: async (digest) =>
+          storage.hasWorkspaceHttpStepApproval(workspaceId, digest) ? "approved" : "unapproved",
+        readApprovedDigests: async () =>
+          new Set(storage.listWorkspaceHttpStepApprovals(workspaceId)),
+      },
+      httpWebhook: {
+        execute: async ({
+          collectionId,
+          collectionPath,
+          automation,
+          approvalDigest,
+          effect,
+          depth,
+          signal,
+        }) => {
+          if (!options.executeOutboundWebhook) {
+            return {
+              ok: false,
+              reason: "Outbound webhooks are not enabled on this server.",
+              beforeSend: true,
+            };
+          }
+          const result = await options.executeOutboundWebhook({
+            workspaceId,
+            ownerUserId,
+            request: {
+              collectionId,
+              collectionPath,
+              automationId: automation.id,
+              stepOrdinal: effect.stepOrdinal,
+              approvalDigest,
+              deliveryId: effect.deliveryId,
+              chainDepth: depth,
+              evaluatedSafeHeaders: effect.headers.map((header) => ({
+                name: header.name,
+                value: header.value,
+              })),
+              evaluatedBody: effect.body,
+              defaultContentType: effect.defaultContentType,
+            },
+            signal,
+          });
+          if (result.body.ok) {
+            return { ok: true, status: result.body.status };
+          }
+          return {
+            ok: false,
+            ...(result.body.status !== undefined ? { status: result.body.status } : {}),
+            reason: result.body.reason,
+            ...(result.body.beforeSend ? { beforeSend: true } : {}),
+            ...(result.body.error === "approval_required" || result.body.error === "reach_stopped"
+              ? { waitReason: "held" as const }
+              : {}),
+          };
+        },
+      },
       nowMs,
     };
   }
@@ -1322,6 +1414,25 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     };
   }
 
+  function scheduleWebhookRetry(ws: Hosted): void {
+    clearTimeout(ws.webhookRetryTimer);
+    ws.webhookRetryTimer = undefined;
+    if (ws.closed || !runsOn(ws.host)) return;
+    const nextRetryAtMs = storage.nextIncomingWebhookRetryAtMs(
+      ws.replica.workspaceId,
+      ws.replica.ownerUserId,
+    );
+    if (nextRetryAtMs === null) return;
+    const delayMs = Math.max(0, nextRetryAtMs - nowMs());
+    ws.webhookRetryTimer = setTimeout(() => {
+      ws.webhookRetryTimer = undefined;
+      if (!ws.closed && runsOn(ws.host)) {
+        ws.drainIncomingWebhooks();
+      }
+    }, delayMs);
+    ws.webhookRetryTimer.unref?.();
+  }
+
   function open(replica: AutomationReplica): void {
     const state: WorkspaceState = {
       replica,
@@ -1389,6 +1500,8 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       ),
       lostToReport: true,
       names: new Map(),
+      webhookLeaseId: `${replica.incarnation}:${randomUUID()}`,
+      webhookRetryTimer: undefined,
     };
     storage.beginAutomationServerCopy({
       workspaceId: replica.workspaceId,
@@ -1400,6 +1513,11 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       incarnation: replica.incarnation,
       nowMs: nowMs(),
     });
+    storage.recoverAcceptedIncomingWebhookDeliveries({
+      workspaceId: replica.workspaceId,
+      installId: AUTOMATION_SERVER_INSTALL_ID,
+      nowMs: nowMs(),
+    });
     const create =
       options.createExecutor ?? ((executorOptions) => new CollectionAutomations(executorOptions));
     const executorInput = executorOptions(state, () => ws);
@@ -1407,6 +1525,59 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       executor: create(executorInput),
       runStore: executorInput.store,
       presses: pressHost(state, () => ws),
+      drainIncomingWebhooks: () => {
+        if (ws.closed || ws.drainingWebhooks) return;
+        ws.drainingWebhooks = true;
+        clearTimeout(ws.webhookRetryTimer);
+        ws.webhookRetryTimer = undefined;
+        void drainIncomingWebhooksForWorkspace({
+          storage,
+          workspaceId: replica.workspaceId,
+          ownerUserId: replica.ownerUserId,
+          leaseId: ws.webhookLeaseId,
+          adapter: ws.adapter,
+          currentGeneration: () => runningGeneration(ws),
+          nowMs,
+          hold: () => hold(ws),
+          sync: async () => {
+            await ws.replica.sync();
+            syncSoon(ws);
+          },
+          isRecordPublished: (recordPath) =>
+            storage.currentFileObjectId({
+              workspaceId: replica.workspaceId,
+              versionId: MAIN_VERSION_ID,
+              path: recordPath,
+            }) !== undefined,
+          onWritten: () => {
+            syncSoon(ws);
+            ws.executor.notifyClaimed();
+          },
+          onError: options.onError,
+        })
+          .then(({ settled, progressed }) => {
+            ws.drainingWebhooks = false;
+            if (ws.closed || runningGeneration(ws) === null) return;
+            if (
+              (settled > 0 || progressed) &&
+              storage.hasPendingIncomingWebhookDeliveries(
+                replica.workspaceId,
+                nowMs(),
+                replica.ownerUserId,
+                ws.webhookLeaseId,
+              )
+            ) {
+              setImmediate(() => ws.drainIncomingWebhooks());
+              return;
+            }
+            scheduleWebhookRetry(ws);
+          })
+          .catch((error: unknown) => {
+            ws.drainingWebhooks = false;
+            options.onError(`drain incoming webhooks in workspace "${replica.workspaceId}"`, error);
+            scheduleWebhookRetry(ws);
+          });
+      },
     });
     hosted.set(replica.workspaceId, ws);
     reportLostRuns(ws);
@@ -1460,6 +1631,8 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     if (hosted.get(ws.replica.workspaceId) === ws) hosted.delete(ws.replica.workspaceId);
     clearTimeout(ws.retryTimer);
     clearTimeout(ws.syncTimer);
+    clearTimeout(ws.webhookRetryTimer);
+    ws.webhookRetryTimer = undefined;
     scheduler.remove(ws.replica.workspaceId);
     ws.presses.stop();
     await ws.executor.dispose();
@@ -1515,6 +1688,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     [
       ...new Set([
         ...storage.serverHostedWorkspaces(),
+        ...storage.workspacesWithIncomingWebhooks(),
         ...(options.live?.workspaces() ?? []),
         ...(options.datasetHost?.automations.wantedWorkspaces() ?? []),
       ]),
@@ -1808,7 +1982,40 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       }),
     // A closed copy runs nothing, so it holds nothing.
     holds: (scope) => ownedCopy(scope).executor.holds(),
-    allow: (scope, input) => ownedCopy(scope).executor.confirmReach(input),
+    allow: (scope, input, allowOptions) =>
+      ownedCopy(scope).executor.confirmReach(
+        input,
+        allowOptions?.recheckDesktopHttpApproval
+          ? {
+              approveHttpStep: async (approval) => {
+                await allowOptions.recheckDesktopHttpApproval!();
+                let result;
+                try {
+                  result = storage.approveWorkspaceHttpStep({
+                    workspaceId: scope.workspaceId,
+                    ownerUserId: scope.ownerUserId,
+                    approvalDigest: approval.approvalDigest,
+                    collectionPath: approval.collectionPath,
+                    automationId: approval.automationId,
+                    stepOrdinal: approval.stepOrdinal,
+                    nowMs: nowMs(),
+                  });
+                } catch (error) {
+                  if (error instanceof SyncRelayQuotaExceededError) {
+                    throw relayError("quota_exceeded", error.message);
+                  }
+                  throw error;
+                }
+                if (!result.ok) {
+                  if (result.reason === "unauthorized") throw notFound();
+                  throw badRequest(
+                    `At most ${result.limit} webhook approvals are allowed per workspace (${result.count} used).`,
+                  );
+                }
+              },
+            }
+          : undefined,
+      ),
   };
 
   const stopDatasetClaims = options.datasetHost?.observeAutomationClaims((workspaceId, failed) => {

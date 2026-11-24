@@ -13,10 +13,6 @@ import {
   nextAcceptedHistoryDigest,
   nextVersionedAcceptedHistoryDigest,
 } from "./liveAcceptedHistory";
-import {
-  parseNativeRestoreProposalReceipt,
-  type NativeRestoreHistoryProof,
-} from "./liveRestoreProposal";
 
 const fixture = JSON.parse(
   gunzipSync(
@@ -28,10 +24,8 @@ const fixture = JSON.parse(
     ),
   ).toString(),
 ) as {
-  receiptJson: string;
   acceptedEvents: { metadataJson: string; evidenceDigest: string }[];
 };
-const budget = { maxBytes: 1_000_000, maxEvents: 10 };
 const legacy = () =>
   parseAdmittedLiveUpdateMetadata(JSON.parse(fixture.acceptedEvents[0]!.metadataJson));
 const modern = (metadata = legacy()): AdmittedLiveUpdateMetadata => ({
@@ -40,17 +34,6 @@ const modern = (metadata = legacy()): AdmittedLiveUpdateMetadata => ({
   authorSnapshot: [{ kind: "human", humanId: "alice", humanName: "Alice" }],
   firstSeenDeletes: [{ clientId: 7, startClock: 1, endClock: 3 }],
 });
-const proofDigest = (history: NativeRestoreHistoryProof) =>
-  history.suffix.reduce(
-    (previous, event, index) =>
-      nextVersionedAcceptedHistoryDigest(
-        previous,
-        history.checkpoint.eventCount + index + 1,
-        event,
-      ),
-    history.checkpoint.evidenceDigest,
-  );
-
 it("keeps the native v1 canonical bytes and event digests unchanged", () => {
   const old = legacy(),
     initial = initialAcceptedHistoryDigest("namespace", old.accepted.binding);
@@ -66,9 +49,6 @@ it("keeps the native v1 canonical bytes and event digests unchanged", () => {
   expect(nextVersionedAcceptedHistoryDigest(initial, 1, old)).toBe(
     fixture.acceptedEvents[0]!.evidenceDigest,
   );
-  expect(
-    parseNativeRestoreProposalReceipt(fixture.receiptJson, budget).acceptedHistory.eventCount,
-  ).toBe(2);
 });
 
 it("uses the v2 field order and binds authors, deletion ranges and checkpoint coverage", () => {
@@ -116,48 +96,6 @@ it("uses the v2 field order and binds authors, deletion ranges and checkpoint co
     "firstSeenDeletes",
     "checkpointCoverage",
   ]);
-});
-
-it("allows a v1-to-v2 suffix and refuses a validly hashed downgrade", () => {
-  const receipt = parseNativeRestoreProposalReceipt(fixture.receiptJson, budget);
-  receipt.acceptedHistory.suffix[1] = modern(receipt.acceptedHistory.suffix[1]);
-  receipt.acceptedHistory.evidenceDigest = proofDigest(receipt.acceptedHistory);
-  expect(
-    parseNativeRestoreProposalReceipt(JSON.stringify(receipt), budget).acceptedHistory.suffix[1]!
-      .canonicalVersion,
-  ).toBe(2);
-  receipt.acceptedHistory.suffix[0] = modern(receipt.acceptedHistory.suffix[0]);
-  receipt.acceptedHistory.suffix[1] = canonicalAcceptedMetadata(receipt.acceptedHistory.suffix[1]!);
-  receipt.acceptedHistory.evidenceDigest = proofDigest(receipt.acceptedHistory);
-  expect(() => parseNativeRestoreProposalReceipt(JSON.stringify(receipt), budget)).toThrow(
-    /inconsistent/,
-  );
-});
-
-it("refuses downgrade across a v2 checkpoint boundary", () => {
-  const receipt = parseNativeRestoreProposalReceipt(fixture.receiptJson, budget),
-    history = receipt.acceptedHistory;
-  const first = modern(history.suffix[0]),
-    second = history.suffix[1]!;
-  const evidence = nextVersionedAcceptedHistoryDigest(history.checkpoint.evidenceDigest, 1, first);
-  history.checkpoint = {
-    ...history.checkpoint,
-    eventCount: 1,
-    terminal: first.accepted.receipt,
-    canonicalVersion: 2,
-    evidenceDigest: evidence,
-  };
-  history.suffix = [second];
-  history.evidenceDigest = proofDigest(history);
-  expect(() => parseNativeRestoreProposalReceipt(JSON.stringify(receipt), budget)).toThrow(
-    /inconsistent/,
-  );
-  history.suffix = [modern(second)];
-  history.evidenceDigest = proofDigest(history);
-  expect(
-    parseNativeRestoreProposalReceipt(JSON.stringify(receipt), budget).acceptedHistory.checkpoint
-      .canonicalVersion,
-  ).toBe(2);
 });
 
 const shared = JSON.parse(

@@ -168,6 +168,10 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "workspace search": ["tokyo"],
   "history agent-run-plan": ["run-1"],
   "history undo-agent-run": ["run-1", hash],
+  "inbox list": [],
+  "inbox add": ["--title", "Follow up", "Remember to send receipt"],
+  "inbox archive": ["Inbox/item.md"],
+  "inbox move": ["Inbox/item.md", "Projects"],
   // JSON verb parsers declare their socket dispatch after validating these request fields.
   ...Object.fromEntries(
     Object.entries(CLI_COMMANDS).flatMap(([group, command]) =>

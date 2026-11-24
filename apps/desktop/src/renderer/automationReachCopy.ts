@@ -17,5 +17,7 @@ export function automationReachCopy(
       return `wake ${step.target}`;
     case "notify":
       return `notify ${step.target}`;
+    case "send-http":
+      return `send a webhook to ${step.target}`;
   }
 }
