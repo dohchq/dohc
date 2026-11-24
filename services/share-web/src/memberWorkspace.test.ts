@@ -288,6 +288,17 @@ it("reads the owner's own workspace with the owner's session, sending the worksp
     expect(response.status).toBe(404);
     expect(await response.text()).toBe(refusal);
   }
+  // Only a dot ends the account's prefix; a link's session never reads as an account's.
+  for (const session of [`owner/${WORKSPACE}`, `ownerA${WORKSPACE}`]) {
+    const before = f.forwarded.length;
+    expect((await f.view("/api/view/meta", OWNER, session)).status, session).not.toBe(200);
+    expect(
+      f.forwarded
+        .slice(before)
+        .some((sent) => sent.headers.get("authorization")?.startsWith("DohcOwner")),
+      session,
+    ).toBe(false);
+  }
 });
 
 it("lists the workspaces an account owns and joined, only for its own cookie on this site", async () => {

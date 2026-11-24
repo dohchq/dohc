@@ -187,7 +187,7 @@ interface MemberCaller {
 type LinkCaller = BrowserSession | AgentCaller | MemberCaller;
 
 /** The view routes' session token for a member's grant or an owner's workspace. */
-const ACCOUNT_SESSION = /^(member|owner).([A-Za-z0-9_.:-]{1,256})$/u;
+const ACCOUNT_SESSION = /^(member|owner)\.([A-Za-z0-9_.:-]{1,256})$/u;
 
 /**
  * The limits' identity for a caller's link. An agent's MCP request reads the

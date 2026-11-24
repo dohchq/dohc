@@ -204,7 +204,11 @@ export function createLinkReadRoutes(
           selectorPaths: capability.effectiveSelector.paths,
           limit: linkCurrentFileLimit * CURRENT_SCAN_FACTOR,
         });
-        if (snapshot.tooMany) throw notFound();
+        // A member's refusal stays generic, so it can't hint at hidden work. Nothing is hidden from the owner.
+        if (snapshot.tooMany) {
+          if (capability.credential.kind === "owner") return tooManyFiles();
+          throw notFound();
+        }
         const freshness = newestFilteredOpFreshness(
           share.workspaceId,
           () => requireFresh().effectiveSelector,

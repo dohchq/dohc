@@ -192,7 +192,6 @@ type MemberRouteStorage = Pick<
   | "readFolderRules"
   | "listAccountWorkspaces"
   | "listJoinedWorkspaces"
-  | "workspaceRoleOf"
 >;
 
 export function createWorkspaceMemberRoutes(options: {
@@ -496,13 +495,12 @@ export function createWorkspaceMemberRoutes(options: {
       // Only share-web asks, for the browser signed in with this cookie.
       if (!request.headers.has("cookie") || !options.hasValidRelayExchangeKey(request))
         throw notFound();
+      // An email invite becomes a membership once its person signs in.
+      await options.claimPendingShares(userId, request.signal);
       const body: BrowserWorkspaceList = {
         ok: true,
         owned: storage
           .listAccountWorkspaces(userId)
-          .filter(
-            ({ workspaceId }) => storage.workspaceRoleOf(workspaceId, userId)?.role === "owner",
-          )
           .map(({ workspaceId, name }) => ({ workspaceId, name })),
         joined: storage.listJoinedWorkspaces(userId),
       };

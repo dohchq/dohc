@@ -668,6 +668,18 @@ describe("the owner reads their own workspace through the link read routes", () 
     expect(files.map((file) => file.path).sort()).toEqual(["docs/plan.md", "hidden/x.md"]);
   });
 
+  it("tells the owner their workspace is too large to list, even past the cap on what the relay reads", async () => {
+    const { h } = await seed(undefined, { linkCurrentFileLimit: 1 });
+    await ownerWrite(h, "later/new.md", "new work");
+    for (const count of [2, 12]) {
+      for (let index = 0; index < count; index++)
+        await ownerWrite(h, `bulk/${count}-${index}.md`, "work");
+      const large = await ownerRead(h, "/sync/link/current", WORKSPACE, OWNER);
+      expect(large.status, String(count)).toBe(413);
+      expect(await json(large)).toEqual(linkRefusalBody("link_too_many_files"));
+    }
+  });
+
   it("refuses another account, a member, a missing credential, another site and a fenced owner like an unknown grant", async () => {
     const { h, storage } = await seed();
     const ana = await member(h, storage, "ana");
@@ -747,6 +759,24 @@ describe("a browser's list of the account's workspaces", () => {
       200,
     );
     expect(await json(await list(h, "ana"))).toEqual({ ok: true, owned: [], joined: [] });
+  });
+
+  it("lists a workspace the account was invited to by email before it first signed in", async () => {
+    // No account has the email yet, so the invite waits for its person.
+    const { h } = await seed(undefined, { resolveUserIdByEmail: () => null });
+    const invite = await post(h, OWNER, `/sync/${WORKSPACE}/members/invites`, {
+      email: "cleo@dohc.test",
+      workspaceName: "Community",
+    });
+    expect(invite.status).toBe(200);
+    const body = await json(await list(h, "cleo"));
+    expect(body).toEqual({
+      ok: true,
+      owned: [],
+      joined: [{ workspaceId: WORKSPACE, name: "Community", grantId: expect.any(String) }],
+    });
+    const { grantId } = (body.joined as Array<{ grantId: string }>)[0]!;
+    expect((await memberRead(h, "/sync/link/current", grantId, "cleo")).status).toBe(200);
   });
 
   it("answers only share-web, with the account's cookie and the exchange key", async () => {
