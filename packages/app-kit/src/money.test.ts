@@ -47,6 +47,10 @@ describe("dohc/money", () => {
       "5-",
       "1e3",
       "Infinity",
+      "1 2.30",
+      "1USD2.30",
+      "1$2",
+      "$12$",
     ]) {
       expect(parseCents(text, usd), text).toBeNull();
     }
@@ -61,6 +65,13 @@ describe("dohc/money", () => {
         ["EUR", "de-DE"],
         ["EUR", "fr-FR"],
         ["JPY", "ja-JP"],
+        ["EUR", "de-AT"],
+        ["CHF", "de-CH"],
+        ["EUR", "nl-NL"],
+        ["INR", "en-IN"],
+        ["EGP", "ar-EG"],
+        ["ILS", "he-IL"],
+        ["SEK", "sv-SE"],
       ] as const) {
         expect(parseCents(formatCents(cents, { currency, locale }), { currency, locale })).toBe(
           cents,

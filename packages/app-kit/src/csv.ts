@@ -72,8 +72,8 @@ function csvField(cell: CsvCell, delimiter: string): string {
   if (typeof cell === "number" && !Number.isFinite(cell)) {
     throw new RangeError(`A CSV number must be finite, not ${cell}.`);
   }
-  if (typeof cell !== "string") return String(cell);
-  const text = formulaStart.test(cell) ? `'${cell}` : cell;
+  const text =
+    typeof cell !== "string" ? String(cell) : formulaStart.test(cell) ? `'${cell}` : cell;
   return text.includes(delimiter) || /["\r\n]/.test(text)
     ? `"${text.replaceAll('"', '""')}"`
     : text;

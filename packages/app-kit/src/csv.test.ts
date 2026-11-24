@@ -54,6 +54,7 @@ describe("dohc/csv", () => {
         "",
       ].join("\r\n"),
     );
+    expect(toCsv([[-12.3, "a.b"]], { delimiter: "." })).toBe('"-12.3"."a.b"\r\n');
     expect(() => toCsv([[Number.NaN]])).toThrow("A CSV number must be finite, not NaN.");
   });
 

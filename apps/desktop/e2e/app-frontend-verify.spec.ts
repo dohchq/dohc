@@ -435,11 +435,11 @@ import { Receipt } from "dohc/icons";
 import { formatCents, parseCents } from "dohc/money";
 import { parseCsv, toCsv } from "dohc/csv";
 const rows = parseCsv(["date,memo,amount", '2026-11-01,"Coffee, beans",-12.30', "2026-11-02,Refund,2.05", ""].join(String.fromCharCode(13, 10)));
-const total = rows.slice(1).reduce((sum, row) => sum + (parseCents(row[2]!) ?? 0), 0);
+const total = rows.slice(1).reduce((sum, row) => sum + (parseCents(row[2]!, { locale: "en-US" }) ?? 0), 0);
 createRoot(document.getElementById("root")!).render(
   <main>
     <Receipt aria-label="Receipt" />
-    <p id="total">{formatCents(total)}</p>
+    <p id="total">{formatCents(total, { locale: "en-US" })}</p>
     <pre id="export">{toCsv([["memo", "cents"], ["=SUM(A1)", total]])}</pre>
   </main>,
 );`,

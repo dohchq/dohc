@@ -231,7 +231,7 @@ import { Sparkline } from "dohc/charts";
 import { Wallet } from "dohc/icons";
 import { formatCents } from "dohc/money";
 import { toCsv } from "dohc/csv";
-createRoot(document.getElementById("root")!).render(<AppShell><StatCard label="Spend" value={formatCents(12000)} footer={<><Wallet /><Sparkline values={[10, 20, 15]} /><pre>{toCsv([["=1"]])}</pre></>} /></AppShell>);`,
+createRoot(document.getElementById("root")!).render(<AppShell><StatCard label="Spend" value={formatCents(12000, { locale: "en-US" })} footer={<><Wallet /><Sparkline values={[10, 20, 15]} /><pre>{toCsv([["=1"]])}</pre></>} /></AppShell>);`,
               ),
             ),
           ],

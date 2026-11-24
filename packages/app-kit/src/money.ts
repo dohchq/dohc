@@ -22,41 +22,57 @@ export function formatCents(
   return format.format(`${cents < 0 ? "-" : ""}${decimal}` as Intl.StringNumericLiteral);
 }
 
-const spaces = /\s/g;
+const invisible = /\p{Cf}/gu;
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const asciiDigits = "9876543210";
 
 export function parseCents(
   text: string,
   { currency = "USD", locale }: MoneyOptions = {},
 ): number | null {
   const { format, digits } = currencyFormat(currency, locale);
-  const numberParts = new Intl.NumberFormat(locale).formatToParts(12345.6);
-  const part = (parts: Intl.NumberFormatPart[], type: string) =>
-    (parts.find((item) => item.type === type)?.value ?? "").replace(spaces, "");
-  let value = text.replace(spaces, "");
-  for (const literal of [part(format.formatToParts(1), "currency"), currency.toUpperCase()]) {
-    if (literal) value = value.split(literal).join("");
-  }
+  const parts = format.formatToParts(-1234567.5);
+  const part = (type: string) =>
+    (parts.find((item) => item.type === type)?.value ?? "").replace(invisible, "");
+  const localDigits = Array.from(
+    new Intl.NumberFormat(locale, { useGrouping: false }).format(Number(asciiDigits)),
+  );
+  const signs = new Set(["-", String.fromCharCode(0x2212), part("minusSign")]);
+  const symbols = [part("currency").trim(), currency.toUpperCase()].filter(Boolean);
+  let value = Array.from(text.replace(invisible, "").trim(), (char) => {
+    const index = localDigits.indexOf(char);
+    return index === -1 ? char : asciiDigits[index]!;
+  }).join("");
   let negative = false;
+  const takeSign = () => {
+    if (!signs.has(value[0] ?? "")) return true;
+    if (negative) return false;
+    negative = true;
+    value = value.slice(1).trimStart();
+    return true;
+  };
   const wrapped = /^\((.+)\)$/.exec(value);
   if (wrapped) {
     negative = true;
-    value = wrapped[1]!;
+    value = wrapped[1]!.trim();
   }
-  const signed = /^[-\u2212](.+)$/.exec(value);
-  if (signed) {
-    if (negative) return null;
-    negative = true;
-    value = signed[1]!;
+  if (!takeSign()) return null;
+  const symbol = symbols.find((item) => value.startsWith(item) || value.endsWith(item));
+  if (symbol) {
+    value = value.startsWith(symbol)
+      ? value.slice(symbol.length).trimStart()
+      : value.slice(0, -symbol.length).trimEnd();
   }
-  const group = escape(part(numberParts, "group"));
-  const decimal = escape(part(numberParts, "decimal") || ".");
+  if (!takeSign()) return null;
+  const groupText = part("group");
+  const group = /^\s$/.test(groupText) ? "\\s" : escape(groupText);
+  const decimal = escape(part("decimal") || ".");
   const whole = group
     ? `\\d+|\\d{1,3}(?:${group}\\d{3})+|\\d{1,2}(?:${group}\\d{2})+${group}\\d{3}`
     : "\\d+";
   const match = new RegExp(`^(${whole})(?:${decimal}(\\d+))?$`).exec(value);
   if (!match || (match[2]?.length ?? 0) > digits) return null;
-  const units = `${group ? match[1]!.replace(new RegExp(group, "g"), "") : match[1]}${(match[2] ?? "").padEnd(digits, "0")}`;
+  const units = `${match[1]!.replace(/\D/g, "")}${(match[2] ?? "").padEnd(digits, "0")}`;
   const cents = Number(units);
   if (!Number.isSafeInteger(cents)) return null;
   return negative && cents !== 0 ? -cents : cents;
