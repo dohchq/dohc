@@ -412,6 +412,20 @@ function MessageActions({
           style={styles.pickerScroll}
           contentContainerStyle={styles.picker}
         >
+          <Pressable
+            onPress={close}
+            accessibilityRole="button"
+            accessibilityLabel={confirmWords.cancel}
+            style={styles.choice}
+          >
+            <SymbolView
+              name="xmark"
+              size={14}
+              weight="semibold"
+              tintColor={theme.muted}
+              fallback={<X size={16} color={theme.muted} strokeWidth={2.5} />}
+            />
+          </Pressable>
           {REACTION_CHOICES.map((emoji) => (
             <Pressable
               key={emoji}
@@ -434,20 +448,6 @@ function MessageActions({
               <Text style={styles.choiceEmoji}>{emoji}</Text>
             </Pressable>
           ))}
-          <Pressable
-            onPress={close}
-            accessibilityRole="button"
-            accessibilityLabel={confirmWords.cancel}
-            style={styles.choice}
-          >
-            <SymbolView
-              name="xmark"
-              size={14}
-              weight="semibold"
-              tintColor={theme.muted}
-              fallback={<X size={16} color={theme.muted} strokeWidth={2.5} />}
-            />
-          </Pressable>
         </ScrollView>
       ) : null}
       {problem ? (
