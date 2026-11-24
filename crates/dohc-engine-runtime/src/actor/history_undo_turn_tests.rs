@@ -375,7 +375,7 @@ async fn run(
         .await
 }
 
-type MaterializationFault = Arc<
+pub(in crate::actor) type MaterializationFault = Arc<
     dyn Fn(&dohc_engine_storage::MaterializationJob) -> Option<dohc_engine_files::MaterializeError>
         + Send
         + Sync,
@@ -385,6 +385,12 @@ fn materialization_faults()
     static FAULTS: OnceLock<Mutex<std::collections::HashMap<PathBuf, MaterializationFault>>> =
         OnceLock::new();
     FAULTS.get_or_init(Mutex::default)
+}
+pub(in crate::actor) fn fail_materializations(root: &Path, fault: MaterializationFault) {
+    materialization_faults()
+        .lock()
+        .unwrap()
+        .insert(root.to_path_buf(), fault);
 }
 pub(in crate::actor) fn materialization_error(
     root: &Path,
