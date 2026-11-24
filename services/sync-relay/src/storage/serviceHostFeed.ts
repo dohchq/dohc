@@ -9,6 +9,12 @@ import {
   pathVisibleThroughShare,
 } from "../shareFilter";
 import { canonicalLiveSelector } from "./liveDocumentAuthority";
+import {
+  parseConflictResolve,
+  SyncRelayInvalidConflictResolveError,
+  type ConflictResolveEnvelopeContext,
+  type ParsedResolve,
+} from "../conflictResolve";
 import { currentServiceHostEnrollments } from "./serviceHostEnrollment";
 import {
   listServiceActivationRetirements,
@@ -17,6 +23,7 @@ import {
 
 /** The op kinds that name one live document, and so may belong to a hosted one. */
 export const HOSTED_DOCUMENT_OP_KINDS = [
+  "conflict.resolve",
   "moment.append",
   "ydoc.update",
   "live.audit.application",
@@ -30,12 +37,19 @@ const CONFLICT_EFFECT_WHERE =
 const KINDS = HOSTED_DOCUMENT_OP_KINDS.map((kind) => `'${kind}'`).join(",");
 const OBJECT = `CASE op_kind WHEN 'live.audit.settlement' THEN json_extract(payload_json, '$.record.binding.objectId')
   WHEN 'live.audit.base' THEN json_extract(payload_json, '$.record.checkpoint.binding.objectId')
+  WHEN 'conflict.resolve' THEN json_extract(payload_json, '$.transition.current.objectId')
   ELSE json_extract(payload_json, '$.objectId') END`;
 
+const INDEX_SQL = `CREATE INDEX ${INDEX} ON sync_relay_log(workspace_id, ${OBJECT}, relay_seq) WHERE op_kind IN (${KINDS})`;
+
 export function initializeServiceHostFeedIndex(db: SqliteDb): void {
-  db.exec(
-    `CREATE INDEX IF NOT EXISTS ${INDEX} ON sync_relay_log(workspace_id, ${OBJECT}, relay_seq) WHERE op_kind IN (${KINDS})`,
-  );
+  const stored = db
+    .prepare("SELECT sql FROM sqlite_schema WHERE type='index' AND name=?")
+    .get(INDEX)?.sql;
+  if (stored !== INDEX_SQL) {
+    db.exec(`DROP INDEX IF EXISTS ${INDEX}`);
+    db.exec(INDEX_SQL);
+  }
   db.exec(`CREATE INDEX IF NOT EXISTS ${CONFLICT_EFFECT_INDEX} ON sync_relay_log(workspace_id, json_extract(payload_json, '$.objectId'), relay_seq)
     WHERE ${CONFLICT_EFFECT_WHERE}`);
 }
@@ -220,22 +234,67 @@ export function mainLiveLineageExists(
   );
 }
 
+/**
+ * The note a `conflict.resolve` resolves, at its one path, when it touches
+ * that note alone: its text on main, one write of it and, for a live note, a
+ * rich-text successor. The hosted feed serves no other resolve, so it never
+ * reveals another file, version or location.
+ */
+export function singleNoteResolve(
+  payloadJson: string,
+  context: ConflictResolveEnvelopeContext,
+): { objectId: string; path: string } | null {
+  let resolve: ParsedResolve;
+  try {
+    resolve = parseConflictResolve(payloadJson, context);
+  } catch (error) {
+    if (error instanceof SyncRelayInvalidConflictResolveError) return null;
+    throw error;
+  }
+  const { current, incoming, result, exportedBefore, effects, lineageTransition } = resolve;
+  if (resolve.targetVersionId !== "main" || resolve.paths.length !== 1 || !current.present)
+    return null;
+  const note = (side: ParsedResolve["current"]) =>
+    side.present &&
+    side.objectId === current.objectId &&
+    side.contentKind === "text" &&
+    side.pathRef === 0;
+  const successor = lineageTransition?.successor;
+  return note(current) &&
+    note(result) &&
+    (!incoming.present || note(incoming)) &&
+    (!exportedBefore?.present || note(exportedBefore)) &&
+    (effects.length === 0 || (effects.length === 1 && effects[0]!.kind === "write")) &&
+    (lineageTransition === null || successor?.contentKind === "richdoc")
+    ? { objectId: current.objectId, path: resolve.paths[0]! }
+    : null;
+}
+
 /** A retained conflict effect whose parent the hosted feed never serves, even on re-enrollment. */
 export function hasServiceHostConflictEffect(
   storage: StorageContext,
-  input: { workspaceId: string; objectId: string },
+  input: { workspaceId: string; objectId: string; path: string },
 ): boolean {
-  return !!storage.db
-    .prepare(`SELECT 1 FROM sync_relay_log AS effect INDEXED BY ${CONFLICT_EFFECT_INDEX}
-    WHERE workspace_id=? AND json_extract(payload_json, '$.objectId')=? AND relay_seq>? AND ${CONFLICT_EFFECT_WHERE}
-      AND json_extract(payload_json, '$.versionId')='main'
-      AND length(json_extract(payload_json, '$.conflictId'))>0
-      AND json_type(payload_json, '$.conflictEffectIndex')='integer' AND json_extract(payload_json, '$.conflictEffectIndex')>=0
-      AND EXISTS(SELECT 1 FROM sync_relay_log AS parent WHERE parent.workspace_id=effect.workspace_id AND parent.origin_id=effect.origin_id
-        AND parent.origin_seq=effect.origin_seq-json_extract(effect.payload_json, '$.conflictEffectIndex')-1
-        AND parent.op_kind='conflict.resolve' AND json_extract(parent.payload_json, '$.targetVersionId')='main'
-        AND json_extract(parent.payload_json, '$.conflictId')=json_extract(effect.payload_json, '$.conflictId')
-        AND json_extract(parent.payload_json, '$.effects[' || json_extract(effect.payload_json, '$.conflictEffectIndex') || '].momentId')=
-          json_extract(effect.payload_json, '$.momentId')) LIMIT 1`)
-    .get(input.workspaceId, input.objectId, storage.getEpochLogFloor(input.workspaceId));
+  const parents = storage.db
+    .prepare(`SELECT parent.payload_json, parent.recorded_at_ms FROM sync_relay_log AS effect INDEXED BY ${CONFLICT_EFFECT_INDEX}
+    JOIN sync_relay_log AS parent ON parent.workspace_id=effect.workspace_id AND parent.origin_id=effect.origin_id
+      AND parent.origin_seq=effect.origin_seq-json_extract(effect.payload_json, '$.conflictEffectIndex')-1
+    WHERE effect.workspace_id=? AND json_extract(effect.payload_json, '$.objectId')=? AND effect.relay_seq>?
+      AND effect.op_kind='moment.append' AND json_type(effect.payload_json, '$.conflictId')='text'
+      AND json_extract(effect.payload_json, '$.versionId')='main'
+      AND length(json_extract(effect.payload_json, '$.conflictId'))>0
+      AND json_type(effect.payload_json, '$.conflictEffectIndex')='integer' AND json_extract(effect.payload_json, '$.conflictEffectIndex')>=0
+      AND parent.op_kind='conflict.resolve' AND json_extract(parent.payload_json, '$.targetVersionId')='main'
+      AND json_extract(parent.payload_json, '$.conflictId')=json_extract(effect.payload_json, '$.conflictId')
+      AND json_extract(parent.payload_json, '$.effects[' || json_extract(effect.payload_json, '$.conflictEffectIndex') || '].momentId')=
+        json_extract(effect.payload_json, '$.momentId')`)
+    .iterate(input.workspaceId, input.objectId, storage.getEpochLogFloor(input.workspaceId));
+  for (const parent of parents) {
+    const note = singleNoteResolve(String(parent.payload_json), {
+      workspaceId: input.workspaceId,
+      recordedAtMs: Number(parent.recorded_at_ms),
+    });
+    if (note?.objectId !== input.objectId || note.path !== input.path) return true;
+  }
+  return false;
 }

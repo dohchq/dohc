@@ -45,9 +45,13 @@ it.each(["direct", "owned"] as const)(
       const spy = vi.spyOn((reopened as StorageContext).db, "prepare");
       let query: string;
       try {
-        expect(reopened.hasServiceHostConflictEffect(binding)).toBe(false);
+        expect(
+          reopened.hasServiceHostConflictEffect({ ...binding, path: binding.currentPath }),
+        ).toBe(false);
         query = spy.mock.calls.find(([sql]) =>
-          sql.startsWith("SELECT 1 FROM sync_relay_log AS effect"),
+          sql.startsWith(
+            "SELECT parent.payload_json, parent.recorded_at_ms FROM sync_relay_log AS effect",
+          ),
         )![0];
       } finally {
         spy.mockRestore();
@@ -66,3 +70,43 @@ it.each(["direct", "owned"] as const)(
     }
   },
 );
+
+it("rebuilds the hosted documents index when an existing store opens with an older one", async () => {
+  const f = await fixture();
+  let reopened: ReturnType<typeof openSyncRelayStorage> | undefined;
+  try {
+    const name = "idx_sync_relay_log_hosted_documents";
+    f.raw
+      .prepare(`INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq)
+      VALUES (?,'owner',0,'conflict.resolve',?,1,1)`)
+      .run(
+        binding.workspaceId,
+        JSON.stringify({ transition: { current: { objectId: binding.objectId } } }),
+      );
+    f.raw.exec(`DROP INDEX ${name}`);
+    f.raw
+      .exec(`CREATE INDEX ${name} ON sync_relay_log(workspace_id, json_extract(payload_json, '$.objectId'), relay_seq)
+      WHERE op_kind IN ('moment.append','ydoc.update')`);
+    reopened = openSyncRelayStorage(f.path, {});
+    const read = () =>
+      reopened!
+        .listServiceHostDocumentRows({
+          workspaceId: binding.workspaceId,
+          objectId: binding.objectId,
+          afterRelaySeq: 0,
+          limit: 10,
+        })
+        .map((row) => row.opKind);
+    expect(read()).toEqual(["conflict.resolve"]);
+    const definition = () =>
+      f.raw.prepare("SELECT sql FROM sqlite_schema WHERE type='index' AND name=?").get(name)?.sql;
+    const rebuilt = definition();
+    reopened.close();
+    reopened = openSyncRelayStorage(f.path, {});
+    expect(definition()).toBe(rebuilt);
+    expect(read()).toEqual(["conflict.resolve"]);
+  } finally {
+    reopened?.close();
+    await f.close();
+  }
+});
