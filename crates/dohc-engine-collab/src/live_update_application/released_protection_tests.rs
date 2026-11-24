@@ -651,8 +651,8 @@ fn measure_protected_inspection_over_half_a_mebibyte() {
     let append = doc.richdoc_append_paragraph("Appended.");
     let fold = Ydoc::wire();
     fold.apply(&head.encode_full_state()).unwrap();
-    // The disk edit changes the last paragraph, so the fold deletes it.
-    let fold = fold.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &format!("{markdown} A disk edit.")).unwrap();
+    // The disk edit rewrites the end of the last paragraph, so the fold deletes text.
+    let fold = fold.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &format!("{} A disk edit.", &markdown[..markdown.len() - 10])).unwrap();
     let time = |run: &dyn Fn()| {
         let mut samples: Vec<f64> = (0..7)
             .map(|_| {

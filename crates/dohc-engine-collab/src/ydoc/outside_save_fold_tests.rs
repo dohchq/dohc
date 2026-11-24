@@ -731,3 +731,35 @@ fn an_outside_edit_inside_a_line_keeps_the_marks_around_it() {
         fold_over(before, after);
     }
 }
+
+#[test]
+fn a_paragraph_saved_above_an_edited_one_does_not_take_in_a_collaborators_typing() {
+    let doc = folded("Apples.\n");
+    let peer = Ydoc::wire();
+    peer.apply(&doc.encode_full_state()).unwrap();
+    let text = peer.richdoc_block_text(0).unwrap();
+    {
+        let mut txn = peer.doc.transact_mut();
+        text.insert(&mut txn, 6, " from the orchard");
+    }
+    let markdown = "Cherries.\n\nApples in the basket.\n";
+    doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, markdown)
+        .expect(markdown);
+    doc.apply(&peer.encode_full_state()).unwrap();
+    let merged = doc.project_richdoc().unwrap();
+    assert!(!merged.contains("Cherries from the orchard"), "{merged}");
+}
+
+#[test]
+fn a_quote_whose_second_line_changes_kind_is_replaced_without_editing_its_first() {
+    let added = "and more ".repeat(100);
+    let before = "> The first line of the quote.\n>\n> Second.\n";
+    let after = format!("> The first line of the quote, {added}\n>\n> # Second.\n");
+    let doc = folded(before);
+    let start = clock(&doc);
+    fold_over(before, &after);
+    doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &after)
+        .expect(&after);
+    let grown = clock(&doc) - start;
+    assert!(grown < added.len() as u64 + 200, "grew {grown}");
+}

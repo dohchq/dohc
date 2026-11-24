@@ -839,12 +839,15 @@ export function encodeLiveFrameSync(
     update = byteView(r.missingStateUpdate);
   requireFrame(vector.length > 0 && update.length > 0, "limit");
   requireWithin("maxStateVectorBytes", vector.length, p.maxStateVectorBytes);
-  requireWithin("maxSyncBytes", update.length, p.maxSyncBytes);
-  return writeBytes(p.maxSyncBytes, (w) => {
+  const write = (w: Writer) => {
     writeBinding(w, binding);
     w.blob(vector);
     w.blob(update);
-  });
+  };
+  const size = new Writer(Number.POSITIVE_INFINITY);
+  write(size);
+  requireWithin("maxSyncBytes", size.offset, p.maxSyncBytes);
+  return writeBytes(p.maxSyncBytes, write);
 }
 export function decodeLiveFrameSync(
   value: Uint8Array,

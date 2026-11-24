@@ -5401,30 +5401,57 @@ fn edit_blocks_in_place<const WIRE_DEFAULTS: bool>(
     blocks: &[MdBlock<'_>],
     inline: bool,
 ) -> u32 {
-    let paired = count.min(blocks.len() as u32);
-    let old: Vec<XmlOut> = body.children(&*txn).collect();
     let utf16 = txn.doc().offset_kind() == yrs::OffsetKind::Utf16;
-    if paired == 0 || !utf16 || old.len() as u32 != body.len(&*txn) {
+    if count == 0 || count != blocks.len() as u32 || !utf16 {
+        return 0;
+    }
+    let old: Vec<XmlOut> = body.children(&*txn).collect();
+    if old.len() as u32 != body.len(&*txn) {
         return 0;
     }
     let scratch = yrs::Doc::new();
     let fresh = scratch.get_or_insert_xml_fragment(ROOT_BODY);
     let mut scratch_txn = scratch.transact_mut();
-    for block in blocks[..paired as usize].iter().rev() {
+    for block in blocks.iter().rev() {
         insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &fresh, 0, block, inline);
     }
     let new: Vec<XmlOut> = fresh.children(&scratch_txn).collect();
-    if new.len() as u32 != paired {
+    if new.len() as u32 != count {
         return 0;
     }
     for (offset, (old, new)) in old[start as usize..].iter().zip(&new).enumerate() {
-        if !edit_in_place(txn, old, &scratch_txn, new) {
+        if !(same_shape(&*txn, old, &scratch_txn, new)
+            && edit_in_place(txn, old, &scratch_txn, new))
+        {
             let index = start + offset as u32;
             body.remove_range(txn, index, 1);
             insert_md_block::<_, WIRE_DEFAULTS>(txn, body, index, &blocks[offset], inline);
         }
     }
-    paired
+    count
+}
+
+fn same_shape<A: ReadTxn, B: ReadTxn>(
+    old_txn: &A,
+    old: &XmlOut,
+    new_txn: &B,
+    new: &XmlOut,
+) -> bool {
+    match (old, new) {
+        (XmlOut::Element(old), XmlOut::Element(new)) => {
+            let olds: Vec<XmlOut> = old.children(old_txn).collect();
+            let news: Vec<XmlOut> = new.children(new_txn).collect();
+            same_element(old_txn, old, new_txn, new)
+                && olds.len() as u32 == old.len(old_txn)
+                && olds.len() == news.len()
+                && olds
+                    .iter()
+                    .zip(&news)
+                    .all(|(old, new)| same_shape(old_txn, old, new_txn, new))
+        }
+        (XmlOut::Text(_), XmlOut::Text(_)) => true,
+        _ => false,
+    }
 }
 
 fn edit_in_place<T: ReadTxn>(
@@ -5437,13 +5464,9 @@ fn edit_in_place<T: ReadTxn>(
         (XmlOut::Element(old), XmlOut::Element(new)) => {
             let olds: Vec<XmlOut> = old.children(&*txn).collect();
             let news: Vec<XmlOut> = new.children(new_txn).collect();
-            same_element(&*txn, old, new_txn, new)
-                && olds.len() as u32 == old.len(&*txn)
-                && olds.len() == news.len()
-                && olds
-                    .iter()
-                    .zip(&news)
-                    .all(|(old, new)| edit_in_place(txn, old, new_txn, new))
+            olds.iter()
+                .zip(&news)
+                .all(|(old, new)| edit_in_place(txn, old, new_txn, new))
         }
         (XmlOut::Text(old), XmlOut::Text(new)) => edit_text_in_place(txn, old, new_txn, new),
         _ => false,

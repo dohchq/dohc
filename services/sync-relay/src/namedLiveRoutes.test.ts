@@ -1649,8 +1649,10 @@ it("names the limit and the size in the server log when a note is too large for 
   expect(await socket.status).toBe(101);
   await openProductionSync(f, socket, false, { ...f.frames.receive, maxSyncBytes: 1024 });
   await vi.waitFor(() => expect(socket.ws.readyState).toBe(WebSocket.CLOSED));
-  expect(logged.mock.calls.map(([line]) => String(line))).toContain(
-    "[sync-relay] live frame refused: maxSyncBytes is 1024 bytes, the frame needed 2000 bytes",
+  expect(logged.mock.calls.map(([line]) => String(line))).toContainEqual(
+    expect.stringMatching(
+      /^\[sync-relay\] live frame refused: maxSyncBytes is 1024 bytes, the frame needed \d{4} bytes$/,
+    ),
   );
 });
 
