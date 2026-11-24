@@ -399,6 +399,9 @@ export function sceneUrl(recipe: string, width: number, height: number, longEdge
       ),
     );
     sceneUrls.set(key, url);
+    url.catch(() => {
+      if (sceneUrls.get(key) === url) sceneUrls.delete(key);
+    });
   }
   return url;
 }

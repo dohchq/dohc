@@ -702,7 +702,11 @@
 }
 
 .lb-photo-retry {
+  border: 0;
+  padding: 0;
+  background: none;
   color: var(--kit-ink);
+  font: inherit;
   font-weight: 600;
   text-decoration: underline;
   cursor: pointer;

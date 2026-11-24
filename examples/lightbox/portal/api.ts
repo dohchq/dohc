@@ -127,14 +127,19 @@ export function useLoader<T>(key: string | null, load: (client: AppClient) => Pr
   const client = useApp();
   const [state, setState] = useState<{ key: string | null; data?: T; error?: unknown }>({ key: null });
   const [version, setVersion] = useState(0);
+  const mutationGen = useRef(0);
   const loadRef = useRef(load);
   loadRef.current = load;
   useEffect(() => {
     if (key === null) return;
     let current = true;
+    const startedGen = mutationGen.current;
     loadRef.current(client).then(
-      (data) => current && setState({ key, data }),
-      (error: unknown) => current && setState((previous) => ({ key, data: previous.key === key ? previous.data : undefined, error })),
+      (data) => current && mutationGen.current === startedGen && setState({ key, data }),
+      (error: unknown) =>
+        current &&
+        mutationGen.current === startedGen &&
+        setState((previous) => ({ key, data: previous.key === key ? previous.data : undefined, error })),
     );
     return () => {
       current = false;
@@ -147,10 +152,12 @@ export function useLoader<T>(key: string | null, load: (client: AppClient) => Pr
     loading: key !== null && (!matched || (state.data === undefined && state.error === undefined)),
     reload: useCallback(() => setVersion((value) => value + 1), []),
     replace: useCallback(
-      (update: (current: T) => T) =>
+      (update: (current: T) => T) => {
+        mutationGen.current++;
         setState((previous) =>
           previous.key === key && previous.data !== undefined ? { ...previous, data: update(previous.data) } : previous,
-        ),
+        );
+      },
       [key],
     ),
   };
@@ -159,6 +166,7 @@ export function useLoader<T>(key: string | null, load: (client: AppClient) => Pr
 interface FileCacheEntry {
   readonly promise: Promise<string>;
   promote(): void;
+  cancel(): void;
   refs: number;
   url: string | null;
   revokeOnRelease: boolean;
@@ -166,6 +174,7 @@ interface FileCacheEntry {
 
 interface QueuedFileTask {
   priority: "high" | "low";
+  cancelled: boolean;
   run: () => void;
 }
 
@@ -283,15 +292,17 @@ function drainFileQueue() {
 function runPacedFile<T>(
   priority: "high" | "low",
   work: () => Promise<T>,
-): { promise: Promise<T>; promote(): void } {
-  const task: QueuedFileTask = { priority, run: () => undefined };
+): { promise: Promise<T>; promote(): void; cancel(): void } {
+  const task: QueuedFileTask = { priority, cancelled: false, run: () => undefined };
+  let cancelReject: ((reason?: unknown) => void) | null = null;
   const promise = new Promise<T>((resolve, reject) => {
+    cancelReject = reject;
     const attemptWork = (attempt: number) => {
       void (async () => {
         try {
           resolve(await work());
         } catch (error) {
-          if (isAppBackendError(error) && error.status === 429 && attempt < MAX_FILE_RETRIES) {
+          if (!task.cancelled && isAppBackendError(error) && error.status === 429 && attempt < MAX_FILE_RETRIES) {
             noteRateLimit();
             task.run = () => attemptWork(attempt + 1);
             (task.priority === "high" ? highFileQueue : lowFileQueue).unshift(task);
@@ -309,7 +320,7 @@ function runPacedFile<T>(
     drainFileQueue();
   });
   const promote = () => {
-    if (task.priority === "high") return;
+    if (task.priority === "high" || task.cancelled) return;
     task.priority = "high";
     const position = lowFileQueue.indexOf(task);
     if (position >= 0) {
@@ -318,7 +329,18 @@ function runPacedFile<T>(
       drainFileQueue();
     }
   };
-  return { promise, promote };
+  const cancel = () => {
+    if (task.cancelled) return;
+    task.cancelled = true;
+    for (const queue of [highFileQueue, lowFileQueue]) {
+      const position = queue.indexOf(task);
+      if (position >= 0) {
+        queue.splice(position, 1);
+        cancelReject?.(new Error("Cancelled."));
+      }
+    }
+  };
+  return { promise, promote, cancel };
 }
 
 function evictUnusedFileUrls() {
@@ -327,6 +349,7 @@ function evictUnusedFileUrls() {
     if (fileUrls.size <= MAX_CACHED_FILE_URLS) break;
     if (entry.refs > 0) continue;
     fileUrls.delete(key);
+    entry.cancel();
     if (entry.url) URL.revokeObjectURL(entry.url);
     else entry.revokeOnRelease = true;
   }
@@ -336,6 +359,7 @@ function releaseEntry(key: string, entry: FileCacheEntry) {
   entry.refs = Math.max(0, entry.refs - 1);
   if (entry.refs === 0 && entry.revokeOnRelease) {
     if (fileUrls.get(key) === entry) fileUrls.delete(key);
+    entry.cancel();
     if (entry.url) URL.revokeObjectURL(entry.url);
     return;
   }
@@ -378,6 +402,7 @@ export function acquirePhotoFileUrl(
   const entry: FileCacheEntry = {
     promise: Promise.resolve(""),
     promote: () => undefined,
+    cancel: () => undefined,
     refs: 1,
     url: null,
     revokeOnRelease: false,
@@ -397,6 +422,7 @@ export function acquirePhotoFileUrl(
   const fullEntry: FileCacheEntry = Object.assign(entry, {
     promise: task.promise,
     promote: task.promote,
+    cancel: task.cancel,
   });
   task.promise.catch(() => {
     if (fileUrls.get(key) === fullEntry) fileUrls.delete(key);
@@ -430,6 +456,7 @@ export function revokePhotoFileUrl(operation: string, fileId: string) {
   entry.revokeOnRelease = true;
   if (entry.refs === 0) {
     fileUrls.delete(key);
+    entry.cancel();
     if (entry.url) URL.revokeObjectURL(entry.url);
   }
 }

@@ -76,27 +76,24 @@ export function Photo({
   const ready = state.key === key ? state : { key };
   if (ready.error)
     return (
-      <div className={`lb-photo lb-photo-error ${className ?? ""}`} role="img" aria-label={`${photo.title} couldn't load`}>
-        <span>{ready.error}</span>
-        <span
-          role="button"
-          tabIndex={0}
-          className="lb-photo-retry"
-          onClick={(event) => {
-            event.stopPropagation();
-            setState({ key: "" });
-            setRetry((count) => count + 1);
-          }}
-          onKeyDown={(event) => {
-            if (event.key !== "Enter" && event.key !== " ") return;
-            event.preventDefault();
-            event.stopPropagation();
-            setState({ key: "" });
-            setRetry((count) => count + 1);
-          }}
-        >
-          Try again
+      <div className={`lb-photo lb-photo-error ${className ?? ""}`}>
+        <span role="img" aria-label={`${photo.title} couldn't load`}>
+          {ready.error}
         </span>
+        {size === "full" ? (
+          <button
+            type="button"
+            className="lb-photo-retry"
+            aria-label={`Retry ${photo.title}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              setState({ key: "" });
+              setRetry((count) => count + 1);
+            }}
+          >
+            Try again
+          </button>
+        ) : null}
       </div>
     );
   if (!ready.url) return <div ref={placeholder} className={`lb-photo lb-photo-loading ${className ?? ""}`} aria-hidden="true" />;

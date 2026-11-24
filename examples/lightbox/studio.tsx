@@ -319,14 +319,25 @@ function ShootView({ shoot, onShoot }: { shoot: Shoot; onShoot(shoot?: Shoot): v
     assets.replace((list) => list.map((asset) => (asset.id === assetId ? { ...asset, ...change } : asset)));
 
   const change = async (asset: StudioAsset, next: Partial<StudioAsset>, operation: string, input: object, done: string) => {
-    const before = Object.fromEntries(Object.keys(next).map((key) => [key, asset[key as keyof StudioAsset]]));
+    const keys = Object.keys(next) as Array<keyof StudioAsset>;
+    const before = Object.fromEntries(keys.map((key) => [key, asset[key]])) as Partial<StudioAsset>;
     patch(asset.id, next);
     try {
       await invoke(client, operation, input);
+      patch(asset.id, next);
       toast(done);
       onShoot();
     } catch (error) {
-      patch(asset.id, before);
+      assets.replace((list) =>
+        list.map((item) => {
+          if (item.id !== asset.id) return item;
+          const reverted: Partial<StudioAsset> = {};
+          for (const key of keys) {
+            if (item[key] === next[key]) (reverted as Record<string, unknown>)[key] = before[key];
+          }
+          return { ...item, ...reverted };
+        }),
+      );
       toast(errorMessage(error), { tone: "danger", retry: () => void change(asset, next, operation, input, done) });
     }
   };

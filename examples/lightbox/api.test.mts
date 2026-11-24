@@ -279,3 +279,38 @@ it("binds each release to the specific cache entry so a failed view's cleanup ne
   expect(revokedUrls).not.toContain(url);
   retried.release();
 });
+
+it("cancels undispatched queued downloads when their cache entry is evicted", async () => {
+  const { api, AppBackendError } = await loadLightboxApi();
+  const { client, started } = makeThrottledBroker(AppBackendError);
+
+  const leases = Array.from({ length: 36 }, (_, index) =>
+    api.acquirePhotoFileUrl(
+      client,
+      `abandon_${index}`,
+      "assetFileAccess",
+      { code: "GOLDHOUR2026", assetId: `abandon_${index}` },
+      "image/jpeg",
+      "low",
+    ),
+  );
+  await vi.advanceTimersByTimeAsync(0);
+  expect(started.filter((entry) => entry.startsWith("file:"))).toHaveLength(24);
+  for (const lease of leases) lease.release();
+
+  const replacement = Array.from({ length: 34 }, (_, index) =>
+    api.acquirePhotoFileUrl(
+      client,
+      `next_${index}`,
+      "assetFileAccess",
+      { code: "GOLDHOUR2026", assetId: `next_${index}` },
+      "image/jpeg",
+      "low",
+    ),
+  );
+  await Promise.allSettled(leases.map((lease) => lease.promise));
+  await vi.advanceTimersByTimeAsync(120_000);
+  await expect(Promise.all(replacement.map((lease) => lease.promise))).resolves.toHaveLength(34);
+  expect(started).not.toContain("file:abandon_35");
+  for (const lease of replacement) lease.release();
+});

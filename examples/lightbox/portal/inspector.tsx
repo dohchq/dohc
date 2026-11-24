@@ -153,6 +153,7 @@ export function Inspector<T extends PhotoSource & { readonly mimeType?: string }
   const draftGen = useRef(0);
   const savingRef = useRef(false);
   const root = useRef<HTMLDivElement | null>(null);
+  const opener = useRef<HTMLElement | null>(null);
   const bodyRef = useRef<HTMLTextAreaElement | null>(null);
   const rulesRef = useRef(rules);
   rulesRef.current = rules;
@@ -184,7 +185,11 @@ export function Inspector<T extends PhotoSource & { readonly mimeType?: string }
   }, [active.id, reload]);
 
   useEffect(() => {
+    opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     root.current?.focus();
+    return () => {
+      opener.current?.focus();
+    };
   }, []);
 
   useEffect(() => {
@@ -222,6 +227,28 @@ export function Inspector<T extends PhotoSource & { readonly mimeType?: string }
   const canNext = compare !== null ? stepCompare(compare, 1) !== null : index < items.length - 1;
 
   const keyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Tab" && root.current) {
+      const focusable = [
+        ...root.current.querySelectorAll<HTMLElement>(
+          'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+        ),
+      ];
+      if (focusable.length > 0) {
+        const first = focusable[0]!;
+        const last = focusable[focusable.length - 1]!;
+        if (event.shiftKey && (document.activeElement === first || document.activeElement === root.current)) {
+          event.preventDefault();
+          last.focus();
+          return;
+        }
+        if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+          return;
+        }
+      }
+      return;
+    }
     if (isTyping(event.target)) {
       if (event.key === "Escape") {
         updateDraft(null);
@@ -262,9 +289,7 @@ export function Inspector<T extends PhotoSource & { readonly mimeType?: string }
       setNotes((current) => (current.id === targetId ? { id: targetId, list: [...(current.list ?? []), note] } : current));
       toast(`Note ${expectedCount} pinned.`);
       if (draftGen.current === gen) {
-        savingRef.current = false;
         updateDraft(null);
-        setBody("");
         root.current?.focus();
       }
     } catch (error) {

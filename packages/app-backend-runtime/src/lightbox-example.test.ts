@@ -168,9 +168,9 @@ describe("Lightbox proofing Collection", () => {
       picksUsed: 0,
     });
     expect(gallery.assets).toHaveLength(13);
-    expect(gallery.assets.map((asset: Result) => asset.id)).not.toEqual(
-      expect.arrayContaining(["pos_0140", "pos_0152", "pos_0167"]),
-    );
+    const publicIds = gallery.assets.map((asset: Result) => asset.id);
+    for (const hidden of ["pos_0140", "pos_0152", "pos_0167"])
+      expect(publicIds).not.toContain(hidden);
     const serialized = JSON.stringify(gallery);
     for (const secret of ["internal", "280000", "GOLDHOUR2026", "rating", "colorLabel", "green"])
       expect(serialized).not.toContain(secret);
@@ -213,6 +213,7 @@ describe("Lightbox proofing Collection", () => {
     const ids = [...first.assets, ...second.assets, ...third.assets].map(
       (asset: Result) => asset.id,
     );
+    expect(ids).toHaveLength(13);
     expect(new Set(ids).size).toBe(13);
     expect(third.nextCursor).toBeNull();
   });
@@ -386,6 +387,11 @@ describe("Lightbox proofing Collection", () => {
     await expect(
       f.openFile("assetFileAccess", { code: CODE, assetId: "pos_0012" }, draft.fileId),
     ).rejects.toMatchObject({ refusal: { code: "not_found" } });
+    const other = await upload(f, image("file_other_0000000002"), "POS_0201");
+    await f.call("publishAsset", { assetIds: [other.id], published: true }, "owner");
+    await expect(
+      f.openFile("assetFileAccess", { code: CODE, assetId: other.id }, draft.fileId),
+    ).rejects.toThrow("does not grant access to the file");
 
     await f.call("publishAsset", { assetIds: [draft.id], published: false }, "owner");
     await expect(f.openFile("assetFileAccess", input, draft.fileId)).rejects.toMatchObject({
