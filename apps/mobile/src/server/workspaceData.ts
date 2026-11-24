@@ -85,8 +85,8 @@ export interface View<T> {
   affectedBy(changes: FeedChanges, known: Known, value: T | null): boolean;
   /** What the view shows after a read, from what it showed before and what the read answered. */
   carry?(previous: T | null, next: T): T;
-  /** The text a value shows a person, for a view that keeps it as the last text when its object goes. */
-  lastText?(value: T | null): string | undefined;
+  /** What a value shows a person, for a view that keeps its last text when its object goes: equal when it looks the same. */
+  shownAs?(value: T | null): string | null;
   /** The messages a value shows, so the outbox can tell which of its saved writes a read now shows. */
   messages?(value: T): readonly ChatMessage[];
 }
@@ -173,12 +173,16 @@ export const views = {
               : undefined;
         return last === undefined ? next : { kind: "missing", last };
       },
-      lastText: (value) =>
-        value?.kind === "page"
-          ? value.markdown
-          : value?.kind === "missing"
-            ? value.last
-            : undefined,
+      shownAs(value) {
+        if (value === null) return null;
+        const text =
+          value.kind === "page"
+            ? value.markdown
+            : value.kind === "missing"
+              ? value.last
+              : undefined;
+        return text ?? `\u0000${value.kind}`;
+      },
       // Any file change can put another object at the page's path: one deleted and another made there. The listing that
       // would say so may not be read yet, so any file change reads the page again. A live edit, which changes no file,
       // reads it again when it's to the object at its path, or to any page while the store doesn't know which that is.
@@ -573,11 +577,11 @@ export function createWorkspaceData(options: {
         target.stale = false;
         const previous = unseen ? null : target.state.value;
         const value = target.view.carry ? target.view.carry(previous, answer.value) : answer.value;
-        const text = target.view.lastText;
+        const shownAs = target.view.shownAs;
         target.prefetched =
           target.listeners.size === 0 &&
-          text !== undefined &&
-          (unseen || text(value) !== text(previous));
+          shownAs !== undefined &&
+          (unseen || shownAs(value) !== shownAs(previous));
         const saved = { view: target.view, value, cursor: answer.cursor, stale: false };
         cache.set(scope, { ...saved, prefetched: target.prefetched || undefined });
         set(target, { value, loading: false, problem: null, failures: target.state.failures });

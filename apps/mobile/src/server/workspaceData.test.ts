@@ -1174,6 +1174,33 @@ describe("prefetching pages", () => {
     expect(data.state(views.page("a.md")).value).toEqual({ kind: "missing", last: "Seen text" });
   });
 
+  it("marks unseen a refresh that turned a too-large page missing after the screen closed", async () => {
+    const refresh = deferred<Answer>();
+    const tooLarge = ops(
+      { ok: false, reason: "dohc: This page is too large to open here.", refusal: "too-large" },
+      "0.1.1",
+    );
+    const server = serve("ws-prefetch-kind", tooLarge, () => refresh.promise);
+    const first = deferred<Answer>();
+    server.on("GET", feedPath("ws-prefetch-kind", "0.1.1"), () => first.promise);
+    server.on("GET", feedPath("ws-prefetch-kind", "0.2.1"), held);
+    const cache = createReadCache();
+    const { data } = open(server, "ws-prefetch-kind", cache);
+    const close = data.subscribe(views.page("a.md"), () => {});
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({ kind: "too-large" }),
+    );
+    first.resolve(feed({ cursor: "0.2.1", changed: { files: ["object-a"] } }));
+    await vi.waitFor(() => expect(reads(server)).toBe(2));
+    close();
+    refresh.resolve(ops({ ok: false, reason: "dohc: No document.", refusal: "missing" }, "0.2.1"));
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({ kind: "missing" }),
+    );
+    const scope = cacheScope(signInTo(server), "ws-prefetch-kind");
+    expect(cache.get(scope, "page:a.md")?.prefetched).toBe(true);
+  });
+
   it("keeps ten prefetched pages through a file change, and reads none of them again until opened", async () => {
     const server = serve("ws-prefetch-ten", page("Read ahead"));
     const change = deferred<Answer>();
