@@ -1171,7 +1171,10 @@ const signedOut: AccountState = {
 describe("the account's Notices across sign-out and failure", () => {
   it("lands nothing a read held before a 401 answers, deletes the list, and sends the marks after the next sign-in", async () => {
     const { server, store, ids, disk, kept, signIn, signOut } = setup();
-    const account = fakeAccount({ status: "signed-in", signIn: { ...signIn, email: "a@b.c" } });
+    const account = fakeAccount({
+      status: "signed-in",
+      signIn: { ...signIn, email: "a@b.c", name: "Ice" },
+    });
     clearNoticeListsOnSignInChange(account, kept);
     store.resume();
     const held = await reply(server, server.read(), [relayRow("a")], { replace: true });
@@ -1195,7 +1198,12 @@ describe("the account's Notices across sign-out and failure", () => {
   });
 
   it("deletes the list on sign-out, a new sign-in, or a launch with none, never on the saved one", async () => {
-    const signIn = (userId: string) => ({ ...setup().signIn, userId, email: `${userId}@b.c` });
+    const signIn = (userId: string) => ({
+      ...setup().signIn,
+      userId,
+      email: `${userId}@b.c`,
+      name: "Ice",
+    });
     const run = async (from: AccountState, to: AccountState) => {
       const disk = keptDisk();
       disk.sql(

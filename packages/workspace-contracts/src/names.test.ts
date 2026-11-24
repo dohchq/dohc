@@ -1,6 +1,13 @@
 import { readFileSync } from "node:fs";
 import { expect, it, vi } from "vitest";
-import { cutText, nameSlug, nameByteLength, isPortableNamePath, truncateName } from "./names";
+import {
+  accountAuthorName,
+  cutText,
+  nameSlug,
+  nameByteLength,
+  isPortableNamePath,
+  truncateName,
+} from "./names";
 import { scanMentionTokens, normalizeHandle, activeMentionQuery } from "./chatMentions";
 
 it("cuts text to its limit with no space before the …", () => {
@@ -89,4 +96,11 @@ it("loads and truncates at code points when Intl.Segmenter is unavailable", asyn
   } finally {
     vi.unstubAllGlobals();
   }
+});
+
+it("names an account's phone writes by its name as the engine shows it, or Unnamed", () => {
+  expect(accountAuthorName("  Ice​ ")).toBe("Ice");
+  expect(accountAuthorName("A".repeat(50))).toBe(`${"A".repeat(39)}…`);
+  expect(accountAuthorName("​")).toBe("Unnamed");
+  expect(accountAuthorName(null)).toBe("Unnamed");
 });

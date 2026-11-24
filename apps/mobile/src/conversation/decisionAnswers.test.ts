@@ -116,6 +116,7 @@ function launch(server: Server, disk = keptDisk()): Outbox {
     origin: server.origin,
     userId: "u-1",
     email: "u-1@example.com",
+    name: "Ice",
     isCurrent: () => true,
     client: createServerClient({
       origin: server.origin,

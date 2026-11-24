@@ -16,6 +16,7 @@ const SAVED: StoredSignIn = {
   token: "tok-1",
   userId: "u-1",
   email: "ice@example.com",
+  name: "Ice",
 };
 const WORKSPACES = { status: 200, body: { ok: true, workspaces: [] } };
 const SESSIONS = {
@@ -72,7 +73,7 @@ function serveSignIn(
   server: ReturnType<typeof testServer>,
   account: Answer = {
     status: 200,
-    body: { session: {}, user: { id: "u-2", email: "sam@example.com" } },
+    body: { session: {}, user: { id: "u-2", email: "sam@example.com", name: "Ice" } },
   },
 ) {
   server.on("POST", "/api/auth/device/code", {
@@ -116,6 +117,7 @@ describe("signing in", () => {
       token: "tok-2",
       userId: "u-2",
       email: "sam@example.com",
+      name: "Ice",
     });
     expect(signedIn(account).email).toBe("sam@example.com");
   });
@@ -131,7 +133,10 @@ describe("signing in", () => {
     const session = server.calls.find((call) => call.path === "/api/auth/get-session")!;
     account.cancelSignIn();
     expect(session.signal.aborted).toBe(true);
-    held.resolve({ status: 200, body: { user: { id: "u-2", email: "sam@example.com" } } });
+    held.resolve({
+      status: 200,
+      body: { user: { id: "u-2", email: "sam@example.com", name: "Ice" } },
+    });
     expect(await first).toBe("cancelled");
     expect(tokens.log).not.toContain("save");
     expect(account.state()).toMatchObject({ status: "signed-out" });

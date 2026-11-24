@@ -1,7 +1,7 @@
 import { chatMentionTokens, normalizeHandle } from "@dohc/workspace-contracts/chat-mentions";
 import type { ChatWakeCandidate } from "@dohc/workspace-contracts/chat-wakes";
 import type { ChatMessage, ChatThread } from "@dohc/workspace-contracts/engine";
-import { cutText } from "@dohc/workspace-contracts/names";
+import { shownName } from "@dohc/workspace-contracts/names";
 import { asRecord } from "@dohc/workspace-core";
 import type { JsonValue } from "@dohc/workspace-engine-client";
 import type { WriteCommand } from "./accountChatWrites";
@@ -28,15 +28,6 @@ export class TooManyWakeCandidates extends Error {
     super(`A message wakes at most ${MAX_WAKE_CANDIDATES} agents on the account's computers.`);
     this.name = "TooManyWakeCandidates";
   }
-}
-
-// The characters the engine drops from a name (names.rs, shown_name), keeping ZWNJ, ZWJ, and variation selectors.
-const HIDDEN_IN_NAMES =
-  /(?![\u200C\u200D\p{Variation_Selector}])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu;
-
-/** A name as the engine shows it: hidden characters dropped, trimmed, and cut to 40 characters. */
-export function shownName(name: string): string {
-  return cutText(name.replace(HIDDEN_IN_NAMES, "").trim(), 40);
 }
 
 /** What resolution reads, through the reads' secret-file filter. A hidden thread or message is null, as a missing one. */

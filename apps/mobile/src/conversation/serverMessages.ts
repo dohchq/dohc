@@ -1,5 +1,6 @@
 import { workspaceWords } from "@dohc/interface-words/workspace";
 import { chatMentions } from "@dohc/workspace-contracts/chat-mentions";
+import { accountAuthorName } from "@dohc/workspace-contracts/names";
 import type { ChatMessage } from "../server/workspaceReads";
 import { decisionOf } from "./decisionAnswers";
 import type { PhoneMention } from "./mentionDraft";
@@ -44,6 +45,10 @@ export function personAuthor(id: string, name: string, fills: readonly string[])
     .join("");
   return { id, name, kind: "person", initials, hue: fills[hash % fills.length] };
 }
+
+/** The author of a message only this phone has: the account, by the name the server will give the message. */
+export const localAuthor = (accountName: string, fills: readonly string[]): Author =>
+  personAuthor("local:you", accountAuthorName(accountName), fills);
 
 /** A message from the server, with its question or poll as the server has it. */
 export function serverMessage(

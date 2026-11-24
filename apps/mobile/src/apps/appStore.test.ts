@@ -133,7 +133,13 @@ describe("teardown", () => {
     for (const end of ["sign-out", "401"] as const) {
       const server = testServer();
       serveSessionEnd(server);
-      const stored = { origin: server.origin, token: "tok", userId: "u-1", email: "a@example.com" };
+      const stored = {
+        origin: server.origin,
+        token: "tok",
+        userId: "u-1",
+        email: "a@example.com",
+        name: "Ice",
+      };
       const runner = createAppRunner();
       const teardown = appTeardown(runner);
       let atDelete: unknown = "not run";

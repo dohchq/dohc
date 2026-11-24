@@ -24,6 +24,8 @@ export interface StoredSignIn {
   readonly token: string;
   readonly userId: string;
   readonly email: string;
+  /** The account's name, which the server gives the phone's chat writes. */
+  readonly name: string;
 }
 
 export interface SignInStore {
@@ -36,6 +38,7 @@ export interface SignIn {
   readonly origin: string;
   readonly userId: string;
   readonly email: string;
+  readonly name: string;
   readonly client: ServerClient;
   /** False once this sign-in has ended. Check it before applying anything one of its requests answered. */
   isCurrent(): boolean;
@@ -209,6 +212,7 @@ export function createAccount(options: {
       origin: stored.origin,
       userId: stored.userId,
       email: stored.email,
+      name: stored.name,
       isCurrent: () => current.id === generation,
       client: createServerClient({
         origin: stored.origin,
@@ -364,6 +368,7 @@ export function createAccount(options: {
           token: outcome.token,
           userId: account.userId,
           email: account.email,
+          name: account.name,
         };
         await options.pendingSignOuts?.end(stored).catch(() => undefined);
         await write(async () => {

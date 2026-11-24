@@ -111,8 +111,6 @@ export const chatWords = {
   /** A row of that menu, for VoiceOver: the name, then what they are. */
   mentionPerson: (name: string) => `${name}, person`,
   mentionAgent: (name: string) => `${name}, agent`,
-  /** A message's author while only this phone has it. */
-  you: "You",
   /** A message on its way: a request may have reached the server. */
   sending: "Sending",
   /** The server has answered "pending" for a long time. It may still be saved. */

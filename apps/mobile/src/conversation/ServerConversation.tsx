@@ -72,6 +72,7 @@ import { UNSHOWN_MESSAGE, UNSHOWN_QUESTION, type ReplyTo } from "./ReplyContext"
 import {
   conversationItems,
   localMessage,
+  localAuthor,
   type ConversationItem,
   serverMessage,
   withMentions,
@@ -236,15 +237,7 @@ function useScreenWrites(target: string) {
     [signIn, workspaceId],
   );
   const react = useReact(writes, rowScope);
-  const you = useMemo<Author>(
-    () => ({
-      id: "local:you",
-      name: chatWords.you,
-      kind: "person",
-      initials: (signIn.email[0] ?? "").toUpperCase(),
-    }),
-    [signIn],
-  );
+  const you = useMemo<Author>(() => localAuthor(signIn.name, workspaceMarkFills), [signIn]);
   const reactionsByMessage = useMemo(
     () => (state && rowScope ? reactionRecords(state, rowScope) : null),
     [state, rowScope],

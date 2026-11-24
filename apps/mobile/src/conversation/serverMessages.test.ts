@@ -4,6 +4,7 @@ import {
   conversationItems,
   localMessage,
   mentionSegments,
+  localAuthor,
   serverMessage,
   withMentions,
 } from "./serverMessages";
@@ -115,5 +116,14 @@ describe("mentionSegments", () => {
       "#000000",
     ]);
     expect(withMentions(named, candidates).body).toEqual([{ mention: "Ice" }]);
+  });
+});
+
+describe("localAuthor", () => {
+  it("draws this phone's own message as the server will draw it once saved", () => {
+    const fills = ["#111111", "#222222", "#333333"];
+    const local = localAuthor(" Ice ", fills);
+    const saved = serverMessage(entry("m", "human", "Ice", 0), null, fills).author;
+    expect({ ...local, id: saved.id }).toEqual(saved);
   });
 });
