@@ -263,7 +263,7 @@ export function MemberChats({
           {/* A Group rule can set its level apart from the member level. A changed level reaches the open Group in place. */}
           <ChannelView
             key={`${opened.shareId}\n${group.channelWireId}\n${follows}`}
-            client={hub.client(group)}
+            client={hub.client(group, opened.moderates)}
             name={group.name}
             onEnded={followGone}
             readOnlyNote={
@@ -356,14 +356,17 @@ export function MemberComments({
   const client = useMemo(
     () =>
       opened &&
-      commentsClient({
-        shareId: opened.shareId,
-        userId: opened.userId,
-        path,
-        access,
-        maxPostBytes: opened.maxPostBytes,
-        maxBodyBytes: opened.maxBodyBytes,
-      }),
+      commentsClient(
+        {
+          shareId: opened.shareId,
+          userId: opened.userId,
+          path,
+          access,
+          maxPostBytes: opened.maxPostBytes,
+          maxBodyBytes: opened.maxBodyBytes,
+        },
+        opened.moderates,
+      ),
     [opened, path, access],
   );
   const name = path.split("/").at(-1) ?? path;

@@ -1,12 +1,13 @@
 import { shareSenderLabel, shareAccessLabel } from "@dohc/security-contract/share-labels";
-import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
+import { GENERAL_CHANNEL_WIRE_ID, isWorkspaceGroup } from "@dohc/security-contract/chat-wire-ids";
 import { ShareSender } from "../ShareSender";
-import { MessageReactions } from "./chatMessages";
+import { DeletedMessageLine, MessageReactions } from "./chatMessages";
 import { WorkLinkText } from "./workReferences";
 import { chatEditorPath, chatEditorTitle } from "../shell/chatsNav";
 import { parseTab } from "./workbenchState";
 import { PostFeedList } from "./PostFeedList";
-import { BookmarkAction, ThreadMessages } from "./ChatPosts";
+import { BookmarkAction, ThreadMessages, threadHeading } from "./ChatPosts";
+import { useMessageDelete } from "./messageDelete";
 import {
   ActionButton,
   FEED_META,
@@ -1488,6 +1489,9 @@ export function ChatsView(props: {
                       bodySnippet: preview.bodySnippet,
                       ...(preview.automation ? { automation: preview.automation } : {}),
                       ...(preview.authorReported ? { authorReported: preview.authorReported } : {}),
+                      ...(preview.deletedAtMs === undefined
+                        ? {}
+                        : { deletedAtMs: preview.deletedAtMs }),
                     }
                   : null,
                 reactions: preview?.reactions ?? [],
@@ -1831,6 +1835,47 @@ export function ChatsView(props: {
     nav,
     refreshChannelBadges,
   ]);
+  // The open post keeps the thread it opened with. When its first message is
+  // deleted, the engine titles an untitled post "New chat", so the thread is
+  // read again for its title.
+  const openThreadId = nav.level === "thread" ? nav.thread.id : null;
+  const openChannelId = nav.level === "thread" ? nav.channel.id : null;
+  const openingNowDeleted =
+    nav.level === "thread" &&
+    nav.thread.openingMessage?.deletedAtMs === undefined &&
+    messages[0]?.threadId === nav.thread.id &&
+    messages[0].deletedAtMs !== undefined;
+  const openingTitle = useWorkspaceQuery(useWorkspaceSession(), {
+    key: `chats-opening-title:${workspaceId}:${openChannelId}:${openThreadId}`,
+    manual: true,
+    load: async () => {
+      if (openChannelId === null) return null;
+      const result = await bridge().listChannelThreads({ workspaceId, channelId: openChannelId });
+      return result.threads.find((entry) => entry.id === openThreadId) ?? null;
+    },
+  });
+  const readOpeningTitle = openingTitle.retry;
+  // Each read of the messages tries again until the title lands, so a failed
+  // read recovers at the next activity.
+  useEffect(() => {
+    if (openingNowDeleted) void readOpeningTitle();
+  }, [messages, openingNowDeleted, readOpeningTitle]);
+  const freshThread = openingTitle.value;
+  useEffect(() => {
+    if (!freshThread) return;
+    setNav((current) =>
+      current.level === "thread" && current.thread.id === freshThread.id
+        ? {
+            ...current,
+            thread: {
+              ...current.thread,
+              title: freshThread.title,
+              openingMessage: freshThread.openingMessage,
+            },
+          }
+        : current,
+    );
+  }, [freshThread]);
   const latestRefresh = useRef(refreshForActivity);
   latestRefresh.current = refreshForActivity;
   // False once this view unmounts, so its notices' Try again reloads nothing.
@@ -3510,6 +3555,13 @@ export function ChatsView(props: {
     }),
     [threadReactions.reactions, reactionReadOnly, toggleReaction, threadReactions.viewerAuthorId],
   );
+  // Only a Group's posts can be deleted: not General's, an agent's or a DM's.
+  const threadDelete = useMessageDelete({
+    workspaceId,
+    viewerAuthorId: threadReactions.viewerAuthorId,
+    enabled:
+      nav.level === "thread" && isWorkspaceGroup(nav.channel.wireId ?? null, nav.channel.kind),
+  });
 
   const decisionsByMessage = useMemo(
     () => new Map(decisions.map((decision) => [decision.messageId, decision])),
@@ -3923,16 +3975,19 @@ export function ChatsView(props: {
             };
             const strippedBody = stripFeedMarkdown(item.message.body, mentionCandidates);
             const strippedTitle = stripPostMarkdown(item.thread.title) || item.thread.title;
-            const body = (
-              <span className="mt-0.5 block whitespace-pre-wrap break-words text-[14px] leading-[21px] text-ink">
-                <MentionText
-                  body={strippedBody}
-                  candidates={mentionCandidates}
-                  attachments={item.message.attachments}
-                  onOpenPath={hasFileMentions ? props.onOpenPath : undefined}
-                />
-              </span>
-            );
+            const body =
+              item.message.deletedAtMs !== undefined ? (
+                <DeletedMessageLine testId="chats-feed-item-deleted" className="mt-0.5" />
+              ) : (
+                <span className="mt-0.5 block whitespace-pre-wrap break-words text-[14px] leading-[21px] text-ink">
+                  <MentionText
+                    body={strippedBody}
+                    candidates={mentionCandidates}
+                    attachments={item.message.attachments}
+                    onOpenPath={hasFileMentions ? props.onOpenPath : undefined}
+                  />
+                </span>
+              );
             return (
               <div
                 key={item.message.id}
@@ -4113,7 +4168,7 @@ export function ChatsView(props: {
         onKeyDownCapture={onKeyDownCapture}
       >
         <ChatHeader
-          label={nav.thread.title}
+          label={threadHeading(nav)}
           testId="chats-thread"
           onBack={goBack}
           action={
@@ -4279,7 +4334,9 @@ export function ChatsView(props: {
               onOpenPath={props.onOpenPath}
               onNavCommand={props.onNavCommand}
               setMessageNode={setMessageNode}
+              deleteAction={threadDelete.action}
             />
+            {threadDelete.dialog}
           </div>
           <TypingIndicator
             names={presence.typingNames}

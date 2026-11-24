@@ -46,6 +46,7 @@ import {
   closeTestStorage,
   closeTestStorages,
   createShare,
+  expectNoDeletedDigest,
   inspect,
   inspectDatabase,
   json,
@@ -1300,6 +1301,39 @@ describe("a personal agent's posts", () => {
     expect(count(f, "sync_relay_personal_agent_threads", "agent_id = ?", agent.agentId)).toBe(2);
   });
 
+  it("deletes its own message at View, and not its person's or another agent's", async () => {
+    const f = await fixture();
+    const reach: Reach = [{ workspaceId: WS_A, level: "comment" }];
+    const agent = await signIn(f, { reach });
+    const second = await signIn(f, { agent: { kind: "new", name: "Second" }, reach });
+    chats(f, WS_A, agent.agentId);
+    fromComputer(f, WS_A, [ownerSays("from-owner", "thread-team", "the owner's words")]);
+    const mine = (await ok(await post(f, agent, { threadId: "thread-team" }))).message as {
+      messageId: string;
+    };
+    const theirs = (await ok(await post(f, second, { threadId: "thread-team" }))).message as {
+      messageId: string;
+    };
+    await ok(await setReach(f, agent, [{ workspaceId: WS_A, level: "view" }]));
+    const remove = (messageId: string) =>
+      tool(f, agent, "delete", { workspaceId: WS_A, threadId: "thread-team", messageId });
+
+    expect(await ok(await remove(mine.messageId))).toMatchObject({
+      workspaceId: WS_A,
+      threadId: "thread-team",
+      messageId: mine.messageId,
+    });
+    await expectRefused(await remove("from-owner"));
+    await expectRefused(await remove(theirs.messageId));
+    // Every delete door takes the same id lengths.
+    await expectRefused(await remove("m".repeat(512)));
+    const kinds = logOf(f, WS_A).map((row) => [row.opKind, payloadOf(row).messageId]);
+    expect(kinds).toContainEqual(["chat.message.tombstone", mine.messageId]);
+    expect(kinds).toContainEqual(["chat.message.delete", mine.messageId]);
+    expect(kinds).toContainEqual(["chat.message.append", "from-owner"]);
+    expect(kinds).toContainEqual(["chat.message.append", theirs.messageId]);
+  });
+
   it("reads and replies in a Comment thread by its id, on a current or deleted file, never on a secret path", async () => {
     const f = await fixture();
     await claimWorkspace(f.h, OWNER, "workspace-c");
@@ -1890,6 +1924,69 @@ describe("a personal agent's wait", () => {
       cursor: { v: 1, agentId: agent.agentId, turn: WS_A },
     });
     expect(ids(await waitOnce(f, agent, { cursor: answer.cursor }))).toEqual([]);
+  });
+
+  it("leaves out a message deleted while its answer waits on the fence", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
+    chats(f, WS_A, agent.agentId);
+    fromComputer(f, WS_A, [
+      ownerSays("kept", "thread-team", "@Helper still here"),
+      ownerSays("gone", "thread-team", "@Helper the deleted words"),
+    ]);
+    const fresh = f.h.linkAuthority.freshPersonal.bind(f.h.linkAuthority);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let reached!: () => void;
+    const atFence = new Promise<void>((resolve) => (reached = resolve));
+    vi.spyOn(f.h.linkAuthority, "freshPersonal").mockImplementation(async (authority) => {
+      const current = await fresh(authority);
+      reached();
+      await gate;
+      return current;
+    });
+
+    const answering = tool(f, agent, "wait", { timeoutMs: 0 });
+    await atFence;
+    vi.mocked(f.h.linkAuthority.freshPersonal).mockImplementation(fresh);
+    expect(
+      f.storage.deleteWorkspaceMessage({
+        workspaceId: WS_A,
+        threadId: "thread-team",
+        messageId: "gone",
+        actor: { kind: "account", userId: OWNER },
+        nowMs: 5000,
+      }).ok,
+    ).toBe(true);
+    release();
+    const answer = (await ok(await answering)) as WaitAnswer;
+    expect(ids(answer)).toEqual(["kept"]);
+    expect(JSON.stringify(answer)).not.toContain("the deleted words");
+  });
+
+  it("reads a deleted message in a channel as its line, with no body and no digest", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }] });
+    chats(f, WS_A, agent.agentId);
+    fromComputer(f, WS_A, [ownerSays("gone", "thread-team", "the deleted words")]);
+    expect(
+      f.storage.deleteWorkspaceMessage({
+        workspaceId: WS_A,
+        threadId: "thread-team",
+        messageId: "gone",
+        actor: { kind: "account", userId: OWNER },
+        nowMs: 5000,
+      }).ok,
+    ).toBe(true);
+
+    const page = await ok(
+      await tool(f, agent, "chat", { workspaceId: WS_A, channelWireId: "wire-team" }),
+    );
+    expect(page.messages).toEqual([
+      expect.objectContaining({ messageId: "gone", deletedAtMs: 5000 }),
+    ]);
+    expect(JSON.stringify(page)).not.toContain("the deleted words");
+    expectNoDeletedDigest(f.dbPath, page);
   });
 
   it("reads only from where each workspace entered its reach, whatever the cursor names", async () => {

@@ -69,6 +69,9 @@ interface WorkspaceState {
   pauses: Map<string, ChatThreadPause>;
   // Each automation message's chain depth, which stays in the engine.
   chainDepths: Map<string, number>;
+  // File threads created untitled. Each takes its first message's first
+  // line, as in the engine.
+  untitled: Set<string>;
 }
 
 type SeedChannelInput = {
@@ -1503,10 +1506,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return JSON.stringify([
           workspace,
           normalizeTrimmed(requiredString(params, "threadId"), "invalid-input"),
-          normalizeTrimmed(
-            requiredString(params, "title", "invalid-thread-title"),
-            "invalid-thread-title",
-          ),
+          optionalString(params, "title")?.trim() ?? "",
           normalizeTrimmed(requiredString(linked, "objectId", "invalid-path"), "invalid-path"),
           pathHint === undefined ? "" : normalizePath(pathHint),
         ]);
@@ -1909,13 +1909,12 @@ export class ChatsLoopbackEngine implements EngineTransport {
     );
     const pathHint = optionalString(linked, "pathHint");
     const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
+    const typed = optionalString(params, "title")?.trim();
+    if (!typed) state.untitled.add(threadId);
     const thread: ChatThread = {
       id: threadId,
       workspaceId: workspace,
-      title: normalizeNonempty(
-        requiredString(params, "title", "invalid-thread-title"),
-        "invalid-thread-title",
-      ),
+      title: typed || "New chat",
       createdAtMs: atMs,
       updatedAtMs: atMs,
       linkedFile: {
@@ -2169,6 +2168,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const ids = state.threadMessages.get(threadId) ?? [];
     ids.push(messageId);
     state.threadMessages.set(threadId, ids);
+    const thread = state.threads.get(threadId);
+    if (thread && ids.length === 1 && state.untitled.has(threadId))
+      thread.title = body.split("\n")[0]?.slice(0, 80) || "New chat";
     for (const handle of mentionHandles(body)) {
       state.mentions.push({
         threadId,
@@ -3817,6 +3819,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
         runLinks: new Map(),
         pauses: new Map(),
         chainDepths: new Map(),
+        untitled: new Set(),
       };
       this.workspaces.set(id, state);
     }

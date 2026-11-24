@@ -350,7 +350,11 @@ export function AboutMore(props: {
 
 // One comment on the file, which is a chat about it: its first line, then
 // when it last changed.
-export function AboutChatRow(props: { thread: ChatThreadRecord; onOpen: () => void }) {
+export function AboutChatRow(props: {
+  thread: ChatThreadRecord;
+  title?: string;
+  onOpen: () => void;
+}) {
   const when = formatChatTime(props.thread.updatedAtMs);
   return (
     <button
@@ -363,7 +367,7 @@ export function AboutChatRow(props: { thread: ChatThreadRecord; onOpen: () => vo
       <span aria-hidden className={`${MARK_BOX} text-subtle`}>
         <MessageSquare size={14} />
       </span>
-      <span className="min-w-0 flex-1 truncate">{props.thread.title}</span>
+      <span className="min-w-0 flex-1 truncate">{props.title ?? props.thread.title}</span>
       <time
         dateTime={when.iso}
         title={when.label}

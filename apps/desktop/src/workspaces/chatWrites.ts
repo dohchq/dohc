@@ -644,11 +644,11 @@ export function createChatWrites(dependencies: {
   // A file chat has no author and belongs to no channel, so only the shared
   // view gate applies. It links the file's stable object id, never the path.
   // A joined workspace sends it to the owner, so it needs the account that
-  // joined, as a post does.
+  // joined, as a post does. A person's comment starts it untitled.
   async function createFileThread(
     place: ChatWritePlace,
     input: {
-      title: string;
+      title?: string;
       linkedFile(): Promise<{ objectId: string; pathHint: string }>;
     },
   ) {

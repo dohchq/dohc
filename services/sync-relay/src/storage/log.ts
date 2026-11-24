@@ -39,10 +39,12 @@ import {
   parseLiveAuthorSnapshot,
   type LiveAuthorSnapshot,
 } from "@dohc/live-session-contract/live-authorship";
-import { SHARE_MEMBER_ORIGIN_PREFIX } from "../relayLogInputs";
+import { MESSAGE_TOMBSTONE_OP_KIND, SHARE_MEMBER_ORIGIN_PREFIX } from "../relayLogInputs";
 import { stableJsonStringify } from "../canonicalJson";
 import { recordChatMessageAlerts } from "./chatMessageAlerts";
 import { NO_LIVE_AUTHORITY } from "../relayWriteChanges";
+import { sha256Hex } from "@dohc/workspace-core/hash";
+import { deletedAppendDigests, tombstoneForDeletedAppend } from "./messageDeletes";
 import {
   bindStoppedNoteClient,
   isOwnerSaveOfStoppedNote,
@@ -169,6 +171,11 @@ export function appendLogBatchInTransaction(
       references: readonly import("@dohc/workspace-engine-client/daemon").WorkReferenceMapping[];
       datasetAccess?: import("./workReferences").DatasetReferenceAccess;
     };
+    /**
+     * Only a message delete skips the quota. Its tombstone can free less than
+     * its delete op adds, and a full workspace must still let a message go.
+     */
+    quotaExempt?: "message-delete";
   },
 ): AppendLogBatchResult {
   for (const op of input.ops) {
@@ -193,7 +200,7 @@ export function appendLogBatchInTransaction(
          WHERE workspace_id = ? AND origin_id = ?`,
   );
   const existingStmt = storage.db.prepare(
-    `SELECT op_kind, payload_json, recorded_at_ms, settlement_admission_json, admitted_author_snapshot_json
+    `SELECT relay_seq, op_kind, payload_json, recorded_at_ms, settlement_admission_json, admitted_author_snapshot_json
          FROM sync_relay_log
          WHERE workspace_id = ? AND origin_id = ? AND origin_seq = ?`,
   );
@@ -258,6 +265,20 @@ export function appendLogBatchInTransaction(
         classify(op);
         continue;
       }
+      // A deleted message's retry matches the append it replaced, by digest.
+      const deleted =
+        existing?.op_kind === MESSAGE_TOMBSTONE_OP_KIND && op.opKind === "chat.message.append"
+          ? deletedAppendDigests(storage, Number(existing.relay_seq))
+          : null;
+      if (
+        deleted &&
+        op.settlementAdmission === undefined &&
+        deleted.appendSha256 === sha256Hex(op.payloadJson) &&
+        Number(existing!.recorded_at_ms) === op.recordedAtMs
+      ) {
+        skipped += 1;
+        continue;
+      }
       throw new SyncRelayConflictError(
         `origin_seq ${op.originSeq} already exists with different content`,
       );
@@ -294,6 +315,17 @@ export function appendLogBatchInTransaction(
     }
   }
   input.confirm?.(newOps);
+  // A deleted message appended again at a new coordinate is stored as its
+  // tombstone. No known path sends one; this keeps any other path closed.
+  const deletedCopies = new Map<SyncRelayLogInput, (relaySeq: number) => void>();
+  for (const [index, op] of newOps.entries()) {
+    if (op.opKind !== "chat.message.append") continue;
+    const tombstone = tombstoneForDeletedAppend(storage, input.workspaceId, op.payloadJson);
+    if (!tombstone) continue;
+    const stored = { ...op, opKind: MESSAGE_TOMBSTONE_OP_KIND, payloadJson: tombstone.payloadJson };
+    newOps[index] = stored;
+    deletedCopies.set(stored, tombstone.record);
+  }
   addedLogBytes = newOps.reduce(
     (bytes, op) =>
       bytes +
@@ -306,7 +338,7 @@ export function appendLogBatchInTransaction(
         : Buffer.byteLength(JSON.stringify(op.settlementAdmission))),
     0,
   );
-  assertWorkspaceQuota(storage, input.workspaceId, addedLogBytes);
+  if (!input.quotaExempt) assertWorkspaceQuota(storage, input.workspaceId, addedLogBytes);
 
   // Data-integrity gate: a log op must never be made
   // durable while it references a blob the relay does not hold. The blob
@@ -362,6 +394,7 @@ export function appendLogBatchInTransaction(
       op.relayAdmission ?? null,
     );
     inserted += 1;
+    deletedCopies.get(op)?.(Number(result.lastInsertRowid));
     // A departed publication must move neither projection: either one
     // alone would bring the document back where it no longer is. A
     // redundant copy keeps the accepted creation's object, path and file.
@@ -479,7 +512,8 @@ export function appendLogBatchInTransaction(
   }
   // Applying a folder marker charges its folder's rule span, which the check above
   // couldn't count. A batch that took the workspace over rolls back.
-  if (newOps.length > 0) assertWorkspaceQuota(storage, input.workspaceId, 0, { afterWrite: true });
+  if (newOps.length > 0 && !input.quotaExempt)
+    assertWorkspaceQuota(storage, input.workspaceId, 0, { afterWrite: true });
   for (const relaySeq of chatMessages) recordChatMessageAlerts(storage, relaySeq);
   for (const edit of ownerEdits)
     bindStoppedNoteClient(storage, { workspaceId: input.workspaceId, ...edit });
@@ -715,7 +749,8 @@ export function fetchThreadMessages(
   return fetchPlacedMessages(storage, input, { sql: "thread_id = ?", params: [input.threadId] });
 }
 
-// The messages of one scan window whose thread's first create matches `place`.
+// The messages of one scan window whose thread's first create matches `place`,
+// with deleted messages and the deletes an open follow learns them from.
 function fetchPlacedMessages(
   storage: StorageContext,
   input: ChatPageInput,
@@ -760,7 +795,8 @@ function fetchPlacedMessages(
     .prepare(`WITH window_messages AS MATERIALIZED (
       SELECT m.* FROM sync_relay_log m
       WHERE m.workspace_id = ? AND m.relay_seq BETWEEN ? AND ?
-        AND m.op_kind = 'chat.message.append' AND json_valid(m.payload_json)
+        AND m.op_kind IN ('chat.message.append', 'chat.message.tombstone', 'chat.message.delete')
+        AND json_valid(m.payload_json)
     ), window_threads AS MATERIALIZED (
       SELECT DISTINCT json_extract(payload_json, '$.threadId') AS thread_id FROM window_messages
     ), thread_creates AS MATERIALIZED (
@@ -793,6 +829,7 @@ function fetchPlacedMessages(
   };
 }
 
+// A deleted message keeps its coordinate as a tombstone, so a retry finds it.
 export function fetchChatMessage(
   storage: StorageContext,
   input: {
@@ -803,7 +840,7 @@ export function fetchChatMessage(
 ): SyncRelayLogRow | null {
   const row = storage.db
     .prepare(`SELECT * FROM sync_relay_log
-    WHERE workspace_id = ? AND origin_id = ? AND op_kind = 'chat.message.append'
+    WHERE workspace_id = ? AND origin_id = ? AND op_kind IN ('chat.message.append', 'chat.message.tombstone')
       AND json_extract(payload_json, '$.messageId') = ? ORDER BY relay_seq LIMIT 1`)
     .get(input.workspaceId, input.originId, input.messageId);
   return row ? rowToLogRow(row) : null;

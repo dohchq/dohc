@@ -482,3 +482,57 @@ describe("a Notice a member can no longer read", () => {
     },
   );
 });
+
+describe("a deleted message's Notices", () => {
+  const page = async (s: Awaited<ReturnType<typeof seed>>, userId: string, query = "") => {
+    const response = await s.h(request(userId, `/sync/notices?limit=200${query}`));
+    expect(response.status, await response.clone().text()).toBe(200);
+    return (await json(response)) as { notices: RelayNotice[]; nextCursor: string };
+  };
+  const remove = (
+    s: Awaited<ReturnType<typeof seed>>,
+    as: string,
+    messageId: string,
+    threadId: string,
+  ) => post(s.h, as, `/sync/${WORKSPACE}/chat/messages/${messageId}/delete`, { threadId });
+  const storedBodies = (s: Awaited<ReturnType<typeof seed>>) =>
+    s.storage.db
+      .prepare("SELECT * FROM sync_relay_notices")
+      .all()
+      .map((row) => JSON.stringify(row));
+
+  it("removes each recipient's Notice, moves the head a parked read waits on, and keeps no copy of the body", async () => {
+    const s = await seed();
+    await s.member("ana");
+    const bo = await s.member("bo");
+    const held = (await page(s, "ana")).nextCursor;
+    await bo.says("ask", "t-quiet", "@Ana @Kim the secret plan");
+    const caughtUp = (await page(s, "ana")).nextCursor;
+    expect((await s.notices("ana")).map((row) => row.target?.message)).toEqual(["ask"]);
+    expect((await s.notices(OWNER)).map((row) => row.target?.message)).toEqual(["ask"]);
+
+    // A parked read wakes when the head it compares moves.
+    const head = s.storage.noticeHead("ana");
+    expect((await remove(s, "bo", "ask", "t-quiet")).status).toBe(200);
+    expect(s.storage.noticeHead("ana")).not.toBe(head);
+    expect((await page(s, "ana", `&cursor=${encodeURIComponent(caughtUp)}`)).notices).toEqual([
+      expect.objectContaining({ removed: true, body: "" }),
+    ]);
+    expect(await s.notices("ana")).toEqual([]);
+    expect(await s.notices(OWNER)).toEqual([]);
+    expect((await page(s, "ana", `&cursor=${encodeURIComponent(held)}`)).notices).toEqual([
+      expect.objectContaining({ removed: true, body: "" }),
+    ]);
+    expect(storedBodies(s).some((row) => row.includes("secret plan"))).toBe(false);
+  });
+
+  it("removes the Notice of the owner's own message, which the owner's engine pushed", async () => {
+    const s = await seed();
+    await s.member("ana");
+    await s.ownerSays("hey", "t-events", "@Ana the secret plan");
+    expect((await s.notices("ana")).map((row) => row.target?.message)).toEqual(["hey"]);
+    expect((await remove(s, OWNER, "hey", "t-events")).status).toBe(200);
+    expect(await s.notices("ana")).toEqual([]);
+    expect(storedBodies(s).some((row) => row.includes("secret plan"))).toBe(false);
+  });
+});

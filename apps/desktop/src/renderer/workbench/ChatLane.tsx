@@ -20,7 +20,9 @@ import { ipcErrorMessage } from "../ipcError";
 import { withErrorWords } from "../../ipc/errorWords";
 import type { ChatMessageListHandle, ChatReactionControls } from "./chatMessages";
 import { FailedRunLine, failedRunEnd, WaitingLine, type ChatWorking } from "./ChatThreadPanel";
+import { isWorkspaceGroup } from "@dohc/security-contract/chat-wire-ids";
 import { ThreadedChat } from "./ThreadedChat";
+import { useMessageDelete } from "./messageDelete";
 import { useReactions } from "./reactionStore";
 import {
   MentionComposer,
@@ -861,6 +863,12 @@ export function ChatLane(props: {
   const reactionThreads = useMemo(() => [...laneIds, ...postThreadIds], [laneIds, postThreadIds]);
   const reactionViews = reactionThreads.map((id) => reactions.view(id));
   const viewerAuthorId = reactionViews.find((view) => view.viewerAuthorId)?.viewerAuthorId ?? "";
+  // Only a Group's messages can be deleted: not General's, an agent's or a DM's.
+  const messageDelete = useMessageDelete({
+    workspaceId,
+    viewerAuthorId,
+    enabled: isWorkspaceGroup(props.channel.wireId ?? null, props.channel.kind),
+  });
   const reactionControls: ChatReactionControls | undefined =
     reactionViews.length > 0
       ? {
@@ -1016,89 +1024,93 @@ export function ChatLane(props: {
   const place = agentDm ? (props.agentName ?? "Your agent") : `# ${props.channel.name}`;
 
   return (
-    <ThreadedChat
-      key={`${workspaceId}:${channelId}`}
-      testIdPrefix="chats-lane"
-      chatIds={laneIds}
-      messages={messages}
-      runs={runs}
-      loading={loading}
-      emptyLabel={agentDm ? "No messages yet." : `No messages in #${props.channel.name} yet.`}
-      place={place}
-      header={
-        <>
-          {props.header}
-          <DispatchAnnouncement
-            testId="chats-lane-dispatch-announcement"
-            text={
-              dispatch && liveRunId !== null
-                ? dispatchAnnouncement(true, dispatch.pendingCount)
-                : ""
-            }
+    <>
+      <ThreadedChat
+        key={`${workspaceId}:${channelId}`}
+        deleteAction={messageDelete.action}
+        testIdPrefix="chats-lane"
+        chatIds={laneIds}
+        messages={messages}
+        runs={runs}
+        loading={loading}
+        emptyLabel={agentDm ? "No messages yet." : `No messages in #${props.channel.name} yet.`}
+        place={place}
+        header={
+          <>
+            {props.header}
+            <DispatchAnnouncement
+              testId="chats-lane-dispatch-announcement"
+              text={
+                dispatch && liveRunId !== null
+                  ? dispatchAnnouncement(true, dispatch.pendingCount)
+                  : ""
+              }
+            />
+          </>
+        }
+        belowList={
+          <AgentThreadLines
+            workspaceId={workspaceId}
+            chatThreadIds={reactionThreads}
+            className="mx-5 mb-1 mt-2"
           />
-        </>
-      }
-      belowList={
-        <AgentThreadLines
-          workspaceId={workspaceId}
-          chatThreadIds={reactionThreads}
-          className="mx-5 mb-1 mt-2"
-        />
-      }
-      notice={props.notice}
-      composer={(inset) =>
-        props.locked ? (
-          <ComposerNotice testId="chats-lane-readonly" className="px-5 pb-4 pt-1">
-            {props.lockedLine ?? "This Group is read-only for you."}
-          </ComposerNotice>
-        ) : (
-          <MentionComposer
-            pinned
-            testIdPrefix="chats-lane"
-            composerId="chats-lane-composer"
-            value={composer}
-            sending={sending}
-            disabled={loading}
-            placeholder={
-              agentDm
-                ? `Message ${props.agentName ?? "your agent"}`
-                : `Message #${props.channel.name}`
-            }
-            sendLabel="Send message"
-            candidates={props.mentionCandidates}
-            fileCandidates={props.fileCandidates}
-            loadFileHeadings={props.loadFileHeadings}
-            onChange={setComposer}
-            poll={poll}
-            onPollChange={setPoll}
-            onSend={() => void send()}
-            onRosterPick={agentOffer.onRosterPick}
-            rosterScope={agentOffer.scope}
-            agentOffer={agentOffer.offer}
-            inset={inset}
-            handle={composerHandle}
-          />
-        )
-      }
-      replyNotice={
-        props.locked ? (
-          <ComposerNotice testId="chats-lane-thread-readonly" className="px-4 pb-4 pt-1">
-            {props.lockedLine ?? "This Group is read-only for you."}
-          </ComposerNotice>
-        ) : undefined
-      }
-      onSendReply={sendReply}
-      mentionCandidates={props.mentionCandidates}
-      fileCandidates={props.fileCandidates}
-      loadFileHeadings={props.loadFileHeadings}
-      onOpenPath={props.onOpenPath}
-      reactionControls={reactionControls}
-      renderMessageFooter={renderFooter}
-      working={working}
-      workingMessageId={dispatch?.liveTriggerMessageId ?? null}
-      listRef={listRef}
-      firstUnreadMessageId={firstUnreadMessageId}
-      flashMessageId={flashMessageId}
-    />
+        }
+        notice={props.notice}
+        composer={(inset) =>
+          props.locked ? (
+            <ComposerNotice testId="chats-lane-readonly" className="px-5 pb-4 pt-1">
+              {props.lockedLine ?? "This Group is read-only for you."}
+            </ComposerNotice>
+          ) : (
+            <MentionComposer
+              pinned
+              testIdPrefix="chats-lane"
+              composerId="chats-lane-composer"
+              value={composer}
+              sending={sending}
+              disabled={loading}
+              placeholder={
+                agentDm
+                  ? `Message ${props.agentName ?? "your agent"}`
+                  : `Message #${props.channel.name}`
+              }
+              sendLabel="Send message"
+              candidates={props.mentionCandidates}
+              fileCandidates={props.fileCandidates}
+              loadFileHeadings={props.loadFileHeadings}
+              onChange={setComposer}
+              poll={poll}
+              onPollChange={setPoll}
+              onSend={() => void send()}
+              onRosterPick={agentOffer.onRosterPick}
+              rosterScope={agentOffer.scope}
+              agentOffer={agentOffer.offer}
+              inset={inset}
+              handle={composerHandle}
+            />
+          )
+        }
+        replyNotice={
+          props.locked ? (
+            <ComposerNotice testId="chats-lane-thread-readonly" className="px-4 pb-4 pt-1">
+              {props.lockedLine ?? "This Group is read-only for you."}
+            </ComposerNotice>
+          ) : undefined
+        }
+        onSendReply={sendReply}
+        mentionCandidates={props.mentionCandidates}
+        fileCandidates={props.fileCandidates}
+        loadFileHeadings={props.loadFileHeadings}
+        onOpenPath={props.onOpenPath}
+        reactionControls={reactionControls}
+        renderMessageFooter={renderFooter}
+        working={working}
+        workingMessageId={dispatch?.liveTriggerMessageId ?? null}
+        listRef={listRef}
+        firstUnreadMessageId={firstUnreadMessageId}
+        flashMessageId={flashMessageId}
+      />
+      {messageDelete.dialog}
+    </>
   );
 }

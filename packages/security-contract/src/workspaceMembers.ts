@@ -33,6 +33,17 @@ export const MAX_WORKSPACE_MEMBERS = 1_000;
 
 export const MAX_MEMBER_EMAIL_CHARS = 320;
 
+/** The longest message or thread id any door takes to delete a message. */
+export const MESSAGE_DELETE_ID_MAX_CHARS = 512;
+
+// A failed delete's words on the desktop, in the CLI and on the share page.
+// The failure leads; the refusal or the offline words follow it. The relay
+// answers not-found to every refused delete, so the refusal fits a message
+// that is gone, someone else's, or one a changed role no longer covers.
+export const MESSAGE_DELETE_FAILED = "dohc could not delete the message.";
+export const MESSAGE_DELETE_REFUSED = "It is gone, or your role does not let you delete it.";
+export const MESSAGE_DELETE_OFFLINE = "Deleting needs a connection.";
+
 export interface WorkspacePerson {
   /** Stable id of this entry. The owner's entry uses `"owner"`. */
   memberId: string;
@@ -172,6 +183,12 @@ export const WORKSPACE_MEMBER_ROUTES = {
    * admin. Null clears the rule, so the Group takes the member level.
    */
   groupRule: "/sync/:workspaceId/members/groups/:channelWireId/rule",
+  /**
+   * POST {threadId} → {messageId, threadId, deletedAtMs}. Deletes a message in a Group or
+   * a file's Comments: the owner or an admin any message, a member their own.
+   * Every refusal answers not-found.
+   */
+  messageDelete: "/sync/:workspaceId/chat/messages/:messageId/delete",
   /**
    * POST → WorkspaceMembersView. Owner or admin. One of:
    * - {folder, members, people}: a new rule for a workspace-relative folder

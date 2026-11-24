@@ -42,6 +42,28 @@
 .chat-body table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
 .chat-body :is(th, td) { border: 1px solid var(--viewer-line); padding: 4px 8px; }
 .chat-body-omitted { margin: 0; color: var(--viewer-muted); font-size: 14px; font-style: italic; }
+/* A message's Delete shows on hover or focus, and always on a touch screen. */
+.chat-delete { align-self: center; min-width: 24px; height: 24px; margin-left: auto; padding: 0 4px; opacity: 0; }
+.chat-message:hover .chat-delete, .chat-delete:focus-visible { opacity: 1; }
+@media (pointer: coarse) { .chat-delete { opacity: 1; } }
+/* A deleted message's line, as the desktop draws it: the interface font, muted, after the Ban mark. */
+.chat-deleted { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--viewer-muted); font: 14px/1.55 ui-sans-serif, system-ui, sans-serif; }
+.chat-deleted .icon { flex: none; color: var(--viewer-subtle); }
+/* The desktop's confirmation card: a tile beside one text column, the buttons at its right end.
+   `download-card` keeps it at a fixed top, so a failure below the text doesn't move it. */
+.chat-delete-dialog[open] { display: flex; gap: 12px; }
+.chat-delete-column { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 24px; padding-top: 4px; }
+.chat-delete-body { display: flex; flex-direction: column; gap: 4px; color: var(--viewer-muted); font-size: 13px; }
+.link-page dialog .chat-delete-body p { margin: 0; }
+.chat-delete-quote { overflow: hidden; border-left: 2px solid var(--viewer-line); padding-left: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.link-page dialog .chat-delete-error { display: flex; align-items: flex-start; gap: 4px; margin: 0; color: var(--viewer-danger); font-size: 12px; }
+.chat-delete-error .icon { flex: none; margin-top: 3px; }
+.chat-delete-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.link-page dialog .chat-delete-actions .handoff-button { margin: 0; }
+/* Cancel is the desktop's outlined secondary: no fill of its own, so it never reads as a second confirm. */
+.link-page dialog .chat-delete-actions .handoff-button.secondary { border-color: var(--viewer-line); background: transparent; color: var(--viewer-muted); }
+.link-page dialog .chat-delete-actions .handoff-button.secondary:enabled:hover { background: var(--viewer-hover); color: var(--viewer-ink); }
+.link-page dialog .chat-delete-actions .handoff-button.secondary:disabled { color: var(--viewer-subtle); }
 
 .chat-jump { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); background: var(--viewer-paper); }
 .handoff-button.secondary.chat-jump:hover { background: var(--viewer-panel); }

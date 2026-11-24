@@ -3732,8 +3732,7 @@ describe("engine history and linked Chats IPC contract", () => {
     expect(
       CreateFileChatPayload.safeParse({
         workspaceId: "ws-engine",
-        path: "notes/plan.md",
-        title: "",
+        path: "",
       }).success,
     ).toBe(false);
     expect(

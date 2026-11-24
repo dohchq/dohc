@@ -1704,6 +1704,39 @@ function makeRoom(
   );
 }
 
+const NOTICE_TOMBSTONE_SQL = `UPDATE sync_relay_notices
+     SET removed_at_ms = ?, body = '', target_json = NULL, expires_at_ms = ?, change_seq = ?
+     WHERE recipient_user_id = ? AND notice_id = ?`;
+
+/**
+ * Removes every recipient's Notice of one deleted chat message, read or not,
+ * so no stored Notice body keeps its text. Each row becomes a tombstone with a
+ * new change, so each computer drops it through an ordinary pull.
+ */
+export function removeChatMessageNotices(
+  storage: StorageContext,
+  input: { senderUserId: string; relaySeq: number; nowMs: number },
+): void {
+  const noticeId = noticeIdFrom(input.senderUserId, `chat-message:${input.relaySeq}`);
+  const recipients = storage.db
+    .prepare(
+      `SELECT recipient_user_id FROM sync_relay_notices INDEXED BY idx_sync_relay_notices_post
+     WHERE sender_user_id = ? AND notice_id = ? AND removed_at_ms IS NULL`,
+    )
+    .all(input.senderUserId, noticeId)
+    .map((row) => String(row.recipient_user_id));
+  const tombstone = storage.db.prepare(NOTICE_TOMBSTONE_SQL);
+  for (const recipientUserId of recipients) {
+    tombstone.run(
+      input.nowMs,
+      input.nowMs + NOTICE_REMOVED_RETENTION_MS,
+      nextChangeSeq(storage, recipientUserId),
+      recipientUserId,
+      noticeId,
+    );
+  }
+}
+
 // Turns up to `needed` rows into tombstones: read or dismissed rows from
 // `markedSender` (anyone's when null), then unread rows from `unreadSender`
 // (anyone's when null), oldest first. Each tombstone drops its body and
@@ -1731,11 +1764,7 @@ function removeRows(
   const noticeIds = pick(markedSender, MARKED, needed);
   if (noticeIds.length < needed)
     noticeIds.push(...pick(unreadSender, UNREAD, needed - noticeIds.length));
-  const tombstone = storage.db.prepare(
-    `UPDATE sync_relay_notices
-     SET removed_at_ms = ?, body = '', target_json = NULL, expires_at_ms = ?, change_seq = ?
-     WHERE recipient_user_id = ? AND notice_id = ?`,
-  );
+  const tombstone = storage.db.prepare(NOTICE_TOMBSTONE_SQL);
   const removeWake = storage.db.prepare(
     "DELETE FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?",
   );

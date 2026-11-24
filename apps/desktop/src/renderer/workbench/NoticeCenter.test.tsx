@@ -11,6 +11,7 @@ import {
   type WorkspaceErrorNotice,
 } from "./NoticeCenter";
 import { deferred } from "../../testing/deferred";
+import { initKeyboardNavigation, KEYBOARD_NAV_ATTRIBUTE } from "../keyboardNavigation";
 import { Overlay } from "../Overlay";
 function liveDeliveryIcon(surface: HTMLElement): string | undefined {
   const icon = surface.querySelector("svg");
@@ -162,6 +163,54 @@ it("keeps Notices open on a step that runs in place, with focus on its row and t
   expect(screen.getByTestId("notice-held")).toBeTruthy();
   view.rerender(noticeElement({ ...props, workspaceErrors: [{ ...done, id: "restored" }] }));
   expect(screen.getByTestId("notice-restored").contains(document.activeElement)).toBe(true);
+});
+
+it("keeps the keyboard mark when a step pressed with Enter moves focus to its row and outcome", async () => {
+  const stop = initKeyboardNavigation();
+  const marked = () => document.documentElement.hasAttribute(KEYBOARD_NAV_ATTRIBUTE);
+  try {
+    const held: WorkspaceErrorNotice = {
+      id: "held",
+      tone: "warning",
+      title: "Access to team was widened outside dohc",
+      message: "Until you choose…",
+      atMs: 1,
+      canRetry: false,
+      seen: true,
+      actionLabel: "Restore rule",
+      additionalActionLabels: ["Allow new access"],
+      actionStays: true,
+      noDismiss: true,
+      target: { to: "folder", path: "team" },
+    };
+    const props = { onWorkspaceErrorAction: vi.fn(), onOpenTarget: async () => null };
+    const view = renderNotices({ ...props, workspaceErrors: [held] });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const allow = within(screen.getByTestId("notice-held")).getByRole("button", {
+      name: "Allow new access",
+    });
+    allow.focus();
+    fireEvent.keyDown(allow, { key: "Tab" });
+    await userEvent.keyboard("{Enter}");
+    expect(props.onWorkspaceErrorAction).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("notice-held").contains(document.activeElement)).toBe(true);
+    expect(marked()).toBe(true);
+
+    const done: WorkspaceErrorNotice = {
+      id: "done",
+      tone: "success",
+      message: "Members can now edit team.",
+      atMs: 2,
+      canRetry: false,
+      seen: true,
+    };
+    view.rerender(noticeElement({ ...props, workspaceErrors: [done] }));
+    expect(screen.getByTestId("notice-done").contains(document.activeElement)).toBe(true);
+    expect(marked()).toBe(true);
+  } finally {
+    stop();
+    document.documentElement.removeAttribute(KEYBOARD_NAV_ATTRIBUTE);
+  }
 });
 
 it("shows a row's lead above its rows and reads it out while Notices is open", async () => {

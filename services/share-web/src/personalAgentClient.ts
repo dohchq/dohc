@@ -11,6 +11,7 @@ export type PersonalAgentAction =
   | "chat"
   | "discussion"
   | "post"
+  | "delete"
   | "wait"
   | "collection-writes";
 

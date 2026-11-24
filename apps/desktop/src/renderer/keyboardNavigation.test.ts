@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import css from "./styles.css?raw";
-import { initKeyboardNavigation, KEYBOARD_NAV_ATTRIBUTE } from "./keyboardNavigation";
+import {
+  initKeyboardNavigation,
+  KEYBOARD_NAV_ATTRIBUTE,
+  resumeKeyboardMark,
+} from "./keyboardNavigation";
 
 describe("keyboard navigation", () => {
   let stop: () => void;
@@ -47,12 +51,66 @@ describe("keyboard navigation", () => {
     expect(marked()).toBe(false);
   });
 
+  it("brings back a mark Enter took away when a step moves focus later", () => {
+    key("Tab");
+    key("Enter");
+    expect(marked()).toBe(false);
+    resumeKeyboardMark();
+    expect(marked()).toBe(true);
+
+    press();
+    key("Enter");
+    resumeKeyboardMark();
+    expect(marked()).toBe(false);
+
+    key("Tab");
+    key("Enter");
+    press();
+    resumeKeyboardMark();
+    expect(marked()).toBe(false);
+  });
+
   it("keeps the mark as it was for a modifier alone or Escape", () => {
     key("Tab");
     key("Shift");
     key("Escape");
     expect(marked()).toBe(true);
     press();
+    key("Escape");
+    expect(marked()).toBe(false);
+  });
+
+  it("brings back the mark at Escape after Enter or Space opened something from a marked control", () => {
+    for (const name of ["Enter", " "]) {
+      press();
+      key("Tab");
+      key(name);
+      expect(marked(), name).toBe(false);
+      key("Escape");
+      expect(marked(), `${name}, then Escape`).toBe(true);
+    }
+    // Enter again inside the dialog still closes back to the ring.
+    key("Enter");
+    key("Enter");
+    key("Escape");
+    expect(marked()).toBe(true);
+  });
+
+  it("leaves the mark off at Escape when Enter came after a pointer press or another key", () => {
+    press();
+    key("Enter");
+    key("Escape");
+    expect(marked()).toBe(false);
+
+    key("Tab");
+    key("Enter");
+    press();
+    key("Escape");
+    expect(marked()).toBe(false);
+
+    key("Tab");
+    key("Enter");
+    key("a");
     key("Escape");
     expect(marked()).toBe(false);
   });

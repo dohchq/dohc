@@ -1,4 +1,7 @@
-import type { GroupRuleLevel } from "@dohc/security-contract/workspace-members";
+import {
+  MESSAGE_DELETE_FAILED,
+  type GroupRuleLevel,
+} from "@dohc/security-contract/workspace-members";
 import type { UndoAgentRunResult } from "@dohc/workspace-contracts/agent-run-undo";
 import type { HeldNoteChangeInput, HeldNoteChangeResult } from "@dohc/workspace-engine-client";
 import { ChatMessageWaiters } from "./chatMessageWaiters";
@@ -2569,6 +2572,7 @@ const HAND_WRITTEN_SHARE_RULES: {
   reply: "chat",
   nothingToReport: "chat",
   react: "chat",
+  chatDelete: "chat",
   fileChatStart: "chat",
   export: "chat",
   watch: "chat",
@@ -4927,6 +4931,35 @@ async function dispatchWorkspace(
       };
     }
 
+    case "chatDelete": {
+      // A delete goes to the relay, as the Members page's actions do. A
+      // workspace that never synced, or another share view, has none.
+      if ((context.readOnly && !context.joined) || !context.members)
+        throw new CliCommandError("Delete messages in a workspace that syncs, or one you joined.");
+      const threads = await loadThreads(chats, channels);
+      const messagesByThread = await loadMessagesByThread(chats, threads);
+      const target = resolveThreadOrMessage(request.args.message, threads, messagesByThread);
+      if (!target.rootMessage) {
+        throw new CliCommandError(`no such message: ${request.args.message}`);
+      }
+      try {
+        await context.members({
+          action: "deleteMessage",
+          threadId: target.thread.thread.id,
+          messageId: target.rootMessage.id,
+        });
+      } catch (cause) {
+        throw new CliCommandError(
+          `${MESSAGE_DELETE_FAILED} ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
+      }
+      return {
+        threadId: cliThreadId(target.thread.thread.id),
+        messageId: cliMessageId(target.rootMessage.id),
+        deleted: true as const,
+      };
+    }
+
     case "grep": {
       const threads = await loadThreads(chats, channels);
       const scopedChannel = request.args.group
@@ -5184,6 +5217,7 @@ async function workspaceContextForRequest(
     request.verb === "nothingToReport" ||
     (declaredReadOnlyRule !== undefined && declaredReadOnlyRule !== "handler-decides") ||
     request.verb === "react" ||
+    request.verb === "chatDelete" ||
     request.verb === "export" ||
     request.verb === "watch" ||
     (request.verb === "show" && !request.args.peek);
@@ -5220,6 +5254,7 @@ function joinedWorkspaceWriteRefusal(verb: CliVerb, fileRequest: boolean): strin
     case "post":
     case "reply":
     case "react":
+    case "chatDelete":
     case "show":
     case "documentCreate":
     case "documentEdit":

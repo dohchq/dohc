@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { getDohcYDocBodyFragment, markdownToYDoc } from "@dohc/ydoc-projection";
 import type { NamedLiveBrowserState } from "@dohc/ydoc-projection/named-live-browser-transport";
@@ -164,6 +164,8 @@ function server(
     history?: Record<string, unknown[]>;
     older?: Record<string, unknown[]>;
     postFails?: { status: number; code: string };
+    moderates?: boolean;
+    deleteFails?: number;
     openHeld?: boolean;
     // Holds a read of the log that asks for no wait too, so a test can see what each read asked for.
     holdLogs?: boolean;
@@ -191,6 +193,7 @@ function server(
 ) {
   let signedIn = options.signedIn ?? true,
     groupsFail = options.groupsFail ?? 0,
+    deleteFails = options.deleteFails ?? 0,
     holdGroups = options.holdGroups ?? 0;
   // A test can change the level, the rules or the files while the page is open; the next read carries them.
   const files = () =>
@@ -234,7 +237,12 @@ function server(
         body,
         answer: (value, status = 200) => {
           held.splice(held.indexOf(item), 1);
-          resolve(jsonResponse(value, status));
+          // A chat follow page always lists the messages deleted since its cursor.
+          const page =
+            (path === "chat" || path === "comments") && status === 200
+              ? { deleted: [], ...(value as object) }
+              : value;
+          resolve(jsonResponse(page, status));
         },
       };
       held.push(item);
@@ -306,6 +314,7 @@ function server(
       userId: user(),
       maxPostBytes: 9000,
       maxBodyBytes: 8000,
+      moderates: options.moderates ?? false,
       channels: groups().map((group) => ({
         channelWireId: group.wire,
         name: group.name,
@@ -319,6 +328,18 @@ function server(
       return hold("groups", url, signal, listing());
     }
     if (url.pathname === "/api/named-chat/channels") return jsonResponse(listing());
+    if (url.pathname === "/api/named-chat/messages/delete") {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      posts.push({ deleted: body });
+      if (deleteFails > 0) {
+        deleteFails -= 1;
+        return jsonResponse({ ok: false, error: "not found" }, 404);
+      }
+      return jsonResponse({
+        shareId: "share",
+        deleted: { messageId: body.messageId, threadId: body.threadId, deletedAtMs: 50_000 },
+      });
+    }
     // The relay answers 404 for a file or Group the member no longer reaches.
     const gone = (place: { path?: unknown; channelWireId?: unknown }) =>
       typeof place.path === "string"
@@ -1956,6 +1977,163 @@ it("copies a toast's text with the Copy button beside it", async () => {
   expect(writeText).toHaveBeenCalledWith(
     'dohc could not open "plan.md" for editing\nThe owner paused live editing for this page. You can still read it.',
   );
+});
+
+describe("deleting a Group message", () => {
+  const history = {
+    "wire-plans": [chat(3, "Plans start here"), chat(4, "Mine to take back", "sam")],
+  };
+  const deletes = () => [
+    ...groupPanel().querySelectorAll<HTMLButtonElement>('button[aria-label="Delete message"]'),
+  ];
+  const dialog = () => container.querySelector<HTMLDialogElement>("dialog[open]");
+  const inDialog = (label: string) =>
+    [...dialog()!.querySelectorAll("button")].find((node) => node.textContent === label)!;
+  async function settledOpen() {
+    await settle(
+      () =>
+        text().includes("Mine to take back") &&
+        text().includes("Plans start here") &&
+        following("chat").length === 1,
+    );
+  }
+
+  it("lets a member delete only their own message, says why a refused delete failed, and leaves the line", async () => {
+    server({ history, deleteFails: 1 });
+    await render();
+    await settledOpen();
+    expect(deletes()).toHaveLength(1);
+    await act(async () => deletes()[0]!.click());
+    expect(dialog()!.querySelector("h2")?.textContent).toBe("Delete this message?");
+    expect(dialog()!.querySelector(".chat-delete-quote")?.textContent).toBe("Mine to take back");
+    expect(dialog()!.querySelector("#chat-delete-body")?.textContent).toContain(
+      "This removes the message from this conversation for everyone. You can't undo it. People who already read it may keep a copy.",
+    );
+    // Delete takes focus, as on the desktop. A held Enter does nothing, and the arrows move between the buttons.
+    expect(document.activeElement).toBe(inDialog("Delete"));
+    const held = new KeyboardEvent("keydown", {
+      key: "Enter",
+      repeat: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    inDialog("Delete").dispatchEvent(held);
+    expect(held.defaultPrevented).toBe(true);
+    await act(async () =>
+      inDialog("Delete").dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true, cancelable: true }),
+      ),
+    );
+    expect(document.activeElement).toBe(inDialog("Cancel"));
+    await act(async () => inDialog("Delete").click());
+    await settle(() => dialog()?.querySelector('[role="alert"]') !== null);
+    const alert = dialog()!.querySelector('[role="alert"]')!;
+    expect(alert.textContent).toBe(
+      "dohc could not delete the message. It is gone, or your role does not let you delete it.",
+    );
+    expect(alert.classList.contains("chat-delete-error")).toBe(true);
+    expect(alert.querySelector(".icon")).not.toBeNull();
+    // Delete was disabled while it ran; Try again takes focus back.
+    expect(document.activeElement).toBe(inDialog("Try again"));
+    await act(async () => inDialog("Try again").click());
+    await settle(() => dialog() === null && !text().includes("Mine to take back"));
+    expect(posts.filter((post) => "deleted" in post)).toEqual([
+      { deleted: { shareId: "share", threadId: "t4", messageId: "m4" } },
+      { deleted: { shareId: "share", threadId: "t4", messageId: "m4" } },
+    ]);
+    // The desktop's line: the Ban mark before the words.
+    const line = groupPanel().querySelector(".chat-deleted")!;
+    expect(line.textContent).toBe("Message deleted");
+    expect(line.querySelector(".icon circle")).not.toBeNull();
+    expect(groupPanel().textContent).toContain("Plans start here");
+    expect(deletes()).toHaveLength(0);
+    // As on the desktop, the deleted line offers no Reply; Ana's post keeps hers.
+    expect(groupPanel().querySelector('.chat-message[data-seq="4"] .chat-replies')).toBeNull();
+    expect(
+      groupPanel().querySelector('.chat-message[data-seq="3"] .chat-replies')?.textContent,
+    ).toBe("Reply");
+    // Its Delete has gone and no message follows, so focus goes to the composer, not the pane.
+    expect(document.activeElement).toBe(groupPanel().querySelector(".chat-composer textarea"));
+  });
+
+  it("keeps a deleted post's replies link and puts focus on it", async () => {
+    server({
+      history: {
+        "wire-plans": [
+          chat(3, "Plans start here"),
+          chat(4, "Mine to take back", "sam"),
+          chat(5, "Noted", "ana", { threadId: "t4", startsPost: false }),
+        ],
+      },
+    });
+    await render();
+    await settledOpen();
+    await act(async () => deletes()[0]!.click());
+    await act(async () => inDialog("Delete").click());
+    await settle(() => dialog() === null && !text().includes("Mine to take back"));
+    const replies = groupPanel().querySelector('.chat-message[data-seq="4"] .chat-replies');
+    expect(replies?.textContent).toBe("1 reply");
+    expect(document.activeElement).toBe(replies);
+  });
+
+  it("offers Delete on every message to the owner or an admin, and Cancel deletes nothing", async () => {
+    server({ history, moderates: true });
+    await render();
+    await settledOpen();
+    expect(deletes()).toHaveLength(2);
+    await act(async () => deletes()[0]!.click());
+    // Another person's message names its author.
+    expect(dialog()!.querySelector("h2")?.textContent).toBe("Delete Ana's message?");
+    expect(dialog()!.querySelector(".chat-delete-quote")?.textContent).toBe("Plans start here");
+    await act(async () => inDialog("Cancel").click());
+    expect(dialog()).toBeNull();
+    expect(posts.filter((post) => "deleted" in post)).toEqual([]);
+    expect(text()).toContain("Plans start here");
+    // Escape hands focus back to the Delete that opened the dialog.
+    deletes()[1]!.focus();
+    await act(async () => deletes()[1]!.click());
+    expect(document.activeElement).toBe(inDialog("Delete"));
+    await act(async () => dialog()!.dispatchEvent(new Event("cancel", { cancelable: true })));
+    expect(dialog()).toBeNull();
+    expect(document.activeElement).toBe(deletes()[1]);
+  });
+
+  it("removes a message another person deleted when the follow brings the delete", async () => {
+    server({ history });
+    await render();
+    await settledOpen();
+    await act(async () =>
+      following("chat")[0]!.answer({
+        shareId: "share",
+        nextCursor: 22,
+        hasMore: false,
+        messages: [],
+        deleted: [{ messageId: "m3", threadId: "t3", deletedAtMs: 21_000, relaySeq: 22 }],
+      }),
+    );
+    await settle(() => !text().includes("Plans start here"));
+    expect(groupPanel().textContent).toContain("Mine to take back");
+  });
+
+  it("keeps a message deleted when an older page read before the delete arrives after it", async () => {
+    server({ history, older: { "wire-plans": [chat(2, "Deleted older text")] } });
+    await render();
+    await settledOpen();
+    // The follow brings the delete of a message this page has not loaded yet.
+    await act(async () =>
+      following("chat")[0]!.answer({
+        shareId: "share",
+        nextCursor: 22,
+        hasMore: false,
+        messages: [],
+        deleted: [{ messageId: "m2", threadId: "t2", deletedAtMs: 21_000, relaySeq: 22 }],
+      }),
+    );
+    await click("Load earlier messages");
+    await settle(() => groupPanel().querySelectorAll(".chat-message").length === 3);
+    expect(groupPanel().textContent).not.toContain("Deleted older text");
+    expect(groupPanel().textContent).toContain("Message deleted");
+  });
 });
 
 // A folder rule gives a member a level on its files that can differ from the member level.

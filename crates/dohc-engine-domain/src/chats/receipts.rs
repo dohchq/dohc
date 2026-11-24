@@ -5,7 +5,7 @@
 
 use super::{
     ChatActorKind, ChatDecision, ChatDecisionState, ChatReaction, ChatReactionState, ChatThread,
-    ChatThreadLane, LinkedChatStore,
+    ChatThreadLane, LinkedChatStore, require_thread,
 };
 use crate::error::DomainError;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -92,12 +92,14 @@ struct StoredCoordinate {
     origin_seq: i64,
 }
 
+/// The thread a start answered, without its title: an untitled thread's
+/// title is its opening line, which a delete erases, so a retry reads the
+/// title as it is now.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredThread {
     workspace_id: String,
     thread_id: String,
-    title: String,
     created_at_ms: i64,
     updated_at_ms: i64,
     lane: String,
@@ -244,7 +246,6 @@ pub(super) fn record_receipt(
         StageResult::Thread(thread) => Some(serde_json::to_string(&StoredThread {
             workspace_id: thread.workspace_id.clone(),
             thread_id: thread.thread_id.clone(),
-            title: thread.title.clone(),
             created_at_ms: thread.created_at_ms,
             updated_at_ms: thread.updated_at_ms,
             lane: thread.lane.as_str().to_owned(),
@@ -337,10 +338,11 @@ pub(super) fn replayed_thread(
         return Ok(None);
     };
     let stored: StoredThread = serde_json::from_str(&json).map_err(|_| corrupt_receipt())?;
+    let title = require_thread(conn, workspace_id, &stored.thread_id)?.title;
     Ok(Some(ChatThread {
         workspace_id: stored.workspace_id,
         thread_id: stored.thread_id,
-        title: stored.title,
+        title,
         created_at_ms: stored.created_at_ms,
         updated_at_ms: stored.updated_at_ms,
         lane: ChatThreadLane::from_db(&stored.lane)?,

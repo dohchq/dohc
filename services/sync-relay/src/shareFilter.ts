@@ -271,6 +271,9 @@ export interface ChatShareThreadResolver extends ShareFileChatResolver {
   // file-linked thread). Keeping those states distinct prevents a later batch
   // from treating a private thread as new and re-binding it into a share.
   threadChannelWireId(threadId: string): string | null | undefined;
+  // Whether the relay deleted this message. A deleted message's attachments
+  // are withheld, as its copies drop them.
+  messageDeleted(threadId: string, messageId: string): boolean;
 }
 
 export function isChatChannelSelector(
@@ -988,7 +991,7 @@ function filterChatOpForChannelShare(
     };
   }
 
-  // The four thread-scoped kinds, all scoped the same way and all serving the
+  // The thread-scoped kinds, all scoped the same way and all serving the
   // same allowlists the file branch serves.
   // `hasOwn`, never `in`: `in` walks the prototype chain, so an op kind of
   // "toString" would index a function and throw where a refusal belongs.
@@ -998,6 +1001,7 @@ function filterChatOpForChannelShare(
     if (chat.threadChannelWireId(threadId) !== selector.channelWireId) {
       return { allowed: false };
     }
+    if (attachmentOfDeleted(opKind, record, threadId, chat)) return { allowed: false };
     return {
       allowed: true,
       payload: servedChatPayload(record, opKind as keyof typeof SERVED_CHAT_FIELDS),
@@ -1008,7 +1012,7 @@ function filterChatOpForChannelShare(
   return { allowed: false };
 }
 
-// The exactly five chat kinds a file share carries. The list is an
+// The exactly seven chat kinds a file share carries. The list is an
 // allowlist and nothing falls through it. `chat.follow.set`,
 // `chat.feed.read.set`, and `chat.thread.read.set` are the reader's own state
 // and are deliberately absent
@@ -1064,6 +1068,20 @@ const SERVED_CHAT_FIELDS = {
     "chosenOption",
   ],
   "chat.attachment.add": ["attachmentId", "threadId", "messageId", "targetKind", "createdAtMs"],
+  // A deleted message's line, which the relay writes at the append's
+  // coordinate. Neither digest of the deleted append is ever in the log.
+  "chat.message.tombstone": [
+    "messageId",
+    "threadId",
+    "parentMessageId",
+    "authorKind",
+    "authorDisplayName",
+    "authorOwnerDisplayName",
+    "authorUserId",
+    "createdAtMs",
+    "deletedAtMs",
+  ],
+  "chat.message.delete": ["messageId", "threadId", "deletedAtMs"],
 } as const satisfies Record<string, readonly string[]>;
 
 const FILE_CHAT_THREAD_SCOPED_KINDS = [
@@ -1071,7 +1089,20 @@ const FILE_CHAT_THREAD_SCOPED_KINDS = [
   "chat.reaction.set",
   "chat.decision.set",
   "chat.attachment.add",
+  "chat.message.tombstone",
+  "chat.message.delete",
 ] as const;
+
+function attachmentOfDeleted(
+  opKind: string,
+  record: Record<string, unknown>,
+  threadId: string,
+  chat: ChatShareThreadResolver,
+): boolean {
+  if (opKind !== "chat.attachment.add") return false;
+  const messageId = collectString(record.messageId);
+  return messageId !== null && chat.messageDeleted(threadId, messageId);
+}
 
 // The binding a `chat.thread.create` payload claims for ITSELF. Exactly one
 // shape may be present: an op carrying both is malformed, and reading either
@@ -1180,7 +1211,8 @@ function filterFileChatOpForPathShare(
     served.linkedPath = servedPath;
     return { allowed: true, payload: served, blobSha256s: [] };
   }
-  // The four thread-scoped kinds first serve their allowlist. Recipient
+  if (attachmentOfDeleted(opKind, record, threadId, chat)) return { allowed: false };
+  // The thread-scoped kinds first serve their allowlist. Recipient
   // decoration adds token/path metadata only for attachments inside the selector.
   // Outside-selector attachments stay opaque, without an object id or path.
   return {
@@ -1205,6 +1237,7 @@ const CHAT_TEXT_FIELDS: Readonly<Record<string, readonly string[]>> = {
   ],
   "chat.reaction.set": ["emoji", "authorDisplayName"],
   "chat.decision.set": ["options", "chosenOption"],
+  "chat.message.tombstone": ["authorDisplayName", "authorOwnerDisplayName"],
 };
 
 function withholdIn(value: unknown, covers: (path: string) => boolean): unknown {
@@ -1360,7 +1393,7 @@ export function boundaryMove(
 // allowlist per selector kind. Path/version selector: moment.append (all
 // referenced paths visible, version matches), version.create for the shared
 // version (forkSnapshots redacted), the payload-free workspace.init bootstrap
-// op, and the five file-chat kinds whose thread resolves to a file
+// op, and the seven file-chat kinds whose thread resolves to a file
 // inside the selector. Chat-channel selector: only the
 // granted channel's chat ops (see filterChatOpForChannelShare) — file, secret,
 // version, and bootstrap ops stay excluded. Everything unrecognized is
@@ -1371,6 +1404,39 @@ export function filterOpForShare(
   payloadJson: string,
   chat?: ChatShareThreadResolver,
   // For a group: serve only this half. A page is read one half at a time.
+  half?: "chat" | "files",
+): ShareOpDecision {
+  return withoutDeletedWords(
+    shareReadDecision(selector, opKind, payloadJson, chat, half),
+    opKind,
+    chat,
+  );
+}
+
+// A decision names its poll's choices. Once the relay deletes the poll's
+// message, a reader reads the decision with no choices. Only reads drop them:
+// the stored op keeps them, so a retry and the owner's journal still match.
+// A thread's title is the one a person typed, so it stays.
+function withoutDeletedWords(
+  decision: ShareOpDecision,
+  opKind: string,
+  chat: ChatShareThreadResolver | undefined,
+): ShareOpDecision {
+  if (opKind !== "chat.decision.set" || !decision.allowed || !chat) return decision;
+  const served = asRecord(decision.payload);
+  const threadId = collectString(served?.threadId);
+  const messageId = collectString(served?.messageId);
+  if (!served || !threadId || !messageId || !chat.messageDeleted(threadId, messageId))
+    return decision;
+  const { options: _options, chosenOption: _chosenOption, ...rest } = served;
+  return { ...decision, payload: rest };
+}
+
+function shareReadDecision(
+  selector: AnyShareSelector,
+  opKind: string,
+  payloadJson: string,
+  chat?: ChatShareThreadResolver,
   half?: "chat" | "files",
 ): ShareOpDecision {
   const parsed = parseShareOpPayloadWithReferencedPaths(payloadJson);
@@ -1598,7 +1664,7 @@ export function filterOpForShare(
 //
 // Only chat crosses in this direction today. A chat grant at
 // `read-write` appends what the channel branch admits. A file share appends
-// only the five file-chat kinds: the file-chat branch's own terminal
+// only the seven file-chat kinds: the file-chat branch's own terminal
 // deny is the allowlist, so `moment.append`, `workspace.init`, `version.create`,
 // and every unknown kind are refused there. This function never falls through
 // to the read filter.

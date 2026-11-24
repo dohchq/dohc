@@ -169,6 +169,7 @@ type CliCommandBody =
       agent?: string;
     }
   | { verb: "react"; message: string; emoji: string }
+  | { verb: "chatDelete"; message: string }
   | {
       verb: "grep";
       pattern: string;
@@ -1224,6 +1225,22 @@ const CHAT_VERBS = {
       if (!message || !emoji) fail("react requires a message id and emoji");
       noExtraArgs(extra, "react");
       return { verb: "react", message, emoji };
+    },
+  },
+  delete: {
+    capabilityId: "chat.message.delete",
+    summary:
+      "Delete a message in a Group or a file's Comments: your own, or any as the owner or an admin.",
+    operands: "<message>",
+    notes: [
+      "This can't be undone. The message shows as deleted everywhere it syncs. People who already read it may keep a copy.",
+      "It needs a workspace that syncs and a connection.",
+    ],
+    parse: ({ operands }) => {
+      const [message, ...extra] = operands;
+      if (!message) fail("delete requires a message id");
+      noExtraArgs(extra, "delete");
+      return { verb: "chatDelete", message };
     },
   },
   grep: {

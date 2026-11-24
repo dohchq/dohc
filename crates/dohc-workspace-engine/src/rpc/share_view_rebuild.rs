@@ -599,7 +599,7 @@ impl EngineService {
             .await?;
         let read = self.rebuild_read_old(&old, params).await;
         self.workspace_close(Some(old)).await?;
-        let old = read?;
+        let mut old = read?;
 
         // The swap renames the store between these folders, which only
         // works within one filesystem.
@@ -635,6 +635,7 @@ impl EngineService {
         };
         self.rebuild_crash_point("built")?;
 
+        exclude_deleted_chat(root, workspace_id, &mut old.unsent)?;
         let (plan, copies) = plan(root, &manifest, params, &old, &new)?;
         let saved = saved_copies(root);
         std::fs::create_dir_all(&saved)
@@ -1452,6 +1453,53 @@ fn plan(
         },
         named,
     ))
+}
+
+/// The fresh pull can learn of deletions the old copy missed while offline.
+/// Apply them before old journal text becomes a new recovery file.
+fn exclude_deleted_chat(
+    root: &Path,
+    workspace_id: &str,
+    unsent: &mut RebuildUnsent,
+) -> Result<(), WireError> {
+    let store =
+        dohc_engine_storage::EngineStore::open_read_only(&staging_store(root).join("engine.db"))
+            .map_err(|_| failed("share-view-rebuild-store-unreadable"))?;
+    let deleted = store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT EXISTS (SELECT 1 FROM chat_deleted_messages \
+                 WHERE workspace_id = ?1 AND message_id = ?2)",
+            )?;
+            let messages: BTreeSet<&str> = unsent
+                .messages
+                .keys()
+                .map(String::as_str)
+                .chain(
+                    unsent
+                        .chat
+                        .iter()
+                        .filter_map(|(_, payload)| payload["messageId"].as_str()),
+                )
+                .collect();
+            let mut deleted = HashSet::new();
+            for message in messages {
+                if statement.query_row([workspace_id, message], |row| row.get::<_, bool>(0))? {
+                    deleted.insert(message.to_owned());
+                }
+            }
+            Ok::<_, rusqlite::Error>(deleted)
+        })
+        .map_err(|_| failed("share-view-rebuild-store-unreadable"))?;
+    unsent
+        .messages
+        .retain(|message, _| !deleted.contains(message));
+    unsent.chat.retain(|(_, payload)| {
+        payload["messageId"]
+            .as_str()
+            .is_none_or(|message| !deleted.contains(message))
+    });
+    Ok(())
 }
 
 /// One Markdown file per thread with unsent chat: each message with its

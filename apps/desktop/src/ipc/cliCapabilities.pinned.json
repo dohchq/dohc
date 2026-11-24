@@ -45,6 +45,9 @@
     "react": [
       "chat.react"
     ],
+    "chatDelete": [
+      "chat.message.delete"
+    ],
     "grep": [
       "chat.search"
     ],
@@ -327,6 +330,7 @@
       "members.link.change",
       "members.end",
       "members.group.rule",
+      "chat.message.delete",
       "members.folder.rule",
       "members.folder.marker.remove"
     ],
@@ -372,6 +376,7 @@
     "chat reply": "chat.reply",
     "chat retry": "agent.run.retry",
     "chat react": "chat.react",
+    "chat delete": "chat.message.delete",
     "chat grep": "chat.search",
     "chat export": "chat.export",
     "dataset list": "dataset.list",

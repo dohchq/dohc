@@ -186,6 +186,7 @@ it("lists the workspaces from the reach check that starts each request", async (
   const f = fixture();
   const client = await f.connect();
   expect((await client.listTools()).tools.map((tool) => tool.name).sort()).toEqual([
+    "dohc_delete_message",
     "dohc_list_files",
     "dohc_list_groups",
     "dohc_list_workspaces",
@@ -209,6 +210,55 @@ it("lists the workspaces from the reach check that starts each request", async (
   });
   // The request's own reach check answers the list.
   expect(f.calls).toEqual([]);
+});
+
+it("deletes one of the agent's own messages through the relay, and says when it cannot", async () => {
+  const f = fixture({
+    answer: ({ action, body }) =>
+      action === "delete" && body.messageId === "personal-message:mine"
+        ? Response.json({
+            ok: true,
+            workspaceId: "trip",
+            messageId: body.messageId,
+            threadId: body.threadId,
+            deletedAtMs: 9,
+          })
+        : Response.json({ ok: false, code: "not_found" }, { status: 404 }),
+  });
+  const client = await f.connect();
+  const deleted = await client.callTool({
+    name: "dohc_delete_message",
+    arguments: { workspace: "trip", threadId: "thread-1", messageId: "personal-message:mine" },
+  });
+  expect(deleted.isError).toBeFalsy();
+  expect(structured(deleted)).toEqual({
+    ok: true,
+    workspace: "trip",
+    threadId: "thread-1",
+    messageId: "personal-message:mine",
+    deletedAtMs: 9,
+  });
+  const refused = await client.callTool({
+    name: "dohc_delete_message",
+    arguments: { workspace: "trip", threadId: "thread-1", messageId: "someone-else" },
+  });
+  expect(refused.isError).toBe(true);
+  expect(structured(refused)).toMatchObject({
+    ok: false,
+    code: "not_found",
+    error:
+      "dohc could not delete this message. You can delete only your own messages in a Group or a file's Comments.",
+  });
+  expect(f.calls).toEqual([
+    {
+      action: "delete",
+      body: { workspaceId: "trip", threadId: "thread-1", messageId: "personal-message:mine" },
+    },
+    {
+      action: "delete",
+      body: { workspaceId: "trip", threadId: "thread-1", messageId: "someone-else" },
+    },
+  ]);
 });
 
 it("lists a workspace's Groups, each by the channel the other tools take, and says when the server is busy or keeps no copies", async () => {

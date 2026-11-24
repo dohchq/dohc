@@ -153,6 +153,28 @@ export function inspect<T>(dbPath: string, query: (db: InspectionDatabase) => T)
   }
 }
 
+// A deleted message's digests are for retries only. A reader who joins later
+// could check a guessed message against one, so no answer holds one, and no
+// message in it names a digest field. File ops name blob digests, as they should.
+export function expectNoDeletedDigest(dbPath: string, answer: unknown): void {
+  const digests = new Set(
+    inspect(dbPath, (db) =>
+      db.prepare("SELECT append_sha256, body_sha256 FROM sync_relay_deleted_messages").all(),
+    ).flatMap((row) => [String(row.append_sha256), String(row.body_sha256)]),
+  );
+  expect(digests.size).toBeGreaterThan(0);
+  const visit = (value: unknown, path: string): void => {
+    if (typeof value === "string") expect(digests.has(value), path).toBe(false);
+    else if (Array.isArray(value)) value.forEach((item, index) => visit(item, `${path}[${index}]`));
+    else if (value !== null && typeof value === "object")
+      for (const [key, item] of Object.entries(value)) {
+        if ("messageId" in value) expect(key.endsWith("Sha256"), `${path}.${key}`).toBe(false);
+        visit(item, `${path}.${key}`);
+      }
+  };
+  visit(answer, "answer");
+}
+
 export function countRows(dbPath: string, table: string): number {
   return inspect(dbPath, (db) =>
     Number(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()?.count ?? 0),

@@ -79,6 +79,7 @@
   "chat.follows.list",
   "chat.inbox.read",
   "chat.inbox.seen.mark",
+  "chat.message.delete",
   "chat.message.link",
   "chat.navigation.list",
   "chat.post",

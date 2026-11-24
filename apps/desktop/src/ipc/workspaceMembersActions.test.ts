@@ -146,6 +146,19 @@ describe("workspace members actions", () => {
     }
   });
 
+  // The relay answers not-found to every refusal: a message that is gone,
+  // someone else's for a member, or one a changed role no longer covers.
+  it("words a refused delete so it is true whatever the cause", async () => {
+    const h = harness();
+    h.relay.mockResolvedValueOnce(json({ error: "not_found" }, 404));
+    await expect(
+      h.bridge.workspaceMembers({
+        workspaceId: "ws-1",
+        request: { action: "deleteMessage", threadId: "t-1", messageId: "m-1" },
+      }),
+    ).rejects.toThrow(/^It is gone, or your role does not let you delete it\.$/u);
+  });
+
   it("refuses a received share view before asking the relay", async () => {
     const h = harness({
       shareView: {

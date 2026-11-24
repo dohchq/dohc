@@ -92,6 +92,8 @@ export function pushChatResolver(
     threadFileBinding: (id) => storage.findThreadCreateFileBinding(workspaceId, id),
     objectCurrentPath: (id) => storage.objectCurrentPath(workspaceId, id),
     objectIdAtPath: (path) => storage.objectIdAtPath(workspaceId, path),
+    messageDeleted: (threadId, messageId) =>
+      storage.messageDeleted(workspaceId, threadId, messageId),
   };
 }
 

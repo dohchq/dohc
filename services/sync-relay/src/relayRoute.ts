@@ -201,6 +201,7 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
       action === "workspaces" ||
       action === "groups" ||
       action === "post" ||
+      action === "delete" ||
       action === "wait" ||
       action === "chat" ||
       action === "discussion" ||

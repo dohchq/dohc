@@ -3,6 +3,7 @@ import { modalReturnTarget } from "../modalFocus";
 import { onOverlayOpen } from "../overlayStack";
 import { createPortal, flushSync } from "react-dom";
 import { onComposerRoomChange } from "./toastClearance";
+import { resumeKeyboardMark } from "../keyboardNavigation";
 import { automationReachCopy } from "../automationReachCopy";
 import {
   AlertTriangle,
@@ -2488,9 +2489,11 @@ export function NoticeCenter(props: {
   const runLocalAction = (action: NoticeAction, from: HTMLElement) => {
     if (action.stays) {
       // The pressed step goes disabled while it works, which drops its focus,
-      // so the row's own stop takes it.
+      // so the row's own stop takes it, and then the outcome. A step pressed
+      // from the keyboard keeps the keyboard mark, so both show where focus is.
       const row = from.closest<HTMLElement>(NOTICE_ROW);
       rowStop(row ?? undefined)?.focus();
+      resumeKeyboardMark();
       keptFocus.current = row ? { row, before: new Set(rowsNow()) } : null;
       action.onClick();
       return;

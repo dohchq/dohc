@@ -432,8 +432,9 @@ fn rebuild_chat_index_for_workspace(
     }
     {
         let mut stmt = conn.prepare(
+            // A deleted message has no search row, as its delete left it.
             "SELECT thread_id, message_id, author_kind, author_display_name, body \
-             FROM chat_messages WHERE workspace_id = ?1 \
+             FROM chat_messages WHERE workspace_id = ?1 AND deleted_at_ms IS NULL \
              ORDER BY thread_id, message_order",
         )?;
         let mut rows = stmt.query(params![workspace_id])?;

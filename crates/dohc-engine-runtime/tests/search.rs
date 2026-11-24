@@ -972,3 +972,88 @@ fn shared_channel_replicated_chat_is_findable_through_the_real_search_reader() {
         Some("shared-message")
     );
 }
+
+#[test]
+fn a_rebuilt_index_keeps_a_deleted_message_out_of_search() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = engine_db_path(&scratch).expect("db");
+    {
+        let mut store = open(&db, 1);
+        for op in [
+            replicated_envelope(
+                "search-peer",
+                0,
+                "chat.thread.create",
+                json!({
+                    "threadId": "deleted-thread",
+                    "title": "",
+                    "createdAtMs": 10,
+                    "linkedObjectId": "deleted-object",
+                    "linkedAtMs": 10
+                }),
+            ),
+            replicated_envelope(
+                "search-peer",
+                1,
+                "chat.message.append",
+                json!({
+                    "messageId": "deleted-message",
+                    "threadId": "deleted-thread",
+                    "authorKind": "human",
+                    "authorDisplayName": "Sam",
+                    "body": "Synchronized quasar content",
+                    "createdAtMs": 20
+                }),
+            ),
+            replicated_envelope(
+                "relay:message-delete:actor-1",
+                0,
+                "chat.message.delete",
+                json!({
+                    "messageId": "deleted-message",
+                    "threadId": "deleted-thread",
+                    "deletedAtMs": 30
+                }),
+            ),
+        ] {
+            apply_chat_envelope(&mut store, &op, &NO_FAULTS).expect(&op.op_kind);
+        }
+        ensure_index(&mut store, &root, 40);
+    }
+
+    // A restart that finds no index generation rebuilds every row.
+    let mut store = open(&db, 100);
+    let outcome = store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute("DELETE FROM engine_search_index_state", [])?;
+            Ok::<(), dohc_engine_runtime::SearchError>(())
+        })
+        .expect("drop the index generation");
+    assert!(matches!(outcome, TxnOutcome::Committed(())));
+    ensure_index(&mut store, &root, 110);
+    let rows: Vec<String> = store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT message_id FROM engine_search_chat_messages_fts \
+                 WHERE workspace_id=?1 AND thread_id='deleted-thread'",
+            )?;
+            statement
+                .query_map([WS], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .expect("rebuilt chat rows");
+    assert_eq!(
+        rows,
+        vec![dohc_engine_domain::chats::CHAT_THREAD_HEADER_MESSAGE_ID.to_owned()]
+    );
+    for word in ["quasar", "Synchronized", "Sam"] {
+        assert!(
+            store
+                .read_with(|conn| granular(conn, word))
+                .expect("search")
+                .is_empty(),
+            "{word}"
+        );
+    }
+}

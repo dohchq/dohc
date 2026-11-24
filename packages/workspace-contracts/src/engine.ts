@@ -852,8 +852,7 @@ export interface ChatChannelSummary extends ChatChannel {
 // messages read from the start of the thread; `revision` is server-owned and
 // bumps on every applied advance — callers may CAS on it but never write it.
 // On an owned workspace the account's read mark decides what is read, and
-// `lastReadSequence` counts the messages before the earliest unread one in
-// arrival order, so it indexes the first unread message.
+// `lastReadSequence` is the place ChannelThreadSummary describes.
 interface ChatThreadReadState {
   workspaceId: WorkspaceId;
   threadId: ChatThreadId;
@@ -889,7 +888,9 @@ export interface ChatThread {
 export interface ChannelThreadSummary {
   thread: ChatThread;
   messageCount: number;
-  // See ChatThreadReadState.lastReadSequence.
+  // The arrival position of the first unread message that isn't deleted, in
+  // the order the thread shows, so it indexes that message. The message count
+  // when nothing is unread.
   lastReadSequence: number;
   // Derived, never stored. Messages past the local count, or on an owned
   // workspace, messages after the account's read mark.
@@ -913,6 +914,8 @@ export interface ChannelThreadSummary {
     authorAgentId?: string;
     // Only active reactions belonging to this opening message.
     reactions: ChatReaction[];
+    // Set once the relay deleted the message. The snippet is then empty.
+    deletedAtMs?: number;
   };
   // The thread's Work card. Absent when no agent reported work in it.
   work?: ChatThreadWork;
@@ -1031,6 +1034,9 @@ export interface ChatMessage {
   // Thread and stream reads name each open agent request: one per agent that
   // was asked to answer this message and has not finished. Absent when none.
   agentRequests?: ChatStreamAgentRequest[];
+  // Set once the relay deleted the message. The body is then empty, and a
+  // link author a copy first saw deleted has empty link ids.
+  deletedAtMs?: number;
 }
 
 // Where one agent's request to answer a message stands. A failure carries its
@@ -1226,9 +1232,10 @@ export interface LinkedChatStore {
   // Creates a FILE-LINKED thread. linkedFile is required (exactly-one-owner
   // at creation): an ownerless thread would be readable and indexed but
   // unreachable by navigation. Channel threads go through startChannelThread.
+  // An untitled thread shows its first message's first line.
   createThread(input: {
     workspaceId: WorkspaceId;
-    title: string;
+    title?: string;
     linkedFile: { objectId: WorkspaceObjectId; pathHint?: string };
   }): Promise<ChatThread>;
   createChannel(input: {

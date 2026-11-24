@@ -131,7 +131,7 @@ function fixture() {
     createThread: vi.fn<ChatWriteStore["createThread"]>(async (input) => ({
       id: "file-thread",
       workspaceId: input.workspaceId,
-      title: input.title,
+      title: input.title ?? "New chat",
       createdAtMs: 1,
       updatedAtMs: 1,
       linkedFile: { ...input.linkedFile, linkedAtMs: 1 },

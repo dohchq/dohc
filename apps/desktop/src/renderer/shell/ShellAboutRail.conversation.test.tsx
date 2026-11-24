@@ -30,6 +30,7 @@ const bridgeMock = {
   listEngineMoments: vi.fn(),
   linksIn: vi.fn(async () => null),
   chatFileMentionsPage: vi.fn(async () => null),
+  onWorkspaceActivity: vi.fn(() => () => undefined),
   chatLinks:
     vi.fn<
       (input: {

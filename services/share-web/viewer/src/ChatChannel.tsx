@@ -7,6 +7,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { compareMessageOrder } from "@dohc/workspace-contracts/chat-order";
 import { renderSafeMarkdown } from "./markdown";
@@ -18,11 +19,17 @@ import {
   mergeChatMessages,
   NamedChatError,
   type ChatPost,
+  type DeletedChatMessage,
   type GroupType,
   type NamedChatAccess,
   type NamedChatMessage,
 } from "./namedChat";
 import { RETRY_INITIAL_MS, RETRY_MAX_MS } from "./retry";
+import {
+  MESSAGE_DELETE_FAILED,
+  MESSAGE_DELETE_OFFLINE,
+  MESSAGE_DELETE_REFUSED,
+} from "@dohc/security-contract/workspace-members";
 import "./namedChat.css";
 
 // One channel view for the named chat page and the link viewer.
@@ -90,6 +97,17 @@ function LinkHolderMark() {
   );
 }
 
+const isAgent = (message: NamedChatMessage) =>
+  message.authorKind === "agent" || message.authorKind === "automation" || message.linkAgent;
+
+// "Agent" is dohc's word for an agent that gave no name. Such an agent goes by whose it is, as on the desktop.
+function authorName(message: NamedChatMessage): string {
+  const owner = isAgent(message) ? message.authorOwnerDisplayName : null;
+  return owner !== null && message.authorDisplayName === "Agent"
+    ? `${owner}'s agent`
+    : message.authorDisplayName;
+}
+
 /** A post or a chat message with its replies: how many, and how to open them. */
 interface Replies {
   count: number;
@@ -102,10 +120,12 @@ function ChatMessage({
   message,
   replies,
   canReply,
+  onDelete,
 }: {
   message: NamedChatMessage;
   replies?: Replies;
   canReply: boolean;
+  onDelete?: () => void;
 }) {
   // Attachments are out of scope, so no image source is allowed.
   const html = useMemo(
@@ -113,14 +133,13 @@ function ChatMessage({
     [message.body],
   );
   // An agent that joined with the link wears the agent mark, then the link mark.
-  const agent =
-    message.authorKind === "agent" || message.authorKind === "automation" || message.linkAgent;
+  const agent = isAgent(message);
   // A safe integer can lie outside the Date range; such a message shows without a time.
   const sent = new Date(message.createdAtMs),
     dated = !Number.isNaN(sent.getTime());
-  // "Agent" is dohc's word for an agent that gave no name. Such an agent goes by whose it is, as on the desktop.
   const owner = agent ? message.authorOwnerDisplayName : null,
     unnamed = owner !== null && message.authorDisplayName === "Agent";
+  const deleted = message.deletedAtMs !== undefined;
   return (
     <li className="chat-message" data-seq={message.relaySeq} data-author-kind={message.authorKind}>
       <p className="chat-meta">
@@ -131,26 +150,40 @@ function ChatMessage({
             aria-label={message.authorKind === "automation" ? "Automation" : "Agent"}
           />
         )}
-        <span className="chat-author">
-          {unnamed ? `${owner}'s agent` : message.authorDisplayName}
-        </span>
+        <span className="chat-author">{authorName(message)}</span>
         {message.authorKind === "link" && <LinkHolderMark />}
         {owner && !unnamed && <span className="chat-owner">{owner}'s agent</span>}
         {dated && <time dateTime={sent.toISOString()}>{sentAt(sent)}</time>}
+        {onDelete && message.deletedAtMs === undefined && (
+          <button
+            type="button"
+            className="icon-button chat-delete"
+            aria-label="Delete message"
+            title="Delete message"
+            onClick={onDelete}
+          >
+            <Icon name="trash" size={14} />
+          </button>
+        )}
       </p>
-      {html === null ? (
+      {message.deletedAtMs !== undefined ? (
+        <p className="chat-deleted">
+          <Icon name="ban" size={13} />
+          Message deleted
+        </p>
+      ) : html === null ? (
         <p className="chat-body chat-body-omitted">
           This message is too long to show in the browser.
         </p>
       ) : (
         <div className="markdown chat-body" dangerouslySetInnerHTML={{ __html: html }} />
       )}
-      {/* A person who can't post has nothing to reply with, so only a thread with replies opens,
-          or one holding the reply they wrote before they lost Comment, for them to copy. */}
-      {replies && (canReply || replies.count > 0 || replies.drafted) && (
+      {/* A person who can't post has nothing to reply with, and a deleted message nothing to reply to,
+          as on the desktop. So only a thread with replies opens, or one holding an unsent reply to copy. */}
+      {replies && ((canReply && !deleted) || replies.count > 0 || replies.drafted) && (
         <button type="button" className="chat-replies" onClick={replies.open}>
           {replies.count === 0
-            ? canReply
+            ? canReply && !deleted
               ? "Reply"
               : "Unsent reply"
             : replies.count === 1
@@ -159,6 +192,160 @@ function ChatMessage({
         </button>
       )}
     </li>
+  );
+}
+
+/** A delete the reader asked for: asking, running, or refused with why. */
+type Removing = {
+  message: NamedChatMessage;
+  // The reader's own message keeps "this"; another's names its author.
+  own: boolean;
+  phase: "asking" | "deleting" | "failed";
+  why: string | null;
+};
+
+const ARROW_STEP: Partial<Record<string, -1 | 1>> = {
+  ArrowLeft: -1,
+  ArrowUp: -1,
+  ArrowRight: 1,
+  ArrowDown: 1,
+};
+
+// A deleted message's place: its replies, else the next message's first control, else the composer.
+function survivor(scroller: HTMLElement | null, seq: number): HTMLElement | null {
+  const item = scroller?.querySelector(`.chat-message[data-seq="${seq}"]`);
+  return (
+    item?.querySelector<HTMLElement>(".chat-replies") ??
+    item?.nextElementSibling?.querySelector<HTMLElement>(".chat-delete, .chat-replies") ??
+    scroller?.closest(".chat-channel")?.querySelector<HTMLElement>(".chat-composer textarea") ??
+    null
+  );
+}
+
+// The message stays as it is until the relay answers, so a refusal has nothing to restore.
+// The card is the desktop's confirmation: a tile beside one text column, its keys included.
+function DeleteMessage({
+  removing,
+  cancel,
+  confirm,
+  fallback,
+}: {
+  removing: Removing;
+  cancel(): void;
+  confirm(): void;
+  // Takes focus when the deleted message leaves no control in its place.
+  fallback: RefObject<HTMLElement | null>;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null),
+    confirmButton = useRef<HTMLButtonElement>(null);
+  // The control that opened the dialog, read before the dialog takes focus, and the message it asks about.
+  const [opener] = useState(() => document.activeElement),
+    [seq] = useState(() => removing.message.relaySeq);
+  useEffect(() => {
+    const current = dialog.current;
+    current?.showModal();
+    confirmButton.current?.focus();
+    return () => {
+      current?.close();
+      // React removes the dialog before this runs, so the browser can't hand
+      // focus back. A deleted message has lost its Delete, so focus stays in its place.
+      if (opener instanceof HTMLElement && opener !== document.body && opener.isConnected)
+        opener.focus();
+      else (survivor(fallback.current, seq) ?? fallback.current)?.focus();
+    };
+  }, [opener, seq, fallback]);
+  const deleting = removing.phase === "deleting",
+    failed = removing.phase === "failed";
+  // The confirm was disabled while the delete ran; Try again takes focus back.
+  useEffect(() => {
+    if (failed) confirmButton.current?.focus();
+  }, [failed]);
+  const quote = removing.message.body?.replace(/\s+/gu, " ").trim();
+  return (
+    <dialog
+      ref={dialog}
+      className="download-card chat-delete-dialog"
+      aria-labelledby="chat-delete-title"
+      aria-describedby="chat-delete-body"
+      onCancel={(event) => {
+        // While the delete runs, only its answer closes the dialog.
+        event.preventDefault();
+        if (!deleting) cancel();
+      }}
+      onKeyDown={(event) => {
+        // A held Enter never confirms: it may be the key that opened the dialog, repeating.
+        if (event.key === "Enter" && event.repeat) {
+          event.preventDefault();
+          return;
+        }
+        // The arrow keys move between the buttons, as in the desktop's dialogs.
+        const step = ARROW_STEP[event.key];
+        if (!step || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+        const buttons = [
+          ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
+            ".chat-delete-actions button:enabled",
+          ),
+        ];
+        if (buttons.length === 0) return;
+        event.preventDefault();
+        const from = buttons.indexOf(event.target as HTMLButtonElement);
+        buttons[
+          from === -1
+            ? step === 1
+              ? 0
+              : buttons.length - 1
+            : (from + step + buttons.length) % buttons.length
+        ]!.focus();
+      }}
+    >
+      <span className="tile bad">
+        <Icon name="trash" size={16} />
+      </span>
+      <div className="chat-delete-column">
+        <div>
+          <h2 id="chat-delete-title">
+            {removing.own
+              ? "Delete this message?"
+              : `Delete ${authorName(removing.message)}'s message?`}
+          </h2>
+          <div id="chat-delete-body" className="chat-delete-body">
+            {/* The dialog covers the message, so it shows what it deletes. */}
+            {quote ? <p className="chat-delete-quote">{quote}</p> : null}
+            <p>
+              This removes the message from this conversation for everyone. You can't undo it.
+              People who already read it may keep a copy.
+            </p>
+          </div>
+        </div>
+        {failed && (
+          <p className="chat-delete-error" role="alert">
+            <Icon name="alert" size={12} />
+            <span>
+              {removing.why ? `${MESSAGE_DELETE_FAILED} ${removing.why}` : MESSAGE_DELETE_FAILED}
+            </span>
+          </p>
+        )}
+        <div className="chat-delete-actions">
+          <button
+            type="button"
+            className="handoff-button secondary"
+            disabled={deleting}
+            onClick={cancel}
+          >
+            Cancel
+          </button>
+          <button
+            ref={confirmButton}
+            type="button"
+            className="handoff-button danger"
+            disabled={deleting}
+            onClick={confirm}
+          >
+            {deleting ? "Deleting…" : failed ? "Try again" : "Delete"}
+          </button>
+        </div>
+      </div>
+    </dialog>
   );
 }
 
@@ -248,8 +435,20 @@ export interface ChatChannelClient {
     since: number,
     holdMs: number,
     signal: AbortSignal,
-  ): Promise<{ messages: NamedChatMessage[]; nextCursor: number; hasMore: boolean }>;
+  ): Promise<{
+    messages: NamedChatMessage[];
+    deleted?: DeletedChatMessage[];
+    nextCursor: number;
+    hasMore: boolean;
+  }>;
   post(post: ChatPost, signal: AbortSignal): Promise<NamedChatMessage>;
+  /** Where the reader can delete: their own messages, or any for the owner or an admin. The relay decides. */
+  remove?: {
+    can(message: NamedChatMessage): boolean;
+    /** Whether the reader wrote it. */
+    own(message: NamedChatMessage): boolean;
+    run(message: NamedChatMessage, signal: AbortSignal): Promise<DeletedChatMessage>;
+  };
   /** The body the relay stores, or null when it would refuse it. */
   normalize(text: string): string | null;
   tooLong(text: string): boolean;
@@ -327,12 +526,16 @@ export function ChannelView({
     setDraftText(text);
     if (composerKey !== null) writeDraft(composerKey, text);
   };
+  const [removing, setRemoving] = useState<Removing | null>(null),
+    remove = client.remove;
   const [posting, setPosting] = useState(false),
     [postError, setPostError] = useState<{ text: string; retry: boolean } | null>(null);
   const mounted = useRef<AbortController | null>(null),
     follower = useRef<AbortController | null>(null);
   const messagesRef = useRef<NamedChatMessage[]>([]),
     cursorRef = useRef<number | null>(null);
+  // Every delete this conversation has heard. A page read before a delete can arrive after it, with the message's text.
+  const deletesRef = useRef<DeletedChatMessage[]>([]);
   const intent = useRef<(ChatPost & { key: string | null }) | null>(null),
     postingRef = useRef(false),
     olderRef = useRef(false);
@@ -356,8 +559,13 @@ export function ChannelView({
   const onEndedRef = useRef(onEnded);
   onEndedRef.current = onEnded;
 
-  const receive = (incoming: NamedChatMessage[], own: boolean) => {
-    const merged = mergeChatMessages(messagesRef.current, incoming),
+  const receive = (
+    incoming: NamedChatMessage[],
+    own: boolean,
+    deleted: readonly DeletedChatMessage[] = [],
+  ) => {
+    if (deleted.length) deletesRef.current = [...deletesRef.current, ...deleted];
+    const merged = mergeChatMessages(messagesRef.current, incoming, deletesRef.current),
       added = merged.length - messagesRef.current.length;
     messagesRef.current = merged;
     setMessages(merged);
@@ -386,7 +594,8 @@ export function ChannelView({
           hold = result.hasMore ? 0 : CHAT_FOLLOW_HOLD_MS;
           delay = RETRY_INITIAL_MS;
           setFollowing("live");
-          if (result.messages.length) receive(result.messages, false);
+          if (result.messages.length || result.deleted?.length)
+            receive(result.messages, false, result.deleted);
         } catch (error) {
           if (!current()) return;
           const reason = ended(error);
@@ -423,6 +632,7 @@ export function ChannelView({
       controller.abort();
       follower.current?.abort();
       follower.current = null;
+      deletesRef.current = [];
     };
   }, []);
 
@@ -433,7 +643,11 @@ export function ChannelView({
       (result) => {
         if (controller.signal.aborted) return;
         // A message posted while history loaded stays in the list.
-        messagesRef.current = mergeChatMessages(result.messages, messagesRef.current);
+        messagesRef.current = mergeChatMessages(
+          result.messages,
+          messagesRef.current,
+          deletesRef.current,
+        );
         cursorRef.current = result.nextCursor;
         stick.current = true;
         setMessages(messagesRef.current);
@@ -505,7 +719,11 @@ export function ChannelView({
       if (controller.signal.aborted) return;
       holdPlace();
       // Older pages never move the following cursor.
-      messagesRef.current = mergeChatMessages(messagesRef.current, result.messages);
+      messagesRef.current = mergeChatMessages(
+        messagesRef.current,
+        result.messages,
+        deletesRef.current,
+      );
       setMessages(messagesRef.current);
       setOlderCursor(result.olderCursor);
       setOlder("idle");
@@ -639,6 +857,33 @@ export function ChannelView({
       }
     }
   };
+  // The line changes from the relay's answer. Other open pages hear the delete from their follows.
+  const confirmRemove = async () => {
+    const controller = mounted.current,
+      target = removing;
+    if (!controller || !remove || !target || target.phase === "deleting") return;
+    setRemoving({ ...target, phase: "deleting", why: null });
+    try {
+      const deleted = await remove.run(target.message, controller.signal);
+      if (controller.signal.aborted) return;
+      receive([], false, [deleted]);
+      setRemoving(null);
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      const status = error instanceof NamedChatError ? error.status : 0;
+      if (status === 401) {
+        setRemoving(null);
+        onEndedRef.current("signed-out");
+        return;
+      }
+      // Every refusal reads as not-found, so a delete never confirms a hidden message.
+      setRemoving({
+        ...target,
+        phase: "failed",
+        why: status === 404 ? MESSAGE_DELETE_REFUSED : status === 0 ? MESSAGE_DELETE_OFFLINE : null,
+      });
+    }
+  };
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     // Enter sends with a keyboard. On a touch screen Enter adds a line and the Send button sends.
     if (
@@ -757,6 +1002,17 @@ export function ChannelView({
                     message={message}
                     replies={view?.replies.get(message.relaySeq)}
                     canReply={access === "read-write"}
+                    {...(remove?.can(message)
+                      ? {
+                          onDelete: () =>
+                            setRemoving({
+                              message,
+                              own: remove.own(message),
+                              phase: "asking",
+                              why: null,
+                            }),
+                        }
+                      : {})}
                   />
                 ))}
               </ol>
@@ -886,6 +1142,14 @@ export function ChannelView({
             )}
           </div>
         </form>
+      )}
+      {removing && (
+        <DeleteMessage
+          removing={removing}
+          cancel={() => setRemoving(null)}
+          confirm={() => void confirmRemove()}
+          fallback={scroller}
+        />
       )}
     </section>
   );

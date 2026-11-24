@@ -429,6 +429,8 @@ fn enforce_shared_channel_boundary(
         // require equality to the grant. Unresolved (missing thread, or a
         // thread with no / a different channel) -> deny.
         "chat.message.append"
+        | "chat.message.tombstone"
+        | "chat.message.delete"
         | "chat.reaction.set"
         | "chat.decision.set"
         | "chat.attachment.add" => {
@@ -448,7 +450,7 @@ fn enforce_shared_channel_boundary(
     Ok(())
 }
 
-/// The exactly five chat kinds a file share carries, mirroring the
+/// The exactly seven chat kinds a file share carries, mirroring the
 /// relay's own allowlist (`services/sync-relay/src/shareFilter.ts`,
 /// `filterFileChatOpForPathShare`).
 ///
@@ -458,9 +460,11 @@ fn enforce_shared_channel_boundary(
 /// a file share has no channel. Everything not named here reaches
 /// `enforce_share_view_boundary` and is refused as a kind a share does not
 /// carry.
-pub(crate) const SHARE_VIEW_CHAT_KINDS: [&str; 5] = [
+pub(crate) const SHARE_VIEW_CHAT_KINDS: [&str; 7] = [
     "chat.thread.create",
     "chat.message.append",
+    "chat.message.tombstone",
+    "chat.message.delete",
     "chat.reaction.set",
     "chat.decision.set",
     "chat.attachment.add",
@@ -609,6 +613,8 @@ fn enforce_share_view_chat_boundary(
             }
         },
         "chat.message.append"
+        | "chat.message.tombstone"
+        | "chat.message.delete"
         | "chat.reaction.set"
         | "chat.decision.set"
         | "chat.attachment.add" => {
@@ -832,7 +838,7 @@ pub(crate) fn enforce_share_view_boundary(
         .ok_or(SyncError::ShareBoundaryViolation)?;
     if !matches!(op.op_kind.as_str(), "moment.append" | "version.create") {
         // A known kind a share does not carry is a scope decision — a secret
-        // op, or a chat kind outside the five in `SHARE_VIEW_CHAT_KINDS`
+        // op, or a chat kind outside the seven in `SHARE_VIEW_CHAT_KINDS`
         // (which never reach here), is outside what any file share covers.
         // That is where `chat.follow.set`, `chat.feed.read.set`, and
         // `chat.thread.read.set` land: the

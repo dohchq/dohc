@@ -2,6 +2,7 @@ import { McpServer, type CallToolResult } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { readBoundedJson } from "@dohc/service-http";
 import { asRecord } from "@dohc/workspace-core/records";
+import { MESSAGE_DELETE_ID_MAX_CHARS } from "@dohc/security-contract/workspace-members";
 import {
   ANSWER_RESERVE_MS,
   answerMcp,
@@ -161,6 +162,14 @@ const messageSchema = z.object({
   createdAtMs: z.number().int(),
   body: z.string().nullable(),
   bodyTooLarge: z.boolean(),
+  /** Set on a deleted message, whose body is gone. */
+  deletedAtMs: z.number().int().optional(),
+});
+const deletedSchema = z.object({
+  ok: z.literal(true),
+  messageId: z.string(),
+  threadId: z.string(),
+  deletedAtMs: z.number().int(),
 });
 const pageSchema = z.object({
   ok: z.literal(true),
@@ -599,6 +608,52 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
             "dohc could not post this message. Check its channel or thread and its text, then try again.",
         },
       ),
+  );
+
+  server.registerTool(
+    "dohc_delete_message",
+    {
+      description:
+        "Delete one of your own messages in a Group or a file's Comments. This can't be undone. Its text leaves every chat view; " +
+        "people see that a message was there. People who already read it may keep a copy. " +
+        "You can delete only messages you posted, whatever your level.",
+      inputSchema: z.object({
+        workspace: workspaceArg(),
+        threadId: z
+          .string()
+          .min(1)
+          .max(MESSAGE_DELETE_ID_MAX_CHARS)
+          .describe("The message's threadId, from dohc_read_channel or dohc_read_discussion."),
+        messageId: z
+          .string()
+          .min(1)
+          .max(MESSAGE_DELETE_ID_MAX_CHARS)
+          .describe("The messageId of a message you posted."),
+      }),
+    },
+    async ({ workspace, threadId, messageId }) => {
+      try {
+        const deleted = await answered(
+          await call("delete", { workspaceId: workspace, threadId, messageId }),
+          deletedSchema,
+          {
+            not_found:
+              "dohc could not delete this message. You can delete only your own messages in a Group or a file's Comments.",
+            bad_request:
+              "dohc could not delete this message. Check its workspace, threadId and messageId.",
+          },
+        );
+        return toolResult({
+          ok: true,
+          workspace,
+          threadId: deleted.threadId,
+          messageId: deleted.messageId,
+          deletedAtMs: deleted.deletedAtMs,
+        });
+      } catch (e) {
+        return failed(e);
+      }
+    },
   );
 
   server.registerTool(

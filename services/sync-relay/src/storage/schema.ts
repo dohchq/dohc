@@ -69,6 +69,7 @@ import {
 import { initializeAccountNames } from "./accountNames";
 import { initializeDirectMessageSchema } from "./directMessages";
 import { initializeGroupRuleSchema } from "./groupRules";
+import { initializeDeletedMessageSchema } from "./messageDeletes";
 import { initializeWorkspaceSecretSchema } from "./workspaceSecrets";
 import { initializeOutboundWebhookSchema } from "./outboundWebhooks";
 import { initializeIncomingWebhookSchema } from "./incomingWebhooks";
@@ -1703,6 +1704,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   initializeWorkspaceLevelChanges(db);
   initializeDirectMessageSchema(db);
   initializeGroupRuleSchema(db);
+  initializeDeletedMessageSchema(db);
   initializeWorkspaceSecretSchema(db);
   initializeOutboundWebhookSchema(db);
   initializeIncomingWebhookSchema(db);

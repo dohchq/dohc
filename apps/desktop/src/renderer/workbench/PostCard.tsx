@@ -13,6 +13,7 @@ import { AgentName, ChatAvatar, isAgentAuthor, LinkHolderMark } from "./ChatAvat
 import { neutralPresentation } from "./actorPresentation";
 import {
   chatAuthorLabel,
+  DeletedMessageLine,
   MessageReactions,
   RowToolbar,
   TOOLBAR_BUTTON,
@@ -217,25 +218,30 @@ export function PostCard(props: {
   const createdAtMs = message?.createdAtMs ?? props.thread.createdAtMs;
   const time = formatChatTime(createdAtMs);
   const commentCount = Math.max(0, props.thread.messageCount - 1);
-  const rawText = message
-    ? postText(props.thread.title, message.bodySnippet)
-    : { heading: props.thread.title, excerpt: "" };
+  // A deleted post keeps its author and time, and shows nothing it held. A
+  // live post has no heading of its own, so neither does a deleted one.
+  const deleted = message?.deletedAtMs !== undefined;
+  const rawText =
+    message && !deleted
+      ? postText(props.thread.title, message.bodySnippet)
+      : { heading: props.thread.title, excerpt: "" };
   const heading = stripPostMarkdown(rawText.heading) || rawText.heading;
   const excerpt = stripPostMarkdown(rawText.excerpt);
-  const plain = message !== null && excerpt === "";
+  const plain = message !== null && !deleted && excerpt === "";
   const openDecision = (props.thread.openDecisionCount ?? 0) > 0;
   const work = props.thread.work;
 
-  const reactions = message
-    ? props.data.reactions.filter((reaction) => reaction.messageId === message.id)
-    : [];
+  const reactions =
+    message && !deleted
+      ? props.data.reactions.filter((reaction) => reaction.messageId === message.id)
+      : [];
   const byEmoji = new Map<string, ChatReactionRecord[]>();
   for (const reaction of reactions) {
     const list = byEmoji.get(reaction.emoji);
     if (list) list.push(reaction);
     else byEmoji.set(reaction.emoji, [reaction]);
   }
-  const readOnly = props.reactionControls.readOnly === true || message === null;
+  const readOnly = props.reactionControls.readOnly === true || message === null || deleted;
   const actions = (
     <>
       <ActionButton
@@ -335,22 +341,28 @@ export function PostCard(props: {
               {formatShortTime(createdAtMs)}
             </time>
           </span>
-          <span
-            data-testid="chats-post-title"
-            className={`mt-0.5 line-clamp-3 whitespace-pre-wrap break-words text-ink ${
-              plain ? "text-[14px] leading-[21px]" : "text-[14px] font-semibold leading-5"
-            }`}
-          >
-            <WorkLinkText text={heading} interactive={false} testId="chats-post-title" />
-          </span>
-          {excerpt ? (
-            <span
-              data-testid="chats-post-excerpt"
-              className="mt-px line-clamp-3 whitespace-pre-wrap break-words text-[13px] leading-5 text-muted"
-            >
-              <WorkLinkText text={excerpt} interactive={false} testId="chats-post-excerpt" />
-            </span>
-          ) : null}
+          {deleted ? (
+            <DeletedMessageLine testId="chats-post-deleted" className="mt-0.5" />
+          ) : (
+            <>
+              <span
+                data-testid="chats-post-title"
+                className={`mt-0.5 line-clamp-3 whitespace-pre-wrap break-words text-ink ${
+                  plain ? "text-[14px] leading-[21px]" : "text-[14px] font-semibold leading-5"
+                }`}
+              >
+                <WorkLinkText text={heading} interactive={false} testId="chats-post-title" />
+              </span>
+              {excerpt ? (
+                <span
+                  data-testid="chats-post-excerpt"
+                  className="mt-px line-clamp-3 whitespace-pre-wrap break-words text-[13px] leading-5 text-muted"
+                >
+                  <WorkLinkText text={excerpt} interactive={false} testId="chats-post-excerpt" />
+                </span>
+              ) : null}
+            </>
+          )}
           {work || byEmoji.size > 0 || openDecision || commentCount > 0 ? (
             <div data-testid="chats-post-footer" className={FEED_META}>
               {work ? (

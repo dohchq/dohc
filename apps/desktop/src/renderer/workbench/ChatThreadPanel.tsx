@@ -25,6 +25,7 @@ import { ChatAvatar, useAgentInk } from "./ChatAvatar";
 import { ChatMarkdown } from "./ChatMarkdown";
 import {
   ChatMessageList,
+  DeletedMessageLine,
   DENSITY,
   type ChatMessageListHandle,
   type ChatReactionControls,
@@ -120,11 +121,15 @@ function AgentReplyPeek(props: {
         </span>
       </span>
       <div inert className="dohc-chat-peek text-[14px] text-ink">
-        <ChatMarkdown
-          body={reply.body}
-          candidates={props.mentionCandidates}
-          attachments={reply.attachments}
-        />
+        {reply.deletedAtMs !== undefined ? (
+          <DeletedMessageLine testId="chats-reply-peek-deleted" />
+        ) : (
+          <ChatMarkdown
+            body={reply.body}
+            candidates={props.mentionCandidates}
+            attachments={reply.attachments}
+          />
+        )}
       </div>
     </div>
   );

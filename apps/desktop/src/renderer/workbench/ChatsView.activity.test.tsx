@@ -13,6 +13,7 @@ import {
   channel,
   thread,
   message,
+  openingPreview,
   personalFeedItem,
   bridgeMock,
   shareListing,
@@ -629,6 +630,116 @@ describe("ChatsView live activity refresh", () => {
 
     expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("5 unread");
     expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    ["their own post", { authorDisplayName: "You", authorUserId: "user-me" }],
+    ["someone else's post, as a moderator", { authorDisplayName: "Sam", authorUserId: "user-sam" }],
+  ])("drops the deleted first line from the title of %s", async (_case, author) => {
+    const words = "I'll bring bean seeds on Saturday.";
+    const opening = message({ ...author, id: "message-1", body: words });
+    const reply = message({ id: "message-2", body: "Great, see you there.", createdAtMs: NOW + 1 });
+    const listed = (title: string, deletedAtMs?: number) => ({
+      threads: [
+        thread({
+          title,
+          messageCount: 2,
+          openingMessage: openingPreview({
+            ...author,
+            bodySnippet: deletedAtMs === undefined ? words : "",
+            ...(deletedAtMs === undefined ? {} : { deletedAtMs }),
+          }),
+        }),
+      ],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue(listed(words));
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening, reply] });
+    renderView(vi.fn(), vi.fn(), { initialNav: { level: "channel", channel: channel() } });
+    await userEvent.click(await screen.findByTestId("chats-post-card"));
+    expect((await screen.findByTestId("chats-thread-title")).textContent).toBe(words);
+
+    // The delete lands: the engine's title falls back with the first line gone.
+    bridgeMock.listChannelThreads.mockResolvedValue(listed("New chat", NOW + 2));
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [{ ...opening, body: "", deletedAtMs: NOW + 2 }, reply],
+    });
+    act(() => emitWorkspaceActivity());
+
+    await screen.findByTestId("chats-message-deleted");
+    // The header names the post's Group, and the thread shows no heading.
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-thread-title").textContent).toBe("Post in #general"),
+    );
+    expect(screen.getByTestId("chats-thread-post-title").className).toBe("sr-only");
+    // A screen reader's heading names the post as the header does.
+    expect(screen.getByTestId("chats-thread-post-title").textContent).toBe("Post in #general");
+    expect(screen.getByTestId("chats-thread-view").textContent).not.toContain(words);
+
+    // Its card shows the author, the time and the deleted line, with no title.
+    await userEvent.click(screen.getByTestId("chats-thread-back"));
+    await screen.findByTestId("chats-post-deleted");
+    expect(screen.queryByTestId("chats-post-title")).toBeNull();
+    expect(screen.getByTestId("chats-post-card").textContent).not.toContain("New chat");
+  });
+
+  it("keeps a Group post's own title of New chat while its first message stands", async () => {
+    const opening = message({ id: "message-1", body: "A different opening line" });
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [
+        thread({
+          title: "New chat",
+          messageCount: 1,
+          openingMessage: openingPreview({ bodySnippet: "A different opening line" }),
+        }),
+      ],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening] });
+    renderView(vi.fn(), vi.fn(), { initialNav: { level: "channel", channel: channel() } });
+    await userEvent.click(await screen.findByTestId("chats-post-card"));
+
+    expect((await screen.findByTestId("chats-thread-title")).textContent).toBe("New chat");
+  });
+
+  it("reads a deleted first line's title again at the next activity after a failed read", async () => {
+    const words = "I'll bring bean seeds on Saturday.";
+    const opening = message({ id: "message-1", body: words });
+    const reply = message({ id: "message-2", body: "Great, see you there.", createdAtMs: NOW + 1 });
+    const listed = (title: string, deletedAtMs?: number) => ({
+      threads: [
+        thread({
+          title,
+          messageCount: 2,
+          openingMessage: openingPreview({
+            bodySnippet: deletedAtMs === undefined ? words : "",
+            ...(deletedAtMs === undefined ? {} : { deletedAtMs }),
+          }),
+        }),
+      ],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue(listed(words));
+    bridgeMock.listChatMessages.mockImplementation(async () => ({ messages: [opening, reply] }));
+    renderView(vi.fn(), vi.fn(), { initialNav: { level: "channel", channel: channel() } });
+    await userEvent.click(await screen.findByTestId("chats-post-card"));
+    expect((await screen.findByTestId("chats-thread-title")).textContent).toBe(words);
+
+    // The delete lands, and the title's read fails once.
+    bridgeMock.listChannelThreads.mockImplementation(async () => {
+      throw new Error("The engine is busy.");
+    });
+    bridgeMock.listChatMessages.mockImplementation(async () => ({
+      messages: [{ ...opening, body: "", deletedAtMs: NOW + 2 }, reply],
+    }));
+    act(() => emitWorkspaceActivity());
+    await screen.findByTestId("chats-message-deleted");
+    await waitFor(() => expect(bridgeMock.listChannelThreads).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+    expect(screen.getByTestId("chats-thread-title").textContent).toBe(words);
+
+    bridgeMock.listChannelThreads.mockResolvedValue(listed("New chat", NOW + 2));
+    act(() => emitWorkspaceActivity());
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-thread-title").textContent).toBe("Post in #general"),
+    );
   });
 });
 

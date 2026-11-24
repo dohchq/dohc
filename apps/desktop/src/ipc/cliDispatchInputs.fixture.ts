@@ -145,6 +145,7 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "chat reply": ["thread", "Reply"],
   "chat retry": ["thread"],
   "chat react": ["message", "thumbsup"],
+  "chat delete": ["message"],
   "chat grep": ["pattern"],
   "chat export": ["--out", "exports"],
   "file duplicate": ["Notes/a.md"],

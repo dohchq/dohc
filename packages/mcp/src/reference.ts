@@ -331,6 +331,7 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
   ],
   retry: [["chat", "retry", "th_1"]],
   react: [["chat", "react", "msg_1", "👍"]],
+  delete: [["chat", "delete", "msg_1"]],
   grep: [
     [
       "chat",
@@ -957,6 +958,7 @@ function declaredWriteSocketVerbs(command: string): Record<string, CliSocketVerb
 export const CHAT_SOCKET_VERBS: Record<string, CliSocketVerb> = {
   ...declaredSocketVerbs("chat"),
   "create-group": "groupCreate",
+  delete: "chatDelete",
   ...declaredWriteSocketVerbs("chat"),
 };
 

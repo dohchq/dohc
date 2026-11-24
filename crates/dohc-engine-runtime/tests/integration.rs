@@ -42,6 +42,8 @@ mod outbound_drain;
 mod owner_publication;
 #[path = "reader_settlement.rs"]
 mod reader_settlement;
+#[path = "rebuild_unsent.rs"]
+mod rebuild_unsent;
 #[path = "recovery_import.rs"]
 mod recovery_import;
 #[path = "relay_materialization.rs"]

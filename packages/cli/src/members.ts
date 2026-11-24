@@ -5,6 +5,7 @@ import {
   isPaletteSlot,
   MAX_MEMBER_EMAIL_CHARS,
   MEMBER_STATES,
+  MESSAGE_DELETE_ID_MAX_CHARS,
   WORKSPACE_ROLES,
   type InviteLinkAction,
   type WorkspaceMembersView,
@@ -56,6 +57,15 @@ const agentActions = [
   z
     .object({ action: z.literal("group"), group, level: groupRuleLevel.nullable().optional() })
     .strict(),
+  // A message in a Group or a file's Comments: your own, or any for the owner
+  // or an admin. The relay decides.
+  z
+    .object({
+      action: z.literal("deleteMessage"),
+      threadId: z.string().min(1).max(MESSAGE_DELETE_ID_MAX_CHARS),
+      messageId: z.string().min(1).max(MESSAGE_DELETE_ID_MAX_CHARS),
+    })
+    .strict(),
   z
     .object({
       action: z.literal("folder"),
@@ -92,6 +102,7 @@ export const MEMBERS_CAPABILITIES = {
   end: "members.end",
   leave: "members.leave",
   group: "members.group.rule",
+  deleteMessage: "chat.message.delete",
   folder: "members.folder.rule",
   folderMarker: "members.folder.marker.remove",
 } as const satisfies Record<MembersRequest["action"], CapabilityId>;
@@ -188,7 +199,7 @@ export const MembersResult = z.discriminatedUnion("status", [
   // The relay lists no Members page for this account: membership ended, the
   // account was removed, or the workspace was never shared with members.
   z.object({ status: z.literal("refused") }).strict(),
-  // Leave finished. This account has no page left to show.
+  // Leave or a delete finished. Leave leaves no page to show.
   z.object({ status: z.literal("done") }).strict(),
   // One Group's access, as `dohc members group` shows it. Null is no rule:
   // the Group takes the member level.

@@ -1920,6 +1920,11 @@ export interface SyncRelayStorage {
   joinWorkspace: WorkspaceMembersMethod<"joinWorkspace">;
   createWorkspaceGroup: WorkspaceMembersMethod<"createWorkspaceGroup">;
   setWorkspaceGroupRule: WorkspaceMembersMethod<"setWorkspaceGroupRule">;
+  // Deleted messages (storage/messageDeletes.ts).
+  deleteWorkspaceMessage: MessageDeletesMethod<"deleteWorkspaceMessage">;
+  deletedMessageCount: MessageDeletesMethod<"deletedMessageCount">;
+  messageDeleted: MessageDeletesMethod<"messageDeleted">;
+  deletedMessageTimes: MessageDeletesMethod<"deletedMessageTimes">;
   // Folder rules (storage/folderRules.ts).
   changeFolderRule: FolderRulesMethod<"changeFolderRule">;
   removeFolderMarkers: FolderRulesMethod<"removeFolderMarkers">;
@@ -2328,6 +2333,13 @@ type FolderRulesMethod<K extends keyof FolderRulesModule> = FolderRulesModule[K]
   ? (...args: A) => R
   : never;
 type DirectMessagesModule = typeof import("./directMessages");
+type MessageDeletesModule = typeof import("./messageDeletes");
+type MessageDeletesMethod<K extends keyof MessageDeletesModule> = MessageDeletesModule[K] extends (
+  storage: never,
+  ...args: infer A
+) => infer R
+  ? (...args: A) => R
+  : never;
 type DirectMessagesMethod<K extends keyof DirectMessagesModule> = DirectMessagesModule[K] extends (
   storage: never,
   ...args: infer A
