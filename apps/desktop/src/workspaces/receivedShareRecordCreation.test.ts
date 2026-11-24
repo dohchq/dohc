@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ShareUnavailableError } from "@dohc/workspace-contracts/relay";
-import { createReceivedShareRecord } from "./receivedShareRecordCreation";
+import { createReceivedShareRecord, type LiveShareGrant } from "./receivedShareRecordCreation";
 import type {
   ShareViewFiles,
   ShareViewFilesTarget,
@@ -19,6 +19,7 @@ function fixture() {
     rootPath: "C:/draft",
     schedulingRootPath: "C:/draft",
     shareId: "share",
+    recipientUserId: "me",
     granterEmail: "owner@test",
     grantedSelector: selector,
     ended: false,
@@ -45,7 +46,7 @@ function fixture() {
       resolved,
       collectionPath: "trip/Tasks",
       files: { read, change },
-      checkAuthority: vi.fn<() => Promise<typeof selector | null>>(async () => selector),
+      checkAuthority: vi.fn<() => Promise<LiveShareGrant | null>>(async () => ({ selector })),
       assertCurrent: vi.fn(),
       recordStatus: vi.fn(
         async (
@@ -84,7 +85,7 @@ describe("received-share record drafts", () => {
     const membership = { paths: [], versionId: null, wholeWorkspace: true as const };
     const f = fixture();
     f.host.resolved.grantedSelector = { ...membership, access: "edit" };
-    f.host.checkAuthority.mockResolvedValue({ ...membership, access: "edit" });
+    f.host.checkAuthority.mockResolvedValue({ selector: { ...membership, access: "edit" } });
     expect(await createReceivedShareRecord(input, f.host)).toEqual({
       path: "trip/Tasks/One.md",
       recordId: id,
@@ -96,6 +97,86 @@ describe("received-share record drafts", () => {
       "This Collection does not have Edit access.",
     );
     expect(below.host.files.change).not.toHaveBeenCalled();
+    // The relay lowered the member to View after the copy stored Edit.
+    const lowered = fixture();
+    lowered.host.resolved.grantedSelector = { ...membership, access: "edit" };
+    lowered.host.checkAuthority.mockResolvedValue({ selector: { ...membership, access: "view" } });
+    await expect(createReceivedShareRecord(input, lowered.host)).rejects.toThrow(
+      "This Collection does not have Edit access.",
+    );
+    expect(lowered.host.files.change).not.toHaveBeenCalled();
+  });
+
+  // The same levels the CLI and MCP read (desktopCliServer.test.ts).
+  it("takes the level of the Collection's folder from the stored reach", async () => {
+    const membership = {
+      paths: [],
+      versionId: null,
+      wholeWorkspace: true as const,
+      access: "view" as const,
+    };
+    const reach = (trip: "comment" | "edit") => ({
+      signature: "r1",
+      visibilitySignature: "v1",
+      rootLevel: "view" as const,
+      folders: [{ path: "trip", level: trip }],
+    });
+    const f = fixture();
+    Object.assign(f.host.resolved, { grantedSelector: membership, reach: reach("edit") });
+    f.host.checkAuthority.mockResolvedValue({ selector: membership, reach: reach("edit") });
+    expect(await createReceivedShareRecord(input, f.host)).toMatchObject({
+      path: "trip/Tasks/One.md",
+    });
+    const below = fixture();
+    Object.assign(below.host.resolved, { grantedSelector: membership, reach: reach("comment") });
+    await expect(createReceivedShareRecord(input, below.host)).rejects.toThrow(
+      "This Collection does not have Edit access.",
+    );
+    expect(below.host.files.change).not.toHaveBeenCalled();
+  });
+
+  // The stored reach is the relay's answer at the last pull. The relay's
+  // reach now decides: it can lower the member below it, or a folder rule
+  // can keep a View member at Edit.
+  it("judges the live grant with the relay's reach now, not the stored one", async () => {
+    const membership = { paths: [], versionId: null, wholeWorkspace: true as const };
+    const rootEdit = {
+      signature: "r1",
+      visibilitySignature: "v1",
+      rootLevel: "edit" as const,
+      folders: [],
+    };
+    const lowered = fixture();
+    Object.assign(lowered.host.resolved, {
+      grantedSelector: { ...membership, access: "edit" },
+      reach: rootEdit,
+    });
+    lowered.host.checkAuthority.mockResolvedValue({
+      selector: { ...membership, access: "view" },
+      reach: { signature: "r2", visibilitySignature: "v1", rootLevel: "view", folders: [] },
+    });
+    await expect(createReceivedShareRecord(input, lowered.host)).rejects.toThrow(
+      "This Collection does not have Edit access.",
+    );
+    expect(lowered.host.files.change).not.toHaveBeenCalled();
+    // The relay lowered the member, but a rule still gives them Edit in trip.
+    const ruled = fixture();
+    Object.assign(ruled.host.resolved, {
+      grantedSelector: { ...membership, access: "edit" },
+      reach: rootEdit,
+    });
+    ruled.host.checkAuthority.mockResolvedValue({
+      selector: { ...membership, access: "view" },
+      reach: {
+        signature: "r2",
+        visibilitySignature: "v1",
+        rootLevel: "view",
+        folders: [{ path: "trip", level: "edit" }],
+      },
+    });
+    expect(await createReceivedShareRecord(input, ruled.host)).toMatchObject({
+      path: "trip/Tasks/One.md",
+    });
   });
 
   it("keeps an offline draft and retries the same journaled file after reopening", async () => {
@@ -118,7 +199,7 @@ describe("received-share record drafts", () => {
       if (refusal === "revoked")
         f.host.checkAuthority.mockRejectedValue(new ShareUnavailableError());
       if (refusal === "scope")
-        f.host.checkAuthority.mockResolvedValue({ ...selector, paths: ["private"] });
+        f.host.checkAuthority.mockResolvedValue({ selector: { ...selector, paths: ["private"] } });
       if (refusal === "stale")
         f.host.assertCurrent.mockImplementation(() => {
           throw new Error("stale workspace");

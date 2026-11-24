@@ -4,6 +4,11 @@ import {
   isValidShareVersionId,
   type ShareAccess,
 } from "@dohc/security-contract/share-selector";
+import {
+  highestListedLevel,
+  parseListedReach,
+  type ListedReach,
+} from "@dohc/security-contract/listed-reach";
 import type { ShareViewSelector } from "./shareViewInfo";
 import {
   formatSize,
@@ -182,15 +187,31 @@ type EngineGrantedSelector = {
   versionId: string | null;
   access: ShareAccess;
   wholeWorkspace?: true;
+  reach?: {
+    signature: string;
+    visibilitySignature: string;
+    rootLevel: ShareAccess | null;
+    folders: { path: string; level: ShareAccess }[];
+  };
 };
 
-/** The pinned grant a share RPC carries: every dimension, always. */
-export function engineGrantedSelector(selector: GrantedSelector): EngineGrantedSelector {
+/**
+ * The pinned grant a share RPC carries: every dimension, always. A
+ * membership also carries the reach it last stored, which opens its lanes
+ * on the highest level it lists and tells the pull which pages it can apply.
+ */
+export function engineGrantedSelector(
+  selector: GrantedSelector,
+  reach?: ListedReach | null,
+): EngineGrantedSelector {
   return {
     paths: [...selector.paths],
     versionId: selector.versionId,
     access: selector.access,
     ...(selector.wholeWorkspace === true ? { wholeWorkspace: true as const } : {}),
+    ...(selector.wholeWorkspace === true && reach
+      ? { reach: { ...reach, folders: reach.folders.map(({ path, level }) => ({ path, level })) } }
+      : {}),
   };
 }
 
@@ -211,12 +232,46 @@ export function sharePinAtStatedLevel(pinned: unknown, stated: unknown): ShareVi
   return { ...pin, access: statement.access };
 }
 
+// Whether a copy can send file changes. A membership can wherever its stored
+// reach lists Edit, whatever its member level. A reach dohc can't read lists
+// no level.
+export function shareViewSendsFiles(
+  shareView: { grantedSelector?: unknown; reach?: unknown } | null | undefined,
+): boolean {
+  const grantedSelector = recordedShareSelector(shareView?.grantedSelector);
+  if (!grantedSelector) return false;
+  const reach =
+    grantedSelector.wholeWorkspace === true && shareView?.reach !== undefined
+      ? parseListedReach(shareView.reach)
+      : undefined;
+  const highest = reach === undefined ? grantedSelector.access : reach && highestListedLevel(reach);
+  return highest === "edit";
+}
+
+// A membership's copy sends with an identity it records once its levels list
+// Edit. Until then it is marked editingNotReady, and every write gate gives it
+// View where it would give Edit. A copy keeps waiting when its levels change,
+// and starts to wait when they first list Edit.
+export function membershipWaitsToSend(
+  before:
+    | { grantedSelector?: unknown; reach?: unknown; editingNotReady?: unknown }
+    | null
+    | undefined,
+  after: { grantedSelector?: unknown; reach?: unknown },
+): boolean {
+  if (recordedShareSelector(after.grantedSelector)?.wholeWorkspace !== true) return false;
+  return (
+    shareViewSendsFiles(after) && (before?.editingNotReady === true || !shareViewSendsFiles(before))
+  );
+}
+
 export function shareViewIdentitySelector(input: {
   shareView:
     | {
         grantedSelector?: unknown;
         ended?: boolean;
         relayUrl?: string | null;
+        reach?: unknown;
       }
     | null
     | undefined;
@@ -226,8 +281,7 @@ export function shareViewIdentitySelector(input: {
   const { shareView, relayUrl, relayUrlsMatch } = input;
   if (!shareView || shareView.ended === true) return null;
   const grantedSelector = recordedShareSelector(shareView.grantedSelector);
-  if (!grantedSelector) return null;
-  if (grantedSelector.access !== "edit") return null;
+  if (!grantedSelector || !shareViewSendsFiles(shareView)) return null;
   if (!relayUrl) return null;
   if (shareView.relayUrl && !relayUrlsMatch(relayUrl, shareView.relayUrl)) {
     return null;

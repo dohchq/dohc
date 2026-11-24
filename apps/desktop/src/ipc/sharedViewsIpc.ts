@@ -9,6 +9,7 @@ import {
   SHARE_EDITING_NOT_READY_MESSAGE,
   type CheckSharedViewAccessResult,
   engineStoreRefusalRecovery,
+  UPDATING_ACCESS_MESSAGE,
 } from "./bridgeContract";
 import { registerOperations } from "./operationTable";
 import {
@@ -21,15 +22,23 @@ import {
   requireCredentials,
 } from "../workspaces/credentialScopedOperation";
 import { parseShareCode, relayUrlsMatch } from "../workspaces/syncCode";
-import { RelayUnauthorizedError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
+import {
+  RelayUnauthorizedError,
+  ShareUnavailableError,
+  type ShareReachSignatures,
+  type SyncRelayConnection,
+} from "@dohc/workspace-contracts/relay";
 import { refreshReceivedReferencePin } from "../workspaces/workspaceFileReferenceScopes";
 import {
   ShareSelectorInvalidError,
   type fetchShareViewInfo,
   type fetchShareViewAccess,
+  type fetchShareViewReach,
   type probeShareViewLog,
   type ShareViewSelector,
 } from "../workspaces/shareViewInfo";
+import { storedShareViewReach } from "../workspaces/shareViewReach";
+import type { ListedReach } from "@dohc/security-contract/listed-reach";
 import type { RendererWorkspaceOperationSession } from "../window/rendererWorkspaceOperation";
 import {
   SHARE_VIEW_REOPEN_MESSAGE,
@@ -40,6 +49,8 @@ import {
   SharePinInvalidError,
   sharePinAtStatedLevel,
   shareViewIdentitySelector,
+  shareViewSendsFiles,
+  membershipWaitsToSend,
   recordedShareSelector,
 } from "../workspaces/shareViewRecords";
 import { type ShareAccess, shareAccessRank } from "@dohc/security-contract/share-selector";
@@ -53,11 +64,16 @@ import { cloudSyncFolderCancelledError } from "../workspaces/cloudSyncFolder";
 import type { createJoinedWorkspaceRunner } from "../workspaces/createJoinedWorkspace";
 import type { WorkspaceAuthorityBinding } from "../workspaces/workspaceAuthorityOwner";
 import type { ShareViewFiles } from "../workspaces/shareViewFiles";
-import type { ShareViewPullCommitted } from "../workspaces/sharedView";
+import type {
+  RefreshSharedViewOutcome,
+  ShareViewPullCommitted,
+  StandaloneShareViewRefreshOutcome,
+} from "../workspaces/sharedView";
 import type { withStaleSensitiveWorkspaceOperation } from "../workspaces/workspaceAssets";
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type { setWorkspaceShareView } from "../workspaces/WorkspaceRegistry";
 import type { WorkspaceActivityScope } from "./workspaceActivityBroadcast";
+import type { ShareViewRebuildOutcome } from "../workspaces/shareViewRebuild";
 
 // How long a held pull waits at the relay, under its 30 s limit.
 const SHARE_VIEW_HOLD_MS = 25_000;
@@ -89,6 +105,7 @@ export function registerSharedViewsIpcHandlers<
   engineDaemonStartup(): Promise<unknown>;
   fetchShareViewInfo: typeof fetchShareViewInfo;
   fetchShareViewAccess: typeof fetchShareViewAccess;
+  fetchShareViewReach: typeof fetchShareViewReach;
   probeShareViewLog: typeof probeShareViewLog;
   usableRoot(path: string): string;
   confirmNewWorkspaceFolder?(rootPath: string, event?: Event): Promise<boolean>;
@@ -128,7 +145,17 @@ export function registerSharedViewsIpcHandlers<
   // Whether this attachment has the document open in a live session, which
   // shows each change as it lands.
   showsLive(attachmentId: symbol, path: string): boolean;
-}): void {
+  // Rebuild a closed copy under the reach the relay lists now, or join the
+  // rebuild already running for it. Main holds the copy's sessions and
+  // reports what stopped it in Notices.
+  rebuildShareView(workspaceId: string, rebuildId: string): Promise<ShareViewRebuildOutcome>;
+  // The rebuild the engine holds a record of for the copy, and its phase, or
+  // null when there is none.
+  readShareViewRebuild(workspaceId: string): Promise<{ rebuildId: string; phase: string } | null>;
+  // Delete a converged rebuild's leftovers: its aside and staging stores and
+  // its record.
+  finishShareViewRebuild(workspaceId: string, rebuildId: string): Promise<void>;
+}): { resumeRebuilds(): Promise<void> } {
   const {
     registerHandler,
     assertTrustedSender,
@@ -193,24 +220,28 @@ export function registerSharedViewsIpcHandlers<
   const accessStatements = new Map<string, number>();
   const accessStatementsFor = (workspaceId: string) => accessStatements.get(workspaceId) ?? 0;
 
+  // Truthy when the copy can take its level: "recorded" when it has the
+  // identity, "unneeded" when its levels list no Edit, so it sends no file
+  // changes and needs none. Only "recorded" proves the copy can send.
   async function recordShareViewIdentity(
     workspace: RegistryEntry & { attachmentId: symbol },
-  ): Promise<boolean> {
+  ): Promise<"recorded" | "unneeded" | false> {
     await warmCredentialCache().catch(() => undefined);
     const credentials = currentCredentials();
-    const grantedSelector = shareViewIdentitySelector({
-      shareView: workspace.shareView,
-      relayUrl: credentials?.relayUrl,
-      relayUrlsMatch,
-    });
     if (
-      !grantedSelector ||
       !credentials?.relayUrl ||
       !workspace.shareView?.recipientUserId ||
       workspace.shareView.recipientUserId !== credentials.userId ||
       workspace.shareView.ended
     )
       return false;
+    if (!shareViewSendsFiles(workspace.shareView)) return "unneeded";
+    const grantedSelector = shareViewIdentitySelector({
+      shareView: workspace.shareView,
+      relayUrl: credentials.relayUrl,
+      relayUrlsMatch,
+    });
+    if (!grantedSelector) return false;
     const recorded = await receivedShareEngine
       .relayFor({
         engineWorkspaceId: workspace.workspaceId,
@@ -218,8 +249,32 @@ export function registerSharedViewsIpcHandlers<
         attachmentId: workspace.attachmentId,
         relay: { baseUrl: credentials.relayUrl, token: credentials.token },
       })
-      .recordShareViewIdentity({ grantedSelector });
-    return recorded.identity !== "not-required";
+      .recordShareViewIdentity({
+        grantedSelector,
+        reach: storedShareViewReach(workspace.shareView),
+      });
+    return recorded.identity === "not-required" ? false : "recorded";
+  }
+
+  // A membership that can send says editing is not ready until its identity
+  // is recorded, and every write gate reads the mark. Each change that first
+  // gives a membership Edit sets the mark; a recorded identity clears it. A
+  // failed or skipped record leaves it, so a copy already enrolled keeps
+  // editing while signed out. A path share's mark follows its pinned level.
+  async function markSendingReady(workspaceId: string): Promise<void> {
+    const view = requireWorkspace(workspaceId).shareView;
+    if (
+      !view ||
+      view.ended ||
+      recordedShareSelector(view.grantedSelector)?.wholeWorkspace !== true ||
+      view.editingNotReady !== true
+    )
+      return;
+    const next = { ...view };
+    delete next.editingNotReady;
+    await setWorkspaceShareView(workspaceId, next);
+    refreshNativeWorkspaceSurfaces();
+    notifyRenderer({ workspaceId, summaryChanged: true });
   }
 
   async function narrowShareViewLevel(input: {
@@ -230,6 +285,8 @@ export function registerSharedViewsIpcHandlers<
     access: ShareAccess;
     editingNotReady?: true;
     levelReadOvertaken?(): boolean;
+    // A membership's listed reach, under the visibility the copy already has.
+    reachFor?(current: unknown): { reach: ListedReach } | null;
     currentShareView(): ShareViewIdentity | undefined;
     assertCurrent(): void;
   }): Promise<void> {
@@ -246,6 +303,7 @@ export function registerSharedViewsIpcHandlers<
             latest.shareId !== input.shareId ||
             !latestPin ||
             latest.ended ||
+            latest.rebuild ||
             latestPin.access !== input.from ||
             input.levelReadOvertaken?.()
           )
@@ -253,15 +311,130 @@ export function registerSharedViewsIpcHandlers<
           const narrowed: ShareViewIdentity = {
             ...latest,
             grantedSelector: { ...latestPin, access: input.access },
+            ...input.reachFor?.(latest),
             unsavedPaths,
             unconfirmedChanges,
           };
-          if (input.editingNotReady) narrowed.editingNotReady = true;
+          if (input.editingNotReady || membershipWaitsToSend(latest, narrowed))
+            narrowed.editingNotReady = true;
           else delete narrowed.editingNotReady;
           await setWorkspaceShareView(input.workspaceId, narrowed);
         },
       ),
     );
+  }
+
+  // Read a membership's reach again after a pull applied nothing because the
+  // relay selected it under other signatures. Under the same visibility only
+  // the levels moved: writers pause while capture keeps what they made, the
+  // new levels go in, and the next pull continues. A changed visibility
+  // changes nothing here: the next pull is served under it, and the engine
+  // closes the copy for a rebuild before that pull answers.
+  async function followShareViewReach(
+    workspaceId: string,
+    rootPath: string,
+    relay: SyncRelayConnection,
+    assertCurrent: () => void,
+  ): Promise<"installed" | "current" | "visibility-changed"> {
+    const view = requireWorkspace(workspaceId).shareView;
+    if (!view || view.ended || recordedShareSelector(view.grantedSelector)?.wholeWorkspace !== true)
+      return "current";
+    const listed = await dependencies.fetchShareViewReach({ relay, shareId: view.shareId });
+    assertCurrent();
+    // A view with no readable reach takes the listed one: it has no
+    // visibility of its own to compare.
+    const stored = storedShareViewReach(view);
+    if (stored && stored.visibilitySignature !== listed.visibilitySignature) {
+      return "visibility-changed";
+    }
+    if (stored?.signature === listed.signature) return "current";
+    await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      shareViewFiles.narrow(
+        lease,
+        { kind: "standalone", workspaceId },
+        assertCurrent,
+        async (unsavedPaths, unconfirmedChanges) => {
+          const latest = requireWorkspace(workspaceId).shareView;
+          if (!latest || latest.shareId !== view.shareId || latest.ended) return;
+          const next = { ...latest, reach: listed, unsavedPaths, unconfirmedChanges };
+          // The caller records the identity next and clears the mark.
+          if (membershipWaitsToSend(latest, next)) next.editingNotReady = true;
+          await setWorkspaceShareView(workspaceId, next);
+        },
+      ),
+    );
+    refreshNativeWorkspaceSurfaces();
+    return "installed";
+  }
+
+  // The engine closed a membership's copy because the relay changed which
+  // items it sees. Record the rebuild so the view shows "Updating access" and
+  // nothing here reads the copy until the new one is swapped in.
+  async function closeForRebuild(workspaceId: string, rebuildId: string): Promise<void> {
+    const view = requireWorkspace(workspaceId).shareView;
+    if (!view || view.rebuild?.rebuildId === rebuildId) return;
+    await setWorkspaceShareView(workspaceId, { ...view, rebuild: { rebuildId } });
+    notifyRenderer({ workspaceId, summaryChanged: true });
+  }
+
+  // The engine closes the copy before it answers with the rebuild's id, so a
+  // crash or a failed record can lose the id. Ask the engine before reading
+  // the copy, and record the rebuild it names.
+  async function recoverRebuild(workspaceId: string): Promise<void> {
+    const view = requireWorkspace(workspaceId).shareView;
+    if (!view || view.ended || recordedShareSelector(view.grantedSelector)?.wholeWorkspace !== true)
+      return;
+    const rebuild = await dependencies.readShareViewRebuild(workspaceId);
+    if (rebuild === null) return;
+    // Only a closed copy can lose its id: the runner needs it to go further.
+    // A converged copy whose record no longer names it was installed, and
+    // only its finish failed, which leaves the hidden History aside. The
+    // runner may have installed it while the status was read, so read the
+    // record again.
+    if (
+      rebuild.phase === "converged" &&
+      requireWorkspace(workspaceId).shareView?.rebuild === undefined
+    ) {
+      await dependencies
+        .finishShareViewRebuild(workspaceId, rebuild.rebuildId)
+        .catch((error: unknown) => {
+          console.error("[desktop] joined copy rebuild finish:", error);
+        });
+      return;
+    }
+    await closeForRebuild(workspaceId, rebuild.rebuildId);
+  }
+
+  function updatingAccess(workspaceId: string): boolean {
+    return requireWorkspace(workspaceId).shareView?.rebuild !== undefined;
+  }
+
+  // Rebuild the copy if it is closed. An ended membership takes today's end
+  // path. The window learns the outcome either way.
+  async function rebuildClosedCopy(workspaceId: string): Promise<ShareViewRebuildOutcome | null> {
+    const view = requireWorkspace(workspaceId).shareView;
+    if (!view?.rebuild || view.ended) return null;
+    try {
+      const outcome = await dependencies.rebuildShareView(workspaceId, view.rebuild.rebuildId);
+      if (outcome.kind === "ended") {
+        const workspace = requireWorkspace(workspaceId);
+        await withStaleSensitiveWorkspaceOperation(workspace.rootPath, (lease) =>
+          shareViewFiles.end(lease, { kind: "standalone", workspaceId }, () => undefined),
+        );
+        refreshNativeWorkspaceSurfaces();
+      }
+      return outcome;
+    } finally {
+      notifyRenderer({ workspaceId, summaryChanged: true });
+    }
+  }
+
+  // Start the rebuild without waiting: a refresh holds the copy, and the
+  // rebuild closes every session on it first.
+  function startRebuild(workspaceId: string): void {
+    void rebuildClosedCopy(workspaceId).catch((error: unknown) => {
+      console.error("[desktop] joined copy rebuild:", error);
+    });
   }
 
   // Receive side: open a pasted share code as a READ-ONLY shared view.
@@ -293,8 +466,13 @@ export function registerSharedViewsIpcHandlers<
     // Pre-flight against the relay before creating anything locally; also
     // learns who shared it for the honest read-only copy.
     let info: Awaited<ReturnType<typeof fetchShareViewInfo>>;
+    // A membership's levels, which its first pull already gates by.
+    let reach: ListedReach | null = null;
     try {
       info = await fetchShareViewInfo({ relay, shareId: parsed.shareId });
+      if (info.selector?.wholeWorkspace === true) {
+        reach = await dependencies.fetchShareViewReach({ relay, shareId: parsed.shareId });
+      }
     } catch (error) {
       if (error instanceof ShareUnavailableError) {
         throw new Error(
@@ -330,9 +508,13 @@ export function registerSharedViewsIpcHandlers<
     const membership = grantedSelector.wholeWorkspace === true;
     const membershipName = info.subjectName ?? "the workspace";
     const unfinished = (error: unknown) =>
-      new Error(
-        `dohc could not finish reading ${membershipName}: ${causeOf(error)}. What arrived stays in ${rootPath}. Try again continues from there.`,
-      );
+      error instanceof AccessUpdatingError
+        ? new Error(
+            `dohc could not finish reading ${membershipName} while its access is being updated. What arrived stays in ${rootPath}.`,
+          )
+        : new Error(
+            `dohc could not finish reading ${membershipName}: ${causeOf(error)}. What arrived stays in ${rootPath}. Try again continues from there.`,
+          );
     const kept = membership
       ? listWorkspaces().find(
           (entry) =>
@@ -347,14 +529,25 @@ export function registerSharedViewsIpcHandlers<
       : undefined;
     if (kept) {
       await engineDaemonStartup();
+      // A copy closed for its access is rebuilt first, and the pull continues
+      // from the rebuilt copy.
+      await recoverRebuild(kept.workspaceId);
+      const rebuilt = await rebuildClosedCopy(kept.workspaceId);
+      if (rebuilt?.kind === "ended")
+        throw new Error(
+          `Your membership of ${membershipName} ended. What arrived stays in ${rootPath}.`,
+        );
+      if (rebuilt && rebuilt.kind !== "rebuilt") throw unfinished(new AccessUpdatingError());
       try {
-        await firstPull(kept.rootPath, kept.workspaceId);
+        await firstPull(kept.rootPath, kept.workspaceId, relay);
       } catch (error) {
         if (error instanceof ShareUnavailableError)
           throw new Error(
             `Your membership of ${membershipName} ended. What arrived stays in ${rootPath}.`,
           );
-        throw unfinished(error);
+        if (!(error instanceof AccessUpdatingError)) throw unfinished(error);
+        // The window shows Updating access until the rebuild finishes.
+        startRebuild(kept.workspaceId);
       } finally {
         notifyRenderer();
       }
@@ -384,6 +577,9 @@ export function registerSharedViewsIpcHandlers<
       populate: async (created, authorityBinding) => {
         assertOpenIdentity();
         const statedEdit = grantedSelector.access === "edit";
+        const waitsToSend =
+          statedEdit ||
+          membershipWaitsToSend(null, { grantedSelector, ...(reach ? { reach } : {}) });
         const shareView: ShareViewIdentity = {
           shareId: parsed.shareId,
           ...(info.granterUserId ? { granterUserId: info.granterUserId } : {}),
@@ -395,7 +591,8 @@ export function registerSharedViewsIpcHandlers<
           // instead of trusting the relay's selection each time. A share
           // stated at Edit is pinned at View until its identity is recorded.
           grantedSelector: statedEdit ? { ...grantedSelector, access: "view" } : grantedSelector,
-          ...(statedEdit ? { editingNotReady: true as const } : {}),
+          ...(waitsToSend ? { editingNotReady: true as const } : {}),
+          ...(reach ? { reach } : {}),
           receivedIdentity: info.receivedIdentity,
           ...membershipPlace(info),
           // Persist the origin relay so a later refresh signed into a different
@@ -404,26 +601,27 @@ export function registerSharedViewsIpcHandlers<
           recipientUserId: credentials.userId,
         };
         await setWorkspaceShareView(created.workspaceId, shareView);
+        // Before the first pull: a share view that writes back needs its own
+        // sync identity, and the pull is what gives it the share cursor that
+        // makes local writes journal. A membership at View can still list Edit
+        // in a folder, so this runs whatever the stated level.
+        //
+        // Soft. Opening a share is a read, and a failure here costs the
+        // recipient editing, not what they were given: the copy opens at
+        // View, and a refresh that finds Edit records the identity and
+        // pins Edit.
+        const recorded = await workspaceAuthorities
+          .withBinding(authorityBinding, (lease) =>
+            recordShareViewIdentity({
+              ...canonicalWorkspaceFor(lease),
+              shareView: { ...shareView, grantedSelector },
+            }),
+          )
+          .catch((error) => {
+            console.error("[desktop] share view identity:", error);
+            return false;
+          });
         if (statedEdit) {
-          // Before the first pull: a share view that writes back needs its own
-          // sync identity, and the pull is what gives it the share cursor that
-          // makes local writes journal.
-          //
-          // Soft. Opening a share is a read, and a failure here costs the
-          // recipient editing, not what they were given: the copy opens at
-          // View, and a refresh that finds Edit records the identity and
-          // pins Edit.
-          const recorded = await workspaceAuthorities
-            .withBinding(authorityBinding, (lease) =>
-              recordShareViewIdentity({
-                ...canonicalWorkspaceFor(lease),
-                shareView: { ...shareView, grantedSelector },
-              }),
-            )
-            .catch((error) => {
-              console.error("[desktop] share view identity:", error);
-              return false;
-            });
           const written = requireWorkspace(created.workspaceId).shareView;
           if (
             recorded &&
@@ -435,10 +633,11 @@ export function registerSharedViewsIpcHandlers<
             delete pinnedAtEdit.editingNotReady;
             await setWorkspaceShareView(created.workspaceId, pinnedAtEdit);
           }
-        }
+        } else if (waitsToSend && recorded === "recorded")
+          await markSendingReady(created.workspaceId);
         refreshNativeWorkspaceSurfaces();
         try {
-          await firstPull(created.rootPath, created.workspaceId);
+          await firstPull(created.rootPath, created.workspaceId, relay);
         } catch (error) {
           // A membership keeps what arrived, unless it ended.
           if (!membership || error instanceof ShareUnavailableError) throw error;
@@ -475,25 +674,59 @@ export function registerSharedViewsIpcHandlers<
     // Through the PROJECTION, not a raw parse: the level lives under the
     // record's pinned grant, and a raw parse would strip it and hand the
     // renderer a fresh share view with no level to state.
-    if (pullFailure) throw unfinished(pullFailure.error);
+    if (pullFailure && !(pullFailure.error instanceof AccessUpdatingError))
+      throw unfinished(pullFailure.error);
+    // The engine closed the copy during its first pull. The window shows
+    // Updating access until the rebuild finishes.
+    if (pullFailure) startRebuild(created.workspaceId);
     const summary = workspaceSummaryFor(requireWorkspace(created.workspaceId));
     return { workspace: summary };
   }
 
-  async function firstPull(rootPath: string, workspaceId: string): Promise<void> {
-    const reconciled = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
-      shareViewFiles.reconcile(lease, { kind: "standalone", workspaceId }, "refresh"),
+  async function firstPull(
+    rootPath: string,
+    workspaceId: string,
+    relay: SyncRelayConnection,
+  ): Promise<void> {
+    // A membership kept from before levels were listed reads them first.
+    if (lacksReach(workspaceId))
+      await followShareViewReach(workspaceId, rootPath, relay, () => undefined);
+    for (let attempt = 0; ; attempt += 1) {
+      const reconciled = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        shareViewFiles.reconcile(lease, { kind: "standalone", workspaceId }, "refresh"),
+      );
+      if (reconciled.kind !== "refresh") {
+        throw new Error("Shared view refresh returned an invalid result.");
+      }
+      const outcome = reconciled.outcome;
+      if ("ok" in outcome && !outcome.ok) {
+        throw new Error(outcome.errorMessage);
+      }
+      if (outcome.status === "ended") {
+        throw new ShareUnavailableError();
+      }
+      if (!outcome.reachChanged) return;
+      if (outcome.rebuildId !== undefined) {
+        await closeForRebuild(workspaceId, outcome.rebuildId);
+        throw new AccessUpdatingError();
+      }
+      if (
+        attempt > 0 ||
+        (await followShareViewReach(workspaceId, rootPath, relay, () => undefined)) !== "installed"
+      ) {
+        throw new Error("the workspace's access changed while it was being read");
+      }
+    }
+  }
+
+  function lacksReach(workspaceId: string): boolean {
+    const view = requireWorkspace(workspaceId).shareView;
+    return (
+      !!view &&
+      !view.ended &&
+      recordedShareSelector(view.grantedSelector)?.wholeWorkspace === true &&
+      storedShareViewReach(view) === null
     );
-    if (reconciled.kind !== "refresh") {
-      throw new Error("Shared view refresh returned an invalid result.");
-    }
-    const outcome = reconciled.outcome;
-    if ("ok" in outcome && !outcome.ok) {
-      throw new Error(outcome.errorMessage);
-    }
-    if (outcome.status === "ended") {
-      throw new ShareUnavailableError();
-    }
   }
 
   const pullCache = new Map<
@@ -509,8 +742,23 @@ export function registerSharedViewsIpcHandlers<
       // A membership's level as this computer knows it, which its held pull
       // names. Cleared once the relay says it differs, until a check moves it.
       level?: ShareViewSelector["access"];
+      reach?: ShareReachSignatures;
     }
   >();
+  // The relay a membership reads its reach from: the signed-in one, when it
+  // is the view's own and its account is the recipient.
+  function membershipRelay(view: RegistryEntry["shareView"]): SyncRelayConnection | null {
+    const credentials = currentCredentials();
+    if (
+      !view ||
+      recordedShareSelector(view.grantedSelector)?.wholeWorkspace !== true ||
+      !credentials?.relayUrl ||
+      view.recipientUserId !== credentials.userId ||
+      (view.relayUrl && !relayUrlsMatch(credentials.relayUrl, view.relayUrl))
+    )
+      return null;
+    return { baseUrl: credentials.relayUrl, token: credentials.token };
+  }
   const cacheClosers = new Map<Sender, () => void>();
   const clearCache = (sender: Sender) => {
     pullCache.delete(sender);
@@ -640,6 +888,7 @@ export function registerSharedViewsIpcHandlers<
             ...(held
               ? { hold: SHARE_VIEW_HOLD_MS, ...(cached.level ? { level: cached.level } : {}) }
               : {}),
+            ...(cached.reach ? { reach: cached.reach } : {}),
           });
           if (probe.levelChanged) delete cached.level;
           controller.signal.throwIfAborted();
@@ -751,6 +1000,13 @@ export function registerSharedViewsIpcHandlers<
           if (!shareViewIdentityIsIntact(workspace.shareView)) {
             throw new Error(SHARE_VIEW_REOPEN_MESSAGE);
           }
+          // A closed copy answers only its rebuild, which this starts again
+          // after a restart or a Try again.
+          await recoverRebuild(workspace.workspaceId);
+          if (requireWorkspace(workspace.workspaceId).shareView?.rebuild) {
+            startRebuild(workspace.workspaceId);
+            throw new Error(UPDATING_ACCESS_MESSAGE);
+          }
           // A proven large fresh import can publish its workspace handle before
           // initial capture finishes. Every share.* RPC stays fenced until the
           // phase reaches ready or degraded, including the Edit identity call
@@ -777,7 +1033,7 @@ export function registerSharedViewsIpcHandlers<
           // Refresh the relay-derived chat fact for the banner's next step. It
           // does not grant desktop generic-chat writes. Keep the share identity
           // current for the separate Edit proposal lane.
-          let identityRecorded = false;
+          let identityRecorded: Awaited<ReturnType<typeof recordShareViewIdentity>> = false;
           let identityFailure: unknown;
           let editStatedForCopyBelowEdit = false;
           let saysEditingNotReady = false;
@@ -883,10 +1139,15 @@ export function registerSharedViewsIpcHandlers<
                     ? membershipPlace(info)
                     : {}),
                 };
+                // A membership that can send keeps its mark until an identity
+                // is recorded. A record that found no Edit on an older read
+                // proves nothing about levels installed since.
                 if (
-                  identityRecorded ||
-                  (widenedPin?.access ?? pinnedLevel(current.shareView)) === "edit" ||
-                  (statedLevel !== undefined && statedLevel !== "edit" && !overtaken)
+                  (identityRecorded === "recorded" ||
+                    !membershipWaitsToSend(current.shareView, nextShareView)) &&
+                  (identityRecorded ||
+                    (widenedPin?.access ?? pinnedLevel(current.shareView)) === "edit" ||
+                    (statedLevel !== undefined && statedLevel !== "edit" && !overtaken))
                 )
                   delete nextShareView.editingNotReady;
                 await setWorkspaceShareView(workspace.workspaceId, nextShareView);
@@ -914,7 +1175,8 @@ export function registerSharedViewsIpcHandlers<
             }
             if (!identityRecorded && identityFailure === undefined) {
               try {
-                await recordShareViewIdentity(refreshedWorkspace);
+                if ((await recordShareViewIdentity(refreshedWorkspace)) === "recorded")
+                  await markSendingReady(workspace.workspaceId);
               } catch (error) {
                 console.error("[desktop] share view enrolment:", error);
                 identityFailure = error;
@@ -933,27 +1195,95 @@ export function registerSharedViewsIpcHandlers<
               }
             }
           }
-          let outcome;
+          let outcome: StandaloneShareViewRefreshOutcome | RefreshSharedViewOutcome;
           let nextCursor: number | undefined;
           let pulled: ShareViewPullCommitted["changes"] = [];
+          // The reach signatures this view now settles on, which a held probe
+          // compares with each empty page. After a visibility change they are
+          // the served ones, so the probe stops counting the same change as news.
+          let settledReach: ShareReachSignatures | undefined;
           try {
-            const reconciled = await withStaleSensitiveWorkspaceOperation(
-              workspace.rootPath,
-              (lease) =>
-                shareViewFiles.reconcile(
-                  lease,
-                  { kind: "standalone", workspaceId: workspace.workspaceId },
-                  "refresh",
-                  (committed) => {
-                    nextCursor = committed.cursor;
-                    pulled = committed.changes;
-                  },
-                ),
-            );
-            if (reconciled.kind !== "refresh") {
-              throw new Error("Shared view refresh returned an invalid result.");
+            const reconcile = async () => {
+              const reconciled = await withStaleSensitiveWorkspaceOperation(
+                workspace.rootPath,
+                (lease) =>
+                  shareViewFiles.reconcile(
+                    lease,
+                    { kind: "standalone", workspaceId: workspace.workspaceId },
+                    "refresh",
+                    (committed) => {
+                      nextCursor = committed.cursor;
+                      pulled = committed.changes;
+                    },
+                  ),
+              );
+              if (reconciled.kind !== "refresh") {
+                throw new Error("Shared view refresh returned an invalid result.");
+              }
+              return reconciled.outcome;
+            };
+            const reachRelay = membershipRelay(workspace.shareView);
+            // Installed levels can list Edit where the member had none, so the
+            // copy enrolls for sending before anything is written under them.
+            const enrollInstalled = async () => {
+              const recorded = await recordShareViewIdentity(currentShareViewWorkspace()).catch(
+                (error: unknown) => {
+                  console.error("[desktop] share view enrolment:", error);
+                  return false as const;
+                },
+              );
+              if (recorded === "recorded") await markSendingReady(workspace.workspaceId);
+            };
+            if (
+              reachRelay &&
+              lacksReach(workspace.workspaceId) &&
+              (await followShareViewReach(
+                workspace.workspaceId,
+                workspace.rootPath,
+                reachRelay,
+                () => operation.assertCurrent(),
+              )) === "installed"
+            ) {
+              await enrollInstalled();
             }
-            outcome = reconciled.outcome;
+            // A pull the engine closed the copy on records the rebuild and starts it.
+            const closedForRebuild = async (pulled: typeof outcome) => {
+              if (("ok" in pulled && !pulled.ok) || pulled.rebuildId === undefined) return false;
+              await closeForRebuild(workspace.workspaceId, pulled.rebuildId);
+              startRebuild(workspace.workspaceId);
+              return true;
+            };
+            outcome = await reconcile();
+            if (
+              !(await closedForRebuild(outcome)) &&
+              !("ok" in outcome && !outcome.ok) &&
+              outcome.reachChanged &&
+              reachRelay
+            ) {
+              const followed = await followShareViewReach(
+                workspace.workspaceId,
+                workspace.rootPath,
+                reachRelay,
+                () => operation.assertCurrent(),
+              );
+              // Pull again under the installed levels. A second change waits for
+              // the next refresh, unless the engine closes the copy for it.
+              if (followed === "installed") {
+                await enrollInstalled();
+                outcome = await reconcile();
+                await closedForRebuild(outcome);
+              } else if (followed === "visibility-changed") settledReach = outcome.reachChanged;
+            }
+            if (settledReach === undefined) {
+              const stored = storedShareViewReach(
+                requireWorkspace(workspace.workspaceId).shareView,
+              );
+              if (stored)
+                settledReach = {
+                  signature: stored.signature,
+                  visibilitySignature: stored.visibilitySignature,
+                };
+            }
           } catch (error) {
             operation.assertCurrent();
             // A pull that failed on a later page still persisted the refusals its
@@ -977,9 +1307,17 @@ export function registerSharedViewsIpcHandlers<
             notifyPull(changedSummary);
             return RefreshSharedViewResult.parse(outcome);
           }
-          const editingNotReady = saysEditingNotReady && outcome.status !== "ended";
+          // A membership still marked is not cached either, so the next
+          // background refresh enrolls again.
+          const marked = requireWorkspace(input.workspaceId).shareView;
+          const editingNotReady =
+            (saysEditingNotReady ||
+              (recordedShareSelector(marked?.grantedSelector)?.wholeWorkspace === true &&
+                marked?.editingNotReady === true)) &&
+            outcome.status !== "ended";
           if (
             outcome.status !== "ended" &&
+            !updatingAccess(input.workspaceId) &&
             !editingNotReady &&
             !editStatedForCopyBelowEdit &&
             !levelReadOvertaken() &&
@@ -995,6 +1333,7 @@ export function registerSharedViewsIpcHandlers<
               nextCursor,
               credentialGeneration,
               ...membershipLevel(workspace.shareView.grantedSelector),
+              ...(settledReach ? { reach: settledReach } : {}),
             });
             const clear = () => clearCache(event.sender);
             const stopClose = dependencies.onSenderClosed(event.sender, clear);
@@ -1074,6 +1413,16 @@ export function registerSharedViewsIpcHandlers<
           };
         }
       },
+      // The copy is closed, so no session names this window: the handler
+      // starts only the rebuild the membership's record names.
+      retryShareViewRebuild: async (input) => {
+        const view = requireWorkspace(input.workspaceId).shareView;
+        if (!view || view.ended || !shareViewIdentityIsIntact(view)) return;
+        // The panel shows during startup too, and the engine reads the rebuild.
+        await engineDaemonStartup();
+        await recoverRebuild(input.workspaceId);
+        startRebuild(input.workspaceId);
+      },
       dismissShareCaptureNotice: async (input, { operation }) => {
         operation.assertCurrent();
         const view = operation.workspace.shareView;
@@ -1094,6 +1443,15 @@ export function registerSharedViewsIpcHandlers<
             dismissedKey: state.key,
           },
         });
+        notifyRenderer({ workspaceId: input.workspaceId, summaryChanged: true });
+      },
+      dismissAccessSavedNotice: async (input, { operation }) => {
+        operation.assertCurrent();
+        const view = operation.workspace.shareView;
+        // A dismissal of an older recovery folder must not hide a newer Notice.
+        if (!view || view.accessSaved?.folder !== input.folder) return;
+        const { accessSaved: _dismissed, ...rest } = view;
+        await setWorkspaceShareView(input.workspaceId, rest);
         notifyRenderer({ workspaceId: input.workspaceId, summaryChanged: true });
       },
       checkSharedViewAccess: async (input, { event }): Promise<CheckSharedViewAccessResult> => {
@@ -1125,6 +1483,8 @@ export function registerSharedViewsIpcHandlers<
               if (!view || !pin) return { status: "unverified" };
               if (!shareViewIdentityIsIntact(view)) return { status: "needs-reopen" };
               if (view.ended) return { status: "ended" };
+              // A closed copy is not narrowed: its rebuild reads the new levels.
+              if (view.rebuild) return { status: "unverified" };
               if (!joinedByAccount(view, credentials)) return { status: "unverified" };
               const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
               const readAccess = () =>
@@ -1171,12 +1531,33 @@ export function registerSharedViewsIpcHandlers<
                 return { status: "ended" };
               }
               scoped.assertCurrent();
+              const statedAccess = stated.access;
+              // Main's write gate reads a membership's levels from its stored
+              // reach, so the relay's reach goes in with a new level. It is read
+              // under the same deadline, before the record it is compared with.
+              let listed: ListedReach | null = null;
+              if (pin.wholeWorkspace === true && statedAccess !== levelAtRead) {
+                listed = await dependencies.fetchShareViewReach({
+                  relay,
+                  shareId: view.shareId,
+                  signal: AbortSignal.any([controller.signal, operation.signal]),
+                });
+                scoped.assertCurrent();
+              }
               clearTimeout(timeout);
               accessStatements.set(
                 workspace.workspaceId,
                 accessStatementsFor(workspace.workspaceId) + 1,
               );
-              const statedAccess = stated.access;
+              // The listed reach goes in only under the visibility the copy
+              // already has. A changed one is the rebuild's to install.
+              const reachFor = (current: unknown) => {
+                const stored = storedShareViewReach(current);
+                return listed &&
+                  (!stored || stored.visibilitySignature === listed.visibilitySignature)
+                  ? { reach: listed }
+                  : null;
+              };
               // Preserve the file/version pin. A metadata read can narrow access,
               // but cannot expand the scope this local copy was admitted with.
               // A membership's level is the owner's member level now, so it also
@@ -1187,32 +1568,47 @@ export function registerSharedViewsIpcHandlers<
                 return { status: "unverified" };
               if (currentView.ended) return { status: "ended" };
               if (currentPin.access !== levelAtRead) return { status: "unverified" };
+              // A pull beside this check may have closed the copy meanwhile.
+              if (currentView.rebuild) return { status: "unverified" };
+              const moves =
+                currentPin.wholeWorkspace === true && statedAccess !== currentPin.access;
+              // Another window moved the level after this one read it.
+              if (moves && !listed) return { status: "unverified" };
               // A membership's level is the owner's member level, so it also rises.
               // Edit waits until the copy's identity is recorded, as a refresh does.
-              if (
-                currentPin.wholeWorkspace === true &&
-                shareAccessRank(statedAccess) > shareAccessRank(currentPin.access)
-              ) {
+              if (moves && shareAccessRank(statedAccess) > shareAccessRank(currentPin.access)) {
+                // Under a new visibility the gate keeps the old levels until the
+                // rebuild, so the raise waits for it and a later check makes it.
+                const reach = reachFor(currentView);
+                if (!reach) return { status: "unverified" };
                 const raised = { ...currentPin, access: statedAccess };
                 const ready =
                   statedAccess !== "edit" ||
                   (await recordShareViewIdentity({
                     ...operation.workspace,
-                    shareView: { ...currentView, grantedSelector: raised },
+                    shareView: { ...currentView, grantedSelector: raised, ...reach },
                   }).catch((error: unknown) => {
                     console.error("[desktop] share view identity:", error);
                     return false;
                   }));
                 scoped.assertCurrent();
                 const latest = operation.workspace.shareView;
+                const latestReach = latest ? reachFor(latest) : null;
                 if (
                   ready &&
+                  latestReach &&
                   latest?.shareId === view.shareId &&
                   !latest.ended &&
+                  !latest.rebuild &&
                   recordedShareSelector(latest.grantedSelector)?.access === currentPin.access
                 ) {
-                  const next = { ...latest, grantedSelector: raised };
-                  delete next.editingNotReady;
+                  const next = { ...latest, grantedSelector: raised, ...latestReach };
+                  // A raise to Edit that recorded the identity can send. Any
+                  // other raise recorded none, so a copy that can send waits
+                  // for a refresh.
+                  if (ready !== "recorded" && membershipWaitsToSend(latest, next))
+                    next.editingNotReady = true;
+                  else delete next.editingNotReady;
                   await setWorkspaceShareView(workspace.workspaceId, next);
                   refreshNativeWorkspaceSurfaces();
                   notifyRenderer({ workspaceId: workspace.workspaceId, summaryChanged: true });
@@ -1225,6 +1621,7 @@ export function registerSharedViewsIpcHandlers<
                   shareId: view.shareId,
                   from: currentPin.access,
                   access: statedAccess,
+                  reachFor,
                   currentShareView: () => operation.workspace.shareView,
                   assertCurrent: scoped.assertCurrent,
                 });
@@ -1232,11 +1629,14 @@ export function registerSharedViewsIpcHandlers<
                 notifyRenderer({ workspaceId: workspace.workspaceId, summaryChanged: true });
               }
               const marked = operation.workspace.shareView;
+              // A membership that can send keeps its mark until a refresh
+              // records its identity.
               if (
                 statedAccess !== "edit" &&
                 marked?.shareId === view.shareId &&
                 marked.editingNotReady &&
-                !marked.ended
+                !marked.ended &&
+                !membershipWaitsToSend(marked, marked)
               ) {
                 const unmarked = { ...marked };
                 delete unmarked.editingNotReady;
@@ -1248,7 +1648,7 @@ export function registerSharedViewsIpcHandlers<
               const committed = operation.workspace.shareView;
               if (committed?.ended) return { status: "ended" };
               const committedPin = recordedShareSelector(committed?.grantedSelector);
-              if (committed?.shareId !== view.shareId || !committedPin)
+              if (committed?.shareId !== view.shareId || !committedPin || committed.rebuild)
                 return { status: "unverified" };
               // Only a membership has a role, and a level that the owner changes
               // for everyone; the window says so when this check moved it. The
@@ -1271,14 +1671,22 @@ export function registerSharedViewsIpcHandlers<
               ) {
                 Object.assign(pulling, membershipLevel(committedPin));
               }
+              // A membership that waits to send answers View where it is pinned
+              // at Edit, as its write gates and summary do.
+              const answered =
+                committedPin.wholeWorkspace === true &&
+                committedPin.access === "edit" &&
+                committed.editingNotReady === true
+                  ? "view"
+                  : committedPin.access;
               const statesMore =
-                shareAccessRank(statedAccess) > shareAccessRank(committedPin.access)
+                shareAccessRank(statedAccess) > shareAccessRank(answered)
                   ? { relayStatesMore: true as const }
                   : {};
               return committedPin.wholeWorkspace === true
                 ? {
                     status: "current",
-                    access: committedPin.access,
+                    access: answered,
                     ...(stated.role ? { role: stated.role } : {}),
                     ...(committedPin.access !== levelAtRead
                       ? {
@@ -1303,6 +1711,21 @@ export function registerSharedViewsIpcHandlers<
       },
     },
   );
+
+  return {
+    // At start nothing else rebuilds a closed copy: its window shows Updating
+    // access and reads nothing. Start each one, as Try again would.
+    async resumeRebuilds() {
+      for (const { workspaceId } of listWorkspaces()) {
+        try {
+          await recoverRebuild(workspaceId);
+        } catch (error) {
+          console.error("[desktop] joined copy rebuild status:", error);
+        }
+        if (requireWorkspace(workspaceId).shareView?.rebuild) startRebuild(workspaceId);
+      }
+    },
+  };
 }
 
 // Where a membership sits on the relay: the role it last named, and the
@@ -1323,6 +1746,9 @@ function membershipLevel(selector: unknown): { level?: ShareViewSelector["access
   const pin = recordedShareSelector(selector);
   return pin?.wholeWorkspace === true ? { level: pin.access } : {};
 }
+
+// The engine closed a membership's copy for a rebuild.
+class AccessUpdatingError extends Error {}
 
 function causeOf(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);

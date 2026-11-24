@@ -5,17 +5,22 @@ import type { createLiveAdapter, LiveProvider } from "../../editor/liveAdapter";
 
 const hoisted = vi.hoisted(() => ({
   posted: [] as string[],
+  copied: [] as unknown[],
   mounted: [] as {
     canEdit(): boolean;
     edit(change: () => void): boolean;
     destroy: ReturnType<typeof vi.fn>;
+    refresh: ReturnType<typeof vi.fn>;
   }[],
   readDoc: null as Y.Doc | null,
   adapter: null as Parameters<typeof createLiveAdapter>[0] | null,
 }));
 
 vi.mock("../../editor/bridge", () => ({
-  post: (kind: string) => hoisted.posted.push(kind),
+  post: (kind: string, payload?: { markdown?: unknown }) => {
+    hoisted.posted.push(kind);
+    if (kind === "markdown") hoisted.copied.push(payload?.markdown);
+  },
 }));
 vi.mock("@dohc/ydoc-projection/browser-editor", () => ({
   mountLiveBodyEditor: (
@@ -49,15 +54,16 @@ class FakeElement {
   append() {}
   after() {}
   remove() {}
+  replaceChildren() {}
   addEventListener() {}
   scrollTo() {}
 }
 
-function note(format?: number) {
+function note(format?: number, words = "Packing list") {
   const doc = new Y.Doc();
   const paragraph = new Y.XmlElement("paragraph");
   const text = new Y.XmlText();
-  text.insert(0, "Packing list");
+  text.insert(0, words);
   paragraph.insert(0, [text]);
   getDohcYDocBodyFragment(doc).insert(0, [paragraph]);
   if (format !== undefined) doc.getMap("meta").set("schemaVersion", format);
@@ -90,6 +96,7 @@ const page = {
 
 beforeEach(() => {
   hoisted.posted.length = 0;
+  hoisted.copied.length = 0;
   hoisted.mounted.length = 0;
   hoisted.adapter = null;
   const root = new FakeElement();
@@ -170,5 +177,43 @@ describe("the live document", () => {
     expect(change).not.toHaveBeenCalled();
     expect(written()).toBe(0);
     expect(hoisted.posted).toContain("unsupportedFormat");
+  });
+});
+
+describe("a newer read of the page", () => {
+  const app = () =>
+    window as unknown as {
+      __dohcReplaceRead(markdown: string): void;
+      __dohcCopyMarkdown(): void;
+      __dohcSetEditable(value: boolean): void;
+    };
+
+  it("replaces the read text in the same page, and copying and editing follow the new text", () => {
+    hoisted.readDoc = note(1);
+    mountDocument(page);
+    hoisted.readDoc = note(1, "Packing list and passports");
+    app().__dohcReplaceRead("Packing list and passports");
+    const [first, second] = hoisted.mounted;
+    expect(hoisted.mounted).toHaveLength(2);
+    expect(first?.destroy).toHaveBeenCalledOnce();
+    expect(second?.destroy).not.toHaveBeenCalled();
+
+    app().__dohcSetEditable(false);
+    expect(second?.refresh).toHaveBeenCalled();
+    expect(first?.refresh).not.toHaveBeenCalled();
+    app().__dohcCopyMarkdown();
+    expect(hoisted.copied).toEqual(["Packing list and passports\n"]);
+  });
+
+  it("binds no editor to a newer read in format 2, leaves no copy or edit bound, and tells the app", () => {
+    hoisted.readDoc = note(1);
+    mountDocument(page);
+    hoisted.readDoc = note(2);
+    app().__dohcReplaceRead("Packing list");
+    expect(hoisted.mounted).toHaveLength(1);
+    expect(hoisted.mounted[0]?.destroy).toHaveBeenCalledOnce();
+    expect(hoisted.posted).toContain("unsupportedFormat");
+    expect(app().__dohcCopyMarkdown).toBeUndefined();
+    expect(app().__dohcSetEditable).toBeUndefined();
   });
 });

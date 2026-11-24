@@ -386,6 +386,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
       ...workspace,
       remote: { serverUrl: "https://cloud.test", ownerUserId: "verified-owner" },
     }),
+    currentPathOf: async () => null,
     warmCredentials: async () => undefined,
     currentCredentials: () => chatCredentials,
     currentCredentialGeneration: () => 0,

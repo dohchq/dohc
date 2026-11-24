@@ -1,7 +1,7 @@
 import { isRecord } from "@dohc/workspace-core/records";
 import { recordedShareSelector } from "../workspaces/shareViewRecords";
-import { shareViewIdentityIsIntact, shareViewIsPresent } from "../workspaces/shareViewMarker";
-import { shareViewTakesLocalWrites } from "../workspaces/shareWriteGate";
+import { shareViewIsPresent } from "../workspaces/shareViewMarker";
+import { shareViewWriteLevel, shareViewWriteScopeOf } from "../workspaces/shareWriteGate";
 
 /**
  * Who may press a document Collection's buttons from this computer, and
@@ -20,11 +20,8 @@ export function documentButtonAccess(
   if (!shareViewIsPresent(shareView)) return "press";
   const marker = isRecord(shareView) ? shareView : {};
   const grant = recordedShareSelector(marker.grantedSelector);
-  if (
-    !grant ||
-    !shareViewIdentityIsIntact(marker) ||
-    !shareViewTakesLocalWrites({ access: grant.access, ended: marker.ended === true })
-  )
+  const scope = shareViewWriteScopeOf(marker, null);
+  if (!grant || !scope || shareViewWriteLevel(scope, { folder: collectionPath }) !== "edit")
     return "no-access";
   if (grant.versionId !== null || grant.paths.length === 0) return "no-access";
   const covers = grant.paths.some(

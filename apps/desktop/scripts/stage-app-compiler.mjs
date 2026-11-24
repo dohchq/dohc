@@ -41,6 +41,7 @@ function compilerFiles(platform, arch) {
     "licenses/react.txt",
     "licenses/react-dom.txt",
     "licenses/scheduler.txt",
+    "licenses/lucide.txt",
     ...BUILTIN_FILES.map((name) => `builtins/${name}`),
   ];
 }
@@ -306,6 +307,7 @@ export async function stageAppCompiler(options = {}) {
         "entities",
       );
       const reactRoot = dirname(require.resolve("react/package.json"));
+      const lucideRoot = dirname(require.resolve("lucide-react/package.json"));
       const reactDomRoot = dirname(require.resolve("react-dom/package.json"));
       const schedulerRoot = dirname(
         createRequire(join(reactDomRoot, "package.json")).resolve("scheduler/package.json"),
@@ -336,6 +338,7 @@ export async function stageAppCompiler(options = {}) {
       await cp(join(reactRoot, "LICENSE"), join(staging, "licenses/react.txt"));
       await cp(join(reactDomRoot, "LICENSE"), join(staging, "licenses/react-dom.txt"));
       await cp(join(schedulerRoot, "LICENSE"), join(staging, "licenses/scheduler.txt"));
+      await cp(join(lucideRoot, "LICENSE"), join(staging, "licenses/lucide.txt"));
       const builtins = await buildClosedAppBuiltins(esbuild, sourceRoot);
       for (const [name, asset] of builtins.files) {
         await writeFile(join(staging, "builtins", name), asset.bytes);

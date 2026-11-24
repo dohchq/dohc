@@ -300,6 +300,14 @@ export interface ShareViewRefusal {
 // its log.
 export const MAX_REPORTED_REFUSALS = 20;
 
+// The two signatures of a member's reach: `signature` changes whenever its
+// levels do, `visibilitySignature` only when what it reaches, or where it
+// reads History, does.
+export interface ShareReachSignatures {
+  signature: string;
+  visibilitySignature: string;
+}
+
 export interface PullShareViewResult {
   fetched: number;
   applied: number;
@@ -310,6 +318,13 @@ export interface PullShareViewResult {
   refusalCount: number;
   changedPaths: ShareViewChangedPath[];
   nextCursor: number;
+  // Set when the relay selected a page under another reach than the one the
+  // pull carried. That page applied nothing: read the reach again, then pull on.
+  reachChanged?: ShareReachSignatures;
+  // Set when the reach's visibility changed, or a page marked a move across
+  // its edge: the engine closed the copy for a rebuild, and from here on answers this root only for that rebuild.
+  // `commitCursor` then does nothing.
+  rebuildId?: string;
   // Persist the cursor only after the caller has materialized changedPaths
   // to disk — the same contract as pullWorkspaceFromRelay. A crash before
   // the commit re-fetches (and re-replays) the delta; replay is

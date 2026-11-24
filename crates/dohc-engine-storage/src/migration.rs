@@ -3790,6 +3790,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_MATERIALIZATION_STAGED_DACLS_DDL,
         sets_user_version: None,
     },
+    // The log head a share view's first page named.
+    Migration {
+        ordinal: 109,
+        id: "v2-share-view-fences",
+        sql: include_str!("share_view_fences.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5852,6 +5859,10 @@ mod tests {
             (
                 "v2-materialization-staged-dacls",
                 "0886c99a4cf9618f67b742ed28dc9b04d18fdc2a8367a833a307da28d91dfa15",
+            ),
+            (
+                "v2-share-view-fences",
+                "106779c42c404b7cb144a53d3f7394ecf24da6458f1e391466b1967ea66b5315",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

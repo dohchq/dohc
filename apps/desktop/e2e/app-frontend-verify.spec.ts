@@ -423,6 +423,28 @@ document.getElementById("q").addEventListener("input", () => {
 });`,
     });
 
+    await writeApp("apps/kit-ledger", {
+      "app.publish.json": JSON.stringify({
+        version: 1,
+        entryPath: "main.tsx",
+        inputs: ["main.tsx"],
+        packageMap: {},
+      }),
+      "main.tsx": `import { createRoot } from "react-dom/client";
+import { Receipt } from "dohc/icons";
+import { formatCents, parseCents } from "dohc/money";
+import { parseCsv, toCsv } from "dohc/csv";
+const rows = parseCsv(["date,memo,amount", '2026-11-01,"Coffee, beans",-12.30', "2026-11-02,Refund,2.05", ""].join(String.fromCharCode(13, 10)));
+const total = rows.slice(1).reduce((sum, row) => sum + (parseCents(row[2]!, { locale: "en-US" }) ?? 0), 0);
+createRoot(document.getElementById("root")!).render(
+  <main>
+    <Receipt aria-label="Receipt" />
+    <p id="total">{formatCents(total, { locale: "en-US" })}</p>
+    <pre id="export">{toCsv([["memo", "cents"], ["=SUM(A1)", total]])}</pre>
+  </main>,
+);`,
+    });
+
     await writeApp("apps/stalled-startup", {
       "app.publish.json": JSON.stringify({
         version: 1,
@@ -714,6 +736,22 @@ document.getElementById("q").addEventListener("input", () => {
       ],
     });
     expect(validFill).toMatchObject({ kind: "frontendVerified", ok: true, stage: "complete" });
+
+    const kitLedger = await publish(desktop.page, {
+      action: "verifyFrontend",
+      workspaceId,
+      appRoot: "apps/kit-ledger",
+      steps: [
+        { kind: "waitFor", selector: "svg.lucide-receipt[aria-label='Receipt']" },
+        { kind: "waitFor", selector: "#total", textIncludes: "-$10.25" },
+        { kind: "waitFor", selector: "#export", textIncludes: "'=SUM(A1),-1025" },
+      ],
+    });
+    expect(kitLedger, JSON.stringify(kitLedger)).toMatchObject({
+      kind: "frontendVerified",
+      ok: true,
+      stage: "complete",
+    });
 
     // Earlier-step in-flight backend call must not satisfy a later no-op click's expectBackend
     const prefillClick = await publish(desktop.page, {

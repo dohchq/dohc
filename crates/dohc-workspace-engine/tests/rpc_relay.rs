@@ -2,6 +2,8 @@ use crate::common;
 
 #[path = "rpc_relay/artifact_recovery.rs"]
 mod artifact_recovery;
+#[path = "rpc_relay/rebuild.rs"]
+mod rebuild;
 
 use common::*;
 use std::collections::HashMap;
@@ -104,6 +106,12 @@ impl TestResponse {
     }
 }
 
+/// Changes the fake relay's state as a share log page is read.
+type ShareLogHook = Box<dyn FnOnce(&mut RelayState) + Send>;
+
+/// Holds a share log page's answer after the relay has read it.
+type ShareLogHold = Box<dyn FnOnce() + Send>;
+
 #[derive(Default)]
 struct RelayState {
     workspace_ops: Vec<Value>,
@@ -114,10 +122,25 @@ struct RelayState {
     pushed_workspace_ops: Vec<Value>,
     local_origin_id: Option<String>,
     share_posts: HashMap<String, usize>,
+    // Every change a share's direct writes sent, in order.
+    share_written: Vec<Value>,
     workspace_log_delay: Option<Duration>,
     workspace_log_started: Option<Arc<AtomicBool>>,
     workspace_page_limit: Option<usize>,
+    // The reach signatures each share's log pages name, as (signature,
+    // visibility signature).
+    share_signatures: HashMap<String, (String, String)>,
+    // The most ops one share log page holds. Unset, one page holds them all.
+    share_page_limit: Option<usize>,
     refuse_claims: bool,
+    // Runs once, as the next share log page is read, before the relay reads it.
+    on_share_log: Option<ShareLogHook>,
+    // Runs once, after the next share log page is read and before it is
+    // answered, with the relay free to answer other requests.
+    share_log_hold: Option<ShareLogHold>,
+    // Takes the next direct write, then answers 500, as when its answer is
+    // lost on the way back.
+    lose_share_write_answer: bool,
 }
 
 struct FakeRelay {
@@ -145,10 +168,15 @@ impl FakeRelay {
                         if stream.set_nonblocking(false).is_err() {
                             continue;
                         }
-                        if let Ok(request) = read_request(&mut stream) {
-                            let response = handle_request(&thread_state, request);
-                            let _ = write_response(&mut stream, response);
-                        }
+                        // Each request on its own thread, so a held answer
+                        // doesn't hold the others.
+                        let state = Arc::clone(&thread_state);
+                        thread::spawn(move || {
+                            if let Ok(request) = read_request(&mut stream) {
+                                let response = handle_request(&state, request);
+                                let _ = write_response(&mut stream, response);
+                            }
+                        });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(1));
@@ -209,12 +237,36 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
     if let Some(rest) = path.strip_prefix("/sync/shares/") {
         let (share_id, suffix) = rest.split_once('/').expect("share route");
         if let Some(sha256) = suffix.strip_prefix("blobs/") {
+            if method == "PUT" {
+                state
+                    .share_blobs
+                    .insert((share_id.to_owned(), sha256.to_owned()), request.body);
+                return TestResponse::json(json!({ "ok": true }));
+            }
             let bytes = state
                 .share_blobs
                 .get(&(share_id.to_owned(), sha256.to_owned()))
                 .cloned()
                 .expect("share blob");
             return TestResponse::bytes(bytes);
+        }
+        if suffix == "collection-writes" {
+            let changes = request.json()["changes"]
+                .as_array()
+                .cloned()
+                .expect("changes");
+            let paths: Vec<Value> = changes
+                .iter()
+                .filter_map(|change| change["afterPath"].as_str())
+                .map(Value::from)
+                .collect();
+            state.share_written.extend(changes);
+            if std::mem::take(&mut state.lose_share_write_answer) {
+                let mut lost = TestResponse::json(json!({ "error": "lost" }));
+                lost.status = 500;
+                return lost;
+            }
+            return TestResponse::json(json!({ "paths": paths }));
         }
         assert_eq!(suffix, "log");
         if method == "POST" {
@@ -232,6 +284,9 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
                 "currentMaxOriginSeq": current,
             }));
         }
+        if let Some(hook) = state.on_share_log.take() {
+            hook(&mut state);
+        }
         let since = request.query_i64("since");
         let rows = state
             .share_ops
@@ -241,16 +296,40 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
             .into_iter()
             .filter(|row| row["relaySeq"].as_i64().unwrap_or(0) > since)
             .collect::<Vec<_>>();
+        let limit = state.share_page_limit.unwrap_or(usize::MAX);
+        let has_more = rows.len() > limit;
+        let rows: Vec<Value> = rows.into_iter().take(limit).collect();
         let next = rows
             .last()
             .and_then(|row| row["relaySeq"].as_i64())
             .unwrap_or(since);
-        return TestResponse::json(json!({
+        let mut page = json!({
             "ops": rows,
             "ownOriginId": "relay:share-member:authenticated-origin",
             "nextCursor": next,
-            "hasMore": false,
-        }));
+            "hasMore": has_more,
+        });
+        if let Some((signature, visibility)) = state.share_signatures.get(share_id) {
+            page["reach"] = json!({
+                "signature": signature, "visibilitySignature": visibility, "rootLevel": "view", "folders": [],
+            });
+            // This fake's log holds only the share's ops.
+            page["logHead"] = json!(
+                state
+                    .share_ops
+                    .get(share_id)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|row| row["relaySeq"].as_i64())
+                    .max()
+                    .unwrap_or(0)
+            );
+        }
+        if let Some(hold) = state.share_log_hold.take() {
+            drop(state);
+            hold();
+        }
+        return TestResponse::json(page);
     }
     if path.ends_with("/blobs/have") {
         return TestResponse::json(json!({ "missing": [] }));
@@ -3047,4 +3126,105 @@ async fn ordinary_publication_state_follows_a_keyed_post_through_push() {
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidParams, "{params}");
     }
+}
+
+/// A membership's pull whose page the relay selected under another visibility
+/// closes the copy before it answers: the manifest is on disk in `closed`,
+/// the answer names its rebuild id, and from then on the root answers only
+/// requests that carry that id. A page under new levels alone closes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pull_under_another_visibility_closes_the_copy_before_it_answers() {
+    let relay = FakeRelay::start(RelayState::default());
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let workspace_id = "rpc-relay-visibility";
+    let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
+    let mut id = 1;
+    let pull = json!({
+        "workspaceId": workspace_id,
+        "shareId": "membership",
+        "grantedSelector": {
+            "paths": [], "access": "view", "wholeWorkspace": true,
+            "reach": { "signature": "r1", "visibilitySignature": "v1", "rootLevel": "view", "folders": [] },
+        },
+    });
+    let manifest = scratch.path().join(".dohc/local/rebuild.json");
+    let serve = |signature: &str, visibility: &str| {
+        relay
+            .state
+            .lock()
+            .expect("relay state")
+            .share_signatures
+            .insert(
+                "membership".to_owned(),
+                (signature.to_owned(), visibility.to_owned()),
+            );
+    };
+
+    serve("r2", "v1");
+    let levels_only = call(
+        &transport,
+        &handle,
+        &mut id,
+        "share.view.pull",
+        pull.clone(),
+    )
+    .await;
+    assert_eq!(
+        levels_only["reachChanged"],
+        json!({ "signature": "r2", "visibilitySignature": "v1" })
+    );
+    assert!(levels_only.get("rebuildId").is_none());
+    assert!(!manifest.exists());
+
+    serve("r2", "v2");
+    let closed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "share.view.pull",
+        pull.clone(),
+    )
+    .await;
+    assert_eq!(
+        closed["reachChanged"],
+        json!({ "signature": "r2", "visibilitySignature": "v2" })
+    );
+    let rebuild_id = closed["rebuildId"].as_str().expect("rebuild id").to_owned();
+    assert!(
+        closed.get("pendingCursor").is_none(),
+        "a closed copy commits no cursor"
+    );
+    let written: Value =
+        serde_json::from_slice(&std::fs::read(&manifest).expect("manifest")).expect("json");
+    assert_eq!(
+        (
+            &written["rebuildId"],
+            &written["phase"],
+            &written["shareId"],
+            &written["visibilitySignature"]
+        ),
+        (
+            &json!(rebuild_id),
+            &json!("closed"),
+            &json!("membership"),
+            &json!("v2")
+        )
+    );
+
+    id += 1;
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(id, "share.view.pull", Some(handle.clone()), pull.clone()),
+        )
+        .await
+        .expect_err("a closed copy refuses its pull");
+    assert_eq!(
+        (refused.code, refused.message.as_str()),
+        (ErrorCode::Forbidden, "share-view-updating-access")
+    );
+    let mut tagged = pull;
+    tagged["rebuildId"] = json!(rebuild_id);
+    call(&transport, &handle, &mut id, "share.view.pull", tagged).await;
 }

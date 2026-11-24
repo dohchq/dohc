@@ -1092,7 +1092,7 @@ export async function importDroppedPaths(
 // such a folder holds, such as a protected file's kept change, is workspace
 // data and never lands as an ordinary file. Only Windows separates folders
 // with a backslash; elsewhere it is part of a name.
-function inDohcFolder(realPath: string): boolean {
+export function inDohcFolder(realPath: string): boolean {
   return realPath
     .split(process.platform === "win32" ? /[\\/]/ : "/")
     .some((part) => part.toLowerCase() === ".dohc");

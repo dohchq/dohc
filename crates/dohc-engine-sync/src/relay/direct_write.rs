@@ -515,7 +515,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 reason: "passive store cannot write to the relay",
             }));
         }
-        if granted.access != crate::ShareAccess::Edit || granted.version_id.is_some() {
+        // Edit somewhere opens the lane. Each write's path was checked when it
+        // was made, and the relay checks it again.
+        if granted.highest() != Some(crate::ShareAccess::Edit) || granted.version_id.is_some() {
             return Ok(DirectWritePushOutcome::default());
         }
         let plan = match read_direct_write_plan(store, workspace_id, share_id)? {

@@ -4,7 +4,7 @@ import {
   clearAgentColorOverrides,
 } from "./workbench/actorPresentation";
 import { useRequestSequence } from "./useRequestSequence";
-import { lazy, Suspense, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useContext, useEffect, useId, useRef, useState } from "react";
 import {
   DesktopUserSettingsResult,
   ShareHandoffStatus,
@@ -18,7 +18,8 @@ import { WorkspaceManager } from "./WorkspaceManager";
 import { DevPanel } from "./DevPanel";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
 import { Titlebar, workspaceName } from "./Titlebar";
-import { ChevronRight } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleAlert, LockKeyhole } from "lucide-react";
+import { SecondaryButton } from "./ui/controls";
 import { readError, refusalCode } from "../ipc/errorWords";
 import {
   REGISTRY_READ_FAILURE_TITLE,
@@ -26,10 +27,12 @@ import {
 } from "../workspaces/registryReadFailure";
 import { errorDetails } from "./shell/copyDetails";
 import { StandaloneNotices } from "./shell/connectionNotices";
-import { ShellErrorReporter } from "./shell/useShellError";
+import { ShellErrorReporter, ShellNoticeClear } from "./shell/useShellError";
 import { useMenuCommandsWithoutWorkspace } from "./appMenuCommands";
 import { TitlebarUpdateButton, useDesktopUpdate, useUpdateFailureNotices } from "./UpdateButton";
 import { CopyButton } from "./ui/CopyButton";
+import { PathLine } from "./ui/PathLine";
+import { revealInFileManagerLabel } from "../workspaces/explorerMenu";
 import { useSentNotices } from "./shell/useSentNotices";
 import {
   useHeldWorkspacePathOpenFailures,
@@ -48,7 +51,8 @@ const LazyStatesPage = lazy(() =>
 
 const NOOP = () => undefined;
 
-// The registry error has no workspace shell; it answers menu commands
+// A window with no workspace shell, for the registry error and a copy that
+// is updating access. It answers menu commands
 // itself, reports into its own notices, and offers updates in its title bar.
 function RegistryErrorTitlebar() {
   const reportFailure = useContext(ShellErrorReporter);
@@ -76,6 +80,181 @@ function RegistryErrorTitlebar() {
   return (
     <div className="app-chrome absolute inset-x-0 top-0">
       <Titlebar update={<TitlebarUpdateButton update={update} />} />
+    </div>
+  );
+}
+
+// A joined workspace whose copy the engine closed because the owner changed
+// what this member can see. The shell would read the closed copy, so it is
+// not mounted; this says why and offers another workspace.
+function UpdatingAccess(props: { workspace: Workspace }) {
+  const reportFailure = useContext(ShellErrorReporter);
+  const clearNotice = useContext(ShellNoticeClear);
+  const manageWorkspaces = (): void => {
+    void bridge()
+      .openWorkspaceManager()
+      .catch((error: unknown) =>
+        reportFailure?.({
+          message: "dohc could not open the workspace manager.",
+          cause: error,
+          retry: manageWorkspaces,
+        }),
+      );
+  };
+  const workspaceId = props.workspace.workspaceId;
+  const showFolder = (): void => {
+    void bridge()
+      .revealWorkspaceFolder({ workspaceId })
+      .catch((error: unknown) =>
+        reportFailure?.({
+          message: "dohc could not show this workspace's folder.",
+          cause: error,
+          retry: showFolder,
+        }),
+      );
+  };
+  const stopped = props.workspace.shareView?.updatingAccessStopped;
+  const ended = stopped?.reason === "ended";
+  const identity = `update-access:${workspaceId}`;
+  // How the update ends arrives as this view's state.
+  const tryAgain = useCallback((): void => {
+    void bridge()
+      .retryShareViewRebuild({ workspaceId })
+      .catch((error: unknown) => {
+        reportFailure?.({
+          message: readError(error).words ?? "dohc could not update access.",
+          cause: error,
+          retry: tryAgain,
+          identity,
+        });
+      });
+  }, [workspaceId, reportFailure, identity]);
+  // A stopped update is one thing that failed. This state shows it with Try
+  // again, so it files a Notices row and no toast. Waiting for the server
+  // shows here only, as an ended membership does. A new try or an ended
+  // membership takes the failure back.
+  const failed = stopped?.reason === "failed" ? stopped : null;
+  const failedTitle = failed?.title,
+    failedDetail = failed?.detail ?? null,
+    failedCause = failed?.cause;
+  useEffect(() => {
+    if (failedDetail !== null) {
+      reportFailure?.({
+        quiet: true,
+        ...(failedTitle ? { title: failedTitle } : {}),
+        message: failedDetail,
+        ...(failedCause ? { details: [["Code", failedCause] as const] } : {}),
+        retry: tryAgain,
+        identity,
+      });
+    } else clearNotice?.(identity);
+  }, [failedTitle, failedDetail, failedCause, reportFailure, clearNotice, tryAgain, identity]);
+  // The failure's Details, as its toast reports it but for the time. It
+  // stays open only for the report it opened on.
+  const report =
+    failed === null
+      ? null
+      : errorDetails([
+          ["Error", failed.detail],
+          ...(failed.title ? [["Title", failed.title] as const] : []),
+          ...(failed.cause ? [["Code", failed.cause] as const] : []),
+          ["Platform", bridge().platform],
+        ]);
+  const [detailsFor, setDetailsFor] = useState<string | null>(null);
+  const detailsOpen = report !== null && detailsFor === report;
+  const detailsId = useId();
+  return (
+    <div
+      data-testid="workspace-updating-access"
+      role="status"
+      className="relative flex h-screen flex-col items-center justify-center gap-3 bg-bg px-8 text-center"
+    >
+      <RegistryErrorTitlebar />
+      <LockKeyhole size={20} strokeWidth={1.75} aria-hidden className="text-muted" />
+      <p className="dohc-section-label m-0">
+        {ended ? "Access ended" : failed ? "Access update stopped" : "Updating access"}
+      </p>
+      <h2 className="m-0 text-xl font-semibold leading-tight tracking-tight text-ink">
+        {workspaceName(props.workspace)}
+      </h2>
+      {ended ? null : (
+        <p className="m-0 max-w-md select-text text-[13px] leading-relaxed text-muted">
+          The owner changed what you can see here. This copy stays closed until it matches.
+        </p>
+      )}
+      {stopped ? (
+        <div className="flex max-w-md items-start gap-2">
+          {ended ? null : (
+            <CircleAlert
+              size={14}
+              strokeWidth={1.9}
+              aria-hidden
+              className="mt-[3px] shrink-0 text-danger"
+            />
+          )}
+          <div
+            className={`m-0 select-text text-[13px] leading-relaxed text-ink${ended ? "" : " text-left"}`}
+          >
+            {stopped.title ? <p className="m-0 font-medium">{stopped.title}</p> : null}
+            <p className="m-0">{stopped.detail}</p>
+          </div>
+          {report === null && !ended ? (
+            <CopyButton label="Copy" pinName iconOnly getText={() => stopped.detail} />
+          ) : null}
+        </div>
+      ) : null}
+      {/* The copy's own folder: name it, copy it, and open it. */}
+      {ended ? (
+        <div className="flex w-full max-w-md items-center justify-center gap-2">
+          <PathLine
+            path={props.workspace.rootPath}
+            className="justify-center select-text text-[12px] text-muted"
+          />
+          <CopyButton label="Copy path" pinName iconOnly getText={() => props.workspace.rootPath} />
+        </div>
+      ) : null}
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        {stopped && !ended ? <SecondaryButton onClick={tryAgain}>Try again</SecondaryButton> : null}
+        {ended ? (
+          <SecondaryButton onClick={showFolder}>
+            {revealInFileManagerLabel(bridge().platform)}
+          </SecondaryButton>
+        ) : null}
+        <SecondaryButton onClick={manageWorkspaces}>Open another workspace</SecondaryButton>
+        {report === null ? null : (
+          <button
+            type="button"
+            aria-expanded={detailsOpen}
+            aria-controls={detailsId}
+            onClick={() => setDetailsFor(detailsOpen ? null : report)}
+            className="flex items-center gap-0.5 rounded px-1 text-[12px] text-muted transition-colors hover:text-ink"
+          >
+            {detailsOpen ? "Hide details" : "Details"}
+            <ChevronDown
+              size={12}
+              strokeWidth={1.9}
+              aria-hidden
+              className={`transition-transform duration-150 ease-out motion-reduce:transition-none${detailsOpen ? " rotate-180" : ""}`}
+            />
+          </button>
+        )}
+      </div>
+      {detailsOpen ? (
+        <div
+          id={detailsId}
+          className="relative w-full max-w-md rounded-md border border-line bg-panel-2 text-left"
+        >
+          <span className="absolute right-1 top-1">
+            <CopyButton iconOnly pinName label="Copy details" getText={() => report} />
+          </span>
+          <pre
+            tabIndex={0}
+            className="m-0 max-h-[240px] overflow-y-auto overscroll-contain whitespace-pre-wrap wrap-anywhere select-text py-1.5 pl-2 pr-8 font-sans text-[11px] leading-snug text-muted"
+          >
+            {report}
+          </pre>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -410,6 +589,10 @@ export function DesktopRoot() {
             />
             <DevPanel />
           </>
+        ) : workspace.shareView?.updatingAccess ? (
+          <StandaloneNotices>
+            <UpdatingAccess key={workspace.workspaceId} workspace={workspace} />
+          </StandaloneNotices>
         ) : (
           <>
             <DesktopWorkspaceShell

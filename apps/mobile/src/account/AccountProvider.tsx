@@ -41,6 +41,7 @@ import { pendingSignOuts } from "../server/pushRegistration";
 import { createAlerts, type Alerts } from "../push/alerts";
 import { clearAlertsAtSignOut, nativeAlerts } from "../push/nativeAlerts";
 import { createReadCache, type WorkspaceData } from "../server/workspaceData";
+import { pageTimings } from "../pages/pageTimings";
 import {
   createWorkspaceList,
   type WorkspaceList,
@@ -140,6 +141,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
 
   const [cache] = useState(() => createReadCache(createCacheRows(createCacheDatabase())));
   useEffect(() => cache.follow(account), [account, cache]);
+  useEffect(() => pageTimings?.follow(account), [account]);
 
   useEffect(() => outbox.follow(account), [account, outbox]);
   const deletion = useSyncExternalStore(outbox.subscribe, () => outbox.state().deletion);

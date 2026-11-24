@@ -251,6 +251,7 @@ export function createShareProposalsIpc<Operation extends WorkspaceOperation>(de
     rootPath: string;
     shareId: string;
     grant: ShareViewSelector;
+    reach: ShareViewProposalScope["reach"];
     relay: SyncRelayConnection;
     credentialGeneration: number;
   }
@@ -533,6 +534,7 @@ export function createShareProposalsIpc<Operation extends WorkspaceOperation>(de
               .submitShareProposal({
                 shareId: scope.shareId,
                 grantedSelector: scope.grant,
+                reach: scope.reach,
                 // Each submit mints a fresh key. It makes the relay's idempotency
                 // hold for a retry inside one submit (blobs, then the POST), not for
                 // a second press: a second press sends whatever is pending then,
@@ -584,6 +586,7 @@ export function createShareProposalsIpc<Operation extends WorkspaceOperation>(de
             const result = await relay.pushDirectWrites({
               shareId: scope.shareId,
               grantedSelector: scope.grant,
+              reach: scope.reach,
             });
             operation.assert(scope);
             for (const write of result.writes) {

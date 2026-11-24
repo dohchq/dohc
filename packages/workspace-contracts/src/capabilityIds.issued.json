@@ -249,6 +249,7 @@
   "settings.workspace.reset",
   "settings.workspace.write",
   "share.access.read",
+  "share.access.saved.dismiss",
   "share.capture.notice.dismiss",
   "share.copy.read",
   "share.create",

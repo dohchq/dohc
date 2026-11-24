@@ -13,7 +13,7 @@ No app code runs.
 
 ### Pinned built-in kit
 
-`stage-app-compiler.mjs` pre-bundles React 19 (`react`, `react/jsx-runtime`, `react-dom`, `react-dom/client`) and `@dohc/app-kit` (`dohc/app`, `dohc/ui`, `dohc/charts`) into `resources/app-compiler/builtins/`, inside the compiler root that Seatbelt and Landlock already allow read-only.
+`stage-app-compiler.mjs` pre-bundles React 19 (`react`, `react/jsx-runtime`, `react-dom`, `react-dom/client`) and `@dohc/app-kit` (`dohc/app`, `dohc/ui`, `dohc/charts`, `dohc/icons`, `dohc/money`, `dohc/csv`) into `resources/app-compiler/builtins/`, inside the compiler root that Seatbelt and Landlock already allow read-only.
 
 - `manifest.json` pins the SHA-256 of every staged file in `builtins/` and its React licenses, and `stage-app-compiler.mjs` embeds those expected hashes into `adapter.mjs` and `worker.mjs` at build time.
 - Both `adapter.mjs` and `worker.mjs` verify every loaded `builtins/*` file against those embedded hashes before compiling, and fold the combined kit digest into `compilerIdentity.version` (`0.28.1+kit-<sha256>`) under recipe `dohc-closed-app-v4`.

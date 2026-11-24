@@ -155,6 +155,7 @@ import {
   useShellError,
   type OtherAccountNotice,
 } from "./shell/useShellError";
+import { useAccessSavedNotice } from "./shell/accessSavedNotice";
 import { useDocumentSaveNotices } from "./shell/useDocumentSaveNotices";
 import { useReportsNotice } from "./shell/useReportsNotice";
 import { useDisconnectedLinkAgents, useShareRemovalNotices } from "./shell/useShareRemovalNotices";
@@ -1165,6 +1166,7 @@ function WorkspaceShell(props: {
     clear: clearCollectionCopiesLeft,
   });
   useWorkspacePathOpenFailures(workspaceId, reportShellFailure);
+  useAccessSavedNotice(workspaceId, props.workspace.shareView?.accessSaved, reportShellFailure);
   // The updater's state, for the title bar, the stopped workspace, the
   // palette, and the menus.
   const desktopUpdate = useDesktopUpdate(reportShellFailure);

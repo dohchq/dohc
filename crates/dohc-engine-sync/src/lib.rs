@@ -133,9 +133,9 @@ pub use relay::{
     SHARE_CHAT_REFUSED, SettlementPublicationRefusal, ShareBlobRequest, ShareBlobUploadRequest,
     ShareCollectionWriteRequest, ShareCollectionWriteResponse, ShareLogPushRequest,
     ShareProposalChange, ShareProposalSubmitOutcome, ShareProposalSubmitRequest,
-    ShareProposalSubmitResponse, ShareReplicationEnvelope, ShareViewChangedPath,
-    ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest, ShareViewResponse,
-    SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
+    ShareProposalSubmitResponse, ShareReachSignatures, ShareReplicationEnvelope,
+    ShareViewChangedPath, ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest,
+    ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
     SharedChannelRequest, SharedChannelResponse, SyncPassOutcome, WorkReferenceMapping,
     collision_key, hosted_feed_only, no_hosted_feed, read_direct_write_status,
     read_direct_writes_waiting, read_record_creation_statuses,
@@ -143,8 +143,8 @@ pub use relay::{
 pub use router::{RoutedApply, apply_replication_envelope};
 pub use secret_apply::apply_secret_envelope;
 pub use share::{
-    MAX_SHARE_VERSION_ID_CHARS, ShareAccess, ShareBoundary, ShareGrant, ShareScope, ShareSurface,
-    apply_shared_envelope, is_valid_share_version_id,
+    MAX_SHARE_VERSION_ID_CHARS, ShareAccess, ShareBoundary, ShareGrant, ShareReach, ShareScope,
+    ShareSurface, apply_shared_envelope, is_valid_share_version_id,
 };
 pub use share_grant::GrantBinding;
 pub use version_apply::{apply_version_envelope, apply_workspace_envelope};

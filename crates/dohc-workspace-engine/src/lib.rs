@@ -17,6 +17,7 @@ pub mod live_application_ingress;
 mod read_methods;
 #[cfg(test)]
 mod reader_runtime_tests;
+pub mod rebuild_manifest;
 pub mod root_binding;
 mod rpc;
 
@@ -117,6 +118,12 @@ pub struct EngineService {
     /// EngineServices in one process, back this with a shared/global semaphore to
     /// keep the ceiling aggregate.
     blob_egress_budget: BlobEgressBudget,
+    /// Roots whose copy is closed for a rebuild, with its id. See
+    /// `rpc::rebuild`.
+    rebuilding_roots: Mutex<HashMap<std::path::PathBuf, String>>,
+    /// Where a harness stops the next rebuild, as a crash would.
+    #[cfg(feature = "harness")]
+    rebuild_crash_at: Mutex<Option<String>>,
 }
 
 impl Default for EngineService {
@@ -198,6 +205,13 @@ impl EngineService {
         service
     }
 
+    /// Harness-only: stop the next rebuild at `point`, as a crash would.
+    #[cfg(feature = "harness")]
+    #[doc(hidden)]
+    pub fn crash_rebuild_at_for_harness(&self, point: &str) {
+        *lock(&self.rebuild_crash_at) = Some(point.to_owned());
+    }
+
     fn with_supervisor(supervisor: &'static WorkspaceSupervisor) -> Self {
         EngineService {
             replica_mode: None,
@@ -256,6 +270,9 @@ impl EngineService {
             #[cfg(test)]
             bind_root_faults: None,
             blob_egress_budget: BlobEgressBudget::new(BLOB_EGRESS_BYTE_BUDGET),
+            rebuilding_roots: Mutex::new(HashMap::new()),
+            #[cfg(feature = "harness")]
+            rebuild_crash_at: Mutex::new(None),
         }
     }
 

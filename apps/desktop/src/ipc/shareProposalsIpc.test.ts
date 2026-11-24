@@ -659,6 +659,7 @@ describe("registered share proposal handlers", () => {
     expect(h.pushDirect).toHaveBeenCalledWith({
       shareId: "pinned-share",
       grantedSelector: { paths: ["docs"], versionId: null, access: "edit" },
+      reach: null,
     });
   });
 

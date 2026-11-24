@@ -228,7 +228,10 @@ test(
                 `import { createRoot } from "react-dom/client";
 import { AppShell, StatCard } from "dohc/ui";
 import { Sparkline } from "dohc/charts";
-createRoot(document.getElementById("root")!).render(<AppShell><StatCard label="Spend" value="$120" footer={<Sparkline values={[10, 20, 15]} />} /></AppShell>);`,
+import { Wallet } from "dohc/icons";
+import { formatCents } from "dohc/money";
+import { toCsv } from "dohc/csv";
+createRoot(document.getElementById("root")!).render(<AppShell><StatCard label="Spend" value={formatCents(12000, { locale: "en-US" })} footer={<><Wallet /><Sparkline values={[10, 20, 15]} /><pre>{toCsv([["=1"]])}</pre></>} /></AppShell>);`,
               ),
             ),
           ],
@@ -243,7 +246,14 @@ createRoot(document.getElementById("root")!).render(<AppShell><StatCard label="S
         ["bundle.css", "bundle.js"],
       );
       assert.match(Buffer.from(kitResult.files[0].bytes).toString(), /--kit-bg/);
-      assert.match(Buffer.from(kitResult.files[1].bytes).toString(), /Spend/);
+      const kitBundle = Buffer.from(kitResult.files[1].bytes).toString();
+      assert.match(kitBundle, /Spend/);
+      assert.match(kitBundle, /"wallet"/);
+      assert.doesNotMatch(kitBundle, /"trash-2"/);
+      assert.match(
+        await readFile(join(destination, "licenses/lucide.txt"), "utf8"),
+        /Lucide Icons and Contributors/,
+      );
       await assert.rejects(compile(request, bounds, AbortSignal.abort()), { reason: "cancelled" });
       const pageBounds = { ...bounds, maxOutputBytes: 16384 };
       const page = await compile(

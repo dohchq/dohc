@@ -9,9 +9,11 @@ import {
 import {
   RelayUnauthorizedError,
   ShareUnavailableError,
+  type ShareReachSignatures,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import { isChatShareAccessValue } from "@dohc/security-contract/share-grant";
+import { parseListedReach, type ListedReach } from "@dohc/security-contract/listed-reach";
 import { relayApiFetch } from "./sharedChannels";
 
 export interface ShareViewSelector {
@@ -262,6 +264,27 @@ export async function fetchShareViewAccess(input: {
   return { access: body.access, role, levelChangedBy: body.levelChangedBy };
 }
 
+/**
+ * A membership's reach as the relay lists it now. Each share log page lists
+ * it, so this reads the smallest page.
+ */
+export async function fetchShareViewReach(input: {
+  relay: SyncRelayConnection;
+  shareId: string;
+  signal?: AbortSignal;
+}): Promise<ListedReach> {
+  const response = await shareFetch(
+    input.relay,
+    `/sync/shares/${encodeURIComponent(input.shareId)}/log?since=0&limit=1`,
+    { signal: input.signal },
+  );
+  const body: unknown = await response.json();
+  const reach =
+    body && typeof body === "object" && "reach" in body ? parseListedReach(body.reach) : null;
+  if (reach === null) throw new Error("The server did not return a readable reach for this share.");
+  return reach;
+}
+
 export async function probeShareViewLog(input: {
   relay: SyncRelayConnection;
   shareId: string;
@@ -271,6 +294,8 @@ export async function probeShareViewLog(input: {
   // The level this computer knows. The relay answers a hold at once when its
   // own record differs.
   level?: ShareAccess;
+  // The reach signatures this computer holds for a membership.
+  reach?: ShareReachSignatures;
   signal?: AbortSignal;
 }): Promise<{ unchanged: boolean; levelChanged?: true }> {
   // Standalone share.view.pull reads the whole share log without channelWireId,
@@ -297,7 +322,16 @@ export async function probeShareViewLog(input: {
   }
   // This cursor is only a probe. The engine commits the next cursor after
   // applying changes and recording refusals through the full refresh path.
-  const unchanged = body.ops.length === 0 && !body.hasMore;
+  // A page under other reach signatures is news even with no ops: the levels,
+  // or what they reach, moved, and only the full refresh reads them again.
+  const listed =
+    "reach" in body && body.reach !== null && typeof body.reach === "object" ? body.reach : {};
+  const reachMoved =
+    input.reach !== undefined &&
+    (("signature" in listed ? listed.signature : undefined) !== input.reach.signature ||
+      ("visibilitySignature" in listed ? listed.visibilitySignature : undefined) !==
+        input.reach.visibilitySignature);
+  const unchanged = body.ops.length === 0 && !body.hasMore && !reachMoved;
   return "levelChanged" in body && body.levelChanged === true
     ? { unchanged, levelChanged: true }
     : { unchanged };

@@ -11,6 +11,7 @@ export interface SavedView {
   readonly value: unknown;
   readonly cursor: string;
   readonly stale: boolean;
+  readonly prefetched?: boolean;
 }
 
 export interface CacheRows {
@@ -202,7 +203,8 @@ function serialize(views: readonly SavedView[], maxBytes: number) {
   for (const view of views) {
     const left = maxBytes - bytes - (parts.length > 0 ? 1 : 0);
     if (left <= 0) break;
-    const saved = { id: view.id, value: view.value, cursor: view.cursor, stale: view.stale };
+    const { id, value, cursor, stale } = view;
+    const saved = { id, value, cursor, stale, prefetched: view.prefetched || undefined };
     if (leastJsonBytes(saved, left) > left) continue;
     const part = JSON.stringify(saved);
     const size = utf8Bytes(part);
@@ -258,7 +260,8 @@ function savedViews(text: unknown): readonly SavedView[] | null {
       item.value === null
     )
       return null;
-    views.push({ id: item.id, value: item.value, cursor: item.cursor, stale: item.stale });
+    const { id, value, cursor, stale } = item;
+    views.push({ id, value, cursor, stale, prefetched: item.prefetched === true || undefined });
   }
   return views;
 }

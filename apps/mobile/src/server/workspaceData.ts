@@ -85,6 +85,7 @@ export interface View<T> {
   affectedBy(changes: FeedChanges, known: Known, value: T | null): boolean;
   /** What the view shows after a read, from what it showed before and what the read answered. */
   carry?(previous: T | null, next: T): T;
+  shownAs?(value: T | null): string | null;
   /** The messages a value shows, so the outbox can tell which of its saved writes a read now shows. */
   messages?(value: T): readonly ChatMessage[];
 }
@@ -171,6 +172,16 @@ export const views = {
               : undefined;
         return last === undefined ? next : { kind: "missing", last };
       },
+      shownAs(value) {
+        if (value === null) return null;
+        const text =
+          value.kind === "page"
+            ? value.markdown
+            : value.kind === "missing"
+              ? value.last
+              : undefined;
+        return text ?? `\u0000${value.kind}`;
+      },
       // Any file change can put another object at the page's path: one deleted and another made there. The listing that
       // would say so may not be read yet, so any file change reads the page again. A live edit, which changes no file,
       // reads it again when it's to the object at its path, or to any page while the store doesn't know which that is.
@@ -204,6 +215,7 @@ export interface Cached {
   readonly cursor: string;
   /** A change the feed reported may have touched it since. */
   readonly stale: boolean;
+  readonly prefetched?: boolean;
 }
 
 /**
@@ -269,6 +281,7 @@ export function createReadCache(files?: CacheRows): ReadCache {
         value: cached.value,
         cursor: cached.cursor,
         stale: cached.stale,
+        prefetched: cached.prefetched,
       }));
   const cache: ReadCache = {
     entries: (scope) => [...(scopes.get(scope)?.values() ?? [])],
@@ -310,6 +323,7 @@ export function createReadCache(files?: CacheRows): ReadCache {
                 value: item.value,
                 cursor: item.cursor,
                 stale: item.stale,
+                prefetched: item.prefetched,
               });
           }
           if (views.size > 0) scopes.set(scope, views);
@@ -380,6 +394,7 @@ export interface WorkspaceData {
   subscribe(view: View<unknown>, listener: () => void): () => void;
   /** Reads the view now, as a screen about to open it would, unless it shows a fresh value or a read is on its way. */
   prefetch(view: View<unknown>): void;
+  prefetchPages(paths: readonly string[]): void;
   retry(view: View<unknown>): void;
   feed(): FeedState;
   subscribeFeed(listener: () => void): () => void;
@@ -403,14 +418,18 @@ export interface WorkspaceData {
 export const FEED_RETRY_MS = 1000;
 export const FEED_RETRY_MAX_MS = 30_000;
 export const FEED_FAILURES_SHOWN = 3;
+export const PREFETCH_AT_ONCE = 2;
+export const PREFETCH_MAX = 10;
 
 let instances = 0;
+const prefetches = new Map<string, number>();
 
 interface Entry {
   readonly view: View<unknown>;
   state: ViewState<unknown>;
   readonly listeners: Set<() => void>;
   stale: boolean;
+  prefetched?: boolean;
   readonly reads: ReturnType<typeof requestGenerations>;
 }
 
@@ -446,16 +465,20 @@ export function createWorkspaceData(options: {
   }
   function seed(found: readonly Cached[]) {
     for (const cached of found) {
+      if (cached.stale && cached.prefetched) continue;
       const target = entries.get(cached.view.id);
       if (target) {
         target.state = { ...target.state, value: cached.value };
         target.stale = cached.stale;
+        target.prefetched = cached.prefetched;
+        shown(target);
       } else {
         entries.set(cached.view.id, {
           view: cached.view,
           state: { value: cached.value, loading: false, problem: null, failures: 0 },
           listeners: new Set(),
           stale: cached.stale,
+          prefetched: cached.prefetched,
           reads: requestGenerations(),
         });
       }
@@ -478,10 +501,11 @@ export function createWorkspaceData(options: {
       seed(cache.entries(scope));
       for (const target of entries.values()) {
         if (target.listeners.size > 0 && live() && (target.state.value === null || target.stale))
-          read(target);
+          void read(target);
         else if (target.state.loading) set(target, { ...target.state, loading: false });
       }
       startFeed();
+      drain();
     });
   }
 
@@ -530,18 +554,31 @@ export function createWorkspaceData(options: {
     for (const listener of target.listeners) listener();
   }
 
-  function read(target: Entry) {
+  function shown(target: Entry) {
+    if (!target.prefetched || target.listeners.size === 0 || target.state.value === null) return;
+    target.prefetched = false;
+    const cached = cache.get(scope, target.view.id);
+    if (cached) cache.set(scope, { ...cached, prefetched: undefined });
+  }
+
+  function read(target: Entry, prefetch = false) {
     const request = target.reads.next();
     const from = cursor;
-    set(target, { ...target.state, loading: true });
-    target.view.read(signIn.client, workspaceId, everything.signal).then(
+    const unseen = target.prefetched || target.state.value === null;
+    if (!prefetch) set(target, { ...target.state, loading: true });
+    return target.view.read(signIn.client, workspaceId, everything.signal).then(
       (answer) => {
         if (!live() || !target.reads.isLatest(request)) return;
         target.stale = false;
-        const value = target.view.carry
-          ? target.view.carry(target.state.value, answer.value)
-          : answer.value;
-        cache.set(scope, { view: target.view, value, cursor: answer.cursor, stale: false });
+        const previous = unseen ? null : target.state.value;
+        const value = target.view.carry ? target.view.carry(previous, answer.value) : answer.value;
+        const shownAs = target.view.shownAs;
+        target.prefetched =
+          target.listeners.size === 0 &&
+          shownAs !== undefined &&
+          (unseen || shownAs(value) !== shownAs(previous));
+        const saved = { view: target.view, value, cursor: answer.cursor, stale: false };
+        cache.set(scope, { ...saved, prefetched: target.prefetched || undefined });
         set(target, { value, loading: false, problem: null, failures: target.state.failures });
         if (target.view.messages) options.onMessages?.(target.view.messages(value));
         follow(from === null ? answer.cursor : laterCursor(answer.cursor, from));
@@ -551,7 +588,7 @@ export function createWorkspaceData(options: {
         if (!live() || !target.reads.isLatest(request)) return;
         if (isGone(error)) return gone();
         const problem = shownProblem(error);
-        if (problem === null) return;
+        if (problem === null || prefetch) return;
         set(target, {
           ...target.state,
           loading: false,
@@ -560,6 +597,25 @@ export function createWorkspaceData(options: {
         });
       },
     );
+  }
+
+  const queued: View<unknown>[] = [];
+  const prefetching = new Set<string>();
+  function drain() {
+    while (running && live() && !restoring && prefetching.size < PREFETCH_AT_ONCE) {
+      const view = queued.shift();
+      const count = prefetches.get(scope) ?? 0;
+      if (!view || count >= PREFETCH_MAX) return;
+      const found = entries.get(view.id);
+      if (found && (found.listeners.size > 0 || found.state.value !== null || found.state.loading))
+        continue;
+      prefetches.set(scope, count + 1);
+      prefetching.add(view.id);
+      void read(found ?? entry(view), true).finally(() => {
+        prefetching.delete(view.id);
+        drain();
+      });
+    }
   }
 
   /** Starts the feed from a read's cursor, or moves it back to one older than its own. */
@@ -647,7 +703,7 @@ export function createWorkspaceData(options: {
       cache.drop(scope);
       for (const [id, target] of entries) {
         if (target.listeners.size > 0) {
-          read(target);
+          void read(target);
           continue;
         }
         forget(target);
@@ -662,7 +718,7 @@ export function createWorkspaceData(options: {
     for (const target of entries.values()) {
       if (!target.view.affectedBy(answer.changed, known, target.state.value)) continue;
       if (target.listeners.size > 0) {
-        read(target);
+        void read(target);
         continue;
       }
       forget(target);
@@ -679,17 +735,24 @@ export function createWorkspaceData(options: {
     subscribe(view, listener) {
       const target = entry(view);
       target.listeners.add(listener);
-      if (target.listeners.size === 1 && due(target)) read(target);
+      if (target.listeners.size === 1 && due(target)) void read(target);
+      shown(target);
       return () => void target.listeners.delete(listener);
     },
     prefetch(view) {
       const target = entry(view);
-      if (due(target)) read(target);
+      if (due(target)) void read(target);
+    },
+    prefetchPages(paths) {
+      for (const view of paths.map(views.page))
+        if (!prefetching.has(view.id) && !queued.some((next) => next.id === view.id))
+          queued.push(view);
+      drain();
     },
     retry(view) {
       if (hasGone) return options.reopen?.();
       const target = entry(view);
-      if (live() && !target.state.loading) read(target);
+      if (live() && !target.state.loading) void read(target);
     },
     feed: () => feedState,
     subscribeFeed(listener) {
@@ -704,6 +767,7 @@ export function createWorkspaceData(options: {
     resume() {
       running = true;
       startFeed();
+      drain();
     },
     pause() {
       running = false;

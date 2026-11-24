@@ -18,6 +18,9 @@ export const BUILTIN_NAMESPACE = "dohc-builtin";
 export const BUILTIN_FILES = [
   "dohc-app.mjs",
   "dohc-charts.mjs",
+  "dohc-csv.mjs",
+  "dohc-icons.mjs",
+  "dohc-money.mjs",
   "dohc-tokens.css",
   "dohc-ui.css",
   "dohc-ui.mjs",
@@ -37,6 +40,9 @@ export const BUILTIN_SPECIFIERS: ReadonlyMap<string, BuiltinFileName> = new Map(
   ["dohc/app", "dohc-app.mjs"],
   ["dohc/ui", "dohc-ui.mjs"],
   ["dohc/charts", "dohc-charts.mjs"],
+  ["dohc/icons", "dohc-icons.mjs"],
+  ["dohc/money", "dohc-money.mjs"],
+  ["dohc/csv", "dohc-csv.mjs"],
 ]);
 
 const BUILTIN_INTERNAL_SPECIFIERS: ReadonlyMap<string, BuiltinFileName> = new Map([
@@ -128,6 +134,24 @@ function rewriteKitCssPlugin(): Esbuild.Plugin {
   };
 }
 
+function pureLucideIconsPlugin(): Esbuild.Plugin {
+  return {
+    name: "dohc-pure-lucide-icons",
+    setup(build) {
+      build.onLoad(
+        { filter: /[\\/]lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/][^\\/]+\.mjs$/ },
+        async (args) => ({
+          contents: (await readFile(args.path, "utf8")).replace(
+            /= createLucideIcon\(/g,
+            "= /* @__PURE__ */ createLucideIcon(",
+          ),
+          loader: "js",
+        }),
+      );
+    },
+  };
+}
+
 async function bundleVirtualModule(
   esbuild: typeof Esbuild,
   absWorkingDir: string,
@@ -157,13 +181,16 @@ async function bundleKitEntry(
   absWorkingDir: string,
   entryPoint: string,
   externals: readonly string[],
-  rewriteCss: boolean,
+  plugins: Esbuild.Plugin[],
+  keepPureAnnotations = false,
 ): Promise<Uint8Array> {
   const result = await esbuild.build({
     absWorkingDir,
     entryPoints: [entryPoint],
     bundle: true,
-    minify: true,
+    minifyIdentifiers: true,
+    minifySyntax: true,
+    minifyWhitespace: !keepPureAnnotations,
     write: false,
     platform: "browser",
     format: "esm",
@@ -173,7 +200,7 @@ async function bundleKitEntry(
     legalComments: "none",
     logLevel: "silent",
     external: [...externals],
-    plugins: rewriteCss ? [rewriteKitCssPlugin()] : [],
+    plugins,
   });
   return result.outputFiles[0]!.contents;
 }
@@ -281,6 +308,9 @@ export async function buildClosedAppBuiltins(
     dohcTokensCssBytes,
     dohcUiCssBytes,
     dohcChartsBytes,
+    dohcIconsBytes,
+    dohcMoneyBytes,
+    dohcCsvBytes,
   ] = await Promise.all([
     bundleVirtualModule(
       esbuild,
@@ -315,14 +345,14 @@ export async function buildClosedAppBuiltins(
       repoRoot,
       join(kitSrcDir, "app.tsx"),
       ["react", "react/jsx-runtime"],
-      false,
+      [],
     ),
     bundleKitEntry(
       esbuild,
       repoRoot,
       join(kitSrcDir, "ui.tsx"),
       ["react", "react/jsx-runtime", "react-dom"],
-      true,
+      [rewriteKitCssPlugin()],
     ),
     bundleKitCss(esbuild, repoRoot, join(kitSrcDir, "tokens.css")),
     bundleKitCss(esbuild, repoRoot, join(kitSrcDir, "ui.css")),
@@ -331,8 +361,18 @@ export async function buildClosedAppBuiltins(
       repoRoot,
       join(kitSrcDir, "charts.tsx"),
       ["react", "react/jsx-runtime"],
+      [rewriteKitCssPlugin()],
+    ),
+    bundleKitEntry(
+      esbuild,
+      repoRoot,
+      join(kitSrcDir, "icons.ts"),
+      ["react", "react/jsx-runtime"],
+      [pureLucideIconsPlugin()],
       true,
     ),
+    bundleKitEntry(esbuild, repoRoot, join(kitSrcDir, "money.ts"), [], []),
+    bundleKitEntry(esbuild, repoRoot, join(kitSrcDir, "csv.ts"), [], []),
   ]);
 
   return finalizeBuiltins([
@@ -345,6 +385,9 @@ export async function buildClosedAppBuiltins(
     ["dohc-tokens.css", dohcTokensCssBytes],
     ["dohc-ui.css", dohcUiCssBytes],
     ["dohc-charts.mjs", dohcChartsBytes],
+    ["dohc-icons.mjs", dohcIconsBytes],
+    ["dohc-money.mjs", dohcMoneyBytes],
+    ["dohc-csv.mjs", dohcCsvBytes],
   ]);
 }
 

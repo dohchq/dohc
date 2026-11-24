@@ -8,6 +8,7 @@ fn share_view_and_shared_channel_fail_closed_outside_boundary() {
         surface: ShareSurface::ShareView,
         channel_wire_id: None,
         granted: Some(ShareGrant {
+            reach: None,
             scope: crate::ShareScope::Paths(vec!["shared/docs".to_owned()]),
             version_id: None,
             access: ShareAccess::View,
@@ -1449,6 +1450,7 @@ fn a_membership_view_pushes_only_its_posts_in_groups() {
     let (_scratch, _path, mut engine) = open_store();
     let client = RelaySyncClient::new(PagedShareRelay::new([], []));
     let grant = |access| ShareGrant {
+        reach: None,
         scope: crate::ShareScope::Workspace,
         version_id: None,
         access,
@@ -1573,6 +1575,45 @@ fn a_membership_view_pushes_only_its_posts_in_groups() {
             .is_err(),
         "View posts nothing"
     );
+    // A member's lane opens on the highest level its reach lists anywhere.
+    // The engine sends every Group post on it and leaves levels to the relay.
+    // This test relay takes them all; a real one refuses a Group post at View,
+    // and the engine sets it aside with a Notice, as the refusal test below
+    // shows. Skipping it here would move the cursor past it and lose it.
+    let listed = |level| ShareGrant {
+        reach: Some(crate::ShareReach {
+            signature: "r1".to_owned(),
+            visibility_signature: "v1".to_owned(),
+            root_level: Some(ShareAccess::View),
+            folders: [("Plans".to_owned(), level)].into(),
+        }),
+        ..grant(ShareAccess::View)
+    };
+    assert!(
+        client
+            .push_share_view_groups(
+                &mut engine,
+                "ws",
+                "share",
+                &listed(ShareAccess::View),
+                &NoFaults
+            )
+            .is_err(),
+        "View everywhere posts nothing"
+    );
+    assert_eq!(
+        client
+            .push_share_view_groups(
+                &mut engine,
+                "ws",
+                "share",
+                &listed(ShareAccess::Comment),
+                &NoFaults
+            )
+            .expect("Comment in one folder opens the lane for a View member")
+            .pushed,
+        4
+    );
     assert_eq!(
         client
             .push_share_view_groups(
@@ -1584,7 +1625,8 @@ fn a_membership_view_pushes_only_its_posts_in_groups() {
             )
             .expect("Comment sends its Group posts")
             .pushed,
-        4
+        0,
+        "the posts went already"
     );
     let pushes = client
         .transport()
@@ -1611,6 +1653,33 @@ fn a_membership_view_pushes_only_its_posts_in_groups() {
             ("chat.reaction.set", 2, Some(json!("t-group"))),
             ("chat.decision.set", 3, Some(json!("t-group"))),
         ]
+    );
+    drop(pushes);
+
+    // The reverse: a Comment member under a View rule everywhere still posts
+    // in its Groups, which take the member level, not the files' level.
+    journal_local_replication_op(
+        &mut engine,
+        "ws",
+        "local",
+        "epoch-1",
+        "stream-1",
+        "chat.message.append",
+        &json!({"threadId": "t-group", "messageId": "m-later"}),
+        2_000,
+        &NoFaults,
+    )
+    .expect("journal a later Group post");
+    let ruled = ShareGrant {
+        access: ShareAccess::Comment,
+        ..listed(ShareAccess::View)
+    };
+    assert_eq!(
+        client
+            .push_share_view_groups(&mut engine, "ws", "share", &ruled, &NoFaults)
+            .expect("a Comment member under a View rule sends its Group posts")
+            .pushed,
+        1
     );
 }
 
@@ -1697,6 +1766,7 @@ fn a_membership_view_pushes_its_comments_on_files_by_path() {
         .expect("journal a local chat op");
     }
     let grant = ShareGrant {
+        reach: None,
         scope: crate::ShareScope::Workspace,
         version_id: None,
         access: ShareAccess::Comment,
@@ -1816,6 +1886,7 @@ fn a_membership_view_sets_aside_an_op_the_relay_refuses_and_keeps_pushing() {
         json!({"threadId": "t-owner", "messageId": "m-2"}),
     );
     let grant = ShareGrant {
+        reach: None,
         scope: crate::ShareScope::Workspace,
         version_id: None,
         access: ShareAccess::Comment,

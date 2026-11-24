@@ -5,7 +5,10 @@
   "exports": {
     "./app": "./src/app.tsx",
     "./ui": "./src/ui.tsx",
-    "./charts": "./src/charts.tsx"
+    "./charts": "./src/charts.tsx",
+    "./icons": "./src/icons.ts",
+    "./money": "./src/money.ts",
+    "./csv": "./src/csv.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -17,6 +20,7 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "jsdom": "^30.0.1",
+    "lucide-react": "^1.30.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "typescript": "^7.0.2",

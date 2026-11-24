@@ -73,13 +73,11 @@ export function readOrdinaryActivationBasis(
 interface AnchorPayload {
   versionId?: unknown;
   objectId?: unknown;
-  path?: unknown;
   contentKind?: unknown;
   isBaseState?: unknown;
   lineageClaimId?: unknown;
   updateBlobSha256?: unknown;
   targetVersionId?: unknown;
-  paths?: unknown[];
   transition?: { result?: { present?: unknown; objectId?: unknown; pathRef?: number } };
   lineageTransition?: {
     successor?: {
@@ -90,15 +88,11 @@ interface AnchorPayload {
     };
   } | null;
 }
-/**
- * Whether a log row began this lineage, at this path when one is given: its base-state update, or the conflict resolve
- * that installed it.
- */
+/** Whether a log row began this lineage: its base-state update, or the conflict resolve that installed it. */
 export function beginsLineage(
   opKind: unknown,
   payloadJson: string,
   document: { mainVersionId: string; objectId: string; lineageClaimId: string },
-  path?: string,
   lineageEpoch?: string | null,
 ): boolean {
   const payload = JSON.parse(payloadJson) as AnchorPayload;
@@ -107,7 +101,6 @@ export function beginsLineage(
     return (
       payload.versionId === document.mainVersionId &&
       payload.objectId === document.objectId &&
-      (path === undefined || payload.path === path) &&
       payload.contentKind === "richdoc" &&
       payload.isBaseState === true &&
       payload.lineageClaimId === lineage &&
@@ -122,7 +115,6 @@ export function beginsLineage(
     result?.present === true &&
     result.objectId === document.objectId &&
     typeof result.pathRef === "number" &&
-    (path === undefined || payload.paths?.[result.pathRef] === path) &&
     successor?.contentKind === "richdoc" &&
     successor.lineageClaimId === lineage &&
     successor.updateBlobSha256 === lineage &&

@@ -2345,6 +2345,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return this.db.isTransaction ? read() : this.readTx(read);
   }
 
+  shareLogHead(workspaceId: string): number {
+    return this.readShareTx(() =>
+      Number(
+        this.db
+          .prepare(
+            "SELECT COALESCE(MAX(relay_seq), 0) AS head FROM sync_relay_log WHERE workspace_id = ?",
+          )
+          .get(workspaceId)?.head ?? 0,
+      ),
+    );
+  }
+
   refreshAccountEmail(userId: string, email: AccountEmail | null, nowMs: number): void {
     // Most refreshes find the same email; skip the write transaction for those.
     const stored = this.readShareTx(() => accountEmail(this.db, userId));

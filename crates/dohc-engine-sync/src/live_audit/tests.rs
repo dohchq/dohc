@@ -2392,6 +2392,7 @@ fn every_file_share_level_refuses_historical_native_audit() {
             surface: crate::ShareSurface::ShareView,
             channel_wire_id: None,
             granted: Some(crate::ShareGrant {
+                reach: None,
                 scope: crate::ShareScope::Paths(vec![]),
                 version_id: Some("main".into()),
                 access,
