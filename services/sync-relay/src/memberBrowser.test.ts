@@ -9,7 +9,6 @@ import { DiscussionActivityHub } from "./discussionActivity";
 import { MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE } from "./namedRecipientChat";
 import type { SyncRelayHandler } from "./server";
 import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
-import { recordAccountName } from "./storage/accountNames";
 import type { StorageContext } from "./storage/context";
 import type { SyncRelayStorage } from "./storage";
 import {
@@ -853,11 +852,12 @@ describe("a member's Chats in a browser", () => {
   });
 
   it("withholds a link to a folder the member can't see from their Notice's title and body", async () => {
-    const { h, storage } = await seed();
+    const { h, storage } = await seed(undefined, {
+      lookupUserDisplayName: (userId: string) => (userId === "ana" ? "Ana" : `Name ${userId}`),
+    });
     await member(h, storage, "ana");
     await ownerRule(h, "hidden", "people:\n  ben@dohc.test: edit\n");
     await ownerWrite(h, "hidden/x.md", "hidden work");
-    recordAccountName(storage as unknown as StorageContext, "ana", "Ana");
     await ownerAppend(h, [
       channel("wire-notice", "Team @[hidden]"),
       thread("t-notice", "wire-notice"),

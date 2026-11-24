@@ -148,7 +148,14 @@ import * as appCollectionStorage from "./storage/appCollections";
 import * as noticeStorage from "./storage/notices";
 import * as pushStorage from "./storage/pushSubscriptions";
 import * as pushDeviceStorage from "./storage/pushDevices";
-import { recordAccountName } from "./storage/accountNames";
+import {
+  beginAccountNameLookup,
+  recordAccountName,
+  recordAccountNames,
+  unnamedAccountIds,
+  workspaceAccountIds,
+  type AccountNameLookupToken,
+} from "./storage/accountNames";
 import * as automationHostStorage from "./storage/automationHosts";
 import * as automationWorkspaceStorage from "./storage/automationWorkspaces";
 import * as accountWorkspaceStorage from "./storage/accountWorkspaces";
@@ -957,8 +964,29 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   ): pushStorage.PushSubscriptionRow {
     return pushStorage.bindPushSubscription(this, input);
   }
-  recordAccountName(userId: string, name: string | null): void {
-    recordAccountName(this, userId, name);
+  beginAccountNameLookup(): AccountNameLookupToken {
+    return beginAccountNameLookup(this);
+  }
+  recordAccountName(
+    userId: string,
+    name: string | null,
+    nowMs?: number,
+    generation?: number,
+  ): void {
+    recordAccountName(this, userId, name, nowMs, generation);
+  }
+  recordAccountNames(
+    entries: Iterable<readonly [string, string | null]>,
+    nowMs?: number,
+    generation?: number,
+  ): void {
+    recordAccountNames(this, entries, nowMs, generation);
+  }
+  workspaceAccountIds(workspaceId: string, limit?: number): string[] {
+    return workspaceAccountIds(this, workspaceId, limit);
+  }
+  unnamedAccountIds(limit: number, afterUserId?: string): string[] {
+    return unnamedAccountIds(this, limit, afterUserId);
   }
 
   removePushSubscription(input: { installationId: string; userId: string }): void {
