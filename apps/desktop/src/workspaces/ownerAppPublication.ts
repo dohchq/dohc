@@ -48,6 +48,7 @@ const manifestLimit = 64 * 1024;
 const staticAppFile = /\.(?:css|js|jsx|ts|tsx|json|png|jpe?g|gif|webp|avif|woff2)$/i;
 const staticAppExcluded = (path: string) =>
   /(?:^|\/)(?:package\.json|dohc\.json|tsconfig(?:\.[^/]*)?\.json)$/.test(path) ||
+  /(?:^|\/)[^/]+\.(?:test|spec)\.[^/]+$/i.test(path) ||
   path.split("/").some((part) => part === "node_modules" || part.startsWith("."));
 const autoManifestExcludedNames = new Set([
   "app.publish.json",
@@ -529,11 +530,21 @@ async function selectAppSources(
       ...(schemaPath ? [schemaPath] : []),
     ]),
   ];
-  const outside = paths.find((path) => !allowed(path));
-  if (outside)
+  const outsidePaths = paths.filter((path) => !allowed(path));
+  if (outsidePaths.length > 0) {
+    const maxListed = 5;
+    const listed =
+      outsidePaths.length > maxListed
+        ? `${outsidePaths.slice(0, maxListed).join(", ")} (and ${outsidePaths.length - maxListed} more)`
+        : outsidePaths.join(", ");
+    const subject = first ? `${manifestPath} lists ${listed}` : listed;
+    const verb = outsidePaths.length === 1 ? "is" : "are";
+    const files = outsidePaths.length === 1 ? "the file" : "those files";
+    const them = outsidePaths.length === 1 ? "it" : "them";
     throw new Error(
-      `${first ? `${manifestPath} lists ${outside}` : outside}, which is outside this link's shared files. Choose a link that includes it.`,
+      `${subject}, which ${verb} outside this link's shared files. Move ${files} inside ${input.appRoot}, or create a link whose paths include ${them}.`,
     );
+  }
   const metadata = await capture(paths, inputBounds.maxInputBytes);
   if (
     manifest &&

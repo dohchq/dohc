@@ -324,9 +324,52 @@ describe("app.publish.json paths", () => {
     const h = harness();
     place(h, "app", "");
     await expect(h.prepare("app", ["app"])).rejects.toThrow(
-      "app/app.publish.json lists shared/theme.css, which is outside this link's shared files. Choose a link that includes it.",
+      "app/app.publish.json lists shared/theme.css, which is outside this link's shared files. Move the file inside app, or create a link whose paths include it.",
     );
     expect(h.capturePaths).toEqual([["app/app.publish.json"]]);
+  });
+
+  it("names multiple out-of-selector paths and caps long lists with an actionable fix", async () => {
+    const h = harness();
+    h.sources.clear();
+    h.sources.set(
+      "tournament/spectator/app.publish.json",
+      JSON.stringify({
+        version: 1,
+        entryPath: "../spectator.tsx",
+        inputs: ["../spectator.tsx", "../shared/bracket.ts", "../shared/theme.css", "local.ts"],
+        packageMap: {},
+      }),
+    );
+    h.sources.set("tournament/spectator.tsx", "console.log(1);");
+    h.sources.set("tournament/shared/bracket.ts", "export const x = 1;");
+    h.sources.set("tournament/shared/theme.css", "body {}");
+    h.sources.set("tournament/spectator/local.ts", "export const y = 2;");
+    await expect(h.prepare("tournament/spectator", ["tournament/spectator"])).rejects.toThrow(
+      "tournament/spectator/app.publish.json lists tournament/spectator.tsx, tournament/shared/bracket.ts, tournament/shared/theme.css, which are outside this link's shared files. Move those files inside tournament/spectator, or create a link whose paths include them.",
+    );
+    expect(h.capturePaths).toEqual([["tournament/spectator/app.publish.json"]]);
+
+    const manyInputs = [
+      "../shared/a.ts",
+      "../shared/b.ts",
+      "../shared/c.ts",
+      "../shared/d.ts",
+      "../shared/e.ts",
+      "../shared/f.ts",
+    ];
+    h.sources.set(
+      "tournament/spectator/app.publish.json",
+      JSON.stringify({
+        version: 1,
+        entryPath: "../shared/a.ts",
+        inputs: manyInputs,
+        packageMap: {},
+      }),
+    );
+    await expect(h.prepare("tournament/spectator", ["tournament/spectator"])).rejects.toThrow(
+      "tournament/spectator/app.publish.json lists tournament/shared/a.ts, tournament/shared/b.ts, tournament/shared/c.ts, tournament/shared/d.ts, tournament/shared/e.ts (and 1 more), which are outside this link's shared files. Move those files inside tournament/spectator, or create a link whose paths include them.",
+    );
   });
 
   it("names the missing app.publish.json after the engine refuses to capture it", async () => {
@@ -403,12 +446,14 @@ describe("app without app.publish.json", () => {
     );
   });
 
-  it("includes every type the compiler accepts, and leaves out build configuration and installed packages", async () => {
+  it("includes every type the compiler accepts, and leaves out build configuration, tests, and installed packages", async () => {
     const h = harness();
     page(h, {
       "app/index.html": '<!doctype html><script type="module" src="main.ts"></script>',
       "app/main.ts": "import data from './data.json'; document.title = data.title;",
       "app/data.json": '{"title":"Trip"}',
+      "app/main.test.ts": 'import { it } from "vitest"; it("works", () => {});',
+      "app/main.spec.js": 'import fs from "node:fs"; console.log(fs);',
       "app/package.json": "{}",
       "app/tsconfig.json": "{}",
       "app/dohc.json": "{}",
@@ -686,6 +731,15 @@ describe("owner dataset publication", () => {
     h.sources.set("app/nested-col/dataset.json", "{}");
     h.sources.set("app/nested-col/operations.js", "export const operations = {};");
     h.sources.set("app/automations.yaml", "automations: []");
+    h.sources.set("app/spectator.tsx", "export const Spectator = () => null;");
+    h.sources.set("app/helper.test.ts", 'import { expect } from "vitest"; expect(1).toBe(1);');
+    h.sources.set("app/main.test.tsx", 'import fs from "node:fs"; console.log(fs);');
+    h.sources.set("app/src/view.spec.ts", 'import { it } from "vitest"; it("ok", () => {});');
+    h.sources.set("app/fixtures.test.json", '{"mock":true}');
+    h.sources.set(
+      "app/Upper.Test.TS",
+      'import { describe } from "vitest"; describe("x", () => {});',
+    );
 
     h.setDeclaration({
       version: 1,
@@ -722,6 +776,7 @@ describe("owner dataset publication", () => {
       "app/app.publish.json",
       "app/helper.ts",
       "app/main.tsx",
+      "app/spectator.tsx",
       "app/src/changes/view.tsx",
       "app/style.css",
     ]);

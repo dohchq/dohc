@@ -397,5 +397,37 @@ describe("verifyFrontend app publication contract", () => {
       ok: true,
       stage: "complete",
     });
+
+    const warnedResult = OwnerAppPublicationResult.parse({
+      ...okResult,
+      diagnostics: [
+        {
+          code: "input_outside_app_root",
+          severity: "warning",
+          path: "tournament/spectator.tsx",
+          detail:
+            "Path is outside the app folder; a default share link scoped to the app folder will refuse it.",
+          remedy:
+            "Move shared files inside the app folder, or create a share link whose paths include every referenced folder.",
+        },
+      ],
+    });
+    const warned = await executeCli({
+      argv: [
+        "app",
+        "verifyFrontend",
+        JSON.stringify({ workspaceId: "w1", appRoot: "tournament/spectator" }),
+        "--json",
+      ],
+      cwd: "/workspace",
+      env: {},
+      request: async () => warnedResult,
+    });
+    expect(warned.exitCode).toBe(0);
+    expect(JSON.parse(warned.stdout)).toMatchObject({
+      kind: "frontendVerified",
+      ok: true,
+      diagnostics: [{ code: "input_outside_app_root", severity: "warning" }],
+    });
   });
 });
