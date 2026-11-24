@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import { LINK_REFUSALS, linkRefusalBody } from "@dohc/security-contract/link-refusal";
-import { normalizeLinkRefusal } from "./linkRefusal";
+import { liveNoteStanding, normalizeLinkRefusal } from "./linkRefusal";
 
 it.each([401, 403, 404])("hides non-contract %s bodies", async (status) => {
   const result = await normalizeLinkRefusal(
@@ -91,3 +91,14 @@ it.each(["link", "link-lane-owner", "linkx", "link-refresh", "link-handoff", "li
     expect(await result.json()).toEqual(body);
   },
 );
+
+// A note with no record may never get one, so only a record that says starting or off answers.
+it.each([
+  [undefined, undefined],
+  ["live", undefined],
+  ["starting", "starting"],
+  ["off", "off"],
+  ["stopping", "off"],
+] as const)("answers from a note record in state %s with %s", (state, standing) => {
+  expect(liveNoteStanding(state)).toBe(standing);
+});

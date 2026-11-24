@@ -110,7 +110,7 @@ import { createLiveTickets } from "./liveTickets";
 import { createPhonePages, type PhonePages } from "./phonePages";
 import { createLiveHostReports } from "./namedLiveHostReports";
 import { createLinkLiveResolver } from "./linkLiveBrowserAuth";
-import { normalizeLinkRefusal, opaqueLinkRefusal } from "./linkRefusal";
+import { liveNoteStanding, normalizeLinkRefusal, opaqueLinkRefusal } from "./linkRefusal";
 import { isLinkEndpointPath, isLinkLivePath } from "./linkEndpointPath";
 import { relayEntryPattern, SYNC_RELAY_REQUEST_LOG } from "./requestLog";
 import { createLinkLiveHttp } from "./linkLiveHttp";
@@ -1283,10 +1283,10 @@ const sessionHostBlocked = selfHost
 const liveNote = selfHost
   ? (document: { workspaceId: string; objectId: string }) => {
       if (storage.getLiveHostControl()?.configuredMode !== "service") return undefined;
-      const state =
+      return liveNoteStanding(
         storage.readServiceHostEnrollmentByObjectId(document.workspaceId, document.objectId)?.note
-          .state ?? "starting";
-      return state === "live" ? undefined : state === "starting" ? "starting" : "off";
+          .state,
+      );
     }
   : undefined;
 if (selfHost && deployment)

@@ -656,6 +656,89 @@ describe("App", () => {
     expect(container.querySelector("article.markdown")?.textContent).toContain("Shared content");
   });
 
+  it.each([
+    [
+      "renamed",
+      { path: "docs/renamed.md" },
+      "Editing is no longer available. Copy any unsynced changes before closing this file.",
+    ],
+    ["removed", null, "This file moved or was removed. Ask its owner for a new link."],
+  ] as const)(
+    "says a file open for editing moved or was removed only when the shared files lose it: %s",
+    async (_, change, words) => {
+      const objectId = "share-object:v1:" + "a".repeat(64);
+      const meta: ViewMeta = {
+        ...DEFAULT_META,
+        access: "edit",
+        effectiveSelector: { access: "edit", versionId: null, paths: ["docs"] },
+      };
+      const file: SharedFile = {
+        path: "docs/doc.md",
+        objectId,
+        blobSha256: "a".repeat(64),
+        contentKind: "text",
+      };
+      const fallback = viewerFetch(() => {
+        throw new Error("Unexpected handoff");
+      });
+      let deliver: ((response: Response) => void) | undefined;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input, init) => {
+          const route = requestPath(input);
+          if (route === "/api/view/meta") return jsonResponse(meta);
+          if (route === "/api/view/current") return currentPage([file], 7, 0, meta);
+          if (route.startsWith("/api/view/log")) {
+            if (!fullRequestPath(input).includes("hold=")) return logOpsPage([], 7);
+            return new Promise<Response>((resolve) => {
+              deliver = resolve;
+            });
+          }
+          if (route.startsWith("/api/view/blob/")) return new Response("Shared content");
+          if (route === "/api/live/link-document-state") return new Response(null, { status: 204 });
+          if (route === "/api/live/link-document")
+            return jsonResponse(
+              linkRefusalBody("link_live_unavailable"),
+              LINK_REFUSALS.link_live_unavailable.status,
+            );
+          return fallback(input, init);
+        }),
+      );
+      await renderApp();
+      await settle(() => container.querySelector("article.markdown") !== null);
+      await act(async () => buttonNamed("Edit file")!.click());
+      await settle(() => container.querySelector(".edit-notice") !== null && deliver !== undefined);
+      await act(async () =>
+        deliver?.(
+          logOpsPage(
+            [
+              {
+                relaySeq: 8,
+                recordedAtMs: 1,
+                opKind: "moment.append",
+                payload: {
+                  objectId,
+                  operation: change ? "rename" : "delete",
+                  payloadBeforePath: file.path,
+                  payloadBeforeBlobSha256: file.blobSha256,
+                  ...(change && {
+                    payloadAfterPath: change.path,
+                    payloadAfterBlobSha256: file.blobSha256,
+                    payloadAfterContentKind: "text",
+                  }),
+                },
+              },
+            ],
+            8,
+          ),
+        ),
+      );
+      await settle(() => container.querySelector(".edit-alert") !== null);
+      expect(container.querySelector(".edit-alert")?.textContent).toBe(words);
+      expect(container.querySelector(".edit-notice") === null).toBe(change === null);
+    },
+  );
+
   it("keeps comments closed until asked for, with their count on the button", async () => {
     const fallback = viewerFetch(() => {
       throw new Error("Unexpected handoff");

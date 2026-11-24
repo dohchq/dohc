@@ -3,7 +3,6 @@ import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import {
   LiveAuthorityUnavailableError,
-  LiveDocumentGoneError,
   LiveHostUnavailableError,
   LiveLinkFullError,
   LiveStartingError,
@@ -117,9 +116,7 @@ export async function namedRequest(
       if (removedResponse) {
         if (record(value) && value.code === "share_access_removed")
           throw new ShareAccessRemovedError();
-        throw path === "/api/live/link-ticket"
-          ? new LiveDocumentGoneError("Unavailable")
-          : new LiveAuthorityUnavailableError("Unavailable");
+        throw new LiveAuthorityUnavailableError("Unavailable");
       }
       if (linkRefused) {
         const code = parseLinkRefusal(value, response.status);

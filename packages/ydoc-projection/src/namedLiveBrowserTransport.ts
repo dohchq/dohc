@@ -96,8 +96,6 @@ export class LiveHostUnavailableError extends Error {}
 export class LiveStoppedError extends Error {}
 /** The server answered that live editing of the document is starting. The page tries again by itself. */
 export class LiveStartingError extends Error {}
-/** The server no longer finds the document where this page opened it. It moved or was removed. */
-export class LiveDocumentGoneError extends Error {}
 /** The server answered that the link can take no more people. Trying again cannot help. */
 export class LiveLinkFullError extends Error {}
 /** The server answered that the owner removed this account's access. */
@@ -472,14 +470,12 @@ export function createNamedLiveBrowserTransport<
           return "authority-unavailable";
         if (!listing.files.some((file) => record(file) && file.objectId === target.objectId))
           return "document-gone";
-        if (checking) {
-          kept = undefined;
-          return "live-stopped";
-        }
       } catch (error) {
         if (error instanceof AccessRemoved) return "access-removed";
       }
-      return passingRefusal();
+      if (!checking) return passingRefusal();
+      kept = undefined;
+      return "live-stopped";
     }
     /** Whether the invitation says the owner removed this account's access. */
     async function accessRemoved(held: Attempt, grantId: string): Promise<boolean> {
@@ -505,11 +501,13 @@ export function createNamedLiveBrowserTransport<
       if (closed || ["quarantined", "refused"].includes(state().status)) return;
       automatic = true;
       attempted = true;
-      const checking = state().reason === "live-stopped";
+      const reason = state().reason,
+        checking = reason === "live-stopped";
       stop();
       const held: Attempt = { controller: new AbortController(), writes: new Set() };
       attempt = held;
-      if (!checking) override = { status: "authorizing", reason: null };
+      if (!checking && reason !== "live-starting")
+        override = { status: "authorizing", reason: null };
       notify();
       held.timer = setTimeout(
         // A busy live host holds the ticket and the socket's upgrade until it has woken the file, so an
@@ -643,11 +641,9 @@ export function createNamedLiveBrowserTransport<
                       ? "live-stopped"
                       : error instanceof LiveStartingError
                         ? "live-starting"
-                        : error instanceof LiveDocumentGoneError
-                          ? "document-gone"
-                          : error instanceof LiveHostUnavailableError
-                            ? "host-unavailable"
-                            : "connection-failed",
+                        : error instanceof LiveHostUnavailableError
+                          ? "host-unavailable"
+                          : "connection-failed",
         );
       }
     }

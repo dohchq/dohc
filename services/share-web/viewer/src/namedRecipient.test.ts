@@ -1,7 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import {
   LiveAuthorityUnavailableError,
-  LiveDocumentGoneError,
   LiveHostUnavailableError,
   LiveStartingError,
   LiveStoppedError,
@@ -108,16 +107,6 @@ it("tells a page that live editing is starting, by its code", async () => {
   expect(linkRefusalCode(error)).toBe("link_live_starting");
 });
 
-it("tells an open link page whose ticket is not found that its file moved or was removed", async () => {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async () => Response.json({ ok: false, error: "not found" }, { status: 404 })),
-  );
-  await expect(
-    namedRequest("/api/live/link-ticket", new AbortController().signal),
-  ).rejects.toBeInstanceOf(LiveDocumentGoneError);
-});
-
 it("shows removal for the verified named recipient", async () => {
   vi.stubGlobal(
     "fetch",
@@ -133,7 +122,7 @@ it("shows removal for the verified named recipient", async () => {
   ).rejects.toBeInstanceOf(ShareAccessRemovedError);
 });
 
-it.each(["/api/live/link-document", "/api/live/named-documents"])(
+it.each(["/api/live/link-document", "/api/live/link-ticket", "/api/live/named-documents"])(
   "keeps an unverified refusal opaque on %s",
   async (path) => {
     vi.stubGlobal(

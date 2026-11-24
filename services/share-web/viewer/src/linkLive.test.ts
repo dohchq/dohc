@@ -151,7 +151,7 @@ it("refuses unexpected metadata fields and responses arriving after selection ca
   );
   await expect(openLinkDocument("abcdefghijkl", "docs/a.md", controller.signal)).rejects.toThrow();
 });
-it("reports a link ticket that is not found as a file that moved or was removed, not as a failed connection", async () => {
+it("reports a refused link ticket as unavailable, not as a failed connection", async () => {
   vi.stubGlobal("location", { origin: "https://share.example.test" });
   vi.stubGlobal(
     "fetch",
@@ -166,7 +166,7 @@ it("reports a link ticket that is not found as a file that moved or was removed,
     await session.reconnect();
     expect(session.state()).toMatchObject({
       status: "disconnected",
-      reason: "document-gone",
+      reason: "authority-unavailable",
     });
   } finally {
     session.close();

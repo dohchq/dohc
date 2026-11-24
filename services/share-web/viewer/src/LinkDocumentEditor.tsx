@@ -4,7 +4,6 @@ import type { NamedLiveBrowserState } from "@dohc/ydoc-projection/named-live-bro
 import {
   draftNeedsReview,
   DraftReview,
-  LINK_FILE_GONE,
   LIVE_OFF,
   NamedDocumentEditor,
   type NamedDocumentSession,
@@ -15,6 +14,7 @@ import { openLinkDocument } from "./linkLive";
 import { linkRefusalCode } from "./namedRecipient";
 import { LINK_REFUSALS, type LinkRefusalCode } from "@dohc/security-contract/link-refusal";
 
+const FILE_GONE = "This file moved or was removed. Ask its owner for a new link.";
 const COULD_NOT_OPEN =
   "dohc could not open this file for editing. Retry in a moment. If it keeps happening, ask the owner.";
 
@@ -157,11 +157,11 @@ export function LinkDocumentEditor({
       {!available && (
         <p className="edit-alert" role="alert">
           {gone
-            ? LINK_FILE_GONE
+            ? FILE_GONE
             : "Editing is no longer available. Copy any unsynced changes before closing this file."}
         </p>
       )}
-      {error && (
+      {error && !gone && (
         <div className="edit-notice" role="alert">
           <span className="tile bad">
             <Icon name="alert" />

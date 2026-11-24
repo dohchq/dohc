@@ -1321,6 +1321,43 @@ it("keeps an invited editor's off page checking when reading the invitation agai
   await vi.advanceTimersByTimeAsync(30_000);
   expect(tickets()).toBe(asked + 1);
 });
+it.each([
+  ["an opaque 404", () => new Response(null, { status: 404 })],
+  ["a 503", () => new Response(null, { status: 503 })],
+  [
+    "a network error",
+    () => {
+      throw new TypeError("Failed to fetch");
+    },
+  ],
+] as const)(
+  "keeps an invited editor's off page checking when reading the invitation again gives %s",
+  async (_, listing) => {
+    const f = await live();
+    vi.useFakeTimers();
+    let forgot = false;
+    f.intercept((path) =>
+      path === "/api/live/named-ticket"
+        ? forgot
+          ? new Response(null, { status: 404 })
+          : Response.json(NAMED_LIVE_STOPPED, { status: 404 })
+        : forgot && path === "/api/live/named-documents"
+          ? listing()
+          : undefined,
+    );
+    const tickets = () => f.requests.filter(({ path }) => path === "/api/live/named-ticket").length;
+    f.socket.close();
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+    expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "live-stopped" });
+    forgot = true;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "live-stopped" });
+    const asked = tickets();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(tickets()).toBe(asked + 1);
+  },
+);
 it("waits while live editing of the file is starting, takes no typing, and joins by itself once it is live", async () => {
   vi.useFakeTimers();
   const f = fixture();
@@ -1333,8 +1370,12 @@ it("waits while live editing of the file is starting, takes no typing, and joins
   await f.value.reconnect();
   expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "live-starting" });
   expect(namedLiveEditable(f.value.state())).toBe(false);
+  const seen: string[] = [];
+  f.value.subscribe((state) => seen.push(state.status));
   await vi.advanceTimersByTimeAsync(1_000);
   expect(f.value.state()).toMatchObject({ reason: "live-starting" });
+  expect(seen.length).toBeGreaterThan(0);
+  expect(seen).not.toContain("authorizing");
   starting = false;
   while (!f.sockets.length) await vi.advanceTimersByTimeAsync(250);
   const socket = await f.socketAt(0),

@@ -1,5 +1,6 @@
 import { relayPathSegments } from "./requestInputs";
 import { isLinkEndpointPath } from "./linkEndpointPath";
+import type { LiveNoteState } from "./storage/serviceHostEnrollment";
 import {
   LINK_REFUSALS,
   NAMED_LIVE_STOPPED,
@@ -31,6 +32,15 @@ export type SessionHostBlock = "held" | "stopped";
 
 /** Where a note stands in going live, as its record says, while it is not live. */
 export type LiveNoteStanding = "starting" | "off";
+
+/** Where a note stands, from its record's state. No record, or a live note, gives no answer. */
+export function liveNoteStanding(state: LiveNoteState | undefined): LiveNoteStanding | undefined {
+  return state === "starting"
+    ? "starting"
+    : state === "off" || state === "stopping"
+      ? "off"
+      : undefined;
+}
 
 /** What a link holder is told about a blocked document. */
 export function sessionHostRefusal(block: SessionHostBlock): Response {

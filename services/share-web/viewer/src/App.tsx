@@ -455,6 +455,7 @@ export function App() {
     discriminator: string;
     path: string;
     blobSha256: string;
+    objectId: string | undefined;
   } | null>(null);
   // The bar's place for an editor's Done, Save and saved state, and whether the live editor has the file.
   const [barSlot, setBarSlot] = useState<HTMLElement | null>(null);
@@ -924,7 +925,11 @@ export function App() {
         discriminator={editing.discriminator}
         path={editing.path}
         available={available}
-        gone={editable && selected === undefined}
+        gone={
+          editable &&
+          editing.objectId !== undefined &&
+          !files.some((file) => file.objectId === editing.objectId)
+        }
         onClose={stopEditing}
         barSlot={barSlot}
         onOpenChange={setEditorOpen}
@@ -1116,6 +1121,7 @@ export function App() {
                       discriminator: ready.session,
                       path: selected.path,
                       blobSha256: selected.blobSha256,
+                      objectId: selected.objectId,
                     });
                   }}
                 >

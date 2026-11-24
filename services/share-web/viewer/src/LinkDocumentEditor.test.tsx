@@ -247,7 +247,6 @@ it.each([
     "live-stopped",
     "Live editing of this file is off. Only its owner can start it again. You can still read and comment here.",
   ],
-  ["document-gone", "This file moved or was removed. Ask its owner for a new link."],
 ])(
   "tells an open page why editing is not live, with no retry button; %s",
   async (reason, words) => {
