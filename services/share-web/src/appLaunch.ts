@@ -428,7 +428,16 @@ export function createAppLaunchHandler(options: {
         else pending++;
       }
       const abort = new AbortController();
-      const signal = AbortSignal.any([request.signal, abort.signal, AbortSignal.timeout(15_000)]);
+      const timeoutMs =
+        url.pathname === "/backend" &&
+        request.headers.get("content-type") === "application/octet-stream"
+          ? 90_000
+          : 15_000;
+      const signal = AbortSignal.any([
+        request.signal,
+        abort.signal,
+        AbortSignal.timeout(timeoutMs),
+      ]);
       let scope:
         | { publicationId: string; material?: LaunchMaterial; abort: AbortController }
         | undefined;

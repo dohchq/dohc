@@ -498,3 +498,43 @@ it("validates exact pending submissions without accepting caller identity", asyn
     expect((await forward(body, async () => Response.json(reply))).status).toBe(404);
   }
 });
+
+it("maps upload body read timeouts to 408 and reports limit details on named 413", async () => {
+  const timeoutSignal = AbortSignal.abort(new DOMException("Timed out", "TimeoutError"));
+  const timedOutNamed = await forward(
+    upload,
+    async () => {
+      throw new Error("relay must not run");
+    },
+    "application/json",
+    timeoutSignal,
+    false,
+  );
+  expect(timedOutNamed.status).toBe(408);
+  expect(await timedOutNamed.json()).toEqual({
+    error: "App backend upload exceeded the 90000 ms timeout limit.",
+  });
+  const timedOutLink = await forward(
+    upload,
+    async () => {
+      throw new Error("relay must not run");
+    },
+    "application/json",
+    timeoutSignal,
+    true,
+  );
+  expect(timedOutLink.status).toBe(408);
+
+  const oversizedNamed = await forward(
+    { ...upload, bytes: Buffer.alloc(APP_BACKEND_UPLOAD_BYTES + 1) },
+    async () => {
+      throw new Error("relay must not run");
+    },
+    "application/json",
+    new AbortController().signal,
+    false,
+  );
+  expect(oversizedNamed.status).toBe(413);
+  const body413 = (await oversizedNamed.json()) as { error: string };
+  expect(body413.error).toContain(`${APP_BACKEND_UPLOAD_BYTES} bytes`);
+});

@@ -50,6 +50,28 @@ export async function forwardAppBackend(input: {
   const contentType = input.request.headers.get("content-type");
   const isBinaryUpload = contentType === "application/octet-stream";
   if (!isBinaryUpload && contentType !== "application/json") return error(400);
+  const readError = (cause: unknown) => {
+    const reason = input.signal.reason as { name?: unknown } | undefined;
+    const timedOut = input.signal.aborted && reason?.name === "TimeoutError";
+    if (timedOut) {
+      return input.capability
+        ? new Response(null, { status: 408, headers: responseHeaders })
+        : Response.json(
+            {
+              error: isBinaryUpload
+                ? "App backend upload exceeded the 90000 ms timeout limit."
+                : "App backend request exceeded the 15000 ms timeout limit.",
+            },
+            { status: 408, headers: responseHeaders },
+          );
+    }
+    if (cause instanceof RangeError) {
+      return input.capability
+        ? error(413)
+        : Response.json({ error: cause.message }, { status: 413, headers: responseHeaders });
+    }
+    return error(400);
+  };
   let body: unknown;
   try {
     if (isBinaryUpload) {
@@ -60,7 +82,7 @@ export async function forwardAppBackend(input: {
       body = await readBoundedJson(input.request, APP_BACKEND_REQUEST_BYTES, input.signal);
     }
   } catch (cause) {
-    return error(cause instanceof RangeError ? 413 : 400);
+    return readError(cause);
   }
   if (
     !record(body) ||
@@ -153,7 +175,7 @@ export async function forwardAppBackend(input: {
       };
     } else return error(400);
   } catch (cause) {
-    return error(cause instanceof RangeError ? 413 : 400);
+    return readError(cause);
   }
 
   const url = new URL(

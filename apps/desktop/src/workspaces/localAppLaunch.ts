@@ -358,10 +358,15 @@ export async function createLocalAppLaunchHost(options: {
             };
           request.once("aborted", requestAborted);
           response.once("close", responseClosed);
+          const timeoutMs =
+            request.url === "/backend" &&
+            request.headers["content-type"] === "application/octet-stream"
+              ? 90_000
+              : 15_000;
           let activeSignal = AbortSignal.any([
             requestSignal,
             abort.signal,
-            AbortSignal.timeout(15_000),
+            AbortSignal.timeout(timeoutMs),
           ]);
           let admitted = false,
             eventsAdmitted = false;

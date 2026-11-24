@@ -2604,11 +2604,11 @@ export const shareWebRefusalBody = REFUSAL_BODY;
  * The routes that authenticate before they read, then bound the body and its
  * deadline: an agent's MCP request and a Collection write can carry megabytes.
  */
-export function streamsRequestBody(url: URL, method?: string): boolean {
+export function streamsRequestBody(url: URL, method: string): boolean {
   return (
     url.pathname.startsWith(MCP_PATH_PREFIX) ||
     url.pathname.startsWith(PERSONAL_MCP_PATH_PREFIX) ||
     url.pathname === COLLECTION_WRITES_PATH ||
-    (url.pathname === "/backend" && (method === undefined || method === "POST"))
+    (url.pathname === "/backend" && method === "POST")
   );
 }
