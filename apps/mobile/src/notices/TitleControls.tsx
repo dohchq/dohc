@@ -2,6 +2,7 @@ import { Check, CheckCircle2, Copy, X } from "lucide-react-native";
 import { useEffect, useState } from "react";
 import { Pressable, StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
 import { useTheme } from "../theme";
+import { TOUCH } from "../touch";
 
 // Copy and × on a notice's title line, each a 44pt target that doesn't overlap the other. A Notice from the server
 // takes Done there, a check in a circle, in place of ×. Without a dismiss label, that column stays empty so every copy
@@ -87,7 +88,13 @@ const pressedBox = ({ pressed }: { pressed: boolean }) => [styles.box, pressed &
 
 const styles = StyleSheet.create({
   controls: { flexDirection: "row", gap: 22, marginTop: -0.5 },
-  // Each control is a real 44pt square; the negative margin keeps it laid out as 22pt, so the columns don't move.
-  box: { width: 44, height: 44, margin: -11, alignItems: "center", justifyContent: "center" },
+  // Each control is a real TOUCH square; the negative margin keeps it laid out as 22pt, so the columns don't move.
+  box: {
+    width: TOUCH,
+    height: TOUCH,
+    margin: (22 - TOUCH) / 2,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   pressed: { opacity: 0.5 },
 });

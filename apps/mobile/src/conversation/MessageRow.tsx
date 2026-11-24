@@ -33,6 +33,8 @@ import type { AnswerActions, LocalActions, ReactActions } from "./useOutbox";
 import type { WakeRetry } from "./chatWakeState";
 import { WakeState } from "./WakeState";
 import { symbolFallback } from "../symbolFallback";
+import { useBackCloses } from "../backCloses";
+import { ripple, slopTo } from "../touch";
 
 // One message, as in Slack: an author line starts a group; follow-ups from the same author within a few minutes don't repeat it.
 // Where writes are on, a message the server has offers its reactions, Add reaction and Reply; one only this phone has
@@ -155,7 +157,7 @@ export const MessageRow = memo(function MessageRow({
         {message.replies ? (
           <Pressable
             style={styles.replies}
-            hitSlop={{ top: 11, bottom: 11 }}
+            hitSlop={slopTo(22)}
             accessibilityRole="button"
             onPress={onOpenReplies ? () => onOpenReplies(message) : undefined}
             accessibilityLabel={`${message.replies.count} replies, last at ${message.replies.last}`}
@@ -302,7 +304,8 @@ function ReactionChip({
     );
   return (
     <Pressable
-      hitSlop={{ top: 9, bottom: 9, left: 2, right: 2 }}
+      hitSlop={{ ...slopTo(26), left: 2, right: 2 }}
+      android_ripple={ripple(theme)}
       disabled={disabled}
       onPress={onPress}
       accessibilityRole="button"
@@ -318,7 +321,8 @@ function ReactionChip({
 function ReplyButton({ onPress, theme }: { onPress(): void; theme: Theme }) {
   return (
     <Pressable
-      hitSlop={{ top: 9, bottom: 9, left: 4, right: 4 }}
+      hitSlop={{ ...slopTo(26), left: 4, right: 4 }}
+      android_ripple={ripple(theme)}
       onPress={onPress}
       accessibilityRole="button"
       accessibilityLabel={chatWords.reply}
@@ -363,6 +367,7 @@ function MessageActions({
       if (opener.current) AccessibilityInfo.sendAccessibilityEvent(opener.current, "focus");
     });
   };
+  useBackCloses(picking, close);
   return (
     <>
       <View style={styles.reactions}>
@@ -377,7 +382,8 @@ function MessageActions({
         ))}
         <Pressable
           ref={opener}
-          hitSlop={{ top: 9, bottom: 9, left: 4, right: 4 }}
+          hitSlop={{ ...slopTo(26), left: 4, right: 4 }}
+          android_ripple={ripple(theme)}
           disabled={disabled}
           onPress={() => setPicking((open) => !open)}
           accessibilityRole="button"
@@ -536,7 +542,8 @@ function AgentTarget({ author, top, name }: { author: Author; top: number; name:
       style={[styles.target, { top, width, height }]}
     >
       {/* Empty views are flattened away unless kept, and then nothing under the button would take the touch. */}
-      <View collapsable={false} style={styles.targetMark} />
+      {/* With a name, the mark's area reaches it, so no dead strip lies between them. */}
+      <View collapsable={false} style={[styles.targetMark, name ? { width: nameLeft } : null]} />
       {name ? (
         <View
           collapsable={false}
@@ -610,7 +617,9 @@ export function Avatar({ author, theme, size }: { author: Author; theme: Theme; 
         },
       ]}
     >
-      <Text style={[styles.initials, { fontSize: size * 0.36 }]}>{author.initials}</Text>
+      <Text style={[styles.initials, { fontSize: size * 0.36 }]} allowFontScaling={false}>
+        {author.initials}
+      </Text>
     </View>
   );
 }
@@ -636,7 +645,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 4,
     paddingHorizontal: 8,
-    height: 26,
+    minHeight: 26,
     borderRadius: 13,
     borderWidth: 1,
   },

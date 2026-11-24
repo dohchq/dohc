@@ -14,8 +14,19 @@ export interface Choices {
   readonly cancel?: string;
 }
 
-// The platform's own sheet: an action sheet on iOS, an alert on Android. Resolves the chosen option's index,
-// or null when cancelled.
+type Sheet = (choices: Choices, answer: (index: number | null) => void) => void;
+let sheet: Sheet | null = null;
+
+/** Android's menu sheet registers here while it's mounted (src/ChoiceSheet.tsx); the returned function unregisters. */
+export function showSheetWith(show: Sheet): () => void {
+  sheet = show;
+  return () => {
+    if (sheet === show) sheet = null;
+  };
+}
+
+// The platform's own sheet: an action sheet on iOS. On Android, a menu of two or more choices is a Material bottom
+// sheet, and a confirmation of one action an alert. Resolves the chosen option's index, or null when cancelled.
 export function choose({
   title,
   message,
@@ -35,6 +46,10 @@ export function choose({
         },
         (index) => resolve(index < options.length ? index : null),
       );
+      return;
+    }
+    if (options.length > 1 && sheet) {
+      sheet({ title, message, options, cancel }, resolve);
       return;
     }
     Alert.alert(

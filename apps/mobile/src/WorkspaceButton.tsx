@@ -5,6 +5,7 @@ import { useWorkspaces } from "./chats/Workspaces";
 import { sampleBuild } from "./sampleBuild";
 import { useTheme } from "./theme";
 import { symbolFallback } from "./symbolFallback";
+import { ripple, TOUCH } from "./touch";
 
 // The workspace switcher, in the header as in Slack and Notion. A signed-in build opens the switcher sheet; the
 // sample has none.
@@ -16,12 +17,15 @@ export function WorkspaceButton() {
   return (
     <Pressable
       style={styles.button}
+      android_ripple={sampleBuild ? undefined : ripple(theme)}
       onPress={sampleBuild ? undefined : () => router.push("/workspaces")}
       accessibilityRole="button"
       accessibilityLabel={`Workspace: ${workspace.name}. Switch workspace`}
     >
       <View style={[styles.mark, { backgroundColor: workspace.color }]}>
-        <Text style={styles.initial}>{workspace.initial}</Text>
+        <Text style={styles.initial} allowFontScaling={false}>
+          {workspace.initial}
+        </Text>
       </View>
       <SymbolView
         name="chevron.down"
@@ -35,7 +39,14 @@ export function WorkspaceButton() {
 }
 
 const styles = StyleSheet.create({
-  button: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 4 },
+  button: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 4,
+    minHeight: TOUCH,
+    borderRadius: 8,
+  },
   mark: { width: 28, height: 28, borderRadius: 8, alignItems: "center", justifyContent: "center" },
   initial: { color: "#fff", fontSize: 14, fontWeight: "700" },
 });

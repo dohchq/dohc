@@ -10,6 +10,7 @@ import { waitingToSend } from "../demo";
 import type { PhoneWorkspace } from "./types";
 import { useWorkspaceMenu } from "./workspaceMenu";
 import { symbolFallback } from "../symbolFallback";
+import { ripple, TOUCH } from "../touch";
 
 // The sample's "you", in a sample build only (src/sampleBuild.ts).
 // src/routes.test.ts reads the next statement as text, on one line.
@@ -44,6 +45,7 @@ export function ChatsHeader({
       {workspace ? (
         <Pressable
           style={styles.workspace}
+          android_ripple={ripple(theme)}
           onPress={() => (sampleBuild ? void openMenu() : router.push("/workspaces"))}
           accessibilityRole="button"
           accessibilityLabel={
@@ -53,7 +55,9 @@ export function ChatsHeader({
           }
         >
           <View style={[styles.mark, { backgroundColor: workspace.color }]}>
-            <Text style={styles.markText}>{workspace.initial}</Text>
+            <Text style={styles.markText} allowFontScaling={false}>
+              {workspace.initial}
+            </Text>
           </View>
           <Text style={[styles.name, { color: theme.ink }]} numberOfLines={1}>
             {workspace.name}
@@ -76,7 +80,9 @@ export function ChatsHeader({
           // The sample has no Settings: nothing to press, so it isn't a button.
           <View accessible accessibilityRole="image" accessibilityLabel="You" style={styles.action}>
             <View style={[styles.me, { backgroundColor: sampleMe.hue }]}>
-              <Text style={styles.meText}>{sampleMe.initials}</Text>
+              <Text style={styles.meText} allowFontScaling={false}>
+                {sampleMe.initials}
+              </Text>
             </View>
           </View>
         ) : (
@@ -94,12 +100,15 @@ function SettingsButton() {
   return (
     <Pressable
       style={styles.action}
+      android_ripple={ripple(theme, true)}
       onPress={() => router.push("/settings")}
       accessibilityRole="button"
       accessibilityLabel={accountWords.settings}
     >
       <View style={[styles.me, { backgroundColor: theme.accent }]}>
-        <Text style={[styles.meText, { color: theme.bg }]}>{[...email][0]?.toUpperCase()}</Text>
+        <Text style={[styles.meText, { color: theme.bg }]} allowFontScaling={false}>
+          {[...email][0]?.toUpperCase()}
+        </Text>
       </View>
     </Pressable>
   );
@@ -115,13 +124,20 @@ const styles = StyleSheet.create({
     paddingBottom: 8,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  workspace: { flexDirection: "row", alignItems: "center", gap: 9, flexShrink: 1, minHeight: 44 },
+  workspace: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 9,
+    flexShrink: 1,
+    minHeight: TOUCH,
+    borderRadius: 8,
+  },
   mark: { width: 32, height: 32, borderRadius: 8, alignItems: "center", justifyContent: "center" },
   markText: { color: "#fff", fontSize: 15, fontWeight: "700" },
   name: { fontSize: 22, fontWeight: "700", flexShrink: 1 },
   chevron: { marginLeft: -3 },
   actions: { flexDirection: "row", alignItems: "center" },
-  action: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
+  action: { width: TOUCH, height: TOUCH, alignItems: "center", justifyContent: "center" },
   me: { width: 34, height: 34, borderRadius: 17, alignItems: "center", justifyContent: "center" },
   meText: { color: "#fff", fontSize: 12, fontWeight: "700" },
 });

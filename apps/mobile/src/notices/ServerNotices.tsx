@@ -1,9 +1,9 @@
 import { noticesWords } from "@dohc/interface-words/notices";
 import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import type { LegendListRef, OnViewableItemsChangedInfo } from "@legendapp/list/react-native";
-import { Stack, useIsFocused } from "expo-router";
+import { Stack, useIsFocused, useScrollToTop } from "expo-router";
 import { Check } from "lucide-react-native";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, type RefObject } from "react";
 import { Platform, StyleSheet, Text, View } from "react-native";
 import { HeaderButton } from "../AndroidHeader";
 import { useTheme } from "../theme";
@@ -39,6 +39,8 @@ export function ServerNotices() {
   );
   // The list's keyboard view keeps the keyboard's room under the rows; this brings the open free answer's row above it.
   const list = useRef<LegendListRef>(null);
+  // Tapping Notices again scrolls back to the top, on Android as on iOS.
+  useScrollToTop(list as RefObject<LegendListRef>);
   const answering = freeAnswer(notices);
   const { onItemSizeChanged } = useAnswerReveal({
     list,

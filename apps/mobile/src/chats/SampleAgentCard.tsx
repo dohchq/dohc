@@ -1,17 +1,26 @@
-import { useLocalSearchParams } from "expo-router";
-import { StyleSheet, Text, View } from "react-native";
+import { useLocalSearchParams, useRouter } from "expo-router";
+import { useEffect } from "react";
+import { Platform, StyleSheet, Text, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AgentMark } from "../AgentMark";
 import { AS_REPORTED, agentCard, agentCardLabel } from "./agentCard";
 import { sampleAgent } from "../conversation/sample";
 import { useTheme } from "../theme";
 
 // An agent's card, as the desktop shows it from the agent's badge: a small sheet that closes by swiping down or tapping
-// outside it. It paints no background of its own, so the sheet's surface fills it to the bottom edge.
+// outside it. It paints no background of its own, so the sheet's surface fills it to the bottom edge. Android's sheet
+// reaches under the navigation bar, so there its lines stop above it.
 // It shows the name; the agent's kind, or its owner; what its client reported, marked as reported.
 export function SampleAgentCard() {
   const theme = useTheme();
   const { id } = useLocalSearchParams<{ id: string }>();
   const agent = sampleAgent(id);
+  const router = useRouter();
+  const insets = useSafeAreaInsets();
+  // A link to an agent the sample doesn't have opens nothing: the sheet closes rather than stand empty.
+  useEffect(() => {
+    if (!agent && router.canGoBack()) router.back();
+  }, [agent, router]);
   if (!agent) return null;
   const card = agentCard({
     name: agent.name,
@@ -21,7 +30,14 @@ export function SampleAgentCard() {
     reported: agent.reported,
   });
   return (
-    <View style={styles.sheet} accessible accessibilityLabel={agentCardLabel(card)}>
+    <View
+      style={[
+        styles.sheet,
+        { paddingBottom: 12 + (Platform.OS === "android" ? insets.bottom : 0) },
+      ]}
+      accessible
+      accessibilityLabel={agentCardLabel(card)}
+    >
       <AgentMark hue={agent.agentHue} connected={agent.connected} size={36} />
       <View style={styles.lines}>
         <Text style={[styles.name, { color: theme.ink }]}>
@@ -55,7 +71,6 @@ const styles = StyleSheet.create({
     gap: 12,
     paddingHorizontal: 20,
     paddingTop: 24,
-    paddingBottom: 12,
   },
   lines: { flex: 1, gap: 4 },
   name: { fontSize: 17, fontWeight: "600", lineHeight: 22 },

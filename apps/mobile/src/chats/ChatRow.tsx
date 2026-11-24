@@ -1,11 +1,15 @@
 import { SymbolView } from "expo-symbols";
 import { memo, useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { AgentMark } from "../AgentMark";
 import { useTheme, type Theme } from "../theme";
 import { chatWords, countText } from "./chatLabels";
 import type { ChatRowData } from "./types";
 import { symbolFallback } from "../symbolFallback";
+import { ripple, TOUCH } from "../touch";
+
+// iOS shades a pressed row; Android ripples instead.
+const shades = Platform.OS === "ios";
 
 // One line per chat, as in Slack: the leading mark says what it is, bold says unread, grey says muted.
 export const ChatRow = memo(function ChatRow({
@@ -19,6 +23,7 @@ export const ChatRow = memo(function ChatRow({
 }) {
   const theme = useTheme();
   const [pressed, setPressed] = useState(false);
+  const shaded = pressed && shades;
   // An agent that gave no name is "Agent", as on the desktop.
   const name = row.kind === "agent" && row.name.trim() === "" ? chatWords.unnamedAgent : row.name;
   return (
@@ -29,11 +34,12 @@ export const ChatRow = memo(function ChatRow({
         onPressIn?.(row);
       }}
       onPressOut={() => setPressed(false)}
-      style={[styles.row, pressed && { backgroundColor: theme.panel2 }]}
+      android_ripple={ripple(theme)}
+      style={[styles.row, shaded && { backgroundColor: theme.panel2 }]}
       accessibilityRole="button"
       accessibilityLabel={`${name}${row.kind === "agent" ? (row.connected ? ", connected agent" : ", agent") : ""}${row.unread ? ", unread" : ""}${row.count ? `, ${row.count} new` : ""}${row.muted ? ", muted" : ""}`}
     >
-      <Leading row={row} theme={theme} pressed={pressed} />
+      <Leading row={row} theme={theme} pressed={shaded} />
       <Text
         numberOfLines={1}
         style={[
@@ -73,11 +79,11 @@ function Leading({ row, theme, pressed }: { row: ChatRowData; theme: Theme; pres
           size={17}
           weight={row.unread ? "semibold" : "regular"}
           tintColor={row.muted ? theme.subtle : theme.ink}
-          fallback={
-            <Text style={{ color: theme.subtle, fontSize: 17 }}>
-              {row.kind === "group" ? "#" : "▤"}
-            </Text>
-          }
+          fallback={symbolFallback(
+            row.kind === "group" ? "number" : "doc.text",
+            17,
+            row.muted ? theme.subtle : theme.ink,
+          )}
         />
       </View>
     );
@@ -91,7 +97,9 @@ function Leading({ row, theme, pressed }: { row: ChatRowData; theme: Theme; pres
   return (
     <View style={styles.lead}>
       <View style={[styles.person, { backgroundColor: row.hue ?? theme.subtle }]}>
-        <Text style={styles.initials}>{row.initials}</Text>
+        <Text style={styles.initials} allowFontScaling={false}>
+          {row.initials}
+        </Text>
       </View>
       {row.online ? (
         <View
@@ -122,7 +130,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    minHeight: 44,
+    minHeight: TOUCH,
     paddingHorizontal: 16,
   },
   lead: { width: 30, height: 30, alignItems: "center", justifyContent: "center" },
@@ -148,7 +156,7 @@ const styles = StyleSheet.create({
   trailing: { width: 20, alignItems: "center" },
   count: {
     minWidth: 18,
-    height: 18,
+    minHeight: 18,
     borderRadius: 9,
     paddingHorizontal: 5,
     alignItems: "center",

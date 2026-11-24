@@ -8,7 +8,7 @@ The phone uses the desktop's words and behaviour, which the dohc-interface skill
 Take shared words from `@dohc/interface-words`. Never copy them.
 The phone differs from the desktop on purpose in these ways:
 
-- Touch targets are at least 44 pt.
+- Touch targets are at least 44 pt on iOS and 48 dp on Android (`src/touch.ts`), and Android controls ripple when pressed.
 - Use the system's tab bar, navigation, large titles, sheets, and haptics on iOS, and Material's on Android.
 - Body text is 17 pt, with Dynamic Type, in the system font.
 - Use SF Symbols only where iOS draws the control. Use lucide for dohc's own content.
@@ -32,8 +32,11 @@ On Android a tab's stack draws dohc's own header above the screen (`src/AndroidH
 nested stack's screen out under itself. `Stack.Toolbar` is iOS only, since Android's needs `@expo/ui` and shows no text
 buttons; give Android the same actions as `headerRight` `HeaderButton`s. SF Symbols draw only on iOS, so a `SymbolView`
 passes `symbolFallback` (`src/symbolFallback.tsx`), which maps the names in use to lucide icons. Android's web view may
-inject `__dohcPage` after the editor's script runs; the editor starts when it arrives (`editor/page.ts`). `confirm.ts`
-uses an `Alert` on Android, which shows at most three buttons.
+inject `__dohcPage` after the editor's script runs; the editor starts when it arrives (`editor/page.ts`). On Android,
+`choose` (`src/confirm.ts`) shows a menu of two or more choices in a Material bottom sheet (`src/ChoiceSheet.tsx`), and a
+one-action confirmation in an `Alert`. Back closes what is open on a screen, such as the reaction picker or New post,
+before it leaves the screen (`src/backCloses.ts`). `plugins/androidLaunchTheme.js` gives the splash, the window and
+system dialogs dohc's colours.
 
 On iOS the sync band on the sample's Notices and Sharing sits in a small native host (`modules/bar-band`), through
 `src/notices/useSyncBandHost.tsx`. It tells iOS the band's strip is covered, keeps the band on the list's top edge but
