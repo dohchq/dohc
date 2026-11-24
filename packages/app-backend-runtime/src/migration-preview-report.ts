@@ -103,10 +103,14 @@ function assertRowsBound(db: DatabaseSync, table: string, info: Table): void {
   // copied into a JavaScript value before we enforce the report row limit.
   const bytes =
     info.columns.map((name) => `COALESCE(length(CAST(${quote(name)} AS BLOB)),0)`).join("+") || "0";
-  if (statement(db, `SELECT 1 FROM ${quote(table)} WHERE (${bytes}) > ? LIMIT 1`).get(rawRowBytes))
+  const oversized = statement(
+    db,
+    `SELECT (${bytes}) AS bytes FROM ${quote(table)} WHERE (${bytes}) > ? LIMIT 1`,
+  ).get(rawRowBytes);
+  if (oversized)
     reject(
       "resource_limit",
-      "A migration preview source row exceeds 128 KiB. No values were omitted.",
+      `A migration preview source row exceeds 128 KiB (${rawRowBytes} bytes). It used ${Number(oversized.bytes)} bytes. No values were omitted.`,
     );
 }
 function equalValue(a: SQLOutputValue, b: SQLOutputValue): boolean {
@@ -212,12 +216,12 @@ export function createMigrationPreviewReport(input: {
         if (encoded.length > rowBytes)
           reject(
             "resource_limit",
-            "A migration preview row exceeds 256 KiB. No values were omitted.",
+            `A migration preview row exceeds 256 KiB (${rowBytes} bytes). It used ${encoded.length} bytes. No values were omitted.`,
           );
         if (bytes + encoded.length > input.maxBytes)
           reject(
             "resource_limit",
-            "The migration preview exceeds its byte allowance. No changes were omitted.",
+            `The migration preview exceeds its byte allowance of ${input.maxBytes} bytes. It used ${bytes + encoded.length} bytes. No changes were omitted.`,
           );
         let written = 0;
         while (written < encoded.length)

@@ -299,9 +299,9 @@ function integer(value: number, min = 0, max = Number.MAX_SAFE_INTEGER): number 
     invalid("Invalid journal number.");
   return value;
 }
-function copyBytes(value: Uint8Array, max: number): Uint8Array {
-  if (!(value instanceof Uint8Array) || value.byteLength > max)
-    invalid("This change is too large to save.");
+function copyBytes(value: Uint8Array, max: number, label: string): Uint8Array {
+  if (!(value instanceof Uint8Array)) invalid(`Invalid ${label.toLowerCase()}.`);
+  if (value.byteLength > max) invalid(appBackendLimit(label, max, value.byteLength, "bytes"));
   return new Uint8Array(value);
 }
 function scope(value: DatasetScope): DatasetScope {
@@ -622,7 +622,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         idempotencyKey: text(String(row.idempotency_key), 128),
         payloadSha256: digest(String(row.payload_sha256)),
         resultJson: resultText(String(row.result_json), APP_BACKEND_BULK_LIMITS.resultBytes),
-        changeset: copyBytes(row.changeset as Uint8Array, maxEvent),
+        changeset: copyBytes(row.changeset as Uint8Array, maxEvent, "Collection change"),
         changesetSha256: digest(String(row.changeset_sha256)),
         attachedFileIds: fileIds(JSON.parse(String(row.attached_file_ids))),
         recordedAtMs: integer(Number(row.recorded_at_ms)),
@@ -1157,7 +1157,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         definitionJson = resultText(input.definitionJson);
       const checkpoint =
           input.checkpoint instanceof Uint8Array
-            ? copyBytes(input.checkpoint, maxCheckpoint)
+            ? copyBytes(input.checkpoint, maxCheckpoint, "Collection checkpoint")
             : structuredClone(input.checkpoint),
         capacityBytes = integer(input.capacityBytes ?? 128 * 1024 * 1024, 4096, maxCheckpoint);
       const authorize = input.authorize,
@@ -1255,7 +1255,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         definitionJson = resultText(input.definitionJson);
       const checkpoint =
           input.checkpoint instanceof Uint8Array
-            ? copyBytes(input.checkpoint, maxCheckpoint)
+            ? copyBytes(input.checkpoint, maxCheckpoint, "Collection checkpoint")
             : structuredClone(input.checkpoint),
         authorize = input.authorize,
         account = input.account;
@@ -1383,7 +1383,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         definitionJson = resultText(input.definitionJson);
       const checkpoint =
           input.checkpoint instanceof Uint8Array
-            ? copyBytes(input.checkpoint, maxCheckpoint)
+            ? copyBytes(input.checkpoint, maxCheckpoint, "Collection checkpoint")
             : structuredClone(input.checkpoint),
         authorize = input.authorize,
         account = input.account;
@@ -1551,7 +1551,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
           input.resultJson,
           input.profile === "bulk" ? APP_BACKEND_BULK_LIMITS.resultBytes : undefined,
         ),
-        changeset = copyBytes(input.changeset, maxEvent),
+        changeset = copyBytes(input.changeset, maxEvent, "Collection change"),
         changesetSha256 = digest(input.changesetSha256);
       const attachedFileIds = fileIds(input.attachedFileIds),
         recordedAtMs = integer(input.recordedAtMs ?? now()),

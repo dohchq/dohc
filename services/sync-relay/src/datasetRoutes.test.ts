@@ -2006,3 +2006,71 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
     workspaceUsageBeforeWithdrawn - expectedLocalAppRowBytes - dataset2UsageBeforeFinalApprove,
   );
 });
+
+it("surfaces the SQL parameter limit as 409 and recycles standalone Node workers at the 256 MiB RSS ceiling with 503", async () => {
+  const f = await httpFixture();
+  const sql136 = `SELECT ${Array.from({ length: 136 }, () => "?").join("+")} AS total`;
+  const operationSource = `globalThis.operations = {
+    read(ctx, input) {
+      if (input && input.kind === "params")
+        return ctx.db.query(${JSON.stringify(sql136)}, Array.from({ length: 136 }, (_, i) => i));
+      if (input && input.kind === "memory")
+        return ctx.db.query("SELECT length(randomblob(251658240)) AS bytes");
+      return ctx.db.query("SELECT * FROM requests ORDER BY id");
+    }
+  };`;
+  const customRevision = describeDatasetRevision({
+    definition: {
+      ...definition,
+      operations: [
+        {
+          operationId: id(6),
+          name: "read",
+          label: "Read",
+          tableId: id(2),
+          kind: "read",
+          access: "owner",
+          readOnly: true,
+          fieldIds: [id(3), id(4)],
+        },
+      ],
+    },
+    revision: 1,
+    schemaSql,
+    operationSource,
+  });
+  expect(
+    (
+      await f.http(`${f.path}/activate`, {
+        revision: customRevision,
+        schemaSql,
+        operationSource,
+      })
+    ).status,
+  ).toBe(200);
+  const invoke = (input: unknown, idempotencyKey: string) =>
+    f.http(`${f.path}/invoke`, {
+      revision: 1,
+      revisionSha256: customRevision.revisionSha256,
+      operationId: id(6),
+      input,
+      idempotencyKey,
+    });
+  const paramLimit = await invoke({ kind: "params" }, "param-limit");
+  expect(paramLimit.status).toBe(409);
+  expect(await paramLimit.json()).toEqual({
+    code: "resource_limit",
+    message: "SQL statement exceeded its limit of 128 parameters. It used 136 parameters.",
+  });
+  const memoryLimit = await invoke({ kind: "memory" }, "memory-limit");
+  expect(memoryLimit.status).toBe(503);
+  expect(await memoryLimit.json()).toMatchObject({
+    code: "worker_budget",
+    message: expect.stringMatching(
+      /^Collection worker memory exceeded its limit of 256 MiB\. It used \d+ MiB\. Stopped while running the Collection action\. Try again\.$/,
+    ),
+  });
+  const recovered = await invoke({}, "after-memory-limit");
+  expect(recovered.status).toBe(200);
+  expect(await recovered.json()).toMatchObject({ result: [] });
+});

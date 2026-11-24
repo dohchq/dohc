@@ -526,6 +526,72 @@ describe("persistent dataset worker", () => {
     });
   });
 
+  it("stops unbounded standalone Node SQLite memory growth at the worker RSS ceiling and recovers on a fresh worker", async () => {
+    await fixture(async ({ open }) => {
+      const worker = await open();
+      const sqlBomb = {
+        ...operation(),
+        readOnly: true,
+        source:
+          "globalThis.operations={run(ctx){return ctx.db.query('SELECT length(randomblob(251658240)) AS bytes');}}",
+      };
+      await expect(worker.prepare(sqlBomb)).rejects.toMatchObject({
+        code: "worker_budget",
+        message: expect.stringMatching(
+          /^Collection worker memory exceeded its limit of 256 MiB\. It used \d+ MiB\. Stopped while running the Collection action\. Try again\.$/,
+        ),
+      });
+      await expect(worker.prepare({ ...operation(), readOnly: true })).rejects.toMatchObject({
+        code: "worker_budget",
+      });
+      await worker.close();
+      const recovered = await open();
+      expect((await recovered.prepare({ ...operation(), readOnly: true })).result).toEqual([]);
+    });
+  });
+
+  it("reports SQL parameter limit and changeset size limit as resource_limit refusals without killing the worker", async () => {
+    await fixture(async ({ open }) => {
+      const worker = await open({ databaseBytes: 128 * 1024 });
+      const sql136 = `SELECT ${Array.from({ length: 136 }, () => "?").join("+")} AS total`;
+      await expect(
+        worker.prepare({
+          ...operation(),
+          readOnly: true,
+          source: `globalThis.operations={run(ctx){return ctx.db.query(${JSON.stringify(sql136)},Array.from({length:136},(_,i)=>i));}}`,
+        }),
+      ).rejects.toMatchObject({
+        name: "AppBackendRuntimeError",
+        refusal: {
+          code: "resource_limit",
+          message: "SQL statement exceeded its limit of 128 parameters. It used 136 parameters.",
+        },
+      });
+      const seeded = await worker.prepare({
+        ...operation(),
+        source: `globalThis.operations={run(ctx){ctx.db.execute("INSERT INTO items VALUES(1,printf('%70000c','a'))");return 1;}}`,
+      });
+      const afterSeed = await worker.finalize(event(seeded));
+      await expect(
+        worker.prepare({
+          ...operation(afterSeed),
+          source: `globalThis.operations={run(ctx){ctx.db.execute("UPDATE items SET value=printf('%70000c','b') WHERE id=1");return 1;}}`,
+        }),
+      ).rejects.toMatchObject({
+        name: "AppBackendRuntimeError",
+        refusal: {
+          code: "resource_limit",
+          message: expect.stringMatching(
+            /^Collection change exceeded its limit of 131072 bytes\. It used \d+ bytes\.$/,
+          ),
+        },
+      });
+      expect(
+        (await worker.prepare({ ...operation(afterSeed), readOnly: true })).result,
+      ).toHaveLength(1);
+    });
+  });
+
   // Short SQLite work can register zero CPU ticks on a loaded Windows host.
   // Compute a costly index per row so replay and integrity checks exceed that granularity.
   const cpuBudgetSchema =

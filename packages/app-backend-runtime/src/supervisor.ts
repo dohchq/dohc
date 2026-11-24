@@ -1,7 +1,11 @@
 import { parseDatasetRevision } from "@dohc/security-contract/dataset";
 import { datasetChangeDigest } from "@dohc/security-contract/dataset-artifacts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { APP_BACKEND_OPERATION_FILES } from "@dohc/security-contract/app-backend";
+import {
+  APP_BACKEND_OPERATION_FILES,
+  AppBackendLimitError,
+  appBackendLimit,
+} from "@dohc/security-contract/app-backend";
 import { lstat, open } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -1261,13 +1265,29 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         !info.isFile() ||
         info.isSymbolicLink() ||
         info.size < 100 ||
-        info.size > captured.capacityBytes ||
         !reportInfo.isFile() ||
         reportInfo.isSymbolicLink() ||
-        reportInfo.size !== migrated.report.bytes ||
-        reportInfo.size > captured.capacityBytes
+        reportInfo.size !== migrated.report.bytes
       )
-        throw new Error("This preview needs more space than the Collection has reserved.");
+        throw new Error("This preview does not match the Collection. Preview the change again.");
+      if (info.size > captured.capacityBytes)
+        throw new Error(
+          appBackendLimit(
+            "Migration preview checkpoint",
+            captured.capacityBytes,
+            info.size,
+            "bytes",
+          ),
+        );
+      if (reportInfo.size > captured.capacityBytes)
+        throw new Error(
+          appBackendLimit(
+            "Migration preview report",
+            captured.capacityBytes,
+            reportInfo.size,
+            "bytes",
+          ),
+        );
       const hash = createHash("sha256"),
         file = await open(path, "r"),
         buffer = Buffer.alloc(1024 * 1024);
@@ -1415,8 +1435,19 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
           );
       }
       const info = await lstat(path);
-      if (!info.isFile() || info.size < 100 || info.size > captured.capacityBytes)
-        throw new Error("This change needs more space than the Collection has reserved.");
+      if (!info.isFile() || info.size < 100)
+        throw new Error(
+          "The changed records do not match the Collection. Preview the change again.",
+        );
+      if (info.size > captured.capacityBytes)
+        throw new Error(
+          appBackendLimit(
+            "Collection migration checkpoint",
+            captured.capacityBytes,
+            info.size,
+            "bytes",
+          ),
+        );
       const file = await open(path, "r");
       try {
         const hash = createHash("sha256"),
@@ -1753,11 +1784,18 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     },
     invoke(raw: DatasetInvocation): Promise<DatasetInvocationResult> {
       try {
-        if (
-          raw.files &&
-          (!Array.isArray(raw.files) || raw.files.length > APP_BACKEND_OPERATION_FILES)
-        )
-          throw new Error("This Collection action uses too many files.");
+        if (raw.files !== undefined) {
+          if (!Array.isArray(raw.files)) throw new Error("Invalid operation files.");
+          if (raw.files.length > APP_BACKEND_OPERATION_FILES)
+            throw new AppBackendLimitError(
+              appBackendLimit(
+                "Collection action files",
+                APP_BACKEND_OPERATION_FILES,
+                raw.files.length,
+                "files",
+              ),
+            );
+        }
         const filesJson = boundedText(
           JSON.stringify(raw.files ?? []),
           32 * 1024,

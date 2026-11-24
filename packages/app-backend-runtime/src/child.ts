@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { appBackendLimit } from "@dohc/security-contract/app-backend";
 import { AppBackendRuntimeError } from "./protocol.js";
 import type { ChildReply, ChildRequest } from "./protocol.js";
 import { authorize, evaluate } from "./guest.js";
@@ -115,7 +116,14 @@ async function handle(request: ChildRequest): Promise<ChildReply> {
         db.setAuthorizer(null);
         changeset = session.changeset();
         if (changeset.byteLength > request.limits.databaseBytes)
-          throw new Error("This change is larger than an app can make at once.");
+          throw new Error(
+            appBackendLimit(
+              "Collection change",
+              request.limits.databaseBytes,
+              changeset.byteLength,
+              "bytes",
+            ),
+          );
       } finally {
         session.close();
       }
@@ -125,7 +133,14 @@ async function handle(request: ChildRequest): Promise<ChildReply> {
     db.close();
     const database = readFileSync(path);
     if (database.byteLength > request.limits.databaseBytes)
-      throw new Error("App database exceeds the runtime limit.");
+      throw new Error(
+        appBackendLimit(
+          "Collection database",
+          request.limits.databaseBytes,
+          database.byteLength,
+          "bytes",
+        ),
+      );
     return {
       ok: true,
       resultJson,

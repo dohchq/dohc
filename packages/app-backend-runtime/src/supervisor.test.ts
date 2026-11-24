@@ -1280,3 +1280,67 @@ it("holds its folder, and runs startup maintenance, before a first preview reser
     f.journal.checkpointStages({ workspaceId: f.scope.workspaceId, authorize: f.authorize }),
   ).toEqual([]);
 });
+
+it("recycles a worker that crosses the standalone Node memory ceiling and serves the next call cleanly", async () => {
+  const f = await fixture({
+    source: `globalThis.operations={
+      run(ctx,input){
+        if(input.id) ctx.db.execute('INSERT INTO items VALUES(?,?)',[input.id,input.value]);
+        return ctx.db.query('SELECT * FROM items ORDER BY id');
+      },
+      bomb(ctx){
+        return ctx.db.query('SELECT length(randomblob(251658240)) AS bytes');
+      }
+    }`,
+  });
+  await f.invoke({ id: "one", value: "saved" });
+  await expect(
+    f.supervisor.invoke({
+      scope: f.scope,
+      tables: ["items"],
+      operation: "bomb",
+      caller: { kind: "owner" },
+      callerKey: "owner",
+      input: {},
+      idempotencyKey: "bomb",
+      payloadSha256: hash("{}"),
+      readOnly: true,
+      authorize: f.authorize,
+    }),
+  ).rejects.toMatchObject({
+    code: "worker_budget",
+    message: expect.stringMatching(
+      /^Collection worker memory exceeded its limit of 256 MiB\. It used \d+ MiB\. Stopped while running the Collection action\. Try again\.$/,
+    ),
+  });
+  expect((await f.invoke({}, { readOnly: true })).result).toEqual([{ id: "one", value: "saved" }]);
+});
+
+it("names the file limit and actual file count when an operation exceeds the file cap", async () => {
+  const f = await fixture();
+  const files = Array.from({ length: 33 }, (_, index) => ({
+    fileId: `file-${index}`,
+    name: `file-${index}.txt`,
+    contentType: "text/plain",
+    byteLength: 10,
+    sha256: hash(`file-${index}`),
+  }));
+  await expect(
+    f.supervisor.invoke({
+      scope: f.scope,
+      tables: ["items"],
+      operation: "run",
+      caller: { kind: "owner" },
+      callerKey: "owner",
+      input: {},
+      idempotencyKey: "too-many-files",
+      payloadSha256: hash("{}"),
+      readOnly: false,
+      files,
+      authorize: f.authorize,
+    }),
+  ).rejects.toMatchObject({
+    name: "AppBackendLimitError",
+    message: "Collection action files exceeded its limit of 32 files. It used 33 files.",
+  });
+});

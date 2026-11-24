@@ -248,6 +248,20 @@ Shared datasets have one configured writer; unavailable hosts cannot accept
 offline shared writes. Cross-dataset transactions are unsupported.
 See the [runtime contract](../../packages/app-backend-runtime/README.md).
 
+Persistent Collection workers isolate SQLite memory differently by host runtime.
+Desktop Electron utility processes link SQLite with `SQLITE_DEFAULT_MEMSTATUS=1`,
+so `PRAGMA hard_heap_limit=67108864` (64 MiB) rejects allocations inside SQLite's
+allocator with `SQLITE_NOMEM`. Standalone Node.js (`services/sync-relay`) ships
+`node:sqlite` with `SQLITE_DEFAULT_MEMSTATUS=0`, which ignores `PRAGMA hard_heap_limit`.
+When `DEFAULT_MEMSTATUS=0` is detected, persistent workers enable a 256 MiB peak-RSS
+ceiling (`workerMemoryBytes`) on their budget watch thread during budgeted steps
+(app code and dataset checks, polled every 25 ms and rechecked at step completion).
+Crossing the ceiling kills and recycles the worker with `worker_budget` naming the
+limit, unit, and observed peak usage. Because this watchdog observes OS RSS after
+pages fault rather than inside SQLite's allocator, it bounds sustained and completed
+allocations without replacing host memory limits. Snapshot evaluations (`child.ts`)
+on standalone Node rely on `deadlineMs` and `PRAGMA max_page_count`.
+
 ## Automation edits do not widen access
 
 An automation can reach only what all its Collection's editors can reach.

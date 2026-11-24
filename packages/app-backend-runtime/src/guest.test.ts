@@ -287,6 +287,51 @@ describe("reusable guest evaluator", () => {
       ).toBe('"next"');
     });
   });
+
+  it("names the 128-parameter limit and count separately from non-scalar SQL parameters", async () => {
+    await withDatabase(async (db) => {
+      const sumSql = (count: number) =>
+        `SELECT ${Array.from({ length: count }, () => "?").join("+")} AS total`;
+      const atLimit = await evaluate(
+        db,
+        request(
+          `return ctx.db.query(${JSON.stringify(sumSql(128))}, Array.from({ length: 128 }, () => 1));`,
+        ),
+        { persistentConnection: true },
+      );
+      expect(JSON.parse(atLimit.resultJson)).toEqual([{ total: 128 }]);
+
+      await expect(
+        evaluate(
+          db,
+          request(
+            `return ctx.db.query(${JSON.stringify(sumSql(136))}, Array.from({ length: 136 }, (_, i) => i));`,
+          ),
+          { persistentConnection: true },
+        ),
+      ).rejects.toMatchObject({
+        name: "AppBackendLimitError",
+        message: "SQL statement exceeded its limit of 128 parameters. It used 136 parameters.",
+      });
+
+      const caught = await evaluate(
+        db,
+        request(`
+          let overLimit = '', nonScalar = '', nonArray = '';
+          try { ctx.db.execute(${JSON.stringify(sumSql(129))}, Array.from({ length: 129 }, () => 'x')); } catch (e) { overLimit = e.message; }
+          try { ctx.db.query('SELECT ?', [{ nested: true }]); } catch (e) { nonScalar = e.message; }
+          try { ctx.db.query('SELECT ?', 'not-an-array'); } catch (e) { nonArray = e.message; }
+          return { overLimit, nonScalar, nonArray };
+        `),
+        { persistentConnection: true },
+      );
+      expect(JSON.parse(caught.resultJson)).toEqual({
+        overLimit: "SQL statement exceeded its limit of 128 parameters. It used 129 parameters.",
+        nonScalar: "SQL parameters must be scalar values.",
+        nonArray: "SQL parameters must be scalar values.",
+      });
+    });
+  });
 });
 
 describe("guest memory", () => {

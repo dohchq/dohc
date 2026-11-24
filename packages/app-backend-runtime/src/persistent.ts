@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import {
   APP_BACKEND_OPERATION_FILES,
+  appBackendLimit,
   parseAppBackendJson,
 } from "@dohc/security-contract/app-backend";
 import { randomBytes } from "node:crypto";
@@ -67,6 +68,7 @@ export interface PersistentRuntimeOptions {
   entryPath?: string;
   silenceMs?: number;
   commandCapMs?: number;
+  workerMemoryBytes?: number;
 }
 // How long a command waits for the worker by default. A loaded machine can take seconds to start a worker process.
 const WORKER_WAIT_MS = 30_000;
@@ -132,7 +134,12 @@ export async function openPersistentAppBackend(
   input: PersistentOpenInput,
   options: PersistentRuntimeOptions = {},
 ) {
-  const config = openRequest(input);
+  const config = openRequest({
+    ...input,
+    ...(input.workerMemoryBytes === undefined && options.workerMemoryBytes !== undefined
+      ? { workerMemoryBytes: options.workerMemoryBytes }
+      : {}),
+  });
   const entryPath = trustedPath(
     options.entryPath ??
       fileURLToPath(import.meta.resolve("@dohc/app-backend-runtime/persistent-child")),
@@ -209,16 +216,29 @@ export async function openPersistentAppBackend(
       return [];
     }
   }
-  // The worker's CPU budget watch leaves this marker as it ends the worker.
+  // The worker's budget watch leaves this marker as it ends the worker.
+  const MiB = 1024 * 1024;
   function exceededBudget(): string | undefined {
-    const marker = budgetMarkers()[0];
+    const markers = budgetMarkers();
+    const marker = markers[0];
     const budget = marker === undefined ? undefined : parseBudgetMarkerName(marker);
     if (marker === undefined || budget === undefined) return undefined;
     // An antivirus scan can hold the file; the reason is already known.
-    try {
-      rmSync(join(config.directory, marker), { force: true });
-    } catch {
-      /* removed before the next launch */
+    for (const file of markers) {
+      try {
+        rmSync(join(config.directory, file), { force: true });
+      } catch {
+        /* removed before the next launch */
+      }
+    }
+    if (budget.resource === "memory") {
+      if (budget.limitBytes === undefined || budget.usedBytes === undefined)
+        return `Collection worker memory exceeded its limit${during(active)}.`;
+      const inMiB = budget.limitBytes % MiB === 0;
+      const limit = inMiB ? budget.limitBytes / MiB : budget.limitBytes;
+      const used = inMiB ? Math.ceil(budget.usedBytes / MiB) : budget.usedBytes;
+      const unit = inMiB ? "MiB" : "bytes";
+      return `${appBackendLimit("Collection worker memory", limit, used, unit)}${during(active) ? ` Stopped${during(active)}.` : ""}`;
     }
     const { kind, budgetMs } = budget;
     if (budgetMs === undefined) {

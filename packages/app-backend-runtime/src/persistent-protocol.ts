@@ -32,6 +32,7 @@ export interface PersistentOpenInput {
   scope: DatasetScope;
   cursor: DatasetCursor;
   databaseBytes?: number;
+  workerMemoryBytes?: number;
   limits?: Partial<Omit<RuntimeLimits, "databaseBytes">>;
   queueDeadlineMs?: number;
   // Cancels opening: the host kills the starting worker and rejects with the signal's reason.
@@ -78,6 +79,10 @@ export interface CommittedChangeset extends DatasetCursor {
 }
 export const REPLAY_BATCH_EVENTS = 64;
 export const REPLAY_BATCH_BYTES = 32 * 1024 * 1024;
+const MiB = 1024 * 1024;
+export const DEFAULT_WORKER_MEMORY_BYTES = 256 * MiB;
+const MIN_WORKER_MEMORY_BYTES = 64 * MiB;
+const MAX_WORKER_MEMORY_BYTES = 4096 * MiB;
 export interface MigrateCheckpointInput {
   path: string;
   schemaSql: string;
@@ -92,9 +97,10 @@ export interface MigratedCheckpoint {
 }
 export interface OpenRequest extends Omit<
   PersistentOpenInput,
-  "limits" | "databaseBytes" | "queueDeadlineMs" | "signal"
+  "limits" | "databaseBytes" | "workerMemoryBytes" | "queueDeadlineMs" | "signal"
 > {
   limits: RuntimeLimits;
+  workerMemoryBytes: number;
 }
 export type PersistentCommand =
   | { kind: "open"; input: OpenRequest }
@@ -202,6 +208,14 @@ export function openRequest(input: PersistentOpenInput): OpenRequest {
     databaseBytes > 128 * 1024 * 1024
   )
     reject("invalid_input", "Invalid dataset storage reservation.");
+  const workerMemoryBytes = input.workerMemoryBytes ?? DEFAULT_WORKER_MEMORY_BYTES;
+  if (
+    !Number.isSafeInteger(workerMemoryBytes) ||
+    workerMemoryBytes < MIN_WORKER_MEMORY_BYTES ||
+    workerMemoryBytes > MAX_WORKER_MEMORY_BYTES ||
+    workerMemoryBytes % MiB !== 0
+  )
+    reject("invalid_input", "Invalid dataset worker memory limit.");
   const limits = { ...runtimeLimits(input.limits), databaseBytes };
   return {
     directory: input.directory,
@@ -220,5 +234,6 @@ export function openRequest(input: PersistentOpenInput): OpenRequest {
     },
     cursor: { revision: input.cursor.revision, digest: input.cursor.digest },
     limits,
+    workerMemoryBytes,
   };
 }

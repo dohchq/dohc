@@ -58,7 +58,7 @@ Guest memory, stack, execution, SQL calls, query results, inputs, and outputs ar
 `memoryBytes` is an operation's whole Wasm memory, 24 MiB by default. QuickJS uses about 5 MiB of it.
 This QuickJS build has no `malloc_usable_size`, so QuickJS's own memory limit cannot count allocations. The memory's fixed size is the bound.
 An operation that needs more fails with an error that names the limit. The limit is in whole MiB and at least 16 MiB, which QuickJS needs to start.
-SQLite has a 64 MiB native heap cap and a database page cap.
+SQLite sets `PRAGMA hard_heap_limit=67108864` (64 MiB) and a database page cap. Electron enforces that 64 MiB SQLite heap cap natively; standalone Node.js compiles `node:sqlite` with `SQLITE_DEFAULT_MEMSTATUS=0` and ignores it, so snapshot evaluations on standalone Node rely on `deadlineMs` and `PRAGMA max_page_count`.
 The parent deadline also covers native SQL, initialization, serialization, and child startup.
 There is no operating-system filesystem sandbox around the child. Guest confinement depends on Wasm and the explicit callbacks.
 
@@ -148,6 +148,7 @@ Implicit `rowid`, `oid`, and `_rowid_` reads are unavailable unless backed by a 
 Those alias names are reserved for an `INTEGER PRIMARY KEY`; use other names for ordinary fields.
 Prepare refuses deferred foreign-key violations and transactions ended by conflict handling before the host can commit a journal event.
 The persistent storage reservation defaults to 128 MiB and can be lowered. It includes internal cursor pages; other guest limits retain snapshot defaults.
+Under standalone Node.js (`DEFAULT_MEMSTATUS=0`, where SQLite ignores `PRAGMA hard_heap_limit`), persistent workers enforce a 256 MiB peak-RSS ceiling (`workerMemoryBytes`, configurable per open) on their budget watch thread during budgeted steps, terminating and recycling an over-budget worker with `worker_budget`.
 This reservation is a bound, not a measured performance or scale guarantee.
 Electron hosts must inject their utility-process launcher and package the `persistent-child` export.
 
