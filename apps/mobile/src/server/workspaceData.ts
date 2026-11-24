@@ -242,6 +242,9 @@ export const cacheScope = (signIn: Pick<SignIn, "origin" | "userId">, workspaceI
 const listScope = (signIn: Pick<SignIn, "origin" | "userId">) =>
   JSON.stringify([signIn.origin, signIn.userId]);
 
+const choiceScope = (signIn: Pick<SignIn, "origin" | "userId">) =>
+  JSON.stringify([signIn.origin, signIn.userId, "chosen"]);
+
 export function createReadCache(files?: CacheRows): ReadCache {
   const scopes = new Map<string, Map<string, Cached>>();
   // A drop moves its scope's generation on, and a clear every scope's, so a restore that a delete overtakes adds nothing.
@@ -337,6 +340,13 @@ export function createReadCache(files?: CacheRows): ReadCache {
             if (!kept.has(known)) forget(known);
           void files.keep([...kept]);
         },
+        loadChosen() {
+          const expected = epoch;
+          return files
+            .readList(choiceScope(signIn))
+            .then((found) => (epoch === expected && typeof found === "string" ? found : null));
+        },
+        chose: (workspaceId) => void files.writeList(choiceScope(signIn), workspaceId),
       };
     },
     flush: () => void files?.flush(),
@@ -368,6 +378,8 @@ export interface WorkspaceData {
   state<T>(view: View<T>): ViewState<T>;
   /** Opens the view while any listener stays: it reads unless it already shows a fresh value. */
   subscribe(view: View<unknown>, listener: () => void): () => void;
+  /** Reads the view now, as a screen about to open it would, unless it shows a fresh value or a read is on its way. */
+  prefetch(view: View<unknown>): void;
   retry(view: View<unknown>): void;
   feed(): FeedState;
   subscribeFeed(listener: () => void): () => void;
@@ -383,7 +395,8 @@ export interface WorkspaceData {
    * Marks the account's place in a thread at a message a screen shows. A mark the server took, or one on its way, is
    * not sent again; one that failed, including the server's "Couldn't send", says nothing, and the next showing sends
    * it again. A 404 that still counts means the workspace may be gone, as for a read. Resolves once the mark settles,
-   * at once for one it doesn't send; it never rejects.
+   * at once for one it doesn't send; it never rejects. The chats view shows the thread read at once, unless it's a
+   * post's, whose replies the mark leaves; a mark that fails reads the chats again.
    */
   markRead(threadId: string, messageId: string): Promise<void>;
 }
@@ -509,6 +522,9 @@ export function createWorkspaceData(options: {
     }
     return found;
   }
+
+  const due = (target: Entry) =>
+    live() && !target.state.loading && (target.state.value === null || target.stale);
 
   function set(target: Entry, state: ViewState<unknown>) {
     target.state = state;
@@ -657,6 +673,35 @@ export function createWorkspaceData(options: {
     }
   }
 
+  function clearUnread(threadId: string): boolean {
+    const target = entries.get(views.chats.id);
+    const chats = target?.state.value as readonly ChatGroup[] | null | undefined;
+    if (!target || !chats) return false;
+    let cleared = false;
+    const value = chats.map((group) => {
+      if (!group.unreadThreadIds.includes(threadId) || group.postThreadIds?.includes(threadId))
+        return group;
+      cleared = true;
+      const unreadThreadIds = group.unreadThreadIds.filter((id) => id !== threadId);
+      return {
+        ...group,
+        unreadThreadIds,
+        unreadCount: unreadThreadIds.length === 0 ? 0 : group.unreadCount,
+      };
+    });
+    if (!cleared) return false;
+    set(target, { ...target.state, value });
+    const cached = cache.get(scope, views.chats.id);
+    if (cached) cache.set(scope, { ...cached, value });
+    return true;
+  }
+
+  function readChatsAgain() {
+    const target = entry(views.chats);
+    if (target.listeners.size === 0) target.stale = true;
+    else if (!target.state.loading) read(target);
+  }
+
   const store: WorkspaceData = {
     workspaceId,
     instance: ++instances,
@@ -664,14 +709,12 @@ export function createWorkspaceData(options: {
     subscribe(view, listener) {
       const target = entry(view);
       target.listeners.add(listener);
-      if (
-        target.listeners.size === 1 &&
-        live() &&
-        !target.state.loading &&
-        (target.state.value === null || target.stale)
-      )
-        read(target);
+      if (target.listeners.size === 1 && due(target)) read(target);
       return () => void target.listeners.delete(listener);
+    },
+    prefetch(view) {
+      const target = entry(view);
+      if (due(target)) read(target);
     },
     retry(view) {
       if (hasGone) return options.reopen?.();
@@ -706,14 +749,17 @@ export function createWorkspaceData(options: {
       if (!live() || sending.get(threadId) === messageId || marked.get(threadId) === messageId)
         return Promise.resolve();
       sending.set(threadId, messageId);
+      const cleared = clearUnread(threadId);
       return markThreadRead(signIn.client, workspaceId, threadId, messageId, everything.signal)
         .then(
           () => {
             marked.set(threadId, messageId);
           },
           (error: unknown) => {
+            if (!live()) return;
             // As a read's 404 does, one that still counts says the workspace may be gone from this phone.
-            if (live() && isGone(error)) gone();
+            if (isGone(error)) return gone();
+            if (cleared) readChatsAgain();
           },
         )
         .finally(() => {

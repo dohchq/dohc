@@ -15,7 +15,7 @@ import { createServerClient } from "./client";
 import { CACHE_FORMAT } from "./keptStore";
 import { createOpenWorkspace } from "./openWorkspace";
 import { keptDisk, type KeptDisk } from "./testKeptDisk";
-import { memoryStore, serveSessionEnd, testServer, type Answer } from "./testServer";
+import { deferred, memoryStore, serveSessionEnd, testServer, type Answer } from "./testServer";
 import {
   cacheScope,
   createReadCache,
@@ -899,5 +899,67 @@ describe("the saved workspace list", () => {
     ]);
     expect(stored(disk)).not.toContain(SCOPE_B);
     open.stop();
+  });
+
+  async function chooseB(server: ReturnType<typeof testServer>, disk: KeptDisk) {
+    await readBoth(server, disk);
+    const { files, workspace } = launchAccount(server, disk);
+    await vi.waitFor(() => expect(workspace.state().currentWorkspaceId).toBe("ws-a"));
+    workspace.choose("ws-b");
+    await files.flush();
+    workspace.stop();
+  }
+
+  function relaunch(
+    server: ReturnType<typeof testServer>,
+    disk: KeptDisk,
+    signIn = signInTo(server),
+  ) {
+    const launched = launchAccount(server, disk, signIn);
+    const opened: (string | null)[] = [];
+    launched.workspace.subscribe(() => opened.push(launched.workspace.state().currentWorkspaceId));
+    return { ...launched, opened };
+  }
+
+  it("reopens the workspace chosen last, without opening another first, until it no longer shows", async () => {
+    const server = serverWithA();
+    const disk = keptDisk();
+    await chooseB(server, disk);
+    const answer = deferred<Answer>();
+    server.on("GET", "/sync/account/workspaces", () => answer.promise);
+
+    const { workspace, opened } = relaunch(server, disk);
+    await vi.waitFor(() => expect(workspace.state().currentWorkspaceId).toBe("ws-b"));
+    expect(opened).toEqual(["ws-b"]);
+    answer.resolve(listAnswer(entry("ws-a"), entry("ws-b", false)));
+    await vi.waitFor(() => expect(workspace.state().currentWorkspaceId).toBe("ws-a"));
+    workspace.stop();
+  });
+
+  it("keeps the choice to its own account, and loses it when cache.db is deleted", async () => {
+    const server = serverWithA();
+    const disk = keptDisk();
+    await chooseB(server, disk);
+    server.on("GET", "/sync/account/workspaces", held);
+    const otherAccount = { ...signInTo(server), userId: "u-2" };
+    await launch(disk).files.writeList(JSON.stringify([server.origin, "u-2"]), [
+      entry("ws-a"),
+      entry("ws-b"),
+    ]);
+
+    const other = relaunch(server, disk, otherAccount);
+    await vi.waitFor(() => expect(other.workspace.state().currentWorkspaceId).toBe("ws-a"));
+    expect(other.opened).toEqual(["ws-a"]);
+    other.workspace.stop();
+    const same = relaunch(server, disk);
+    await vi.waitFor(() => expect(same.workspace.state().currentWorkspaceId).toBe("ws-b"));
+    same.workspace.stop();
+
+    await launch(disk).files.removeAll();
+    server.on("GET", "/sync/account/workspaces", listAnswer(entry("ws-a"), entry("ws-b")));
+    const emptied = relaunch(server, disk);
+    await vi.waitFor(() => expect(emptied.workspace.state().currentWorkspaceId).toBe("ws-a"));
+    expect(emptied.opened).toEqual(["ws-a"]);
+    emptied.workspace.stop();
   });
 });

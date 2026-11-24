@@ -865,3 +865,122 @@ describe("a read mark the server couldn't send", () => {
     expect(count(server, path)).toBe(1);
   });
 });
+
+describe("a chat read before it opens", () => {
+  const stream = (group: string): Answer =>
+    ops(
+      {
+        ok: true,
+        stream: {
+          group: { id: group, name: group, kind: "group" },
+          items: [],
+          nextBefore: null,
+          readPosition: null,
+        },
+      },
+      "0.5.2",
+    );
+
+  it("reads once, and the screen that opens it reads nothing more", async () => {
+    const server = testServer();
+    const answer = deferred<Answer>();
+    server.on("POST", "/sync/ws-a/ops/chat", () => answer.promise);
+    server.on("GET", feedPath("ws-a", "0.5.2"), held);
+    const { data } = open(server);
+    const view = views.stream("channel-1");
+    data.prefetch(view);
+    data.prefetch(view);
+    data.subscribe(view, () => {});
+    answer.resolve(stream("channel-1"));
+    await vi.waitFor(() => expect(data.state(view).value).toMatchObject({ kind: "stream" }));
+    data.prefetch(view);
+    await settled();
+    expect(count(server, "/sync/ws-a/ops/chat")).toBe(1);
+  });
+
+  it("reads again only once a change makes it stale", async () => {
+    const server = testServer();
+    server.on("POST", "/sync/ws-a/ops/chat", stream("channel-1"));
+    server.on("POST", "/sync/ws-a/ops/groupsFull", ops(groups(), "0.5.2"));
+    const changed = deferred<Answer>();
+    server.on("GET", feedPath("ws-a", "0.5.2"), () => changed.promise);
+    server.on("GET", feedPath("ws-a", "0.6.2"), held);
+    const { data } = open(server);
+    const view = views.stream("channel-1");
+    data.prefetch(view);
+    await vi.waitFor(() => expect(data.state(view).value).toMatchObject({ kind: "stream" }));
+    data.prefetch(view);
+    await settled();
+    expect(count(server, "/sync/ws-a/ops/chat")).toBe(1);
+
+    changed.resolve(feed({ cursor: "0.6.2", changed: { chats: [] } }));
+    await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.6.2"))).toBe(1));
+    data.prefetch(view);
+    await vi.waitFor(() => expect(count(server, "/sync/ws-a/ops/chat")).toBe(2));
+  });
+});
+
+describe("a read mark and the chats' unread counts", () => {
+  const unread = (lanes: Record<string, "posts" | "chat">) =>
+    ops(
+      {
+        ok: true,
+        groups: [
+          {
+            id: "dm-1",
+            name: "Maya",
+            slug: "dm-1",
+            kind: "dm",
+            threadCount: Object.keys(lanes).length,
+            threads: Object.entries(lanes).map(([id, lane]) => ({
+              id,
+              title: "",
+              lane,
+              messageCount: 3,
+              unreadCount: 2,
+              updatedAtMs: 1,
+            })),
+          },
+        ],
+      },
+      "0.5.2",
+    );
+
+  async function chatsOpen(answer: Answer, marks: Answer | (() => Promise<Answer>)) {
+    const server = testServer();
+    server.on("POST", "/sync/ws-a/ops/groupsFull", answer);
+    server.on("POST", "/sync/ws-a/ops/markRead", marks);
+    server.on("GET", feedPath("ws-a", "0.5.2"), held);
+    const { data } = open(server);
+    data.subscribe(views.chats, () => {});
+    await vi.waitFor(() => expect(data.state(views.chats).value).toHaveLength(1));
+    return { server, data, group: () => data.state(views.chats).value![0]! };
+  }
+
+  it("shows the thread read as the mark goes, before the server answers", async () => {
+    const { data, group } = await chatsOpen(unread({ "thread-1": "chat" }), held);
+    void data.markRead("thread-1", "message-1");
+    expect(group()).toMatchObject({ unreadCount: 0, unreadThreadIds: [] });
+  });
+
+  it("keeps the count while another thread is unread, and a post's thread as it was", async () => {
+    const { data, group } = await chatsOpen(
+      unread({ "thread-1": "chat", "post-1": "posts" }),
+      held,
+    );
+    void data.markRead("post-1", "post-1");
+    expect(group()).toMatchObject({ unreadCount: 4, unreadThreadIds: ["thread-1", "post-1"] });
+    void data.markRead("thread-1", "message-1");
+    expect(group()).toMatchObject({ unreadCount: 4, unreadThreadIds: ["post-1"] });
+  });
+
+  it("reads the chats again when the mark fails", async () => {
+    const { server, data, group } = await chatsOpen(unread({ "thread-1": "chat" }), {
+      status: 503,
+      body: { ok: false, code: "server_busy" },
+    });
+    await data.markRead("thread-1", "message-1");
+    await vi.waitFor(() => expect(count(server, "/sync/ws-a/ops/groupsFull")).toBe(2));
+    await vi.waitFor(() => expect(group()).toMatchObject({ unreadCount: 2 }));
+  });
+});

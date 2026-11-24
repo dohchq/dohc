@@ -36,7 +36,9 @@ export function createOpenWorkspace(options: {
 }): OpenWorkspace {
   const { signIn, list, cache, onMessages, beforeSwitch } = options;
   const listeners = new Set<() => void>();
+  const saved = cache.savedList(signIn);
   let chosen: string | null = null;
+  let loadingChoice = saved !== null;
   let active = false;
   let stopped = false;
   let state: OpenWorkspaceState = { currentWorkspaceId: null, data: null };
@@ -68,7 +70,7 @@ export function createOpenWorkspace(options: {
   }
 
   function update() {
-    if (stopped) return;
+    if (stopped || loadingChoice) return;
     const listed = list.state();
     const openable =
       listed.status === "ready"
@@ -88,12 +90,19 @@ export function createOpenWorkspace(options: {
       // The list is followed from the first subscriber, so making this starts nothing.
       if (!unsubscribe) {
         unsubscribe = list.subscribe(update);
+        void saved?.loadChosen().then((found) => {
+          loadingChoice = false;
+          if (!signIn.isCurrent()) return;
+          chosen ??= found;
+          update();
+        });
         update();
       }
       return () => void listeners.delete(listener);
     },
     choose(workspaceId) {
       chosen = workspaceId;
+      if (!stopped && signIn.isCurrent()) saved?.chose(workspaceId);
       update();
     },
     setShowOnPhone(workspaceId, showOnPhone) {

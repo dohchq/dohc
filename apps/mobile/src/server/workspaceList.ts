@@ -41,6 +41,9 @@ export interface SavedList {
   load(): Promise<readonly AccountWorkspace[] | null>;
   /** The list as the server answered it, or as a change on this phone left it: it's saved, and decides what the cache keeps. */
   listed(workspaces: readonly AccountWorkspace[]): void;
+  /** The workspace the person chose last, or null. It never rejects. */
+  loadChosen(): Promise<string | null>;
+  chose(workspaceId: string): void;
 }
 
 export interface WorkspaceListStore {
