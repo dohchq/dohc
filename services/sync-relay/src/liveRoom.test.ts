@@ -1387,6 +1387,49 @@ it("refuses an edit under the note's own editor id", async () => {
   expect(unsaved(f)).toEqual([]);
 });
 
+it("takes the owner's edit under the editor id the owner typed with before the room opened, and nobody else's", async () => {
+  const f = note();
+  const typed = new Y.Doc();
+  Y.applyUpdate(typed, Y.encodeStateAsUpdate(f.doc));
+  const before = Y.encodeStateVector(typed);
+  typed.getMap("frontmatter").set("title", "Draft");
+  expect(
+    f.storage.commitLiveUpdateJournal(
+      f.capture(Y.encodeStateAsUpdate(typed, before), "owner-before-room"),
+    ).result.kind,
+  ).toBe("accepted");
+  const room = rooms(f);
+  const shared = editor(f, room, readerAuthor, readerAccess);
+  await shared.open();
+  expect((await shared.submit(shared.change("place", "Porto"))).result).toBe("success");
+  const link = editor(f, room, ana, {
+    principalKind: "link",
+    principalId: "link-principal",
+    grantId: "link-grant",
+    grantGeneration: 1,
+  });
+  await link.open();
+  for (const other of [shared, link]) {
+    other.doc.clientID = typed.clientID;
+    expect(await other.submit(other.change("title", "Taken"))).toEqual({
+      result: "refused",
+      reason: "provenance-refused",
+    });
+  }
+  const desktop = ownerDesktop(f, room);
+  await desktop.open();
+  desktop.doc.clientID = typed.clientID;
+  expect((await desktop.submit(desktop.change("title", "Draft, kept typing"))).result).toBe(
+    "success",
+  );
+  expect(unsaved(f).map((edit) => edit.sender)).toEqual([readerAuthor, olu]);
+  desktop.session.close();
+  shared.session.close();
+  link.session.close();
+  await vi.waitFor(() => expect(unsaved(f)).toEqual([]));
+  expect(savedAuthors(f).slice(1)).toEqual([readerAuthor, olu]);
+});
+
 it("refuses an edit that builds on something the room does not have, or is too large", async () => {
   const f = note();
   const room = rooms(f, { maxUpdateBytes: 64 });

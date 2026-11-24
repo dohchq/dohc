@@ -7,6 +7,7 @@ import {
 import type { StorageContext } from "./context";
 import { LIVE_AUTHOR_CLIENTS } from "./liveAuthorshipSchema";
 import { documentParams, parseLiveRoomAuthority } from "./liveUpdateJournal";
+import { LIVE_JOURNAL_PROVENANCE, LIVE_JOURNAL_TABLE } from "./schema";
 import type { LiveRoomAuthority, SqliteDb } from "./types";
 import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import { assertWorkspaceQuota } from "./workspaces";
@@ -147,7 +148,8 @@ export function appendLiveRoomEdit(
 ): { kind: "written"; position: number } | { kind: "refused" } {
   const params = documentParams(input.document);
   const sender = JSON.stringify(input.sender);
-  const authority = JSON.stringify(parseLiveRoomAuthority(input.authority));
+  const access = parseLiveRoomAuthority(input.authority);
+  const authority = JSON.stringify(access);
   const identities = input.sender.map(liveAuthorIdentity);
   // Nothing outside the room reads its edits before a save, which wakes everyone, so taking one
   // wakes no live host. A wake on every edit had each capture read its access again.
@@ -159,8 +161,10 @@ export function appendLiveRoomEdit(
           `SELECT author_snapshot_json FROM ${LIVE_AUTHOR_CLIENTS} WHERE ${DOCUMENT} AND client_id=?`,
         )
         .get(...params, clientId);
-      // An id the note has content under and nobody is tied to belongs to the seed or the engine.
-      if (!prior && inNote) return { kind: "refused" as const };
+      // An untied id the note has content under is the sender's only when every journal row with
+      // its content came in under the sender's access. Otherwise it is the seed's or the engine's.
+      if (!prior && inNote && !journaledUnder(storage, params, clientId, access))
+        return { kind: "refused" as const };
       if (!prior) bindings.push(clientId);
       else if (
         !isDeepStrictEqual(
@@ -195,6 +199,22 @@ export function appendLiveRoomEdit(
       .run(position, authority);
     return { kind: "written" as const, position };
   });
+}
+
+function journaledUnder(
+  storage: StorageContext,
+  params: readonly string[],
+  clientId: number,
+  access: LiveRoomAuthority,
+): boolean {
+  const row = storage.db
+    .prepare(
+      `SELECT MIN(j.principal_kind=? AND j.principal_id=? AND j.grant_id IS ?) AS own FROM ${LIVE_JOURNAL_PROVENANCE} p
+        JOIN ${LIVE_JOURNAL_TABLE} j ON j.journal_cursor=p.journal_cursor
+        WHERE p.workspace_id=? AND p.main_version_id=? AND p.object_id=? AND p.lineage_claim_id=? AND p.client_id=?`,
+    )
+    .get(access.principalKind, access.principalId, access.grantId, ...params, clientId);
+  return row?.own === 1;
 }
 
 /** A note's edits that were taken and not saved, oldest first. */
