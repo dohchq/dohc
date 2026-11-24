@@ -36,10 +36,8 @@ class AppWebViewModule : Module() {
   }
 }
 
-/** A workspace app on Android. It decides here, at once, and refuses by default: one POST of the launch's handoff to
- * the app's bootstrap, then no main-frame or non-web navigation, no download, no camera, microphone or location, no
- * file picker, and a new window only as a link the person tapped, which JS asks about before it leaves dohc. The app
- * frame's sandbox and the server's policies hold the rest (docs/engineering/security-boundaries.md). */
+/** A workspace app on Android. It decides here, at once, and refuses by default. What it refuses, and what the app
+ * frame's sandbox and the server's policies hold instead: docs/engineering/security-boundaries.md. */
 @SuppressLint("SetJavaScriptEnabled", "ViewConstructor")
 class AppWebView(context: Context, appContext: AppContext) : ExpoView(context, appContext) {
   override val shouldUseAndroidLayout = true
@@ -57,7 +55,6 @@ class AppWebView(context: Context, appContext: AppContext) : ExpoView(context, a
     val view = WebView(context)
     view.settings.apply {
       javaScriptEnabled = true
-      domStorageEnabled = true
       allowFileAccess = false
       allowContentAccess = false
       setGeolocationEnabled(false)
@@ -116,8 +113,8 @@ class AppWebView(context: Context, appContext: AppContext) : ExpoView(context, a
     view.destroy()
   }
 
-  /** The window a tap opened: a hidden view that loads nothing, reports the first address it's sent to, and is gone
-   * after that or after a second. One at a time. */
+  /** The window a tap opened: a hidden view that answers every request empty, reports the first address it's sent to,
+   * and is gone after that or after a second. One at a time. */
   private fun catcher(): WebView {
     drop()
     val view = WebView(context)

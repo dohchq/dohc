@@ -219,8 +219,9 @@ camera, microphone or location. These hold in any browser that opens the app.
 The phone's web view adds its own refusals. After the bootstrap it refuses
 every top-level navigation, hands no address to the system, saves no download,
 grants no camera, microphone or location, and turns a new window into a link
-the person tapped. The app's own requests and subresources follow its CSP. The phone asks before that link leaves dohc, and only
-for HTTPS outside the dohc server and the app domain (`apps/mobile/src/apps/`).
+the person tapped. The phone asks before that link leaves dohc, and only for
+HTTPS outside the dohc server and the app domain (`apps/mobile/src/apps/`).
+The app's own requests and subresources follow its CSP.
 
 - iOS uses react-native-webview: incognito, a navigation rule for every frame,
   and a separate web content process.

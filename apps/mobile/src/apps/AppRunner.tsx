@@ -2,6 +2,7 @@ import { Stack, useRouter } from "expo-router";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { AppState, View } from "react-native";
 import { useKeyboardState } from "react-native-keyboard-controller";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { WebView } from "react-native-webview";
 import { AppWebView } from "../../modules/app-web-view";
 import { useAccount, useSignIn } from "../account/AccountProvider";
@@ -51,25 +52,22 @@ export function AppRunScreen() {
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
       <Stack.Screen options={{ title: running?.name ?? "" }} />
-      {running ? (
-        <AppView key={running.key} app={running} serverOrigin={origin} onEnd={() => runner.end()} />
+      {running && AppWebView ? (
+        <AndroidAppView
+          key={running.key}
+          app={running}
+          serverOrigin={origin}
+          onEnd={() => runner.end()}
+        />
+      ) : running ? (
+        <AppView key={running.key} app={running} serverOrigin={origin} />
       ) : null}
     </View>
   );
 }
 
-function AppView({
-  app,
-  serverOrigin,
-  onEnd,
-}: {
-  app: RunningApp;
-  serverOrigin: string;
-  onEnd(): void;
-}) {
+function AppView({ app, serverOrigin }: { app: RunningApp; serverOrigin: string }) {
   const [allows] = useState(() => createNavigationRule(app.action));
-  if (AppWebView)
-    return <AndroidAppView view={AppWebView} app={app} serverOrigin={serverOrigin} onEnd={onEnd} />;
   return (
     <WebView
       style={{ flex: 1 }}
@@ -98,21 +96,22 @@ function AppView({
 }
 
 function AndroidAppView({
-  view: View,
   app,
   serverOrigin,
   onEnd,
 }: {
-  view: NonNullable<typeof AppWebView>;
   app: RunningApp;
   serverOrigin: string;
   onEnd(): void;
 }) {
-  // Android draws under the keyboard, so the app's view ends above it and scrolls its focused field into sight.
+  // Android draws under the keyboard and the system bar, so the app's view ends above both, and scrolls its focused
+  // field into sight.
   const keyboard = useKeyboardState((state) => (state.isVisible ? state.height : 0));
+  const { bottom } = useSafeAreaInsets();
+  if (!AppWebView) return null;
   return (
-    <View
-      style={{ flex: 1, marginBottom: keyboard }}
+    <AppWebView
+      style={{ flex: 1, marginBottom: Math.max(keyboard, bottom) }}
       bootstrap={app.action}
       handoff={app.handoff}
       onOpenLink={(event) => {
