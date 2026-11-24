@@ -1225,6 +1225,15 @@ const LISTED_CAPABILITIES = {
     mcpReason:
       "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
   }),
+  "dataset.types.write": capability(
+    "Write TypeScript types for a Collection's tables and operations.",
+    {
+      ipc: ["dataset"],
+      mcp: { owner: ["dohc_dataset"] },
+      mcpReason:
+        "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
+    },
+  ),
   "dataset.history.list": capability("List saved operations, with values to undo edits.", {
     ipc: ["dataset"],
     mcp: { owner: ["dohc_dataset"] },

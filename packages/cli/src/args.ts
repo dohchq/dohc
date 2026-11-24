@@ -1707,6 +1707,13 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
     summary: "Show a Collection's tables, fields, and operations.",
     notes: ["Use describe to find approved operation IDs."],
   },
+  types: {
+    summary: "Write TypeScript types for a Collection's tables and operations.",
+    notes: [
+      "Writes .dohc/types/<name>.d.ts from the approved revision. Import it with import type.",
+      "Run it again after a change is approved.",
+    ],
+  },
   history: { summary: "List saved operations, with values to undo edits." },
   historyRevision: { summary: "Show the saved source of one past revision." },
   prepareHistoryRestore: {
