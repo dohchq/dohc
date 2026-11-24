@@ -480,7 +480,7 @@ export function createOwnerDatasetCopyRegistry(options: {
       assertOwner(): void;
       runtime?: Parameters<typeof createOwnerDatasetCopy>[0]["runtime"];
       /** Hears that what the copy shows changed. The request that opens the copy names it. */
-      onChanged?(): void;
+      onChanged?: Parameters<typeof createOwnerDatasetCopy>[0]["onChanged"];
     }): Promise<Copy> {
       z.string().uuid().parse(input.datasetId);
       const origin = new URL(input.origin);

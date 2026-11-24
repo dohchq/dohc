@@ -1301,12 +1301,21 @@ function notifyCollectionRulesChanged(workspaceId: string, datasetId: string): v
 // This computer's copy of a syncing workspace's Collection, or its saved
 // Collections list without a Collection, changed from the server: the windows
 // on that workspace read it again where they show it.
-function notifyCollectionCopyChanged(workspaceId: string, datasetId?: string): void {
+function notifyCollectionCopyChanged(
+  workspaceId: string,
+  datasetId?: string,
+  revision?: number,
+): void {
   notifyWorkspaceWindows(
     workspaceId,
     CHANNELS.collectionCopyChanged,
     datasetId === undefined ? {} : { datasetId },
   );
+  if (datasetId !== undefined && revision !== undefined) {
+    activeDatasetHostsByWorkspace
+      .get(workspaceId)
+      ?.notifyExternalDatasetChanged(datasetId, revision);
+  }
 }
 
 function notifyWorkspaceWindows(
@@ -7328,6 +7337,7 @@ let inspectNamedForCli:
     >["inspectNamed"]
   | undefined;
 const activeDatasetHosts = new Set<Promise<LocalDatasetHost>>();
+const activeDatasetHostsByWorkspace = new Map<string, LocalDatasetHost>();
 // Each workspace attachment's local dataset host, opened on first use and
 // closed when the attachment's state is disposed, after its automation
 // executor. Dataset IPC and the automation executor share it.
@@ -7337,7 +7347,11 @@ async function closeLocalDatasetHost(slot: DatasetHostSlot): Promise<void> {
   slot.pending = null;
   if (!pending) return;
   try {
-    await (await pending).close();
+    const resolved = await pending;
+    for (const [id, host] of activeDatasetHostsByWorkspace) {
+      if (host === resolved) activeDatasetHostsByWorkspace.delete(id);
+    }
+    await resolved.close();
   } catch (error) {
     console.error("Collection shutdown failed", error);
   } finally {
@@ -7633,7 +7647,8 @@ async function ownerCopyData(
           throw new Error("Sign in as this Collection's owner.");
       },
       runtime: datasetCopyRuntime(),
-      onChanged: () => notifyCollectionCopyChanged(workspace.workspaceId, datasetId),
+      onChanged: (change) =>
+        notifyCollectionCopyChanged(workspace.workspaceId, datasetId, change?.revision),
     }),
   ).catch((error: unknown) => {
     if (error instanceof LocalStateUnavailableError) return null;
@@ -7836,7 +7851,12 @@ const localDatasetHostFor = async (
       const ownedPending = pending;
       // The executor indexes dataset automations once the host is open.
       void pending.then(
-        () => collectionAutomationsOf(workspace.workspaceId)?.datasetsChanged(),
+        (resolved) => {
+          if (slot.pending === ownedPending) {
+            activeDatasetHostsByWorkspace.set(workspace.workspaceId, resolved);
+          }
+          collectionAutomationsOf(workspace.workspaceId)?.datasetsChanged();
+        },
         () => undefined,
       );
       void pending.catch(() => {

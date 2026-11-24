@@ -36,6 +36,16 @@ export type AppBrokerObservation =
     }
   | { kind: "aborted"; id: string; op: AppBrokerOp; operation?: string };
 
+export interface AppBrokerLimits {
+  readonly maxPending?: number;
+  readonly backendBurst?: number;
+  readonly backendRefillMs?: number;
+}
+
+export interface AppBrokerHandle {
+  notifyDatasetChanged(dataset: string, revision: number): void;
+}
+
 /**
  * Runs only in the trusted bootstrap. The app receives this one frame-bound port.
  * `activated` is this window's transient user activation when the request arrived: a real click or key
@@ -47,21 +57,31 @@ export function attachAppCollectionBroker(
   send: (body: unknown, signal: AbortSignal, request: { activated: boolean }) => Promise<Response>,
   lifetime: AbortSignal,
   observe?: (event: AppBrokerObservation) => void,
-): void {
+  limits?: AppBrokerLimits,
+): AppBrokerHandle {
+  const bounded = (v: unknown, min: number, max: number, fallback: number) =>
+    typeof v === "number" && Number.isSafeInteger(v) && v >= min && v <= max ? v : fallback;
+  const maxPending = bounded(limits?.maxPending, 1, 16, 4),
+    backendBurst = bounded(limits?.backendBurst, 1, 240, 30),
+    backendRefillMs = bounded(limits?.backendRefillMs, 10, 10_000, 2000);
   let closed = false,
     loaded = false,
     pending = 0,
-    backendTokens = 30,
+    backendTokens = backendBurst,
     collectionTokens = 12,
     updated = Date.now();
   const channel = new MessageChannel(),
     controller = new AbortController(),
-    ids = new Set<string>();
+    ids = new Set<string>(),
+    queuedEvents = new Map<string, number>();
   const emit = (event: AppBrokerObservation) => {
     try {
       observe?.(event);
     } catch {}
   };
+  const validDatasetKey = (v: unknown): v is string =>
+    typeof v === "string" &&
+    (v === "" || (/^[a-z][a-z0-9_-]{0,63}$/.test(v) && v !== "prototype" && v !== "constructor"));
   const knownOp = (v: unknown): AppBrokerOp =>
     v === "collection.list" ||
     v === "collection.create" ||
@@ -79,6 +99,7 @@ export function attachAppCollectionBroker(
     channel.port1.close();
     channel.port2.close();
     ids.clear();
+    queuedEvents.clear();
   };
   const active = () => navigator.userActivation?.isActive === true;
   let armed = !active();
@@ -109,9 +130,15 @@ export function attachAppCollectionBroker(
       return;
     }
     loaded = true;
-    frame.contentWindow?.postMessage({ kind: "dohc-app-channel", version: 1 }, "*", [
-      channel.port2,
-    ]);
+    const handshake =
+      maxPending > 4
+        ? { kind: "dohc-app-channel", version: 1, maxInFlight: Math.min(maxPending, 8) }
+        : { kind: "dohc-app-channel", version: 1 };
+    frame.contentWindow?.postMessage(handshake, "*", [channel.port2]);
+    for (const [dataset, revision] of queuedEvents) {
+      channel.port1.postMessage({ kind: "dataset.changed", dataset, revision });
+    }
+    queuedEvents.clear();
     emit({ kind: "handshake-delivered" });
   });
   const record = (value: unknown): value is Record<string, unknown> =>
@@ -156,8 +183,10 @@ export function attachAppCollectionBroker(
         /^[a-z][a-z0-9_-]{0,63}$/.test(body.dataset) &&
         body.dataset !== "prototype" &&
         body.dataset !== "constructor");
+    const validReadOnly = !Object.hasOwn(body, "readOnly") || body.readOnly === true;
     const valid =
       validAlias &&
+      validReadOnly &&
       (body.op === "collection.list"
         ? ["id,limit,op", "afterPath,id,limit,op"].includes(keys)
         : body.op === "collection.create"
@@ -166,6 +195,8 @@ export function attachAppCollectionBroker(
             ? [
                 "id,idempotencyKey,input,op,operation",
                 "dataset,id,idempotencyKey,input,op,operation",
+                "id,idempotencyKey,input,op,operation,readOnly",
+                "dataset,id,idempotencyKey,input,op,operation,readOnly",
               ].includes(keys)
             : body.op === "backend.attempt"
               ? ["id,op,operation,request", "dataset,id,op,operation,request"].includes(keys)
@@ -182,10 +213,10 @@ export function attachAppCollectionBroker(
                   : false);
     if (!valid) return rejectLocal("invalid_keys", 400);
     const now = Date.now();
-    backendTokens = Math.min(30, backendTokens + (now - updated) / 2000);
+    backendTokens = Math.min(backendBurst, backendTokens + (now - updated) / backendRefillMs);
     collectionTokens = Math.min(12, collectionTokens + (now - updated) / 5000);
     updated = now;
-    if (pending >= 4 || (backend ? backendTokens : collectionTokens) < 1)
+    if (pending >= maxPending || (backend ? backendTokens : collectionTokens) < 1)
       return rejectLocal("rate_limited", 429);
     if (backend) backendTokens--;
     else collectionTokens--;
@@ -286,4 +317,22 @@ export function attachAppCollectionBroker(
     }
   };
   channel.port1.start();
+  return {
+    notifyDatasetChanged(dataset: string, revision: number) {
+      if (
+        closed ||
+        !validDatasetKey(dataset) ||
+        typeof revision !== "number" ||
+        !Number.isSafeInteger(revision) ||
+        revision < 0
+      )
+        return;
+      if (!loaded) {
+        const previous = queuedEvents.get(dataset) ?? -1;
+        if (revision > previous) queuedEvents.set(dataset, revision);
+        return;
+      }
+      channel.port1.postMessage({ kind: "dataset.changed", dataset, revision });
+    },
+  };
 }

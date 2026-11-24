@@ -81,17 +81,24 @@ export function isAppBackendError(error: unknown): error is AppBackendError {
   return error instanceof AppBackendError;
 }
 
+export interface DatasetChangeEvent {
+  readonly dataset: string;
+  readonly revision: number;
+}
+
 export interface AppClient {
   invoke<T = unknown>(
     operation: string,
     input?: unknown,
     idempotencyKey?: string,
+    options?: { readonly readOnly?: boolean },
   ): Promise<InvokeReply<T>>;
   read<T = unknown>(operation: string, input?: unknown): Promise<T>;
   upload(file: File | FileUploadInput, idempotencyKey: string): Promise<UploadReply>;
   file(fileId: string, operation: string, input?: unknown): Promise<FileReply>;
   attempt(operation: string, request: AttemptRequest): Promise<AttemptResult>;
   dataset(alias: string): AppClient;
+  subscribe?(listener: (event: DatasetChangeEvent) => void): () => void;
   close(): void;
 }
 
@@ -206,7 +213,8 @@ export function mutationKey(kind: string): string {
 }
 
 let capturedHostPort: MessagePort | null = null;
-const hostPortWaiters = new Set<(port: MessagePort) => void>();
+let capturedHostMaxInFlight: number | undefined;
+const hostPortWaiters = new Set<(port: MessagePort, maxInFlight?: number) => void>();
 
 function installHostChannelCapture() {
   if (typeof window === "undefined") return;
@@ -221,8 +229,13 @@ function installHostChannelCapture() {
       return;
     }
     capturedHostPort = event.ports[0]!;
+    const hint = event.data.maxInFlight;
+    capturedHostMaxInFlight =
+      typeof hint === "number" && Number.isSafeInteger(hint) && hint >= 1 && hint <= 12
+        ? hint
+        : undefined;
     window.removeEventListener("message", onMessage);
-    for (const waiter of hostPortWaiters) waiter(capturedHostPort);
+    for (const waiter of hostPortWaiters) waiter(capturedHostPort, capturedHostMaxInFlight);
     hostPortWaiters.clear();
   };
   window.addEventListener("message", onMessage);
@@ -239,16 +252,43 @@ type Pending = {
   timer?: ReturnType<typeof setTimeout>;
 };
 
+const latestRevisionLookup = new WeakMap<AppClient, () => number | null>();
+
 function createManagedClient(options: AppClientOptions, shared: boolean): AppClient {
   const invokeTimeoutMs = options.invokeTimeoutMs ?? DEFAULT_INVOKE_TIMEOUT_MS;
   const transferTimeoutMs = options.transferTimeoutMs ?? DEFAULT_TRANSFER_TIMEOUT_MS;
-  const maxInFlight = options.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT;
+  let maxInFlight = options.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT;
 
   let port: MessagePort | undefined;
   let closed = false;
   let inFlight = 0;
+  let flushScheduled = false;
   const waiting: Pending[] = [];
   const sent = new Map<string, Pending>();
+  const latestRevisions = new Map<string, number>();
+  const queuedChanges = new Map<string, number>();
+  const listeners = new Set<(event: DatasetChangeEvent) => void>();
+
+  const recordDatasetChange = (dataset: string, revision: number) => {
+    if (revision <= (latestRevisions.get(dataset) ?? -1)) return;
+    latestRevisions.set(dataset, revision);
+    queuedChanges.set(dataset, revision);
+    if (flushScheduled) return;
+    flushScheduled = true;
+    queueMicrotask(() => {
+      flushScheduled = false;
+      if (closed) return queuedChanges.clear();
+      const batch = [...queuedChanges.entries()];
+      queuedChanges.clear();
+      for (const [ds, rev] of batch) {
+        for (const listener of [...listeners]) {
+          try {
+            listener({ dataset: ds, revision: rev });
+          } catch {}
+        }
+      }
+    });
+  };
 
   const fail = (item: Pending, status: BackendStatus) => {
     clearTimeout(item.timer);
@@ -279,11 +319,25 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
     }
   };
 
-  const bindPort = (nextPort: MessagePort) => {
+  const bindPort = (nextPort: MessagePort, hostMaxInFlight?: number) => {
     if (closed || port) return;
+    if (options.maxInFlight === undefined && hostMaxInFlight !== undefined) {
+      maxInFlight = hostMaxInFlight;
+    }
     port = nextPort;
     port.onmessage = ({ data }: MessageEvent) => {
-      if (!isRecord(data) || typeof data.id !== "string") return;
+      if (!isRecord(data)) return;
+      if (
+        data.kind === "dataset.changed" &&
+        typeof data.dataset === "string" &&
+        typeof data.revision === "number" &&
+        Number.isSafeInteger(data.revision) &&
+        data.revision >= 0
+      ) {
+        recordDatasetChange(data.dataset, data.revision);
+        return;
+      }
+      if (typeof data.id !== "string") return;
       const item = sent.get(data.id);
       if (!item) return;
       sent.delete(data.id);
@@ -307,7 +361,7 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
   if (options.port) {
     bindPort(options.port);
   } else if (capturedHostPort) {
-    bindPort(capturedHostPort);
+    bindPort(capturedHostPort, capturedHostMaxInFlight);
   } else {
     hostPortWaiters.add(bindPort);
   }
@@ -351,17 +405,21 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
     }
     sent.clear();
     waiting.length = 0;
+    queuedChanges.clear();
+    listeners.clear();
   };
   const viewFor = (datasetAlias?: string): AppClient => {
     const scope = datasetAlias === undefined ? {} : { dataset: datasetAlias };
-    return {
+    const view: AppClient = {
       invoke<T = unknown>(
         operation: string,
         input: unknown = {},
         idempotencyKey = `read:${crypto.randomUUID()}`,
+        invokeOptions?: { readonly readOnly?: boolean },
       ): Promise<InvokeReply<T>> {
+        const readOnly = invokeOptions?.readOnly === true ? { readOnly: true } : {};
         return send(
-          { op: "backend.invoke", ...scope, operation, idempotencyKey, input },
+          { op: "backend.invoke", ...scope, operation, idempotencyKey, input, ...readOnly },
           invokeTimeoutMs,
           (value) =>
             isRecord(value) &&
@@ -371,7 +429,9 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
         ) as Promise<InvokeReply<T>>;
       },
       async read<T = unknown>(operation: string, input: unknown = {}): Promise<T> {
-        const reply = await this.invoke<T>(operation, input, `read:${crypto.randomUUID()}`);
+        const reply = await this.invoke<T>(operation, input, `read:${crypto.randomUUID()}`, {
+          readOnly: true,
+        });
         return reply.result;
       },
       async upload(file: File | FileUploadInput, idempotencyKey: string): Promise<UploadReply> {
@@ -407,18 +467,34 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
       },
       dataset(alias: string): AppClient {
         const checked = assertDatasetAlias(alias);
-        let view = scopedViews.get(checked);
-        if (!view) {
-          view = viewFor(checked);
-          scopedViews.set(checked, view);
-        }
-        return view;
+        let scoped = scopedViews.get(checked);
+        if (!scoped) scopedViews.set(checked, (scoped = viewFor(checked)));
+        return scoped;
+      },
+      subscribe(listener: (event: DatasetChangeEvent) => void): () => void {
+        if (closed) return () => {};
+        const wrapped =
+          datasetAlias === undefined
+            ? listener
+            : (event: DatasetChangeEvent) => {
+                if (event.dataset === datasetAlias) listener(event);
+              };
+        listeners.add(wrapped);
+        return () => listeners.delete(wrapped);
       },
       close() {
         if (datasetAlias !== undefined) return;
         closeRoot();
       },
     };
+    latestRevisionLookup.set(view, () =>
+      datasetAlias !== undefined
+        ? (latestRevisions.get(datasetAlias) ?? null)
+        : latestRevisions.size > 0
+          ? Math.max(...latestRevisions.values())
+          : null,
+    );
+    return view;
   };
   return viewFor();
 }
@@ -475,6 +551,7 @@ export function useApp(): AppClient {
 export interface DatasetQueryOptions {
   readonly enabled?: boolean;
   readonly dataset?: string;
+  readonly live?: boolean;
 }
 
 export interface DatasetMutationOptions {
@@ -526,6 +603,7 @@ export function useDatasetQuery<T = unknown>(
   const datasetAlias = options?.dataset;
   const target = useMemo(() => resolveTargetClient(client, datasetAlias), [client, datasetAlias]);
   const enabled = options?.enabled ?? true;
+  const live = options?.live ?? true;
   let serializedInput: string | null = null;
   if (enabled) {
     if (input === undefined) {
@@ -554,6 +632,8 @@ export function useDatasetQuery<T = unknown>(
   }));
   const [version, setVersion] = useState(0);
   const generation = useRef(0);
+  const liveRef = useRef(live);
+  liveRef.current = live;
 
   const reload = useCallback(() => {
     setVersion((current) => current + 1);
@@ -578,38 +658,67 @@ export function useDatasetQuery<T = unknown>(
       );
       return;
     }
-    let alive = true;
-    const token = ++generation.current;
+    let alive = true,
+      inFlight = false,
+      currentRev: number | null = null,
+      pendingRev: number | null = null;
     const parsedInput: unknown = JSON.parse(serializedInput);
-    setState((current) =>
-      current.scope === scope
-        ? { ...current, loading: true, error: null }
-        : { scope, data: undefined, revision: null, loading: true, error: null },
-    );
-    target.invoke<T>(operation, parsedInput).then(
-      (reply) => {
-        if (!alive || token !== generation.current) return;
-        setState({
-          scope,
-          data: reply.result,
-          revision: reply.revision,
-          loading: false,
-          error: null,
-        });
-      },
-      (caught: unknown) => {
-        if (!alive || token !== generation.current) return;
-        setState({
-          scope,
-          data: undefined,
-          revision: null,
-          loading: false,
-          error: caught instanceof AppBackendError ? caught : new AppBackendError(503),
-        });
-      },
-    );
+    const runFetch = (background: boolean) => {
+      if (!alive) return;
+      const token = ++generation.current;
+      inFlight = true;
+      if (!background) {
+        setState((current) =>
+          current.scope === scope
+            ? { ...current, loading: true, error: null }
+            : { scope, data: undefined, revision: null, loading: true, error: null },
+        );
+      }
+      target.invoke<T>(operation, parsedInput, undefined, { readOnly: true }).then(
+        (reply) => {
+          if (!alive || token !== generation.current) return;
+          inFlight = false;
+          currentRev = reply.revision;
+          setState({
+            scope,
+            data: reply.result,
+            revision: reply.revision,
+            loading: false,
+            error: null,
+          });
+          const wanted = Math.max(
+            pendingRev ?? -1,
+            liveRef.current ? (latestRevisionLookup.get(target)?.() ?? -1) : -1,
+          );
+          pendingRev = null;
+          if (liveRef.current && wanted > reply.revision) runFetch(true);
+        },
+        (caught: unknown) => {
+          if (!alive || token !== generation.current) return;
+          inFlight = false;
+          pendingRev = null;
+          const error = caught instanceof AppBackendError ? caught : new AppBackendError(503);
+          setState((current) =>
+            background && current.scope === scope
+              ? { ...current, loading: false, error }
+              : { scope, data: undefined, revision: null, loading: false, error },
+          );
+        },
+      );
+    };
+    const unsubscribe = target.subscribe?.((event) => {
+      if (!alive || !liveRef.current) return;
+      if (currentRev !== null && event.revision <= currentRev) return;
+      if (inFlight) {
+        pendingRev = Math.max(pendingRev ?? -1, event.revision);
+        return;
+      }
+      runFetch(true);
+    });
+    runFetch(false);
     return () => {
       alive = false;
+      unsubscribe?.();
     };
   }, [enabled, operation, scope, serializedInput, target, version]);
 
