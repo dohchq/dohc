@@ -178,6 +178,7 @@ function Editor(props: {
   return (
     <ScrollView
       style={{ backgroundColor: theme.bg }}
+      contentInsetAdjustmentBehavior="automatic"
       contentContainerStyle={styles.screen}
       keyboardShouldPersistTaps="handled"
     >
