@@ -144,6 +144,7 @@
   "dataset.relation.choices.prepare",
   "dataset.restore",
   "dataset.schema.change.prepare",
+  "dataset.types.write",
   "device.motion.read",
   "device.privacy.open",
   "device.update.download",

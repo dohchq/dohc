@@ -54,6 +54,7 @@ type AppKind = OwnerAppPublicationResult["kind"];
 export const DATASET_RESULTS: Record<DatasetAction, DatasetKind[]> = {
   list: ["list", "collections-refused"],
   describe: ["description"],
+  types: ["types-written"],
   history: ["history"],
   historyRevision: ["history-revision"],
   prepareHistoryRestore: ["migration-prepared"],

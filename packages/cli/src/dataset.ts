@@ -450,6 +450,7 @@ const DATASET_REQUEST_OPTIONS = [
     action: z.literal("describe"),
     includeArchived: z.boolean().optional(),
   }),
+  datasetAction({ ...selection, action: z.literal("types") }),
   datasetAction({
     ...selection,
     action: z.literal("lifecycle"),
@@ -868,6 +869,13 @@ export const DatasetResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("collections-refused"), refusal: DatasetListRefusal }).strict(),
   z
     .object({
+      kind: z.literal("types-written"),
+      path: z.string().min(1).max(4096),
+      revision: z.number().int().positive(),
+    })
+    .strict(),
+  z
+    .object({
       kind: z.literal("description"),
       dataset: description,
       copy: DatasetCopyStatus.optional(),
@@ -922,6 +930,7 @@ export type DatasetResult = z.infer<typeof DatasetResult>;
 export const DATASET_CAPABILITIES = {
   list: "dataset.list",
   describe: "dataset.describe",
+  types: "dataset.types.write",
   history: "dataset.history.list",
   historyRevision: "dataset.history.revision",
   prepareHistoryRestore: "dataset.history.restore.prepare",

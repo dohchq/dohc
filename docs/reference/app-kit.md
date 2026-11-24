@@ -152,6 +152,45 @@ Collection definitions can use `formatVersion: 2` to declare tables, fields, and
 }
 ```
 
+## Typed rows and operations
+
+`dohc dataset types` writes TypeScript declarations for a Collection's approved revision to `.dohc/types/<name>-<datasetId>.d.ts` at the workspace root and returns the exact `path`. `<name>` comes from the Collection's folder, for example `.dohc/types/expenses-11111111-1111-4111-8111-111111111101.d.ts` for `expenses/dataset.json`.
+
+```bash
+dohc dataset types '{"workspaceId":"<workspaceId>","datasetPath":"expenses/dataset.json"}'
+```
+
+The file exports:
+
+- `Tables`: each table's row, keyed by SQL column, with values as dohc's generated operations read and write them. A checkbox is `boolean`, a select is a union of its options, a multi-select or a many relation is an array, and a field that isn't required can be `null`.
+- `Row<"table">`: one table's row.
+- `FieldIds`: each column's `fieldId`, the key generated operations use in `values`.
+- `Operations`: each operation's `kind`, `table`, `access`, `readOnly`, and `fields`, the row columns it declares.
+- `OperationName`: the operation names.
+
+Import them with `import type`, so the app bundle and its approval never include the file. Generated row-list reads (without `groupBy`) return `{ rows, nextCursor }` with each row's `values` keyed by `FieldIds`:
+
+```tsx
+import type {
+  FieldIds,
+  Operations,
+  Row,
+} from "../.dohc/types/expenses-11111111-1111-4111-8111-111111111101";
+
+type ExpenseFields = Operations["listExpenses"]["fields"];
+type ExpenseValues = {
+  [Column in keyof ExpenseFields as FieldIds["expenses"][Column]]: ExpenseFields[Column];
+};
+type ExpensePage = {
+  rows: Array<{ id: Row<"expenses">["id"]; version: number; values: ExpenseValues }>;
+  nextCursor: { id: Row<"expenses">["id"]; value: unknown } | null;
+};
+
+const { data } = useDatasetQuery<ExpensePage>("listExpenses");
+```
+
+Types describe the approved revision, not a draft. Run the command again after you approve a change. Operations you write yourself return whatever their code returns, so type their results with `Row`, `fields`, or your own types.
+
 ## Staging an app and its Collections together
 
 To create or update bound Collections and approve an app in one owner review, run `dohc app stage`:

@@ -32,6 +32,7 @@ import {
   type ShareLinkPublication,
 } from "../workspaces/datasetBoundApps";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
+import { writeDatasetTypes } from "../workspaces/datasetTypes";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { generateDatasetFormSources } from "../workspaces/datasetFormGenerator";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
@@ -499,6 +500,7 @@ export function createDatasetHandler<
           const readsData = [
             "list",
             "describe",
+            "types",
             "createForm",
             "invoke",
             "upload",
@@ -979,6 +981,17 @@ export function createDatasetHandler<
                   };
             current();
             return { kind: "description" as const, ...addressed(result) };
+          }
+          if (input.action === "types") {
+            const { revision } = await data.approvedArtifacts(input.datasetId);
+            current();
+            if (!operation.workspace.rootPath)
+              throw new Error(
+                "Open this workspace's folder on this computer to write Collection types.",
+              );
+            const path = await writeDatasetTypes(operation.workspace.rootPath, revision);
+            current();
+            return { kind: "types-written" as const, path, revision: revision.revision };
           }
           if (input.action === "upload") {
             const description = await data.describe(input.datasetId);

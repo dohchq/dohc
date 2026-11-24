@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "entryPath": "index.tsx",
+  "inputs": [
+    "index.tsx"
+  ],
+  "dataset": {
+    "kind": "dataset",
+    "datasetPath": "quant-workbench/data/dataset.json",
+    "operations": [
+      "publishedReport"
+    ]
+  }
+}
