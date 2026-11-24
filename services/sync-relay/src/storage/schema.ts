@@ -61,6 +61,7 @@ import { initializeLiveRoomPauseSchema } from "./liveRoomPauses";
 import { initializePhoneAppSchema } from "./phoneApps";
 import { initializeShareInvitationEmailSchema } from "./shareInvitationEmails";
 import { initializeWorkspaceSecretSchema } from "./workspaceSecrets";
+import { initializeOutboundWebhookSchema } from "./outboundWebhooks";
 import type { SqliteDb } from "./types";
 
 const NORMALIZED_SHARE_SCHEMA_SQL = `
@@ -1686,6 +1687,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   initializePhoneAppSchema(db);
   initializeShareInvitationEmailSchema(db);
   initializeWorkspaceSecretSchema(db);
+  initializeOutboundWebhookSchema(db);
   db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
         ON sync_relay_link_handoff_codes(result_grant_id)

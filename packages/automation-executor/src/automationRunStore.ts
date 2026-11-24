@@ -174,6 +174,28 @@ const EffectSchema = z.union([
     }),
     byFormula: z.boolean().optional(),
   }),
+  z.object({
+    kind: z.literal("http"),
+    deliveryId: z.string().min(1),
+    collectionPath: z.string().min(1),
+    automationId: z.string().min(1),
+    stepOrdinal: z.number().int().nonnegative(),
+    targetLabel: z.string().min(1),
+    url: z.union([
+      z.object({ kind: z.literal("literal"), url: z.string().min(1) }),
+      z.object({ kind: z.literal("secret"), secret: z.string().min(1) }),
+    ]),
+    headers: z.array(z.object({ name: z.string().min(1), value: z.string() })),
+    secretHeaders: z.array(
+      z.object({
+        name: z.string().min(1),
+        secret: z.string().min(1),
+        prefix: z.string().nullable(),
+      }),
+    ),
+    body: z.string().nullable(),
+    defaultContentType: z.enum(["application/json", "text/plain; charset=utf-8"]).nullable(),
+  }),
 ]);
 const RefSchema = z.object({
   id: z.string(),
@@ -195,6 +217,11 @@ const StepSchema = z.object({
   planMs: z.number().nonnegative().optional(),
   appendMs: z.number().nonnegative().optional(),
   appendCount: z.number().int().nonnegative().optional(),
+  codeFileSha256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/u)
+    .optional(),
+  httpRefusedBeforeSend: z.literal(true).optional(),
   effects: z.array(EffectSchema),
   output: OutputSchema.optional(),
   collections: z.array(CollectionRefSchema).optional(),
@@ -319,6 +346,12 @@ export const WriteSchema = z.union([
     noticeId: z.string(),
     name: z.string(),
     supersededBy: z.string().optional(),
+  }),
+  z.object({
+    kind: z.literal("http-sent"),
+    target: z.string(),
+    status: z.number().int(),
+    deliveryId: z.string(),
   }),
 ]);
 // Effect application time excludes the progress append. The count is per
@@ -537,6 +570,8 @@ export interface StoredStep {
   /** Effect-result appends, persisted by the existing run save. */
   appendMs?: number;
   appendCount?: number;
+  codeFileSha256?: string;
+  httpRefusedBeforeSend?: true;
   destinations?: Array<{
     path: string;
     rules: { datasetId: string; revision: number; revisionSha256: string } | null;

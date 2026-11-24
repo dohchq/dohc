@@ -115,13 +115,36 @@ export async function undoAutomationRuns(
   );
   const datasetChanges = host === null ? [] : datasetUndoChanges(host, runs);
   const result = empty();
+  const webhooksSent = runs.reduce(
+    (total, run) =>
+      total +
+      run.applied.reduce(
+        (stepTotal, applied) =>
+          stepTotal + applied.writes.filter((write) => write.kind === "http-sent").length,
+        0,
+      ),
+    0,
+  );
+  if (webhooksSent > 0) result.webhooksSent = webhooksSent;
   const keptFields: UndoKeptField[] = [];
   const undoWrites: UndoWrite[] = [];
+  const NUMERIC_UNDO_KEYS = [
+    "reverted",
+    "removed",
+    "kept",
+    "changedSince",
+    "missing",
+    "irreversible",
+    "actions",
+    "actionsReversed",
+    "deleted",
+    "keptChanged",
+    "gone",
+  ] as const;
   const accumulate = (next: CollectionAutomationUndone) => {
-    for (const key of Object.keys(result) as Array<
-      Exclude<keyof CollectionAutomationUndone, "sharedReversals">
-    >)
+    for (const key of NUMERIC_UNDO_KEYS) {
       result[key] += next[key];
+    }
   };
   const ordered = [...targets.values()].reverse();
   const actions = new Map<string, Array<Extract<Target, { kind: "action" }>>>();

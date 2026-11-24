@@ -55,6 +55,8 @@ export interface CollectionAutomationUndone {
   actions: number;
   /** Dataset actions their reverse actions undid. */
   actionsReversed: number;
+  /** Outbound webhook requests already sent by the runs; external requests cannot be undone. */
+  webhooksSent?: number;
 }
 
 export interface CollectionAutomationUndoDependencies {
@@ -297,6 +299,19 @@ export async function undoCollectionAutomationRuns(
     actions: 0,
     actionsReversed: 0,
   };
+  if (onlyRecordId === undefined) {
+    const sent = runs.reduce(
+      (total, run) =>
+        total +
+        run.applied.reduce(
+          (stepTotal, applied) =>
+            stepTotal + applied.writes.filter((write) => write.kind === "http-sent").length,
+          0,
+        ),
+      0,
+    );
+    if (sent > 0) undone.webhooksSent = sent;
+  }
   const keptFields: UndoKeptField[] = [];
   const activeRuns = only
     ? runs

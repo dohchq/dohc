@@ -1,4 +1,5 @@
 import {
+  hasPersonalStep,
   parseAutomationsFile,
   writeAutomationsFile,
   type Automation,
@@ -59,16 +60,6 @@ export type AutomationDefinitionList = {
   switchReason?: string;
   sync: "accepted" | "pending" | "refused";
 };
-
-function hasPersonalStep(automation: Automation): boolean {
-  const personal = (steps: Automation["do"]): boolean =>
-    steps.some(
-      (step) =>
-        step.kind === "wake-agent" ||
-        (step.kind === "if" && (personal(step.do) || personal(step.otherwise))),
-    );
-  return personal(automation.do);
-}
 
 export function automationDefinitionList(
   current: AutomationFileContent | null,

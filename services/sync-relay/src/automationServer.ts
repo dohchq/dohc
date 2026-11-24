@@ -92,7 +92,12 @@ import type { OwnerScope, ServerRuns } from "./automationServerRoutes";
 import type { RelayDatasetHost } from "./datasetHost";
 import type { DatasetServerPress } from "./datasetAutomations";
 import type { AppBackendAuth } from "./appBackendAuthority";
-import { notFound, RelayError } from "./errors";
+import type {
+  OutboundWebhookDispatchRequest,
+  OutboundWebhookDispatchResponse,
+} from "@dohc/workspace-contracts/http-step-approvals";
+import { badRequest, notFound, relayError, RelayError } from "./errors";
+import { SyncRelayQuotaExceededError } from "./storage/errors";
 import { observeRelayWrites } from "./relayWriteChanges";
 import type { SyncRelayStorage } from "./storage";
 import type {
@@ -206,6 +211,13 @@ export interface AutomationServerOptions {
   >;
   /** A GET of the owner's share listings, answered in process (createSyncRelayHandler's readOwnerShares). */
   readOwnerShares(ownerUserId: string, path: string): Promise<{ status: number; body: unknown }>;
+  /** Executes a verified outbound HTTP webhook step in process for server-hosted automations. */
+  executeOutboundWebhook?(input: {
+    readonly workspaceId: string;
+    readonly ownerUserId: string;
+    readonly request: OutboundWebhookDispatchRequest;
+    readonly signal?: AbortSignal;
+  }): Promise<{ httpStatus: number; body: OutboundWebhookDispatchResponse }>;
   lookupUserDisplayName(userId: string): Promise<string | null> | string | null;
   /** The notice route's limiter, so the server and the owner's computers share one limit per person. */
   noticeLimiter: TokenBucketLimiter;
@@ -1132,6 +1144,63 @@ export async function startAutomationServer(options: AutomationServerOptions) {
           options.datasetHost.automations.workspace(workspaceId, ownerUserId, replica.signal),
         );
       },
+      httpApprovals: {
+        isApproved: async (digest) =>
+          storage.hasWorkspaceHttpStepApproval(workspaceId, digest) ? "approved" : "unapproved",
+        readApprovedDigests: async () =>
+          new Set(storage.listWorkspaceHttpStepApprovals(workspaceId)),
+      },
+      httpWebhook: {
+        execute: async ({
+          collectionId,
+          collectionPath,
+          automation,
+          approvalDigest,
+          effect,
+          depth,
+          signal,
+        }) => {
+          if (!options.executeOutboundWebhook) {
+            return {
+              ok: false,
+              reason: "Outbound webhooks are not enabled on this server.",
+              beforeSend: true,
+            };
+          }
+          const result = await options.executeOutboundWebhook({
+            workspaceId,
+            ownerUserId,
+            request: {
+              collectionId,
+              collectionPath,
+              automationId: automation.id,
+              stepOrdinal: effect.stepOrdinal,
+              approvalDigest,
+              deliveryId: effect.deliveryId,
+              chainDepth: depth,
+              evaluatedSafeHeaders: effect.headers.map((header) => ({
+                name: header.name,
+                value: header.value,
+              })),
+              evaluatedBody: effect.body,
+              defaultContentType: effect.defaultContentType,
+            },
+            signal,
+          });
+          if (result.body.ok) {
+            return { ok: true, status: result.body.status };
+          }
+          return {
+            ok: false,
+            ...(result.body.status !== undefined ? { status: result.body.status } : {}),
+            reason: result.body.reason,
+            ...(result.body.beforeSend ? { beforeSend: true } : {}),
+            ...(result.body.error === "approval_required" || result.body.error === "reach_stopped"
+              ? { waitReason: "held" as const }
+              : {}),
+          };
+        },
+      },
       nowMs,
     };
   }
@@ -1808,7 +1877,40 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       }),
     // A closed copy runs nothing, so it holds nothing.
     holds: (scope) => ownedCopy(scope).executor.holds(),
-    allow: (scope, input) => ownedCopy(scope).executor.confirmReach(input),
+    allow: (scope, input, allowOptions) =>
+      ownedCopy(scope).executor.confirmReach(
+        input,
+        allowOptions?.recheckDesktopHttpApproval
+          ? {
+              approveHttpStep: async (approval) => {
+                await allowOptions.recheckDesktopHttpApproval!();
+                let result;
+                try {
+                  result = storage.approveWorkspaceHttpStep({
+                    workspaceId: scope.workspaceId,
+                    ownerUserId: scope.ownerUserId,
+                    approvalDigest: approval.approvalDigest,
+                    collectionPath: approval.collectionPath,
+                    automationId: approval.automationId,
+                    stepOrdinal: approval.stepOrdinal,
+                    nowMs: nowMs(),
+                  });
+                } catch (error) {
+                  if (error instanceof SyncRelayQuotaExceededError) {
+                    throw relayError("quota_exceeded", error.message);
+                  }
+                  throw error;
+                }
+                if (!result.ok) {
+                  if (result.reason === "unauthorized") throw notFound();
+                  throw badRequest(
+                    `At most ${result.limit} webhook approvals are allowed per workspace (${result.count} used).`,
+                  );
+                }
+              },
+            }
+          : undefined,
+      ),
   };
 
   const stopDatasetClaims = options.datasetHost?.observeAutomationClaims((workspaceId, failed) => {

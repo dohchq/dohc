@@ -669,6 +669,37 @@ describe("direct writes to a Collection's own files", () => {
     ).toBe(200);
   });
 
+  it("refuses any collaborator change to an automation with an http step", async () => {
+    const r = await relay();
+    const hook =
+      "  - id: send-hook\n    name: Send hook\n    when: record-added\n    do:\n      - if: record.Title != ''\n        do:\n          - http: https://hooks.example.com/notify\n";
+    const withHook = automations(STAMP, hook);
+    await upload(r, withHook);
+    await expectCode(
+      await write(r, [create(`${PACKING}/automations.yaml`, withHook)]),
+      403,
+      "share_op_rejected",
+    );
+
+    await r.owner.write("object-automations-http", `${PACKING}/automations.yaml`, withHook);
+    const hookEdited = automations(STAMP, hook.replace("/notify", "/evil"));
+    const hookRemoved = automations(STAMP);
+    const stampEdited = automations(STAMP.replace("Packed", "Shipped"), hook);
+    await upload(r, hookEdited, hookRemoved, stampEdited);
+    for (const [index, after] of [hookEdited, hookRemoved].entries()) {
+      await expectCode(
+        await write(r, [edit(`${PACKING}/automations.yaml`, withHook, after)], {
+          submitId: `http-refused-${index}`,
+        }),
+        403,
+        "share_op_rejected",
+      );
+    }
+    expect(
+      (await write(r, [edit(`${PACKING}/automations.yaml`, withHook, stampEdited)])).status,
+    ).toBe(200);
+  });
+
   it("creates a new Collection with its schema first", async () => {
     const r = await relay();
     const auto = automations(STAMP);

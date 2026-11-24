@@ -99,6 +99,7 @@ export interface ServerRuns {
       seq: number;
       recipient?: string;
     },
+    options?: { recheckDesktopHttpApproval?: () => Promise<void> },
   ): Promise<"confirmed" | "changed">;
 }
 
@@ -114,6 +115,7 @@ export function createAutomationServerRoutes(
     request: Request,
     route: AutomationServerRoute,
     ownerUserId: string,
+    options?: { recheckDesktopHttpApproval?: () => Promise<void> },
   ): Promise<Response> {
     const server = runs();
     if (!server || !storage.workspaceIsOwnedBy(route.workspaceId, ownerUserId)) throw notFound();
@@ -180,13 +182,17 @@ export function createAutomationServerRoutes(
       case "allow": {
         const recipient =
           body.recipient === undefined ? undefined : line(body.recipient, 1_024, "recipient");
-        const status = await server.allow(scope, {
-          automationId: collectionAutomationId(body.automationId),
-          definitionHash: definitionHash(body.definitionHash),
-          step: line(body.step, 512, "step"),
-          seq: nonNegativeInteger(body.seq, "seq"),
-          ...(recipient === undefined ? {} : { recipient }),
-        });
+        const status = await server.allow(
+          scope,
+          {
+            automationId: collectionAutomationId(body.automationId),
+            definitionHash: definitionHash(body.definitionHash),
+            step: line(body.step, 512, "step"),
+            seq: nonNegativeInteger(body.seq, "seq"),
+            ...(recipient === undefined ? {} : { recipient }),
+          },
+          options,
+        );
         return jsonResponse({ ok: true, status }, 200);
       }
     }
