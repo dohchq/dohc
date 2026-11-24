@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useApp } from "dohc/app";
-import { errorMessage, photoFileUrl, type PhotoSource } from "./api";
+import { errorMessage, photoFileUrl, releasePhotoFileUrl, type PhotoSource } from "./api";
 import { sceneUrl } from "./scenes";
 
 export interface FileAccess {
@@ -66,6 +66,7 @@ export function Photo({
     );
     return () => {
       current = false;
+      if (photo.fileId) releasePhotoFileUrl(access.operation, photo.fileId);
     };
   }, [visible, retry, client, key, access.operation, fileInput, photo.fileId, photo.demoScene, photo.width, photo.height, photo.mimeType, size]);
 

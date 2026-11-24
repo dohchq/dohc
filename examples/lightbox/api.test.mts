@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import * as appKit from "@dohc/app-kit/app";
-import type { AppClient, InvokeReply } from "@dohc/app-kit/app";
+import * as appKit from "../../packages/app-kit/src/app.tsx";
+import type { AppClient, InvokeReply } from "../../packages/app-kit/src/app.tsx";
 
 interface LightboxApiModule {
   invoke<T>(client: AppClient, operation: string, input: unknown): Promise<T>;
@@ -13,24 +13,27 @@ interface LightboxApiModule {
     mimeType: string,
     priority?: "high" | "low",
   ): Promise<string>;
+  releasePhotoFileUrl(operation: string, fileId: string): void;
+  revokePhotoFileUrl(operation: string, fileId: string): void;
   uploadPhoto(
     client: AppClient,
     file: File,
   ): Promise<{ fileId: string; width: number; height: number; bytes: number; ms: number }>;
 }
 
-const LIGHTBOX_API = resolve(import.meta.dirname, "../../../../examples/lightbox/portal/api.ts");
+const LIGHTBOX_API = resolve(import.meta.dirname, "portal/api.ts");
 
 async function loadLightboxApi(): Promise<{
   api: LightboxApiModule;
   AppBackendError: typeof appKit.AppBackendError;
 }> {
+  vi.doMock("react", () => ({}));
   vi.doMock("dohc/app", () => appKit);
   const api = (await import(/* @vite-ignore */ LIGHTBOX_API)) as LightboxApiModule;
   return { api, AppBackendError: appKit.AppBackendError };
 }
 
-function makeThrottledBroker(AppBackendError: typeof import("@dohc/app-kit/app").AppBackendError) {
+function makeThrottledBroker(AppBackendError: typeof appKit.AppBackendError) {
   let tokens = 30;
   let updated = Date.now();
   let pending = 0;
@@ -47,11 +50,7 @@ function makeThrottledBroker(AppBackendError: typeof import("@dohc/app-kit/app")
   };
   let failFirstUploadOnce = true;
   const client: AppClient = {
-    async invoke<T>(
-      operation: string,
-      _input?: unknown,
-      idempotencyKey?: string,
-    ): Promise<InvokeReply<T>> {
+    async invoke<T>(operation: string, _input?: unknown, idempotencyKey?: string): Promise<InvokeReply<T>> {
       take(`invoke:${operation}`);
       try {
         return {
@@ -119,12 +118,20 @@ function makeThrottledBroker(AppBackendError: typeof import("@dohc/app-kit/app")
   return { client, started, uploadKeys };
 }
 
+let blobCounter = 0;
+let revokedUrls: string[] = [];
+
 beforeEach(() => {
+  blobCounter = 0;
+  revokedUrls = [];
   vi.resetModules();
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-11-24T00:00:00Z"));
   vi.stubGlobal("createImageBitmap", async () => ({ width: 1200, height: 800, close() {} }));
-  vi.spyOn(URL, "createObjectURL").mockImplementation(() => "blob:test");
+  vi.spyOn(URL, "createObjectURL").mockImplementation(() => `blob:test-${++blobCounter}`);
+  vi.spyOn(URL, "revokeObjectURL").mockImplementation((url) => {
+    revokedUrls.push(url);
+  });
 });
 
 afterEach(() => {
@@ -151,9 +158,7 @@ it("reserves broker capacity for interactive calls and promotes a queued thumbna
   expect(started.filter((entry) => entry.startsWith("file:"))).toHaveLength(24);
   expect(started).not.toContain("file:photo_31");
 
-  await expect(
-    api.invoke(client, "toggleClientPick", { assetId: "photo_0", selected: true }),
-  ).resolves.toMatchObject({
+  await expect(api.invoke(client, "toggleClientPick", { assetId: "photo_0", selected: true })).resolves.toMatchObject({
     ok: true,
   });
 
@@ -166,7 +171,7 @@ it("reserves broker capacity for interactive calls and promotes a queued thumbna
     "high",
   );
   expect(promoted).toBe(thumbs[31]);
-  await expect(promoted).resolves.toBe("blob:test");
+  await expect(promoted).resolves.toMatch(/^blob:test-/);
   expect(started).toContain("file:photo_31");
   expect(started).not.toContain("file:photo_25");
 
@@ -181,9 +186,7 @@ it("paces 18 sequential photo uploads and registrations across the 30-token burs
   const run = (async () => {
     const ids: string[] = [];
     for (let index = 0; index < 18; index++) {
-      const file = new File([new Uint8Array([1, 2, 3])], `shot_${index}.jpg`, {
-        type: "image/jpeg",
-      });
+      const file = new File([new Uint8Array([1, 2, 3])], `shot_${index}.jpg`, { type: "image/jpeg" });
       const sent = await api.uploadPhoto(client, file);
       await api.invoke(client, "uploadAsset", {
         shootId: "shoot_positano",
@@ -202,4 +205,27 @@ it("paces 18 sequential photo uploads and registrations across the 30-token burs
   const firstKeys = uploadKeys.get("shot_0.jpg")!;
   expect(firstKeys).toHaveLength(2);
   expect(firstKeys[0]).toBe(firstKeys[1]);
+});
+
+it("evicts and revokes unused photo blob URLs past the cache cap and on explicit revoke", async () => {
+  const { api, AppBackendError } = await loadLightboxApi();
+  const { client } = makeThrottledBroker(AppBackendError);
+
+  const urls: string[] = [];
+  for (let index = 0; index < 35; index++) {
+    const promise = api.photoFileUrl(
+      client,
+      `evict_${index}`,
+      "studioFileAccess",
+      { assetId: `evict_${index}` },
+      "image/jpeg",
+      "high",
+    );
+    await vi.advanceTimersByTimeAsync(2500);
+    urls.push(await promise);
+    api.releasePhotoFileUrl("studioFileAccess", `evict_${index}`);
+  }
+  expect(revokedUrls).toEqual(expect.arrayContaining([urls[0], urls[1], urls[2]]));
+  api.revokePhotoFileUrl("studioFileAccess", "evict_34");
+  expect(revokedUrls).toContain(urls[34]);
 });

@@ -22,7 +22,13 @@ afterEach(async () => {
 
 async function exampleFiles() {
   const names = (await readdir(EXAMPLE_ROOT, { recursive: true, withFileTypes: true }))
-    .filter((entry) => entry.isFile() && entry.name !== "README.md")
+    .filter(
+      (entry) =>
+        entry.isFile() &&
+        entry.name !== "README.md" &&
+        !entry.name.endsWith(".test.ts") &&
+        !entry.name.endsWith(".test.mts"),
+    )
     .map((entry) => join(entry.parentPath, entry.name));
   return new Map(
     await Promise.all(

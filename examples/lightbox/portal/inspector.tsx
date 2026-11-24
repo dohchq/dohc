@@ -150,10 +150,17 @@ export function Inspector<T extends PhotoSource & { readonly mimeType?: string }
   const [saving, setSaving] = useState(false);
   const [showResolved, setShowResolved] = useState(true);
   const [reload, setReload] = useState(0);
+  const draftGen = useRef(0);
   const root = useRef<HTMLDivElement | null>(null);
   const bodyRef = useRef<HTMLTextAreaElement | null>(null);
   const rulesRef = useRef(rules);
   rulesRef.current = rules;
+
+  const updateDraft = (next: Draft | null) => {
+    draftGen.current++;
+    setDraft(next);
+    setSaving(false);
+  };
 
   useEffect(() => {
     let current = true;
@@ -161,7 +168,10 @@ export function Inspector<T extends PhotoSource & { readonly mimeType?: string }
       (list) => current && setNotes({ id: active.id, list }),
       (error: unknown) => current && setNotes({ id: active.id, error: errorMessage(error) }),
     );
+    draftGen.current++;
     setDraft(null);
+    setBody("");
+    setSaving(false);
     return () => {
       current = false;
     };
@@ -208,7 +218,7 @@ export function Inspector<T extends PhotoSource & { readonly mimeType?: string }
   const keyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (isTyping(event.target)) {
       if (event.key === "Escape") {
-        setDraft(null);
+        updateDraft(null);
         root.current?.focus();
       }
       return;
@@ -217,13 +227,13 @@ export function Inspector<T extends PhotoSource & { readonly mimeType?: string }
       event.target instanceof HTMLElement && Boolean(event.target.closest("button, a, [role='button'], [role='radio']"));
     if (onControl && (event.key === " " || event.key === "Enter")) return;
     if (event.key === "Escape") {
-      if (draft) setDraft(null);
+      if (draft) updateDraft(null);
       else if (compare !== null) setCompare(null);
       else onClose();
     } else if (event.key === "ArrowRight") step(1);
     else if (event.key === "ArrowLeft") step(-1);
     else if (event.key.toLowerCase() === "c") toggleCompare();
-    else if (event.key.toLowerCase() === "n" && canPin) setDraft({ xPct: 50, yPct: 50 });
+    else if (event.key.toLowerCase() === "n" && canPin) updateDraft({ xPct: 50, yPct: 50 });
     else if (!onKey(event, active)) return;
     event.preventDefault();
   };
@@ -233,19 +243,26 @@ export function Inspector<T extends PhotoSource & { readonly mimeType?: string }
     if (!draft || !rules.add) return;
     const authorName = rules.fixedName ?? name.trim();
     if (!authorName || !body.trim()) return;
+    const gen = draftGen.current;
+    const targetId = active.id;
+    const pendingDraft = draft;
+    const trimmedBody = body.trim();
+    const expectedCount = list.length + 1;
     setSaving(true);
     try {
-      const note = await rules.add(active, { ...draft, authorName, body: body.trim() });
+      const note = await rules.add(active, { ...pendingDraft, authorName, body: trimmedBody });
       if (!rules.fixedName) saveName(authorName);
-      setNotes((current) => (current.id === active.id ? { id: active.id, list: [...(current.list ?? []), note] } : current));
-      setDraft(null);
-      setBody("");
-      toast(`Note ${list.length + 1} pinned.`);
-      root.current?.focus();
+      setNotes((current) => (current.id === targetId ? { id: targetId, list: [...(current.list ?? []), note] } : current));
+      toast(`Note ${expectedCount} pinned.`);
+      if (draftGen.current === gen) {
+        updateDraft(null);
+        setBody("");
+        root.current?.focus();
+      }
     } catch (error) {
       toast(errorMessage(error), { tone: "danger" });
     } finally {
-      setSaving(false);
+      if (draftGen.current === gen) setSaving(false);
     }
   };
 
@@ -350,7 +367,7 @@ export function Inspector<T extends PhotoSource & { readonly mimeType?: string }
               hovered={hovered}
               onHover={setHovered}
               draft={draft}
-              onDraft={setDraft}
+              onDraft={updateDraft}
               showPins
               canPin={canPin}
             />
@@ -440,7 +457,7 @@ export function Inspector<T extends PhotoSource & { readonly mimeType?: string }
                   aria-label="Note"
                 />
                 <div className="lb-composer-actions">
-                  <Button size="sm" variant="ghost" onClick={() => setDraft(null)}>
+                  <Button size="sm" variant="ghost" onClick={() => updateDraft(null)}>
                     Cancel
                   </Button>
                   <Button

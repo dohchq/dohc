@@ -159,6 +159,9 @@ export function useLoader<T>(key: string | null, load: (client: AppClient) => Pr
 interface FileCacheEntry {
   readonly promise: Promise<string>;
   promote(): void;
+  refs: number;
+  url: string | null;
+  revokeOnRelease: boolean;
 }
 
 interface QueuedFileTask {
@@ -167,6 +170,7 @@ interface QueuedFileTask {
 }
 
 const fileUrls = new Map<string, FileCacheEntry>();
+const MAX_CACHED_FILE_URLS = 32;
 const BROKER_BURST = 30;
 const BROKER_REFILL_MS = 2000;
 const INTERACTIVE_RESERVE = 6;
@@ -317,6 +321,17 @@ function runPacedFile<T>(
   return { promise, promote };
 }
 
+function evictUnusedFileUrls() {
+  if (fileUrls.size <= MAX_CACHED_FILE_URLS) return;
+  for (const [key, entry] of fileUrls) {
+    if (fileUrls.size <= MAX_CACHED_FILE_URLS) break;
+    if (entry.refs > 0) continue;
+    fileUrls.delete(key);
+    if (entry.url) URL.revokeObjectURL(entry.url);
+    else entry.revokeOnRelease = true;
+  }
+}
+
 export function photoFileUrl(
   client: AppClient,
   fileId: string,
@@ -328,18 +343,65 @@ export function photoFileUrl(
   const key = `${operation}:${fileId}`;
   const cached = fileUrls.get(key);
   if (cached) {
+    cached.refs++;
+    fileUrls.delete(key);
+    fileUrls.set(key, cached);
     if (priority === "high") cached.promote();
     return cached.promise;
   }
-  const entry = runPacedFile(priority, () =>
+  const entry: FileCacheEntry = {
+    promise: Promise.resolve(""),
+    promote: () => undefined,
+    refs: 1,
+    url: null,
+    revokeOnRelease: false,
+  };
+  const task = runPacedFile(priority, () =>
     client.file(fileId, operation, input).then(({ bytesBase64 }) => {
       const bytes = decodeBase64(bytesBase64);
-      return URL.createObjectURL(new Blob([bytes as BlobPart], { type: mimeType }));
+      const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: mimeType }));
+      if (entry.revokeOnRelease && entry.refs <= 0) {
+        URL.revokeObjectURL(url);
+        return url;
+      }
+      entry.url = url;
+      return url;
     }),
   );
-  entry.promise.catch(() => fileUrls.delete(key));
-  fileUrls.set(key, entry);
-  return entry.promise;
+  const fullEntry: FileCacheEntry = Object.assign(entry, {
+    promise: task.promise,
+    promote: task.promote,
+  });
+  task.promise.catch(() => {
+    if (fileUrls.get(key) === fullEntry) fileUrls.delete(key);
+  });
+  fileUrls.set(key, fullEntry);
+  evictUnusedFileUrls();
+  return fullEntry.promise;
+}
+
+export function releasePhotoFileUrl(operation: string, fileId: string) {
+  const key = `${operation}:${fileId}`;
+  const entry = fileUrls.get(key);
+  if (!entry) return;
+  entry.refs = Math.max(0, entry.refs - 1);
+  if (entry.refs === 0 && entry.revokeOnRelease) {
+    fileUrls.delete(key);
+    if (entry.url) URL.revokeObjectURL(entry.url);
+    return;
+  }
+  evictUnusedFileUrls();
+}
+
+export function revokePhotoFileUrl(operation: string, fileId: string) {
+  const key = `${operation}:${fileId}`;
+  const entry = fileUrls.get(key);
+  if (!entry) return;
+  entry.revokeOnRelease = true;
+  if (entry.refs === 0) {
+    fileUrls.delete(key);
+    if (entry.url) URL.revokeObjectURL(entry.url);
+  }
 }
 
 export async function copyText(value: string): Promise<boolean> {

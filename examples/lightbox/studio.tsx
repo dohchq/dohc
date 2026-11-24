@@ -12,6 +12,7 @@ import {
   formatDay,
   invoke,
   loadPages,
+  revokePhotoFileUrl,
   uploadPhoto,
   useLoader,
   type ColorLabel,
@@ -423,6 +424,7 @@ function ShootView({ shoot, onShoot }: { shoot: Shoot; onShoot(shoot?: Shoot): v
     setDeleting(null);
     try {
       await invoke(client, "deleteAsset", { assetId: asset.id });
+      if (asset.fileId) revokePhotoFileUrl(STUDIO_FILES.operation, asset.fileId);
       assets.replace((list) => list.filter((item) => item.id !== asset.id));
       viewer.close();
       toast(`Deleted ${asset.title}.`);
@@ -553,6 +555,17 @@ function ShootView({ shoot, onShoot }: { shoot: Shoot; onShoot(shoot?: Shoot): v
           </div>
         </div>
         <div className="lb-hero-actions">
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              assets.reload();
+              onShoot();
+            }}
+            id="refresh-shoot"
+          >
+            Refresh
+          </Button>
           <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>
             Edit details
           </Button>
