@@ -777,12 +777,14 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
  * Returns false when it stopped at a step after which the sequence does not read as the editor's
  * document: two containers that share an id became neighbours and read as one.
  * `afterEachStep` is called with the editor's document once for each step that replaces, when
- * it is written, and once more for formatting steps that end the transaction.
+ * it is written, and once more for formatting steps that end the transaction. When it returns
+ * false the writer stops there and returns false too: the next step's places are places in the
+ * editor's document, and mean nothing in a sequence that does not read as it.
  */
 export function writeTransaction(
   writing: BodyWriting,
   transaction: Transform,
-  afterEachStep?: (shown: ProseMirrorNode) => void,
+  afterEachStep?: (shown: ProseMirrorNode) => boolean,
 ): boolean {
   const docs = [...transaction.docs, transaction.doc];
   let formatted = -1;
@@ -800,12 +802,11 @@ export function writeTransaction(
     formatted = -1;
     for (const range of ranges.reverse()) writeRange(writing, after, ...range);
     if (!writeBlockStartsThatDiffer(writing, after)) return false;
-    afterEachStep?.(after);
+    if (afterEachStep?.(after) === false) return false;
   }
   if (formatted < 0) return true;
   writeFormatting(writing, docs[formatted]!, transaction.doc);
-  afterEachStep?.(transaction.doc);
-  return true;
+  return afterEachStep?.(transaction.doc) !== false;
 }
 
 type Line = { bare: "" | "start" | "item" | "spill"; owner?: Line };
@@ -1262,7 +1263,8 @@ const TRIES = 3;
  * of the blocks that had no boundary of their own should have had one first, by their index
  * before the write. `linesLeftWanting` is asked after each step, and once more for the whole
  * write against the note as it was before. `isRead` says whether the note read as the
- * editor's document after every step, marks aside. `isSettled` says that it did, that no step
+ * editor's document after every step, marks aside; the write stops at the first step after
+ * which it does not. `isSettled` says that it did, that no step
  * brought a line into being with no boundary of its own, and that no boundary the write made
  * is left in front of what a line with none held.
  */
@@ -1299,10 +1301,11 @@ export function linesAWriteLeavesWanting(
     bringsNone &&= linesBroughtIntoBeing(before, now).length === 0;
     before = now;
     state = stateOf();
+    return reads;
   };
   note.transact(() => {
     const wrote = transactions.every((transaction) => writeTransaction(writing, transaction, look));
-    if (!wrote) look(null);
+    if (!wrote && isRead) look(null);
   });
   const whole = linesLeftWanting(first, begun, before, writing);
   for (const block of whole.wanting) wanting.add(block);

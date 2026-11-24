@@ -233,6 +233,7 @@ Accepted:
 - Records are never deleted, so a note keeps the records of every container it ever had. Measured with random runs: about 27 bytes for each record no line names; a quote, callout or list leaves 4 when it goes and a list item 2; one person wrapping and lifting 2,000 times left 1,486 such records, 41 KB. Nothing removes them yet, and removing them is not safe while an undo or an offline change can still name them.
 - A letter typed in an empty line that someone joins away at the same moment lands at the end of the line above.
 - An editor writes one edit as one change and one undo step, unless every part of it is marked as outside history. So undoing a typed letter also takes back what a plugin added to that edit outside history.
+- An editor refuses two edits for now: Enter over a selection, and a drop of dragged text, that join a line with no boundary of its own into the line above and split it off again. The edit would write that line's boundary, and its undo would take the boundary away with whatever someone else made of the line since. Nothing is written and nothing is lost: the note and the editor stay as they were.
 
 Unchanged from today (Yjs inside one text), now also reachable across lines:
 - One person bolds a word while another deletes it: Yjs would delete a formatting item on the page that receives the delete, in no change. Editors stop that cleanup, and the checks take the history either way (section 5).

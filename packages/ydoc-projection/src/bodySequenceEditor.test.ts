@@ -2044,6 +2044,49 @@ describe.each(["bare", "hosted"] as const)(
       },
     );
 
+    it("writes nothing for Enter over a selection that runs from the middle of the line above across a code block to the start of that paragraph, and shows the note again", () => {
+      const lines = [stored({}, "ab"), stored(CODE, "cd", WIKILINK, "ef"), stored({}, "gh")];
+      const a = person(noteOfLines(lines), 10, shape);
+      const before = a.view.state.doc.toJSON();
+      const held = Y.encodeStateAsUpdate(a.doc);
+      a.select([0, 1], [2, 0]);
+      const shown = a.shown.count;
+      a.press("Enter");
+      expect(a.sent).toEqual([]);
+      expect(Y.encodeStateAsUpdate(a.doc)).toEqual(held);
+      expect(a.view.state.doc.toJSON()).toEqual(before);
+      expect(a.shown.count).toBe(shown + 1);
+      a.expectMirror();
+      a.typeAt(0, 1, "x");
+      expect(a.lines()).toEqual(["axb", "cd", "ef", "gh"]);
+      a.expectMirror();
+    });
+
+    it("stops writing a dispatch to a copy at the first step after which the copy does not read as the editor's document", () => {
+      const lines = [stored({ ...RULE, path: ["Q"] }, "ab"), stored({}, "cd")];
+      const a = person(noteOfLines(lines), 10, shape);
+      expect(a.view.state.doc.toString()).toBe(
+        'doc(blockquote(horizontalRule, paragraph("ab")), paragraph("cd"))',
+      );
+      a.view.dispatch(a.view.state.tr.setSelection(NodeSelection.create(a.view.state.doc, 1)));
+      const dragged = dropOfSelection(a.view.state, a.view.state.doc.content.size);
+      expect(dragged.steps).toHaveLength(2);
+      const copy = declared(93);
+      Y.applyUpdate(copy.doc, noteOfLines(lines));
+      const left = linesAWriteLeavesWanting(writingOf(copy), [dragged]);
+      expect(left).toEqual({ wanting: [1], isSettled: false, isRead: false });
+      expect(readBodySequence(schema, copy.doc).toString()).toBe(
+        'doc(paragraph("ab"), paragraph("cd"))',
+      );
+      copy.doc.destroy();
+      a.view.dispatch(dragged);
+      expect(a.sent).toHaveLength(2);
+      expect(a.view.state.doc.toString()).toBe(
+        'doc(blockquote(paragraph("ab")), paragraph("cd"), horizontalRule)',
+      );
+      a.expectMirror();
+    });
+
     it("writes a block dragged to the top of the note when the drag's first step changes nothing, in a list item's added paragraph further down", () => {
       const lines = [
         stored({}, "ab"),
