@@ -86,6 +86,16 @@ export function rowText(shown: ShownValue, fieldName: string): string | null {
   }
 }
 
+/** A record's name, from the field that names it: Untitled when it has none, or only spaces, as on the desktop. */
+export function recordName(
+  lead: CollectionField | null,
+  values: Readonly<Record<string, RecordValue>>,
+  files: Readonly<Record<string, string>>,
+): string {
+  const text = lead && rowText(shownValue(lead, values[lead.fieldId], files), lead.name);
+  return text?.trim() ? text : collectionWords.untitledRecord;
+}
+
 /**
  * How the phone edits a field's type: typed text, a number or a web address with their keyboards, a switch, a list
  * of choices, or the system's date picker. Null for a type it doesn't edit yet: a relation or an attachment needs a
