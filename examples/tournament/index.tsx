@@ -19,6 +19,7 @@ import {
 import { Dashboard } from "./spectator/Dashboard";
 import type { ScoreActions } from "./spectator/Courts";
 import {
+  isDecided,
   playersById,
   roundCount,
   roundName,
@@ -55,6 +56,7 @@ function Organizer() {
   const [creating, setCreating] = useState(false);
   const [seeding, setSeeding] = useState(false);
   const [opened, setOpened] = useState<Match | null>(null);
+  const [completing, setCompleting] = useState<Match | null>(null);
 
   const report = useCallback((caught: unknown, fallback: string) => {
     if (isAppBackendError(caught) && caught.refusal?.code === "conflict")
@@ -76,6 +78,7 @@ function Organizer() {
   const pickTournament = useCallback((id: string) => {
     setTournamentId(id);
     setOpened(null);
+    setCompleting(null);
     setNotice(null);
   }, []);
 
@@ -120,7 +123,7 @@ function Organizer() {
         void run(match, "startMatch", { courtId: court.id }, true),
       point: (match: Match, side: Side) => void run(match, "scorePoint", { side }, false),
       undo: (match: Match) => void run(match, "undoPoint", {}, false),
-      complete: (match: Match) => void run(match, "completeMatch", {}, true),
+      complete: (match: Match) => setCompleting(match),
     }),
     [busy, live.switching, run],
   );
@@ -210,7 +213,74 @@ function Organizer() {
           onClose={() => setOpened(null)}
         />
       ) : null}
+      {completing && live.data?.tournament ? (
+        <ConfirmComplete
+          match={live.data.matches.find((entry) => entry.id === completing.id) ?? null}
+          snapshot={live.data}
+          disabled={live.switching || busy.has(completing.id)}
+          onCancel={() => setCompleting(null)}
+          onConfirm={(target) => {
+            setCompleting(null);
+            void run(target, "completeMatch", {}, true);
+          }}
+        />
+      ) : null}
     </AppShell>
+  );
+}
+
+function ConfirmComplete({
+  match,
+  snapshot,
+  disabled,
+  onCancel,
+  onConfirm,
+}: {
+  match: Match | null;
+  snapshot: Snapshot;
+  disabled: boolean;
+  onCancel(): void;
+  onConfirm(match: Match): void;
+}) {
+  const people = useMemo(() => playersById(snapshot), [snapshot]);
+  const tournament = snapshot.tournament;
+  if (!match || !tournament || match.status !== "live") return null;
+  const decided = isDecided(tournament, match.scoreA, match.scoreB);
+  const aWon = match.scoreA > match.scoreB;
+  const winner = people.get((aWon ? match.playerA : match.playerB) ?? "")?.name ?? "Winner";
+  const loser = people.get((aWon ? match.playerB : match.playerA) ?? "")?.name ?? "Opponent";
+  const high = Math.max(match.scoreA, match.scoreB);
+  const low = Math.min(match.scoreA, match.scoreB);
+  return (
+    <Modal
+      open
+      title="Complete match?"
+      onClose={onCancel}
+      footer={
+        <>
+          <Button onClick={onCancel}>Cancel</Button>
+          <Button
+            variant="primary"
+            disabled={disabled || !decided}
+            onClick={() => onConfirm(match)}
+          >
+            Complete match
+          </Button>
+        </>
+      }
+    >
+      <Stack gap={12}>
+        <p className="co-muted">
+          {decided
+            ? `${winner} wins ${high}–${low} over ${loser}.`
+            : `The score is now ${match.scoreA}–${match.scoreB} and is no longer decided.`}
+        </p>
+        <Callout tone="warning" title="This can't be undone">
+          Completing this match updates Elo ratings, frees the court, and advances the winner into
+          the next round.
+        </Callout>
+      </Stack>
+    </Modal>
   );
 }
 

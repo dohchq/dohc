@@ -108,45 +108,75 @@ export function useLiveSnapshot(
   const generation = useRef(0);
   const pinnedId = useRef<string | null>(tournamentId);
   if (tournamentId !== null) pinnedId.current = tournamentId;
+  const loadRef = useRef<() => void>(() => undefined);
+  const holdRef = useRef<() => void>(() => undefined);
 
-  const load = useCallback(() => {
-    const target = tournamentId ?? pinnedId.current;
-    const mine = ++generation.current;
-    client.read<Snapshot>("liveSnapshot", target ? { tournamentId: target } : {}).then(
-      (result) => {
-        if (mine !== generation.current) return;
+  useEffect(() => {
+    let disposed = false;
+    let inFlight = false;
+    let timer: number | undefined;
+    const clearTimer = () => {
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timer = undefined;
+      }
+    };
+    const schedule = () => {
+      clearTimer();
+      if (disposed || document.hidden) return;
+      timer = window.setTimeout(() => {
+        timer = undefined;
+        if (!disposed && !document.hidden) void runLoad();
+      }, intervalMs);
+    };
+    const runLoad = async () => {
+      clearTimer();
+      inFlight = true;
+      const target = tournamentId ?? pinnedId.current;
+      const mine = ++generation.current;
+      try {
+        const result = await client.read<Snapshot>(
+          "liveSnapshot",
+          target ? { tournamentId: target } : {},
+        );
+        if (disposed || mine !== generation.current) return;
         if (tournamentId === null && result.tournament) pinnedId.current = result.tournament.id;
         setData(result);
         setError(null);
         setLoading(false);
-      },
-      (caught: unknown) => {
-        if (mine !== generation.current) return;
+      } catch (caught: unknown) {
+        if (disposed || mine !== generation.current) return;
         setError(caught instanceof AppBackendError ? caught : new AppBackendError(503));
         setLoading(false);
-      },
-    );
-  }, [client, tournamentId]);
-
-  const loadRef = useRef(load);
-  loadRef.current = load;
-
-  useEffect(() => {
+      } finally {
+        if (!disposed && mine === generation.current) {
+          inFlight = false;
+          schedule();
+        }
+      }
+    };
+    loadRef.current = () => {
+      if (!disposed) void runLoad();
+    };
+    holdRef.current = () => {
+      generation.current += 1;
+      inFlight = false;
+      schedule();
+    };
     setLoading(true);
-    load();
-    const timer = window.setInterval(() => {
-      if (!document.hidden) load();
-    }, intervalMs);
+    void runLoad();
     const onVisible = () => {
-      if (!document.hidden) load();
+      if (document.hidden) clearTimer();
+      else if (!inFlight) void runLoad();
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
+      disposed = true;
+      clearTimer();
       generation.current += 1;
-      window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [load, intervalMs]);
+  }, [client, tournamentId, intervalMs]);
 
   const isCurrent = useCallback(
     (id: string | null) => id !== null && id === pinnedId.current,
@@ -158,7 +188,7 @@ export function useLiveSnapshot(
   }, []);
 
   const hold = useCallback(() => {
-    generation.current += 1;
+    holdRef.current();
   }, []);
 
   const patchMatch = useCallback((forTournamentId: string, match: Match) => {

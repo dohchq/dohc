@@ -499,7 +499,7 @@ describe("tournament example on the real Collection host", () => {
     expect(demo.recent.length).toBeGreaterThan(0);
     for (const live of demo.matches.filter((m: Json) => m.status === "live")) {
       expect(live.startedAt).toBeLessThan(demo.now - 60_000);
-      const log = await f.call("matchLog", { matchId: live.id });
+      const log = (await f.call("matchLog", { matchId: live.id })) as unknown as Json[];
       for (const event of log) expect(event.at).toBeLessThanOrEqual(demo.now);
     }
     const startSum = demo.standings.reduce((sum: number, p: Json) => sum + p.startRating, 0);
