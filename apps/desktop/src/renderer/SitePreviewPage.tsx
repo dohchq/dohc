@@ -11,6 +11,7 @@ import {
   Settings2,
   Share2,
   Square,
+  Terminal,
   X,
 } from "lucide-react";
 import { needsBuiltArtifact } from "@dohc/workspace-core";
@@ -31,6 +32,7 @@ import { openLinkExternally } from "./linkActivation";
 import { isLoopbackOrigin } from "../security/loopback";
 import { APP_CHECK_FALLBACK_MESSAGE } from "./appCopy";
 import { OwnerAppPublication } from "./OwnerAppPublication";
+import { AppInspectorDrawer } from "./AppInspectorDrawer";
 import { AppViewBody, useAppView, type AppViewNotices } from "./AppView";
 import { ipcErrorMessage } from "./ipcError";
 import { isWorkspaceRestricted, withErrorWords } from "../ipc/errorWords";
@@ -659,6 +661,24 @@ export function SitePreviewPage(props: {
   }
 
   const canShare = !props.sharedView && site?.authority.kind === "workspace" && !!props.onShareSite;
+  const isOwnerLocalApp =
+    needsPublication && !props.sharedView && site?.authority.kind === "workspace";
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const toggleInspector = useCallback(() => setInspectorOpen((open) => !open), []);
+  useEffect(() => {
+    setInspectorOpen(false);
+  }, [props.workspaceId, props.siteRoot]);
+  useEffect(() => {
+    if (!isOwnerLocalApp || !(props.visible ?? true) || !(props.focused ?? true)) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "i") {
+        event.preventDefault();
+        toggleInspector();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isOwnerLocalApp, props.visible, props.focused, toggleInspector]);
   const appView = useAppView({
     workspaceId: props.workspaceId,
     appRoot: props.siteRoot,
@@ -670,6 +690,7 @@ export function SitePreviewPage(props: {
     holdFocus: reviewOpen,
     notices: props.notices,
     reportError: props.reportError,
+    onToggleInspector: isOwnerLocalApp ? toggleInspector : undefined,
   });
   const onTitle = props.onTitle;
   const title = site?.title;
@@ -814,6 +835,22 @@ export function SitePreviewPage(props: {
                   : undefined
               }
             />
+          ) : null}
+          {isOwnerLocalApp ? (
+            <IconButton
+              data-testid="app-view-inspector-toggle"
+              aria-label="Inspect data"
+              aria-pressed={inspectorOpen}
+              title={
+                bridge().platform === "darwin"
+                  ? "Inspect data (⇧⌘I)"
+                  : "Inspect data (Ctrl+Shift+I)"
+              }
+              onClick={toggleInspector}
+              className={`size-7 ${inspectorOpen ? "bg-selected text-ink" : ""}`}
+            >
+              <Terminal size={13} aria-hidden />
+            </IconButton>
           ) : null}
           {needsPublication ? (
             <IconButton
@@ -983,7 +1020,15 @@ export function SitePreviewPage(props: {
             ) : null}
 
             {needsPublication ? (
-              <AppViewBody view={appView} onReview={() => setReviewOpen(true)} />
+              <>
+                <AppViewBody view={appView} onReview={() => setReviewOpen(true)} />
+                {isOwnerLocalApp && inspectorOpen ? (
+                  <AppInspectorDrawer
+                    workspaceId={props.workspaceId}
+                    onClose={() => setInspectorOpen(false)}
+                  />
+                ) : null}
+              </>
             ) : !preview && blocked && !runningMode ? (
               <RestrictedModeState
                 variant="page"

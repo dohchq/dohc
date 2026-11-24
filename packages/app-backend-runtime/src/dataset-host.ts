@@ -38,10 +38,25 @@ import type {
   DatasetInvocation,
   DatasetInvocationResult,
   DatasetMigration,
+  DatasetSqlQuery,
   createDatasetSupervisor,
   DatasetMigrationCandidate,
 } from "./supervisor.js";
 import type { AppOperationRefusal, JsonValue } from "./protocol.js";
+import type { PersistentSqlParam, PersistentSqlResult } from "./persistent-protocol.js";
+import {
+  createDatasetTraceBuffer,
+  DATASET_TRACE_CAPACITY,
+  traceFailure,
+  traceSuccess,
+  type DatasetTraceEntry,
+} from "./dataset-trace.js";
+export {
+  createDatasetTraceBuffer,
+  DATASET_TRACE_CAPACITY,
+  type DatasetTraceEntry,
+} from "./dataset-trace.js";
+export type { PersistentSqlParam, PersistentSqlResult } from "./persistent-protocol.js";
 import { prepareDatasetRecoveryExport, type RecoveryAttachment } from "./recovery-export.js";
 import { stageDatasetRecovery, type RecoveryLimits } from "./recovery.js";
 import { validateDatasetRecovery } from "./recovery-import.js";
@@ -195,6 +210,7 @@ export interface DatasetHostOptions<Context> {
   journal: DatasetJournal;
   supervisor: {
     invoke(input: DatasetInvocation): Promise<DatasetInvocationResult>;
+    querySql?(input: DatasetSqlQuery): Promise<PersistentSqlResult>;
     migrate(input: DatasetMigration): Promise<DatasetCursor>;
     retire?(scope: DatasetScope): Promise<void>;
   } & Partial<
@@ -772,6 +788,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       );
     return head.cursor;
   }
+  const traces = createDatasetTraceBuffer();
   const host = {
     /** For the trusted executor. Commits and presses claim through the host; deleting a dataset forgets its claims. */
     automationClaims: {
@@ -2284,46 +2301,122 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         if (hash(artifacts(key).operationSource) !== permitted.revision.operationsSha256) denied();
         journal.head(key, authorize);
       }
-      const response = await options.supervisor.invoke({
-        scope: key,
-        tables: approvedLinkRead
-          ? [table.sqlName]
-          : permitted.revision.definition.tables.map((table) => table.sqlName),
-        restrictTables: approvedLinkRead || undefined,
-        operation: operation.name,
-        profile,
-        caller: approvedLinkRead
-          ? { ...permitted.authority.caller, approvedRead: operationId }
-          : permitted.authority.caller,
-        callerKey: hash(JSON.stringify([permitted.authority.principalKey, through])),
-        input,
-        idempotencyKey,
-        payloadSha256: hash(JSON.stringify([raw.revisionSha256, operationId, input])),
-        readOnly: operation.readOnly,
-        files: resources.files,
-        accountAndAttach: resources.accountAndAttach,
-        signal: raw.signal,
-        authorize,
-        ...(permitted.authority.beforeCommit
-          ? { beforeCommit: permitted.authority.beforeCommit }
-          : {}),
-        recordCommit: (commit) =>
-          automations.recordCommit({ ...commit, approved: permitted.revision, actor: committedBy }),
-        ...(operation.reversedBy === undefined
-          ? {}
-          : { refuseResult: (result: JsonValue) => missingUndo(operation, result) }),
-      });
+      const started = performance.now();
+      let response: DatasetInvocationResult;
+      try {
+        response = await options.supervisor.invoke({
+          scope: key,
+          tables: approvedLinkRead
+            ? [table.sqlName]
+            : permitted.revision.definition.tables.map((table) => table.sqlName),
+          restrictTables: approvedLinkRead || undefined,
+          operation: operation.name,
+          profile,
+          caller: approvedLinkRead
+            ? { ...permitted.authority.caller, approvedRead: operationId }
+            : permitted.authority.caller,
+          callerKey: hash(JSON.stringify([permitted.authority.principalKey, through])),
+          input,
+          idempotencyKey,
+          payloadSha256: hash(JSON.stringify([raw.revisionSha256, operationId, input])),
+          readOnly: operation.readOnly,
+          files: resources.files,
+          accountAndAttach: resources.accountAndAttach,
+          signal: raw.signal,
+          authorize,
+          ...(permitted.authority.beforeCommit
+            ? { beforeCommit: permitted.authority.beforeCommit }
+            : {}),
+          recordCommit: (commit) =>
+            automations.recordCommit({
+              ...commit,
+              approved: permitted.revision,
+              actor: committedBy,
+            }),
+          ...(operation.reversedBy === undefined
+            ? {}
+            : { refuseResult: (result: JsonValue) => missingUndo(operation, result) }),
+        });
+      } catch (error) {
+        traces.record(
+          key.datasetId,
+          traceFailure(operation.name, permitted.authority.caller.kind, started, error),
+        );
+        throw error;
+      }
+      const { metrics, changesetBytes, ...publicResponse } = response;
+      traces.record(
+        key.datasetId,
+        traceSuccess(
+          operation.name,
+          permitted.authority.caller.kind,
+          started,
+          response.revision,
+          metrics,
+          changesetBytes ?? 0,
+        ),
+      );
       if (approvedLinkRead) {
         const result = validateDatasetReadResult(
-          response.result,
+          publicResponse.result,
           input,
           permitted.revision.definition,
           operation,
         );
         authorize();
-        return { ...response, result };
+        return { ...publicResponse, result };
       }
-      return response;
+      return publicResponse;
+    },
+    async querySql(
+      context: Context,
+      raw: DatasetScope & {
+        sql: string;
+        params?: PersistentSqlParam[];
+        explain?: boolean;
+        limit?: number;
+        signal?: AbortSignal;
+      },
+    ): Promise<PersistentSqlResult> {
+      const key = scope(raw);
+      if (!options.supervisor.querySql)
+        throw new DatasetHostError("invalid", "Read-only SQL inspection is unavailable.");
+      const ownerToken = JSON.stringify(owner(context, key));
+      live(key);
+      const approved = revision(key);
+      const authorize = () => {
+        raw.signal?.throwIfAborted();
+        live(key);
+        if (JSON.stringify(owner(context, key)) !== ownerToken) denied();
+      };
+      authorize();
+      const result = await options.supervisor.querySql({
+        scope: key,
+        tables: approved.definition.tables.map((table) => table.sqlName),
+        sql: raw.sql,
+        params: raw.params,
+        explain: raw.explain,
+        maxRows: raw.limit,
+        signal: raw.signal,
+        authorize,
+      });
+      authorize();
+      return result;
+    },
+    trace(
+      context: Context,
+      raw: DatasetScope & { limit?: number },
+    ): { entries: DatasetTraceEntry[]; limit: number } {
+      const key = scope(raw);
+      owner(context, key);
+      revision(key);
+      const limit = raw.limit ?? 50;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > DATASET_TRACE_CAPACITY)
+        throw new DatasetHostError(
+          "invalid",
+          `Choose a trace limit from 1 to ${DATASET_TRACE_CAPACITY}.`,
+        );
+      return { entries: traces.list(key.datasetId, limit), limit };
     },
     /** Resolve a protected resource only while the operation's data revision and grants still hold. */
     async readOperation<T>(
@@ -2375,6 +2468,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
   };
   return Object.assign(host, {
     async retireScope(key: DatasetScope): Promise<void> {
+      traces.clear(key.datasetId);
       await options.supervisor.retire?.(key);
       for (const [id, saved] of migrationCandidates) {
         if (

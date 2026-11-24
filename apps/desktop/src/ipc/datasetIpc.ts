@@ -501,6 +501,8 @@ export function createDatasetHandler<
             "list",
             "describe",
             "types",
+            "sql",
+            "trace",
             "createForm",
             "invoke",
             "upload",
@@ -992,6 +994,32 @@ export function createDatasetHandler<
             const path = await writeDatasetTypes(operation.workspace.rootPath, revision);
             current();
             return { kind: "types-written" as const, path, revision: revision.revision };
+          }
+          if (input.action === "sql") {
+            if (!("querySql" in data) || !data.querySql)
+              throw new Error(
+                "Read-only SQL inspection needs a local Collection or a synced Collection copy on this computer.",
+              );
+            const result = await data.querySql({
+              datasetId: input.datasetId,
+              sql: input.sql,
+              params: input.params,
+              explain: input.explain,
+              limit: input.limit,
+              signal: operation.signal,
+            });
+            current();
+            return { kind: "sql" as const, ...result };
+          }
+          if (input.action === "trace") {
+            if (!("trace" in data) || !data.trace)
+              throw new Error("Operation traces are unavailable for this Collection.");
+            const result = await data.trace({
+              datasetId: input.datasetId,
+              limit: input.limit,
+            });
+            current();
+            return { kind: "trace" as const, ...result };
           }
           if (input.action === "upload") {
             const description = await data.describe(input.datasetId);

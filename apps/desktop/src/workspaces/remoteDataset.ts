@@ -35,7 +35,12 @@ import type { CloudCredentials } from "./cloudCredentialStore";
 import { credentialScopedOperation } from "./credentialScopedOperation";
 import { RELAY_FETCH_TIMEOUT_MS } from "./sharedChannels";
 import type { DatasetTransferReceipt, DatasetTransferTarget } from "./localDatasetTransfer";
-import type { createDatasetHost } from "@dohc/app-backend-runtime/dataset-host";
+import type {
+  createDatasetHost,
+  DatasetTraceEntry,
+  PersistentSqlParam,
+  PersistentSqlResult,
+} from "@dohc/app-backend-runtime/dataset-host";
 import type { CollectionAutomationPress } from "@dohc/automation-executor/collection-automations";
 import type { AutomationPressActor } from "@dohc/workspace-engine-client";
 
@@ -140,6 +145,18 @@ export interface OwnerDatasetData {
   setGrant?(input: Extract<DatasetRequest, { action: "setGrant" | "removeGrant" }>): Promise<void>;
   /** Presses a button on the server, which runs its automation. The owner's route only. */
   press?(input: DatasetServerPressInput): Promise<CollectionAutomationPress>;
+  querySql?(input: {
+    datasetId: string;
+    sql: string;
+    params?: PersistentSqlParam[];
+    explain?: boolean;
+    limit?: number;
+    signal?: AbortSignal;
+  }): Promise<PersistentSqlResult & { copy?: import("@dohc/cli/dataset").DatasetCopyStatus }>;
+  trace?(input: {
+    datasetId: string;
+    limit?: number;
+  }): Promise<{ entries: DatasetTraceEntry[]; limit: number }>;
 }
 
 /** A Collection's data on a server, where its owner also reads its grants and presses its buttons. */
@@ -873,6 +890,8 @@ export function createDatasetAuthorityRouter(
         | "pendingAttempts"
         | "reconcileAttempt"
         | "cancelAttempt"
+        | "querySql"
+        | "trace"
       >,
   route: DatasetAuthorityRoute,
 ): OwnerDatasetData {
@@ -1043,6 +1062,20 @@ export function routeEachDataset(
           "This Collection is only on this computer. Move it to your server to give a person access.",
         );
       await authority.setGrant(value);
+    },
+    querySql: async (value) => {
+      const authority = await target(value.datasetId);
+      if (!authority.querySql)
+        throw new Error(
+          "Read-only SQL inspection needs a local Collection or a synced Collection copy on this computer.",
+        );
+      return authority.querySql(value);
+    },
+    trace: async (value) => {
+      const authority = await target(value.datasetId);
+      if (!authority.trace)
+        throw new Error("Operation traces are unavailable for this Collection.");
+      return authority.trace(value);
     },
   };
 }

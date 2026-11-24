@@ -159,7 +159,7 @@ Returns `{ ok: true, recordPath } | { ok: false, reason }`.
 
 ### `dohc_dataset`
 
-Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its dataset.json path relative to the MCP server folder. List and describe return this path; datasetId is internal identity. After a move, update path references. For action create, definition is a dataset.json descriptor object (formatVersion 1 or 2, name, schemaPath, operationsPath, tables, operations; plus datasetId for formatVersion 1). Generated create operations take input: { values: { "<fieldId>": value } }; generated edit operations take input: { id, expectedVersion, values: { "<fieldId>": value } } (keyed by field UUIDs from describe). Apps bind to these same datasets; they have no separate private app store. Action types writes .dohc/types/<name>.d.ts with TypeScript types for the approved tables and operations; an app imports them with import type. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. savePath must be absolute and outside the workspace. A relative sourcePath is read only and resolves from the MCP server folder; an absolute sourcePath is also supported. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.
+Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its dataset.json path relative to the MCP server folder. List and describe return this path; datasetId is internal identity. After a move, update path references. For action create, definition is a dataset.json descriptor object (formatVersion 1 or 2, name, schemaPath, operationsPath, tables, operations; plus datasetId for formatVersion 1). Generated create operations take input: { values: { "<fieldId>": value } }; generated edit operations take input: { id, expectedVersion, values: { "<fieldId>": value } } (keyed by field UUIDs from describe). Apps bind to these same datasets; they have no separate private app store. Action types writes .dohc/types/<name>.d.ts with TypeScript types for the approved tables and operations; an app imports them with import type. Action sql runs an owner-only read-only SQL query (or EXPLAIN QUERY PLAN with explain: true) under the SQLite authorizer. Action trace lists recent in-memory operation timings and SQL metrics. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. savePath must be absolute and outside the workspace. A relative sourcePath is read only and resolves from the MCP server folder; an absolute sourcePath is also supported. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -1908,6 +1908,35 @@ Writes .dohc/types/<name>.d.ts from the approved revision. Import it with import
 - `expectedDatasetId`: `UUID`
 
 Returns `{ kind: "types-written", path, revision }`.
+
+#### `dohc dataset sql`
+
+Run a read-only SQL query or EXPLAIN QUERY PLAN against a Collection.
+
+Owner only. Refuses writes, PRAGMAs, and internal tables. Pass explain: true to inspect SQLite's query plan.
+
+- `workspaceId`: `string`. Required.
+- `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
+- `sql`: `string`. Required.
+- `params`: `(string | number | null)[]`
+- `explain`: `boolean`
+- `limit`: `integer`
+
+Returns `{ kind: "sql", columns, rows, truncated, durationMs, revision, explain, copy?: { offline, savedAtMs, coverage?: "saved-pages", host?, signedOut?: true, updateFailed?: true } }`.
+
+#### `dohc dataset trace`
+
+Show recent operation timings and SQL metrics for a Collection.
+
+Owner only. Keeps the last 200 invocations in memory per Collection.
+
+- `workspaceId`: `string`. Required.
+- `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
+- `limit`: `integer`
+
+Returns `{ kind: "trace", entries: { atMs, operation, durationMs, statementCount, rowsRead, wasmMemoryBytes, changesetBytes, callerKind, revision, status, refusalCode }[], limit }`.
 
 #### `dohc dataset history`
 

@@ -15,7 +15,7 @@ import {
   datasetNumberText,
   losslessDatasetNumber,
 } from "@dohc/security-contract/dataset-conversion";
-import { authorize, evaluate } from "./guest.js";
+import { authorize, evaluate, hasStatement, sqlTokens } from "./guest.js";
 import {
   AppBackendLimitError,
   appBackendLimit,
@@ -30,6 +30,7 @@ import type { JsonValue } from "./protocol.js";
 import {
   checkCursor,
   checkDigest,
+  checkSqlQuery,
   DEFAULT_WORKER_MEMORY_BYTES,
   digest,
   openRequest,
@@ -61,8 +62,11 @@ import type {
   CpuBudgets,
   DatasetCursor,
   OpenRequest,
+  OperationMetrics,
   PersistentCommand,
   PersistentResult,
+  PersistentSqlParam,
+  PersistentSqlResult,
   PersistentWorkerMessage,
 } from "./persistent-protocol.js";
 
@@ -408,11 +412,14 @@ async function handle(command: PersistentCommand): Promise<PersistentResult> {
     transaction = true;
     const session = db.createSession();
     const limits = operationLimits(config.limits, command.profile);
-    let result: JsonValue, attachedFileIds: string[], changeset: Uint8Array;
+    let result: JsonValue,
+      attachedFileIds: string[],
+      changeset: Uint8Array,
+      metrics: OperationMetrics | undefined;
     try {
       if (command.guest.tables.some((table) => !config.tables.includes(table)))
         reject("invalid_input", "Operation tables exceed Collection access.");
-      ({ result, attachedFileIds } = await appCode(async () => {
+      ({ result, attachedFileIds, metrics } = await appCode(async () => {
         if (process.env.DOHC_TEST_APP_CODE_READY === "1") process.send!({ testAppCodeReady: true });
         const evaluated = await evaluate(
           db!,
@@ -426,6 +433,7 @@ async function handle(command: PersistentCommand): Promise<PersistentResult> {
             command.profile,
           ),
           attachedFileIds: evaluated.attachedFileIds,
+          metrics: evaluated.metrics,
         };
       }));
       db.setAuthorizer(null);
@@ -460,8 +468,89 @@ async function handle(command: PersistentCommand): Promise<PersistentResult> {
       changeset,
       changesetSha256,
       attachedFileIds,
+      ...(metrics ? { metrics } : {}),
       columns,
     };
+  }
+  if (command.kind === "querySql") {
+    progress("running the Collection SQL query");
+    expectCursor(command.input.expected);
+    const {
+      sql: rawSql,
+      params,
+      explain,
+      maxRows,
+      maxBytes,
+    } = checkSqlQuery(command.input, config.limits.sourceBytes);
+    const tokens = hasStatement(rawSql) ? sqlTokens(rawSql) : [];
+    if (!tokens.length) reject("invalid_input", "SQL query is empty.");
+    const semicolon = tokens.findIndex((token) => !token.quoted && token.value === ";");
+    if (semicolon !== -1 && semicolon < tokens.length - 1)
+      reject("invalid_input", "Run one SQL statement at a time.");
+    if (!tokens[0]!.quoted && tokens[0]!.value === "explain")
+      reject("invalid_input", "Pass explain: true instead of writing EXPLAIN in the SQL.");
+    const sql = explain ? `EXPLAIN QUERY PLAN ${rawSql}` : rawSql;
+    const started = performance.now();
+    db.exec("BEGIN");
+    transaction = true;
+    try {
+      authorize(db, { tables: config.tables, readOnly: true }, { persistentConnection: true });
+      const activeDb = db;
+      return appCode((): PersistentSqlResult => {
+        try {
+          const statement = activeDb.prepare(sql);
+          const resultColumns = statement.columns().map((column) => column.name);
+          const rows: Array<Record<string, PersistentSqlParam>> = [];
+          let bytes = 2,
+            truncated = false;
+          for (const rawRow of statement.iterate(...params)) {
+            if (rows.length >= maxRows) {
+              truncated = true;
+              break;
+            }
+            const row: Record<string, PersistentSqlParam> = {};
+            for (const [key, value] of Object.entries(rawRow)) {
+              row[key] =
+                typeof value === "bigint"
+                  ? Number.isSafeInteger(Number(value))
+                    ? Number(value)
+                    : String(value)
+                  : value instanceof Uint8Array
+                    ? `<${value.byteLength} bytes>`
+                    : value === null || typeof value === "string" || typeof value === "number"
+                      ? value
+                      : String(value);
+            }
+            const nextBytes =
+              bytes + Buffer.byteLength(JSON.stringify(row)) + (rows.length ? 1 : 0);
+            if (nextBytes > maxBytes) {
+              truncated = true;
+              break;
+            }
+            bytes = nextBytes;
+            rows.push(row);
+          }
+          return {
+            columns: resultColumns,
+            rows,
+            truncated,
+            durationMs: Math.max(0, Math.round(performance.now() - started)),
+            revision: cursor.revision,
+            explain,
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "SQL query failed.";
+          if (/not authorized|prohibited/i.test(message))
+            reject(
+              "not_authorized",
+              "Only read-only SELECT queries against this Collection's approved tables are allowed.",
+            );
+          reject("invalid_input", message.slice(0, 1024));
+        }
+      });
+    } finally {
+      rollback();
+    }
   }
   if (command.kind === "apply") {
     if (!batching) progress("reapplying a saved change");

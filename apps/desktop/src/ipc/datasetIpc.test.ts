@@ -1841,3 +1841,72 @@ it("surfaces local and share-link boundApps on permissions and migration preview
     ],
   });
 });
+
+it("allows owner sql and trace while refusing both on shared views", async () => {
+  const f = fixture();
+  const querySql = vi.fn(async () => ({
+    columns: ["id"],
+    rows: [{ id: "r1" }],
+    truncated: false,
+    durationMs: 2,
+    revision: 1,
+    explain: false,
+  }));
+  const trace = vi.fn(async () => ({
+    limit: 20,
+    entries: [
+      {
+        atMs: 1700000000000,
+        operation: "submit",
+        durationMs: 3,
+        statementCount: 1,
+        rowsRead: 1,
+        wasmMemoryBytes: 1024,
+        changesetBytes: 64,
+        callerKind: "owner",
+        revision: 1,
+        status: "ok" as const,
+        refusalCode: null,
+      },
+    ],
+  }));
+  Object.assign(f.host, { querySql, trace });
+
+  const sql = DatasetResult.parse(
+    await f.handler("window", {
+      action: "sql",
+      workspaceId: "workspace",
+      datasetPath: "data/dataset.json",
+      sql: "SELECT id FROM responses",
+    }),
+  );
+  expect(sql).toMatchObject({ kind: "sql", columns: ["id"], rows: [{ id: "r1" }] });
+  const traced = DatasetResult.parse(
+    await f.handler("window", {
+      action: "trace",
+      workspaceId: "workspace",
+      datasetPath: "data/dataset.json",
+      limit: 20,
+    }),
+  );
+  expect(traced).toMatchObject({ kind: "trace", limit: 20 });
+
+  f.workspace.shareView = { shareId: "share-1", grantId: "grant-1" };
+  const sqlRefusal = await f
+    .handler("window", {
+      action: "sql",
+      workspaceId: "workspace",
+      datasetPath: "data/dataset.json",
+      sql: "SELECT id FROM responses",
+    })
+    .catch((error) => error);
+  expect(isDatasetOwnerOnly(sqlRefusal)).toBe(true);
+  const traceRefusal = await f
+    .handler("window", {
+      action: "trace",
+      workspaceId: "workspace",
+      datasetPath: "data/dataset.json",
+    })
+    .catch((error) => error);
+  expect(isDatasetOwnerOnly(traceRefusal)).toBe(true);
+});

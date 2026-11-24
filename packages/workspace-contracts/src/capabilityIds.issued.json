@@ -145,6 +145,8 @@
   "dataset.relation.choices.prepare",
   "dataset.restore",
   "dataset.schema.change.prepare",
+  "dataset.sql.read",
+  "dataset.trace.read",
   "dataset.types.write",
   "device.motion.read",
   "device.privacy.open",

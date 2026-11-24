@@ -34,6 +34,7 @@ import {
   createDatasetHost,
   DatasetHostError,
   type DatasetHostOptions,
+  type PersistentSqlParam,
 } from "@dohc/app-backend-runtime/dataset-host";
 import {
   createDatasetJournal,
@@ -1561,6 +1562,31 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       invoke: (input: LocalDatasetInvocation) => invoke(input),
       query: (input: LocalDatasetInvocation) => invoke(input, true),
       action: (input: LocalDatasetInvocation) => invoke(input, false),
+      querySql(input: {
+        datasetId: string;
+        sql: string;
+        params?: PersistentSqlParam[];
+        explain?: boolean;
+        limit?: number;
+        signal?: AbortSignal;
+      }) {
+        return tracked(() =>
+          trackDatasetOperation(input.datasetId, () =>
+            host.querySql(owner, {
+              workspaceId,
+              datasetId: input.datasetId,
+              sql: input.sql,
+              params: input.params,
+              explain: input.explain,
+              limit: input.limit,
+              signal: signal(input.signal),
+            }),
+          ),
+        );
+      },
+      async trace(input: { datasetId: string; limit?: number }) {
+        return tracked(async () => host.trace(owner, { workspaceId, ...input }));
+      },
       /** For main's automation executor only. Claims are this workspace's, from the host's ledger. */
       automations: {
         context(input: LocalDatasetAutomationContext): LocalDatasetAutomationContext {

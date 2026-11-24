@@ -31,9 +31,13 @@ import type {
 import {
   openPersistentAppBackend,
   PersistentRuntimeError,
+  type OperationMetrics,
   type PersistentAppBackend,
   type PersistentRuntimeOptions,
+  type PersistentSqlParam,
+  type PersistentSqlResult,
 } from "./persistent.js";
+export type { OperationMetrics, PersistentSqlParam, PersistentSqlResult } from "./persistent.js";
 import { acquireSupervisorOwnership, type SupervisorOwnership } from "./worker-ownership.js";
 import {
   readMigrationPreviewReportPage,
@@ -103,6 +107,15 @@ export interface DatasetInvocationResult {
   result: JsonValue;
   revision: number;
   replayed: boolean;
+  metrics?: OperationMetrics;
+  changesetBytes?: number;
+}
+export interface DatasetSqlQuery extends DatasetAccess {
+  sql: string;
+  params?: PersistentSqlParam[];
+  explain?: boolean;
+  maxRows?: number;
+  maxBytes?: number;
 }
 export interface DatasetMigrationCandidate {
   candidateId: string;
@@ -1117,6 +1130,8 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
           result: prepared.result,
           revision: worker.cursor.revision,
           replayed: false,
+          ...(prepared.metrics ? { metrics: prepared.metrics } : {}),
+          changesetBytes: 0,
         };
       }
       const refusal = input.refuseResult?.(prepared.result) ?? null;
@@ -1171,6 +1186,8 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         result: JSON.parse(committed.receipt.resultJson),
         revision: committed.receipt.revision,
         replayed: committed.kind === "replayed",
+        ...(prepared.metrics ? { metrics: prepared.metrics } : {}),
+        changesetBytes: committed.kind === "replayed" ? 0 : prepared.changeset.byteLength,
       };
     } catch (error) {
       if (isAppBackendRuntimeError(error)) {
@@ -1183,6 +1200,54 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         throw error;
       }
       // Closing rolls back any proposal. A durable host event remains and is replayed next time.
+      if (lane.worker) await stopWorker(lane);
+      currentAuthority();
+      throw error;
+    } finally {
+      input.signal?.removeEventListener("abort", abort);
+    }
+  }
+
+  async function runSql(lane: Lane, input: DatasetSqlQuery): Promise<PersistentSqlResult> {
+    const captured = head(input);
+    if (!captured.active)
+      throw new Error(
+        "This host stopped accepting changes to this Collection. Its owner can publish its app again to finish moving it, or finish restoring it from its recovery file.",
+      );
+    let worker: Worker | undefined;
+    const abort = () => {
+      void worker?.runtime.abort("This SQL query stopped before it finished.").catch(() => {});
+    };
+    const currentAuthority = () => {
+      const current = head(input);
+      if (!current.active || !sameAuthority(captured.cursor, current.cursor))
+        throw new Error("The Collection's rules changed. Reload the Collection. Then try again.");
+    };
+    try {
+      worker = await recover(lane, input);
+      currentAuthority();
+      input.signal?.addEventListener("abort", abort, { once: true });
+      const result = await worker.runtime.querySql({
+        expected: worker.cursor,
+        sql: input.sql,
+        params: input.params,
+        explain: input.explain,
+        maxRows: input.maxRows,
+        maxBytes: input.maxBytes,
+      });
+      currentAuthority();
+      const after = head(input);
+      if (!sameCursor(after.cursor, worker.cursor))
+        throw new Error("The Collection changed while dohc read it. Try again.");
+      return result;
+    } catch (error) {
+      if (
+        error instanceof PersistentRuntimeError &&
+        (error.code === "invalid_input" || error.code === "not_authorized")
+      ) {
+        currentAuthority();
+        throw error;
+      }
       if (lane.worker) await stopWorker(lane);
       currentAuthority();
       throw error;
@@ -1828,6 +1893,27 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         boundedText(input.callerKey, 1024, "Caller key");
         boundedText(input.idempotencyKey, 128, "Retry key");
         return enqueue(input, bytes, (lane) => execute(lane, input));
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    },
+    querySql(raw: DatasetSqlQuery): Promise<PersistentSqlResult> {
+      try {
+        const sql = boundedText(raw.sql, DEFAULT_LIMITS.sourceBytes, "SQL query");
+        const paramsJson = boundedText(
+          JSON.stringify(raw.params ?? []),
+          DEFAULT_LIMITS.inputBytes,
+          "SQL parameters",
+        );
+        const input: DatasetSqlQuery = {
+          ...raw,
+          scope: copyScope(raw.scope),
+          tables: approvedTables(raw.tables),
+          sql,
+          params: JSON.parse(paramsJson),
+        };
+        const bytes = Buffer.byteLength(sql) + Buffer.byteLength(paramsJson);
+        return enqueue(input, bytes, (lane) => runSql(lane, input));
       } catch (error) {
         return Promise.reject(error);
       }

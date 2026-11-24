@@ -55,6 +55,8 @@ export const DATASET_RESULTS: Record<DatasetAction, DatasetKind[]> = {
   list: ["list", "collections-refused"],
   describe: ["description"],
   types: ["types-written"],
+  sql: ["sql"],
+  trace: ["trace"],
   history: ["history"],
   historyRevision: ["history-revision"],
   prepareHistoryRestore: ["migration-prepared"],

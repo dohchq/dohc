@@ -1745,6 +1745,17 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
       "Run it again after a change is approved.",
     ],
   },
+  sql: {
+    summary: "Run a read-only SQL query or EXPLAIN QUERY PLAN against a Collection.",
+    notes: [
+      "Owner only. Refuses writes, PRAGMAs, and internal tables.",
+      "Pass explain: true to inspect SQLite's query plan.",
+    ],
+  },
+  trace: {
+    summary: "Show recent operation timings and SQL metrics for a Collection.",
+    notes: ["Owner only. Keeps the last 200 invocations in memory per Collection."],
+  },
   history: { summary: "List saved operations, with values to undo edits." },
   historyRevision: { summary: "Show the saved source of one past revision." },
   prepareHistoryRestore: {

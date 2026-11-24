@@ -462,6 +462,22 @@ const DATASET_REQUEST_OPTIONS = [
   datasetAction({ ...selection, action: z.literal("types") }),
   datasetAction({
     ...selection,
+    action: z.literal("sql"),
+    sql: z.string().min(1).max(262_144),
+    params: z
+      .array(z.union([z.string(), z.number().finite(), z.null()]))
+      .max(128)
+      .optional(),
+    explain: z.boolean().optional(),
+    limit: z.number().int().min(1).max(1000).optional(),
+  }),
+  datasetAction({
+    ...selection,
+    action: z.literal("trace"),
+    limit: z.number().int().min(1).max(200).optional(),
+  }),
+  datasetAction({
+    ...selection,
     action: z.literal("lifecycle"),
     after: z.string().min(1).max(256).optional(),
     limit: z.number().int().min(1).max(100).optional(),
@@ -894,6 +910,45 @@ export const DatasetResult = z.discriminatedUnion("kind", [
     .strict(),
   z
     .object({
+      kind: z.literal("sql"),
+      columns: z.array(z.string().max(1024)).max(1024),
+      rows: z
+        .array(z.record(z.string(), z.union([z.string(), z.number().finite(), z.null()])))
+        .max(1000),
+      truncated: z.boolean(),
+      durationMs: z.number().int().nonnegative(),
+      revision: z.number().int().nonnegative(),
+      explain: z.boolean(),
+      copy: DatasetCopyStatus.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("trace"),
+      entries: z
+        .array(
+          z
+            .object({
+              atMs: z.number().int().nonnegative(),
+              operation: z.string().min(1).max(128),
+              durationMs: z.number().int().nonnegative(),
+              statementCount: z.number().int().nonnegative(),
+              rowsRead: z.number().int().nonnegative(),
+              wasmMemoryBytes: z.number().int().nonnegative(),
+              changesetBytes: z.number().int().nonnegative(),
+              callerKind: z.string().min(1).max(64),
+              revision: z.number().int().nonnegative().nullable(),
+              status: z.enum(["ok", "refused", "error"]),
+              refusalCode: z.string().max(128).nullable(),
+            })
+            .strict(),
+        )
+        .max(200),
+      limit: z.number().int().min(1).max(200),
+    })
+    .strict(),
+  z
+    .object({
       kind: z.literal("description"),
       dataset: description,
       copy: DatasetCopyStatus.optional(),
@@ -949,6 +1004,8 @@ export const DATASET_CAPABILITIES = {
   list: "dataset.list",
   describe: "dataset.describe",
   types: "dataset.types.write",
+  sql: "dataset.sql.read",
+  trace: "dataset.trace.read",
   history: "dataset.history.list",
   historyRevision: "dataset.history.revision",
   prepareHistoryRestore: "dataset.history.restore.prepare",

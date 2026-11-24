@@ -74,6 +74,7 @@ export function useAppView(options: {
   holdFocus: boolean;
   notices?: AppViewNotices | undefined;
   reportError?: ReportError | undefined;
+  onToggleInspector?: (() => void) | undefined;
 }) {
   const { workspaceId, appRoot, enabled } = options;
   const viewId = useRef(crypto.randomUUID()).current;
@@ -231,6 +232,8 @@ export function useAppView(options: {
     (event: Shortcut) => {
       const primary = event.ctrlKey || event.metaKey;
       if (event.key === "F5" || (primary && event.key.toLowerCase() === "r")) reload();
+      else if (primary && event.shiftKey && event.key.toLowerCase() === "i")
+        latest.current.onToggleInspector?.();
       else if (event.altKey && event.key === "ArrowLeft") navigate("back");
       else if (event.altKey && event.key === "ArrowRight") navigate("forward");
       else if (event.key === "F6") {

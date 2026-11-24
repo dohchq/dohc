@@ -52,6 +52,29 @@ export interface PersistentPrepareInput {
   readOnly?: boolean;
   files?: AppOperationFile[];
 }
+export interface OperationMetrics {
+  statementCount: number;
+  rowsRead: number;
+  wasmMemoryBytes: number;
+  durationMs: number;
+}
+export type PersistentSqlParam = string | number | null;
+export interface PersistentSqlInput {
+  expected: DatasetCursor;
+  sql: string;
+  params?: PersistentSqlParam[];
+  explain?: boolean;
+  maxRows?: number;
+  maxBytes?: number;
+}
+export interface PersistentSqlResult {
+  columns: string[];
+  rows: Array<Record<string, PersistentSqlParam>>;
+  truncated: boolean;
+  durationMs: number;
+  revision: number;
+  explain: boolean;
+}
 export interface PreparedOperation {
   proposalId: string;
   readOnly: boolean;
@@ -59,6 +82,7 @@ export interface PreparedOperation {
   changeset: Uint8Array;
   changesetSha256: string;
   attachedFileIds: string[];
+  metrics?: OperationMetrics;
   /**
    * Each approved table's column names, in the order a changeset records
    * them. A migration can reorder columns, so reading a changeset needs
@@ -111,8 +135,14 @@ export type PersistentCommand =
   | { kind: "applyBatch"; input: CommittedChangeset[]; chunkMs?: number }
   | { kind: "snapshot"; path: string }
   | { kind: "migrateCheckpoint"; input: MigrateCheckpointInput }
+  | { kind: "querySql"; input: PersistentSqlInput }
   | { kind: "close" };
-export type PersistentResult = DatasetCursor | PreparedOperation | MigratedCheckpoint | null;
+export type PersistentResult =
+  | DatasetCursor
+  | PreparedOperation
+  | MigratedCheckpoint
+  | PersistentSqlResult
+  | null;
 export type PersistentReply =
   | { id: number; ok: true; result: PersistentResult }
   | { id: number; ok: false; error: string; code: string; refusal?: AppOperationRefusal };
@@ -171,6 +201,34 @@ export function checkCursor(cursor: DatasetCursor): void {
   if (!cursor || !Number.isSafeInteger(cursor.revision) || cursor.revision < 0)
     reject("invalid_input", "Invalid dataset revision.");
   checkDigest(cursor.digest);
+}
+export function checkSqlQuery(
+  input: Omit<PersistentSqlInput, "expected">,
+  maxSqlBytes: number,
+): {
+  sql: string;
+  params: PersistentSqlParam[];
+  explain: boolean;
+  maxRows: number;
+  maxBytes: number;
+} {
+  const sql = boundedText(input.sql, maxSqlBytes, "SQL query");
+  const params = input.params ?? [];
+  if (
+    !Array.isArray(params) ||
+    params.length > 128 ||
+    params.some(
+      (v) => v !== null && typeof v !== "string" && (typeof v !== "number" || !Number.isFinite(v)),
+    )
+  )
+    reject("invalid_input", "SQL parameters must be scalar values.");
+  const maxRows = input.maxRows ?? 200,
+    maxBytes = input.maxBytes ?? 256 * 1024;
+  if (!Number.isSafeInteger(maxRows) || maxRows < 1 || maxRows > 1000)
+    reject("invalid_input", "Choose a row limit from 1 to 1000.");
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1024 || maxBytes > 1024 * 1024)
+    reject("invalid_input", "Invalid SQL response size limit.");
+  return { sql, params: [...params], explain: input.explain === true, maxRows, maxBytes };
 }
 export function trustedPath(path: string): string {
   if (typeof path !== "string" || !isAbsolute(path) || path.includes("\0"))

@@ -89,6 +89,7 @@ const jsonFields: Readonly<Record<string, unknown>> = {
   expectedAuthorityRevision: 1,
   stageId: id,
   reviewDigest: hash,
+  sql: "SELECT 1",
 };
 
 export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>> = {
