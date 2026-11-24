@@ -159,22 +159,26 @@ export function createBodySequenceHistory(
  * reading as the stored note. The plugin does this for the sequence it binds. A host that holds a
  * note's document with no editor on it calls this itself.
  *
- * Yjs has no setting for this, and decides it for a whole transaction: after its
- * `afterTransaction` listeners, from this field of the transaction. The field is cleared from a
- * deep observer of the sequence. Yjs calls that before those listeners, and also when another
- * observer or listener throws, so a host listener that throws from `afterTransaction` cannot
- * leave the field set. A transaction from elsewhere that changes the sequence also leaves alone
- * the formatting items of any other text it changes in the same document. Those items change
- * nothing that text reads as; they stay stored. A transaction that does not change the sequence
- * is cleaned as Yjs cleans it.
+ * Yjs has no setting for this, and decides it for a whole transaction. Each text's observer call
+ * sets a field of the transaction, and after the `afterTransaction` listeners Yjs cleans the
+ * texts the transaction put items into or deleted items of. For a transaction from elsewhere
+ * that did so to the sequence, a `beforeObserverCalls` listener makes that field read false,
+ * whatever is set later: it gives the transaction a getter in the field's place. That costs
+ * nothing for each event, and no listener that throws can undo it. When one throws before this
+ * one runs, Yjs calls no observer and cleans nothing. Such a transaction also leaves alone the
+ * formatting items of any other text it changes in the same document. Those items change nothing
+ * that text reads as; they stay stored. Any other transaction is cleaned as Yjs cleans it.
  */
 export function keepBodySequenceFormatting(sequence: Y.Text): () => void {
-  if (!sequence.doc) throw new Error("The body sequence must be part of a Yjs document.");
-  const keep = (_events: unknown, transaction: Y.Transaction) => {
-    transaction._needFormattingCleanup = false;
+  const doc = sequence.doc;
+  if (!doc) throw new Error("The body sequence must be part of a Yjs document.");
+  const keep = (transaction: Y.Transaction) => {
+    const changed: ReadonlyMap<unknown, unknown> = transaction.changed;
+    if (transaction.local || !changed.has(sequence)) return;
+    Object.defineProperty(transaction, "_needFormattingCleanup", { get: () => false, set() {} });
   };
-  sequence.observeDeep(keep);
-  return () => sequence.unobserveDeep(keep);
+  doc.on("beforeObserverCalls", keep);
+  return () => doc.off("beforeObserverCalls", keep);
 }
 
 type Bound = { sequence: Y.Text; history: Y.UndoManager; reader: BodyReader };
@@ -439,12 +443,13 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
         !isBusy(doc) && unread.length === 0 && reader.reading().doc === base;
       showsWhatStands = (base) => !showing && stands(base);
 
-      const show = (select?: (transaction: Transaction, end: number) => void) => {
+      const show = (select?: (transaction: Transaction, end: number) => void, was?: Selection) => {
         if (destroyed) return;
         const reading = reader.reading();
         const current = view.state.doc;
         const start =
           current === reading.doc ? null : current.content.findDiffStart(reading.doc.content);
+        let transaction = view.state.tr;
         if (start === null) reader.adopt(current);
         else {
           let { a, b } = current.content.findDiffEnd(reading.doc.content)!;
@@ -453,7 +458,6 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
             a += overlap;
             b += overlap;
           }
-          let transaction = view.state.tr;
           const step = new ReplaceStep(start, a, reading.doc.slice(start, b));
           let same = !transaction.maybeStep(step).failed && transaction.doc.eq(reading.doc);
           if (!same) {
@@ -462,6 +466,10 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
           }
           if (same) reader.adopt(transaction.doc);
           select?.(transaction, b);
+        }
+        const isAsItWas = was !== undefined && transaction.doc.eq(was.$anchor.doc);
+        if (isAsItWas) transaction.setSelection(was.map(transaction.doc, StepMap.empty));
+        if (start !== null || isAsItWas) {
           if (view.state.storedMarks) transaction.setStoredMarks(view.state.storedMarks);
           showing = true;
           try {
@@ -545,7 +553,7 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
           return options.unwritten?.("overtaken");
         }
         const target = { sequence, reader };
-        let why: BodySequenceUnwritten | null = "overtaken";
+        let why: BodySequenceUnwritten | null = null;
         writing = true;
         try {
           const how = howToWrite(target, pending);
@@ -554,7 +562,8 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
           if (lines.length > 0) {
             if (!change(false, () => giveBoundaries(target, lines)))
               return void (why = ran ? "overtaken" : "guarded");
-            if (isBusy(doc) || unread.length > 0 || !reader.reading().doc.eq(base)) return;
+            if (isBusy(doc) || unread.length > 0 || !reader.reading().doc.eq(base))
+              return void (why = "overtaken");
             reader.adopt(base);
           }
           const recorded = pending.some(
@@ -566,12 +575,10 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
             writing = false;
           });
           const guarded = lines.length > 0 ? "guardedAfterBoundary" : "guarded";
-          why = wrote ? null : ran ? "overtaken" : guarded;
+          if (!wrote) why = ran ? "overtaken" : guarded;
         } finally {
           writing = false;
-          const isAsItWas = why !== null && why !== "overtaken";
-          const was = isAsItWas ? selections.get(pending[0]!) : undefined;
-          show(was && ((shows) => shows.setSelection(was.map(shows.doc, StepMap.empty))));
+          show(undefined, why && why !== "overtaken" ? selections.get(pending[0]!) : undefined);
           if (why) options.unwritten?.(why);
         }
       };

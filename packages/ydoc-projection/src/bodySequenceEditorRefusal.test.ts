@@ -1,10 +1,14 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from "vitest";
-import { LINES, note, person, stopEveryone } from "./bodySequenceTestSupport.js";
+import { editorOn, LINES, note, page, person, stopEveryone } from "./bodySequenceTestSupport.js";
 
+const planner = vi.hoisted(() => ({ throws: false }));
 vi.mock("./bodySequenceWriting.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./bodySequenceWriting.js")>()),
-  howToWrite: () => null,
+  howToWrite() {
+    if (planner.throws) throw new Error("the planner");
+    return null;
+  },
 }));
 
 afterEach(stopEveryone);
@@ -24,5 +28,25 @@ it.each(["bare", "hosted"] as const)(
     expect(a.sent).toEqual([]);
     expect(a.view.state.doc.toJSON()).toEqual(before);
     a.expectMirror();
+  },
+);
+
+it.each(["bare", "hosted"] as const)(
+  "says the dispatch cannot be written when no trial settles, and nothing when the trial throws, on a %s page",
+  (shape) => {
+    const told: string[] = [];
+    const a = editorOn(page(note(...LINES), 10, shape), shape, [], [], {
+      unwritten: (why) => told.push(why),
+    });
+    a.typeAt(1, 2, "x");
+    expect(told).toEqual(["unwritable"]);
+    planner.throws = true;
+    try {
+      expect(() => a.type("x")).toThrow("the planner");
+    } finally {
+      planner.throws = false;
+    }
+    expect(told).toHaveLength(1);
+    expect(a.sent).toEqual([]);
   },
 );

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -1578,6 +1578,33 @@ describe("formatting items Yjs would delete on its own", () => {
     expect(receiveDelete(false)).toEqual({ flags: [true, false], sent: 1, formats: 1 });
     expect(receiveDelete(true)).toEqual({ flags: [false], sent: 0, formats: 2 });
   });
+
+  it.each(["with no editor", "under an editor"] as const)(
+    "are kept %s at no cost for each boundary a change from elsewhere touches: Yjs sorts no events by their place in the note",
+    (how) => {
+      const base = page(note("one", "two", "three"), 10);
+      const peer = page(note("one", "two", "three"), 20);
+      const release =
+        how === "under an editor"
+          ? (editorOn(base), () => {})
+          : keepBodySequenceFormatting(base.sequence);
+      peer.doc.transact(() => {
+        for (const item of peer.sequence.toDelta() as { insert: unknown }[])
+          if (item.insert instanceof Y.XmlElement) item.insert.setAttribute("type", "heading");
+      });
+      const places = vi.spyOn(Y.YEvent.prototype, "path", "get");
+      try {
+        for (const update of peer.sent) base.receive(update);
+        expect(places).not.toHaveBeenCalled();
+      } finally {
+        places.mockRestore();
+      }
+      release();
+      expect(readBodySequence(schema, base.doc).toString()).toBe(
+        'doc(heading("one"), heading("two"), heading("three"))',
+      );
+    },
+  );
 
   it.each(["with no editor", "under an editor"] as const)(
     "stay when a listener the host registered first throws from afterTransaction, %s: the note's document sends no change of its own",
@@ -3414,6 +3441,78 @@ describe.each(["bare", "hosted"] as const)(
       expect(a.sent).toHaveLength(2);
       expect(a.boundaryIds()).toEqual(given);
       expect(told).toHaveLength(1);
+      a.expectMirror();
+    });
+
+    it("says nothing of a dispatch that was written, when a listener of the host throws from afterTransaction as it is sent", () => {
+      const base = page(note("abc"), 10, shape);
+      let armed = false;
+      base.doc.on("afterTransaction", () => {
+        if (!armed) return;
+        armed = false;
+        throw new Error("the host's listener");
+      });
+      const told: string[] = [];
+      const a = editorOn(base, shape, [], [], { unwritten: (why) => told.push(why) });
+      a.select([0, 1]);
+      armed = true;
+      expect(() => a.type("X")).toThrow("the host's listener");
+      expect(readBodySequence(schema, a.doc).textContent).toBe("aXbc");
+      expect(a.sent).toHaveLength(1);
+      expect(told).toEqual([]);
+    });
+
+    it("says nothing when the host's guard throws, which is none of the reasons", () => {
+      const told: string[] = [];
+      const a = editorOn(page(note("abc"), 10, shape), shape, [], [], {
+        edit() {
+          throw new Error("the host's guard");
+        },
+        unwritten: (why) => told.push(why),
+      });
+      a.select([0, 1]);
+      expect(() => a.type("X")).toThrow("the host's guard");
+      expect(a.sent).toEqual([]);
+      expect(told).toEqual([]);
+    });
+
+    it("puts the selection back as it was when the guard does not run a dispatch that leaves the document as it read: a letter typed over the same letter", () => {
+      const told: string[] = [];
+      const a = editorOn(page(note("abc"), 10, shape), shape, [], [], {
+        edit: () => false,
+        unwritten: (why) => told.push(why),
+      });
+      a.select([0, 1], [0, 2]);
+      const selected = a.view.state.selection.toJSON();
+      const shown = a.shown.count;
+      a.type("b");
+      expect(told).toEqual(["guarded"]);
+      expect(a.lines()).toEqual(["abc"]);
+      expect(a.view.state.selection.toJSON()).toEqual(selected);
+      expect(a.shown.count).toBe(shown + 1);
+      expect(a.sent).toEqual([]);
+      a.expectMirror();
+    });
+
+    it("leaves the selection where the shown note puts it when the guard takes a change from elsewhere and then does not run the dispatch: the place it was is no place in that note", () => {
+      const base = page(note("abc", "defgh"), 10, shape);
+      const peer = person(note("abc", "defgh"), 20, shape);
+      peer.select([0, 1], [1, 5]);
+      peer.press("Backspace");
+      const fromPeer = peer.sent.splice(0);
+      const told: string[] = [];
+      const a = editorOn(base, shape, [], [], {
+        edit() {
+          for (const update of fromPeer.splice(0)) base.receive(update);
+          return false;
+        },
+        unwritten: (why) => told.push(why),
+      });
+      a.select([1, 5]);
+      a.type("X");
+      expect(told).toEqual(["guarded"]);
+      expect(a.lines()).toEqual(["a"]);
+      expect(a.sent).toEqual([]);
       a.expectMirror();
     });
 
