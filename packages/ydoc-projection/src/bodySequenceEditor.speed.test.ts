@@ -8,6 +8,7 @@ import { createBodyReader } from "./bodySequenceReading.js";
 import {
   boundary,
   declared,
+  element,
   note,
   noteOf,
   page,
@@ -201,8 +202,19 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)(
         sequence.insert(sequence.length, LINE, {});
       }
     });
-    const timed = (...acts: ((view: EditorView) => void)[]) => {
-      const { view } = editorWithNoPage(headed, 40);
+    const underCode = noteOf(({ sequence }) => {
+      sequence.insertEmbed(0, boundary({ type: "codeBlock", language: null }), {});
+      sequence.insert(sequence.length, LINE, {});
+      sequence.insertEmbed(sequence.length, element("wikilink", { target: "Page" }), {});
+      sequence.insert(sequence.length, "tail", {});
+      for (let line = 1; line < 10_000; line++) {
+        sequence.insertEmbed(sequence.length, boundary(), {});
+        sequence.insert(sequence.length, LINE, {});
+      }
+    });
+    const timed = (...acts: ((view: EditorView) => void)[]): string[] => timedOn(headed, ...acts);
+    const timedOn = (baseline: Uint8Array, ...acts: ((view: EditorView) => void)[]) => {
+      const { view } = editorWithNoPage(baseline, 40);
       return acts.map((act) => {
         const start = performance.now();
         act(view);
@@ -219,6 +231,59 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)(
       `${edits}: the next letter typed there, once the line has its boundary: ${typed[1]!}`,
       `${edits}: one Enter in its middle, once: ${timed((view) => view.dispatch(view.state.tr.split(30)))[0]!}`,
       `${edits}: one Enter at its start, once: ${timed((view) => view.dispatch(view.state.tr.split(1)))[0]!}`,
+    );
+    const codeEnd = 1 + LETTERS;
+    const paragraph = codeEnd + 1;
+    const under = paragraph + 7;
+    const below = under + LETTERS + 2;
+    const inCode = timedOn(
+      underCode,
+      (view) => view.dispatch(view.state.tr.insertText("x", codeEnd)),
+      (view) => view.dispatch(view.state.tr.insertText("x", codeEnd + 1)),
+    );
+    const language = timedOn(
+      underCode,
+      (view) => view.dispatch(view.state.tr.setNodeMarkup(0, undefined, { language: "js" })),
+      (view) => view.dispatch(view.state.tr.setNodeMarkup(0, undefined, { language: "ts" })),
+    );
+    const joined = timedOn(
+      underCode,
+      (view) => view.dispatch(view.state.tr.join(under)),
+      (view) => view.dispatch(view.state.tr.insertText("x", paragraph + 3)),
+    );
+    const cut = timedOn(
+      underCode,
+      (view) => view.dispatch(view.state.tr.delete(codeEnd - 1, paragraph + 2)),
+      (view) => view.dispatch(view.state.tr.insertText("x", codeEnd - 1)),
+    );
+    const divided = timedOn(
+      underCode,
+      (view) =>
+        view.dispatch(view.state.tr.replaceWith(0, 0, schema.nodes.horizontalRule!.create())),
+      (view) =>
+        view.dispatch(view.state.tr.replaceWith(0, 0, schema.nodes.horizontalRule!.create())),
+    );
+    const apart = timedOn(
+      underCode,
+      (view) => view.dispatch(view.state.tr.join(below)),
+      (view) => view.dispatch(view.state.tr.split(below - 1)),
+      (view) => view.dispatch(view.state.tr.join(below)),
+      (view) => view.dispatch(view.state.tr.split(below - 1)),
+      (view) => view.dispatch(view.state.tr.join(below)),
+    );
+    const spill = "10,000 paragraphs under a code block whose paragraph after it has no boundary";
+    report.push(
+      `${spill}: the first letter typed at the code block's end: ${inCode[0]!}`,
+      `${spill}: the second letter typed there: ${inCode[1]!}`,
+      `${spill}: the code block's language changed: ${language[0]!}`,
+      `${spill}: its language changed again: ${language[1]!}`,
+      `${spill}: the paragraph under that paragraph joined into it, which gives it its boundary first, once: ${joined[0]!}`,
+      `${spill}: the next letter typed in it: ${joined[1]!}`,
+      `${spill}: a selection from the code into that paragraph deleted, which gives it its boundary first, once: ${cut[0]!}`,
+      `${spill}: the next letter typed at the code block's end: ${cut[1]!}`,
+      `${spill}: a divider put above the code block, which gives that paragraph its boundary first, once: ${divided[0]!}`,
+      `${spill}: a second divider put above it: ${divided[1]!}`,
+      `${spill}: the two paragraphs under that paragraph joined, which leaves it as it is, then split and joined again: ${apart.join(", ")}`,
     );
     console.log(report.join("\n"));
   },

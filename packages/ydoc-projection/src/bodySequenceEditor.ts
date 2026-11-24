@@ -33,13 +33,10 @@ import {
   type Followed,
 } from "./bodySequenceReading.js";
 import {
-  changesBlocks,
   giveBoundaries,
   keepsContainers,
   keepsPairs,
-  linesGivenBoundaries,
-  linesMade,
-  linesWithNoBoundary,
+  linesToGiveFirst,
   writeTransaction,
 } from "./bodySequenceWriting.js";
 
@@ -307,7 +304,10 @@ function holdSelection(
  * transaction in it is kept out (`addToHistory` false), so undoing a typed letter also takes back
  * what a plugin appended to that dispatch. When the dispatch edits a line that has no boundary of
  * its own, or needs such a line to have one, that boundary is written first, in a transaction and
- * an update of its own that the history does not follow.
+ * an update of its own that the history does not follow. The change the history follows gives no
+ * such line a boundary. To find the lines, a dispatch that reaches past one block next to such a
+ * line is first written to a copy of the note. When the copy does not come to read as the
+ * editor's document, nothing is written and the editor shows the note again.
  *
  * A change of the sequence from elsewhere, and an undo or redo, is shown as one transaction that
  * replaces what differs, keeps the nodes of the blocks it does not touch, and keeps the selection
@@ -509,7 +509,8 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
         const target = { sequence, reader };
         writing = true;
         try {
-          const lines = linesGivenBoundaries(target, pending);
+          const lines = linesToGiveFirst(target, pending);
+          if (lines === null) return;
           if (lines.length > 0) {
             if (!change(false, () => giveBoundaries(target, lines))) return;
             if (isBusy(doc) || unread.length > 0 || !reader.reading().doc.eq(base)) return;
@@ -518,10 +519,8 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
           const recorded = pending.some(
             (transaction) => transaction.getMeta(ADD_TO_HISTORY) !== false,
           );
-          const had = changesBlocks(pending) ? linesWithNoBoundary(reader.reading()) : null;
           change(recorded, () => {
             for (const transaction of pending) if (!writeTransaction(target, transaction)) break;
-            if (had) giveBoundaries(target, linesMade(reader.reading(), had));
             writing = false;
           });
         } finally {

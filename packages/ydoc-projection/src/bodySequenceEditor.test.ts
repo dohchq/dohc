@@ -21,7 +21,14 @@ import {
   isBodySequenceChange,
   keepBodySequenceFormatting,
 } from "./bodySequenceEditor.js";
-import { boundaryAt, createBodyReader, isAddedParagraph } from "./bodySequenceReading.js";
+import {
+  blockHolding,
+  blockStartingAt,
+  boundaryAt,
+  createBodyReader,
+  isAddedParagraph,
+  positionOf,
+} from "./bodySequenceReading.js";
 import {
   deleteRange,
   GIVEN_BOUNDARY,
@@ -34,7 +41,13 @@ import {
   writeBody,
   type BodyChange,
 } from "./bodySequenceWriter.js";
-import { keepsContainers } from "./bodySequenceWriting.js";
+import {
+  keepsContainers,
+  linesAWriteLeavesWanting,
+  linesWithNoBoundary,
+  type BodyWriting,
+  type LineWithNoBoundary,
+} from "./bodySequenceWriting.js";
 import { readBodySequence } from "./bodySequenceYjs.js";
 import {
   boundary,
@@ -1848,8 +1861,145 @@ describe.each(["bare", "hosted"] as const)(
   },
 );
 
+describe.each(["bare", "hosted"] as const)(
+  "on a %s page, a selection that runs from a code block into the paragraph after it",
+  (shape) => {
+    const AFTER_CODE = [stored(CODE, "ab", WIKILINK, "cd")];
+    const codeOf = (text: string) => schema.nodes.codeBlock!.create(null, schema.text(text));
+
+    it("records no boundary for that paragraph when a letter is typed over a selection that ends at its start, so a letter someone else types there stays there when the change is undone", () => {
+      const a = person(noteOfLines(AFTER_CODE), 10, shape);
+      const b = person(noteOfLines(AFTER_CODE), 20, shape);
+      a.select([0, 1], [1, 0]);
+      const effects = a.effects(() => a.type("Z"));
+      expect(a.view.state.doc.toString()).toBe('doc(codeBlock("aZ"), paragraph(wikilink, "cd"))');
+      expect(effects.madeBoundaries).toEqual([]);
+      exchange(a, b);
+      b.typeAt(1, 0, "P");
+      exchange(b, a);
+      expect(a.undo()).toBe(true);
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.view.state.doc.toString()).toBe(
+          'doc(codeBlock("ab"), paragraph("P", wikilink, "cd"))',
+        );
+      }
+    });
+
+    it("keeps the code block's boundary when a code block is put over a selection from its start to that paragraph's start, so a language someone else gives it at the same moment stays", () => {
+      const a = person(noteOfLines(AFTER_CODE), 10, shape);
+      const b = person(noteOfLines(AFTER_CODE), 20, shape);
+      const [code] = a.boundaryIds();
+      const effects = a.effects(() =>
+        a.view.dispatch(tiptapInsertContentAt(a.view.state.tr, 1, 5, codeOf("X"))),
+      );
+      expect(a.view.state.doc.toString()).toBe('doc(codeBlock("X"), paragraph(wikilink, "cd"))');
+      expect(effects.goneBoundaries).toEqual([]);
+      expect(effects.madeBoundaries).toEqual([]);
+      expect(a.boundaryIds()).toEqual([code]);
+      b.view.dispatch(b.view.state.tr.setNodeMarkup(0, undefined, { language: "js" }));
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.view.state.doc.toString()).toBe(
+          'doc(codeBlock("X"), paragraph(wikilink, "cd"))',
+        );
+        expect(each.view.state.doc.child(0).attrs.language).toBe("js");
+      }
+    });
+
+    it("makes that paragraph the heading a pasted slice ends in", () => {
+      const a = person(noteOfLines(AFTER_CODE), 10, shape);
+      const before = a.view.state.doc.toJSON();
+      const slice = new Slice(
+        Fragment.from([
+          schema.nodes.paragraph!.create(),
+          schema.nodes.heading!.create({ level: 2 }),
+        ]),
+        1,
+        1,
+      );
+      a.view.dispatch(a.view.state.tr.replace(2, 5, slice));
+      expect(a.view.state.doc.toString()).toBe('doc(codeBlock("a"), heading(wikilink, "cd"))');
+      a.expectMirror();
+      expect(a.undo()).toBe(true);
+      expect(a.view.state.doc.toJSON()).toEqual(before);
+      a.expectMirror();
+    });
+
+    const KEPT = [stored(CODE, "ab", WIKILINK, "x", HARD_BREAK)];
+    const UNDER_TWO = [stored(CODE, "cc"), stored(CODE, "kk", WIKILINK, "x", HARD_BREAK)];
+    it.each([
+      [
+        "Backspace is pressed over a selection that ends in it",
+        KEPT,
+        (a: Person) => {
+          a.select([0, 1], [1, 1]);
+          a.press("Backspace");
+        },
+        'doc(codeBlock("a"), paragraph("x", hardBreak))',
+      ],
+      [
+        "a letter is typed over a selection that ends in it",
+        KEPT,
+        (a: Person) => {
+          a.select([0, 1], [1, 1]);
+          a.type("Z");
+        },
+        'doc(codeBlock("aZ"), paragraph("x", hardBreak))',
+      ],
+      [
+        "a code block is put over a selection that ends in it",
+        KEPT,
+        (a: Person) => a.view.dispatch(tiptapInsertContentAt(a.view.state.tr, 1, 6, codeOf("X"))),
+        'doc(codeBlock("X"), paragraph("x", hardBreak))',
+      ],
+      [
+        "Backspace is pressed over a selection from two code blocks above into it",
+        UNDER_TWO,
+        (a: Person) => {
+          a.select([0, 1], [2, 1]);
+          a.press("Backspace");
+        },
+        'doc(codeBlock("c"), paragraph("x", hardBreak))',
+      ],
+    ] as const)(
+      "gives that paragraph its boundary first when %s and ProseMirror keeps it a paragraph, so it is still the heading someone else made it when the change is undone",
+      (_name, lines, act, shown) => {
+        const a = person(noteOfLines(lines), 10, shape);
+        const b = person(noteOfLines(lines), 20, shape);
+        const paragraph = a.view.state.doc.childCount - 1;
+        const before = a.view.state.doc.toString();
+        act(a);
+        expect(a.view.state.doc.toString()).toBe(shown);
+        a.expectMirror();
+        exchange(a, b);
+        b.select([1, 0]);
+        expect(b.retype("heading", { level: 3 })).toBe(true);
+        exchange(b, a);
+        expect(a.undo()).toBe(true);
+        exchange(a, b);
+        for (const each of [a, b]) {
+          each.expectMirror();
+          expect(each.view.state.doc.toString()).toBe(
+            before.replace(/paragraph\(wikilink/, "heading(wikilink"),
+          );
+          expect(each.view.state.doc.child(paragraph).attrs.level).toBe(3);
+        }
+      },
+    );
+  },
+);
+
 const ORACLE_NOTES: [string, StoredLine[]][] = [
   ["two paragraphs", [stored({}, "ab"), stored({}, "cd")]],
+  ["code, then an item and text", [stored(CODE, "ab", WIKILINK, "cd")]],
+  ["code, then an item, a letter and an item", [stored(CODE, "ab", WIKILINK, "x", HARD_BREAK)]],
+  [
+    "code, then code with an item, a letter and an item",
+    [stored(CODE, "cc"), stored(CODE, "kk", WIKILINK, "x", HARD_BREAK)],
+  ],
   [
     "a heading, an empty line and a paragraph",
     [stored({ type: "heading", level: 2 }, "ab"), stored({}), stored({}, "cd")],
@@ -1963,16 +2113,18 @@ ORACLE_NOTES.push(
 
 const ORACLE_COUNTS = {
   outcomes: {
-    applied: 16721,
-    "filtered by keepsContainers": 5205,
-    "not offered": 609,
+    applied: 24039,
+    "filtered by keepsContainers": 6948,
+    "not offered": 650,
     "range error": 0,
   },
-  undone: 16260,
-  given: 10240,
+  undone: 23520,
+  given: 14746,
+  typedInBySomeoneElse: 25585,
+  retypedBySomeoneElse: 18712,
   excepted: {
-    "a mark on an inline item": 511,
-    "formatting stored under a code block's letters": 15,
+    "a mark on an inline item": 560,
+    "formatting stored under a code block's letters": 18,
   },
 };
 
@@ -2034,33 +2186,11 @@ const ORACLE_EXCEPTIONS: {
   },
 ];
 
-function linesWithNoBoundary(a: Person): { path: string; items: string[]; next?: string }[] {
-  const reading = createBodyReader(schema, a.sequence, a.containers).reading();
-  const tokens = tokensOf(a.sequence);
-  const lines: { path: string; items: string[]; next?: string }[] = [];
-  reading.blocks.forEach((block, at) => {
-    if (boundaryAt(reading, at) >= 0) return;
-    const items = block.shown.flatMap((piece) => {
-      const first = reading.bases[at]! + piece.index;
-      const size = "text" in piece ? piece.text.length : 1;
-      return Array.from({ length: size }, (_, unit) => tokens[first + unit]!.id);
-    });
-    const next =
-      items.length === 0 && reading.lines[at]?.element ? tokens[reading.bases[at]!] : null;
-    lines.push({
-      path: JSON.stringify(reading.paths[at]),
-      items,
-      ...(next ? { next: next.id } : {}),
-    });
-  });
-  return lines;
-}
-
-const attrsOfBoundary = (token: { attrs: string }) =>
-  Object.fromEntries(JSON.parse(token.attrs) as [string, unknown][]) as {
-    path?: unknown;
-    type?: unknown;
-  };
+const SECOND_PERSONS_LETTER = "\u2603";
+const writingOf = (note: { sequence: Y.Text; containers: Y.Map<unknown> }): BodyWriting => ({
+  sequence: note.sequence,
+  reader: createBodyReader(schema, note.sequence, note.containers),
+});
 
 type Outcome = "applied" | "filtered by keepsContainers" | "not offered" | "range error";
 const oracle = {
@@ -2069,6 +2199,8 @@ const oracle = {
   excepted: new Map<string, number>(),
   undone: 0,
   given: 0,
+  typedInBySomeoneElse: 0,
+  retypedBySomeoneElse: 0,
 };
 
 describe("the note reads as the document ProseMirror computed", () => {
@@ -2084,7 +2216,6 @@ describe("the note reads as the document ProseMirror computed", () => {
     const check = (label: string, act: (a: Person) => void) => {
       const a = person(baseline, 10);
       const before = a.view.state.doc;
-      const lacking = linesWithNoBoundary(a);
       let applied: Transaction | null = null;
       let filtered: Transaction | null = null;
       const dispatch = a.view.dispatch.bind(a.view);
@@ -2127,80 +2258,15 @@ describe("the note reads as the document ProseMirror computed", () => {
         }
         expect(a.sent.length, label).toBeLessThanOrEqual(2);
         if (a.sent.length === 2) oracle.given += 1;
-        const tokens = tokensOf(a.sequence);
-        const givenFirst = a.sent.length === 2 ? boundariesMadeIn(a.sent[0]!) : [];
-        for (const made of a.sent.length > 0 ? boundariesMadeIn(a.sent.at(-1)!) : []) {
-          const at = tokens.findIndex((token) => token.id === made);
-          const next = tokens[at + 1];
-          const own = tokens[at];
-          if (!next || !own || own.kind !== "boundary") continue;
-          const attrs = attrsOfBoundary(own);
-          let above = at - 1;
-          while (tokens[above]?.kind === "boundary" && !givenFirst.includes(tokens[above]!.id))
-            above -= 1;
-          const wasGivenItsOwn = givenFirst.includes(tokens[above]?.id ?? "");
-          const standing = new Set(tokens.map((token) => token.id));
-          const runsAcrossBlocks = wrote.steps.some((step, order) => {
-            let across = false;
-            step.getMap().forEach((oldStart, oldEnd) => {
-              const doc = wrote.docs[order]!;
-              if (oldEnd - oldStart > 1 && !doc.resolve(oldStart).sameParent(doc.resolve(oldEnd)))
-                across = true;
-            });
-            return across;
-          });
-          const isItsOwn =
-            !wasGivenItsOwn &&
-            lacking.some((line) => {
-              if (line.path !== JSON.stringify(attrs.path)) return false;
-              if (line.next !== undefined)
-                return !runsAcrossBlocks && line.next === next.id && attrs.type === "paragraph";
-              return !runsAcrossBlocks && line.items.find((id) => standing.has(id)) === next.id;
-            });
-          if (isItsOwn)
-            throw new Error(
-              `${label} in ${before.toString()}: the recorded change wrote the boundary of a line that had none`,
-            );
-        }
-        const recorded = a.sent.length > 0 ? Y.decodeUpdate(a.sent.at(-1)!) : null;
-        const idOf = (id: Y.ID) => `${String(id.client)}:${String(id.clock)}`;
-        const deleted = (id: string) => {
-          const [client, clock] = id.split(":").map(Number) as [number, number];
-          return (recorded?.ds.clients.get(client) ?? []).some(
-            (range) => clock >= range.clock && clock < range.clock + range.len,
+        const settled = declared(95);
+        Y.applyUpdate(settled.doc, baseline);
+        if (a.sent.length === 2) Y.applyUpdate(settled.doc, a.sent[0]!);
+        const again = linesAWriteLeavesWanting(writingOf(settled), [wrote]);
+        settled.doc.destroy();
+        if (again.wanting.length > 0 || !again.isSettled)
+          throw new Error(
+            `${label} in ${before.toString()}: the recorded change ${again.isSettled ? `left the lines of blocks ${again.wanting.join()} wanting a boundary, and gave them none first` : "does not read as the editor's document when written again"}`,
           );
-        };
-        const standing = new Set(tokens.map((token) => token.id));
-        for (const line of lacking) {
-          const first = line.items.find((id) => standing.has(id));
-          if (!recorded || first === undefined) continue;
-          const own = new Set(line.items);
-          const inIt = (id: Y.ID | null) => id !== null && own.has(idOf(id));
-          const startsALine = (struct: Y.Item) =>
-            struct.content instanceof Y.ContentType &&
-            struct.content.type instanceof Y.XmlElement &&
-            struct.content.type.nodeName === BLOCK_ELEMENT;
-          const edited =
-            line.items.some(deleted) ||
-            recorded.structs.some(
-              (struct) =>
-                struct instanceof Y.Item &&
-                ((inIt(struct.origin) && (!startsALine(struct) || inIt(struct.rightOrigin))) ||
-                  (struct.parent instanceof Y.ID && inIt(struct.parent))),
-            );
-          if (!edited) continue;
-          const now = createBodyReader(schema, a.sequence, a.containers).reading();
-          const at = tokens.findIndex((token) => token.id === first);
-          const stillBare = now.blocks.some(
-            (block, index) =>
-              boundaryAt(now, index) < 0 &&
-              block.shown.some((piece) => now.bases[index]! + piece.index === at),
-          );
-          if (stillBare)
-            throw new Error(
-              `${label} in ${before.toString()}: the recorded change edited a line that had no boundary, and gave it none first`,
-            );
-        }
         if (a.undo()) {
           a.expectMirror();
           const undone = readBodySequence(schema, a.doc);
@@ -2221,6 +2287,93 @@ describe("the note reads as the document ProseMirror computed", () => {
       }
       oracle.outcomes[outcome] += 1;
       stopEveryone();
+      if (outcome === "applied") withASecondPerson(label, act);
+    };
+
+    const blockOf = (who: Person, line: LineWithNoBoundary) => {
+      const reading = writingOf(who).reader.reading();
+      const tokens = tokensOf(who.sequence);
+      const idOf = (id: Y.ID) => `${String(id.client)}:${String(id.clock)}`;
+      const indexOf = (ids: readonly Y.ID[]) =>
+        tokens.findIndex((token) => ids.some((id) => idOf(id) === token.id));
+      if (line.bare !== "item") {
+        const first = indexOf(line.items);
+        const at = first < 0 ? -1 : positionOf(reading, first);
+        return { reading, block: at < 0 ? -1 : blockHolding(reading, at), at };
+      }
+      const under = line.owner ? indexOf([line.owner]) : -1;
+      const below = under < 0 ? -1 : blockStartingAt(reading, positionOf(reading, under));
+      const isItsParagraph =
+        below > 0 &&
+        reading.blocks[below - 1]!.node.type.name === "paragraph" &&
+        reading.paths[below - 1]!.join() === reading.paths[below]!.join();
+      const block = isItsParagraph ? below - 1 : -1;
+      return { reading, block, at: block < 0 ? -1 : reading.starts[block]! + 1 };
+    };
+
+    const withASecondPerson = (label: string, act: (a: Person) => void) => {
+      const noted = declared(96);
+      Y.applyUpdate(noted.doc, baseline);
+      const lines = linesWithNoBoundary(writingOf(noted));
+      noted.doc.destroy();
+      for (const line of lines) {
+        const a = person(baseline, 10);
+        const b = person(baseline, 20);
+        const was = a.view.state.doc;
+        try {
+          act(a);
+        } catch (error) {
+          if (!(error instanceof RangeError)) throw error;
+        }
+        const did = a.view.state.doc;
+        const idOf = (id: Y.ID) => `${String(id.client)}:${String(id.clock)}`;
+        const headed = line.bare === "item" ? line.owner : line.items[0];
+        const givenIt =
+          a.sent.length < 2 || !headed
+            ? []
+            : Y.decodeUpdate(a.sent[0]!).structs.flatMap((struct) =>
+                struct instanceof Y.Item &&
+                struct.rightOrigin &&
+                Y.compareIDs(struct.rightOrigin, headed)
+                  ? [idOf(struct.id)]
+                  : [],
+              );
+        exchange(a, b);
+        const there = blockOf(b, line);
+        const own =
+          there.block < 0 || boundaryAt(there.reading, there.block) < 0
+            ? null
+            : there.reading.lines[there.block]!.item!.id;
+        if (there.block >= 0 && (own === null || givenIt.includes(idOf(own)))) {
+          const keptItsKind = there.reading.blocks[there.block]!.node.sameMarkup(line.node);
+          b.view.dispatch(b.view.state.tr.insertText(SECOND_PERSONS_LETTER, there.at));
+          b.view.dispatch(
+            b.view.state.tr.setSelection(TextSelection.create(b.view.state.doc, there.at)),
+          );
+          const retyped = line.bare !== "item" && b.retype("heading", { level: 3 });
+          exchange(b, a);
+          if (a.undo()) {
+            exchange(a, b);
+            oracle.typedInBySomeoneElse += 1;
+            if (retyped && keptItsKind) oracle.retypedBySomeoneElse += 1;
+            for (const each of [a, b]) {
+              each.expectMirror();
+              const now = blockOf(each, line);
+              const block = now.block < 0 ? null : now.reading.blocks[now.block]!.node;
+              const holdsTheLetter = block?.textContent.includes(SECOND_PERSONS_LETTER) === true;
+              const isTheKind =
+                !retyped ||
+                !keptItsKind ||
+                (block?.type.name === "heading" && block.attrs.level === 3);
+              if (!holdsTheLetter || !isTheKind)
+                throw new Error(
+                  `${label} in ${was.toString()}, which gave ${did.toString()}: someone else typed at the start of block ${String(line.block)}${retyped ? " and made it a heading" : ""}, and after the undo the note reads ${each.view.state.doc.toString()}`,
+                );
+            }
+          }
+        }
+        stopEveryone();
+      }
     };
     const select = (a: Person, from: number, to = from) =>
       a.view.dispatch(
@@ -2277,6 +2430,39 @@ describe("the note reads as the document ProseMirror computed", () => {
         check(`two paragraphs pasted ${over}, the first whole`, (a) =>
           a.view.dispatch(a.view.state.tr.replaceRange(pos, to, twoParagraphs(0))),
         );
+        check(`a letter typed ${over}`, (a) =>
+          a.view.dispatch(a.view.state.tr.insertText("Z", pos, to)),
+        );
+        check(`Backspace ${over}`, (a) => {
+          select(a, pos, to);
+          a.press("Backspace");
+        });
+        check(`a code block put ${over}`, (a) =>
+          a.view.dispatch(
+            tiptapInsertContentAt(
+              a.view.state.tr,
+              pos,
+              to,
+              schema.nodes.codeBlock!.create(null, schema.text("X")),
+            ),
+          ),
+        );
+        check(`an empty paragraph and a heading pasted ${over}`, (a) =>
+          a.view.dispatch(
+            a.view.state.tr.replaceRange(
+              pos,
+              to,
+              new Slice(
+                Fragment.from([
+                  schema.nodes.paragraph!.create(),
+                  schema.nodes.heading!.create({ level: 2 }),
+                ]),
+                1,
+                1,
+              ),
+            ),
+          ),
+        );
         check(`a heading and a paragraph put ${over}`, (a) =>
           a.view.dispatch(
             tiptapInsertContentAt(a.view.state.tr, pos, to, [
@@ -2308,7 +2494,7 @@ describe("the note reads as the document ProseMirror computed", () => {
         .map(([outcome, count]) => `${outcome} ${String(count)}`)
         .join(
           ", ",
-        )}; undone and read as before ${String(oracle.undone)}; a line given its boundary first ${String(oracle.given)}; exceptions: ${
+        )}; undone and read as before ${String(oracle.undone)}; a line given its boundary first ${String(oracle.given)}; someone else typed at the start of a line that had no boundary, and it was undone ${String(oracle.typedInBySomeoneElse)}, of which they also made the line a heading ${String(oracle.retypedBySomeoneElse)}; exceptions: ${
         [...oracle.excepted].map(([name, count]) => `${name} (${String(count)})`).join("; ") ||
         "none"
       }`,
@@ -2317,6 +2503,8 @@ describe("the note reads as the document ProseMirror computed", () => {
     expect(oracle.outcomes).toEqual(ORACLE_COUNTS.outcomes);
     expect(oracle.undone).toBe(ORACLE_COUNTS.undone);
     expect(oracle.given).toBe(ORACLE_COUNTS.given);
+    expect(oracle.typedInBySomeoneElse).toBe(ORACLE_COUNTS.typedInBySomeoneElse);
+    expect(oracle.retypedBySomeoneElse).toBe(ORACLE_COUNTS.retypedBySomeoneElse);
     expect(Object.fromEntries(oracle.excepted)).toEqual(ORACLE_COUNTS.excepted);
   });
 });
@@ -3418,8 +3606,8 @@ describe("an anchor in a paragraph that has been typed in", () => {
 
 type PeerSweep = { tried: number; nothingWritten: number; compared: number; enterUndone: number };
 const PEER_SWEEP_COUNTS: Record<HostShape, PeerSweep> = {
-  bare: { tried: 220, nothingWritten: 31, compared: 189, enterUndone: 62 },
-  hosted: { tried: 220, nothingWritten: 31, compared: 189, enterUndone: 62 },
+  bare: { tried: 256, nothingWritten: 37, compared: 219, enterUndone: 74 },
+  hosted: { tried: 256, nothingWritten: 37, compared: 219, enterUndone: 74 },
 };
 
 describe.each(["bare", "hosted"] as const)(
@@ -3885,7 +4073,7 @@ describe.each(["bare", "hosted"] as const)(
         'doc(mathBlock, heading("X"), paragraph("Y"), paragraph("d"))',
       ],
     ] as const)(
-      "stores a heading put over %s and into the next line as a heading, and gives that line its boundary first",
+      "stores a heading put over %s and into the next line as a heading",
       (_name, lines, from, shown) => {
         const a = person(noteOfLines(lines), 10, shape);
         const before = a.view.state.doc.toJSON();
@@ -3894,8 +4082,6 @@ describe.each(["bare", "hosted"] as const)(
         a.view.dispatch(a.view.state.tr.replaceWith(from, from + 6, [heading, paragraph]));
         expect(a.view.state.doc.toString()).toBe(shown);
         a.expectMirror();
-        expect(a.sent).toHaveLength(2);
-        expect(boundariesMadeIn(a.sent[0]!)).toHaveLength(1);
         expect(a.undo()).toBe(true);
         expect(a.view.state.doc.toJSON()).toEqual(before);
         a.expectMirror();
@@ -4059,7 +4245,7 @@ const tally = (): Tally => ({
   examples: [],
 });
 const sayTally = (name: string, { notes, examples, ...counts }: Tally) =>
-  `the editor against the reference writer, ${name}: ${String(notes)} notes; compared ${String(counts.compared)}; read the same and gave boundaries to other lines ${JSON.stringify(counts.givenDifferently)}; gave the same and read differently ${JSON.stringify(counts.readDifferently)}; made another edit, so read and gave differently ${JSON.stringify(counts.bothDifferently)}; gave and read the same and kept other boundaries ${JSON.stringify(counts.keptDifferently)}; gave, read and kept the same and recorded other boundaries ${JSON.stringify(counts.recordedDifferently)}; only one of the two took the edit ${String(counts.onlyOne)}, neither ${String(counts.neither)}\n${examples.join("\n")}`;
+  `the editor against the reference writer, ${name}: ${String(notes)} notes; compared ${String(counts.compared)}; read the same and gave boundaries to other lines ${JSON.stringify(counts.givenDifferently)}; gave the same and read differently ${JSON.stringify(counts.readDifferently)}; made another edit, so read and gave differently ${JSON.stringify(counts.bothDifferently)}; of all compared, kept other boundaries of the note ${JSON.stringify(counts.keptDifferently)}; of all compared, recorded other new boundaries ${JSON.stringify(counts.recordedDifferently)}; only one of the two took the edit ${String(counts.onlyOne)}, neither ${String(counts.neither)}\n${examples.join("\n")}`;
 
 const BUCKETS = [
   "givenDifferently",
@@ -4091,8 +4277,16 @@ const WHY_THEY_DIFFER: { why: string; edits: readonly string[] }[] = [
     edits: ["a delete of a whole block"],
   },
   {
-    why: "A delete that runs from one block into another that holds what the first cannot leaves two blocks in ProseMirror. The reference writer joins what fits.",
-    edits: ["a delete across blocks"],
+    why: "A delete that runs from one block into another that holds what the first cannot leaves two blocks in ProseMirror, also under a typed letter or Enter. The reference writer joins what fits. Where the second block is a paragraph with no boundary and stays one, the editor gives it its boundary first, as a line the change edits; the reference writer's delete gives none to a line it runs into.",
+    edits: [
+      "a delete across blocks",
+      "a letter typed over a selection across blocks",
+      "Enter over a selection across blocks",
+    ],
+  },
+  {
+    why: "The editor writes a divider over a selection that ends in another block as that block's start replaced, so that block's boundary becomes the divider's, and it gives no boundary to a line the selection takes away whole. The reference writer joins that block away, gives the first line a boundary, and makes that line the divider or writes the divider a new boundary.",
+    edits: ["a divider over a selection across blocks"],
   },
   {
     why: "Backspace in an empty line under a block that holds no text takes the line away in ProseMirror, and the block above for the reference writer.",
@@ -4109,13 +4303,19 @@ const withNoReason = (counts: Differential) =>
   );
 
 const DIFFERENTIAL_COUNTS: Differential = {
-  compared: 7042,
-  onlyOne: 1655,
-  neither: 373,
-  givenDifferently: { "Enter over a selection across blocks, from the note's start": 18 },
+  compared: 8062,
+  onlyOne: 1888,
+  neither: 398,
+  givenDifferently: {
+    "Enter over a selection across blocks, from the note's start": 18,
+    "a delete across blocks": 3,
+    "a letter typed over a selection across blocks": 3,
+    "Enter over a selection across blocks": 2,
+    "a divider over a selection across blocks": 2,
+  },
   readDifferently: {
-    "Enter over a selection across blocks, from the note's start": 25,
-    "a change of kind to codeBlock": 20,
+    "Enter over a selection across blocks, from the note's start": 28,
+    "a change of kind to codeBlock": 23,
     "a block put first in its container": 2,
     "a divider": 2,
     "a divider over a selection": 2,
@@ -4125,26 +4325,40 @@ const DIFFERENTIAL_COUNTS: Differential = {
     "a delete of a whole block": 1,
   },
   bothDifferently: {
-    "Enter over a selection across blocks, from the note's start": 14,
+    "Enter over a selection across blocks, from the note's start": 17,
+    "a delete across blocks": 9,
+    "a letter typed over a selection across blocks": 9,
+    "Enter over a selection across blocks": 6,
     "two paragraphs pasted over a selection, the first whole": 1,
     "a block put right under another": 1,
   },
   keptDifferently: {
-    "Enter over a selection across blocks, from the note's start": 4,
-    "two paragraphs pasted over a selection across blocks, the first whole": 32,
-    "a divider over a selection across blocks": 6,
+    "Enter over a selection across blocks, from the note's start": 61,
+    "a divider over a selection across blocks": 84,
+    "two paragraphs pasted over a selection across blocks, the first whole": 44,
     "a divider over a selection": 2,
     "a divider over a selection, as a delete and a block put in": 2,
+    "a delete of a whole block": 1,
   },
-  recordedDifferently: {},
+  recordedDifferently: {
+    "Enter over a selection across blocks, from the note's start": 46,
+    "a divider over a selection across blocks": 78,
+    "two paragraphs pasted over a selection across blocks, the first whole": 44,
+    "a change of kind to codeBlock": 23,
+    "a delete across blocks": 12,
+    "a letter typed over a selection across blocks": 12,
+    "Enter over a selection across blocks": 8,
+    "a divider over a selection": 2,
+    "a divider over a selection, as a delete and a block put in": 2,
+    "a block put right under another": 2,
+  },
 };
 const DIFFERENTIAL_COUNTS_AT_RANDOM: Differential = {
-  compared: 536,
-  onlyOne: 203,
-  neither: 46,
+  compared: 558,
+  onlyOne: 227,
+  neither: 48,
   givenDifferently: {},
   readDifferently: {
-    "a delete across blocks": 1,
     "a change of kind to codeBlock": 6,
     "a block put first in its container": 2,
     "a divider": 2,
@@ -4154,13 +4368,30 @@ const DIFFERENTIAL_COUNTS_AT_RANDOM: Differential = {
     "a divider over a selection, as a delete and a block put in": 1,
     "a join": 1,
   },
-  bothDifferently: { "Enter over a selection across blocks, from the note's start": 4 },
+  bothDifferently: {
+    "a letter typed over a selection across blocks": 2,
+    "a delete across blocks": 1,
+    "Enter over a selection across blocks, from the note's start": 4,
+  },
   keptDifferently: {
-    "two paragraphs pasted over a selection across blocks, the first whole": 3,
+    "two paragraphs pasted over a selection across blocks, the first whole": 7,
+    "a divider over a selection across blocks": 4,
+    "Enter over a selection across blocks, from the note's start": 2,
+    "a divider over a selection": 2,
+    "a divider over a selection, as a delete and a block put in": 2,
+    "a delete of a whole block": 1,
+    "a join": 1,
+  },
+  recordedDifferently: {
+    "two paragraphs pasted over a selection across blocks, the first whole": 7,
+    "a letter typed over a selection across blocks": 2,
+    "a delete across blocks": 1,
+    "a divider over a selection across blocks": 4,
+    "a change of kind to codeBlock": 6,
+    "Enter over a selection across blocks, from the note's start": 3,
     "a divider over a selection": 2,
     "a divider over a selection, as a delete and a block put in": 2,
   },
-  recordedDifferently: {},
 };
 
 function placesOf(
@@ -4335,7 +4566,11 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
       const gaveTheSame = references.filter(
         (said) => givenBy(said) === JSON.stringify(byTheEditor),
       );
-      const keptTheSame = gaveTheSame.filter((said) => said.kept === kept);
+      const orAll = (some: typeof references, all: typeof references) =>
+        some.length > 0 ? some : all;
+      const givers = orAll(gaveTheSame, references);
+      const keptTheSame = givers.filter((said) => said.kept === kept);
+      const keepers = orAll(keptTheSame, givers);
       const readsTheSame = readTheSame.length > 0;
       const gave = `the editor gave ${JSON.stringify(byTheEditor)}, the reference ${givenBy(references[0]!)}`;
       const reads = `the editor reads ${a.view.state.doc.toString()}, the reference ${references[0]!.read.toString()}`;
@@ -4343,15 +4578,15 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
         count(counted.bothDifferently, `${gave}; ${reads}`);
       else if (gaveTheSame.length === 0) count(counted.givenDifferently, gave);
       else if (!readsTheSame) count(counted.readDifferently, reads);
-      else if (keptTheSame.length === 0)
+      if (keptTheSame.length === 0)
         count(
           counted.keptDifferently,
-          `the editor kept ${kept}, the reference ${gaveTheSame[0]!.kept}, of ${boundariesKept(start.sequence, was).join()}`,
+          `the editor kept ${kept}, the reference ${givers[0]!.kept}, of ${boundariesKept(start.sequence, was).join()}`,
         );
-      else if (!keptTheSame.some((said) => said.recorded === recorded))
+      if (!keepers.some((said) => said.recorded === recorded))
         count(
           counted.recordedDifferently,
-          `the editor recorded [${recorded}], the reference [${keptTheSame[0]!.recorded}]`,
+          `the editor recorded [${recorded}], the reference [${keepers[0]!.recorded}]`,
         );
     }
     stopEveryone();
@@ -4476,6 +4711,12 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
             across,
             [cutAcross, (make) => toOffset === 0 && toAt - 1 > at && cutUpToTheLast(make)],
             (a) => a.view.dispatch(a.view.state.tr.delete(from + offset, to)),
+          );
+          compare(
+            "a letter typed over a selection across blocks",
+            across,
+            (make) => cutAcross(make) && letter(make, at, offset, "Z"),
+            (a) => a.view.dispatch(a.view.state.tr.insertText("Z", from + offset, to)),
           );
           compare(
             "a divider over a selection across blocks",

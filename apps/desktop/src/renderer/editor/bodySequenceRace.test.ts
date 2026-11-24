@@ -371,7 +371,7 @@ describe("the desktop's commands next to a line with no boundary of its own", ()
       ["mathBlock", "h2", "paragraph", "paragraph"],
     ],
   ] as const)(
-    "stores the heading that insertContent puts over %s and into the next line, and gives that line its boundary first",
+    "stores the heading that insertContent puts over %s and into the next line",
     (_name, lines, line, blocks) => {
       const a = desktop(lines(), 10);
       const before = a.view.state.doc.toJSON();
@@ -380,7 +380,6 @@ describe("the desktop's commands next to a line with no boundary of its own", ()
       expect(a.blocks()).toEqual(blocks);
       expect(a.lines().slice(-3)).toEqual(["X", "Y", "d"]);
       a.expectMirror();
-      expect(a.sent).toHaveLength(2);
       expect(a.undo()).toBe(true);
       expect(a.view.state.doc.toJSON()).toEqual(before);
       a.expectMirror();
@@ -429,6 +428,82 @@ describe("the desktop's commands next to a line with no boundary of its own", ()
       );
     }
   });
+
+  it("records no boundary for the paragraph after a code block when a letter is typed over a selection that runs from the code to that paragraph's start, so a letter someone else types there stays there when the change is undone", () => {
+    const a = desktop(codeThenTextItCannotHold(), 10);
+    const b = person(codeThenTextItCannotHold(), 20);
+    a.select([0, 1], [1, 0]);
+    const effects = a.effects(() => a.type("Z"));
+    expect(a.view.state.doc.toString()).toBe('doc(codeBlock("aZ"), paragraph(wikilink, "cd"))');
+    expect(effects.madeBoundaries).toEqual([]);
+    exchange(a, b);
+    b.typeAt(1, 0, "P");
+    exchange(b, a);
+    expect(a.undo()).toBe(true);
+    exchange(a, b);
+    for (const each of [a, b]) {
+      each.expectMirror();
+      expect(each.view.state.doc.toString()).toBe(
+        'doc(codeBlock("ab"), paragraph("P", wikilink, "cd"))',
+      );
+    }
+  });
+
+  it("keeps the code block's boundary when insertContent puts a code block over a selection from its start to the start of the paragraph after it, so a language someone else gives it at the same moment stays", () => {
+    const a = desktop(codeThenTextItCannotHold(), 10);
+    const b = person(codeThenTextItCannotHold(), 20);
+    const [code] = a.boundaryIds();
+    a.select([0, 0], [1, 0]);
+    const effects = a.effects(() => a.editor.commands.insertContent("<pre><code>X</code></pre>"));
+    expect(a.view.state.doc.toString()).toBe('doc(codeBlock("X"), paragraph(wikilink, "cd"))');
+    expect(effects.goneBoundaries).toEqual([]);
+    expect(a.boundaryIds()).toEqual([code]);
+    b.view.dispatch(b.view.state.tr.setNodeMarkup(0, undefined, { language: "js" }));
+    exchange(a, b);
+    for (const each of [a, b]) {
+      each.expectMirror();
+      expect(each.view.state.doc.toString()).toBe('doc(codeBlock("X"), paragraph(wikilink, "cd"))');
+      expect(each.view.state.doc.child(0).attrs.language).toBe("js");
+    }
+  });
+
+  it.each([
+    ["Backspace deletes", (a: ReturnType<typeof desktop>) => a.press("Backspace"), "a"],
+    ["a typed letter replaces", (a: ReturnType<typeof desktop>) => a.type("Z"), "aZ"],
+  ] as const)(
+    "gives the paragraph after a code block its boundary first when %s a selection that ends in it and it stays a paragraph, so it is still the heading someone else made it when the change is undone",
+    (_name, act, code) => {
+      const codeThenAParagraphItKeeps = () =>
+        noteOf(({ sequence }) => {
+          sequence.insertEmbed(0, boundary({ type: "codeBlock", language: null }), {});
+          sequence.insert(1, "ab", {});
+          sequence.insertEmbed(3, WIKILINK(), {});
+          sequence.insert(4, "x", {});
+          sequence.insertEmbed(5, element("hardBreak", {}), {});
+        });
+      const a = desktop(codeThenAParagraphItKeeps(), 10);
+      const b = person(codeThenAParagraphItKeeps(), 20);
+      a.select([0, 1], [1, 1]);
+      act(a);
+      expect(a.view.state.doc.toString()).toBe(
+        `doc(codeBlock("${code}"), paragraph("x", hardBreak))`,
+      );
+      a.expectMirror();
+      expect(a.sent).toHaveLength(2);
+      exchange(a, b);
+      b.select([1, 0]);
+      expect(b.retype("heading", { level: 3 })).toBe(true);
+      exchange(b, a);
+      expect(a.undo()).toBe(true);
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.view.state.doc.toString()).toBe(
+          'doc(codeBlock("ab"), heading(wikilink, "x", hardBreak))',
+        );
+      }
+    },
+  );
 
   it("puts setHorizontalRule's divider in front of a line's own boundary when the caret is at the line's start, so the line is still the heading someone else made it at the same moment", () => {
     const a = desktop(note(...LINES), 10);
