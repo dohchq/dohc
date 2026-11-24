@@ -390,6 +390,38 @@ describe("outbound webhook relay routes (Model E1)", () => {
     expect(await duplicate.json()).toEqual({ ok: true, status: 200, deduplicated: true });
     expect(sent).toHaveLength(1);
 
+    // A workspace member stops dispatch too, until they are removed.
+    const invitedMember = await handler(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/members/invites`,
+        jsonBody({ email: "member@dohc.test", workspaceName: "Community" }),
+      ),
+    );
+    expect(invitedMember.status, await invitedMember.clone().text()).toBe(200);
+    const members = (await invitedMember.json()) as {
+      people: Array<{ email: string | null; memberId: string }>;
+    };
+    const memberId = members.people.find((person) => person.email === "member@dohc.test")?.memberId;
+    expect(memberId).toBeDefined();
+    const afterMember = await handler(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/webhooks/outbound-dispatch`,
+        jsonBody({
+          ...dispatchPayload,
+          deliveryId: createHash("sha256").update("delivery-after-member").digest("hex"),
+        }),
+      ),
+    );
+    expect(afterMember.status).toBe(403);
+    expect(await afterMember.json()).toMatchObject({ ok: false, error: "reach_stopped" });
+    expect(sent).toHaveLength(1);
+    expect(
+      (await handler(request(OWNER, `/sync/${WORKSPACE}/members/${memberId}/remove`, jsonBody({}))))
+        .status,
+    ).toBe(200);
+
     // Sharing Collection with Edit access immediately stops dispatch authoritatively.
     await createShare(handler, OWNER, WORKSPACE, {
       recipientUserId: "collaborator",
