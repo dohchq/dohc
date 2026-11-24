@@ -1109,6 +1109,24 @@ export function keepsBoundariesWithTheirText(
   return true;
 }
 
+/**
+ * The lines with no boundary of their own that a change brought into being: those of `now` with
+ * no counterpart in `before`, both from `linesWithNoBoundary`. A line's counterpart holds one of
+ * its items. Text before the first boundary has the earlier such text for its counterpart, and
+ * a list item's added paragraph the earlier one of the same item. Section 4 has a change write
+ * the boundary of a line it brings into being, so a change should leave none.
+ */
+export function linesBroughtIntoBeing(
+  before: readonly LineWithNoBoundary[],
+  now: readonly LineWithNoBoundary[],
+): LineWithNoBoundary[] {
+  const isItsCounterpart = (line: LineWithNoBoundary, was: LineWithNoBoundary) =>
+    line.bare === "spill"
+      ? was.items.some((id) => line.items.some((own) => Y.compareIDs(id, own)))
+      : was.bare === line.bare && was.path === line.path;
+  return now.filter((line) => !before.some((was) => isItsCounterpart(line, was)));
+}
+
 const sameIds = (one: readonly Y.ID[], other: readonly Y.ID[]) =>
   one.length === other.length && one.every((id, at) => Y.compareIDs(id, other[at]!));
 
@@ -1255,7 +1273,8 @@ const TRIES = 3;
  * of the blocks that had no boundary of their own should have had one first, by their index
  * before the write. `linesLeftWanting` is asked after each step, so a line a step joins away is
  * not taken for one a later step starts. `isSettled` says whether the note then reads as the
- * editor's document, marks aside, and the last step kept each boundary with its text.
+ * editor's document, marks aside, and the last step kept each boundary with its text and
+ * brought no line into being with no boundary of its own.
  */
 export function linesAWriteLeavesWanting(
   writing: BodyWriting,
@@ -1277,16 +1296,18 @@ export function linesAWriteLeavesWanting(
       ? other.items[0] === undefined
       : other.items[0] !== undefined && Y.compareIDs(one.items[0], other.items[0]));
   const look = (shown: ProseMirrorNode | null) => {
-    isSettled =
-      shown !== null &&
-      readsAlike(writing.reader.reading().doc, shown) &&
-      keepsBoundariesWithTheirText(writing.sequence, state);
-    for (const block of linesLeftWanting(before, state, writing, !isSettled)) {
+    const now = linesWithNoBoundary(writing);
+    const reads = shown !== null && readsAlike(writing.reader.reading().doc, shown);
+    for (const block of linesLeftWanting(before, state, writing, !reads)) {
       const line = before.find((each) => each.block === block)!;
       const was = first.find((each) => isTheSameLine(each, line));
       if (was) wanting.add(was.block);
     }
-    before = linesWithNoBoundary(writing);
+    isSettled =
+      reads &&
+      keepsBoundariesWithTheirText(writing.sequence, state) &&
+      linesBroughtIntoBeing(before, now).length === 0;
+    before = now;
     state = stateOf();
   };
   note.transact(() => {
