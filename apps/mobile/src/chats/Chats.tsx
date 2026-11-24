@@ -103,14 +103,12 @@ function ServerChatList({ workspace }: { workspace: PhoneWorkspace }) {
     [data],
   );
   const [warmUnread] = useState(() => unreadPrefetch(phoneWrites));
-  const [pulled, setPulled] = useState(false);
+  const [pulling, setPulling] = useState(false);
   const refresh = useCallback(() => {
-    retry();
-    setPulled(data?.state(views.chats).loading === true);
-  }, [data, retry]);
-  useEffect(() => {
-    if (!state.loading) setPulled(false);
-  }, [state.loading]);
+    if (!data) return;
+    setPulling(true);
+    void data.refresh(views.chats).finally(() => setPulling(false));
+  }, [data]);
   useEffect(() => {
     if (sections && data) warmUnread(data, sections);
   }, [sections, data, warmUnread]);
@@ -120,7 +118,7 @@ function ServerChatList({ workspace }: { workspace: PhoneWorkspace }) {
       sections={sections}
       onPressIn={prefetch}
       failure={state.problem ? { label: failed, onRetry: retry } : null}
-      refresh={{ refreshing: pulled && state.loading, onRefresh: refresh }}
+      refresh={{ refreshing: pulling, onRefresh: refresh }}
     />
   );
 }
