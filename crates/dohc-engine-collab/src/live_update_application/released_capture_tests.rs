@@ -133,7 +133,7 @@ fn the_released_window_proof_refuses_each_unproven_base() {
 fn proof_bytes(f: &Fixture) -> usize {
     let digest = hex_sha256(moment_text(f, "retired").as_bytes());
     let length = moment_text(f, "retired").len() as i64;
-    let mut budget = restore_content::Budget { remaining: RELEASED_CAPTURE_PROOF_BYTES };
+    let mut budget = budget::Budget { remaining: RELEASED_CAPTURE_PROOF_BYTES };
     f.store
         .read_with(|conn| {
             settled_base::settled_base(conn, "namespace", &f.key, "owner.md", &f.binding.lineage_claim_id, ("retired", &digest, length), settled_base::Settlement::Latest, &mut budget, None)

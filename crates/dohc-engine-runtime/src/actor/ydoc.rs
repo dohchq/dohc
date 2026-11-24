@@ -3808,8 +3808,6 @@ fn ydoc_settle_attempt_on_store(
         let source_preserving = projection.markdown_write_safety
             == MarkdownWriteSafety::SourcePreserving
             && override_text == projection.content;
-        let audited_restore =
-            live_audit.is_some_and(|audit| audit.restored_source() == Some(override_text));
         let adoption = kind == SettlementKind::CollectionAdoption
             && dohc_engine_domain::collections::markdown_frontmatter_json_with_body(override_text)
                 .is_some_and(|(fields, _)| fields == doc.frontmatter_json())
@@ -3825,7 +3823,7 @@ fn ydoc_settle_attempt_on_store(
                     .as_deref()
                     == Some(override_text)
             });
-        if !(source_preserving || audited_restore || adoption) {
+        if !(source_preserving || adoption) {
             return Err(CollabError::FrontmatterEditRefused.into());
         }
         projection.markdown_write_safety = MarkdownWriteSafety::SourcePreserving;

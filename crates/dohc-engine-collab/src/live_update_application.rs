@@ -28,7 +28,7 @@ mod accepted_history;
 mod publication;
 pub(crate) use publication::{
     adoption_contains_predecessor_in, read_native_accepted_cut_in, read_native_accepted_in,
-    read_native_applied_cursor_in, read_restore_predecessor_in, require_restore_registration_in,
+    read_native_applied_cursor_in,
 };
 mod ack_read;
 pub mod passive;
@@ -45,7 +45,7 @@ pub use activation::{
 };
 mod adoption;
 pub mod owner_activations;
-pub use accepted_history::{NativeAcceptedCheckpoint, NativeRestoreHistoryProof};
+pub use accepted_history::NativeAcceptedCheckpoint;
 mod bootstrap;
 pub use adoption::{adopt_owner_committed, OwnerAdoptionAck, OwnerAdoptionCut};
 mod released_protection;
@@ -68,9 +68,8 @@ pub use released_protection::{
     UnprovenCommitment, Validation, ValidationError, Work, HELD_PROOF_CLOSE_BOUND,
     HELD_PROOF_DEADLINE, MAX_PROOF_WAITERS,
 };
-mod restore_content;
+mod budget;
 pub(crate) mod restore_fence;
-mod restore_resume;
 mod retirement;
 pub use retirement::{
     begin_retirement, prepare_retirement, reconcile_activation, release_activation,
@@ -86,24 +85,10 @@ mod settlement;
 pub use bootstrap::{
     bootstrap_committed, BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck,
 };
-pub use restore_content::{
-    NativeRestoreApplication, NativeRestoreApplicationReceipt, NativeRestorePoint,
-    NativeRestorePreparation, NativeRestoreProposal, NativeRestoreProposalReceipt,
-    NativeRestoreSource,
-};
-pub use restore_fence::require_crossed_since as require_crossed_cancellations;
 pub use restore_fence::require_open as require_restore_open;
-pub(crate) use restore_fence::require_registration as require_restore_registration;
-pub use restore_fence::{
-    cancel_restore_fence, cancelled_restores, NativeRestoreCancellationReceipt, NativeRestoreFence,
-    NativeRestoreFenceReceipt, NativeRestoreRefusal, NativeRestoreRefusalReason,
-    NativeRestoreSelection, RestoreDeliveryOrigin, RestoreFenceCancellation,
-    RestoreFenceCancellationOutcome, MAX_CANCELLED_RESTORES,
-};
 pub use restore_fence::{
     current_generation as restore_generation, require_generation as require_restore_generation,
 };
-pub use restore_resume::{NativeRestoreResume, NativeRestoreResumeReceipt};
 pub use settlement::{
     with_retirement_settlement, with_settlement, LiveSettlementAudit,
     LiveSettlementPublicationState, LiveSettlementResult,
@@ -148,8 +133,6 @@ pub enum ApplicationError {
         "this document's accepted updates must receive their dependencies before a restore fence"
     )]
     AcceptedStateIncomplete,
-    #[error("native restore refused before fencing ({:?})", .0.reason)]
-    RestoreRefused(Box<NativeRestoreRefusal>),
     #[error(
         "this document's last settlement must reach its file before its interval can name another author"
     )]
@@ -1260,7 +1243,7 @@ impl ApplicationOwner {
         )?;
         let requested = activation_id;
         let activation_id = store.read_with(|conn| {
-            restore_fence::require_registration(conn, &key, &namespace, &binding)?;
+            restore_fence::require_open(conn, &key)?;
             owner_activations::registration_activation(
                 conn,
                 &namespace,
@@ -1305,12 +1288,7 @@ impl ApplicationOwner {
         let outcome = store.write_with(&NoFaults, |tx| {
             require_workspace(tx, &registration)?;
             require_hosted_ready(tx, &key)?;
-            restore_fence::require_registration(
-                tx,
-                &key,
-                &registration.namespace,
-                &registration.binding,
-            )?;
+            restore_fence::require_open(tx, &key)?;
             if owner_activations::registration_activation(
                 tx,
                 &registration.namespace,
@@ -1453,9 +1431,6 @@ impl ApplicationOwner {
 /// Work a host must finish before it unloads a document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnloadPending {
-    /// A restore fence for the document has neither resumed nor been
-    /// cancelled.
-    Restore,
     /// Owner updates or deferred replicated updates have not been delivered.
     Delivery,
     /// Applied updates on the current lineage are past its last settlement,
@@ -1488,8 +1463,6 @@ macro_rules! frozen_at_refused_seed {
 /// needs. A refused queue waits for its owner, not for delivery, unless the
 /// owner's Try again granted its head an attempt.
 const UNLOAD_PENDING: &str = "SELECT
-    EXISTS(SELECT 1 FROM live_restore_fences
-        WHERE workspace_id=?1 AND object_id=?2 AND resume_receipt_json IS NULL AND cancelled_json IS NULL),
     (?3 AND EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND object_id=?2 AND deferred_while_bound=0))
         OR EXISTS(SELECT 1 FROM owner_ydoc_outboxes
             WHERE workspace_id=?1 AND object_id=?2 AND pending_bytes>0
@@ -1586,7 +1559,7 @@ pub fn frozen_at_refused_seed(conn: &Connection, key: &DocKey) -> Result<bool, A
     .map_err(read_sql)
 }
 
-/// Name the first incomplete restore, delivery, or settlement record for one
+/// Name the first incomplete delivery or settlement record for one
 /// document. The caller still proves the artifact holds the head.
 pub fn unload_pending(
     conn: &Connection,
@@ -1614,16 +1587,13 @@ fn pending(
     object_id: &str,
     deferred: bool,
 ) -> Result<Option<UnloadPending>, ApplicationError> {
-    let (restore, delivery): (bool, bool) = conn
+    let delivery: bool = conn
         .query_row(
             UNLOAD_PENDING,
             params![workspace_id, object_id, deferred],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get(0),
         )
         .map_err(read_sql)?;
-    if restore {
-        return Ok(Some(UnloadPending::Restore));
-    }
     if delivery {
         return Ok(Some(UnloadPending::Delivery));
     }
@@ -1912,7 +1882,7 @@ pub fn apply_committed_with_settlement_limit(
                     ApplicationPending::ApplicabilityUnavailable,
                 ));
             }
-            restore_fence::require_registration(tx, &key, &held.namespace, &held.binding)?;
+            restore_fence::require_open(tx, &key)?;
             let Some(marker) = durable::read_marker_in(tx, &key)? else {
                 return Ok(ApplicationResult::Pending(
                     ApplicationPending::BaselineUnavailable,
@@ -3319,6 +3289,37 @@ mod tests {
             Err(ApplicationError::Collab(CollabError::RestoreFenced))
         ));
         assert_eq!(count(&store, "live_device_update_applications"), 1);
+    }
+
+    #[test]
+    fn a_resumed_restore_still_stops_the_note() {
+        let (_dir, mut store, mut cache, _owner, handle) = fixture();
+        let update = event("restored", 1, Ydoc::wire().plaintext_insert(0, "draft"));
+        apply(&mut store, &mut cache, &handle, update);
+        let lineage = binding().lineage_claim_id;
+        let zeros = "0".repeat(64);
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO live_device_settlements(settlement_id,relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,previous_cursor,terminal_cursor,previous_ydoc_sequence,local_ydoc_sequence,application_count,interval_digest,moment_id,markdown_digest,source_state_vector_digest,binding_json,host_coordinate_json,recorded_at_ms) VALUES ('settled','relay-A','workspace-1','main','object-1',?1,0,1,0,1,1,?2,'moment',?2,?2,?3,'{}',0)",
+                params![lineage, zeros, serde_json::to_string(&binding()).unwrap()]).unwrap();
+            tx.execute("INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json,proposal_json,proposal_candidate_sha256,proposal_frozen_sha256,proposal_point_sha256,application_json,application_delivery_id,resume_receipt_json,resume_settlement_id,resume_evidence_digest) VALUES ('workspace-1','main','object-1','relay-A','resumed',?1,'{}','{}',?2,?2,?2,'{}','restored','{}','settled',?3)",
+                params![serde_json::json!({"oldBinding":binding(),"newFence":8}).to_string(), lineage, zeros]).unwrap();
+            Ok::<_,StorageError>(())
+        }).unwrap();
+        assert!(matches!(
+            store.read_with(|conn| restore_generation(conn, &key())),
+            Err(CollabError::RestoreFenced)
+        ));
+        let write = durable::record_local_update(
+            &mut store,
+            &mut cache,
+            &key(),
+            &Ydoc::wire().plaintext_insert(0, "later"),
+            durable::LocalAppend::default(),
+            &NoFaults,
+            0,
+            |_, _, _| Ok(()),
+        );
+        assert!(matches!(write, Err(CollabError::RestoreFenced)));
     }
 
     fn reopen(store: EngineStore, dir: &ScratchDir) -> EngineStore {
