@@ -167,7 +167,6 @@ type OwnerLiveDeliveryReason =
   | "document-unavailable"
   | "workspace-changed"
   | "session-host-refused"
-  | "live-start-failed"
   | "session-host-diverged"
   | "live-document-without-lineage"
   | "live-edit-unadmitted"
@@ -1205,7 +1204,6 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                         status: string;
                         reason?: unknown;
                         objectId?: unknown;
-                        record?: { reason?: unknown };
                       }[];
                       diverged?: unknown;
                     };
@@ -1274,10 +1272,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                     const rows = listedRows.map((row) =>
                       starting.has(row.path) && row.status === "unavailable"
                         ? { path: row.path, status: "preparing" }
-                        : row.reason === "session-host-refused" &&
-                            row.record?.reason === "start-failed"
-                          ? { ...row, reason: "live-start-failed" }
-                          : row,
+                        : row,
                     );
                     const preparing = rows.some((row) => row.status === "preparing");
                     // The server reports a diverged copy even after its owner stopped every document.
@@ -1297,26 +1292,23 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                           ? "live-document-without-lineage"
                           : unavailableFor("session-host-refused")
                             ? "session-host-refused"
-                            : unavailableFor("live-start-failed")
-                              ? "live-start-failed"
-                              : unavailableFor("live-edit-unadmitted")
-                                ? "live-edit-unadmitted"
-                                : unavailableFor("conflict-parent-withheld")
-                                  ? "conflict-parent-withheld"
-                                  : unavailableFor("live-history-over-budget")
-                                    ? "live-history-over-budget"
-                                    : unavailableFor("live-start-failing")
-                                      ? "live-start-failing"
-                                      : unavailableFor("workspace-changed")
-                                        ? "workspace-changed"
-                                        : unavailableFor("document-unavailable")
-                                          ? "document-unavailable"
-                                          : undefined;
+                            : unavailableFor("live-edit-unadmitted")
+                              ? "live-edit-unadmitted"
+                              : unavailableFor("conflict-parent-withheld")
+                                ? "conflict-parent-withheld"
+                                : unavailableFor("live-history-over-budget")
+                                  ? "live-history-over-budget"
+                                  : unavailableFor("live-start-failing")
+                                    ? "live-start-failing"
+                                    : unavailableFor("workspace-changed")
+                                      ? "workspace-changed"
+                                      : unavailableFor("document-unavailable")
+                                        ? "document-unavailable"
+                                        : undefined;
                     const ownerMustAct =
                       reason === "session-host-diverged" ||
                       reason === "live-document-without-lineage" ||
                       reason === "session-host-refused" ||
-                      reason === "live-start-failed" ||
                       reason === "live-edit-unadmitted" ||
                       reason === "conflict-parent-withheld" ||
                       reason === "live-history-over-budget";

@@ -328,11 +328,6 @@ describe("sync status surface", () => {
     },
     {
       delivery: "retrying" as const,
-      reason: "live-start-failed" as const,
-      label: "Live editing cannot start",
-    },
-    {
-      delivery: "retrying" as const,
       reason: "session-host-diverged" as const,
       label: "Live editing stopped",
     },

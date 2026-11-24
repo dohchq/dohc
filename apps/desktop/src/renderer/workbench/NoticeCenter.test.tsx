@@ -620,11 +620,6 @@ describe("notice center", () => {
       body: "The server stopped live editing for a document in this workspace. Your copy and its History are unchanged. Others cannot edit it live. Open Live documents to try again.",
     },
     {
-      reason: "live-start-failed" as const,
-      title: "Live editing cannot start",
-      body: "The server could not start live editing for a document in this workspace. Your copy and its History are unchanged. Others cannot edit it live. Open Live documents to try again.",
-    },
-    {
       reason: "live-document-without-lineage" as const,
       title: "Live editing cannot start",
       body: "The server cannot start live editing for a document until you open it once in dohc. Notes larger than 256 KB do not open as live documents. Open Live documents to see which document it is, make it smaller or split it if needed, open it in dohc, and then resume live editing.",

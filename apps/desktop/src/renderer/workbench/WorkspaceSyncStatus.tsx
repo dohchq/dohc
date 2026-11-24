@@ -101,7 +101,6 @@ function liveDeliveryLabel(
   )
     return "Live editing stopped";
   if (
-    reason === "live-start-failed" ||
     reason === "live-document-without-lineage" ||
     reason === "live-history-over-budget" ||
     reason === "live-start-failing"
