@@ -241,11 +241,6 @@ export function preparedSettlement(
 export function settlementCommitted(op: SyncRelayLogInput): boolean {
   return op.settlementAdmission?.status === "accepted" && prepared.has(op);
 }
-/**
- * Whether a recorded settlement replaces the note's stored file, which an
- * unaccepted save from its own origin wrote. Its before is the last accepted
- * settlement's, so the stored file had left the accepted line.
- */
 export function settlementReplacesUnacceptedSave(
   storage: StorageContext,
   op: SyncRelayLogInput,
