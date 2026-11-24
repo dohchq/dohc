@@ -124,6 +124,26 @@ it("retains v2 metadata in bounded readers and refuses a rehashed v1 downgrade",
       ),
     ).toEqual(metadata[1]);
     const cursor = through;
+    const markRestored = (restored: boolean) => {
+      f.raw.exec("PRAGMA foreign_keys = OFF");
+      f.raw
+        .prepare(
+          "UPDATE sync_relay_live_update_journal SET restore_operation_id=?,validation_checkpoint_sha256=?,validation_checkpoint_bytes=? WHERE journal_cursor=?",
+        )
+        .run(...(restored ? ["restore-1", "0".repeat(64), baseline] : [null, null, null]), cursor);
+      f.raw.exec("PRAGMA foreign_keys = ON");
+    };
+    markRestored(true);
+    expect(() =>
+      readAcceptedHistoryDeliveryMetadata(
+        f.storage as StorageContext,
+        delivery,
+        new RestoreHistoryBudget(64_000_000, 1),
+      ),
+    ).toThrow(/damaged/);
+    expect(read).toThrow(/damaged/);
+    markRestored(false);
+    expect(read()).toEqual(metadata);
     f.raw
       .prepare(
         "UPDATE sync_relay_live_update_journal SET first_seen_deletes_json=? WHERE journal_cursor=?",

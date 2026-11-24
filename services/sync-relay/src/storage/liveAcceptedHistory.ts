@@ -119,6 +119,7 @@ function boundedMetadata(
       `SELECT ${metadataColumns} FROM ${LIVE_JOURNAL_TABLE} WHERE ${documentWhere} AND journal_cursor=?`,
     )
     .get(...params, cursor)!;
+  require(raw.restore_operation_id === null);
   const ranges = storage.db
     .prepare(
       `SELECT * FROM ${LIVE_JOURNAL_PROVENANCE} WHERE journal_cursor=? ORDER BY client_id,start_clock`,
@@ -220,7 +221,6 @@ export function readAcceptedHistoryInterval(
     require(canonicalVersion !== 2 || metadata.canonicalVersion === 2);
     canonicalVersion = metadata.canonicalVersion ?? 1;
     require(raw.relay_database_namespace === namespace);
-    require(raw.restore_operation_id === null);
     if (raw.validation_checkpoint_sha256 !== null)
       assertJournalCheckpointPosition(storage.db, {
         admitted: { metadata },
