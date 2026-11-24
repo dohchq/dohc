@@ -335,6 +335,8 @@ describe("a tapped alert", () => {
     });
     const android = { content: { data }, trigger: { type: "push", remoteMessage: {} } };
     expect(tapData(android)).toBe(data);
+    const nested = { content: { data }, trigger: { type: "push", payload: { aps, body: data } } };
+    expect(tapData(nested)).toBe(data);
   });
 
   function tapping() {
