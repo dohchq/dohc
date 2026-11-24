@@ -174,38 +174,6 @@ fn resolved_note(payload: &serde_json::Value) -> Option<&str> {
     .then_some(object_id)
 }
 
-/// Move the read of a document held for the withheld parent of a conflict
-/// child to just before `parent_seq`, where the feed now serves that parent,
-/// so its next read fetches it. A document no longer held there at `from`
-/// moves nothing.
-pub(crate) fn rewind_to_conflict_parent(
-    store: &mut EngineStore,
-    workspace_id: &str,
-    object_id: &str,
-    from: i64,
-    parent_seq: i64,
-    faults: &dyn FaultInjector,
-) -> Result<bool, SyncError> {
-    match store.write_with(faults, |tx| {
-        tx.execute(
-            "UPDATE hosted_documents SET backfill_cursor=?4 \
-             WHERE workspace_id=?1 AND object_id=?2 AND backfill_cursor=?3 \
-               AND state='held' AND held_reason=?5",
-            params![
-                workspace_id,
-                object_id,
-                from,
-                parent_seq - 1,
-                CONFLICT_PARENT_WITHHELD
-            ],
-        )
-        .map_err(SyncError::persist)
-    })? {
-        TxnOutcome::Committed(moved) => Ok(moved == 1),
-        TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
-    }
-}
-
 /// Record that a pass journaled `op`, a row of the document it names, which
 /// no committed pass has written the files of yet. Until a commit's read
 /// covers it, that document finishes its files before it parks, since once

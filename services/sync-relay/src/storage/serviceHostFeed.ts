@@ -252,7 +252,12 @@ export function singleNoteResolve(
     throw error;
   }
   const { current, incoming, result, exportedBefore, effects, lineageTransition } = resolve;
-  if (resolve.targetVersionId !== "main" || resolve.paths.length !== 1 || !current.present)
+  if (
+    resolve.targetVersionId !== "main" ||
+    resolve.sourceVersionId !== "main" ||
+    resolve.paths.length !== 1 ||
+    !current.present
+  )
     return null;
   const note = (side: ParsedResolve["current"]) =>
     side.present &&

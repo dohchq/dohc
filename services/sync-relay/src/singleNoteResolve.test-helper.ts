@@ -207,6 +207,12 @@ export const WITHHELD_RESOLVES: Array<[string, (payload: NoteResolvePayload) => 
     },
   ],
   [
+    "a merge from a named version into main",
+    (payload) => {
+      payload.sourceVersionId = "fork";
+    },
+  ],
+  [
     "a move, with a delete and a write",
     (payload) => {
       const { incoming, result } = payload.transition;

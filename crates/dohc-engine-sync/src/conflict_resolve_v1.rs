@@ -1862,17 +1862,6 @@ fn conflict_parent_seq(
         .ok_or(SyncError::CoordinateDiverged)
 }
 
-/// The conflict a conflict child resolves, and the origin sequence it names
-/// its `conflict.resolve` at. `None` for any other op.
-pub(crate) fn conflict_parent(envelope: &ReplicationEnvelope) -> Option<(String, i64)> {
-    if envelope.op_kind != "moment.append" {
-        return None;
-    }
-    let owner = crate::moment_apply::validate_tagged_shadow_payload(&envelope.payload).ok()?;
-    let parent_seq = conflict_parent_seq(envelope, owner.effect_index).ok()?;
-    Some((owner.conflict_id, parent_seq))
-}
-
 /// The conflict a conflict child on a hosted replica resolves, when no
 /// imported `conflict.resolve` stands where the child names its parent: the
 /// feed withheld it. `None` for any other op.
@@ -1880,7 +1869,13 @@ pub(crate) fn withheld_parent_conflict(
     conn: &rusqlite::Connection,
     envelope: &ReplicationEnvelope,
 ) -> Result<Option<String>, SyncError> {
-    let Some((conflict_id, parent_seq)) = conflict_parent(envelope) else {
+    if envelope.op_kind != "moment.append" {
+        return Ok(None);
+    }
+    let Ok(owner) = crate::moment_apply::validate_tagged_shadow_payload(&envelope.payload) else {
+        return Ok(None);
+    };
+    let Ok(parent_seq) = conflict_parent_seq(envelope, owner.effect_index) else {
         return Ok(None);
     };
     let parent_present: bool = conn
@@ -1892,7 +1887,7 @@ pub(crate) fn withheld_parent_conflict(
             |row| row.get(0),
         )
         .map_err(SyncError::corrupt)?;
-    Ok((!parent_present).then_some(conflict_id))
+    Ok((!parent_present).then_some(owner.conflict_id))
 }
 
 pub(crate) fn verify_imported_conflict_effect_in_tx(
@@ -2974,12 +2969,16 @@ fn close_reviews_of_the_same_merge(
     tx: &Transaction<'_>,
     payload: &ConflictResolveV1,
 ) -> Result<(), SyncError> {
-    let (Some(result), Some(merged)) = (payload.result.present(), payload.current.present()) else {
+    let (Some(_), Some(result), Some(merged)) = (
+        payload.lineage_transition.as_ref(),
+        payload.result.present(),
+        payload.current.present(),
+    ) else {
         return Ok(());
     };
     let closed = tx
         .prepare(
-            "UPDATE conflicts SET status='resolved',updated_at_ms=?5,                chosen_from=CASE WHEN current_blob_sha256=?4 THEN 'current'                  WHEN incoming_blob_sha256=?4 THEN 'incoming' ELSE 'merged' END,                resolution=CASE WHEN current_blob_sha256=?4 THEN 'kept-current'                  WHEN incoming_blob_sha256=?4 THEN 'applied-incoming' ELSE 'applied-merged' END              WHERE workspace_id=?1 AND target_version_id=?2 AND incoming_object_id=?3                AND status='open' AND metadata_origin='sync'                AND current_blob_sha256=?6              RETURNING conflict_id",
+            "UPDATE conflicts SET status='resolved',updated_at_ms=?5,              chosen_from=CASE WHEN current_blob_sha256=?4 THEN 'current'                WHEN incoming_blob_sha256=?4 THEN 'incoming' ELSE 'merged' END,              resolution=CASE WHEN current_blob_sha256=?4 THEN 'kept-current'                WHEN incoming_blob_sha256=?4 THEN 'applied-incoming' ELSE 'applied-merged' END              WHERE workspace_id=?1 AND target_version_id=?2 AND status='open' AND metadata_origin='sync'                AND current_object_id=?3 AND incoming_object_id=?3 AND current_path=?7 AND incoming_path=?7                AND current_blob_sha256=?6              RETURNING conflict_id",
         )
         .map_err(SyncError::corrupt)?
         .query_map(
@@ -2989,7 +2988,8 @@ fn close_reviews_of_the_same_merge(
                 result.object_id,
                 result.blob_sha256,
                 payload.effect_context.recorded_at_ms,
-                merged.blob_sha256
+                merged.blob_sha256,
+                payload.paths[merged.path_ref]
             ],
             |row| row.get::<_, String>(0),
         )
@@ -5279,25 +5279,44 @@ mod tests {
         assert_eq!(reviews, vec![("own-review".to_owned(), true)]);
     }
 
-    fn review_after_decision(same_merge: bool) -> Vec<(String, String, String, Option<String>)> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum OtherReview {
+        SameMerge,
+        AnotherMerge,
+        PlainNote,
+        AnotherFile,
+    }
+
+    fn review_after_decision(case: OtherReview) -> Vec<(String, String, String, Option<String>)> {
         let (_scratch, mut store, built) = text_keep_receiver_fixture();
-        let payload = &built.validated.payload;
+        let mut payload = built.validated.payload;
+        if case != OtherReview::PlainNote {
+            payload.lineage_transition = Some(LineageTransitionV1 {
+                predecessor_claim_id: "a".repeat(64),
+                predecessor_state_vector_sha256: "a".repeat(64),
+                predecessor_delete_set_sha256: "a".repeat(64),
+                artifact_preimage_sha256: "a".repeat(64),
+                successor: None,
+            });
+        }
         store
             .write_with(&NoFaults, |tx| {
-                let mut merged = conflict_state_from_head(tx, payload, &payload.current)?;
+                let mut merged = conflict_state_from_head(tx, &payload, &payload.current)?;
                 let mut other_side = merged.clone();
                 if let (Some(merged), Some(other)) =
                     (merged.snapshot.as_mut(), other_side.snapshot.as_mut())
                 {
                     merged.latest_moment_id = "merged-here".to_owned();
-                    if !same_merge {
-                        merged.blob_sha256 = "c".repeat(64);
+                    match case {
+                        OtherReview::AnotherMerge => merged.blob_sha256 = "c".repeat(64),
+                        OtherReview::AnotherFile => merged.object_id = "occupant".to_owned(),
+                        OtherReview::SameMerge | OtherReview::PlainNote => {}
                     }
                     other.latest_moment_id = "other-side".to_owned();
                     other.blob_sha256 = "b".repeat(64);
                 }
                 open_review(tx, "other-review", merged, other_side)?;
-                close_imported_conflict(tx, payload, false)
+                close_imported_conflict(tx, &payload, false)
             })
             .unwrap();
         store
@@ -5314,7 +5333,7 @@ mod tests {
     #[test]
     fn a_decision_closes_another_computers_review_of_the_same_merge() {
         assert_eq!(
-            review_after_decision(true),
+            review_after_decision(OtherReview::SameMerge),
             vec![(
                 "other-review".to_owned(),
                 "resolved".to_owned(),
@@ -5325,14 +5344,20 @@ mod tests {
     }
 
     #[test]
-    fn a_decision_leaves_open_a_review_of_another_merge() {
-        assert_eq!(
-            review_after_decision(false)
-                .into_iter()
-                .map(|row| row.1)
-                .collect::<Vec<_>>(),
-            vec!["open".to_owned()]
-        );
+    fn a_decision_leaves_open_a_review_it_did_not_decide() {
+        for case in [
+            OtherReview::AnotherMerge,
+            OtherReview::PlainNote,
+            OtherReview::AnotherFile,
+        ] {
+            assert_eq!(
+                review_after_decision(case)
+                    .into_iter()
+                    .map(|row| row.1)
+                    .collect::<Vec<_>>(),
+                vec!["open".to_owned()]
+            );
+        }
     }
 
     #[test]

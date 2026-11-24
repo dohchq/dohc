@@ -531,8 +531,6 @@ struct HostedFeed {
     pushes: Mutex<Vec<PushRequest>>,
     /// Documents whose new host ops the relay refuses, each kept as a refusal at its coordinate.
     refusing: Mutex<BTreeSet<String>>,
-    /// Coordinates the feed withholds, as an older relay withheld every conflict resolution.
-    withholding: Mutex<BTreeSet<(String, i64)>>,
     /// Corrupts each push response after the relay recorded the batch.
     garble: Mutex<Option<fn(&mut PushResponse)>>,
     /// Loses the reply to the next push after the relay recorded its batch.
@@ -552,7 +550,6 @@ impl HostedFeed {
             pulls: Mutex::new(Vec::new()),
             pushes: Mutex::new(Vec::new()),
             refusing: Mutex::new(BTreeSet::new()),
-            withholding: Mutex::new(BTreeSet::new()),
             garble: Mutex::new(None),
             lose_push_reply: AtomicBool::new(false),
             downloads: Mutex::new(Vec::new()),
@@ -749,7 +746,6 @@ impl RelayTransport for HostedFeed {
             return Err(RelayError::BadRequest);
         }
         let since = req.cursor.max(self.epoch_log_floor.load(Ordering::SeqCst));
-        let withholding = self.withholding.lock().unwrap().clone();
         let log = self.log.lock().unwrap();
         let rows = log
             .iter()
@@ -768,7 +764,7 @@ impl RelayTransport for HostedFeed {
                 (Some(object_id), None) => shared.contains_key(object_id),
                 (None, None) => row.op_kind == "workspace.init",
                 (None, Some(_)) => false,
-            } && !withholding.contains(&(row.origin_id.clone(), row.origin_seq));
+            };
             if admitted {
                 ops.push((*row).clone());
             }
@@ -859,18 +855,12 @@ impl RelayTransport for HostedFeed {
         &self,
         req: LogCoordinateRequest,
     ) -> Result<LogCoordinateResponse, RelayError> {
-        let shared = self.shared.lock().unwrap().clone();
-        let withholding = self.withholding.lock().unwrap().clone();
         Ok(self
             .log
             .lock()
             .unwrap()
             .iter()
             .find(|row| row.origin_id == req.origin_id && row.origin_seq == req.origin_seq)
-            .filter(|row| {
-                crate::hosted::hosted_document(row).is_some_and(|id| shared.contains_key(id))
-                    && !withholding.contains(&(row.origin_id.clone(), row.origin_seq))
-            })
             .cloned()
             .map_or(
                 LogCoordinateResponse::Absent,
@@ -1828,36 +1818,6 @@ fn a_hosted_replica_imports_a_served_note_resolve_and_applies_its_effect() {
     sync(&client, &mut store);
     client.transport().append(parent);
     client.transport().append(child);
-    sync(&client, &mut store);
-    assert_resolved(&mut store, &merged);
-}
-
-#[test]
-fn a_note_held_for_a_withheld_resolve_reads_it_once_the_feed_serves_it() {
-    let (_scratch, _path, mut store) = hosted_store();
-    let (feed, parent, child, merged) = single_note_resolve();
-    let client = RelaySyncClient::new(feed);
-    sync(&client, &mut store);
-    let feed = client.transport();
-    feed.withholding
-        .lock()
-        .unwrap()
-        .insert((parent.origin_id.clone(), parent.origin_seq));
-    feed.append(parent);
-    feed.append(child);
-    sync(&client, &mut store);
-    assert_eq!(
-        hold(&store, "hosted-object"),
-        Some(HostedHold::ConflictParentWithheld {
-            conflict_id: "note-conflict".to_owned()
-        })
-    );
-    assert_eq!(
-        document(&store, "hosted-object").unwrap().backfill_cursor,
-        3
-    );
-
-    feed.withholding.lock().unwrap().clear();
     sync(&client, &mut store);
     assert_resolved(&mut store, &merged);
 }
