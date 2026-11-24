@@ -11,6 +11,7 @@ import {
 import { hasPreferredNameControlCharacters } from "./chatIdentityValues";
 import { RECORD_ID_FRONTMATTER_KEY } from "./collection";
 import { isNormalizedRelativePath, yamlKeyText } from "./collectionValues";
+import { WORKSPACE_SECRET_NAME_PATTERN, validateSecretHttpUrl } from "./workspaceSecrets";
 
 // The on-disk contract for `automations.yaml`, the file in a Collection's
 // folder that stores its automations. dohc writes it with
@@ -176,6 +177,39 @@ export const MAX_ACTION_INPUT_KEYS = 32;
 // Input keys are names in the action's code, like field names in a form.
 // Like every length bound in this file, it counts UTF-16 code units.
 export const MAX_ACTION_INPUT_KEY_LENGTH = 64;
+export const MAX_HTTP_STEPS_PER_AUTOMATION = 3;
+export const MAX_HTTP_HEADERS = 16;
+const MAX_HTTP_HEADER_NAME_LENGTH = 64;
+export const MAX_HTTP_HEADER_VALUE_BYTES = 2_048;
+const MAX_HTTP_SECRET_PREFIX_LENGTH = 64;
+export const MAX_HTTP_TOTAL_HEADER_BYTES = 8_192;
+export const MAX_HTTP_BODY_BYTES = 64 * 1024;
+export const AUTOMATION_HTTP_USER_AGENT = "dohc-automation/1";
+export const HTTP_HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,64}$/u;
+export const HTTP_HEADER_VALUE_PATTERN = /^[\x20-\x7e]*$/u;
+const FORBIDDEN_HTTP_HEADERS: ReadonlySet<string> = new Set([
+  "host",
+  "connection",
+  "content-length",
+  "transfer-encoding",
+  "cookie",
+  "accept-encoding",
+  "te",
+  "upgrade",
+  "keep-alive",
+  "trailer",
+  "user-agent",
+]);
+
+export function isForbiddenHttpHeader(name: string): boolean {
+  const lower = name.toLowerCase();
+  return (
+    FORBIDDEN_HTTP_HEADERS.has(lower) ||
+    RESERVED_KEYS.has(lower) ||
+    lower.startsWith("proxy-") ||
+    lower.startsWith("x-dohc-")
+  );
+}
 // Keys that JSON objects reserve. The dataset host refuses an input key or
 // an operation name part that is one, so the file refuses it first.
 const RESERVED_KEYS: ReadonlySet<string> = new Set(["__proto__", "prototype", "constructor"]);
@@ -256,6 +290,23 @@ interface AutomationInputValue {
   value: AutomationValue;
 }
 
+type AutomationHttpTarget = { kind: "literal"; url: string } | { kind: "secret"; secret: string };
+
+interface AutomationHttpHeader {
+  name: string;
+  value: AutomationValue;
+}
+
+interface AutomationHttpSecretHeader {
+  name: string;
+  secret: string;
+  prefix: string | null;
+}
+
+type AutomationHttpBody =
+  | { kind: "json"; fields: AutomationInputValue[] }
+  | { kind: "text"; template: string };
+
 const AUTOMATION_WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
 export type AutomationWeekday = (typeof AUTOMATION_WEEKDAYS)[number];
 
@@ -331,9 +382,59 @@ type AutomationStep =
    * user id. Whether the step may run is decided at run time.
    */
   | { kind: "wake-agent"; text: string; person: string }
+  /**
+   * A personal step (ADR 0012): sends a status-only POST webhook to an
+   * owner-confirmed static HTTPS destination in a private solo Collection.
+   */
+  | {
+      kind: "http";
+      url: AutomationHttpTarget;
+      method: "POST";
+      headers: AutomationHttpHeader[];
+      secretHeaders: AutomationHttpSecretHeader[];
+      body: AutomationHttpBody | null;
+    }
   | { kind: "run"; code: string; as: string | null }
   /** `file` is relative to the Collection's folder. */
   | { kind: "run-file"; file: string; as: string | null };
+
+export type AutomationHttpStep = Extract<AutomationStep, { kind: "http" }>;
+
+/** Whether a single step uses personal/owner-only reach (ADR 0012). */
+function isPersonalAutomationStep(step: AutomationStep): boolean {
+  return step.kind === "wake-agent" || step.kind === "http";
+}
+
+/** Whether an automation contains any personal step at any depth. */
+export function hasPersonalStep(automation: Automation): boolean {
+  const walk = (steps: readonly AutomationStep[]): boolean =>
+    steps.some(
+      (step) =>
+        isPersonalAutomationStep(step) ||
+        (step.kind === "if" && (walk(step.do) || walk(step.otherwise))),
+    );
+  return walk(automation.do);
+}
+
+/** Whether an automation contains any outbound HTTP webhook step at any depth. */
+export function hasHttpStep(automation: Automation): boolean {
+  const walk = (steps: readonly AutomationStep[]): boolean =>
+    steps.some(
+      (step) =>
+        step.kind === "http" || (step.kind === "if" && (walk(step.do) || walk(step.otherwise))),
+    );
+  return walk(automation.do);
+}
+
+/** Safe display target for an HTTP step; never exposes an unsealed secret URL. */
+export function httpStepTargetLabel(step: Pick<AutomationHttpStep, "url">): string {
+  if (step.url.kind === "secret") return `secret ${step.url.secret}`;
+  try {
+    return new URL(step.url.url).hostname.toLowerCase();
+  } catch {
+    return step.url.url;
+  }
+}
 
 export interface Automation {
   id: string;
@@ -387,6 +488,13 @@ export const AUTOMATION_DIAGNOSTIC_CODES = [
   "reserved-input-key",
   // An operation or action name the dataset host would refuse.
   "invalid-operation-name",
+  "invalid-http-url",
+  "invalid-http-method",
+  "invalid-secret-name",
+  "invalid-http-header-name",
+  "forbidden-http-header",
+  "too-many-http-headers",
+  "too-many-http-steps",
   // A write that would not read back as the same automation.
   "changed-on-reread",
 ] as const;
@@ -478,6 +586,7 @@ const STEP_OPTIONS = {
   post: ["group"],
   "direct-message": ["to"],
   "wake-agent": ["person"],
+  http: ["method", "headers", "secret-headers", "body"],
   run: ["as"],
   "run-file": ["as"],
 } as const satisfies Record<AutomationStep["kind"], readonly string[]>;
@@ -502,6 +611,7 @@ interface StepContext {
   issues: Issues;
   hasRecord: boolean;
   stepCount: number;
+  httpStepCount: number;
   boundNames: Set<string>;
 }
 
@@ -844,6 +954,215 @@ function readInput(value: unknown, path: string, issues: Issues): AutomationInpu
   return valid ? input : null;
 }
 
+const utf8ByteLength = (text: string): number => new TextEncoder().encode(text).byteLength;
+
+function readHttpTarget(value: unknown, path: string, issues: Issues): AutomationHttpTarget | null {
+  if (value instanceof Map) {
+    const entries = readMapping(value, path, ["secret"], issues);
+    if (entries === null) return null;
+    const secretPath = pointer(path, "secret");
+    const secret = readText(required(entries, "secret", path, issues), secretPath, 64, issues);
+    if (secret !== null && !WORKSPACE_SECRET_NAME_PATTERN.test(secret)) {
+      issues.push({ code: "invalid-secret-name", path: secretPath });
+      return null;
+    }
+    return secret === null ? null : { kind: "secret", secret };
+  }
+  if (value === null || value === undefined) {
+    issues.push({ code: "empty-value", path });
+    return null;
+  }
+  if (typeof value !== "string") {
+    issues.push({ code: "expected-text", path });
+    return null;
+  }
+  if (value.trim().length === 0) {
+    issues.push({ code: "empty-value", path });
+    return null;
+  }
+  if (value.startsWith("=")) {
+    issues.push({ code: "unexpected-formula-marker", path });
+    return null;
+  }
+  if (/[{}]/u.test(value) || validateSecretHttpUrl(value) === null) {
+    issues.push({ code: "invalid-http-url", path });
+    return null;
+  }
+  return { kind: "literal", url: value };
+}
+
+function readHttpHeaderName(
+  key: unknown,
+  path: string,
+  seenHeaders: Set<string>,
+  issues: Issues,
+): string | null {
+  const keyText = yamlKeyText(key);
+  if (keyText === null) {
+    issues.push({ code: "expected-text", path });
+    return null;
+  }
+  if (keyText.startsWith("=")) {
+    issues.push({ code: "unexpected-formula-marker", path });
+    return null;
+  }
+  if (keyText.length > MAX_HTTP_HEADER_NAME_LENGTH) {
+    issues.push({ code: "too-long", path });
+    return null;
+  }
+  if (!HTTP_HEADER_NAME_PATTERN.test(keyText)) {
+    issues.push({ code: "invalid-http-header-name", path });
+    return null;
+  }
+  if (isForbiddenHttpHeader(keyText)) {
+    issues.push({ code: "forbidden-http-header", path });
+    return null;
+  }
+  const lower = keyText.toLowerCase();
+  if (seenHeaders.has(lower)) {
+    issues.push({ code: "duplicate-key", path });
+    return null;
+  }
+  seenHeaders.add(lower);
+  return keyText;
+}
+
+function readHttpHeaders(
+  value: unknown,
+  path: string,
+  seenHeaders: Set<string>,
+  issues: Issues,
+): AutomationHttpHeader[] | null {
+  if (value === undefined) return [];
+  if (value === null || (value instanceof Map && value.size === 0)) {
+    issues.push({ code: "empty-value", path });
+    return null;
+  }
+  if (!(value instanceof Map)) {
+    issues.push({ code: "expected-mapping", path });
+    return null;
+  }
+  const headers: AutomationHttpHeader[] = [];
+  let valid = true;
+  for (const [key, entry] of value) {
+    const fieldPath = keyPointer(path, key);
+    const name = readHttpHeaderName(key, fieldPath, seenHeaders, issues);
+    const headerValue = readValue(entry, fieldPath, issues);
+    if (name === null || headerValue === null) {
+      valid = false;
+      continue;
+    }
+    if (headerValue.kind === "literal") {
+      if (Array.isArray(headerValue.value)) {
+        issues.push({ code: "expected-scalar", path: fieldPath });
+        valid = false;
+        continue;
+      }
+      if (headerValue.value === null) {
+        issues.push({ code: "empty-value", path: fieldPath });
+        valid = false;
+        continue;
+      }
+      const formatted = String(headerValue.value);
+      if (!HTTP_HEADER_VALUE_PATTERN.test(formatted)) {
+        issues.push({ code: "control-characters", path: fieldPath });
+        valid = false;
+        continue;
+      }
+      if (utf8ByteLength(formatted) > MAX_HTTP_HEADER_VALUE_BYTES) {
+        issues.push({ code: "too-long", path: fieldPath });
+        valid = false;
+        continue;
+      }
+    }
+    headers.push({ name, value: headerValue });
+  }
+  return valid ? headers : null;
+}
+
+function readHttpSecretHeaders(
+  value: unknown,
+  path: string,
+  seenHeaders: Set<string>,
+  issues: Issues,
+): AutomationHttpSecretHeader[] | null {
+  if (value === undefined) return [];
+  if (value === null || (value instanceof Map && value.size === 0)) {
+    issues.push({ code: "empty-value", path });
+    return null;
+  }
+  if (!(value instanceof Map)) {
+    issues.push({ code: "expected-mapping", path });
+    return null;
+  }
+  const secretHeaders: AutomationHttpSecretHeader[] = [];
+  let valid = true;
+  for (const [key, entry] of value) {
+    const fieldPath = keyPointer(path, key);
+    const name = readHttpHeaderName(key, fieldPath, seenHeaders, issues);
+    const mapping = readMapping(entry, fieldPath, ["secret", "prefix"], issues);
+    if (name === null || mapping === null) {
+      valid = false;
+      continue;
+    }
+    const secretPath = pointer(fieldPath, "secret");
+    const secret = readText(required(mapping, "secret", fieldPath, issues), secretPath, 64, issues);
+    if (secret !== null && !WORKSPACE_SECRET_NAME_PATTERN.test(secret)) {
+      issues.push({ code: "invalid-secret-name", path: secretPath });
+      valid = false;
+      continue;
+    }
+    let prefix: string | null = null;
+    if (mapping.has("prefix")) {
+      const prefixPath = pointer(fieldPath, "prefix");
+      const parsedPrefix = readText(
+        mapping.get("prefix"),
+        prefixPath,
+        MAX_HTTP_SECRET_PREFIX_LENGTH,
+        issues,
+      );
+      if (parsedPrefix === null) {
+        valid = false;
+        continue;
+      }
+      if (!HTTP_HEADER_VALUE_PATTERN.test(parsedPrefix)) {
+        issues.push({ code: "control-characters", path: prefixPath });
+        valid = false;
+        continue;
+      }
+      prefix = parsedPrefix;
+    }
+    if (secret === null) {
+      valid = false;
+      continue;
+    }
+    secretHeaders.push({ name, secret, prefix });
+  }
+  return valid ? secretHeaders : null;
+}
+
+function readHttpBody(
+  value: unknown,
+  path: string,
+  issues: Issues,
+): AutomationHttpBody | null | undefined {
+  if (value === undefined) return null;
+  if (value === null) {
+    issues.push({ code: "empty-value", path });
+    return undefined;
+  }
+  if (typeof value === "string") {
+    const template = readTemplate(value, path, issues);
+    return template === null ? undefined : { kind: "text", template };
+  }
+  if (value instanceof Map) {
+    const fields = readInput(value, path, issues);
+    return fields === null ? undefined : { kind: "json", fields };
+  }
+  issues.push({ code: "expected-mapping", path });
+  return undefined;
+}
+
 // A name or alias Intl knows, in any letter case. Intl resolves every fixed
 // offset it accepts, however it is spelled, to "+HH:MM" or "-HH:MM".
 function isTimeZoneName(value: string): boolean {
@@ -1131,6 +1450,44 @@ function readStep(
       );
       return text === null || person === null ? null : { kind, text, person };
     }
+    case "http": {
+      context.httpStepCount += 1;
+      if (context.httpStepCount === MAX_HTTP_STEPS_PER_AUTOMATION + 1) {
+        issues.push({ code: "too-many-http-steps", path });
+      }
+      const url = readHttpTarget(argument, argumentPath, issues);
+      const method = "POST" as const;
+      if (entries.has("method")) {
+        const rawMethod = entries.get("method");
+        if (rawMethod !== "POST") {
+          issues.push({ code: "invalid-http-method", path: option("method") });
+        }
+      }
+      const seenHeaders = new Set<string>();
+      const headers = readHttpHeaders(
+        entries.get("headers"),
+        option("headers"),
+        seenHeaders,
+        issues,
+      );
+      const secretHeaders = readHttpSecretHeaders(
+        entries.get("secret-headers"),
+        option("secret-headers"),
+        seenHeaders,
+        issues,
+      );
+      if (
+        headers !== null &&
+        secretHeaders !== null &&
+        headers.length + secretHeaders.length > MAX_HTTP_HEADERS
+      ) {
+        issues.push({ code: "too-many-http-headers", path });
+      }
+      const body = readHttpBody(entries.get("body"), option("body"), issues);
+      return url === null || headers === null || secretHeaders === null || body === undefined
+        ? null
+        : { kind, url, method, headers, secretHeaders, body };
+    }
     case "run": {
       const code = readText(argument, argumentPath, MAX_INLINE_CODE_LENGTH, issues);
       const as = bindName(entries.get("as"), option("as"), "value", scope, context);
@@ -1195,6 +1552,7 @@ function readAutomation(
     // whether it has a record.
     hasRecord: when === null || RECORD_TRIGGERS.has(when.kind),
     stepCount: 0,
+    httpStepCount: 0,
     boundNames: new Set(),
   };
   const steps = readSteps(
@@ -1472,6 +1830,41 @@ function stepYaml(step: AutomationStep): Map<string, unknown> {
       return withOptions(step.kind, step.text, [["group", step.group]]);
     case "wake-agent":
       return withOptions(step.kind, step.text, [["person", step.person]]);
+    case "http":
+      return withOptions(
+        step.kind,
+        step.url.kind === "literal" ? step.url.url : new Map([["secret", step.url.secret]]),
+        [
+          [
+            "headers",
+            step.headers.length === 0
+              ? null
+              : new Map(step.headers.map(({ name, value }) => [name, valueYaml(value)])),
+          ],
+          [
+            "secret-headers",
+            step.secretHeaders.length === 0
+              ? null
+              : new Map(
+                  step.secretHeaders.map(({ name, secret, prefix }) => [
+                    name,
+                    new Map<string, unknown>([
+                      ["secret", secret],
+                      ...(prefix === null ? [] : [["prefix", prefix] as const]),
+                    ]),
+                  ]),
+                ),
+          ],
+          [
+            "body",
+            step.body === null
+              ? null
+              : step.body.kind === "text"
+                ? step.body.template
+                : inputYaml(step.body.fields),
+          ],
+        ],
+      );
     case "run":
       return withOptions(step.kind, step.code, [["as", step.as]]);
     case "run-file":

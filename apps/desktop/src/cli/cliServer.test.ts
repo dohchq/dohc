@@ -3319,7 +3319,7 @@ describe("CLI socket server", () => {
     const answers: Array<
       Awaited<ReturnType<NonNullable<CliWorkspaceContext["automations"]>["retry"]>>
     > = [
-      { status: "definition-changed", repeatsMessages: true },
+      { status: "definition-changed", repeatsMessages: true, repeatsWebhooks: true },
       { status: "queued", press: false },
       {
         status: "refused",
@@ -3419,12 +3419,16 @@ describe("CLI socket server", () => {
       ok: false,
       status: "definition-changed",
       repeatsMessages: true,
+      repeatsWebhooks: true,
     });
     expect("reason" in refused && refused.reason).toContain(
       "This automation changed since the run failed.",
     );
     expect("reason" in refused && refused.reason).toContain(
       "Posts, direct messages, and notices it already sent may be sent again.",
+    );
+    expect("reason" in refused && refused.reason).toContain(
+      "Webhook requests it already sent may be sent again.",
     );
     await expect(
       invoke("automationRetry", { ...args, run: "atc_1", startOver: true }),

@@ -132,20 +132,9 @@ export function selfHostLiveProfile() {
         ownerOutbox: nativeIngress.ownerOutbox,
       },
       sync: nativeIngress.sync,
-      // One restore at a time. Its native reservation, about 206 MiB, shares
-      // the 512 MiB ingress budget with live applications and owner delivery.
-      restore: {
-        maxBytes: 2 * MiB,
-        maxEvents: 64,
-        aggregateBytes: 40 * MiB,
-        workingReserveBytes: 8 * MiB,
-        maxOperations: 1,
-        validation,
-      },
       activation: {
         validation,
         maxCaptureBytes: 4 * MiB,
-        maxActivationHistoryEntries: 2_000,
         maxEntriesPerDrain: 128,
         maxBytesPerDrain: 4 * MiB,
         maxDocumentsPerPass: 8,

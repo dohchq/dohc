@@ -5,6 +5,15 @@ import { ChatMessageWaiters } from "./chatMessageWaiters";
 import { signalChatWrite, subscribeChatWrites } from "../workspaces/chatWriteSignals";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
+import type {
+  InboxAddInput,
+  InboxAddResult,
+  InboxArchiveInput,
+  InboxArchiveResult,
+  InboxMoveInput,
+  InboxMoveResult,
+  InboxSource,
+} from "@dohc/workspace-contracts/inbox";
 import { creationPartialMessage } from "@dohc/cli/creation";
 import type { AgentNotice } from "../notices/agentNotices";
 import type { SentNoticeTarget } from "../notices/noticeTarget";
@@ -616,6 +625,18 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   liveDocuments?: CliLiveDocumentsPort;
   automations?: CliAutomationsPort;
   buttons?: CliButtonsPort;
+  inbox?: {
+    add(
+      input: InboxAddInput,
+      source: InboxSource,
+      origin: LiveDocumentEditOrigin | null,
+    ): Promise<InboxAddResult>;
+    archive(
+      input: InboxArchiveInput,
+      origin: LiveDocumentEditOrigin | null,
+    ): Promise<InboxArchiveResult>;
+    move(input: InboxMoveInput, origin: LiveDocumentEditOrigin | null): Promise<InboxMoveResult>;
+  };
 }
 
 export interface CliRunMessageLink {
@@ -1096,11 +1117,15 @@ function automationRetryResult(result: AutomationRunRetry): CliResultByVerb["aut
         ok: false,
         status: result.status,
         repeatsMessages: result.repeatsMessages,
+        ...(result.repeatsWebhooks ? { repeatsWebhooks: true } : {}),
         reason: [
           "This automation changed since the run failed.",
           "Running it again starts from the first step and can repeat changes it already made.",
           ...(result.repeatsMessages
             ? ["Posts, direct messages, and notices it already sent may be sent again."]
+            : []),
+          ...(result.repeatsWebhooks
+            ? ["Webhook requests it already sent may be sent again."]
             : []),
           "To do that, try again with --start-over, or startOver: true.",
         ].join(" "),
@@ -2475,6 +2500,7 @@ const HAND_WRITTEN_SHARE_RULES: {
   chatFileMentions: "anywhere",
   outsideChanges: "owner",
   planUndoAgentRun: "owner",
+  inboxList: "owner",
   workspaceSearch: "owner",
   linksEdges: "anywhere",
   linksIn: "anywhere",
@@ -3157,6 +3183,57 @@ const DECLARED_WRITERS: {
       return { ok: true as const, ...result };
     } catch (error) {
       return pathFreeFailure(error, "dohc could not undo this agent run.");
+    }
+  },
+  inboxAdd: async (request, context, options) => {
+    if (!context.inbox) return { ok: false as const, reason: "Workspace Inbox is unavailable." };
+    try {
+      const isAgent = request.args.actor === "agent";
+      const origin = isAgent ? documentEditOrigin(context, options, undefined) : null;
+      const result = await context.inbox.add(
+        {
+          ...(request.args.title !== undefined ? { title: request.args.title } : {}),
+          ...(request.args.body !== undefined ? { body: request.args.body } : {}),
+          ...(request.args.url !== undefined ? { url: request.args.url } : {}),
+          ...(request.args.kind !== undefined ? { kind: request.args.kind } : {}),
+        },
+        isAgent ? "agent" : "cli",
+        origin,
+      );
+      await notifyWrite(options, context);
+      return { ok: true as const, ...result };
+    } catch (error) {
+      return pathFreeFailure(error, "dohc could not capture this item into Inbox.");
+    }
+  },
+  inboxArchive: async (request, context, options) => {
+    if (!context.inbox) return { ok: false as const, reason: "Workspace Inbox is unavailable." };
+    try {
+      refusePathColon(request.args.item);
+      const origin =
+        request.args.actor === "agent" ? documentEditOrigin(context, options, undefined) : null;
+      const result = await context.inbox.archive({ item: request.args.item }, origin);
+      await notifyWrite(options, context);
+      return { ok: true as const, ...result };
+    } catch (error) {
+      return pathFreeFailure(error, "dohc could not archive this Inbox item.");
+    }
+  },
+  inboxMove: async (request, context, options) => {
+    if (!context.inbox) return { ok: false as const, reason: "Workspace Inbox is unavailable." };
+    try {
+      refusePathColon(request.args.item);
+      refusePathColon(request.args.targetFolder);
+      const origin =
+        request.args.actor === "agent" ? documentEditOrigin(context, options, undefined) : null;
+      const result = await context.inbox.move(
+        { item: request.args.item, targetFolder: request.args.targetFolder },
+        origin,
+      );
+      await notifyWrite(options, context);
+      return { ok: true as const, ...result };
+    } catch (error) {
+      return pathFreeFailure(error, "dohc could not move this Inbox item.");
     }
   },
 };

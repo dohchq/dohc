@@ -14,10 +14,17 @@ import {
 } from "@dohc/app-backend-runtime/automation";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import {
+  HTTP_HEADER_VALUE_PATTERN,
+  MAX_HTTP_BODY_BYTES,
+  MAX_HTTP_HEADER_VALUE_BYTES,
+  MAX_HTTP_STEPS_PER_AUTOMATION,
+  MAX_HTTP_TOTAL_HEADER_BYTES,
   automationTextParts,
   automationTextProblem,
+  httpStepTargetLabel,
   type Automation,
   type AutomationDiagnosticCode,
+  type AutomationHttpStep,
   type AutomationScheduleTrigger,
 } from "@dohc/workspace-contracts/automations";
 import {
@@ -300,6 +307,20 @@ export function formulaProblems(automation: Automation): FormulaProblem[] {
         }
         case "run-file":
           break;
+        case "http": {
+          values(
+            `${at}/headers`,
+            step.headers.map(({ name, value }) => ({ key: name, value })),
+          );
+          if (step.body?.kind === "json") {
+            values(`${at}/body`, step.body.fields);
+          } else if (step.body?.kind === "text") {
+            const code =
+              step.body.template.trim() === "" ? null : automationTextProblem(step.body.template);
+            if (code !== null) problems.push({ path: `${at}/body`, code });
+          }
+          break;
+        }
         default: {
           // Every other step sends a message, whose {expressions} must parse.
           const code = step.text.trim() === "" ? null : automationTextProblem(step.text);
@@ -702,6 +723,7 @@ export function shapeProblem(
   const steps = orderSteps(automation.do);
   const bindings = bindingsOf(steps);
   let finds = 0;
+  let httpSteps = 0;
   let formulas =
     (automation.if === null ? 0 : 1) +
     (automation.when.kind === "field-changed" && automation.when.to?.kind === "formula" ? 1 : 0) +
@@ -766,9 +788,30 @@ export function shapeProblem(
       case "run":
       case "run-file":
         break;
+      case "http": {
+        httpSteps += 1;
+        const headerFormulas = step.headers.flatMap((header) =>
+          isFormula(header.value) ? [header.value.expression] : [],
+        );
+        const bodyFormulas =
+          step.body?.kind === "json"
+            ? step.body.fields.flatMap((entry) =>
+                isFormula(entry.value) ? [entry.value.expression] : [],
+              )
+            : [];
+        formulas += headerFormulas.length + bodyFormulas.length;
+        if (step.body?.kind === "text") formulas += 1;
+        if (recordless !== null && [...headerFormulas, ...bodyFormulas].some(readsTriggerRecord)) {
+          return `${automation.when.kind === "schedule" ? "A schedule" : "A Group message"} starts this automation, so a webhook step cannot use trigger.record. Use a value instead.`;
+        }
+        break;
+      }
     }
   }
   if (finds > MAX_FINDS) return `An automation can use at most ${MAX_FINDS} Find steps.`;
+  if (httpSteps > MAX_HTTP_STEPS_PER_AUTOMATION) {
+    return `An automation can use at most ${MAX_HTTP_STEPS_PER_AUTOMATION} webhook steps.`;
+  }
   if (bindings.has(BEFORE_BINDING)) return `A step result cannot be named ${BEFORE_BINDING}.`;
   if (formulas > AUTOMATION_LIMITS.formulasPerBatch) {
     return `An automation can use at most ${AUTOMATION_LIMITS.formulasPerBatch} formulas.`;
@@ -918,7 +961,11 @@ function groupTriggerReach(automation: Automation, chat: ChatDirectory | null): 
 }
 
 /** The Group, people, or person's own reach one chat step reaches. Any other step reaches no chat. */
-function chatReachOf(step: AutomationStep, chat: ChatDirectory | null): ReachStep[] {
+function chatReachOf(
+  step: AutomationStep,
+  ordinal: number,
+  chat: ChatDirectory | null,
+): ReachStep[] {
   switch (step.kind) {
     case "post": {
       const group = chat?.group(step.group);
@@ -947,6 +994,8 @@ function chatReachOf(step: AutomationStep, chat: ChatDirectory | null): ReachSte
           person: { userId: step.person, name: chat?.person(step.person) ?? "that person" },
         },
       ];
+    case "http":
+      return [{ kind: "http", target: httpStepTargetLabel(step), stepOrdinal: ordinal }];
     case "notify":
       return step.to.flatMap((person): ReachStep[] =>
         isFormula(person) || typeof person.value !== "string"
@@ -978,7 +1027,7 @@ export function reachStepsOf(
   const bindings = bindingsOf(steps);
   const target = (path: string | null) => (path === null ? collection : collectionNamed(path));
   const reach = groupTriggerReach(automation, chat);
-  for (const { step } of everyStep(steps)) {
+  for (const { ordinal, step } of everyStep(steps)) {
     if (step.kind === "set") {
       const bound = step.records === null ? null : bindings.get(step.records);
       reach.push({ kind: "change-records", collection: target(bound ? bound.collection : null) });
@@ -992,7 +1041,7 @@ export function reachStepsOf(
       // has run.
       reach.push({ kind: "find-records", collection });
     } else {
-      reach.push(...chatReachOf(step, chat));
+      reach.push(...chatReachOf(step, ordinal, chat));
     }
   }
   return reach;
@@ -1006,7 +1055,9 @@ export function reachStepsOf(
 export function chatReachStepsOf(automation: Automation, chat: ChatDirectory | null): ReachStep[] {
   return [
     ...groupTriggerReach(automation, chat),
-    ...[...everyStep(orderSteps(automation.do))].flatMap(({ step }) => chatReachOf(step, chat)),
+    ...[...everyStep(orderSteps(automation.do))].flatMap(({ ordinal, step }) =>
+      chatReachOf(step, ordinal, chat),
+    ),
   ];
 }
 
@@ -1234,6 +1285,9 @@ type Slot =
   | { kind: "text"; ordinal: number }
   // A direct message's person that a formula names.
   | { kind: "person"; ordinal: number; index: number }
+  | { kind: "http-header"; ordinal: number; name: string }
+  | { kind: "http-body-field"; ordinal: number; key: string }
+  | { kind: "http-body-text"; ordinal: number }
   // A code step's answer. Later steps read its output by `as`.
   | { kind: "code"; ordinal: number; as: string | null };
 
@@ -1494,6 +1548,15 @@ export function namesUsed(step: AutomationStep): ReadonlySet<string> | "all" {
     case "invoke":
       formulas(step.input.map((entry) => entry.value));
       break;
+    case "http":
+      formulas(step.headers.map((header) => header.value));
+      if (step.body?.kind === "json") {
+        formulas(step.body.fields.map((entry) => entry.value));
+      } else if (step.body?.kind === "text") {
+        for (const part of automationTextParts(step.body.template) ?? [])
+          if (part.kind === "expression") sources.push(part.expression);
+      }
+      break;
     default:
       for (const part of automationTextParts(step.text) ?? [])
         if (part.kind === "expression") sources.push(part.expression);
@@ -1644,6 +1707,21 @@ export function stepRequest(
   } else if (step.kind === "invoke") {
     for (const { key, value } of step.input)
       if (isFormula(value)) add({ kind: "input", ordinal, key }, value.expression);
+  } else if (step.kind === "http") {
+    for (const { name, value } of step.headers)
+      if (isFormula(value)) add({ kind: "http-header", ordinal, name }, value.expression);
+    if (step.body?.kind === "json") {
+      for (const { key, value } of step.body.fields)
+        if (isFormula(value)) add({ kind: "http-body-field", ordinal, key }, value.expression);
+    } else if (step.body?.kind === "text") {
+      slots.push({ kind: "http-body-text", ordinal });
+      items.push({
+        kind: "text",
+        parts: automationTextParts(step.body.template) ?? [
+          { kind: "text", text: step.body.template },
+        ],
+      });
+    }
   } else if (step.kind === "set" || step.kind === "add-record") {
     // A Set on the records a Find returned gives each record its own value.
     const records =
@@ -1676,6 +1754,10 @@ function slotKey(slot: Slot): string {
       return `person:${slot.index}`;
     case "input":
       return `input:${slot.key}`;
+    case "http-header":
+      return `http-header:${slot.name}`;
+    case "http-body-field":
+      return `http-body-field:${slot.key}`;
     default:
       return slot.kind;
   }
@@ -1760,7 +1842,20 @@ export type PlannedEffect =
       byFormula?: boolean;
     }
   /** A dataset action to run, by name, with its input as the formulas gave it. */
-  | { kind: "invoke"; operation: string; input: JsonObject };
+  | { kind: "invoke"; operation: string; input: JsonObject }
+  | {
+      kind: "http";
+      deliveryId: string;
+      collectionPath: string;
+      automationId: string;
+      stepOrdinal: number;
+      targetLabel: string;
+      url: AutomationHttpStep["url"];
+      headers: Array<{ name: string; value: string }>;
+      secretHeaders: AutomationHttpStep["secretHeaders"];
+      body: string | null;
+      defaultContentType: "application/json" | "text/plain; charset=utf-8" | null;
+    };
 
 export type StepOutput =
   | { kind: "find"; records: RunRef[] }
@@ -1793,6 +1888,12 @@ function slotSubject(slot: Slot): string {
       return `The person in step ${slot.ordinal + 1}`;
     case "input":
       return `The input "${slot.key}" in step ${slot.ordinal + 1}`;
+    case "http-header":
+      return `The header "${slot.name}" in step ${slot.ordinal + 1}`;
+    case "http-body-field":
+      return `The body field "${slot.key}" in step ${slot.ordinal + 1}`;
+    case "http-body-text":
+      return `The request body in step ${slot.ordinal + 1}`;
     case "code":
       return `The code in step ${slot.ordinal + 1}`;
     default:
@@ -2095,6 +2196,90 @@ export function planStep(
       for (const { key: name, value } of step.input)
         input[name] = isFormula(value) ? (answers.get(`input:${name}`) ?? null) : value.value;
       return done([{ kind: "invoke", operation: step.operation, input }]);
+    }
+    case "http": {
+      const evaluatedHeaders: Array<{ name: string; value: string }> = [];
+      let headerBytes = 0;
+      for (const { name, value } of step.headers) {
+        const raw = isFormula(value) ? (answers.get(`http-header:${name}`) ?? null) : value.value;
+        if (raw === null || raw === undefined) {
+          return { problem: `The header "${name}" in step ${ordinal + 1} is empty.` };
+        }
+        if (typeof raw === "object") {
+          return {
+            problem: `The header "${name}" in step ${ordinal + 1} must be text, a number, or true or false.`,
+          };
+        }
+        const formatted = String(raw);
+        if (!HTTP_HEADER_VALUE_PATTERN.test(formatted)) {
+          return {
+            problem: `The header "${name}" in step ${ordinal + 1} contains characters HTTP headers do not allow.`,
+          };
+        }
+        const valueBytes = Buffer.byteLength(formatted, "utf8");
+        if (valueBytes > MAX_HTTP_HEADER_VALUE_BYTES) {
+          return {
+            problem: `The header "${name}" in step ${ordinal + 1} exceeds the ${MAX_HTTP_HEADER_VALUE_BYTES}-byte limit.`,
+          };
+        }
+        headerBytes += Buffer.byteLength(name, "utf8") + valueBytes;
+        if (headerBytes > MAX_HTTP_TOTAL_HEADER_BYTES) {
+          return {
+            problem: `The headers in step ${ordinal + 1} exceed the ${MAX_HTTP_TOTAL_HEADER_BYTES}-byte limit.`,
+          };
+        }
+        evaluatedHeaders.push({ name, value: formatted });
+      }
+      let body: string | null = null;
+      let defaultContentType: "application/json" | "text/plain; charset=utf-8" | null = null;
+      if (step.body?.kind === "text") {
+        const rendered = answers.get("http-body-text") ?? null;
+        if (typeof rendered !== "string") {
+          return { problem: `The request body in step ${ordinal + 1} is not text.` };
+        }
+        body = rendered;
+        defaultContentType = "text/plain; charset=utf-8";
+      } else if (step.body?.kind === "json") {
+        const payload: JsonObject = Object.create(null) as JsonObject;
+        for (const { key: fieldKey, value } of step.body.fields) {
+          payload[fieldKey] = isFormula(value)
+            ? (answers.get(`http-body-field:${fieldKey}`) ?? null)
+            : value.value;
+        }
+        body = JSON.stringify(payload);
+        defaultContentType = "application/json";
+      }
+      if (body !== null && Buffer.byteLength(body, "utf8") > MAX_HTTP_BODY_BYTES) {
+        return {
+          problem: `The request body in step ${ordinal + 1} exceeds the ${MAX_HTTP_BODY_BYTES}-byte limit.`,
+        };
+      }
+      const deliveryId = createHash("sha256")
+        .update(
+          JSON.stringify([
+            "dohc-http-delivery-v1",
+            claim.automationId,
+            key.claimId,
+            key.hash,
+            ordinal,
+          ]),
+        )
+        .digest("hex");
+      return done([
+        {
+          kind: "http",
+          deliveryId,
+          collectionPath: claim.collectionPath,
+          automationId: automation.id,
+          stepOrdinal: ordinal,
+          targetLabel: httpStepTargetLabel(step),
+          url: step.url,
+          headers: evaluatedHeaders,
+          secretHeaders: step.secretHeaders,
+          body,
+          defaultContentType,
+        },
+      ]);
     }
     case "run":
     case "run-file": {

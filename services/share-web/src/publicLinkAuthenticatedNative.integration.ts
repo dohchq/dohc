@@ -1,7 +1,3 @@
-import {
-  OwnerRestoreActionResponse,
-  OwnerRestoreRelayReview,
-} from "../../../apps/desktop/src/ipc/ownerRestoreContract.js";
 import { createServer as createHttpsServer } from "node:https";
 import {
   chromium,
@@ -87,7 +83,6 @@ interface PublicProofAdmission {
   ordinaryMaxRequestBytes: number;
   native: {
     settlement: unknown;
-    restore: unknown;
     sync: unknown;
     ingress: unknown;
     client: unknown;
@@ -407,7 +402,6 @@ it("exercises public Edit through owner creation, exchange and native applicatio
         relayExchangeKey: exchangeKey,
         namedBrowserSessionLimits: capacity.namedSessions,
         resolveActor: createSessionActorResolver(relayAuth),
-        ownerRestoreHost: () => active,
       });
       let routes!: ReturnType<typeof createNamedLiveRoutes>,
         namedRoutes!: ReturnType<typeof createNamedLiveRoutes>,
@@ -817,42 +811,18 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       await browserExpect
         .poll(() => frameChanges.captureCount())
         .toBe(capacity.admittedConcurrency);
-      const options = OwnerRestoreActionResponse.options.parse(
-        await ownerRequest("/sync/workspace/live-restores/options", { path: "docs/a.md" }),
-      );
-      const point = options.points.find((row) => row.cursor === 0);
-      if (!point) throw new Error("Baseline restore point missing.");
-      const planned = OwnerRestoreActionResponse.plan.parse(
-        await ownerRequest("/sync/workspace/live-restores/plan", {
-          document: options.document,
+      expect(
+        deployment.storage.revokeShareGrant({
           shareId,
           grantId,
-          restorePointCursor: point.cursor,
-          restorePointReceiptDigest: point.receiptDigest,
-        }),
-      );
-      const stopped = OwnerRestoreActionResponse.begin.parse(
-        await ownerRequest("/sync/workspace/live-restores", { intent: planned.intent }),
-      );
-      expect(stopped.phase).toBe("authority-invalidated");
+          revokedAtMs: Date.now(),
+          expectedDependentGrantIds: [],
+          guard: deployment.storage.captureStanding(),
+        }).ok,
+      ).toBe(true);
       wire.events.push({ authorityInvalidationObservedAt: Date.now() });
       await hostile.hostileSend(partial);
       await hostile.until(() => hostile.closed !== undefined);
-      const prefix = `/sync/workspace/live-restores/${stopped.operationId}`;
-      const prepared = OwnerRestoreActionResponse.prepare.parse(
-        await ownerRequest(prefix + "/prepare", {}),
-      );
-      expect(prepared.result.kind).toBe("prepared");
-      const reviewed = OwnerRestoreRelayReview.parse(await ownerRequest(prefix + "/review", {}));
-      if (!reviewed.result || "kind" in reviewed.result)
-        throw new Error("Exact owner restore review missing.");
-      expect(reviewed.result.content.frozenMarkdown).toBe(settledMarkdown);
-      expect(reviewed.result.content.restoredMarkdown).toBe("Hello\n");
-      const restored = OwnerRestoreActionResponse.confirm.parse(
-        await ownerRequest(prefix + "/confirm", { proposalDigest: reviewed.result.proposalDigest }),
-      );
-      expect(restored.result.kind).toBe("resumed");
-      expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe("Hello\n");
       const obsolete = await wire.connect(first.context, oldTicket, "old-unused-ticket");
       expect(await obsolete.status).toBe(404);
       await obsolete.close();
@@ -882,18 +852,17 @@ it("exercises public Edit through owner creation, exchange and native applicatio
           database.close();
         }
       }
-      results.restore = {
+      results.revoke = {
         admittedConcurrency: capacity.admittedConcurrency,
         stalePartialRefused: true,
         oldTicketRefused: true,
         oldGrantRefused: true,
         revokedTicketCapacity,
         exactBefore: settledMarkdown,
-        exactAfter: "Hello\n",
-        proposalDigest: reviewed.result.proposalDigest,
       };
-      // Restore retires the stopped share grant. Create the replacement from the
-      // current selector rather than trying to add a grant to that retired share.
+      expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(settledMarkdown);
+      // Create the replacement from the current selector rather than trying to
+      // add a grant to the revoked share.
       const freshLink = await ownerRequest("/sync/workspace/shares/links", {
         paths: ["docs/a.md"],
         access: "edit",
@@ -1300,71 +1269,6 @@ it("exercises public Edit through owner creation, exchange and native applicatio
             frameChanges,
           });
         },
-        publishSettled: async (document, path) => {
-          // These documents are registered directly, without an ordinary owner
-          // history. Publish the actual native file through the fixture relay;
-          // the separate automatic-View case tests real ordinary replication.
-          const bytes = readFileSync(join(workspace, path)),
-            digest = hash(bytes);
-          const originId = `settled-${document.objectId}`,
-            recordedAtMs = Date.now();
-          const current = () =>
-            storage
-              .readCurrentFileState({
-                workspaceId: document.workspaceId,
-                versionId: document.mainVersionId,
-                selectorPaths: [path],
-                limit: 1,
-              })
-              .files.find((file) => file.path === path);
-          const previous = current();
-          expect(previous).toBeDefined();
-          const originSeq = storage.maxOriginSeq(document.workspaceId, originId) + 1;
-          if (previous!.blobSha256 !== digest) {
-            storage.putBlob({
-              workspaceId: document.workspaceId,
-              sha256: digest,
-              content: bytes,
-              createdAtMs: recordedAtMs,
-            });
-            const published = await ownerRequest(`/sync/${document.workspaceId}/log`, {
-              originId,
-              ops: [
-                {
-                  originSeq,
-                  opKind: "moment.append",
-                  recordedAtMs,
-                  payload: {
-                    objectId: document.objectId,
-                    momentId: `${originId}-${originSeq}`,
-                    versionId: document.mainVersionId,
-                    recordedAtMs,
-                    operation: "write",
-                    metadata: { origin: "sync" },
-                    beforePresent: "present",
-                    path,
-                    payloadBeforePath: previous!.path,
-                    payloadBeforeBlobSha256: previous!.blobSha256,
-                    payloadAfterPath: path,
-                    payloadAfterBlobSha256: digest,
-                    payloadAfterContentKind: "text",
-                    payloadAfterByteLength: bytes.length,
-                  },
-                },
-              ],
-            });
-            expect(published.inserted).toBe(1);
-          }
-          expect(current()?.blobSha256).toBe(digest);
-          results.restoreViewPublication = {
-            kind: "fixture-relay-publication-of-native-file",
-            objectId: document.objectId,
-            path,
-            blobSha256: digest,
-            byteLength: bytes.length,
-            automaticReplicationProven: false,
-          };
-        },
         listeners: () => frameChanges.captureCount(),
         allListeners: () => sharedChanges.listenerCount(),
         ownerRequest,
@@ -1574,7 +1478,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
               sha256: expectedHash,
               admissionSha256: admissionDigest,
               scope:
-                "Owner HTTP Edit and protected-cookie exchange; tiny controls; pinned browser baseline and small edits; distinct wire workload; pinned restart/stale/selector/access and restore recipe with runtime-derived continuation at C with C-1 Chromium receivers; mixed named/link presence; actual automatic service settlement and View DOM within five seconds from pre-receipt submission",
+                "Owner HTTP Edit and protected-cookie exchange; tiny controls; pinned browser baseline and small edits; distinct wire workload; pinned restart/stale/selector/access at C with C-1 Chromium receivers; mixed named/link presence; actual automatic service settlement and View DOM within five seconds from pre-receipt submission",
               omissions: [
                 "Owner UI creation control",
                 "Private named158/160 rerun",
@@ -1582,7 +1486,6 @@ it("exercises public Edit through owner creation, exchange and native applicatio
                 "Browser-restart draft recovery",
                 "Large pinned updates are wire-authored; Chromium receives and renders them through the production provider",
                 "Transition stages use one active submitter and C-1 browser receivers",
-                "Restore continuation View uses fixture publication of the actual native file; automatic replication is tested separately",
                 "Internal ordinary replication TLS; native sync uses the recorded owned-loopback transport seam",
               ],
               results,

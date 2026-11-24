@@ -1,4 +1,13 @@
 import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-mentions";
+import {
+  InboxAddInput,
+  InboxArchiveInput,
+  InboxKindSchema,
+  InboxListInput,
+  InboxMoveInput,
+  InboxStatusSchema,
+  MAX_INBOX_LIST_LIMIT,
+} from "@dohc/workspace-contracts/inbox";
 import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
 import { PlanUndoAgentRunInput } from "@dohc/workspace-contracts/agent-run-undo";
 import { OutsideChangesInput } from "@dohc/workspace-contracts/outside-changes";
@@ -268,6 +277,7 @@ function declaredWrite<Verb extends DeclaredWriteVerb>(
     capabilityId,
     summary: cli.summary,
     operands: cli.operands,
+    ...("flags" in cli ? { flags: cli.flags } : {}),
     ...("notes" in cli ? { notes: cli.notes } : {}),
     parse: (input) => ({ verb, ...parse(input) }) as CliCommandBody,
   };
@@ -2132,6 +2142,27 @@ const DECLARED_PARSERS: {
     noExtraArgs(input.operands, command);
     return OutsideChangesInput.parse({});
   },
+  inboxList: (input, command) => {
+    noExtraArgs(input.operands, command);
+    const rawStatus = lastValue(input, "--status");
+    let status: z.output<typeof InboxStatusSchema> | undefined;
+    if (rawStatus !== undefined) {
+      const parsed = InboxStatusSchema.safeParse(rawStatus);
+      if (!parsed.success) fail("--status must be New, Filed, or Archived");
+      status = parsed.data;
+    }
+    const rawLimit = lastValue(input, "--limit");
+    let limit: number | undefined;
+    if (rawLimit !== undefined) {
+      limit = integerFlag(rawLimit, "--limit", { allowZero: false });
+      if (limit > MAX_INBOX_LIST_LIMIT)
+        fail(`--limit must be between 1 and ${MAX_INBOX_LIST_LIMIT}`);
+    }
+    return InboxListInput.parse({
+      ...(status !== undefined ? { status } : {}),
+      ...(limit !== undefined ? { limit } : {}),
+    });
+  },
   workspaceSearch: (input, command) => {
     const [query, ...extra] = input.operands;
     if (!query || !query.trim()) fail(`${command} requires a query`);
@@ -2223,6 +2254,52 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
           return { verb: "notices" };
         },
       },
+    },
+  },
+  inbox: {
+    summary: "Capture notes and links into the workspace Inbox and triage them.",
+    notes: ["Creates Inbox/ lazily on first capture. Listing does not create Inbox/."],
+    verbs: {
+      add: declaredWrite("inboxAdd", (input) => {
+        const title = lastValue(input, "--title");
+        const url = lastValue(input, "--url");
+        const rawKind = lastValue(input, "--kind");
+        let kind: z.output<typeof InboxKindSchema> | undefined;
+        if (rawKind !== undefined) {
+          const parsed = InboxKindSchema.safeParse(rawKind);
+          if (!parsed.success) fail("--kind must be note, file, image, link, or webhook");
+          kind = parsed.data;
+        }
+        const body = input.operands.length > 0 ? input.operands.join(" ") : undefined;
+        if (!title?.trim() && !url?.trim() && !body?.trim()) {
+          fail("inbox add requires --title, --url, or body text");
+        }
+        const parsed = InboxAddInput.safeParse({
+          ...(title !== undefined ? { title } : {}),
+          ...(url !== undefined ? { url } : {}),
+          ...(kind !== undefined ? { kind } : {}),
+          ...(body !== undefined ? { body } : {}),
+        });
+        if (!parsed.success) {
+          fail(parsed.error.issues[0]?.message ?? "invalid inbox add input");
+        }
+        return parsed.data;
+      }),
+      archive: declaredWrite("inboxArchive", ({ operands }) => {
+        const [item, ...extra] = operands;
+        if (!item) fail("inbox archive requires a path under Inbox/");
+        noExtraArgs(extra, "inbox archive");
+        return InboxArchiveInput.parse({ item });
+      }),
+      move: declaredWrite("inboxMove", ({ operands }) => {
+        const [item, rawFolder, ...extra] = operands;
+        if (!item || rawFolder === undefined) {
+          fail("inbox move requires a path under Inbox/ and a target folder");
+        }
+        noExtraArgs(extra, "inbox move");
+        const targetFolder = rawFolder === "." ? "" : rawFolder;
+        return InboxMoveInput.parse({ item, targetFolder });
+      }),
     },
   },
   sync: {

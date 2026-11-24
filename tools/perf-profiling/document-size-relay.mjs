@@ -1,5 +1,4 @@
 import { startGenerator } from "./document-size-generator.mjs";
-import { readReservationBounds } from "./document-size-reservation.mjs";
 import { startDocumentSocketProbe } from "./document-size-sockets.mjs";
 import { startDocumentNativeHost } from "./document-size-native.mjs";
 import assert from "node:assert/strict";
@@ -17,7 +16,6 @@ import {
   sha256,
   STATE_MAX_BYTES,
   RELAY_CPU_BUDGET_MS,
-  restoreReservation,
 } from "./document-size-fixtures.mjs";
 import { documentStats } from "./document-size-summary.mjs";
 
@@ -74,7 +72,6 @@ export async function runRelayCase(options) {
     const generated = await generator.call("init", options);
     const baselineBytes = generated.bytes,
       projectionText = generated.text;
-    const bounds = await readReservationBounds(checkout);
     const { nodes, depth } = generated;
     const fixture = { sha256: generated.fixtureSha256, bytes: generated.sourceBytes };
     const result = {
@@ -98,8 +95,6 @@ export async function runRelayCase(options) {
       workerHardLimitMiB: 512,
       workerMetrics:
         "Per-thread CPU; boundary-sampled old V8 spaces/external memory; 25 ms parent-requested total used heap conservatively bounds old space. RSS belongs to the relay process. Short intra-update peaks can be missed.",
-      reservation: restoreReservation(baselineBytes.byteLength, bounds),
-      reservationBounds: bounds,
       generatorPid: generator.pid,
       process: { pid: process.pid, startedAt: new Date().toISOString() },
     };
@@ -542,7 +537,6 @@ export async function runRelayCase(options) {
         baselineBytes.byteLength,
         ...result.updates.map((row) => row.stateBytes),
       );
-      result.reservation = restoreReservation(result.largestStateBytes, bounds);
       // Reconstruct the committed cut in an independent Y.Doc; disk reopen is below.
       for (const entry of docs) {
         const cut = storage.readLiveUpdateJournalCut({ document: entry.document });
@@ -579,8 +573,7 @@ export async function runRelayCase(options) {
             await sockets.run(docs[0], "restart");
         };
       }
-      if (native)
-        await native.finish(docs, Y, projection, sha256(baselineBytes), sha256(projectionText));
+      if (native) await native.finish(docs, Y, projection);
       result.initialTransferPerDocumentBytes = result.socketProbes?.length
         ? Math.max(...result.socketProbes.map((row) => row.initialTransferBytes))
         : null;

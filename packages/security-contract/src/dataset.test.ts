@@ -387,6 +387,66 @@ describe("dataset publication binding", () => {
     }).toEqual(capability);
   });
 
+  it("includes display.table for multi-table Collections and keeps it when dropping field names", () => {
+    const approved = revision();
+    const secondTableId = id(90);
+    const secondPkId = id(91);
+    const secondNameId = id(92);
+    const secondDeleteId = id(93);
+    approved.definition.tables.push({
+      tableId: secondTableId,
+      name: "Expenses",
+      sqlName: "expenses",
+      primaryKey: "id",
+      fields: [
+        {
+          fieldId: secondPkId,
+          name: "ID",
+          sqlColumn: "id",
+          type: "text",
+          required: true,
+          unique: true,
+        },
+        {
+          fieldId: secondNameId,
+          name: "Title",
+          sqlColumn: "title",
+          type: "text",
+          required: true,
+          unique: false,
+        },
+      ],
+    });
+    approved.definition.operations.push({
+      operationId: secondDeleteId,
+      name: "deleteExpense",
+      label: "Delete expense",
+      tableId: secondTableId,
+      kind: "delete",
+      access: "helper",
+      readOnly: false,
+      fieldIds: [],
+    });
+    const capability = resolveAppDatasetCapability(binding(approved), approved);
+    const generated = displayAppDatasetCapability(capability, approved, true);
+    expect(generated.operations.map((op) => op.display)).toEqual([
+      { kind: "create", label: "Submit", fields: ["Name"], table: "People" },
+      { kind: "read", label: "View responses", fields: ["Record ID", "Name"], table: "People" },
+      { kind: "delete", label: "Delete response", fields: [], table: "People" },
+      { kind: "delete", label: "Delete expense", fields: [], table: "Expenses" },
+    ]);
+    expect(parseAppDatasetCapability(generated)).toEqual(generated);
+    expect(() => verifyAppDatasetCapability(generated, approved)).toThrow();
+
+    const custom = displayAppDatasetCapability(capability, approved, false);
+    expect(custom.operations.map((op) => op.display)).toEqual([
+      { kind: "action", label: "Submit", fields: [], table: "People" },
+      { kind: "action", label: "View responses", fields: [], table: "People" },
+      { kind: "action", label: "Delete response", fields: [], table: "People" },
+      { kind: "action", label: "Delete expense", fields: [], table: "Expenses" },
+    ]);
+  });
+
   it.each(["source", "schemaSql", "operations", "dataPath"])(
     "refuses %s supplied by a consumer binding",
     (key) => {

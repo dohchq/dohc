@@ -1,4 +1,17 @@
+import { createHash } from "node:crypto";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
+import {
+  HTTP_HEADER_VALUE_PATTERN,
+  MAX_HTTP_BODY_BYTES,
+  MAX_HTTP_HEADER_VALUE_BYTES,
+  MAX_HTTP_TOTAL_HEADER_BYTES,
+  httpStepTargetLabel,
+  type AutomationHttpStep,
+} from "@dohc/workspace-contracts/automations";
+import {
+  AUTOMATION_CHAIN_DEPTH_CAP,
+  computeHttpStepApprovalDigest,
+} from "@dohc/workspace-contracts/http-step-approvals";
 import { changedSincePressed } from "./automationButtons";
 import type { StoredRun } from "./automationRunStore";
 import {
@@ -10,13 +23,14 @@ import {
 } from "./datasetAutomationPlan";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
-import type { AutomationClaim } from "@dohc/workspace-engine-client";
+import { isEngineStoreBusyRefusal, type AutomationClaim } from "@dohc/workspace-engine-client";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import {
   parseCollectionAutomationId,
   codeFilesOf,
   codeStepOrdinals,
   codeRecordKey,
+  definitionDigest,
   definitionHash,
   findOverflowError,
   findQueryOf,
@@ -29,7 +43,7 @@ import {
   type RunClaim,
   type PlannedEffect,
 } from "./automationPlan";
-import { chatNeedsOf } from "./automationChat";
+import { AutomationChatSessionWait, chatNeedsOf } from "./automationChat";
 import {
   automationTargetPathProblem,
   checkAutomationReach,
@@ -107,6 +121,8 @@ export type RecordRunDependencies = Pick<
       | "checkPresser"
       | "authorizeDataset"
       | "isButtonField"
+      | "httpWebhook"
+      | "isHttpStepApproved"
     >
   > &
   Partial<Pick<DatasetAutomationRunDependencies, "withHost" | "cachedRoster">>;
@@ -147,6 +163,30 @@ const failed = (error: string): CollectionAutomationRunOutcome => ({
 });
 // The largest page a generated read operation returns (packages/security-contract/src/datasetOperations.ts).
 const DATASET_FIND_PAGE = 100;
+
+function savedHttpHeadersAndBodyMatchDeclaration(
+  effect: Extract<PlannedEffect, { kind: "http" }>,
+  step: AutomationHttpStep,
+): boolean {
+  if (effect.headers.length !== step.headers.length) return false;
+  let headerBytes = 0;
+  for (let index = 0; index < step.headers.length; index += 1) {
+    const expected = step.headers[index]!;
+    const actual = effect.headers[index]!;
+    if (actual.name !== expected.name) return false;
+    if (!HTTP_HEADER_VALUE_PATTERN.test(actual.value)) return false;
+    const valueBytes = Buffer.byteLength(actual.value, "utf8");
+    if (valueBytes > MAX_HTTP_HEADER_VALUE_BYTES) return false;
+    headerBytes += Buffer.byteLength(actual.name, "utf8") + valueBytes;
+    if (headerBytes > MAX_HTTP_TOTAL_HEADER_BYTES) return false;
+    if (expected.value.kind !== "formula" && actual.value !== String(expected.value.value)) {
+      return false;
+    }
+  }
+  if (step.body === undefined) return effect.body === null;
+  if (effect.body === null) return false;
+  return Buffer.byteLength(effect.body, "utf8") <= MAX_HTTP_BODY_BYTES;
+}
 
 export async function prepareRecordBackend(
   deps: RecordRunDependencies,
@@ -1364,20 +1404,42 @@ export async function prepareRecordBackend(
           },
         ];
       }
-      await authorizeCode(savedCodeTargets({ ordinal: place.ordinal, effects: [effect] }));
+      if (effect.kind === "http" && place.mode !== "fresh") {
+        return {
+          outcome: failed(
+            `dohc stopped while sending the webhook in step ${place.ordinal + 1}. The request may have reached its destination, so dohc did not send it again. Check the destination before choosing Try again.`,
+          ),
+        };
+      }
+      let currentRoster: Exclude<ReachRoster, { kind: "unknown" }> | null = null;
       const datasetEffect =
         effect.kind === "dataset-edit" ||
         effect.kind === "dataset-create" ||
         effect.kind === "dataset-action";
-      const currentRoster =
-        !datasetEffect || deps.authorizeDataset === undefined ? await checkNow() : null;
       const effectPath =
         effect.kind === "set"
           ? effect.target.collectionPath
           : "collectionPath" in effect
             ? (effect.collectionPath ?? pathOf(place.ordinal))
             : pathOf(place.ordinal);
-      await verifyTarget(effectPath);
+      try {
+        await authorizeCode(savedCodeTargets({ ordinal: place.ordinal, effects: [effect] }));
+        currentRoster =
+          !datasetEffect || deps.authorizeDataset === undefined ? await checkNow() : null;
+        await verifyTarget(effectPath);
+      } catch (error) {
+        if (effect.kind !== "http") throw error;
+        if (isEngineStoreBusyRefusal(error)) {
+          return { outcome: { kind: "wait", reason: "busy" }, httpRefusedBeforeSend: true };
+        }
+        if (error instanceof AutomationRunWait) {
+          return { outcome: { kind: "wait", reason: error.reason }, httpRefusedBeforeSend: true };
+        }
+        if (error instanceof AutomationChatSessionWait) {
+          return { outcome: { kind: "wait", reason: "session" }, httpRefusedBeforeSend: true };
+        }
+        throw error;
+      }
       if (
         effect.kind === "dataset-edit" ||
         effect.kind === "dataset-create" ||
@@ -1430,6 +1492,209 @@ export async function prepareRecordBackend(
           ),
         );
         return result ?? { outcome: { kind: "wait", reason: "engine" } };
+      }
+      if (effect.kind === "http") {
+        if (claim.depth >= AUTOMATION_CHAIN_DEPTH_CAP) {
+          return {
+            outcome: failed(
+              `This automation chain reached the maximum depth of ${AUTOMATION_CHAIN_DEPTH_CAP}, so dohc did not send the webhook in step ${place.ordinal + 1}.`,
+            ),
+            httpRefusedBeforeSend: true,
+          };
+        }
+        const collectionId =
+          parseCollectionAutomationId(claim.automationId)?.collectionId ??
+          source.datasetId ??
+          deps.collectionIdOf?.(collection.path) ??
+          null;
+        if (collectionId === null) {
+          return {
+            outcome: failed(
+              `dohc could not identify this Collection before sending the webhook in step ${place.ordinal + 1}.`,
+            ),
+            httpRefusedBeforeSend: true,
+          };
+        }
+        const orderedSteps = stepsInOrder(automation);
+        const stepEntry = orderedSteps.find(({ ordinal }) => ordinal === place.ordinal);
+        if (!stepEntry || stepEntry.step.kind !== "http") {
+          return {
+            outcome: failed(
+              `Step ${place.ordinal + 1} is no longer an outbound webhook step in this automation.`,
+            ),
+            httpRefusedBeforeSend: true,
+          };
+        }
+        const declaredStep = stepEntry.step;
+        const expectedTargetLabel = httpStepTargetLabel(declaredStep);
+        const expectedDefaultContentType =
+          declaredStep.body?.kind === "json"
+            ? "application/json"
+            : declaredStep.body?.kind === "text"
+              ? "text/plain; charset=utf-8"
+              : null;
+        if (
+          effect.stepOrdinal !== place.ordinal ||
+          effect.collectionPath !== collection.path ||
+          effect.automationId !== automation.id ||
+          effect.targetLabel !== expectedTargetLabel ||
+          effect.defaultContentType !== expectedDefaultContentType ||
+          !isDeepStrictEqual(effect.url, declaredStep.url) ||
+          !isDeepStrictEqual(effect.secretHeaders, declaredStep.secretHeaders) ||
+          !savedHttpHeadersAndBodyMatchDeclaration(effect, declaredStep)
+        ) {
+          return {
+            outcome: failed(
+              `The saved webhook request in step ${place.ordinal + 1} no longer matches the approved automation definition, so dohc did not send it.`,
+            ),
+            httpRefusedBeforeSend: true,
+          };
+        }
+        const httpReachStep: ReachStep = {
+          kind: "http",
+          target: expectedTargetLabel,
+          stepOrdinal: place.ordinal,
+        };
+        if (currentRoster !== null) {
+          if (await deps.checkReach?.([httpReachStep], currentRoster)) {
+            return { outcome: { kind: "wait", reason: "held" }, httpRefusedBeforeSend: true };
+          }
+          const [reach] = checkAutomationReach(currentRoster, {
+            id: automation.id,
+            collection,
+            codeFiles: codeFilesOf(automation, collection.path),
+            steps: [httpReachStep],
+          });
+          if (reach && !reach.allowed) {
+            return { outcome: failed(reach.reason), httpRefusedBeforeSend: true };
+          }
+        }
+        const stepByOrdinal = new Map(orderedSteps.map((entry) => [entry.ordinal, entry.step]));
+        const executedCodeHashes = new Map<string, string>();
+        for (const savedStep of run.steps) {
+          const def = stepByOrdinal.get(savedStep.ordinal);
+          if (def?.kind !== "run-file") continue;
+          if (savedStep.codeFileSha256 === undefined) {
+            return {
+              outcome: failed(
+                `dohc could not verify the executed revision of code file "${def.file}" before sending the webhook in step ${place.ordinal + 1}.`,
+              ),
+              httpRefusedBeforeSend: true,
+            };
+          }
+          const previousHash = executedCodeHashes.get(def.file);
+          if (previousHash !== undefined && previousHash !== savedStep.codeFileSha256) {
+            return {
+              outcome: failed(
+                `Code file "${def.file}" changed during this run, so dohc did not send the webhook in step ${place.ordinal + 1}.`,
+              ),
+              httpRefusedBeforeSend: true,
+            };
+          }
+          executedCodeHashes.set(def.file, savedStep.codeFileSha256);
+        }
+        const codeFileHashes: Array<{ file: string; sha256: string }> = [];
+        const uniqueFiles = [
+          ...new Set(
+            orderedSteps.flatMap(({ step }) => (step.kind === "run-file" ? [step.file] : [])),
+          ),
+        ].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+        for (const file of uniqueFiles) {
+          const read = await deps.readCode(`${collection.path}/${file}`);
+          if (read === null || read.truncated) {
+            return {
+              outcome: failed(
+                `dohc could not verify code file "${file}" before sending the webhook in step ${place.ordinal + 1}.`,
+              ),
+              httpRefusedBeforeSend: true,
+            };
+          }
+          const currentHash = createHash("sha256").update(read.text).digest("hex");
+          const executedHash = executedCodeHashes.get(file);
+          if (executedHash !== undefined && executedHash !== currentHash) {
+            return {
+              outcome: failed(
+                `Code file "${file}" changed after it ran, so dohc did not send the webhook in step ${place.ordinal + 1}.`,
+              ),
+              httpRefusedBeforeSend: true,
+            };
+          }
+          codeFileHashes.push({ file, sha256: currentHash });
+        }
+        const digest = definitionDigest(automation);
+        const approvalDigest = computeHttpStepApprovalDigest({
+          collectionId,
+          collectionPath: collection.path,
+          automationId: automation.id,
+          stepOrdinal: place.ordinal,
+          step: declaredStep,
+          definitionDigest: digest,
+          codeFileHashes,
+        });
+        const approvalState = deps.isHttpStepApproved
+          ? await deps.isHttpStepApproved(approvalDigest)
+          : "unapproved";
+        if (approvalState === "unavailable") {
+          return {
+            outcome: failed(
+              `dohc could not verify owner confirmation for the webhook in step ${place.ordinal + 1}. Check Settings or sync status and try again.`,
+            ),
+            httpRefusedBeforeSend: true,
+          };
+        }
+        if (approvalState !== "approved") {
+          return { outcome: { kind: "wait", reason: "held" }, httpRefusedBeforeSend: true };
+        }
+        if (!deps.httpWebhook) {
+          return {
+            outcome: failed("Outbound webhooks are not available for this workspace."),
+            httpRefusedBeforeSend: true,
+          };
+        }
+        const boundEffect: Extract<PlannedEffect, { kind: "http" }> = {
+          kind: "http",
+          deliveryId: effect.deliveryId,
+          collectionPath: collection.path,
+          automationId: automation.id,
+          stepOrdinal: place.ordinal,
+          targetLabel: expectedTargetLabel,
+          url: declaredStep.url,
+          headers: effect.headers.map((entry) => ({ name: entry.name, value: entry.value })),
+          secretHeaders: declaredStep.secretHeaders,
+          body: effect.body,
+          defaultContentType: expectedDefaultContentType,
+        };
+        const sent = await deps.httpWebhook.execute({
+          collectionId,
+          collectionPath: collection.path,
+          automation,
+          definitionDigest: digest,
+          approvalDigest,
+          codeFileHashes,
+          effect: boundEffect,
+          depth: claim.depth,
+          signal,
+        });
+        if (!sent.ok) {
+          if (sent.waitReason !== undefined) {
+            return {
+              outcome: { kind: "wait", reason: sent.waitReason },
+              ...(sent.beforeSend ? { httpRefusedBeforeSend: true as const } : {}),
+            };
+          }
+          return {
+            outcome: failed(sent.reason),
+            ...(sent.beforeSend ? { httpRefusedBeforeSend: true as const } : {}),
+          };
+        }
+        return [
+          {
+            kind: "http-sent",
+            target: effect.targetLabel,
+            status: sent.status,
+            deliveryId: effect.deliveryId,
+          },
+        ];
       }
       if (effect.kind === "message" || effect.kind === "notice" || effect.kind === "wake") {
         if (current !== null && currentRoster !== null) {

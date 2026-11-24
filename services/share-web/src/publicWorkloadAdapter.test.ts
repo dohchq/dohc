@@ -60,7 +60,6 @@ function prepare(root: string) {
         updates: [step(`${name}-accepted`)],
         ...(name === "view" ? {} : { interrupted: step(`${name}-interrupted`) }),
         ...(["restart", "staleFrame"].includes(name) ? { resumed: step(`${name}-resumed`) } : {}),
-        ...(name === "restore" ? { continuation: step("restore-continuation") } : {}),
       },
     ]),
   ) as PublicFixtureSelection["transitions"];
@@ -126,15 +125,14 @@ function prepare(root: string) {
   return { root, selection, seal, save, json, blob, checkpoint };
 }
 
-it("builds both current manifests while preserving sources and keeping restore bytes runtime-derived", () =>
+it("builds both current manifests while preserving sources", () =>
   fixture((f) => {
     const result = preparePublicWorkload(f.seal(), join(f.root, "output"), renderPublicFixture);
     const wire = readPublicWorkload(result.wirePin, 2),
       transitions = readPublicTransitionWorkload(result.transitionPin, 2);
     expect(wire.checkpoint).toEqual(Buffer.from(f.checkpoint));
     expect(wire.rounds).toHaveLength(2);
-    expect(transitions.cases.restore.continuation?.recipe.text).toBe("restore-continuation");
-    expect(transitions.manifest.cases.restore.resumed).toBeUndefined();
+    expect(transitions.manifest.cases.accessChange.resumed).toBeUndefined();
     const receipt = JSON.parse(readFileSync(result.receipt.path, "utf8"));
     expect(receipt).toMatchObject({
       purpose: "tiny-adapter-test",
@@ -142,11 +140,6 @@ it("builds both current manifests while preserving sources and keeping restore b
       browserProofComplete: false,
     });
     expect(receipt.sourceAssets[0].preserved.sha256).toBe(f.blob.sha256);
-    expect(
-      receipt.derivations.find(
-        (item: { kind?: string }) => item.kind === "recipe-only-awaiting-native-restore",
-      ).submittedCandidate,
-    ).toBeNull();
     const first = wire.rounds[0]!.updates,
       second = wire.rounds[1]!.updates;
     const ids = first.map(
@@ -205,7 +198,7 @@ it(
       const result = JSON.parse(readFileSync(join(output, "result.json"), "utf8"));
       expect(readPublicWorkload(result.wirePin, 2).rounds).toHaveLength(2);
       expect(
-        readPublicTransitionWorkload(result.transitionPin, 2).cases.restore.continuation,
+        readPublicTransitionWorkload(result.transitionPin, 2).cases.restart.resumed,
       ).toBeDefined();
       // The run took 15 s beside 32 CPU burners, so the test bound sits above its 30 s child bound.
     }),
