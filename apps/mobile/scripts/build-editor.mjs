@@ -75,6 +75,7 @@ body { font: 1rem/1.6 "Inter Variable", -apple-system, system-ui, sans-serif; }
 .markdown blockquote { margin: 0; padding-left: 12px; border-left: 3px solid var(--rule); }
 .markdown code, .source { font: calc(15rem / 17) ui-monospace, monospace; }
 .source { white-space: pre-wrap; word-wrap: break-word; margin: 0; }
+.markdown .dohc-raw-block { white-space: pre-wrap; word-wrap: break-word; }
 .markdown a { color: inherit; }
 `;
 
