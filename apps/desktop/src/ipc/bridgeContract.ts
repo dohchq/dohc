@@ -24,6 +24,7 @@ export {
 } from "@dohc/workspace-contracts/share-link-agents";
 import { accessOperations } from "./accessOperations";
 import { memberOperations } from "./memberOperations";
+import { directMessageOperations } from "./directMessageOperations";
 import { SaveStateSchema } from "@dohc/workspace-contracts/save-state-schema";
 import { nameByteLength } from "@dohc/workspace-contracts/names";
 import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
@@ -56,6 +57,7 @@ import {
   SHARE_ACCESS_VALUES,
   shareAccessRank,
 } from "@dohc/security-contract/share-selector";
+import { isDirectId } from "@dohc/security-contract/direct-messages";
 import { hasEngineIgnoredSegment, WORKSPACE_KINDS, WORKSPACE_MODES } from "@dohc/workspace-core";
 import { z } from "zod";
 import { AGENT_HUES } from "@dohc/workspace-contracts/agent-hues";
@@ -121,6 +123,9 @@ import {
   TAB_KINDS,
   singletonTabIdentity,
   MAX_COLLECTION_VIEWS,
+  MAX_DIRECT_ACCOUNT_CHARS,
+  MAX_DIRECT_NAME_CHARS,
+  MAX_DIRECT_NAMES,
   MAX_EXPANDED_FOLDERS,
   MAX_EDITOR_GROUPS,
   MAX_EDITOR_GROUP_ID_CHARS,
@@ -3304,111 +3309,6 @@ export type SetChatReactionResult = z.infer<typeof SetChatReactionResult>;
 
 export const EMAIL_STRING = z.email().max(320);
 
-// Direct messages. A DM is a `kind:"dm"` channel plus one shared-channel
-// chat grant per participant, riding the shared-channel lane. The
-// whole surface is gated on collaboration (signed in + relay): a solo user
-// sees none of it. Identity is always main-derived — the renderer never
-// supplies who is sending or who a grant belongs to.
-export const DmRecord = z.object({
-  channelId: OPAQUE_ID,
-  channelWireId: z.string().min(1).max(256),
-  name: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
-  // What this viewer calls the DM: the owner sees the recipients they
-  // addressed; a participant sees the granter (the replicated channel name
-  // is the owner's recipient list — often the participant's own address).
-  peerLabel: z.string().min(1).max(320),
-  role: z.enum(["owner", "participant"]),
-  // The chat grant a PARTICIPANT joined this DM through — the presence
-  // SHARE scope both sides converge on (the relay maps it to the granter's
-  // workspace, where the owner publishes). Null for the OWNER (who publishes
-  // into their own workspace scope) and until a participant's grant registers.
-  shareId: OPAQUE_ID.nullable(),
-  // The single running conversation (the anti-forum rule). Null only in the
-  // brief window before the creator's first message replicates.
-  threadId: OPAQUE_ID.nullable(),
-  unreadCount: z.number().int().min(0),
-  // False for a participant whose grant ended: already-replayed messages
-  // stay readable, sending is closed.
-  connected: z.boolean(),
-});
-export type DmRecord = z.infer<typeof DmRecord>;
-
-export const DmRequestRow = z.object({
-  shareId: OPAQUE_ID,
-  granterEmail: EMAIL_STRING.nullable(),
-});
-export type DmRequestRow = z.infer<typeof DmRequestRow>;
-
-export const SyncDmsPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  // The DM the caller is reading, when it is reading one. The shared-channel
-  // pass is bounded, so a poll that names its open conversation keeps that one
-  // fresh instead of waiting for the rotation to reach it.
-  openChannelId: OPAQUE_ID.optional(),
-  // True for the renderer's own scheduled refreshes: the list and conversation
-  // timers, and the first refresh when Chats or a conversation opens. Main
-  // pulls this workspace's own relay log for these, where members' replies to
-  // owned DMs and Groups land. A refresh that reacts to a workspace activity
-  // event leaves it unset, because the pull's own events would refresh again.
-  poll: z.boolean().optional(),
-});
-export type SyncDmsPayload = z.infer<typeof SyncDmsPayload>;
-
-export const SyncDmsResult = z.object({
-  // False when signed out / no relay: the renderer hides the whole DM
-  // surface (solo zero-bloat).
-  available: z.boolean(),
-  dms: z.array(DmRecord),
-  pending: z.array(DmRequestRow),
-  declined: z.array(DmRequestRow),
-  // True when the request listing or the shared-channel pass failed as a
-  // whole. One failing share does not count. The renderer holds the syncs
-  // nobody asked for instead of trying again at once.
-  failed: z.boolean(),
-});
-export type SyncDmsResult = z.infer<typeof SyncDmsResult>;
-
-export const AcceptDmPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  shareId: OPAQUE_ID,
-});
-export type AcceptDmPayload = z.infer<typeof AcceptDmPayload>;
-
-export const AcceptDmResult = z.object({ dm: DmRecord });
-export type AcceptDmResult = z.infer<typeof AcceptDmResult>;
-
-export const DeclineDmPayload = z.object({ shareId: OPAQUE_ID });
-export type DeclineDmPayload = z.infer<typeof DeclineDmPayload>;
-
-export const RequestDmAgainPayload = z.object({ shareId: OPAQUE_ID });
-export type RequestDmAgainPayload = z.infer<typeof RequestDmAgainPayload>;
-
-// A participant's reverse path for where an accepted DM lives: ends
-// the same JoinedSharedChannel row leaveSharedChannel ends, keyed by DM
-// shareId. The owner side has no shareId (DmRecord.shareId is null for the
-// owner) and never calls this.
-export const LeaveDmPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  shareId: OPAQUE_ID,
-});
-export type LeaveDmPayload = z.infer<typeof LeaveDmPayload>;
-
-export const StartDmPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  // One or more recipient emails ("a@x.com, b@y.com") — parsed/validated in
-  // main; grants are addressed per recipient.
-  recipients: z.string().min(3).max(2000),
-  body: CHAT_BODY,
-  fileReferences: z.array(ChatFileReferenceInput).max(20).optional(),
-});
-export type StartDmPayload = z.infer<typeof StartDmPayload>;
-
-export const StartDmResult = z.object({
-  dm: DmRecord,
-  message: ChatMessageRecord,
-});
-export type StartDmResult = z.infer<typeof StartDmResult>;
-
 // Ephemeral presence. The renderer's presence transport is
 // IPC-proxied so the relay bearer token never reaches the renderer: main holds
 // cachedCredentials.token and makes the actual relay presence request. These
@@ -4522,6 +4422,8 @@ export type CloudStatusPayload = z.infer<typeof CloudStatusPayload>;
 export const CloudStatusResult = z.object({
   ownPresentation: ActorPresentation.optional(),
   connected: z.boolean(),
+  // The signed-in account (server and user id), as onCloudSessionChanged names it. Read from this computer.
+  sessionKey: z.string().optional(),
   email: z.string().optional(),
   serverUrl: z.string().optional(),
   relayUrl: z.string().optional(),
@@ -7526,6 +7428,21 @@ export const WorkspaceUiState = z
       .max(RECORD_PANEL_MAX_WIDTH)
       .optional()
       .catch(undefined),
+    // Each open direct tab's person name, by conversation id, with the account it was read as.
+    directNames: z
+      .record(
+        z.string().refine(isDirectId),
+        z
+          .object({
+            account: z.string().min(1).max(MAX_DIRECT_ACCOUNT_CHARS),
+            name: z.string().min(1).max(MAX_DIRECT_NAME_CHARS),
+          })
+          .strict(),
+      )
+      .refine((names) => Object.keys(names).length <= MAX_DIRECT_NAMES, {
+        message: "Too many direct tab names.",
+      })
+      .optional(),
   })
   .superRefine((state, context) => {
     const groupIds = new Set<string>();
@@ -8165,9 +8082,11 @@ export const usageRecordOperations = {
 // Notices sent to a person. "account" rows come from the signed-in account's
 // notice list on the relay and reach all of that person's computers. "local"
 // rows stay on this computer: nobody is signed in, the workspace does not sync
-// through the signed-in server, or the server has no notice list. Dismissed
-// rows are not listed. Lengths count code points, as the relay does.
-export const NoticeStoreName = z.enum(["local", "account"]);
+// through the signed-in server, or the server has no notice list. "direct"
+// rows are the account's direct messages not read yet; reading the
+// conversation takes them away. Dismissed rows are not listed. Lengths count
+// code points, as the relay does.
+export const NoticeStoreName = z.enum(["local", "account", "direct"]);
 const codePoints = (min: number, max: number) =>
   z.string().refine((value) => {
     const length = [...value].length;
@@ -9450,6 +9369,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof serverAccountOperations>,
     OperationBridge<typeof accessOperations>,
     OperationBridge<typeof memberOperations>,
+    OperationBridge<typeof directMessageOperations>,
     OperationBridge<typeof workspaceVersionOperations>,
     OperationBridge<typeof historyOperations>,
     OperationBridge<typeof captureRecoveryOperations>,
@@ -9658,14 +9578,6 @@ export interface DohcDesktopBridge
   chatRunRecordsForThread(
     payload: ChatRunRecordsForThreadPayload,
   ): Promise<ChatRunRecordsForThreadResult>;
-  // Direct messages: reconcile DM state with the relay and list the
-  // workspace's DMs; start (or continue) a DM with a recipient set.
-  syncDms(payload: SyncDmsPayload): Promise<SyncDmsResult>;
-  acceptDm(payload: AcceptDmPayload): Promise<AcceptDmResult>;
-  declineDm(payload: DeclineDmPayload): Promise<void>;
-  requestDmAgain(payload: RequestDmAgainPayload): Promise<void>;
-  startDm(payload: StartDmPayload): Promise<StartDmResult>;
-  leaveDm(payload: LeaveDmPayload): Promise<void>;
   // Ephemeral presence: IPC-proxied so the relay bearer token stays in
   // main. publish (or leave) a presence state and long-poll for peer changes;
   // presenceCancel aborts an in-flight poll on unmount / workspace switch.
@@ -9721,6 +9633,8 @@ export interface DohcDesktopBridge
   // Live push: a timed save stopped counting, because the usage record
   // changed outside dohc. A poke; readUsageRecord reads the file again.
   onUsageRecordStopped(listener: () => void): () => void;
+  /** The signed-in account's direct conversations changed on its server. */
+  onDirectChanged(listener: () => void): () => void;
   // Live push: the notices listNotices returns changed. A poke, not the
   // rows. Returns an unsubscribe function.
   onNoticesChanged(listener: () => void): () => void;

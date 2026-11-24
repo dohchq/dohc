@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ChatChannelRecord,
   ChannelThreadRecord,
-  DmRecord,
   PresenceScopeInput,
 } from "../../ipc/bridgeContract";
 import { ChatsView as ProductionChatsView, type ChatPresenceCollaboration } from "./ChatsView";
@@ -15,17 +14,12 @@ import type { DesktopUserSettings } from "../../settings/userSettings";
 import { settingsWithAgent } from "../../testing/agentSettings";
 import type { PresencePeer, PresenceSnapshot, PresenceTransport } from "../collab/presenceChannel";
 
-type TestChatsViewProps = Omit<Parameters<typeof ProductionChatsView>[0], "workspaces"> & {
-  workspaces?: Parameters<typeof ProductionChatsView>[0]["workspaces"];
-};
+type TestChatsViewProps = Parameters<typeof ProductionChatsView>[0];
 
 function ChatsView(props: TestChatsViewProps) {
   return (
     <ReactionStoreProvider workspaceId={props.workspaceId}>
-      <ProductionChatsView
-        workspaces={[{ workspaceId: props.workspaceId, label: "Work" }]}
-        {...props}
-      />
+      <ProductionChatsView {...props} />
     </ReactionStoreProvider>
   );
 }
@@ -97,11 +91,8 @@ const bridgeMock = {
   createChatChannel: vi.fn(),
   startChannelThread: vi.fn(),
   setChatReaction: vi.fn(),
-  syncDms: vi.fn(),
-  acceptDm: vi.fn(),
-  declineDm: vi.fn(),
-  requestDmAgain: vi.fn(),
-  leaveDm: vi.fn(),
+  directConversations: vi.fn(),
+  onDirectChanged: vi.fn(() => () => {}),
   onWorkspaceActivity: vi.fn(),
 };
 
@@ -196,20 +187,9 @@ beforeEach(() => {
     sessionKey: "session-a",
     relay: { state: "answered" as const, granted: [], received: [], removed: [] },
   });
-  bridgeMock.syncDms.mockResolvedValue({
-    available: false,
-    dms: [],
-    pending: [],
-    declined: [],
-  });
-  vi.stubGlobal("dohcDesktop", {
-    ...bridgeMock,
-    syncDms: async (payload: { workspaceId: string; openChannelId?: string }) => ({
-      pending: [],
-      declined: [],
-      ...(await bridgeMock.syncDms(payload)),
-    }),
-  });
+  // Signed out of direct messages.
+  bridgeMock.directConversations.mockResolvedValue({ available: false });
+  vi.stubGlobal("dohcDesktop", bridgeMock);
 });
 
 afterEach(() => {
@@ -232,7 +212,6 @@ function renderView(
   render(
     <ChatsView
       workspaceId="workspace-a"
-      workspaces={[{ workspaceId: "workspace-a", label: "Work" }]}
       onOpenFileChat={vi.fn()}
       onError={vi.fn()}
       collaboration={collaboration}
@@ -472,8 +451,7 @@ describe("ChatsView presence (MU-C1)", () => {
 // presence scope (workspace vs share) a conversation lands in, and prove the
 // memoized transport is only rebuilt on a real scope switch.
 // onLeave (optional) fires synchronously when the presence transport's
-// leave() is invoked — used to pin ordering against another async call (e.g.
-// Presence must leave before the leaveDm IPC ends the row).
+// leave() is invoked — used to pin ordering against another async call.
 function recordingCollab(onLeave?: (topic: string) => void) {
   const calls: PresenceScopeInput[] = [];
   const publishes: { scope: PresenceScopeInput; topic: string }[] = [];
@@ -659,221 +637,6 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
       kind: "share",
       workspaceId: "workspace-a",
       shareId: "share-1",
-    });
-  });
-});
-
-describe("ChatsView presence scope selection (DM)", () => {
-  const participantDm: DmRecord = {
-    channelId: "dm-local",
-    channelWireId: "wire-dm",
-    name: "granter@x.com",
-    peerLabel: "granter@x.com",
-    role: "participant",
-    shareId: "dm-share-1",
-    threadId: "dm-thread-1",
-    unreadCount: 0,
-    connected: true,
-  };
-  const ownerDm: DmRecord = {
-    ...participantDm,
-    channelId: "dm-owned",
-    channelWireId: "wire-dm-owned",
-    role: "owner",
-    shareId: null,
-  };
-
-  async function openDmByChannelId(
-    user: ReturnType<typeof userEvent.setup>,
-    channelId: string,
-  ): Promise<void> {
-    const items = await screen.findAllByTestId("chats-dm-item");
-    const target = items.find((b) => b.getAttribute("data-channel-id") === channelId);
-    if (!target) throw new Error(`no DM item for ${channelId}`);
-    await user.click(target);
-    await screen.findByTestId("chats-dm-view");
-  }
-
-  it("uses SHARE scope + the DM wireId topic for a PARTICIPANT DM", async () => {
-    bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
-    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [participantDm] });
-    const rec = recordingCollab();
-    const user = userEvent.setup();
-    render(
-      <ChatsView
-        workspaceId="workspace-a"
-        onOpenFileChat={vi.fn()}
-        onError={vi.fn()}
-        collaboration={rec.collaboration}
-      />,
-    );
-    await openDmByChannelId(user, "dm-local");
-    await waitFor(() => expect(rec.publishes.some((p) => p.topic === "wire-dm")).toBe(true));
-    expect(rec.publishes.find((p) => p.topic === "wire-dm")?.scope).toEqual({
-      kind: "share",
-      workspaceId: "workspace-a",
-      shareId: "dm-share-1",
-    });
-  });
-
-  it("uses WORKSPACE scope + the DM wireId topic for an OWNER DM", async () => {
-    bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
-    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [ownerDm] });
-    const rec = recordingCollab();
-    const user = userEvent.setup();
-    render(
-      <ChatsView
-        workspaceId="workspace-a"
-        onOpenFileChat={vi.fn()}
-        onError={vi.fn()}
-        collaboration={rec.collaboration}
-      />,
-    );
-    await openDmByChannelId(user, "dm-owned");
-    await waitFor(() => expect(rec.publishes.some((p) => p.topic === "wire-dm-owned")).toBe(true));
-    expect(rec.publishes.find((p) => p.topic === "wire-dm-owned")?.scope).toEqual({
-      kind: "workspace",
-      workspaceId: "workspace-a",
-    });
-  });
-
-  it("switching DM -> channel changes scope and topic (transport rebuilt)", async () => {
-    bridgeMock.listChatChannels.mockResolvedValue({ channels: [channelRecord], fileThreads: [] });
-    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
-    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [participantDm] });
-    const rec = recordingCollab();
-    const user = userEvent.setup();
-    render(
-      <ChatsView
-        workspaceId="workspace-a"
-        onOpenFileChat={vi.fn()}
-        onError={vi.fn()}
-        collaboration={rec.collaboration}
-      />,
-    );
-    await openDmByChannelId(user, "dm-local");
-    await waitFor(() => expect(rec.publishes.some((p) => p.topic === "wire-dm")).toBe(true));
-    expect(rec.publishes.find((p) => p.topic === "wire-dm")?.scope).toEqual({
-      kind: "share",
-      workspaceId: "workspace-a",
-      shareId: "dm-share-1",
-    });
-    // Back out and open the plain channel: WORKSPACE scope on the channel topic
-    // (the fixture has no wire mapping, so it falls back to channel.id).
-    await user.click(screen.getByTestId("chats-dm-back"));
-    await user.click(await screen.findByTestId("chats-channel"));
-    await screen.findByTestId("chats-channel-view");
-    await waitFor(() => expect(rec.publishes.some((p) => p.topic === "channel-1")).toBe(true));
-    expect(rec.publishes.find((p) => p.topic === "channel-1")?.scope).toEqual({
-      kind: "workspace",
-      workspaceId: "workspace-a",
-    });
-    const keys = rec.calls.map(scopeKey);
-    for (let i = 1; i < keys.length; i += 1) expect(keys[i]).not.toBe(keys[i - 1]);
-    expect(keys).toContain("share:dm-share-1");
-    expect(keys).toContain("ws:workspace-a");
-  });
-
-  it("awaits the transport leave settling before ending the row", async () => {
-    bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
-    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [participantDm] });
-    const order: string[] = [];
-    const leaves: { scope: PresenceScopeInput; topic: string }[] = [];
-    let releaseLeave!: () => void;
-    const leaveGate = new Promise<void>((resolve) => {
-      releaseLeave = resolve;
-    });
-    const collaboration: ChatPresenceCollaboration = {
-      transportForScope: (scope) => ({
-        async publish() {
-          return { version: 0, peers: [] };
-        },
-        async leave({ topic }) {
-          await leaveGate;
-          leaves.push({ scope, topic });
-          order.push("presence-leave-settled");
-        },
-        poll: ({ signal }) =>
-          new Promise<PresenceSnapshot>((resolve) => {
-            if (signal.aborted) return resolve({ version: 0, peers: [] });
-            signal.addEventListener("abort", () => resolve({ version: 0, peers: [] }), {
-              once: true,
-            });
-          }),
-      }),
-      clientId: "me",
-      displayName: "Me",
-    };
-    bridgeMock.leaveDm.mockImplementation(async () => {
-      order.push("leave-dm");
-    });
-    const user = userEvent.setup();
-    render(
-      <ChatsView
-        workspaceId="workspace-a"
-        onOpenFileChat={vi.fn()}
-        onError={vi.fn()}
-        collaboration={collaboration}
-      />,
-    );
-    await openDmByChannelId(user, "dm-local");
-    await user.click(await screen.findByTestId("chats-dm-leave"));
-    await user.click(await screen.findByTestId("chats-leave-dm-confirm"));
-
-    // The transport leave is still gated: give any (incorrect) fire-and-forget
-    // path several ticks to reach leaveDm, then prove it has NOT.
-    await act(async () => {
-      for (let i = 0; i < 20; i += 1) await Promise.resolve();
-    });
-    expect(bridgeMock.leaveDm).not.toHaveBeenCalled();
-    expect(leaves).toEqual([]);
-
-    releaseLeave();
-    await waitFor(() => expect(bridgeMock.leaveDm).toHaveBeenCalled());
-    expect(leaves).toEqual([
-      {
-        scope: {
-          kind: "share",
-          workspaceId: "workspace-a",
-          shareId: "dm-share-1",
-        },
-        topic: "wire-dm",
-      },
-    ]);
-    expect(order).toEqual(["presence-leave-settled", "leave-dm"]);
-  });
-
-  it("re-arms presence with a fresh publish if leaveDm rejects", async () => {
-    bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
-    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [participantDm] });
-    const rec = recordingCollab();
-    bridgeMock.leaveDm.mockRejectedValue(new Error("relay unreachable"));
-    const user = userEvent.setup();
-    render(
-      <ChatsView
-        workspaceId="workspace-a"
-        onOpenFileChat={vi.fn()}
-        onError={vi.fn()}
-        collaboration={rec.collaboration}
-      />,
-    );
-    await openDmByChannelId(user, "dm-local");
-    await waitFor(() => expect(rec.publishes.some((p) => p.topic === "wire-dm")).toBe(true));
-    const publishesBeforeLeave = rec.publishes.length;
-
-    await user.click(await screen.findByTestId("chats-dm-leave"));
-    await user.click(await screen.findByTestId("chats-leave-dm-confirm"));
-    await waitFor(() => expect(bridgeMock.leaveDm).toHaveBeenCalled());
-
-    expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
-    await waitFor(() => expect(rec.publishes.length).toBeGreaterThan(publishesBeforeLeave));
-    expect(rec.publishes.at(-1)).toEqual({
-      scope: {
-        kind: "share",
-        workspaceId: "workspace-a",
-        shareId: "dm-share-1",
-      },
-      topic: "wire-dm",
     });
   });
 });

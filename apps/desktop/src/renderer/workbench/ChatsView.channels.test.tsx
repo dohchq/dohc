@@ -51,7 +51,7 @@ describe("ChatsView channels", () => {
       expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
     });
 
-    it("shows no Agents section and makes no direct-message or saved-message calls", async () => {
+    it("shows no Agents section and makes no saved-message calls", async () => {
       bridgeMock.listChatChannels.mockResolvedValue({
         channels: [channel({ name: "Launch team" })],
         fileThreads: [],
@@ -63,7 +63,6 @@ describe("ChatsView channels", () => {
       await screen.findByTestId("chats-channel");
       expect(screen.queryByTestId("chats-my-agent-section")).toBeNull();
       expect(screen.queryByText("Add an agent")).toBeNull();
-      expect(bridgeMock.syncDms).not.toHaveBeenCalled();
       expect(bridgeMock.listChatBookmarks).not.toHaveBeenCalled();
     });
 

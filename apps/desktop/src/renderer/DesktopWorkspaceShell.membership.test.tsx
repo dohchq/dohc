@@ -720,7 +720,7 @@ describe("a joined workspace", () => {
       "Not syncing. This copy stays on this computer.",
     );
     expect(band.textContent).toBe(
-      "Your membership ended. This copy stays on this computer. Ask the owner to invite you again to keep working in it.",
+      "Your membership ended. This copy stays on this computer, and your direct messages stay open. Ask the owner to invite you again to keep working in it.",
     );
     await waitFor(() =>
       expect(screen.getAllByTestId("tree-row").some((row) => row.dataset.path === "plan.md")).toBe(

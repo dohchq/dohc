@@ -65,6 +65,7 @@ import {
   initializeWorkspaceMemberSchema,
 } from "./workspaceMembers";
 import { initializeAccountNames } from "./accountNames";
+import { initializeDirectMessageSchema } from "./directMessages";
 import { initializeWorkspaceSecretSchema } from "./workspaceSecrets";
 import { initializeOutboundWebhookSchema } from "./outboundWebhooks";
 import { initializeIncomingWebhookSchema } from "./incomingWebhooks";
@@ -1695,6 +1696,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   initializeShareInvitationEmailSchema(db);
   initializeAccountNames(db);
   initializeWorkspaceLevelChanges(db);
+  initializeDirectMessageSchema(db);
   initializeWorkspaceSecretSchema(db);
   initializeOutboundWebhookSchema(db);
   initializeIncomingWebhookSchema(db);

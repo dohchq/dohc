@@ -254,10 +254,8 @@ type DemoDesktopBridge = Pick<
   | "listChatChannels"
   | "listChatChannelShares"
   | "listJoinedSharedChannels"
-  | "syncDms"
-  | "acceptDm"
-  | "declineDm"
-  | "requestDmAgain"
+  | "directConversations"
+  | "onDirectChanged"
   | "listChannelThreads"
   | "listChatMessages"
   | "getChatThreadRevision"
@@ -280,7 +278,6 @@ type DemoDesktopBridge = Pick<
   | "joinSharedChannel"
   | "leaveSharedChannel"
   | "revokeRelayShare"
-  | "startDm"
   | "exportDocumentFile"
 >;
 
@@ -697,17 +694,12 @@ const demoBridge = {
   async listJoinedSharedChannels(payload: { channelWireIds: readonly string[] }) {
     return { joined: answerDemoJoinedLane(payload.channelWireIds) };
   },
-  async syncDms() {
-    return { available: false, dms: [], pending: [], declined: [], failed: false };
+  // The demo is signed out, so Chats shows no People section.
+  async directConversations() {
+    return { available: false as const };
   },
-  async acceptDm() {
-    throw new Error("Message requests aren't available in the demo.");
-  },
-  async declineDm() {
-    return undefined;
-  },
-  async requestDmAgain() {
-    return undefined;
+  onDirectChanged() {
+    return () => {};
   },
   async listChannelThreads(payload: { channelId: string }) {
     return {
@@ -804,9 +796,6 @@ const demoBridge = {
   async leaveSharedChannel() {},
   async revokeRelayShare() {
     return { undo: { undoId: "demo-undo", expiresAtMs: Date.now() + 600_000 } };
-  },
-  async startDm() {
-    throw new Error("Direct messages are unavailable in the demo.");
   },
   // A browser saves an export as a download. A PDF opens the browser's print
   // dialog, where the person saves it as a PDF.

@@ -330,7 +330,6 @@ export function DemoSidebar(props: {
         <ReactionStoreProvider workspaceId="marketing-demo">
           <ChatsView
             workspaceId="marketing-demo"
-            workspaces={[{ workspaceId: "marketing-demo", label: "Lisbon trip" }]}
             onOpenFileChat={(thread) => thread.path && props.onOpenDocument(thread.path)}
             onOpenPath={props.onOpenDocument}
             onError={() => undefined}

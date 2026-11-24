@@ -143,8 +143,11 @@ export function SettingsDialog(props: {
     identity?: string,
   ) => void;
   onClearError?: (identity: string) => void;
+  /** Opens New message in Chats with this workspace member chosen. */
+  onMessageMember?: (memberId: string) => void;
   /** The title bar says the server is unreachable. */
   serverNamed?: boolean;
+  /** A change that went through, with its Undo. */
   onNotice?: (message: string, undo?: () => void) => void;
   /** Each workspace settings answer, so the shell can say what the file ignored. */
   onWorkspaceSettingsRead?: (read: WorkspaceSettingsResult) => void;
@@ -946,6 +949,7 @@ export function SettingsDialog(props: {
                 }}
                 {...(props.onError ? { onError: props.onError } : {})}
                 {...(props.onClearError ? { onClearError: props.onClearError } : {})}
+                {...(props.onMessageMember ? { onMessage: props.onMessageMember } : {})}
                 {...(props.serverNamed ? { serverNamed: true } : {})}
               />
             ) : null}

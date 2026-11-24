@@ -80,7 +80,7 @@ function statOf(
 }
 
 describe("createWorkspaceFolder", () => {
-  it.each(["link", "shares", "notices", "workspaces", "personal-agents", "account"])(
+  it.each(["link", "shares", "notices", "workspaces", "personal-agents", "account", "direct"])(
     "refuses a manifest with reserved id %s without changing it",
     async (workspaceId) => {
       const root = join(base, workspaceId);

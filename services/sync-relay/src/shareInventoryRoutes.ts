@@ -10,6 +10,7 @@ import type { PublicEditRelease } from "@dohc/security-contract";
 import { badRequest, notFound, relayError } from "./errors";
 import { cursorCodec } from "./requestInputs";
 import {
+  isOldDirectMessageShare,
   resolveReceivedShareAuthority,
   selectorTargetsBlockedChannel,
   type AuthorizedShareAction,
@@ -87,6 +88,17 @@ export function createShareInventoryRoutes(
       ? await lookupUserEmail(share.granterUserId)
       : null;
   }
+  // An ended old direct message stays out too. One whose owner deleted their
+  // account got no ended row (`fenceAccount`), since its share row is gone.
+  function removedReceivedShares(userId: string, pageIds?: ReadonlySet<string>) {
+    return storage
+      .listRemovedSharesInRecipientList(userId)
+      .filter((row) => !pageIds || pageIds.has(row.shareId))
+      .filter((row) => {
+        const share = storage.getShare(row.shareId);
+        return !share || !isOldDirectMessageShare(storage, share);
+      });
+  }
   async function receivedSummaries(
     rows: readonly SyncRelayShareWithGrantRow[],
     actorUserId: string,
@@ -118,7 +130,12 @@ export function createShareInventoryRoutes(
       if (!currentFallback) return [];
       const selector = parseStoredAnyShareSelectorJson(currentFallback.share.selectorJson);
       return selector &&
-        selectorTargetsBlockedChannel(storage, currentFallback.share.workspaceId, selector)
+        selectorTargetsBlockedChannel(
+          storage,
+          currentFallback.share.workspaceId,
+          selector,
+          "received",
+        )
         ? []
         : [
             receivedShareSummary(
@@ -228,9 +245,7 @@ export function createShareInventoryRoutes(
         const received = await receivedSummaries(active, actor.userId);
         // Re-read removals after asynchronous serialization; a grant can end during a page.
         const pageIds = new Set(page.shareIds);
-        const removed = storage
-          .listRemovedSharesInRecipientList(actor.userId)
-          .filter((row) => pageIds.has(row.shareId));
+        const removed = removedReceivedShares(actor.userId, pageIds);
         return jsonResponse({
           ok: true,
           received,
@@ -285,7 +300,7 @@ export function createShareInventoryRoutes(
         ok: true,
         granted,
         received,
-        removed: storage.listRemovedSharesInRecipientList(actor.userId),
+        removed: removedReceivedShares(actor.userId),
       });
     }
     if (route.route === "shares-list") throw relayError("method_not_allowed");

@@ -12,6 +12,12 @@ import {
 } from "./shareFilter";
 import type { SyncRelayStorage } from "./storage";
 import {
+  fenceAccount,
+  initializeAccountDeletion,
+  purgeAccountRows,
+} from "./storage/accountDeletion";
+import type { StorageContext } from "./storage/context";
+import {
   appendLog,
   chatChannelCreate,
   chatThreadCreate,
@@ -345,7 +351,7 @@ describe("DM grants over the relay", () => {
     resetOpSeq();
   });
 
-  it("creates an email-addressed chat grant and lists it on both sides", async () => {
+  it("creates an email-addressed chat grant and lists it only for its owner", async () => {
     const h = handler(await testStorage());
     await createWorkspace(h);
     const shareId = await createDmGrant(h);
@@ -412,20 +418,18 @@ describe("DM grants over the relay", () => {
       generation: 1,
     });
 
+    // Direct messages are relay conversations now. Its recipient's Received
+    // list and share detail leave an old one out, so it can't pass for a Group invitation.
     const received = await json(await h(request(MEMBER, "/sync/shares")));
-    const receivedRow = (received.received as Array<Record<string, unknown>>).find(
-      (row) => row.shareId === shareId,
-    );
-    expect(receivedRow?.selector).toEqual({
-      kind: "chat",
-      channelWireId: DM_WIRE,
-    });
-    expect(receivedRow).toMatchObject({
-      access: "read-write",
-      grantId: expect.any(String),
-      generation: 1,
-    });
-    expect(receivedRow?.workspaceId).toBeUndefined();
+    expect(
+      (received.received as Array<Record<string, unknown>>).find((row) => row.shareId === shareId),
+    ).toBeUndefined();
+    const page = await json(await h(request(MEMBER, "/sync/shares?received=true")));
+    expect(
+      (page.received as Array<Record<string, unknown>>).find((row) => row.shareId === shareId),
+    ).toBeUndefined();
+    const absent = await denialBytes(await h(request(MEMBER, "/sync/shares/never-existed")));
+    expect(await denialBytes(await h(request(MEMBER, `/sync/shares/${shareId}`)))).toBe(absent);
   });
 
   it("serves a participant a DM stream BYTE-IDENTICALLY to a MU-C4 channel stream — no DM-only field", async () => {
@@ -693,10 +697,46 @@ describe("DM grants over the relay", () => {
     ).toBe(absentLog);
     expect(await denialBytes(await memberAppend(h, shareId, [memberMessage(1)]))).toBe(removed);
 
+    // Received names no ended old direct message either.
     const listing = await json(await h(request(MEMBER, "/sync/shares")));
     expect(
       (listing.received as Array<Record<string, unknown>>).find((row) => row.shareId === shareId),
     ).toBeUndefined();
+    expect(listing.removed).toEqual([]);
+    const page = await json(await h(request(MEMBER, "/sync/shares?received=true")));
+    expect(page.removed).toEqual([]);
+  });
+
+  it("leaves an old direct message out of Received when its owner deletes their account", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const ops = [dmChannelCreate(), dmThreadCreate()];
+    ops.push(
+      chatOp(
+        "chat.channel.create",
+        chatChannelCreate("wire-general", { name: "General", slug: "general", kind: "channel" })
+          .payload,
+      ),
+    );
+    await appendOwnerOps(h, ops);
+    await createDmGrant(h);
+    const chatShareId = await createDmGrant(h, {
+      recipientEmail: `${MEMBER}@dohc.test`,
+      channelWireId: "wire-general",
+      access: "read-write",
+    });
+    const context = storage as unknown as StorageContext;
+    const key = "account-deletion-key-at-least-32-bytes";
+    initializeAccountDeletion(context, key);
+    const { manifest } = fenceAccount(context, key, OWNER, `${OWNER}@dohc.test`);
+    purgeAccountRows(context, OWNER, `${OWNER}@dohc.test`, manifest!);
+    // An ordinary chat share still says its owner removed it.
+    const listing = await json(await h(request(MEMBER, "/sync/shares")));
+    expect(listing.received).toEqual([]);
+    expect((listing.removed as Array<{ shareId: string }>).map((row) => row.shareId)).toEqual([
+      chatShareId,
+    ]);
   });
 
   it("refuses appends through a read-only chat grant and through a PATH grant", async () => {

@@ -162,6 +162,7 @@ import {
 } from "./linkSecurity";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { createWorkspaceMemberRoutes, isWorkspaceMemberRoute } from "./workspaceMemberRoutes";
+import { createDirectMessageRoutes, isDirectMessageRoute } from "./directMessageRoutes";
 import { PresenceHub } from "./presence";
 import { ReplicaWatches } from "./replicaWatches";
 import { createPresenceRoutes } from "./presenceRoutes";
@@ -867,6 +868,13 @@ export function createSyncRelayHandler({
     linkKey,
     shareWebOrigin,
     discussionActivity,
+  });
+  const respondToDirectMessages = createDirectMessageRoutes({
+    storage,
+    activity: discussionActivity,
+    nowMs,
+    newId,
+    lookupUserDisplayName,
   });
   const respondToNamedShareTransport = createNamedShareTransportRoutes(
     storage,
@@ -1749,6 +1757,21 @@ export function createSyncRelayHandler({
       if (route.route === "account-operation") {
         if (!respondToAccountOperation) throw notFound();
         return await respondToAccountOperation(request, route);
+      }
+      const bearerActor = async (workspaceId: string) => {
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? ""))
+          throw notFound();
+        return await resolveActor(
+          new Request(request.url, {
+            headers: { authorization: authorization! },
+            signal: request.signal,
+          }),
+          workspaceId,
+        );
+      };
+      if (isDirectMessageRoute(route)) {
+        return await respondToDirectMessages(request, route, await bearerActor(""));
       }
       if (
         route.route === "chat-runners" ||

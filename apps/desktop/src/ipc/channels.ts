@@ -232,6 +232,7 @@ export const CHANNELS = {
   workspaceTrustChanged: "desktop:workspace-trust-changed",
   // A timed save stopped counting, because the usage record changed outside dohc.
   usageRecordStopped: "desktop:usage-record-stopped",
+  directChanged: "desktop:direct-changed",
   noticesChanged: "desktop:notices-changed",
   // Main wrote or removed a draft it set aside for a workspace; the renderer
   // lists them again.
@@ -290,12 +291,6 @@ export const CHANNELS = {
   readEngineMoment: "desktop:read-engine-moment",
   restoreEngineMomentFile: "desktop:restore-engine-moment-file",
   chatRunRecordsForThread: "desktop:chat-run-records-for-thread",
-  syncDms: "desktop:sync-dms",
-  acceptDm: "desktop:accept-dm",
-  declineDm: "desktop:decline-dm",
-  requestDmAgain: "desktop:request-dm-again",
-  startDm: "desktop:start-dm",
-  leaveDm: "desktop:leave-dm",
   // Ephemeral presence: IPC-proxied so the relay bearer token never
   // reaches the renderer — main holds the token and makes the relay presence
   // request. publish (or leave), long-poll, and cancel an in-flight poll.

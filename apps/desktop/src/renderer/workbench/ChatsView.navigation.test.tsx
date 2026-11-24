@@ -3,7 +3,6 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatBookmarkRecord } from "../../ipc/bridgeContract";
-import { deferred } from "../../testing/deferred";
 import { chatTabPath } from "./workbenchState";
 import {
   ChatsView,
@@ -12,60 +11,11 @@ import {
   thread,
   message,
   openingPreview,
-  dm,
   bridgeMock,
-  emitWorkspaceActivity,
   renderView,
 } from "./ChatsView.testHarness";
 
 describe("ChatsView expand-to-tab", () => {
-  it("shows the overview error while a restored DM cannot sync", async () => {
-    bridgeMock.listChatChannels.mockRejectedValue(new Error("Engine unavailable"));
-    bridgeMock.syncDms.mockRejectedValue(new Error("Engine unavailable"));
-    renderView(vi.fn(), vi.fn(), {
-      variant: "page",
-      editorTabPath: chatTabPath({ kind: "dm", id: dm().channelId }),
-    });
-    expect(await screen.findByText("Engine unavailable")).toBeTruthy();
-    const retry = screen.getByRole("button", { name: "Try again" });
-    expect(screen.queryByText("Loading Chats…")).toBeNull();
-    const before = bridgeMock.listChatChannels.mock.calls.length;
-    await userEvent.click(retry);
-    await waitFor(() =>
-      expect(bridgeMock.listChatChannels.mock.calls.length).toBeGreaterThan(before),
-    );
-    expect(await screen.findByText("Engine unavailable")).toBeTruthy();
-  });
-
-  it("restores a DM after a failed lookup succeeds on an activity retry", async () => {
-    bridgeMock.syncDms.mockRejectedValueOnce(new Error("offline"));
-    renderView(vi.fn(), vi.fn(), {
-      variant: "page",
-      editorTabPath: chatTabPath({ kind: "dm", id: dm().channelId }),
-    });
-    await waitFor(() => expect(bridgeMock.syncDms).toHaveBeenCalled());
-    expect(screen.getByText("Loading Chats…")).toBeTruthy();
-    expect(screen.queryByTestId("chats-page-empty")).toBeNull();
-    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [dm()] });
-    await act(async () => emitWorkspaceActivity());
-    expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
-  });
-
-  it("keeps a restored DM loading until its lookup settles", async () => {
-    const pending = deferred<{ available: boolean; dms: ReturnType<typeof dm>[] }>();
-    bridgeMock.syncDms.mockImplementation(() => pending.promise);
-    renderView(vi.fn(), vi.fn(), {
-      variant: "page",
-      editorTabPath: chatTabPath({ kind: "dm", id: dm().channelId }),
-    });
-    await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalled());
-    expect(screen.getByText("Loading Chats…")).toBeTruthy();
-    expect(screen.queryByTestId("chats-page-empty")).toBeNull();
-    await act(async () => pending.resolve({ available: true, dms: [dm()] }));
-    expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
-    expect(screen.queryByTestId("chats-dm-back")).toBeNull();
-  });
-
   it("marks the page variant on the root so the tab surface is testable", async () => {
     renderView(vi.fn(), vi.fn(), { variant: "page" });
     const view = await screen.findByTestId("chats-personal-feed");
@@ -113,22 +63,6 @@ describe("ChatsView expand-to-tab", () => {
       thread: expect.objectContaining({ id: "thread-1" }),
     });
     expect(screen.queryByTestId("chats-thread-view")).toBeNull();
-  });
-
-  it("hands a DM selection from the panel to the editor", async () => {
-    const user = userEvent.setup();
-    const onOpenInTab = vi.fn();
-    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [dm()] });
-    renderView(vi.fn(), vi.fn(), { onOpenInTab });
-
-    await user.click(await screen.findByTestId("chats-dm-item"));
-
-    expect(onOpenInTab).toHaveBeenCalledWith({
-      level: "dm",
-      dm: expect.objectContaining({ channelId: "channel-dm-1" }),
-    });
-    expect(screen.queryByTestId("chats-dm-view")).toBeNull();
-    expect(bridgeMock.listChatMessages).not.toHaveBeenCalled();
   });
 
   it("keeps thread navigation inside its channel editor", async () => {
@@ -227,78 +161,6 @@ describe("ChatsView expand-to-tab", () => {
     expect(onNavChange.mock.calls[0]?.[0]).toMatchObject({ level: "thread" });
   });
 
-  it("seeds an expanded tab at the panel's DM conversation", async () => {
-    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [dm()] });
-    renderView(vi.fn(), vi.fn(), {
-      variant: "page",
-      initialNav: { level: "dm", dm: dm() },
-    });
-
-    const view = await screen.findByTestId("chats-dm-view");
-    expect(view.dataset.variant).toBe("page");
-    expect((await screen.findByTestId("chats-dm-title")).textContent).toBe("bob@example.com");
-  });
-
-  it("opens a Feed DM directly in the page and preserves its focused message", async () => {
-    const user = userEvent.setup();
-    const directDm = dm();
-    const focused = message({
-      id: "message-feed-dm-focus",
-      threadId: directDm.threadId ?? "thread-dm-1",
-      body: "Focused Feed DM",
-    });
-    const pendingSync = new Promise<never>(() => undefined);
-    bridgeMock.syncDms
-      .mockResolvedValueOnce({ available: true, dms: [directDm] })
-      .mockImplementation(() => pendingSync);
-    bridgeMock.listPersonalChatFeed.mockResolvedValue({
-      items: [
-        {
-          message: focused,
-          thread: {
-            id: directDm.threadId ?? "thread-dm-1",
-            title: "DM conversation",
-            createdAtMs: NOW,
-            updatedAtMs: NOW,
-          },
-          channel: {
-            id: directDm.channelId,
-            wireId: directDm.channelWireId,
-            name: directDm.name,
-            slug: "bob-example-com",
-            kind: "dm" as const,
-          },
-          reactions: [],
-          matchedBy: ["person" as const],
-        },
-      ],
-    });
-    bridgeMock.listChatMessages.mockResolvedValue({ messages: [focused] });
-    vi.mocked(Element.prototype.scrollIntoView).mockClear();
-
-    renderView(vi.fn(), vi.fn(), { variant: "page" });
-    await screen.findByTestId("chats-personal-feed");
-    const feedMessage = await screen.findByText("Focused Feed DM");
-    await user.click(feedMessage.closest("button")!);
-
-    expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
-    await waitFor(() => {
-      expect(screen.getByTestId("chats-dm-message").className).toContain("dohc-target-flash");
-      expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: "center" });
-    });
-  });
-
-  it("seeds an expanded tab at the new-message compose screen", async () => {
-    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [] });
-    renderView(vi.fn(), vi.fn(), {
-      variant: "page",
-      initialNav: { level: "dm-new" },
-    });
-
-    const view = await screen.findByTestId("chats-dm-new");
-    expect(view.dataset.variant).toBe("page");
-  });
-
   it("restores unsent drafts alongside the seeded conversation", async () => {
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
     renderView(vi.fn(), vi.fn(), {
@@ -307,8 +169,6 @@ describe("ChatsView expand-to-tab", () => {
       initialDrafts: {
         composer: "half-typed reply",
         newThreadBody: "",
-        dmRecipients: "",
-        dmDraft: "",
         replyTarget: null,
         resolveTargetMessageId: null,
         poll: { threadId: "thread-1", choices: ["Thursday", "Friday"], open: true },
@@ -337,8 +197,6 @@ describe("ChatsView expand-to-tab", () => {
       initialDrafts: {
         composer: "Lunch?",
         newThreadBody: "",
-        dmRecipients: "",
-        dmDraft: "",
         replyTarget: null,
         resolveTargetMessageId: null,
         poll: { threadId: "thread-1", choices: ["Soup", "Salad"], open: true },
@@ -367,8 +225,6 @@ describe("ChatsView expand-to-tab", () => {
       initialDrafts: {
         composer: "replying mid-expand",
         newThreadBody: "",
-        dmRecipients: "",
-        dmDraft: "",
         replyTarget: { messageId: "message-1", authorLabel: "You" },
         resolveTargetMessageId: "message-1",
         poll: null,
