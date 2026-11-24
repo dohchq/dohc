@@ -89,7 +89,15 @@ describe("Collection file controls", () => {
     fireEvent.change(screen.getByLabelText("Receipt"), {
       target: { files: [new File([], "empty.txt")] },
     });
+    expect(screen.getByText("Up to 20 MiB")).toBeTruthy();
     expect(screen.getByRole("alert").textContent).toContain("non-empty");
+    const oversized = new File(["a"], "huge.pdf", { type: "application/pdf" });
+    Object.defineProperty(oversized, "size", { value: 21 * 1024 * 1024 });
+    fireEvent.change(screen.getByLabelText("Receipt"), {
+      target: { files: [oversized] },
+    });
+    expect(screen.getByRole("alert").textContent).toContain("20971520 bytes");
+    expect(screen.getByRole("alert").textContent).toContain(String(21 * 1024 * 1024));
     expect(upload).not.toHaveBeenCalled();
   });
   it("aborts an upload after unmount and cannot apply its returned ID", async () => {

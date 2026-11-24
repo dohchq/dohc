@@ -87,11 +87,13 @@ export async function loadRequest(
   frame: Frame,
   body: Record<string, unknown>,
 ): Promise<BrokerReply> {
-  return frame.evaluate(
-    (body) =>
-      (globalThis as unknown as { loadRequest(body: unknown): Promise<BrokerReply> }).loadRequest(
-        body,
-      ),
-    body,
-  );
+  return frame.evaluate((raw) => {
+    const payload =
+      raw.op === "backend.upload" && Array.isArray(raw.bytes)
+        ? { ...raw, bytes: new Uint8Array(raw.bytes as number[]).buffer }
+        : raw;
+    return (
+      globalThis as unknown as { loadRequest(body: unknown): Promise<BrokerReply> }
+    ).loadRequest(payload);
+  }, body);
 }

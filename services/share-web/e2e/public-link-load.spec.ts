@@ -86,7 +86,7 @@ async function journey(
     idempotencyKey: randomUUID(),
     name: "receipt.pdf",
     contentType: "application/pdf",
-    bytesBase64: syntheticReceipt.toString("base64"),
+    bytes: [...syntheticReceipt],
   });
   samples.push({
     participant: index,

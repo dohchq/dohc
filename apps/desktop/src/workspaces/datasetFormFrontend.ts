@@ -128,7 +128,10 @@ const finish = result => {
 const send = () => {
   if (!port || !pending || pending.sent) return;
   pending.sent = true;
-  try { port.postMessage(pending.message); } catch { finish({ uncertain: true }); }
+  try {
+    if (pending.transfer?.length) port.postMessage(pending.message, pending.transfer);
+    else port.postMessage(pending.message);
+  } catch { finish({ uncertain: true }); }
 };
 const validAttempt = value => {
   if (!record(value) || !Object.hasOwn(value, "attempt")) return false;
@@ -195,8 +198,8 @@ const receiveChannel = event => {
   });
 };
 window.addEventListener("message", receiveChannel);
-const request = message => new Promise(resolve => {
-  pending = { message: { id: crypto.randomUUID(), ...message }, resolve, sent: false,
+const request = (message, transfer) => new Promise(resolve => {
+  pending = { message: { id: crypto.randomUUID(), ...message }, transfer, resolve, sent: false,
     timer: setTimeout(() => finish({ uncertain: true }), 30000) };
   send();
 });
@@ -266,7 +269,8 @@ const readDraft = () => {
     }
     if (typeof value === "string" && value.length > 2000) message = "Use 2000 characters or fewer.";
     if (field.type === "attachment" && value !== null) {
-      if (value.size < 1 || value.size > definition.uploadBytes) message = "Choose a nonempty file up to 5 MB.";
+      if (value.size < 1) message = "Choose a nonempty file.";
+      else if (value.size > definition.uploadBytes) message = "File exceeded the " + definition.uploadBytes + " bytes (" + Math.round(definition.uploadBytes / 1024 / 1024) + " MiB) limit. It used " + value.size + " bytes.";
       else uploads.push({ fieldId: field.fieldId, file: value });
     } else if (!(value === null && field.omitWhenEmpty)) values[field.fieldId] = value;
     if (message) {
@@ -284,12 +288,9 @@ const readDraft = () => {
   }
   return { values, uploads };
 };
-const readFile = file => new Promise(resolve => {
-  const reader = new FileReader();
-  reader.onload = () => resolve(typeof reader.result === "string" ? reader.result.slice(reader.result.indexOf(",") + 1) : null);
-  reader.onerror = reader.onabort = () => resolve(null);
-  try { reader.readAsDataURL(file); } catch { resolve(null); }
-});
+const readFile = async file => {
+  try { return await file.arrayBuffer(); } catch { return null; }
+};
 const saveAttempt = async () => {
   if (attempt.token) return { saved: true };
   const result = await request({ op: "backend.attempt", operation: definition.operation,
@@ -316,9 +317,10 @@ form.addEventListener("submit", async event => {
   status.textContent = "Sending your response. Keep this page open until it is confirmed.";
   while (attempt.uploads?.length) {
     const upload = attempt.uploads[0];
-    if (!upload.bytesBase64) upload.bytesBase64 = await readFile(upload.file);
-    const result = upload.bytesBase64 ? await request({ op: "backend.upload", idempotencyKey: attempt.key + ":file:" + upload.fieldId,
-      name: upload.file.name, contentType: upload.file.type || "application/octet-stream", bytesBase64: upload.bytesBase64 }) : { refused: true };
+    if (!upload.bytes) upload.bytes = await readFile(upload.file);
+    const copy = upload.bytes ? upload.bytes.slice(0) : null;
+    const result = copy ? await request({ op: "backend.upload", idempotencyKey: attempt.key + ":file:" + upload.fieldId,
+      name: upload.file.name, contentType: upload.file.type || "application/octet-stream", bytes: copy }, [copy]) : { refused: true };
     if (!result.fileId) {
       busy = false; submit.disabled = false; submit.textContent = "Try again";
       if (result.refused) { attempt = undefined; fields.disabled = false; submit.textContent = "Submit"; status.textContent = "The file was not accepted. Choose another file and try again."; }

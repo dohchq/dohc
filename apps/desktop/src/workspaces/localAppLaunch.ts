@@ -11,9 +11,13 @@ import {
 import {
   APP_BACKEND_REQUEST_BYTES,
   APP_BACKEND_RESULT_BYTES,
-  APP_BACKEND_UPLOAD_REQUEST_BYTES,
+  APP_BACKEND_UPLOAD_BYTES,
+  AppBackendLimitError,
+  appBackendLimit,
+  assertAppBackendUploadBytes,
+  parseAppBackendFile,
   parseAppBackendInvokeRequest,
-  parseAppBackendUploadRequest,
+  parseAppBackendUploadMeta,
   parseAppBackendRefusal,
 } from "@dohc/security-contract/app-backend";
 import {
@@ -169,6 +173,26 @@ async function readJson(
   return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(parts, size)));
 }
 
+async function readBinary(
+  request: IncomingMessage,
+  maxBytes: number,
+  signal: AbortSignal,
+): Promise<Uint8Array> {
+  const parts: Buffer[] = [];
+  let size = 0;
+  for await (const part of request) {
+    signal.throwIfAborted();
+    size += part.length;
+    if (size > maxBytes)
+      throw new AppBackendLimitError(
+        appBackendLimit("Attachment upload", maxBytes, size, "bytes", true),
+      );
+    parts.push(Buffer.from(part));
+  }
+  signal.throwIfAborted();
+  return Buffer.concat(parts, size);
+}
+
 /** Each approved local app gets its own loopback origin and an opaque, credential-free child frame. */
 export async function createLocalAppLaunchHost(options: {
   backend: LocalAppLaunchBackend;
@@ -312,7 +336,7 @@ export async function createLocalAppLaunchHost(options: {
           const request=proof?fetch('/resume',{method:'POST',headers:{'x-dohc-app-proof':proof},signal:lifetime.signal}):fetch('/session',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({handoff}),signal:lifetime.signal});
           request.then(async r=>{if(!r.ok)throw Error();const value=await r.json();if(stopped)return;proof=value.proof;saveProof(proof);
             frame=document.createElement('iframe');frame.title='Local app';frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox';frame.style='display:block;border:0;width:100%;height:100vh';
-            const broker=(${attachAppCollectionBroker.toString()})(frame,(body,signal,request)=>fetch('/backend',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof,'x-dohc-app-activated':request.activated?'1':'0'},body:JSON.stringify(body),signal}),lifetime.signal,${observe},${brokerLimits});
+            const broker=(${attachAppCollectionBroker.toString()})(frame,(body,signal,request)=>{if(body.op==='backend.upload'){const{bytes,...meta}=body;return fetch('/backend',{method:'POST',headers:{'content-type':'application/octet-stream','x-dohc-app-proof':proof,'x-dohc-app-activated':request.activated?'1':'0','x-dohc-app-meta':encodeURIComponent(JSON.stringify(meta))},body:bytes,signal});}return fetch('/backend',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof,'x-dohc-app-activated':request.activated?'1':'0'},body:JSON.stringify(body),signal});},lifetime.signal,${observe},${brokerLimits});
             addEventListener('message',event=>{const scheme=event.data?.kind==='dohc-color-scheme'?event.data.scheme:null;if(event.source===frame.contentWindow&&(scheme==='light'||scheme==='dark'))frame.style.colorScheme=scheme;},{signal:lifetime.signal});
             frame.srcdoc=value.html;document.body.append(frame);const status=document.getElementById('status');status.textContent='';status.style.margin='0';
             ${eventLoop}
@@ -334,10 +358,15 @@ export async function createLocalAppLaunchHost(options: {
             };
           request.once("aborted", requestAborted);
           response.once("close", responseClosed);
+          const timeoutMs =
+            request.url === "/backend" &&
+            request.headers["content-type"] === "application/octet-stream"
+              ? 90_000
+              : 15_000;
           let activeSignal = AbortSignal.any([
             requestSignal,
             abort.signal,
-            AbortSignal.timeout(15_000),
+            AbortSignal.timeout(timeoutMs),
           ]);
           let admitted = false,
             eventsAdmitted = false;
@@ -487,11 +516,51 @@ export async function createLocalAppLaunchHost(options: {
               current();
               return reply(response, 200, { proof, html: resumed.html });
             }
-            const body = await readJson(request, APP_BACKEND_UPLOAD_REQUEST_BYTES, activeSignal);
             // The app frame has neither the proof nor this origin. Only dohc's tab can claim a click, though: a session
             // for a browser handed its URL, and so its proof, to whoever asked, an agent included, which can send this header.
             const activated =
               launchOptions?.keepAlive === true && request.headers["x-dohc-app-activated"] === "1";
+            if (request.headers["content-type"] === "application/octet-stream") {
+              const rawMeta = request.headers["x-dohc-app-meta"];
+              if (typeof rawMeta !== "string" || !rawMeta || rawMeta.length > 4096)
+                return reply(response, 400);
+              let meta: unknown;
+              try {
+                meta = JSON.parse(decodeURIComponent(rawMeta));
+              } catch {
+                return reply(response, 400);
+              }
+              if (
+                !exact(meta, ["id", "op", "idempotencyKey", "name", "contentType"], ["dataset"]) ||
+                meta.op !== "backend.upload" ||
+                typeof meta.id !== "string" ||
+                meta.id.length > 64 ||
+                !/^[A-Za-z0-9_-]+$/.test(meta.id)
+              )
+                return reply(response, 400);
+              const bytes = await readBinary(request, APP_BACKEND_UPLOAD_BYTES, activeSignal);
+              assertAppBackendUploadBytes(bytes.byteLength);
+              const input = parseAppBackendUploadMeta({
+                authorityRevision,
+                idempotencyKey: meta.idempotencyKey,
+                name: meta.name,
+                contentType: meta.contentType,
+                ...(Object.hasOwn(meta, "dataset") ? { dataset: meta.dataset } : {}),
+              });
+              const uploaded = await options.backend.request(
+                publicationId,
+                "upload",
+                { ...input, bytes },
+                activeSignal,
+                activated,
+              );
+              activeSignal.throwIfAborted();
+              current();
+              if (Buffer.byteLength(JSON.stringify(uploaded)) > APP_BACKEND_RESULT_BYTES)
+                return reply(response, 503);
+              return reply(response, 200, uploaded);
+            }
+            const body = await readJson(request, APP_BACKEND_REQUEST_BYTES, activeSignal);
             if (!body || typeof body !== "object" || Array.isArray(body))
               return reply(response, 400);
             const row = body as Record<string, unknown>;
@@ -502,11 +571,7 @@ export async function createLocalAppLaunchHost(options: {
             )
               return reply(response, 400);
             const collection = row.op === "collection.list" || row.op === "collection.create";
-            if (
-              row.op !== "backend.upload" &&
-              Buffer.byteLength(JSON.stringify(row)) >
-                (collection ? APP_COLLECTION_REQUEST_BYTES : APP_BACKEND_REQUEST_BYTES)
-            )
+            if (collection && Buffer.byteLength(JSON.stringify(row)) > APP_COLLECTION_REQUEST_BYTES)
               return reply(response, 413);
             let result: unknown;
             if (
@@ -590,29 +655,6 @@ export async function createLocalAppLaunchHost(options: {
                 activated,
               );
             } else if (
-              row.op === "backend.upload" &&
-              exact(
-                row,
-                ["id", "op", "idempotencyKey", "name", "contentType", "bytesBase64"],
-                ["dataset"],
-              )
-            ) {
-              const input = parseAppBackendUploadRequest({
-                authorityRevision: authorityRevision,
-                idempotencyKey: row.idempotencyKey,
-                name: row.name,
-                contentType: row.contentType,
-                bytesBase64: row.bytesBase64,
-                ...(Object.hasOwn(row, "dataset") ? { dataset: row.dataset } : {}),
-              });
-              result = await options.backend.request(
-                publicationId,
-                "upload",
-                input,
-                activeSignal,
-                activated,
-              );
-            } else if (
               row.op === "backend.file" &&
               exact(row, ["id", "op", "fileId", "operation", "input"], ["dataset"])
             ) {
@@ -629,7 +671,7 @@ export async function createLocalAppLaunchHost(options: {
                 input: row.input,
                 ...(Object.hasOwn(row, "dataset") ? { dataset: row.dataset } : {}),
               });
-              result = await options.backend.readBrowserFile(
+              const downloaded = await options.backend.readBrowserFile(
                 publicationId,
                 {
                   authorityRevision: input.authorityRevision,
@@ -640,16 +682,36 @@ export async function createLocalAppLaunchHost(options: {
                 },
                 activeSignal,
               );
+              activeSignal.throwIfAborted();
+              current();
+              if (
+                !downloaded ||
+                typeof downloaded !== "object" ||
+                Array.isArray(downloaded) ||
+                !("file" in downloaded) ||
+                !("bytes" in downloaded) ||
+                !(downloaded.bytes instanceof Uint8Array)
+              )
+                return reply(response, 503);
+              const file = parseAppBackendFile(downloaded.file);
+              if (
+                downloaded.bytes.byteLength !== file.byteLength ||
+                downloaded.bytes.byteLength > APP_BACKEND_UPLOAD_BYTES
+              )
+                return reply(response, 503);
+              response.writeHead(200, {
+                ...common,
+                "content-type": "application/octet-stream",
+                "x-dohc-app-file": encodeURIComponent(JSON.stringify(file)),
+              });
+              response.end(Buffer.from(downloaded.bytes));
+              return;
             } else return reply(response, 400);
             activeSignal.throwIfAborted();
             current();
             if (
               Buffer.byteLength(JSON.stringify(result)) >
-              (row.op === "backend.file"
-                ? APP_BACKEND_UPLOAD_REQUEST_BYTES
-                : collection
-                  ? APP_COLLECTION_RESPONSE_BYTES
-                  : APP_BACKEND_RESULT_BYTES)
+              (collection ? APP_COLLECTION_RESPONSE_BYTES : APP_BACKEND_RESULT_BYTES)
             )
               return reply(response, 503);
             return reply(response, 200, result);
@@ -668,6 +730,8 @@ export async function createLocalAppLaunchHost(options: {
                   return reply(response, 409, parseAppBackendRefusal(error.refusal));
                 } catch {}
               }
+              if (error instanceof AppBackendLimitError)
+                return reply(response, 413, { error: error.message });
               reply(
                 response,
                 error instanceof RangeError

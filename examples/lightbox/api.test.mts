@@ -100,6 +100,7 @@ function makeThrottledBroker(AppBackendError: typeof appKit.AppBackendError) {
     async file(fileId) {
       take(`file:${fileId}`);
       try {
+        const bytes = new Uint8Array([0]).buffer;
         return {
           file: {
             fileId,
@@ -108,7 +109,8 @@ function makeThrottledBroker(AppBackendError: typeof appKit.AppBackendError) {
             byteLength: 1,
             sha256: "a".repeat(64),
           },
-          bytesBase64: "AA==",
+          bytes,
+          blob: () => new Blob([bytes], { type: "image/jpeg" }),
         };
       } finally {
         pending--;

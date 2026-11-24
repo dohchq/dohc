@@ -11,6 +11,8 @@ import { isShareablePath } from "@dohc/security-contract/share-selector";
 import {
   APP_BACKEND_OPERATION_FILES,
   appBackendFileSignatureMatches,
+  assertAppBackendUploadBytes,
+  parseAppBackendUploadMeta,
   parseAppBackendUploadRequest,
   parseAppBackendFile,
   type AppBackendFile,
@@ -224,16 +226,15 @@ export interface LocalDatasetInvocation {
    */
   agent?: LocalDatasetAgent;
 }
-export interface LocalDatasetUpload {
+export type LocalDatasetUpload = {
   datasetId: string;
   revision: number;
   revisionSha256: string;
   idempotencyKey: string;
   name: string;
   contentType: string;
-  bytesBase64: string;
   signal?: AbortSignal;
-}
+} & ({ bytes: Uint8Array; bytesBase64?: never } | { bytesBase64: string; bytes?: never });
 export interface LocalDatasetFileRequest {
   datasetId: string;
   revision: number;
@@ -847,7 +848,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         };
       },
     });
-    function readFile(input: LocalDatasetFileRequest, attachedOnly: boolean) {
+    function readFileBytes(input: LocalDatasetFileRequest, attachedOnly: boolean) {
       assertCurrent();
       signal(input.signal).throwIfAborted();
       if (typeof input.fileId !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(input.fileId))
@@ -872,7 +873,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       const file = parseAppBackendFile(JSON.parse(row.metadata));
       if (row.content.byteLength !== file.byteLength || digest(row.content) !== file.sha256)
         throw new Error("Collection file integrity check failed.");
-      return { file, bytesBase64: Buffer.from(row.content).toString("base64") };
+      return { file, bytes: row.content };
     }
     const exclusiveDatasets = new Map<string, symbol>();
     const activeDatasetOperations = new Map<string, Set<Promise<void>>>();
@@ -1442,15 +1443,29 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
                 : ownerId;
             };
             const principal = authorize();
-            const parsed = parseAppBackendUploadRequest({
-              authorityRevision: input.revision,
-              idempotencyKey: input.idempotencyKey,
-              name: input.name,
-              contentType: input.contentType,
-              bytesBase64: input.bytesBase64,
-            });
-            const bytes = Buffer.from(parsed.bytesBase64, "base64"),
-              sha256 = digest(bytes);
+            let parsed: { idempotencyKey: string; name: string; contentType: string };
+            let bytes: Uint8Array;
+            if ("bytes" in input && input.bytes instanceof Uint8Array) {
+              assertAppBackendUploadBytes(input.bytes.byteLength);
+              parsed = parseAppBackendUploadMeta({
+                authorityRevision: input.revision,
+                idempotencyKey: input.idempotencyKey,
+                name: input.name,
+                contentType: input.contentType,
+              });
+              bytes = input.bytes;
+            } else {
+              const decoded = parseAppBackendUploadRequest({
+                authorityRevision: input.revision,
+                idempotencyKey: input.idempotencyKey,
+                name: input.name,
+                contentType: input.contentType,
+                bytesBase64: input.bytesBase64,
+              });
+              parsed = decoded;
+              bytes = Buffer.from(decoded.bytesBase64, "base64");
+            }
+            const sha256 = digest(bytes);
             if (!appBackendFileSignatureMatches(parsed.contentType, bytes))
               throw new Error("File content does not match its type.");
             const now = Date.now();
@@ -1537,7 +1552,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         return tracked(async () => {
           signal(input.signal).throwIfAborted();
           checkRevision(input);
-          return transaction(() => readFile(input, false));
+          return transaction(() => {
+            const { file, bytes } = readFileBytes(input, false);
+            return { file, bytesBase64: Buffer.from(bytes).toString("base64") };
+          });
         });
       },
       invoke: (input: LocalDatasetInvocation) => invoke(input),
@@ -1837,7 +1855,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
               result.fileId !== fileId
             )
               throw new Error("This action does not grant access to the file.");
-            return readFile({ ...input, fileId }, true);
+            return readFileBytes({ ...input, fileId }, true);
           }),
         ),
       attempt(context, input, request) {

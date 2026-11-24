@@ -9,8 +9,9 @@ import {
   verifyAppDatasetCapability,
 } from "@dohc/security-contract/dataset-authorization";
 import {
+  assertAppBackendUploadBytes,
   parseAppBackendInvokeRequest,
-  parseAppBackendUploadRequest,
+  parseAppBackendUploadMeta,
 } from "@dohc/security-contract/app-backend";
 import type { AppDatasetBinding, DatasetRevision } from "@dohc/security-contract/dataset";
 import {
@@ -345,7 +346,17 @@ export function createLocalDatasetApps(options: {
         );
       }
       if (action === "upload") {
-        const input = parseAppBackendUploadRequest(raw);
+        if (
+          !raw ||
+          typeof raw !== "object" ||
+          Array.isArray(raw) ||
+          !("bytes" in raw) ||
+          !(raw.bytes instanceof Uint8Array)
+        )
+          throw new Error("Invalid app upload.");
+        const { bytes, ...meta } = raw as Record<string, unknown> & { bytes: Uint8Array };
+        assertAppBackendUploadBytes(bytes.byteLength);
+        const input = parseAppBackendUploadMeta(meta);
         return inContext(
           publicationId,
           input.authorityRevision,
@@ -363,7 +374,7 @@ export function createLocalDatasetApps(options: {
               idempotencyKey: input.idempotencyKey,
               name: input.name,
               contentType: input.contentType,
-              bytesBase64: input.bytesBase64,
+              bytes,
               signal,
             });
           },

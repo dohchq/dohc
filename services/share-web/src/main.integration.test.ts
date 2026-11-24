@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import {
@@ -405,13 +406,211 @@ describe("share-web Node request adapter", () => {
       relay.finishAllBlobs();
     }
   });
+
+  it("streams authenticated app binary uploads larger than the 16 KiB default cap on /backend", async () => {
+    const publicationId = "b".repeat(64);
+    const bundleBytes = Buffer.from("console.log('ready');");
+    const bundleSha = createHash("sha256").update(bundleBytes).digest("hex");
+    const payload = Buffer.concat([Buffer.from("%PDF-1.7\n"), Buffer.alloc(64 * 1024, 0x41)]);
+    const payloadSha = createHash("sha256").update(payload).digest("hex");
+    let relayUploadBodies: Array<Record<string, unknown>> = [];
+    const relayServer = createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+      request.on("end", () => {
+        if (request.method === "POST" && request.url === "/sync/link-exchange") {
+          response.setHeader("content-type", "application/json");
+          response.end(
+            JSON.stringify({
+              ok: true,
+              grantId: "grant-app-upload",
+              capabilityToken: CAPABILITY_TOKEN,
+              capabilityExpiresAtMs: Date.now() + 15 * 60_000,
+            }),
+          );
+          return;
+        }
+        if (
+          request.method === "GET" &&
+          request.url === `/sync/link/app-publications/${publicationId}`
+        ) {
+          response.setHeader("content-type", "application/json");
+          response.end(
+            JSON.stringify({
+              publicationId,
+              authorityRevision: 1,
+              files: [
+                {
+                  path: "bundle.js",
+                  contentType: "text/javascript; charset=utf-8",
+                  sha256: bundleSha,
+                  byteLength: bundleBytes.byteLength,
+                },
+              ],
+            }),
+          );
+          return;
+        }
+        if (
+          request.method === "GET" &&
+          request.url ===
+            `/sync/link/app-publications/${publicationId}/blobs/${bundleSha}?authorityRevision=1`
+        ) {
+          response.setHeader("content-type", "text/javascript; charset=utf-8");
+          response.end(bundleBytes);
+          return;
+        }
+        if (
+          request.method === "POST" &&
+          request.url === `/sync/link/app-publications/${publicationId}/backend/upload`
+        ) {
+          const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<
+            string,
+            unknown
+          >;
+          relayUploadBodies.push(body);
+          response.setHeader("content-type", "application/json");
+          response.end(
+            JSON.stringify({
+              file: {
+                fileId: "file_0123456789abcdef",
+                name: body.name,
+                contentType: body.contentType,
+                byteLength: payload.byteLength,
+                sha256: payloadSha,
+              },
+              replayed: false,
+            }),
+          );
+          return;
+        }
+        response.statusCode = 404;
+        response.end();
+      });
+    });
+    relayServers.add(relayServer);
+    await listenOnEphemeralPort(relayServer);
+    const relayAddress = relayServer.address();
+    if (!relayAddress || typeof relayAddress === "string") throw new Error("relay did not bind");
+
+    const viewerHost = "viewer.example.com";
+    const appDomain = "example.net";
+    const server = await startShareWeb({
+      relayUrl: `http://127.0.0.1:${relayAddress.port}`,
+      publicHost: viewerHost,
+      publicOrigin: `https://${viewerHost}`,
+      appDomain,
+    });
+
+    const exchangeBody = JSON.stringify({ secret: EXCHANGE_SECRET });
+    const exchangeResponse = await sendHttpRequest(server.port, "/api/exchange", {
+      method: "POST",
+      headers: {
+        host: viewerHost,
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(exchangeBody),
+      },
+      body: exchangeBody,
+    });
+    expect(exchangeResponse.statusCode).toBe(200);
+    const { session: discriminator } = JSON.parse(await readResponse(exchangeResponse)) as {
+      session: string;
+    };
+    const cookies = (exchangeResponse.headers["set-cookie"] ?? []).map((c) => c.split(";", 1)[0]!);
+
+    const launchBody = JSON.stringify({ discriminator, publicationId });
+    const launchResponse = await sendHttpRequest(server.port, "/api/apps/launch", {
+      method: "POST",
+      headers: {
+        host: viewerHost,
+        origin: `https://${viewerHost}`,
+        cookie: cookies.join("; "),
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(launchBody),
+      },
+      body: launchBody,
+    });
+    expect(launchResponse.statusCode).toBe(200);
+    const launch = JSON.parse(await readResponse(launchResponse)) as {
+      action: string;
+      handoff: string;
+    };
+    const appUrl = new URL(launch.action);
+    const appHost = appUrl.host;
+
+    const formBody = `handoff=${encodeURIComponent(launch.handoff)}`;
+    const bootstrapResponse = await sendHttpRequest(server.port, appUrl.pathname, {
+      method: "POST",
+      headers: {
+        host: appHost,
+        origin: `https://${viewerHost}`,
+        "content-type": "application/x-www-form-urlencoded",
+        "content-length": Buffer.byteLength(formBody),
+      },
+      body: formBody,
+    });
+    expect(bootstrapResponse.statusCode).toBe(200);
+    const appCookie = (bootstrapResponse.headers["set-cookie"] ?? [])[0]!.split(";", 1)[0]!;
+    const bootstrapHtml = await readResponse(bootstrapResponse);
+    const proof = /const proof="([^"]+)"/u.exec(bootstrapHtml)?.[1];
+    expect(proof).toBeTruthy();
+
+    const meta = encodeURIComponent(
+      JSON.stringify({
+        id: "upload-64k",
+        op: "backend.upload",
+        idempotencyKey: "k-64k",
+        name: "large.pdf",
+        contentType: "application/pdf",
+      }),
+    );
+
+    const unauth = await sendHttpRequest(server.port, "/backend", {
+      method: "POST",
+      headers: {
+        host: appHost,
+        origin: appUrl.origin,
+        "content-type": "application/octet-stream",
+        "content-length": payload.byteLength,
+        "x-dohc-app-meta": meta,
+      },
+      body: payload,
+    });
+    expect(unauth.statusCode).toBe(404);
+    await readResponse(unauth);
+    expect(relayUploadBodies).toHaveLength(0);
+
+    const uploaded = await sendHttpRequest(server.port, "/backend", {
+      method: "POST",
+      headers: {
+        host: appHost,
+        origin: appUrl.origin,
+        cookie: appCookie,
+        "x-dohc-app-proof": proof!,
+        "content-type": "application/octet-stream",
+        "content-length": payload.byteLength,
+        "x-dohc-app-meta": meta,
+      },
+      body: payload,
+    });
+    expect(uploaded.statusCode).toBe(200);
+    expect(JSON.parse(await readResponse(uploaded))).toMatchObject({
+      replayed: false,
+      file: { fileId: "file_0123456789abcdef", byteLength: payload.byteLength },
+    });
+    expect(relayUploadBodies).toHaveLength(1);
+    expect(Buffer.from(String(relayUploadBodies[0]!.bytesBase64), "base64")).toEqual(payload);
+  });
 });
 
 async function startShareWeb(
   options: {
+    appDomain?: string;
     devMode?: boolean;
     nodeEnv?: "test" | "production";
     publicEditRelease?: string;
+    publicHost?: string;
+    publicOrigin?: string;
     relayExchangeKey?: string;
     relayUrl?: string;
     shutdownGracePeriodMs?: number;
@@ -435,7 +634,11 @@ async function startShareWeb(
   delete env.DOHC_SHARE_WEB_TRUSTED_PROXIES;
   delete env.DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY;
   delete env.DOHC_SHARE_WEB_INTERNAL_HOSTS;
+  delete env.DOHC_SHARE_WEB_APP_DOMAIN;
+  delete env.DOHC_SHARE_WEB_PUBLIC_ORIGIN;
   if (options.devMode !== false) env.DOHC_SHARE_WEB_DEV = "1";
+  if (options.appDomain !== undefined) env.DOHC_SHARE_WEB_APP_DOMAIN = options.appDomain;
+  if (options.publicOrigin !== undefined) env.DOHC_SHARE_WEB_PUBLIC_ORIGIN = options.publicOrigin;
   if (options.shutdownGracePeriodMs !== undefined) {
     env.DOHC_SHARE_WEB_TEST_SHUTDOWN_GRACE_PERIOD_MS = String(options.shutdownGracePeriodMs);
   }
@@ -464,7 +667,7 @@ async function startShareWeb(
       NODE_ENV: options.nodeEnv ?? "test",
       DOHC_SHARE_WEB_RELAY_URL: relayUrl,
       DOHC_SHARE_WEB_PUBLIC_RELAY_URL: relayUrl,
-      DOHC_SHARE_WEB_PUBLIC_HOSTS: PUBLIC_HOST,
+      DOHC_SHARE_WEB_PUBLIC_HOSTS: options.publicHost ?? PUBLIC_HOST,
       DOHC_SHARE_WEB_PORT: "0",
       DOHC_SHARE_WEB_BIND: "127.0.0.1",
     },
@@ -582,7 +785,7 @@ function requestBlob(port: number, session: LinkSession): PendingBlobRequest {
 function sendHttpRequest(
   port: number,
   path: string,
-  options: { body?: string; headers: Record<string, string | number>; method: string },
+  options: { body?: string | Buffer; headers: Record<string, string | number>; method: string },
 ): Promise<IncomingMessage> {
   return new Promise((resolve, reject) => {
     const request = requestHttp({ host: "127.0.0.1", port, path, ...options }, resolve);

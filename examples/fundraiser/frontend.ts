@@ -1,7 +1,7 @@
 import "./frontend.css";
 import { downloadBlob, readRecoveryFile, recoveryText } from "./recovery.ts";
 import {
-  BackendError, backendStatus, createFundraiserClient, createRegistrationAttempt, decodeBase64, defaultAppContext, mutationKey,
+  BackendError, backendStatus, createFundraiserClient, createRegistrationAttempt, defaultAppContext, encodeBase64, mutationKey,
   RECEIPT_MAX_BYTES, RECEIPT_TYPES, receiptUploadFromFile, submitRegistration,
   restoreRegistrationAttempt, type RegistrationRetry,
   type AppContext, type BackendStatus, type FundraiserClient, type RegistrationAttempt, type RegistrationDraft, type RetainedRegistrationAttempt,
@@ -685,7 +685,7 @@ function createOrganizerView(client: FundraiserClient): View {
           const reply = receiptState.reply, { file } = reply;
           const meta = el("p", { class: "hint" }, `${file.name} · ${Math.max(1, Math.round(file.byteLength / 1024))} KB`);
           if (file.contentType === "image/jpeg" || file.contentType === "image/png") {
-            return el("div", {}, el("img", { class: "receipt-image", src: `data:${file.contentType};base64,${reply.bytesBase64}`, alt: `Payment receipt from ${row.fullName}` }), meta);
+            return el("div", {}, el("img", { class: "receipt-image", src: `data:${file.contentType};base64,${encodeBase64(new Uint8Array(reply.bytes))}`, alt: `Payment receipt from ${row.fullName}` }), meta);
           }
           const saveStatus = el("p", { class: "hint", "aria-live": "polite" });
           return el("div", {}, el("p", {}, file.contentType === "application/pdf" ? "Download this PDF to view the receipt." : "Download this file to view the receipt."), meta,
@@ -707,7 +707,7 @@ function createOrganizerView(client: FundraiserClient): View {
       renderDetail();
     }
     async function saveReceipt(reply: FileReply, status: HTMLElement): Promise<void> {
-      const file = new File([decodeBase64(reply.bytesBase64)], reply.file.name, { type: reply.file.contentType });
+      const file = new File([reply.bytes], reply.file.name, { type: reply.file.contentType });
       try { downloadBlob(file, reply.file.name); status.textContent = "Receipt download started."; }
       catch { status.textContent = "The receipt download could not start. Try again."; }
     }

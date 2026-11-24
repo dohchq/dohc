@@ -46,4 +46,4 @@ export interface AttendeesInput { sessionId?: SessionId; status?: RegistrationSt
 export interface BackendFile { fileId: string; name: string; contentType: string; byteLength: number; sha256: string }
 export interface InvokeReply<T> { result: T; revision: number; replayed: boolean }
 export interface UploadReply { file: BackendFile; replayed: boolean }
-export interface FileReply { file: BackendFile; bytesBase64: string }
+export interface FileReply { file: BackendFile; bytes: ArrayBuffer }

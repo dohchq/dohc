@@ -63,7 +63,7 @@ async function fixture(keepAlive = false) {
         byteLength: 4,
         sha256: "a".repeat(64),
       },
-      bytesBase64: "JVBERg==",
+      bytes: Buffer.from("%PDF"),
     })),
   };
   const host = await createLocalAppLaunchHost({ backend, lifetime: lifetime.signal });
@@ -371,27 +371,51 @@ it("carries exact Collection list and create requests and answers an unavailable
   expect((await f.post("/backend", list, headers)).status).toBe(404);
 });
 
-it("binds upload and authorized file operations to the same approved app", async () => {
+it("binds binary upload and authorized binary file operations to the same approved app and enforces 20 MiB cap", async () => {
   const f = await fixture(),
     opened = await f.open(),
     headers = { "x-dohc-app-proof": opened.proof };
-  expect(
-    (
-      await f.post(
-        "/backend",
-        {
-          id: "upload",
-          op: "backend.upload",
-          idempotencyKey: "upload-1",
-          name: "receipt.pdf",
-          contentType: "application/pdf",
-          bytesBase64: "JVBERg==",
-        },
-        headers,
-      )
-    ).status,
-  ).toBe(200);
+  const meta = {
+    id: "upload",
+    op: "backend.upload",
+    idempotencyKey: "upload-1",
+    name: "receipt.pdf",
+    contentType: "application/pdf",
+  };
+  const uploadRes = await fetch(f.origin + "/backend", {
+    method: "POST",
+    headers: {
+      origin: f.origin,
+      "content-type": "application/octet-stream",
+      "x-dohc-app-meta": encodeURIComponent(JSON.stringify(meta)),
+      ...headers,
+    },
+    body: Buffer.from("%PDF"),
+  });
+  expect(uploadRes.status).toBe(200);
   expect(f.backend.request.mock.calls.at(-1)?.[1]).toBe("upload");
+  expect(f.backend.request.mock.calls.at(-1)?.[2]).toMatchObject({
+    authorityRevision: 1,
+    idempotencyKey: "upload-1",
+    name: "receipt.pdf",
+    contentType: "application/pdf",
+    bytes: Buffer.from("%PDF"),
+  });
+  const oversize = Buffer.alloc(20 * 1024 * 1024 + 1);
+  const oversizeRes = await fetch(f.origin + "/backend", {
+    method: "POST",
+    headers: {
+      origin: f.origin,
+      "content-type": "application/octet-stream",
+      "x-dohc-app-meta": encodeURIComponent(JSON.stringify({ ...meta, id: "oversize" })),
+      ...headers,
+    },
+    body: oversize,
+  });
+  expect(oversizeRes.status).toBe(413);
+  expect(await oversizeRes.json()).toEqual({
+    error: expect.stringMatching(/20971520 bytes.*bytes/),
+  });
   const file = {
     id: "file",
     op: "backend.file",
@@ -399,7 +423,14 @@ it("binds upload and authorized file operations to the same approved app", async
     operation: "receipt.read",
     input: {},
   };
-  expect((await f.post("/backend", file, headers)).status).toBe(200);
+  const fileRes = await f.post("/backend", file, headers);
+  expect(fileRes.status).toBe(200);
+  expect(fileRes.headers.get("content-type")).toBe("application/octet-stream");
+  expect(JSON.parse(decodeURIComponent(fileRes.headers.get("x-dohc-app-file")!))).toMatchObject({
+    fileId: file.fileId,
+    byteLength: 4,
+  });
+  expect(Buffer.from(await fileRes.arrayBuffer())).toEqual(Buffer.from("%PDF"));
   expect(f.backend.readBrowserFile).toHaveBeenCalledWith(
     publicationId,
     { authorityRevision: 1, fileId: file.fileId, operation: file.operation, input: {} },

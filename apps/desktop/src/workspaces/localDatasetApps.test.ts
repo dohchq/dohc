@@ -23,6 +23,7 @@ import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "./localAppLau
 import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
 import { unguardedCollections } from "../testing/collectionsHolder";
 import { recordNewCollectionsHolder, type CollectionsHolderCheck } from "./collectionsHolder";
+import { writeDatasetRecoveryExport } from "./datasetRecoveryExport";
 
 const compileFixture = createDatasetFixtureCompiler();
 
@@ -516,7 +517,7 @@ describe("local approved dataset apps", () => {
       idempotencyKey: "receipt",
       name: "receipt.pdf",
       contentType: "application/pdf",
-      bytesBase64: "JVBERi0=",
+      bytes: Buffer.from("%PDF-"),
     })) as { file: { fileId: string } };
     const invoke = f.invocation();
     invoke.input.values[id(5)] = uploaded.file.fileId;
@@ -548,7 +549,7 @@ describe("local approved dataset apps", () => {
       input: { fileId: uploaded.file.fileId },
     };
     expect(await f.host.apps.readBrowserFile(admin.publicationId, request)).toMatchObject({
-      bytesBase64: "JVBERi0=",
+      bytes: Uint8Array.from(Buffer.from("%PDF-")),
     });
     await expect(
       f.host.apps.readBrowserFile(admin.publicationId, {
@@ -584,7 +585,7 @@ describe("local approved dataset apps", () => {
         idempotencyKey: "other",
         name: "receipt.pdf",
         contentType: "application/pdf",
-        bytesBase64: "JVBERi0=",
+        bytes: Buffer.from("%PDF-"),
       }),
     ).rejects.toThrow(/cannot upload/);
     const disclosure = f.host.apps.readBrowserFile(admin.publicationId, request);
@@ -632,7 +633,7 @@ describe("local approved dataset apps", () => {
       idempotencyKey: "same-key",
       name: "receipt.pdf",
       contentType: "application/pdf",
-      bytesBase64: "JVBERi0=",
+      bytes: Buffer.from("%PDF-"),
     };
     const first = (await f.host.apps.request(f.published.publicationId, "upload", upload)) as {
       file: { fileId: string };
@@ -732,7 +733,7 @@ it("keeps local form uploads, submissions and selected fields working through re
     idempotencyKey: "renamed-receipt",
     name: "receipt.pdf",
     contentType: "application/pdf",
-    bytesBase64: "JVBERi0=",
+    bytes: Buffer.from("%PDF-"),
   })) as { file: { fileId: string } };
   const invoke = f.invocation();
   invoke.input.values[id(5)] = uploaded.file.fileId;
@@ -763,7 +764,7 @@ it("keeps local form uploads, submissions and selected fields working through re
       operation: "fileRead",
       input: { fileId: uploaded.file.fileId },
     }),
-  ).toMatchObject({ bytesBase64: "JVBERi0=" });
+  ).toMatchObject({ bytes: Uint8Array.from(Buffer.from("%PDF-")) });
   expect(
     await restarted.apps.request(
       f.published.publicationId,
@@ -939,7 +940,7 @@ it("runs a multi-Collection local app with alias routing, cross-Collection file 
     idempotencyKey: "exp-receipt",
     name: "receipt.pdf",
     contentType: "application/pdf",
-    bytesBase64: "JVBERi0=",
+    bytes: Buffer.from("%PDF-"),
   })) as { file: { fileId: string } };
   await f.host.apps.request(activated.publicationId, "invoke", {
     authorityRevision: activated.authorityRevision,
@@ -964,7 +965,7 @@ it("runs a multi-Collection local app with alias routing, cross-Collection file 
       operation: "fileRead",
       input: { fileId: uploaded.file.fileId },
     }),
-  ).toMatchObject({ bytesBase64: "JVBERi0=" });
+  ).toMatchObject({ bytes: Uint8Array.from(Buffer.from("%PDF-")) });
 
   await expect(
     f.host.apps.readBrowserFile(activated.publicationId, {
@@ -1447,5 +1448,156 @@ describe("local app write attribution", () => {
     expect(session.ended.aborted).toBe(true);
     expect(session.ended.reason).toBe("needs-approval");
     expect(subscribedCount).toBe(0);
+  });
+
+  it("transfers a 15 MiB PDF over raw binary HTTP, round-trips recovery export/import, and refuses >20 MiB with limit details", async () => {
+    const f = await fixture();
+    const app = await f.prepareApp("app-binary", [id(6), id(7), id(8)]);
+    const published = await f.host.apps.activate(app, new AbortController().signal);
+    const lifetime = new AbortController();
+    const launcher = await createLocalAppLaunchHost({
+      backend: f.host.apps,
+      lifetime: lifetime.signal,
+    });
+    launchers.push(launcher);
+    const session = await launcher.launchSession(published.publicationId, lifetime.signal, {
+      keepAlive: true,
+    });
+    const origin = new URL(session.url).origin,
+      handoff = new URL(session.url).hash.slice(1);
+    const opened = (await (
+      await fetch(origin + "/session", {
+        method: "POST",
+        headers: { origin, "content-type": "application/json" },
+        body: JSON.stringify({ handoff }),
+      })
+    ).json()) as { proof: string };
+    const authHeaders = { origin, "x-dohc-app-proof": opened.proof };
+
+    const pdfBytes = Buffer.alloc(15 * 1024 * 1024, 0x41);
+    pdfBytes.write("%PDF-1.7\n", 0, "ascii");
+    const expectedSha = hash(pdfBytes);
+
+    const uploadRes = await fetch(origin + "/backend", {
+      method: "POST",
+      headers: {
+        ...authHeaders,
+        "content-type": "application/octet-stream",
+        "x-dohc-app-meta": encodeURIComponent(
+          JSON.stringify({
+            id: "up-15m",
+            op: "backend.upload",
+            idempotencyKey: "pdf-15m",
+            name: "statement.pdf",
+            contentType: "application/pdf",
+          }),
+        ),
+      },
+      body: pdfBytes,
+    });
+    expect(uploadRes.status).toBe(200);
+    const uploaded = (await uploadRes.json()) as {
+      file: { fileId: string; byteLength: number; sha256: string };
+      replayed: boolean;
+    };
+    expect(uploaded.replayed).toBe(false);
+    expect(uploaded.file.byteLength).toBe(pdfBytes.byteLength);
+    expect(uploaded.file.sha256).toBe(expectedSha);
+
+    const attachRes = await fetch(origin + "/backend", {
+      method: "POST",
+      headers: { ...authHeaders, "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "attach-15m",
+        op: "backend.invoke",
+        operation: "submit",
+        idempotencyKey: "attach-15m",
+        input: { values: { [id(4)]: "Annual statement", [id(5)]: uploaded.file.fileId } },
+      }),
+    });
+    expect(attachRes.status).toBe(200);
+
+    const downloadRes = await fetch(origin + "/backend", {
+      method: "POST",
+      headers: { ...authHeaders, "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "dl-15m",
+        op: "backend.file",
+        fileId: uploaded.file.fileId,
+        operation: "fileRead",
+        input: { fileId: uploaded.file.fileId },
+      }),
+    });
+    expect(downloadRes.status).toBe(200);
+    expect(downloadRes.headers.get("content-type")).toBe("application/octet-stream");
+    const downloadedMeta = JSON.parse(
+      decodeURIComponent(downloadRes.headers.get("x-dohc-app-file")!),
+    ) as { fileId: string; byteLength: number; sha256: string };
+    expect(downloadedMeta).toMatchObject({
+      fileId: uploaded.file.fileId,
+      byteLength: pdfBytes.byteLength,
+      sha256: expectedSha,
+    });
+    const downloadedBytes = Buffer.from(await downloadRes.arrayBuffer());
+    expect(downloadedBytes.byteLength).toBe(pdfBytes.byteLength);
+    expect(hash(downloadedBytes)).toBe(expectedSha);
+
+    const oversizeBytes = Buffer.alloc(20 * 1024 * 1024 + 1, 0x42);
+    oversizeBytes.write("%PDF-1.7\n", 0, "ascii");
+    const oversizeRes = await fetch(origin + "/backend", {
+      method: "POST",
+      headers: {
+        ...authHeaders,
+        "content-type": "application/octet-stream",
+        "x-dohc-app-meta": encodeURIComponent(
+          JSON.stringify({
+            id: "up-over",
+            op: "backend.upload",
+            idempotencyKey: "pdf-over",
+            name: "too-big.pdf",
+            contentType: "application/pdf",
+          }),
+        ),
+      },
+      body: oversizeBytes,
+    });
+    expect(oversizeRes.status).toBe(413);
+    expect(await oversizeRes.json()).toEqual({
+      error: expect.stringMatching(/20971520 bytes.*bytes/),
+    });
+
+    const archive = await f.host.prepareExport(id(1));
+    const backupPath = join(f.workspaceRoot, "large-pdf.dohc-recovery");
+    await writeDatasetRecoveryExport({
+      workspaceRoots: [],
+      path: backupPath,
+      stream: archive.stream(),
+      signal: new AbortController().signal,
+      maxBytes: archive.maxBytes,
+      authorize() {},
+    });
+    await archive.dispose();
+
+    const restoredRoot = await mkdtemp(join(tmpdir(), "dohc-local-apps-restored-"));
+    roots.push(restoredRoot);
+    await openedLocalState({ workspaceId: "w", rootPath: restoredRoot });
+    const restoredHost = await createLocalDatasetHost({
+      holder: unguardedCollections,
+      localPersonId: () => "person-local",
+      workspaceId: "w",
+      workspaceRoot: restoredRoot,
+    });
+    hosts.push(restoredHost);
+    const preparedRecovery = await restoredHost.prepareRecovery({ sourcePath: backupPath });
+    await restoredHost.claimRecovery({ ...preparedRecovery, oldHostStopped: true });
+    const restoredFile = await restoredHost.file({
+      datasetId: id(1),
+      revision: 1,
+      revisionSha256: f.revision.revisionSha256,
+      fileId: uploaded.file.fileId,
+    });
+    expect(restoredFile.file.byteLength).toBe(pdfBytes.byteLength);
+    expect(restoredFile.file.sha256).toBe(expectedSha);
+    expect(hash(Buffer.from(restoredFile.bytesBase64, "base64"))).toBe(expectedSha);
   });
 });

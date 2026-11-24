@@ -27,7 +27,7 @@ const upload = {
   idempotencyKey: "upload-1",
   name: file.name,
   contentType: file.contentType,
-  bytesBase64: "JVBERg==",
+  bytes: Buffer.from("%PDF"),
 };
 const readFile = {
   id: "one",
@@ -75,16 +75,33 @@ function forward(
   signal = new AbortController().signal,
   link = true,
 ) {
+  const isBinaryUpload =
+    contentType === "application/json" &&
+    !!body &&
+    typeof body === "object" &&
+    !Array.isArray(body) &&
+    (body as Record<string, unknown>).op === "backend.upload" &&
+    "bytes" in body &&
+    (body as Record<string, unknown>).bytes instanceof Uint8Array;
+  let requestBody: BodyInit;
+  const headers: Record<string, string> = {
+    "content-type": isBinaryUpload ? "application/octet-stream" : contentType,
+    cookie: "app=cookie",
+    "x-dohc-app-proof": "proof",
+    authorization: "Bearer attacker",
+  };
+  if (isBinaryUpload) {
+    const { bytes, ...meta } = body as Record<string, unknown> & { bytes: Uint8Array };
+    headers["x-dohc-app-meta"] = encodeURIComponent(JSON.stringify(meta));
+    requestBody = Buffer.from(bytes);
+  } else {
+    requestBody = JSON.stringify(body);
+  }
   return forwardAppBackend({
     request: new Request("https://app.example.net/backend", {
       method: "POST",
-      body: JSON.stringify(body),
-      headers: {
-        "content-type": contentType,
-        cookie: "app=cookie",
-        "x-dohc-app-proof": "proof",
-        authorization: "Bearer attacker",
-      },
+      body: requestBody,
+      headers,
     }),
     relayUrl: "https://relay.example.org",
     publicationId: "a".repeat(64),
@@ -153,7 +170,15 @@ it("forwards to fixed backend routes with launch authority and no browser creden
       return Response.json(reply);
     });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual(reply);
+    if (action === "file") {
+      expect(response.headers.get("content-type")).toBe("application/octet-stream");
+      expect(JSON.parse(decodeURIComponent(response.headers.get("x-dohc-app-file")!))).toEqual(
+        file,
+      );
+      expect(Buffer.from(await response.arrayBuffer())).toEqual(Buffer.from("%PDF"));
+    } else {
+      expect(await response.json()).toEqual(reply);
+    }
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(response.headers.has("content-disposition")).toBe(false);
   }
@@ -219,7 +244,12 @@ it("forwards an optional dataset alias on invoke, attempt, upload, and file and 
       return Response.json(reply);
     });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual(reply);
+    if (action === "file") {
+      expect(response.headers.get("content-type")).toBe("application/octet-stream");
+      expect(Buffer.from(await response.arrayBuffer())).toEqual(Buffer.from("%PDF"));
+    } else {
+      expect(await response.json()).toEqual(reply);
+    }
   }
   let calls = 0;
   const relay = async () => {
@@ -285,25 +315,11 @@ it("bounds operation bodies separately from file uploads", async () => {
     (await forward({ ...invoke, input: "x".repeat(APP_BACKEND_REQUEST_BYTES) }, relay)).status,
   ).toBe(404);
   expect(
-    (await forward({ ...upload, bytesBase64: "x".repeat(APP_BACKEND_UPLOAD_REQUEST_BYTES) }, relay))
-      .status,
-  ).toBe(404);
-  expect(
-    (
-      await forward(
-        { ...upload, bytesBase64: Buffer.alloc(APP_BACKEND_UPLOAD_BYTES + 1).toString("base64") },
-        relay,
-      )
-    ).status,
+    (await forward({ ...upload, bytes: Buffer.alloc(APP_BACKEND_UPLOAD_BYTES + 1) }, relay)).status,
   ).toBe(404);
   expect(calls).toBe(0);
   expect(
-    (
-      await forward(
-        { ...upload, bytesBase64: Buffer.alloc(APP_BACKEND_UPLOAD_BYTES).toString("base64") },
-        relay,
-      )
-    ).status,
+    (await forward({ ...upload, bytes: Buffer.alloc(APP_BACKEND_UPLOAD_BYTES) }, relay)).status,
   ).toBe(200);
 });
 
@@ -481,4 +497,44 @@ it("validates exact pending submissions without accepting caller identity", asyn
   ]) {
     expect((await forward(body, async () => Response.json(reply))).status).toBe(404);
   }
+});
+
+it("maps upload body read timeouts to 408 and reports limit details on named 413", async () => {
+  const timeoutSignal = AbortSignal.abort(new DOMException("Timed out", "TimeoutError"));
+  const timedOutNamed = await forward(
+    upload,
+    async () => {
+      throw new Error("relay must not run");
+    },
+    "application/json",
+    timeoutSignal,
+    false,
+  );
+  expect(timedOutNamed.status).toBe(408);
+  expect(await timedOutNamed.json()).toEqual({
+    error: "App backend upload exceeded the 90000 ms timeout limit.",
+  });
+  const timedOutLink = await forward(
+    upload,
+    async () => {
+      throw new Error("relay must not run");
+    },
+    "application/json",
+    timeoutSignal,
+    true,
+  );
+  expect(timedOutLink.status).toBe(408);
+
+  const oversizedNamed = await forward(
+    { ...upload, bytes: Buffer.alloc(APP_BACKEND_UPLOAD_BYTES + 1) },
+    async () => {
+      throw new Error("relay must not run");
+    },
+    "application/json",
+    new AbortController().signal,
+    false,
+  );
+  expect(oversizedNamed.status).toBe(413);
+  const body413 = (await oversizedNamed.json()) as { error: string };
+  expect(body413.error).toContain(`${APP_BACKEND_UPLOAD_BYTES} bytes`);
 });

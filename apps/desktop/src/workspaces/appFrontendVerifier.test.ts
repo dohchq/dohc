@@ -605,7 +605,7 @@ describe("verifyLocalAppFrontend", () => {
         runBrowser: async (browserInput: AppFrontendBrowserVerifyInput) => {
           const started = await browserInput.startSession();
           try {
-            const { backend } = await exchangeLaunchProof(started.url);
+            const { origin, proof, backend } = await exchangeLaunchProof(started.url);
 
             const okRes = await backend({
               id: "r1",
@@ -671,13 +671,22 @@ describe("verifyLocalAppFrontend", () => {
               },
             );
 
-            const uploadRes = await backend({
+            const uploadMeta = {
               id: "r5",
               op: "backend.upload",
               idempotencyKey: "k4",
               name: "a.txt",
               contentType: "text/plain",
-              bytesBase64: "YQ==",
+            };
+            const uploadRes = await fetch(new URL("/backend", started.url), {
+              method: "POST",
+              headers: {
+                origin,
+                "content-type": "application/octet-stream",
+                "x-dohc-app-proof": proof,
+                "x-dohc-app-meta": encodeURIComponent(JSON.stringify(uploadMeta)),
+              },
+              body: Buffer.from("a"),
             });
             expect(uploadRes.status).toBe(404);
             expect(browserInput.consumeBackendHint("backend.upload", undefined)).toMatchObject({

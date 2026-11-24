@@ -53,7 +53,7 @@ It is not a public share link.
 ### Form limits
 
 A form supports several file fields and up to 128 fields, the same limit as a table.
-Each file can contain up to 5 MiB. One response can attach up to 32 files, the most an operation accepts.
+Each file can contain up to 20 MiB. One response can attach up to 32 files, the most an operation accepts.
 A form can have more optional file controls, but cannot require more files than an operation accepts.
 The combined response, including file references, must fit the 64 KiB operation input limit.
 Larger answers can reach that limit before every field reaches its own text limit.

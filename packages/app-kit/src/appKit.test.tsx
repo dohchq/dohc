@@ -114,7 +114,7 @@ describe("dohc/app", () => {
     const poisonedInput = {
       name: "receipt.pdf",
       contentType: "application/pdf",
-      bytesBase64: "JVBERi0=",
+      bytes: new Uint8Array([37, 80, 68, 70, 45]),
       idempotencyKey: "spoofed-key",
       op: "backend.invoke",
       id: "spoofed-id",
@@ -123,7 +123,7 @@ describe("dohc/app", () => {
     await waitFor(() => expect(fake.sent).toHaveLength(3));
     const uploadMsg = fake.sent[2]!;
     expect(Object.keys(uploadMsg).sort()).toEqual([
-      "bytesBase64",
+      "bytes",
       "contentType",
       "id",
       "idempotencyKey",
@@ -131,6 +131,10 @@ describe("dohc/app", () => {
       "op",
     ]);
     expect(uploadMsg.op).toBe("backend.upload");
+    expect(uploadMsg.bytes).toBeInstanceOf(ArrayBuffer);
+    expect(new Uint8Array(uploadMsg.bytes as ArrayBuffer)).toEqual(
+      new Uint8Array([37, 80, 68, 70, 45]),
+    );
     expect(uploadMsg.idempotencyKey).toBe("explicit-upload-key");
     expect(uploadMsg.id).not.toBe("spoofed-id");
     fake.reply({
@@ -148,6 +152,39 @@ describe("dohc/app", () => {
       },
     });
     expect((await uploadPromise).file.fileId).toBe("f-1");
+
+    const downloadPromise = client.file("f-1", "readReceipt", { id: "r-1" });
+    await waitFor(() => expect(fake.sent).toHaveLength(4));
+    const fileBytes = new Uint8Array([37, 80, 68, 70, 45]).buffer;
+    fake.reply({
+      id: fake.sent[3]!.id,
+      ok: true,
+      value: {
+        file: {
+          fileId: "f-1",
+          name: "receipt.pdf",
+          contentType: "application/pdf",
+          byteLength: 5,
+          sha256: "abc",
+        },
+        bytes: fileBytes,
+      },
+    });
+    const downloaded = await downloadPromise;
+    expect(downloaded.bytes).toBe(fileBytes);
+    expect(downloaded.blob().type).toBe("application/pdf");
+    expect(downloaded.blob().size).toBe(5);
+
+    const oversize = new Uint8Array(20 * 1024 * 1024 + 1);
+    await expect(
+      client.upload(
+        { name: "huge.pdf", contentType: "application/pdf", bytes: oversize },
+        "oversize-key",
+      ),
+    ).rejects.toMatchObject({
+      status: 413,
+      message: expect.stringMatching(/20971520 bytes.*20971521 bytes/),
+    });
     client.close();
   });
 
@@ -1089,7 +1126,7 @@ describe("dohc/ui and dohc/charts", () => {
       const sneakyUpload = {
         name: "receipt.txt",
         contentType: "text/plain",
-        bytesBase64: "ZGF0YQ==",
+        bytes: new Uint8Array([100, 97, 116, 97]),
         dataset: "workouts",
       };
       await expensesA.upload(sneakyUpload, "up-scoped");

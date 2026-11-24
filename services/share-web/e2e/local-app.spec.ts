@@ -79,12 +79,12 @@ const definition: DatasetDefinition = {
 const frontend = `
 const root=document.getElementById('root');root.innerHTML='<h1>Local orders</h1><button id="order">Save order</button><button id="list">List orders</button><button id="receipt">Read receipt</button><button id="full">Check capacity</button><p id="result" role="status">Connecting</p>';
 let port;const result=document.getElementById('result');let pending=new Map();
-const send=body=>new Promise(resolve=>{pending.set(body.id,resolve);port.postMessage(body);});
+const send=(body,transfer)=>new Promise(resolve=>{pending.set(body.id,resolve);if(transfer)port.postMessage(body,transfer);else port.postMessage(body);});
 addEventListener('message',event=>{if(event.data?.kind!=='dohc-app-channel')return;port=event.ports[0];port.onmessage=event=>{pending.get(event.data.id)?.(event.data);pending.delete(event.data.id);};port.start();result.textContent='Ready';},{once:true});
-document.getElementById('order').onclick=async()=>{const upload=await send({id:'upload',op:'backend.upload',idempotencyKey:'receipt-1',name:'receipt.pdf',contentType:'application/pdf',bytesBase64:'JVBERi0='});if(!upload.ok){result.textContent='Access ended';return;}const saved=await send({id:'order',op:'backend.invoke',operation:'order',idempotencyKey:'order-1',input:{fileId:upload.value.file.fileId}});result.textContent=JSON.stringify(saved);};
+document.getElementById('order').onclick=async()=>{const bytes=new Uint8Array([37,80,68,70,45]).buffer;const upload=await send({id:'upload',op:'backend.upload',idempotencyKey:'receipt-1',name:'receipt.pdf',contentType:'application/pdf',bytes},[bytes]);if(!upload.ok){result.textContent='Access ended';return;}const saved=await send({id:'order',op:'backend.invoke',operation:'order',idempotencyKey:'order-1',input:{fileId:upload.value.file.fileId}});result.textContent=JSON.stringify(saved);};
 document.getElementById('full').onclick=async()=>{result.textContent=JSON.stringify(await send({id:'full',op:'backend.invoke',operation:'order',idempotencyKey:'full-1',input:{refuse:true}}));};
 document.getElementById('list').onclick=async()=>{result.textContent=JSON.stringify(await send({id:'list',op:'backend.invoke',operation:'list',idempotencyKey:'list-1',input:{}}));};
-document.getElementById('receipt').onclick=async()=>{const listed=await send({id:'files',op:'backend.invoke',operation:'list',idempotencyKey:'list-2',input:{}});if(!listed.ok){result.textContent='Access ended';return;}const fileId=listed.value.result.rows[0].file_id;result.textContent=JSON.stringify(await send({id:'receipt',op:'backend.file',fileId,operation:'receipt',input:{fileId}}));};
+document.getElementById('receipt').onclick=async()=>{const listed=await send({id:'files',op:'backend.invoke',operation:'list',idempotencyKey:'list-2',input:{}});if(!listed.ok){result.textContent='Access ended';return;}const fileId=listed.value.result.rows[0].file_id;const reply=await send({id:'receipt',op:'backend.file',fileId,operation:'receipt',input:{fileId}});result.textContent=reply.ok?JSON.stringify({ok:true,file:reply.value.file,text:new TextDecoder().decode(reply.value.bytes)}):JSON.stringify(reply);};
 `;
 const backendSource = `globalThis.operations={
 order(ctx,input){if(input.refuse)ctx.refuse('capacity_full','This session is full.');ctx.db.execute('INSERT INTO orders VALUES(?,?)',[ctx.requestId,input.fileId]);ctx.files.attach(input.fileId);return {saved:true};},
@@ -225,7 +225,7 @@ test("local app works without an account, survives restart, and stops at shared 
     const listed = JSON.parse(await status.innerText());
     expect(listed.value.result.rows).toHaveLength(1);
     await app.getByRole("button", { name: "Read receipt" }).click();
-    await expect(status).toContainText('"bytesBase64":"JVBERi0="');
+    await expect(status).toContainText('"text":"%PDF-"');
     await app.getByRole("button", { name: "Check capacity" }).click();
     await expect(status).toContainText(
       '"error":{"code":"capacity_full","message":"This session is full."}',

@@ -33,7 +33,8 @@ form.addEventListener("submit", async event => {
     const quantities = [...form.querySelectorAll<HTMLInputElement>('input[type="number"]')].filter(input => Number(input.value) > 0).map(input => ({itemId:input.name,quantity:Number(input.value)}));
     if (!quantities.length) { status.textContent = "Choose at least one item."; return; }
     const file = form.querySelector<HTMLInputElement>('input[type="file"]')!.files?.[0];
-    if (file && (file.size < 1 || file.size > 5*1024*1024)) { status.textContent = "Choose a nonempty receipt up to 5 MB."; return; }
+    if (file && file.size < 1) { status.textContent = "Choose a nonempty receipt."; return; }
+    if (file && file.size > 20 * 1024 * 1024) { status.textContent = `Receipt exceeded the ${20 * 1024 * 1024} bytes (20 MiB) limit. It used ${file.size} bytes.`; return; }
     attempt = {key:crypto.randomUUID(),input:{customerName:form.querySelector<HTMLInputElement>('[name="customer"]')!.value,items:quantities},file};
   }
   busy = true; discardConfirmed = false; discard.textContent = "Discard pending order"; freeze(); status.textContent = "Saving order…";

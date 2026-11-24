@@ -43,7 +43,7 @@ const record = (value: unknown): value is Record<string, unknown> => !!value && 
 const isFile = (value: unknown): boolean => record(value) && typeof value.fileId === "string" && typeof value.name === "string" &&
   typeof value.contentType === "string" && typeof value.byteLength === "number" && typeof value.sha256 === "string";
 
-type Pending = { message: Record<string, unknown>; timeoutMs: number; check(value: unknown): boolean; resolve(value: unknown): void; reject(error: Error): void; timer?: ReturnType<typeof setTimeout> };
+type Pending = { message: Record<string, unknown>; transfer?: Transferable[]; timeoutMs: number; check(value: unknown): boolean; resolve(value: unknown): void; reject(error: Error): void; timer?: ReturnType<typeof setTimeout> };
 
 /** Accepts the parent's channel once, queues requests until it arrives, and keeps the broker's in-flight limit. */
 export function connectBackend(): BackendPort {
@@ -57,7 +57,10 @@ export function connectBackend(): BackendPort {
       inFlight++;
       sent.set(id, item);
       item.timer = setTimeout(() => { if (sent.delete(id)) { inFlight--; fail(item, 503); pump(); } }, item.timeoutMs);
-      try { port.postMessage(item.message); }
+      try {
+        if (item.transfer?.length) port.postMessage(item.message, item.transfer);
+        else port.postMessage(item.message);
+      }
       catch { sent.delete(id); inFlight--; fail(item, 503); }
     }
   };
@@ -87,10 +90,10 @@ export function connectBackend(): BackendPort {
     pump();
   };
   window.addEventListener("message", receiveChannel);
-  const request = (message: Record<string, unknown>, timeoutMs: number, check: (value: unknown) => boolean): Promise<unknown> =>
+  const request = (message: Record<string, unknown>, timeoutMs: number, check: (value: unknown) => boolean, transfer?: Transferable[]): Promise<unknown> =>
     new Promise((resolve, reject) => {
       if (closed) { reject(new BackendError(503)); return; }
-      const item: Pending = { message: { id: crypto.randomUUID(), ...message }, timeoutMs, check, resolve, reject };
+      const item: Pending = { message: { id: crypto.randomUUID(), ...message }, transfer, timeoutMs, check, resolve, reject };
       item.timer = setTimeout(() => {
         const index = waiting.indexOf(item);
         if (index >= 0) { waiting.splice(index, 1); fail(item, 503); }
@@ -101,10 +104,13 @@ export function connectBackend(): BackendPort {
   return {
     invoke: <T>(operation: string, input: unknown, idempotencyKey: string) => request({ op: "backend.invoke", operation, idempotencyKey, input }, INVOKE_TIMEOUT_MS,
       value => record(value) && "result" in value && typeof value.revision === "number" && typeof value.replayed === "boolean") as Promise<InvokeReply<T>>,
-    upload: (receipt, idempotencyKey) => request({ op: "backend.upload", idempotencyKey, ...receipt }, TRANSFER_TIMEOUT_MS,
-      value => record(value) && isFile(value.file) && typeof value.replayed === "boolean") as Promise<UploadReply>,
+    upload: (receipt, idempotencyKey) => {
+      const bytes = decodeBase64(receipt.bytesBase64).slice().buffer;
+      return request({ op: "backend.upload", idempotencyKey, name: receipt.name, contentType: receipt.contentType, bytes }, TRANSFER_TIMEOUT_MS,
+        value => record(value) && isFile(value.file) && typeof value.replayed === "boolean", [bytes]) as Promise<UploadReply>;
+    },
     file: (fileId, operation, input) => request({ op: "backend.file", fileId, operation, input }, TRANSFER_TIMEOUT_MS,
-      value => record(value) && isFile(value.file) && typeof value.bytesBase64 === "string") as Promise<FileReply>,
+      value => record(value) && isFile(value.file) && value.bytes instanceof ArrayBuffer) as Promise<FileReply>,
     attempt: input => request({ op: "backend.attempt", operation: "register", request: input }, INVOKE_TIMEOUT_MS,
       validRegistrationAttemptResult) as Promise<RegistrationAttemptResult>,
     close() {

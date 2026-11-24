@@ -2961,9 +2961,9 @@ Answers `{ result, revision, replayed }`. A refusal from the operation arrives a
 
 ### `backend.upload`
 
-Uploads one file, at most 5 MiB, for a later operation to attach.
+Uploads one file, at most 20 MiB, as a transferred `ArrayBuffer` for a later operation to attach.
 
-Fields: `name`, `contentType`, `bytesBase64`, `idempotencyKey`.
+Fields: `name`, `contentType`, `bytes`, `idempotencyKey`.
 
 Answers `{ file, replayed }`.
 
@@ -2973,7 +2973,7 @@ Reads an uploaded file through an exposed read operation.
 
 Fields: `fileId`, `operation`, `input`.
 
-Answers `{ file, bytesBase64 }`.
+Answers `{ file, bytes }` (`bytes` is a transferred `ArrayBuffer`).
 
 ### `backend.attempt`
 

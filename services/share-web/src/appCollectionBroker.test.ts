@@ -132,13 +132,14 @@ it("forwards backend operations, uploads, and file reads while rejecting supplie
       idempotencyKey: "attempt-1",
       input: {},
     };
+    const uploadBytes = new Uint8Array([37, 80, 68, 70]).buffer;
     const upload = {
       id: "upload",
       op: "backend.upload",
       idempotencyKey: "upload-1",
       name: "receipt.pdf",
       contentType: "application/pdf",
-      bytesBase64: "JVBERg==",
+      bytes: uploadBytes,
     };
     const file = {
       id: "file",
@@ -153,8 +154,7 @@ it("forwards backend operations, uploads, and file reads while rejecting supplie
       operation: "register",
       request: { action: "get" },
     };
-    for (const body of [invoke, upload, file, attempt])
-      expect((await f.request(body)).ok).toBe(true);
+    for (const body of [invoke, upload, attempt]) expect((await f.request(body)).ok).toBe(true);
     for (const body of [
       { ...invoke, caller: { kind: "owner" } },
       { ...upload, path: "private" },
@@ -162,25 +162,46 @@ it("forwards backend operations, uploads, and file reads while rejecting supplie
     ])
       expect((await f.request(body)).status).toBe(400);
     expect((await f.request({ ...attempt, principalKey: "other" })).status).toBe(400);
-    expect(calls).toEqual([invoke, upload, file, attempt]);
+    expect(calls).toEqual([invoke, upload, attempt]);
   } finally {
     f.close();
   }
 });
-it("uses bounded file budgets without widening operation replies", async () => {
-  const f = harness(async () => Response.json({ bytesBase64: "A".repeat(2 * 1024 * 1024) }));
+it("uses bounded binary file budgets without widening operation replies", async () => {
+  const largeBytes = new Uint8Array(15 * 1024 * 1024);
+  largeBytes.set([37, 80, 68, 70, 45]);
+  const fileMeta = {
+    fileId: "file_0123456789abcdef",
+    name: "report.pdf",
+    contentType: "application/pdf",
+    byteLength: largeBytes.byteLength,
+    sha256: "a".repeat(64),
+  };
+  const f = harness(async (body) => {
+    const req = body as { op?: string };
+    if (req.op === "backend.file") {
+      return new Response(largeBytes, {
+        headers: {
+          "content-type": "application/octet-stream",
+          "x-dohc-app-file": encodeURIComponent(JSON.stringify(fileMeta)),
+        },
+      });
+    }
+    if (req.op === "backend.invoke") return Response.json({ text: "A".repeat(2 * 1024 * 1024) });
+    return Response.json({ file: fileMeta, replayed: false });
+  });
   try {
-    expect(
-      (
-        await f.request({
-          id: "file",
-          op: "backend.file",
-          fileId: "file_0123456789abcdef",
-          operation: "receipt.read",
-          input: {},
-        })
-      ).ok,
-    ).toBe(true);
+    const fileRes = (await f.request({
+      id: "file",
+      op: "backend.file",
+      fileId: "file_0123456789abcdef",
+      operation: "receipt.read",
+      input: {},
+    })) as { ok: boolean; value?: { file: typeof fileMeta; bytes: ArrayBuffer } };
+    expect(fileRes.ok).toBe(true);
+    expect(fileRes.value?.file).toEqual(fileMeta);
+    expect(fileRes.value?.bytes).toBeInstanceOf(ArrayBuffer);
+    expect(fileRes.value?.bytes.byteLength).toBe(largeBytes.byteLength);
     expect(
       (
         await f.request({
@@ -211,7 +232,7 @@ it("uses bounded file budgets without widening operation replies", async () => {
           idempotencyKey: "upload-1",
           name: "file",
           contentType: "application/pdf",
-          bytesBase64: "A".repeat(2 * 1024 * 1024),
+          bytes: new Uint8Array(15 * 1024 * 1024).buffer,
         })
       ).ok,
     ).toBe(true);
@@ -223,7 +244,7 @@ it("uses bounded file budgets without widening operation replies", async () => {
           idempotencyKey: "upload-2",
           name: "file",
           contentType: "application/pdf",
-          bytesBase64: "A".repeat(8 * 1024 * 1024),
+          bytes: new Uint8Array(20 * 1024 * 1024 + 1).buffer,
         })
       ).status,
     ).toBe(413);
@@ -243,7 +264,7 @@ it("bounds backend workflow bursts while preserving the collection budget", asyn
             idempotencyKey: "upload-" + index,
             name: "file",
             contentType: "application/pdf",
-            bytesBase64: "JVBERg==",
+            bytes: new Uint8Array([37, 80, 68, 70]).buffer,
           })
         ).ok,
       ).toBe(true);

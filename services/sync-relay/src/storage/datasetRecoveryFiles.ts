@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import {
-  APP_BACKEND_UPLOAD_BYTES,
   appBackendFileSignatureMatches,
   parseAppBackendFile,
 } from "@dohc/security-contract/app-backend";
@@ -66,12 +65,8 @@ export function createDatasetRecoveryFiles(
       authorize(input);
       const { revision, ...raw } = input.file,
         file = parseAppBackendFile(raw);
-      if (
-        !Number.isSafeInteger(revision) ||
-        revision < 1 ||
-        file.byteLength > APP_BACKEND_UPLOAD_BYTES
-      )
-        throw new Error("Dataset attachment exceeds the host limit.");
+      if (!Number.isSafeInteger(revision) || revision < 1)
+        throw new Error("Dataset attachment has an invalid revision.");
       const metadata = JSON.stringify(file),
         bytes = new Uint8Array(file.byteLength);
       let offset = 0;
