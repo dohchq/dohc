@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "entryPath": "studio.tsx",
+  "inputs": [
+    "studio.tsx",
+    "portal/api.ts",
+    "portal/gallery.tsx",
+    "portal/inspector.tsx",
+    "portal/photo.tsx",
+    "portal/scenes.ts",
+    "portal/toast.tsx",
+    "portal/lightbox.css"
+  ],
+  "dataset": {
+    "kind": "dataset",
+    "datasetPath": "lightbox/proofing/dataset.json",
+    "operations": [
+      "listShoots",
+      "studioAssets",
+      "studioAnnotations",
+      "studioFileAccess",
+      "exportFinalPicksList",
+      "createShoot",
+      "updateShoot",
+      "uploadAsset",
+      "setOwnerRating",
+      "setColorLabel",
+      "publishAsset",
+      "deleteAsset",
+      "resolveAnnotation",
+      "addPinnedAnnotation"
+    ]
+  }
+}
