@@ -175,7 +175,7 @@ A person with the Member workspace role in a workspace someone else owns. A memb
 _Avoid_: guest, collaborator, teammate, Group member
 
 **Workspace role**:
-A person's standing in a workspace: Owner, Admin, or Member. The owner adds and removes admins and sets folder access rules; admins manage members and Group access rules and moderate. Planned, not built yet.
+A person's standing in a workspace: Owner, Admin, or Member. The owner adds and removes admins; the owner and admins manage members, set access rules, and moderate. Planned, not built yet.
 _Avoid_: permission, rank, moderator
 
 **Member level**:
@@ -183,8 +183,12 @@ The one share access level, View, Comment, or Edit, that a workspace gives all i
 _Avoid_: member permission, default access
 
 **Access rule**:
-A list of the Member role and people, each with a share access level, on one folder or Group. It replaces the member level for that item and what it contains; a member it does not cover cannot see the item. It never limits the owner or admins. Planned, not built yet.
+A list of the Member role and people, each with a share access level, on one folder or Group. It replaces the member level for that item and what it contains; a member it does not cover cannot see the item. It never limits the owner or admins. The server keeps it. Planned, not built yet.
 _Avoid_: permission, ACL, private folder, private channel
+
+**Folder marker**:
+The `.dohc-access` file the relay writes in a folder that has an access rule. It names the rule, so the rule follows the folder when someone renames or moves it. Only the owner's computer holds markers. Planned, not built yet.
+_Avoid_: rule file, access.yaml
 
 **Invite link**:
 A URL that lets anyone who signs in with a server account join a workspace as a member. The owner or an admin can turn it off or reset it. Planned, not built yet.

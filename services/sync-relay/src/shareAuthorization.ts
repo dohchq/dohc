@@ -44,7 +44,7 @@ type ShareAuthorizationStorage = Pick<
   | "listActiveShareGrantsForRecipient"
   | "workspaceIsOwnedBy"
 > &
-  Partial<Pick<SyncRelayStorage, "workspaceMemberGrantIsCurrent">>;
+  Partial<Pick<SyncRelayStorage, "workspaceMemberGrantRole">>;
 
 export interface AuthorizedShareAction<Selector extends AnyShareSelector = AnyShareSelector> {
   ok: true;
@@ -255,12 +255,14 @@ function validateCurrentShareGrant(
   if (!storedSelector) return { ok: false, reason: "gauntlet" };
   // A workspace share is held only by people in the workspace, each through
   // an independent grant on an active member entry.
+  const workspaceRole =
+    "kind" in storedSelector && storedSelector.kind === "workspace"
+      ? (storage.workspaceMemberGrantRole?.(share.shareId, grant.grantId) ?? null)
+      : undefined;
   if (
-    "kind" in storedSelector &&
-    storedSelector.kind === "workspace" &&
-    (grant.principalKind !== "user" ||
-      grant.parentGrantId !== null ||
-      storage.workspaceMemberGrantIsCurrent?.(share.shareId, grant.grantId) !== true)
+    workspaceRole === null ||
+    (workspaceRole !== undefined &&
+      (grant.principalKind !== "user" || grant.parentGrantId !== null))
   ) {
     return { ok: false, reason: "gauntlet" };
   }
@@ -268,7 +270,7 @@ function validateCurrentShareGrant(
   if (selectorTargetsBlockedChannel(storage, share.workspaceId, storedSelector, use)) {
     return { ok: false, reason: "gauntlet" };
   }
-  const effectiveSelector = effectiveShareSelector(storedSelector, grant.access);
+  const effectiveSelector = effectiveShareSelector(storedSelector, grant.access, workspaceRole);
   if (!effectiveSelector) return { ok: false, reason: "gauntlet" };
 
   return { ok: true, share, grant, effectiveSelector };

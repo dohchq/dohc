@@ -42,6 +42,9 @@ export function workspaceAdminOrigin(memberId: string): string {
   return `${WORKSPACE_ADMIN_ORIGIN_PREFIX}${memberId}`;
 }
 
+// Folder markers (ADR 0017). Only the relay writes them, inside a folder rule's change.
+export const FOLDER_ACCESS_ORIGIN = "relay:folder-access";
+
 // A desktop stores a received share's op under `shared:<shareId>:<source>` and
 // checks a link post against its source, so no client may write from it.
 export const SHARED_REPLAY_ORIGIN_PREFIX = "shared:";
@@ -140,6 +143,9 @@ function assertUnreservedLogOrigin(originId: string, serviceHost: boolean): void
   }
   if (originId.startsWith(WORKSPACE_ADMIN_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for an admin's new Group");
+  }
+  if (originId.startsWith(FOLDER_ACCESS_ORIGIN)) {
+    throw badRequest("originId is reserved for folder markers");
   }
   if (originId.startsWith(SHARED_REPLAY_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for replayed share ops");

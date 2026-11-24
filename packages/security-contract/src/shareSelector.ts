@@ -1,4 +1,5 @@
 import { validateUserWritePath } from "@dohc/workspace-core";
+import { isFolderMarkerPath } from "./accessRuleFiles";
 import { classifyEngineFilePath } from "./enginePathFloor";
 
 const preparedPaths = new WeakSet<PreparedSharePath>();
@@ -25,6 +26,8 @@ export const prepareSharePath = (path: string) => PreparedSharePath.prepare(path
  * desktop keeps it as a membership's pin and sends it with each share RPC so
  * the engine applies the same reach; the relay never reads it from a client.
  * It names no paths and no version, or it selects nothing.
+ *
+ * No scope selects a folder marker. Only the relay writes one.
  */
 export interface ShareFileScope {
   paths: readonly string[];
@@ -41,6 +44,7 @@ export function visibleSharePath(
     typeof path === "string" ? prepareSharePath(path) : preparedPaths.has(path) ? path : null;
   if (!prepared) return null;
   const normalized = prepared.path;
+  if (isFolderMarkerPath(normalized)) return null;
   if (selector.wholeWorkspace === true) {
     return selector.paths.length === 0 && selector.versionId === null ? normalized : null;
   }

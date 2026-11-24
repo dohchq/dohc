@@ -363,7 +363,9 @@ export function createShareReadQueries(
           const current = currentFiles.get(objectId)!;
           if (current === "reset") return reset;
           const projected =
-            current === null ? null : accountlessProjection.projectPath(current.path);
+            current === null || visibleSharePath(fileSelector, current.path) === null
+              ? null
+              : accountlessProjection.projectPath(current.path);
           return {
             relaySeq: row.relaySeq,
             opKind: "file.current",

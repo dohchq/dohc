@@ -408,8 +408,9 @@ export function assertWorkspaceQuota(
   storage: StorageContext,
   workspaceId: string,
   addedBytes: number,
+  { afterWrite = false } = {},
 ): void {
-  if (addedBytes <= 0) return;
+  if (addedBytes <= 0 && !afterWrite) return;
   const currentUsage = workspaceUsageBytes(storage, workspaceId);
   if (currentUsage + addedBytes > storage.options.workspaceQuotaBytes) {
     throw new SyncRelayQuotaExceededError(

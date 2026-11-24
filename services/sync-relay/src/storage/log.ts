@@ -477,6 +477,9 @@ export function appendLogBatchInTransaction(
       replacesStoredFile,
     );
   }
+  // Applying a folder marker charges its folder's rule span, which the check above
+  // couldn't count. A batch that took the workspace over rolls back.
+  if (newOps.length > 0) assertWorkspaceQuota(storage, input.workspaceId, 0, { afterWrite: true });
   for (const relaySeq of chatMessages) recordChatMessageAlerts(storage, relaySeq);
   for (const edit of ownerEdits)
     bindStoppedNoteClient(storage, { workspaceId: input.workspaceId, ...edit });

@@ -1891,7 +1891,7 @@ describe("a new page in the owner's workspace", () => {
     await uploadAs(r, ana, text);
     const changes = [create("plans/idea.md", text)];
     const decision = filterCollectionWriteForShare(
-      { kind: "workspace", access: "edit" },
+      { kind: "workspace", access: "edit", role: "member" },
       changes,
       undefined,
       r.storage.memberFolders(WORKSPACE, "ana"),

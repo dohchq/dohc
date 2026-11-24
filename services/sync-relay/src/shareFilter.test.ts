@@ -145,15 +145,17 @@ describe("share selector validation", () => {
 
   it("requires a nonempty main-version file selector, or the whole workspace, at exact Edit access", () => {
     expect(isLiveEditShareSelector({ ...pathShare, access: "edit" })).toBe(true);
-    expect(isLiveEditShareSelector({ kind: "workspace", access: "edit" })).toBe(true);
+    expect(isLiveEditShareSelector({ kind: "workspace", access: "edit", role: "member" })).toBe(
+      true,
+    );
     for (const selector of [
       pathShare,
       { ...pathShare, access: "comment" as const },
       { ...pathShare, access: "edit" as const, versionId: "pinned-version" },
       { ...pathShare, access: "edit" as const, paths: [] },
       { kind: "chat" as const, channelWireId: "channel-1", access: "read-write" as const },
-      { kind: "workspace" as const, access: "view" as const },
-      { kind: "workspace" as const, access: "comment" as const },
+      { kind: "workspace" as const, access: "view" as const, role: "member" as const },
+      { kind: "workspace" as const, access: "comment" as const, role: "member" as const },
     ]) {
       expect(isLiveEditShareSelector(selector), JSON.stringify(selector)).toBe(false);
     }
@@ -1992,7 +1994,7 @@ describe("a new page under Edit", () => {
     recordedAtMs: 1,
     ...overrides,
   });
-  const member: WorkspaceShareSelector = { kind: "workspace", access: "edit" };
+  const member: WorkspaceShareSelector = { kind: "workspace", access: "edit", role: "member" };
   // The owner's main holds `docs/plan.md`, a Collection at `trip/packing`,
   // and a dataset at `trip/people`.
   const files = ["docs/plan.md", "trip/packing/collection.yaml", "trip/people/dataset.json"];
@@ -2024,9 +2026,10 @@ describe("a new page under Edit", () => {
 
   it("refuses View and Comment", () => {
     for (const access of ["view", "comment"] as const) {
-      expect(decide({ kind: "workspace", access }, [page("docs/idea.md")]), access).toEqual(
-        REFUSED,
-      );
+      expect(
+        decide({ kind: "workspace", access, role: "member" }, [page("docs/idea.md")]),
+        access,
+      ).toEqual(REFUSED);
     }
   });
 
@@ -2062,8 +2065,57 @@ describe("a new page under Edit", () => {
       expect(decision.allowed && decision.write.kind, path).toBe("new-page");
     }
     expect(
-      decide({ kind: "workspace", access: "comment" }, [page("drafts/idea.md")], true),
+      decide(
+        { kind: "workspace", access: "comment", role: "member" },
+        [page("drafts/idea.md")],
+        true,
+      ),
     ).toEqual(REFUSED);
+  });
+
+  it("refuses a folder marker, however it is spelled, from a member or an admin by any lane", () => {
+    const admin: WorkspaceShareSelector = { ...member, role: "admin" };
+    const change = (afterPath: string) => ({
+      basedOnPath: null,
+      basedOnBlobSha256: null,
+      operation: "write",
+      afterPath,
+      afterBlobSha256: sha(5),
+      afterContentKind: "text",
+      afterByteLength: 14,
+      recordedAtMs: 5,
+    });
+    const markerWrite = (path: string) =>
+      JSON.stringify({
+        momentId: "m-marker",
+        versionId: "main",
+        objectId: "o-marker",
+        path,
+        recordedAtMs: 1,
+        operation: "write",
+        payloadBeforeBlobSha256: null,
+        payloadBeforePath: null,
+        payloadAfterBlobSha256: sha(6),
+        payloadAfterPath: path,
+        metadata: { origin: "user" },
+        beforePresent: "null",
+      });
+    for (const selector of [member, admin]) {
+      for (const path of ["docs/.dohc-access", "docs/.DOHC-Access", ".dohc-access"]) {
+        expect(filterProposedChangeForShare(selector, change(path)).allowed, path).toBe(false);
+        expect(filterOpForShare(selector, "moment.append", markerWrite(path)).allowed, path).toBe(
+          false,
+        );
+        expect(decide(selector, [page(path, { afterContentKind: "text" })], true)).toEqual(REFUSED);
+      }
+    }
+    // The same ordinary file is still an admin's to change.
+    expect(
+      filterProposedChangeForShare(
+        admin,
+        page("docs/plan.md", { basedOnPath: "docs/plan.md", basedOnBlobSha256: sha(3) }),
+      ).allowed,
+    ).toBe(true);
   });
 
   it("refuses a member's new Collection, which would create a folder, and takes an admin's", () => {

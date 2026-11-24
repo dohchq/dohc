@@ -18,6 +18,7 @@ export interface StoredWorkspaceShareSelector {
 
 export interface WorkspaceShareSelector extends StoredWorkspaceShareSelector {
   access: ShareAccess;
+  role: "admin" | "member";
 }
 
 /** The file side: a scope only the relay builds, never stored or sent. */

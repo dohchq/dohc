@@ -315,17 +315,18 @@ function ownerOf(storage: StorageContext, workspaceId: string): string | null {
 }
 
 /**
- * Whether a grant on a workspace share belongs to an active entry at the
- * access its role gives. Authorization asks this for every workspace grant.
+ * The role of the active entry a grant on a workspace share belongs to, at the
+ * access that role gives, or null. Authorization asks this for every workspace
+ * grant.
  */
-export function workspaceMemberGrantIsCurrent(
+export function workspaceMemberGrantRole(
   storage: StorageContext,
   shareId: string,
   grantId: string,
-): boolean {
-  return !!storage.db
+): "admin" | "member" | null {
+  const row = storage.db
     .prepare(
-      `SELECT 1 FROM ${MEMBERS} AS m
+      `SELECT m.role FROM ${MEMBERS} AS m
      JOIN ${MEMBERSHIPS} AS ms ON ms.workspace_id = m.workspace_id
      JOIN sync_relay_share_grants AS g ON g.grant_id = m.grant_id
      WHERE ms.share_id = ? AND m.grant_id = ? AND m.state = 'active' AND g.share_id = ms.share_id
@@ -333,6 +334,16 @@ export function workspaceMemberGrantIsCurrent(
        AND g.access = CASE m.role WHEN 'admin' THEN 'edit' ELSE ms.member_level END`,
     )
     .get(shareId, grantId);
+  return row?.role === "admin" || row?.role === "member" ? row.role : null;
+}
+
+/** Whether a grant on a workspace share belongs to an active entry (`workspaceMemberGrantRole`). */
+export function workspaceMemberGrantIsCurrent(
+  storage: StorageContext,
+  shareId: string,
+  grantId: string,
+): boolean {
+  return workspaceMemberGrantRole(storage, shareId, grantId) !== null;
 }
 
 /** The caller's role in the workspace, or null when they are not in it. */

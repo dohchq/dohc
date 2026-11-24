@@ -3,6 +3,7 @@ import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
 import { reusePreparedStatements } from "./storage/preparedStatements";
 import * as workReferenceStorage from "./storage/workReferences";
 import * as workspaceMembersStorage from "./storage/workspaceMembers";
+import * as folderRulesStorage from "./storage/folderRules";
 import * as directMessagesStorage from "./storage/directMessages";
 import { prepareLiveApplications } from "./storage/liveApplicationAuthorship";
 import { prepareHostedSettlements, prepareSettlementAudits } from "./storage/hostedSettlement";
@@ -1802,6 +1803,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   ) {
     return workspaceMembersStorage.workspaceMemberGrantIsCurrent(this, ...args);
   }
+  workspaceMemberGrantRole(...args: Parameters<SyncRelayStorage["workspaceMemberGrantRole"]>) {
+    return workspaceMembersStorage.workspaceMemberGrantRole(this, ...args);
+  }
   workspaceRoleOf(...args: Parameters<SyncRelayStorage["workspaceRoleOf"]>) {
     return workspaceMembersStorage.workspaceRoleOf(this, ...args);
   }
@@ -1810,6 +1814,15 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
   createWorkspaceGroup(...args: Parameters<SyncRelayStorage["createWorkspaceGroup"]>) {
     return workspaceMembersStorage.createWorkspaceGroup(this, ...args);
+  }
+  changeFolderRule(...args: Parameters<SyncRelayStorage["changeFolderRule"]>) {
+    return folderRulesStorage.changeFolderRule(this, ...args);
+  }
+  removeFolderMarkers(...args: Parameters<SyncRelayStorage["removeFolderMarkers"]>) {
+    return folderRulesStorage.removeFolderMarkers(this, ...args);
+  }
+  readFolderRules(...args: Parameters<SyncRelayStorage["readFolderRules"]>) {
+    return folderRulesStorage.readFolderRules(this, ...args);
   }
   resolveDirectPick(...args: Parameters<SyncRelayStorage["resolveDirectPick"]>) {
     return directMessagesStorage.resolveDirectPick(this, ...args);
@@ -2245,6 +2258,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     selectorPaths: readonly string[];
     sha256: string;
     epochLogFloor: number;
+    visible?: (path: string) => boolean;
   }): number | null {
     return currentFilesStorage.currentFileBlobByteLength(this, input);
   }

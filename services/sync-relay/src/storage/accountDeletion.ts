@@ -418,6 +418,15 @@ export function purgeAccountRows(
           }
         }
       if (RETAINED_ACCOUNT_HISTORY.has(table)) continue;
+      // A folder rule outlives whoever changed it last.
+      if (table === "sync_relay_folder_rules") {
+        storage.db
+          .prepare(
+            "UPDATE sync_relay_folder_rules SET changed_by_user_id=NULL WHERE changed_by_user_id=?",
+          )
+          .run(userId);
+        continue;
+      }
       if (columns.includes("notice_id")) {
         const prefix = noticeIdFrom(userId, "");
         storage.db
