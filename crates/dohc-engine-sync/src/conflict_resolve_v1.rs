@@ -2967,6 +2967,37 @@ fn close_imported_conflict(
             crate::refusal_notices::clear_conflict_in_tx(tx, &payload.workspace_id, &conflict_id)?;
         }
     }
+    close_hosted_reviews(tx, payload)
+}
+
+fn close_hosted_reviews(
+    tx: &Transaction<'_>,
+    payload: &ConflictResolveV1,
+) -> Result<(), SyncError> {
+    let Some(result) = payload.result.present() else {
+        return Ok(());
+    };
+    let closed = tx
+        .prepare(
+            "UPDATE conflicts SET status='resolved',updated_at_ms=?5,                chosen_from=CASE WHEN current_blob_sha256=?4 THEN 'current'                  WHEN incoming_blob_sha256=?4 THEN 'incoming' ELSE 'merged' END,                resolution=CASE WHEN current_blob_sha256=?4 THEN 'kept-current'                  WHEN incoming_blob_sha256=?4 THEN 'applied-incoming' ELSE 'applied-merged' END              WHERE workspace_id=?1 AND target_version_id=?2 AND incoming_object_id=?3                AND status='open' AND metadata_origin='sync'                AND EXISTS(SELECT 1 FROM hosted_documents WHERE workspace_id=?1 AND object_id=?3)              RETURNING conflict_id",
+        )
+        .map_err(SyncError::corrupt)?
+        .query_map(
+            params![
+                payload.workspace_id,
+                payload.target_version_id,
+                result.object_id,
+                result.blob_sha256,
+                payload.effect_context.recorded_at_ms
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(SyncError::persist)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(SyncError::persist)?;
+    for conflict_id in closed {
+        crate::refusal_notices::clear_conflict_in_tx(tx, &payload.workspace_id, &conflict_id)?;
+    }
     Ok(())
 }
 
@@ -5245,6 +5276,69 @@ mod tests {
             panic!("the lookup did not commit");
         };
         assert_eq!(reviews, vec![("own-review".to_owned(), true)]);
+    }
+
+    fn hosted_review_after_decision(hosted: bool) -> Vec<(String, String, String, Option<String>)> {
+        let (_scratch, mut store, built) = text_keep_receiver_fixture();
+        let payload = &built.validated.payload;
+        store
+            .write_with(&NoFaults, |tx| {
+                let mut merged = conflict_state_from_head(tx, payload, &payload.current)?;
+                let mut other_side = merged.clone();
+                if let (Some(merged), Some(other)) =
+                    (merged.snapshot.as_mut(), other_side.snapshot.as_mut())
+                {
+                    merged.latest_moment_id = "merged-here".to_owned();
+                    other.latest_moment_id = "other-side".to_owned();
+                    other.blob_sha256 = "b".repeat(64);
+                }
+                open_review(tx, "host-review", merged, other_side)?;
+                if hosted {
+                    tx.execute_batch(
+                        "INSERT OR IGNORE INTO sync_identity(workspace_id,origin_id,replication_epoch,
+                           stream_identity,created_at_ms) VALUES ('ws','service-host:ws','epoch','stream',0);
+                         INSERT OR IGNORE INTO hosted_replicas(workspace_id,created_at_ms) VALUES('ws',1);
+                         INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation)
+                         SELECT workspace_id,object_id,path,'ready',0 FROM snapshots WHERE path='doc.md'",
+                    )
+                    .map_err(SyncError::persist)?;
+                }
+                close_imported_conflict(tx, payload, false)
+            })
+            .unwrap();
+        store
+            .read_with(|conn| {
+                conn.prepare(
+                    "SELECT conflict_id,status,chosen_from,resolution FROM conflicts                      WHERE conflict_id='host-review'",
+                )?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+                .collect()
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn a_decision_closes_the_review_a_host_holds_of_a_note_it_hosts() {
+        assert_eq!(
+            hosted_review_after_decision(true),
+            vec![(
+                "host-review".to_owned(),
+                "resolved".to_owned(),
+                "current".to_owned(),
+                Some("kept-current".to_owned())
+            )]
+        );
+    }
+
+    #[test]
+    fn a_decision_leaves_open_a_review_of_other_heads_on_a_computer_that_does_not_host_the_note() {
+        assert_eq!(
+            hosted_review_after_decision(false)
+                .into_iter()
+                .map(|row| row.1)
+                .collect::<Vec<_>>(),
+            vec!["open".to_owned()]
+        );
     }
 
     #[test]
