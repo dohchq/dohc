@@ -118,7 +118,13 @@ export function verifyOrdinaryActivationCut(
   requireValue(
     base.origin_id === source.baseOriginId &&
       base.origin_seq === source.baseOriginSeq &&
-      beginsLineage(base.op_kind, base.payload_json, document, source.currentPath),
+      beginsLineage(
+        base.op_kind,
+        base.payload_json,
+        document,
+        source.currentPath,
+        baseline.lineageEpoch,
+      ),
     "Native activation base coordinate differs from ordinary history.",
   );
   requireValue(

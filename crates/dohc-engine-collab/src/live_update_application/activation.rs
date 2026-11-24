@@ -401,7 +401,8 @@ pub fn capture_imported_owner_activation(
         let reader_source = local.has_reader_source();
         let baseline_bytes = get_binary_blob(tx, &lineage)?.ok_or(ApplicationError::Corrupt)?;
         let original_doc = Ydoc::wire(); original_doc.apply(&baseline_bytes)?;
-        if reader_source { original_doc.validate_reader_baseline(&baseline_bytes)?; }
+        let lineage_epoch = marker.lineage_epoch_tag.as_deref();
+        if reader_source { original_doc.validate_lineage_baseline(&baseline_bytes, true, lineage_epoch)?; }
         let projection = local.project(ContentKind::Richdoc)?.content;
         // The same rule as the version's settled file, so a document whose
         // file keeps a body the engine reads differently still activates.
@@ -437,7 +438,7 @@ pub fn capture_imported_owner_activation(
         let full_state = local.encode_full_state_bounded(max_bytes.saturating_sub(baseline_length as usize).min(crate::limits::MAX_YDOC_UPDATE_BYTES))
             .ok_or(ApplicationError::ConfiguredByteBudgetExceeded)?;
         if !reader_source {
-            original_doc.validate_public_baseline(&baseline_bytes)?;
+            original_doc.validate_lineage_baseline(&baseline_bytes, false, lineage_epoch)?;
         }
         // A retirement still settling this document leaves no tail to follow yet.
         if super::retirement::retiring(tx, key)? { return Err(ApplicationError::Conflict); }

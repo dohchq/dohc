@@ -734,10 +734,10 @@ fn verify_candidate(
     let final_bytes = budget.state(doc)?;
     let exact = if doc.has_reader_source() {
         let exact = point_source(conn, held, doc, &projection, &input, resolver, budget)?;
-        doc.validate_reader_baseline(&final_bytes)?;
+        accepted_history::validate_baseline(conn, held, doc, &final_bytes, true)?;
         Some(exact)
     } else {
-        doc.validate_public_baseline(&final_bytes)?;
+        accepted_history::validate_baseline(conn, held, doc, &final_bytes, false)?;
         doc.preserved_markdown_source(&projection)
     };
     let mut ranges = Vec::new();

@@ -82,7 +82,12 @@ interface AnchorPayload {
   paths?: unknown[];
   transition?: { result?: { present?: unknown; objectId?: unknown; pathRef?: number } };
   lineageTransition?: {
-    successor?: { contentKind?: unknown; lineageClaimId?: unknown; updateBlobSha256?: unknown };
+    successor?: {
+      contentKind?: unknown;
+      lineageClaimId?: unknown;
+      updateBlobSha256?: unknown;
+      epochTag?: unknown;
+    };
   } | null;
 }
 /**
@@ -94,6 +99,7 @@ export function beginsLineage(
   payloadJson: string,
   document: { mainVersionId: string; objectId: string; lineageClaimId: string },
   path?: string,
+  lineageEpoch?: string | null,
 ): boolean {
   const payload = JSON.parse(payloadJson) as AnchorPayload;
   const lineage = document.lineageClaimId;
@@ -105,7 +111,8 @@ export function beginsLineage(
       payload.contentKind === "richdoc" &&
       payload.isBaseState === true &&
       payload.lineageClaimId === lineage &&
-      payload.updateBlobSha256 === lineage
+      payload.updateBlobSha256 === lineage &&
+      !lineageEpoch
     );
   const result = payload.transition?.result;
   const successor = payload.lineageTransition?.successor;
@@ -118,6 +125,7 @@ export function beginsLineage(
     (path === undefined || payload.paths?.[result.pathRef] === path) &&
     successor?.contentKind === "richdoc" &&
     successor.lineageClaimId === lineage &&
-    successor.updateBlobSha256 === lineage
+    successor.updateBlobSha256 === lineage &&
+    (lineageEpoch === undefined || successor.epochTag === lineageEpoch)
   );
 }

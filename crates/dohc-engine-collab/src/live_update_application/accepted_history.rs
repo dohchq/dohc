@@ -200,12 +200,17 @@ pub(super) fn origin_stamp_in(
 /// engine's reader built by the reader's rule, any other by the strict public
 /// rule. Initialization, native replay and every checkpoint use it, so a
 /// lineage whose baseline the reader built replays and checkpoints too.
-fn validate_baseline(doc: &Ydoc, bytes: &[u8]) -> Result<(), ApplicationError> {
-    if doc.has_reader_source() {
-        doc.validate_reader_baseline(bytes)?;
-    } else {
-        doc.validate_public_baseline(bytes)?;
-    }
+pub(super) fn validate_baseline(
+    conn: &Connection,
+    held: &Registration,
+    doc: &Ydoc,
+    bytes: &[u8],
+    reader: bool,
+) -> Result<(), ApplicationError> {
+    let b = &held.binding;
+    let key = crate::DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
+    let epoch = crate::durable::lineage_epoch_in(conn, &key, &b.lineage_claim_id)?;
+    doc.validate_lineage_baseline(bytes, reader, epoch.as_deref())?;
     Ok(())
 }
 
@@ -219,7 +224,7 @@ pub(super) fn initialize(
     }
     let doc = Ydoc::wire();
     doc.apply(baseline)?;
-    validate_baseline(&doc, baseline)?;
+    validate_baseline(tx, held, &doc, baseline, doc.has_reader_source())?;
     let checkpoint = NativeAcceptedCheckpoint {
         canonical_version: None,
         restore_operation_id: None,
@@ -838,7 +843,7 @@ fn append_inner(
         if reconstruction.is_none() {
             budget.charge(state.len())?;
         }
-        validate_baseline(doc, &state)?;
+        validate_baseline(tx, held, doc, &state, doc.has_reader_source())?;
         insert_checkpoint(
             tx,
             held,
@@ -1120,11 +1125,13 @@ pub(super) fn read_inner(
     let baseline = budget.blob(conn, &c.state_digest)?;
     let doc = Ydoc::wire();
     doc.apply(&baseline)?;
-    if retain_metadata && doc.has_reader_source() {
-        doc.validate_reader_baseline(&baseline)?;
-    } else {
-        doc.validate_public_baseline(&baseline)?;
-    }
+    validate_baseline(
+        conn,
+        held,
+        &doc,
+        &baseline,
+        retain_metadata && doc.has_reader_source(),
+    )?;
     let p = parameters(held);
     let sql = format!(
         "SELECT event_count,journal_cursor,length(CAST(metadata_json AS BLOB)),update_sha256,evidence_digest FROM live_accepted_updates WHERE {DOCUMENT} AND event_count>?6 AND journal_cursor<=?7 ORDER BY event_count LIMIT ?8"

@@ -1769,11 +1769,8 @@ pub fn adopt_owner_committed(
             None => {
                 let journal = Ydoc::wire();
                 journal.apply(&cut.baseline_bytes)?;
-                if imported_source.as_ref().is_some_and(|source| source.reader_source) {
-                    journal.validate_reader_baseline(&cut.baseline_bytes)?;
-                } else {
-                    journal.validate_public_baseline(&cut.baseline_bytes)?;
-                }
+                let reader = imported_source.as_ref().is_some_and(|source| source.reader_source);
+                journal.validate_lineage_baseline(&cut.baseline_bytes, reader, marker.lineage_epoch_tag.as_deref())?;
                 for event in &cut.events { journal.apply(&event.update_bytes)?; }
                 if journal.has_missing_updates() {
                     return Err(invalid("owner adoption journal does not account for durable state"));
