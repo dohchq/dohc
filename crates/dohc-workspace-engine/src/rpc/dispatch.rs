@@ -171,12 +171,6 @@ impl EngineService {
                     | "liveApplication.syncOpen"
                     | "liveApplication.appliedRead"
                     | "liveApplication.settle"
-                    | "liveApplication.fenceRestore"
-                    | "liveApplication.cancelRestoreFence"
-                    | "liveApplication.prepareRestore"
-                    | "liveApplication.applyRestore"
-                    | "liveApplication.settleRestore"
-                    | "liveApplication.resumeRestore"
             )
         {
             return Err(WireError::new(
@@ -205,9 +199,6 @@ impl EngineService {
             }
             crate::LiveApplicationInput::Admitted(input) => {
                 self.live_application_apply(ctx, request, *input).await
-            }
-            crate::LiveApplicationInput::Restore(input) => {
-                self.live_application_restore(ctx, request, *input).await
             }
             crate::LiveApplicationInput::Owner(input) => {
                 self.owner_delivery_apply(ctx, request, *input).await
@@ -304,9 +295,6 @@ impl EngineService {
         }
         if request.method == "liveApplication.ack" {
             return self.live_application_ack(ctx, request).await;
-        }
-        if request.method == "liveApplication.fenceRestore" {
-            return self.live_application_fence_restore(ctx, request).await;
         }
         if request.method == "versionedBinary.readBlob" {
             let (result, blob_egress) = self
@@ -437,14 +425,6 @@ impl EngineService {
             "liveApplication.releaseActivation" => {
                 Box::pin(self.live_application_release(&ctx, request.workspace, request.params))
                     .await?
-            }
-            "liveApplication.cancelRestoreFence" => {
-                Box::pin(self.live_application_cancel_restore_fence(
-                    &ctx,
-                    request.workspace,
-                    request.params,
-                ))
-                .await?
             }
             "liveApplication.register" => {
                 self.live_application_register(&ctx, request.workspace, request.params)
@@ -2017,6 +1997,12 @@ mod tests {
             "ydoc.apply",
             "chats.dispatch.reclaimRunning",
             "chats.dispatch.recordEligibleTriggers",
+            "liveApplication.fenceRestore",
+            "liveApplication.cancelRestoreFence",
+            "liveApplication.prepareRestore",
+            "liveApplication.applyRestore",
+            "liveApplication.settleRestore",
+            "liveApplication.resumeRestore",
         ] {
             assert!(
                 !registered(&service, retired).await,

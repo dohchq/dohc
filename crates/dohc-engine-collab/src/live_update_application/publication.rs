@@ -1,5 +1,5 @@
 use super::*;
-use restore_content::Budget;
+use budget::Budget;
 
 /// Reconstruct only native accepted history. No host handle or authority escapes.
 pub(crate) fn read_native_accepted_in(
@@ -80,7 +80,6 @@ fn native_accepted(
         through,
         budget,
         accepted_history::CHECKPOINT_EVENTS as usize,
-        accepted_history::HistoryPurpose::Native,
     )?;
     Ok(Some((held, history.doc)))
 }
@@ -120,7 +119,6 @@ pub(crate) fn adoption_contains_predecessor_in(
             cursor,
             &mut budget,
             accepted_history::CHECKPOINT_EVENTS as usize,
-            accepted_history::HistoryPurpose::Native,
         )?;
         let projection = history.doc.project(crate::ContentKind::Richdoc)?.content;
         if let Some(source) = history.doc.preserved_markdown_source(&projection) {
@@ -138,98 +136,6 @@ pub(crate) fn adoption_contains_predecessor_in(
     result
 }
 
-/// The accepted head that the restore producing this exact binding replaced,
-/// from that restore's verified resume evidence. None when the current
-/// generation is not a resumed restore of this registration.
-pub(crate) fn read_restore_predecessor_in(
-    conn: &Connection,
-    key: &DocKey,
-    namespace: &str,
-    binding: &LiveObjectBinding,
-    remaining: &mut usize,
-) -> Result<Option<String>, ApplicationError> {
-    let mut budget = Budget {
-        remaining: *remaining,
-    };
-    let result = restore_predecessor(conn, key, namespace, binding, &mut budget);
-    *remaining = budget.remaining;
-    result
-}
-
-fn restore_predecessor(
-    conn: &Connection,
-    key: &DocKey,
-    namespace: &str,
-    binding: &LiveObjectBinding,
-    budget: &mut Budget,
-) -> Result<Option<String>, ApplicationError> {
-    let Some(held) = registration_in(conn, key, budget)? else {
-        return Ok(None);
-    };
-    if held.namespace != namespace || held.binding != *binding {
-        return Ok(None);
-    }
-    current_in(conn, &held, budget)?;
-    let b = &held.binding;
-    let generation = "FROM live_restore_fences WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND new_generation=?6";
-    let p = params![
-        held.namespace,
-        b.workspace_id,
-        b.main_version_id,
-        b.object_id,
-        b.lineage_claim_id,
-        b.restore_fence_generation
-    ];
-    let length: i64 = conn
-        .query_row(
-            &format!("SELECT coalesce(sum(length(CAST(operation_id AS BLOB))),0) {generation}"),
-            p,
-            |r| r.get(0),
-        )
-        .map_err(read_sql)?;
-    budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
-    let operation: Option<String> = conn
-        .query_row(&format!("SELECT operation_id {generation}"), p, |r| {
-            r.get(0)
-        })
-        .optional()
-        .map_err(read_sql)?;
-    let Some(operation) = operation else {
-        return Ok(None);
-    };
-    restore_resume::replaced_head(conn, &held, &operation, budget)
-}
-
-/// The restore registration check, charged to a publication proof's budget.
-pub(crate) fn require_restore_registration_in(
-    conn: &Connection,
-    key: &DocKey,
-    namespace: &str,
-    binding: &LiveObjectBinding,
-    remaining: &mut usize,
-) -> Result<(), ApplicationError> {
-    let mut budget = Budget {
-        remaining: *remaining,
-    };
-    let result = charge_sql(
-        conn,
-        &mut budget,
-        &format!(
-            "SELECT {}",
-            fence_registration("workspace_id=?1 AND main_version_id=?2 AND object_id=?3")
-        ),
-        params![key.workspace_id, key.version_id, key.object_id],
-    )
-    .and_then(|()| restore_fence::require_registration(conn, key, namespace, binding));
-    *remaining = budget.remaining;
-    result
-}
-
-/// The text restore_fence::require_registration reads from the document's newest fence.
-fn fence_registration(document: &str) -> String {
-    format!("coalesce((SELECT length(CAST(relay_database_namespace AS BLOB))+coalesce(length(CAST(resume_receipt_json AS BLOB)),0)+CASE WHEN cancelled_json IS NULL THEN 0 ELSE length(CAST(cancelled_json AS BLOB))+length(CAST(input_json AS BLOB))+length(CAST(receipt_json AS BLOB)) END FROM live_restore_fences WHERE {document} ORDER BY new_generation DESC LIMIT 1),0)")
-}
-
 fn charge_sql(
     conn: &Connection,
     budget: &mut Budget,
@@ -243,19 +149,16 @@ fn charge_sql(
 }
 
 /// `sync::current` after charging the raw text it reads: the workspace's main
-/// version, this registration's binding row, the newest restore fence, and
-/// the durable marker.
+/// version, this registration's binding row, and the durable marker.
 fn current_in(
     conn: &Connection,
     held: &Registration,
     budget: &mut Budget,
 ) -> Result<(), ApplicationError> {
     let b = &held.binding;
-    let fence = fence_registration("workspace_id=?2 AND main_version_id=?3 AND object_id=?4");
-    charge_sql(conn, budget, &format!("SELECT coalesce((SELECT length(CAST(main_version_id AS BLOB)) FROM versioned_workspaces WHERE workspace_id=?2),0)
+    charge_sql(conn, budget, "SELECT coalesce((SELECT length(CAST(main_version_id AS BLOB)) FROM versioned_workspaces WHERE workspace_id=?2),0)
         +coalesce((SELECT length(CAST(lineage_claim_id AS BLOB))+length(CAST(current_path AS BLOB))+length(CAST(selector_paths_json AS BLOB))+length(CAST(host_id AS BLOB))+length(CAST(instance_id AS BLOB))+length(CAST(connection_id AS BLOB)) FROM live_device_application_bindings WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4),0)
-        +{fence}
-        +coalesce((SELECT coalesce(length(CAST(content_kind AS BLOB)),0)+coalesce(length(CAST(regime AS BLOB)),0)+coalesce(length(CAST(lineage_claim_status AS BLOB)),0)+coalesce(length(CAST(lineage_claim_id AS BLOB)),0)+coalesce(length(CAST(lineage_parent_claim_id AS BLOB)),0)+coalesce(length(CAST(lineage_epoch_tag AS BLOB)),0)+coalesce(length(CAST(path AS BLOB)),0)+coalesce(length(CAST(base_origin_id AS BLOB)),0) FROM ydoc_docs WHERE workspace_id=?2 AND version_id=?3 AND object_id=?4),0)"),
+        +coalesce((SELECT coalesce(length(CAST(content_kind AS BLOB)),0)+coalesce(length(CAST(regime AS BLOB)),0)+coalesce(length(CAST(lineage_claim_status AS BLOB)),0)+coalesce(length(CAST(lineage_claim_id AS BLOB)),0)+coalesce(length(CAST(lineage_parent_claim_id AS BLOB)),0)+coalesce(length(CAST(lineage_epoch_tag AS BLOB)),0)+coalesce(length(CAST(path AS BLOB)),0)+coalesce(length(CAST(base_origin_id AS BLOB)),0) FROM ydoc_docs WHERE workspace_id=?2 AND version_id=?3 AND object_id=?4),0)",
         params![held.namespace,b.workspace_id,b.main_version_id,b.object_id])?;
     sync::current(conn, held).map(|_| ())
 }

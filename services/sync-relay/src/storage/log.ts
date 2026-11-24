@@ -1,4 +1,8 @@
-import { commitHostedSettlement, settlementResponseIdentifier } from "./hostedSettlement";
+import {
+  commitHostedSettlement,
+  settlementReplacesUnacceptedSave,
+  settlementResponseIdentifier,
+} from "./hostedSettlement";
 import { admitIncomingWebhookOpsInTransaction } from "./incomingWebhooks";
 import { indexWorkReferenceSnapshot } from "./workReferenceSchema";
 import { registerWorkReferencesInTransaction, updateWorkReferenceScopes } from "./workReferences";
@@ -387,6 +391,7 @@ export function appendLogBatchInTransaction(
       );
     const replacesStoredFile = () => {
       if (op.opKind !== "moment.append") return false;
+      if (settlementReplacesUnacceptedSave(storage, op, input.originId)) return true;
       if (owner === undefined)
         return isResumedHostSave(storage, {
           workspaceId: input.workspaceId,

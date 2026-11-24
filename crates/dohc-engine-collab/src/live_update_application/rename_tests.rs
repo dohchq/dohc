@@ -228,10 +228,8 @@ fn released_unregistered() -> Fixture {
     f
 }
 
-/// The adoption half of a restore after release: a binding the chain held at
-/// another restore generation counts only when resumed restores led from it
-/// to the registration's. Claimed with none, it refuses S's adoption with no
-/// writes, though nothing is Carried; unchanged, S adopts.
+/// A binding the chain held at another restore generation refuses S's
+/// adoption with no writes, though nothing is Carried; unchanged, S adopts.
 #[test]
 fn another_restore_generation_needs_its_restore() {
     let mut f = released_with_nothing_carried();
@@ -243,82 +241,4 @@ fn another_restore_generation_needs_its_restore() {
     let adopted = f.adopt();
     assert!(matches!(adopted, Err(ApplicationError::Conflict)), "{adopted:?}");
     assert_eq!(rows(&f, &SUCCESSION_WRITES), before);
-}
-
-fn proves(f: &Fixture, binding: &LiveObjectBinding) -> Result<(), ApplicationError> {
-    let held = f.handle.registration.lock().unwrap();
-    f.store.read_with(|conn| require_historical(conn, &held, &f.key, &[binding], 100))
-}
-
-#[test]
-fn a_resumed_restore_proves_the_generation_it_fenced() {
-    let (f, original) = resumed_at_one();
-    proves(&f, &original).unwrap();
-    let mut unrestored = original.clone();
-    unrestored.restore_fence_generation = 5;
-    assert!(matches!(proves(&f, &unrestored), Err(ApplicationError::Conflict)));
-    let mut elsewhere = original;
-    elsewhere.current_path = "elsewhere.md".into();
-    elsewhere.selector_paths = vec!["elsewhere.md".into()];
-    assert!(matches!(proves(&f, &elsewhere), Err(ApplicationError::Conflict)));
-}
-
-fn resumed_at_one() -> (Fixture, LiveObjectBinding) {
-    let mut f = Fixture::new();
-    f.adopt().unwrap();
-    let original = f.binding.clone();
-    native_tail_edit(&mut f, "Unaccepted owner edit", 11);
-    let prep = native_tail_input(&mut f, None, 0);
-    let proposal = native_tail_prepare(&mut f, prep.clone()).unwrap();
-    let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
-    let mut binding = f.binding.clone();
-    binding.restore_fence_generation = 1;
-    let input = NativeRestoreApplication {
-        preparation: prep,
-        candidate_digest: proposal.receipt().candidate_digest.clone(),
-        native_source_manifest_digest: proposal.receipt().native_source_manifest_digest.clone(),
-        admitted: AdmittedLiveUpdateMetadata {
-            accepted: RelayAcceptedLiveUpdate {
-                receipt: LiveUpdateReceipt {
-                    delivery_id: "resume-owner".into(),
-                    update_digest: proposal.receipt().candidate_digest.clone(),
-                    journal_cursor: 71,
-                    accepting_host_epoch: 2,
-                },
-                binding: binding.clone(),
-                authority: ServerDerivedLiveUpdateAuthority::Owner { principal_id: "restoring-owner".into() },
-                received_at_ms: 80,
-            },
-            first_seen: proposal.receipt().replacement_ranges.clone(),
-            canonical_version: Some(2),
-            author_snapshot: Some(vec![]),
-            first_seen_deletes: Some(vec![]),
-            checkpoint_coverage: None,
-        },
-    };
-    f._owner
-        .apply_restore(&mut f.store, None, &mut WriterDocCache::new(), input.clone(), coordinate.clone(), 2_000_000, 100, 90, &NoFaults, |_, _, _, _| Ok(()))
-        .unwrap();
-    let settlement = f
-        ._owner
-        .with_restore_settlement(&mut f.store, None, input.clone(), coordinate.clone(), 2_000_000, 100, |store, audit| {
-            restore_content::tests::record_test_projection(store, audit, "resumed-owner")
-        })
-        .unwrap();
-    f._owner
-        .resume_restore(
-            &mut f.store,
-            None,
-            NativeRestoreResume { application: input, settlement_id: settlement.settlement_id.unwrap() },
-            coordinate.clone(),
-            2_000_000,
-            100,
-            100,
-            &NoFaults,
-            |_, _, _, _| Ok(()),
-        )
-        .unwrap();
-    f.binding = binding.clone();
-    f.handle = f._owner.register(&mut f.store, "namespace".into(), coordinate, binding).unwrap();
-    (f, original)
 }

@@ -214,6 +214,16 @@ mod tests {
     use super::*;
     use yrs::types::Attrs;
 
+    fn restored(frozen: &Ydoc, markdown: &str, point: &Ydoc) -> Result<Vec<u8>, CollabError> {
+        frozen.stage_source_preserving_edit_bounded(
+            markdown,
+            Some(2_000_000),
+            true,
+            true,
+            |staged| copy(point, staged, 2_000_000),
+        )
+    }
+
     #[test]
     fn restore_copy_keeps_nested_blocks_marks_and_typed_attributes() {
         let point = Ydoc::wire();
@@ -254,9 +264,7 @@ mod tests {
         frozen.apply(&point.encode_full_state()).unwrap();
         frozen.richdoc_append_paragraph("later");
         let before = frozen.state_vector();
-        let delta = frozen
-            .rewrite_richdoc_preserving_source_bounded(&markdown, &point, 2_000_000, None)
-            .unwrap();
+        let delta = restored(&frozen, &markdown, &point).unwrap();
         assert_eq!(
             frozen.canonical_content()[ROOT_BODY],
             point.canonical_content()[ROOT_BODY]
@@ -311,9 +319,7 @@ mod tests {
             frozen
                 .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Later\r\n")
                 .unwrap();
-            frozen
-                .rewrite_richdoc_preserving_source_bounded(source, &point, 2_000_000, None)
-                .unwrap();
+            restored(&frozen, source, &point).unwrap();
             let projection = frozen.project(ContentKind::Richdoc).unwrap().content;
             assert_eq!(
                 projection,
@@ -347,7 +353,7 @@ mod tests {
         frozen.richdoc_append_paragraph("unchanged");
         let before = frozen.encode_full_state();
         assert!(matches!(
-            frozen.rewrite_richdoc_preserving_source_bounded(&source,&point,2_000_000,None),
+            restored(&frozen, &source, &point),
             Err(CollabError::MalformedUpdate {reason}) if reason == "unsupported restore point value"
         ));
         assert_eq!(before, frozen.encode_full_state());
@@ -388,12 +394,7 @@ mod tests {
             let frozen = Ydoc::wire();
             frozen.richdoc_append_paragraph("unchanged");
             let before = frozen.encode_full_state();
-            assert!(
-                frozen
-                    .rewrite_richdoc_preserving_source_bounded("point\n", &point, 2_000_000, None)
-                    .is_err(),
-                "case {case}"
-            );
+            assert!(restored(&frozen, "point\n", &point).is_err(), "case {case}");
             assert_eq!(before, frozen.encode_full_state());
         }
     }

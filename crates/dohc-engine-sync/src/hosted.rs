@@ -80,9 +80,9 @@ pub fn is_hosted_replica(store: &EngineStore, workspace_id: &str) -> Result<bool
 ///
 /// A hosted replica writes only what a session host does for a document it
 /// hosts: live `ydoc.update`, settlement `moment.append` and `live.audit.*`.
-/// The relay refuses anything else from a host, so it is refused here, before
-/// it commits a coordinate nothing could push. A parked document is no longer
-/// hosted.
+/// It never resolves a conflict. The relay refuses anything else from a host,
+/// so it is refused here, before it commits a coordinate nothing could push.
+/// A parked document is no longer hosted.
 pub(crate) fn allocate_outbound_seq_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
@@ -96,6 +96,7 @@ pub(crate) fn allocate_outbound_seq_in_tx(
         reason: "payload is not valid JSON",
     })?;
     let hosted = match document_named(op_kind, &payload) {
+        Some(_) if op_kind == "conflict.resolve" => false,
         Some(object_id) => tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM hosted_documents \
@@ -149,9 +150,28 @@ fn document_named<'a>(op_kind: &str, payload: &'a serde_json::Value) -> Option<&
         "moment.append" | "ydoc.update" | "live.audit.application" => &payload["objectId"],
         "live.audit.settlement" => &payload["record"]["binding"]["objectId"],
         "live.audit.base" => &payload["record"]["checkpoint"]["binding"]["objectId"],
+        "conflict.resolve" => return resolved_note(payload),
         _ => return None,
     }
     .as_str()
+}
+
+/// The note a `conflict.resolve` names at its one path, when every side it
+/// states is that note. The feed serves no other resolve.
+fn resolved_note(payload: &serde_json::Value) -> Option<&str> {
+    let [_] = payload["paths"].as_array()?.as_slice() else {
+        return None;
+    };
+    let transition = &payload["transition"];
+    let object_id = transition["current"]["objectId"].as_str()?;
+    [
+        &transition["incoming"],
+        &transition["result"],
+        &payload["exportedBefore"],
+    ]
+    .into_iter()
+    .all(|side| side["present"] != true || side["objectId"] == object_id)
+    .then_some(object_id)
 }
 
 /// Record that a pass journaled `op`, a row of the document it names, which
@@ -284,7 +304,8 @@ const DOCUMENT_NAMED_SQL: &str = "CASE op_kind \
     WHEN 'live.audit.application' THEN json_extract(payload_json,'$.objectId') \
     WHEN 'live.audit.settlement' THEN json_extract(payload_json,'$.record.binding.objectId') \
     WHEN 'live.audit.base' \
-      THEN json_extract(payload_json,'$.record.checkpoint.binding.objectId') END";
+      THEN json_extract(payload_json,'$.record.checkpoint.binding.objectId') \
+    WHEN 'conflict.resolve' THEN json_extract(payload_json,'$.transition.current.objectId') END";
 
 /// The before side of a hosted moment that replaced an object the feed
 /// withholds, as the moment's row states it.
@@ -424,15 +445,19 @@ fn held_by_departed(
 }
 
 /// The path and version an op takes or writes through: a moment's after
-/// side, unless it deletes, and a Y.Doc row's projection.
+/// side, unless it deletes, a Y.Doc row's projection, and a resolve's one
+/// path.
 fn claimed_path(op: &ReplicationEnvelope) -> Option<(&str, &str)> {
     let payload = &op.payload;
-    let path = match op.op_kind.as_str() {
-        "moment.append" if payload["operation"] != "delete" => &payload["payloadAfterPath"],
-        "ydoc.update" => &payload["path"],
+    let (path, version) = match op.op_kind.as_str() {
+        "moment.append" if payload["operation"] != "delete" => {
+            (&payload["payloadAfterPath"], &payload["versionId"])
+        }
+        "ydoc.update" => (&payload["path"], &payload["versionId"]),
+        "conflict.resolve" => (&payload["paths"][0], &payload["targetVersionId"]),
         _ => return None,
     };
-    Some((path.as_str()?, payload["versionId"].as_str()?))
+    Some((path.as_str()?, version.as_str()?))
 }
 
 /// Why a hosted replica holds `op` back before routing it, or `None`. A row

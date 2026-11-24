@@ -12,7 +12,7 @@ import type { SyncRelayLogInput, SyncRelayLogRow, SyncRelayStorage } from "./sto
 import { referencedBlobShas } from "./storage/blobReferences";
 import { logBlobsMissing } from "./storage/errors";
 import { readRefusal, refuseOp } from "./storage/relayAdmission";
-import type { ServiceHostFeedScope } from "./storage/serviceHostFeed";
+import { singleNoteResolve, type ServiceHostFeedScope } from "./storage/serviceHostFeed";
 import type { ServiceActivationRetirement } from "./storage/serviceActivationRetirement";
 import { chargesProofBudget, type RetirementRefusal } from "./storage/serviceActivationPublication";
 import { MAX_BLOB_BYTES } from "./wireLimits";
@@ -30,7 +30,8 @@ import {
 // unchanged, because activation and settlement need the document's object,
 // lineage, moment and journal coordinates. Admission is by the object a row
 // names, so a hosted document's history before it entered a share is served,
-// and no other object's row or bytes ever are.
+// and no other object's row or bytes ever are. A conflict resolution is served
+// only when it resolves one hosted note at its shared path and nothing else.
 
 const MAX_BLOB_HAVE = 2_000;
 const REACH_PAGE_ROWS = 500;
@@ -92,6 +93,17 @@ function hostedObject(
 
 const absent = (value: unknown) => value === undefined || value === null;
 
+function sharedResolvedNote(
+  scope: ServiceHostFeedScope,
+  row: Pick<SyncRelayLogRow, "payloadJson" | "recordedAtMs">,
+): string | null {
+  const note = singleNoteResolve(row.payloadJson, {
+    workspaceId: scope.workspaceId,
+    recordedAtMs: row.recordedAtMs,
+  });
+  return note && scope.shared.get(note.objectId) === note.path ? note.objectId : null;
+}
+
 export type HostedRowDecision =
   | { allowed: false }
   | { allowed: true; objectId: string | null; blobSha256s: string[] };
@@ -114,7 +126,10 @@ export function hostedRowDecision(
       ? { allowed: true, objectId: null, blobSha256s: [] }
       : { allowed: false };
   }
-  const objectId = hostedObject(scope, claimedDocument(row.opKind, record), scope.shared);
+  const objectId =
+    row.opKind === "conflict.resolve"
+      ? sharedResolvedNote(scope, row)
+      : hostedObject(scope, claimedDocument(row.opKind, record), scope.shared);
   if (objectId === null) return { allowed: false };
   // A refused row stays in the history but grants no bytes: append never checked its blobs.
   if (row.settlementAdmission?.status === "refused")
@@ -139,9 +154,9 @@ export function hostedRowDecision(
 /**
  * The document an op writes, when the host may append it. It may write only
  * the content of a document it hosts or settles, at its enrolled or bound
- * path: never move, delete or replace it, and never touch another file. A
- * revoked share or a move leaves the enabled enrolled document writable, so
- * edits the host accepted can settle.
+ * path: never move, delete or replace it, never resolve a conflict, and never
+ * touch another file. A revoked share or a move leaves the enabled enrolled
+ * document writable, so edits the host accepted can settle.
  */
 function hostedWriter(
   scope: ServiceHostFeedScope,
@@ -149,6 +164,7 @@ function hostedWriter(
   opKind: string,
   payload: unknown,
 ): string | null {
+  if (opKind === "conflict.resolve") return null;
   const record = asRecord(payload);
   if (!record) return null;
   const claim = claimedDocument(opKind, record);

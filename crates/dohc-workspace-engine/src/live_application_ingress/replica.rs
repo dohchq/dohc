@@ -1,5 +1,5 @@
 use super::*;
-use dohc_engine_collab::live_update_application::passive::ReplicaJournalEntry;
+use dohc_engine_collab::live_update_application::passive::ReplicaJournalRow;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -25,30 +25,18 @@ fn field<'a>(bytes: &mut &'a [u8]) -> Result<&'a [u8], WireError> {
     Ok(value)
 }
 
-/// Metadata, then each delivery's update and optional checkpoint as binary
-/// spans. A restore cancellation carries no bytes.
-pub(super) fn decode(mut bytes: &[u8]) -> Result<Vec<ReplicaJournalEntry>, WireError> {
-    let mut rows: Vec<ReplicaJournalEntry> = serde_json::from_slice(field(&mut bytes)?)
+/// Metadata, then each delivery's update as a binary span.
+pub(super) fn decode(mut bytes: &[u8]) -> Result<Vec<ReplicaJournalRow>, WireError> {
+    let mut rows: Vec<ReplicaJournalRow> = serde_json::from_slice(field(&mut bytes)?)
         .map_err(|_| invalid("invalid replica page metadata"))?;
     if rows.len() > 500 {
         return Err(invalid("replica page row limit"));
     }
     for row in &mut rows {
-        let ReplicaJournalEntry::Update(row) = row else {
-            continue;
-        };
-        if !row.admitted.update_bytes.is_empty()
-            || row
-                .restore
-                .as_ref()
-                .is_some_and(|r| !r.checkpoint_bytes.is_empty())
-        {
+        if !row.admitted.update_bytes.is_empty() {
             return Err(invalid("replica bytes must use binary spans"));
         }
         row.admitted.update_bytes = field(&mut bytes)?.to_vec();
-        if let Some(restore) = &mut row.restore {
-            restore.checkpoint_bytes = field(&mut bytes)?.to_vec();
-        }
         row.admitted
             .validate()
             .map_err(|_| invalid("invalid replica admitted update"))?;
