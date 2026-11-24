@@ -287,7 +287,7 @@ const resolveAccountSession: ResolveAccountSession = async (request) => {
 };
 
 /** The owner's workspace `w` with Registrations and its records, behind the account route on a server with no copies. */
-async function phone() {
+async function phone(keys = KEYS.slice(0, 2)) {
   revoked.clear();
   const base = baseFixture(),
     directory = await mkdtemp(join(tmpdir(), "phone-collections-"));
@@ -312,7 +312,7 @@ async function phone() {
     capacityBytes: 1024 * 1024,
   });
   pushFile(base.storage, "dataset", null, collectionFile);
-  for (const key of KEYS)
+  for (const key of keys)
     await host.invoke(owner, {
       ...scope,
       revision: 1,
@@ -412,7 +412,7 @@ const rowKeys = (answer: { body: Record<string, unknown> }) =>
   ((answer.body.result as { rows: { id: string }[] }).rows ?? []).map((row) => row.id);
 
 it("lists, describes, and reads a Collection's records a page at a time", async () => {
-  const f = await phone();
+  const f = await phone(KEYS);
   expect(await f.op("collections", {})).toEqual(
     ok({ collections: [{ datasetId: DATASET, name: "Registrations" }], nextCursor: null }),
   );
@@ -601,7 +601,7 @@ it("refuses the answer when Show on phone turns off, the sign-in is revoked, the
 // As the phone's app reads (phoneApps.ts), any sign-in of the owner's reads them: a computer's too. An agent has no
 // account sign-in to send, so the account route turns it away before any operation.
 it("gives a computer's sign-in of the owner what it gives the phone", async () => {
-  const f = await phone();
+  const f = await phone(KEYS);
   expect(await f.op("collections", {}, "owner:desktop-1:desktop")).toEqual(
     await f.op("collections", {}),
   );
