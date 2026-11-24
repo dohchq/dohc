@@ -14,6 +14,7 @@ import {
   type DatasetSupervisorOptions,
 } from "./supervisor.ts";
 import { DEFAULT_LIMITS, type AppRuntimeLauncher } from "./protocol.ts";
+import { sqliteEnforcesHardHeapLimit } from "./budget-watch.ts";
 
 // These waits cover one worker command at the product deadline plus durable journal writes around it.
 const workerWait = { timeout: 2 * DEFAULT_LIMITS.deadlineMs };
@@ -1281,7 +1282,19 @@ it("holds its folder, and runs startup maintenance, before a first preview reser
   ).toEqual([]);
 });
 
-it("recycles a worker that crosses the standalone Node memory ceiling and serves the next call cleanly", async () => {
+it("enforces the worker SQLite memory ceiling and serves the next call cleanly", async () => {
+  const probe = new DatabaseSync(":memory:");
+  let sqliteEnforcesHardHeap: boolean;
+  try {
+    sqliteEnforcesHardHeap = sqliteEnforcesHardHeapLimit(
+      probe
+        .prepare("PRAGMA compile_options")
+        .all()
+        .map((row) => String(row.compile_options)),
+    );
+  } finally {
+    probe.close();
+  }
   const f = await fixture({
     source: `globalThis.operations={
       run(ctx,input){
@@ -1289,30 +1302,39 @@ it("recycles a worker that crosses the standalone Node memory ceiling and serves
         return ctx.db.query('SELECT * FROM items ORDER BY id');
       },
       bomb(ctx){
-        return ctx.db.query('SELECT length(randomblob(251658240)) AS bytes');
+        return ctx.db.query('SELECT length(randomblob(285212672)) AS bytes');
       }
     }`,
   });
   await f.invoke({ id: "one", value: "saved" });
-  await expect(
-    f.supervisor.invoke({
-      scope: f.scope,
-      tables: ["items"],
-      operation: "bomb",
-      caller: { kind: "owner" },
-      callerKey: "owner",
-      input: {},
-      idempotencyKey: "bomb",
-      payloadSha256: hash("{}"),
-      readOnly: true,
-      authorize: f.authorize,
-    }),
-  ).rejects.toMatchObject({
-    code: "worker_budget",
-    message: expect.stringMatching(
-      /^Collection worker memory exceeded its limit of 256 MiB\. It used \d+ MiB\. Stopped while running the Collection action\. Try again\.$/,
-    ),
+  const bomb = f.supervisor.invoke({
+    scope: f.scope,
+    tables: ["items"],
+    operation: "bomb",
+    caller: { kind: "owner" },
+    callerKey: "owner",
+    input: {},
+    idempotencyKey: "bomb",
+    payloadSha256: hash("{}"),
+    readOnly: true,
+    authorize: f.authorize,
   });
+  if (sqliteEnforcesHardHeap) {
+    await expect(bomb).rejects.toMatchObject({
+      name: "AppBackendRuntimeError",
+      refusal: {
+        code: "resource_limit",
+        message: "SQL statement exceeded its 64 MiB SQLite memory limit.",
+      },
+    });
+  } else {
+    await expect(bomb).rejects.toMatchObject({
+      code: "worker_budget",
+      message: expect.stringMatching(
+        /^Collection worker memory exceeded its limit of 256 MiB\. It used \d+ MiB\. Stopped while running the Collection action\. Try again\.$/,
+      ),
+    });
+  }
   expect((await f.invoke({}, { readOnly: true })).result).toEqual([{ id: "one", value: "saved" }]);
 });
 

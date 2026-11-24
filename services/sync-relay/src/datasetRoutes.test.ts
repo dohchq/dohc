@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
@@ -2007,7 +2008,17 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
   );
 });
 
-it("surfaces SQL parameter, journal change, migration preview, and standalone Node RSS limits over relay HTTP routes", async () => {
+it("surfaces SQL parameter, journal change, migration preview, and worker memory limits over relay HTTP routes", async () => {
+  const probe = new DatabaseSync(":memory:");
+  let sqliteEnforcesHardHeap: boolean;
+  try {
+    sqliteEnforcesHardHeap = !probe
+      .prepare("PRAGMA compile_options")
+      .all()
+      .some((row) => String(row.compile_options) === "DEFAULT_MEMSTATUS=0");
+  } finally {
+    probe.close();
+  }
   const f = await httpFixture();
   const sql136 = `SELECT ${Array.from({ length: 136 }, () => "?").join("+")} AS total`;
   const operationSource = `globalThis.operations = {
@@ -2015,13 +2026,12 @@ it("surfaces SQL parameter, journal change, migration preview, and standalone No
       if (input && input.kind === "params")
         return ctx.db.query(${JSON.stringify(sql136)}, Array.from({ length: 136 }, (_, i) => i));
       if (input && input.kind === "memory")
-        return ctx.db.query("SELECT length(randomblob(251658240)) AS bytes");
+        return ctx.db.query("SELECT length(randomblob(285212672)) AS bytes");
       return ctx.db.query("SELECT * FROM requests ORDER BY id");
     },
     write(ctx, input) {
       if (input && input.kind === "seed") {
-        for (let i = 0; i < 9; i++)
-          ctx.db.execute("INSERT INTO requests(id,name) VALUES(?,printf('%1048576c','a'))", ["big-" + i]);
+        ctx.db.execute("INSERT INTO requests(id,name) WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM n WHERE i<8) SELECT 'big-'||i, printf('%1048576c','a') FROM n");
         return { seeded: true };
       }
       if (input && input.kind === "oversized_change") {
@@ -2089,13 +2099,21 @@ it("surfaces SQL parameter, journal change, migration preview, and standalone No
     message: "SQL statement exceeded its limit of 128 parameters. It used 136 parameters.",
   });
   const memoryLimit = await invoke(id(6), { kind: "memory" }, "memory-limit");
-  expect(memoryLimit.status).toBe(503);
-  expect(await memoryLimit.json()).toMatchObject({
-    code: "worker_budget",
-    message: expect.stringMatching(
-      /^Collection worker memory exceeded its limit of 256 MiB\. It used \d+ MiB\. Stopped while running the Collection action\. Try again\.$/,
-    ),
-  });
+  if (sqliteEnforcesHardHeap) {
+    expect(memoryLimit.status).toBe(409);
+    expect(await memoryLimit.json()).toEqual({
+      code: "resource_limit",
+      message: "SQL statement exceeded its 64 MiB SQLite memory limit.",
+    });
+  } else {
+    expect(memoryLimit.status).toBe(503);
+    expect(await memoryLimit.json()).toMatchObject({
+      code: "worker_budget",
+      message: expect.stringMatching(
+        /^Collection worker memory exceeded its limit of 256 MiB\. It used \d+ MiB\. Stopped while running the Collection action\. Try again\.$/,
+      ),
+    });
+  }
   const recovered = await invoke(id(6), {}, "after-memory-limit");
   expect(recovered.status).toBe(200);
   expect(await recovered.json()).toMatchObject({ result: [] });
