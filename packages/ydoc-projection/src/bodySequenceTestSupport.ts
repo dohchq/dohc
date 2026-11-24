@@ -14,6 +14,7 @@ import {
   bodySequencePlugin,
   createBodySequenceHistory,
   isBodySequenceChange,
+  type BodySequenceOptions,
 } from "./bodySequenceEditor.js";
 import { readBodySequence } from "./bodySequenceYjs.js";
 import { getDohcProseMirrorSchema } from "./import-export.js";
@@ -229,7 +230,7 @@ export function editorOn(
   shape: HostShape = "bare",
   plugins: Plugin[] = [],
   pluginsBefore: Plugin[] = [],
-  options: { history?: Y.UndoManager; edit?: (change: () => void) => boolean } = {},
+  options: Pick<BodySequenceOptions, "history" | "edit" | "unwritten"> = {},
 ) {
   const mount = window.document.createElement("div");
   window.document.body.append(mount);
@@ -252,6 +253,7 @@ export function editorOn(
           containers: base.containers,
           history,
           ...(edit ? { edit } : {}),
+          ...(options.unwritten ? { unwritten: options.unwritten } : {}),
         }),
         keymap(baseKeymap),
         ...plugins,

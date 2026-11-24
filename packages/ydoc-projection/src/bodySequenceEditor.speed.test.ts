@@ -229,7 +229,7 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)(
       });
     const underCode = underCodeWith([boundary(), LINE]);
     const timed = (...acts: ((view: EditorView) => void)[]): string[] => timedOn(headed, ...acts);
-    const timedOn = (baseline: Uint8Array, ...acts: ((view: EditorView) => void)[]) => {
+    const timedOn = (baseline: Uint8Array, ...acts: ((view: EditorView, doc: Y.Doc) => void)[]) => {
       const runs = Array.from({ length: 5 }, () => {
         const base = declared(40);
         Y.applyUpdate(base.doc, baseline);
@@ -237,7 +237,7 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)(
         try {
           return acts.map((act) => {
             const start = performance.now();
-            act(view);
+            act(view, base.doc);
             return performance.now() - start;
           });
         } finally {
@@ -255,7 +255,32 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)(
       (view) => view.dispatch(view.state.tr.insertText("x", 31)),
     );
     const edits = "10,000 paragraphs, the first with no boundary";
+    const lastThousandAsHeadings = (() => {
+      const peer = declared(50);
+      Y.applyUpdate(peer.doc, long);
+      const had = Y.encodeStateVector(peer.doc);
+      peer.doc.transact(() => {
+        const boundaries = (peer.sequence.toDelta() as { insert: unknown }[]).flatMap(
+          ({ insert }) => (insert instanceof Y.XmlElement ? [insert] : []),
+        );
+        for (const each of boundaries.slice(-1_000)) {
+          each.setAttribute("type", "heading");
+          each.setAttribute("level", 1 as unknown as string);
+        }
+      });
+      const update = Y.encodeStateAsUpdate(peer.doc, had);
+      peer.doc.destroy();
+      return update;
+    })();
+    const manyKinds = timedOn(long, (view, doc) => {
+      Y.applyUpdate(doc, lastThousandAsHeadings);
+      if (view.state.doc.lastChild!.type.name !== "heading")
+        throw new Error("the editor does not show the headings");
+    });
     report.push("each time below is the median of five editors mounted anew on the note");
+    report.push(
+      `10,000 paragraphs of 60 letters: one change from elsewhere that makes the last 1,000 of them headings, update to editor: ${manyKinds[0]!}`,
+    );
     report.push(
       `${edits}: the first letter typed in its middle, which gives it its boundary first: ${typed[0]!}`,
       `${edits}: the next letter typed there, once the line has its boundary: ${typed[1]!}`,
