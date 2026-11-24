@@ -666,6 +666,10 @@ export function everyStepOracle(part: number): void {
             );
         }
         if (wrote && unsettled) {
+          if (label.startsWith("Enter"))
+            throw new Error(
+              `${label} in ${before.toString()} was refused. Enter is written in every shape: at a caret, and over a selection in one block or across blocks.`,
+            );
           a.expectMirror();
           expectTheWindowToAgree(agreement, longer, [wrote], `${label} in ${before.toString()}`);
           outcome = "refused, as no trial settles";

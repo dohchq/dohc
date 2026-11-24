@@ -10,7 +10,7 @@ import {
   type EditorState,
   type Transaction,
 } from "@tiptap/pm/state";
-import { ReplaceStep } from "@tiptap/pm/transform";
+import { ReplaceStep, StepMap } from "@tiptap/pm/transform";
 import * as Y from "yjs";
 import {
   BLOCK_ELEMENT,
@@ -71,12 +71,31 @@ export type BodySequenceOptions = {
    */
   edit?: (change: () => void) => boolean;
   /**
+   * Told why, each time a dispatch that changed the editor's document was not written. The editor
+   * shows the note again first, and unless the note was overtaken, with the selection as it was
+   * before the dispatch.
+   */
+  unwritten?: (why: BodySequenceUnwritten) => void;
+  /**
    * A history that outlives this editor, made with `createBodySequenceHistory` for this note's
    * document. Without one the plugin makes its own and destroys it with the view. Editors given
    * one history share its undo steps, as two panes on one note do.
    */
   history?: Y.UndoManager;
 };
+
+/**
+ * Why a dispatch was not written.
+ *
+ * - `unwritable`: the adapter cannot write it, and nothing was written.
+ * - `guarded`: the host's `edit` guard did not run the change, and nothing was written.
+ * - `guardedAfterBoundary`: the guard ran the change that gives a line its boundary and then did
+ *   not run the dispatch. The boundary stays, as every boundary that was sent does, and the note
+ *   reads as it did.
+ * - `overtaken`: the note changed before the dispatch could be written. A boundary given before
+ *   that stays too.
+ */
+export type BodySequenceUnwritten = "unwritable" | "guarded" | "guardedAfterBoundary" | "overtaken";
 
 const NONE: readonly Transaction[] = [];
 const ADD_TO_HISTORY = "addToHistory";
@@ -140,21 +159,22 @@ export function createBodySequenceHistory(
  * reading as the stored note. The plugin does this for the sequence it binds. A host that holds a
  * note's document with no editor on it calls this itself.
  *
- * Yjs has no setting for this, and decides it for a whole transaction: after `afterTransaction`,
- * from this field of the transaction. So a transaction from elsewhere that changes the sequence
- * also leaves alone the formatting items of any other text it changes in the same document.
- * Those items change nothing that text reads as; they stay stored. A transaction that does not
- * change the sequence is cleaned as Yjs cleans it.
+ * Yjs has no setting for this, and decides it for a whole transaction: after its
+ * `afterTransaction` listeners, from this field of the transaction. The field is cleared from a
+ * deep observer of the sequence. Yjs calls that before those listeners, and also when another
+ * observer or listener throws, so a host listener that throws from `afterTransaction` cannot
+ * leave the field set. A transaction from elsewhere that changes the sequence also leaves alone
+ * the formatting items of any other text it changes in the same document. Those items change
+ * nothing that text reads as; they stay stored. A transaction that does not change the sequence
+ * is cleaned as Yjs cleans it.
  */
 export function keepBodySequenceFormatting(sequence: Y.Text): () => void {
-  const doc = sequence.doc;
-  if (!doc) throw new Error("The body sequence must be part of a Yjs document.");
-  const keep = (transaction: Y.Transaction) => {
-    const changed: ReadonlyMap<unknown, unknown> = transaction.changedParentTypes;
-    if (changed.has(sequence)) transaction._needFormattingCleanup = false;
+  if (!sequence.doc) throw new Error("The body sequence must be part of a Yjs document.");
+  const keep = (_events: unknown, transaction: Y.Transaction) => {
+    transaction._needFormattingCleanup = false;
   };
-  doc.on("afterTransaction", keep);
-  return () => doc.off("afterTransaction", keep);
+  sequence.observeDeep(keep);
+  return () => sequence.unobserveDeep(keep);
 }
 
 type Bound = { sequence: Y.Text; history: Y.UndoManager; reader: BodyReader };
@@ -200,6 +220,10 @@ const HELD_BY_WHAT_FOLLOWS = 2;
  * what stands before it. At the start of a block with no boundary of its own the place is kept
  * with what follows it, so it stays in that block, unless `assoc` is negative. Such an anchor
  * carries an association of 2, which no anchor made here for another place has.
+ *
+ * Null while `state`'s document is not what the sequence reads as: inside a dispatch, until the
+ * adapter has written it, a place in that document is no place in the sequence yet. Ask again
+ * once the dispatch is done.
  */
 export function bodySequenceAnchor(
   state: EditorState,
@@ -207,8 +231,9 @@ export function bodySequenceAnchor(
   assoc = 0,
 ): Y.RelativePosition | null {
   const bound = boundOf(state);
-  if (!bound) return null;
-  const reading = bound.reader.reading();
+  const reading = bound?.reader.reading();
+  if (!bound || !reading) return null;
+  if (reading.doc !== state.doc && !reading.doc.eq(state.doc)) return null;
   const side = assoc < 0 ? -1 : 0;
   const follows = side < 0 ? -1 : whatFollowsStartOf(reading, pos);
   return follows < 0
@@ -309,10 +334,11 @@ function holdSelection(
  * line is first written to a copy of the blocks around it, and to a copy of the whole note when
  * that one does not read as the editor's document. A dispatch that cannot be written step by
  * step is tried with the steps of a transaction that touch as one range, as the delete and the
- * split of Enter over a selection do. Nothing is written, and the editor shows the note again,
- * when no copy comes to read as the editor's document, and when a boundary the dispatch makes
- * would still stand in front of what such a line held with that line given none that lasts: a
- * drop of dragged text that joins the line away and splits it off again.
+ * split of Enter over a selection do. Nothing is written, and the editor shows the note again
+ * with the selection as it was, when no copy comes to read as the editor's document, and when a
+ * boundary the dispatch makes would still stand in front of what such a line held with that line
+ * given none that lasts: a drop of dragged text that joins the line away and splits it off again.
+ * `unwritten` is told of each dispatch that was not written.
  *
  * A change of the sequence from elsewhere, and an undo or redo, is shown as one transaction that
  * replaces what differs, keeps the nodes of the blocks it does not touch, and keeps the selection
@@ -338,6 +364,7 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
       change();
       return true;
     });
+  const selections = new WeakMap<Transaction, Selection>();
   let flushed = NONE;
   let bound: Bound | null = null;
   let showsWhatStands: ((base: ProseMirrorNode) => boolean) | null = null;
@@ -346,10 +373,12 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
     bound: () => bound,
     state: {
       init: () => NONE,
-      apply: (transaction, pending) =>
-        !transaction.docChanged || isBodySequenceChange(transaction)
-          ? pending
-          : [...(pending === flushed ? NONE : pending), transaction],
+      apply(transaction, pending, state) {
+        if (!transaction.docChanged || isBodySequenceChange(transaction)) return pending;
+        if (pending !== flushed) return [...pending, transaction];
+        selections.set(transaction, state.selection);
+        return [transaction];
+      },
     },
     filterTransaction(transaction, state) {
       if (!transaction.docChanged || isBodySequenceChange(transaction)) return true;
@@ -483,9 +512,12 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
         if (unread.length > 0) catchUp();
       };
 
+      let ran = false;
       const change = (recorded: boolean, write: () => void) => {
         let wrote = false;
-        edit(() =>
+        ran = false;
+        edit(() => {
+          ran = true;
           doc.transact((carrier) => {
             const own = carrier.changed.size === 0 ? unread.lastIndexOf(carrier) : -1;
             if (own < 0) return;
@@ -494,8 +526,8 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
             if (recorded) carrier.meta.set(bodySequenceKey, origin);
             write();
             wrote = true;
-          }, origin),
-        );
+          }, origin);
+        });
         return wrote;
       };
 
@@ -508,29 +540,39 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
         }
         flushed = pending;
         const base = pending[0]!.before;
-        if (!stands(base)) return catchUp();
+        if (!stands(base)) {
+          catchUp();
+          return options.unwritten?.("overtaken");
+        }
         const target = { sequence, reader };
+        let why: BodySequenceUnwritten | null = "overtaken";
         writing = true;
         try {
           const how = howToWrite(target, pending);
-          if (how === null) return;
+          if (how === null) return void (why = "unwritable");
           const { lines } = how;
           if (lines.length > 0) {
-            if (!change(false, () => giveBoundaries(target, lines))) return;
+            if (!change(false, () => giveBoundaries(target, lines)))
+              return void (why = ran ? "overtaken" : "guarded");
             if (isBusy(doc) || unread.length > 0 || !reader.reading().doc.eq(base)) return;
             reader.adopt(base);
           }
           const recorded = pending.some(
             (transaction) => transaction.getMeta(ADD_TO_HISTORY) !== false,
           );
-          change(recorded, () => {
+          const wrote = change(recorded, () => {
             for (const transaction of how.transactions)
               if (!writeTransaction(target, transaction)) break;
             writing = false;
           });
+          const guarded = lines.length > 0 ? "guardedAfterBoundary" : "guarded";
+          why = wrote ? null : ran ? "overtaken" : guarded;
         } finally {
           writing = false;
-          show();
+          const isAsItWas = why !== null && why !== "overtaken";
+          const was = isAsItWas ? selections.get(pending[0]!) : undefined;
+          show(was && ((shows) => shows.setSelection(was.map(shows.doc, StepMap.empty))));
+          if (why) options.unwritten?.(why);
         }
       };
 

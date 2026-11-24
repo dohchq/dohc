@@ -595,6 +595,7 @@ describe("the desktop's commands next to a line with no boundary of its own", ()
     a.view.dispatch(dropped.replaceRange(at, at, slice));
     expect(a.sent).toEqual([]);
     expect(a.view.state.doc.toString()).toBe(read);
+    expect(a.view.state.selection.toJSON()).toEqual(state.selection.toJSON());
     a.expectMirror();
     b.typeAt(2, 0, "P");
     b.select([2, 0]);

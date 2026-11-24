@@ -959,6 +959,20 @@ describe("a change of the sequence from elsewhere", () => {
     a.expectMirror();
   });
 
+  it("keeps the caret where a written dispatch left it when the note is then shown again only to drop a mark the format does not keep", () => {
+    const a = person(note(...LINES), 10);
+    a.select([1, 3]);
+    const caret = a.view.state.selection.from;
+    const shown = a.shown.count;
+    const marked = schema.nodes.hardBreak!.create(null, null, [schema.marks.bold!.create()]);
+    a.view.dispatch(a.view.state.tr.replaceSelectionWith(marked, false));
+    expect(a.shown.count).toBe(shown + 1);
+    expect(a.view.state.doc.child(1).child(1).marks).toEqual([]);
+    expect(a.view.state.selection.from).toBe(caret + 1);
+    expect(a.sent).toHaveLength(1);
+    a.expectMirror();
+  });
+
   it("gives an anchor that stays with its letters through changes and in another editor", () => {
     const a = person(note(...LINES), 10);
     const b = person(note(...LINES), 20);
@@ -1562,8 +1576,36 @@ describe("formatting items Yjs would delete on its own", () => {
       return { flags, sent: bolder.sent.length, formats: formats(bolder.sequence) };
     };
     expect(receiveDelete(false)).toEqual({ flags: [true, false], sent: 1, formats: 1 });
-    expect(receiveDelete(true)).toEqual({ flags: [true], sent: 0, formats: 2 });
+    expect(receiveDelete(true)).toEqual({ flags: [false], sent: 0, formats: 2 });
   });
+
+  it.each(["with no editor", "under an editor"] as const)(
+    "stay when a listener the host registered first throws from afterTransaction, %s: the note's document sends no change of its own",
+    (how) => {
+      const base = page(note("One word here"), 10);
+      const deleter = page(note("One word here"), 20);
+      let armed = false;
+      base.doc.on("afterTransaction", () => {
+        if (!armed) return;
+        armed = false;
+        throw new Error("the host's listener");
+      });
+      const release =
+        how === "under an editor"
+          ? (editorOn(base), () => {})
+          : keepBodySequenceFormatting(base.sequence);
+      base.sequence.format(5, 4, { bold: {} });
+      deleter.sequence.delete(5, 4);
+      base.sent.length = 0;
+      armed = true;
+      expect(() => {
+        for (const update of deleter.sent) base.receive(update);
+      }).toThrow("the host's listener");
+      release();
+      expect(base.sent).toEqual([]);
+      expect(formats(base.sequence)).toBe(2);
+    },
+  );
 });
 
 describe.each(["bare", "hosted"] as const)("on a %s page, a finding of the review", (shape) => {
@@ -2042,6 +2084,37 @@ describe.each(["bare", "hosted"] as const)(
       a.expectMirror();
     });
 
+    it.each([
+      ["that drop", (a: Person) => a.view.dispatch(dropOfSelection(a.view.state, 2))],
+      [
+        "the delete and the split of that Enter with a mark put on another line",
+        (a: Person) => {
+          const { doc, tr } = a.view.state;
+          const split = tr.delete(2, intoThatParagraph(doc, 0)).split(2);
+          const end = split.doc.content.size - 1;
+          a.view.dispatch(split.addMark(end - 2, end, schema.marks.bold!.create()));
+        },
+      ],
+    ])(
+      "puts the selection back as it was, and says the dispatch cannot be written, when %s is refused",
+      (_name, act) => {
+        const told: string[] = [];
+        const base = page(noteOfLines(UNDER_CODE), 10, shape);
+        const a = editorOn(base, shape, [], [], { unwritten: (why) => told.push(why) });
+        const { doc } = a.view.state;
+        a.view.dispatch(
+          a.view.state.tr.setSelection(TextSelection.create(doc, 3, intoThatParagraph(doc, 0))),
+        );
+        const selected = a.view.state.selection.toJSON();
+        act(a);
+        expect(a.sent).toEqual([]);
+        expect(a.view.state.doc.toJSON()).toEqual(doc.toJSON());
+        expect(a.view.state.selection.toJSON()).toEqual(selected);
+        expect(told).toEqual(["unwritable"]);
+        a.expectMirror();
+      },
+    );
+
     it("writes Enter over a selection that runs from the middle of the line above across a code block to the start of that paragraph as one range: the paragraph gets its boundary first, the recorded change makes none, and undo reads as before", () => {
       const a = person(noteOfLines(UNDER_CODE), 10, shape);
       const before = a.view.state.doc.toJSON();
@@ -2465,6 +2538,28 @@ describe.each(["bare", "hosted"] as const)("one dispatch of the editor on a %s p
 });
 
 describe("an anchor", () => {
+  it("is not given while the editor's document is ahead of what the sequence reads as, which a plugin in front of the adapter sees inside a dispatch", () => {
+    const asked: (Y.RelativePosition | null)[] = [];
+    let asks = false;
+    const inFront = new Plugin({
+      view: () => ({
+        update(view) {
+          if (asks) asked.push(bodySequenceAnchor(view.state, 3));
+        },
+      }),
+    });
+    const a = person(note("abc"), 10, "bare", [], [inFront]);
+    a.select([0, 0]);
+    asks = true;
+    a.type("x");
+    asks = false;
+    expect(asked).toEqual([null]);
+    expect(a.lines()).toEqual(["xabc"]);
+    const anchor = bodySequenceAnchor(a.view.state, 3);
+    expect(anchor).not.toBeNull();
+    expect(bodySequenceAnchorPosition(a.view.state, anchor!)).toBe(3);
+  });
+
   it("stays in a list item's added paragraph when someone types there", () => {
     const item = () => noteOfLines([stored({ type: "heading", level: 2, ...IN_ITEM }, "Title")]);
     const a = person(item(), 10);
@@ -3230,7 +3325,10 @@ describe.each(["bare", "hosted"] as const)(
 
     it("drops a dispatch when a peer's change arrives between the boundary it gives a line and its own change", () => {
       const head = [stored(null, `h${EMOJI}h`), stored({}, "ab")];
-      const a = person(noteOfLines(head), 10, shape);
+      const told: string[] = [];
+      const a = editorOn(page(noteOfLines(head), 10, shape), shape, [], [], {
+        unwritten: (why) => told.push(why),
+      });
       const b = person(noteOfLines(head), 20, shape);
       b.typeAt(1, 1, "!");
       const fromPeer = b.sent.splice(0);
@@ -3246,9 +3344,11 @@ describe.each(["bare", "hosted"] as const)(
       expect(a.lines()).toEqual([`h${EMOJI}h`, "a!b"]);
       expect(a.sent).toHaveLength(1);
       expect(a.history.undoStack).toHaveLength(0);
+      expect(told).toEqual(["overtaken"]);
       a.expectMirror();
       a.select([0, 0]);
       a.press("Enter");
+      expect(told).toHaveLength(1);
       exchange(a, b);
       for (const each of [a, b]) {
         each.expectMirror();
@@ -3257,23 +3357,63 @@ describe.each(["bare", "hosted"] as const)(
       }
     });
 
-    it("shows the note as it stands when the host's guard does not run the change", () => {
+    it("shows the note as it stands, with the selection as it was, and says so when the host's guard does not run the change", () => {
       const base = page(note("abc"), 10, shape);
       let allowed = false;
+      const told: string[] = [];
       const a = editorOn(base, shape, [], [], {
         edit(change) {
           if (allowed) base.doc.transact(change);
           return allowed;
         },
+        unwritten: (why) => told.push(why),
       });
-      a.typeAt(0, 1, "X");
+      a.select([0, 1], [0, 2]);
+      const selected = a.view.state.selection.toJSON();
+      a.type("X");
       expect(a.lines()).toEqual(["abc"]);
       expect(a.sent).toEqual([]);
+      expect(a.view.state.selection.toJSON()).toEqual(selected);
+      expect(told).toEqual(["guarded"]);
       a.expectMirror();
       allowed = true;
       a.typeAt(0, 1, "X");
       expect(a.lines()).toEqual(["aXbc"]);
       expect(a.sent).toHaveLength(1);
+      expect(told).toHaveLength(1);
+      a.expectMirror();
+    });
+
+    it("says when the host's guard ran the change that gives a line its boundary and then not the dispatch: the boundary stays, the note reads as before, and the next edit of that line gives it none", () => {
+      const base = page(noteOfLines([stored(null, "hh"), stored({}, "ab")]), 10, shape);
+      let allowed = 1;
+      const told: string[] = [];
+      const a = editorOn(base, shape, [], [], {
+        edit(change) {
+          if (allowed-- <= 0) return false;
+          if (shape === "hosted") base.doc.transact(change);
+          else change();
+          return true;
+        },
+        unwritten: (why) => told.push(why),
+      });
+      const before = a.view.state.doc.toJSON();
+      expect(a.boundaryIds()).toHaveLength(1);
+      a.typeAt(0, 1, "X");
+      expect(told).toEqual(["guardedAfterBoundary"]);
+      expect(a.view.state.doc.toJSON()).toEqual(before);
+      expect(a.sent).toHaveLength(1);
+      expect(boundariesMadeIn(a.sent[0]!)).toHaveLength(1);
+      const given = a.boundaryIds();
+      expect(given).toHaveLength(2);
+      expect(a.history.undoStack).toHaveLength(0);
+      a.expectMirror();
+      allowed = 9;
+      a.typeAt(0, 1, "X");
+      expect(a.lines()).toEqual(["hXh", "ab"]);
+      expect(a.sent).toHaveLength(2);
+      expect(a.boundaryIds()).toEqual(given);
+      expect(told).toHaveLength(1);
       a.expectMirror();
     });
 
