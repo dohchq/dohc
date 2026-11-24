@@ -84,6 +84,7 @@ export async function waitForPreparation(
           const artifact = matching[0];
           let downloadDeadline = Math.min(deadline, now() + 30_000),
             attempts = 0,
+            transferTimeoutMs = 60_000,
             transferStartedAt;
           if (!Number.isSafeInteger(artifact.id) || artifact.id <= 0)
             throw new Error("The prepared artifact has no valid identity.");
@@ -104,6 +105,7 @@ export async function waitForPreparation(
                 artifact.id,
                 downloadDeadline - now(),
                 deadline - now(),
+                transferTimeoutMs,
               );
             } catch (error) {
               if (error instanceof WorkflowAllowanceError) throw error;
@@ -137,6 +139,7 @@ export async function waitForPreparation(
                       `Retrying preparation artifact ${name} body transfer after ${seconds}s: ${cause.message}`,
                     );
                     downloadDeadline = Math.min(deadline, now() + 30_000);
+                    if (cause.name === "TimeoutError") transferTimeoutMs = 120_000;
                     sawUnavailable = false;
                     lastRequestError = undefined;
                     continue;
