@@ -36,7 +36,7 @@ export interface AppRunner {
   end(match?: (scope: AppScope) => boolean): void;
   /** Starts a launch for `scope`, ending the last. Resolves whether it showed. */
   start(scope: AppScope & { readonly name: string }, launch: Promise<AppLaunch>): Promise<boolean>;
-  /** Ends the running app because its web process died. Its review says so until the next launch starts. */
+  /** Ends the running app because its web process died. Its review says so until the next launch, or until `end` names it. */
   stop(): void;
   /** The app `stop` ended, or null. */
   stopped(): AppScope | null;
@@ -54,7 +54,10 @@ export function createAppRunner(): AppRunner {
   };
   const end: AppRunner["end"] = (match = () => true) => {
     if (pending && match(pending.scope)) pending = null;
+    const forget = stopped !== null && match(stopped);
+    if (forget) stopped = null;
     if (running && match(running)) set(null);
+    else if (forget) set(running);
   };
   return {
     state: () => running,

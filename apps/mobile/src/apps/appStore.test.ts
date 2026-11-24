@@ -108,6 +108,11 @@ describe("a launch", () => {
     answerLaunch(server);
     expect(await apps.open(app, still)).toBe(true);
     expect(runner.stopped()).toBeNull();
+    runner.stop();
+    runner.end((scope) => scope.workspaceId !== "ws-1");
+    expect(runner.stopped()).not.toBeNull();
+    runner.end();
+    expect(runner.stopped()).toBeNull();
   });
 
   it("opens nothing in a build that can't run apps", async () => {

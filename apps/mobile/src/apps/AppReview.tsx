@@ -111,12 +111,11 @@ function Review({
     act(appWords.openFailed, async (app) => {
       if (await apps.open({ ...app, name }, leaving.signal)) router.push("/app-run");
     });
-  // This app's web process died while it ran: the runner's screen has left, and Try again opens it again.
+  // This app's web process died while it ran: the runner's screen has left, and Try again opens it again. The runner
+  // forgets it when its sign-in or workspace ends.
   const stopped = useSyncExternalStore(runner.subscribe, runner.stopped);
-  useEffect(() => {
-    if (stopped?.publicationId === publicationId && stopped.workspaceId === apps.workspaceId)
-      setFailure({ text: appWords.stopped, retry: () => void open() });
-  }, [stopped]);
+  const stoppedHere =
+    stopped?.publicationId === publicationId && stopped.workspaceId === apps.workspaceId;
   const revoke = async () => {
     if (
       await confirm({
@@ -187,7 +186,11 @@ function Review({
           <ActionPill label={appWords.revoke} onPress={revoke} busy={busy} />
         </View>
       ) : null}
-      {failure ? <ProblemLine text={failure.text} onRetry={failure.retry} /> : null}
+      {failure ? (
+        <ProblemLine text={failure.text} onRetry={failure.retry} />
+      ) : stoppedHere ? (
+        <ProblemLine text={appWords.stopped} onRetry={open} />
+      ) : null}
 
       <Text style={[styles.heading, { color: theme.ink }]} accessibilityRole="header">
         {appWords.reach}
