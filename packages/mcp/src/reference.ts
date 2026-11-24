@@ -672,6 +672,8 @@ const NOT_SHARED_READS: Record<string, string> = {
     "Workspace search runs only on the owning workspace. Shared profiles do not offer this read.",
   dohc_plan_agent_run_undo:
     "Only the original workspace plans an agent run undo. Shared profiles do not offer this read.",
+  dohc_inbox_list:
+    "The workspace Inbox belongs to the owning workspace. Shared profiles do not offer this read.",
 };
 
 export const MCP_TOOL_GROUPS: readonly {
@@ -704,6 +706,10 @@ export const MCP_TOOL_GROUPS: readonly {
       "dohc_import_data",
       "dohc_query_database",
       "dohc_list_notices",
+      "dohc_inbox_list",
+      "dohc_inbox_add",
+      "dohc_inbox_archive",
+      "dohc_inbox_move",
     ],
   },
   {
@@ -934,15 +940,19 @@ function declaredSocketVerbs(command: string): Record<string, CliSocketVerb> {
   );
 }
 
+function declaredWriteSocketVerbs(command: string): Record<string, CliSocketVerb> {
+  return Object.fromEntries(
+    Object.values<DeclaredWrite>(DECLARED_WRITES).flatMap(({ cli, socket }) =>
+      "none" in cli || cli.command[0] !== command ? [] : [[cli.command[1], socket.verb]],
+    ),
+  );
+}
+
 // The chat commands whose socket verb has another name.
 export const CHAT_SOCKET_VERBS: Record<string, CliSocketVerb> = {
   ...declaredSocketVerbs("chat"),
   "create-group": "groupCreate",
-  ...Object.fromEntries(
-    Object.values<DeclaredWrite>(DECLARED_WRITES).flatMap(({ cli, socket }) =>
-      "none" in cli || cli.command[0] !== "chat" ? [] : [[cli.command[1], socket.verb]],
-    ),
-  ),
+  ...declaredWriteSocketVerbs("chat"),
 };
 
 // What a verb returns. Chat, history, Access, automation, and account verbs print their socket verb's
@@ -954,31 +964,33 @@ function verbReturns(command: string, name: string): string {
       ? "fileDuplicate"
       : command === "links"
         ? declaredSocketVerbs("links")[name]
-        : command === "workspace"
-          ? declaredSocketVerbs("workspace")[name]
-          : command === "chat"
-            ? (CHAT_SOCKET_VERBS[name] ?? name)
-            : command === "history"
-              ? HISTORY_RESULTS[name]
-              : command === "document"
-                ? DOCUMENT_RESULTS[name]
-                : command === "automation"
-                  ? AUTOMATION_RESULTS[name]
-                  : command === "access"
-                    ? ACCESS_RESULTS[name]
-                    : command === "sync"
-                      ? SYNC_RESULTS[name]
-                      : command === "notices"
-                        ? NOTICES_RESULTS[name]
-                        : command === "share"
-                          ? SHARE_RESULTS[name]
-                          : command === "members"
-                            ? MEMBERS_RESULTS[name]
-                            : command === "version"
-                              ? VERSION_RESULTS[name]
-                              : command === "account"
-                                ? ACCOUNT_RESULTS[name]
-                                : undefined;
+        : command === "inbox"
+          ? { ...declaredSocketVerbs("inbox"), ...declaredWriteSocketVerbs("inbox") }[name]
+          : command === "workspace"
+            ? declaredSocketVerbs("workspace")[name]
+            : command === "chat"
+              ? (CHAT_SOCKET_VERBS[name] ?? name)
+              : command === "history"
+                ? HISTORY_RESULTS[name]
+                : command === "document"
+                  ? DOCUMENT_RESULTS[name]
+                  : command === "automation"
+                    ? AUTOMATION_RESULTS[name]
+                    : command === "access"
+                      ? ACCESS_RESULTS[name]
+                      : command === "sync"
+                        ? SYNC_RESULTS[name]
+                        : command === "notices"
+                          ? NOTICES_RESULTS[name]
+                          : command === "share"
+                            ? SHARE_RESULTS[name]
+                            : command === "members"
+                              ? MEMBERS_RESULTS[name]
+                              : command === "version"
+                                ? VERSION_RESULTS[name]
+                                : command === "account"
+                                  ? ACCOUNT_RESULTS[name]
+                                  : undefined;
   if (socketVerb !== undefined) {
     if (!Object.hasOwn(cliResultSchemas, socketVerb))
       throw new Error(`dohc ${command} ${name} has no result schema.`);

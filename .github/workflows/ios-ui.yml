@@ -6,30 +6,15 @@ name: iOS sample UI tests
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    # The UI tests drive the whole sample app: its JavaScript, the editor and
-    # its workspace packages, fonts, and words, as well as the native modules
-    # and the Expo config the prebuild reads. The phone app, the packages its
-    # bundles import (directly, or through the page editor and
-    # live-session-contract), and the install inputs. Other packages and
-    # manifests don't reach the iOS build.
+    # Runs only for phone app UI/native changes and its UI-specific copy/brand
+    # assets. Shared contract/engine packages and root manifests already run
+    # @dohc/mobile typecheck and Vitest tests in PR checks; use workflow_dispatch
+    # when a shared-package change needs an advisory iOS simulator run.
     paths:
       - 'apps/mobile/**'
       - 'packages/interface-words/**'
-      - 'packages/workspace-contracts/**'
-      - 'packages/live-session-contract/**'
       - 'packages/brand/**'
-      - 'packages/ydoc-projection/**'
-      - 'packages/security-contract/**'
-      - 'packages/workspace-core/**'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - 'pnpm-workspace.yaml'
-      - '.npmrc'
-      - '.pnpmfile.cjs'
-      - '.pnpmfile.mjs'
-      - '.node-version'
       - 'patches/**'
-      - 'tsconfig.base.json'
       - 'scripts/verification/ios-ui.mjs'
       - '.github/workflows/ios-ui.yml'
   workflow_dispatch:

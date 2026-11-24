@@ -48,7 +48,7 @@ export async function startDocumentNativeHost(options, deployment) {
     await seed.waitForExit();
   }
   const profile = selfHostLiveProfile();
-  const { ingress, client, settlement, sync, restore, adoption } = profile.service;
+  const { ingress, client, settlement, sync, adoption } = profile.service;
   const configPath = join(options.directory, "native-host.json");
   await writeFile(
     configPath,
@@ -65,7 +65,6 @@ export async function startDocumentNativeHost(options, deployment) {
         client,
         settlement,
         sync,
-        restore,
         adoption,
       },
       null,
@@ -88,7 +87,6 @@ export async function startDocumentNativeHost(options, deployment) {
     joins: [],
     settlements: [],
     restartVerified: false,
-    restore: null,
   };
   const joinDocument = async (entry, Y, projection, phase) => {
     const started = performance.now();
@@ -148,7 +146,7 @@ export async function startDocumentNativeHost(options, deployment) {
       if (delivery.kind !== "done") throw Error("Native application did not complete");
       return performance.now() - started;
     },
-    async finish(entries, Y, projection, baselineDigest, baselineMarkdownDigest) {
+    async finish(entries, Y, projection) {
       for (const entry of entries) {
         const started = performance.now();
         const settled = await active.settle(entry.document, options.signal);
@@ -167,101 +165,6 @@ export async function startDocumentNativeHost(options, deployment) {
       await this.join(entries, Y, projection, "restart");
       result.restartVerified = true;
       await this.onRestart?.();
-      const entry = entries[0],
-        storage = deployment.storage;
-      const current = storage.resolveCurrentLiveDocumentBinding({
-        document: entry.document,
-        actor: { kind: "owner", userId: "owner" },
-      });
-      assert.equal(current.kind, "current");
-      const { beginStopRestore, advanceStopRestoreFence } = await load(
-        "services/sync-relay/src/storage/liveRestoreOperation.ts",
-      );
-      const lookup = {
-        operationId: "benchmark-restore",
-        workspaceId: "workspace",
-        ownerUserId: "owner",
-      };
-      const started = performance.now();
-      const captured = await active.captureNative(current.binding, options.signal);
-      const client = captured.client,
-        originalRestore = client.sendLiveRestore;
-      result.restoreTransports = [];
-      client.sendLiveRestore = async (...args) => {
-        const row = {
-          action: args[1],
-          inputBytes: args[2].byteLength,
-          configuredMaxBytes: args[3],
-        };
-        result.restoreTransports.push(row);
-        result.restorePayloadBytes = Math.max(result.restorePayloadBytes ?? 0, row.inputBytes);
-        try {
-          const response = await originalRestore.apply(client, args);
-          row.outputBytes = response.bytes.byteLength;
-          result.restorePayloadBytes = Math.max(result.restorePayloadBytes, row.outputBytes);
-          return response;
-        } catch (error) {
-          row.refusal = String(error);
-          throw error;
-        }
-      };
-      try {
-        beginStopRestore(
-          storage,
-          {
-            deliveryKind: "bootstrap",
-            ...lookup,
-            document: entry.document,
-            shareId: "share",
-            grantId: "grant",
-            expectedGrantGeneration: 4,
-            expectedDependentGrantIds: [],
-            expectedFence: current.binding.restoreFenceGeneration,
-            restorePointCursor: 0,
-            restorePointReceiptDigest: baselineDigest,
-          },
-          Date.now(),
-        );
-        advanceStopRestoreFence(storage, lookup, Date.now());
-        const stopped = await active.stopRestore(lookup, options.signal);
-        assert.equal(stopped.kind, "done");
-        const prepared = await active.prepareRestore(lookup, options.signal);
-        assert.equal(prepared.kind, "prepared");
-        const restored = await active.completeRestore(
-          lookup,
-          prepared.proposalDigest,
-          options.signal,
-        );
-        assert.equal(restored.kind, "resumed");
-        const cut = storage.readLiveUpdateJournalCut({ document: entry.document });
-        assert.equal(cut.kind, "cut");
-        const recovered = new Y.Doc();
-        try {
-          Y.applyUpdate(recovered, cut.cut.checkpoint.bytes);
-          for (const update of cut.cut.suffix) Y.applyUpdate(recovered, update.bytes);
-          assert.equal(sha256(projection.yDocToMarkdown(recovered)), baselineMarkdownDigest);
-          assert.equal(
-            sha256(await readFile(join(workspace, entry.currentPath))),
-            sha256(projection.yDocToMarkdown(recovered)),
-          );
-        } finally {
-          recovered.destroy();
-        }
-        result.restore = {
-          verified: true,
-          ms: performance.now() - started,
-          payloadBytes: result.restorePayloadBytes,
-          checkpointBytes: cut.cut.checkpoint.bytes.byteLength,
-        };
-      } catch (error) {
-        result.restore = {
-          verified: false,
-          ms: performance.now() - started,
-          refusal: String(error?.stack ?? error),
-        };
-      } finally {
-        client.sendLiveRestore = originalRestore;
-      }
     },
     async close() {
       await active.close();

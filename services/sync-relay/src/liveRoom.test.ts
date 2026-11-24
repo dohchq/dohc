@@ -33,7 +33,10 @@ import { observeRelayWrites } from "./relayWriteChanges.js";
 import { appendLiveRoomEdit, liveRoomEdits } from "./storage/liveRoomEdits.js";
 import { liveRoomPaused, liveRoomPauses, pauseLiveRoom } from "./storage/liveRoomPauses.js";
 import { liveJournalSeedClientId } from "./storage/liveUpdateJournal.js";
-import { readRetiredJournalPage } from "./storage/serviceActivationRetirement.js";
+import {
+  readRetiredJournalPage,
+  retirementJournalEvidence,
+} from "./storage/serviceActivationRetirement.js";
 import {
   markdownToYDoc,
   yDocToMarkdown,
@@ -826,6 +829,39 @@ it("keeps each save's last row with its journal row, for a retired note's journa
     journal.map((cursor) => [cursor]),
   );
   expect(page({ restoreFenceGeneration: 1 })).toBeNull();
+  // A row a shared restore wrote is refused as damage, in the pages and in a reconciliation's evidence.
+  const last = storage.db
+    .prepare(
+      "SELECT delivery_id,relay_database_namespace FROM sync_relay_live_update_journal WHERE journal_cursor=?",
+    )
+    .get(acceptedCursor)!;
+  const evidence = () =>
+    retirementJournalEvidence(
+      storage,
+      {
+        relayDatabaseNamespace: String(last.relay_database_namespace),
+        activationId: "activation",
+        workspaceId: document.workspaceId,
+        mainVersionId: "main",
+        objectId: document.objectId,
+        lineageClaimId: document.lineageClaimId,
+        path: "docs/note.md",
+        restoreFenceGeneration: 0,
+        acceptedThrough: acceptedCursor,
+        requestedAtMs: 1,
+      },
+      [String(last.delivery_id)],
+    );
+  expect(evidence().absent).toEqual([]);
+  storage.db.exec("PRAGMA foreign_keys = OFF");
+  storage.db
+    .prepare(
+      "UPDATE sync_relay_live_update_journal SET restore_operation_id='restore-1',validation_checkpoint_sha256=?,validation_checkpoint_bytes=? WHERE journal_cursor=?",
+    )
+    .run("0".repeat(64), new Uint8Array([0, 0]), acceptedCursor);
+  storage.db.exec("PRAGMA foreign_keys = ON");
+  expect(() => page({})).toThrow("live update journal is damaged");
+  expect(evidence).toThrow("live update journal is damaged");
 });
 
 // Proves: a save whose transaction rolls back after the room was told of it leaves the room's edits

@@ -18,6 +18,7 @@ export const RETIRED_CAPABILITY_IDS: readonly string[] = [
   "version.try",
   "version.try.read",
   "version.try.dismiss",
+  "share.live.restore",
 ];
 
 export interface CapabilityMetadata {
@@ -81,6 +82,45 @@ const LISTED_CAPABILITIES = {
   "links.edges": capability("Read a bounded page of file links.", { ipc: [], mcp: {} }),
   "links.in": capability("Read documents that link to a file.", { ipc: [], mcp: {} }),
   "links.resolve": capability("Resolve links from one document.", { ipc: [], mcp: {} }),
+  "inbox.list": capability("List items in the workspace Inbox Collection.", {
+    ipc: [],
+    mcp: {},
+    mcpReason:
+      "Inbox belongs to the owning workspace. Shared profiles omit this read; socket admission and main workspace checks remain the gates.",
+  }),
+  "inbox.add": capability("Capture a note or link into the workspace Inbox Collection.", {
+    ipc: [],
+    mcp: {},
+  }),
+  "inbox.archive": capability("Mark a workspace Inbox item as Archived.", {
+    ipc: [],
+    mcp: {},
+  }),
+  "inbox.move": capability(
+    "Move a workspace Inbox item and any linked Inbox attachments into an owned folder.",
+    {
+      ipc: [],
+      mcp: {},
+    },
+  ),
+  "inbox.archive.undo": capability(
+    "Restore a workspace Inbox item's previous Status if it is still Archived.",
+    {
+      ipc: ["inboxUndoArchive"],
+    },
+  ),
+  "inbox.move.undo": capability(
+    "Undo a workspace Inbox move after checking old paths and preserving later note edits.",
+    {
+      ipc: ["inboxUndoMove"],
+    },
+  ),
+  "inbox.capture.files": capability(
+    "Capture dropped files, picked files, or pasted images into the workspace Inbox Collection.",
+    {
+      ipc: ["inboxCaptureFiles"],
+    },
+  ),
   "workspace.search": capability(
     "Search pages, Collections, records, and chats in the owning workspace.",
     {
@@ -377,7 +417,6 @@ const LISTED_CAPABILITIES = {
   "share.discussion.activity.cancel": capability("Cancel a share discussion activity wait.", {
     ipc: ["cancelRelayShareDiscussionActivity"],
   }),
-  "share.live.restore": capability("Restore an owner's live document.", { ipc: ["ownerRestore"] }),
   "share.skips.dismiss": capability("Acknowledge skipped changes in a received share.", {
     ipc: ["dismissShareSkips"],
   }),
@@ -1662,6 +1701,56 @@ const LISTED_CAPABILITIES = {
   "account.delete": capability("Delete the connected server account with its password.", {
     ipc: ["deleteServerAccount", "retryServerAccountDisconnect"],
     mcpReason: "No desktop MCP tool; account deletion needs the account password.",
+  }),
+  "workspace.secrets.list": capability(
+    "List the names, usages, and allowed hosts of this workspace's sealed secrets.",
+    {
+      ipc: ["listWorkspaceSecrets"],
+      mcpReason: "Desktop UI only; workspace secrets are managed by the owner in Settings.",
+    },
+  ),
+  "workspace.secrets.set": capability("Save or replace a sealed secret for this workspace.", {
+    ipc: ["setWorkspaceSecret"],
+    mcpReason:
+      "Desktop UI only; local and connected agents cannot create or rotate workspace secrets.",
+  }),
+  "workspace.secrets.delete": capability("Delete a sealed secret from this workspace.", {
+    ipc: ["deleteWorkspaceSecret"],
+    mcpReason: "Desktop UI only; local and connected agents cannot delete workspace secrets.",
+  }),
+  "workspace.webhooks.list": capability(
+    "List incoming webhook metadata and recent deliveries for this workspace.",
+    {
+      ipc: ["listIncomingWebhooks"],
+      mcpReason: "Desktop UI only; incoming webhooks are managed by the owner in Settings.",
+    },
+  ),
+  "workspace.webhooks.create": capability(
+    "Create an incoming webhook URL for a private Collection in this workspace.",
+    {
+      ipc: ["createIncomingWebhook"],
+      mcpReason:
+        "Desktop UI only; local and connected agents cannot create public incoming webhook URLs.",
+    },
+  ),
+  "workspace.webhooks.update": capability(
+    "Rename, pause, or resume an incoming webhook in this workspace.",
+    {
+      ipc: ["updateIncomingWebhook"],
+      mcpReason: "Desktop UI only; incoming webhooks are managed by the owner in Settings.",
+    },
+  ),
+  "workspace.webhooks.rotate": capability(
+    "Rotate an incoming webhook token, invalidating its previous URL.",
+    {
+      ipc: ["rotateIncomingWebhook"],
+      mcpReason:
+        "Desktop UI only; local and connected agents cannot rotate public incoming webhook URLs.",
+    },
+  ),
+  "workspace.webhooks.delete": capability("Delete an incoming webhook from this workspace.", {
+    ipc: ["deleteIncomingWebhook"],
+    mcpReason: "Desktop UI only; incoming webhooks are managed by the owner in Settings.",
   }),
 } as const;
 

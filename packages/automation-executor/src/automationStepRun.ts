@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isEngineStoreBusyRefusal } from "@dohc/workspace-engine-client";
 import {
   prepareRecordBackend,
@@ -119,7 +120,9 @@ export interface StepBackend {
     effect: StoredStep["effects"][number],
     place: { index: number; ordinal: number; part: number; mode: EffectMode; recorded?: boolean },
     chat: ChatDirectory | null,
-  ): Promise<RunWrite[] | { outcome: CollectionAutomationRunOutcome }>;
+  ): Promise<
+    RunWrite[] | { outcome: CollectionAutomationRunOutcome; httpRefusedBeforeSend?: true }
+  >;
 }
 
 /**
@@ -405,10 +408,12 @@ async function walkSteps(
     };
     // A code file is read when its step starts; a saved step never reads it again.
     let source: string | undefined;
+    let codeFileSha256: string | undefined;
     if (step.kind === "run-file") {
       const read = await readCodeFile(dependencies, input.collection.path, ordinal, step.file);
       if (typeof read !== "string") return { outcome: failed(read.problem) };
       source = read;
+      codeFileSha256 = createHash("sha256").update(read).digest("hex");
     }
     enter("planMs");
     const names = namesUsed(step);
@@ -508,6 +513,7 @@ async function walkSteps(
           return {
             step: {
               ordinal,
+              ...(codeFileSha256 !== undefined ? { codeFileSha256 } : {}),
               ...(reads.destinations ? { destinations: reads.destinations(ordinal) } : {}),
               effects,
               ...(planned.step.output ? { output: planned.step.output } : {}),
@@ -592,7 +598,13 @@ async function walkSteps(
           { index, ordinal: step.ordinal, part, mode, recorded },
           messages.chat,
         );
-        if ("outcome" in applied) return applied.outcome;
+        if ("outcome" in applied) {
+          if (effect.kind === "http" && applied.httpRefusedBeforeSend === true) {
+            step.httpRefusedBeforeSend = true;
+            await store.save(run);
+          }
+          return applied.outcome;
+        }
         writes =
           receipt === null
             ? applied
@@ -617,6 +629,17 @@ async function walkSteps(
         run.applied[index] = landed;
         if (writes.some(engineWrite)) progress.engineEffects++;
         if (!(await progress.checkpoint())) return { kind: "wait", reason: "engine" };
+        continue;
+      }
+      if (effect.kind === "http") {
+        await store.appendEffect(run, landed);
+        const appendMs = Math.max(0, dependencies.nowMs() - appendStarted);
+        if (step.appendMs !== undefined && step.appendCount !== undefined) {
+          step.appendMs += appendMs;
+          step.appendCount += 1;
+        }
+        run.applied.push(landed);
+        progress.effects = index + 1;
         continue;
       }
       progress.append = store.appendEffect(run, landed).then(
@@ -645,9 +668,14 @@ async function walkSteps(
       if (input.stopped.aborted) return end(stopped);
       if (input.signal.aborted) return end(failed(DEADLINE_ERROR, true));
       let step = savedSteps.get(ordinal) ?? null;
-      const fresh = step === null;
+      let fresh = step === null;
       if (step !== null) {
         reused += 1;
+        if (step.httpRefusedBeforeSend === true) {
+          delete step.httpRefusedBeforeSend;
+          await store.save(run);
+          fresh = true;
+        }
       } else {
         await finishEffectAppend(progress);
         // Saved steps run first, in order; one this walk never reached means the run is not this automation's.

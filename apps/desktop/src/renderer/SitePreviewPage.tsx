@@ -284,13 +284,21 @@ export function SitePreviewPage(props: {
   // tab start (or share) someone else's site under its own name. The exact
   // root match this checks is the same one prepareShare already requires
   // before sharing.
-  const modes = useMemo(
-    () =>
-      load.status === "ready" && load.site.root === props.siteRoot
-        ? availableModes(load.site, props.sharedView)
-        : [],
-    [load, props.siteRoot, props.sharedView],
+  const site = load.status === "ready" && load.site.root === props.siteRoot ? load.site : null;
+  const declaresApp =
+    props.siteRoot !== "" &&
+    props.siteRoot !== "." &&
+    !!site?.sourceFiles.includes(`${props.siteRoot}/app.publish.json`);
+  const rawModes = useMemo(
+    () => (site ? availableModes(site, props.sharedView) : []),
+    [site, props.sharedView],
   );
+  const needsPublication =
+    !props.sharedView &&
+    site?.authority.kind === "workspace" &&
+    declaresApp &&
+    rawModes.every((mode) => mode === "static");
+  const modes = useMemo(() => (needsPublication ? [] : rawModes), [needsPublication, rawModes]);
   const previewUrlAllowed = preview ? isLoopbackOrigin(preview.url) : false;
 
   useEffect(() => {
@@ -650,15 +658,7 @@ export function SitePreviewPage(props: {
     }
   }
 
-  // Same exact-root requirement as `modes` above — an ancestor site never
-  // renders as if it were this tab's own.
-  const site = load.status === "ready" && load.site.root === props.siteRoot ? load.site : null;
   const canShare = !props.sharedView && site?.authority.kind === "workspace" && !!props.onShareSite;
-  const declaresApp = !!site?.sourceFiles.includes(
-    props.siteRoot ? `${props.siteRoot}/app.publish.json` : "app.publish.json",
-  );
-  const needsPublication =
-    !props.sharedView && site?.authority.kind === "workspace" && modes.length === 0 && declaresApp;
   const appView = useAppView({
     workspaceId: props.workspaceId,
     appRoot: props.siteRoot,

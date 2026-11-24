@@ -278,16 +278,11 @@ export function serviceOwnerTransport(options: {
       check(signal);
       return response;
     }
-    if (
-      request.method !== "liveApplication.settle" &&
-      request.method !== "liveApplication.fenceRestore" &&
-      request.method !== "liveApplication.cancelRestoreFence"
-    )
+    if (request.method !== "liveApplication.settle")
       throw new Error("Unsupported service owner request.");
-    if (request.method === "liveApplication.settle")
-      registration(
-        configRecord(request.params, ["registrationId", "terminalReceipt"]).registrationId,
-      );
+    registration(
+      configRecord(request.params, ["registrationId", "terminalReceipt"]).registrationId,
+    );
     const response = await client.sendRequest(request, signal);
     check(signal);
     return response;

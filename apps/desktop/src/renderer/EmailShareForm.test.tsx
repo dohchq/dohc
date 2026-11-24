@@ -119,7 +119,7 @@ describe("automation steps a share would stop", () => {
   it("drops a check still running when the share on screen changes, so Invite never makes the old one", async () => {
     const user = userEvent.setup();
     let answer: (value: { stops: [] }) => void = () => undefined;
-    bridgeMock.automationShareImpact.mockImplementation(
+    bridgeMock.automationShareImpact.mockImplementationOnce(
       () =>
         new Promise((resolve) => {
           answer = resolve;
@@ -145,13 +145,33 @@ describe("automation steps a share would stop", () => {
     });
   });
 
-  it("asks nothing for a View share, and shares when the check itself fails, saying so", async () => {
+  it("checks incoming webhooks on a View share, warns when a webhook would pause, and shares when the check fails", async () => {
     const user = userEvent.setup();
+    bridgeMock.automationShareImpact.mockResolvedValueOnce({
+      stops: [],
+      pausedWebhooks: [
+        {
+          webhookId: "whk_aaaaaaaaaaaaaaaaaaaaaaaa",
+          name: "iPhone Capture",
+          collectionPath: "Trip",
+        },
+      ],
+    });
     render(<EmailShareForm workspaceId="ws-1" target={{ kind: "paths", paths: ["Trip"] }} />);
     await user.type(screen.getByTestId("share-email"), "ana@dohc.test");
     await user.click(screen.getByTestId("share-create"));
-    expect(bridgeMock.automationShareImpact).not.toHaveBeenCalled();
-    expect(screen.queryByTestId("share-automation-check-failed")).toBeNull();
+    expect(bridgeMock.automationShareImpact).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      recipientEmail: "ana@dohc.test",
+      paths: ["Trip"],
+      access: "view",
+    });
+    expect(bridgeMock.createRelayShare).not.toHaveBeenCalled();
+    expect((await screen.findByTestId("share-automation-warning")).textContent).toBe(
+      'This share pauses the incoming webhook "iPhone Capture" in Trip because incoming webhooks run only in private Collections.',
+    );
+    await user.click(screen.getByTestId("share-create"));
+    expect(bridgeMock.createRelayShare).toHaveBeenCalledTimes(1);
     cleanup();
 
     bridgeMock.automationShareImpact.mockRejectedValue(

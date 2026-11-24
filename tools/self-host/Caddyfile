@@ -15,6 +15,10 @@
   }
   @relay path /sync/*
   handle @relay {
+    # Incoming webhook URLs carry their bearer token in `/sync/hooks/:token`.
+    # If you enable Caddy access logs (`log`), redact `request>uri` for
+    # `/sync/hooks/*` (e.g. `format filter { fields { request>uri regexp ^/sync/hooks/[^/?#]+ /sync/hooks/[REDACTED] } }`)
+    # so raw webhook tokens are never written to disk logs.
     # The relay's largest per-route body cap. A Collection import streams a
     # whole Collection and bounds itself.
     @relayBounded not path_regexp ^/sync/[^/]+/datasets/[^/]+/imports/[^/]+$

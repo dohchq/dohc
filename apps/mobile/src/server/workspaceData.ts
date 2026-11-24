@@ -54,7 +54,7 @@ import type { SavedList } from "./workspaceList";
 // workspace list again to decide. Try again on a store that has gone asks, through `reopen`, for a new one. A 503 is
 // not this: it's a failed read or feed failure like any other.
 
-export type ReadProblem = ServerProblemKind | "restoring";
+export type ReadProblem = ServerProblemKind;
 
 export interface ViewState<T> {
   readonly value: T | null;
@@ -402,12 +402,6 @@ interface Entry {
   readonly reads: ReturnType<typeof requestGenerations>;
 }
 
-function readProblem(error: unknown): ReadProblem | null {
-  return error instanceof ServerError && error.code === "restore-in-progress"
-    ? "restoring"
-    : shownProblem(error);
-}
-
 export function createWorkspaceData(options: {
   readonly signIn: Pick<SignIn, "client" | "isCurrent" | "origin" | "userId">;
   readonly workspaceId: string;
@@ -541,7 +535,7 @@ export function createWorkspaceData(options: {
         // An answer that no longer counts says nothing, not even that the workspace has gone.
         if (!live() || !target.reads.isLatest(request)) return;
         if (isGone(error)) return gone();
-        const problem = readProblem(error);
+        const problem = shownProblem(error);
         if (problem === null) return;
         set(target, {
           ...target.state,
@@ -602,7 +596,7 @@ export function createWorkspaceData(options: {
         if (isGone(error)) return gone();
         failures += 1;
         const delay = Math.min(FEED_RETRY_MS * 2 ** (failures - 1), FEED_RETRY_MAX_MS);
-        const problem = readProblem(error);
+        const problem = shownProblem(error);
         if (
           problem !== null &&
           !shown &&

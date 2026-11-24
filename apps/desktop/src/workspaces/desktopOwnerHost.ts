@@ -1,6 +1,6 @@
 import { openSync, readSync, closeSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import { EngineClient, DEFAULT_MAX_BLOB_BYTES } from "@dohc/workspace-engine-client/daemon";
+import { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import {
   connectDeviceHost,
   parseDeviceHostCredential,
@@ -98,7 +98,7 @@ export function readDesktopOwnerHostConfig(path: string): DesktopOwnerHostConfig
   if (
     !transport ||
     Object.keys(transport)
-      .filter((field) => field !== "maxRestoreBytes" && field !== "sync")
+      .filter((field) => field !== "sync")
       .sort()
       .join() !== fields.join() ||
     fields.some((field) => !Number.isSafeInteger(transport[field]) || transport[field] < 1) ||
@@ -107,12 +107,7 @@ export function readDesktopOwnerHostConfig(path: string): DesktopOwnerHostConfig
     transport.maxFrameBytes > 16_777_216 ||
     transport.maxQueuedBytes <
       Math.max(control.maxPayloadBytes + 16, transport.maxFrameBytes + 36) ||
-    transport.maxAdoptionBytes * 3 + transport.maxFrameBytes * 4 > transport.aggregateBytes ||
-    (transport.maxRestoreBytes !== undefined &&
-      (!Number.isSafeInteger(transport.maxRestoreBytes) ||
-        transport.maxRestoreBytes < 5 ||
-        transport.maxRestoreBytes > DEFAULT_MAX_BLOB_BYTES ||
-        transport.maxRestoreBytes * 5 + transport.maxFrameBytes * 4 > transport.aggregateBytes))
+    transport.maxAdoptionBytes * 3 + transport.maxFrameBytes * 4 > transport.aggregateBytes
   )
     throw new Error("Invalid private owner host transport budget.");
   const sync = parseOwnerLiveSyncConfig(

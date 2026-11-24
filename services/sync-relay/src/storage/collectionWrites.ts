@@ -9,6 +9,7 @@ import {
 } from "@dohc/security-contract/dataset";
 import {
   MAX_AUTOMATIONS_FILE_BYTES,
+  hasPersonalStep,
   parseAutomationsFile,
   type Automation,
   type AutomationsFileParseResult,
@@ -73,7 +74,6 @@ import { assertMemberChanges } from "../memberActions";
 const MAX_COLLECTION_SCHEMA_BYTES = 65_536;
 // A record a new Collection brings, frontmatter and body together.
 const MAX_COLLECTION_RECORD_BYTES = 1024 * 1024;
-const PERSONAL_STEP = "wake-agent";
 
 const COLLECTION_WRITE_AUTHORS_MIGRATION = "collection-write-authors-v1";
 
@@ -1392,8 +1392,9 @@ function personalAutomations(result: AutomationsFileParseResult): string[] | nul
   const texts: string[] = [];
   for (const entry of result.entries) {
     if (entry.status !== "valid") return null;
-    const text = modelJson(entry.automation);
-    if (text.includes(`"kind":"${PERSONAL_STEP}"`)) texts.push(text);
+    if (hasPersonalStep(entry.automation)) {
+      texts.push(modelJson(entry.automation));
+    }
   }
   return texts.sort();
 }

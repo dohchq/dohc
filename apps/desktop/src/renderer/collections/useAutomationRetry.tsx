@@ -16,6 +16,7 @@ export const START_OVER_SENTENCE =
   "This automation changed since it failed. Running it again starts from the beginning and can repeat changes it already made.";
 export const REPEATS_MESSAGES_SENTENCE =
   "Posts, direct messages, and notices it already sent may be sent again.";
+export const REPEATS_WEBHOOKS_SENTENCE = "Webhook requests it already sent may be sent again.";
 
 export function useAutomationRetry<Target>(options: {
   workspaceId: string;
@@ -32,6 +33,7 @@ export function useAutomationRetry<Target>(options: {
     target: Target;
     epoch: number;
     repeatsMessages: boolean;
+    repeatsWebhooks: boolean;
   } | null>(null);
   useEffect(() => setConfirming(null), [workspaceId]);
 
@@ -43,7 +45,12 @@ export function useAutomationRetry<Target>(options: {
         .then((result) => {
           if (!workspace.isCurrent(epoch)) return;
           if (result.status === "definition-changed")
-            setConfirming({ target, epoch, repeatsMessages: result.repeatsMessages });
+            setConfirming({
+              target,
+              epoch,
+              repeatsMessages: result.repeatsMessages,
+              repeatsWebhooks: result.repeatsWebhooks === true,
+            });
           else if (result.status === "refused") onError(result.reason, new Error(result.reason));
           else if (result.status === "switched-off") onSwitchedOff(result.target, target);
           else onQueued();
@@ -75,6 +82,7 @@ export function useAutomationRetry<Target>(options: {
         <p>
           {START_OVER_SENTENCE}
           {confirming.repeatsMessages ? ` ${REPEATS_MESSAGES_SENTENCE}` : ""}
+          {confirming.repeatsWebhooks ? ` ${REPEATS_WEBHOOKS_SENTENCE}` : ""}
         </p>
       </ConfirmDialog>
     ) : null;
