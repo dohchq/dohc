@@ -56,6 +56,12 @@ describe("dohc/money", () => {
     }
     expect(parseCents("15.5", { currency: "JPY", locale: "en-US" })).toBeNull();
     expect(parseCents("99999999999999999", usd)).toBeNull();
+    expect(parseCents("1,23,456.78", usd)).toBeNull();
+    expect(parseCents(`1${String.fromCharCode(0x200b)}2.30`, usd)).toBeNull();
+    const euro = { currency: "EUR", locale: "fr-FR" };
+    expect(parseCents("1\n234,56", euro)).toBeNull();
+    expect(parseCents("1\t234,56", euro)).toBeNull();
+    expect(parseCents("1 234,56", euro)).toBe(123456);
   });
 
   it("round-trips every formatted amount", () => {
@@ -72,6 +78,7 @@ describe("dohc/money", () => {
         ["EGP", "ar-EG"],
         ["ILS", "he-IL"],
         ["SEK", "sv-SE"],
+        ["EUR", "fy-NL"],
       ] as const) {
         expect(parseCents(formatCents(cents, { currency, locale }), { currency, locale })).toBe(
           cents,
