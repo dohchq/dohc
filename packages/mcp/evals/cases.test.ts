@@ -12,7 +12,7 @@ import type { DatasetSnapshot, EvalCase, FrontendVerificationRecord, RunRecord }
 import { CASES } from "./cases";
 import { evalServerArgs, readEvalJsonRecord, seedWorkspace, workspaceFiles } from "./claude";
 import { fakeDesktop } from "./desktop";
-import { EVERYDAY_CASES } from "./everydayCases";
+import { EVERYDAY_CASES, gradeBookingFrontend } from "./everydayCases";
 import { createEverydayDesktop } from "./everydayDesktop";
 import { grade } from "./grade";
 
@@ -480,7 +480,7 @@ describe("eval cases", () => {
       },
     };
     delete stubBookingFrontendRun.files["apps/booking/app.js"];
-    const stubBookingChecks = await grade(booking.expect, stubBookingFrontendRun, booking.gradeRun);
+    const stubBookingChecks = gradeBookingFrontend(stubBookingFrontendRun);
     expect(stubBookingChecks.some((c) => !c.pass && c.name.includes("booking controls"))).toBe(
       true,
     );
@@ -499,11 +499,7 @@ describe("eval cases", () => {
         ),
       },
     };
-    const unlistedScriptChecks = await grade(
-      booking.expect,
-      unlistedScriptBookingRun,
-      booking.gradeRun,
-    );
+    const unlistedScriptChecks = gradeBookingFrontend(unlistedScriptBookingRun);
     expect(
       unlistedScriptChecks.some(
         (c) => !c.pass && c.detail?.includes("not listed in app.publish.json"),
@@ -630,7 +626,7 @@ describe("eval cases", () => {
       ...bookingSolved.run,
       frontendVerifications: undefined,
     };
-    const skippedVerifyChecks = await grade(booking.expect, skippedVerifyBooking, booking.gradeRun);
+    const skippedVerifyChecks = gradeBookingFrontend(skippedVerifyBooking);
     expect(
       skippedVerifyChecks.some((c) => !c.pass && c.detail?.includes("verifyFrontend was not run")),
     ).toBe(true);
@@ -642,11 +638,7 @@ describe("eval cases", () => {
         "apps/booking/app.js": `${bookingSolved.run.files["apps/booking/app.js"]}\n// edited after verify\n`,
       },
     };
-    const editedAfterChecks = await grade(
-      booking.expect,
-      editedAfterVerifyBooking,
-      booking.gradeRun,
-    );
+    const editedAfterChecks = gradeBookingFrontend(editedAfterVerifyBooking);
     expect(
       editedAfterChecks.some((c) => !c.pass && c.detail?.includes("source changed after")),
     ).toBe(true);
@@ -675,7 +667,7 @@ describe("eval cases", () => {
         },
       },
     };
-    const noStepsChecks = await grade(booking.expect, noStepsBookingVerify, booking.gradeRun);
+    const noStepsChecks = gradeBookingFrontend(noStepsBookingVerify);
     expect(noStepsChecks.some((c) => !c.pass && c.detail?.includes("click.expectBackend"))).toBe(
       true,
     );
@@ -691,11 +683,7 @@ describe("eval cases", () => {
         }),
       },
     };
-    const manifestOnlyChecks = await grade(
-      booking.expect,
-      manifestOnlyEditBooking,
-      booking.gradeRun,
-    );
+    const manifestOnlyChecks = gradeBookingFrontend(manifestOnlyEditBooking);
     expect(
       manifestOnlyChecks.some((c) => !c.pass && c.detail?.includes("source changed after")),
     ).toBe(true);
@@ -708,7 +696,7 @@ describe("eval cases", () => {
           "// dohc-app-channel ports .onmessage backend.invoke bookSeat idempotencyKey addEventListener name seats\n",
       },
     };
-    const commentOnlyChecks = await grade(booking.expect, commentOnlyBooking, booking.gradeRun);
+    const commentOnlyChecks = gradeBookingFrontend(commentOnlyBooking);
     expect(commentOnlyChecks.some((c) => !c.pass)).toBe(true);
 
     const syntaxBrokenBooking: RunRecord = {
@@ -718,7 +706,7 @@ describe("eval cases", () => {
         "apps/booking/app.js": `${bookingSolved.run.files["apps/booking/app.js"]}\nconst = ;\n`,
       },
     };
-    const syntaxBrokenChecks = await grade(booking.expect, syntaxBrokenBooking, booking.gradeRun);
+    const syntaxBrokenChecks = gradeBookingFrontend(syntaxBrokenBooking);
     expect(syntaxBrokenChecks.some((c) => !c.pass && c.detail?.includes("syntax error"))).toBe(
       true,
     );
@@ -734,11 +722,7 @@ describe("eval cases", () => {
         },
       },
     };
-    const observedWithoutBookChecks = await grade(
-      booking.expect,
-      observedWithoutBookSeat,
-      booking.gradeRun,
-    );
+    const observedWithoutBookChecks = gradeBookingFrontend(observedWithoutBookSeat);
     expect(
       observedWithoutBookChecks.some(
         (c) => !c.pass && c.detail?.includes("observed verifyFrontend"),
