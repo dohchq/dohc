@@ -241,6 +241,31 @@ export function preparedSettlement(
 export function settlementCommitted(op: SyncRelayLogInput): boolean {
   return op.settlementAdmission?.status === "accepted" && prepared.has(op);
 }
+/**
+ * Whether a recorded settlement replaces the note's stored file, which an
+ * unaccepted save from its own origin wrote. Its before is the last accepted
+ * settlement's, so the stored file had left the accepted line.
+ */
+export function settlementReplacesUnacceptedSave(
+  storage: StorageContext,
+  op: SyncRelayLogInput,
+  originId: string,
+): boolean {
+  const p = prepared.get(op);
+  if (!p || !settlementCommitted(op)) return false;
+  const stored = storage.db
+    .prepare(
+      `SELECT l.origin_id,l.settlement_admission_json,json_extract(l.payload_json,'$.objectId') AS object_id
+        FROM sync_relay_current_files f JOIN sync_relay_log l ON l.relay_seq=f.state_relay_seq
+        WHERE f.workspace_id=? AND f.version_id='main' AND f.path=?`,
+    )
+    .get(p.binding.workspaceId, p.binding.currentPath);
+  return (
+    stored?.origin_id === originId &&
+    stored.object_id === p.binding.objectId &&
+    stored.settlement_admission_json === null
+  );
+}
 /** Under the writer: the proof's terminal still ends the same accepted history in this relay's namespace. */
 export function settlementProofCurrent(storage: StorageContext, proof: SettlementProof): boolean {
   try {
