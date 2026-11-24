@@ -1,12 +1,12 @@
 import { appWords } from "@dohc/interface-words/apps";
 import { confirmWords } from "@dohc/interface-words/confirmations";
-import { Alert, Linking } from "react-native";
+import { Alert, Linking, Platform } from "react-native";
 
 const ignore = () => undefined;
 let asking = false;
 
 /**
- * Asks "Open in Safari?", naming the link's host, before a link leaves dohc, one question at a time. Pass only an
+ * Asks "Open in Safari?" ("Open link?" on Android), naming the link's host, before a link leaves dohc, one question at a time. Pass only an
  * address the external-link rule allowed (appNavigation.ts).
  */
 export function offerLink(url: string): void {
@@ -14,7 +14,7 @@ export function offerLink(url: string): void {
   asking = true;
   const done = () => void (asking = false);
   Alert.alert(
-    appWords.openOutside,
+    appWords.openOutside[Platform.OS === "ios" ? "ios" : "android"],
     new URL(url).host,
     [
       { text: confirmWords.cancel, style: "cancel", onPress: done },
