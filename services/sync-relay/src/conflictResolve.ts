@@ -82,7 +82,7 @@ interface LineageTransition {
   successor: Successor | null;
 }
 
-interface ParsedResolve {
+export interface ParsedResolve {
   workspaceId: string;
   conflictId: string;
   chosenFrom: "current" | "incoming" | "merged";
@@ -748,10 +748,10 @@ function validateBindings(payload: ParsedResolve): void {
   }
 }
 
-export function conflictResolveBlobShas(
+export function parseConflictResolve(
   payloadJson: string,
   envelope: ConflictResolveEnvelopeContext,
-): string[] {
+): ParsedResolve {
   const observedBytes = utf8Bytes(payloadJson);
   if (observedBytes > MAX_PAYLOAD_JSON_BYTES) {
     invalid(
@@ -828,7 +828,14 @@ export function conflictResolveBlobShas(
       : undefined,
   };
   validateBindings(payload);
+  return payload;
+}
 
+export function conflictResolveBlobShas(
+  payloadJson: string,
+  envelope: ConflictResolveEnvelopeContext,
+): string[] {
+  const payload = parseConflictResolve(payloadJson, envelope);
   const roots: string[] = [];
   for (const candidate of [payload.current, payload.incoming, payload.result]) {
     if (candidate.present) roots.push(candidate.blobSha256);

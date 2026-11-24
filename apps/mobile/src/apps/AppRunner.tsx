@@ -1,19 +1,23 @@
 import { Stack, useRouter } from "expo-router";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { AppState, View } from "react-native";
+import { useKeyboardState } from "react-native-keyboard-controller";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { WebView } from "react-native-webview";
+import { AppWebView } from "../../modules/app-web-view";
 import { useAccount, useSignIn } from "../account/AccountProvider";
 import { useTheme } from "../theme";
 import { createNavigationRule, externalLink } from "./appNavigation";
 import type { RunningApp } from "./appStore";
 import { offerLink } from "./offerLink";
 
-// The running app, full screen in its own WebView, on an iPhone only (canOpenApps.ts). Native Back closes it, and the
+// The running app, full screen in its own web view. Native Back closes it, and the
 // screen leaves whenever the runner ends the app. While it runs, the workspace's apps are read again every CHECK_MS
 // and on each return to the foreground, so a revoke on another phone or a withdrawn publication closes it within that
 // time; the server has already ended the app's access.
 //
-// The WebView's settings are pinned for the app sandbox:
+// On Android the app runs in AppWebView (modules/app-web-view), which decides its loads in native code. On iOS the
+// WebView's settings are pinned for the app sandbox:
 // - `originWhitelist` lets every address reach the navigation rule, so react-native-webview never hands one to the
 //   system itself;
 // - no window opens. A tapped link opens in Safari only when externalLink allows it and the person says so, since
@@ -48,7 +52,16 @@ export function AppRunScreen() {
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
       <Stack.Screen options={{ title: running?.name ?? "" }} />
-      {running ? <AppView key={running.key} app={running} serverOrigin={origin} /> : null}
+      {running && AppWebView ? (
+        <AndroidAppView
+          key={running.key}
+          app={running}
+          serverOrigin={origin}
+          onEnd={() => runner.end()}
+        />
+      ) : running ? (
+        <AppView key={running.key} app={running} serverOrigin={origin} />
+      ) : null}
     </View>
   );
 }
@@ -78,6 +91,34 @@ function AppView({ app, serverOrigin }: { app: RunningApp; serverOrigin: string 
       mediaCapturePermissionGrantType="deny"
       allowsLinkPreview={false}
       allowsPictureInPictureMediaPlayback={false}
+    />
+  );
+}
+
+function AndroidAppView({
+  app,
+  serverOrigin,
+  onEnd,
+}: {
+  app: RunningApp;
+  serverOrigin: string;
+  onEnd(): void;
+}) {
+  // Android draws under the keyboard and the system bar, so the app's view ends above both, and scrolls its focused
+  // field into sight.
+  const keyboard = useKeyboardState((state) => (state.isVisible ? state.height : 0));
+  const { bottom } = useSafeAreaInsets();
+  if (!AppWebView) return null;
+  return (
+    <AppWebView
+      style={{ flex: 1, marginBottom: Math.max(keyboard, bottom) }}
+      bootstrap={app.action}
+      handoff={app.handoff}
+      onOpenLink={(event) => {
+        const url = externalLink(event.nativeEvent.url, app.action, serverOrigin);
+        if (url) offerLink(url);
+      }}
+      onEnd={onEnd}
     />
   );
 }

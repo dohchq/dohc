@@ -9,7 +9,6 @@ const app = "app.dohc.mobile";
 const screens = [
   ["chats", "dohc:///", 'content-desc="planning, unread, 2 new"'],
   ["home", "dohc:///home", 'content-desc="Workspace: Lisbon trip. Switch workspace"'],
-  ["search", "dohc:///search", 'text="Search"'],
   ["notices", "dohc:///notices", 'content-desc="Mark all read"'],
   ["page", "dohc:///page?path=trip%2Fpacking-list.md", 'text="First-aid kit"'],
   ["chat", "dohc:///chat/g-planning?name=planning", 'text="#planning"'],

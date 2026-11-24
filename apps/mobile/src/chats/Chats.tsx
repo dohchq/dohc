@@ -89,6 +89,7 @@ function ServerChatList({ workspace }: { workspace: PhoneWorkspace }) {
       current={workspace}
       sections={sections}
       failure={state.problem ? { label: failed, onRetry: retry } : null}
+      onRefresh={retry}
     />
   );
 }
@@ -103,6 +104,7 @@ export function ChatsScreen({
   failure,
   notice,
   list,
+  onRefresh,
 }: {
   current: PhoneWorkspace | null;
   /** Null while the chats are read. */
@@ -112,6 +114,8 @@ export function ChatsScreen({
   /** Between the header and the list: why no workspace is open, or the sample's band. */
   notice?: ReactNode;
   list?: RefObject<LegendListRef | null>;
+  /** Pull to refresh: reads the chats again. */
+  onRefresh?: () => void;
 }) {
   const theme = useTheme();
   const router = useRouter();
@@ -170,6 +174,7 @@ export function ChatsScreen({
           scrollEventThrottle={32}
           onScroll={(event) => setScrolled(event.nativeEvent.contentOffset.y > 0)}
           contentContainerStyle={{ paddingTop: 0, paddingBottom: 120 }}
+          {...(onRefresh ? { refreshing: false, onRefresh } : {})}
           renderItem={({ item }) =>
             item.type === "header" ? (
               <SectionHeader
