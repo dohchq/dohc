@@ -161,9 +161,6 @@ export function appendLiveRoomEdit(
           `SELECT author_snapshot_json FROM ${LIVE_AUTHOR_CLIENTS} WHERE ${DOCUMENT} AND client_id=?`,
         )
         .get(...params, clientId);
-      // An untied id the note has content under is the sender's only when every journal row with
-      // its content came in under the sender's access, or, with no such row, when the note's base
-      // holds it and the sender owns the note. Otherwise it is the seed's or the engine's.
       if (!prior && inNote && !sendersContent(storage, params, clientId, access))
         return { kind: "refused" as const };
       if (!prior) bindings.push(clientId);
