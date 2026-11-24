@@ -104,7 +104,12 @@ const STEP_REMEDY = {
 
 let queue: Promise<void> = Promise.resolve();
 let sessionConfigured = false;
-let activeRun: { origin: string; webContentsId: number; onExternalBlocked(): void } | null = null;
+let activeRun: {
+  origin: string;
+  webContentsId: number;
+  view: WebContentsView;
+  onExternalBlocked(): void;
+} | null = null;
 
 function allowRequestUrl(raw: string, resourceType: string, origin: string): boolean {
   if (resourceType === "subFrame") return raw === "about:srcdoc" || raw === "about:blank";
@@ -366,6 +371,7 @@ async function executeVerification(
   activeRun = {
     origin,
     webContentsId: wc.id,
+    view,
     onExternalBlocked() {
       if (++externalRequestsBlocked === 1) {
         pushDiag({
@@ -965,7 +971,6 @@ async function executeVerification(
     }
     throw error;
   } finally {
-    void view;
     activeRun = null;
     if (!wc.isDestroyed()) {
       const closed = new Promise<void>((resolve) => {
