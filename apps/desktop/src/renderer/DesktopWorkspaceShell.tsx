@@ -2411,6 +2411,13 @@ function WorkspaceShell(props: {
     },
     [markCurrentSwitchPhase, workspaceSelectionGeneration],
   );
+  // A restored file that another tab replaced before it showed never reports ready.
+  useEffect(() => {
+    const target = restoredActiveFileSurface.current;
+    if (openingSettled || target === null) return;
+    const group = wb.editorGroups.find((candidate) => candidate.id === target.groupId);
+    if (group?.activeTab !== target.path) setOpeningSettled(true);
+  }, [openingSettled, wb]);
 
   // Debounced persist (500ms): tabs, view, panel visibility/width, rail.
   useEffect(() => {
