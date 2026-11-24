@@ -6,7 +6,11 @@ import {
   isDatasetReopenWaitError,
   isDatasetWorkerFailure,
 } from "@dohc/app-backend-runtime/supervisor";
-import { parseAppBackendJson, type AppBackendJson } from "@dohc/security-contract/app-backend";
+import {
+  AppBackendLimitError,
+  parseAppBackendJson,
+  type AppBackendJson,
+} from "@dohc/security-contract/app-backend";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { jsonResponse } from "@dohc/service-http";
 import type { AccountSession } from "@dohc/workspace-auth/session";
@@ -334,6 +338,15 @@ export function createPhoneCollections(options: {
             answer: { refused: { code: error.refusal.code, message: error.refusal.message } },
           };
         }
+        if (
+          error instanceof AppBackendLimitError ||
+          (error instanceof Error && error.name === "AppBackendLimitError")
+        ) {
+          await answers(datasetId);
+          return {
+            answer: { refused: { code: "resource_limit", message: error.message } },
+          };
+        }
         // A key used before for another payload: the phone resends a write unchanged, so its operation or rules
         // changed between tries, and the first try may have saved.
         if (
@@ -521,6 +534,11 @@ export function createPhoneCollections(options: {
               ? { "retry-after": String(Math.ceil(error.retryAfterMs / 1000)) }
               : {},
           );
+        if (
+          error instanceof AppBackendLimitError ||
+          (error instanceof Error && error.name === "AppBackendLimitError")
+        )
+          throw relayError("payload_too_large", error.message);
         if (isAppBackendRuntimeError(error)) throw relayError("conflict");
         if (error instanceof JournalError)
           throw relayError(error.code === "invalid" ? "bad_request" : "conflict");

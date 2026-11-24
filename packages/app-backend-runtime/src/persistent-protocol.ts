@@ -78,6 +78,7 @@ export interface CommittedChangeset extends DatasetCursor {
 }
 export const REPLAY_BATCH_EVENTS = 64;
 export const REPLAY_BATCH_BYTES = 32 * 1024 * 1024;
+export const DEFAULT_WORKER_MEMORY_BYTES = 256 * 1024 * 1024;
 export interface MigrateCheckpointInput {
   path: string;
   schemaSql: string;

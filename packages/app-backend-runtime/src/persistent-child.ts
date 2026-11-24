@@ -4,6 +4,7 @@ import {
   lstatSync,
   openSync,
   closeSync,
+  readFileSync,
   statSync,
   unlinkSync,
 } from "node:fs";
@@ -15,12 +16,17 @@ import {
   losslessDatasetNumber,
 } from "@dohc/security-contract/dataset-conversion";
 import { authorize, evaluate } from "./guest.js";
-import { AppBackendLimitError, parseAppBackendJson } from "@dohc/security-contract/app-backend";
+import {
+  AppBackendLimitError,
+  appBackendLimit,
+  parseAppBackendJson,
+} from "@dohc/security-contract/app-backend";
 import { AppBackendRuntimeError, operationLimits } from "./protocol.js";
 import type { JsonValue } from "./protocol.js";
 import {
   checkCursor,
   checkDigest,
+  DEFAULT_WORKER_MEMORY_BYTES,
   digest,
   openRequest,
   PersistentRuntimeError,
@@ -40,6 +46,10 @@ import {
   BUDGET_STATE_SLOTS,
   CPU_BUDGET_MARKER_PREFIX,
   disarmBudget,
+  memoryBudgetMarkerName,
+  MEMORY_BUDGET_MARKER_PREFIX,
+  processPeakMemoryBytes,
+  sqliteEnforcesHardHeapLimit,
   watchBudget,
 } from "./budget-watch.js";
 import { databaseBytes } from "./persistent-protocol.js";
@@ -127,14 +137,20 @@ function writeMarker(next: DatasetCursor): void {
 //
 const budgetState = new BigInt64Array(new SharedArrayBuffer(BUDGET_STATE_SLOTS * 8));
 const [APP_CODE, DATASET_CHECK] = [1n, 2n];
+let workerMemoryLimitBytes = 0n;
 const budgetWatchSource = `
 const {workerData}=require("node:worker_threads");
+const {readFileSync}=require("node:fs");
 const {writeFile}=require("node:fs/promises");
 const {join}=require("node:path");
 const CPU_BUDGET_MARKER_PREFIX=${JSON.stringify(CPU_BUDGET_MARKER_PREFIX)};
+const MEMORY_BUDGET_MARKER_PREFIX=${JSON.stringify(MEMORY_BUDGET_MARKER_PREFIX)};
 const budgetMarkerName=(${budgetMarkerName.toString()});
+const memoryBudgetMarkerName=(${memoryBudgetMarkerName.toString()});
+const processPeakMemoryBytes=(${processPeakMemoryBytes.toString()});
 (${watchBudget.toString()})(new BigInt64Array(workerData.state),()=>{const used=process.cpuUsage();return BigInt(used.user+used.system);},
-  (kind,budgetMs)=>writeFile(join(workerData.directory,budgetMarkerName(kind,budgetMs)),"",{flag:"wx"}),()=>process.kill(process.pid,"SIGKILL"),50,250);`;
+  ()=>processPeakMemoryBytes(process.platform,()=>process.memoryUsage.rss(),()=>process.resourceUsage().maxRSS,()=>readFileSync("/proc/self/status","utf8")),
+  (exceeded)=>writeFile(join(workerData.directory,exceeded.resource==="cpu"?budgetMarkerName(exceeded.kind,exceeded.budgetMs):memoryBudgetMarkerName(exceeded.limitBytes,exceeded.usedBytes)),"",{flag:"wx"}),()=>process.kill(process.pid,"SIGKILL"),50,250);`;
 let budgetWatch: Worker | undefined;
 let exiting = false;
 process.on("exit", () => {
@@ -144,6 +160,13 @@ const cpuMicros = () => {
   const used = process.cpuUsage();
   return BigInt(used.user + used.system);
 };
+const peakMemoryBytes = () =>
+  processPeakMemoryBytes(
+    process.platform,
+    () => process.memoryUsage.rss(),
+    () => process.resourceUsage().maxRSS,
+    () => readFileSync("/proc/self/status", "utf8"),
+  );
 function startBudgetWatch(): void {
   if (budgetWatch) return;
   budgetWatch = new Worker(budgetWatchSource, {
@@ -173,11 +196,14 @@ function budgeted<T>(kind: bigint, budget: bigint, run: () => T): T {
     kind,
     start - (kind === APP_CODE ? appCharged : 0n),
     budget,
+    workerMemoryLimitBytes,
   );
   const disarm = () => {
     const end = cpuMicros();
     // Check completed work too: the watch may not have polled before this step ended.
-    if (!disarmBudget(budgetState, section, end))
+    if (
+      !disarmBudget(budgetState, section, end, workerMemoryLimitBytes > 0n ? peakMemoryBytes() : 0n)
+    )
       for (;;) Atomics.wait(budgetState, 0, Atomics.load(budgetState, 0));
     if (kind === APP_CODE) appCharged += end - start;
     else {
@@ -246,6 +272,13 @@ function initialize(input: OpenRequest): DatasetCursor {
   db.exec(
     "PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; PRAGMA hard_heap_limit=67108864; PRAGMA busy_timeout=0; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
   );
+  const compileOptions = db
+    .prepare("PRAGMA compile_options")
+    .all()
+    .map((row) => String(row.compile_options));
+  workerMemoryLimitBytes = sqliteEnforcesHardHeapLimit(compileOptions)
+    ? 0n
+    : BigInt(DEFAULT_WORKER_MEMORY_BYTES);
   const pageSize = Number(db.prepare("PRAGMA page_size").get()!.page_size);
   db.exec(`PRAGMA max_page_count=${Math.floor(config.limits.databaseBytes / pageSize)}`);
   if (!config.checkpointPath) {
@@ -401,7 +434,14 @@ async function handle(command: PersistentCommand): Promise<PersistentResult> {
     if (!foreignKeysHold(db))
       reject("invalid_changeset", "This change breaks a foreign key between records.");
     if (changeset.byteLength > config.limits.databaseBytes)
-      reject("resource_limit", "This change needs more space than the Collection has reserved.");
+      throw new AppBackendLimitError(
+        appBackendLimit(
+          "Collection change",
+          config.limits.databaseBytes,
+          changeset.byteLength,
+          "bytes",
+        ),
+      );
     const changesetSha256 = digest(changeset),
       proposalId = randomUUID();
     if (command.guest.readOnly) {

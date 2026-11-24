@@ -180,7 +180,8 @@ export function authorize(
 }
 
 const MiB = 1024 * 1024,
-  WASM_PAGE_BYTES = 64 * 1024;
+  WASM_PAGE_BYTES = 64 * 1024,
+  MAX_SQL_PARAMETERS = 128;
 let quickjsCode: Promise<WebAssembly.Module> | undefined;
 const compiledQuickJS = () =>
   (quickjsCode ??= readFile(
@@ -377,9 +378,12 @@ function run(
           "SQL parameters",
         );
         const params: unknown = JSON.parse(paramsJson);
+        if (!Array.isArray(params)) throw new Error("SQL parameters must be scalar values.");
+        if (params.length > MAX_SQL_PARAMETERS)
+          throw new AppBackendLimitError(
+            appBackendLimit("SQL statement", MAX_SQL_PARAMETERS, params.length, "parameters"),
+          );
         if (
-          !Array.isArray(params) ||
-          params.length > 128 ||
           params.some(
             (value) =>
               value !== null &&

@@ -526,6 +526,58 @@ describe("persistent dataset worker", () => {
     });
   });
 
+  it("opens a healthy standalone Node worker even when the parent process holds more than 256 MiB of RSS", async () => {
+    await fixture(async ({ open }) => {
+      const parentMemory = Buffer.alloc(270 * 1024 * 1024, 1);
+      expect(parentMemory[0]).toBe(1);
+      const worker = await open();
+      expect((await worker.prepare({ ...operation(), readOnly: true })).result).toEqual([]);
+      expect(parentMemory[parentMemory.length - 1]).toBe(1);
+    });
+  });
+
+  it("reports SQL parameter limit and changeset size limit as resource_limit refusals without killing the worker", async () => {
+    await fixture(async ({ open }) => {
+      const worker = await open({ databaseBytes: 128 * 1024 });
+      const sql136 = `SELECT ${Array.from({ length: 136 }, () => "?").join("+")} AS total`;
+      await expect(
+        worker.prepare({
+          ...operation(),
+          readOnly: true,
+          source: `globalThis.operations={run(ctx){return ctx.db.query(${JSON.stringify(sql136)},Array.from({length:136},(_,i)=>i));}}`,
+        }),
+      ).rejects.toMatchObject({
+        name: "AppBackendRuntimeError",
+        refusal: {
+          code: "resource_limit",
+          message: "SQL statement exceeded its limit of 128 parameters. It used 136 parameters.",
+        },
+      });
+      const seeded = await worker.prepare({
+        ...operation(),
+        source: `globalThis.operations={run(ctx){ctx.db.execute("INSERT INTO items VALUES(1,printf('%70000c','a'))");return 1;}}`,
+      });
+      const afterSeed = await worker.finalize(event(seeded));
+      await expect(
+        worker.prepare({
+          ...operation(afterSeed),
+          source: `globalThis.operations={run(ctx){ctx.db.execute("UPDATE items SET value=printf('%70000c','b') WHERE id=1");return 1;}}`,
+        }),
+      ).rejects.toMatchObject({
+        name: "AppBackendRuntimeError",
+        refusal: {
+          code: "resource_limit",
+          message: expect.stringMatching(
+            /^Collection change exceeded its limit of 131072 bytes\. It used \d+ bytes\.$/,
+          ),
+        },
+      });
+      expect(
+        (await worker.prepare({ ...operation(afterSeed), readOnly: true })).result,
+      ).toHaveLength(1);
+    });
+  });
+
   // Short SQLite work can register zero CPU ticks on a loaded Windows host.
   // Compute a costly index per row so replay and integrity checks exceed that granularity.
   const cpuBudgetSchema =

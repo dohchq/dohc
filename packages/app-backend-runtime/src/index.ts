@@ -124,7 +124,7 @@ async function run(
         child?.kill();
       };
       const deadline = setTimeout(() => {
-        failure = new Error("App operation exceeded its deadline.");
+        failure = new Error(`App operation exceeded its ${request.limits.deadlineMs} ms deadline.`);
         child?.kill();
       }, request.limits.deadlineMs);
       signal?.addEventListener("abort", abort, { once: true });

@@ -207,6 +207,18 @@ it.each([
     step: "checking the tables",
     message: "dohc's checks of this Collection ran too long while checking the tables. Try again.",
   },
+  {
+    marker: `memory-budget-exceeded-${256 * 1024 * 1024}-${256 * 1024 * 1024 + 4096}`,
+    step: "running the Collection action",
+    message:
+      "Collection worker memory exceeded its limit of 256 MiB. It used 257 MiB. Stopped while running the Collection action. Try again.",
+  },
+  {
+    marker: "memory-budget-exceeded-NaN-Infinity",
+    step: "running the Collection action",
+    message:
+      "Collection worker memory exceeded its limit while running the Collection action. Try again.",
+  },
 ])(
   "reads an empty budget marker without showing a non-finite duration: $marker",
   async ({ marker, step, message }) => {

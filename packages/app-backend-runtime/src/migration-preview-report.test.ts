@@ -317,7 +317,7 @@ it("rejects oversized rows or reports and removes incomplete output without repl
       afterTables: ["items"],
       maxBytes: 1,
     }),
-  ).toThrow("byte allowance");
+  ).toThrow(/byte allowance of 1 bytes\. It used \d+ bytes\./);
   expect(existsSync(input.path)).toBe(false);
   expect(() =>
     createMigrationPreviewReport({
@@ -340,12 +340,12 @@ it("rejects an oversized source value before JavaScript materializes the row", (
   input.after.prepare("INSERT INTO items VALUES(1,?)").run("x".repeat(128 * 1024 + 1));
   expect(() =>
     createMigrationPreviewReport({ ...input, beforeTables: ["items"], afterTables: ["items"] }),
-  ).toThrow("source row exceeds 128 KiB");
+  ).toThrow(/source row exceeds 128 KiB \(131072 bytes\)\. It used 131074 bytes\./);
   expect(existsSync(input.path)).toBe(false);
   input.before.prepare("INSERT INTO items VALUES(1,?)").run("x".repeat(128 * 1024 + 1));
   expect(() =>
     createMigrationPreviewReport({ ...input, beforeTables: ["items"], afterTables: ["items"] }),
-  ).toThrow("source row exceeds 128 KiB");
+  ).toThrow(/source row exceeds 128 KiB \(131072 bytes\)\. It used 131074 bytes\./);
   expect(existsSync(input.path)).toBe(false);
   const combined = fixture(
     "CREATE TABLE items(id INTEGER PRIMARY KEY,a BLOB,b BLOB)",
@@ -353,7 +353,7 @@ it("rejects an oversized source value before JavaScript materializes the row", (
   );
   expect(() =>
     createMigrationPreviewReport({ ...combined, beforeTables: ["items"], afterTables: ["items"] }),
-  ).toThrow("source row exceeds 128 KiB");
+  ).toThrow(/source row exceeds 128 KiB \(131072 bytes\)\. It used 131073 bytes\./);
 });
 
 it("reads an empty report and rejects truncated JSONL instead of silently omitting its last row", () => {
