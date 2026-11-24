@@ -39,6 +39,7 @@ import {
   shownProblem,
   type ServerClient,
 } from "../src/server/client";
+import { deviceName } from "../src/account/deviceName";
 import { serverName } from "../src/server/origin";
 import { useTheme } from "../src/theme";
 import { signedInOnly } from "../src/sampleOnly";
@@ -181,7 +182,7 @@ function SettingsScreen() {
     act(session.sessionId, async () => {
       // Ending this phone's own session is signing out.
       if (session.current) return signOut();
-      const device = session.client ?? accountWords.unknownDevice;
+      const device = sessionName(session);
       if (
         !(await confirm({
           title: accountWords.endSessionTitle(device),
@@ -275,11 +276,7 @@ function SettingsScreen() {
             list.map((session) => (
               <Row
                 key={session.sessionId}
-                title={
-                  session.current
-                    ? accountWords.thisPhone
-                    : (session.client ?? accountWords.unknownDevice)
-                }
+                title={session.current ? accountWords.thisPhone : sessionName(session)}
                 detail={accountWords.signedInOn(
                   new Date(session.createdAtMs).toLocaleDateString(undefined, {
                     year: "numeric",
@@ -578,3 +575,6 @@ const styles = StyleSheet.create({
 });
 
 export default signedInOnly(SettingsScreen);
+
+const sessionName = (session: AccountSession) =>
+  (session.client === null ? null : deviceName(session.client)) ?? accountWords.unknownDevice;
