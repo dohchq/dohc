@@ -27,6 +27,7 @@ Rules:
 - Use either `operations: ["opName", ...]` (recommended) or `operationIds: ["<UUID>", ...]`, never both. Omit `revision` and `revisionSha256` so `prepareLocal`, `prepare`, and `stage` pin the latest approved Collection revision automatically.
 - Local owner apps can bind up to 16 Collections using `datasets` instead of `dataset`: an object map `"datasets": { "<alias>": { "kind": "dataset", "datasetPath": "...", "operations": [...] } }` (call `backend.invoke` with `dataset: "<alias>"`). Share-link apps support at most one Collection (`dataset`).
 - Only one of `dataset`, `datasets`, or `collection` may appear.
+- For typed rows, run `dohc dataset types '{"workspaceId":"...","datasetPath":"..."}'`. It writes `.dohc/types/<name>-<datasetId>.d.ts` from the approved revision and returns the exact `path`. Import it with `import type { FieldIds, Row, Operations } from "<relative path>/.dohc/types/<name>-<datasetId>"` and run it again after each approved change.
 - For public share-link apps, list only `access: "link"` operations. Never include owner-only reads in a public app manifest.
 
 ## Built-in app kit and TypeScript/JSX
