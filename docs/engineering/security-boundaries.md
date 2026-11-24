@@ -216,10 +216,10 @@ no top navigation and no same-origin access. The server's CSPs allow no frames
 in the app, no form posts and no workers. Its permissions policy allows no
 camera, microphone or location. These hold in any browser that opens the app.
 
-The phone's web view adds its own refusals. It loads nothing after the
-bootstrap except the app's frame, hands no address to the system, saves no
-download, grants no camera, microphone or location, and turns a new window into
-a link the person tapped. The phone asks before that link leaves dohc, and only
+The phone's web view adds its own refusals. After the bootstrap it refuses
+every top-level navigation, hands no address to the system, saves no download,
+grants no camera, microphone or location, and turns a new window into a link
+the person tapped. The app's own requests and subresources follow its CSP. The phone asks before that link leaves dohc, and only
 for HTTPS outside the dohc server and the app domain (`apps/mobile/src/apps/`).
 
 - iOS uses react-native-webview: incognito, a navigation rule for every frame,

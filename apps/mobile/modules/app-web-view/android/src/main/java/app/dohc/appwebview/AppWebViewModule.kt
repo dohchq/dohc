@@ -137,6 +137,12 @@ class AppWebView(context: Context, appContext: AppContext) : ExpoView(context, a
         }
         return true
       }
+
+      // It shares the app's renderer; returning false here would end dohc too.
+      override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+        if (view === catcher) drop()
+        return true
+      }
     }
     catcher = view
     main.postDelayed({ if (catcher === view) drop() }, 1_000)

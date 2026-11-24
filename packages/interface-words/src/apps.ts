@@ -44,5 +44,6 @@ export const appWords = {
   openFailed: "dohc could not open this app.",
 
   // A link the person tapped in an app, before it leaves dohc. The message is the link's host.
-  openOutside: { ios: "Open in Safari?", android: "Open in browser?" },
+  // Android may hand the link to an installed app that owns the site, as Chrome does.
+  openOutside: { ios: "Open in Safari?", android: "Open link?" },
 } as const;

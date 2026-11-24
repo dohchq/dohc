@@ -68,21 +68,8 @@ function AppView({
   onEnd(): void;
 }) {
   const [allows] = useState(() => createNavigationRule(app.action));
-  // Android draws under the keyboard, so the app's view ends above it and scrolls its focused field into sight.
-  const keyboard = useKeyboardState((state) => (state.isVisible ? state.height : 0));
   if (AppWebView)
-    return (
-      <AppWebView
-        style={{ flex: 1, marginBottom: keyboard }}
-        bootstrap={app.action}
-        handoff={app.handoff}
-        onOpenLink={(event) => {
-          const url = externalLink(event.nativeEvent.url, app.action, serverOrigin);
-          if (url) offerLink(url);
-        }}
-        onEnd={onEnd}
-      />
-    );
+    return <AndroidAppView view={AppWebView} app={app} serverOrigin={serverOrigin} onEnd={onEnd} />;
   return (
     <WebView
       style={{ flex: 1 }}
@@ -106,6 +93,33 @@ function AppView({
       mediaCapturePermissionGrantType="deny"
       allowsLinkPreview={false}
       allowsPictureInPictureMediaPlayback={false}
+    />
+  );
+}
+
+function AndroidAppView({
+  view: View,
+  app,
+  serverOrigin,
+  onEnd,
+}: {
+  view: NonNullable<typeof AppWebView>;
+  app: RunningApp;
+  serverOrigin: string;
+  onEnd(): void;
+}) {
+  // Android draws under the keyboard, so the app's view ends above it and scrolls its focused field into sight.
+  const keyboard = useKeyboardState((state) => (state.isVisible ? state.height : 0));
+  return (
+    <View
+      style={{ flex: 1, marginBottom: keyboard }}
+      bootstrap={app.action}
+      handoff={app.handoff}
+      onOpenLink={(event) => {
+        const url = externalLink(event.nativeEvent.url, app.action, serverOrigin);
+        if (url) offerLink(url);
+      }}
+      onEnd={onEnd}
     />
   );
 }

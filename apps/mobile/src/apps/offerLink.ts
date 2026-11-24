@@ -6,7 +6,7 @@ const ignore = () => undefined;
 let asking = false;
 
 /**
- * Asks "Open in Safari?" ("Open in browser?" on Android), naming the link's host, before a link leaves dohc, one question at a time. Pass only an
+ * Asks "Open in Safari?" ("Open link?" on Android), naming the link's host, before a link leaves dohc, one question at a time. Pass only an
  * address the external-link rule allowed (appNavigation.ts).
  */
 export function offerLink(url: string): void {
