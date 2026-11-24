@@ -46,7 +46,7 @@ export interface HostedPullDuties {
     readonly parking: number;
     readonly leaving: number;
     readonly recovering: number;
-    readonly movedRestores: number;
+    readonly movedRetiring: number;
     readonly retained: number;
     readonly retiring: number;
     readonly held: number;

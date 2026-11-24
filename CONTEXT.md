@@ -85,8 +85,12 @@ A named way to render a Collection, such as a table, board, or calendar. Availab
 _Avoid_: dashboard (see App), layout
 
 **Notice**:
-One item in a person's Notices: a problem or finished task on this computer, or something sent to that person, such as a mention or an automation's message. Items sent to a person reach all of their computers.
+One item in a person's Notices: a problem or finished task on this computer, or something sent to that person, such as a mention or an automation's message. Items sent to a person reach all of their computers. Notices never land in Inbox.
 _Avoid_: notification (for the item), inbox, alert
+
+**Inbox**:
+A workspace's private Document Collection at `Inbox/` that holds captured notes, links, dropped files, and incoming webhook deliveries waiting to be filed or archived. Created lazily on first capture, drop, or webhook. Distinct from Notices, which report outcomes and problems to a person.
+_Avoid_: Notices (that is for alerts and messages to a person), triage queue
 
 **Automation**:
 A rule on a Collection: one trigger, optional conditions, and steps that run in order. It belongs to the Collection, so anyone who can edit the Collection can change it, and it reaches only what all of them can reach.

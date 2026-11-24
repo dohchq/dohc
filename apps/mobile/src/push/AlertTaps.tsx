@@ -6,7 +6,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useAccount } from "../account/AccountProvider";
 import { Toast } from "../notices/Toast";
 import { serverName } from "../server/origin";
-import { openTap, type AlertsState } from "./alerts";
+import { openTap, tapData, type AlertsState } from "./alerts";
 
 const UNAVAILABLE: AlertsState = { status: "unavailable" };
 const none = { subscribe: () => () => undefined, state: () => UNAVAILABLE };
@@ -29,7 +29,7 @@ export function AlertTaps() {
     handled.current = request.identifier;
     setFailed(null);
     const generation = () => alerts?.generation() ?? null;
-    void openTap(signIn, request.content.data, generation, workspaceList).then((target) => {
+    void openTap(signIn, tapData(request), generation, workspaceList).then((target) => {
       if (handled.current !== request.identifier) return;
       if (target === null || target === "offline" || target === "server-busy") {
         handled.current = null;

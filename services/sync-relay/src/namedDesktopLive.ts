@@ -25,6 +25,7 @@ import type { createLiveTickets } from "./liveTickets";
 import type { SyncRelayStorage } from "./storage";
 import { type LiveHostChanges } from "./relayWriteChanges";
 import { observeDesktopReadiness } from "./desktopReadinessChanges";
+import type { SessionHostBlock } from "./linkRefusal";
 
 /** The browser's live sessions, which share-web's live socket resolves with the account cookie. */
 export interface MemberBrowserSessions {
@@ -53,6 +54,8 @@ export function createNamedDesktopLive(options: {
   hostsMemberDocuments(): boolean;
   /** Why this server's live host stopped trying to host the document, if it did. */
   hostBlocked?(document: { workspaceId: string; objectId: string }): string | undefined;
+  /** Whether the note takes no editors until its owner acts, as when it is paused or held. */
+  blocked?: (document: { workspaceId: string; objectId: string }) => SessionHostBlock | undefined;
 }) {
   const { storage } = options,
     limits = parseNamedLiveBrowserHttpLimits(options.limits);
@@ -235,7 +238,8 @@ export function createNamedDesktopLive(options: {
               versionId: "main",
               path: path.normalized,
             });
-            if (!objectId) return refuse();
+            if (!objectId || options.blocked?.({ workspaceId: share.workspaceId, objectId }))
+              return refuse();
             let authorized = false,
               counted = false;
             const grants = namedGrant

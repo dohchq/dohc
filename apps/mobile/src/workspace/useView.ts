@@ -1,5 +1,4 @@
 import { accountWords } from "@dohc/interface-words/account";
-import { documentWords } from "@dohc/interface-words/documents";
 import { noticesWords } from "@dohc/interface-words/notices";
 import { workspaceWords } from "@dohc/interface-words/workspace";
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
@@ -71,11 +70,7 @@ export function useKeptContentProblem(
 /** Why a read failed, in words: what the server did, then what to do. */
 export function useProblemText(): (problem: ReadProblem) => string {
   const server = serverName(useSignIn().origin);
-  return useCallback(
-    (problem: ReadProblem) =>
-      problem === "restoring" ? documentWords.restoring : accountWords.problem(problem, server),
-    [server],
-  );
+  return useCallback((problem: ReadProblem) => accountWords.problem(problem, server), [server]);
 }
 
 /**

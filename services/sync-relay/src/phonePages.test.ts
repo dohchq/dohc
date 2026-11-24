@@ -11,7 +11,7 @@ import { createChatWakeWaits } from "./chatWakeRoutes";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { errorResponse } from "./errors";
 import type { LiveTicketScope } from "./liveBrowserContext";
-import { binding, keptByOwnerRestore, scope } from "./liveTickets.test-helper";
+import { binding, scope } from "./liveTickets.test-helper";
 import { personalRouteFixture } from "./personalLiveDocumentRoutes.test-helper";
 import { createPhonePages, PHONE_OWNER_DOCUMENTS_PER_ACCOUNT } from "./phonePages";
 import { selfHostLiveProfile } from "./selfHostLiveProfile";
@@ -268,16 +268,6 @@ it("ends a session read past its wait as busy, and mints nothing", async () => {
     body: { ok: false, code: "server_busy" },
   });
   expect(f.mint).not.toHaveBeenCalled();
-});
-
-it("opens a page its owner's restore kept live", async () => {
-  const f = await phone();
-  f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input });
-  f.ready();
-  keptByOwnerRestore(f.raw, namespace);
-  expect(await f.open(binding.currentPath)).toMatchObject(
-    answer(expect.objectContaining({ status: "ready", objectId: binding.objectId })),
-  );
 });
 
 it("never resumes a Pause or Stop, and answers a page retained at its old path as unavailable", async () => {

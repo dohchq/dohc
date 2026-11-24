@@ -44,6 +44,10 @@
     "historyOperation",
     "historyUndo",
     "inbox",
+    "inboxAdd",
+    "inboxArchive",
+    "inboxList",
+    "inboxMove",
     "keepOutsideChange",
     "keptCopies",
     "link",
@@ -144,6 +148,10 @@
     "historyOperation",
     "historyUndo",
     "inbox",
+    "inboxAdd",
+    "inboxArchive",
+    "inboxList",
+    "inboxMove",
     "keepOutsideChange",
     "link",
     "linksEdges",
@@ -186,6 +194,7 @@
   "publicGroups": [
     "links",
     "notices",
+    "inbox",
     "sync",
     "access",
     "share",
@@ -206,6 +215,10 @@
     "links in",
     "links resolve",
     "notices list",
+    "inbox add",
+    "inbox archive",
+    "inbox move",
+    "inbox list",
     "sync stop",
     "access refresh",
     "access object",
@@ -345,6 +358,10 @@
         {
           "group": "notices",
           "block": "  notices      Read this workspace's Notices.\n               list\n"
+        },
+        {
+          "group": "inbox",
+          "block": "  inbox        Capture notes and links into the workspace Inbox and triage them.\n               add, archive, move, list\n"
         },
         {
           "group": "sync",
@@ -551,6 +568,11 @@
     "members member": "Usage: dohc members member <person> [options]\n\nMake an admin a member again.\n\nRun dohc inside a workspace folder while the dohc app is open.\nWorks in a workspace you own or joined, signed in with the account that owns or\njoined it. Your server decides what your role allows.\nMembers see names and roles. Admins also invite people, remove members, let them\nback in, set the member level, and manage the invite link. Only the owner\nchanges roles or ends membership.\nA person is a member id from dohc members list, or the email of an invite or a\nperson.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n",
     "members let-back-in": "Usage: dohc members let-back-in <person> [options]\n\nLet a removed account back in as a member.\n\nRun dohc inside a workspace folder while the dohc app is open.\nWorks in a workspace you own or joined, signed in with the account that owns or\njoined it. Your server decides what your role allows.\nMembers see names and roles. Admins also invite people, remove members, let them\nback in, set the member level, and manage the invite link. Only the owner\nchanges roles or ends membership.\nA person is a member id from dohc members list, or the email of an invite or a\nperson.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n",
     "members link": "Usage: dohc members link <on|off|reset> [options]\n\nTurn the invite link on or off, or reset it.\n\nAnyone with the link who signs in becomes a member. Turning it off or resetting\nit removes no one who already joined. Reset stops the old link working.\ndohc members list shows the link.\n\nRun dohc inside a workspace folder while the dohc app is open.\nWorks in a workspace you own or joined, signed in with the account that owns or\njoined it. Your server decides what your role allows.\nMembers see names and roles. Admins also invite people, remove members, let them\nback in, set the member level, and manage the invite link. Only the owner\nchanges roles or ends membership.\nA person is a member id from dohc members list, or the email of an invite or a\nperson.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n",
-    "members end": "Usage: dohc members end [options]\n\nEnd membership for everyone. Members lose access; copies already on their computers stay.\n\nRun dohc inside a workspace folder while the dohc app is open.\nWorks in a workspace you own or joined, signed in with the account that owns or\njoined it. Your server decides what your role allows.\nMembers see names and roles. Admins also invite people, remove members, let them\nback in, set the member level, and manage the invite link. Only the owner\nchanges roles or ends membership.\nA person is a member id from dohc members list, or the email of an invite or a\nperson.\n\nOptions:\n  --everyone         Required. Confirms that every member and admin loses\n                     access.\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n"
+    "members end": "Usage: dohc members end [options]\n\nEnd membership for everyone. Members lose access; copies already on their computers stay.\n\nRun dohc inside a workspace folder while the dohc app is open.\nWorks in a workspace you own or joined, signed in with the account that owns or\njoined it. Your server decides what your role allows.\nMembers see names and roles. Admins also invite people, remove members, let them\nback in, set the member level, and manage the invite link. Only the owner\nchanges roles or ends membership.\nA person is a member id from dohc members list, or the email of an invite or a\nperson.\n\nOptions:\n  --everyone         Required. Confirms that every member and admin loses\n                     access.\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n",
+    "inbox": "Usage: dohc inbox <verb> [arguments] [options]\n\nCapture notes and links into the workspace Inbox and triage them.\n\nVerbs:\n  add       Capture a note or link into the workspace Inbox.\n  archive   Mark an Inbox item as Archived.\n  move      Move an Inbox item (and any linked Inbox attachments) into an owned\n            folder.\n  list      List items waiting in the workspace Inbox.\n\nRun dohc inside a workspace folder while the dohc app is open.\nCreates Inbox/ lazily on first capture. Listing does not create Inbox/.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n\nRun dohc inbox <verb> --help to see its arguments and options.\n",
+    "inbox list": "Usage: dohc inbox list [options]\n\nList items waiting in the workspace Inbox.\n\nRun dohc inside a workspace folder while the dohc app is open.\nCreates Inbox/ lazily on first capture. Listing does not create Inbox/.\n\nOptions:\n  --status <<New|Filed|Archived>>   Filter items by status.\n  --limit <<n>>                     Show at most this many items (default 50,\n                                    max 100).\n  --as-agent                        Post and read chat as an agent.\n  --agent-id <id>                   Work as this agent you run, by its id in\n                                    Settings › Agents. Implies --as-agent.\n  --workspace <id>                  Work in this workspace, by its id, instead\n                                    of the one this folder is in. Relative paths\n                                    then start at the workspace's folder.\n  --json                            Print the result as JSON.\n  --help                            Show help. -h does the same.\n",
+    "inbox add": "Usage: dohc inbox add [body] [options]\n\nCapture a note or link into the workspace Inbox.\n\nCreates Inbox/ lazily on first capture.\n\nRun dohc inside a workspace folder while the dohc app is open.\nCreates Inbox/ lazily on first capture. Listing does not create Inbox/.\n\nOptions:\n  --title <<text>>                          Title for the Inbox item.\n  --url <<https://...>>                     Optional http or https link to\n                                            capture.\n  --kind <<note|file|image|link|webhook>>   Item kind (defaults to link when\n                                            --url is set, otherwise note).\n  --as-agent                                Post and read chat as an agent.\n  --agent-id <id>                           Work as this agent you run, by its\n                                            id in Settings › Agents. Implies\n                                            --as-agent.\n  --workspace <id>                          Work in this workspace, by its id,\n                                            instead of the one this folder is\n                                            in. Relative paths then start at the\n                                            workspace's folder.\n  --json                                    Print the result as JSON.\n  --help                                    Show help. -h does the same.\n",
+    "inbox archive": "Usage: dohc inbox archive <path> [options]\n\nMark an Inbox item as Archived.\n\nUpdates Status to Archived through the item's live document session.\n\nRun dohc inside a workspace folder while the dohc app is open.\nCreates Inbox/ lazily on first capture. Listing does not create Inbox/.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n",
+    "inbox move": "Usage: dohc inbox move <path> <folder> [options]\n\nMove an Inbox item (and any linked Inbox attachments) into an owned folder.\n\nRewrites workspace links and returns History operation id(s) for Undo.\nUse \"\" or \".\" as <folder> to move into the workspace root.\n\nRun dohc inside a workspace folder while the dohc app is open.\nCreates Inbox/ lazily on first capture. Listing does not create Inbox/.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n"
   }
 }

@@ -19,6 +19,7 @@ export const MENU_COMMANDS = [
   "new-file",
   "new-folder",
   "new-collection",
+  "quick-capture",
   "open-workspace",
   "import-files",
   "export-workspace",

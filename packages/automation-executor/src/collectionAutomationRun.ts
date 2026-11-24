@@ -149,7 +149,34 @@ export interface CollectionRecordWrites {
   }): Promise<{ path: string; recordId: string }>;
 }
 
+export interface AutomationHttpWebhookExecutor {
+  execute(input: {
+    collectionId: string;
+    collectionPath: string;
+    automation: Automation;
+    definitionDigest: string;
+    approvalDigest: string;
+    codeFileHashes: ReadonlyArray<{ file: string; sha256: string }>;
+    effect: Extract<PlannedEffect, { kind: "http" }>;
+    depth: number;
+    signal: AbortSignal;
+  }): Promise<
+    | { ok: true; status: number }
+    | {
+        ok: false;
+        status?: number;
+        reason: string;
+        waitReason?: "held" | "session";
+        beforeSend?: boolean;
+      }
+  >;
+}
+
 export interface CollectionAutomationRunDependencies {
+  /** Sends a planned outbound HTTP webhook step after owner confirmation and reach checks. */
+  httpWebhook?: AutomationHttpWebhookExecutor;
+  /** Checks whether a specific HTTP step approval digest is currently approved outside the workspace. */
+  isHttpStepApproved?(digest: string): Promise<"approved" | "unapproved" | "unavailable">;
   /** Local aggregate observer, after the run's durable successful completion. */
   onUsageSuccess?(invocation: import("./automationUsage").AutomationUsageInvocation): void;
   /** Before each effect this attempt lands. Throwing fails the run before the effect changes anything. */
@@ -687,6 +714,8 @@ export async function applyDocumentEffect(
     return await applyChatEffect(dependencies, context, effect);
   // A document Collection's automation that names an action never runs (unsupportedReason).
   if (effect.kind === "invoke") throw new Error("Only a dataset Collection has actions.");
+  if (effect.kind === "http")
+    throw new Error("Outbound HTTP steps are handled by the run backend.");
   const key = stepKey(run.claimId, run.keySeed, ordinal);
   const seam = (
     edit: CollectionRecordWrites,

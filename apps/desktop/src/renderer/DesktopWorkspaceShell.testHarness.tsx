@@ -9,7 +9,6 @@ import { afterEach, expect, vi } from "vitest";
 import * as Y from "yjs";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import type { MembersResult } from "@dohc/cli/members";
-import type { OwnerRestoreRequest } from "../ipc/ownerRestoreContract";
 import type {
   AgentRunStateEvent,
   AgentThreadLinesEvent,
@@ -693,6 +692,27 @@ function makeBaseBridge(
       imported: ["imported.md"],
       skipped: 0,
     })),
+    inboxList: vi.fn(async () => ({ exists: false, items: [], hasMore: false })),
+    inboxAdd: vi.fn(async () => ({
+      path: "Inbox/2026-11-23-item.md",
+      recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      title: "Item",
+      createdInbox: true,
+    })),
+    inboxArchive: vi.fn(async () => ({
+      path: "Inbox/2026-11-23-item.md",
+      previousStatus: "New",
+    })),
+    inboxMove: vi.fn(async () => ({
+      fromPath: "Inbox/2026-11-23-item.md",
+      toPath: "Projects/2026-11-23-item.md",
+    })),
+    inboxCaptureFiles: vi.fn(async () => ({
+      items: [],
+      skipped: 0,
+      skippedSources: [],
+      createdInbox: false,
+    })),
     exportWorkspaceZip: vi.fn(async () => ({ path: "/tmp/workspace.zip" })),
     readExplorerMenu: vi.fn(async (): Promise<ExplorerMenuEntry[]> => []),
     revealExplorerPath: vi.fn(async () => undefined),
@@ -1086,12 +1106,6 @@ export function makeBridge(
     dataset: vi.fn(async (request: DatasetRequest): Promise<DatasetResult> => {
       if (request.action === "list") return { kind: "list", datasets: [], nextCursor: null };
       throw new Error(`Unexpected dataset action in shell fixture: ${request.action}`);
-    }),
-    // The synced workspace lists its unfinished restores when it opens; the
-    // restore tests swap in their own.
-    ownerRestore: vi.fn(async (request: OwnerRestoreRequest): Promise<unknown> => {
-      if (request.action === "unfinished") return { restores: [], unreadable: 0, nextCursor: null };
-      throw new Error(`Unexpected owner restore action in shell fixture: ${request.action}`);
     }),
     getCollection: vi.fn(async (): Promise<GetCollectionResult> => ({
       path: "tasks",

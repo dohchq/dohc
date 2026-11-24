@@ -28,13 +28,20 @@ Accept that difference. Look again only if it shows on another page or grows.
 
 ## Android
 
-On iOS the sync band on Notices and Sharing sits in a small native host (`modules/bar-band`), through
+On Android a tab's stack draws dohc's own header above the screen (`src/AndroidHeader.tsx`): the system header lays a
+nested stack's screen out under itself. `Stack.Toolbar` is iOS only, since Android's needs `@expo/ui` and shows no text
+buttons; give Android the same actions as `headerRight` `HeaderButton`s. SF Symbols draw only on iOS, so a `SymbolView`
+passes `symbolFallback` (`src/symbolFallback.tsx`), which maps the names in use to lucide icons. Android's web view may
+inject `__dohcPage` after the editor's script runs; the editor starts when it arrives (`editor/page.ts`). `confirm.ts`
+uses an `Alert` on Android, which shows at most three buttons.
+
+On iOS the sync band on the sample's Notices and Sharing sits in a small native host (`modules/bar-band`), through
 `src/notices/useSyncBandHost.tsx`. It tells iOS the band's strip is covered, keeps the band on the list's top edge but
 never above the folded bar, has VoiceOver read the band before the list, and reports the space between the bar and the
 tab bar. The band is at most half that space, and scrolls inside itself when its text is taller. Android doesn't have
-the host yet. There the screen draws the band at the bar's reported height, the list keeps an empty first row of the
-band's height, and the band has no height cap. The reading order and a focused row's place aren't handled. Nothing on
-Android has been run since the host was added.
+the host. There the screen draws the band at the bar's reported height, the list keeps an empty first row of the
+band's height, and the band has no height cap. The reading order and a focused row's place aren't handled, and the
+band hasn't run on Android.
 
 ## Controls that act
 

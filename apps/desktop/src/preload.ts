@@ -7,6 +7,11 @@ import {
   protectedCopyOperations,
   stoppedRunOperations,
 } from "./ipc/writeOperations";
+import {
+  inboxDesktopOperations,
+  inboxReadOperations,
+  inboxWriteOperations,
+} from "./ipc/inboxOperations";
 import { heldChangeOperations } from "./ipc/heldChangeOperations";
 import {
   shareHandoffOperations,
@@ -22,6 +27,8 @@ import { accessOperations } from "./ipc/accessOperations";
 import { memberOperations } from "./ipc/memberOperations";
 import { settingsOperations } from "./ipc/settingsOperations";
 import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
+import { workspaceSecretsOperations } from "./ipc/workspaceSecretsOperations";
+import { incomingWebhooksOperations } from "./ipc/incomingWebhooksOperations";
 import { explorerMenuOperations } from "./ipc/explorerMenuOperations";
 import { devToolsGranted } from "./ipc/devToolsIpc";
 import { insecureLoopbackServersForTests } from "./workspaces/cloudConfiguration";
@@ -178,8 +185,6 @@ ipcRenderer.on(CHANNELS.menuCommand, (_event, raw: unknown) => {
 // reject IPC that the outgoing document queued while renderer reload cleanup
 // was draining on the same WebContents object.
 const rendererDocumentId = crypto.randomUUID();
-const relay = operationBridge(relayShareOperations, invoke);
-
 const bridge: DohcDesktopBridge = {
   ...operationBridge(workspaceFileOperations, invoke),
   ...operationBridge(explorerMenuOperations, invoke),
@@ -189,8 +194,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(shareMountOperations, invoke),
   ...operationBridge(shareProposalOperations, invoke),
   ...operationBridge(sharedChannelOperations, invoke),
-  ...relay,
-  ownerRestore: relay.ownerRestore as DohcDesktopBridge["ownerRestore"],
+  ...operationBridge(relayShareOperations, invoke),
   ...operationBridge(workspaceFolderNameOperations, invoke),
   ...operationBridge(systemMotionOperations, invoke),
   ...operationBridge(updateDownloadOperations, invoke),
@@ -589,6 +593,8 @@ const bridge: DohcDesktopBridge = {
   onSearchResults: (listener) => onEvent(CHANNELS.searchResults, SearchResultsEvent, listener),
   ...operationBridge(noticeOperations, invoke),
   ...operationBridge(scheduleHostOperations, invoke),
+  ...operationBridge(workspaceSecretsOperations, invoke),
+  ...operationBridge(incomingWebhooksOperations, invoke),
   ...operationBridge(chatDispatchNoticeOperations, invoke),
   onNoticesChanged: (listener) =>
     onEvent(CHANNELS.noticesChanged, NoticesChangedEvent, () => listener()),
@@ -605,6 +611,9 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(stoppedRunOperations, invoke),
   ...operationBridge(protectedCopyOperations, invoke),
   ...operationBridge(agentRunUndoOperations, invoke),
+  ...operationBridge(inboxReadOperations, invoke),
+  ...operationBridge(inboxWriteOperations, invoke),
+  ...operationBridge(inboxDesktopOperations, invoke),
   ...operationBridge(chatDispatchPauseOperations, invoke),
   ...operationBridge(agentThreadOperations, invoke),
   onChatDispatchPaused: (listener) =>

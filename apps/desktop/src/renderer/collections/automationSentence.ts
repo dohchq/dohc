@@ -166,6 +166,19 @@ export function stepParts(step: AutomationStep): SentencePart[] {
       return [text("run code")];
     case "run-file":
       return [text(`run ${step.file}`)];
+    case "http": {
+      let target: string;
+      if (step.url.kind === "secret") {
+        target = `secret ${step.url.secret}`;
+      } else {
+        try {
+          target = new URL(step.url.url).hostname.toLowerCase();
+        } catch {
+          target = step.url.url;
+        }
+      }
+      return [text(`send a webhook to ${target}`)];
+    }
   }
 }
 
