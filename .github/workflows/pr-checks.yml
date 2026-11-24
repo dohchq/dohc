@@ -163,7 +163,12 @@ jobs:
               - 'examples/trip-poll/**'
               - 'examples/fundraiser/**'
               - 'examples/stock-orders/**'
+              - 'examples/personal-control-tower/**'
               - 'examples/accounting/**'
+              - 'examples/lightbox/**'
+              - 'examples/tournament/**'
+              - 'examples/hex-tactics/**'
+              - 'examples/quant-workbench/**'
               # The desktop daemon prebuild reads Cargo configuration.
               - '.cargo/**'
               # build-artifacts.test.mjs reads the desktop ignore rules.

@@ -1,5 +1,6 @@
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 import { defineConfig } from "vitest/config";
 
 // macOS $TMPDIR is a link into /private. Tests that make folders under
@@ -13,5 +14,15 @@ if (process.platform !== "win32") process.env.TMPDIR = realpathSync(tmpdir());
 const workerStepsMs = 32_000;
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      "dohc/app": resolve(import.meta.dirname, "../app-kit/src/app.tsx"),
+      "dohc/ui": resolve(import.meta.dirname, "../app-kit/src/ui.tsx"),
+      "dohc/charts": resolve(import.meta.dirname, "../app-kit/src/charts.tsx"),
+      "dohc/icons": resolve(import.meta.dirname, "../app-kit/src/icons.ts"),
+      "dohc/money": resolve(import.meta.dirname, "../app-kit/src/money.ts"),
+      "dohc/csv": resolve(import.meta.dirname, "../app-kit/src/csv.ts"),
+    },
+  },
   test: { maxWorkers: 1, testTimeout: workerStepsMs, hookTimeout: workerStepsMs },
 });
