@@ -11,7 +11,9 @@ import { LazyChatsView, LazyCollectionPage } from "./shell/lazyViews";
 export function preloadViewForPath(path: string): void {
   switch (fileKindForPath(path).displayKind) {
     case "markdown":
+      // A note can show its read view while the engine opens it.
       preloadMarkdownEditor();
+      void preloadMarkdownReadView();
       return;
     case "drawing":
       void LazyExcalidrawCanvas.preload();

@@ -2294,6 +2294,11 @@ function WorkspaceShell(props: {
         if (stored) {
           const parsed = parseUiState(stored);
           const restoredGroup = activeGroup(parsed);
+          // Each split shows its active tab, so its view loads with the file.
+          for (const group of parsed.editorGroups) {
+            if (group.activeTab !== null && !TAB_KINDS[parseTab(group.activeTab).kind].virtual)
+              preloadViewForPath(group.activeTab);
+          }
           if (
             restoredGroup.activeTab !== null &&
             !TAB_KINDS[parseTab(restoredGroup.activeTab).kind].virtual
@@ -2303,7 +2308,6 @@ function WorkspaceShell(props: {
               groupId: restoredGroup.id,
               path: restoredGroup.activeTab,
             };
-            preloadViewForPath(restoredGroup.activeTab);
           }
           // Order matters: writeWb (which sets wbRef), THEN enable flushes — a
           // beforeunload between "loaded" and the restored state's commit
@@ -6417,8 +6421,12 @@ function WorkspaceShell(props: {
   useEffect(() => {
     if (!syncStatus) return;
     rendererMarks.markOnce("workspace-shell-interactive");
-    scheduleIdleViewPreloads();
   }, [syncStatus]);
+  // Code for views nobody opened yet loads only once the workbench takes
+  // input, so it does not compete with opening the workspace.
+  useEffect(() => {
+    if (syncStatus && workbenchRestored) scheduleIdleViewPreloads();
+  }, [syncStatus, workbenchRestored]);
 
   // Open the workspace for this renderer selection. Main admits the exact
   // session before watcher readiness, then returns the capture decision and
