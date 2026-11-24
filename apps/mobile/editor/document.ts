@@ -166,7 +166,16 @@ function followCaretAboveKeyboard() {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0 || !document.activeElement?.closest(".markdown"))
       return;
-    const caret = selection.getRangeAt(0).getBoundingClientRect();
+    // WebKit gives a caret on an empty line a zero rect, so the line break after the caret is measured instead, or
+    // an empty line's own element.
+    let caret = selection.getRangeAt(0).getBoundingClientRect();
+    const node = selection.focusNode;
+    if (caret.height === 0 && node instanceof Element) {
+      const after = node.childNodes[selection.focusOffset];
+      if (after instanceof HTMLBRElement) caret = after.getBoundingClientRect();
+      if (caret.height === 0 && node.textContent === "" && node !== document.activeElement)
+        caret = node.getBoundingClientRect();
+    }
     // WebKit may already shrink the visual viewport for the keyboard; take whichever edge is higher, so the
     // keyboard is never counted twice. A small margin keeps the caret clear of it. The scroll is instant, so it
     // reads the same under Reduce Motion.
@@ -181,6 +190,8 @@ function followCaretAboveKeyboard() {
   };
   (window as Window & { __dohcKeyboard?: (height: number) => void }).__dohcKeyboard = (height) => {
     covered = height;
+    const editor = document.getElementById("editor");
+    if (editor) editor.style.paddingBottom = height > 0 ? `max(40vh, ${height + 48}px)` : "";
     reveal();
   };
   document.addEventListener("selectionchange", () => requestAnimationFrame(reveal));

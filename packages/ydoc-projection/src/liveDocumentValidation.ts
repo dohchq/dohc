@@ -84,6 +84,7 @@ const PROJECTION_SOURCE_META_KEYS = [...SOURCE_META_KEYS, "dohcFrontmatterSource
 const FRONTMATTER_SOURCE_ITEM_META_PREFIX = "dohcFrontmatterSourceItem:";
 // Metadata only the engine's Markdown reader writes.
 const ENGINE_META_KEYS = new Set(["dohcLineageEpoch", "dohcMarkdownSourceReader"]);
+const LINEAGE_EPOCH_META_KEY = "dohcLineageEpoch";
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 let bodySequenceNotesAdmitted = false;
@@ -97,10 +98,19 @@ export function admitBodySequenceNotes(admitted: boolean): void {
 }
 
 /** Each key's own rule from `validateMetadata`, for one item of a body-sequence note's metadata. */
-function bodySequenceMetadata(engineReader: boolean): BodySequenceIntakeRules["metadata"] {
+function bodySequenceMetadata(
+  engineReader: boolean,
+  lineageEpoch = false,
+): BodySequenceIntakeRules["metadata"] {
   return (key, shown) => {
     const kept = key.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX);
-    if (!kept && !META_KEYS.has(key) && !(engineReader && ENGINE_META_KEYS.has(key))) return false;
+    if (
+      !kept &&
+      !META_KEYS.has(key) &&
+      !(engineReader && ENGINE_META_KEYS.has(key)) &&
+      !(lineageEpoch && key === LINEAGE_EPOCH_META_KEY)
+    )
+      return false;
     if (!shown) return true;
     const { value } = shown;
     if (key === "dohcMarkdownCrlf") return value === true;
@@ -120,10 +130,11 @@ function bodySequenceCut(
 ): BodySequenceCut | undefined {
   if (!bodySequenceNotesAdmitted) return undefined;
   const rules = { policy, metadata: bodySequenceMetadata(engineReader) };
+  const stateRules = { policy, metadata: bodySequenceMetadata(engineReader, true) };
   return {
     holds: holdsBodySequence,
     entry(document, bytes, apply, kind) {
-      if (kind === "state") return bodySequenceStateRefusal(document, bytes, apply, rules);
+      if (kind === "state") return bodySequenceStateRefusal(document, bytes, apply, stateRules);
       if (holdsBodySequence(document))
         return bodySequenceChangeRefusal(document, bytes, apply, rules);
       apply();
@@ -549,7 +560,9 @@ function journalValidator(
         ownedPolicy,
         topology,
         "refuse",
-        undefined,
+        () => {
+          if (changesLineageEpoch(cut)) refuse("invalid-schema");
+        },
         engineReader,
       );
       if (timing) timing.projectionMs = performance.now() - projectionStarted!;
@@ -677,6 +690,19 @@ type ProjectedCut =
 // refused: the engine's own check reads some sources differently from the
 // importer, so a forged witness must not reach it through an update.
 type UnverifiedSource = "drop" | "refuse";
+
+function changesLineageEpoch(
+  cut: Extract<ValidatedLiveUpdateCut, { mode: "journal-candidate" }>,
+): boolean {
+  const item = cut.document.share.get("meta")?._map.get(LINEAGE_EPOCH_META_KEY);
+  if (!item) return false;
+  const { client, clock } = item.id;
+  const holds = (ranges: readonly LiveUpdateStructRange[]) =>
+    ranges.some(
+      (range) => range.clientId === client && range.startClock <= clock && clock < range.endClock,
+    );
+  return holds(cut.candidate.firstSeen) || holds(cut.candidate.firstSeenDeletes);
+}
 
 function projectAndFinalize(
   cut: ValidatedLiveUpdateCut,
@@ -976,6 +1002,7 @@ export function liveEditRefusal(
   try {
     const limit = bodySequenceChangeLimit(update, policy, work);
     if (limit !== undefined) return { reason: "capacity-refused", limit };
+    const keepsEngineMeta = engineMetaKept(copy);
     const refusal = bodySequenceChangeRefusal(
       copy,
       update,
@@ -983,7 +1010,7 @@ export function liveEditRefusal(
       { policy: bodySequenceRoomPolicy(policy), metadata: ROOM_METADATA },
       work,
     );
-    if (refusal === undefined) return undefined;
+    if (refusal === undefined) return keepsEngineMeta() ? undefined : invalid;
     return refusal === "capacity-refused" ? { reason: refusal } : invalid;
   } catch {
     return invalid;
@@ -1011,6 +1038,7 @@ function editFitsFormat1(copy: Y.Doc, update: Uint8Array): boolean {
   }
   const version = copy.share.get("meta")?._map.get("schemaVersion");
   const hadVersion = version !== undefined && !version.deleted;
+  const keepsEngineMeta = engineMetaKept(copy);
   let fits = true;
   // Read before the change ends: Yjs then joins each new item to the one before it from the same
   // editor without comparing their parents.
@@ -1028,9 +1056,19 @@ function editFitsFormat1(copy: Y.Doc, update: Uint8Array): boolean {
   return (
     fits &&
     !(hadVersion && version.deleted) &&
+    keepsEngineMeta() &&
     copy.store.pendingStructs === null &&
     copy.store.pendingDs === null
   );
+}
+
+function engineMetaKept(copy: Y.Doc): () => boolean {
+  const meta = copy.share.get("meta")?._map;
+  const items = [...ENGINE_META_KEYS].flatMap((key) => {
+    const item = meta?.get(key);
+    return item && !item.deleted ? [item] : [];
+  });
+  return () => items.every((item) => !item.deleted);
 }
 
 function placedItemsFit(copy: Y.Doc, transaction: Y.Transaction): boolean {
@@ -1072,6 +1110,7 @@ function placedItemsFit(copy: Y.Doc, transaction: Y.Transaction): boolean {
         (!PUBLIC_ROOTS.has(parent) || (parent === "body") !== (sub === null))
       )
         return false;
+      if (parent === "meta" && sub !== null && ENGINE_META_KEYS.has(sub)) return false;
       if (
         parent === "meta" &&
         sub === "schemaVersion" &&
@@ -1090,9 +1129,7 @@ function placedItemsFit(copy: Y.Doc, transaction: Y.Transaction): boolean {
             ? sub !== null && value(content)
             : parent === "meta"
               ? sub !== null &&
-                (META_KEYS.has(sub) ||
-                  ENGINE_META_KEYS.has(sub) ||
-                  sub.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) &&
+                (META_KEYS.has(sub) || sub.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) &&
                 content instanceof Y.ContentAny
               : typeof parent === "string"
                 ? false
@@ -1248,7 +1285,7 @@ function validateMetadata(
 ): { metadata: Record<string, unknown>; witness: ReturnType<typeof readMarkdownSourceWitness> } {
   const snapshot: Record<string, unknown> = Object.create(null);
   for (const [key, value] of meta.entries()) {
-    if (engineReader && key === "dohcLineageEpoch") {
+    if (key === LINEAGE_EPOCH_META_KEY) {
       if (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value)) refuse("invalid-schema");
       snapshot[key] = value;
       continue;
@@ -1388,10 +1425,8 @@ function validatePublicState(
         refuse("invalid-schema");
       const withoutSources = (values: Record<string, unknown>) => {
         const kept = { ...values };
-        if (engineReader) {
-          delete kept.dohcLineageEpoch;
-          delete kept.dohcMarkdownSourceReader;
-        }
+        delete kept[LINEAGE_EPOCH_META_KEY];
+        if (engineReader) delete kept.dohcMarkdownSourceReader;
         for (const key of PROJECTION_SOURCE_META_KEYS) delete kept[key];
         for (const key of Object.keys(kept))
           if (key.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) delete kept[key];

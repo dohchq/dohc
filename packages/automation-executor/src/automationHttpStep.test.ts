@@ -82,7 +82,7 @@ describe("automation http steps", () => {
           recipientUserId: "user-alex",
           recipientEmail: "alex@example.com",
           files: { paths: ["Tasks"], versionId: null, access: "edit" },
-          channel: null,
+          chat: null,
         },
       ],
     };
@@ -95,7 +95,7 @@ describe("automation http steps", () => {
           recipientUserId: "user-alex",
           recipientEmail: "alex@example.com",
           files: { paths: ["Tasks"], versionId: null, access: "view" },
-          channel: null,
+          chat: null,
         },
       ],
     };

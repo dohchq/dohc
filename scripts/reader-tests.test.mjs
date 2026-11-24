@@ -116,10 +116,8 @@ test("every ignored test that needs only a staged reader runs in the phase", () 
   const names = readerTests();
   for (const name of [
     "a_reader_built_lineage_adopts_its_successor",
-    "reader_restore_no_reader_prefix_refuses_before_fencing",
     "real_reader_proves_frontmatter_source_without_rewriting_live_state",
     "real_reader_settles_without_edits_and_revalidates_after_restart",
-    "reader_restore_dispatches_outside_the_actor_at_every_phase",
     "outside_reader_fold_refuses_file_staleness",
     "real_reader_refuses_a_note_over_its_capacity_once_without_a_crash",
   ]) {

@@ -819,7 +819,9 @@ it.each([
     expect(enrolled).toContain(f.binding.currentPath);
     if (covered) expect(enrolled).toContain(copy.path);
     else expect(enrolled).not.toContain(copy.path);
-    expect(f.storage.hasServiceHostConflictEffect(f.binding)).toBe(true);
+    expect(
+      f.storage.hasServiceHostConflictEffect({ ...f.binding, path: f.binding.currentPath }),
+    ).toBe(true);
     expect(f.storage.hasServiceHostConflictEffect(copy)).toBe(false);
   },
 );
