@@ -3064,6 +3064,40 @@ fn first_imported_activation_settlement_rejects_another_objects_baseline() {
     imported_activation_publication(true, false);
 }
 
+#[test]
+fn first_settlement_of_a_lineage_a_resolve_began_reads_the_resolved_path() {
+    let (mut f, _, baseline, _) = imported_owner(false, true);
+    let b = f.binding.clone();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            let resolve = json!({
+                "targetVersionId": b.main_version_id,
+                "paths": [b.current_path],
+                "transition": {"result": {"objectId": b.object_id, "pathRef": 0}},
+                "lineageTransition": {"successor": {
+                    "lineageClaimId": b.lineage_claim_id,
+                    "updateBlobSha256": b.lineage_claim_id,
+                    "contentKind": "richdoc",
+                }},
+            });
+            tx.execute(
+                "UPDATE replication_log SET op_kind='conflict.resolve',payload_json=?1
+                 WHERE (origin_id,origin_seq)=(SELECT json_extract(record_json,'$.baseCoordinate.originId'),json_extract(record_json,'$.baseCoordinate.originSeq') FROM live_audit_base_publications)",
+                [resolve.to_string()],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    settle_bootstrap_publication(&mut f, 1, "service-first-settlement").unwrap();
+    let first = crate::list_replication_ops(&f.store, "ws", "service-origin", -1, 500)
+        .unwrap()
+        .into_iter()
+        .find(|op| op.payload["momentId"] == "service-first-settlement")
+        .unwrap();
+    assert_eq!(first.payload["payloadBeforeBlobSha256"], baseline);
+}
+
 /// An owner lineage adopted on a store that replicates as `service-origin`,
 /// from an imported activation, its adoption seed accepted at cursor 1 and
 /// acknowledged. Returns it with the source that bootstrapped the lineage,
