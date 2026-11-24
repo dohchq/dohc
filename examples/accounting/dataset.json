@@ -1,0 +1,824 @@
+{
+  "formatVersion": 2,
+  "datasetId": "6d1f3c2a-8b4e-4f7a-9c35-2e8d41a7b901",
+  "name": "Accounting",
+  "tables": [
+    {
+      "sqlName": "accounts",
+      "name": "Accounts",
+      "primaryKey": "id",
+      "fields": [
+        {
+          "sqlColumn": "id",
+          "name": "Code",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "name",
+          "name": "Name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "sqlColumn": "type",
+          "name": "Type",
+          "type": "select",
+          "required": true,
+          "options": [
+            "asset",
+            "liability",
+            "equity",
+            "income",
+            "expense"
+          ]
+        },
+        {
+          "sqlColumn": "role",
+          "name": "Role",
+          "type": "select",
+          "options": [
+            "receivable",
+            "sales_tax"
+          ]
+        },
+        {
+          "sqlColumn": "is_bank",
+          "name": "Bank account",
+          "type": "checkbox",
+          "required": true
+        },
+        {
+          "sqlColumn": "archived",
+          "name": "Archived",
+          "type": "checkbox",
+          "required": true
+        }
+      ]
+    },
+    {
+      "sqlName": "fiscal_periods",
+      "name": "Fiscal periods",
+      "primaryKey": "id",
+      "fields": [
+        {
+          "sqlColumn": "id",
+          "name": "Period",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "start_date",
+          "name": "Starts",
+          "type": "date",
+          "required": true
+        },
+        {
+          "sqlColumn": "end_date",
+          "name": "Ends",
+          "type": "date",
+          "required": true
+        },
+        {
+          "sqlColumn": "status",
+          "name": "Status",
+          "type": "select",
+          "required": true,
+          "options": [
+            "open",
+            "locked"
+          ]
+        },
+        {
+          "sqlColumn": "locked_at_ms",
+          "name": "Locked at",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "sqlName": "journal_entries",
+      "name": "Journal entries",
+      "primaryKey": "id",
+      "fields": [
+        {
+          "sqlColumn": "id",
+          "name": "ID",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "number",
+          "name": "Number",
+          "type": "number",
+          "required": true,
+          "unique": true
+        },
+        {
+          "sqlColumn": "entry_date",
+          "name": "Date",
+          "type": "date",
+          "required": true
+        },
+        {
+          "sqlColumn": "currency",
+          "name": "Currency",
+          "type": "text",
+          "required": true
+        },
+        {
+          "sqlColumn": "memo",
+          "name": "Memo",
+          "type": "text",
+          "required": true
+        },
+        {
+          "sqlColumn": "source",
+          "name": "Source",
+          "type": "select",
+          "required": true,
+          "options": [
+            "manual",
+            "invoice",
+            "payment",
+            "bank",
+            "reversal"
+          ]
+        },
+        {
+          "sqlColumn": "source_id",
+          "name": "Source record",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "reverses_entry_id",
+          "name": "Reverses",
+          "type": "relation",
+          "relation": {
+            "table": "journal_entries",
+            "field": "id"
+          }
+        },
+        {
+          "sqlColumn": "total_cents",
+          "name": "Total cents",
+          "type": "number",
+          "required": true
+        },
+        {
+          "sqlColumn": "receipt_file_id",
+          "name": "Receipt",
+          "type": "attachment"
+        },
+        {
+          "sqlColumn": "created_at_ms",
+          "name": "Created at",
+          "type": "number",
+          "required": true
+        }
+      ]
+    },
+    {
+      "sqlName": "journal_lines",
+      "name": "Journal lines",
+      "primaryKey": "id",
+      "fields": [
+        {
+          "sqlColumn": "id",
+          "name": "ID",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "entry_id",
+          "name": "Entry",
+          "type": "relation",
+          "required": true,
+          "relation": {
+            "table": "journal_entries",
+            "field": "id"
+          }
+        },
+        {
+          "sqlColumn": "line_no",
+          "name": "Line",
+          "type": "number",
+          "required": true
+        },
+        {
+          "sqlColumn": "account_id",
+          "name": "Account",
+          "type": "relation",
+          "required": true,
+          "relation": {
+            "table": "accounts",
+            "field": "id"
+          }
+        },
+        {
+          "sqlColumn": "debit_cents",
+          "name": "Debit cents",
+          "type": "number",
+          "required": true
+        },
+        {
+          "sqlColumn": "credit_cents",
+          "name": "Credit cents",
+          "type": "number",
+          "required": true
+        },
+        {
+          "sqlColumn": "memo",
+          "name": "Memo",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "sqlName": "bank_imports",
+      "name": "Bank statement rows",
+      "primaryKey": "id",
+      "fields": [
+        {
+          "sqlColumn": "id",
+          "name": "ID",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "import_id",
+          "name": "Import",
+          "type": "text",
+          "required": true
+        },
+        {
+          "sqlColumn": "line_no",
+          "name": "Line",
+          "type": "number",
+          "required": true
+        },
+        {
+          "sqlColumn": "bank_account_id",
+          "name": "Bank account",
+          "type": "relation",
+          "required": true,
+          "relation": {
+            "table": "accounts",
+            "field": "id"
+          }
+        },
+        {
+          "sqlColumn": "posted_on",
+          "name": "Date",
+          "type": "date",
+          "required": true
+        },
+        {
+          "sqlColumn": "description",
+          "name": "Description",
+          "type": "text",
+          "required": true
+        },
+        {
+          "sqlColumn": "amount_cents",
+          "name": "Amount cents",
+          "type": "number",
+          "required": true
+        },
+        {
+          "sqlColumn": "currency",
+          "name": "Currency",
+          "type": "text",
+          "required": true
+        },
+        {
+          "sqlColumn": "base_hash",
+          "name": "Content SHA-256",
+          "type": "text",
+          "required": true
+        },
+        {
+          "sqlColumn": "row_hash",
+          "name": "Row SHA-256",
+          "type": "text",
+          "required": true
+        },
+        {
+          "sqlColumn": "status",
+          "name": "Status",
+          "type": "select",
+          "required": true,
+          "options": [
+            "new",
+            "duplicate",
+            "posted",
+            "ignored"
+          ]
+        },
+        {
+          "sqlColumn": "journal_entry_id",
+          "name": "Journal entry",
+          "type": "relation",
+          "relation": {
+            "table": "journal_entries",
+            "field": "id"
+          }
+        },
+        {
+          "sqlColumn": "imported_at_ms",
+          "name": "Imported at",
+          "type": "number",
+          "required": true
+        }
+      ]
+    },
+    {
+      "sqlName": "clients",
+      "name": "Clients",
+      "primaryKey": "id",
+      "fields": [
+        {
+          "sqlColumn": "id",
+          "name": "ID",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "name",
+          "name": "Name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "sqlColumn": "email",
+          "name": "Email",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "address",
+          "name": "Address",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "created_at_ms",
+          "name": "Created at",
+          "type": "number",
+          "required": true
+        }
+      ]
+    },
+    {
+      "sqlName": "invoices",
+      "name": "Invoices",
+      "primaryKey": "id",
+      "fields": [
+        {
+          "sqlColumn": "id",
+          "name": "ID",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "number",
+          "name": "Number",
+          "type": "text",
+          "unique": true
+        },
+        {
+          "sqlColumn": "client_id",
+          "name": "Client",
+          "type": "relation",
+          "required": true,
+          "relation": {
+            "table": "clients",
+            "field": "id"
+          }
+        },
+        {
+          "sqlColumn": "issue_date",
+          "name": "Issued",
+          "type": "date",
+          "required": true
+        },
+        {
+          "sqlColumn": "due_date",
+          "name": "Due",
+          "type": "date",
+          "required": true
+        },
+        {
+          "sqlColumn": "currency",
+          "name": "Currency",
+          "type": "text",
+          "required": true
+        },
+        {
+          "sqlColumn": "tax_rate_bp",
+          "name": "Tax rate basis points",
+          "type": "number",
+          "required": true
+        },
+        {
+          "sqlColumn": "subtotal_cents",
+          "name": "Subtotal cents",
+          "type": "number",
+          "required": true
+        },
+        {
+          "sqlColumn": "tax_cents",
+          "name": "Tax cents",
+          "type": "number",
+          "required": true
+        },
+        {
+          "sqlColumn": "total_cents",
+          "name": "Total cents",
+          "type": "number",
+          "required": true
+        },
+        {
+          "sqlColumn": "notes",
+          "name": "Notes",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "status",
+          "name": "Status",
+          "type": "select",
+          "required": true,
+          "options": [
+            "draft",
+            "issued",
+            "paid",
+            "void"
+          ]
+        },
+        {
+          "sqlColumn": "journal_entry_id",
+          "name": "Issue entry",
+          "type": "relation",
+          "relation": {
+            "table": "journal_entries",
+            "field": "id"
+          }
+        },
+        {
+          "sqlColumn": "payment_entry_id",
+          "name": "Payment entry",
+          "type": "relation",
+          "relation": {
+            "table": "journal_entries",
+            "field": "id"
+          }
+        },
+        {
+          "sqlColumn": "void_entry_id",
+          "name": "Void entry",
+          "type": "relation",
+          "relation": {
+            "table": "journal_entries",
+            "field": "id"
+          }
+        },
+        {
+          "sqlColumn": "paid_on",
+          "name": "Paid on",
+          "type": "date"
+        },
+        {
+          "sqlColumn": "version",
+          "name": "Version",
+          "type": "number",
+          "required": true
+        },
+        {
+          "sqlColumn": "created_at_ms",
+          "name": "Created at",
+          "type": "number",
+          "required": true
+        }
+      ]
+    },
+    {
+      "sqlName": "invoice_lines",
+      "name": "Invoice lines",
+      "primaryKey": "id",
+      "fields": [
+        {
+          "sqlColumn": "id",
+          "name": "ID",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "invoice_id",
+          "name": "Invoice",
+          "type": "relation",
+          "required": true,
+          "relation": {
+            "table": "invoices",
+            "field": "id"
+          }
+        },
+        {
+          "sqlColumn": "line_no",
+          "name": "Line",
+          "type": "number",
+          "required": true
+        },
+        {
+          "sqlColumn": "description",
+          "name": "Description",
+          "type": "text",
+          "required": true
+        },
+        {
+          "sqlColumn": "quantity_milli",
+          "name": "Quantity thousandths",
+          "type": "number",
+          "required": true
+        },
+        {
+          "sqlColumn": "unit_price_cents",
+          "name": "Unit price cents",
+          "type": "number",
+          "required": true
+        },
+        {
+          "sqlColumn": "amount_cents",
+          "name": "Amount cents",
+          "type": "number",
+          "required": true
+        },
+        {
+          "sqlColumn": "revenue_account_id",
+          "name": "Revenue account",
+          "type": "relation",
+          "required": true,
+          "relation": {
+            "table": "accounts",
+            "field": "id"
+          }
+        }
+      ]
+    }
+  ],
+  "operations": [
+    {
+      "name": "trialBalance",
+      "label": "Trial balance",
+      "kind": "action",
+      "table": "journal_lines",
+      "access": "link",
+      "readOnly": true
+    },
+    {
+      "name": "incomeStatement",
+      "label": "Income statement",
+      "kind": "action",
+      "table": "journal_lines",
+      "access": "link",
+      "readOnly": true
+    },
+    {
+      "name": "balanceSheet",
+      "label": "Balance sheet",
+      "kind": "action",
+      "table": "journal_lines",
+      "access": "link",
+      "readOnly": true
+    },
+    {
+      "name": "accountLedger",
+      "label": "Account ledger",
+      "kind": "action",
+      "table": "journal_lines",
+      "access": "link",
+      "readOnly": true
+    },
+    {
+      "name": "booksInfo",
+      "label": "Books summary",
+      "kind": "action",
+      "table": "accounts",
+      "access": "link",
+      "readOnly": true
+    },
+    {
+      "name": "overview",
+      "label": "Overview",
+      "kind": "action",
+      "table": "journal_entries",
+      "access": "owner",
+      "readOnly": true
+    },
+    {
+      "name": "listAccounts",
+      "label": "List accounts",
+      "kind": "action",
+      "table": "accounts",
+      "access": "owner",
+      "readOnly": true
+    },
+    {
+      "name": "addAccount",
+      "label": "Add account",
+      "kind": "action",
+      "table": "accounts",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "updateAccount",
+      "label": "Rename or archive account",
+      "kind": "action",
+      "table": "accounts",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "listPeriods",
+      "label": "List fiscal periods",
+      "kind": "action",
+      "table": "fiscal_periods",
+      "access": "owner",
+      "readOnly": true
+    },
+    {
+      "name": "addFiscalYear",
+      "label": "Open fiscal year",
+      "kind": "action",
+      "table": "fiscal_periods",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "lockPeriod",
+      "label": "Lock fiscal period",
+      "kind": "action",
+      "table": "fiscal_periods",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "listEntries",
+      "label": "List journal entries",
+      "kind": "action",
+      "table": "journal_entries",
+      "access": "owner",
+      "readOnly": true
+    },
+    {
+      "name": "getEntry",
+      "label": "Read journal entry",
+      "kind": "action",
+      "table": "journal_entries",
+      "access": "owner",
+      "readOnly": true
+    },
+    {
+      "name": "postJournalEntry",
+      "label": "Post journal entry",
+      "kind": "action",
+      "table": "journal_entries",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "postJournalEntries",
+      "label": "Post journal entries",
+      "kind": "action",
+      "table": "journal_entries",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "reverseJournalEntry",
+      "label": "Reverse journal entry",
+      "kind": "action",
+      "table": "journal_entries",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "attachReceipt",
+      "label": "Attach receipt",
+      "kind": "action",
+      "table": "journal_entries",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "receiptAccess",
+      "label": "Read receipt",
+      "kind": "action",
+      "table": "journal_entries",
+      "access": "owner",
+      "readOnly": true
+    },
+    {
+      "name": "stageBankRows",
+      "label": "Import bank statement rows",
+      "kind": "action",
+      "table": "bank_imports",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "listBankRows",
+      "label": "List bank statement rows",
+      "kind": "action",
+      "table": "bank_imports",
+      "access": "owner",
+      "readOnly": true
+    },
+    {
+      "name": "postBankRows",
+      "label": "Post bank statement rows",
+      "kind": "action",
+      "table": "bank_imports",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "setBankRowsIgnored",
+      "label": "Ignore bank statement rows",
+      "kind": "action",
+      "table": "bank_imports",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "keepDuplicateBankRow",
+      "label": "Keep duplicate bank row",
+      "kind": "action",
+      "table": "bank_imports",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "listClients",
+      "label": "List clients",
+      "kind": "action",
+      "table": "clients",
+      "access": "owner",
+      "readOnly": true
+    },
+    {
+      "name": "saveClient",
+      "label": "Save client",
+      "kind": "action",
+      "table": "clients",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "listInvoices",
+      "label": "List invoices",
+      "kind": "action",
+      "table": "invoices",
+      "access": "owner",
+      "readOnly": true
+    },
+    {
+      "name": "getInvoice",
+      "label": "Read invoice",
+      "kind": "action",
+      "table": "invoices",
+      "access": "owner",
+      "readOnly": true
+    },
+    {
+      "name": "saveDraftInvoice",
+      "label": "Save draft invoice",
+      "kind": "action",
+      "table": "invoices",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "deleteDraftInvoice",
+      "label": "Delete draft invoice",
+      "kind": "action",
+      "table": "invoices",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "issueInvoice",
+      "label": "Issue invoice",
+      "kind": "action",
+      "table": "invoices",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "recordPayment",
+      "label": "Record invoice payment",
+      "kind": "action",
+      "table": "invoices",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "voidInvoice",
+      "label": "Void invoice",
+      "kind": "action",
+      "table": "invoices",
+      "access": "owner",
+      "readOnly": false
+    }
+  ]
+}
