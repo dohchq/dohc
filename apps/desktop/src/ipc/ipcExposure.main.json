@@ -407,7 +407,14 @@
     "desktop:outside-changes",
     "desktop:retrieve-workspace",
     "desktop:plan-undo-agent-run",
-    "desktop:undo-agent-run"
+    "desktop:undo-agent-run",
+    "desktop:inbox-list",
+    "desktop:inbox-add",
+    "desktop:inbox-archive",
+    "desktop:inbox-capture-files",
+    "desktop:inbox-move",
+    "desktop:inbox-undo-archive",
+    "desktop:inbox-undo-move"
   ],
   "guards": {
     "desktop:held-note-change": "active-workspace",
@@ -471,6 +478,13 @@
     "desktop:outside-changes": "active-workspace",
     "desktop:retrieve-workspace": "active-workspace",
     "desktop:plan-undo-agent-run": "active-workspace",
-    "desktop:undo-agent-run": "active-workspace"
+    "desktop:undo-agent-run": "active-workspace",
+    "desktop:inbox-list": "active-workspace",
+    "desktop:inbox-add": "active-workspace",
+    "desktop:inbox-archive": "active-workspace",
+    "desktop:inbox-capture-files": "trusted-sender",
+    "desktop:inbox-move": "active-workspace",
+    "desktop:inbox-undo-archive": "active-workspace",
+    "desktop:inbox-undo-move": "active-workspace"
   }
 }

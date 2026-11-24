@@ -173,6 +173,11 @@ import type {
   protectedCopyOperations,
   stoppedRunOperations,
 } from "./writeOperations";
+import type {
+  inboxDesktopOperations,
+  inboxReadOperations,
+  inboxWriteOperations,
+} from "./inboxOperations";
 import { isLoopbackHostname } from "../security/loopback";
 import {
   AgentId,
@@ -9405,6 +9410,9 @@ export interface DohcDesktopBridge
     OperationBridge<typeof stoppedRunOperations>,
     OperationBridge<typeof protectedCopyOperations>,
     OperationBridge<typeof agentRunUndoOperations>,
+    OperationBridge<typeof inboxReadOperations>,
+    OperationBridge<typeof inboxWriteOperations>,
+    OperationBridge<typeof inboxDesktopOperations>,
     OperationBridge<typeof chatDispatchPauseOperations>,
     OperationBridge<typeof agentThreadOperations>,
     OperationBridge<typeof agentsListeningOperations>,

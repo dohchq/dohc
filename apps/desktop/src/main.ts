@@ -18,7 +18,10 @@ import {
   sharedChannelOperations,
   relayShareOperations,
 } from "./ipc/shareOperations";
-import { createOperationHistory } from "./workspaces/workspaceHistoryOperations";
+import {
+  createOperationHistory,
+  undoWorkspaceHistoryOperation,
+} from "./workspaces/workspaceHistoryOperations";
 import { createReceivedFileReferenceScopes } from "./workspaces/workspaceFileReferenceScopes";
 import { mountRootFor } from "./workspaces/shareMounts";
 import {
@@ -241,6 +244,14 @@ import { createChatScopeCapability } from "./ipc/chatScope";
 import { registerChatsIpcHandlers } from "./ipc/chatsIpc";
 import { protectedCopyHandlers, workspaceVersionHandlers } from "./ipc/workspaceVersionsIpc";
 import { agentRunUndoOperations, protectedCopyOperations } from "./ipc/writeOperations";
+import { createInboxIpcHandlers } from "./ipc/inboxIpc";
+import {
+  inboxDesktopOperations,
+  inboxReadOperations,
+  inboxWriteOperations,
+} from "./ipc/inboxOperations";
+import { prepareMoveWorkspacePathAs } from "./workspaces/workspaceFileMoves";
+import { listInboxItems, type WorkspaceInboxHost } from "./workspaces/workspaceInbox";
 import { createShareProposalsIpc } from "./ipc/shareProposalsIpc";
 import { createShareDirectWriteDelivery } from "./ipc/shareDirectWriteDelivery";
 import { registerSharedViewsIpcHandlers } from "./ipc/sharedViewsIpc";
@@ -5183,6 +5194,89 @@ function collectionEditContextWith(
   });
 }
 
+function inboxHostForOperation<State>(
+  operation: WorkspaceAuthorityOperation<RegistryEntry & { readonly attachmentId?: symbol }, State>,
+): WorkspaceInboxHost {
+  const workspace = operation.workspace;
+  const capture = activity.engineCaptureFor(workspace.workspaceId, workspace.rootPath);
+  if (!capture) {
+    throw new Error("The workspace engine is not running.");
+  }
+  const history = createOperationHistory((work) => withEngineAdapter(workspace, work));
+  return {
+    capture,
+    withAdapter: (work) => withEngineAdapter(workspace, work),
+    onCaptureSettled: (listener) => {
+      const daemon = desktopEngine.daemon;
+      if (!daemon) throw new Error("The workspace engine is not running.");
+      return onWorkspaceCaptureSettled(daemon, workspace.workspaceId, listener);
+    },
+    personDisplayName: localUserDisplayName,
+    registeredRoots: () => listWorkspaces().map((entry) => entry.rootPath),
+    moveFile: async ({ fromPath, toPath, author }) => {
+      const complete = await prepareMoveWorkspacePathAs(operation, { fromPath, toPath }, author, {
+        capture,
+        requestId: `inbox-move:${randomUUID()}`,
+        trashItem: (path) => shell.trashItem(path),
+        beforeMove: (storedSpelling) =>
+          moveAcceptedEdits.beforeMove(workspace.workspaceId, storedSpelling),
+        linkRewrites: history.rewriteHistoryLinks
+          ? {
+              workspaceId: workspace.workspaceId,
+              signal: operation.signal,
+              history: { rewriteHistoryLinks: history.rewriteHistoryLinks.bind(history) },
+            }
+          : undefined,
+        markDeleted: (path) => {
+          if (workspace.attachmentId) {
+            engineYDocSessionIpc
+              .fileMutationPort()
+              .markDeletedUnderPath(workspace.attachmentId, path);
+          }
+        },
+      });
+      const outcome = await complete();
+      if (!outcome.ok) throw new Error(outcome.reason);
+      return {
+        fromPath: outcome.fromPath,
+        toPath: outcome.toPath,
+        ...(outcome.operationId ? { operationId: outcome.operationId } : {}),
+      };
+    },
+    undoOperation: async (operationId, author) => {
+      const resolvedAuthor: MomentWriteAuthor =
+        author.kind === "agent"
+          ? {
+              ...author,
+              onBehalfOf: author.onBehalfOf ?? (await localPerson()).humanId,
+            }
+          : author.kind === "human"
+            ? author
+            : await localPerson();
+      const outcome = await undoWorkspaceHistoryOperation(
+        operation,
+        { operationId },
+        resolvedAuthor,
+        {
+          history,
+          agent: resolvedAuthor.kind === "agent",
+        },
+      );
+      if (!outcome.ok) throw new Error(outcome.reason);
+      if (outcome.remaining.length > 0) {
+        throw new Error(outcome.remaining[0]!.reason);
+      }
+    },
+    onChanged: (paths) => {
+      notifyRenderer({
+        workspaceId: workspace.workspaceId,
+        ...(paths ? { paths: [...paths] } : {}),
+      });
+      activity.queueCloudSync(workspace.workspaceId);
+    },
+  };
+}
+
 // A workspace text file, or null when there is none.
 async function readWorkspaceTextIfPresent(rootPath: string, relativePath: string) {
   try {
@@ -7581,9 +7675,14 @@ const { startDesktopCliServer } = createDesktopCliServer({
             : "Agent"),
       });
     },
+    inboxList: (workspace, input) =>
+      listInboxItems(workspace, input, {
+        withAdapter: (work) => withEngineAdapter(workspace, work),
+      }),
     workspaceSearch: (workspace, input) => workspaceRetrieval.search(workspace, input),
   },
   hasOpenWorkspaceWindow: (workspaceId) => hasAnyWorkspaceWindowFor(workspaceId),
+  inboxHostFor: (operation) => inboxHostForOperation(operation),
   heldChanges: workspaceHeldChanges,
   findWorkspace,
   agentYouRun: async (agentId) =>
@@ -11528,6 +11627,15 @@ function registerIpcHandlers(): void {
       },
     }),
   );
+  const inboxHandlers = createInboxIpcHandlers({
+    exactRendererWorkspaceReferences,
+    withRendererWorkspaceOperation,
+    localPerson,
+    hostFor: inboxHostForOperation,
+  });
+  registerOperations(operationBoundary, inboxReadOperations, inboxHandlers.reads);
+  registerOperations(operationBoundary, inboxWriteOperations, inboxHandlers.writes);
+  registerOperations(operationBoundary, inboxDesktopOperations, inboxHandlers.desktop);
 
   workspaceEngineIpc.registerHistory();
 

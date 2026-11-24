@@ -40,11 +40,7 @@ import {
 } from "../../../services/sync-relay/src/storage/serviceActivation.js";
 import { SyncRelayQuotaExceededError } from "../../../services/sync-relay/src/storage/errors.js";
 import { KNOWN_REFUSAL_WORDS } from "../../../services/sync-relay/src/serverLogWords.js";
-import {
-  readOrdinaryActivationHistory,
-  verifyOrdinaryActivationCut,
-} from "../../../services/sync-relay/src/storage/ordinaryActivationSource.js";
-import { checkpointPolicySha256 } from "../../../services/sync-relay/src/storage/ordinaryActivationCheckpoint.js";
+import { verifyOrdinaryActivationCut } from "../../../services/sync-relay/src/storage/ordinaryActivationSource.js";
 import {
   validateOrdinaryActivation,
   type OrdinaryActivationValidator,
@@ -112,7 +108,7 @@ const host = {
   connectionId: "connection",
 };
 const actor = { kind: "owner" as const, userId: "owner" };
-const bounds = { maxCaptureBytes: 1_000_000, maxHistoryEntries: 10, maxBytesPerDrain: 1_000_000 };
+const bounds = { maxCaptureBytes: 1_000_000, maxBytesPerDrain: 1_000_000 };
 const stop = { operationId: "restore", workspaceId: "workspace", ownerUserId: "owner" };
 // A `large` note is not validated here; its projections are placeholders that only a finished validation would refuse.
 function fixture(note = "Original", large = false, clientID?: number) {
@@ -320,22 +316,17 @@ it("activates at a hosted cursor that passed rows of documents outside the hoste
   }
 });
 
-it("rejects different CRDT history even when its rendered Markdown matches the ordinary cut", async () => {
+it("refuses a full state that does not contain its baseline even when its rendered Markdown matches", async () => {
   const f = fixture(),
-    changed = new Y.Doc();
+    other = markdownToYDoc("Original", { clientID: 9 });
   try {
-    Y.applyUpdate(changed, f.capture.fullState);
-    changed.getMap("frontmatter").set("temporary", "removed");
-    changed.getMap("frontmatter").delete("temporary");
-    const bytes = Y.encodeStateAsUpdate(changed);
-    const validated = validateJournal({
+    other.getMap("frontmatter").set("title", "Edited");
+    const bytes = Y.encodeStateAsUpdate(other);
+    const validated = validateBaseline({
       document: f.document,
       currentPath: "docs/a.md",
-      checkpoint: f.capture.baselineBytes,
-      suffix: [],
-      candidate: bytes,
+      checkpoint: bytes,
     });
-    expect(validated.kind).toBe("accepted");
     if (validated.kind !== "accepted") throw new Error("Invalid test update");
     expect(validated.evidence.projectedMarkdownSha256).toBe(f.capture.source.sourceDigest);
     Object.assign(f.capture, { fullState: bytes });
@@ -343,29 +334,26 @@ it("rejects different CRDT history even when its rendered Markdown matches the o
       fullStateDigest: hash(bytes),
       fullStateByteLength: bytes.length,
     });
-    await expect(f.prepare()).rejects.toThrow("complete ordinary CRDT history");
+    await expect(f.prepare()).rejects.toThrow("Native activation does not contain its baseline.");
     expect(f.raw.prepare("SELECT * FROM sync_relay_live_documents").all()).toEqual([]);
   } finally {
-    changed.destroy();
+    other.destroy();
     f.close();
   }
 });
 
-it("checks configured history entry and byte budgets before loading relay blobs", async () => {
-  const f = fixture();
+it("refuses a baseline past the byte budget before validating it", async () => {
+  const f = fixture(),
+    validate = vi.fn(validateActivation);
   try {
-    const read = vi.spyOn(f.storage, "getBlob");
-    await expect(f.prepare({ ...bounds, maxHistoryEntries: 1 })).rejects.toThrow("entry budget");
-    expect(read).not.toHaveBeenCalled();
     await expect(
-      f.prepare({ ...bounds, maxBytesPerDrain: f.capture.baselineBytes.length - 1 }),
+      f.prepare({ ...bounds, maxBytesPerDrain: f.capture.baselineBytes.length - 1 }, validate),
     ).rejects.toBeInstanceOf(ServiceActivationHistoryOverBudget);
-    expect(read).not.toHaveBeenCalled();
-    await expect(
-      f.prepare({ ...bounds, maxBytesPerDrain: f.capture.baselineBytes.length }),
-    ).rejects.toThrow("metadata");
-    expect(read).not.toHaveBeenCalled();
+    expect(validate).not.toHaveBeenCalled();
     expect(f.raw.prepare("SELECT * FROM sync_relay_service_activations").all()).toEqual([]);
+    expect(
+      await f.prepare({ ...bounds, maxBytesPerDrain: f.capture.baselineBytes.length }, validate),
+    ).toMatchObject({ replayed: false });
   } finally {
     f.close();
   }
@@ -417,38 +405,22 @@ function losingDevice(f: ReturnType<typeof fixture>) {
   return { doc, lineageClaimId };
 }
 // The ordinary-cut check a fresh capture runs, without retaining an activation.
-async function verify(f: ReturnType<typeof fixture>, readBounds = bounds) {
-  const input = {
-    source: f.capture.source,
-    document: f.document,
-    baselineBytes: f.capture.baselineBytes,
-    fullState: f.capture.fullState,
-    bounds: readBounds,
-    checkpoint: null,
-  };
-  const read = readOrdinaryActivationHistory(f.storage as StorageContext, input);
-  if (read.kind !== "history") throw new Error(`Expected a history read, not ${read.kind}.`);
-  const history = read.history;
+async function verify(f: ReturnType<typeof fixture>) {
   const validation = await validateActivation({
     document: f.document,
     currentPath: "docs/a.md",
     baselineBytes: f.capture.baselineBytes,
-    cut: {
-      source: f.capture.source,
-      fullState: f.capture.fullState,
-      history,
-      maxBytesPerDrain: readBounds.maxBytesPerDrain,
-    },
+    fullState: f.capture.fullState,
   });
   if (validation.kind !== "accepted")
     throw new Error(
       validation.kind === "refused" ? validation.message : JSON.stringify(validation),
     );
   return verifyOrdinaryActivationCut(f.storage as StorageContext, {
-    ...input,
+    source: f.capture.source,
+    document: f.document,
+    baselineBytes: f.capture.baselineBytes,
     baseline: validation.baseline,
-    history,
-    proof: validation.proof,
   });
 }
 it("activates past a losing base from a second device and keeps one lineage through Resume and a fresh capture", async () => {
@@ -528,18 +500,6 @@ function staleArtifact(
     VALUES ('workspace','object',?,?,'main','docs/a.md',?,'text',?,3)`)
     .run(f.capture.source.committedCursor, momentId, stale.blob_sha256, stale.byte_length);
 }
-const otherWrite = (changes: Record<string, unknown>) => ({
-  versionId: "main",
-  objectId: "other-object",
-  momentId: "other",
-  path: "docs/c.md",
-  operation: "write",
-  payloadAfterPath: "docs/c.md",
-  payloadAfterContentKind: "text",
-  payloadAfterBlobSha256: "c".repeat(64),
-  payloadAfterByteLength: 1,
-  ...changes,
-});
 // Proves: a later divergent file moment of the same lineage leaves an earlier
 // source standing, beside a losing device's base and delta that break nothing.
 it("activates past a same-lineage stale settlement artifact and a losing base from another device", async () => {
@@ -559,172 +519,6 @@ it("activates past a same-lineage stale settlement artifact and a losing base fr
     );
     staleArtifact(f);
     expect(await f.prepare()).toEqual({ document: f.document, replayed: false, completed: false });
-  } finally {
-    loser.doc.destroy();
-    f.close();
-  }
-});
-
-const divergent =
-  "Ordinary activation found a later ordinary file moment with a divergent projection.";
-it.each([
-  // The artifact origin's nearest row names another lineage; its favourable row behind that doesn't count.
-  [
-    "an unfavourable nearer row",
-    (f) => {
-      append(
-        f,
-        "origin",
-        3,
-        "ydoc.update",
-        ydocUpdate({
-          isBaseState: false,
-          lineageClaimId: "b".repeat(64),
-          updateBlobSha256: "b".repeat(64),
-        }),
-      );
-      staleArtifact(f, "origin", 4);
-    },
-    divergent,
-  ],
-  [
-    "the document moving away and back",
-    (f) => {
-      staleArtifact(f);
-      append(
-        f,
-        "origin",
-        4,
-        "moment.append",
-        otherWrite({
-          objectId: "object",
-          operation: "move",
-          path: "docs/b.md",
-          payloadAfterPath: "docs/b.md",
-        }),
-      );
-      append(
-        f,
-        "origin",
-        5,
-        "moment.append",
-        otherWrite({
-          objectId: "object",
-          operation: "move",
-          path: "docs/a.md",
-          payloadAfterPath: "docs/a.md",
-        }),
-      );
-    },
-    "Ordinary activation history replaced the live document.",
-  ],
-  [
-    "unclaimed lineage evidence",
-    (f) => {
-      staleArtifact(f);
-      append(
-        f,
-        "other",
-        0,
-        "ydoc.update",
-        ydocUpdate({ isBaseState: false, updateBlobSha256: "d".repeat(64) }),
-      );
-    },
-    "Ordinary activation history differs from the captured lineage.",
-  ],
-  [
-    "a base inconsistent with the captured claim",
-    (f) => {
-      staleArtifact(f);
-      const other = Buffer.from("another base");
-      append(
-        f,
-        "other",
-        0,
-        "ydoc.update",
-        ydocUpdate({
-          isBaseState: true,
-          lineageClaimId: f.document.lineageClaimId,
-          updateBlobSha256: hash(other),
-        }),
-        other,
-      );
-    },
-    "Ordinary activation has a different baseline.",
-  ],
-] as [string, (f: ReturnType<typeof fixture>) => void, string][])(
-  "refuses a stale settlement artifact after %s",
-  async (_case, add, message) => {
-    const f = fixture();
-    try {
-      add(f);
-      await expect(f.prepare()).rejects.toThrow(message);
-      expect(f.raw.prepare("SELECT * FROM sync_relay_live_documents").all()).toEqual([]);
-    } finally {
-      f.close();
-    }
-  },
-);
-// Proves: every row the replacement scan examines between the artifact's
-// nearest row and the cut is charged to the proof budget, so a long unrelated
-// interval refuses for this pass instead of stalling the writer.
-
-// Proves: the search for the artifact origin's nearest row charges every row
-// of the document it walks back over, so a long losing-lineage interval
-// refuses for this pass instead of an uncharged sort, and walks the index in
-// relay order without one.
-it("charges the walk back over a long losing-lineage interval to an artifact origin's nearest row", async () => {
-  const f = fixture(),
-    loser = losingDevice(f);
-  try {
-    f.raw.exec("BEGIN");
-    for (let seq = 2; seq < 300; seq++)
-      append(
-        f,
-        "losing-device",
-        seq,
-        "ydoc.update",
-        ydocUpdate({
-          isBaseState: false,
-          lineageClaimId: loser.lineageClaimId,
-          updateBlobSha256: hash(Buffer.from(`losing-${seq}`)),
-          padding: "p".repeat(4096),
-        }),
-      );
-    f.raw.exec("COMMIT");
-    staleArtifact(f, "other-device", 0);
-    const context = f.storage as StorageContext,
-      prepare = vi.spyOn(context.db, "prepare");
-    // The walk's own charge shows within the read bound.
-    await expect(verify(f)).rejects.toThrow(
-      "Ordinary activation metadata exceeds its configured byte budget.",
-    );
-    const payloads = Number(
-      f.raw
-        .prepare(
-          "SELECT sum(octet_length(payload_json)) AS bytes FROM sync_relay_log WHERE relay_seq>=2",
-        )
-        .get()!.bytes,
-    );
-    await expect(
-      verify(f, { ...bounds, maxBytesPerDrain: payloads + f.capture.baselineBytes.length }),
-    ).rejects.toThrow("Ordinary activation history exceeds its configured byte budget.");
-    await expect(verify(f, { ...bounds, maxBytesPerDrain: 4_000_000 })).rejects.toThrow(divergent);
-    const walk = prepare.mock.calls
-      .map((call) => call[0])
-      .find(
-        (sql) =>
-          sql.includes("idx_sync_relay_log_document_page") &&
-          sql.includes("ORDER BY relay_seq DESC"),
-      )!;
-    prepare.mockRestore();
-    const plan = f.raw
-      .prepare(`EXPLAIN QUERY PLAN ${walk}`)
-      .all("workspace", "main", "object", 2, f.capture.source.committedCursor)
-      .map((row) => String(row.detail));
-    expect(plan).toEqual([
-      "SEARCH sync_relay_log USING INDEX idx_sync_relay_log_document_page (workspace_id=? AND <expr>=? AND <expr>=? AND relay_seq>? AND relay_seq<?)",
-    ]);
   } finally {
     loser.doc.destroy();
     f.close();
@@ -1003,7 +797,6 @@ function activationDriver(
       validateActivation,
       validateAdmission: validateJournal,
       maxCaptureBytes: 1_000_000,
-      maxActivationHistoryEntries: 10,
       maxEntriesPerDrain: 10,
       maxBytesPerDrain: 1_000_000,
       maxDocumentsPerPass: 1,
@@ -1479,16 +1272,15 @@ it("refuses a capture whose validation runs out of heap, blocks it for its owner
     f.close();
   }
 }, 60_000);
-// A history past what the relay reads refuses until it changes, so the document waits as a failure does, longer before
-// each try, rather than being captured on every pass. One within the same budget still goes live.
-it("captures a document whose history is past the self-host read budget, then waits longer before each try or for its owner", async () => {
-  const { maxActivationHistoryEntries } = selfHostLiveProfile().service.activation,
-    f = fixture(),
+// A baseline past the relay's byte budget refuses until it changes, so the document waits as a failure does, longer
+// before each try, rather than being captured on every pass. One within the same budget still goes live.
+it("captures a document whose baseline is past the byte budget, then waits longer before each try or for its owner", async () => {
+  const f = fixture(longNote),
     within = fixture();
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(0);
   try {
-    const config = { maxActivationHistoryEntries },
+    const config = pastBudgetConfig(f),
       signal = () => new AbortController().signal,
       drained = { kind: "pending" as const, reason: "transport interrupted", continueDrain: false };
     vi.spyOn(OwnerCommittedDelivery.prototype, "drain").mockResolvedValue(drained);
@@ -1508,7 +1300,6 @@ it("captures a document whose history is past the self-host read budget, then wa
     expect(
       within.raw.prepare("SELECT count(*) AS n FROM sync_relay_service_activations").get()!.n,
     ).toBe(1);
-    typePastBudget(f, maxActivationHistoryEntries);
     const capture = vi.fn(async () => f.capture),
       send = vi.fn(async () => ({ result: { released: true } }));
     const d = activationDriver(f, capture, send, undefined, undefined, config);
@@ -1525,11 +1316,11 @@ it("captures a document whose history is past the self-host read budget, then wa
     // The first retry is the next pass. The one after it waits a second.
     expect(await d.driver.activate(d.target, signal())).toEqual(pastBudget);
     expect(await d.driver.activate(d.target, signal())).toEqual(backingOff);
-    // Another edit only lengthens the history.
+    // Another edit leaves the baseline as it was.
     append(
       f,
       "origin",
-      maxActivationHistoryEntries + 2,
+      3,
       "ydoc.update",
       ydocUpdate({
         isBaseState: false,
@@ -1556,28 +1347,16 @@ it("captures a document whose history is past the self-host read budget, then wa
     within.close();
   }
 });
+const longNote = "We should book early and keep a list of what each person brings. ".repeat(20);
+// A byte budget one byte short of the fixture's baseline, which a fixture of the default note fits.
+const pastBudgetConfig = (f: ReturnType<typeof fixture>) => ({
+  maxBytesPerDrain: f.capture.baselineBytes.length - 1,
+});
 const pastBudget = {
   kind: "pending",
-  reason: "Ordinary activation history exceeds its configured entry budget.",
+  reason: "Ordinary activation baseline exceeds its configured byte budget.",
 };
 const backingOff = { kind: "pending", reason: "Hosted document waits before it tries again." };
-// Edits after the fixture's base until its history has one row more than `entries`.
-function typePastBudget(f: ReturnType<typeof fixture>, entries: number) {
-  f.raw.exec("BEGIN");
-  for (let seq = 3; seq <= entries + 1; seq++)
-    append(
-      f,
-      "origin",
-      seq,
-      "ydoc.update",
-      ydocUpdate({
-        isBaseState: false,
-        lineageClaimId: f.document.lineageClaimId,
-        updateBlobSha256: hash(Buffer.from(`edit-${seq}`)),
-      }),
-    );
-  f.raw.exec("COMMIT");
-}
 // The owner's device starts the note again from a new base, which names a new lineage. Its capture names that base.
 function rebaseOwner(f: ReturnType<typeof fixture>, originSeq: number) {
   const doc = markdownToYDoc("Started again"),
@@ -1612,21 +1391,17 @@ function rebaseOwner(f: ReturnType<typeof fixture>, originSeq: number) {
     fullStateByteLength: baselineBytes.length,
   });
 }
-// A document waiting after a history past its budget is captured again only once its wait ends or its owner resumes.
-it("captures a document waiting after a history past its budget only once its wait ends", async () => {
-  const { maxActivationHistoryEntries } = selfHostLiveProfile().service.activation,
-    f = fixture();
+// A document waiting after a baseline past its budget is captured again only once its wait ends or its owner resumes.
+it("captures a document waiting after a baseline past its budget only once its wait ends", async () => {
+  const f = fixture(longNote);
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(0);
   const loser = losingDevice(f);
   try {
-    typePastBudget(f, maxActivationHistoryEntries);
     const prepare = vi.spyOn(ServiceActivationStore.prototype, "prepare"),
       capture = vi.fn(async () => f.capture),
       signal = () => new AbortController().signal;
-    const d = activationDriver(f, capture, undefined, undefined, undefined, {
-      maxActivationHistoryEntries,
-    });
+    const d = activationDriver(f, capture, undefined, undefined, undefined, pastBudgetConfig(f));
     for (let pass = 0; pass < 2; pass++)
       expect(await d.driver.activate(d.target, signal())).toEqual(pastBudget);
     for (let seq = 2; seq <= 4; seq++) {
@@ -1658,12 +1433,10 @@ it("captures a document waiting after a history past its budget only once its wa
   }
 });
 it("captures and checks the owner's new base once the wait ends, and activates it", async () => {
-  const { maxActivationHistoryEntries } = selfHostLiveProfile().service.activation,
-    f = fixture();
+  const f = fixture(longNote);
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(0);
   try {
-    typePastBudget(f, maxActivationHistoryEntries);
     vi.spyOn(OwnerCommittedDelivery.prototype, "drain").mockResolvedValue({
       kind: "pending",
       reason: "transport interrupted",
@@ -1672,12 +1445,10 @@ it("captures and checks the owner's new base once the wait ends, and activates i
     const prepare = vi.spyOn(ServiceActivationStore.prototype, "prepare"),
       capture = vi.fn(async () => f.capture),
       signal = () => new AbortController().signal;
-    const d = activationDriver(f, capture, undefined, undefined, undefined, {
-      maxActivationHistoryEntries,
-    });
+    const d = activationDriver(f, capture, undefined, undefined, undefined, pastBudgetConfig(f));
     for (let pass = 0; pass < 2; pass++)
       expect(await d.driver.activate(d.target, signal())).toEqual(pastBudget);
-    rebaseOwner(f, maxActivationHistoryEntries + 2);
+    rebaseOwner(f, 3);
     expect(await d.driver.activate(d.target, signal())).toEqual(backingOff);
     vi.setSystemTime(1000);
     expect(await d.driver.activate(d.target, signal())).toMatchObject({
@@ -1697,7 +1468,7 @@ it("captures and checks the owner's new base once the wait ends, and activates i
   }
 });
 // The self-host profile's activation limits as the relay parses them, checked in this process under the profile's own
-// policy. The validator names that policy, as the relay's does, so activation folds a history longer than one read.
+// policy, as the relay's validator is.
 function selfHostActivation() {
   const { validation, ...limits } = selfHostLiveProfile().service.activation;
   const { targets: _targets, ...config } = parseServiceActivationConfig({
@@ -1705,11 +1476,8 @@ function selfHostActivation() {
     ...limits,
     targets: [],
   })!;
-  const validate: OrdinaryActivationValidator = Object.assign(
-    async (work: Parameters<OrdinaryActivationValidator>[0]) =>
-      validateOrdinaryActivation(work, validation),
-    { policySha256: checkpointPolicySha256(validation) },
-  );
+  const validate: OrdinaryActivationValidator = async (work) =>
+    validateOrdinaryActivation(work, validation);
   return { ...config, validateActivation: validate, validation };
 }
 // Types after the fixture's edit, one keystroke per relay row as one person types, until the history since the
@@ -1764,10 +1532,8 @@ function typeNote(f: ReturnType<typeof fixture>, entries: number) {
     fullStateByteLength: fullState.length,
   });
 }
-// 1,075 rows is the longest note on the real server; 2,000 rows, the self-host entry limit, is about 400 words typed
-// before a note is first shared. Each folds its rows into a checkpoint before its last read, which walks at most one page.
-const selfHostEntryLimit = selfHostLiveProfile().service.activation.maxActivationHistoryEntries;
-it.each([1_075, selfHostEntryLimit, selfHostEntryLimit + 1])(
+// 1,075 rows is the longest note on the real server; 2,000 rows is about 400 words typed before a note is first shared.
+it.each([1_075, 2_000, 20_000])(
   "activates a typed note with %i rows since its base under the self-host limits",
   async (entries) => {
     const config = selfHostActivation(),
@@ -1807,127 +1573,6 @@ it.each([1_075, selfHostEntryLimit, selfHostEntryLimit + 1])(
   },
   60_000,
 );
-// A real typed row carries about 490 bytes of operation JSON, more than these rows do.
-it("charges a typed note at the self-host activation limit well within the byte budget", async () => {
-  const { maxCaptureBytes, maxActivationHistoryEntries, maxBytesPerDrain, validation } =
-      selfHostActivation(),
-    f = fixture();
-  try {
-    typeNote(f, maxActivationHistoryEntries);
-    const input = {
-      source: f.capture.source,
-      document: f.document,
-      baselineBytes: f.capture.baselineBytes,
-      fullState: f.capture.fullState,
-      bounds: { maxCaptureBytes, maxHistoryEntries: maxActivationHistoryEntries, maxBytesPerDrain },
-      checkpoint: null,
-    };
-    const read = readOrdinaryActivationHistory(f.storage as StorageContext, input);
-    if (read.kind !== "history") throw new Error(`Expected a history read, not ${read.kind}.`);
-    const history = read.history;
-    const result = validateOrdinaryActivation(
-      {
-        document: f.document,
-        currentPath: "docs/a.md",
-        baselineBytes: f.capture.baselineBytes,
-        cut: {
-          source: f.capture.source,
-          fullState: f.capture.fullState,
-          history,
-          maxBytesPerDrain,
-        },
-      },
-      validation,
-    );
-    if (result.kind !== "accepted") throw new Error(JSON.stringify(result));
-    const json = f.raw
-      .prepare(
-        "SELECT sum(length(CAST(payload_json AS BLOB))) AS bytes FROM sync_relay_log WHERE relay_seq>=?",
-      )
-      .get(f.capture.source.baseRelaySeq)!.bytes as number;
-    // With every row's JSON at 490 bytes, the whole charge stays under half the budget.
-    expect(result.proof!.charged - json + maxActivationHistoryEntries * 490).toBeLessThan(
-      maxBytesPerDrain / 2,
-    );
-    expect(
-      await verifyOrdinaryActivationCut(f.storage as StorageContext, {
-        ...input,
-        baseline: result.baseline,
-        history,
-        proof: result.proof,
-      }),
-    ).toEqual({ verified: true });
-  } finally {
-    f.close();
-  }
-}, 60_000);
-// The owner outbox drain keeps its own page bound, apart from how much history one activation may check.
-
-it("waits longer before each capture of a history whose check runs out of its work budget, as one past the read budget", async () => {
-  const f = fixture();
-  vi.useFakeTimers({ toFake: ["Date"] });
-  vi.setSystemTime(0);
-  try {
-    const message = "Ordinary activation history exceeds its configured validation budget.",
-      capture = vi.fn(async () => f.capture);
-    const d = activationDriver(f, capture, undefined, undefined, undefined, {
-      validateActivation: async () => ({ kind: "over-budget", message }),
-    });
-    for (let pass = 0; pass < 2; pass++)
-      expect(await d.driver.activate(d.target, new AbortController().signal)).toEqual({
-        kind: "pending",
-        reason: message,
-      });
-    expect(d.driver.blocked(d.target)).toBe("history-over-budget");
-    expect(await d.driver.activate(d.target, new AbortController().signal)).toEqual(backingOff);
-    expect(capture).toHaveBeenCalledTimes(2);
-    await expect(
-      f.prepare(bounds, async () => ({ kind: "over-budget", message })),
-    ).rejects.toBeInstanceOf(ServiceActivationHistoryOverBudget);
-  } finally {
-    vi.useRealTimers();
-    f.close();
-  }
-});
-it("answers over-budget when a history check runs past its byte budget", async () => {
-  const f = fixture();
-  try {
-    const input = {
-      source: f.capture.source,
-      document: f.document,
-      baselineBytes: f.capture.baselineBytes,
-      fullState: f.capture.fullState,
-      bounds,
-      checkpoint: null,
-    };
-    const read = readOrdinaryActivationHistory(f.storage as StorageContext, input);
-    if (read.kind !== "history") throw new Error(`Expected a history read, not ${read.kind}.`);
-    const history = read.history;
-    const work = {
-      document: f.document,
-      currentPath: "docs/a.md",
-      baselineBytes: f.capture.baselineBytes,
-      cut: {
-        source: f.capture.source,
-        fullState: f.capture.fullState,
-        history,
-        maxBytesPerDrain: bounds.maxBytesPerDrain,
-      },
-    };
-    expect(validateOrdinaryActivation(work, policy).kind).toBe("accepted");
-    expect(
-      validateOrdinaryActivation(
-        { ...work, cut: { ...work.cut, maxBytesPerDrain: f.capture.fullState.length } },
-        policy,
-      ),
-    ).toEqual({
-      kind: "over-budget",
-      message: "Ordinary activation history exceeds its configured byte budget.",
-    });
-  } finally {
-    f.close();
-  }
-});
 // A document whose activation keeps failing for a reason nothing classifies waits longer before each try, so it isn't captured on every pass.
 it("waits longer before each retry of an activation that keeps failing, and tries at once after its owner resumes", async () => {
   const f = fixture();
@@ -2114,61 +1759,45 @@ it("reports why an activation keeps failing once two failures in a row have last
 // An idle unload removes the document's target and adds it again for the same document. Its block and its wait stay
 // through the unload and the open that wakes it.
 it("keeps the block and the wait of a blocked or waiting document through an idle unload", async () => {
-  const f = fixture();
+  const f = fixture(longNote);
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(0);
   try {
-    const message = "Ordinary activation history exceeds its configured validation budget.";
-    const validateActivation: OrdinaryActivationValidator = async () => ({
-      kind: "over-budget",
-      message,
-    });
     const capture = vi.fn(async () => f.capture),
-      signal = () => new AbortController().signal,
-      waiting = { kind: "pending", reason: "Hosted document waits before it tries again." };
-    const d = activationDriver(f, capture, undefined, undefined, undefined, { validateActivation });
+      signal = () => new AbortController().signal;
+    const d = activationDriver(f, capture, undefined, undefined, undefined, pastBudgetConfig(f));
     const unload = () => {
       d.driver.sleep(d.target, f.document);
       d.driver.wake(d.target);
     };
-    expect(await d.driver.activate(d.target, signal())).toEqual({
-      kind: "pending",
-      reason: message,
-    });
+    expect(await d.driver.activate(d.target, signal())).toEqual(pastBudget);
     expect(d.driver.blocked(d.target)).toBe("history-over-budget");
     unload();
     expect(d.driver.blocked(d.target)).toBe("history-over-budget");
-    expect(await d.driver.activate(d.target, signal())).toEqual({
-      kind: "pending",
-      reason: message,
-    });
+    expect(await d.driver.activate(d.target, signal())).toEqual(pastBudget);
     unload();
-    expect(await d.driver.activate(d.target, signal())).toEqual(waiting);
+    expect(await d.driver.activate(d.target, signal())).toEqual(backingOff);
     expect(capture).toHaveBeenCalledTimes(2);
   } finally {
     vi.useRealTimers();
     f.close();
   }
 });
-// A history past its budget counts as a failure, so a different failure after it waits as the next in the count.
-it("counts a history past its budget in the wait before the next try", async () => {
-  const { maxActivationHistoryEntries } = selfHostLiveProfile().service.activation,
-    f = fixture();
+// A baseline past its budget counts as a failure, so a different failure after it waits as the next in the count.
+it("counts a baseline past its budget in the wait before the next try", async () => {
+  const f = fixture(longNote);
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(0);
   try {
-    typePastBudget(f, maxActivationHistoryEntries);
     const capture = vi.fn(async () => f.capture),
-      d = activationDriver(f, capture, undefined, undefined, undefined, {
-        maxActivationHistoryEntries,
-      }),
+      d = activationDriver(f, capture, undefined, undefined, undefined, pastBudgetConfig(f)),
       signal = () => new AbortController().signal;
     expect(await d.driver.activate(d.target, signal())).toEqual(pastBudget);
     capture.mockImplementation(async () => {
       throw new Error("Engine is unavailable.");
     });
     await expect(d.driver.activate(d.target, signal())).rejects.toThrow("Engine is unavailable.");
-    // The failure that follows names no history, so the document no longer reads as one past its budget.
+    // The failure that follows is no budget refusal, so the document no longer reads as one past its budget.
     expect(d.driver.blocked(d.target)).toBeUndefined();
     expect(await d.driver.activate(d.target, signal())).toEqual(backingOff);
     expect(capture).toHaveBeenCalledTimes(2);
@@ -2190,12 +1819,12 @@ it("counts a history past its budget in the wait before the next try", async () 
 // every pass unless its failures count. Counted, the captures spread out by the wait.
 
 // A write can land between validation and the transaction without moving the relay cursor.
-it("refuses a capture as stale when its history changes after validation", async () => {
+it("refuses a capture when its base row is refused after validation", async () => {
   const f = fixture();
   try {
     const validate: OrdinaryActivationValidator = async (work) => {
       const result = await validateActivation(work);
-      f.raw.prepare("UPDATE sync_relay_log SET settlement_admission_json=? WHERE relay_seq=3").run(
+      f.raw.prepare("UPDATE sync_relay_log SET settlement_admission_json=? WHERE relay_seq=2").run(
         JSON.stringify({
           status: "refused",
           settlementId: "late",
@@ -2204,7 +1833,9 @@ it("refuses a capture as stale when its history changes after validation", async
       );
       return result;
     };
-    await expect(f.prepare(bounds, validate)).rejects.toThrow(ServiceActivationStaleCut);
+    await expect(f.prepare(bounds, validate)).rejects.toThrow(
+      "Ordinary activation base history is unavailable.",
+    );
     expect(f.raw.prepare("SELECT * FROM sync_relay_live_documents").all()).toEqual([]);
     expect(f.raw.prepare("SELECT * FROM sync_relay_service_activations").all()).toEqual([]);
     expect(f.storage.getLiveHostControl()!.registeredConnectionId).toBeNull();
@@ -2212,17 +1843,11 @@ it("refuses a capture as stale when its history changes after validation", async
     f.close();
   }
 });
-it("checks a validated history in the transaction from its rows' coordinates and admissions, without reading its update bytes", async () => {
+it("activates without reading the update bytes of the history since its base", async () => {
   const f = fixture();
   try {
     const read = vi.spyOn(f.storage, "getBlob");
-    const validate: OrdinaryActivationValidator = async (work) => {
-      expect(read).toHaveBeenCalled();
-      const result = await validateActivation(work);
-      read.mockClear();
-      return result;
-    };
-    expect(await f.prepare(bounds, validate)).toEqual({
+    expect(await f.prepare()).toEqual({
       document: f.document,
       replayed: false,
       completed: false,
@@ -2232,24 +1857,19 @@ it("checks a validated history in the transaction from its rows' coordinates and
     f.close();
   }
 });
-// A retained activation the read found can go before the transaction; its capture's history was never read or validated.
+// A retained activation the read found can go before the transaction; its capture's full state was never validated.
 it("refuses a capture as stale when the retained activation it read is gone by the transaction", async () => {
   const f = fixture();
   try {
-    const read = vi.spyOn(f.storage, "getBlob");
     await f.prepare();
-    expect(read).toHaveBeenCalled();
-    read.mockClear();
     const documents = f.raw.prepare("SELECT * FROM sync_relay_live_documents").all(),
       control = f.storage.getLiveHostControl();
     const validate: OrdinaryActivationValidator = async (work) => {
-      expect(work).not.toHaveProperty("cut");
+      expect(work).not.toHaveProperty("fullState");
       f.raw.exec("DELETE FROM sync_relay_service_activations");
       return validateActivation(work);
     };
     await expect(f.prepare(bounds, validate)).rejects.toThrow(ServiceActivationStaleCut);
-    // It refuses before reading the history it never validated.
-    expect(read).not.toHaveBeenCalled();
     expect(f.raw.prepare("SELECT * FROM sync_relay_service_activations").all()).toEqual([]);
     expect(f.raw.prepare("SELECT * FROM sync_relay_live_documents").all()).toEqual(documents);
     expect(f.storage.getLiveHostControl()).toEqual(control);
@@ -2778,17 +2398,12 @@ it("refuses a successor while its predecessor retires, or that names another tai
   }
 });
 
-it("refuses a successor under a changed workspace identity, from another baseline, or from an unverified source", async () => {
+it("refuses a successor under a changed workspace identity or from another baseline", async () => {
   const f = fixture();
   try {
     await retirePredecessor(f);
     await expect(prepareSuccessor(f, successor(f, { baseRelaySeq: 1 }))).rejects.toThrow(
       "successor has another baseline",
-    );
-    await expect(
-      prepareSuccessor(f, successor(f, { sourceMomentId: "moment-not-in-history" })),
-    ).rejects.toThrow(
-      "Native activation source moment is neither ordinary history nor a proved settlement.",
     );
     expect(activations(f)).toHaveLength(1);
     expect(
@@ -3990,40 +3605,6 @@ it("resumes from the owner's save after a Stop when the host's last save lands a
     f.close();
   }
 });
-const unsettled = "neither ordinary history nor a proved settlement",
-  unproved = "Native activation source settlement is not proved.";
-it.each([
-  [
-    "its moment without the committed binding",
-    "moment",
-    (f) => {
-      f.raw.exec("DELETE FROM sync_relay_live_settlement_bindings");
-    },
-    unsettled,
-  ],
-  [
-    "pruned settled state",
-    "moment",
-    (f) => {
-      f.raw
-        .prepare("DELETE FROM sync_relay_blobs WHERE sha256=?")
-        .run(f.capture.source.fullStateDigest);
-    },
-    unproved,
-  ],
-] as [string, "moment" | "audit", (f: ReturnType<typeof fixture>) => void, string][])(
-  "refuses a departed settlement source with %s",
-  async (_case, published, change, message) => {
-    const f = fixture();
-    try {
-      await departedSettlementSource(f, published);
-      change(f);
-      await expect(verify(f)).rejects.toThrow(message);
-    } finally {
-      f.close();
-    }
-  },
-);
 
 it("verifies the engine's own event-zero audit record digest and origin stamp", () => {
   const db = new DatabaseSync(":memory:");

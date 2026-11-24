@@ -62,21 +62,7 @@ import {
   ServiceActivationHistoryOverBudget,
   validateOrdinaryActivation,
 } from "./storage/ordinaryActivationValidation.js";
-import {
-  readOrdinaryActivationHistory,
-  ServiceActivationTooLarge,
-  verifyOrdinaryActivationCut,
-} from "./storage/ordinaryActivationSource.js";
-import {
-  CHECKPOINT_MOMENTS,
-  checkpointPolicySha256,
-  readOrdinaryCheckpoint,
-} from "./storage/ordinaryActivationCheckpoint.js";
-import {
-  foldOrdinaryCheckpointPages,
-  ORDINARY_FOLD_PAGE_ROWS,
-  ORDINARY_FOLD_RUN_PAGES,
-} from "./storage/ordinaryActivationFold.js";
+import { ServiceActivationTooLarge } from "./storage/ordinaryActivationSource.js";
 import {
   nativeSettlementId,
   prepareHostedSettlements,
@@ -380,7 +366,6 @@ async function configureActivation(f: Awaited<ReturnType<typeof fixture>>, limit
     activation: {
       targets: [{ workspaceId: "workspace", path: "file.md" }],
       maxCaptureBytes: 1_000_000,
-      maxActivationHistoryEntries: 10,
       maxEntriesPerDrain: 10,
       maxBytesPerDrain: 1_000_000,
       maxDocumentsPerPass: 1,
@@ -714,7 +699,7 @@ async function completedServiceOwner(
     registeredAtMs: 3,
     guard() {},
     validate: async (work) => validateOrdinaryActivation(work, policy),
-    bounds: { maxCaptureBytes: 1_000_000, maxHistoryEntries: 10, maxBytesPerDrain: 1_000_000 },
+    bounds: { maxCaptureBytes: 1_000_000, maxBytesPerDrain: 1_000_000 },
   });
   const access = store.pending(document, earlier),
     delivery = f.storage.createLiveCommittedDeliveryStore(f.history, access);
@@ -3862,291 +3847,6 @@ it("keeps the owner editing a note after restoring it, when the restore ended it
   expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
 });
 
-// The retiring host's push of the restored note, which puts the restore in the relay's ordinary history. Returns the
-// restored note's complete state.
-const pushRestoredUpdate = (o: Enrolled) => {
-  const ordinary = new Y.Doc({ gc: false }),
-    restored = new Y.Doc({ gc: false });
-  for (const bytes of [o.engine.capture.baselineBytes, o.engine.capture.fullState])
-    Y.applyUpdate(ordinary, bytes);
-  Y.applyUpdate(
-    restored,
-    o.raw
-      .prepare(
-        "SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal ORDER BY journal_cursor DESC LIMIT 1",
-      )
-      .get()!.validation_checkpoint_bytes as Uint8Array,
-  );
-  const update = Buffer.from(Y.encodeStateAsUpdate(restored, Y.encodeStateVector(ordinary))),
-    fullState = Buffer.from(Y.encodeStateAsUpdate(restored));
-  ordinary.destroy();
-  restored.destroy();
-  o.raw
-    .prepare(
-      "INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)",
-    )
-    .run(sha256(update), update.length, update);
-  o.raw
-    .prepare(
-      "INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',3,'ydoc.update',?,3)",
-    )
-    .run(
-      JSON.stringify({
-        versionId: "main",
-        objectId: "object",
-        path: o.sibling.path,
-        contentKind: "richdoc",
-        isBaseState: false,
-        lineageClaimId: o.document.lineageClaimId,
-        updateBlobSha256: sha256(update),
-      }),
-    );
-  return fullState;
-};
-const firstText = (node: Y.XmlFragment | Y.XmlElement): Y.XmlText | null => {
-  for (const child of node.toArray()) {
-    const found =
-      child instanceof Y.XmlText ? child : child instanceof Y.XmlElement ? firstText(child) : null;
-    if (found) return found;
-  }
-  return null;
-};
-
-const restoredCapture = (o: Enrolled, fullState: Buffer): NativeOwnerActivation => {
-  const moment = o.raw
-    .prepare(
-      "SELECT moment_id,blob_sha256,byte_length FROM sync_relay_object_moments WHERE moment_id='restore-publication'",
-    )
-    .get()!;
-  const head = Number(
-    o.raw.prepare("SELECT max(relay_seq) AS head FROM sync_relay_log").get()!.head,
-  );
-  return {
-    ...o.engine.capture,
-    activationId: SUCCESSOR,
-    fullState,
-    source: {
-      ...o.engine.capture.source,
-      predecessorActivationId: ACTIVATION,
-      committedCursor: head,
-      sourceMomentId: String(moment.moment_id),
-      sourceDigest: String(moment.blob_sha256),
-      sourceByteLength: Number(moment.byte_length),
-      fullStateDigest: sha256(fullState),
-      fullStateByteLength: fullState.length,
-    },
-  };
-};
-
-// Proves: after a restore and Stop, the successor that Resume starts, whose source is the restore's settlement
-// moment, reads from a checkpoint folded through that moment. Here the owner's ordinary history reached the restored
-// text before the settlement, and a later save of the same text makes the settlement no longer the note's newest file
-// moment, so the read proves the settlement. The checkpoint kept the projection of the history before the moment,
-// which is the prefix a read from the base validates. Where the checkpoint no longer holds the projection of every
-// history after the settlement, or no longer keeps the settlement, the read answers base.
-it.each<{ after: string; steps: ("row" | "save")[]; read: "history" | "base" }>([
-  { after: "a save", steps: ["save"], read: "history" },
-  // More Y.Doc rows after the settlement than the checkpoint's tail keeps.
-  {
-    after: "a save and 33 Y.Doc rows",
-    steps: ["save", ...Array<"row">(33).fill("row")],
-    read: "base",
-  },
-  // A page that ended before a later moment kept the projection of its last row only.
-  { after: "two Y.Doc rows and a save", steps: ["row", "row", "save"], read: "base" },
-  // As many saves as the checkpoint keeps moments, so it no longer keeps the settlement.
-  {
-    after: `${CHECKPOINT_MOMENTS} saves`,
-    steps: Array<"save">(CHECKPOINT_MOMENTS).fill("save"),
-    read: "base",
-  },
-])(
-  "reads a restored note's successor followed by $after from a checkpoint folded through the restore's settlement: $read",
-  async ({ steps, read }) => {
-    const o = await enrolledServiceHost({ supervised: true });
-    vi.spyOn(console, "error").mockImplementation(() => {});
-    o.beginRestore();
-    o.f.storage.advanceStopRestoreFence(stopLookup, 50);
-    await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({
-      kind: "pending",
-      reason: "native-fence-pending",
-    });
-    const proposalDigest = await admitRestore(o),
-      { publish } = restoreEngine(o, o.host);
-    await expect(o.host.completeRestore(stopLookup, proposalDigest)).resolves.toMatchObject({
-      kind: "resumed",
-      proposalDigest,
-    });
-    const restored = pushRestoredUpdate(o);
-    await publish();
-    await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true), {
-      timeout: 10_000,
-    });
-    expect(
-      preparedStop(o.f.storage, {
-        workspaceId: "workspace",
-        ownerUserId: "owner",
-        path: o.sibling.path,
-        enabled: false,
-        retire: true,
-        nowMs: 300,
-        guard() {},
-      }),
-    ).toMatchObject({ enabled: false, retired: true });
-    o.supervisor!.reconcile();
-    await vi.waitFor(() => expect(retiredRow(o).retired).toBe(true), { timeout: 10_000 });
-    const capture = restoredCapture(o, restored),
-      storage = o.f.storage as StorageContext;
-    const settlement = Number(
-      o.raw
-        .prepare("SELECT relay_seq FROM sync_relay_object_moments WHERE moment_id=?")
-        .get(capture.source.sourceMomentId)!.relay_seq,
-    );
-    // The owner's rows after the settlement: saves of the restored text, and Y.Doc rows that type a letter and take it
-    // back, so the note's Markdown stays the restored text.
-    const doc = new Y.Doc({ gc: false });
-    Y.applyUpdate(doc, capture.fullState);
-    const text = firstText(doc.getXmlFragment("body"))!;
-    let originSeq = 4,
-      cursor = 0;
-    const append = (opKind: string, payload: Record<string, unknown>) => {
-      o.raw
-        .prepare(
-          "INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',?,?,?,4)",
-        )
-        .run(
-          originSeq++,
-          opKind,
-          JSON.stringify({
-            versionId: "main",
-            objectId: "object",
-            path: o.sibling.path,
-            ...payload,
-          }),
-        );
-      cursor = Number(
-        o.raw.prepare("SELECT max(relay_seq) AS head FROM sync_relay_log").get()!.head,
-      );
-    };
-    for (const step of steps) {
-      if (step === "row") {
-        const before = Y.encodeStateVector(doc);
-        doc.transact(() => {
-          text.insert(0, "x");
-          text.delete(0, 1);
-        });
-        const update = Buffer.from(Y.encodeStateAsUpdate(doc, before));
-        o.raw
-          .prepare(
-            "INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)",
-          )
-          .run(sha256(update), update.length, update);
-        append("ydoc.update", {
-          contentKind: "richdoc",
-          isBaseState: false,
-          lineageClaimId: o.document.lineageClaimId,
-          updateBlobSha256: sha256(update),
-        });
-      } else {
-        const momentId = `saved-after-resume-${originSeq}`;
-        append("moment.append", {
-          momentId,
-          operation: "write",
-          payloadAfterPath: o.sibling.path,
-          payloadAfterContentKind: "text",
-          payloadAfterBlobSha256: capture.source.sourceDigest,
-          payloadAfterByteLength: capture.source.sourceByteLength,
-        });
-        o.raw
-          .prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
-        VALUES ('workspace','object',?,?,'main',?,?,'text',?,4)`)
-          .run(
-            cursor,
-            momentId,
-            o.sibling.path,
-            capture.source.sourceDigest,
-            capture.source.sourceByteLength,
-          );
-      }
-    }
-    const fullState = Buffer.from(Y.encodeStateAsUpdate(doc));
-    doc.destroy();
-    const source = {
-      ...capture.source,
-      committedCursor: cursor,
-      fullStateDigest: sha256(fullState),
-      fullStateByteLength: fullState.length,
-    };
-    const scope = {
-      namespace: source.relayDatabaseNamespace,
-      document: o.document,
-      replicationEpoch: source.replicationEpoch,
-      streamIdentity: source.streamIdentity,
-      base: {
-        relaySeq: source.baseRelaySeq,
-        originId: source.baseOriginId,
-        originSeq: source.baseOriginSeq,
-      },
-      policySha256: checkpointPolicySha256(restorePolicy),
-    };
-    await expect(
-      foldOrdinaryCheckpointPages(storage, {
-        scope,
-        pages: ORDINARY_FOLD_RUN_PAGES,
-        nowMs: () => 500,
-        validate: async (work) => validateOrdinaryActivation(work, restorePolicy),
-        bounds: { pageRows: ORDINARY_FOLD_PAGE_ROWS, pageBytes: 1_000_000 },
-      }),
-    ).resolves.toMatchObject({ kind: "folded", reachedCursor: true });
-    const folded = readOrdinaryCheckpoint(storage, scope)!;
-    expect(folded.throughRelaySeq).toBe(source.committedCursor);
-    expect(folded.moments.some((moment) => moment.relaySeq === settlement)).toBe(
-      steps.filter((step) => step === "save").length < CHECKPOINT_MOMENTS,
-    );
-    const input = {
-      source,
-      document: o.document,
-      baselineBytes: capture.baselineBytes,
-      fullState,
-      checkpoint: scope,
-      bounds: { maxCaptureBytes: 1_000_000, maxHistoryEntries: 1_000, maxBytesPerDrain: 1_000_000 },
-    };
-    const found = readOrdinaryActivationHistory(storage, input);
-    if (read === "base") return expect(found.kind).toBe("base");
-    if (found.kind !== "history")
-      throw new Error(`Expected a history read from the checkpoint, not ${found.kind}.`);
-    expect(found.history).toMatchObject({
-      from: 0,
-      artifact: null,
-      checkpoint: { throughRelaySeq: folded.throughRelaySeq },
-    });
-    expect(found.history.settled).not.toBeNull();
-    const validation = validateOrdinaryActivation(
-      {
-        document: o.document,
-        currentPath: source.currentPath,
-        baselineBytes: capture.baselineBytes,
-        cut: {
-          source,
-          fullState,
-          history: found.history,
-          maxBytesPerDrain: input.bounds.maxBytesPerDrain,
-        },
-      },
-      restorePolicy,
-    );
-    if (validation.kind !== "accepted") throw new Error(validation.message);
-    expect(() =>
-      verifyOrdinaryActivationCut(storage, {
-        ...input,
-        history: found.history,
-        baseline: validation.baseline,
-        proof: validation.proof,
-      }),
-    ).not.toThrow();
-  },
-);
-
 // Proves: the owner's restore is charged for the record it stores, and no
 // more. A restore that keeps nothing fits in exactly the room it needs, and one
 // byte less refuses it. Keeping the owner's live session adds only the bytes of
@@ -4403,7 +4103,7 @@ const replacementActivation = async (
     registeredAtMs: 33,
     guard() {},
     validate: async (work) => validateOrdinaryActivation(work, policy),
-    bounds: { maxCaptureBytes: 1_000_000, maxHistoryEntries: 10, maxBytesPerDrain: 1_000_000 },
+    bounds: { maxCaptureBytes: 1_000_000, maxBytesPerDrain: 1_000_000 },
   });
   const access = store.pending(document, host),
     delivery = o.f.storage.createLiveCommittedDeliveryStore(o.f.history, access);
@@ -4947,788 +4647,122 @@ it("keeps accepted edits and queued edits when another device removes an enrolle
   ).toBe("queued-before-removal");
 });
 
-for (const c of [
-  { changedText: true, name: "keeps a document inactive when its saved text needs attention" },
-  { changedText: false, name: "resumes a document with only its own text" },
-])
-  it(c.name, async () => {
-    const o = await enrolledServiceHost(),
-      move = documentMoves(o);
-    const log = vi.spyOn(console, "error").mockImplementation(() => {});
-    o.distinctRegistrations();
-    const sibling = await replacementActivation(o, { name: "sibling", path: "docs/c.md" });
-    const siblingCapture = o.otherActivations.get(REPLACEMENT_ACTIVATION)!;
-    const siblingDocument = {
-      workspaceId: sibling.workspaceId,
-      mainVersionId: "main" as const,
-      objectId: sibling.objectId,
-      lineageClaimId: siblingCapture.source.lineageClaimId,
-    };
-    o.f.storage.ensureOwnedLiveDocument({
-      intent: "share",
-      workspaceId: sibling.workspaceId,
-      ownerUserId: "owner",
-      shareId: "share",
-      path: sibling.path,
-      nowMs: 35,
-      guard() {},
-    });
-    const visitor = c.changedText
-      ? undefined
-      : await replacementActivation(o, {
-          name: "visitor",
-          path: "docs/visitor.md",
-          activationId: `ordinary-activation-${"d".repeat(64)}`,
-        });
-    if (visitor) move(visitor, "elsewhere/visitor.md");
-    await o.host.update({ workspaces: [o.workspace], documents: [o.sibling, sibling], ...stay });
-    await vi.waitFor(() => {
-      expect(o.host.settled(o.sibling)).toBe(true);
-      expect(o.host.isDocumentReady(siblingDocument)).toBe(true);
-    });
-    const removed = vi.spyOn(ServiceActivationDriver.prototype, "removeTarget");
-    o.replies.pass = { departed: [o.sibling.objectId] };
-    o.replies.commit = { departed: [o.sibling.objectId] };
-    move(o.sibling, "elsewhere/a.md");
-    await o.host.update({
-      workspaces: [o.workspace],
-      documents: [sibling],
-      departing: [o.sibling],
-    });
-    await vi.waitFor(() =>
-      expect(removed, "The moved document must leave activation.").toHaveBeenCalledWith(
-        expect.objectContaining({ path: o.sibling.path }),
-      ),
-    );
-    await o.nextPull();
-    if (visitor) {
-      move(visitor, o.sibling.path);
-      expect(
-        o.f.storage.objectIdAtPathInVersion({
-          workspaceId: "workspace",
-          versionId: "main",
-          path: o.sibling.path,
-        }),
-      ).toBe(visitor.objectId);
-    }
-    const sent = o.ownerCalls().length;
-    expect(
-      o.f.storage.setServiceHostEnrollmentEnabled({
-        workspaceId: "workspace",
-        path: o.sibling.path,
-        ownerUserId: "owner",
-        enabled: false,
-        nowMs: 50,
-        guard() {},
-      }),
-    ).toMatchObject({ ownerStop: "pause" });
-    const key = retirementKey(o);
-    await vi.waitFor(() =>
-      expect(retiringSettles(o, sent)).toContainEqual([
-        "liveApplication.settle",
-        expect.objectContaining({ retirement: key }),
-      ]),
-    );
-    o.replies.pass = {};
-    o.replies.commit = {};
-    await vi.waitFor(() => expect(retiredRow(o).retired).toBe(true));
-    if (visitor) move(visitor, "elsewhere/visitor.md");
-    const returnedAt = log.mock.calls.length;
-    move(o.sibling, o.sibling.path, c.changedText ? "Different text on return\n" : undefined);
-    o.engine.capture = {
-      ...o.engine.capture,
-      activationId: SUCCESSOR,
-      source: { ...o.engine.capture.source, predecessorActivationId: ACTIVATION },
-    };
-    o.engine.adoption = { activationId: SUCCESSOR, throughCursor: null };
-    const capture = o.engine.capture;
-    const source = {
-      ...capture.source,
-      committedCursor: Number(
-        o.raw
-          .prepare("SELECT MAX(relay_seq) AS cursor FROM sync_relay_log WHERE workspace_id=?")
-          .get("workspace")!.cursor,
-      ),
-    };
-    const read = () => {
-      const found = readOrdinaryActivationHistory(o.f.storage as StorageContext, {
-        source,
-        document: o.document,
-        baselineBytes: capture.baselineBytes,
-        fullState: capture.fullState,
-        checkpoint: null,
-        bounds: { maxCaptureBytes: 1_000_000, maxHistoryEntries: 100, maxBytesPerDrain: 1_000_000 },
-      });
-      if (found.kind !== "history") throw new Error(`Expected a history read, not ${found.kind}.`);
-      return found.history;
-    };
-    if (c.changedText) {
-      expect(read, "The returned document must refuse a move that changed its text.").toThrow(
-        "Ordinary activation history replaced the live document.",
-      );
-    } else {
-      expect(read, "The returned document must rebuild its own edits.").not.toThrow();
-      const history = read();
-      expect(read(), "Reading the returned document again must give the same edits.").toEqual(
-        history,
-      );
-      expect(
-        history.rows.map((row) => row.origin_id),
-        "The returned document must use only its own edits.",
-      ).toEqual(["origin", "origin"]);
-      const doc = new Y.Doc();
-      try {
-        for (const bytes of history.updates) Y.applyUpdate(doc, bytes);
-        expect(
-          yDocToMarkdown(doc),
-          "The other document's text must stay out of the returned document.",
-        ).not.toContain("Document visitor");
-        const rebuilt = createLiveMarkdownRegistrationValidator(restorePolicy)({
-          document: o.document,
-          currentPath: o.sibling.path,
-          checkpoint: Y.encodeStateAsUpdate(doc),
-        });
-        expect(rebuilt).toMatchObject({
-          kind: "accepted",
-          evidence: { projectedMarkdownSha256: capture.source.sourceDigest },
-        });
-      } finally {
-        doc.destroy();
-      }
-    }
-    expect(
-      o.f.storage.ensureOwnedLiveDocument({
-        intent: "owner-resume",
-        workspaceId: "workspace",
-        path: o.sibling.path,
-        ownerUserId: "owner",
-        nowMs: 60,
-        guard() {},
-      }),
-    ).toMatchObject({ enabled: true });
-    const pushes = () =>
-      o
-        .client()
-        .sendRequest.mock.calls.filter(
-          (call) => ((call as unknown[])[0] as { method: string }).method === "sync.push",
-        ).length;
-    await o.host.update({ workspaces: [o.workspace], documents: [o.sibling, sibling], ...stay });
-    if (c.changedText) {
-      await vi.waitFor(() =>
-        expect(log.mock.calls.slice(returnedAt)).toContainEqual([
-          "Service activation pass failed.",
-          "ServerLogError: Ordinary activation history replaced the live document.",
-        ]),
-      );
-      for (let pass = 0; pass < 3; pass++) {
-        // A document that backs off does not keep its workspace pulling, so this waits on passes.
-        await o.nextPass();
-        expect(
-          o.host.isDocumentReady(o.document),
-          "The returned document must stay inactive after its text changed.",
-        ).toBe(false);
-        expect(o.host.isDocumentReady(siblingDocument)).toBe(true);
-      }
-    } else {
-      await vi.waitFor(() =>
-        expect(
-          o.host.isDocumentReady(o.document),
-          "The returned document must activate with its own text.",
-        ).toBe(true),
-      );
-      const pushed = pushes();
-      await vi.waitFor(() =>
-        expect(
-          pushes(),
-          "The workspace must publish after the returned document activates.",
-        ).toBeGreaterThan(pushed),
-      );
-    }
+it("resumes a document that moved away and back while another document took its path", async () => {
+  const o = await enrolledServiceHost(),
+    move = documentMoves(o);
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.distinctRegistrations();
+  const sibling = await replacementActivation(o, { name: "sibling", path: "docs/c.md" });
+  const siblingCapture = o.otherActivations.get(REPLACEMENT_ACTIVATION)!;
+  const siblingDocument = {
+    workspaceId: sibling.workspaceId,
+    mainVersionId: "main" as const,
+    objectId: sibling.objectId,
+    lineageClaimId: siblingCapture.source.lineageClaimId,
+  };
+  o.f.storage.ensureOwnedLiveDocument({
+    intent: "share",
+    workspaceId: sibling.workspaceId,
+    ownerUserId: "owner",
+    shareId: "share",
+    path: sibling.path,
+    nowMs: 35,
+    guard() {},
   });
-
-for (const c of [
-  { kind: "different", name: "keeps a document inactive when the saved file has different text" },
-  { kind: "departed", name: "keeps a document inactive while preserving a newer saved file" },
-  { kind: "saved", name: "keeps a document inactive with its saved text intact" },
-  {
-    kind: "saved-matching",
-    name: "keeps a document inactive while its saved file needs attention",
-  },
-  {
-    kind: "departed-matching",
-    name: "keeps a document inactive without replacing its newer saved text",
-  },
-  {
-    kind: "saved-move",
-    name: "keeps a document inactive when its saved text differs from its current edits",
-  },
-  {
-    kind: "saved-move-no-write",
-    name: "keeps a document inactive with its different saved text preserved",
-  },
-  {
-    kind: "saved-move-unindexed",
-    name: "keeps a document inactive while its different saved text stays available",
-  },
-  {
-    kind: "saved-file-different",
-    name: "keeps a document inactive while its saved file has other text",
-  },
-  {
-    kind: "saved-move-departed",
-    name: "keeps a document inactive without changing its different saved text",
-  },
-  {
-    kind: "saved-file-current",
-    name: "keeps a document inactive with its saved file's different text available",
-  },
-  {
-    kind: "saved-move-selected-write",
-    name: "keeps a document inactive while its saved file keeps another device's text",
-  },
-  {
-    kind: "saved-file-unindexed-moves",
-    name: "keeps a document inactive with all its different saved text available",
-  },
-  {
-    kind: "saved-file-later-moves",
-    name: "keeps a document inactive while preserving all its different saved text",
-  },
-  {
-    kind: "saved-after-return",
-    name: "keeps a document inactive with its latest saved text available",
-  },
-  {
-    kind: "saved-after-unindexed-return",
-    name: "keeps a document inactive while its saved text remains available",
-  },
-  {
-    kind: "saved-after-indexed-return",
-    name: "keeps a document inactive without changing its available saved text",
-  },
-  {
-    kind: "saved-after-stale-write",
-    name: "keeps a document inactive with its current saved edits intact",
-  },
-  { kind: "returned-saved", name: "resumes a document with its latest saved edits" },
-  {
-    kind: "returned-current",
-    name: "resumes a document with its current edits and matching saved text",
-  },
-  { kind: "current", name: "resumes a document with its current edits" },
-] as const)
-  it(c.name, async () => {
-    const o = await enrolledServiceHost(),
-      move = documentMoves(o);
-    const log = vi.spyOn(console, "error").mockImplementation(() => {});
-    const capture = o.engine.capture;
-    const base = createLiveMarkdownRegistrationValidator(restorePolicy)({
-      document: o.document,
-      currentPath: o.sibling.path,
-      checkpoint: capture.baselineBytes,
-    });
-    if (base.kind !== "accepted") throw new Error(base.reason);
-    const resumes =
-      c.kind === "current" || c.kind === "returned-current" || c.kind === "returned-saved";
-    const writesAfterReturn =
-      c.kind === "saved-after-return" ||
-      c.kind === "saved-after-stale-write" ||
-      c.kind === "returned-saved";
-    const repeatsCurrentWrite =
-      c.kind === "saved-after-unindexed-return" || c.kind === "saved-after-indexed-return";
-    const unindexedMoves =
-      c.kind === "saved-file-unindexed-moves" || c.kind === "saved-after-unindexed-return";
-    if (!resumes) {
-      o.native.binding = o.binding;
-      o.nativeEdits("queued-while-inactive");
-    }
-    const appendWrite = (
-      originId: string,
-      originSeq: number,
-      text: string,
-      native = false,
-      departed = false,
-      payloadRecordedAtMs: number | null = 40,
-      beforeBlobSha256?: string,
-    ) => {
-      const bytes = Buffer.from(text),
-        digest = sha256(bytes);
-      o.f.storage.putBlob({
-        workspaceId: "workspace",
-        sha256: digest,
-        content: bytes,
-        createdAtMs: 40,
-      });
-      const payload = {
-        versionId: "main",
-        objectId: o.sibling.objectId,
-        path: o.sibling.path,
-        operation: "write",
-        momentId: native
-          ? `moment-ydoc-${sha256(Buffer.from(`${originId}\0${originSeq}`))}`
-          : "external-write",
-        payloadAfterPath: o.sibling.path,
-        payloadAfterContentKind: "text",
-        payloadAfterBlobSha256: digest,
-        payloadAfterByteLength: bytes.length,
-        metadata: {},
-        beforePresent: beforeBlobSha256 !== undefined,
-        recordedAtMs: payloadRecordedAtMs,
-        ...(beforeBlobSha256 === undefined
-          ? {}
-          : {
-              beforePath: o.sibling.path,
-              payloadBeforePath: o.sibling.path,
-              payloadBeforeContentKind: "text",
-              payloadBeforeBlobSha256: beforeBlobSha256,
-            }),
-      };
-      expect(
-        o.f.storage.appendLogBatch({
-          workspaceId: "workspace",
-          originId,
-          ops: [
-            {
-              originSeq,
-              opKind: "moment.append",
-              payloadJson: JSON.stringify(payload),
-              recordedAtMs: 40,
-              ...(departed ? { relayAdmission: "departed" as const } : {}),
-            },
-          ],
-        }),
-      ).toMatchObject({ inserted: 1 });
-    };
-    const unindexedMove = (beforePath: string, path: string, originSeq: number) => {
-      const payload = {
-        momentId: `unindexed-move-${originSeq}`,
-        objectId: o.sibling.objectId,
-        versionId: "main",
-        operation: "rename",
-        path,
-        beforePath,
-        payloadBeforePath: beforePath,
-        payloadAfterPath: path,
-        payloadBeforeContentKind: "text",
-        payloadAfterContentKind: "text",
-        payloadBeforeBlobSha256: capture.source.sourceDigest,
-        payloadAfterBlobSha256: capture.source.sourceDigest,
-        payloadAfterByteLength: capture.source.sourceByteLength,
-        ...(unindexedMoves ? {} : { recordedAtMs: null }),
-      };
-      expect(
-        o.f.storage.appendLogBatch({
-          workspaceId: "workspace",
-          originId: "unindexed-moving-device",
-          ops: [
-            {
-              originSeq,
-              opKind: "moment.append",
-              payloadJson: JSON.stringify(payload),
-              recordedAtMs: 40,
-            },
-          ],
-        }),
-      ).toMatchObject({ inserted: 1 });
-    };
-    if (c.kind === "current") {
-      move(o.sibling, "elsewhere/a.md");
-      move(o.sibling, o.sibling.path);
-      appendWrite("origin", 3, base.evidence.projectedMarkdown, true);
-    } else if (c.kind === "saved-move") {
-      appendWrite("origin", 3, base.evidence.projectedMarkdown, true);
-    } else if (
-      c.kind === "saved-file-current" ||
-      c.kind === "saved-file-unindexed-moves" ||
-      c.kind === "saved-file-later-moves" ||
-      c.kind === "returned-current" ||
-      repeatsCurrentWrite
-    ) {
-      const current = createLiveMarkdownRegistrationValidator(restorePolicy)({
-        document: o.document,
-        currentPath: o.sibling.path,
-        checkpoint: capture.fullState,
-      });
-      if (current.kind !== "accepted") throw new Error(current.reason);
-      expect(current.evidence.projectedMarkdownSha256).toBe(capture.source.sourceDigest);
-      appendWrite("origin", 3, current.evidence.projectedMarkdown, true);
-      if (c.kind !== "returned-current")
-        appendWrite(
-          "writing-device",
-          0,
-          "Different saved text\n",
-          false,
-          false,
-          null,
-          capture.source.sourceDigest,
-        );
-    } else if (
-      c.kind === "saved-move-unindexed" ||
-      c.kind === "saved-move-departed" ||
-      c.kind === "saved-file-different"
-    ) {
-      appendWrite(
-        "writing-device",
-        0,
-        "Different saved text\n",
-        false,
-        c.kind === "saved-move-departed",
-        null,
-      );
-    } else if (c.kind !== "saved-move-no-write" && !writesAfterReturn) {
-      appendWrite(
-        "writing-device",
-        0,
-        "Different saved text\n",
-        false,
-        false,
-        c.kind === "saved-move-selected-write" ? null : 40,
-      );
-      if (
-        c.kind === "departed" ||
-        c.kind === "saved" ||
-        c.kind === "departed-matching" ||
-        c.kind === "saved-matching" ||
-        c.kind === "saved-move-selected-write"
-      ) {
-        expect(
-          o.f.storage.appendLogBatch({
-            workspaceId: "workspace",
-            originId: "origin",
-            ops: [
-              {
-                originSeq: 3,
-                opKind: "ydoc.update",
-                payloadJson: JSON.stringify({
-                  versionId: "main",
-                  objectId: o.sibling.objectId,
-                  path: o.sibling.path,
-                  contentKind: "richdoc",
-                  lineageClaimId: o.document.lineageClaimId,
-                  isBaseState: false,
-                  updateBlobSha256: sha256(capture.fullState),
-                }),
-                recordedAtMs: 40,
-              },
-            ],
-          }),
-        ).toMatchObject({ inserted: 1 });
-        appendWrite(
-          "origin",
-          4,
-          c.kind === "saved-matching" || c.kind === "departed-matching"
-            ? "Different saved text\n"
-            : base.evidence.projectedMarkdown,
-          true,
-          c.kind === "departed" || c.kind === "departed-matching",
-          c.kind === "saved" || c.kind === "saved-matching" ? null : 40,
-        );
-      }
-    }
-    const removed = vi.spyOn(ServiceActivationDriver.prototype, "removeTarget");
-    o.replies.pass = { departed: [o.sibling.objectId] };
-    o.replies.commit = { departed: [o.sibling.objectId] };
-    if (c.kind.startsWith("saved-move")) {
-      const bytes = Buffer.from("Different saved text\n"),
-        digest = sha256(bytes);
-      o.f.storage.putBlob({
-        workspaceId: "workspace",
-        sha256: digest,
-        content: bytes,
-        createdAtMs: 40,
-      });
-      expect(
-        o.f.storage.appendLogBatch({
-          workspaceId: "workspace",
-          originId: "saving-device",
-          ops: [
-            {
-              originSeq: 0,
-              opKind: "moment.append",
-              payloadJson: JSON.stringify({
-                versionId: "main",
-                objectId: o.sibling.objectId,
-                momentId: "saved-move",
-                operation: "rename",
-                path: "elsewhere/a.md",
-                beforePath: o.sibling.path,
-                payloadBeforePath: o.sibling.path,
-                payloadAfterPath: "elsewhere/a.md",
-                payloadBeforeContentKind: "text",
-                payloadAfterContentKind: "text",
-                payloadBeforeBlobSha256: digest,
-                payloadAfterBlobSha256: digest,
-                payloadAfterByteLength: bytes.length,
-                recordedAtMs: 40,
-              }),
-              recordedAtMs: 40,
-            },
-          ],
-        }),
-      ).toMatchObject({ inserted: 1 });
-    } else if (unindexedMoves) unindexedMove(o.sibling.path, "elsewhere/a.md", 0);
-    else move(o.sibling, "elsewhere/a.md");
-    const pause = () => {
-      expect(
-        o.f.storage.setServiceHostEnrollmentEnabled({
-          workspaceId: "workspace",
-          path: o.sibling.path,
-          ownerUserId: "owner",
-          enabled: false,
-          nowMs: 50,
-          guard() {},
-        }),
-      ).toMatchObject({ ownerStop: "pause" });
-      return retirementKey(o);
-    };
-    let sent = o.ownerCalls().length;
-    const paused = unindexedMoves ? pause() : undefined;
-    await o.depart();
-    if (!paused)
-      await vi.waitFor(() =>
-        expect(removed, "The document must leave activation.").toHaveBeenCalledWith(
-          expect.objectContaining({ path: o.sibling.path }),
-        ),
-      );
-    await o.nextPull();
-    if (!paused) sent = o.ownerCalls().length;
-    const key = paused ?? pause();
-    await vi.waitFor(() =>
-      expect(retiringSettles(o, sent)).toContainEqual([
-        "liveApplication.settle",
-        expect.objectContaining({ retirement: key }),
-      ]),
-    );
-    o.replies.pass = {};
-    o.replies.commit = {};
-    await vi.waitFor(() => expect(retiredRow(o).retired).toBe(true));
-    if (paused)
-      expect(removed, "The document must leave activation.").toHaveBeenCalledWith(
-        expect.objectContaining({ path: o.sibling.path }),
-      );
-    const returnedAt = log.mock.calls.length;
-    if (unindexedMoves) unindexedMove("elsewhere/a.md", o.sibling.path, 1);
-    else move(o.sibling, o.sibling.path);
-    if (c.kind === "saved-file-later-moves") {
-      unindexedMove(o.sibling.path, "elsewhere/a.md", 0);
-      unindexedMove("elsewhere/a.md", o.sibling.path, 1);
-    }
-    if (writesAfterReturn || repeatsCurrentWrite) {
-      const current = createLiveMarkdownRegistrationValidator(restorePolicy)({
-        document: o.document,
-        currentPath: o.sibling.path,
-        checkpoint: capture.fullState,
-      });
-      if (current.kind !== "accepted") throw new Error(current.reason);
-      expect(current.evidence.projectedMarkdownSha256).toBe(capture.source.sourceDigest);
-      if (repeatsCurrentWrite) appendWrite("origin", 4, current.evidence.projectedMarkdown, true);
-      else {
-        const before = sha256(Buffer.from(base.evidence.projectedMarkdown));
-        appendWrite("origin", 3, current.evidence.projectedMarkdown, true, false, 40, before);
-        if (c.kind === "saved-after-return")
-          appendWrite(
-            "writing-device",
-            0,
-            "Different saved text\n",
-            false,
-            false,
-            null,
-            capture.source.sourceDigest,
-          );
-        if (c.kind === "saved-after-stale-write")
-          appendWrite("origin", 4, base.evidence.projectedMarkdown, true, false, 40, before);
-      }
-    }
-    o.engine.capture = {
-      ...capture,
-      activationId: SUCCESSOR,
-      source: {
-        ...capture.source,
-        predecessorActivationId: ACTIVATION,
-        ...(c.kind === "returned-saved"
-          ? { sourceMomentId: `moment-ydoc-${sha256(Buffer.from(["origin", 3].join("\0")))}` }
-          : {}),
-        ...(c.kind === "saved-file-current" ||
-        c.kind === "saved-file-later-moves" ||
-        c.kind === "returned-current"
-          ? { sourceMomentId: "move-1" }
-          : {}),
-      },
-    };
-    o.engine.adoption = { activationId: SUCCESSOR, throughCursor: null };
-    const source = {
-      ...o.engine.capture.source,
-      committedCursor: Number(
-        o.raw
-          .prepare("SELECT MAX(relay_seq) AS cursor FROM sync_relay_log WHERE workspace_id=?")
-          .get("workspace")!.cursor,
-      ),
-    };
-    const bounds = {
-      maxCaptureBytes: 1_000_000,
-      maxHistoryEntries: 100,
-      maxBytesPerDrain: 1_000_000,
-    };
-    const check = () => {
-      const input = {
-        source,
-        document: o.document,
-        baselineBytes: capture.baselineBytes,
-        fullState: capture.fullState,
-        bounds,
-        checkpoint: null,
-      };
-      const found = readOrdinaryActivationHistory(o.f.storage as StorageContext, input);
-      if (found.kind !== "history") throw new Error(`Expected a history read, not ${found.kind}.`);
-      const history = found.history;
-      const validation = validateOrdinaryActivation(
-        {
-          document: o.document,
-          currentPath: source.currentPath,
-          baselineBytes: capture.baselineBytes,
-          cut: {
-            source,
-            fullState: capture.fullState,
-            history,
-            maxBytesPerDrain: bounds.maxBytesPerDrain,
-          },
-        },
-        restorePolicy,
-      );
-      if (validation.kind !== "accepted") throw new Error(validation.message);
-      return verifyOrdinaryActivationCut(o.f.storage as StorageContext, {
-        ...input,
-        history,
-        baseline: validation.baseline,
-        proof: validation.proof,
-      });
-    };
-    const refusal =
-      "Ordinary activation found a later ordinary file moment with a divergent projection.";
-    const currentFile = () =>
-      o.raw
-        .prepare(
-          "SELECT path,blob_sha256 FROM sync_relay_current_files WHERE workspace_id=? AND version_id=? AND path=?",
-        )
-        .get(o.document.workspaceId, o.document.mainVersionId, o.sibling.path);
-    const storedFile = currentFile(),
-      storedAccepted = readAcceptedEdits(o);
-    expect(
-      storedFile,
-      "The saved file must be available before the document resumes.",
-    ).toMatchObject({
+  const visitor = await replacementActivation(o, {
+    name: "visitor",
+    path: "docs/visitor.md",
+    activationId: `ordinary-activation-${"d".repeat(64)}`,
+  });
+  move(visitor, "elsewhere/visitor.md");
+  await o.host.update({ workspaces: [o.workspace], documents: [o.sibling, sibling], ...stay });
+  await vi.waitFor(() => {
+    expect(o.host.settled(o.sibling)).toBe(true);
+    expect(o.host.isDocumentReady(siblingDocument)).toBe(true);
+  });
+  const removed = vi.spyOn(ServiceActivationDriver.prototype, "removeTarget");
+  o.replies.pass = { departed: [o.sibling.objectId] };
+  o.replies.commit = { departed: [o.sibling.objectId] };
+  move(o.sibling, "elsewhere/a.md");
+  await o.host.update({
+    workspaces: [o.workspace],
+    documents: [sibling],
+    departing: [o.sibling],
+  });
+  await vi.waitFor(() =>
+    expect(removed, "The moved document must leave activation.").toHaveBeenCalledWith(
+      expect.objectContaining({ path: o.sibling.path }),
+    ),
+  );
+  await o.nextPull();
+  move(visitor, o.sibling.path);
+  expect(
+    o.f.storage.objectIdAtPathInVersion({
+      workspaceId: "workspace",
+      versionId: "main",
       path: o.sibling.path,
-      blob_sha256:
-        c.kind === "returned-current" ||
-        c.kind === "returned-saved" ||
-        c.kind === "saved-after-stale-write"
-          ? capture.source.sourceDigest
-          : sha256(
-              Buffer.from(
-                c.kind === "saved-move" || c.kind === "current"
-                  ? base.evidence.projectedMarkdown
-                  : "Different saved text\n",
-              ),
-            ),
-    });
-    const queued = o.native.entries.map((entry) => ({
-      ...entry,
-      update: Buffer.from(entry.update),
-    }));
-    const storedText = rebuildEdits(storedAccepted, queued);
-    if (!resumes)
-      expect(queued, "The document must have queued edits before it resumes.").toHaveLength(1);
-    if (resumes) {
-      let failure: unknown;
-      try {
-        check();
-      } catch (error) {
-        failure = error;
-      }
-      expect(
-        failure,
-        `The document must resume with its current edits. ${failure instanceof Error ? failure.message : String(failure)}`,
-      ).toBeUndefined();
-    } else
-      expect(check, "The saved file must be checked before the document resumes.").toThrow(refusal);
+    }),
+  ).toBe(visitor.objectId);
+  const sent = o.ownerCalls().length;
+  expect(
+    o.f.storage.setServiceHostEnrollmentEnabled({
+      workspaceId: "workspace",
+      path: o.sibling.path,
+      ownerUserId: "owner",
+      enabled: false,
+      nowMs: 50,
+      guard() {},
+    }),
+  ).toMatchObject({ ownerStop: "pause" });
+  const key = retirementKey(o);
+  await vi.waitFor(() =>
+    expect(retiringSettles(o, sent)).toContainEqual([
+      "liveApplication.settle",
+      expect.objectContaining({ retirement: key }),
+    ]),
+  );
+  o.replies.pass = {};
+  o.replies.commit = {};
+  await vi.waitFor(() => expect(retiredRow(o).retired).toBe(true));
+  move(visitor, "elsewhere/visitor.md");
+  move(o.sibling, o.sibling.path);
+  o.engine.capture = {
+    ...o.engine.capture,
+    activationId: SUCCESSOR,
+    source: { ...o.engine.capture.source, predecessorActivationId: ACTIVATION },
+  };
+  o.engine.adoption = { activationId: SUCCESSOR, throughCursor: null };
+  expect(
+    o.f.storage.ensureOwnedLiveDocument({
+      intent: "owner-resume",
+      workspaceId: "workspace",
+      path: o.sibling.path,
+      ownerUserId: "owner",
+      nowMs: 60,
+      guard() {},
+    }),
+  ).toMatchObject({ enabled: true });
+  const pushes = () =>
+    o
+      .client()
+      .sendRequest.mock.calls.filter(
+        (call) => ((call as unknown[])[0] as { method: string }).method === "sync.push",
+      ).length;
+  await o.host.update({ workspaces: [o.workspace], documents: [o.sibling, sibling], ...stay });
+  await vi.waitFor(() =>
     expect(
-      o.f.storage.ensureOwnedLiveDocument({
-        intent: "owner-resume",
-        workspaceId: "workspace",
-        path: o.sibling.path,
-        ownerUserId: "owner",
-        nowMs: 60,
-        guard() {},
-      }),
-    ).toMatchObject({ enabled: true });
-    await o.host.update({ workspaces: [o.workspace], documents: [o.sibling], ...stay });
-    if (resumes) {
-      await vi.waitFor(() =>
-        expect(
-          o.host.isDocumentReady(o.document),
-          "The document must become ready with its current edits.",
-        ).toBe(true),
-      );
-    } else {
-      await vi.waitFor(() =>
-        expect(
-          log.mock.calls.slice(returnedAt),
-          "The document must explain why it cannot resume.",
-        ).toContainEqual(["Service activation pass failed.", `ServerLogError: ${refusal}`]),
-      );
-      for (let pass = 0; pass < 3; pass++) {
-        // A document that backs off does not keep its workspace pulling, so this waits on passes.
-        await o.nextPass();
-        expect(
-          o.host.isDocumentReady(o.document),
-          "The document must stay inactive while its saved text needs attention.",
-        ).toBe(false);
-      }
-      expect(
-        o.f.storage.objectMoment({
-          workspaceId: "workspace",
-          objectId: o.sibling.objectId,
-          versionId: "main",
-        }),
-        "The saved file must keep its text.",
-      ).toMatchObject({
-        path: o.sibling.path,
-        blobSha256:
-          c.kind === "saved-file-current" ||
-          c.kind === "saved-file-unindexed-moves" ||
-          c.kind === "saved-file-later-moves" ||
-          c.kind === "saved-after-return" ||
-          repeatsCurrentWrite
-            ? capture.source.sourceDigest
-            : sha256(
-                Buffer.from(
-                  c.kind === "saved-file-different" || c.kind === "saved-after-stale-write"
-                    ? base.evidence.projectedMarkdown
-                    : "Different saved text\n",
-                ),
-              ),
-      });
-      expect(currentFile(), "The saved file must keep its available text.").toEqual(storedFile);
-      const saved = readAcceptedEdits(o);
-      expect(
-        saved,
-        "The accepted edits must stay available while the document is inactive.",
-      ).toEqual(storedAccepted);
-      expect(
-        o.native.entries,
-        "The queued edits must stay available while the document is inactive.",
-      ).toEqual(queued);
-      const rebuilt = rebuildEdits(saved, o.native.entries);
-      expect(
-        rebuilt.acceptedText,
-        "The inactive document must still contain the accepted text.",
-      ).toBe(storedText.acceptedText);
-      expect(
-        rebuilt.queuedText,
-        "The inactive document and queued edits must still contain the latest text.",
-      ).toBe(storedText.queuedText);
-    }
-  });
+      o.host.isDocumentReady(o.document),
+      "The returned document must activate with its own text.",
+    ).toBe(true),
+  );
+  const pushed = pushes();
+  await vi.waitFor(() =>
+    expect(
+      pushes(),
+      "The workspace must publish after the returned document activates.",
+    ).toBeGreaterThan(pushed),
+  );
+});
 
 // Proves: a restarted host's ordinary recovery of a departing document reads
 // only that document's activation, though a moved document's restore keeps its
@@ -5980,7 +5014,7 @@ it.each([
     "history-over-budget",
     () =>
       new ServiceActivationHistoryOverBudget(
-        "Ordinary activation history exceeds its configured entry budget.",
+        "Ordinary activation baseline exceeds its configured byte budget.",
       ),
   ],
 ] as const)("keeps a %s block through an idle unload (case %#)", async (block, refusal) => {
@@ -6079,7 +5113,7 @@ async function reclaimedBlocked(
     block === "refused"
       ? new ServiceActivationTooLarge()
       : new ServiceActivationHistoryOverBudget(
-          "Ordinary activation history exceeds its configured entry budget.",
+          "Ordinary activation baseline exceeds its configured byte budget.",
         ),
   );
   vi.spyOn(console, "error").mockImplementation(() => {});

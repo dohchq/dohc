@@ -315,6 +315,18 @@
     ],
     "undoAgentRun": [
       "history.agent.run.undo"
+    ],
+    "inboxList": [
+      "inbox.list"
+    ],
+    "inboxAdd": [
+      "inbox.add"
+    ],
+    "inboxArchive": [
+      "inbox.archive"
+    ],
+    "inboxMove": [
+      "inbox.move"
     ]
   },
   "public": {
@@ -439,6 +451,10 @@
     "workspace search": "workspace.search",
     "history agent-run-plan": "history.agent.run.plan",
     "history undo-agent-run": "history.agent.run.undo",
-    "app verifyFrontend": "app.frontend.verify"
+    "app verifyFrontend": "app.frontend.verify",
+    "inbox list": "inbox.list",
+    "inbox add": "inbox.add",
+    "inbox archive": "inbox.archive",
+    "inbox move": "inbox.move"
   }
 }

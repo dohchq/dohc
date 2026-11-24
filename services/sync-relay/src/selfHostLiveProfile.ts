@@ -137,7 +137,6 @@ export function selfHostLiveProfile() {
       activation: {
         validation,
         maxCaptureBytes: 4 * MiB,
-        maxActivationHistoryEntries: 2_000,
         maxEntriesPerDrain: 128,
         maxBytesPerDrain: 4 * MiB,
         maxDocumentsPerPass: 8,

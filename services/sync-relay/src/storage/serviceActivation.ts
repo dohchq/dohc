@@ -2,7 +2,6 @@ import { requireFinishedRestoreBinding } from "./liveRestoreLifecycleStorage";
 import { parseNativeOwnerActivationSource } from "@dohc/workspace-engine-client/daemon";
 import { registerLiveHostInTransaction } from "./hostControl";
 import { createHash } from "node:crypto";
-import { setImmediate } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
 import type {
   NativeOwnerActivation,
@@ -47,32 +46,23 @@ import {
 } from "./serviceHostEnrollment";
 import type { RetirementKey } from "./serviceActivationRetirement";
 import {
-  readOrdinaryActivationHistory,
   verifyOrdinaryActivationCut,
   ServiceActivationBusy,
   ServiceActivationStaleCut,
   ServiceActivationTooLarge,
   type OrdinaryActivationBounds,
-  type OrdinaryActivationRead,
 } from "./ordinaryActivationSource";
 import {
   ServiceActivationHistoryOverBudget,
   type OrdinaryActivationValidator,
 } from "./ordinaryActivationValidation";
-import {
-  foldOrdinaryCheckpointPages,
-  ORDINARY_FOLD_PAGE_ROWS,
-  ORDINARY_FOLD_RUN_PAGES,
-  type OrdinaryFoldValidator,
-} from "./ordinaryActivationFold";
-import type { OrdinaryCheckpointScope } from "./ordinaryActivationCheckpoint";
 /** A retained activation whose stored record can't be read back. Only the operator can repair it. */
 export class ServiceActivationDamaged extends Error {
   constructor(options?: ErrorOptions) {
     super("Retained service activation is damaged.", options);
   }
 }
-/** Validation refused the captured history. The message is the validator's, so the owner sees only that it was refused. */
+/** Validation refused the capture. The message is the validator's, so the owner sees only that it was refused. */
 export class ServiceActivationRefused extends Error {}
 /** Validation refused the captured baseline itself, which every capture of the same state repeats. */
 export class ServiceActivationBaselineRefused extends ServiceActivationRefused {}
@@ -794,7 +784,7 @@ export class ServiceActivationStore {
 
   /**
    * Retains a capture as the document's live baseline. Its validation runs in a live validation
-   * process before the transaction opens; the transaction refuses it as stale if the history changed.
+   * process before the transaction opens; the transaction refuses it as stale if the relay advanced.
    */
   async prepare(input: {
     capture: NativeOwnerActivation;
@@ -816,10 +806,9 @@ export class ServiceActivationStore {
       Buffer.byteLength(JSON.stringify(input.capture.source));
     if (capturedBytes > input.bounds.maxCaptureBytes)
       throw new ServiceActivationCaptureOverBudget();
-    // The history read charges the baseline to the same budget, so a baseline past it refuses as a history past it does.
     if (input.capture.baselineBytes.byteLength > input.bounds.maxBytesPerDrain) {
       throw new ServiceActivationHistoryOverBudget(
-        "Ordinary activation history exceeds its configured byte budget.",
+        "Ordinary activation baseline exceeds its configured byte budget.",
       );
     }
     const source = parseNativeOwnerActivationSource(
@@ -852,7 +841,7 @@ export class ServiceActivationStore {
         throw new Error("Service activation owner is unavailable.");
       return ownerUserId;
     };
-    // A retained activation replays without validating history again; a retired one is a predecessor, so its successor validates the full history.
+    // A retained activation replays checking only its baseline; a retired one is a predecessor, so its successor checks its full state.
     const retained = (prior: ReturnType<typeof readServiceActivation>) => {
       const state = serviceActivationState(prior);
       if (state === "retiring") throw new Error("Service activation is retiring.");
@@ -868,91 +857,26 @@ export class ServiceActivationStore {
       }
       if (predecessor) this.#requireSuccession(document, source, predecessor, ownerUserId);
     };
-    const { policySha256 } = input.validate;
-    const lineage: OrdinaryCheckpointScope | null =
-      policySha256 === undefined
-        ? null
-        : {
-            namespace: this.history.namespace,
-            document,
-            replicationEpoch: source.replicationEpoch,
-            streamIdentity: source.streamIdentity,
-            base: {
-              relaySeq: source.baseRelaySeq,
-              originId: source.baseOriginId,
-              originSeq: source.baseOriginSeq,
-            },
-            policySha256,
-          };
-    const read = (checkpoint: OrdinaryCheckpointScope | null) =>
-      this.storage.readTx((): OrdinaryActivationRead | undefined => {
-        input.guard();
-        requireLiveJournalHistory(this.storage, this.history);
-        const prior = readServiceActivation(this.storage, document);
-        const ownerUserId = owner();
-        if (retained(prior)) return undefined;
-        succeed(prior ?? null, ownerUserId);
-        return readOrdinaryActivationHistory(this.storage, {
-          source,
-          document,
-          baselineBytes,
-          fullState,
-          bounds: input.bounds,
-          checkpoint,
-        });
-      });
-    const foldPage: OrdinaryFoldValidator = async (work, signal) => {
-      const result = await input.validate(work, signal);
-      if (result.kind === "accepted" || result.kind === "baseline-refused")
-        throw new Error("Ordinary fold validation answered for an activation.");
-      return result;
-    };
-    // More than one page of history after the checkpoint folds into it a run of pages at a time, so the last read walks at most
-    // one page.
-    let checkpoint = lineage,
-      found = read(checkpoint);
-    while (found?.kind === "fold" && lineage) {
-      input.signal?.throwIfAborted();
-      const folded = await foldOrdinaryCheckpointPages(this.storage, {
-        scope: lineage,
-        validate: foldPage,
-        nowMs: () => input.registeredAtMs,
-        signal: input.signal,
-        bounds: { pageRows: ORDINARY_FOLD_PAGE_ROWS, pageBytes: input.bounds.maxBytesPerDrain },
-        pages: ORDINARY_FOLD_RUN_PAGES,
-      });
-      if (folded.kind === "busy") throw new ServiceActivationBusy();
-      if (folded.kind === "over-budget")
-        throw new ServiceActivationHistoryOverBudget(folded.message);
-      // A fold that cannot go further, or whose next row no page can fold, leaves the read from the base to decide.
-      if (folded.kind === "blocked" || folded.kind === "current" || folded.kind === "refused")
-        checkpoint = null;
-      await setImmediate();
-      found = read(checkpoint);
-    }
-    if (found?.kind === "base") {
-      checkpoint = null;
-      found = read(checkpoint);
-    }
-    if (found && found.kind !== "history") throw new ServiceActivationStaleCut();
-    const history = found?.history;
+    const fresh = this.storage.readTx(() => {
+      input.guard();
+      requireLiveJournalHistory(this.storage, this.history);
+      const prior = readServiceActivation(this.storage, document);
+      const ownerUserId = owner();
+      if (retained(prior)) return false;
+      succeed(prior ?? null, ownerUserId);
+      return true;
+    });
     const validation = await input.validate(
       {
         document,
         currentPath: source.currentPath,
         baselineBytes,
-        ...(history
-          ? { cut: { source, fullState, history, maxBytesPerDrain: input.bounds.maxBytesPerDrain } }
-          : {}),
+        ...(fresh ? { fullState } : {}),
       },
       input.signal,
     );
     if (validation.kind === "retry") throw new ServiceActivationBusy();
     if (validation.kind === "capacity-refused") throw new ServiceActivationTooLarge();
-    if (validation.kind === "over-budget")
-      throw new ServiceActivationHistoryOverBudget(validation.message);
-    if (validation.kind === "folded")
-      throw new Error("Ordinary activation validation answered for a fold.");
     if (validation.kind === "baseline-refused")
       throw new ServiceActivationBaselineRefused(validation.message);
     if (validation.kind !== "accepted") throw new ServiceActivationRefused(validation.message);
@@ -974,20 +898,15 @@ export class ServiceActivationStore {
           throw new Error("Service activation already has another retained source.");
         return { document, replayed: true, completed: kept.completion_json !== null };
       }
-      // The retained activation the read found has since gone, so nothing validated this history.
-      if (!history) throw new ServiceActivationStaleCut();
+      // The retained activation the read found has since gone, so nothing validated this full state.
+      if (!fresh) throw new ServiceActivationStaleCut();
       const predecessor = prior ?? null;
       succeed(predecessor, ownerUserId);
       const ordinaryCut = verifyOrdinaryActivationCut(this.storage, {
         source,
         document,
         baselineBytes,
-        fullState,
         baseline: base,
-        history,
-        proof: validation.proof,
-        bounds: input.bounds,
-        checkpoint,
       });
       if (
         !registerLiveHostInTransaction(this.storage, {

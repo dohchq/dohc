@@ -33,6 +33,10 @@
       "label": "New Collection"
     },
     {
+      "id": "quick-capture",
+      "label": "Capture to Inbox"
+    },
+    {
       "id": "quick-open",
       "label": "Go to"
     },
