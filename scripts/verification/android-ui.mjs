@@ -24,7 +24,8 @@ const screenText = () => {
   return shell("cat /sdcard/ui.xml");
 };
 const now = () => shell("date +'%m-%d %H:%M:%S.000'").trim();
-// The app's crashes and JavaScript errors logged since a device time. Other processes, such as uiautomator, don't count.
+// The app's crashes, JavaScript errors, and web view renderer crashes logged since a device time.
+// Other processes, such as uiautomator, don't count.
 const problems = (since, uid) =>
   adb(
     "logcat",
@@ -36,10 +37,11 @@ const problems = (since, uid) =>
     "brief",
     "AndroidRuntime:E",
     "ReactNativeJS:E",
+    "RNCWebViewClient:E",
     "*:S",
   )
     .split("\n")
-    .filter((line) => /^E\/(AndroidRuntime|ReactNativeJS)/u.test(line));
+    .filter((line) => /^E\/(AndroidRuntime|ReactNativeJS|RNCWebViewClient)/u.test(line));
 
 async function waitFor(label, ms = 30_000) {
   const until = Date.now() + ms;
@@ -83,8 +85,14 @@ for (const mode of ["light", "dark"]) {
     if (!alive()) shell(`am start -W -n ${app}/.MainActivity > /dev/null`);
   }
 }
+// A crash after the last screen's read.
+const late = problems(since, uid);
+if (late.length)
+  console.log(`FAIL after the last screen${late.map((line) => `\n  ${line}`).join("")}`);
 writeFileSync(`${out}/logcat.txt`, adb("logcat", "-d"));
-if (failed) {
-  console.error(`${failed} of ${screens.length * 2} screens failed.`);
+if (failed || late.length) {
+  console.error(
+    `${failed} of ${screens.length * 2} screens failed${late.length ? ", and the app crashed after the last" : ""}.`,
+  );
   process.exit(1);
 }
