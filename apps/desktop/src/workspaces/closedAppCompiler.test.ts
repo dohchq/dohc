@@ -120,6 +120,65 @@ describe("closed app compiler", () => {
     }
   });
 
+  it("renders dohc/icons with dohc/money and dohc/csv, keeping only the icons the app imports", async () => {
+    const compile = (source: string) =>
+      compileClosedApp({
+        entryPath: "main.tsx",
+        bounds: { maxInputFiles: 8, maxInputBytes: 1_000_000, maxOutputBytes: 4_000_000 },
+        inputs: [file("main.tsx", source)],
+      }).then((result) => {
+        expect(result.files.map((output) => output.path)).toEqual(["bundle.js"]);
+        return new TextDecoder().decode(result.files[0]!.bytes);
+      });
+    const ledger = await compile(`import { createRoot } from "react-dom/client";
+import { Receipt, Wallet } from "dohc/icons";
+import { formatCents, parseCents } from "dohc/money";
+import { parseCsv, toCsv } from "dohc/csv";
+const rows = parseCsv(["date,memo,amount", '2026-11-01,"Coffee, beans",-12.30', "2026-11-02,Refund,2.05"].join("\\r\\n"));
+const total = rows.slice(1).reduce((sum, row) => sum + (parseCents(row[2]!) ?? 0), 0);
+const root = createRoot(document.getElementById("root")!);
+root.render(
+  <main>
+    <Receipt aria-label="Receipt" />
+    <Wallet size={16} />
+    <p id="total">{formatCents(total)}</p>
+    <pre id="export">{toCsv([[rows[1]![1]!, total], ["=SUM(A1)", "@x"]])}</pre>
+  </main>,
+);
+globalThis.unmountLedger = () => root.unmount();`);
+    expect(ledger).not.toContain("lucide-trash-2");
+    expect(ledger).not.toContain('"trash-2"');
+    const everyIcon = await compile(
+      "import * as icons from 'dohc/icons'; globalThis.icons = icons;",
+    );
+    expect(everyIcon).toContain('"trash-2"');
+    const { JSDOM } = createRequire(import.meta.url)("jsdom") as {
+      JSDOM: new (
+        html: string,
+        options: { runScripts: "outside-only" },
+      ) => { window: Window & typeof globalThis & { unmountLedger?: () => void } };
+    };
+    const dom = new JSDOM('<div id="root"></div>', { runScripts: "outside-only" });
+    try {
+      // Executes a trusted test fixture to prove bundle compatibility, not runtime isolation.
+      dom.window.eval(ledger);
+      await vi.waitFor(() =>
+        expect(dom.window.document.querySelector("#total")?.textContent).toBe("-$10.25"),
+      );
+      const receipt = dom.window.document.querySelector("svg.lucide-receipt");
+      expect(receipt?.getAttribute("aria-label")).toBe("Receipt");
+      expect(dom.window.document.querySelector("svg.lucide-wallet")?.getAttribute("width")).toBe(
+        "16",
+      );
+      expect(dom.window.document.querySelector("#export")?.textContent).toBe(
+        "\"Coffee, beans\",-1025\r\n'=SUM(A1),'@x\r\n",
+      );
+    } finally {
+      dom.window.unmountLedger?.();
+      dom.window.close();
+    }
+  });
+
   it("emits no bundle.css for dohc/app alone, keeps dohc/charts free of page resets, and refuses reserved overrides", async () => {
     const plain = await compileClosedApp({
       entryPath: "main.tsx",
@@ -153,7 +212,14 @@ describe("closed app compiler", () => {
       }),
     ).rejects.toThrow(/reserved by dohc's built-in kit/);
 
-    for (const reserved of ["react", "react-dom/client", "scheduler", "dohc/ui", "dohc/app"]) {
+    for (const reserved of [
+      "react",
+      "react-dom/client",
+      "scheduler",
+      "dohc/ui",
+      "dohc/app",
+      "dohc/icons",
+    ]) {
       await expect(
         compileClosedApp({
           entryPath: "main.ts",

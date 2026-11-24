@@ -17,6 +17,7 @@ import {
 } from "./closedAppPage.ts";
 import {
   BUILTIN_NAMESPACE,
+  BUILTIN_SPECIFIERS,
   isReservedAppPackage,
   loadClosedAppBuiltins,
   resolveBuiltinImport,
@@ -435,7 +436,7 @@ export async function compileClosedApp(request: ClosedAppBuildRequest): Promise<
                       return {
                         errors: [
                           {
-                            text: `${importer} imports ${args.path}, which is reserved by dohc's built-in kit. dohc provides react, react/jsx-runtime, react-dom, react-dom/client, dohc/app, dohc/ui, and dohc/charts.`,
+                            text: `${importer} imports ${args.path}, which is reserved by dohc's built-in kit. dohc provides ${[...BUILTIN_SPECIFIERS.keys()].join(", ")}.`,
                           },
                         ],
                       };
