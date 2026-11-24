@@ -1,14 +1,23 @@
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { ensureLiveLinkPublicPrincipal } from "./liveAuthorSnapshot";
 import type { StoredLiveDocumentAuthority } from "./types";
-import { serviceHostDocumentEnabled, serviceHostDocumentEnrolled } from "./serviceHostEnrollment";
+import {
+  restoreInProgress,
+  SERVICE_HOST_ENROLLMENTS,
+  serviceHostDocumentEnabled,
+  serviceHostDocumentEnrolled,
+} from "./serviceHostEnrollment";
 import { personalReachIn, readPersonalAuthority } from "./personalAgents";
 import {
   ordinaryActivationBaseline,
   ordinaryActivationBasisCharge,
   persistOrdinaryActivationBasis,
+  ServiceActivationLineageEnding,
   type VerifiedOrdinaryActivationCut,
 } from "./ordinaryActivationSource";
+import { SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
+import { LIVE_ROOM_EDITS } from "./liveRoomEdits";
+import { LIVE_ROOM_PAUSES } from "./liveRoomPauses";
 import { readOrdinaryActivationBasis } from "./ordinaryActivationBasis";
 import {
   allowsServiceActivation,
@@ -1457,13 +1466,30 @@ function registerValidatedBaseline(
       .all(document.workspaceId, document.mainVersionId, document.objectId)
       .map((row) => decodeLiveDocumentAuthority(storage.db, document, row));
     const current = history.find((row) => row.current);
-    if (history.length > 0) {
+    const replaces =
+      ordinaryCut &&
+      current &&
+      !history.some((row) => row.binding.lineageClaimId === document.lineageClaimId)
+        ? current.binding.lineageClaimId
+        : null;
+    if (replaces !== null) {
+      if (lastLineageEnding(storage, document)) throw new ServiceActivationLineageEnding();
+      storage.db
+        .prepare(`UPDATE sync_relay_live_documents SET lineage_state='retired',admission_state='closed',retired_at_ms=?
+          WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND lineage_state='current'`)
+        .run(
+          Math.max(registeredAtMs, current!.registeredAtMs),
+          document.workspaceId,
+          document.mainVersionId,
+          document.objectId,
+          replaces,
+        );
+    } else if (history.length > 0) {
       if (!current || current.binding.lineageClaimId !== document.lineageClaimId) {
         return { kind: "refused", reason: "lineage-conflict" };
       }
       if (
         !current.open ||
-        current.replacesLineageClaimId !== null ||
         current.binding.currentPath !== currentPath ||
         current.baselineSequence !== latest.relay_seq ||
         current.projectedDigest !== evidence.projectedMarkdownSha256 ||
@@ -1496,7 +1522,7 @@ function registerValidatedBaseline(
       document.mainVersionId,
       document.objectId,
       document.lineageClaimId,
-      null,
+      replaces,
       currentPath,
       latest.relay_seq as number,
       evidence.projectedMarkdownSha256,
@@ -1558,6 +1584,31 @@ function registerValidatedBaseline(
       replayed: false,
     };
   });
+}
+
+function lastLineageEnding(storage: StorageContext, document: LiveDocumentKey): boolean {
+  const { workspaceId, mainVersionId, objectId } = document;
+  return (
+    restoreInProgress(storage, workspaceId, objectId) ||
+    storage.db
+      .prepare(`SELECT 1 FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND retired_at_ms IS NULL
+        UNION ALL SELECT 1 FROM ${LIVE_ROOM_EDITS} WHERE workspace_id=? AND main_version_id=? AND object_id=?
+        UNION ALL SELECT 1 FROM ${LIVE_ROOM_PAUSES} WHERE workspace_id=? AND main_version_id=? AND object_id=?
+        UNION ALL SELECT 1 FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=? AND state<>'starting' LIMIT 1`)
+      .get(
+        workspaceId,
+        mainVersionId,
+        objectId,
+        workspaceId,
+        mainVersionId,
+        objectId,
+        workspaceId,
+        mainVersionId,
+        objectId,
+        workspaceId,
+        objectId,
+      ) !== undefined
+  );
 }
 
 export function currentLiveDocumentMoment(

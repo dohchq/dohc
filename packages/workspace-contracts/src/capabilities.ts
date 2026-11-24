@@ -18,6 +18,7 @@ export const RETIRED_CAPABILITY_IDS: readonly string[] = [
   "version.try",
   "version.try.read",
   "version.try.dismiss",
+  "share.live.restore",
 ];
 
 export interface CapabilityMetadata {
@@ -374,7 +375,6 @@ const LISTED_CAPABILITIES = {
   "share.discussion.activity.cancel": capability("Cancel a share discussion activity wait.", {
     ipc: ["cancelRelayShareDiscussionActivity"],
   }),
-  "share.live.restore": capability("Restore an owner's live document.", { ipc: ["ownerRestore"] }),
   "share.skips.dismiss": capability("Acknowledge skipped changes in a received share.", {
     ipc: ["dismissShareSkips"],
   }),

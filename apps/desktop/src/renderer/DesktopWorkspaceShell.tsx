@@ -150,7 +150,6 @@ import { useCollectionCopiesLeftNotice } from "./shell/useCollectionCopiesLeftNo
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
 import { useMergeRemovalNotices } from "./shell/useMergeRemovalNotices";
-import { useSharedRestore } from "./shell/useSharedRestore";
 import { useVersionMergeNotices } from "./shell/useVersionMergeNotices";
 import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
 import { ShellErrorReporter, ShellNoticeClear, useShellError } from "./shell/useShellError";
@@ -5013,20 +5012,6 @@ function WorkspaceShell(props: {
     [openMomentDiffTab, workspaceId],
   );
   const takeRestoreRequest = useCallback(() => setRestoreRequest(null), []);
-  const sharedRestore = useSharedRestore({
-    workspaceId,
-    // Unfinished shared restores get no Notices row. Retry on one says "File
-    // restored" but never reaches the file, and Decline doesn't bring live
-    // editing back.
-    enabled: false,
-    onBeforeRestore: beginLineageOperation,
-    onRestored: onHistoryRestored,
-    openChange: openMomentDiffTab,
-    reportRestoreError,
-    reportShellFailure,
-    showSuccessNotice,
-    clearIdentity,
-  });
   const activateEditorTab = useCallback(
     (groupId: string, path: string) => {
       const current = wbRef.current;
@@ -6702,6 +6687,7 @@ function WorkspaceShell(props: {
               ? `Shared view from ${shareGranterName}. Files are read-only here. Continue commenting in the browser where you opened the link.`
               : `Shared view from ${shareGranterName}, read-only. Ask ${shareView.granterEmail ?? "the owner"} for changes.`;
   const [shareRefreshing, setShareRefreshing] = useState(false);
+  const [shareContentEpoch, setShareContentEpoch] = useState(0);
   const [shareExclusions, setShareExclusions] = useState<{
     workspaceId: string;
     paths: UnjournalableSharePath[];
@@ -6796,7 +6782,7 @@ function WorkspaceShell(props: {
         const repaintAfterChange = async () => {
           await refreshFiles();
           if (!isCurrent()) return;
-          advanceReopenKey(workspaceId);
+          setShareContentEpoch((epoch) => epoch + 1);
         };
         const bestEffortRepaint = async () => {
           try {
@@ -8672,15 +8658,19 @@ function WorkspaceShell(props: {
                                       workspaceId={workspaceId}
                                       path={path}
                                       fileOpenStartMark={fileOpenStartMark(editorGroup.id)}
-                                      // History growth, version switches, and share-mount pulls all
+                                      // History growth, version switches, and share pulls all
                                       // re-read the open file (every counter only ever increases).
                                       refreshKey={
-                                        historyRefreshCounter + versionEpoch + mountContentEpoch
+                                        historyRefreshCounter +
+                                        versionEpoch +
+                                        mountContentEpoch +
+                                        shareContentEpoch
                                       }
                                       // The engine editor re-binds to the new version's Y.Doc lineage
                                       // only on an active-version change: versionEpoch alone, not
                                       // history growth (which must not churn the live session).
                                       engineVersionKey={versionEpoch}
+                                      sharePullKey={shareContentEpoch}
                                       onOpenPath={openPathWithHeading}
                                       drawingCollaboration={chatCollaboration}
                                       // A search or heading jump opens the file's tab, never a record's body.
@@ -9533,7 +9523,10 @@ function WorkspaceShell(props: {
                                 openMoment={openMomentDiffTab}
                                 openHistory={openHistoryView}
                                 linksRevision={
-                                  historyRefreshCounter + versionEpoch + mountContentEpoch
+                                  historyRefreshCounter +
+                                  versionEpoch +
+                                  mountContentEpoch +
+                                  shareContentEpoch
                                 }
                                 openPathAtLine={openPathAtLine}
                                 openChatMention={openChatMention}
@@ -10004,7 +9997,6 @@ function WorkspaceShell(props: {
                             onClose={closeConflictReview}
                           />
                         ) : null}
-                        {sharedRestore.dialog}
                         {agentRunUndoTarget &&
                         agentRunUndoTarget.workspaceId === workspaceId &&
                         canUndoAgentRun ? (

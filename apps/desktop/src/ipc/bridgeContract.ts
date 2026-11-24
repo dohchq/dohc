@@ -27,11 +27,6 @@ import { nameByteLength } from "@dohc/workspace-contracts/names";
 import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
-import type {
-  OwnerRestoreRequest,
-  OwnerRestoreAction,
-  OwnerRestoreResult,
-} from "./ownerRestoreContract";
 import { PublicationAgent } from "@dohc/cli/app-publication";
 import {
   ServerAccountDeletionPreview,
@@ -8208,7 +8203,11 @@ export const RetryAutomationNoticePayload = z.object({
 });
 export const RetryAutomationNoticeResult = z.union([
   z.object({ status: z.literal("queued"), press: z.boolean() }),
-  z.object({ status: z.literal("definition-changed"), repeatsMessages: z.boolean() }),
+  z.object({
+    status: z.literal("definition-changed"),
+    repeatsMessages: z.boolean(),
+    repeatsWebhooks: z.boolean().optional(),
+  }),
   z.object({ status: z.literal("switched-off"), target: AutomationControlsTargetShape }),
   z.object({ status: z.literal("refused"), reason: z.string().min(1).max(2_000) }),
 ]);
@@ -9421,9 +9420,6 @@ export interface DohcDesktopBridge
   publishOwnerApp(payload: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   onAppViewEvent(listener: (event: AppViewEvent) => void): () => void;
   ownerAppResponses(payload: OwnerAppResponsesRequest): Promise<OwnerAppResponsesResult>;
-  ownerRestore<Action extends OwnerRestoreAction>(
-    payload: z.input<typeof OwnerRestoreRequest> & { action: Action },
-  ): Promise<OwnerRestoreResult<Action>>;
   // Constant, not a call: the titlebar lays out around macOS traffic lights
   // on darwin vs the window-controls overlay everywhere else.
   platform: NodeJS.Platform;

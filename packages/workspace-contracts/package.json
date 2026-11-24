@@ -68,7 +68,8 @@
     "./save-state-schema": "./src/saveStateSchema.ts",
     "./usage": "./src/usage.ts",
     "./work-links": "./src/workLinks.ts",
-    "./workspace-secrets": "./src/workspaceSecrets.ts"
+    "./workspace-secrets": "./src/workspaceSecrets.ts",
+    "./http-step-approvals": "./src/httpStepApprovals.ts"
   },
   "scripts": {
     "test": "vitest run",

@@ -32,6 +32,13 @@ export class ServiceActivationStaleCut extends Error {
     super("Ordinary replication advanced before service activation.");
   }
 }
+/** The note's last lineage is still retiring, restoring, saving room edits or paused. A later pass captures it again. */
+export class ServiceActivationLineageEnding extends ServiceActivationStaleCut {
+  constructor() {
+    super();
+    this.message = "The note's last live session is still ending.";
+  }
+}
 /** Live validation had no slot free for the capture. A later pass captures it again. */
 export class ServiceActivationBusy extends Error {
   constructor() {

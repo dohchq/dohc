@@ -233,7 +233,6 @@
     "desktop:open-workspace-window",
     "desktop:order-agents",
     "desktop:owner-app-responses",
-    "desktop:owner-restore",
     "desktop:pause-relay-share-discussion",
     "desktop:pending-stop-and-restores",
     "desktop:pick-image-files",

@@ -169,7 +169,7 @@ test("counts reads by name and action, and repeats by number", () => {
     `export function useThing() {
     bridge().dataset({ action: "list" });
     bridge().dataset({ action: "write" });
-    bridge().ownerRestore({ action: "status" });
+    bridge().heldNoteChange({ action: "review" });
     bridge().saveThing();
     bridge().searchWorkspace();
     bridge().chatLinks();
@@ -177,7 +177,7 @@ test("counts reads by name and action, and repeats by number", () => {
   }`;
   assert.deepEqual(reads(hook, source), [
     hook + " | dataset:list",
-    hook + " | ownerRestore:status",
+    hook + " | heldNoteChange:review",
     hook + " | chatLinks",
     hook + " | chatLinks #2",
   ]);

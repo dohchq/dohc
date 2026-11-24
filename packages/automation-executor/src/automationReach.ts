@@ -142,6 +142,8 @@ export type ReachStep = (
   | { kind: "notify"; person: ReachPerson }
   // A personal step, such as waking this person's agent.
   | { kind: "personal"; person: ReachPerson }
+  // A personal outbound HTTP webhook step (ADR 0012): solo owner Collection only.
+  | { kind: "http"; target: string; stepOrdinal: number }
 ) & {
   /** Retains a static step's existing hold identity when storage-specific checks expand. */ identity?: string;
 };
@@ -523,6 +525,15 @@ function checkOwnerStep(
       const other = editors[0];
       return other
         ? stop(`This step acts as you, and ${nameOf(other)} can also edit ${collection.name}.`)
+        : ALLOWED;
+    }
+    case "http": {
+      const other = editors[0];
+      return other
+        ? stop(
+            `This step sends a webhook to ${step.target}, and ${nameOf(other)} can also edit ${collection.name}.`,
+            nameOf(other),
+          )
         : ALLOWED;
     }
   }

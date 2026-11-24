@@ -307,7 +307,9 @@ function ReachStatus(props: {
                 ? `A step can now ${automationReachCopy(step)}. It stopped before because ${step.stoppedFor} could not.`
                 : step.fileUnread
                   ? `A step can ${automationReachCopy(step)}. dohc cannot read the automations file in one version of the workspace. New steps here wait for you.`
-                  : `A step can now ${automationReachCopy(step)}. It could not before.`}
+                  : step.action === "send-http"
+                    ? `This step sends a webhook to ${step.target}. Sent requests cannot be undone. Allow it before dohc sends requests there.`
+                    : `A step can now ${automationReachCopy(step)}. It could not before.`}
             </p>
             <SecondaryButton
               size="compact"

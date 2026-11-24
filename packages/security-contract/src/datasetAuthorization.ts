@@ -163,6 +163,7 @@ export function displayAppDatasetCapability(
     capability.revisionSha256 !== approved.revisionSha256
   )
     fail("capability revision does not match the approved revision.");
+  const multiTable = approved.definition.tables.length > 1;
   const shown = {
     ...capability,
     operations: capability.operations.map((operation) => {
@@ -173,10 +174,11 @@ export function displayAppDatasetCapability(
         (candidate) => candidate.tableId === declared?.tableId,
       );
       if (!declared || !table) fail("capability operation is not in the approved revision.");
+      const tableDisplay = multiTable ? { table: table.name } : {};
       if (!generated)
         return {
           ...operation,
-          display: { kind: "action" as const, label: declared.label, fields: [] },
+          display: { kind: "action" as const, label: declared.label, fields: [], ...tableDisplay },
         };
       // A generated form may write fewer of a create's fields.
       const fieldIds =
@@ -190,6 +192,7 @@ export function displayAppDatasetCapability(
           fields: table.fields
             .filter((field) => fieldIds.includes(field.fieldId))
             .map((field) => field.name),
+          ...tableDisplay,
         },
       };
     }),

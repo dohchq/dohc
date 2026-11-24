@@ -39,6 +39,7 @@ import type { ShareProposalRoute, WorkspaceProposalRoute } from "./proposalRoute
 import type { CollectionWriteRoute, OwnerCollectionWriteRoute } from "./collectionWriteRoutes";
 import { parsePersonalAgentRoute, type PersonalAgentRoute } from "./personalAgents";
 import type { WorkspaceSecretRoute } from "./workspaceSecretRoutes";
+import type { OutboundWebhookRoute } from "./outboundWebhookRoutes";
 import { parseShareId, parseString, parseWorkspaceId, relayPathSegments } from "./requestInputs";
 import { notFound } from "./errors";
 import { MAX_ORIGIN_ID_CHARS } from "./wireLimits";
@@ -89,6 +90,7 @@ export type SyncRelayRoute =
   | WorkspaceReplicationRoute
   | { route: "keys"; workspaceId: string }
   | WorkspaceSecretRoute
+  | OutboundWebhookRoute
   | WorkspaceShareCreationRoute
   | ShareInventoryRoute
   | ShareGrantTransitionRoute
@@ -570,6 +572,15 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
         workspaceId,
         name: parseString(parts[3], "name", 64),
       };
+    }
+    throw notFound();
+  }
+  if (parts[2] === "webhooks") {
+    if (parts.length === 4 && parts[3] === "http-approvals") {
+      return { route: "workspace-http-approvals", workspaceId };
+    }
+    if (parts.length === 4 && parts[3] === "outbound-dispatch") {
+      return { route: "workspace-outbound-dispatch", workspaceId };
     }
     throw notFound();
   }

@@ -577,11 +577,12 @@ export function registerCollectionAutomationsIpc<
       event.sender,
       workspaceId,
       stale,
-      async (operation): Promise<ConfirmCollectionAutomationStepResult> => ({
-        status: onServer
-          ? await serverRuns.allow(workspaceId, input)
-          : await operation.state.collectionAutomations.confirmReach(input),
-      }),
+      async (operation): Promise<ConfirmCollectionAutomationStepResult> => {
+        if (onServer) {
+          return { status: await serverRuns.allow(workspaceId, input) };
+        }
+        return { status: await operation.state.collectionAutomations.confirmReach(input) };
+      },
     );
   });
 

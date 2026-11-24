@@ -91,6 +91,8 @@ export const RELAY_ROUTE_PATTERNS = {
   keys: "/sync/:workspaceId/keys",
   "workspace-secrets": "/sync/:workspaceId/secrets",
   "workspace-secret": "/sync/:workspaceId/secrets/:name",
+  "workspace-http-approvals": "/sync/:workspaceId/webhooks/http-approvals",
+  "workspace-outbound-dispatch": "/sync/:workspaceId/webhooks/outbound-dispatch",
   "share-link-agents": "/sync/:workspaceId/shares/:shareId/links/:grantId/agents",
   "share-link-agent-disconnect":
     "/sync/:workspaceId/shares/:shareId/links/:grantId/agents/:connectionId/disconnect",

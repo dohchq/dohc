@@ -93,7 +93,6 @@ import {
   type DesktopWorkspaceCallbacksDependencies,
 } from "./workspaces/desktopWorkspaceCallbacks";
 import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
-import { readOwnerRestoreResponse } from "./ipc/readOwnerRestoreResponse";
 import { datasetResponseAction, readDatasetResponse } from "./ipc/readDatasetResponse";
 import {
   CollectionMoveUnfinishedError,
@@ -402,6 +401,18 @@ import {
   WorkspaceSecretStorageUnavailableError,
   WorkspaceSecretVaultCorruptError,
 } from "./workspaces/localWorkspaceSecretStore";
+import {
+  createLocalHttpApprovalStore,
+  type LocalHttpApprovalStore,
+} from "./workspaces/localHttpApprovalStore";
+import { createLocalOutboundWebhookExecutor } from "./workspaces/localOutboundWebhookExecutor";
+import {
+  HttpStepApprovalDigest,
+  OutboundWebhookDispatchResponse,
+  type HttpStepApprovalWriteInput,
+} from "@dohc/workspace-contracts/http-step-approvals";
+import type { CollectionHttpApprovalGate } from "@dohc/automation-executor/collection-automations";
+import type { AutomationHttpWebhookExecutor } from "@dohc/automation-executor/collection-automation-run";
 import {
   MAX_WORKSPACE_SECRETS,
   WorkspaceSecretSummary,
@@ -1617,6 +1628,13 @@ function chatWakeIntentsFile(): string {
 let cachedAgentThreads: ReturnType<typeof createAgentThreads> | null = null;
 let cachedT3Code: T3CodeConnection | null = null;
 let cachedLocalWorkspaceSecrets: LocalWorkspaceSecretStore | null = null;
+let cachedLocalHttpApprovals: LocalHttpApprovalStore | null = null;
+function localHttpApprovals(): LocalHttpApprovalStore {
+  if (!cachedLocalHttpApprovals) {
+    cachedLocalHttpApprovals = createLocalHttpApprovalStore({ dir: stateDir() });
+  }
+  return cachedLocalHttpApprovals;
+}
 function localWorkspaceSecrets(): LocalWorkspaceSecretStore {
   if (!cachedLocalWorkspaceSecrets) {
     cachedLocalWorkspaceSecrets = createLocalWorkspaceSecretStore({
@@ -2089,8 +2107,7 @@ type RelayShareRetainedUnavailableResult<T> =
 type RelayShareJsonOptions =
   | { retainDependentSetConflict: true }
   | { retainNotFound: true }
-  | { retainUnavailable: true }
-  | { retainRestoreConflict: true };
+  | { retainUnavailable: true };
 
 const relayShareFetch = relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS);
 
@@ -2127,12 +2144,6 @@ async function relayShareResponseWithCredentials(
   return response;
 }
 
-async function relayShareJsonWithCredentials<T>(
-  credentials: CloudSessionCredentials,
-  path: string,
-  init: RequestInit | undefined,
-  options: { retainRestoreConflict: true },
-): Promise<T>;
 async function relayShareJsonWithCredentials<T>(
   credentials: CloudSessionCredentials,
   path: string,
@@ -2209,9 +2220,7 @@ async function relayShareJsonWithCredentials<T>(
           datasetRoute,
           init?.signal ?? new AbortController().signal,
         )
-      : options && "retainRestoreConflict" in options
-        ? await readOwnerRestoreResponse(response)
-        : await response.json().catch(() => null)
+      : await response.json().catch(() => null)
   ) as {
     ok?: boolean;
     error?: string;
@@ -2219,16 +2228,6 @@ async function relayShareJsonWithCredentials<T>(
     [key: string]: unknown;
   } | null;
   if (!response.ok || data?.ok === false) {
-    if (
-      options &&
-      "retainRestoreConflict" in options &&
-      response.status === 409 &&
-      data &&
-      "status" in data &&
-      "result" in data
-    ) {
-      return data as T;
-    }
     if (
       options &&
       "retainDependentSetConflict" in options &&
@@ -2258,9 +2257,7 @@ async function relayShareJsonWithCredentials<T>(
       liveStopRelayError(data) ?? new Error(relayShareErrorCopy(response.status, data));
     throw datasetRoute ? markDatasetServerNotFound(failure, response.status, data) : failure;
   }
-  if (options && !("retainRestoreConflict" in options)) {
-    return { kind: "success", body: data as T };
-  }
+  if (options) return { kind: "success", body: data as T };
   return data as T;
 }
 
@@ -5927,6 +5924,242 @@ async function workspaceSecretsState(
   return parseRelaySecretsResponse(listed.body);
 }
 
+function workspaceHttpApprovalsFor(workspaceId: string): CollectionHttpApprovalGate {
+  const readApprovedDigests = async (): Promise<ReadonlySet<string> | null> => {
+    const entry = findWorkspace(workspaceId);
+    if (entry === null || entry.shareView !== undefined) return new Set();
+    if (entry.remote === undefined && entry.pausedRemote !== undefined) return null;
+    if (entry.remote === undefined) {
+      return null;
+    }
+    let credentials: CloudSessionCredentials;
+    let credentialGeneration: number;
+    try {
+      ({ credentials, credentialGeneration } = await remoteForWorkspace(entry));
+    } catch {
+      return null;
+    }
+    if (credentialCacheGeneration !== credentialGeneration) return null;
+    const response = await relayShareResponseWithCredentials(
+      credentials,
+      `/sync/${encodeURIComponent(workspaceId)}/webhooks/http-approvals`,
+      {
+        method: "GET",
+        signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS),
+      },
+    ).catch(() => null);
+    if (
+      response === null ||
+      credentialCacheGeneration !== credentialGeneration ||
+      response.status !== 200
+    ) {
+      return null;
+    }
+    const body = (await response.json().catch(() => undefined)) as
+      | { approvals?: unknown }
+      | undefined;
+    if (!body || !Array.isArray(body.approvals)) return null;
+    return new Set(body.approvals.filter((item): item is string => typeof item === "string"));
+  };
+  return {
+    isApproved: async (digest) => {
+      const parsedDigest = HttpStepApprovalDigest.safeParse(digest);
+      if (!parsedDigest.success) return "unapproved";
+      const entry = findWorkspace(workspaceId);
+      if (entry === null || entry.shareView !== undefined) return "unapproved";
+      if (entry.remote === undefined && entry.pausedRemote !== undefined) return "unavailable";
+      if (entry.remote === undefined) {
+        return localHttpApprovals().isApproved(workspaceId, parsedDigest.data);
+      }
+      const digests = await readApprovedDigests();
+      if (digests === null) return "unavailable";
+      return digests.has(parsedDigest.data) ? "approved" : "unapproved";
+    },
+    readApprovedDigests: async () => {
+      const entry = findWorkspace(workspaceId);
+      if (entry === null || entry.shareView !== undefined) return new Set();
+      if (entry.remote === undefined && entry.pausedRemote !== undefined) return null;
+      if (entry.remote === undefined) {
+        return localHttpApprovals()
+          .list(workspaceId)
+          .then((listed) => new Set(listed))
+          .catch(() => null);
+      }
+      return readApprovedDigests();
+    },
+    approve: async (input) => {
+      await approveWorkspaceHttpStep(workspaceId, input);
+    },
+  };
+}
+
+async function approveWorkspaceHttpStep(
+  workspaceId: string,
+  input: HttpStepApprovalWriteInput,
+): Promise<void> {
+  const entry = findWorkspace(workspaceId);
+  if (entry === null || entry.shareView !== undefined) {
+    throw new Error("Webhooks are only available in your own workspaces.");
+  }
+  if (entry.remote === undefined && entry.pausedRemote !== undefined) {
+    throw new Error(
+      "Sync is paused for this workspace. Resume sync before allowing webhook steps.",
+    );
+  }
+  if (entry.remote === undefined) {
+    await localHttpApprovals().approve(workspaceId, input);
+    return;
+  }
+  const { credentials, credentialGeneration } = await remoteForWorkspace(entry);
+  if (credentialCacheGeneration !== credentialGeneration) {
+    throw new Error("Your account changed while dohc saved this webhook confirmation.");
+  }
+  const response = await relayShareResponseWithCredentials(
+    credentials,
+    `/sync/${encodeURIComponent(workspaceId)}/webhooks/http-approvals`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+      signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS),
+    },
+  );
+  if (credentialCacheGeneration !== credentialGeneration) {
+    throw new Error("Your account changed while dohc saved this webhook confirmation.");
+  }
+  if (response.status !== 200) {
+    const body = (await response.json().catch(() => undefined)) as
+      | { message?: unknown; error?: unknown }
+      | undefined;
+    const message =
+      typeof body?.message === "string"
+        ? body.message
+        : typeof body?.error === "string"
+          ? body.error
+          : "dohc could not save this webhook confirmation on your server.";
+    throw new Error(message);
+  }
+}
+
+function workspaceHttpWebhookExecutorFor(workspaceId: string): AutomationHttpWebhookExecutor {
+  const localExecutor = createLocalOutboundWebhookExecutor({
+    workspaceId,
+    secrets: localWorkspaceSecrets(),
+  });
+  return {
+    execute: async (input) => {
+      const entry = findWorkspace(workspaceId);
+      if (entry === null || entry.shareView !== undefined) {
+        return {
+          ok: false,
+          reason: "Webhooks are only available in your own workspaces.",
+          beforeSend: true,
+        };
+      }
+      if (entry.remote === undefined && entry.pausedRemote !== undefined) {
+        return {
+          ok: false,
+          reason: "Sync is paused for this workspace. Resume sync before sending webhooks.",
+          beforeSend: true,
+        };
+      }
+      if (entry.remote === undefined) {
+        return localExecutor.execute(input);
+      }
+      let credentials: CloudSessionCredentials;
+      let credentialGeneration: number;
+      try {
+        ({ credentials, credentialGeneration } = await remoteForWorkspace(entry));
+      } catch {
+        return {
+          ok: false,
+          reason: "Sign in to your server to send webhooks.",
+          waitReason: "session",
+          beforeSend: true,
+        };
+      }
+      if (credentialCacheGeneration !== credentialGeneration) {
+        return {
+          ok: false,
+          reason: "Your account changed while sending this webhook.",
+          waitReason: "session",
+          beforeSend: true,
+        };
+      }
+      let response: Response;
+      try {
+        response = await relayShareResponseWithCredentials(
+          credentials,
+          `/sync/${encodeURIComponent(workspaceId)}/webhooks/outbound-dispatch`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              collectionId: input.collectionId,
+              collectionPath: input.collectionPath,
+              automationId: input.automation.id,
+              stepOrdinal: input.effect.stepOrdinal,
+              approvalDigest: input.approvalDigest,
+              deliveryId: input.effect.deliveryId,
+              chainDepth: input.depth,
+              evaluatedSafeHeaders: input.effect.headers.map((header) => ({
+                name: header.name,
+                value: header.value,
+              })),
+              evaluatedBody: input.effect.body,
+              defaultContentType: input.effect.defaultContentType,
+            }),
+            signal: input.signal,
+          },
+        );
+      } catch (error) {
+        if (relayUnreachable(error)) {
+          return {
+            ok: false,
+            reason: "dohc could not reach your server to send this webhook.",
+          };
+        }
+        return { ok: false, reason: "Webhook request failed or timed out." };
+      }
+      if (credentialCacheGeneration !== credentialGeneration) {
+        return {
+          ok: false,
+          reason: "Your account changed while sending this webhook.",
+          waitReason: "session",
+        };
+      }
+      if (response.status === 401) {
+        return {
+          ok: false,
+          reason: "Sign in to your server to send webhooks.",
+          waitReason: "session",
+          beforeSend: true,
+        };
+      }
+      const rawBody: unknown = await response.json().catch(() => undefined);
+      const parsed = OutboundWebhookDispatchResponse.safeParse(rawBody);
+      if (parsed.success) {
+        if (parsed.data.ok) {
+          return { ok: true, status: parsed.data.status };
+        }
+        return {
+          ok: false,
+          ...(parsed.data.status !== undefined ? { status: parsed.data.status } : {}),
+          reason: parsed.data.reason,
+          ...(parsed.data.beforeSend ? { beforeSend: true } : {}),
+          ...(parsed.data.error === "approval_required" || parsed.data.error === "reach_stopped"
+            ? { waitReason: "held" as const }
+            : {}),
+        };
+      }
+      return {
+        ok: false,
+        reason: `Your server refused this webhook request (HTTP ${response.status}).`,
+      };
+    },
+  };
+}
+
 // Which of the owner's computers runs a workspace's schedules, for settings
 // and the ⚡ panel, after a choose or take-over when one is given. This
 // computer acts on the answer at once.
@@ -6490,6 +6723,8 @@ function createCollectionAutomationsFor(
         return await work(host.automations);
       });
     },
+    httpApprovals: workspaceHttpApprovalsFor(workspaceId),
+    httpWebhook: workspaceHttpWebhookExecutorFor(workspaceId),
   });
 }
 
@@ -9640,6 +9875,7 @@ function registerIpcHandlers(): void {
     },
     setWorkspaceRemote: async (workspaceId, remote) => {
       await setWorkspaceRemote(workspaceId, remote);
+      shareRosters.sharesChanged(workspaceId);
       retryStopAndRestoreReleases?.();
       // A wake parked while this workspace didn't sync here can go on, and its agents can be declared.
       chatWakes.resume();

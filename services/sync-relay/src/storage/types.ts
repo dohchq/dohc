@@ -2101,6 +2101,31 @@ export interface SyncRelayStorage {
     ownerUserId: string,
     name: string,
   ): import("./workspaceSecrets").DeleteWorkspaceSecretResult;
+  listWorkspaceHttpStepApprovals(workspaceId: string): string[];
+  hasWorkspaceHttpStepApproval(workspaceId: string, approvalDigest: string): boolean;
+  approveWorkspaceHttpStep(
+    input: Parameters<typeof import("./outboundWebhooks").approveWorkspaceHttpStep>[1],
+  ): import("./outboundWebhooks").ApproveWorkspaceHttpStepResult;
+  reserveWorkspaceHttpDispatch<Refusal = never>(input: {
+    readonly workspaceId: string;
+    readonly ownerUserId: string;
+    readonly deliveryId: string;
+    readonly nowMs: number;
+    readonly beforeReserve?: () => Refusal | null;
+  }): import("./outboundWebhooks").ReserveWorkspaceHttpDispatchResult<Refusal>;
+  listActiveWorkspaceShareGrants(
+    workspaceId: string,
+  ): import("./outboundWebhooks").ActiveWorkspaceShareGrantRow[];
+  finalizeWorkspaceHttpDispatch(
+    input: Parameters<typeof import("./outboundWebhooks").finalizeWorkspaceHttpDispatch>[1],
+  ): void;
+  readCommittedWorkspaceTextFile(
+    workspaceId: string,
+    versionId: string,
+    path: string,
+    maxBytes: number,
+  ): string | null;
+  committedWorkspaceFileExists(workspaceId: string, versionId: string, path: string): boolean;
 }
 
 // The two wire shapes a file-linked thread create carries, kept apart because
