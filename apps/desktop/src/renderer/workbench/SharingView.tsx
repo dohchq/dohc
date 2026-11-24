@@ -8,6 +8,7 @@ import {
   Layers,
   MessageSquare,
   TriangleAlert,
+  Users,
 } from "lucide-react";
 import {
   useCallback,
@@ -66,6 +67,7 @@ import { useRadioGroup } from "../ui/SegmentedControl";
 import { SkeletonLines } from "../ui/SkeletonRows";
 import { notSentWords } from "../notSentWords";
 import { useRequestSequence } from "../useRequestSequence";
+import { JOINED_WORKSPACE_LIMIT } from "../joinedWorkspaceLimit";
 import {
   ABOUT_ROW,
   AccessChecked,
@@ -188,6 +190,8 @@ function subjectOf(row: AccessShareRow): Subject {
       <TriangleAlert size={15} aria-hidden className="shrink-0 text-danger" />
     ) : subject.kind === "chat" ? (
       <MessageSquare size={15} aria-hidden className={GLYPH_CLASS} />
+    ) : subject.kind === "workspace" ? (
+      <Users size={15} aria-hidden className={GLYPH_CLASS} />
     ) : subject.kind === "version" ? (
       <Layers size={15} aria-hidden className={GLYPH_CLASS} />
     ) : subject.path ? (
@@ -221,6 +225,7 @@ export function sharedItemKey(row: AccessShareRow): string {
   if (!selector) return `share\0${row.shareId}`;
   if (selector.kind === "chat" || selector.kind === "group")
     return `${selector.kind}\0${selector.channelWireId}`;
+  if (selector.kind === "workspace") return `workspace\0${row.shareId}`;
   return ["files", selector.versionId ?? "", ...[...new Set(selector.paths)].sort()].join("\0");
 }
 
@@ -1440,6 +1445,18 @@ function receivedActions(
         : null;
     return { primary, menu: showSkips };
   }
+  if (row?.selector?.kind === "workspace" && entry.active)
+    return {
+      primary: null,
+      menu: [
+        {
+          label: "Open",
+          onSelect: () => undefined,
+          disabled: true,
+          description: JOINED_WORKSPACE_LIMIT.open,
+        },
+      ],
+    };
   const live = entry.files && entry.active;
   const openToEdit = actions.openToEdit;
   const files = row ? filesOf(row) : null;
@@ -1493,13 +1510,27 @@ function ReceivedRow(props: {
         : "In this workspace"
       : null;
   const from = entry.ended ? `From ${sender.name}` : null;
+  const membership = row?.selector?.kind === "workspace" && entry.active ? row.selector : null;
+  const role: Who | null = !membership
+    ? null
+    : membership.role === "admin"
+      ? {
+          text: `Admin · ${sender.name} owns this workspace`,
+          title: `Admin · ${sender.full} owns this workspace`,
+        }
+      : access
+        ? {
+            text: `Member · ${sender.name} lets members ${verbOf(access)}`,
+            title: `Member · ${sender.full} lets members ${verbOf(access)}`,
+          }
+        : { text: `Member · from ${sender.name}`, title: `Member · from ${sender.full}` };
   const note = entry.removed
     ? [row?.removalMessage, mount ? "Your copy stays readable but will not update." : null]
         .filter(Boolean)
         .join(" ") || null
     : null;
   const noteId = `${useId()}-note`;
-  const second = entry.damaged || from;
+  const second = entry.damaged || from || role;
   return (
     <li data-testid="sharing-received-row" data-share-id={shareId} data-status={entry.status}>
       <div
@@ -1539,7 +1570,8 @@ function ReceivedRow(props: {
                   testId="sharing-received-menu"
                   items={menu.map((item) => ({
                     ...item,
-                    disabled: props.busy && item.label !== "Show skipped changes",
+                    disabled:
+                      item.disabled || (props.busy && item.label !== "Show skipped changes"),
                   }))}
                   width={ROW_MENU_WIDTH}
                 />
@@ -1554,13 +1586,13 @@ function ReceivedRow(props: {
             {second ? (
               <span className={`${SECOND_LINE} flex flex-wrap items-center gap-y-1`}>
                 {entry.damaged ? <DamagedPill /> : null}
-                {from ? (
+                {from || role ? (
                   <span
                     data-testid="sharing-row-who"
-                    title={`From ${sender.full}`}
+                    title={role ? role.title : `From ${sender.full}`}
                     className="line-clamp-2 min-w-0 wrap-anywhere"
                   >
-                    {from}
+                    {role ? role.text : from}
                   </span>
                 ) : null}
               </span>

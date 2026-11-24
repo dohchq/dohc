@@ -52,6 +52,7 @@ export type ResolvedAccessObject = {
   shareId?: string;
   shareRoot?: boolean;
   ended?: boolean;
+  members?: true;
   relayUrl?: string;
   recipientUserId?: string;
   recipientEmail?: string | null;
@@ -164,6 +165,7 @@ export function createAccessOwner<Workspace>(dependencies: {
       const answer = query.answer({
         ref: resolved.ref,
         shareRoot: resolved.shareRoot,
+        members: resolved.members,
         observation: resolved.shareId ? dependencies.received() : dependencies.roster(workspace),
         recipientUserId: account?.userId ?? "",
         cursorScope: capturedScope,

@@ -408,6 +408,7 @@
     "desktop:retrieve-workspace",
     "desktop:plan-undo-agent-run",
     "desktop:undo-agent-run",
+    "desktop:workspace-members",
     "desktop:inbox-list",
     "desktop:inbox-add",
     "desktop:inbox-archive",

@@ -7,7 +7,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import type { ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
 import type { LinksInResult } from "@dohc/workspace-contracts/links";
+import { readStoredRoster } from "@dohc/automation-executor/roster-listing";
 import { DaemonRefusalError } from "@dohc/workspace-engine-client";
+import { createAccessQuery } from "../../access/accessQuery";
 import type {
   ChatFileMentionRecord,
   DohcDesktopBridge,
@@ -188,6 +190,49 @@ describe("About Access", () => {
     expect(rows.map((row) => row.querySelector(".flex-1")!.classList.contains("text-ink"))).toEqual(
       [true, true, false, false],
     );
+  });
+
+  it("lists the workspace's members, not Only you, for a tracked file with no share", async () => {
+    const member = (grantId: string, recipientEmail: string, access: "comment" | "edit") => ({
+      shareId: "membership",
+      grantId,
+      granterUserId: "owner",
+      granterEmail: "owner@example.com",
+      recipientUserId: grantId,
+      recipientEmail,
+      subjectName: null,
+      sharerName: null,
+      generation: 1,
+      status: "active" as const,
+      selector: { kind: "workspace" as const },
+      access,
+    });
+    const listing = readStoredRoster({
+      grants: [
+        member("ana", "ana@example.com", "comment"),
+        member("ben", "ben@example.com", "edit"),
+      ],
+      links: [],
+      formerGrants: [],
+      endedGrants: [],
+    })!;
+    bridgeMock.getObjectAccess.mockResolvedValue(
+      createAccessQuery().answer({
+        observation: { listing, checkedAtMs: CHECKED_AT, freshness: "fresh" },
+        recipientUserId: "owner",
+        cursorScope: "scope",
+        ref: { kind: "path", path: "docs/plan.md", versionId: null },
+        coverage: "granted",
+      }),
+    );
+    render(<Access />);
+    const rows = await screen.findAllByTestId("about-access-row");
+    expect(rows.map((row) => row.textContent)).toEqual([
+      "Aana@example.comCan comment",
+      "Bben@example.comCan edit",
+    ]);
+    expect(screen.queryByTestId("about-access-empty")).toBeNull();
+    expect(screen.queryByText("Only you")).toBeNull();
   });
 
   it("tells a cause it cannot name apart from no access, and checks again on Try again", async () => {

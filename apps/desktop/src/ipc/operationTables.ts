@@ -64,6 +64,7 @@ import type { WriteFamily } from "@dohc/workspace-contracts/write-declaration";
 import type { OperationDefinition, OperationTable } from "./operationTable";
 import { shareCopyOperations } from "./shareCopyOperations";
 import { accessOperations } from "./accessOperations";
+import { memberOperations } from "./memberOperations";
 import { workspaceFileOperations } from "./workspaceFileOperations";
 import { workspaceSecretsOperations } from "./workspaceSecretsOperations";
 import { incomingWebhooksOperations } from "./incomingWebhooksOperations";
@@ -98,6 +99,7 @@ export const OPERATION_TABLES = [
   systemPrivacySettingsOperations,
   serverAccountOperations,
   accessOperations,
+  memberOperations,
   updateDownloadOperations,
   workspaceVersionOperations,
   historyOperations,

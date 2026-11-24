@@ -9,6 +9,11 @@ import {
   claimWorkspace,
   closeTestStorages,
   createShare,
+  json,
+  jsonBody,
+  LINK_KEY,
+  request,
+  SHARE_WEB_ORIGIN,
   tempRoot,
   testHandler,
   testStorage,
@@ -24,13 +29,18 @@ async function relay() {
   const storage = await testStorage();
   const h = testHandler(storage);
   await claimWorkspace(h, OWNER, WORKSPACE);
-  return { storage, h, route: createSignUpInviteRoute({ storage, key: KEY }) };
+  return {
+    storage,
+    h,
+    route: createSignUpInviteRoute({ storage, key: KEY, inviteLinkKey: LINK_KEY }),
+  };
 }
 
 function ask(
   route: (request: Request) => Promise<Response>,
   email: unknown,
   key: string | null = KEY,
+  extra: Record<string, unknown> = {},
 ): Promise<Response> {
   return route(
     new Request(`http://sync-relay:1788${SIGN_UP_INVITE_PATH}`, {
@@ -39,7 +49,7 @@ function ask(
         "content-type": "application/json",
         ...(key === null ? {} : { [SIGN_UP_INVITE_KEY_HEADER]: key }),
       },
-      body: JSON.stringify({ email }),
+      body: JSON.stringify({ email, ...extra }),
     }),
   );
 }
@@ -47,8 +57,9 @@ function ask(
 async function invited(
   route: (request: Request) => Promise<Response>,
   email: string,
+  inviteToken?: string,
 ): Promise<unknown> {
-  const response = await ask(route, email);
+  const response = await ask(route, email, KEY, inviteToken === undefined ? {} : { inviteToken });
   expect(response.status).toBe(200);
   return ((await response.json()) as { invited: unknown }).invited;
 }
@@ -116,7 +127,7 @@ describe("sign-up invite check", () => {
         recipientEmail: "late@corp.example",
         paths: ["docs"],
       });
-      const route = createSignUpInviteRoute({ storage, key: KEY });
+      const route = createSignUpInviteRoute({ storage, key: KEY, inviteLinkKey: LINK_KEY });
       expect(await invited(route, "late@corp.example")).toBe(true);
 
       owner.invalidate();
@@ -133,5 +144,62 @@ describe("sign-up invite check", () => {
     for (const email of [undefined, 42, "   ", "a".repeat(321)]) {
       expect((await ask(route, email)).status).toBe(400);
     }
+  });
+
+  describe("through a workspace invite link", () => {
+    async function inviteLink(
+      h: ReturnType<typeof testHandler>,
+      action: string,
+    ): Promise<string | null> {
+      const response = await h(
+        request(
+          OWNER,
+          `/sync/${WORKSPACE}/members/invite-link`,
+          jsonBody({ action, workspaceName: "Community" }),
+        ),
+      );
+      expect(response.status, await response.clone().text()).toBe(200);
+      const url = ((await json(response)).inviteLink as { url: string | null }).url;
+      return url === null ? null : url.slice(`${SHARE_WEB_ORIGIN}/join#`.length);
+    }
+
+    it("admits any address that presents a link that is turned on", async () => {
+      const { h, route } = await relay();
+      const token = (await inviteLink(h, "turn-on"))!;
+      expect(await invited(route, "newcomer@corp.example", token)).toBe(true);
+      expect(await invited(route, "newcomer@corp.example")).toBe(false);
+      expect(
+        await invited(
+          route,
+          "newcomer@corp.example",
+          `${token.slice(0, -1)}${token.endsWith("A") ? "B" : "A"}`,
+        ),
+      ).toBe(false);
+      expect(await invited(route, "newcomer@corp.example", "short")).toBe(false);
+    });
+
+    it("stops admitting once the link is turned off or reset", async () => {
+      const { h, route } = await relay();
+      const first = (await inviteLink(h, "turn-on"))!;
+      const second = (await inviteLink(h, "reset"))!;
+      expect(await invited(route, "newcomer@corp.example", first)).toBe(false);
+      expect(await invited(route, "newcomer@corp.example", second)).toBe(true);
+      await inviteLink(h, "turn-off");
+      expect(await invited(route, "newcomer@corp.example", second)).toBe(false);
+    });
+
+    it("admits nobody through a link while invite-link sign-up is off", async () => {
+      const { storage, h } = await relay();
+      const token = (await inviteLink(h, "turn-on"))!;
+      const off = createSignUpInviteRoute({ storage, key: KEY, inviteLinkKey: null });
+      expect(await invited(off, "newcomer@corp.example", token)).toBe(false);
+    });
+
+    it("refuses a token that is not a string", async () => {
+      const { route } = await relay();
+      expect((await ask(route, "newcomer@corp.example", KEY, { inviteToken: 42 })).status).toBe(
+        400,
+      );
+    });
   });
 });

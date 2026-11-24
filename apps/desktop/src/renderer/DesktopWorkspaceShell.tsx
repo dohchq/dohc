@@ -277,6 +277,7 @@ import { Overlay } from "./Overlay";
 import { ShareHandoffSurface, type HandoffChatsOutcome } from "./ShareHandoffSurface";
 import { DEFAULT_SETTINGS_SECTION, type SettingsSectionId } from "./settings/settingsRegistry";
 import { LazyDesktopSettings } from "./settings/LazyDesktopSettings";
+import { titleBarNamesServer } from "./workbench/WorkspaceSyncStatus";
 import { workspaceName } from "./Titlebar";
 import { REMOVE_FAILED, RemoveFromListDialog } from "./RemoveFromListDialog";
 import { removalFacts } from "./workspaceRemoval";
@@ -10211,6 +10212,7 @@ function WorkspaceShell(props: {
                               workspaceOpenFailed={!!workspaceOpenFailure}
                               onError={reportSettingsFailure}
                               onClearError={clearIdentity}
+                              serverNamed={titleBarNamesServer(syncStatus, failedSaves)}
                               onNotice={showSettingsNotice}
                               onWorkspaceSettingsRead={onWorkspaceSettingsRead}
                               workspaceId={workspaceId}

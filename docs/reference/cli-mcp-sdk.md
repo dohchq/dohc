@@ -37,7 +37,7 @@ New to building in dohc with an agent? Start with [Build with agents](../how-to/
 | **Chat and Groups** | [`dohc_list_groups`](#dohc_list_groups), [`dohc_create_group`](#dohc_create_group), [`dohc_read_chat`](#dohc_read_chat), [`dohc_start_group_chat`](#dohc_start_group_chat), [`dohc_reply_to_chat`](#dohc_reply_to_chat), [`dohc_list_file_chats`](#dohc_list_file_chats), [`dohc_start_file_chat`](#dohc_start_file_chat), [`dohc_wait_for_messages`](#dohc_wait_for_messages), [`dohc_retry_chat_run`](#dohc_retry_chat_run), [`dohc_chat_links`](#dohc_chat_links), [`dohc_chat_file_mentions`](#dohc_chat_file_mentions) |
 | **Automations and Buttons** | [`dohc_list_automations`](#dohc_list_automations), [`dohc_switch_automation`](#dohc_switch_automation), [`dohc_inspect_buttons`](#dohc_inspect_buttons), [`dohc_press_button`](#dohc_press_button), [`dohc_list_automation_runs`](#dohc_list_automation_runs), [`dohc_read_automation_run`](#dohc_read_automation_run), [`dohc_retry_automation_run`](#dohc_retry_automation_run) |
 | **Versions and History** | [`dohc_list_versions`](#dohc_list_versions), [`dohc_create_version`](#dohc_create_version), [`dohc_switch_version`](#dohc_switch_version), [`dohc_compare_version`](#dohc_compare_version), [`dohc_merge_version`](#dohc_merge_version), [`dohc_list_version_conflicts`](#dohc_list_version_conflicts), [`dohc_resolve_version_conflict`](#dohc_resolve_version_conflict), [`dohc_list_changes`](#dohc_list_changes), [`dohc_read_change`](#dohc_read_change), [`dohc_read_operation`](#dohc_read_operation), [`dohc_undo_operation`](#dohc_undo_operation), [`dohc_plan_agent_run_undo`](#dohc_plan_agent_run_undo) |
-| **Sharing and connected agents** | [`dohc_read_share_copy`](#dohc_read_share_copy), [`dohc_list_link_agents`](#dohc_list_link_agents), [`dohc_disconnect_link_agent`](#dohc_disconnect_link_agent) |
+| **Sharing and connected agents** | [`dohc_read_share_copy`](#dohc_read_share_copy), [`dohc_list_link_agents`](#dohc_list_link_agents), [`dohc_disconnect_link_agent`](#dohc_disconnect_link_agent), [`dohc_members`](#dohc_members) |
 | **Internal sync, live-document, and recovery** | [`dohc_stop_workspace_sync`](#dohc_stop_workspace_sync), [`dohc_list_live_documents`](#dohc_list_live_documents), [`dohc_stop_live_editing`](#dohc_stop_live_editing), [`dohc_resume_live_editing`](#dohc_resume_live_editing), [`dohc_read_held_change`](#dohc_read_held_change), [`dohc_held_note_change`](#dohc_held_note_change), [`dohc_save_recovery_copy`](#dohc_save_recovery_copy), [`dohc_retry_kept_edits`](#dohc_retry_kept_edits), [`dohc_stop_again`](#dohc_stop_again), [`dohc_list_outside_changes`](#dohc_list_outside_changes), [`dohc_keep_outside_change`](#dohc_keep_outside_change), [`dohc_list_kept_copies`](#dohc_list_kept_copies), [`dohc_save_kept_copy`](#dohc_save_kept_copy), [`dohc_restore_protected_copy`](#dohc_restore_protected_copy), [`dohc_discard_protected_copy`](#dohc_discard_protected_copy), [`dohc_list_retained_copies`](#dohc_list_retained_copies), [`dohc_delete_retained_copies`](#dohc_delete_retained_copies) |
 
 ---
@@ -772,7 +772,7 @@ Returns `{ agentRunId, agentName, planToken, truncated, scannedChanges, restorab
 
 ---
 
-**Sharing and connected agents.** Inspect owned share codes and manage agents connected through a share link.
+**Sharing and connected agents.** Inspect owned share codes, manage agents connected through a share link, and manage the workspace's members.
 
 ### `dohc_read_share_copy`
 
@@ -808,6 +808,16 @@ Changes the workspace, so a shared view does not offer it.
 - `connectionId`: `string`. Required.
 
 Returns `{ connectionId }`.
+
+### `dohc_members`
+
+Do what the Members page does, as the workspace owner: list people, invites, and removed accounts; invite by email (dohc sends no email: tell them to sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); turn the invite link on or off or reset it; or end membership for everyone. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the owner before you remove anyone or end membership. Requires the original workspace and its signed-in owner account.
+
+Members belong to the original workspace and its owner. Shared profiles do not offer this tool.
+
+- `request`: `{ action: "list" } | { action: "invite", email: string } | { action: "level", level: "view" | "comment" | "edit" } | { action: "role", person: string, role: "admin" | "member" } | { action: "remove", person: string } | { action: "letBackIn", person: string } | { action: "link", change: "turn-on" | "turn-off" | "reset" } | { action: "end" }`. Required.
+
+Returns `{ status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } } | { status: "refused" } | { status: "done" }`.
 
 ---
 
@@ -1239,6 +1249,106 @@ Disconnect one agent from a share link.
 Find the connection id with dohc share agents.
 
 With `--json`, prints `{ schemaVersion, connectionId }`.
+
+### `dohc members`
+
+List, invite, and remove the workspace's members, set what they can do, and manage the invite link.
+
+Requires the original workspace and its signed-in owner account. Admins use the Members page in the app. A person is a member id from dohc members list, or the email of an invite or a person.
+
+#### `dohc members list`
+
+```sh
+dohc members list [options]
+```
+
+List people, invites, removed accounts, the member level, and the invite link.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+
+#### `dohc members invite`
+
+```sh
+dohc members invite <email> [options]
+```
+
+Invite someone by email. dohc sends no email: tell them to sign in to dohc with that address.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+
+#### `dohc members remove`
+
+```sh
+dohc members remove <person> [options]
+```
+
+Remove a person or cancel an invite. Copies already on their computer stay.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+
+#### `dohc members level`
+
+```sh
+dohc members level <view|comment|edit> [options]
+```
+
+Set what every member can do: view, comment, or edit. Admins and the owner always edit.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+
+#### `dohc members admin`
+
+```sh
+dohc members admin <person> [options]
+```
+
+Make a member an admin. Admins invite, remove members, and manage the invite link.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+
+#### `dohc members member`
+
+```sh
+dohc members member <person> [options]
+```
+
+Make an admin a member again.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+
+#### `dohc members let-back-in`
+
+```sh
+dohc members let-back-in <person> [options]
+```
+
+Let a removed account back in as a member.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+
+#### `dohc members link`
+
+```sh
+dohc members link <on|off|reset> [options]
+```
+
+Turn the invite link on or off, or reset it.
+
+Anyone with the link who signs in becomes a member. Turning it off or resetting it removes no one who already joined. Reset stops the old link working. dohc members list shows the link.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+
+#### `dohc members end`
+
+```sh
+dohc members end [options]
+```
+
+End membership for everyone. Members lose access; copies already on their computers stay.
+
+- `--everyone`: Required. Confirms that every member and admin loses access.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
 
 ### `dohc document`
 

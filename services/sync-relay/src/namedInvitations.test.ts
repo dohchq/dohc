@@ -125,7 +125,7 @@ it("omits browser invitations from revoked, dependent, damaged, and public grant
     },
   };
   const { grantedShareSummary } = createShareSummaries(
-    { findChannelCreateKind: () => null },
+    { findChannelCreateKind: () => null, workspaceRoleOf: () => null },
     () => ({ subjectName: null }),
     undefined,
     SHARE_WEB_ORIGIN,
@@ -173,7 +173,7 @@ it.each(["chat", "group"] as const)(
         },
       };
       const { grantedShareSummary } = createShareSummaries(
-        { findChannelCreateKind: () => "channel" },
+        { findChannelCreateKind: () => "channel", workspaceRoleOf: () => null },
         () => ({ subjectName: "Team" }),
         undefined,
         SHARE_WEB_ORIGIN,

@@ -82,6 +82,8 @@ const server = serveFetchHandler({
             "/api/live/named-ticket",
             "/api/live/named-documents",
             "/api/named-chat/messages",
+            "/api/members/join-preview",
+            "/api/members/join",
           ].includes(url.pathname) && config.namedBrowserSessionLimits
         ? config.namedBrowserSessionLimits.maxRequestBytes
         : MAX_REQUEST_BODY_BYTES),

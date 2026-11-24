@@ -247,6 +247,7 @@
   "desktop:retrieve-workspace": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:plan-undo-agent-run": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:undo-agent-run": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:workspace-members": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:inbox-list": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:inbox-add": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:inbox-archive": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },

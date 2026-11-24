@@ -44,6 +44,7 @@ import { pinnedAppsFor } from "../../settings/pinnedApps";
 import { CloudSyncSettings, type CloudSettings } from "./CloudSyncSettings";
 import type { CustomizeTarget } from "./customize";
 import { KeyboardSettings } from "./KeyboardSettings";
+import { MembersSettings } from "./MembersSettings";
 import { ProfileHeader } from "./ProfileHeader";
 import { ScheduleHostRow } from "./ScheduleHostRow";
 import { WorkspaceSecretsSettings } from "./WorkspaceSecretsSettings";
@@ -142,6 +143,8 @@ export function SettingsDialog(props: {
     identity?: string,
   ) => void;
   onClearError?: (identity: string) => void;
+  /** The title bar says the server is unreachable. */
+  serverNamed?: boolean;
   onNotice?: (message: string, undo?: () => void) => void;
   /** Each workspace settings answer, so the shell can say what the file ignored. */
   onWorkspaceSettingsRead?: (read: WorkspaceSettingsResult) => void;
@@ -338,10 +341,13 @@ export function SettingsDialog(props: {
     };
   }, [props.workspaceId, props.workspaceIsReady]);
 
+  // A shared view lists no Members or Secrets: the workspace it came from does.
   const availableSections = useMemo(
     () =>
       props.sharedView
-        ? SETTINGS_SECTIONS.filter((section) => section.id !== "secrets")
+        ? SETTINGS_SECTIONS.filter(
+            (section) => section.id !== "members" && section.id !== "secrets",
+          )
         : SETTINGS_SECTIONS,
     [props.sharedView],
   );
@@ -918,6 +924,28 @@ export function SettingsDialog(props: {
                 </SettingRow>
               ) : null}
             </SettingsSection>
+          </div>
+        );
+      case "members":
+        return (
+          <div data-testid={settingsSectionPin("members")}>
+            {/* A shared view has no Members of its own: the original workspace lists them. */}
+            {props.sharedView ? null : (
+              <MembersSettings
+                workspaceId={props.workspaceId}
+                workspaceName={
+                  props.workspaceName ?? workspaceName({ rootPath: props.workspacePath })
+                }
+                {...(props.cloud ? { cloud: props.cloud } : {})}
+                onOpenSync={() => {
+                  setQuery("");
+                  setActiveSection("cloud");
+                }}
+                {...(props.onError ? { onError: props.onError } : {})}
+                {...(props.onClearError ? { onClearError: props.onClearError } : {})}
+                {...(props.serverNamed ? { serverNamed: true } : {})}
+              />
+            )}
           </div>
         );
       case "apps":
