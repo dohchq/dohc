@@ -34,9 +34,9 @@ import {
 } from "./bodySequenceReading.js";
 import {
   giveBoundaries,
+  howToWrite,
   keepsContainers,
   keepsPairs,
-  linesToGiveFirst,
   writeTransaction,
 } from "./bodySequenceWriting.js";
 
@@ -307,10 +307,12 @@ function holdSelection(
  * an update of its own that the history does not follow. The change the history follows gives no
  * such line a boundary. To find the lines, a dispatch that reaches past one block next to such a
  * line is first written to a copy of the blocks around it, and to a copy of the whole note when
- * that one does not read as the editor's document. Nothing is written, and the editor shows the
- * note again, when no copy comes to read as the editor's document, and when a boundary the
- * dispatch makes would stand in front of what such a line held with that line given none that
- * lasts: Enter, or a drop of dragged text, that joins the line away and splits it off again.
+ * that one does not read as the editor's document. A dispatch that cannot be written step by
+ * step is tried with the steps of a transaction that touch as one range, as the delete and the
+ * split of Enter over a selection do. Nothing is written, and the editor shows the note again,
+ * when no copy comes to read as the editor's document, and when a boundary the dispatch makes
+ * would still stand in front of what such a line held with that line given none that lasts: a
+ * drop of dragged text that joins the line away and splits it off again.
  *
  * A change of the sequence from elsewhere, and an undo or redo, is shown as one transaction that
  * replaces what differs, keeps the nodes of the blocks it does not touch, and keeps the selection
@@ -510,8 +512,9 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
         const target = { sequence, reader };
         writing = true;
         try {
-          const lines = linesToGiveFirst(target, pending);
-          if (lines === null) return;
+          const how = howToWrite(target, pending);
+          if (how === null) return;
+          const { lines } = how;
           if (lines.length > 0) {
             if (!change(false, () => giveBoundaries(target, lines))) return;
             if (isBusy(doc) || unread.length > 0 || !reader.reading().doc.eq(base)) return;
@@ -521,7 +524,8 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
             (transaction) => transaction.getMeta(ADD_TO_HISTORY) !== false,
           );
           change(recorded, () => {
-            for (const transaction of pending) if (!writeTransaction(target, transaction)) break;
+            for (const transaction of how.transactions)
+              if (!writeTransaction(target, transaction)) break;
             writing = false;
           });
         } finally {

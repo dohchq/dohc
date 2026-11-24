@@ -5,7 +5,14 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { setBlockType } from "@tiptap/pm/commands";
 import { Fragment, Slice, type Node as ProseMirrorNode } from "@tiptap/pm/model";
-import { AllSelection, EditorState, NodeSelection, Plugin, TextSelection } from "@tiptap/pm/state";
+import {
+  AllSelection,
+  EditorState,
+  NodeSelection,
+  Plugin,
+  TextSelection,
+  type Transaction,
+} from "@tiptap/pm/state";
 import { recordsOfContainer } from "./bodySequenceGrammar.js";
 import {
   bodySequenceAnchor,
@@ -16,7 +23,7 @@ import {
 } from "./bodySequenceEditor.js";
 import { boundaryAt, createBodyReader } from "./bodySequenceReading.js";
 import { deleteRange, setLineKind, splitLine, writeBody } from "./bodySequenceWriter.js";
-import { linesAWriteLeavesWanting } from "./bodySequenceWriting.js";
+import { howToWrite, linesAWriteLeavesWanting } from "./bodySequenceWriting.js";
 import { readBodySequence } from "./bodySequenceYjs.js";
 import {
   boundary,
@@ -2014,23 +2021,242 @@ describe.each(["bare", "hosted"] as const)(
       },
     );
 
-    it("writes nothing for Enter over a selection that runs from the middle of the line above across a code block to the start of that paragraph, and shows the note again", () => {
-      const lines = [stored({}, "ab"), stored(CODE, "cd", WIKILINK, "ef"), stored({}, "gh")];
+    const UNDER_CODE = [stored({}, "ab"), stored(CODE, "cd", WIKILINK, "ef"), stored({}, "gh")];
+    const intoThatParagraph = (doc: ProseMirrorNode, offset: number) =>
+      doc.child(0).nodeSize + doc.child(1).nodeSize + 1 + offset;
+
+    it("writes nothing when text dragged from the end of a long line across a code block to the start of that paragraph is dropped near the long line's start, forty letters away", () => {
+      const lines = [stored({}, `a${"b".repeat(40)}`), ...UNDER_CODE.slice(1)];
       const a = person(noteOfLines(lines), 10, shape);
-      const before = a.view.state.doc.toJSON();
+      const before = a.view.state.doc;
       const held = Y.encodeStateAsUpdate(a.doc);
-      a.select([0, 1], [2, 0]);
-      const shown = a.shown.count;
-      a.press("Enter");
+      a.view.dispatch(
+        a.view.state.tr.setSelection(
+          TextSelection.create(before, 42, intoThatParagraph(before, 0)),
+        ),
+      );
+      a.view.dispatch(dropOfSelection(a.view.state, 2));
       expect(a.sent).toEqual([]);
       expect(Y.encodeStateAsUpdate(a.doc)).toEqual(held);
-      expect(a.view.state.doc.toJSON()).toEqual(before);
-      expect(a.shown.count).toBe(shown + 1);
-      a.expectMirror();
-      a.typeAt(0, 1, "x");
-      expect(a.lines()).toEqual(["axb", "cd", "ef", "gh"]);
+      expect(a.view.state.doc.toJSON()).toEqual(before.toJSON());
       a.expectMirror();
     });
+
+    it("writes Enter over a selection that runs from the middle of the line above across a code block to the start of that paragraph as one range: the paragraph gets its boundary first, the recorded change makes none, and undo reads as before", () => {
+      const a = person(noteOfLines(UNDER_CODE), 10, shape);
+      const before = a.view.state.doc.toJSON();
+      a.select([0, 1], [2, 0]);
+      const shown = a.shown.count;
+      expect(a.press("Enter")).toBe(true);
+      expect(a.view.state.doc.toString()).toBe(
+        'doc(paragraph("a"), paragraph(wikilink, "ef"), paragraph("gh"))',
+      );
+      expect(a.shown.count).toBe(shown);
+      expect(a.sent).toHaveLength(2);
+      expect(boundariesMadeIn(a.sent[0]!)).toHaveLength(1);
+      expect(boundariesMadeIn(a.sent[1]!)).toEqual([]);
+      a.expectMirror();
+      expect(a.undo()).toBe(true);
+      expect(a.view.state.doc.toJSON()).toEqual(before);
+      expect(a.boundaryIds()).toHaveLength(4);
+      a.expectMirror();
+    });
+
+    it("writes that Enter as one range also when its transaction holds a step that changes nothing, two blocks down", () => {
+      const a = person(noteOfLines(UNDER_CODE), 10, shape);
+      const { doc, tr } = a.view.state;
+      const split = tr.delete(2, intoThatParagraph(doc, 0)).split(2);
+      const end = split.doc.content.size - 1;
+      a.view.dispatch(split.replaceWith(end - 1, end, schema.text("h")));
+      expect(a.view.state.doc.toString()).toBe(
+        'doc(paragraph("a"), paragraph(wikilink, "ef"), paragraph("gh"))',
+      );
+      expect(a.sent).toHaveLength(2);
+      expect(boundariesMadeIn(a.sent[1]!)).toEqual([]);
+      a.expectMirror();
+    });
+
+    it("says how to write that Enter: that paragraph first, then one step in place of the two", () => {
+      const a = person(noteOfLines(UNDER_CODE), 10, shape);
+      const { doc, tr } = a.view.state;
+      const twoSteps = tr.delete(2, intoThatParagraph(doc, 0)).split(2);
+      const how = howToWrite(writingOf(a), [twoSteps], "note");
+      expect(how?.lines).toEqual([2]);
+      expect(how?.transactions.map((each) => each.steps.length)).toEqual([1]);
+      expect(how?.transactions[0]!.doc.eq(twoSteps.doc)).toBe(true);
+      expect(a.sent).toEqual([]);
+    });
+
+    it("keeps the letter someone else types at that paragraph's start, and the heading they make it, when they have that Enter and it is then undone", () => {
+      const a = person(noteOfLines(UNDER_CODE), 10, shape);
+      const b = person(noteOfLines(UNDER_CODE), 20, shape);
+      a.select([0, 1], [2, 0]);
+      expect(a.press("Enter")).toBe(true);
+      exchange(a, b);
+      b.typeAt(1, 0, "P");
+      b.select([1, 0]);
+      expect(b.retype("heading", { level: 3 })).toBe(true);
+      exchange(a, b);
+      expect(a.undo()).toBe(true);
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.view.state.doc.toString()).toBe(
+          'doc(paragraph("ab"), codeBlock("cd"), heading("P", wikilink, "ef"), paragraph("gh"))',
+        );
+      }
+    });
+
+    it.each([
+      [
+        10,
+        20,
+        "P",
+        'doc(paragraph("a"), paragraph, heading("P", wikilink, "ef"), paragraph("gh"))',
+        'doc(paragraph("ab"), codeBlock("cd"), paragraph, heading("P", wikilink, "ef"), paragraph("gh"))',
+      ],
+      [
+        10,
+        20,
+        "",
+        'doc(paragraph("a"), paragraph, heading(wikilink, "ef"), paragraph("gh"))',
+        'doc(paragraph("ab"), codeBlock("cd"), paragraph, heading(wikilink, "ef"), paragraph("gh"))',
+      ],
+      [
+        20,
+        10,
+        "P",
+        'doc(paragraph("a"), heading("P"), paragraph(wikilink, "ef"), paragraph("gh"))',
+        'doc(paragraph("ab"), codeBlock("cd"), heading("P"), paragraph(wikilink, "ef"), paragraph("gh"))',
+      ],
+      [
+        20,
+        10,
+        "",
+        'doc(paragraph("a"), heading, paragraph(wikilink, "ef"), paragraph("gh"))',
+        'doc(paragraph("ab"), codeBlock("cd"), heading, paragraph(wikilink, "ef"), paragraph("gh"))',
+      ],
+    ] as const)(
+      "leaves two blocks where that paragraph was when client %i presses that Enter and client %i, who has not got it, types %j at the paragraph's start and makes it a heading: every letter is there once, and the heading is the block whose boundary comes first (a known behaviour)",
+      (enters, other, typed, merged, undone) => {
+        const a = person(noteOfLines(UNDER_CODE), enters, shape);
+        const b = person(noteOfLines(UNDER_CODE), other, shape);
+        a.select([0, 1], [2, 0]);
+        expect(a.press("Enter")).toBe(true);
+        if (typed) b.typeAt(2, 0, typed);
+        b.select([2, 0]);
+        expect(b.retype("heading", { level: 3 })).toBe(true);
+        exchange(a, b);
+        for (const each of [a, b]) {
+          each.expectMirror();
+          expect(each.view.state.doc.toString()).toBe(merged);
+        }
+        expect(a.undo()).toBe(true);
+        exchange(a, b);
+        for (const each of [a, b]) {
+          each.expectMirror();
+          expect(each.view.state.doc.toString()).toBe(undone);
+        }
+      },
+    );
+
+    it("gives that paragraph the heading's kind on the boundary it was given, for Enter over a selection from a heading into it; when someone else then changes the heading's level and types there, undo makes it a paragraph again and keeps their letter", () => {
+      const lines = [stored({ type: "heading", level: 2 }, "ab"), ...UNDER_CODE.slice(1)];
+      const a = person(noteOfLines(lines), 10, shape);
+      const b = person(noteOfLines(lines), 20, shape);
+      a.select([0, 1], [2, 1]);
+      expect(a.press("Enter")).toBe(true);
+      expect(a.view.state.doc.toString()).toBe('doc(heading("a"), heading("ef"), paragraph("gh"))');
+      expect(a.sent).toHaveLength(2);
+      expect(boundariesMadeIn(a.sent[1]!)).toEqual([]);
+      exchange(a, b);
+      b.typeAt(1, 0, "P");
+      b.select([1, 0]);
+      expect(b.retype("heading", { level: 3 })).toBe(true);
+      expect(b.view.state.doc.child(1).attrs.level).toBe(3);
+      exchange(a, b);
+      expect(a.undo()).toBe(true);
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.view.state.doc.toString()).toBe(
+          'doc(heading("ab"), codeBlock("cd"), paragraph(wikilink, "Pef"), paragraph("gh"))',
+        );
+      }
+    });
+
+    it("writes a delete that runs into that paragraph and a divider put in where it joined as one range, and that paragraph stays under the boundary it was given", () => {
+      const a = person(noteOfLines(UNDER_CODE), 10, shape);
+      const { doc, tr } = a.view.state;
+      const before = doc.toJSON();
+      const joined = tr.delete(2, intoThatParagraph(doc, 1));
+      a.view.dispatch(joined.replaceWith(2, 2, schema.nodes.horizontalRule!.create()));
+      expect(a.view.state.doc.toString()).toBe(
+        'doc(paragraph("a"), horizontalRule, paragraph("ef"), paragraph("gh"))',
+      );
+      expect(a.sent).toHaveLength(2);
+      const given = boundariesMadeIn(a.sent[0]!);
+      expect(given).toHaveLength(1);
+      expect(a.boundaryLines().find((line) => line.text === "ef")!.id).toBe(given[0]);
+      a.expectMirror();
+      expect(a.undo()).toBe(true);
+      expect(a.view.state.doc.toJSON()).toEqual(before);
+      a.expectMirror();
+    });
+
+    it("writes what a plugin appends to that Enter as it was dispatched: a letter three blocks down leaves the boundaries between as they were", () => {
+      const lines = [...UNDER_CODE, stored({}, "ij"), stored({}, "kl")];
+      const appends = new Plugin({
+        appendTransaction(transactions, _old, state) {
+          const typed = transactions.some((each) => each.docChanged && !isBodySequenceChange(each));
+          if (!typed || transactions.some((each) => each.getMeta("appended") === true)) return null;
+          return state.tr.insertText("!", state.doc.content.size - 1).setMeta("appended", true);
+        },
+      });
+      const a = person(noteOfLines(lines), 10, shape, [appends]);
+      const were = a.boundaryIds();
+      a.select([0, 1], [2, 0]);
+      expect(a.press("Enter")).toBe(true);
+      expect(a.view.state.doc.toString()).toBe(
+        'doc(paragraph("a"), paragraph(wikilink, "ef"), paragraph("gh"), paragraph("ij"), paragraph("kl!"))',
+      );
+      expect(a.sent).toHaveLength(2);
+      const now = a.boundaryIds();
+      expect(now.filter((id) => were.includes(id))).toEqual([were[0], were[2], were[3], were[4]]);
+      expect(now).toHaveLength(5);
+      a.expectMirror();
+    });
+
+    it.each([
+      [
+        "a mark put on another line",
+        (split: Transaction) => {
+          const end = split.doc.content.size - 1;
+          return split.addMark(end - 2, end, schema.marks.bold!.create());
+        },
+      ],
+      [
+        "another line made a heading",
+        (split: Transaction) =>
+          split.setNodeMarkup(
+            split.doc.content.size - split.doc.lastChild!.nodeSize,
+            schema.nodes.heading!,
+            { level: 2 },
+          ),
+      ],
+    ])(
+      "writes nothing for the delete and the split of that Enter with %s in the same transaction, which is not one range",
+      (_name, more) => {
+        const a = person(noteOfLines(UNDER_CODE), 10, shape);
+        const { doc, tr } = a.view.state;
+        const held = Y.encodeStateAsUpdate(a.doc);
+        a.view.dispatch(more(tr.delete(2, intoThatParagraph(doc, 0)).split(2)));
+        expect(a.sent).toEqual([]);
+        expect(Y.encodeStateAsUpdate(a.doc)).toEqual(held);
+        expect(a.view.state.doc.toJSON()).toEqual(doc.toJSON());
+        a.expectMirror();
+      },
+    );
 
     it("stops writing a dispatch to a copy at the first step after which the copy does not read as the editor's document", () => {
       const lines = [stored({ ...RULE, path: ["Q"] }, "ab"), stored({}, "cd")];

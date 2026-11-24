@@ -511,18 +511,77 @@ describe("the desktop's commands next to a line with no boundary of its own", ()
     },
   );
 
+  const underCode = () =>
+    noteOf(({ sequence }) => {
+      sequence.insertEmbed(0, boundary(), {});
+      sequence.insert(1, "ab", {});
+      sequence.insertEmbed(3, boundary({ type: "codeBlock", language: null }), {});
+      sequence.insert(4, "cd", {});
+      sequence.insertEmbed(6, WIKILINK(), {});
+      sequence.insert(7, "ef", {});
+      sequence.insertEmbed(9, boundary(), {});
+      sequence.insert(10, "gh", {});
+    });
+
+  it("writes Enter over a selection from the line above across a code block into the paragraph after it: that paragraph gets its boundary first and keeps it, and the heading someone else then makes it stays when the Enter is undone", () => {
+    const a = desktop(underCode(), 10);
+    const b = person(underCode(), 20);
+    a.select([0, 1], [2, 1]);
+    const effects = a.effects(() => expect(a.press("Enter")).toBe(true));
+    expect(a.view.state.doc.toString()).toBe(
+      'doc(paragraph("a"), paragraph("ef"), paragraph("gh"))',
+    );
+    expect(a.sent).toHaveLength(2);
+    expect(effects.madeBoundaries).toHaveLength(1);
+    expect(effects.madeLetters).toBe("");
+    a.expectMirror();
+    exchange(a, b);
+    b.typeAt(1, 0, "P");
+    b.select([1, 0]);
+    expect(b.retype("heading", { level: 3 })).toBe(true);
+    exchange(b, a);
+    expect(a.editor.commands.undo()).toBe(true);
+    exchange(a, b);
+    for (const each of [a, b]) {
+      each.expectMirror();
+      expect(each.view.state.doc.toString()).toBe(
+        'doc(paragraph("ab"), codeBlock("cd"), heading(wikilink, "Pef"), paragraph("gh"))',
+      );
+    }
+  });
+
+  it.each([
+    ["P", 'heading("P"), paragraph(wikilink, "ef")'],
+    ["", 'heading, paragraph(wikilink, "ef")'],
+  ])(
+    "leaves the heading someone else makes that paragraph, with %j typed at its start, above the paragraph's text when client 20 presses that Enter, client 10 has not got it, and the Enter is undone: the other's boundary comes first (a known behaviour)",
+    (typed, twoBlocks) => {
+      const a = desktop(underCode(), 20);
+      const b = person(underCode(), 10);
+      a.select([0, 1], [2, 0]);
+      expect(a.press("Enter")).toBe(true);
+      if (typed) b.typeAt(2, 0, typed);
+      b.select([2, 0]);
+      expect(b.retype("heading", { level: 3 })).toBe(true);
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.view.state.doc.toString()).toBe(
+          `doc(paragraph("a"), ${twoBlocks}, paragraph("gh"))`,
+        );
+      }
+      expect(a.editor.commands.undo()).toBe(true);
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.view.state.doc.toString()).toBe(
+          `doc(paragraph("ab"), codeBlock("cd"), ${twoBlocks}, paragraph("gh"))`,
+        );
+      }
+    },
+  );
+
   it("writes nothing when text dragged from the line above across a code block to the start of the paragraph after it is dropped in the line above, where that paragraph would be joined away and split off again under a boundary undo takes away; it is still the heading someone else then makes it", () => {
-    const underCode = () =>
-      noteOf(({ sequence }) => {
-        sequence.insertEmbed(0, boundary(), {});
-        sequence.insert(1, "ab", {});
-        sequence.insertEmbed(3, boundary({ type: "codeBlock", language: null }), {});
-        sequence.insert(4, "cd", {});
-        sequence.insertEmbed(6, WIKILINK(), {});
-        sequence.insert(7, "ef", {});
-        sequence.insertEmbed(9, boundary(), {});
-        sequence.insert(10, "gh", {});
-      });
     const a = desktop(underCode(), 10);
     const b = person(underCode(), 20);
     const read =

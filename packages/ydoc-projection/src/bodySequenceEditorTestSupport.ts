@@ -15,10 +15,10 @@ import {
 } from "./bodySequenceReading.js";
 import {
   giveBoundaries,
+  howToWrite,
   keepsContainers,
   linesAWriteLeavesWanting,
   linesBroughtIntoBeing,
-  linesToGiveFirst,
   linesWithNoBoundary,
   type BodyWriting,
   type LineWithNoBoundary,
@@ -202,25 +202,21 @@ ORACLE_NOTES.push(
 /** What the every-step oracle counts over all its notes. `ORACLE_PARTS` holds each file's share. */
 export const ORACLE_COUNTS = {
   outcomes: {
-    applied: 29397,
+    applied: 29871,
     "filtered by keepsContainers": 9332,
-    "refused, as no trial settles": 618,
+    "refused, as no trial settles": 144,
     "not offered": 1069,
     "range error": 0,
   },
-  undone: 28878,
-  given: 18256,
-  typedInBySomeoneElse: 30734,
-  retypedBySomeoneElse: 22962,
+  undone: 29352,
+  given: 18730,
+  typedInBySomeoneElse: 31466,
+  retypedBySomeoneElse: 23342,
   excepted: {
     "a mark on an inline item": 560,
     "formatting stored under a code block's letters": 33,
   },
-  unsettled: {
-    "Enter over N-N": 237,
-    "a delete and a split over N-N": 237,
-    "a text drag of N-N to N": 144,
-  } as Record<string, number>,
+  unsettled: { "a text drag of N-N to N": 144 } as Record<string, number>,
   drags: {
     "text, applied": 5018,
     "block, applied": 724,
@@ -236,14 +232,14 @@ export type Agreement = {
   onTheWholeNote: number;
 };
 export const AGREEMENT_COUNTS: Agreement = {
-  compared: 39646,
-  trials: 22885,
-  inTheWindow: 22885,
+  compared: 39754,
+  trials: 22993,
+  inTheWindow: 22993,
   onTheWholeNote: 0,
 };
 export const AGREEMENT_IN_THE_DIFFERENTIAL: { sample: Agreement; full: Agreement } = {
-  sample: { compared: 1878, trials: 1017, inTheWindow: 1017, onTheWholeNote: 0 },
-  full: { compared: 9631, trials: 5228, inTheWindow: 5228, onTheWholeNote: 0 },
+  sample: { compared: 1893, trials: 1032, inTheWindow: 1032, onTheWholeNote: 0 },
+  full: { compared: 9739, trials: 5336, inTheWindow: 5336, onTheWholeNote: 0 },
 };
 
 type OracleCounts = typeof ORACLE_COUNTS;
@@ -268,25 +264,21 @@ export const ORACLE_PARTS: readonly {
     sample: {
       counts: {
         outcomes: {
-          applied: 2011,
+          applied: 2025,
           "filtered by keepsContainers": 604,
-          "refused, as no trial settles": 21,
+          "refused, as no trial settles": 7,
           "not offered": 111,
           "range error": 0,
         },
-        undone: 1974,
-        given: 1188,
-        typedInBySomeoneElse: 1962,
-        retypedBySomeoneElse: 1474,
+        undone: 1988,
+        given: 1202,
+        typedInBySomeoneElse: 1982,
+        retypedBySomeoneElse: 1484,
         excepted: {
           "a mark on an inline item": 31,
           "formatting stored under a code block's letters": 8,
         },
-        unsettled: {
-          "a text drag of N-N to N": 7,
-          "Enter over N-N": 7,
-          "a delete and a split over N-N": 7,
-        },
+        unsettled: { "a text drag of N-N to N": 7 },
         drags: {
           "text, applied": 285,
           "block, applied": 52,
@@ -299,25 +291,21 @@ export const ORACLE_PARTS: readonly {
     full: {
       counts: {
         outcomes: {
-          applied: 15098,
+          applied: 15280,
           "filtered by keepsContainers": 4980,
-          "refused, as no trial settles": 232,
+          "refused, as no trial settles": 50,
           "not offered": 593,
           "range error": 0,
         },
-        undone: 14799,
-        given: 9228,
-        typedInBySomeoneElse: 14547,
-        retypedBySomeoneElse: 11128,
+        undone: 14981,
+        given: 9410,
+        typedInBySomeoneElse: 14825,
+        retypedBySomeoneElse: 11270,
         excepted: {
           "a mark on an inline item": 292,
           "formatting stored under a code block's letters": 33,
         },
-        unsettled: {
-          "Enter over N-N": 91,
-          "a delete and a split over N-N": 91,
-          "a text drag of N-N to N": 50,
-        },
+        unsettled: { "a text drag of N-N to N": 50 },
         drags: {
           "text, applied": 2284,
           "block, applied": 367,
@@ -325,12 +313,7 @@ export const ORACLE_PARTS: readonly {
           "text, filtered by keepsContainers": 1233,
         },
       },
-      agreed: {
-        compared: 15330,
-        trials: 9126,
-        inTheWindow: 9126,
-        onTheWholeNote: 0,
-      },
+      agreed: { compared: 15330, trials: 9126, inTheWindow: 9126, onTheWholeNote: 0 },
     },
   },
   {
@@ -339,22 +322,18 @@ export const ORACLE_PARTS: readonly {
     sample: {
       counts: {
         outcomes: {
-          applied: 1893,
+          applied: 1925,
           "filtered by keepsContainers": 528,
-          "refused, as no trial settles": 42,
+          "refused, as no trial settles": 10,
           "not offered": 80,
           "range error": 0,
         },
-        undone: 1872,
-        given: 1173,
-        typedInBySomeoneElse: 2197,
-        retypedBySomeoneElse: 1617,
+        undone: 1904,
+        given: 1205,
+        typedInBySomeoneElse: 2249,
+        retypedBySomeoneElse: 1641,
         excepted: { "a mark on an inline item": 30 },
-        unsettled: {
-          "Enter over N-N": 16,
-          "a delete and a split over N-N": 16,
-          "a text drag of N-N to N": 10,
-        },
+        unsettled: { "a text drag of N-N to N": 10 },
         drags: {
           "text, applied": 346,
           "block, applied": 46,
@@ -367,22 +346,18 @@ export const ORACLE_PARTS: readonly {
     full: {
       counts: {
         outcomes: {
-          applied: 14299,
+          applied: 14591,
           "filtered by keepsContainers": 4352,
-          "refused, as no trial settles": 386,
+          "refused, as no trial settles": 94,
           "not offered": 476,
           "range error": 0,
         },
-        undone: 14079,
-        given: 9028,
-        typedInBySomeoneElse: 16187,
-        retypedBySomeoneElse: 11834,
+        undone: 14371,
+        given: 9320,
+        typedInBySomeoneElse: 16641,
+        retypedBySomeoneElse: 12072,
         excepted: { "a mark on an inline item": 268 },
-        unsettled: {
-          "Enter over N-N": 146,
-          "a delete and a split over N-N": 146,
-          "a text drag of N-N to N": 94,
-        },
+        unsettled: { "a text drag of N-N to N": 94 },
         drags: {
           "text, applied": 2734,
           "text, refused, as no trial settles": 94,
@@ -390,12 +365,7 @@ export const ORACLE_PARTS: readonly {
           "text, filtered by keepsContainers": 1141,
         },
       },
-      agreed: {
-        compared: 14685,
-        trials: 8531,
-        inTheWindow: 8531,
-        onTheWholeNote: 0,
-      },
+      agreed: { compared: 14685, trials: 8531, inTheWindow: 8531, onTheWholeNote: 0 },
     },
   },
 ];
@@ -474,9 +444,10 @@ export function amongMoreLines(lines: readonly StoredLine[]): Longer {
 }
 
 /**
- * Asks for the lines some transactions give first, from a trial on the blocks around them and
- * from one on the whole note, and throws when the two differ. `longer` is the note with more
- * lines around it, so the window leaves blocks out. Counts what it compared in `agreement`.
+ * Asks how to write some transactions, from a trial on the blocks around them and from one on
+ * the whole note, and throws when the two differ in the lines they give first or in which
+ * transactions they write as one step. `longer` is the note with more lines around it, so the
+ * window leaves blocks out. Counts what it compared in `agreement`.
  */
 export function expectTheWindowToAgree(
   agreement: Agreement,
@@ -495,15 +466,17 @@ export function expectTheWindowToAgree(
     return transform;
   });
   const asked = vi.spyOn(Y.Doc.prototype, "getMap");
-  let onTheWholeNote: number[] | null;
-  let inTheWindow: number[] | null;
+  const said = (how: ReturnType<typeof howToWrite>) =>
+    JSON.stringify(how && [how.lines, how.transactions.map((each) => each.steps.length)]);
+  let onTheWholeNote: string;
+  let inTheWindow: string;
   let ranATrial: boolean;
   let copiedTheNote: boolean;
   try {
-    onTheWholeNote = linesToGiveFirst(writing, moved, "note");
+    onTheWholeNote = said(howToWrite(writing, moved, "note"));
     ranATrial = asked.mock.calls.length > 0;
     asked.mockClear();
-    inTheWindow = linesToGiveFirst(writing, moved);
+    inTheWindow = said(howToWrite(writing, moved));
     copiedTheNote = asked.mock.contexts.some((doc) => doc !== fresh.doc);
   } finally {
     asked.mockRestore();
@@ -513,16 +486,17 @@ export function expectTheWindowToAgree(
   if (ranATrial) agreement.trials += 1;
   if (ranATrial && copiedTheNote) agreement.onTheWholeNote += 1;
   else if (ranATrial) agreement.inTheWindow += 1;
-  if (JSON.stringify(inTheWindow) !== JSON.stringify(onTheWholeNote))
+  if (inTheWindow !== onTheWholeNote)
     throw new Error(
-      `${label}, with three paragraphs more on each side: a trial on the blocks around the edit gives ${JSON.stringify(inTheWindow)}, one on the whole note ${JSON.stringify(onTheWholeNote)}`,
+      `${label}, with three paragraphs more on each side: a trial on the blocks around the edit gives ${inTheWindow}, one on the whole note ${onTheWholeNote}`,
     );
 }
 
 /**
- * Writes one applied transaction again to a copy of the note it started from, with the
- * boundaries the editor gave first, and throws when the write brings a line into being with no
- * boundary, does not settle, or leaves a line wanting a boundary that it would not have deleted.
+ * Writes one applied transaction again to a copy of the note it started from, as `howToWrite`
+ * says for that note and with the boundaries the editor gave first. Throws when the write brings
+ * a line into being with no boundary, does not settle, or leaves a line wanting a boundary that
+ * it would not have deleted.
  */
 export function expectNoLineLeftWanting(
   held: Uint8Array,
@@ -530,16 +504,22 @@ export function expectNoLineLeftWanting(
   wrote: Transaction,
   label: string,
 ): void {
-  const asGiven = () => {
+  const asGiven = (isGiven = sent.length === 2) => {
     const settled = declared(95);
     Y.applyUpdate(settled.doc, held);
-    if (sent.length === 2) Y.applyUpdate(settled.doc, sent[0]!);
+    if (isGiven) Y.applyUpdate(settled.doc, sent[0]!);
     return settled;
   };
+  let written: readonly Transform[] = [wrote];
+  if (wrote.steps.length > 1) {
+    const unwritten = asGiven(false);
+    written = howToWrite(writingOf(unwritten), written, "note")?.transactions ?? written;
+    unwritten.doc.destroy();
+  }
   const settled = asGiven();
   const writing = writingOf(settled);
   const had = linesWithNoBoundary(writing);
-  const again = linesAWriteLeavesWanting(writing, [wrote]);
+  const again = linesAWriteLeavesWanting(writing, written);
   const made = linesBroughtIntoBeing(had, linesWithNoBoundary(writingOf(settled)));
   settled.doc.destroy();
   if (made.length > 0)
@@ -555,7 +535,7 @@ export function expectNoLineLeftWanting(
   const more = writingOf(given);
   given.doc.transact(() => giveBoundaries(more, again.wanting));
   const gave = again.wanting.map((block) => more.reader.reading().lines[block]!.item!);
-  linesAWriteLeavesWanting(more, [wrote]);
+  linesAWriteLeavesWanting(more, written);
   const kept = again.wanting.filter((_, at) => !gave[at]!.deleted);
   given.doc.destroy();
   if (kept.length > 0)
@@ -677,7 +657,7 @@ export function everyStepOracle(part: number): void {
         if (wrote && a.sent.length === 0 && a.view.state.doc.eq(before) && !wrote.doc.eq(before)) {
           const fresh = declared(94);
           Y.applyUpdate(fresh.doc, baseline);
-          unsettled = linesToGiveFirst(writingOf(fresh), [wrote], "note") === null;
+          unsettled = howToWrite(writingOf(fresh), [wrote], "note") === null;
           const left = linesAWriteLeavesWanting(writingOf(fresh), [wrote]);
           fresh.doc.destroy();
           if (unsettled && (left.isSettled || left.wanting.length === 0))

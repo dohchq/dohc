@@ -771,7 +771,7 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
  * A block with no boundary of its own can come or go when its neighbours change: the paragraph
  * for what stands before the first boundary, the one the reader adds in front of a list item's
  * content, and the one for what a block cannot hold. This function gives no such block a
- * boundary. An editor calls `linesToGiveFirst` and `giveBoundaries` first, so the boundary of
+ * boundary. An editor calls `howToWrite` and `giveBoundaries` first, so the boundary of
  * each such block the transaction edits, or needs to have one, is written in a change of its own
  * that undo does not record, and the steps meet an ordinary line. After each step the sequence
  * is read again, and each block start the editor has and the reading lacks is written as a
@@ -1425,11 +1425,58 @@ function linesATrialGives(
   return undefined;
 }
 
+function linesToGiveFirst(
+  writing: BodyWriting,
+  transactions: readonly Transform[],
+  trial: "window" | "note",
+): number[] | null {
+  const reading = writing.reader.reading();
+  const touched = whatStepsTouch(reading, transactions);
+  const guessed = linesTouched(reading, touched);
+  if (touched.isSure || !touched.isNearALineWithNoBoundary) return guessed;
+  const inWindow =
+    trial === "window"
+      ? linesATrialGives((given) => copyOfWindow(writing, transactions, touched, given), guessed)
+      : undefined;
+  if (inWindow !== undefined) return inWindow;
+  return linesATrialGives(() => copyOfNote(writing, transactions), guessed) ?? null;
+}
+
+function asOneRange(transaction: Transform): Transform | null {
+  const docs = [...transaction.docs, transaction.doc];
+  let from = 0;
+  let to = 0;
+  let replacing = 0;
+  for (let at = 0; at < transaction.steps.length; at++) {
+    const map = transaction.steps[at]!.getMap();
+    const ranges = rangesOf(docs[at]!, docs[at + 1]!, map, false);
+    if (ranges.length === 0) continue;
+    const [oldStart, oldEnd, newStart, newEnd] = ranges[0]!;
+    const touches = replacing === 0 || (oldStart <= to && oldEnd >= from);
+    if (ranges.length > 1 || !touches) return null;
+    from = replacing === 0 ? newStart : Math.min(map.map(from, -1), newStart);
+    to = replacing === 0 ? newEnd : Math.max(map.map(to, 1), newEnd);
+    replacing += 1;
+  }
+  if (replacing < 2) return null;
+  const { before, doc } = transaction;
+  const until = before.content.size - (doc.content.size - to);
+  const step = new ReplaceStep(from, until, doc.slice(from, to));
+  if (!keepsPairs(step, before) || !keepsContainers(step, before, doc, () => true)) return null;
+  const whole = new Transform(before);
+  try {
+    return !whole.maybeStep(step).failed && whole.doc.eq(doc) ? whole : null;
+  } catch (error) {
+    if (!(error instanceof RangeError)) throw error;
+    return null;
+  }
+}
+
 /**
- * The blocks with no boundary of their own that get one before some editor transactions are
- * written, by their index in what the sequence reads as now, or null when the transactions
- * cannot be written and the dispatch is to be refused. The transactions are the ones of one
- * dispatch, and the first starts from that reading.
+ * How to write the transactions of one dispatch, the first of which starts from what the
+ * sequence reads as now: `lines`, the blocks with no boundary of their own that get one first,
+ * by their index in that reading, and `transactions`, what to write after them. Null when the
+ * dispatch cannot be written and is to be refused.
  *
  * Nothing is written. A first guess is read from the steps: each says what it touches, as the
  * reference writer's operations do. The block a range starts in is edited, and so is each block a
@@ -1459,27 +1506,32 @@ function linesATrialGives(
  * than three copies, the whole note is copied instead, which costs a read of the note; `trial`
  * `"note"` asks for that copy at once.
  *
- * The dispatch is refused when a copy that read as the editor's document after every step is
- * still not settled once no more lines can be given: a boundary the dispatch makes would stand
- * in front of what a line with none held, which undo would take away with whatever someone else
- * made of that line. It is refused too when the whole note takes more than three copies or does
- * not read as the editor's document.
+ * A dispatch cannot be written as dispatched when a copy that read as the editor's document
+ * after every step is still not settled once no more lines can be given: a boundary the dispatch
+ * makes would stand in front of what a line with none held, which undo would take away with
+ * whatever someone else made of that line. Nor can it when the whole note takes more than three
+ * copies or does not read as the editor's document.
+ *
+ * It is then tried once more with each transaction whose steps touch written as one step. Enter
+ * over a selection deletes into such a line and splits it off again; as one step the line keeps
+ * the boundary it is given. A transaction has that form when at least two of its steps replace,
+ * each one range, and each after the first starts or ends where the earlier ones reached, so the
+ * one step holds no letter the dispatch did not put there; when that step passes `keepsPairs`
+ * and `keepsContainers`; and when it gives the transaction's document. `transactions` then
+ * holds that step in the transaction's place. A dispatch with no such transaction, or one that
+ * does not settle this way either, is refused.
  */
-export function linesToGiveFirst(
+export function howToWrite(
   writing: BodyWriting,
   transactions: readonly Transform[],
   trial: "window" | "note" = "window",
-): number[] | null {
-  const reading = writing.reader.reading();
-  const touched = whatStepsTouch(reading, transactions);
-  const guessed = linesTouched(reading, touched);
-  if (touched.isSure || !touched.isNearALineWithNoBoundary) return guessed;
-  const inWindow =
-    trial === "window"
-      ? linesATrialGives((given) => copyOfWindow(writing, transactions, touched, given), guessed)
-      : undefined;
-  if (inWindow !== undefined) return inWindow;
-  return linesATrialGives(() => copyOfNote(writing, transactions), guessed) ?? null;
+): { lines: number[]; transactions: readonly Transform[] } | null {
+  const lines = linesToGiveFirst(writing, transactions, trial);
+  if (lines) return { lines, transactions };
+  const asOne = transactions.map((each) => asOneRange(each) ?? each);
+  if (asOne.every((each, at) => each === transactions[at])) return null;
+  const given = linesToGiveFirst(writing, asOne, trial);
+  return given && { lines: given, transactions: asOne };
 }
 
 /**

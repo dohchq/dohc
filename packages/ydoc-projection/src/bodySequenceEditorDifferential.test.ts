@@ -17,11 +17,7 @@ import {
   writeBody,
   type BodyChange,
 } from "./bodySequenceWriter.js";
-import {
-  linesBroughtIntoBeing,
-  linesToGiveFirst,
-  linesWithNoBoundary,
-} from "./bodySequenceWriting.js";
+import { howToWrite, linesBroughtIntoBeing, linesWithNoBoundary } from "./bodySequenceWriting.js";
 import { readBodySequence } from "./bodySequenceYjs.js";
 import {
   boundary,
@@ -131,6 +127,10 @@ const WHY_THEY_DIFFER: { why: string; edits: readonly string[] }[] = [
     ],
   },
   {
+    why: "Enter over a selection that ends in a line with no boundary of its own deletes into that line and splits it off again. The editor writes the two steps as one range: the line is given its boundary first and keeps it, and the change records no new one. The reference writer's delete joins the line away and gives it none, and its split records a new boundary.",
+    edits: ["Enter over a selection across blocks"],
+  },
+  {
     why: "A selection that takes a divider and ends right after it, with a divider put over it, leaves the document that divider where it stood. The editor writes what changed and keeps its boundary; the reference writer deletes it and writes the new divider a boundary, or makes the first line the divider. The editor gives no boundary to a line the selection takes away whole, where the reference writer gives it one and makes it the divider.",
     edits: ["a divider over a selection across blocks"],
   },
@@ -149,10 +149,11 @@ const withNoReason = (counts: Differential) =>
   );
 
 const EVERY_EDIT: Differential = {
-  compared: 7964,
-  onlyOne: 1986,
+  compared: 8062,
+  onlyOne: 1888,
   neither: 398,
   givenDifferently: {
+    "Enter over a selection across blocks": 98,
     "Enter over a selection across blocks, from the note's start": 18,
     "a divider over a selection across blocks": 2,
   },
@@ -186,10 +187,10 @@ const EVERY_EDIT: Differential = {
   recordedDifferently: {
     "Enter over a selection across blocks, from the note's start": 45,
     "two paragraphs pasted over a selection across blocks, the first whole": 44,
+    "Enter over a selection across blocks": 104,
     "a change of kind to codeBlock": 23,
     "a delete across blocks": 9,
     "a letter typed over a selection across blocks": 9,
-    "Enter over a selection across blocks": 6,
     "a divider over a selection across blocks": 12,
     "a divider over a selection": 2,
     "a divider over a selection, as a delete and a block put in": 2,
@@ -197,10 +198,10 @@ const EVERY_EDIT: Differential = {
   },
 };
 const EVERY_EDIT_AT_RANDOM: Differential = {
-  compared: 1402,
-  onlyOne: 441,
+  compared: 1412,
+  onlyOne: 431,
   neither: 76,
-  givenDifferently: {},
+  givenDifferently: { "Enter over a selection across blocks": 10 },
   readDifferently: {
     "a change of kind to codeBlock": 14,
     "Enter over a selection across blocks, from the note's start": 4,
@@ -229,17 +230,19 @@ const EVERY_EDIT_AT_RANDOM: Differential = {
     "a delete across blocks": 1,
     "a change of kind to codeBlock": 14,
     "Enter over a selection across blocks, from the note's start": 2,
+    "Enter over a selection across blocks": 10,
     "a divider over a selection": 1,
     "a divider over a selection, as a delete and a block put in": 1,
   },
 };
 
 const EVERY_EIGHTH_EDIT: Differential = {
-  compared: 1556,
-  onlyOne: 409,
+  compared: 1570,
+  onlyOne: 395,
   neither: 108,
   givenDifferently: {
     "Enter over a selection across blocks, from the note's start": 6,
+    "Enter over a selection across blocks": 14,
     "a divider over a selection across blocks": 1,
   },
   readDifferently: {
@@ -267,17 +270,17 @@ const EVERY_EIGHTH_EDIT: Differential = {
     "two paragraphs pasted over a selection across blocks, the first whole": 5,
     "a delete across blocks": 1,
     "a letter typed over a selection across blocks": 1,
-    "Enter over a selection across blocks": 1,
+    "Enter over a selection across blocks": 15,
     "a change of kind to codeBlock": 4,
     "a divider over a selection across blocks": 1,
     "a block put right under another": 2,
   },
 };
 const EVERY_EIGHTH_EDIT_AT_RANDOM: Differential = {
-  compared: 249,
-  onlyOne: 74,
+  compared: 250,
+  onlyOne: 73,
   neither: 24,
-  givenDifferently: {},
+  givenDifferently: { "Enter over a selection across blocks": 1 },
   readDifferently: {
     "Enter over a selection across blocks, from the note's start": 1,
     "a change of kind to codeBlock": 1,
@@ -291,6 +294,7 @@ const EVERY_EIGHTH_EDIT_AT_RANDOM: Differential = {
   },
   recordedDifferently: {
     "two paragraphs pasted over a selection across blocks, the first whole": 3,
+    "Enter over a selection across blocks": 1,
     "Enter over a selection across blocks, from the note's start": 1,
     "a change of kind to codeBlock": 1,
   },
@@ -978,11 +982,11 @@ describe(sameEdit, inDeclaredOrder, () => {
     );
     const held = Y.encodeStateAsUpdate(a.doc);
     const asked = vi.spyOn(Y.Doc.prototype, "getMap");
-    expect(linesToGiveFirst(writingOf(a), [quoted])).toBeNull();
+    expect(howToWrite(writingOf(a), [quoted])).toBeNull();
     const copies = asked.mock.contexts.map((from) => from !== a.doc);
     asked.mockRestore();
     expect(copies).toEqual([false, true]);
-    expect(linesToGiveFirst(writingOf(a), [quoted], "note")).toBeNull();
+    expect(howToWrite(writingOf(a), [quoted], "note")).toBeNull();
     a.view.dispatch(quoted);
     expect(a.view.state.doc).toBe(doc);
     expect(Y.encodeStateAsUpdate(a.doc)).toEqual(held);
