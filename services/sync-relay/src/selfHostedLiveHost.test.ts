@@ -27,6 +27,7 @@ import { createNamedFrameChanges } from "./liveHostChanges";
 import { LIVE_NOTE_START_MAX_MS } from "./liveHostingLimits";
 import { hasRelayWriteObservers } from "./relayWriteChanges";
 import { serviceHostDocumentEnabled } from "./storage/serviceHostEnrollment";
+import { openSyncRelayStorage } from "./storage";
 import type { StorageContext } from "./storage/context";
 
 // While `error` is set, opening a divergence marker fails, as on a full disk.
@@ -887,6 +888,74 @@ it("tells the operator a document whose history is past its budget tries again l
   expect(line).not.toContain(f.data);
   await f.waitPasses();
   expect(f.onError).toHaveBeenCalledTimes(1);
+});
+
+it("keeps a starting note's 10-minute clock across a relay restart on the same database", async () => {
+  const f = await fixture();
+  await f.waitStarted(1);
+  await f.waitUpdate(["docs/a.md"]);
+  expect(f.enrollment()!.note).toMatchObject({ generation: 1, state: "starting", sinceMs: 10 });
+  await f.host.close();
+  const storage = openSyncRelayStorage(f.path, f.config);
+  cleanup.push(async () => storage.close());
+  const history = createLiveJournalHistoryAuthority({ namespace, reconciled: true });
+  attachLiveJournalHistory(storage as StorageContext, history);
+  const note = () =>
+    storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)!.note;
+  const restartedAt = 10 + LIVE_NOTE_START_MAX_MS - 30_000;
+  const clock = { now: restartedAt };
+  const onError = vi.fn();
+  const passes = vi.spyOn(storage, "failLapsedLiveNoteStarts");
+  const host = await startSelfHostedLiveHost({
+    trustedAccount: (accountId: string) => ({ accountId, name: "Owner name" }),
+    storage,
+    history,
+    root: f.data,
+    engineExecutable: process.execPath,
+    relayOrigin: "https://relay.test",
+    key: new Uint8Array(32).fill(9),
+    frameChanges: f.frameChanges,
+    startHost: f.startHost,
+    nowMs: () => clock.now,
+    onError,
+  });
+  cleanup.push(() => host.close());
+  await vi.waitFor(
+    () => {
+      host.reconcile();
+      expect(passes.mock.calls.length).toBeGreaterThanOrEqual(3);
+    },
+    { timeout: 10_000 },
+  );
+  expect(passes.mock.calls.every(([nowMs]) => nowMs === restartedAt)).toBe(true);
+  expect(note()).toMatchObject({ generation: 1, state: "starting", sinceMs: 10 });
+  clock.now = 10 + LIVE_NOTE_START_MAX_MS - 1;
+  const before = passes.mock.calls.length;
+  await vi.waitFor(
+    () => {
+      host.reconcile();
+      expect(passes.mock.calls.length).toBeGreaterThanOrEqual(before + 2);
+    },
+    { timeout: 10_000 },
+  );
+  expect(note()).toMatchObject({ generation: 1, state: "starting", sinceMs: 10 });
+  clock.now = 10 + LIVE_NOTE_START_MAX_MS;
+  await vi.waitFor(
+    () => {
+      host.reconcile();
+      expect(note()).toEqual({
+        generation: 1,
+        state: "off",
+        reason: "start-failed",
+        cause: "no-lineage",
+        sinceMs: 10 + LIVE_NOTE_START_MAX_MS,
+        changedBy: "server",
+      });
+    },
+    { timeout: 10_000 },
+  );
+  expect(clock.now - restartedAt).toBe(30_000);
+  expect(onError).not.toHaveBeenCalled();
 });
 
 it("turns a note off when its host refuses it or it is still starting 10 minutes on, until the owner resumes it", async () => {
