@@ -449,6 +449,12 @@ function writeRange(
       setBoundary(boundaryElement(reading, ends)!, reading.blocks[ends]!.node, block.block, null);
     return;
   }
+  const onlyReachesALineWithNoBoundary =
+    continuesLaterBlock &&
+    tokens.length === 1 &&
+    boundaryAt(reading, ends) < 0 &&
+    oldEnd === reading.starts[ends]! + 1;
+  if (onlyReachesALineWithNoBoundary) rest = [];
   const kept = countBelow(reading.starts, oldEnd);
   const keepsItsStart =
     replaced &&
@@ -744,7 +750,8 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
  * block's start and runs into a later block keeps both boundaries when it starts a block besides
  * the one it ends in: the first is the first new block's, with its kind. When all it starts is
  * the block it ends in, the first block goes. A list item's added paragraph that is still one
- * after the step gets no boundary.
+ * after the step gets no boundary, and neither does a block with none that a delete only reaches
+ * the start of: it reads as it did without one.
  *
  * A block with no boundary of its own can come or go when its neighbours change: the paragraph
  * for what stands before the first boundary, the one the reader adds in front of a list item's
@@ -826,8 +833,9 @@ function marksOfLetters(block: ProseMirrorNode): string {
  * A block a range runs into and starts again is still a line when the range puts blocks above
  * it, types into it, or begins at a block's start, and then it is edited when the range types
  * into it. In a delete that starts inside an earlier block it joins that block, as the
- * reference writer's delete has it, and gets none, unless it is that block's own paragraph and
- * the delete stops at its start.
+ * reference writer's delete has it, and gets none. A block a delete only reaches the start of is
+ * not run into: it is the line it was, and is given a boundary only as the paragraph after a
+ * block that goes.
  */
 export function linesGivenBoundaries(
   writing: BodyWriting,
@@ -933,8 +941,8 @@ export function linesGivenBoundaries(
               continue;
             }
             const isTypedInto = tokens.at(-1) !== last;
-            const staysItsParagraph = block - 1 === holder && to === reading.starts[block]! + 1;
-            if (holder >= 0 && started.length === 1 && !isTypedInto && !staysItsParagraph)
+            const isOnlyReached = to === reading.starts[block]! + 1;
+            if (holder >= 0 && started.length === 1 && !isTypedInto && !isOnlyReached)
               gone.add(block);
             if (last !== undefined && "block" in last && last.block.type !== kind) touch(block);
             if (isTypedInto) edits.add(block);

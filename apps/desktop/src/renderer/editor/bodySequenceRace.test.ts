@@ -409,6 +409,27 @@ describe("the desktop's commands next to a line with no boundary of its own", ()
     }
   });
 
+  it("writes no boundary for the paragraph after a code block when Backspace deletes a selection that runs from the code to that paragraph's start, so a letter typed there stays there when the delete is undone", () => {
+    const a = desktop(codeThenTextItCannotHold(), 10);
+    const b = person(codeThenTextItCannotHold(), 20);
+    a.select([0, 1], [1, 0]);
+    const effects = a.effects(() => a.press("Backspace"));
+    expect(a.view.state.doc.toString()).toBe('doc(codeBlock("a"), paragraph(wikilink, "cd"))');
+    expect(a.sent).toHaveLength(1);
+    expect(effects.madeBoundaries).toEqual([]);
+    exchange(a, b);
+    b.typeAt(1, 0, "P");
+    exchange(b, a);
+    expect(a.undo()).toBe(true);
+    exchange(a, b);
+    for (const each of [a, b]) {
+      each.expectMirror();
+      expect(each.view.state.doc.toString()).toBe(
+        'doc(codeBlock("ab"), paragraph("P", wikilink, "cd"))',
+      );
+    }
+  });
+
   it("puts setHorizontalRule's divider in front of a line's own boundary when the caret is at the line's start, so the line is still the heading someone else made it at the same moment", () => {
     const a = desktop(note(...LINES), 10);
     const b = person(note(...LINES), 20);

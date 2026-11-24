@@ -1969,7 +1969,7 @@ const ORACLE_COUNTS = {
     "range error": 0,
   },
   undone: 16260,
-  given: 10232,
+  given: 10240,
   excepted: {
     "a mark on an inline item": 511,
     "formatting stored under a code block's letters": 15,
@@ -3668,20 +3668,21 @@ describe("a change next to the paragraph after a block that cannot hold its cont
     reference.doc.destroy();
   });
 
-  it("gives that paragraph nothing first when a delete takes its code block and ends at its start, as the reference writer does, and writes its boundary in the delete", () => {
+  it("gives that paragraph its boundary first when a delete takes its code block and stops at its start, as the reference writer does for a delete to that block's end, and writes none in the delete", () => {
     const lines = [stored(CODE, "cc"), stored(CODE, "kk", HARD_BREAK, "abc")];
     const a = person(noteOfLines(lines), 10);
     const before = a.view.state.doc.toJSON();
     const was = tokensOf(a.sequence);
     const reference = declared(93);
     Y.applyUpdate(reference.doc, noteOfLines(lines));
-    const change = deleteRange(schema, reference.doc, 0, 0, 2, 0, () => "fresh")!;
+    const change = deleteRange(schema, reference.doc, 0, 0, 1, 2, () => "fresh")!;
     const start = a.view.state.doc.child(0).nodeSize + a.view.state.doc.child(1).nodeSize + 1;
     a.view.dispatch(a.view.state.tr.delete(1, start));
     expect(a.view.state.doc.toString()).toBe('doc(codeBlock, paragraph(hardBreak, "abc"))');
-    expect(change.given).toEqual([]);
-    expect(givenByEditor(a, was)).toEqual([]);
-    expect(a.sent).toHaveLength(1);
+    expect(change.given).toHaveLength(1);
+    expect(givenByEditor(a, was)).toEqual(change.given.map((each) => each.index));
+    expect(a.sent).toHaveLength(2);
+    expect(boundariesMadeIn(a.sent[1]!)).toEqual([]);
     a.expectMirror();
     expect(a.undo()).toBe(true);
     expect(a.view.state.doc.toJSON()).toEqual(before);
@@ -3973,6 +3974,67 @@ describe.each(["bare", "hosted"] as const)(
   },
 );
 
+describe.each(["bare", "hosted"] as const)(
+  "on a %s page, a delete that stops at the start of a paragraph with no boundary",
+  (shape) => {
+    it.each([
+      ["a delete", (a: Person) => a.view.dispatch(a.view.state.tr.delete(2, 5))],
+      [
+        "Backspace over a selection",
+        (a: Person) => {
+          a.select([0, 1], [1, 0]);
+          a.press("Backspace");
+        },
+      ],
+    ] as const)(
+      "writes no boundary for the paragraph after a code block when %s runs from the code to that paragraph's start, so a letter typed there stays there when the delete is undone",
+      (_name, deleteIt) => {
+        const lines = [stored(CODE, "ab", WIKILINK, "cd")];
+        const a = person(noteOfLines(lines), 10, shape);
+        const b = person(noteOfLines(lines), 20, shape);
+        const effects = a.effects(() => deleteIt(a));
+        expect(a.view.state.doc.toString()).toBe('doc(codeBlock("a"), paragraph(wikilink, "cd"))');
+        expect(a.sent).toHaveLength(1);
+        expect(effects.madeBoundaries).toEqual([]);
+        a.expectMirror();
+        exchange(a, b);
+        b.typeAt(1, 0, "P");
+        exchange(b, a);
+        expect(a.undo()).toBe(true);
+        exchange(a, b);
+        for (const each of [a, b]) {
+          each.expectMirror();
+          expect(each.view.state.doc.toString()).toBe(
+            'doc(codeBlock("ab"), paragraph("P", wikilink, "cd"))',
+          );
+        }
+      },
+    );
+
+    it("gives that paragraph its boundary first, and writes none in the delete, when the delete also takes the code block it stands after, so a letter typed at its start stays there when the delete is undone", () => {
+      const lines = [stored(CODE, "cc"), stored(CODE, "kk", HARD_BREAK, "abc")];
+      const a = person(noteOfLines(lines), 10, shape);
+      const b = person(noteOfLines(lines), 20, shape);
+      a.view.dispatch(a.view.state.tr.delete(2, 9));
+      expect(a.view.state.doc.toString()).toBe('doc(codeBlock("c"), paragraph(hardBreak, "abc"))');
+      expect(a.sent).toHaveLength(2);
+      expect(boundariesMadeIn(a.sent[0]!)).toHaveLength(1);
+      expect(boundariesMadeIn(a.sent[1]!)).toEqual([]);
+      exchange(a, b);
+      b.typeAt(1, 0, "P");
+      exchange(b, a);
+      expect(a.undo()).toBe(true);
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.view.state.doc.toString()).toBe(
+          'doc(codeBlock("cc"), codeBlock("kk"), paragraph("P", hardBreak, "abc"))',
+        );
+      }
+    });
+  },
+);
+
 type Differential = {
   compared: number;
   onlyOne: number;
@@ -3981,6 +4043,7 @@ type Differential = {
   readDifferently: Record<string, number>;
   bothDifferently: Record<string, number>;
   keptDifferently: Record<string, number>;
+  recordedDifferently: Record<string, number>;
 };
 type Tally = Differential & { notes: number; examples: string[] };
 const tally = (): Tally => ({
@@ -3992,16 +4055,18 @@ const tally = (): Tally => ({
   readDifferently: {},
   bothDifferently: {},
   keptDifferently: {},
+  recordedDifferently: {},
   examples: [],
 });
 const sayTally = (name: string, { notes, examples, ...counts }: Tally) =>
-  `the editor against the reference writer, ${name}: ${String(notes)} notes; compared ${String(counts.compared)}; read the same and gave boundaries to other lines ${JSON.stringify(counts.givenDifferently)}; gave the same and read differently ${JSON.stringify(counts.readDifferently)}; made another edit, so read and gave differently ${JSON.stringify(counts.bothDifferently)}; gave and read the same and kept other boundaries ${JSON.stringify(counts.keptDifferently)}; only one of the two took the edit ${String(counts.onlyOne)}, neither ${String(counts.neither)}\n${examples.join("\n")}`;
+  `the editor against the reference writer, ${name}: ${String(notes)} notes; compared ${String(counts.compared)}; read the same and gave boundaries to other lines ${JSON.stringify(counts.givenDifferently)}; gave the same and read differently ${JSON.stringify(counts.readDifferently)}; made another edit, so read and gave differently ${JSON.stringify(counts.bothDifferently)}; gave and read the same and kept other boundaries ${JSON.stringify(counts.keptDifferently)}; gave, read and kept the same and recorded other boundaries ${JSON.stringify(counts.recordedDifferently)}; only one of the two took the edit ${String(counts.onlyOne)}, neither ${String(counts.neither)}\n${examples.join("\n")}`;
 
 const BUCKETS = [
   "givenDifferently",
   "readDifferently",
   "bothDifferently",
   "keptDifferently",
+  "recordedDifferently",
 ] as const;
 const WHY_THEY_DIFFER: { why: string; edits: readonly string[] }[] = [
   {
@@ -4049,7 +4114,7 @@ const DIFFERENTIAL_COUNTS: Differential = {
   neither: 373,
   givenDifferently: { "Enter over a selection across blocks, from the note's start": 18 },
   readDifferently: {
-    "Enter over a selection across blocks, from the note's start": 21,
+    "Enter over a selection across blocks, from the note's start": 25,
     "a change of kind to codeBlock": 20,
     "a block put first in its container": 2,
     "a divider": 2,
@@ -4060,17 +4125,18 @@ const DIFFERENTIAL_COUNTS: Differential = {
     "a delete of a whole block": 1,
   },
   bothDifferently: {
-    "Enter over a selection across blocks, from the note's start": 18,
+    "Enter over a selection across blocks, from the note's start": 14,
     "two paragraphs pasted over a selection, the first whole": 1,
     "a block put right under another": 1,
   },
   keptDifferently: {
     "Enter over a selection across blocks, from the note's start": 4,
-    "two paragraphs pasted over a selection across blocks, the first whole": 11,
+    "two paragraphs pasted over a selection across blocks, the first whole": 32,
     "a divider over a selection across blocks": 6,
     "a divider over a selection": 2,
     "a divider over a selection, as a delete and a block put in": 2,
   },
+  recordedDifferently: {},
 };
 const DIFFERENTIAL_COUNTS_AT_RANDOM: Differential = {
   compared: 536,
@@ -4078,7 +4144,7 @@ const DIFFERENTIAL_COUNTS_AT_RANDOM: Differential = {
   neither: 46,
   givenDifferently: {},
   readDifferently: {
-    "a delete across blocks": 2,
+    "a delete across blocks": 1,
     "a change of kind to codeBlock": 6,
     "a block put first in its container": 2,
     "a divider": 2,
@@ -4094,6 +4160,7 @@ const DIFFERENTIAL_COUNTS_AT_RANDOM: Differential = {
     "a divider over a selection": 2,
     "a divider over a selection, as a delete and a block put in": 2,
   },
+  recordedDifferently: {},
 };
 
 function placesOf(
@@ -4117,6 +4184,23 @@ function boundariesKept(sequence: Y.Text, was: readonly { id: string }[]): strin
     if (token.kind !== "boundary" || place === undefined) return [];
     const attrs = new Map(JSON.parse(token.attrs) as [string, unknown][]);
     return [`${String(place)} ${String(attrs.get("type") ?? "paragraph")}`];
+  });
+}
+
+function boundariesRecorded(
+  sequence: Y.Text,
+  was: readonly { id: string }[],
+  given: readonly string[],
+): string[] {
+  const before = new Map(was.map((token, index) => [token.id, index]));
+  const now = tokensOf(sequence);
+  return now.flatMap((token, at) => {
+    if (token.kind !== "boundary" || before.has(token.id) || given.includes(token.id)) return [];
+    const next = now.slice(at + 1).find((later) => before.has(later.id));
+    const attrs = new Map(JSON.parse(token.attrs) as [string, unknown][]);
+    return [
+      `${String(next ? before.get(next.id) : was.length)} ${String(attrs.get("type") ?? "paragraph")}`,
+    ];
   });
 }
 
@@ -4170,9 +4254,11 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
     const reference = declared(93);
     Y.applyUpdate(reference.doc, baseline);
     const given: number[] = [];
+    const givenIds: string[] = [];
     reference.doc.on("update", (update: Uint8Array, origin: unknown) => {
-      if (origin === GIVEN_BOUNDARY)
-        given.push(...placesOf(reference.sequence, boundariesMadeIn(update), was));
+      if (origin !== GIVEN_BOUNDARY) return;
+      givenIds.push(...boundariesMadeIn(update));
+      given.push(...placesOf(reference.sequence, boundariesMadeIn(update), was));
     });
     let made = 0;
     let took = true;
@@ -4194,6 +4280,7 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
       given,
       read: readBodySequence(schema, reference.doc),
       kept: boundariesKept(reference.sequence, was).join(),
+      recorded: boundariesRecorded(reference.sequence, was, givenIds).join(),
     };
     reference.doc.destroy();
     return said;
@@ -4239,22 +4326,32 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
       const givenBy = (said: (typeof references)[number]) =>
         JSON.stringify(inOrder(said.given).filter(butTheLineAbove));
       const kept = boundariesKept(a.sequence, was).join();
+      const recorded = boundariesRecorded(a.sequence, was, givenHere).join();
       a.expectMirror();
       const count = (counts: Record<string, number>, why: string) => {
         counts[edit] = (counts[edit] ?? 0) + 1;
         if (counts[edit] <= 2) counted.examples.push(`${why}: ${where}`);
       };
-      const gaveTheSame = references.some((said) => givenBy(said) === JSON.stringify(byTheEditor));
+      const gaveTheSame = references.filter(
+        (said) => givenBy(said) === JSON.stringify(byTheEditor),
+      );
+      const keptTheSame = gaveTheSame.filter((said) => said.kept === kept);
       const readsTheSame = readTheSame.length > 0;
       const gave = `the editor gave ${JSON.stringify(byTheEditor)}, the reference ${givenBy(references[0]!)}`;
       const reads = `the editor reads ${a.view.state.doc.toString()}, the reference ${references[0]!.read.toString()}`;
-      if (!gaveTheSame && !readsTheSame) count(counted.bothDifferently, `${gave}; ${reads}`);
-      else if (!gaveTheSame) count(counted.givenDifferently, gave);
+      if (gaveTheSame.length === 0 && !readsTheSame)
+        count(counted.bothDifferently, `${gave}; ${reads}`);
+      else if (gaveTheSame.length === 0) count(counted.givenDifferently, gave);
       else if (!readsTheSame) count(counted.readDifferently, reads);
-      else if (!references.some((said) => said.kept === kept))
+      else if (keptTheSame.length === 0)
         count(
           counted.keptDifferently,
-          `the editor kept ${kept}, the reference ${references[0]!.kept}, of ${boundariesKept(start.sequence, was).join()}`,
+          `the editor kept ${kept}, the reference ${gaveTheSame[0]!.kept}, of ${boundariesKept(start.sequence, was).join()}`,
+        );
+      else if (!keptTheSame.some((said) => said.recorded === recorded))
+        count(
+          counted.recordedDifferently,
+          `the editor recorded [${recorded}], the reference [${keptTheSame[0]!.recorded}]`,
         );
     }
     stopEveryone();
@@ -4374,8 +4471,11 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
                 ? setLineKind(schema, doc, at, RULE)
                 : splitLine(schema, doc, at, offset, freshId, RULE),
             );
-          compare("a delete across blocks", across, cutAcross, (a) =>
-            a.view.dispatch(a.view.state.tr.delete(from + offset, to)),
+          compare(
+            "a delete across blocks",
+            across,
+            [cutAcross, (make) => toOffset === 0 && toAt - 1 > at && cutUpToTheLast(make)],
+            (a) => a.view.dispatch(a.view.state.tr.delete(from + offset, to)),
           );
           compare(
             "a divider over a selection across blocks",
@@ -4413,6 +4513,16 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally): voi
                 cutTheWholeBlocks(make) &&
                 cutTheLastsStart(make, at) &&
                 make((doc) => splitLine(schema, doc, at, 0, freshId, PARAGRAPH)),
+              (make) =>
+                toOffset === 0 &&
+                toAt - 1 > at &&
+                cutUpToTheLast(make) &&
+                make((doc) => splitLine(schema, doc, at + 1, 0, freshId)),
+              (make) =>
+                toOffset === 0 &&
+                toAt - 1 > at &&
+                cutUpToTheLast(make) &&
+                make((doc) => splitLine(schema, doc, at + 1, 0, freshId, PARAGRAPH)),
             ],
             (a) => {
               a.select([at, offset], [toAt, toOffset]);
