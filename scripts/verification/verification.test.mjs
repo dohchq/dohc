@@ -1658,7 +1658,15 @@ test("gate selection follows workflow inputs, including shared and gate implemen
     localGates(["packages/excalidraw-scene/fixtures/canonical-json.json"], workflow),
     { rust: true, js: true },
   );
-  for (const file of ["examples/fundraiser/backend.ts", "examples/stock-orders/schema.sql"]) {
+  for (const file of [
+    "examples/fundraiser/backend.ts",
+    "examples/stock-orders/schema.sql",
+    "examples/accounting/books.tsx",
+    "examples/lightbox/studio.tsx",
+    "examples/tournament/index.tsx",
+    "examples/hex-tactics/index.tsx",
+    "examples/quant-workbench/workbench.tsx",
+  ]) {
     assert.deepEqual(localGates([file], workflow), { rust: false, js: true }, file);
   }
   for (const file of [

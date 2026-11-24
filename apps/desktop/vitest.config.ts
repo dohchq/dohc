@@ -1,7 +1,7 @@
 import { realpathSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { createRequire } from "node:module";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 import { desktopTestFiles } from "./vitest.projects.ts";
@@ -42,6 +42,12 @@ const common = {
     alias: {
       react: dirname(require.resolve("react/package.json")),
       "react-dom": dirname(require.resolve("react-dom/package.json")),
+      "dohc/app": resolve(import.meta.dirname, "../../packages/app-kit/src/app.tsx"),
+      "dohc/ui": resolve(import.meta.dirname, "../../packages/app-kit/src/ui.tsx"),
+      "dohc/charts": resolve(import.meta.dirname, "../../packages/app-kit/src/charts.tsx"),
+      "dohc/icons": resolve(import.meta.dirname, "../../packages/app-kit/src/icons.ts"),
+      "dohc/money": resolve(import.meta.dirname, "../../packages/app-kit/src/money.ts"),
+      "dohc/csv": resolve(import.meta.dirname, "../../packages/app-kit/src/csv.ts"),
     },
   },
   test: {
@@ -79,8 +85,13 @@ export default defineConfig({
           ...desktop,
           name: "desktop",
           include: ISOLATE_ALL
-            ? [...tests.isolated, ...tests.sharedDom, ...tests.sharedNode]
-            : tests.isolated,
+            ? [
+                ...tests.isolated,
+                ...tests.sharedDom,
+                ...tests.sharedNode,
+                "../../examples/lightbox/api.test.mts",
+              ]
+            : [...tests.isolated, "../../examples/lightbox/api.test.mts"],
         },
       },
       // Files in a shared project run one after another in the same worker.

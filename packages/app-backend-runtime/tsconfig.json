@@ -1,5 +1,16 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "types": ["node"], "allowImportingTsExtensions": true },
+  "compilerOptions": {
+    "types": ["node"],
+    "allowImportingTsExtensions": true,
+    "paths": {
+      "dohc/app": ["../app-kit/src/app.tsx"],
+      "dohc/ui": ["../app-kit/src/ui.tsx"],
+      "dohc/charts": ["../app-kit/src/charts.tsx"],
+      "dohc/icons": ["../app-kit/src/icons.ts"],
+      "dohc/money": ["../app-kit/src/money.ts"],
+      "dohc/csv": ["../app-kit/src/csv.ts"]
+    }
+  },
   "include": ["src/**/*.ts"]
 }
