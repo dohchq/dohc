@@ -15,12 +15,6 @@ import type {
 } from "./storage/ordinaryActivationValidation.js";
 import type { LiveJournalValidation } from "./storage/types.js";
 import { WORKER_LIVE_VALIDATION_POLICY } from "@dohc/ydoc-projection/live-journal-validation";
-import {
-  liveRestoreValidator,
-  type LiveRestoreReply,
-  type LiveRestoreValidator,
-  type LiveRestoreWork,
-} from "./liveRestoreValidation.js";
 import { childStderrLog, serverLogClass } from "./serverLogWords.js";
 
 export type SettlementNormalizationInput = {
@@ -51,7 +45,6 @@ export type LiveValidationWork = { policy: OrderedLiveUpdateCutPolicy } & (
   | { kind: "journal"; input: Parameters<OwnerOutboxAdmission["validate"]>[0] }
   | { kind: "settlement"; input: SettlementNormalizationInput }
   | { kind: "activation"; input: OrdinaryActivationWork }
-  | { kind: "restore"; input: LiveRestoreWork }
 );
 /** What the worker adds to a journal verdict about its own time. */
 type WorkerTiming = { replayMs?: number; projectionMs?: number; workerMs: number };
@@ -81,8 +74,7 @@ const MAX_LOGGED_VALIDATOR_FAILURES = 1024;
  * How long one edit or settlement check may run once its child can read it, several times the
  * slowest ordinary note. A busy host can slow an ordinary check, so an edit's or settlement's
  * first overrun is tried again, and only a second one started within the retry window refuses
- * it as too large. Restore reads a note's history, which ordinary use can make long, and
- * activation checks a whole note, so they have no limit.
+ * it as too large. Activation checks a whole note, so it has no limit.
  */
 export const LIVE_CHECK_TIME_LIMIT_MS = 10_000;
 const LIVE_CHECK_RETRY_WINDOW_MS = 5 * 60_000;
@@ -132,7 +124,7 @@ export function createValidatorFailureLog(
 /**
  * Two process-wide validation slots, with no retained waiting inputs. Each job
  * runs in a child process: a V8 heap-limit abort or a check past its time limit ends that child, not the relay.
- * Activation and restore together hold at most one slot, so live edits always keep the other.
+ * Activation holds at most one slot, so live edits always keep the other.
  */
 export function createLiveValidationExecutor(
   heapLimitMb = 512,
@@ -258,7 +250,7 @@ export function createLiveValidationExecutor(
   ): Promise<Result | CapacityRetry> {
     signal?.throwIfAborted();
     if (closed) throw new Error("Live validation closed.");
-    const auxiliary = work.kind === "activation" || work.kind === "restore";
+    const auxiliary = work.kind === "activation";
     const slot =
       auxiliary && [...slots].some((slot) => slot.auxiliary)
         ? undefined
@@ -403,17 +395,6 @@ export function createLiveValidationExecutor(
       },
     );
   }
-  /** Preparation refuses a busy pool; admission waits with its captured reads and cancellation signal. */
-  function restore(policy: OrderedLiveUpdateCutPolicy): LiveRestoreValidator {
-    const ownedPolicy = Object.freeze({ ...policy });
-    return liveRestoreValidator((input, signal) =>
-      submit<LiveRestoreReply | { kind: "capacity-refused" }>(
-        { kind: "restore", policy: ownedPolicy, input },
-        { kind: "capacity-refused" },
-        signal,
-      ),
-    );
-  }
   async function close() {
     closed = true;
     notify();
@@ -429,7 +410,6 @@ export function createLiveValidationExecutor(
   return {
     validator,
     ordinaryActivation,
-    restore,
     async normalizeSettlement(input: SettlementNormalizationInput, signal?: AbortSignal) {
       return submit<SettlementNormalizationResult>(
         { kind: "settlement", policy: WORKER_LIVE_VALIDATION_POLICY, input },

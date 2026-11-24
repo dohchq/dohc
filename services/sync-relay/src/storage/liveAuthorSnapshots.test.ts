@@ -14,8 +14,6 @@ import {
   readAcceptedHistoryInterval,
   RestoreHistoryBudget,
 } from "./liveAcceptedHistory.js";
-import { nativeSourceAuthorMatches } from "./liveNativeSourceAuthors.js";
-import type { NativeRestoreProposalReceipt } from "../liveRestoreProposal.js";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import { agentAccessCheck } from "../linkAuthority.js";
 import { SERVICE_HOST_ENROLLMENTS } from "./serviceHostEnrollment.js";
@@ -45,48 +43,6 @@ it("binds server automation provenance to owner admission and exact retries", ()
       { kind: "automation", ...trustedAutomation },
     ]);
     expect(accepted.admitted!.metadata.accepted.authority.principalKind).toBe("owner");
-    const source: NativeRestoreProposalReceipt["nativeSources"][number] = {
-      outboxId: "outbox",
-      outboxSequence: 1,
-      binding: first.metadata.binding,
-      deliveryId: first.metadata.deliveryId,
-      byteLength: first.updateBytes.length,
-      createdAtMs: 1,
-      acceptedReceipt: accepted.admitted!.metadata.accepted.receipt,
-      appendKey: "write/Status",
-      updateDigest: first.metadata.updateDigest,
-      source: {
-        binding: first.metadata.binding,
-        updateDigest: first.metadata.updateDigest,
-        origin: { kind: "ownerDraft", automationDeclaration: trustedAutomation },
-      },
-    };
-    const matches = (candidate: typeof source) =>
-      nativeSourceAuthorMatches(
-        f.storage as StorageContext,
-        candidate,
-        accepted.admitted!.metadata,
-        new RestoreHistoryBudget(1 << 20, 100),
-      );
-    expect(matches(source)).toBe(true);
-    expect(
-      matches({ ...source, source: { ...source.source, origin: { kind: "ownerDraft" } } }),
-    ).toBe(false);
-    expect(
-      matches({
-        ...source,
-        source: {
-          ...source.source,
-          origin: {
-            kind: "ownerDraft",
-            automationDeclaration: {
-              ...trustedAutomation,
-              attribution: { ...trustedAutomation.attribution, onBehalfOf: "someone-else" },
-            },
-          },
-        },
-      }),
-    ).toBe(false);
     expect(f.storage.commitLiveUpdateJournal(first).result).toMatchObject({
       kind: "accepted",
       replayed: true,

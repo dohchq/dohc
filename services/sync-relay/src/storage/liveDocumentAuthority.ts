@@ -2,7 +2,6 @@ import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { ensureLiveLinkPublicPrincipal } from "./liveAuthorSnapshot";
 import type { StoredLiveDocumentAuthority } from "./types";
 import {
-  restoreInProgress,
   SERVICE_HOST_ENROLLMENTS,
   serviceHostDocumentEnabled,
   serviceHostDocumentEnrolled,
@@ -785,7 +784,7 @@ export function resolveLiveObjectHostBinding(
       lineageClaimId: parseLiveUpdateDigest(row.lineage_claim_id),
     };
     const actor = liveBrowserActor(scope);
-    if (!serviceHostDocumentEnabled(storage, document, actor.kind === "owner" ? actor : undefined))
+    if (!serviceHostDocumentEnabled(storage, document))
       return { kind: "refused", reason: "host-unavailable" };
     if (scope.kind !== "link") {
       const current = currentLiveDocumentBinding(storage, { document, actor });
@@ -1589,7 +1588,6 @@ function registerValidatedBaseline(
 function lastLineageEnding(storage: StorageContext, document: LiveDocumentKey): boolean {
   const { workspaceId, mainVersionId, objectId } = document;
   return (
-    restoreInProgress(storage, workspaceId, objectId) ||
     storage.db
       .prepare(`SELECT 1 FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND retired_at_ms IS NULL
         UNION ALL SELECT 1 FROM ${LIVE_ROOM_EDITS} WHERE workspace_id=? AND main_version_id=? AND object_id=?
@@ -1679,7 +1677,7 @@ export function authorizeLiveDocument(
   > | null,
   activation?: ServiceActivationAccess,
 ): CurrentLiveBindingResult {
-  if (!serviceHostDocumentEnabled(storage, document, actor.kind === "owner" ? actor : undefined))
+  if (!serviceHostDocumentEnabled(storage, document))
     return { kind: "refused", reason: "host-unavailable" };
   let bound: BoundLiveDocument | LiveBindingRefusal;
   let authority: ServerDerivedLiveUpdateAuthority;

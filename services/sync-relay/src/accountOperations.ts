@@ -37,7 +37,7 @@ import * as Y from "yjs";
 import { currentAccountFeedCursor, hiddenFile } from "./accountFeed";
 import { replicaChatStore } from "./automationChatWrites";
 import type { AutomationReplica } from "./automationReplicas";
-import { badRequest, notFound, RelayError, relayError } from "./errors";
+import { badRequest, notFound, RelayError } from "./errors";
 import type { CopyVisitor, ServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
 
@@ -393,9 +393,7 @@ function withoutSecretFiles(store: ChatReadStore, place: Place): ChatReadStore {
  * Pages as the copy holds them. While the copy's active version is main, a
  * page the relay hosts live reads as its accepted state, the journal's
  * checkpoint and the updates after it, so an edit the relay accepted reads
- * before it settles into the file. While a restore keeps the relay from
- * cutting that state, the read answers restore-in-progress rather than an
- * older file. Any other page reads as its settled file in the active version.
+ * before it settles into the file. Any other page reads as its settled file in the active version.
  * A lossy note reads as its file, as on the desktop. A page whose file is
  * over the desktop's editor limit is refused before its body is fetched.
  * Nothing here writes to the copy or sends anything.
@@ -433,11 +431,6 @@ function serverDocuments(
         version?.kind === "main"
           ? storage.readAcceptedLiveDocument(workspaceId, path)
           : { kind: "none" as const };
-      if (live.kind === "restoring")
-        throw relayError(
-          "restore-in-progress",
-          "This page is being restored. Try again once it finishes.",
-        );
       if (live.kind === "cut" && live.cut.document.objectId === file.objectId) {
         return {
           path,

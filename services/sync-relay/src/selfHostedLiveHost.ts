@@ -112,7 +112,7 @@ export function selectHostedDocuments(
   const matching = (row: ServiceHostEnrollment) =>
     storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) &&
     storage.verifyWorkspaceIdentity(row) === "matched";
-  // A release applies to the document: it was stopped, paused, or no Edit grant, recorded demand or owner's restore that kept it live covers it.
+  // A release applies to the document: it was stopped, paused, or no Edit grant or recorded demand covers it.
   // A Resume before its activation retires leaves it departing until a successor can follow.
   const departs = (row: ServiceHostEnrollment, covered: boolean) =>
     row.retired ||
@@ -126,7 +126,7 @@ export function selectHostedDocuments(
     away: ServiceHostEnrollment[] = [];
   for (const row of page.documents) {
     const holds = storage.serviceHostEnrollmentCovered(row);
-    // A live session the owner's restore kept has no retirement once that no longer holds. Its retirement
+    // A live session nothing covers any longer may have no retirement yet. Its retirement
     // opens here, before any update lets the document go, so the host retires its activation.
     if (!holds) storage.endLapsedServiceHostRun(row, Date.now());
     if (departs(row, holds)) (matching(row) ? departing : obsolete).push(row);
@@ -134,9 +134,7 @@ export function selectHostedDocuments(
   }
   const still = new Set(away.map(movedKey));
   for (const key of moved) if (!still.has(key)) moved.delete(key);
-  departing.push(
-    ...away.filter((row) => !moved.has(movedKey(row)) || storage.serviceRestoreInProgress(row)),
-  );
+  departing.push(...away.filter((row) => !moved.has(movedKey(row))));
   return { targets, departing, obsolete, nextCursor: page.nextCursor };
 }
 

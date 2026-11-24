@@ -41,7 +41,6 @@ import {
   type LinkCollectionWriteAdmission,
   readOwnerCollectionWrites,
 } from "./collectionWriteRoutes";
-import { createOwnerRestoreRoutes, type OwnerRestoreHost } from "./ownerRestoreRoutes";
 import { createHeldDocumentRoutes, type HeldDocumentHost } from "./heldDocumentRoutes";
 import type { LiveRooms } from "./liveRoom";
 import { createLiveRoomPauseRoutes } from "./liveRoomPauseRoutes";
@@ -191,8 +190,6 @@ export interface CreateSyncRelayHandlerOptions {
   appCollectionPolicy?: AppCollectionPolicy;
   appBackendAdmissionLimits?: Partial<AppBackendAdmissionLimits>;
   datasetHost?: RelayDatasetHost;
-  ownerRestoreHost?: () => OwnerRestoreHost | undefined;
-  // The live rooms, which save a note's taken edits before a restore closes it.
   liveRooms?: () => Pick<LiveRooms, "saveFirst"> | undefined;
   // The session host's read of what its hosted replicas hold for released retained work.
   heldDocumentHost?: () => HeldDocumentHost | undefined;
@@ -302,7 +299,6 @@ export function createSyncRelayHandler({
   appCollectionPolicy,
   appBackendAdmissionLimits,
   datasetHost,
-  ownerRestoreHost = () => undefined,
   liveRooms = () => undefined,
   heldDocumentHost = () => undefined,
   storage,
@@ -1222,14 +1218,6 @@ export function createSyncRelayHandler({
     linkKey,
   );
 
-  const respondToOwnerRestore = createOwnerRestoreRoutes({
-    storage,
-    host: ownerRestoreHost,
-    rooms: liveRooms,
-    nowMs,
-    newId,
-    lookupUserEmail,
-  });
   const respondToHeldDocuments = createHeldDocumentRoutes({ storage, host: heldDocumentHost });
   const respondToLivePauses = createLiveRoomPauseRoutes(storage);
   const respondToOwnerAppPublication = createOwnerAppPublicationRoutes({
@@ -1871,8 +1859,6 @@ export function createSyncRelayHandler({
 
       if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
 
-      if (route.route === "owner-restore")
-        return await respondToOwnerRestore(request, route, actor.userId);
       if (route.route === "owner-collection-writes")
         return readOwnerCollectionWrites(request, route, actor.userId, storage);
 

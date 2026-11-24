@@ -2,7 +2,6 @@ import { expect, it } from "vitest";
 import { parseNamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
 import { parseNamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
-import { parseLiveRestoreConfig } from "./liveRestorePreparation";
 import { parseNativeLiveSyncConfig } from "./liveSyncConfig";
 import { parseServiceActivationConfig } from "./serviceActivationDriver";
 import { selfHostLiveProfile } from "./selfHostLiveProfile";
@@ -30,10 +29,6 @@ it("uses mutually compatible browser, relay, native and owner limits", () => {
   expect(profile.service.activation.maxCaptureBytes).toBeLessThanOrEqual(
     profile.nativeIngress.sync.policy.maxOutputBytes,
   );
-  expect(parseLiveRestoreConfig(profile.service.restore)).toMatchObject({
-    maxBytes: profile.service.restore.maxBytes,
-    maxEvents: profile.service.restore.maxEvents,
-  });
 });
 
 it("returns independent capacity profiles so one caller cannot change another", () => {
@@ -45,10 +40,9 @@ it("returns independent capacity profiles so one caller cannot change another", 
   expect(second.nativeIngress.ingress.aggregateBytes).toBe(512 * 1024 * 1024);
 });
 
-it("uses one policy for journal admission, activation and restores", () => {
+it("uses one policy for journal admission and activation", () => {
   const profile = selfHostLiveProfile();
   expect(profile.service.activation.validation).toEqual(profile.namedLive.validation);
-  expect(profile.service.restore.validation).toEqual(profile.namedLive.validation);
   expect(profile.validation).toMatchObject({
     maxStructVisits: 400_000,
     maxIndexOperations: 100_000_000,

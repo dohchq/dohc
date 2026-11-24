@@ -206,14 +206,6 @@ it("preserves and delivers owner drafts across two real native replicas and auth
         instanceId: "instance",
         workspaces: [{ root: workspace, workspaceId: "workspace", maxRegistrations: 8 }],
         settlement: { maxApplicationsPerSettlement: 8 },
-        restore: {
-          maxBytes: 1000000,
-          maxEvents: 100,
-          aggregateBytes: 20000000,
-          workingReserveBytes: 1000000,
-          maxOperations: 1,
-          validation: validationPolicy,
-        },
         sync: {
           policy: {
             maxClientVectorBytes: 100000,
@@ -381,7 +373,6 @@ it("preserves and delivers owner drafts across two real native replicas and auth
         relayExchangeKey: exchangeKey,
         namedBrowserSessionLimits: { ...browserLimits, maxSessions: 8, retentionMs: 120000 },
         resolveActor: createSessionActorResolver(relayAuth),
-        ownerRestoreHost: () => active,
       });
       let routes!: ReturnType<typeof createOwnerLiveRoutes>;
       const relayHttp = serveFetchHandler({

@@ -66,7 +66,6 @@ import {
   streamsRequestBody,
 } from "./server";
 import { DiscussionActivityHub } from "./discussionActivity";
-import type { OwnerRestoreHost } from "./ownerRestoreRoutes";
 import type { HeldDocumentHost } from "./heldDocumentRoutes";
 import { automationHostMaxBodyBytes } from "./automationHostRoutes";
 import { AUTOMATION_SERVER_MAX_BODY_BYTES, isAutomationServerPath } from "./automationServerRoutes";
@@ -688,13 +687,11 @@ if (testAuthSeam) {
 // (by design — presence is not durable).
 const presence = new PresenceHub();
 
-let ownerRestoreHost: (() => OwnerRestoreHost | undefined) | undefined;
 let liveRooms: LiveRooms | undefined;
 let phonePages: PhonePages | undefined;
 let heldDocumentHost: (() => HeldDocumentHost | undefined) | undefined;
 const relayApplication = createSyncRelayHandler({
   discussionActivity,
-  ownerRestoreHost: () => ownerRestoreHost?.(),
   liveRooms: () => liveRooms,
   heldDocumentHost: () => heldDocumentHost?.(),
   storage,
@@ -1275,10 +1272,6 @@ personalLiveDocument = createPersonalLiveDocumentRoute({
       }
     : {}),
 });
-ownerRestoreHost = () => {
-  const mode = storage.getLiveHostControl()?.configuredMode;
-  return mode === "service" ? serviceHost() : mode === "device" ? deviceControl : undefined;
-};
 // Only a session service keeps hosted replicas, so only it holds documents for released retained work.
 heldDocumentHost = () =>
   storage.getLiveHostControl()?.configuredMode === "service" ? serviceHost() : undefined;
