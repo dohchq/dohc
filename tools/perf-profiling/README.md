@@ -318,7 +318,7 @@ about three hours. This saves baseline work without treating a refusal as perfor
 | Long suffix | Worst-shape separate/4 seeds 3,855 production-validated commits into each document, across both workers. Its timed updates see suffixes of 3,855 to 4,094 entries, the longest the journal allows. Separate 1/2 and shared 4 start fresh; separate/4 bounds their CPU, wait and slot at that suffix. | Seeding is unpaced and excluded from latency statistics. CPU p50 is a long-suffix median, an upper bound on the steady state; mid-suffix updates are not sampled. Shared latency remains diagnostic. |
 | Checkpoints | Each separate/4 document's last timed update commits the real 4,095th entry and its checkpoint. Unit-test both count and 20 MiB suffix-byte triggers. | Byte-trigger timing is not measured: a large artificial update would change the workload. |
 | Churn | Exactly 100,000 edits, eight client IDs; exact state-ceiling crossing search capped at one million, then censored. Replay churned separate 1/4 and shared 4; other shapes separate 1/4. | No decision loss from censoring beyond required headroom. Churned relay samples have short suffixes; the seeded separate/4 arm covers long-suffix replay cost. |
-| Joins | Separate/1: worst shape has twenty native and twenty named/link socket joins across fresh/restart; other shapes have six native and twelve socket proofs. Real restore once per shape. | Join tail has twenty samples. Restore/ACK/native-drain latency is diagnostic, not an unapproved gate. |
+| Joins | Separate/1: worst shape has twenty native and twenty named/link socket joins across fresh/restart; other shapes have six native and twelve socket proofs. | Join tail has twenty samples. ACK/native-drain latency is diagnostic, not an unapproved gate. |
 | Soak | One sixty-minute formatted-retained soak starting at 100,000 edits at the largest otherwise-passing size; next size down if it fails. At most two hours. | Smaller sizes and other shapes rely on rising memory cost; there is no independent sixty-minute sample for them. Two failures leave no qualified raise. |
 
 Long paragraphs exceed 700 bytes so normal fixtures retain node headroom at 10 MiB.
@@ -373,7 +373,7 @@ A longer arm keeps the same per-key cost, so 60-key arms report their rate and t
 | Engine CPU | At most one normalized core during editing. |
 
 Open allowances increase with bytes to pay for full parse/admission; they do not weaken typing or the original control.
-Report logical retained overhead, current state, physical SQLite/WAL, sampled peaks, update/snapshot/transfer sizes and native drain/restore/ACK costs separately.
+Report logical retained overhead, current state, physical SQLite/WAL, sampled peaks, update/snapshot/transfer sizes and native drain/ACK costs separately.
 For each shape require 100,000 edits to fit and at least 5 MiB initial headroom below 20 MiB.
 State-reader and admission bounds follow that state derivation; only the projector's 16 MiB output ceiling stays fixed.
 Choose the largest contiguous otherwise-passing size, then require its full soak. Missing metrics/refusals/crashes/lost edits fail closed.
