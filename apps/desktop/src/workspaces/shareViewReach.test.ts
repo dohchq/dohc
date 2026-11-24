@@ -47,4 +47,15 @@ describe("a joined workspace's Group levels", () => {
     expect(unreadable.group("wire-team")).toBeNull();
     expect(unreadable.postsInSomeGroup).toBe(false);
   });
+
+  // Group posts go through chat, not the file lane, so a copy that waits to
+  // send files still posts at its level.
+  it("keeps the member level in Groups while editing is not ready", () => {
+    for (const stored of [undefined, reach("edit", [])]) {
+      const waiting = grantLevels(workspace("edit"), stored, true);
+      expect(waiting.member).toBe("view");
+      expect(waiting.group("wire-team")).toBe("edit");
+      expect(waiting.postsInSomeGroup).toBe(true);
+    }
+  });
 });

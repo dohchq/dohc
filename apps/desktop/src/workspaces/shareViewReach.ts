@@ -95,11 +95,11 @@ export function grantLevels(
   if (reach === undefined) {
     return {
       member,
-      postsInSomeGroup: takesPosts(member),
+      postsInSomeGroup: takesPosts(selector.access),
       highest: member,
       at: () => member,
       in: () => member,
-      group: () => member,
+      group: () => selector.access,
     };
   }
   return {
