@@ -59,7 +59,7 @@ const SEED = "# Trip plan\n\nThe first line.\n";
 const FIRST_TEXT = "# Trip plan\n\nChosen text from the first computer.\n";
 const SECOND_TEXT = "# Trip plan\n\nOffline edit from the second computer.\n";
 
-test("@c-proof-2701 a live-shared note whose version conflict is resolved resumes live editing, and an Edit link's typing reaches the owner's file", async ({
+test("@live-note-conflict-resume a live-shared note whose version conflict is resolved resumes live editing, and an Edit link's typing reaches the owner's file", async ({
   browser,
 }, testInfo) => {
   test.setTimeout(1_200_000);
