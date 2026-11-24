@@ -3198,6 +3198,7 @@ pub(super) fn ydoc_settle_on_store(
     use_reader: bool,
     conversion_consent: Option<&MarkdownConversionConsent>,
 ) -> Result<YdocSettleOutcome, RuntimeError> {
+    super::store_root::check_root()?;
     let result = ydoc_settle_attempt_on_store(
         store,
         doc_cache,

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { activityPin, settingsNavPin } from "../src/testPins";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -254,6 +254,53 @@ test("@two-client a rule that hides a folder rebuilds a member's copy without it
     expect(await readFile(join(joined!.rootPath, "notes/plan.md"), "utf8")).toBe("# Plan\n");
     await expect(mine.getByTestId("status-workspace")).toHaveText(workspaceName);
     expect(await refresh(mine, joinedId)).not.toMatch(/^(failed|threw)/);
+
+    // The owner renames the folder on disk. Its marker moves with it, so the
+    // rule follows to the new path and the old path holds nothing.
+    await rename(join(ownerTemp.rootPath, "team"), join(ownerTemp.rootPath, "crew"));
+    const ruledFolders = async () => {
+      const view = await relayJson(relay!.baseUrl, OWNER.token, `/sync/${workspaceId}/members`);
+      const rules = (JSON.parse(view.body) as { folderRules?: { folders: { path: string }[] }[] })
+        .folderRules;
+      return (rules ?? []).flatMap((rule) => rule.folders.map((folder) => folder.path)).sort();
+    };
+    await expect.poll(ruledFolders, { timeout: 120_000, intervals: [1_000] }).toEqual(["crew"]);
+    expect(await exists(join(ownerTemp.rootPath, "team"))).toBe(false);
+
+    // A rule change rewrites the marker, so the next rename moves one the
+    // relay wrote. A rename while dohc is closed moves the rule too, once dohc
+    // opens again.
+    const listed = await relayJson(relay.baseUrl, OWNER.token, `/sync/${workspaceId}/members`);
+    const [rule] = (
+      JSON.parse(listed.body) as { folderRules: { ruleId: string; revision: number }[] }
+    ).folderRules;
+    const changed = await relayJson(
+      relay.baseUrl,
+      OWNER.token,
+      `/sync/${workspaceId}/members/folder-rules`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          ruleId: rule!.ruleId,
+          revision: rule!.revision,
+          members: null,
+          people: [],
+        }),
+      },
+    );
+    expect(changed.status, changed.body).toBe(200);
+    await expect
+      .poll(() => readFile(join(ownerTemp.rootPath, "crew/.dohc-access"), "utf8"), {
+        timeout: 60_000,
+      })
+      .toContain(`# Revision ${rule!.revision + 1}\n`);
+    expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+    await owner.close();
+    owner = null;
+    await rename(join(ownerTemp.rootPath, "crew"), join(ownerTemp.rootPath, "squad"));
+    owner = await launchDesktopApp({ workspace: ownerTemp, env: syncEnv });
+    await openWorkspaceFromFirstRun(owner.page, ownerTemp);
+    await expect.poll(ruledFolders, { timeout: 120_000, intervals: [1_000] }).toEqual(["squad"]);
 
     expect(member.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);

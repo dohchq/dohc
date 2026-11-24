@@ -323,37 +323,17 @@ impl WorkspaceSupervisor {
             return Err(RuntimeError::StoreInUse);
         }
 
-        let held_limit = self.held_proofs.clone();
-        let store_path = store_path.to_path_buf();
-        let spawned = match mode {
-            ActorOpenMode::ReadWrite => {
-                if let Some(token) = root_token {
-                    WorkspaceActor::spawn_root_bound(
-                        store_path,
-                        identity.clone(),
-                        1,
-                        now_ms,
-                        token.to_owned(),
-                        work,
-                        held_limit,
-                    )
-                } else {
-                    WorkspaceActor::spawn(store_path, identity.clone(), 1, now_ms, work, held_limit)
-                }
-            }
-            ActorOpenMode::Passive => WorkspaceActor::spawn_passive(
-                store_path,
-                identity.clone(),
-                1,
-                now_ms,
-                root_token.map(str::to_owned),
-                work,
-                held_limit,
-            ),
-            ActorOpenMode::ReadOnly => {
-                WorkspaceActor::spawn_read_only(store_path, identity.clone(), 1, work, held_limit)
-            }
-        };
+        let spawned = WorkspaceActor::spawn_with_mode(
+            db_path.to_path_buf(),
+            store_path.to_path_buf(),
+            identity.clone(),
+            1,
+            now_ms,
+            mode,
+            root_token.map(str::to_owned),
+            work,
+            self.held_proofs.clone(),
+        );
         let spawned = spawned.map(|actor| actor.holding(prepared));
         let store_freshly_created = spawned
             .as_ref()
@@ -407,6 +387,7 @@ impl WorkspaceSupervisor {
         }
 
         let spawned = WorkspaceActor::spawn_with_mode(
+            db_path.to_path_buf(),
             prepared.path.clone(),
             identity.clone(),
             next_generation,

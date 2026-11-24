@@ -617,6 +617,23 @@ impl EngineService {
             }
             "versionedText.rename" => self.versioned_text_rename(&ctx, request).await?,
             "versionedText.checkMove" => self.versioned_text_check_move(&ctx, request).await?,
+            "versionedText.orderFileSteps" => {
+                #[derive(serde::Deserialize)]
+                struct Step {
+                    path: String,
+                    delete: bool,
+                }
+                #[derive(serde::Deserialize)]
+                struct Params {
+                    steps: Vec<Step>,
+                }
+                let Params { mut steps } = serde_json::from_value(request.params)
+                    .map_err(|_| WireError::new(ErrorCode::InvalidParams, "Invalid file steps"))?;
+                steps.sort_by_key(|step| {
+                    dohc_engine_files::marker_step_order(&step.path, step.delete)
+                });
+                json!(steps.into_iter().map(|step| step.path).collect::<Vec<_>>())
+            }
             "versionedText.delete" => Box::pin(self.versioned_text_delete(&ctx, request)).await?,
             "versionedText.rollback" => self.versioned_text_rollback(&ctx, request).await?,
             "versionedText.merge" => self.versioned_text_merge(&ctx, request).await?,
@@ -1915,6 +1932,7 @@ mod tests {
             "versionedText.list",
             "versionedText.captureSources",
             "versionedText.merge",
+            "versionedText.orderFileSteps",
             "versionedText.publicationApplied",
             "versionedText.read",
             "versionedText.readBlob",

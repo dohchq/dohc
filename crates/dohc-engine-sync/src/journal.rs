@@ -170,6 +170,7 @@ pub(crate) fn journal_local_payload_json_in_tx(
     now_ms: i64,
 ) -> Result<i64, SyncError> {
     validate_local_payload_json(workspace_id, op_kind, payload_json)?;
+    check_moment_store(op_kind)?;
     let origin_id: String = tx
         .query_row(
             "SELECT origin_id FROM sync_identity WHERE workspace_id = ?1",
@@ -188,6 +189,26 @@ pub(crate) fn journal_local_payload_json_in_tx(
     )
     .map_err(SyncError::persist)?;
     Ok(origin_seq)
+}
+
+type MomentStoreCheck = fn() -> Result<(), SyncError>;
+
+thread_local! {
+    static MOMENT_STORE_CHECK: std::cell::Cell<Option<MomentStoreCheck>> = const { std::cell::Cell::new(None) };
+}
+
+/// Install the actor's store identity check on its writer thread.
+pub fn install_moment_store_check(check: MomentStoreCheck) {
+    MOMENT_STORE_CHECK.set(Some(check));
+}
+
+fn check_moment_store(op_kind: &str) -> Result<(), SyncError> {
+    if op_kind == "moment.append"
+        && let Some(check) = MOMENT_STORE_CHECK.get()
+    {
+        check()?;
+    }
+    Ok(())
 }
 
 /// The sequence of this replica's next own op. A hosted replica counts in its
@@ -303,6 +324,7 @@ pub fn journal_local_replication_op(
         if identity != (origin_id.to_owned(), replication_epoch.to_owned(), stream_identity.to_owned()) {
             return Err(SyncError::CoordinateDiverged);
         }
+        check_moment_store(op_kind)?;
         let origin_seq =
             next_local_origin_seq(tx, workspace_id, origin_id, op_kind, &payload_json)?;
         tx.execute(

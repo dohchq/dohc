@@ -723,6 +723,9 @@ impl StoreCaptureSink {
     }
 
     fn policy_tracks(&self, path: &str) -> Result<bool, CaptureError> {
+        if dohc_engine_files::is_access_marker(path) {
+            return Ok(true);
+        }
         match &self.files_policy {
             PolicyState::Known(None) => Ok(true),
             PolicyState::Known(Some(rules)) => {
@@ -1096,9 +1099,10 @@ impl StoreCaptureSink {
         }
     }
 
-    /// Retire a head this sink OWNS. `only_if_capture_origin` is always set:
-    /// a head written by RPC or replication may legitimately have no disk
-    /// counterpart, so a disk-driven retire must never destroy it.
+    /// Retire a head this sink OWNS. `only_if_capture_origin` is set, except
+    /// for a folder marker the disk shows gone: a head written by RPC or
+    /// replication may legitimately have no disk counterpart, so a
+    /// disk-driven retire must never destroy it.
     /// `summary` is the delete moment's honest label (the pass summary for a
     /// reconcile delete, an ownership reason for policy/non-ownable retires,
     /// None for a plain live delete); the pass correlation id always rides so
@@ -1253,7 +1257,10 @@ impl StoreCaptureSink {
             now_ms: self.now_ms,
             request_id: None,
             only_if_text_head,
-            only_if_capture_origin: true,
+            // The relay writes a folder's marker, so capture never owns it. A
+            // marker the disk shows gone was moved or deleted by the owner,
+            // and the rule must leave its old path too.
+            only_if_capture_origin: !(confirm_absent && dohc_engine_files::is_access_marker(path)),
             allow_ydoc_origin,
         };
         let result = self.batch_retry.run_single(|| match respelled_to {

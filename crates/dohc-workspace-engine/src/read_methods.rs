@@ -9,6 +9,7 @@ const READS: &[&str] = &[
     "moments.list",
     "sync.ordinary.publicationState",
     "versionedText.list",
+    "versionedText.orderFileSteps",
     "versions.active",
     "versions.compareFiles",
     "versions.list",

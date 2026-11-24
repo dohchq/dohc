@@ -155,6 +155,7 @@ export interface CaptureTextFileMetadata {
 }
 
 export type CaptureVersionedTextStore = VersionedTextStore & {
+  orderFileSteps?: VersionedLiveAdapter["orderFileSteps"];
   readHistoryOperation: VersionedLiveAdapter["readHistoryOperation"];
   readHistoryPage: VersionedLiveAdapter["readHistoryPage"];
   resolveFiles: VersionedLiveAdapter["resolveFiles"];
@@ -1316,6 +1317,10 @@ export function createCaptureLiveStores(
       afterPath?: string;
     }) {
       return await runRead(async (adapter) => await adapter.compareVersionFilesPage(input));
+    },
+
+    async orderFileSteps(steps: Array<{ path: string; delete: boolean }>) {
+      return runRead((adapter) => adapter.orderFileSteps(steps));
     },
 
     async mergeTextFileFromVersion(input: {

@@ -253,6 +253,7 @@ const VERSIONED_PARAM_SHAPES = {
     requiredStrings: ["path", "sourceVersionId", "targetVersionId"],
     optionalStrings: ["workspaceId"],
   },
+  [VERSIONED_METHOD.orderFileSteps]: { optionalJson: ["steps"] },
   [VERSIONED_METHOD.versionsCompareFiles]: {
     requiredStrings: ["sourceVersionId", "targetVersionId"],
     optionalStrings: ["workspaceId", "afterPath"],
@@ -1337,6 +1338,15 @@ export class VersionedLoopbackEngine implements EngineTransport {
         return this.merge(state, workspace, params, request);
       case VERSIONED_METHOD.versionsCompare:
         return this.compare(state, workspace, params);
+      case VERSIONED_METHOD.orderFileSteps: {
+        const steps = params.steps as Array<{ path: string; delete: boolean }>;
+        const rank = ({ path, delete: removing }: (typeof steps)[number]) => {
+          if (path.split("/").at(-1)?.toLowerCase() !== ".dohc-access") return 0;
+          const depth = path.split("/").length;
+          return removing ? 1 / depth : -1 / depth;
+        };
+        return steps.toSorted((a, b) => rank(a) - rank(b)).map(({ path }) => path);
+      }
       case VERSIONED_METHOD.versionsCompareFiles:
         return this.compareFiles(state, params);
       case VERSIONED_METHOD.secretsWrite:

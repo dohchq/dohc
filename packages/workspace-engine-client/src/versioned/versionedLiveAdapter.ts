@@ -793,6 +793,10 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     return { entries: page.entries, nextAfterPath: page.nextCursor };
   }
 
+  async orderFileSteps(steps: Array<{ path: string; delete: boolean }>): Promise<string[]> {
+    return this.request(VERSIONED_METHOD.orderFileSteps, { steps });
+  }
+
   async mergeTextFileFromVersion(input: {
     workspaceId: string;
     targetVersionId: string;

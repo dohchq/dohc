@@ -55,18 +55,9 @@ pub fn freeze_scene_asset_delete_authority_in_tx(
         });
     }
 
-    let scopes = scene_asset_owner_scopes(tx, key)?;
-    let is_scene = scopes.iter().try_fold(false, |found, (version_id, _)| {
-        let scoped_key = DocKey::new(&key.workspace_id, version_id, &key.object_id)?;
-        Ok::<_, CollabError>(
-            found
-                || read_marker_in(tx, &scoped_key)?
-                    .is_some_and(|marker| marker.content_kind == ContentKind::Scene),
-        )
-    })?;
-    if !is_scene {
+    let Some(scopes) = scene_scopes(tx, key)? else {
         return Ok(Vec::new());
-    }
+    };
 
     let inserted = tx
         .execute(
@@ -85,11 +76,60 @@ pub fn freeze_scene_asset_delete_authority_in_tx(
         return read_scene_asset_delete_authority(tx, key, drawing_delete_moment_id);
     }
 
-    let canonical_assets = canonical_scene_assets(tx, key, &scopes)?;
+    for (path, sha256) in owned_scene_assets(tx, key, &scopes)? {
+        let asset_delete_moment_id = scene_asset_delete_moment_id(
+            &key.workspace_id,
+            &key.version_id,
+            drawing_delete_moment_id,
+            &path,
+        );
+        tx.execute(
+            "INSERT INTO scene_asset_delete_authority_items \
+             (workspace_id,version_id,drawing_delete_moment_id,asset_delete_moment_id,asset_path,asset_sha256) \
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            params![
+                key.workspace_id,
+                key.version_id,
+                drawing_delete_moment_id,
+                asset_delete_moment_id,
+                path,
+                sha256
+            ],
+        )
+        .map_err(persist)?;
+    }
+    read_scene_asset_delete_authority(tx, key, drawing_delete_moment_id)
+}
+
+/// The drawing's asset folders, or `None` when the object is no drawing.
+fn scene_scopes(
+    conn: &Connection,
+    key: &DocKey,
+) -> Result<Option<Vec<(String, String)>>, CollabError> {
+    let scopes = scene_asset_owner_scopes(conn, key)?;
+    let is_scene = scopes.iter().try_fold(false, |found, (version_id, _)| {
+        let scoped_key = DocKey::new(&key.workspace_id, version_id, &key.object_id)?;
+        Ok::<_, CollabError>(
+            found
+                || read_marker_in(conn, &scoped_key)?
+                    .is_some_and(|marker| marker.content_kind == ContentKind::Scene),
+        )
+    })?;
+    Ok(is_scene.then_some(scopes))
+}
+
+/// Each binary asset under the drawing's folders that the drawing owns, with
+/// its SHA-256.
+fn owned_scene_assets(
+    conn: &Connection,
+    key: &DocKey,
+    scopes: &[(String, String)],
+) -> Result<BTreeMap<String, String>, CollabError> {
+    let canonical_assets = canonical_scene_assets(conn, key, scopes)?;
     let mut candidates = BTreeMap::new();
-    for (_, owner_directory) in &scopes {
+    for (_, owner_directory) in scopes {
         let pattern = format!("{owner_directory}/*");
-        let mut statement = tx
+        let mut statement = conn
             .prepare(
                 "SELECT a.path,s.binary_sha256,s.metadata_origin FROM path_aliases a \
                  JOIN snapshots s ON s.workspace_id=a.workspace_id \
@@ -125,36 +165,12 @@ pub fn freeze_scene_asset_delete_authority_in_tx(
             }
         }
     }
-
-    for (path, sha256) in candidates {
-        if !scopes
+    candidates.retain(|path, sha256| {
+        scopes
             .iter()
-            .any(|(_, directory)| scene_asset_ref_is_owned(directory, &path, &sha256))
-        {
-            continue;
-        }
-        let asset_delete_moment_id = scene_asset_delete_moment_id(
-            &key.workspace_id,
-            &key.version_id,
-            drawing_delete_moment_id,
-            &path,
-        );
-        tx.execute(
-            "INSERT INTO scene_asset_delete_authority_items \
-             (workspace_id,version_id,drawing_delete_moment_id,asset_delete_moment_id,asset_path,asset_sha256) \
-             VALUES (?1,?2,?3,?4,?5,?6)",
-            params![
-                key.workspace_id,
-                key.version_id,
-                drawing_delete_moment_id,
-                asset_delete_moment_id,
-                path,
-                sha256
-            ],
-        )
-        .map_err(persist)?;
-    }
-    read_scene_asset_delete_authority(tx, key, drawing_delete_moment_id)
+            .any(|(_, directory)| scene_asset_ref_is_owned(directory, path, sha256))
+    });
+    Ok(candidates)
 }
 
 pub fn read_scene_asset_delete_authority(
@@ -239,6 +255,8 @@ fn canonical_scene_assets(
     Ok(assets)
 }
 
+/// The folders that own a drawing's assets, one for its version and one for
+/// each Version it was forked from, each with that Version's id.
 fn scene_asset_owner_scopes(
     conn: &Connection,
     key: &DocKey,

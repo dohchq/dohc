@@ -6,6 +6,9 @@
 /// The media type for a workspace-relative path, by its lowercased extension.
 pub fn media_type_for_path(rel_path: &str) -> &'static str {
     let basename = rel_path.rsplit(['/', '\\']).next().unwrap_or(rel_path);
+    if crate::is_access_marker(basename) {
+        return "text/plain";
+    }
     let extension = basename
         .rsplit_once('.')
         .map(|(_, ext)| ext.to_lowercase())

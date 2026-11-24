@@ -1028,6 +1028,7 @@ fn replay_materializations(
     superseded_after_projection_is_drained: bool,
     workspace_recovery: bool,
 ) -> Result<MaterializationReplaySummary, RuntimeError> {
+    super::store_root::check_root()?;
     if store.is_passive() {
         return Ok(MaterializationReplaySummary {
             parked: 0,

@@ -305,6 +305,7 @@ pub fn apply_reconcile_plan_cancellable(
 ) -> CaptureApplyResult {
     let mut receipt = Receipt::with_capacity(plan.ops.len());
     let reorderable = priority.is_some()
+        && !plan.ops.iter().any(|op| crate::is_access_marker(op.path()))
         && plan.ops.iter().all(|op| {
             matches!(
                 op,
@@ -366,7 +367,9 @@ pub fn apply_reconcile_plan_cancellable(
             waiting = next_waiting(&ops, cursor, &unretired);
             continue;
         }
-        if try_batch && !alone {
+        let marker_write = crate::is_access_marker(ops[cursor].path())
+            && matches!(&ops[cursor], CaptureOp::Ingest { .. });
+        if try_batch && !alone && !marker_write {
             match sink.ingest_batch(&ops[cursor..waiting]) {
                 Some(BatchIngestResult::Committed(outcomes)) => {
                     let count = outcomes.len();
@@ -433,6 +436,10 @@ pub fn apply_reconcile_plan_cancellable(
             return receipt.crashed(op.path());
         }
         let applied = outcome.is_ok();
+        if marker_write && !matches!(outcome, Ok(Applied::Ingested { .. })) {
+            receipt.fail_all(&ops[cursor..]);
+            break;
+        }
         receipt.fold(op, outcome);
         if applied {
             committed();

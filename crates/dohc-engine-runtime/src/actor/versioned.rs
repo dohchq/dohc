@@ -884,6 +884,7 @@ pub(super) fn versioned_text_write_with_publication_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<WriteResult, RuntimeError> {
+    super::store_root::check_root()?;
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -1052,6 +1053,7 @@ fn versioned_binary_write_conditioned_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<BinaryWriteExecutionResult, RuntimeError> {
+    super::store_root::check_root()?;
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -1310,6 +1312,7 @@ fn versioned_text_rename_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<RenameResult, RuntimeError> {
+    super::store_root::check_root()?;
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -1405,6 +1408,7 @@ fn versioned_text_delete_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<DeleteResult, RuntimeError> {
+    super::store_root::check_root()?;
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -3130,6 +3134,7 @@ fn versioned_text_merge_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<MergeExecutionResult, RuntimeError> {
+    super::store_root::check_root()?;
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }

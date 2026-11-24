@@ -29,12 +29,14 @@ const UNREADABLE_ANSWER = "The server sent an answer dohc could not read. Try ag
 const CONTENT_MISSING = "Some file contents are missing on the server.";
 const STOPPED = "It stopped before it finished. Try again.";
 const REINSTALL = "This copy of dohc is missing a file it needs. Reinstall dohc.";
-const HELD_CHANGE_REFUSALS = new Set([
+// Refusals that trying again only repeats.
+const NO_RETRY_REFUSALS = new Set([
   "held-change-shared-owner",
   "held-change-stale",
   "held-change-missing",
   "held-change-conflict",
   "held-change-undo-stale",
+  "workspace-folder-moved",
 ]);
 // Trying again cannot help with this one; updating dohc can.
 const NEWER_DOHC = "It needs a newer version of dohc. Update dohc to open it.";
@@ -209,6 +211,8 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     "volume-shares-new-files": VOLUME_SHARES_NEW_FILES_WORDS,
     "workspace-owned":
       "Another copy of dohc has this workspace open. Close it there, then try again.",
+    "workspace-folder-moved":
+      "This workspace's folder moved while dohc had it open. Open the workspace again from where it is now.",
     "share-read-only": ENGINE_CODE_WORDS.SHARE_READ_ONLY,
     "relay-origin-diverged": ENGINE_CODE_WORDS.ORIGIN_DIVERGED,
     "relay-server-busy": "The server is busy. Try again in a moment.",
@@ -552,7 +556,7 @@ export function readError(error: unknown): ReadError {
       words,
       mapped: words !== null,
       cause: text,
-      ...(name === "DaemonRefusalError" && HELD_CHANGE_REFUSALS.has(key)
+      ...(name === "DaemonRefusalError" && NO_RETRY_REFUSALS.has(key)
         ? { canRetry: false as const }
         : {}),
     };

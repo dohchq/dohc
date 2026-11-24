@@ -1314,6 +1314,68 @@ fn capture_manifest_excludes_pending_conflict_installed_ydoc_asset() {
 }
 
 #[test]
+fn capture_manifest_seeds_a_placed_folder_marker_whoever_wrote_it() {
+    use dohc_engine_domain::capture_manifest_seed;
+
+    let (_scratch, mut store) = open_store();
+    let write = |path: &str, object_id: &str| WriteText {
+        workspace_id: WS.to_owned(),
+        version_id: VERSION.to_owned(),
+        object_id: object_id.to_owned(),
+        path: path.to_owned(),
+        text: "rule".to_owned(),
+        moment_id: format!("m-{object_id}"),
+        request_id: None,
+        metadata_origin: "sync".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: 10,
+    };
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            write_text_in_tx(tx, &write("team/.dohc-access", "obj-placed-marker"))?;
+            write_text_in_tx(tx, &write("team/notes.md", "obj-synced-note"))?;
+            // Fullwidth letters fold to the marker name on the owner's disk.
+            write_text_in_tx(
+                tx,
+                &write("fleet/.dohc-\u{ff41}\u{ff43}\u{ff43}\u{ff45}\u{ff53}\u{ff53}", "obj-wide-marker"),
+            )?;
+            write_text_in_tx(tx, &write("crew/.DOHC-ACCESS", "obj-waiting-marker"))?;
+            // A merge or restore writes its marker to disk through a job.
+            tx.execute(
+                "INSERT INTO materialization_jobs (job_id, workspace_id, target_path, \
+                 content_sha256, preimage_present, preimage_sha256, target_generation, status, \
+                 created_at_ms, completed_at_ms, operation) \
+                 SELECT 'mutation-mat_waiting', ?1, 'crew/.DOHC-ACCESS', blob_sha256, 0, NULL, \
+                 1, 'pending', 10, NULL, 'write' FROM snapshots WHERE object_id = 'obj-waiting-marker'",
+                [WS],
+            )
+            .unwrap();
+            Ok::<_, DomainError>(())
+        })
+        .expect("write synced files");
+
+    let mut seeded: Vec<String> = capture_manifest_seed(&store, WS, VERSION)
+        .expect("capture manifest seed")
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect();
+    seeded.sort();
+    // A folder renamed while dohc was closed must retire its old marker, so
+    // the first scan has to know the marker was on disk. A marker a job has
+    // yet to write, and other synced files, stay out. A pulled marker has no
+    // job, so it counts as placed.
+    assert_eq!(
+        seeded,
+        vec![
+            "fleet/.dohc-\u{ff41}\u{ff43}\u{ff43}\u{ff45}\u{ff53}\u{ff53}".to_owned(),
+            "team/.dohc-access".to_owned()
+        ]
+    );
+}
+
+#[test]
 fn capture_manifest_ignores_another_versions_unwritten_switch_write() {
     use dohc_engine_domain::store::{CAPTURE_ORIGIN, text_blob_sha256};
     use dohc_engine_domain::{capture_manifest_seed, switch_projection_job_id};

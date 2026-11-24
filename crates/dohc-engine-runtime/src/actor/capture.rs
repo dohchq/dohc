@@ -1961,6 +1961,7 @@ fn capture_ingest_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<WriteResult, RuntimeError> {
+    super::store_root::check_root()?;
     #[cfg(feature = "fault-injection")]
     let mut phase = dohc_engine_storage::capture_phase::Phase::new(
         "actor_capture_text",
@@ -2617,6 +2618,7 @@ fn capture_ingest_batch_with_reader_on_store(
     workspace_root: (&std::path::Path, &dyn WorkspaceRootGuard),
     folds: Arc<Vec<dohc_engine_collab::reader_resolver::PreparedFold>>,
 ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
+    super::store_root::check_root()?;
     #[cfg(feature = "fault-injection")]
     let mut phase = dohc_engine_storage::capture_phase::Phase::new(
         "actor_capture_batch",
@@ -3025,6 +3027,7 @@ fn capture_ingest_binary_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<CaptureIngestBinaryResult, RuntimeError> {
+    super::store_root::check_root()?;
     #[cfg(feature = "fault-injection")]
     let mut phase = dohc_engine_storage::capture_phase::Phase::new(
         "actor_capture_binary",
@@ -3524,6 +3527,7 @@ fn capture_retire_on_store(
     leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
 ) -> Result<CaptureRetireResult, RuntimeError> {
+    super::store_root::check_root()?;
     #[cfg(feature = "fault-injection")]
     let mut phase = dohc_engine_storage::capture_phase::Phase::new(
         "actor_capture_retire",

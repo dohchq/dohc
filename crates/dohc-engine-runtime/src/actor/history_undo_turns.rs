@@ -330,7 +330,7 @@ impl ActorHandle {
             let probe = tests::TurnProbe::new(&request, phase, member);
             #[cfg(not(test))]
             let _ = (request, phase, member);
-            let outcome = work(store, cache);
+            let outcome = crate::actor::store_root::check_root().and_then(|()| work(store, cache));
             #[cfg(test)]
             probe.finish();
             outcome
@@ -526,6 +526,12 @@ impl ActorHandle {
                     }
                     let mut originals = preflight_undo_operation_in(conn, &w, &version, &o)?;
                     originals.sort_by_key(|m| m.operation != "rename");
+                    originals.sort_by_key(|moment| {
+                        let target = moment.before_path.as_deref().unwrap_or(&moment.path);
+                        let deletes = (moment.operation == "write" && moment.before_path.is_none())
+                            || (moment.operation == "rename" && !dohc_engine_files::is_access_marker(target));
+                        dohc_engine_files::marker_step_order(if deletes { &moment.path } else { target }, deletes)
+                    });
                     originals
                         .into_iter()
                         .map(|mut effect| {

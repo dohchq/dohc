@@ -2312,6 +2312,7 @@ fn reconcile_collections_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    super::store_root::check_root()?;
     validate_workspace_root(root_dir, root_guard)?;
     let (reconciliation, automation_claims) = match store.write_with(faults, |tx| {
         // Half a pull can lack a relation's target that a later page brings.

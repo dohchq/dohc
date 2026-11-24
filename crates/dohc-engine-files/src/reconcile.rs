@@ -17,7 +17,7 @@
 
 use crate::diff::{ManifestEntry, ScanDiff, ScanManifest, diff_scans, gone_untracked};
 use crate::error::FilesError;
-use crate::scan::{ScanOutcome, Scanner};
+use crate::scan::{FileEntry, ScanListing, ScanOutcome, Scanner};
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::ErrorKind;
@@ -76,6 +76,27 @@ impl CaptureOp {
         match self {
             CaptureOp::Ingest { path, .. } | CaptureOp::Retire { path } => path,
         }
+    }
+}
+
+/// Whether a path is a folder marker, by the collision key the relay uses, so
+/// every spelling the relay treats as a marker carries the same ordering.
+pub fn is_access_marker(path: &str) -> bool {
+    path.rsplit('/')
+        .next()
+        .is_some_and(|name| crate::floor::collision_key(name) == ".dohc-access")
+}
+
+/// Stable sort key for file steps before they receive relay journal positions.
+pub fn marker_step_order(path: &str, deleting: bool) -> (u8, usize) {
+    if !is_access_marker(path) {
+        return (1, 0);
+    }
+    let depth = path.bytes().filter(|&byte| byte == b'/').count();
+    if deleting {
+        (2, usize::MAX - depth)
+    } else {
+        (0, depth)
     }
 }
 
@@ -167,6 +188,7 @@ impl ReconcilePlan {
             ops.push(CaptureOp::Retire { path });
         }
         ops.sort_by(|a, b| a.path().cmp(b.path()));
+        ops.sort_by_key(|op| marker_step_order(op.path(), matches!(op, CaptureOp::Retire { .. })));
         // A rename that changes only case or Unicode normalization retires the
         // old spelling first. A peer on a disk that ignores case then deletes
         // the old file before it writes the new one, never the new one after.
@@ -261,6 +283,68 @@ pub enum ReconcileRun {
     /// [`ReconcileController::reconcile_if_dirty`] found nothing dirty; disk and
     /// engine are already converged and no scan was run.
     Converged,
+}
+
+fn include_disk_markers(
+    root: &Path,
+    listing: &ScanListing,
+    diff: &mut ScanDiff,
+    bounds: &crate::ScanBounds,
+    token: &CancellationToken,
+) -> Result<bool, FilesError> {
+    let mut visited = BTreeSet::new();
+    let mut missing = Vec::new();
+    for added in &diff.added {
+        let folders = Path::new(&added.path).ancestors().skip(1);
+        for folder in folders.take_while(|folder| visited.insert((*folder).to_owned())) {
+            let dir = root.join(folder);
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(err)
+                    if matches!(err.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
+                {
+                    continue;
+                }
+                Err(err) => return Err(FilesError::scan_io(&dir, folder.to_string_lossy(), &err)),
+            };
+            for entry in entries {
+                if token.is_cancelled() {
+                    return Ok(false);
+                }
+                let io =
+                    |err: std::io::Error| FilesError::scan_io(&dir, folder.to_string_lossy(), &err);
+                let entry = entry.map_err(io)?;
+                let name = entry.file_name();
+                let Some(name) = name.to_str().filter(|name| is_access_marker(name)) else {
+                    continue;
+                };
+                let path = folder.join(name).to_string_lossy().replace('\\', "/");
+                if !entry.file_type().map_err(io)?.is_file()
+                    || listing
+                        .files
+                        .binary_search_by(|file| file.path.cmp(&path))
+                        .is_ok()
+                {
+                    continue;
+                }
+                // The sink reads the bytes and returns the captured identity.
+                missing.push(FileEntry {
+                    path,
+                    size: 0,
+                    mtime_ms: 0,
+                    sha256: String::new(),
+                    media_type: "text/plain",
+                });
+                if diff.len() + missing.len() > bounds.max_diff_entries {
+                    return Err(FilesError::DiffTooLarge {
+                        cap: bounds.max_diff_entries,
+                    });
+                }
+            }
+        }
+    }
+    diff.added.extend(missing);
+    Ok(!token.is_cancelled())
 }
 
 /// Final destructive-retire guard. Production uses `symlink_metadata` (lstat,
@@ -725,6 +809,9 @@ impl ReconcileController {
         degraded_paths.dedup();
         let degraded = scan_degraded || !diff.unconfirmed_removed.is_empty();
 
+        if !include_disk_markers(root, &listing, &mut diff, scanner.bounds(), token)? {
+            return Ok(ReconcileRun::Cancelled);
+        }
         let from = self.generation;
         let to = from.next();
         let prepared_from_dirty = self.dirty;

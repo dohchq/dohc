@@ -75,6 +75,8 @@ export type NoticeAction = {
   // button's description.
   reason?: string;
   busy?: boolean;
+  // It runs where the row is: Notices stays open and focus stays on the row.
+  stays?: boolean;
 };
 
 // What opening a row comes to: null once its target opened, or a sentence
@@ -93,6 +95,11 @@ export type Notice = {
   lastLine?: string;
   // Paths the body lists, one per line under it.
   paths?: readonly string[];
+  // Facts that lead the text, one per line right under the title, such as
+  // who reaches a folder at which level.
+  rows?: readonly string[];
+  // What just happened to the row, above its rows, read out when it appears.
+  lead?: string;
   actions?: readonly NoticeAction[];
   // Explicit dismissal: rendered as a small X on the notice
   // row. Only notices whose underlying state has a real ack path expose it.
@@ -136,6 +143,8 @@ export interface WorkspaceErrorNotice {
   message: string;
   lastLine?: string;
   paths?: readonly string[];
+  rows?: readonly string[];
+  lead?: string;
   // A terminal command the message asks the person to run, shown with its copy.
   command?: string;
   copy?: NoticeCopy;
@@ -150,6 +159,13 @@ export interface WorkspaceErrorNotice {
   // The step comes after Try again, so F6 lands on Try again.
   actionAfterRetry?: boolean;
   additionalActionLabels?: string[];
+  // The step that is running, 0 for the action and 1 on for each additional
+  // one. It reads as working, and every step waits until it ends.
+  actionBusy?: number;
+  // Its steps run in place: Notices stays open while they work.
+  actionStays?: boolean;
+  // Try again runs where the row is, as a step that stays does.
+  retryStays?: boolean;
   seen: boolean;
   read?: boolean;
   // The row has no Dismiss: it stays until its action runs.
@@ -304,7 +320,14 @@ type ReachHandlers = Pick<HTMLAttributes<HTMLElement>, "onPointerEnter" | "onFoc
 // A read row of this computer's is remembered by what it says, so one whose
 // words or time change is unread again.
 const localReadKey = (workspaceId: string, notice: Notice): string =>
-  JSON.stringify([workspaceId, notice.id, notice.timeMs ?? null, notice.title, notice.body]);
+  JSON.stringify([
+    workspaceId,
+    notice.id,
+    notice.timeMs ?? null,
+    notice.title,
+    notice.lead ?? null,
+    notice.body,
+  ]);
 
 // Every row keeps this column at its left edge, so unread rows line up and a
 // row that turns read does not move.
@@ -515,13 +538,17 @@ function useDetails(props: {
 // click on clipped text, or Show more, shows all of it in place, wrapped
 // and selectable. Open Details shows it whole too, so Show more never sits
 // beside it. A body with one fact per line shows its first 3 facts whole, so
-// none is cut in half; prose clamps at 3 lines. Paths are facts
-// after the body, each cut in the middle to fit its line until it opens.
+// none is cut in half; prose clamps at 3 lines. Rows are facts before the
+// body and paths are facts after it, each path cut in the middle to fit its
+// line until it opens.
 function NoticeText(props: {
   title: string;
   // The title's weight and color.
   titleClass: string;
   body: string;
+  // Shown whole above the rows; no clamp hides it.
+  lead?: string;
+  rows?: readonly string[];
   paths?: readonly string[];
   // Off for a body that is already shown whole.
   clamp?: boolean;
@@ -548,13 +575,14 @@ function NoticeText(props: {
   const [clipped, setClipped] = useState(false);
   const clamp = props.clamp ?? true;
   const lines = props.body ? props.body.split("\n") : [];
+  const rows = props.rows ?? [];
   const paths = props.paths ?? [];
-  const facts = lines.length + paths.length;
+  const facts = rows.length + lines.length + paths.length;
   const byFacts = clamp && facts > 1;
   const { onOpenChange } = props;
   const copy = useDetails({
     copy: props.copy,
-    shown: [props.title, props.body, ...paths, props.after],
+    shown: [props.title, props.lead, ...rows, props.body, ...paths, props.after],
     revision: props.revision,
     actionClass: props.actionClass,
     testId: props.copyTestId ?? props.testId,
@@ -586,7 +614,12 @@ function NoticeText(props: {
     return () => observer.disconnect();
   }, [open, clamp, byFacts, props.title, props.body]);
   const hidden = clipped || (byFacts && facts > 3);
-  const shownPaths = byFacts && !open ? paths.slice(0, Math.max(0, 3 - lines.length)) : paths;
+  const closed = byFacts && !open;
+  const shownRows = closed ? rows.slice(0, 3) : rows;
+  const shownLines = closed ? lines.slice(0, 3 - shownRows.length) : lines;
+  const shownPaths = closed
+    ? paths.slice(0, Math.max(0, 3 - shownRows.length - shownLines.length))
+    : paths;
   // A click that ends a selection, or the second of a double click, opens nothing.
   const { onOpenRow } = props;
   const openOnClick =
@@ -620,7 +653,29 @@ function NoticeText(props: {
     ),
     body: (
       <>
-        {props.body ? (
+        {props.lead ? (
+          <p
+            data-testid={`${props.testId}-lead`}
+            className="m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[11px] leading-snug text-ink"
+          >
+            {props.lead}
+          </p>
+        ) : null}
+        {shownRows.length > 0 ? (
+          <ul
+            data-testid={`${props.testId}-rows`}
+            data-row-above={open ? "" : undefined}
+            onClick={openRowOnClick}
+            className="m-0 mt-0.5 list-none p-0 text-[11px] leading-snug text-ink"
+          >
+            {shownRows.map((row) => (
+              <li key={row} className={`wrap-anywhere${open ? " select-text" : ""}`}>
+                {row}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {props.body && shownLines.length > 0 ? (
           <p
             ref={bodyRef}
             id={`${id}-body`}
@@ -628,7 +683,7 @@ function NoticeText(props: {
             onClick={openOnClick ?? openRowOnClick}
             className={`m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[12px] leading-snug text-muted${clamp && !byFacts && !open ? " line-clamp-3" : ""}${pointer}`}
           >
-            {byFacts && !open ? lines.slice(0, 3).join("\n") : props.body}
+            {closed ? shownLines.join("\n") : props.body}
           </p>
         ) : null}
         {shownPaths.length > 0 ? (
@@ -1103,6 +1158,8 @@ export function WorkspaceErrorToast(props: {
         title={error.title ?? message}
         titleClass={error.title ? "font-medium text-ink" : "text-ink"}
         body={error.title ? message : ""}
+        lead={error.lead}
+        rows={error.rows}
         paths={error.paths}
         after={error.lastLine}
         onOpenChange={setOpen}
@@ -1143,6 +1200,8 @@ export function WorkspaceErrorToast(props: {
                     <button
                       type="button"
                       data-testid="workspace-shell-error-action"
+                      disabled={error.actionBusy !== undefined}
+                      aria-busy={error.actionBusy === 0 || undefined}
                       onClick={() => props.onAction?.(error.id)}
                       className={TOAST_ACTION_CLASS}
                     >
@@ -1155,6 +1214,8 @@ export function WorkspaceErrorToast(props: {
                           type="button"
                           key={label}
                           data-testid="workspace-shell-error-additional-action"
+                          disabled={error.actionBusy !== undefined}
+                          aria-busy={error.actionBusy === index + 1 || undefined}
                           onClick={() => props.onAction?.(error.id, index + 1)}
                           className={TOAST_ACTION_CLASS}
                         >
@@ -1202,7 +1263,7 @@ export function LocalNoticeRow(props: {
   unread: boolean;
   reach?: ReachHandlers;
   onKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
-  onAction: (action: NoticeAction) => void;
+  onAction: (action: NoticeAction, from: HTMLElement) => void;
   onDismiss: (event: MouseEvent<HTMLButtonElement>) => void;
   // Opens the row's target. Absent while a note says why it cannot.
   onOpen?: () => void;
@@ -1229,6 +1290,8 @@ export function LocalNoticeRow(props: {
         title={notice.title}
         titleClass={props.unread ? "font-medium text-ink" : "text-muted"}
         body={props.note === undefined ? notice.body : ""}
+        lead={props.note === undefined ? notice.lead : undefined}
+        rows={props.note === undefined ? notice.rows : undefined}
         paths={props.note === undefined ? notice.paths : undefined}
         clamp={notice.filePaths === undefined}
         after={props.note === undefined ? notice.lastLine : undefined}
@@ -1293,14 +1356,15 @@ export function LocalNoticeRow(props: {
                 <div className={ROW_ACTIONS_CLASS}>
                   {notice.actions?.map((action, index) => (
                     <button
-                      key={action.label}
+                      // By place: a step that reads as working keeps its button.
+                      key={index}
                       type="button"
                       disabled={action.disabled}
                       aria-describedby={
                         action.reason === undefined ? undefined : `${reasonId}-${index}`
                       }
                       aria-busy={action.busy || undefined}
-                      onClick={() => props.onAction(action)}
+                      onClick={(event) => props.onAction(action, event.currentTarget)}
                       className={ROW_ACTION_CLASS}
                     >
                       {action.label}
@@ -1308,6 +1372,10 @@ export function LocalNoticeRow(props: {
                   ))}
                   {text.copy.action}
                 </div>
+                {/* A step that runs in place, such as Restoring…, is read out as it starts. */}
+                <span role="status" data-testid={`notice-${notice.id}-running`} className="sr-only">
+                  {notice.actions?.find((action) => action.busy)?.label ?? ""}
+                </span>
                 {notice.actions?.map((action, index) =>
                   action.reason === undefined ? null : (
                     <p
@@ -1792,6 +1860,10 @@ export function NoticeCenter(props: {
               {
                 label: error.actionLabel,
                 onClick: () => props.onWorkspaceErrorAction?.(error.id),
+                ...(error.actionBusy !== undefined
+                  ? { disabled: true, busy: error.actionBusy === 0 }
+                  : {}),
+                ...(error.actionStays ? { stays: true } : {}),
               },
             ]
           : []),
@@ -1799,6 +1871,10 @@ export function NoticeCenter(props: {
           ? (error.additionalActionLabels ?? []).map((label, index) => ({
               label,
               onClick: () => props.onWorkspaceErrorAction?.(error.id, index + 1),
+              ...(error.actionBusy !== undefined
+                ? { disabled: true, busy: error.actionBusy === index + 1 }
+                : {}),
+              ...(error.actionStays ? { stays: true } : {}),
             }))
           : []),
       ];
@@ -1811,6 +1887,7 @@ export function NoticeCenter(props: {
                 disabled: error.retryBusy || error.retryBlocked !== undefined,
                 busy: error.retryBusy,
                 ...(error.retryBlocked ? { reason: error.retryBlocked } : {}),
+                ...(error.retryStays ? { stays: true } : {}),
               },
             ]
           : [];
@@ -1843,6 +1920,8 @@ export function NoticeCenter(props: {
         copy: shownCopy(error),
         filePaths: error.filePaths,
         ...(error.paths?.length ? { paths: error.paths } : {}),
+        ...(error.rows?.length ? { rows: error.rows } : {}),
+        ...(error.lead ? { lead: error.lead } : {}),
         Icon: error.tone === "success" ? CheckCircle2 : AlertTriangle,
       });
     }
@@ -2182,6 +2261,22 @@ export function NoticeCenter(props: {
     () => allRecoveryRows.filter((row) => row.workspaceId === props.workspaceId),
     [allRecoveryRows, props.workspaceId],
   );
+  // A row's lead that appears while Notices is open is read out once: no
+  // toast shows then, and a row's own text changes silently.
+  const [said, setSaid] = useState("");
+  const leads = useRef(new Map<string, string>());
+  useEffect(() => {
+    const next = new Map<string, string>();
+    let fresh: string | undefined;
+    for (const notice of notices) {
+      if (!notice.lead) continue;
+      next.set(notice.id, notice.lead);
+      if (leads.current.get(notice.id) !== notice.lead) fresh = notice.lead;
+    }
+    leads.current = next;
+    setSaid(open && fresh !== undefined ? fresh : (current) => (open ? current : ""));
+  }, [notices, open]);
+
   const keptTyping = props.keptTyping ?? [];
   const localCount =
     notices.length + (recoveryRows.length > 0 ? 1 : 0) + (keptTyping.length > 0 ? 1 : 0);
@@ -2306,6 +2401,42 @@ export function NoticeCenter(props: {
     return () => clearTimeout(timer);
   }, [sentToastKey, sentToastFades, onHideSentNoticeToast, sentToastPaused]);
 
+  const rowsNow = () => [...(centerRef.current?.querySelectorAll<HTMLElement>(NOTICE_ROW) ?? [])];
+  // A step that runs in place keeps focus on its row while the row reads as
+  // working. When the row goes, focus moves to the row that came since, its
+  // outcome, waiting on the panel until it comes. `row` is null while it waits.
+  const keptFocus = useRef<{ row: HTMLElement | null; before: Set<HTMLElement> } | null>(null);
+  useLayoutEffect(() => {
+    const kept = keptFocus.current;
+    const center = centerRef.current;
+    if (!kept) return;
+    if (!open || !center) {
+      keptFocus.current = null;
+      return;
+    }
+    const active = document.activeElement;
+    const { row } = kept;
+    if (row?.isConnected) {
+      // A step that failed puts the row back as it was; focus stays there.
+      if (!row.querySelector("[aria-busy='true']")) keptFocus.current = null;
+      else if (active === null || active === document.body) rowStop(row)?.focus();
+      return;
+    }
+    // Focus the person moved stays where they put it.
+    if (active !== null && active !== document.body && active !== center) {
+      keptFocus.current = null;
+      return;
+    }
+    const outcome = rowsNow().find((next) => !kept.before.has(next));
+    if (outcome) {
+      rowStop(outcome)?.focus();
+      keptFocus.current = null;
+    } else if (row) {
+      center.focus();
+      keptFocus.current = { row: null, before: kept.before };
+    }
+  });
+
   // A row about to go takes focus to the next row, or the one before, or
   // the panel, so the keyboard keeps its place in the list.
   const focusPastRow = (element: Element) => {
@@ -2341,7 +2472,16 @@ export function NoticeCenter(props: {
     event.preventDefault();
     rowStop(next)?.focus();
   };
-  const runLocalAction = (action: NoticeAction) => {
+  const runLocalAction = (action: NoticeAction, from: HTMLElement) => {
+    if (action.stays) {
+      // The pressed step goes disabled while it works, which drops its focus,
+      // so the row's own stop takes it.
+      const row = from.closest<HTMLElement>(NOTICE_ROW);
+      rowStop(row ?? undefined)?.focus();
+      keptFocus.current = row ? { row, before: new Set(rowsNow()) } : null;
+      action.onClick();
+      return;
+    }
     returnTarget()?.focus({ preventScroll: true });
     action.onClick();
     setOpen(false);
@@ -2752,6 +2892,9 @@ export function NoticeCenter(props: {
                   </span>
                 ) : null}
               </header>
+              <p role="status" data-testid="notice-center-said" className="sr-only">
+                {said}
+              </p>
               {localCount === 0 && sentNotices.length === 0 ? (
                 props.sentNoticesLoading ? null : (
                   <div className="flex h-20 items-center justify-center gap-2 px-3 text-subtle">

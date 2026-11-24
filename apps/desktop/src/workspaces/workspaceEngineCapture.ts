@@ -51,6 +51,7 @@ import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy
 // engine state — the same reason workspaceFiles/workspaceSearch
 // and the relay's shareFilter already read it from here.
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
+import { isFolderMarkerPath } from "@dohc/security-contract/access-rules";
 import {
   VersionedTextStoreError,
   refuseCallerOperationId,
@@ -435,6 +436,7 @@ export interface AuthoredPathChanges {
   // and any head History had for it is deleted. Refuses a file that is not a
   // regular file.
   recordDisk(path: string, files: readonly string[]): Promise<string[]>;
+  orderFilePaths?(paths: string[], deleting: boolean): Promise<string[]>;
   readDuplicate(operationId: string, path: string): Promise<{ path: string } | null>;
   hasPath(path: string): Promise<boolean>;
   duplicateFile(fromPath: string, toPath: string): Promise<{ path: string; materialized: boolean }>;
@@ -1927,6 +1929,16 @@ function policyTracksPath(path: string, policy: WorkspaceEnginePolicySnapshot): 
 // deliberately not consulted: the floor can never be unmarked by.dohc files.
 function isSecretPath(path: string): boolean {
   return classifyEngineFilePath(path).kind === "secret";
+}
+
+async function orderFileSteps(
+  engine: CaptureVersionedTextStore,
+  steps: { path: string; delete: boolean }[],
+): Promise<string[]> {
+  if (engine.orderFileSteps && steps.some(({ path }) => isFolderMarkerPath(path))) {
+    return engine.orderFileSteps(steps);
+  }
+  return steps.map(({ path }) => path);
 }
 
 function assertEngineWritablePath(
@@ -8756,7 +8768,10 @@ export function createWorkspaceEngineCapture(
                   const single = files.length === 1 ? await readable(files[0]!) : undefined;
                   if (!single) for (const file of files) await readable(file);
                   const held: string[] = [];
-                  for (const file of files) {
+                  for (const file of await orderFileSteps(
+                    engine,
+                    files.map((path) => ({ path, delete: false })),
+                  )) {
                     const disk = single ?? (await readable(file));
                     if (disk.kind === "untracked-content") continue;
                     await writeIfChanged(engine, versionId, file, disk, {
@@ -8776,7 +8791,11 @@ export function createWorkspaceEngineCapture(
                     versionId,
                     under: path,
                   });
-                  for (const headPath of [path, ...heads.map((head) => head.path)]) {
+                  const headPaths = [path, ...heads.map((head) => head.path)];
+                  for (const headPath of await orderFileSteps(
+                    engine,
+                    headPaths.map((path) => ({ path, delete: true })),
+                  )) {
                     if (
                       !pathIsAtOrUnder(headPath, path) ||
                       kept.has(headPath) ||
@@ -8794,6 +8813,11 @@ export function createWorkspaceEngineCapture(
                   }
                   return held;
                 },
+                orderFilePaths: (paths, deleting) =>
+                  orderFileSteps(
+                    engine,
+                    paths.map((path) => ({ path, delete: deleting })),
+                  ),
                 readDuplicate: async (operationId, path) => {
                   const operation = await engine.readHistoryOperation({ workspaceId, operationId });
                   if (
@@ -9183,7 +9207,12 @@ export function createWorkspaceEngineCapture(
         const respelled = new Set(
           deletedPaths.filter((path) => writtenKeys.has(pathCollisionKey(path))),
         );
-        const mergeOrder = [...respelled, ...changedPaths.filter((path) => !respelled.has(path))];
+        const mergeSteps = changedPaths.filter((path) => !respelled.has(path));
+        const ordered = await orderFileSteps(
+          engine,
+          mergeSteps.map((path) => ({ path, delete: deleted.has(path) })),
+        );
+        const mergeOrder = [...respelled, ...ordered];
         // Re-running the merge resumes: a path that already has an open
         // conflict for this version pair re-surfaces that conflict instead of
         // recording a duplicate. Only the paths are retained from the walk.

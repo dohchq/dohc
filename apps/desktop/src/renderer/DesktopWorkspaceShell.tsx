@@ -178,7 +178,7 @@ import {
   namedPaths,
 } from "./shell/importStop";
 import { importSkipLines } from "./shell/importSkips";
-import { errorDetails, type ErrorDetailField } from "./shell/copyDetails";
+import { errorDetails, shellNoticeFields, type ErrorDetailField } from "./shell/copyDetails";
 import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
 import { workspaceCreateOffers, type ShareViewWriter } from "../workspaces/shareWriteGate";
 import { CopyButton } from "./ui/CopyButton";
@@ -7940,6 +7940,8 @@ function WorkspaceShell(props: {
         ...(error.title ? { title: error.title } : {}),
         ...(error.lastLine ? { lastLine: error.lastLine } : {}),
         ...(error.paths ? { paths: error.paths } : {}),
+        ...(error.rows ? { rows: error.rows } : {}),
+        ...(error.lead ? { lead: error.lead } : {}),
         ...(error.command ? { command: error.command } : {}),
         ...(error.change
           ? {}
@@ -7947,13 +7949,7 @@ function WorkspaceShell(props: {
             ? shareCaptureCopy(error.details?.map((detail) => String(detail[1])) ?? [])
             : {
                 copy: {
-                  report: errorDetails([
-                    [error.tone ? "Notice" : "Error", error.message],
-                    ...(error.title ? [["Title", error.title] as const] : []),
-                    ...(error.paths ?? []).map((path) => ["Path", path, path.length] as const),
-                    ...(error.details ?? []),
-                    ...reportFacts(error.atMs),
-                  ]),
+                  report: errorDetails([...shellNoticeFields(error), ...reportFacts(error.atMs)]),
                 },
               }),
         atMs: error.atMs,
@@ -7967,6 +7963,9 @@ function WorkspaceShell(props: {
         ...(error.action?.additional
           ? { additionalActionLabels: error.action.additional.map((action) => action.label) }
           : {}),
+        ...(error.action?.busy !== undefined ? { actionBusy: error.action.busy } : {}),
+        ...(error.action?.stays ? { actionStays: true } : {}),
+        ...(error.retryStays ? { retryStays: true } : {}),
         seen: error.seen,
         ...(error.read ? { read: true } : {}),
         ...(error.noDismiss ? { noDismiss: true } : {}),

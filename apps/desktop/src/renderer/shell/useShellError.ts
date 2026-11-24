@@ -143,6 +143,12 @@ export interface ShellError {
   lastLine?: string;
   // Paths the message lists, one per line under it.
   paths?: readonly string[];
+  // Short facts the message lists, one per line under it, such as who
+  // reaches a folder at which level. Copy details names each a row.
+  rows?: readonly string[];
+  // What just happened to the row, such as a choice that didn't run, on its
+  // own line under the title. Notices reads it out when it appears.
+  lead?: string;
   // A terminal command the message asks the person to run, shown with its copy.
   command?: string;
   // Facts for a report, one "label: value" line each, such as the error as
@@ -154,11 +160,16 @@ export interface ShellError {
   // Answers false when it could not run, so the row stays.
   retry: (() => void | false) | null;
   retryBusy?: boolean;
+  // Try again runs where the row is, as an action that `stays` does, so Notices stays open on its outcome.
+  retryStays?: true;
   // A step offered beside Try again: one that fixes the cause, such as
   // opening the file it names, or a success notice's Undo. A step that
   // `ends` the notice removes its row when it runs; one that `reads` it
   // closes its toast and keeps the row.
   // afterRetry puts the action after Try again, so F6 lands on Try again.
+  // `busy` names the step that is running, 0 for the action and 1 on for
+  // each additional one: it reads as working and every step waits.
+  // `stays`: its steps run where the row is, so Notices stays open on it.
   action?: {
     label: string;
     run: () => void;
@@ -166,6 +177,8 @@ export interface ShellError {
     reads?: boolean;
     afterRetry?: true;
     additional?: { label: string; run: () => void }[];
+    busy?: number;
+    stays?: true;
   };
   // Where a press on the row goes: what it is about. Opening never runs
   // the row's action, so it never retries or ends the row.
@@ -666,7 +679,10 @@ export function useShellError(
       command?: string;
       details?: ReadonlyArray<ErrorDetailField>;
       paths?: readonly string[];
+      rows?: readonly string[];
+      lead?: string;
       retry?: ShellError["retry"];
+      retryStays?: true;
       onDismiss?: () => void;
       action?: ShellError["action"];
       target?: NoticeTarget;
@@ -713,8 +729,11 @@ export function useShellError(
             isStoppedWorkspaceCall(failure.cause) || isStoppedWorkspaceCall(failure.message)
               ? null
               : (failure.retry ?? null),
+          ...(failure.retryStays ? { retryStays: true } : {}),
           ...(failure.command ? { command: failure.command } : {}),
           ...(failure.paths?.length ? { paths: failure.paths } : {}),
+          ...(failure.rows?.length ? { rows: failure.rows } : {}),
+          ...(failure.lead ? { lead: failure.lead } : {}),
           ...(details.length ? { details } : {}),
           ...(failure.onDismiss ? { onDismiss: failure.onDismiss } : {}),
           ...(action ? { action } : {}),
@@ -1197,6 +1216,7 @@ export function useShellError(
   // saves it. An Undo's row goes, so it runs once.
   const runShellErrorAction = useCallback((id: string, index = 0) => {
     const target = shellErrorsRef.current.find((error) => error.id === id);
+    if (target?.action?.busy !== undefined) return;
     if (index > 0) {
       target?.action?.additional?.[index - 1]?.run();
       return;
@@ -1217,12 +1237,14 @@ export function useShellError(
       kind?: ShellErrorKind,
       action?: ShellError["action"],
       target?: NoticeTarget,
+      identity?: string,
     ): (() => void) => {
       const id = push({
         message,
         retry: null,
         tone: "success",
         ...(kind ? { kind } : {}),
+        ...(identity ? { identity } : {}),
         ...(target ? { target } : {}),
         ...(action ? { action } : undo ? { action: { label: "Undo", run: undo, ends: true } } : {}),
       });

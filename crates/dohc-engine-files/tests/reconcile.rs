@@ -148,6 +148,88 @@ fn rename_looks_like_remove_plus_add() {
     assert_eq!(retire_paths(&p), ["old-name.md"]);
 }
 
+#[test]
+fn a_marker_is_every_name_the_relay_folds_to_the_marker_name() {
+    for path in [
+        ".dohc-access",
+        "a/.DOHC-ACCESS",
+        "a/\u{FF0E}dohc-access",
+        "a/.dohc-access. ",
+    ] {
+        assert!(dohc_engine_files::is_access_marker(path), "{path}");
+    }
+    for path in [
+        "a/.dohc-access.bak",
+        "a/dohc-access",
+        ".dohc-access/notes.md",
+    ] {
+        assert!(!dohc_engine_files::is_access_marker(path), "{path}");
+    }
+}
+
+#[test]
+fn capture_orders_marker_writes_before_and_deletes_after_contents() {
+    let ws = Scratch::new();
+    for path in ["old/.DOHC-ACCESS", "old/-first.md", "old/z-last.md"] {
+        ws.write(path, b"old contents");
+    }
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    let token = CancellationToken::new();
+    let _ = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    ws.rename("old", "new");
+
+    let moved = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    let paths: Vec<_> = moved.ops.iter().map(CaptureOp::path).collect();
+    assert_eq!(
+        paths,
+        [
+            "new/.DOHC-ACCESS",
+            "new/-first.md",
+            "new/z-last.md",
+            "old/-first.md",
+            "old/z-last.md",
+            "old/.DOHC-ACCESS",
+        ]
+    );
+}
+
+#[test]
+fn capture_finds_markers_that_appeared_after_enumeration() {
+    struct DropMarkersDuringHash(std::path::PathBuf);
+    impl ScanIoFaultInjector for DropMarkersDuringHash {
+        fn error(&self, path: &str, operation: ScanIoOperation) -> Option<std::io::Error> {
+            if path == "team/sub/notes.md" && operation == ScanIoOperation::Hash {
+                for path in [".dohc-access", "team/.DOHC-ACCESS", "team/sub/.dohc-access"] {
+                    std::fs::write(self.0.join(path), b"rule fr_1\n").expect("write marker");
+                }
+                std::fs::write(self.0.join("team/sub/.dohc-access.bak"), b"backup").unwrap();
+            }
+            None
+        }
+    }
+
+    let ws = Scratch::new();
+    ws.write("team/sub/notes.md", b"new contents");
+    let scanner = Scanner::new_with_io_faults(
+        ScanBounds::default(),
+        Arc::new(DropMarkersDuringHash(ws.path().to_path_buf())),
+    )
+    .expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    let token = CancellationToken::new();
+    let captured = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    assert_eq!(
+        ingest_paths(&captured, IngestReason::Added),
+        [
+            ".dohc-access",
+            "team/.DOHC-ACCESS",
+            "team/sub/.dohc-access",
+            "team/sub/notes.md",
+        ]
+    );
+}
+
 /// APFS keeps finding a file through its old spelling after a rename that
 /// changes only case or Unicode normalization. The old spelling must still
 /// retire, or it stays tracked beside the new one and every pass is degraded.

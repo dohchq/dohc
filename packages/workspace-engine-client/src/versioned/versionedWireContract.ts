@@ -27,6 +27,7 @@ export const VERSIONED_METHOD = {
   versionsMerge: "versionedText.merge",
   versionsCompare: "versionedText.compare",
   versionsCompareFiles: "versions.compareFiles",
+  orderFileSteps: "versionedText.orderFileSteps",
   secretsWrite: "secrets.write",
   secretsList: "secrets.list",
   secretsStateExists: "secrets.stateExists",
@@ -489,6 +490,7 @@ export type VersionedMethodParamsMap = {
   [VERSIONED_METHOD.versionsMerge]: VersionsMergeParams;
   [VERSIONED_METHOD.versionsCompare]: VersionsCompareParams;
   [VERSIONED_METHOD.versionsCompareFiles]: VersionsCompareFilesParams;
+  [VERSIONED_METHOD.orderFileSteps]: JsonObject & { steps: { path: string; delete: boolean }[] };
   [VERSIONED_METHOD.secretsWrite]: SecretsWriteParams;
   [VERSIONED_METHOD.secretsList]: SecretsListParams;
   [VERSIONED_METHOD.secretsStateExists]: WorkspaceOnlyParams;
@@ -537,6 +539,7 @@ export type VersionedMethodResultMap = {
   [VERSIONED_METHOD.versionsMerge]: VersionsMergeResult;
   [VERSIONED_METHOD.versionsCompare]: VersionsCompareResult;
   [VERSIONED_METHOD.versionsCompareFiles]: VersionsCompareFilesResult;
+  [VERSIONED_METHOD.orderFileSteps]: string[];
   [VERSIONED_METHOD.secretsWrite]: SecretWriteResult;
   [VERSIONED_METHOD.secretsList]: SecretsListResult;
   [VERSIONED_METHOD.secretsStateExists]: boolean;
@@ -1141,6 +1144,7 @@ const VersionedResultSchemas = {
   [VERSIONED_METHOD.versionsMerge]: VersionsMergeResultSchema,
   [VERSIONED_METHOD.versionsCompare]: VersionedComparisonRecordSchema,
   [VERSIONED_METHOD.versionsCompareFiles]: VersionsCompareFilesResultSchema,
+  [VERSIONED_METHOD.orderFileSteps]: Schema.mutable(Schema.Array(Schema.String)),
   [VERSIONED_METHOD.secretsWrite]: SecretWriteResultSchema,
   [VERSIONED_METHOD.secretsList]: SecretsListResultSchema,
   [VERSIONED_METHOD.secretsStateExists]: Schema.Boolean,
