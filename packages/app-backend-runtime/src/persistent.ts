@@ -1,10 +1,18 @@
 import { spawn } from "node:child_process";
-import { APP_BACKEND_OPERATION_FILES } from "@dohc/security-contract/app-backend";
+import {
+  APP_BACKEND_OPERATION_FILES,
+  parseAppBackendJson,
+} from "@dohc/security-contract/app-backend";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { readdirSync, rmSync } from "node:fs";
-import { AppBackendRuntimeError, approvedTables, boundedText } from "./protocol.js";
+import {
+  AppBackendRuntimeError,
+  approvedTables,
+  boundedText,
+  operationLimits,
+} from "./protocol.js";
 import type { AppRuntimeChild, AppRuntimeLauncher } from "./protocol.js";
 import {
   checkCursor,
@@ -433,6 +441,7 @@ export async function openPersistentAppBackend(
 
   return {
     async prepare(operation: PersistentPrepareInput): Promise<PreparedOperation> {
+      const limits = operationLimits(config.limits, operation.profile);
       checkCursor(operation.expected);
       if (
         !/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(operation.operation) ||
@@ -468,10 +477,8 @@ export async function openPersistentAppBackend(
       )
         reject("invalid_input", "Invalid operation files.");
       // Serialize before admission: invalid JSON and oversized inputs never consume queue slots.
-      const inputJson = boundedText(
-        JSON.stringify(operation.input),
-        config.limits.inputBytes,
-        "Operation input",
+      const inputJson = JSON.stringify(
+        parseAppBackendJson(operation.input, limits.inputBytes, operation.profile),
       );
       const callerJson = boundedText(
         JSON.stringify(operation.caller),
@@ -481,9 +488,9 @@ export async function openPersistentAppBackend(
       const result = (await send({
         kind: "prepare",
         expected: { ...operation.expected },
+        profile: operation.profile,
         guest: {
           tables,
-          limits: config.limits,
           source: boundedText(operation.source, config.limits.sourceBytes, "Operation source"),
           operation: operation.operation,
           inputJson,
@@ -514,7 +521,7 @@ export async function openPersistentAppBackend(
           (result.readOnly && (result.changeset.byteLength || result.attachedFileIds.length))
         )
           throw Error("Invalid prepared operation.");
-        boundedText(JSON.stringify(result.result), config.limits.resultBytes, "Operation result");
+        boundedText(JSON.stringify(result.result), limits.resultBytes, "Operation result");
       } catch {
         const error = new PersistentRuntimeError("worker_protocol", "Invalid prepared operation.");
         fail(error);

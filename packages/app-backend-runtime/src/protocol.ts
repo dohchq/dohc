@@ -1,3 +1,9 @@
+import {
+  APP_BACKEND_BULK_LIMITS,
+  AppBackendLimitError,
+  appBackendLimit,
+} from "@dohc/security-contract/app-backend";
+
 export type JsonValue =
   | null
   | boolean
@@ -194,9 +200,29 @@ export function runtimeLimits(input: Partial<RuntimeLimits> = {}): RuntimeLimits
   return limits;
 }
 
+export function operationLimits(base: RuntimeLimits, profile?: "bulk"): RuntimeLimits {
+  if (profile !== "bulk") return base;
+  const expanded: Partial<RuntimeLimits> = {
+    inputBytes: APP_BACKEND_BULK_LIMITS.inputBytes,
+    resultBytes: APP_BACKEND_BULK_LIMITS.resultBytes,
+    queryBytes: APP_BACKEND_BULK_LIMITS.resultBytes,
+    queryRows: 16_384,
+    statements: 4096,
+    memoryBytes: 32 * 1024 * 1024,
+    evaluationMs: 2000,
+  };
+  const limits = { ...base };
+  for (const [key, value] of Object.entries(expanded) as Array<[keyof RuntimeLimits, number]>) {
+    if (base[key] === DEFAULT_LIMITS[key]) limits[key] = value;
+  }
+  return limits;
+}
+
 export function boundedText(value: string, maxBytes: number, label: string): string {
-  if (typeof value !== "string" || Buffer.byteLength(value) > maxBytes)
-    throw new Error(`${label} exceeds the app runtime limit.`);
+  if (typeof value !== "string") throw new Error(`${label} must be text.`);
+  const used = Buffer.byteLength(value);
+  if (used > maxBytes)
+    throw new AppBackendLimitError(appBackendLimit(label, maxBytes, used, "bytes"));
   return value;
 }
 

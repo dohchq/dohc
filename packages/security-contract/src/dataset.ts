@@ -72,6 +72,7 @@ export interface DatasetOperation {
   tableId: string;
   kind: DatasetOperationKind;
   access: "link" | "helper" | "owner";
+  profile?: "bulk";
   readOnly: boolean;
   /** Declared readable or writable fields, according to kind; never a SQL grant. */
   fieldIds: string[];
@@ -465,7 +466,7 @@ function operation(value: unknown, index = 0): DatasetOperation {
   const row = record(
     value,
     ["operationId", "name", "label", "tableId", "kind", "access", "readOnly", "fieldIds"],
-    ["reversible", "reversedBy"],
+    ["reversible", "reversedBy", "profile"],
     path,
   );
   const name = text(row.name, 64, `${path}.name`);
@@ -488,6 +489,11 @@ function operation(value: unknown, index = 0): DatasetOperation {
       (entry, fieldIndex) => uuid(entry, `${opLabel}.fieldIds[${fieldIndex}]`),
     ),
   };
+  if (Object.hasOwn(row, "profile")) {
+    if (row.profile !== "bulk" || result.access !== "owner")
+      fail(`${opLabel}.profile must be "bulk" and requires owner access.`);
+    result.profile = "bulk";
+  }
   if (result.kind === "read" && !result.readOnly)
     fail(`${opLabel}: readOnly must be true when kind is "read".`);
   if (["create", "edit", "delete"].includes(result.kind) && result.readOnly)
@@ -810,6 +816,7 @@ function normalizeV2Definition(
         "tableId",
         "access",
         "readOnly",
+        "profile",
         "fields",
         "fieldIds",
         "reversible",
@@ -860,6 +867,7 @@ function normalizeV2Definition(
     };
     if (Object.hasOwn(opRow, "reversible")) normalized.reversible = opRow.reversible as true;
     if (Object.hasOwn(opRow, "reversedBy")) normalized.reversedBy = opRow.reversedBy as string;
+    if (Object.hasOwn(opRow, "profile")) normalized.profile = opRow.profile as "bulk";
     return normalized;
   });
 

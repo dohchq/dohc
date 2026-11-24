@@ -55,7 +55,8 @@ import { createAccountDeletionRoute, fencePendingAccountDeletions } from "./acco
 import type { StorageContext } from "./storage/context";
 import { startLiveJournalCheck } from "./storage/liveJournalCheck";
 import { createSignUpInviteRoute } from "./signUpInviteRoute";
-import { errorBody, errorResponse, notFound } from "./errors";
+import { errorBody, errorResponse, notFound, relayError } from "./errors";
+import { appBackendLimit } from "@dohc/security-contract/app-backend";
 import { RELAY_API_VERSIONS, relayApiVersionRefusal } from "./apiVersion";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { PresenceHub } from "./presence";
@@ -1111,7 +1112,7 @@ const server = serveFetchHandler({
                     : isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
                       ? MAX_LINK_EXCHANGE_BODY_BYTES
                       : maxRequestBodyBytes(url)),
-  oversized: (url) =>
+  oversized: (url, { limit, bytes, declared }) =>
     isLinkEndpointPath(url.pathname)
       ? opaqueLinkRefusal()
       : isLiveAdmissionPath(url.pathname) ||
@@ -1122,7 +1123,14 @@ const server = serveFetchHandler({
           isLinkExchangePath(url.pathname) ||
           isLinkRefreshPath(url.pathname)
         ? errorBody("not_found")
-        : errorBody("payload_too_large"),
+        : errorResponse(
+            relayError(
+              "payload_too_large",
+              declared
+                ? `Request body declared ${bytes} bytes. The limit is ${limit} bytes.`
+                : appBackendLimit("Request body", limit, bytes, "bytes", true),
+            ),
+          ),
   // Never echo internal error details (or anything derived from the request)
   // back to the caller.
   failure: () => jsonResponse({ ok: false, error: "internal error" }, 500),

@@ -38,6 +38,7 @@ export interface PersistentOpenInput {
   signal?: AbortSignal;
 }
 export interface PersistentPrepareInput {
+  profile?: "bulk";
   /** Per-operation table access, bounded by the opened Collection. */
   tables?: string[];
   expected: DatasetCursor;
@@ -97,7 +98,12 @@ export interface OpenRequest extends Omit<
 }
 export type PersistentCommand =
   | { kind: "open"; input: OpenRequest }
-  | { kind: "prepare"; expected: DatasetCursor; guest: GuestRequest }
+  | {
+      kind: "prepare";
+      expected: DatasetCursor;
+      profile?: "bulk";
+      guest: Omit<GuestRequest, "limits">;
+    }
   | { kind: "finalize"; input: FinalizeOperation }
   | { kind: "discard"; proposalId: string }
   | { kind: "apply"; input: CommittedChangeset }

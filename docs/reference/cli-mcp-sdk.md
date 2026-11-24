@@ -2297,7 +2297,7 @@ Use describe to find approved operation IDs. Generated create operations take in
 - `idempotencyKey`: `string`. Required.
 - `invocationId`: `UUID`
 
-Returns `{ kind: "invoked", result, revision, replayed, copy?: { offline, savedAtMs, coverage?: "saved-pages", host?, signedOut?: true, updateFailed?: true } }` or `{ kind: "refused", code, message }`.
+Returns `{ kind: "invoked", result, profile?: "bulk", revision, replayed, copy?: { offline, savedAtMs, coverage?: "saved-pages", host?, signedOut?: true, updateFailed?: true } }` or `{ kind: "refused", code, message }`.
 
 ### `dohc app`
 

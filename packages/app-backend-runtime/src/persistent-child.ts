@@ -15,7 +15,9 @@ import {
   losslessDatasetNumber,
 } from "@dohc/security-contract/dataset-conversion";
 import { authorize, evaluate } from "./guest.js";
-import { AppBackendRuntimeError } from "./protocol.js";
+import { AppBackendLimitError, parseAppBackendJson } from "@dohc/security-contract/app-backend";
+import { AppBackendRuntimeError, operationLimits } from "./protocol.js";
+import type { JsonValue } from "./protocol.js";
 import {
   checkCursor,
   checkDigest,
@@ -368,17 +370,26 @@ async function handle(command: PersistentCommand): Promise<PersistentResult> {
     db.exec(command.guest.readOnly ? "BEGIN" : "BEGIN IMMEDIATE");
     transaction = true;
     const session = db.createSession();
-    let resultJson: string, attachedFileIds: string[], changeset: Uint8Array;
+    const limits = operationLimits(config.limits, command.profile);
+    let result: JsonValue, attachedFileIds: string[], changeset: Uint8Array;
     try {
       if (command.guest.tables.some((table) => !config.tables.includes(table)))
         reject("invalid_input", "Operation tables exceed Collection access.");
-      ({ resultJson, attachedFileIds } = await appCode(() => {
+      ({ result, attachedFileIds } = await appCode(async () => {
         if (process.env.DOHC_TEST_APP_CODE_READY === "1") process.send!({ testAppCodeReady: true });
-        return evaluate(
+        const evaluated = await evaluate(
           db!,
-          { ...command.guest, limits: config.limits },
+          { ...command.guest, limits },
           { persistentConnection: true, schemaTables: config.tables },
         );
+        return {
+          result: parseAppBackendJson(
+            JSON.parse(evaluated.resultJson),
+            limits.resultBytes,
+            command.profile,
+          ),
+          attachedFileIds: evaluated.attachedFileIds,
+        };
       }));
       db.setAuthorizer(null);
       changeset = session.changeset();
@@ -401,7 +412,7 @@ async function handle(command: PersistentCommand): Promise<PersistentResult> {
     return {
       proposalId,
       readOnly: command.guest.readOnly,
-      result: JSON.parse(resultJson),
+      result,
       changeset,
       changesetSha256,
       attachedFileIds,
@@ -651,7 +662,11 @@ async function receive(message: { id: number; command: PersistentCommand }): Pro
       error:
         error instanceof Error ? error.message.slice(0, 1024) : "The Collection action failed.",
       code: error instanceof PersistentRuntimeError ? error.code : "operation_failed",
-      ...(error instanceof AppBackendRuntimeError ? { refusal: error.refusal } : {}),
+      ...(error instanceof AppBackendRuntimeError
+        ? { refusal: error.refusal }
+        : error instanceof AppBackendLimitError
+          ? { refusal: { code: "resource_limit", message: error.message } }
+          : {}),
     });
   } finally {
     busy = false;

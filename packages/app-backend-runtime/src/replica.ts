@@ -4,7 +4,12 @@ import { lstat, mkdtemp, open, readdir, realpath, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { parseDatasetRevision, type DatasetRevision } from "@dohc/security-contract/dataset";
-import type { DatasetCursor, DatasetScope, JournalExportRecord } from "./journal.js";
+import {
+  JOURNAL_RECORD_BYTES,
+  type DatasetCursor,
+  type DatasetScope,
+  type JournalExportRecord,
+} from "./journal.js";
 import {
   equalRecoveryCursor,
   parseRecoveryCursor,
@@ -307,7 +312,8 @@ export async function createDatasetReplica(options: {
               !Array.isArray(page.records) ||
               !page.records.length ||
               page.records.length > 64 ||
-              Buffer.byteLength(JSON.stringify(page.records)) > CHUNK
+              Buffer.byteLength(JSON.stringify(page.records)) >
+                (page.records.length === 1 ? JOURNAL_RECORD_BYTES : CHUNK) + page.records.length + 1
             )
               throw Error("The Collection history has a gap. Download it again.");
             for (const raw of page.records) {
@@ -450,6 +456,7 @@ export async function createDatasetReplica(options: {
             expected: state.cursor,
             source: state.checkpoint.source,
             operation: operation.name,
+            profile: operation.profile,
             caller: { kind: "owner" },
             input: input.input,
             nowMs: Date.now(),
@@ -458,6 +465,7 @@ export async function createDatasetReplica(options: {
           });
           authorize(input.signal);
           return {
+            ...(operation.profile === "bulk" ? { profile: operation.profile } : {}),
             result: value.result,
             revision: state.cursor.revision,
             replayed: false as const,

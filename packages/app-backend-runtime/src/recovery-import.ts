@@ -15,6 +15,7 @@ import {
   type PersistentRuntimeOptions,
 } from "./persistent.js";
 import type { DatasetCursor, JournalExportRecord } from "./journal.js";
+import { JOURNAL_RECORD_BYTES } from "./journal.js";
 import type { StagedDatasetRecovery } from "./recovery.js";
 import {
   parseRecoveryJournalRecord,
@@ -383,12 +384,12 @@ async function validateRecovery(
         const prefix = await readRange({ path, offset, byteLength: 4 }, 4),
           length = new DataView(prefix.buffer, prefix.byteOffset, 4).getUint32(0);
         offset += 4;
-        recoveryInteger(length, 1, MAX_META);
-        const raw = json(await readRange({ path, offset, byteLength: length }, MAX_META)) as Record<
-          string,
-          unknown
-        >;
+        recoveryInteger(length, 1, JOURNAL_RECORD_BYTES);
+        const raw = json(
+          await readRange({ path, offset, byteLength: length }, JOURNAL_RECORD_BYTES),
+        ) as Record<string, unknown>;
         offset += length;
+        if (raw?.kind !== "event") recoveryInteger(length, 1, MAX_META);
         if (raw?.kind === "event" || raw?.kind === "checkpoint") {
           if (!history && raw.kind !== "event") fail("tail includes a checkpoint.");
           journals = true;
