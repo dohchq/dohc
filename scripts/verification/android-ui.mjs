@@ -76,16 +76,20 @@ for (const mode of ["light", "dark"]) {
     );
     // The next screen reads from this read's start, so a crash between screens counts.
     const read = now();
-    const verdict = [missing, ...problems(since, uid)].filter(Boolean);
+    const logged = problems(since, uid);
+    const running = alive();
+    const verdict = [missing, missing || running ? "" : "the app stopped", ...logged].filter(
+      Boolean,
+    );
     since = read;
     console.log(
       `${verdict.length ? "FAIL" : "PASS"} ${name} ${mode}${verdict.map((line) => `\n  ${line}`).join("")}`,
     );
     if (verdict.length) failed += 1;
-    if (!alive()) shell(`am start -W -n ${app}/.MainActivity > /dev/null`);
+    if (!running) shell(`am start -W -n ${app}/.MainActivity > /dev/null`);
   }
 }
-// A crash after the last screen's read.
+// An error logged after the last screen's read.
 const late = problems(since, uid);
 if (late.length)
   console.log(`FAIL after the last screen${late.map((line) => `\n  ${line}`).join("")}`);
