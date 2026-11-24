@@ -121,6 +121,20 @@ it("a typed note activates", async () => {
   expect((await activate(note)).outcome).toEqual(activated(note));
 });
 
+it("a note renamed after its first typed row activates at its new name, and not at its old one", async () => {
+  const note = await typedRelayNote(100);
+  note.appendRename(note.path, "notes/renamed.md", note.end);
+  const at = (currentPath: string) => {
+    const capture = note.captureAt(note.note.fullState);
+    return { ...capture, source: { ...capture.source, currentPath } };
+  };
+  const validate = validation();
+  expect((await activate(note, validate, at(note.path))).outcome).toMatchObject({
+    message: "Service activation selector is unavailable.",
+  });
+  expect((await activate(note, validate, at("notes/renamed.md"))).outcome).toEqual(activated(note));
+});
+
 // The owner's engine writes the source file, and its Markdown may differ from the relay's for the same state.
 it("a typed note whose owner wrote its source in its own Markdown activates", async () => {
   const note = await typedRelayNote(100);

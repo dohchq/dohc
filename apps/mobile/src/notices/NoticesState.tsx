@@ -303,7 +303,7 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
       if (target.kind === "page")
         return router.push({
           pathname: "/page",
-          params: { path: target.path, workspace: target.workspaceId },
+          params: { path: target.path, workspace: target.workspaceId, t0: String(Date.now()) },
         });
       router.push({
         pathname: "/chat/[id]",

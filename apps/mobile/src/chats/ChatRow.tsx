@@ -11,9 +11,11 @@ import { symbolFallback } from "../symbolFallback";
 export const ChatRow = memo(function ChatRow({
   row,
   onPress,
+  onPressIn,
 }: {
   row: ChatRowData;
   onPress(row: ChatRowData): void;
+  onPressIn?: (row: ChatRowData) => void;
 }) {
   const theme = useTheme();
   const [pressed, setPressed] = useState(false);
@@ -22,7 +24,10 @@ export const ChatRow = memo(function ChatRow({
   return (
     <Pressable
       onPress={() => onPress(row)}
-      onPressIn={() => setPressed(true)}
+      onPressIn={() => {
+        setPressed(true);
+        onPressIn?.(row);
+      }}
       onPressOut={() => setPressed(false)}
       style={[styles.row, pressed && { backgroundColor: theme.panel2 }]}
       accessibilityRole="button"

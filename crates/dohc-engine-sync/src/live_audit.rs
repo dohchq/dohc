@@ -19,7 +19,6 @@ mod chunks;
 pub(crate) mod enrollment;
 mod held;
 mod origin_record;
-mod restore_record;
 mod settlement_record;
 pub use application_record::journal_live_event_in_tx;
 pub(crate) use application_record::{
@@ -29,7 +28,7 @@ pub(crate) use application_record::{
 pub use enrollment::journal_live_event_or_defer_in_tx;
 pub(crate) use held::{WAITS_ON_HELD, hold_in_tx, holds, is_audit, refused_before, waits_on_held};
 pub use settlement_record::journal_live_settlement_in_tx;
-pub(crate) use settlement_record::{owner_settlement_cursor_in, restore_successor_settlement_in};
+pub(crate) use settlement_record::owner_settlement_cursor_in;
 
 pub(crate) fn apply_audit_envelope(
     store: &mut EngineStore,
@@ -50,6 +49,11 @@ pub(crate) fn apply_audit_envelope(
 
 pub(crate) const BASE_OP: &str = "live.audit.base";
 const SCOPE: &str = "relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5";
+
+/// A restore a record once carried. No value parses, so a record that
+/// carries one refuses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum Retired {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -116,7 +120,6 @@ impl BaseRecord {
                 .any(|byte| byte.is_ascii_control())
             || checkpoint.event_count != 0
             || checkpoint.terminal.is_some()
-            || checkpoint.restore_operation_id.is_some()
             || checkpoint.state_digest != binding.lineage_claim_id
             || !digest(&checkpoint.state_digest)
             || !digest(&self.origin_stamp)
@@ -156,37 +159,45 @@ impl BaseRecord {
 /// Verifies a historical coordinate without claiming that its base won arbitration.
 fn require_base_coordinate(conn: &Connection, record: &BaseRecord) -> Result<(), SyncError> {
     let binding = &record.checkpoint.binding;
-    let operation: Option<(String, String)> = conn.query_row(
-        "SELECT op_kind,payload_json FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
-        params![binding.workspace_id,record.base_coordinate.origin_id,record.base_coordinate.origin_seq],
-        |row| Ok((row.get(0)?,row.get(1)?)),
-    ).optional().map_err(SyncError::corrupt)?;
-    let Some((kind, json)) = operation else {
+    let key = DocKey::new(
+        &binding.workspace_id,
+        &binding.main_version_id,
+        &binding.object_id,
+    )
+    .map_err(SyncError::corrupt)?;
+    let base_state: Option<bool> = conn
+        .query_row(
+            "SELECT COALESCE(op_kind='ydoc.update' AND json_extract(payload_json,'$.versionId')=?4 AND json_extract(payload_json,'$.objectId')=?5 AND json_extract(payload_json,'$.lineageClaimId')=?6 AND json_extract(payload_json,'$.updateBlobSha256')=?6 AND json_extract(payload_json,'$.contentKind')='richdoc' AND json_extract(payload_json,'$.isBaseState')=1,0)
+             FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+            params![
+                binding.workspace_id,
+                record.base_coordinate.origin_id,
+                record.base_coordinate.origin_seq,
+                binding.main_version_id,
+                binding.object_id,
+                binding.lineage_claim_id
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let Some(base_state) = base_state else {
         return Err(SyncError::RetryableState {
             reason: "native audit base coordinate is unavailable",
         });
     };
-    let payload: serde_json::Value = serde_json::from_str(&json).map_err(SyncError::corrupt)?;
-    if kind != "ydoc.update"
-        || payload.get("versionId").and_then(serde_json::Value::as_str)
-            != Some(&binding.main_version_id)
-        || payload.get("objectId").and_then(serde_json::Value::as_str) != Some(&binding.object_id)
-        || payload
-            .get("lineageClaimId")
-            .and_then(serde_json::Value::as_str)
-            != Some(&binding.lineage_claim_id)
-        || payload
-            .get("updateBlobSha256")
-            .and_then(serde_json::Value::as_str)
-            != Some(&record.checkpoint.state_digest)
-        || payload
-            .get("contentKind")
-            .and_then(serde_json::Value::as_str)
-            != Some("richdoc")
-        || payload
-            .get("isBaseState")
-            .and_then(serde_json::Value::as_bool)
-            != Some(true)
+    if record.checkpoint.state_digest != binding.lineage_claim_id
+        || (!base_state
+            && !dohc_engine_collab::is_lineage_origin_in(
+                conn,
+                &key,
+                false,
+                ContentKind::Richdoc,
+                &binding.lineage_claim_id,
+                &record.base_coordinate.origin_id,
+                record.base_coordinate.origin_seq,
+            )
+            .map_err(SyncError::corrupt)?)
     {
         return Err(invalid("native audit base coordinate differs"));
     }
@@ -285,7 +296,6 @@ pub fn journal_live_base_in_tx(
         relay_database_namespace: namespace.to_owned(),
         checkpoint: NativeAcceptedCheckpoint {
             canonical_version: None,
-            restore_operation_id: None,
             event_count: 0,
             terminal: None,
             binding: source_binding.clone(),
@@ -339,12 +349,18 @@ pub fn journal_live_base_in_tx(
                 "native audit lineage differs from the ordinary base",
             ));
         }
-        match (marker.base_origin_id, marker.base_origin_seq) {
-            (Some(origin_id), Some(origin_seq)) => BaseCoordinate {
+        let origin =
+            dohc_engine_collab::lineage_origin_in(tx, &key, &marker).map_err(SyncError::corrupt)?;
+        match (origin, marker.base_origin_id, marker.base_origin_seq) {
+            (Some(origin), _, _) => BaseCoordinate {
+                origin_id: origin.origin_id,
+                origin_seq: origin.origin_seq,
+            },
+            (None, Some(origin_id), Some(origin_seq)) => BaseCoordinate {
                 origin_id,
                 origin_seq,
             },
-            (None, None) => {
+            (None, None, None) => {
                 let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_base_relay_candidates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)",
                 params![key.workspace_id,key.version_id,key.object_id,binding.lineage_claim_id], |row| row.get(0)).map_err(SyncError::corrupt)?;
                 if existing {

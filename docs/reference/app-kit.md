@@ -11,6 +11,9 @@ dohc's closed app compiler provides a pinned set of browser modules so apps can 
 | `dohc/app` | MessageChannel backend client and hooks (`AppProvider`, `useApp`, `useDatasetQuery`, `useDatasetMutation`, `createAppClient`, `mutationKey`, `AppBackendError`) |
 | `dohc/ui` | Light and dark themed layout, data, and form components (`AppShell`, `PageHeader`, `Grid`, `Stack`, `Card`, `StatCard`, `Tabs`, `DataTable`, `Badge`, `ProgressBar`, `Callout`, `EmptyState`, `Skeleton`, `Button`, `Field`, `Input`, `Select`, `Textarea`, `Checkbox`, `Modal`, plus currency/number/percent/date formatters) |
 | `dohc/charts` | Responsive SVG charts with light and dark tokens: interactive `LineChart`, `BarChart`, and `DonutChart` (single-tab-stop arrow-key navigation), plus non-interactive `Sparkline` |
+| `dohc/icons` | A curated set of [Lucide](https://lucide.dev) icons as React components (for example `Plus`, `Trash2`, `Receipt`, `Wallet`, `Plane`, `CalendarDays`). Only the icons an app imports end up in its bundle |
+| `dohc/money` | Exact money in whole minor units (cents): `formatCents(123400, { currency: "EUR", locale: "de-DE" })` gives `1.234,00 €` without floating-point rounding, and `parseCents("$1,234.50")` gives `123450`, or `null` for text that isn't an exact amount |
+| `dohc/csv` | RFC 4180 `parseCsv(text)` for quoted fields, embedded line breaks, and a leading byte order mark, and `toCsv(rows)`, which prefixes text cells that start with `=`, `+`, `-`, `@`, tab, or carriage return with `'` so spreadsheets don't run them as formulas. Pass amounts as numbers so negative values stay numeric |
 
 The prefixes `react`, `react-dom`, `scheduler`, and `dohc` are reserved. Do not map them in `app.publish.json`'s `packageMap`.
 

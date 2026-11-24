@@ -87,15 +87,21 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
   const press = useCallback(
     (row: HomeRow) => {
       if (row.kind === "folder") toggle(setExpanded, row.path);
-      else if (row.kind === "page") router.push({ pathname: "/page", params: { path: row.path } });
+      else if (row.kind === "page")
+        router.push({ pathname: "/page", params: { path: row.path, t0: String(Date.now()) } });
     },
     [router, toggle],
   );
+  const { data, apps, collections } = useAccount();
+  const pagesShown = !collapsed.has("pages");
+  useEffect(() => {
+    if (rows && pagesShown)
+      data?.prefetchPages(rows.pages.flatMap((row) => (row.kind === "page" ? [row.path] : [])));
+  }, [data, rows, pagesShown]);
 
   // The workspace's apps and Collections read each time Home shows, and its apps after an approval or a revoke.
   // Collections show only when there is one; a failed read is a toast and a Notices row.
   const theme = useTheme();
-  const { apps, collections } = useAccount();
   const appsState = useSyncExternalStore(
     apps?.subscribe ?? nothing,
     useCallback(() => apps?.state() ?? NO_APPS, [apps]),

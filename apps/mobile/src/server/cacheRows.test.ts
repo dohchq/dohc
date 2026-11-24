@@ -15,7 +15,7 @@ import { createServerClient } from "./client";
 import { CACHE_FORMAT } from "./keptStore";
 import { createOpenWorkspace } from "./openWorkspace";
 import { keptDisk, type KeptDisk } from "./testKeptDisk";
-import { memoryStore, serveSessionEnd, testServer, type Answer } from "./testServer";
+import { deferred, memoryStore, serveSessionEnd, testServer, type Answer } from "./testServer";
 import {
   cacheScope,
   createReadCache,
@@ -23,7 +23,7 @@ import {
   views,
   type ReadCache,
 } from "./workspaceData";
-import { createWorkspaceList } from "./workspaceList";
+import { createWorkspaceList, workspaceGap } from "./workspaceList";
 import { FEED_HOLD_MS } from "./workspaceReads";
 
 // The read cache on cache.db, through Node's SQLite (testKeptDisk.ts). Each launch is one run of the app over the same
@@ -397,6 +397,75 @@ describe("a relaunch", () => {
     expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "# A" });
     await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.5.2"))).toBe(2));
     expect(server.calls.filter((call) => call.method === "POST")).toHaveLength(reads);
+  });
+
+  it("shows no text after a relaunch for a page only prefetched that a change touched", async () => {
+    const server = serverWithA();
+    const reread = deferred<Answer>();
+    server.on(
+      "POST",
+      "/sync/ws-a/ops/documentRead",
+      ops({ ok: true, path: "a.md", markdown: "# Old" }, "0.6.2"),
+      () => reread.promise,
+    );
+    const change = deferred<Answer>();
+    server.on("GET", feedPath("ws-a", "0.6.2"), () => change.promise);
+    server.on("GET", feedPath("ws-a", "0.7.1"), held);
+    const disk = keptDisk();
+    const first = launch(disk);
+    const before = open(server, first.cache);
+    before.prefetchPages(["a.md"]);
+    await vi.waitFor(() => expect(before.state(views.page("a.md")).value).not.toBeNull());
+    change.resolve({
+      status: 200,
+      body: { ok: true, cursor: "0.7.1", changed: { files: ["object-a"] } },
+    });
+    const scope = cacheScope(signInTo(server), "ws-a");
+    await vi.waitFor(() => expect(first.cache.get(scope, "page:a.md")?.stale).toBe(true));
+    await first.files.flush();
+    before.stop();
+
+    const data = open(server, launch(disk).cache);
+    data.subscribe(views.page("a.md"), () => {});
+    await vi.waitFor(() => expect(count(server, "/sync/ws-a/ops/documentRead")).toBe(2));
+    expect(data.state(views.page("a.md")).value).toBeNull();
+    reread.resolve(ops({ ok: true, path: "a.md", markdown: "# New" }, "0.7.1"));
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "# New" }),
+    );
+  });
+
+  it("keeps a prefetched page's text as its last once the relaunch shows it on an open screen", async () => {
+    const server = serverWithA();
+    server.on(
+      "POST",
+      "/sync/ws-a/ops/documentRead",
+      ops({ ok: true, path: "a.md", markdown: "# A" }, "0.6.2"),
+      ops({ ok: false, reason: "dohc: No document at a.md.", refusal: "missing" }, "0.6.2"),
+    );
+    server.on("GET", feedPath("ws-a", "0.6.2"), held);
+    const disk = keptDisk();
+    const first = launch(disk);
+    const before = open(server, first.cache);
+    before.prefetchPages(["a.md"]);
+    await vi.waitFor(() => expect(before.state(views.page("a.md")).value).not.toBeNull());
+    await first.files.flush();
+    before.stop();
+
+    const { cache } = launch(disk);
+    const data = open(server, cache);
+    data.subscribe(views.page("a.md"), () => {});
+    expect(data.state(views.page("a.md"))).toMatchObject({ value: null, loading: true });
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "# A" }),
+    );
+    expect(
+      cache.get(cacheScope(signInTo(server), "ws-a"), "page:a.md")?.prefetched,
+    ).toBeUndefined();
+    data.retry(views.page("a.md"));
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({ kind: "missing", last: "# A" }),
+    );
   });
 
   it("paints the loading state before the row is read, and asks the server nothing until it is", async () => {
@@ -899,5 +968,118 @@ describe("the saved workspace list", () => {
     ]);
     expect(stored(disk)).not.toContain(SCOPE_B);
     open.stop();
+  });
+
+  async function chooseB(server: ReturnType<typeof testServer>, disk: KeptDisk) {
+    await readBoth(server, disk);
+    const { files, workspace } = launchAccount(server, disk);
+    await vi.waitFor(() => expect(workspace.state().currentWorkspaceId).toBe("ws-a"));
+    workspace.choose("ws-b");
+    await files.flush();
+    workspace.stop();
+  }
+
+  function relaunch(
+    server: ReturnType<typeof testServer>,
+    disk: KeptDisk,
+    signIn = signInTo(server),
+  ) {
+    const launched = launchAccount(server, disk, signIn);
+    const opened: string[] = [];
+    launched.workspace.subscribe(() => {
+      const current = launched.workspace.state().currentWorkspaceId;
+      if (current !== null && opened.at(-1) !== current) opened.push(current);
+    });
+    return { ...launched, opened };
+  }
+
+  /** A relaunch whose read of the choice saved last waits for `choice`, after the list has landed. */
+  async function slowChoice(server: ReturnType<typeof testServer>, disk: KeptDisk) {
+    await chooseB(server, disk);
+    server.on("GET", "/sync/account/workspaces", listAnswer(entry("ws-a"), entry("ws-b")));
+    const { files } = launch(disk);
+    const choice = deferred<void>();
+    const cache = createReadCache({
+      ...files,
+      readList: (scope) =>
+        scope.endsWith(',"chosen"]')
+          ? choice.promise.then(() => files.readList(scope))
+          : files.readList(scope),
+    });
+    const signIn = signInTo(server);
+    const list = createWorkspaceList(signIn, cache.savedList(signIn));
+    const workspace = createOpenWorkspace({ signIn, list, cache });
+    workspace.subscribe(() => {});
+    list.reload();
+    await vi.waitFor(() =>
+      expect(list.state()).toMatchObject({ status: "ready", pending: new Set() }),
+    );
+    await vi.waitFor(() => expect(count(server, "/sync/account/workspaces")).toBeGreaterThan(0));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    return { list, workspace, choice };
+  }
+
+  it("shows no reason for an empty phone while the choice saved last is read after the list", async () => {
+    const server = serverWithA();
+    const { list, workspace, choice } = await slowChoice(server, keptDisk());
+    expect(workspace.state()).toMatchObject({ currentWorkspaceId: null, choosing: true });
+    expect(workspaceGap(list.state(), workspace.state())).toBeNull();
+    choice.resolve();
+    await vi.waitFor(() => expect(workspace.state().currentWorkspaceId).toBe("ws-b"));
+    expect(workspace.state().choosing).toBe(false);
+    workspace.stop();
+  });
+
+  it("opens a workspace the person chooses while the choice saved last is read, and keeps it after", async () => {
+    const server = serverWithA();
+    const { workspace, choice } = await slowChoice(server, keptDisk());
+    workspace.choose("ws-a");
+    expect(workspace.state()).toMatchObject({ currentWorkspaceId: "ws-a", choosing: false });
+    choice.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(workspace.state().currentWorkspaceId).toBe("ws-a");
+    workspace.stop();
+  });
+
+  it("reopens the workspace chosen last, without opening another first, until it no longer shows", async () => {
+    const server = serverWithA();
+    const disk = keptDisk();
+    await chooseB(server, disk);
+    const answer = deferred<Answer>();
+    server.on("GET", "/sync/account/workspaces", () => answer.promise);
+
+    const { workspace, opened } = relaunch(server, disk);
+    await vi.waitFor(() => expect(workspace.state().currentWorkspaceId).toBe("ws-b"));
+    expect(opened).toEqual(["ws-b"]);
+    answer.resolve(listAnswer(entry("ws-a"), entry("ws-b", false)));
+    await vi.waitFor(() => expect(workspace.state().currentWorkspaceId).toBe("ws-a"));
+    workspace.stop();
+  });
+
+  it("keeps the choice to its own account, and loses it when cache.db is deleted", async () => {
+    const server = serverWithA();
+    const disk = keptDisk();
+    await chooseB(server, disk);
+    server.on("GET", "/sync/account/workspaces", held);
+    const otherAccount = { ...signInTo(server), userId: "u-2" };
+    await launch(disk).files.writeList(JSON.stringify([server.origin, "u-2"]), [
+      entry("ws-a"),
+      entry("ws-b"),
+    ]);
+
+    const other = relaunch(server, disk, otherAccount);
+    await vi.waitFor(() => expect(other.workspace.state().currentWorkspaceId).toBe("ws-a"));
+    expect(other.opened).toEqual(["ws-a"]);
+    other.workspace.stop();
+    const same = relaunch(server, disk);
+    await vi.waitFor(() => expect(same.workspace.state().currentWorkspaceId).toBe("ws-b"));
+    same.workspace.stop();
+
+    await launch(disk).files.removeAll();
+    server.on("GET", "/sync/account/workspaces", listAnswer(entry("ws-a"), entry("ws-b")));
+    const emptied = relaunch(server, disk);
+    await vi.waitFor(() => expect(emptied.workspace.state().currentWorkspaceId).toBe("ws-a"));
+    expect(emptied.opened).toEqual(["ws-a"]);
+    emptied.workspace.stop();
   });
 });

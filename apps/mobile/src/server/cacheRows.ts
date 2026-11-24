@@ -1,7 +1,7 @@
 import type { CacheStore, Sql } from "./keptStore";
 
-// The read cache's rows in cache.db (keptStore.ts): one row of views per workspace scope, and one workspace list per
-// account. Each scope's views are kept under SCOPE_MAX_BYTES, and all scopes' under TOTAL_MAX_BYTES, by deleting the
+// The read cache's rows in cache.db (keptStore.ts): one row of views per workspace scope, and one workspace list and
+// one chosen workspace per account. Each scope's views are kept under SCOPE_MAX_BYTES, and all scopes' under TOTAL_MAX_BYTES, by deleting the
 // scopes used least recently. Both caps count the views' JSON, not the file. Nothing here rejects: a cache that can't
 // be read or written answers as empty.
 
@@ -11,6 +11,7 @@ export interface SavedView {
   readonly value: unknown;
   readonly cursor: string;
   readonly stale: boolean;
+  readonly prefetched?: boolean;
 }
 
 export interface CacheRows {
@@ -26,9 +27,9 @@ export interface CacheRows {
   removeAll(): Promise<void>;
   /** Deletes every scope's views but those of `scopes`, and drops the others' writes that haven't landed. */
   keep(scopes: readonly string[]): Promise<void>;
-  /** The workspace list last saved for the account `scope`, unchecked, or null. */
+  /** The workspace list, or the chosen workspace, last saved for the account `scope`, unchecked, or null. */
   readList(scope: string): Promise<unknown>;
-  /** Saves the account's workspace list now. */
+  /** Saves the account's workspace list, or its chosen workspace, now. */
   writeList(scope: string, workspaces: unknown): Promise<void>;
 }
 
@@ -202,7 +203,8 @@ function serialize(views: readonly SavedView[], maxBytes: number) {
   for (const view of views) {
     const left = maxBytes - bytes - (parts.length > 0 ? 1 : 0);
     if (left <= 0) break;
-    const saved = { id: view.id, value: view.value, cursor: view.cursor, stale: view.stale };
+    const { id, value, cursor, stale } = view;
+    const saved = { id, value, cursor, stale, prefetched: view.prefetched || undefined };
     if (leastJsonBytes(saved, left) > left) continue;
     const part = JSON.stringify(saved);
     const size = utf8Bytes(part);
@@ -258,7 +260,8 @@ function savedViews(text: unknown): readonly SavedView[] | null {
       item.value === null
     )
       return null;
-    views.push({ id: item.id, value: item.value, cursor: item.cursor, stale: item.stale });
+    const { id, value, cursor, stale } = item;
+    views.push({ id, value, cursor, stale, prefetched: item.prefetched === true || undefined });
   }
   return views;
 }

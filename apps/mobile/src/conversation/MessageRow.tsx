@@ -5,6 +5,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import {
   AccessibilityInfo,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -394,10 +395,37 @@ function MessageActions({
             }
           />
         </Pressable>
-        {onReply ? <ReplyButton onPress={() => onReply(message)} theme={theme} /> : null}
+        {onReply ? (
+          <ReplyButton
+            onPress={() => {
+              setPicking(false);
+              onReply(message);
+            }}
+            theme={theme}
+          />
+        ) : null}
       </View>
       {picking ? (
-        <View style={styles.picker}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.pickerScroll}
+          contentContainerStyle={styles.picker}
+        >
+          <Pressable
+            onPress={close}
+            accessibilityRole="button"
+            accessibilityLabel={confirmWords.cancel}
+            style={styles.choice}
+          >
+            <SymbolView
+              name="xmark"
+              size={14}
+              weight="semibold"
+              tintColor={theme.muted}
+              fallback={<X size={16} color={theme.muted} strokeWidth={2.5} />}
+            />
+          </Pressable>
           {REACTION_CHOICES.map((emoji) => (
             <Pressable
               key={emoji}
@@ -420,21 +448,7 @@ function MessageActions({
               <Text style={styles.choiceEmoji}>{emoji}</Text>
             </Pressable>
           ))}
-          <Pressable
-            onPress={close}
-            accessibilityRole="button"
-            accessibilityLabel={confirmWords.cancel}
-            style={styles.choice}
-          >
-            <SymbolView
-              name="xmark"
-              size={14}
-              weight="semibold"
-              tintColor={theme.muted}
-              fallback={<X size={16} color={theme.muted} strokeWidth={2.5} />}
-            />
-          </Pressable>
-        </View>
+        </ScrollView>
       ) : null}
       {problem ? (
         <Text style={[styles.localText, { color: theme.danger }]} accessibilityRole="alert">
@@ -632,7 +646,8 @@ const styles = StyleSheet.create({
   pending: { borderStyle: "dashed" },
   /** Add reaction and Reply: as wide as the touch needs, with no count. */
   tool: { minWidth: 36, justifyContent: "center" },
-  picker: { flexDirection: "row", flexWrap: "wrap", gap: 2, marginTop: 4 },
+  pickerScroll: { marginTop: 4 },
+  picker: { flexDirection: "row", gap: 2 },
   choice: {
     width: 44,
     height: 44,

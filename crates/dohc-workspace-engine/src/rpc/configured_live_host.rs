@@ -31,7 +31,6 @@ pub struct ConfiguredLiveHostConfig {
     workspaces: Vec<WorkspaceConfig>,
     ingress: IngressConfig,
     settlement: Option<SettlementConfig>,
-    restore: Option<crate::live_application_ingress::RestoreConfig>,
     sync: Option<super::live_application::sync::SyncConfig>,
     adoption: Option<ConfiguredOwnerAdoption>,
     recovery: Option<super::recovery_copies::RecoveryConfig>,
@@ -214,7 +213,6 @@ pub(crate) struct Discovery {
         SettlementAdmission,
     )>,
     settlement: Option<(usize, SettlementAdmission)>,
-    restore: Option<crate::live_application_ingress::RestoreConfig>,
     adoption: Option<ConfiguredOwnerAdoption>,
     /// Earlier stores open for their owner's recovery copy, at most one per
     /// workspace. They stay out of `attached`, so a workspace's attached store
@@ -526,9 +524,6 @@ impl EngineService {
             }
             ingress.validate_adoption_budget(adoption.max_bytes, adoption.max_events)?;
         }
-        if let Some(config) = &config.restore {
-            ingress.validate_restore_budget(config)?;
-        }
         let sync = config
             .sync
             .map(|c| {
@@ -559,7 +554,6 @@ impl EngineService {
             membership: tokio::sync::Mutex::new(()),
             settlement,
             sync,
-            restore: config.restore,
             adoption: config.adoption,
             recovery: Arc::new(Mutex::new(Vec::new())),
             copies,
@@ -1337,27 +1331,6 @@ impl EngineService {
         }
         self.relay_sync_admission()
             .ok_or_else(|| invalid("applied sync is not provisioned"))
-    }
-
-    pub(crate) fn restore_config(
-        &self,
-        connection: &ConnectionHandle,
-    ) -> Result<crate::live_application_ingress::RestoreConfig, WireError> {
-        let (expected, config) = if let Some(host) = self.ordinary_live_host.get() {
-            (&host.connection, &host.restore)
-        } else {
-            let host = self
-                .configured_live_host
-                .get()
-                .ok_or_else(|| invalid("restore host not configured"))?;
-            (&host.connection, &host.restore)
-        };
-        if !expected.is_current() || !expected.same_connection(connection) {
-            return Err(invalid("restore connection retired"));
-        }
-        config
-            .clone()
-            .ok_or_else(|| invalid("restore not configured"))
     }
 }
 

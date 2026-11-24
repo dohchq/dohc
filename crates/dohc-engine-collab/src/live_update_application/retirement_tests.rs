@@ -166,7 +166,7 @@ fn imported_source(f: &Fixture, full: &[u8]) -> ImportedOwnerSource {
         committed_cursor: 9,
         base_origin_id: "remote".into(),
         base_origin_seq: 7,
-        base_relay_seq: 9,
+        base_relay_seq: Some(9),
         source_moment_id: f.cut.source_moment_id.clone(),
         source_digest: f.cut.source_digest.clone(),
         source_byte_length: f.cut.source_byte_length,
@@ -1265,223 +1265,6 @@ fn intents(f: &Fixture) -> Vec<(String, i64)> {
 }
 
 #[test]
-fn a_restore_waits_while_its_activation_retires() {
-    let fence = |f: &mut Fixture| {
-        let terminal = f.cut.terminal_receipt.clone();
-        let sequence = f.cut.expected_local_sequence;
-        let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
-        f._owner.fence_restore(
-            &mut f.store,
-            None,
-            NativeRestoreFence {
-                point: crate::live_update_application::NativeRestoreSelection {
-                    journal_cursor: terminal.as_ref().map_or(0, |r| r.journal_cursor),
-                    receipt_digest: terminal.as_ref().map_or_else(
-                        || f.binding.lineage_claim_id.clone(),
-                        |r| r.update_digest.clone(),
-                    ),
-                },
-                operation_id: "restore".into(),
-                relay_database_namespace: "namespace".into(),
-                old_binding: f.binding.clone(),
-                host_id: "host".into(),
-                new_fence: 1,
-                origin: RestoreDeliveryOrigin::Owner { id: f.cut.adoption_id.clone() },
-                terminal,
-                applied_sequence: sequence,
-            },
-            coordinate,
-            40,
-            &NoFaults,
-            |_, _| Ok(()),
-        )
-    };
-    let mut f = Fixture::new();
-    f.adopt().unwrap();
-    let mut wrong = retirement_key(&f, 10);
-    wrong.restore_fence_generation = 1;
-    assert!(matches!(
-        begin_retirement(&mut f.store, &retirement_scope(), &wrong, false, &NoFaults),
-        Err(ApplicationError::Conflict)
-    ));
-    assert!(intents(&f).is_empty(), "an invalid key records nothing");
-    assert!(!begin(&mut f, 10).unwrap().released);
-    assert!(!begin(&mut f, 10).unwrap().released, "Phase A runs again on its own intent");
-    assert_eq!(intents(&f), [("adoption".to_owned(), 0)]);
-    drop(f.store);
-    f.store = EngineStore::open(&f._scratch.join("engine.db"), 31).unwrap();
-    f._owner = ApplicationOwner::new("workspace".into()).unwrap();
-    assert_eq!(intents(&f), [("adoption".to_owned(), 0)], "the intent survives the restart");
-    assert!(f
-        .store
-        .read_with(|conn| super::super::seed_hold(conn, "namespace", &f.binding))
-        .unwrap()
-        .is_none());
-    assert!(matches!(fence(&mut f), Err(ApplicationError::Conflict)));
-    assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
-    host_document(&mut f, true, true);
-    assert!(matches!(release_through(&mut f, 10).unwrap(), Release::Released { replayed: false, .. }));
-    assert!(intents(&f).is_empty());
-    assert!(begin(&mut f, 10).unwrap().released);
-    assert!(intents(&f).is_empty(), "a released replay records nothing");
-    let mut f = never_adopted();
-    begin(&mut f, 10).unwrap();
-    assert_eq!(intents(&f), [("captured".to_owned(), 0)]);
-    host_document(&mut f, true, false);
-    release_through(&mut f, 10).unwrap();
-    assert!(intents(&f).is_empty());
-    let mut f = Fixture::new();
-    f.adopt().unwrap();
-    fence(&mut f).unwrap();
-}
-
-fn restore_fence(f: &mut Fixture, operation: &str) -> Result<NativeRestoreFenceReceipt, ApplicationError> {
-    let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
-    f._owner.fence_restore(
-        &mut f.store,
-        None,
-        NativeRestoreFence {
-            point: crate::live_update_application::NativeRestoreSelection {
-                journal_cursor: 0,
-                receipt_digest: f.binding.lineage_claim_id.clone(),
-            },
-            operation_id: operation.into(),
-            relay_database_namespace: "namespace".into(),
-            old_binding: f.binding.clone(),
-            host_id: "host".into(),
-            new_fence: 1,
-            origin: RestoreDeliveryOrigin::Owner { id: f.cut.adoption_id.clone() },
-            terminal: f.cut.terminal_receipt.clone(),
-            applied_sequence: f.cut.expected_local_sequence,
-        },
-        coordinate,
-        40,
-        &NoFaults,
-        |_, _| Ok(()),
-    )
-}
-
-fn cancellation(f: &Fixture, operation: &str) -> RestoreFenceCancellation {
-    RestoreFenceCancellation {
-        operation_id: operation.into(),
-        object_id: f.binding.object_id.clone(),
-        lineage_claim_id: f.binding.lineage_claim_id.clone(),
-        host_id: "host".into(),
-        new_fence: f.binding.restore_fence_generation + 1,
-    }
-}
-
-fn cancel(
-    f: &mut Fixture,
-    input: &RestoreFenceCancellation,
-) -> Result<RestoreFenceCancellationOutcome, ApplicationError> {
-    cancel_restore_fence(&mut f.store, "namespace", "workspace", "host", input, 50, &NoFaults)
-}
-
-fn bound(f: &Fixture) -> (i64, bool) {
-    f.store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT restore_fence_generation,available FROM live_device_application_bindings
-                 WHERE relay_database_namespace='namespace'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-        })
-        .unwrap()
-}
-
-#[test]
-fn a_restore_fence_that_never_landed_is_cancelled_for_good() {
-    let mut f = Fixture::new();
-    f.adopt().unwrap();
-    let input = cancellation(&f, "restore");
-    let cancelled = RestoreFenceCancellationOutcome::Cancelled {
-        generation: 0,
-        binding: Some(f.binding.clone()),
-    };
-    assert_eq!(cancel(&mut f, &input).unwrap(), cancelled);
-    assert_eq!(cancel(&mut f, &input).unwrap(), cancelled, "a duplicate answers the same");
-    assert_eq!(f.store.table_row_count("live_restore_cancellations").unwrap(), 1);
-    for _ in 0..2 {
-        assert!(matches!(restore_fence(&mut f, "restore"), Err(ApplicationError::Conflict)));
-    }
-    assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
-    assert_eq!(bound(&f), (0, true));
-    let mut later = input.clone();
-    later.new_fence = 2;
-    let mut lineage = input.clone();
-    lineage.lineage_claim_id = "f".repeat(64);
-    let mut object = input.clone();
-    object.object_id = "other".into();
-    for wrong in [later, lineage, object] {
-        assert!(matches!(cancel(&mut f, &wrong), Err(ApplicationError::Conflict)), "{wrong:?}");
-    }
-    assert_eq!(f.store.table_row_count("live_restore_cancellations").unwrap(), 1);
-    assert!(!begin(&mut f, 10).unwrap().released);
-    assert_eq!(intents(&f), [("adoption".to_owned(), 0)]);
-    drop(f.store);
-    f.store = EngineStore::open(&f._scratch.join("engine.db"), 31).unwrap();
-    assert_eq!(cancel(&mut f, &input).unwrap(), cancelled);
-}
-
-#[test]
-fn a_committed_restore_fence_ends_in_its_terminal_cancellation_until_admission() {
-    let mut f = Fixture::new();
-    f.adopt().unwrap();
-    let receipt = restore_fence(&mut f, "restore").unwrap();
-    let input = cancellation(&f, "restore");
-    let mut lineage = input.clone();
-    lineage.lineage_claim_id = "f".repeat(64);
-    let mut later = input.clone();
-    later.new_fence = 2;
-    let mut elsewhere = input.clone();
-    elsewhere.host_id = "elsewhere".into();
-    for wrong in [lineage, later, elsewhere, cancellation(&f, "other")] {
-        assert!(matches!(cancel(&mut f, &wrong), Err(ApplicationError::Conflict)), "{wrong:?}");
-    }
-    assert!(
-        matches!(
-            cancel_restore_fence(&mut f.store, "namespace", "workspace", "elsewhere", &input, 50, &NoFaults),
-            Err(ApplicationError::Conflict)
-        ),
-        "another host's engine"
-    );
-    let RestoreFenceCancellationOutcome::FenceCancelled(cancelled) = cancel(&mut f, &input).unwrap() else {
-        panic!("the committed fence ends in its cancellation");
-    };
-    let mut stopped = f.binding.clone();
-    stopped.restore_fence_generation = 1;
-    assert_eq!(cancelled.fence, receipt);
-    assert_eq!(cancelled.binding, stopped);
-    assert_eq!(cancelled.endpoint.terminal_receipt, f.cut.terminal_receipt);
-    assert_eq!(cancelled.endpoint.event_count, 0);
-    assert_eq!(
-        cancel(&mut f, &input).unwrap(),
-        RestoreFenceCancellationOutcome::FenceCancelled(cancelled.clone()),
-        "a duplicate answers the committed receipt"
-    );
-    assert_eq!(bound(&f), (1, false));
-    assert_eq!(f.store.table_row_count("live_restore_cancellations").unwrap(), 0);
-    assert!(matches!(restore_fence(&mut f, "restore"), Err(ApplicationError::Conflict)), "the fence never replays");
-    let mut f = Fixture::new();
-    f.adopt().unwrap();
-    restore_fence(&mut f, "restore").unwrap();
-    let input = cancellation(&f, "restore");
-    let conn = rusqlite::Connection::open(f._scratch.join("engine.db")).unwrap();
-    conn.execute_batch(
-        "PRAGMA foreign_keys=OFF;
-         UPDATE live_restore_fences SET proposal_json='{}',proposal_candidate_sha256='a',
-           proposal_frozen_sha256='a',proposal_point_sha256='a',application_json='{}',
-           application_delivery_id='admitted'",
-    )
-    .unwrap();
-    drop(conn);
-    assert!(matches!(cancel(&mut f, &input), Err(ApplicationError::Conflict)));
-    assert_eq!(f.store.table_row_count("live_restore_cancellations").unwrap(), 0);
-}
-
-#[test]
 fn a_released_activation_never_regains_live_authority() {
     for adopted in [true, false] {
         let mut f = if adopted {
@@ -1600,24 +1383,6 @@ fn readers_after_a_release() {
     retirement_settle(&mut f, 10, Some(covered)).unwrap();
     let key = f.key.clone();
     let binding = f.binding.clone();
-    let bootstrap_tip = |f: &Fixture| {
-        let held = f.handle.registration.lock().unwrap();
-        let input = NativeRestoreFence {
-            point: crate::live_update_application::NativeRestoreSelection {
-                journal_cursor: 0,
-                receipt_digest: f.binding.lineage_claim_id.clone(),
-            },
-            operation_id: "restore".into(),
-            relay_database_namespace: "namespace".into(),
-            old_binding: f.binding.clone(),
-            host_id: "host".into(),
-            new_fence: 1,
-            origin: RestoreDeliveryOrigin::Bootstrap { id: "bootstrap".into() },
-            terminal: None,
-            applied_sequence: 0,
-        };
-        f.store.read_with(|conn| super::super::restore_fence::applied_tip(conn, &held, &input))
-    };
     let append = |f: &mut Fixture, max_pending_bytes: i64| {
         owner_outbox::append(
             &mut f.store,
@@ -1657,38 +1422,11 @@ fn readers_after_a_release() {
             })
             .unwrap()
     };
-    assert!(matches!(bootstrap_tip(&f), Err(ApplicationError::Conflict)));
     assert_eq!(held(&f), (true, true, false, true));
     assert!(matches!(append(&mut f, 1), Err(owner_outbox::OwnerOutboxError::InvalidInput(_))));
     assert!(refuse(&mut f).is_err());
     assert!(matches!(observe(&mut f), Err(owner_outbox::OwnerOutboxError::ParentMismatch)));
     release_through(&mut f, 10).unwrap();
-    let (binding_json, host) = (
-        serde_json::to_string(&f.binding).unwrap(),
-        serde_json::to_string(&retirement_host()).unwrap(),
-    );
-    f.store
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "INSERT INTO live_device_bootstraps(relay_database_namespace,workspace_id,main_version_id,object_id,
-                    lineage_claim_id,bootstrap_id,bootstrap_moment_id,baseline_moment_relay_sequence,
-                    baseline_registered_at_ms,baseline_digest,baseline_byte_length,projected_markdown_digest,
-                    projected_markdown_byte_length,binding_json,host_coordinate_json,local_ydoc_sequence)
-                 VALUES ('namespace','workspace','main','object',?1,'bootstrap','original',1,3,?1,?2,?3,?4,?5,?6,0)",
-                params![
-                    f.binding.lineage_claim_id,
-                    f.cut.baseline_bytes.len() as i64,
-                    f.cut.source_digest,
-                    f.cut.source_byte_length,
-                    binding_json,
-                    host
-                ],
-            )
-            .map_err(write_sql)
-        })
-        .unwrap();
-    assert!(matches!(bootstrap_tip(&f), Err(ApplicationError::Conflict)));
-    write(&mut f, "DELETE FROM live_device_bootstraps");
     // Its carried delivery keeps coverage accepted-only and its budget
     // retained. Ordinary ownership sees no current owner, and enrollment
     // still refuses the lineage its owner adopted.
