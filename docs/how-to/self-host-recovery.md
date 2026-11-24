@@ -105,6 +105,15 @@ If SQLite journals remain after an unclean shutdown, backup refuses before copyi
 Try a normal start and clean stop only if continuity permits it.
 Otherwise, preserve a private deployment archive for further recovery work.
 
+Do not open the stopped relay database with another tool before a backup.
+Even a read-only open, such as `sqlite3 -readonly`, leaves an empty `-wal` file beside the database.
+Backup then refuses as it does after an unclean shutdown.
+To read a stopped relay database, open it as immutable, which leaves no file behind:
+
+```sh
+sqlite3 'file:/path/to/sync-relay.sqlite?immutable=1'
+```
+
 Use `--env-path PATH` for a different environment file.
 Use `--compose-file PATH` for each additional Compose override.
 Use `--project-name NAME` if your deployment overrides the Compose project name.
