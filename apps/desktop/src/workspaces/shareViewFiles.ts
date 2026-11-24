@@ -97,6 +97,8 @@ export interface ResolvedShareViewFilesTarget {
   grantedSelector: unknown;
   /** A joined workspace's stored reach, as the registry holds it. */
   reach?: unknown;
+  /** The copy has no identity to send with yet, so it takes no Edit. */
+  editingNotReady?: true;
   ended: boolean;
   relayUrl?: string | null;
   recipientEmail?: string | null;
@@ -451,6 +453,7 @@ function targetScope(target: ResolvedShareViewFilesTarget) {
         grantedSelector: target.grantedSelector,
         ended: target.ended,
         ...(target.reach === undefined ? {} : { reach: target.reach }),
+        ...(target.editingNotReady ? { editingNotReady: true } : {}),
       },
       null,
     ) ?? { access: null, ended: true }
@@ -811,6 +814,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
         store,
         pinnedSelector: target.grantedSelector,
         reach: target.reach,
+        editingNotReady: target.editingNotReady,
         shareId: target.shareId,
         ended: target.ended,
         paths: divergenceScopes,
@@ -960,6 +964,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
       store,
       pinnedSelector: target.grantedSelector,
       reach: target.reach,
+      editingNotReady: target.editingNotReady,
       shareId: target.shareId,
       ended: target.ended,
       workspaceLease: lease,
@@ -1144,6 +1149,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
           store: dependencies.openStore(target),
           pinnedSelector: target.grantedSelector,
           reach: target.reach,
+          editingNotReady: target.editingNotReady,
           shareId: target.shareId,
           ended: target.ended,
           workspaceLease: lease,
