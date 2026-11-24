@@ -248,6 +248,23 @@ export function shareViewSendsFiles(
   return highest === "edit";
 }
 
+// A membership's copy sends with an identity it records once its levels list
+// Edit. Until then it is marked editingNotReady, and every write gate gives it
+// View where it would give Edit. A copy keeps waiting when its levels change,
+// and starts to wait when they first list Edit.
+export function membershipWaitsToSend(
+  before:
+    | { grantedSelector?: unknown; reach?: unknown; editingNotReady?: unknown }
+    | null
+    | undefined,
+  after: { grantedSelector?: unknown; reach?: unknown },
+): boolean {
+  if (recordedShareSelector(after.grantedSelector)?.wholeWorkspace !== true) return false;
+  return (
+    shareViewSendsFiles(after) && (before?.editingNotReady === true || !shareViewSendsFiles(before))
+  );
+}
+
 export function shareViewIdentitySelector(input: {
   shareView:
     | {

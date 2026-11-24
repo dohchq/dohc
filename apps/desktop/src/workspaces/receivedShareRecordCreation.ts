@@ -58,6 +58,7 @@ export async function createReceivedShareRecord(
       recipientUserId: resolved.recipientUserId,
       grantedSelector: resolved.grantedSelector,
       ...(resolved.reach === undefined ? {} : { reach: resolved.reach }),
+      ...(resolved.editingNotReady ? { editingNotReady: true } : {}),
     },
     null,
   );
