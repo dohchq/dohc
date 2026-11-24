@@ -837,6 +837,51 @@ fn removal_deletes(_name: &str) -> bool {
     false
 }
 
+fn projection_writes_in_moment_order(
+    store: &EngineStore,
+    workspace_id: &str,
+    mut jobs: Vec<MaterializationJob>,
+) -> Result<Vec<MaterializationJob>, RuntimeError> {
+    let slots = store.read_with(|conn| {
+        let mut slots: std::collections::HashMap<(String, String), Vec<usize>> = Default::default();
+        for (index, job) in jobs.iter().enumerate() {
+            let Some(moment_id) = job
+                .job_id
+                .strip_prefix("ydoc-mat_")
+                .filter(|_| job.operation == MaterializationOperation::Write)
+            else {
+                continue;
+            };
+            let object_id: Option<String> = conn
+                .query_row(
+                    "SELECT m.object_id FROM moments m JOIN snapshots s \
+                     ON s.workspace_id = m.workspace_id AND s.version_id = m.version_id \
+                     AND s.object_id = m.object_id \
+                     WHERE m.workspace_id = ?1 AND m.moment_id = ?2 AND s.path = ?3",
+                    params![workspace_id, moment_id, job.target_path],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(StorageError::corrupt_public)?;
+            if let Some(object_id) = object_id {
+                slots
+                    .entry((job.target_path.clone(), object_id))
+                    .or_default()
+                    .push(index);
+            }
+        }
+        Ok::<_, RuntimeError>(slots)
+    })?;
+    for indexes in slots.into_values().filter(|indexes| indexes.len() > 1) {
+        let mut writes: Vec<_> = indexes.iter().map(|&index| jobs[index].clone()).collect();
+        writes.sort_by_key(|job| job.target_generation);
+        for (&index, job) in indexes.iter().zip(writes) {
+            jobs[index] = job;
+        }
+    }
+    Ok(jobs)
+}
+
 /// Whether every entry in the folder at `rel`, at any depth, is a folder or a
 /// regular file that goes: one whose path `cleared` accepts, or one the
 /// folder removal deletes itself, which is Finder's files such as
@@ -1088,7 +1133,9 @@ fn replay_materializations(
                 None => !job.job_id.starts_with(super::rebuild::REBUILD_JOB_PREFIX),
             }
     });
-    let jobs = secret_alias_deletes_first(switch_parent_deletes_first(jobs));
+    let jobs = secret_alias_deletes_first(switch_parent_deletes_first(
+        projection_writes_in_moment_order(store, scope.workspace_id, jobs)?,
+    ));
     // Filter small replays in SQL; cache the full version only for larger batches.
     let cache_all_paths = jobs
         .iter()
@@ -1109,6 +1156,7 @@ fn replay_materializations(
         let mut secret_key: Option<SecretDataKey> = None;
         // Writes this replay cancelled as superseded, before it reached them.
         let mut superseded: HashSet<String> = HashSet::new();
+        let mut stopped_projection_paths: HashSet<String> = HashSet::new();
         // Whether the workspace is a hosted replica, read at the first
         // projection write.
         let mut is_hosted: Option<bool> = None;
@@ -1503,6 +1551,10 @@ fn replay_materializations(
                     continue;
                 }
             }
+            if projection_write && stopped_projection_paths.contains(&job.target_path) {
+                summary.failed += 1;
+                continue;
+            }
             if let Some(recorder) = scope.self_writes {
                 recorder.record(scope.workspace_id, &job.target_path, &job.content_sha256);
             }
@@ -1536,6 +1588,17 @@ fn replay_materializations(
             ) && let Some(recorder) = scope.self_writes
             {
                 recorder.retract(scope.workspace_id, &job.target_path, &job.content_sha256);
+            }
+            if projection_write
+                && !matches!(
+                    outcome,
+                    Ok(JobOutcome::Completed
+                        | JobOutcome::AlreadyMaterialized
+                        | JobOutcome::Conflict
+                        | JobOutcome::Superseded)
+                )
+            {
+                stopped_projection_paths.insert(job.target_path.clone());
             }
             match outcome {
                 Ok(JobOutcome::Parked) => summary.parked += 1,
