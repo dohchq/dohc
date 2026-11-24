@@ -1,5 +1,4 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
@@ -210,16 +209,6 @@ export async function spawnSyncRelay(input: {
     await stop();
     throw error;
   });
-  try {
-    await requireOwnerRestoreList(baseUrl);
-  } catch (error) {
-    await stop();
-    throw new Error(
-      `sync relay failed its startup check ${startupStatus()}\nstdout:\n${stdout}\nstderr:\n${stderr}`,
-      { cause: error },
-    );
-  }
-
   const port = Number(new URL(baseUrl).port);
   return {
     baseUrl,
@@ -244,31 +233,6 @@ export async function reserveRelayPort(): Promise<number> {
   );
   if (!address || typeof address === "string") throw new Error("No relay port reserved.");
   return address.port;
-}
-
-// An owner's list of unfinished restores reads the deployment's history. A relay without one answers 500.
-async function requireOwnerRestoreList(baseUrl: string): Promise<void> {
-  const workspaceId = randomUUID();
-  const headers = {
-    authorization: "Bearer test:relay-startup-check",
-    "content-type": "application/json",
-  };
-  // A hang guard: a relay that takes the requests and never answers fails startup, which stops it.
-  const signal = AbortSignal.timeout(60_000);
-  const claim = await fetch(`${baseUrl}/sync/workspaces`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ workspaceId }),
-    signal,
-  });
-  if (!claim.ok)
-    throw new Error(`Claiming a workspace answered ${claim.status}: ${await claim.text()}`);
-  const restores = await fetch(`${baseUrl}/sync/${workspaceId}/live-restores/unfinished`, {
-    headers,
-    signal,
-  });
-  if (restores.status !== 200)
-    throw new Error(`Unfinished restores answered ${restores.status}: ${await restores.text()}`);
 }
 
 async function initializeRelayDeployment(args: string[]): Promise<void> {

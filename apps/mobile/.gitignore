@@ -5,3 +5,4 @@
 *.aab
 *.ipa
 src/*.generated.ts
+/modules/*/android/build/

@@ -101,7 +101,6 @@ import {
   RevokeRelayShareGrantResult,
 } from "./bridgeContract";
 import type { OperationTable } from "./operationTable";
-import { OwnerRestoreRequest, OwnerRestoreActionResponse } from "./ownerRestoreContract";
 
 export const shareHandoffOperations = {
   getShareHandoffStatus: {
@@ -295,25 +294,6 @@ export const sharedChannelOperations = {
 } as const satisfies OperationTable;
 
 export const relayShareOperations = {
-  ownerRestore: {
-    capabilityId: "share.live.restore",
-    channel: "desktop:owner-restore",
-    scope: "workspace",
-    guard: "active-workspace",
-    inactiveMessage: "Sharing stopped because this window changed workspaces.",
-    payload: OwnerRestoreRequest,
-    result: z.union([
-      OwnerRestoreActionResponse.options,
-      OwnerRestoreActionResponse.plan,
-      // A pending review fits prepare's shape too, so review goes first to keep its owner.
-      OwnerRestoreActionResponse.begin,
-      OwnerRestoreActionResponse.review,
-      OwnerRestoreActionResponse.prepare,
-      OwnerRestoreActionResponse.confirm,
-      OwnerRestoreActionResponse.decline,
-      OwnerRestoreActionResponse.unfinished,
-    ]),
-  },
   listOwnerLiveDocuments: {
     capabilityId: "share.live.documents.list",
     channel: "desktop:list-owner-live-documents",

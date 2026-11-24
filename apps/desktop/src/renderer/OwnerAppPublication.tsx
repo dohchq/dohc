@@ -33,6 +33,7 @@ import { ipcErrorMessage } from "./ipcError";
 import { Overlay } from "./Overlay";
 import { OwnerAppResponses } from "./OwnerAppResponses";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
+import { CopyButton } from "./ui/CopyButton";
 import { IconButton, Pill, PrimaryButton, SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { syncNamesServer } from "./workbench/WorkspaceSyncStatus";
@@ -52,6 +53,28 @@ const responses = (count: number) => `${count} ${count === 1 ? "response" : "res
 const unconfirmedResponses = (count: number) => `${responses(count)} not yet confirmed`;
 const unconfirmedRemoval = (count: number) =>
   `dohc removed this app's approval but has not confirmed whether ${responses(count)} ${count === 1 ? "was" : "were"} saved.`;
+
+const PUBLICATION_ID = /^[a-f0-9]{64}$/;
+const APP_LINK_SECRET = {
+  what: "the app link",
+  again: "Open Review app to copy it again.",
+} as const;
+
+export function appLinkUrl(
+  shareUrl: string | null | undefined,
+  publicationId: string,
+): string | null {
+  if (!shareUrl || !PUBLICATION_ID.test(publicationId)) return null;
+  let url: URL;
+  try {
+    url = new URL(shareUrl);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  url.searchParams.set("app", publicationId);
+  return url.toString();
+}
 
 /** The local launcher answers with a loopback address only. Anything else never reaches the browser. */
 export function localLaunchUrl(raw: string): string | null {
@@ -1056,6 +1079,20 @@ function PublicationDialog(
   // Share links show once the server returns this app's publications. It stays hidden when the workspace is not synced,
   // the server does not publish apps here, or the sync status reports the server unreachable. Any other failure keeps
   // the label with one line and Try again, which stays while it reloads. Publishing on a link never needs approval here.
+  const publicationAppUrl = (publication: Publication): string | null => {
+    if (
+      publication.manifestUnavailable ||
+      publication.appRoot !== props.appRoot ||
+      !publication.active ||
+      publication.operatorTakedown ||
+      !publication.linkCurrent
+    )
+      return null;
+    const match = links.find(
+      (link) => link.shareId === publication.shareId && link.grantId === publication.grantId,
+    );
+    return appLinkUrl(match?.url, publication.publicationId);
+  };
   const linkRows = publications.filter(
     (publication) => publication.active || publication.operatorTakedown,
   );
@@ -1320,39 +1357,52 @@ function PublicationDialog(
                     </div>
                   ) : (
                     <ul className="m-0 list-none divide-y divide-line rounded-lg border border-line bg-bg p-0">
-                      {linkRows.map((publication) => (
-                        <li
-                          key={publication.publicationId}
-                          className="flex items-center gap-2 px-3 py-2 text-[13px]"
-                        >
-                          <LinkIcon size={12} aria-hidden className="shrink-0 text-muted" />
-                          <span
-                            className={`min-w-0 flex-1 truncate ${publication.operatorTakedown || !publication.linkCurrent ? "text-warning" : "text-ink"}`}
+                      {linkRows.map((publication) => {
+                        const directAppUrl = publicationAppUrl(publication);
+                        return (
+                          <li
+                            key={publication.publicationId}
+                            className="flex items-center gap-2 px-3 py-2 text-[13px]"
                           >
-                            {publication.operatorTakedown
-                              ? "Disabled by server operator"
-                              : !publication.linkCurrent
-                                ? "Link changed"
-                                : "Published on a share link"}
-                          </span>
-                          <span className="shrink-0 text-[12px] text-muted">
-                            Link {publication.grantId.slice(0, 8)}
-                          </span>
-                          {publication.active && !publication.operatorTakedown ? (
-                            <SecondaryButton
-                              size="row"
-                              disabled={!!busy || responsesBusy}
-                              aria-label={`Unpublish ${publication.publicationId}`}
-                              onClick={() => setPendingWithdraw(publication)}
+                            <LinkIcon size={12} aria-hidden className="shrink-0 text-muted" />
+                            <span
+                              className={`min-w-0 flex-1 truncate ${publication.operatorTakedown || !publication.linkCurrent ? "text-warning" : "text-ink"}`}
                             >
-                              {busy === "withdraw" &&
-                              busyPublicationId === publication.publicationId
-                                ? "Unpublishing…"
-                                : "Unpublish"}
-                            </SecondaryButton>
-                          ) : null}
-                        </li>
-                      ))}
+                              {publication.operatorTakedown
+                                ? "Disabled by server operator"
+                                : !publication.linkCurrent
+                                  ? "Link changed"
+                                  : "Published on a share link"}
+                            </span>
+                            <span className="shrink-0 text-[12px] text-muted">
+                              Link {publication.grantId.slice(0, 8)}
+                            </span>
+                            {directAppUrl ? (
+                              <CopyButton
+                                key={directAppUrl}
+                                size="row"
+                                label="Copy app link"
+                                sensitive={APP_LINK_SECRET}
+                                disabled={!!busy || responsesBusy}
+                                getText={() => directAppUrl}
+                              />
+                            ) : null}
+                            {publication.active && !publication.operatorTakedown ? (
+                              <SecondaryButton
+                                size="row"
+                                disabled={!!busy || responsesBusy}
+                                aria-label={`Unpublish ${publication.publicationId}`}
+                                onClick={() => setPendingWithdraw(publication)}
+                              >
+                                {busy === "withdraw" &&
+                                busyPublicationId === publication.publicationId
+                                  ? "Unpublishing…"
+                                  : "Unpublish"}
+                              </SecondaryButton>
+                            ) : null}
+                          </li>
+                        );
+                      })}
                       <li className="flex items-center gap-2 px-3 py-2 text-[13px]">
                         {linkRows.length === 0 ? (
                           <>
@@ -1641,128 +1691,142 @@ function PublicationDialog(
                     <p className="mb-0 text-[12px] text-muted">No publications.</p>
                   ) : (
                     <ul className="m-0 mt-3 list-none space-y-3 p-0">
-                      {publications.map((publication) => (
-                        <li
-                          key={publication.publicationId}
-                          className="flex items-center justify-between gap-3"
-                        >
-                          <div className="min-w-0 text-[12px] text-muted">
-                            <p className="m-0 break-all">
-                              Link {publication.grantId.slice(0, 8)} ·{" "}
-                              {publication.operatorTakedown
-                                ? "Disabled by server operator"
-                                : !publication.linkCurrent
-                                  ? "Link changed"
-                                  : publication.active
-                                    ? "Published"
-                                    : "Unpublished"}
-                            </p>
-                            {publication.operatorTakedown ? (
-                              <>
-                                <p className="m-0 break-words whitespace-pre-wrap text-warning">
-                                  {publication.operatorTakedown.reason}
-                                </p>
-                                <p className="m-0">
-                                  Contact the server operator about this publication.
-                                </p>
-                              </>
-                            ) : null}
-                            {!publication.operatorTakedown && !publication.linkCurrent ? (
-                              <p className="m-0 text-warning">
-                                This publication is unavailable. Choose a current link below and
-                                review the app again.
+                      {publications.map((publication) => {
+                        const directAppUrl = publicationAppUrl(publication);
+                        return (
+                          <li
+                            key={publication.publicationId}
+                            className="flex items-center justify-between gap-3"
+                          >
+                            <div className="min-w-0 text-[12px] text-muted">
+                              <p className="m-0 break-all">
+                                Link {publication.grantId.slice(0, 8)} ·{" "}
+                                {publication.operatorTakedown
+                                  ? "Disabled by server operator"
+                                  : !publication.linkCurrent
+                                    ? "Link changed"
+                                    : publication.active
+                                      ? "Published"
+                                      : "Unpublished"}
                               </p>
-                            ) : null}
-                            {publication.manifestUnavailable ? (
-                              <>
+                              {publication.operatorTakedown ? (
+                                <>
+                                  <p className="m-0 break-words whitespace-pre-wrap text-warning">
+                                    {publication.operatorTakedown.reason}
+                                  </p>
+                                  <p className="m-0">
+                                    Contact the server operator about this publication.
+                                  </p>
+                                </>
+                              ) : null}
+                              {!publication.operatorTakedown && !publication.linkCurrent ? (
                                 <p className="m-0 text-warning">
-                                  Source details unavailable. This publication may belong to another
-                                  app.
+                                  This publication is unavailable. Choose a current link below and
+                                  review the app again.
                                 </p>
-                                <p className="m-0 break-all font-mono">
-                                  {publication.publicationId}
+                              ) : null}
+                              {publication.manifestUnavailable ? (
+                                <>
+                                  <p className="m-0 text-warning">
+                                    Source details unavailable. This publication may belong to
+                                    another app.
+                                  </p>
+                                  <p className="m-0 break-all font-mono">
+                                    {publication.publicationId}
+                                  </p>
+                                </>
+                              ) : (
+                                <p
+                                  className="m-0 truncate font-mono"
+                                  title={publication.sourceRevision}
+                                >
+                                  Source {publication.sourceRevision.slice(0, 12)}
                                 </p>
-                              </>
-                            ) : (
-                              <p
-                                className="m-0 truncate font-mono"
-                                title={publication.sourceRevision}
-                              >
-                                Source {publication.sourceRevision.slice(0, 12)}
-                              </p>
-                            )}
-                            {publication.collectionCapability === "unavailable" ? (
-                              <p className="mb-0 mt-1 text-warning">
-                                Collection access details unavailable. You can still revoke access.
-                              </p>
-                            ) : publication.collectionCapability ? (
-                              <details className="mt-1">
-                                <summary className="cursor-pointer">
-                                  Approved Collection access
-                                </summary>
-                                <div className="mt-2">
-                                  <CollectionPermissionCard
-                                    capability={publication.collectionCapability}
-                                    compact
-                                  />
-                                </div>
-                              </details>
-                            ) : publication.datasetCapability ? null : (
-                              <p className="mb-0 mt-1">No Collection access</p>
-                            )}
-                            {publication.datasetCapability === "unavailable" ? (
-                              <p className="mb-0 mt-1 text-warning">
-                                Collection access details unavailable.
-                              </p>
-                            ) : publication.datasetCapability ? (
-                              <PublishedDatasetDetails
-                                reportError={reportError}
-                                workspaceId={props.workspaceId}
-                                capability={publication.datasetCapability}
-                              />
-                            ) : null}
-                          </div>
-                          <div className="flex shrink-0 flex-col items-end gap-2">
-                            {publication.collectionCapability ? (
-                              <SecondaryButton
-                                disabled={!!busy || responsesBusy}
-                                aria-label={`Revoke Collection access ${publication.publicationId}`}
-                                onClick={() => setPendingRevoke(publication)}
-                              >
-                                {busy === "revokeCollection" &&
-                                busyPublicationId === publication.publicationId
-                                  ? "Revoking…"
-                                  : "Revoke Collection access"}
-                              </SecondaryButton>
-                            ) : null}
-                            {publication.active ? (
-                              <SecondaryButton
-                                disabled={!!busy || responsesBusy}
-                                aria-label={`Unpublish ${publication.publicationId}`}
-                                onClick={() => setPendingWithdraw(publication)}
-                              >
-                                {busy === "withdraw" &&
-                                busyPublicationId === publication.publicationId
-                                  ? "Unpublishing…"
-                                  : "Unpublish"}
-                              </SecondaryButton>
-                            ) : publication.operatorTakedown ||
-                              !publication.linkCurrent ? null : publication.manifestUnavailable ? (
-                              <span className="text-[12px] text-muted">Source unavailable</span>
-                            ) : (
-                              <SecondaryButton
-                                disabled={!!busy || responsesBusy}
-                                onClick={() => void reviewReactivation(publication)}
-                              >
-                                {busy === "prepare" &&
-                                busyPublicationId === publication.publicationId
-                                  ? "Loading revision…"
-                                  : "Review and republish"}
-                              </SecondaryButton>
-                            )}
-                          </div>
-                        </li>
-                      ))}
+                              )}
+                              {publication.collectionCapability === "unavailable" ? (
+                                <p className="mb-0 mt-1 text-warning">
+                                  Collection access details unavailable. You can still revoke
+                                  access.
+                                </p>
+                              ) : publication.collectionCapability ? (
+                                <details className="mt-1">
+                                  <summary className="cursor-pointer">
+                                    Approved Collection access
+                                  </summary>
+                                  <div className="mt-2">
+                                    <CollectionPermissionCard
+                                      capability={publication.collectionCapability}
+                                      compact
+                                    />
+                                  </div>
+                                </details>
+                              ) : publication.datasetCapability ? null : (
+                                <p className="mb-0 mt-1">No Collection access</p>
+                              )}
+                              {publication.datasetCapability === "unavailable" ? (
+                                <p className="mb-0 mt-1 text-warning">
+                                  Collection access details unavailable.
+                                </p>
+                              ) : publication.datasetCapability ? (
+                                <PublishedDatasetDetails
+                                  reportError={reportError}
+                                  workspaceId={props.workspaceId}
+                                  capability={publication.datasetCapability}
+                                />
+                              ) : null}
+                            </div>
+                            <div className="flex shrink-0 flex-col items-end gap-2">
+                              {directAppUrl ? (
+                                <CopyButton
+                                  key={directAppUrl}
+                                  size="row"
+                                  label="Copy app link"
+                                  sensitive={APP_LINK_SECRET}
+                                  disabled={!!busy || responsesBusy}
+                                  getText={() => directAppUrl}
+                                />
+                              ) : null}
+                              {publication.collectionCapability ? (
+                                <SecondaryButton
+                                  disabled={!!busy || responsesBusy}
+                                  aria-label={`Revoke Collection access ${publication.publicationId}`}
+                                  onClick={() => setPendingRevoke(publication)}
+                                >
+                                  {busy === "revokeCollection" &&
+                                  busyPublicationId === publication.publicationId
+                                    ? "Revoking…"
+                                    : "Revoke Collection access"}
+                                </SecondaryButton>
+                              ) : null}
+                              {publication.active ? (
+                                <SecondaryButton
+                                  disabled={!!busy || responsesBusy}
+                                  aria-label={`Unpublish ${publication.publicationId}`}
+                                  onClick={() => setPendingWithdraw(publication)}
+                                >
+                                  {busy === "withdraw" &&
+                                  busyPublicationId === publication.publicationId
+                                    ? "Unpublishing…"
+                                    : "Unpublish"}
+                                </SecondaryButton>
+                              ) : publication.operatorTakedown ||
+                                !publication.linkCurrent ? null : publication.manifestUnavailable ? (
+                                <span className="text-[12px] text-muted">Source unavailable</span>
+                              ) : (
+                                <SecondaryButton
+                                  disabled={!!busy || responsesBusy}
+                                  onClick={() => void reviewReactivation(publication)}
+                                >
+                                  {busy === "prepare" &&
+                                  busyPublicationId === publication.publicationId
+                                    ? "Loading revision…"
+                                    : "Review and republish"}
+                                </SecondaryButton>
+                              )}
+                            </div>
+                          </li>
+                        );
+                      })}
                     </ul>
                   )}
                 </div>

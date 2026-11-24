@@ -84,7 +84,6 @@ export function startDeviceNativeTransport(options: {
           workspaces: config.workspaces,
           ingress: config.ingress,
           settlement: config.settlement,
-          restore: config.restore,
           sync: config.sync,
         }),
         { flag: "wx", mode: 0o600 },

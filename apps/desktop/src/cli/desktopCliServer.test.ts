@@ -284,6 +284,7 @@ function fixture(
         restorable: [],
         skipped: [],
       })),
+      inboxList: vi.fn(async () => ({ exists: false, items: [], hasMore: false })),
       workspaceSearch: vi.fn(async () => ({
         versionId: "main",
         results: [],

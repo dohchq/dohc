@@ -80,8 +80,7 @@ export interface LiveRooms {
   join(host: NamedFrameRoomHost, options?: { readonly owner?: boolean }): NamedFrameHostSession;
   /**
    * Saves every edit the note's rooms hold, taking no new ones until `then` ends, then ends the
-   * rooms: for a step that closes the note to them, such as a restore's fence or the owner's
-   * Stop. With `whileHosted`, the rooms stay open if the note is still hosted after `then`, as
+   * rooms: for a step that closes the note to them, such as the owner's Stop. With `whileHosted`, the rooms stay open if the note is still hosted after `then`, as
    * when one person's access ends and another Edit grant still covers the note. A refused save
    * pauses the note, which keeps its edits in the copy, and `then` still runs. Throws
    * `LiveRoomUnsavedError` without running `then` if the edits could not be saved yet.

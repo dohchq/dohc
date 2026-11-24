@@ -2,7 +2,10 @@ import {
   createLiveBufferBudget,
   LiveConnectionLimitError,
 } from "@dohc/live-session-contract/live-connection";
+import { createHash } from "node:crypto";
 import { afterEach, expect, it } from "vitest";
+import * as Y from "yjs";
+import type { StorageContext } from "./context";
 import {
   cleanupLiveDeliveryFixtures,
   registered,
@@ -71,6 +74,42 @@ it("refuses corrupted stored snapshots, nonempty seed coverage and deletion rang
       );
       expect(f.storage.readLiveUpdateJournalCut({ document }).kind).toBe("cut");
     }
+  } finally {
+    f.close();
+  }
+});
+
+it("refuses a journal row a shared restore wrote", () => {
+  const f = registered({ deployment: true });
+  try {
+    const document = f.input.evidence.document;
+    const update = f.update("status", "restored");
+    expect(f.storage.commitLiveUpdateJournal(f.capture(update, "restored-1")).result.kind).toBe(
+      "accepted",
+    );
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, f.input.baselineBytes);
+    Y.applyUpdate(doc, update);
+    const checkpoint = Y.encodeStateAsUpdate(doc);
+    doc.destroy();
+    const { db } = f.storage as StorageContext;
+    const mark = (restored: boolean) => {
+      db.exec("PRAGMA foreign_keys = OFF");
+      db.prepare(
+        "UPDATE sync_relay_live_update_journal SET restore_operation_id=?,validation_checkpoint_sha256=?,validation_checkpoint_bytes=?",
+      ).run(
+        ...(restored
+          ? ["restore-1", createHash("sha256").update(checkpoint).digest("hex"), checkpoint]
+          : [null, null, null]),
+      );
+      db.exec("PRAGMA foreign_keys = ON");
+    };
+    mark(true);
+    expect(() => f.storage.readLiveUpdateJournalCut({ document })).toThrow(
+      "live update journal is damaged",
+    );
+    mark(false);
+    expect(f.storage.readLiveUpdateJournalCut({ document }).kind).toBe("cut");
   } finally {
     f.close();
   }

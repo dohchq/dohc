@@ -212,7 +212,7 @@ async function fixture() {
   context.tx(() => {
     context.db
       .prepare(`INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,enabled,
-      created_at_ms,updated_at_ms,demand_at_ms,accounted_bytes) VALUES (?,?,?,?,NULL,'epoch','stream',1,1,1,1,64)`)
+      created_at_ms,updated_at_ms,demand_at_ms,accounted_bytes,generation,state,since_ms,changed_by) VALUES (?,?,?,?,NULL,'epoch','stream',1,1,1,1,64,1,'live',1,'server')`)
       .run(scope.workspaceId, binding.objectId, binding.currentPath, OWNER);
   });
 
@@ -991,7 +991,9 @@ it.each([null, "pause", "retire"] as const)(
     const socket = await editing(f, helper);
     const renew = vi.spyOn(f.storage, "renewPersonalSessionDemand");
     if (ownerStop)
-      f.raw.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=?`).run(ownerStop);
+      f.raw
+        .prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=?,state='off',reason=?`)
+        .run(ownerStop, ownerStop === "pause" ? "paused" : "stopped");
     socket.ws.close();
     await vi.waitFor(() => expect(renew).toHaveBeenCalledOnce());
     expect(renew.mock.results[0]).toEqual({ type: "return", value: ownerStop === null });

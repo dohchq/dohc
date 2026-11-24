@@ -327,6 +327,62 @@ describe("steps a share stops", () => {
     ).resolves.toEqual({ stops: [] });
     expect(f.shareImpact).not.toHaveBeenCalled();
   });
+
+  it("includes active incoming webhooks that a View share would pause", async () => {
+    const incomingWebhookShareStops = vi.fn(async () => [
+      {
+        webhookId: "whk_aaaaaaaaaaaaaaaaaaaaaaaa",
+        name: "iPhone Capture",
+        collectionPath: "Inbox",
+      },
+    ]);
+    const handlers = new Map<string, (event: { sender: string }, payload: unknown) => unknown>();
+    registerCollectionAutomationsIpc({
+      registerHandler: (channel, handler) => handlers.set(channel, handler),
+      assertTrustedSender: () => undefined,
+      withRendererWorkspaceOperation: async (_sender, _workspaceId, _message, work) =>
+        work({
+          workspace: { workspaceId: "ws-1", rootPath: "/ws-1" },
+          state: {
+            collectionAutomations: {
+              shareImpact: vi.fn(async () => []),
+            } as never,
+          },
+        }),
+      sharedViewOf: () => undefined,
+      readText: async () => null,
+      createFile: async () => undefined,
+      writeText: async () => ({ status: "written", contentHash: "h" }),
+      showItemInFolder: () => undefined,
+      deletePath: async () => undefined,
+      watchPress: () => undefined,
+      serverRuns: {} as never,
+      relayUnreachable: () => false,
+      incomingWebhookShareStops,
+    });
+    const handler = handlers.get(CHANNELS.automationShareImpact)!;
+    await expect(
+      handler(
+        { sender: "win-1" },
+        {
+          workspaceId: "ws-1",
+          recipientEmail: null,
+          paths: ["Inbox"],
+          access: "view",
+        },
+      ),
+    ).resolves.toEqual({
+      stops: [],
+      pausedWebhooks: [
+        {
+          webhookId: "whk_aaaaaaaaaaaaaaaaaaaaaaaa",
+          name: "iPhone Capture",
+          collectionPath: "Inbox",
+        },
+      ],
+    });
+    expect(incomingWebhookShareStops).toHaveBeenCalledWith("ws-1", ["Inbox"]);
+  });
 });
 
 describe("field marks", () => {

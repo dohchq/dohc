@@ -2,11 +2,7 @@ import { createHash } from "node:crypto";
 import type { StorageContext } from "./context";
 import type { SqliteDb, SyncRelayLogRow } from "./types";
 import { rowToLogRow } from "./rows";
-import {
-  currentServiceHostEnrollments,
-  serviceHostOwnerRetains,
-  enrolledPathCoverage,
-} from "./serviceHostEnrollment";
+import { currentServiceHostEnrollments, enrolledPathCoverage } from "./serviceHostEnrollment";
 import {
   listServiceActivationRetirements,
   type ServiceActivationRetirement,
@@ -127,11 +123,8 @@ function readFeedScope(storage: StorageContext, workspaceId: string): ServiceHos
       departed.add(row.objectId);
     // A Pause cuts reads at once, like a revoked grant, while the enabled
     // enrollment takes the host's settled work until the host releases it.
-    // Recorded demand, or the owner's restore that kept its live session, keeps it shared.
-    else if (
-      row.ownerStop === null &&
-      (row.demandAtMs !== null || covered(row.path) || serviceHostOwnerRetains(storage, row))
-    ) {
+    // Recorded demand keeps it shared.
+    else if (row.ownerStop === null && (row.demandAtMs !== null || covered(row.path))) {
       shared.set(row.objectId, row.path);
     }
   }

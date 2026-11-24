@@ -48,6 +48,8 @@ export interface StoredReachVerdict {
   narrowed?: true;
   /** The former links' evidence this step has already waited for, as "grant#generation". */
   accountedLinks?: readonly string[];
+  /** The exact approval digest shown when an outbound HTTP step hold was issued. */
+  httpApprovalDigest?: string;
   seq: number;
 }
 
@@ -59,6 +61,10 @@ export const StoredReachVerdictSchema = z.object({
   stoppedFor: z.string().nullable(),
   narrowed: z.literal(true).optional(),
   accountedLinks: z.array(z.string().min(1)).optional(),
+  httpApprovalDigest: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/u)
+    .optional(),
   seq: z.number().int().nonnegative(),
   recipient: z
     .object({
@@ -132,7 +138,10 @@ export function mergedReachVerdict(
   return taken;
 }
 
-type Verdict = Pick<StoredReachVerdict, "verdict" | "stoppedFor" | "narrowed" | "accountedLinks">;
+type Verdict = Pick<
+  StoredReachVerdict,
+  "verdict" | "stoppedFor" | "narrowed" | "accountedLinks" | "httpApprovalDigest"
+>;
 
 /**
  * The verdict to keep for one step, given its last one and what the roster
@@ -177,6 +186,7 @@ export function sameReachVerdict(left: Verdict | undefined, right: Verdict): boo
     left?.verdict === right.verdict &&
     left.stoppedFor === right.stoppedFor &&
     left.narrowed === right.narrowed &&
+    left.httpApprovalDigest === right.httpApprovalDigest &&
     (left.accountedLinks ?? []).join("\n") === (right.accountedLinks ?? []).join("\n")
   );
 }

@@ -324,6 +324,7 @@ export function reachPlaces(steps: readonly AutomationStep[], first = 0): number
         step.kind === "find" ||
         step.kind === "post" ||
         step.kind === "wake-agent" ||
+        step.kind === "http" ||
         step.kind === "run" ||
         step.kind === "run-file"
       )

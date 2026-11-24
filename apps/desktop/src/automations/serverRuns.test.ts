@@ -117,3 +117,61 @@ it("carries kept field paths and names from the owner's server", async () => {
   }));
   await expect(server.restore("ws", [], false, "restore-test")).resolves.toEqual(pass);
 });
+
+it("parses server-hosted send-http holds and preserves webhooksSent on Undo", async () => {
+  const hold = {
+    automationId: "collection:obj-tasks#notify",
+    collectionPath: "Tasks",
+    automationName: "Notify",
+    definitionHash: "a".repeat(16),
+    step: "http:0",
+    seq: 2,
+    collection: "Tasks",
+    target: "api.resend.com",
+    action: "send-http" as const,
+    stoppedFor: null,
+    fileUnread: false,
+  };
+  const undone = {
+    status: "undone" as const,
+    reverted: 1,
+    removed: 0,
+    kept: 0,
+    changedSince: 0,
+    missing: 0,
+    irreversible: 0,
+    actions: 0,
+    actionsReversed: 0,
+    deleted: 0,
+    keptChanged: 0,
+    gone: 0,
+    webhooksSent: 2,
+  };
+  const server = createServerRuns(async (_ws, request) => ({
+    status: 200,
+    body: request.action === "holds" ? { ok: true, holds: [hold] } : { ok: true, ...undone },
+    asker: { account: "owner", current: () => true },
+  }));
+  await expect(server.holds("ws")).resolves.toEqual([hold]);
+  await expect(
+    server.undo("ws", { automationId: hold.automationId, claimId: "c1", deletes: null }),
+  ).resolves.toEqual(undone);
+
+  const retryServer = createServerRuns(async () => ({
+    status: 200,
+    body: {
+      ok: true,
+      status: "definition-changed",
+      repeatsMessages: false,
+      repeatsWebhooks: true,
+    },
+    asker: { account: "owner", current: () => true },
+  }));
+  await expect(
+    retryServer.retry("ws", { automationId: hold.automationId, claimId: "c1", startOver: false }),
+  ).resolves.toEqual({
+    status: "definition-changed",
+    repeatsMessages: false,
+    repeatsWebhooks: true,
+  });
+});
