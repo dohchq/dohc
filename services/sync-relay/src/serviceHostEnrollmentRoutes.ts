@@ -562,7 +562,7 @@ export function createServiceHostEnrollmentRoutes(options: {
       !changed(row) &&
       !diverged(row) &&
       (row.note.state === "off"
-        ? document.reason !== "conflict-parent-withheld"
+        ? !storage.hasServiceHostConflictEffect(row)
         : RESUMABLE.has(document.reason ?? ""))
     )
       actions.push("resume");
@@ -897,6 +897,15 @@ export function createServiceHostEnrollmentRoutes(options: {
       }
       const path = input.path as string,
         retained = storage.readServiceHostEnrollment(workspaceId, path);
+      const note = () => {
+        const objectId = storage.objectIdAtPathInVersion({ workspaceId, versionId: "main", path });
+        return (
+          retained ??
+          (objectId === undefined
+            ? null
+            : storage.readServiceHostEnrollmentByObjectId(workspaceId, objectId))
+        );
+      };
       let enabled = false;
       const common = {
         workspaceId,
@@ -915,15 +924,16 @@ export function createServiceHostEnrollmentRoutes(options: {
           row = storage.ensureOwnedLiveDocument({ ...common, intent: "owner-open" });
         } catch (error) {
           if (!(error instanceof LiveHostingRefusal)) throw error;
+          const found = note();
           const refusal = {
-            path: retained?.path ?? path,
-            ...(retained ? { objectId: retained.objectId } : {}),
+            path: found?.path ?? path,
+            ...(found ? { objectId: found.objectId } : {}),
             changed: false,
             ...(error.reason === "paused"
               ? { status: "paused" }
               : { status: "unavailable", reason: error.reason }),
           };
-          return response({ ok: true, ...(retained ? answered(retained, refusal) : refusal) }, 202);
+          return response({ ok: true, ...(found ? answered(found, refusal) : refusal) }, 202);
         }
       } else {
         const held = retained?.ownerUserId === actor.userId ? heldActivation(retained) : undefined;
@@ -934,20 +944,10 @@ export function createServiceHostEnrollmentRoutes(options: {
             ...(held ? { held } : {}),
           });
         } catch (error) {
-          const objectId = storage.objectIdAtPathInVersion({
-            workspaceId,
-            versionId: "main",
-            path,
-          });
-          const note =
-            retained ??
-            (objectId === undefined
-              ? null
-              : storage.readServiceHostEnrollmentByObjectId(workspaceId, objectId));
-          const moved =
-            error instanceof RelayError && error.code === "conflict" && note
-              ? answered(note, { path: note.path, objectId: note.objectId })
-              : undefined;
+          const found = error instanceof RelayError && error.code === "conflict" ? note() : null;
+          const moved = found
+            ? answered(found, { path: found.path, objectId: found.objectId })
+            : undefined;
           if (!moved?.movedTo) throw error;
           return response(
             { ok: false, code: "conflict", error: (error as Error).message, ...moved },

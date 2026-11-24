@@ -832,6 +832,14 @@ function liveDeliveryCopy(
       Icon: AlertTriangle,
     };
   }
+  if (reason === "live-start-failed") {
+    return {
+      title: "Live editing cannot start",
+      body: "The server could not start live editing for a document in this workspace. Your copy and its History are unchanged. Others cannot edit it live. Open Live documents to try again.",
+      recovery: "live-documents",
+      Icon: AlertTriangle,
+    };
+  }
   // Nothing the owner does in dohc continues a server copy that diverged, so
   // nothing offers a Resume. Live documents shows which documents it stopped.
   if (reason === "session-host-diverged") {

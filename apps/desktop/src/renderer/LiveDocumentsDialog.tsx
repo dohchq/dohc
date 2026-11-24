@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import type { LiveNoteRecord } from "@dohc/workspace-contracts/live-note";
 import {
   readLiveStopRefusal,
   liveStopRefusalForRow,
@@ -61,6 +62,7 @@ export type LiveDocumentRow = {
   incident?: string;
   /** The server's document at this path, so Stop and Try again act on it alone. */
   objectId: string;
+  record?: LiveNoteRecord;
   movedTo?: string;
 };
 
@@ -248,7 +250,8 @@ function statusLabel(row: LiveDocumentRow): string {
   if (row.movedTo) return `Moved to ${row.movedTo}`;
   if (row.reason === "document-unavailable") return "File moved or removed";
   if (row.reason === "workspace-changed") return "Workspace changed";
-  if (row.reason === "session-host-refused") return "Stopped by the server";
+  if (row.reason === "session-host-refused")
+    return row.record?.reason === "start-failed" ? "Cannot start" : "Stopped by the server";
   if (row.reason === "session-host-diverged") return "Server copy does not match";
   if (row.reason === "live-document-without-lineage") return "Not started";
   if (row.reason === "live-document-too-large") return "Too large";

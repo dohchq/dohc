@@ -499,11 +499,13 @@ function renderLiveDocuments(
         lineSafe(row.path),
         row.movedTo
           ? `moved to ${lineSafe(row.movedTo)}`
-          : row.reason
-            ? LIVE_REASON_WORDS[row.reason]
-            : row.status === "retired" && row.stopped === false
-              ? "not live"
-              : LIVE_STATUS_WORDS[row.status],
+          : row.reason === "session-host-refused" && row.record?.reason === "start-failed"
+            ? "can't start"
+            : row.reason
+              ? LIVE_REASON_WORDS[row.reason]
+              : row.status === "retired" && row.stopped === false
+                ? "not live"
+                : LIVE_STATUS_WORDS[row.status],
         ...(row.failure ? [`server's reason ${row.failure.word} since ${row.failure.since}`] : []),
         ...(row.canResume && !row.saveOnly ? ["can resume"] : []),
         ...(row.deferredStop

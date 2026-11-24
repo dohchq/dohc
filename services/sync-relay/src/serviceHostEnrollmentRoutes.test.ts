@@ -766,7 +766,9 @@ it.each([0, 1] as const)(
     expect((await (await f.handle(f.request())).json()).documents[0]).toMatchObject({
       reason: "conflict-parent-withheld",
     });
-    expect((await f.stop()).status).toBe(200);
+    const stop = await f.stop();
+    expect(stop.status).toBe(200);
+    expect(await stop.json()).toMatchObject({ status: "retired", actions: [] });
     expect(f.host.holdReason()).toBeUndefined();
     f.storage.releaseServiceHostEnrollment({
       workspaceId: f.binding.workspaceId,
@@ -1688,6 +1690,16 @@ it("answers the owner with each note's record and the actions that work, and a m
     ok: true,
     documents: [{ ...base, status: "retired", stopped: true, ...moved }],
     nextCursor: null,
+  });
+  const reopened = await f.handle(f.request("POST", { path: "docs/renamed.md", open: true }));
+  expect(reopened.status).toBe(202);
+  expect(await reopened.json()).toEqual({
+    ok: true,
+    ...base,
+    changed: false,
+    status: "unavailable",
+    reason: "document-unavailable",
+    ...moved,
   });
   for (const path of [binding.currentPath, "docs/renamed.md"]) {
     const resume = await f.handle(f.request("POST", { path }));

@@ -1768,6 +1768,7 @@ const SYNC_STATUS_BASE_FIELDS = {
       "document-unavailable",
       "workspace-changed",
       "session-host-refused",
+      "live-start-failed",
       "session-host-diverged",
       "live-document-without-lineage",
       "live-edit-unadmitted",

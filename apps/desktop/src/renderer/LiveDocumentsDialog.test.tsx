@@ -427,6 +427,19 @@ describe("LiveDocumentsDialog", () => {
           reason: "session-host-refused",
           canResume: true,
         }),
+        row("docs/start-failed.md", {
+          status: "unavailable",
+          reason: "session-host-refused",
+          canResume: true,
+          record: {
+            generation: 1,
+            state: "off",
+            reason: "start-failed",
+            cause: "failing",
+            since: "2026-11-13T01:00:00.000Z",
+            changedBy: "server",
+          },
+        }),
         row("docs/unopened.md", {
           status: "unavailable",
           reason: "live-document-without-lineage",
@@ -471,6 +484,7 @@ describe("LiveDocumentsDialog", () => {
       "File moved or removed",
       "Workspace changed",
       "Stopped by the server",
+      "Cannot start",
       "Not started",
       "Too large",
       "Server copy does not match",

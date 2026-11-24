@@ -2464,6 +2464,18 @@ describe("server owner peer lifecycle", () => {
       relayDatabaseNamespace: "namespace",
     };
     const refused = { path: "refused.md", status: "unavailable", reason: "session-host-refused" };
+    const startFailed = {
+      ...refused,
+      path: "start-failed.md",
+      record: {
+        generation: 1,
+        state: "off",
+        reason: "start-failed",
+        cause: "failing",
+        since: "2026-11-13T01:00:00.000Z",
+        changedBy: "server",
+      },
+    };
     const unopened = {
       path: "unopened.md",
       status: "unavailable",
@@ -2547,7 +2559,12 @@ describe("server owner peer lifecycle", () => {
       await vi.waitFor(() =>
         expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-history-over-budget"),
       );
-      rows = [...others, refused];
+      rows = [...others, startFailed];
+      f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() =>
+        expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-start-failed"),
+      );
+      rows = [...others, startFailed, refused];
       f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() =>
         expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-refused"),
