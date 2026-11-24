@@ -379,6 +379,7 @@ function PageScreen({ path }: { path: string }) {
                 onMessage={(event) => handleMessage(event.nativeEvent.data, mount)}
                 onError={() => setLostPage("failed")}
                 onContentProcessDidTerminate={() => setLostPage("failed")}
+                onRenderProcessGone={() => setLostPage("failed")}
                 keyboardDisplayRequiresUserAction={false}
                 // WebKit's own bar above the keyboard repeats Done; the header's system Done is the one way out.
                 hideKeyboardAccessoryView
