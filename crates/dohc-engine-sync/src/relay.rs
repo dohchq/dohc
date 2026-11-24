@@ -4983,9 +4983,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
 
     /// Send a whole-workspace share view's own posts in its Groups to the
     /// owner, through the share's append lane. Only a grant with Comment or
-    /// Edit in its Groups or on some file posts: file rules don't lower the
-    /// Group level. A view that never posted has no identity and sends
-    /// nothing.
+    /// Edit in some Group or on some file posts. A view that never posted has
+    /// no identity and sends nothing.
     pub fn push_share_view_groups(
         &self,
         store: &mut EngineStore,
@@ -4995,7 +4994,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
     ) -> Result<SharedChannelPushOutcome, RelayError> {
         if granted.scope != crate::share::ShareScope::Workspace
-            || !(granted.group_level().takes_comments()
+            || !(granted.posts_in_some_group()
                 || granted
                     .highest()
                     .is_some_and(crate::share::ShareAccess::takes_comments))

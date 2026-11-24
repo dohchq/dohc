@@ -457,7 +457,7 @@ describe("workspace members on the roster", () => {
       recipientEmail: `${access}@dohc.test`,
       selector: { kind: "workspace" },
       access,
-      memberReach: { role: "member", level: access, rules: [] },
+      memberReach: { role: "member", level: access, rules: [], groups: [] },
       ...overrides,
     });
   const trip = { path: "Trip", name: "Trip" };
@@ -485,13 +485,13 @@ describe("workspace members on the roster", () => {
         paths: [],
         versionId: null,
         access: "edit",
-        memberReach: { role: "member", level: "edit", rules: [] },
+        memberReach: { role: "member", level: "edit", rules: [], groups: [] },
       },
       {
         paths: [],
         versionId: null,
         access: "view",
-        memberReach: { role: "member", level: "view", rules: [] },
+        memberReach: { role: "member", level: "view", rules: [], groups: [] },
       },
     ]);
     expect(
@@ -519,13 +519,40 @@ describe("workspace members on the roster", () => {
     ).toEqual([{ allowed: true }]);
   });
 
-  it("reaches every Group from a membership, posting at Comment and Edit only", async () => {
-    const roster = await rosterOf([membership("edit"), membership("comment"), membership("view")]);
+  it("reaches every Group from a membership at its level, or at each Group's rule", async () => {
+    const roster = await rosterOf([
+      membership("edit"),
+      membership("comment", {
+        memberReach: {
+          role: "member",
+          level: "comment",
+          rules: [],
+          groups: [
+            ["wire-news", "view"],
+            ["wire-team", null],
+          ],
+        },
+      }),
+      membership("view", {
+        memberReach: { role: "admin", level: "view", rules: [], groups: [] },
+      }),
+    ]);
     if (roster.kind !== "owner") throw new Error("expected an owner roster");
-    expect(roster.grants.map((grant) => grant.chat)).toEqual([
-      { kind: "groups", canPost: true },
-      { kind: "groups", canPost: true },
-      { kind: "groups", canPost: false },
+    expect(roster.grants.map((grant) => [grant.grantId, grant.chat])).toEqual([
+      [
+        "g-comment",
+        {
+          kind: "groups",
+          level: "comment",
+          groups: [
+            ["wire-news", "view"],
+            ["wire-team", null],
+          ],
+        },
+      ],
+      ["g-edit", { kind: "groups", level: "edit", groups: [] }],
+      // An admin posts in every Group at Edit.
+      ["g-view", { kind: "groups", level: "edit", groups: [] }],
     ]);
   });
 
@@ -588,7 +615,7 @@ describe("workspace members on the roster", () => {
     const roster = await rosterOf([
       membership("edit", {
         automationsGeneration: 2,
-        memberReach: { role: "member", level: "edit", rules: [["Budget", "view"]] },
+        memberReach: { role: "member", level: "edit", rules: [["Budget", "view"]], groups: [] },
       }),
     ]);
     expect(

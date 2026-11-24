@@ -432,13 +432,14 @@ Returns `{ ok: true, groups: { kind, id, channelWireId?, name, slug, purpose?, t
 
 ### `dohc_create_group`
 
-Create a Chats group and its folder, as New group does. `name` is the group's name, 1 to 80 characters with a letter or number; its folder is the name as a slug. `purpose` says what the group is for. `type` is posts, chat, or both, the default. A name already taken is refused; find that group with dohc_list_groups. Returns the group's id, name, slug, and kind for dohc_start_group_chat.
+Create a Chats group and its folder, as New group does. `name` is the group's name, 1 to 80 characters with a letter or number; its folder is the name as a slug. `purpose` says what the group is for. `type` is posts, chat, or both, the default. `level` sets what members can do in it as it is made: comment lets them post, view lets them read, none hides it from them. A group made with a level has no folder, and needs a connection. A name already taken is refused; find that group with dohc_list_groups. Returns the group's id, name, slug, and kind for dohc_start_group_chat.
 
 Changes the workspace, so a shared view does not offer it.
 
 - `name`: `string`. Required.
 - `purpose`: `string`
 - `type`: `"posts" | "chat" | "both"`
+- `level`: `"comment" | "view" | "none"`
 
 Returns `{ ok: true, group: { id, name, slug, kind, purpose? } }`.
 
@@ -811,11 +812,11 @@ Returns `{ connectionId }`.
 
 ### `dohc_members`
 
-Do what the Members page does, in a workspace you own or joined: list people, invites, and removed accounts; invite by email (dohc sends no email: tell them to sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); turn the invite link on or off or reset it; or end membership for everyone. The server decides what your role allows: members see names and roles; admins also invite, remove members, let them back in, set the level, and manage the invite link; only the owner changes roles or ends membership. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the person you work for before you remove anyone or end membership.
+Do what the Members page does, in a workspace you own or joined: list people, invites, and removed accounts; invite by email (dohc sends no email: tell them to sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); show or set what members can do in one Group (group is a Group name or id; level comment lets them post, view lets them read, none hides the Group, null removes the Group's own access so it takes the member level; leave level out to read it); set or clear folder access (folder with change containing a workspace-relative folder and members plus people, or clear: true; use ruleId and revision from list to target a specific rule; members null hides the folder; people are email and level pairs); remove an unknown marker (folderMarker with folder); turn the invite link on or off or reset it; or end membership for everyone. The server decides what your role allows: members see names and roles; admins also invite, remove members, let them back in, set the level and folder or Group access, and manage the invite link; only the owner changes roles or ends membership. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the person you work for before you remove anyone, hide a Group, narrow folder access, or end membership.
 
-- `request`: `{ action: "list" } | { action: "invite", email: string } | { action: "level", level: "view" | "comment" | "edit" } | { action: "role", person: string, role: "admin" | "member" } | { action: "remove", person: string } | { action: "letBackIn", person: string } | { action: "link", change: "turn-on" | "turn-off" | "reset" } | { action: "end" }`. Required.
+- `request`: `{ action: "list" } | { action: "invite", email: string } | { action: "level", level: "view" | "comment" | "edit" } | { action: "role", person: string, role: "admin" | "member" } | { action: "remove", person: string } | { action: "letBackIn", person: string } | { action: "link", change: "turn-on" | "turn-off" | "reset" } | { action: "end" } | { action: "group", group: string, level?: "comment" | "view" | "none" | null } | { action: "folder", change: { folder: string, members: "view" | "comment" | "edit" | null, people: ({ email: string, level: "view" | "comment" | "edit" })[], create?: true } | { ruleId: string, revision: integer, members: "view" | "comment" | "edit" | null, people: ({ email: string, level: "view" | "comment" | "edit" })[] } | { folder: string, clear: true } | { ruleId: string, revision: integer, clear: true } } | { action: "folderMarker", folder: string }`. Required.
 
-Returns `{ status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, folderRules, people } } | { status: "refused" } | { status: "done" }`.
+Returns `{ status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } } | { status: "refused" } | { status: "done" } | { status: "group", name, level, memberLevel }`.
 
 ---
 
@@ -1252,7 +1253,7 @@ With `--json`, prints `{ schemaVersion, connectionId }`.
 
 List, invite, and remove the workspace's members, set what they can do, and manage the invite link.
 
-Works in a workspace you own or joined, signed in with the account that owns or joined it. Your server decides what your role allows. Members see names and roles. Admins also invite people, remove members, let them back in, set the member level, and manage the invite link. Only the owner changes roles or ends membership. A person is a member id from dohc members list, or the email of an invite or a person.
+Works in a workspace you own or joined, signed in with the account that owns or joined it. Your server decides what your role allows. Members see names and roles. Admins also invite people, remove members, let them back in, set the member level and a Group's access, and manage the invite link. Only the owner changes roles or ends membership. A person is a member id from dohc members list, or the email of an invite or a person.
 
 #### `dohc members list`
 
@@ -1262,7 +1263,7 @@ dohc members list [options]
 
 List people, invites, removed accounts, the member level, and the invite link.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members invite`
 
@@ -1272,7 +1273,7 @@ dohc members invite <email> [options]
 
 Invite someone by email. dohc sends no email: tell them to sign in to dohc with that address.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members remove`
 
@@ -1282,7 +1283,7 @@ dohc members remove <person> [options]
 
 Remove a person or cancel an invite. Copies already on their computer stay.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members level`
 
@@ -1292,7 +1293,7 @@ dohc members level <view|comment|edit> [options]
 
 Set what every member can do: view, comment, or edit. Admins and the owner always edit.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members admin`
 
@@ -1302,7 +1303,7 @@ dohc members admin <person> [options]
 
 Make a member an admin. Admins invite, remove members, and manage the invite link.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members member`
 
@@ -1312,7 +1313,7 @@ dohc members member <person> [options]
 
 Make an admin a member again.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members let-back-in`
 
@@ -1322,7 +1323,7 @@ dohc members let-back-in <person> [options]
 
 Let a removed account back in as a member.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members link`
 
@@ -1334,7 +1335,48 @@ Turn the invite link on or off, or reset it.
 
 Anyone with the link who signs in becomes a member. Turning it off or resetting it removes no one who already joined. Reset stops the old link working. dohc members list shows the link.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+
+#### `dohc members group`
+
+```sh
+dohc members group <group> [options]
+```
+
+Show or set what members can do in a Group: post, view, or none. Admins and the owner always post.
+
+A Group is a name or id from dohc chat groups. General, direct messages and agents' chats have no access of their own. With none, members no longer see the Group. People who read it may keep a copy.
+
+- `--level <post|view|none>`: Set the Group's access.
+- `--clear`: Remove the Group's access, so it takes the member level.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+
+#### `dohc members folder`
+
+```sh
+dohc members folder <path> [options]
+```
+
+Set or clear access to a workspace folder.
+
+Use a workspace-relative path, or / for the workspace root. Each run sets the whole rule. Repeat --person for everyone the rule keeps. Copies already on people's computers stay when access narrows.
+
+- `--members <view|comment|edit|none>`: Set the member level.
+- `--person <email=level>`: Set one person's level. Repeat for more people.
+- `--clear`: Remove the folder's rule.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+
+#### `dohc members remove-folder-marker`
+
+```sh
+dohc members remove-folder-marker <path> [options]
+```
+
+Remove an unknown or unreadable folder marker.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members end`
 
@@ -1346,7 +1388,7 @@ End membership for everyone. Members lose access; copies already on their comput
 
 - `--everyone`: Required. Confirms that every member and admin loses access.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 ### `dohc document`
 
@@ -1621,10 +1663,11 @@ dohc chat create-group <name> [options]
 
 Create a Group and its folder, as New group does.
 
-The folder is the Group's name as a slug. A Group with the same name is refused.
+The folder is the Group's name as a slug. A Group with the same name is refused. A Group made with --level has no folder. Choosing a level needs a connection.
 
 - `--purpose <text>`: Say what the Group is for, in up to 200 characters.
 - `--type <posts|chat|both>`: Choose what the Group holds. The default is both.
+- `--level <post|view|none>`: Set what members can do in the Group as it is made. With none, members never see it.
 
 With `--json`, prints `{ schemaVersion, group: { kind, id, name, slug, purpose? } }`.
 

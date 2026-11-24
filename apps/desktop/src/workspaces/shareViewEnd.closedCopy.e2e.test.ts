@@ -12,6 +12,8 @@ const reach = (signature: string): ListedReach => ({
   signature,
   visibilitySignature: signature,
   rootLevel: "edit",
+  groupDefault: "edit",
+  groups: [],
   folders: [],
 });
 

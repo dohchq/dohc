@@ -1008,14 +1008,16 @@ describe("chat writes", () => {
       },
     );
 
-    // The relay lists each folder's level. A file's thread takes the level at
-    // the file's current path, and a Group the member level.
+    // The relay lists each folder's and Group's level. A file's thread takes
+    // the level at the file's current path, and a Group its own.
     it("takes a file comment's level from the folder the file sits in now", async () => {
-      const reach = (plans: "view" | "comment") => ({
+      const reach = (plans: "view" | "comment", groups: "view" | "comment" = "comment") => ({
         signature: "r1",
         visibilitySignature: "v1",
         rootLevel: "comment",
         folders: [{ path: "plans", level: plans }],
+        groupDefault: groups,
+        groups: [],
       });
       const test = member("comment");
       Object.assign(test.row.shareView!, { reach: reach("view") });
@@ -1032,7 +1034,7 @@ describe("chat writes", () => {
       expect(test.store.sendMessage).toHaveBeenCalledOnce();
 
       const group = member("view");
-      Object.assign(group.row.shareView!, { reach: reach("comment") });
+      Object.assign(group.row.shareView!, { reach: reach("comment", "view") });
       await expect(group.writeEach.send()).rejects.toThrow(JOINED_REACH);
       onFile(group);
       await group.writeEach.send();
@@ -1054,6 +1056,8 @@ describe("chat writes", () => {
           visibilitySignature: "v1",
           rootLevel: "comment",
           folders: [{ path: "archive", level: "view" }],
+          groupDefault: "comment",
+          groups: [],
         },
       });
       if (change !== "the Group is lowered to View") onFile(test);
@@ -1063,9 +1067,10 @@ describe("chat writes", () => {
       if (change === "the file moves into a View folder")
         test.currentPathOf.mockResolvedValue("archive/day-1.md");
       if (change === "the Group is lowered to View") {
+        const reach = test.row.shareView!.reach!;
         test.row.shareView = {
           ...test.row.shareView!,
-          grantedSelector: { paths: [], versionId: null, access: "view", wholeWorkspace: true },
+          reach: { ...reach, groups: [{ channelWireId: "wire", level: "view" }] },
         };
       }
       hold.held.resolve();
@@ -1083,7 +1088,14 @@ describe("chat writes", () => {
     it("posts in a Group at Comment when every folder is at View", async () => {
       const test = member("comment");
       Object.assign(test.row.shareView!, {
-        reach: { signature: "r1", visibilitySignature: "v1", rootLevel: "view", folders: [] },
+        reach: {
+          signature: "r1",
+          visibilitySignature: "v1",
+          rootLevel: "view",
+          folders: [],
+          groupDefault: "comment",
+          groups: [],
+        },
       });
       await test.writeEach.send();
       expect(test.store.sendMessage).toHaveBeenCalledOnce();
@@ -1094,6 +1106,29 @@ describe("chat writes", () => {
       await expect(
         test.writes.createFileThread(test.place, { title: "Food", linkedFile }),
       ).rejects.toThrow("Only people who can comment post here.");
+    });
+
+    // A Group's rule sets its level for members: a View only Group takes no
+    // post, while a Group with no rule still takes the member level.
+    it("refuses a post in a Group whose rule is View only, and posts in another", async () => {
+      const test = member("comment");
+      Object.assign(test.row.shareView!, {
+        reach: {
+          signature: "r1",
+          visibilitySignature: "v1",
+          rootLevel: "comment",
+          folders: [],
+          groupDefault: "comment",
+          groups: [{ channelWireId: "wire", level: "view" }],
+        },
+      });
+      for (const kind of ["send", "start", "react", "answer"] as const) {
+        await expect(test.writeEach[kind]()).rejects.toThrow(JOINED_REACH);
+      }
+      expectNothingWritten(test);
+      test.store.getChannelWireId.mockResolvedValue("wire-team");
+      await test.writeEach.send();
+      expect(test.store.sendMessage).toHaveBeenCalledOnce();
     });
 
     it("refuses a file comment signed out or as another account", async () => {

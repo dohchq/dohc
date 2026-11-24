@@ -79,6 +79,7 @@ function members(
       viewer: { memberId: VIEWER, role: "owner" },
       memberLevel: "edit",
       inviteLink: null,
+      groupRules: null,
       people: [
         {
           memberId: VIEWER,

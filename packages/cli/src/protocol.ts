@@ -30,6 +30,7 @@ import {
   SharingAccessInput,
 } from "@dohc/workspace-contracts/access";
 import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
+import { GROUP_RULE_LEVELS } from "@dohc/security-contract/workspace-members";
 import type {
   AutomationDefinitionList,
   AutomationSwitchResult,
@@ -128,6 +129,7 @@ const groupCreateArgsSchema = z
     name: z.string().min(1).max(80),
     purpose: z.string().max(200).optional(),
     type: z.enum(["posts", "chat", "both"]).optional(),
+    level: z.enum(GROUP_RULE_LEVELS).optional(),
   })
   .strict();
 const threadsArgsSchema = z.object({ ...argsBase, group: z.string().min(1) }).strict();
@@ -2805,6 +2807,8 @@ const fileMoveResultSchema = z.discriminatedUnion("ok", [
       toPath: z.string(),
       withoutHistory: z.array(z.string()).optional(),
       replaced: replacedPathSchema.optional(),
+      // The folder rules above the item changed, so who can see it may have.
+      accessWarning: z.string().optional(),
     })
     .strict(),
   z

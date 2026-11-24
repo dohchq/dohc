@@ -12,7 +12,7 @@ Folders have no lasting id. A rule kept by path would stop matching when someone
 
 A rule covers a set of folders. The rule operation adds the folder it names. A marker that names the rule adds its folder too, so a copied folder shares its original's rule, and Members settings lists both folders. A folder leaves the set only once no file remains under it and another folder still holds the marker, so the History of a moved folder's old path never shows it unruled. A deleted folder's rule stays. Members settings shows the folder as missing and offers Remove.
 
-A Group's rule is saved on the Group, by the Group's lasting id. A Group is not a file. It records the folder it was created with, and that record does not follow a rename. The Group's rule covers its messages, and the Group's folder can have its own folder rule. Changing a Group's rule never changes a folder's rule, because the Group finds its folder by path, and more than one Group can record the same folder. Group settings shows that folder's rule and warns when members can reach the folder but not the Group.
+A Group's rule is kept by the server with the Group's people and the member level. The server keys it by the Group's lasting id. A Group is not a file. It records the folder it was created with, and that record does not follow a rename. The Group's rule covers its messages, and the Group's folder can have its own folder rule. Changing a Group's rule never changes a folder's rule, because the Group finds its folder by path, and more than one Group can record the same folder. Group settings names that folder, links to it, and says that its files follow that folder's own access rule.
 
 ## Considered options
 

@@ -425,6 +425,7 @@ describe("share-level tool profiles", () => {
               viewer: { memberId: "m-ana", role: "member" },
               memberLevel: "comment",
               inviteLink: null,
+              groupRules: null,
               folderRules: null,
               people: [],
             },
@@ -462,6 +463,7 @@ describe("share-level tool profiles", () => {
         viewer: { memberId: "m-ana", role: "member" },
         memberLevel: "comment",
         inviteLink: null,
+        groupRules: null,
         folderRules: null,
         people: [],
       },
@@ -1234,6 +1236,30 @@ it("routes the owner's Members actions with no workspace id, and refuses leave b
     ).toMatchObject({ isError: true });
   }
   expect(request).toHaveBeenCalledTimes(1);
+});
+
+it("passes folder access changes and marker removal through the Members socket", async () => {
+  const request = vi.fn(async (_request: { verb: string; args: unknown }) => ({ status: "done" }));
+  const { client } = await connectedToolNames({ root: "/workspace", home: "/home", request });
+  const folder = "Design/Private";
+  const changes = [
+    {
+      action: "folder",
+      change: { folder, members: null, people: [{ email: "sam@test", level: "view" }] },
+    },
+    { action: "folder", change: { folder, clear: true } },
+    { action: "folderMarker", folder },
+  ];
+  for (const change of changes) {
+    const result = await client.callTool({ name: "dohc_members", arguments: { request: change } });
+    expect(result.isError).toBeUndefined();
+    expect(request).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        verb: "members",
+        args: { cwd: "/workspace", actor: "agent", request: change },
+      }),
+    );
+  }
 });
 
 it("names the run it works for on every chat write, over a run the caller names", async () => {

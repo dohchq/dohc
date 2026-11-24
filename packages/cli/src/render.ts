@@ -421,6 +421,11 @@ function renderLinkAgents(page: CliResultByVerb["shareAgents"]): string {
 
 const LEVEL_WORDS = { view: "view", comment: "comment", edit: "edit" } as const;
 const ROLE_WORDS = { owner: "Owner", admin: "Admin", member: "Member" } as const;
+const GROUP_LEVEL_LINES = {
+  comment: (name: string) => `Members can post in ${name}.`,
+  view: (name: string) => `Members can read ${name} but not post.`,
+  none: (name: string) => `Members can't see ${name}.`,
+} as const;
 
 // The Members page as lines: who is in the workspace, then invites and
 // removed accounts, each by name and role, with the id the other verbs take last.
@@ -428,6 +433,12 @@ const ROLE_WORDS = { owner: "Owner", admin: "Admin", member: "Member" } as const
 function renderMembers(result: CliResultByVerb["members"]): string {
   if (result.status === "refused") throw new DohcCliError(MEMBERS_REFUSED);
   if (result.status === "done") return "You left this workspace.";
+  if (result.status === "group") {
+    const name = lineSafe(result.name);
+    if (result.level === null)
+      return `${name} has no access of its own: members can ${LEVEL_WORDS[result.memberLevel]}, as everywhere.`;
+    return GROUP_LEVEL_LINES[result.level](name);
+  }
   const { view } = result;
   const row = (person: (typeof view.people)[number]) =>
     [
@@ -465,6 +476,12 @@ function renderMembers(result: CliResultByVerb["members"]): string {
         ]
       : []),
     ...(removed.length ? ["", "Removed (dohc members let-back-in <id>)", ...removed.map(row)] : []),
+    ...(view.folderRules ?? []).flatMap(({ folders, members, people }) => [
+      "",
+      ...folders.map(({ path, state }) => `${lineSafe(path) || "/"} · ${state.replace("-", " ")}`),
+      `  Members: ${members ?? "none"}`,
+      ...people.map(({ email, level }) => `  ${lineSafe(email)}: ${level}`),
+    ]),
   ].join("\n");
 }
 

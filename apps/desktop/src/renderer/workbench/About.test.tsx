@@ -264,6 +264,7 @@ describe("About Access", () => {
         viewer: { memberId: "owner", role: "owner" },
         memberLevel: "comment",
         inviteLink: { enabled: false, url: null },
+        groupRules: [],
         folderRules: [],
         people: [
           person("owner", "owner", "Ana Ruiz", "ana@example.com"),
@@ -306,7 +307,7 @@ describe("About Access", () => {
       status: "active" as const,
       selector: { kind: "workspace" as const },
       access,
-      memberReach: { role: "member" as const, level: access, rules: [] },
+      memberReach: { role: "member" as const, level: access, rules: [], groups: [] },
     });
     const listing = readStoredRoster({
       grants: [
@@ -1155,6 +1156,7 @@ it("lists everyone in a joined workspace by name and role, from the Members page
       viewer: { memberId: "m-sam", role: "member" },
       memberLevel: "comment",
       inviteLink: null,
+      groupRules: null,
       folderRules: null,
       people: [
         person("owner", "owner", "Ana Ruiz"),

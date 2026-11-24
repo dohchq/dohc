@@ -2,9 +2,10 @@
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type {
-  WorkspaceMembersView,
-  WorkspacePerson,
+import {
+  FOLDER_RULE_CHANGED,
+  type WorkspaceMembersView,
+  type WorkspacePerson,
 } from "@dohc/security-contract/workspace-members";
 import type { MembersRequest, MembersResult } from "@dohc/cli/members";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
@@ -51,6 +52,7 @@ function ownerView(overrides: Partial<WorkspaceMembersView> = {}): WorkspaceMemb
     viewer: { memberId: "owner", role: "owner" },
     memberLevel: "comment",
     inviteLink: { enabled: true, url: "https://share.test/join#secret" },
+    groupRules: [],
     folderRules: [],
     people: [owner, ana, bo, cy, dee],
     ...overrides,
@@ -63,6 +65,7 @@ const memberView = (): WorkspaceMembersView => ({
   viewer: { memberId: "m-bo", role: "member" },
   memberLevel: "edit",
   inviteLink: null,
+  groupRules: null,
   folderRules: null,
   people: [owner, ana, bo].map((entry) => ({ ...entry, email: null })),
 });
@@ -141,6 +144,107 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+describe("Folder access", () => {
+  const ruleId = `fr_${"1".repeat(32)}`;
+  const rule: NonNullable<WorkspaceMembersView["folderRules"]>[number] = {
+    ruleId,
+    revision: 1,
+    members: "edit",
+    people: [{ email: "bo@test", level: "view" }],
+    folders: [
+      { path: "Design/Research", state: "covered" },
+      { path: "Old Research", state: "folder-missing" },
+      { path: "Drafts", state: "marker-missing" },
+    ],
+  };
+  const section = () => screen.findByRole("region", { name: "Folder access" });
+
+  it("adds a rule as an admin, lists its folders, confirms narrowing, and clears the rule", async () => {
+    const saved = { ...rule, revision: 2, members: null };
+    const admin = { ...adminView(), memberLevel: "view" as const };
+    bridge.workspaceMembers
+      .mockResolvedValueOnce({ status: "ready", view: admin })
+      .mockResolvedValueOnce({ status: "ready", view: { ...admin, folderRules: [rule] } })
+      .mockResolvedValueOnce({ status: "ready", view: { ...admin, folderRules: [saved] } })
+      .mockResolvedValueOnce({ status: "ready", view: admin });
+    renderMembers();
+    const user = userEvent.setup();
+    const access = within(await section());
+    await user.click(access.getByRole("button", { name: "Add" }));
+    const dialog = within(screen.getByRole("dialog", { name: "Add folder access" }));
+    await user.type(dialog.getByLabelText("Folder path"), "Design/Research");
+    await user.selectOptions(dialog.getByLabelText("Member level"), "edit");
+    await user.click(dialog.getByRole("button", { name: "Add person" }));
+    await user.type(dialog.getByLabelText("Email address"), "bo@test");
+    await user.click(dialog.getByRole("button", { name: "Save" }));
+    expect(await access.findByText("Design/Research")).toBeTruthy();
+    expect(access.getByText("Covered")).toBeTruthy();
+    expect(access.getByText("Folder missing")).toBeTruthy();
+    expect(access.getByText("Marker missing")).toBeTruthy();
+    expect(requests().at(-1)).toEqual({
+      action: "folder",
+      change: { folder: "Design/Research", create: true, members: "edit", people: rule.people },
+    });
+
+    await user.click(access.getByRole("button", { name: "Change" }));
+    const change = within(screen.getByRole("dialog", { name: "Change folder access" }));
+    await user.selectOptions(change.getByLabelText("Member level"), "none");
+    await user.click(change.getByRole("button", { name: "Save" }));
+    const confirm = within(screen.getByRole("dialog", { name: "Limit access to this folder?" }));
+    expect(confirm.getByText("Copies already on people's computers stay.")).toBeTruthy();
+    expect(requests()).toHaveLength(2);
+    await user.click(confirm.getByRole("button", { name: "Limit access" }));
+    expect(await access.findByText("Members · None")).toBeTruthy();
+    expect(requests().at(-1)).toEqual({
+      action: "folder",
+      change: { ruleId, revision: 1, members: null, people: rule.people },
+    });
+
+    await user.click(access.getByRole("button", { name: "Remove" }));
+    await user.click(
+      within(screen.getByRole("dialog", { name: "Remove folder access rule?" })).getByRole(
+        "button",
+        { name: "Remove rule" },
+      ),
+    );
+    expect(await access.findByText("No folder access rules yet.")).toBeTruthy();
+    expect(requests().at(-1)).toEqual({
+      action: "folder",
+      change: { ruleId, revision: 2, clear: true },
+    });
+  });
+
+  it("offers to reload a stale rule without retrying the old save", async () => {
+    bridge.workspaceMembers
+      .mockResolvedValueOnce({ status: "ready", view: ownerView({ folderRules: [rule] }) })
+      .mockRejectedValueOnce(new Error(FOLDER_RULE_CHANGED))
+      .mockResolvedValueOnce({
+        status: "ready",
+        view: ownerView({ folderRules: [{ ...rule, revision: 2, members: "view" }] }),
+      });
+    const { props } = renderMembers();
+    const user = userEvent.setup();
+    await user.click(within(await section()).getByRole("button", { name: "Change" }));
+    const dialog = within(screen.getByRole("dialog", { name: "Change folder access" }));
+    await user.click(dialog.getByRole("button", { name: "Save" }));
+    expect((await dialog.findByRole("alert")).textContent).toContain(
+      "check the rule, and save again",
+    );
+    expect(dialog.queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(props.onError).not.toHaveBeenCalled();
+    await user.click(dialog.getByRole("button", { name: "Reload Members" }));
+    expect(await screen.findByText("Members · View")).toBeTruthy();
+    expect(requests().map(({ action }) => action)).toEqual(["list", "folder", "list"]);
+  });
+
+  it("keeps folder rules and marker removal out of the member view", async () => {
+    bridge.workspaceMembers.mockResolvedValueOnce({ status: "ready", view: memberView() });
+    renderMembers();
+    await screen.findByTestId("settings-members-page");
+    expect(screen.queryByRole("region", { name: "Folder access" })).toBeNull();
+  });
+});
+
 describe("Members page", () => {
   it("shows the owner every person with their email, invites, removed accounts, and the owner's controls", async () => {
     renderMembers();
@@ -164,7 +268,7 @@ describe("Members page", () => {
       "https://share.test/join#secret",
     );
     expect(screen.getByTestId("settings-members-level-words").textContent).toBe(
-      "Members can read everything, post in Groups, and comment on files.",
+      "Members can read and comment on files, and post in Groups.",
     );
     expect(screen.getByTestId("settings-members-end")).toBeTruthy();
     expect(screen.queryByTestId("settings-members-leave")).toBeNull();
@@ -811,7 +915,7 @@ describe("Members page", () => {
     const dialog = screen.getByTestId("settings-members-confirm-admin");
     expect(dialog.textContent).toContain("Make Bo an admin?");
     expect(dialog.textContent).toContain(
-      "Admins can invite and remove members, change the invite link and member level, and see emails.",
+      "Admins can invite and remove members, see their emails, and change the invite link, member level, folder access, and Group access.",
     );
     await userEvent.click(screen.getByTestId("settings-members-confirm-cancel"));
     expect(requests()).toEqual([{ action: "list" }]);

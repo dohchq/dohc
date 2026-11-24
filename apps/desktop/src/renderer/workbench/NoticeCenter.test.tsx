@@ -814,6 +814,30 @@ function sentRow(
   };
 }
 
+// The relay settles a chat Notice whose chat the person can no longer
+// reach: it keeps no target, and its title says the chat is gone.
+it("shows a chat Notice whose chat is gone with the chat mark, not its sender's", async () => {
+  renderNotices({
+    sentNotices: [
+      sentRow("gone", {
+        kind: "chat-message",
+        title: "dohc could not find this chat.",
+        body: "",
+        target: null,
+      }),
+      sentRow("live", { kind: "chat-message", target: { thread: "t1" } }),
+    ],
+    onOpenSentNotice: vi.fn(),
+  });
+  await userEvent.click(screen.getByTestId("notice-center-toggle"));
+  const gone = screen.getByTestId("sent-notice-gone");
+  expect(gone.querySelector("[data-sender-shape]")).toBeNull();
+  expect(gone.querySelector("[data-notice-mark='chat']")).not.toBeNull();
+  expect(
+    screen.getByTestId("sent-notice-live").querySelector("[data-sender-shape='round']"),
+  ).not.toBeNull();
+});
+
 describe("failed run notices", () => {
   const failed = (id: string, target: NoticeRow["target"], postedHere = true) =>
     sentRow(id, {

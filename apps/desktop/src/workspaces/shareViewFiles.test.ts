@@ -3105,6 +3105,8 @@ describe("ShareViewFiles", () => {
         visibilitySignature: "v1",
         rootLevel: "edit",
         folders: [{ path: "plans", level: "view" }],
+        groupDefault: "view",
+        groups: [],
       },
     };
     const files = createShareViewFiles({

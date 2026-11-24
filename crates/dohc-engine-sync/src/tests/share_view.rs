@@ -4767,6 +4767,8 @@ fn reach_grant(signature: &str, visibility_signature: &str) -> ShareGrant {
             visibility_signature: visibility_signature.to_owned(),
             root_level: Some(crate::ShareAccess::Edit),
             folders: Default::default(),
+            group_default: crate::ShareAccess::Edit,
+            groups: Default::default(),
         }),
         scope: crate::ShareScope::Workspace,
         version_id: None,

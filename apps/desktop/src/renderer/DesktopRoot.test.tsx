@@ -213,6 +213,10 @@ describe("workspace summary changes", () => {
     // Nothing is updating now, so the label doesn't say it is.
     expect(within(panel).getByText("Access update stopped")).toBeTruthy();
     expect(within(panel).queryByText("Updating access")).toBeNull();
+    // A stopped update opens nothing on its own, so the line doesn't promise it.
+    expect(screen.getByTestId("workspace-updating-access-line").textContent).toBe(
+      "Your access to this workspace changed.",
+    );
     // This state shows the failure with Try again, so it files a Notices row
     // with Try again and no toast.
     const toggle = await screen.findByTestId("notice-center-toggle");
@@ -437,7 +441,7 @@ describe("workspace summary changes", () => {
     expect(within(panel).getByText("Access ended")).toBeTruthy();
     expect(within(panel).queryByText("Updating access")).toBeNull();
     expect(within(panel).getByText(detail)).toBeTruthy();
-    expect(within(panel).queryByText(/The owner changed what you can see/u)).toBeNull();
+    expect(screen.queryByTestId("workspace-updating-access-line")).toBeNull();
     expect(within(panel).queryByRole("button", { name: "Try again" })).toBeNull();
     expect(within(panel).getByRole("button", { name: "Open another workspace" })).toBeTruthy();
     // The folder is named, copies from beside its path, and opens.
@@ -474,6 +478,10 @@ describe("workspace summary changes", () => {
     expect(screen.queryByTestId("workspace-shell")).toBeNull();
     expect(within(panel).getByText("Updating access")).toBeTruthy();
     expect(within(panel).getByRole("heading", { name: "Community" })).toBeTruthy();
+    // It names no one: the owner or an admin may have changed the access.
+    expect(screen.getByTestId("workspace-updating-access-line").textContent).toBe(
+      "Your access to this workspace changed. dohc is updating this copy and opens it when it's done.",
+    );
     fireEvent.click(within(panel).getByRole("button", { name: "Open another workspace" }));
     expect(openWorkspaceManager).toHaveBeenCalledOnce();
     const { updatingAccess: _, ...current } = shareView;

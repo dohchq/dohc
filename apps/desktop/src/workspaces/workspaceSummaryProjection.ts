@@ -1,4 +1,5 @@
 import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
+import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import { ShareSkippedOpsSummary, WorkspaceSummary } from "../ipc/bridgeContract";
 import type { RegistryEntry } from "./registryStore";
 import { usableShareMountRecord } from "./shareMounts";
@@ -9,6 +10,7 @@ import {
   shareViewIsPresent,
 } from "./shareViewMarker";
 import { recordedShareSelector } from "./shareViewRecords";
+import { storedShareViewReach } from "./shareViewReach";
 
 // The registry -> renderer projection. The registry file is data, not a
 // contract: a record can be hand-edited, half-written by a crash, or written
@@ -99,6 +101,7 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
         ? {
             membership: true as const,
             ...(raw.role === "admin" || raw.role === "member" ? { role: raw.role } : {}),
+            ...storedGroupLevels(raw, pinned, level),
           }
         : {}),
       ...(!damaged && level !== "edit" && raw.editingNotReady === true
@@ -172,6 +175,28 @@ export function workspaceSummariesFrom(entries: readonly RegistryEntry[]): Works
 
 // The recovery folder a rebuild saved into, when the record names one inside
 // the copy's recovery root.
+// A membership's Group levels from the reach stored with it. Without a
+// stored reach, Chats gives every Group the member level, which is the
+// pinned one when the copy shows View while it waits to send. A stored reach
+// it can't read gives every Group View, since the write gate takes no post then.
+function storedGroupLevels(
+  raw: Record<string, unknown>,
+  pinned: ShareAccess | null,
+  shown: ShareAccess | null,
+) {
+  if (raw.reach === undefined)
+    return pinned !== null && pinned !== shown
+      ? { groupLevels: { groupDefault: pinned, groups: [] } }
+      : {};
+  const reach = storedShareViewReach(raw);
+  return {
+    groupLevels:
+      reach === null
+        ? { groupDefault: "view" as const, groups: [] }
+        : { groupDefault: reach.groupDefault, groups: [...reach.groups] },
+  };
+}
+
 function accessSaved(raw: unknown): { accessSaved?: { folder: string; count: number } } {
   if (
     !isRecord(raw) ||

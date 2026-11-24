@@ -12,7 +12,13 @@ describe("NewGroupDialog", () => {
   it("starts in Name with Chat picked and shows inline error if Create is clicked without a name", () => {
     const onCreate = vi.fn();
     render(<NewGroupDialog onCreate={onCreate} onClose={vi.fn()} />);
+    expect(screen.getByRole("heading").textContent).toBe("New Group");
+    expect(screen.getByTestId("chats-new-channel-submit").textContent).toBe("Create Group");
     expect(document.activeElement).toBe(nameField());
+    // Optional follows the label; the field holds no placeholder.
+    const purpose = screen.getByLabelText("What it's for Optional");
+    expect(purpose).toBe(screen.getByTestId("chats-new-channel-purpose"));
+    expect(purpose.hasAttribute("placeholder")).toBe(false);
     expect(screen.getByRole("radio", { name: "Chat" }).getAttribute("aria-checked")).toBe("true");
     const submit = screen.getByTestId("chats-new-channel-submit") as HTMLButtonElement;
     expect(submit.disabled).toBe(false);
@@ -84,5 +90,77 @@ describe("NewGroupDialog", () => {
     render(<NewGroupDialog onCreate={vi.fn()} onClose={onClose} />);
     fireEvent.click(screen.getByTestId("chats-new-channel-cancel"));
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("sends a picked Members level, and none while the Group follows the member level", async () => {
+    const onCreate = vi.fn(async () => null);
+    render(
+      <NewGroupDialog
+        onCreate={onCreate}
+        access={async () => ({ memberLevel: "comment" })}
+        onClose={vi.fn()}
+      />,
+    );
+    const followed = await screen.findByRole("radio", { name: "Default" });
+    expect(followed.getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByTestId("chats-group-access-follows").textContent).toBe(
+      "Follows the member level, Comment, so members can post.",
+    );
+    fireEvent.change(nameField(), { target: { value: "Announcements" } });
+    fireEvent.click(screen.getByTestId("chats-new-channel-submit"));
+    await waitFor(() =>
+      expect(onCreate).toHaveBeenLastCalledWith({
+        name: "Announcements",
+        type: "chat",
+        purpose: "",
+      }),
+    );
+    fireEvent.click(screen.getByRole("radio", { name: "View only" }));
+    fireEvent.click(screen.getByTestId("chats-new-channel-submit"));
+    await waitFor(() =>
+      expect(onCreate).toHaveBeenLastCalledWith({
+        name: "Announcements",
+        type: "chat",
+        purpose: "",
+        level: "view",
+      }),
+    );
+  });
+
+  it("follows the member level again when the pick comes back to Default", async () => {
+    const onCreate = vi.fn(async () => null);
+    render(
+      <NewGroupDialog
+        onCreate={onCreate}
+        access={async () => ({ memberLevel: "view" })}
+        onClose={vi.fn()}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("radio", { name: "No access" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Default" }));
+    fireEvent.change(nameField(), { target: { value: "Announcements" } });
+    fireEvent.click(screen.getByTestId("chats-new-channel-submit"));
+    await waitFor(() =>
+      expect(onCreate).toHaveBeenLastCalledWith({
+        name: "Announcements",
+        type: "chat",
+        purpose: "",
+      }),
+    );
+    expect(screen.getByTestId("chats-group-access-follows")).toBeTruthy();
+  });
+
+  it("says members will see the Group with no connection, and has no picker until someone else is here", async () => {
+    render(<NewGroupDialog onCreate={vi.fn()} access={async () => "offline"} onClose={vi.fn()} />);
+    expect((await screen.findByTestId("chats-new-channel-access-offline")).textContent).toBe(
+      "Members will see this Group. Choose access in Group settings once you're connected.",
+    );
+    expect(screen.queryByRole("radio", { name: "No access" })).toBeNull();
+    cleanup();
+    const alone = deferred<null>();
+    render(<NewGroupDialog onCreate={vi.fn()} access={() => alone.promise} onClose={vi.fn()} />);
+    alone.resolve(null);
+    await alone.promise;
+    expect(screen.queryByTestId("chats-new-channel-access")).toBeNull();
   });
 });

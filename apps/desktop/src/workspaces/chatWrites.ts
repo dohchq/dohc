@@ -130,7 +130,7 @@ const SESSION_CHANGED = "Your server session changed. Try again.";
 
 // Where a member writes in a joined workspace: a Group, or a file's thread,
 // which takes the level at the path the file sits at when it is written.
-type TargetPlace = "group" | { objectId: string } | null;
+type TargetPlace = { group: string } | { objectId: string } | null;
 
 type ChatAttachments = NonNullable<Parameters<LinkedChatStore["sendMessage"]>[0]["attachments"]>;
 
@@ -290,7 +290,7 @@ export function createChatWrites(dependencies: {
     if (!channelId) return null;
     const channels = await place.store.listChannels({ workspaceId: place.workspaceId });
     return channels.some((channel) => channel.id === channelId && channel.kind === "channel")
-      ? "group"
+      ? { group: wire }
       : null;
   }
 
@@ -299,15 +299,15 @@ export function createChatWrites(dependencies: {
     workspaceId: string,
     target: TargetPlace,
   ): Promise<ShareViewWritePlace | null> {
-    if (target === null || target === "group") return target;
+    if (target === null || "group" in target) return target;
     const path = await currentPathOf(workspaceId, target.objectId);
     return path === null ? null : { path };
   }
 
-  // The level decides. A Group takes the member level until Group rules
-  // exist. A file's thread takes the level at the file's current path, by
-  // the rule every gate asks (`shareViewWriteLevel`). Synchronous, so a
-  // caller reads it in the same block as its write.
+  // The level decides. A Group takes its rule's level, and a file's thread
+  // the level at the file's current path, by the rule every gate asks
+  // (`shareViewWriteLevel`). Synchronous, so a caller reads it in the same
+  // block as its write.
   const takesPostsAt = (workspaceId: string, at: ShareViewWritePlace | null) =>
     at !== null && takesPosts(levelOf(workspaceId, at));
 

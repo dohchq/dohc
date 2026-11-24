@@ -58,6 +58,7 @@ import {
   shareAccessRank,
 } from "@dohc/security-contract/share-selector";
 import { isDirectId } from "@dohc/security-contract/direct-messages";
+import { GROUP_RULE_LEVELS } from "@dohc/security-contract/workspace-members";
 import { hasEngineIgnoredSegment, WORKSPACE_KINDS, WORKSPACE_MODES } from "@dohc/workspace-core";
 import { z } from "zod";
 import { AGENT_HUES } from "@dohc/workspace-contracts/agent-hues";
@@ -403,6 +404,20 @@ export const WorkspaceSummary = z.object({
       // A membership's role as the relay last named it. It shows admin actions
       // before the next check; the relay decides each one.
       role: z.enum(["admin", "member"]).optional(),
+      // A membership's Group levels from its stored reach: each listed Group's,
+      // else `groupDefault`. Chats locks a Group's composer at View. Main
+      // refuses the post either way.
+      groupLevels: z
+        .object({
+          groupDefault: SHARE_ACCESS,
+          groups: z
+            .array(
+              z.object({ channelWireId: z.string().min(1).max(256), level: SHARE_ACCESS }).strict(),
+            )
+            .max(100_000),
+        })
+        .strict()
+        .optional(),
       // The stored grant is unreadable. The marker still stands, because a
       // share view whose grant cannot be read must not present as an ordinary
       // workspace: the restrictive stance is what fails closed. The shell
@@ -1146,6 +1161,8 @@ export const MoveWorkspacePathPayload = z.object({
   fromPath: PATH_STRING,
   toPath: PATH_STRING,
   confirmNotVersioned: z.literal(true).optional(),
+  // The person agreed that the move may change who can see the item.
+  confirmAccessChange: z.literal(true).optional(),
 });
 export type MoveWorkspacePathPayload = z.infer<typeof MoveWorkspacePathPayload>;
 
@@ -3234,6 +3251,9 @@ export const CreateChatChannelPayload = z.object({
   purpose: z.string().max(200).optional(),
   // The group's folder. When absent main derives it from the name.
   folderPath: PATH_STRING.optional(),
+  // The members' level, kept by the relay as the Group's rule. A level needs
+  // the relay, so the Group is made there and has no folder.
+  level: z.enum(GROUP_RULE_LEVELS).optional(),
 });
 export type CreateChatChannelPayload = z.infer<typeof CreateChatChannelPayload>;
 

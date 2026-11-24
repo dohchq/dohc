@@ -2,20 +2,17 @@ import { jsonResponse } from "@dohc/service-http";
 import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
 import {
   ACCESS_RULE_MAX_PEOPLE,
-  FOLDER_MARKER_FILE,
-  accessRuleFolder,
   formatAccessRule,
   isFolderRuleId,
   normalizeRuleEmail,
+  prepareFolderRulePath,
   type AccessRule,
 } from "@dohc/security-contract/access-rules";
+import { isShareAccessValue, type ShareAccess } from "@dohc/security-contract/share-selector";
 import {
-  isShareAccessValue,
-  prepareSharePath,
-  type ShareAccess,
-} from "@dohc/security-contract/share-selector";
-import {
+  isGroupRuleLevel,
   isInviteLinkAction,
+  type GroupRuleLevel,
   MAX_MEMBER_EMAIL_CHARS,
   type WorkspaceJoinPreview,
   type WorkspaceJoinResult,
@@ -55,6 +52,7 @@ export type WorkspaceMemberRoute =
   | { route: "members-role"; workspaceId: string; memberId: string }
   | { route: "members-remove"; workspaceId: string; memberId: string }
   | { route: "members-let-back-in"; workspaceId: string; memberId: string }
+  | { route: "members-group-rule"; workspaceId: string; channelWireId: string }
   | { route: "members-join-preview" }
   | { route: "members-join" }
   | { route: "members-group-create" };
@@ -71,6 +69,7 @@ export const WORKSPACE_MEMBER_ROUTE_PATTERNS = {
   "members-role": "/sync/:workspaceId/members/:memberId/role",
   "members-remove": "/sync/:workspaceId/members/:memberId/remove",
   "members-let-back-in": "/sync/:workspaceId/members/:memberId/let-back-in",
+  "members-group-rule": "/sync/:workspaceId/members/groups/:channelWireId/rule",
   "members-join-preview": "/sync/members/join-preview",
   "members-join": "/sync/members/join",
   "members-group-create": "/sync/members/groups",
@@ -103,12 +102,17 @@ export function parseWorkspaceMemberRoute(parts: readonly string[]): WorkspaceMe
     if (parts[2] === "join-preview") return { route: "members-join-preview" };
     if (parts[2] === "groups") return { route: "members-group-create" };
   }
-  if (parts[2] !== "members" || parts.length < 3 || parts.length > 5) return null;
+  if (parts[2] !== "members" || parts.length < 3 || parts.length > 6) return null;
   let workspaceId: string;
   try {
     workspaceId = parseWorkspaceId(parts[1]);
   } catch {
     return null;
+  }
+  if (parts.length === 6) {
+    return parts[3] === "groups" && parts[5] === "rule" && parts[4]
+      ? { route: "members-group-rule", workspaceId, channelWireId: parts[4] }
+      : null;
   }
   if (parts.length === 3) return { route: "members", workspaceId };
   if (parts.length === 4) {
@@ -155,6 +159,7 @@ type MemberRouteStorage = Pick<
   | "previewWorkspaceJoin"
   | "joinWorkspace"
   | "createWorkspaceGroup"
+  | "setWorkspaceGroupRule"
   | "changeFolderRule"
   | "removeFolderMarkers"
   | "readFolderRules"
@@ -240,6 +245,12 @@ export function createWorkspaceMemberRoutes(options: {
       viewer: snapshot.viewer,
       memberLevel: snapshot.membership?.memberLevel ?? "comment",
       inviteLink: manages ? { enabled: url !== null, url } : null,
+      groupRules: manages
+        ? (snapshot.groupRules ?? []).map(({ channelWireId, level }) => ({
+            channelWireId,
+            level: level === null ? "none" : level === "view" ? "view" : "comment",
+          }))
+        : null,
       folderRules: manages
         ? storage.readFolderRules(snapshot.workspaceId).map(({ rule, ...entry }) => ({
             ...entry,
@@ -340,16 +351,19 @@ export function createWorkspaceMemberRoutes(options: {
     };
   };
 
+  // A Group's rule names one level for every member. Person entries are not taken here.
+  const parseGroupRuleLevel = (value: unknown): GroupRuleLevel => {
+    if (!isGroupRuleLevel(value)) throw badRequest('level must be "comment", "view", or "none"');
+    return value;
+  };
+  const storedLevel = (level: GroupRuleLevel) => (level === "none" ? null : level);
+
   // A workspace-relative folder, "" for the root, checked as the path its
   // marker takes.
   const parseFolder = (value: unknown): string => {
-    if (typeof value !== "string" || value.length > 4096) throw badRequest("folder is invalid");
-    const trimmed = value.replace(/^\/+|\/+$/gu, "");
-    const marker = prepareSharePath(
-      trimmed ? `${trimmed}/${FOLDER_MARKER_FILE}` : FOLDER_MARKER_FILE,
-    );
-    if (!marker) throw badRequest("folder is invalid");
-    return accessRuleFolder(marker.path);
+    const folder = typeof value === "string" ? prepareFolderRulePath(value) : null;
+    if (folder === null) throw badRequest("folder is invalid");
+    return folder;
   };
 
   const parseLevel = (value: unknown, name: string): ShareAccess => {
@@ -426,6 +440,26 @@ export function createWorkspaceMemberRoutes(options: {
       await options.claimPendingShares(userId, request.signal);
       return respondWithView(route.workspaceId, userId);
     }
+    if (route.route === "members-group-rule") {
+      if (request.method !== "PUT") throw relayError("method_not_allowed");
+      const input = await readJsonObject(request);
+      if (Object.keys(input).some((key) => key !== "level"))
+        throw badRequest("a Group's rule takes only level");
+      const level =
+        input.level === null ? undefined : storedLevel(parseGroupRuleLevel(input.level));
+      const result = storage.setWorkspaceGroupRule({
+        workspaceId: route.workspaceId,
+        channelWireId: route.channelWireId,
+        actorUserId: userId,
+        level,
+        nowMs: options.nowMs(),
+      });
+      if (!result.ok) throw notFound();
+      // Held reads and personal-agent waits recheck when woken, so a Group
+      // that became hidden leaves them now.
+      options.discussionActivity.wakeLog(route.workspaceId);
+      return respondWithView(route.workspaceId, userId);
+    }
     if (request.method !== "POST") throw relayError("method_not_allowed");
 
     if (route.route === "members-join-preview" || route.route === "members-join") {
@@ -468,14 +502,23 @@ export function createWorkspaceMemberRoutes(options: {
 
     if (route.route === "members-group-create") {
       const input = await readJsonObject(request);
-      // The membership share names the workspace; the caller's role in it decides.
-      if (typeof input.shareId !== "string") throw badRequest("shareId is invalid");
-      const shareId = parseShareId(input.shareId);
+      // The membership share names the workspace, or the owner's computer
+      // names its own; the caller's role in it decides.
+      const place =
+        typeof input.shareId === "string" && input.workspaceId === undefined
+          ? { shareId: parseShareId(input.shareId) }
+          : typeof input.workspaceId === "string" && input.shareId === undefined
+            ? { workspaceId: parseWorkspaceId(input.workspaceId) }
+            : null;
+      if (!place) throw badRequest("shareId is invalid");
       const group = parseGroup(input);
       const created = storage.createWorkspaceGroup({
-        shareId,
+        ...place,
         actorUserId: userId,
         ...group,
+        ...(input.level === undefined
+          ? {}
+          : { level: storedLevel(parseGroupRuleLevel(input.level)) }),
         nowMs: options.nowMs(),
       });
       if (!created.ok) {

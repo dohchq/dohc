@@ -13,6 +13,7 @@ import {
   CloudOff,
   GitPullRequestArrow,
   Info,
+  MessageSquare,
   RefreshCw,
   Sparkles,
   User,
@@ -264,6 +265,18 @@ function SenderMark(props: {
       : presentationClasses({ ...neutralPresentation, agentId }, "agent"),
   );
   const place = props.className ?? "mt-0.5 shrink-0";
+  // The relay drops a chat Notice's target once its chat is gone, so the
+  // row is about the chat now, not who wrote in it.
+  if (props.notice.kind === "chat-message" && props.notice.target === null) {
+    return (
+      <MessageSquare
+        size={14}
+        aria-hidden
+        data-notice-mark="chat"
+        className={`${place} text-muted`}
+      />
+    );
+  }
   if (kind === null) {
     return <Info size={14} aria-hidden className={`${place} text-subtle`} />;
   }

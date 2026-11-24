@@ -43,8 +43,13 @@ export interface RosterGrant {
 /** One channel by its wire id, or every Group in the workspace. */
 export type RosterChat =
   | { kind: "channel"; wireId: string; canPost: boolean }
-  // Piece 4 (access rules) replaces this with each Group's own rule.
-  | { kind: "groups"; canPost: boolean };
+  // A membership: `level` in every Group, except each Group `groups` names,
+  // which takes its rule's level, or none when the rule hides it.
+  | {
+      kind: "groups";
+      level: ShareAccess;
+      groups: readonly (readonly [string, ShareAccess | null])[];
+    };
 
 /** The paths a grant covers, or a member's evaluated folder rules. */
 export interface FileScope {
@@ -368,14 +373,14 @@ function reachesChat(
   channelWireId: string | null,
   post: boolean,
 ): boolean {
-  return person.grants.some(
-    ({ chat }) =>
-      chat !== null &&
-      (!post || chat.canPost) &&
-      (chat.kind === "channel"
-        ? chat.wireId === channelWireId
-        : target === "group" && isWorkspaceGroup(channelWireId, "channel")),
-  );
+  return person.grants.some(({ chat }) => {
+    if (chat === null) return false;
+    if (chat.kind === "channel") return chat.wireId === channelWireId && (!post || chat.canPost);
+    if (target !== "group" || !isWorkspaceGroup(channelWireId, "channel")) return false;
+    const ruled = chat.groups.find(([wireId]) => wireId === channelWireId);
+    const level = ruled ? ruled[1] : chat.level;
+    return level !== null && (!post || level !== "view");
+  });
 }
 
 // Everyone on the roster except the owner, one entry per person. A claimed

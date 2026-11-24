@@ -331,6 +331,13 @@ interface DesktopCliServerDependencies<State> {
     input: JoinedGroupInput,
     assertCurrent: () => void,
   ): Promise<ChatChannelSummary>;
+  // The owner's new Group with a level: the relay creates it with its rule.
+  createOwnedGroupWithLevel(
+    workspace: RegistryEntry,
+    store: DesktopLinkedChatStore,
+    input: JoinedGroupInput,
+    assertCurrent: () => void,
+  ): Promise<ChatChannelSummary>;
   joinedPages: {
     // The role the relay last named, or undefined before it has.
     role(workspaceId: string): "admin" | "member" | undefined;
@@ -776,6 +783,13 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           }
           if (sharedViewOf(workspace.workspaceId))
             throw new Error("This workspace is read-only. Write in the owning workspace.");
+          if (input.level !== undefined)
+            return await dependencies.createOwnedGroupWithLevel(
+              operation.workspace,
+              store,
+              input,
+              () => operation.assertCurrent(),
+            );
           return await createGroup(
             store,
             async (folderPath) => {

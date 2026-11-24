@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  GROUP_RULE_LEVELS,
   FOLDER_RULE_STATES,
   isPaletteSlot,
   MAX_MEMBER_EMAIL_CHARS,
@@ -9,6 +10,7 @@ import {
   type WorkspaceMembersView,
 } from "@dohc/security-contract/workspace-members";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
+import { isFolderRuleId } from "@dohc/security-contract/access-rules";
 
 // One request shape for the Members page and for agents through the CLI and
 // MCP, in a workspace the person owns or joined. The desktop names the
@@ -23,6 +25,18 @@ const email = z
   .min(3)
   .max(MAX_MEMBER_EMAIL_CHARS)
   .regex(/^[^\s@]+@[^\s@]+$/, "Enter an email address.");
+/** A Group: its name or wire id from the CLI, its wire id from the Members page. */
+const group = z.string().trim().min(1).max(256);
+const groupRuleLevel = z.enum(GROUP_RULE_LEVELS);
+const folder = z.string().max(4096);
+const ruleVersion = {
+  ruleId: z.string().refine(isFolderRuleId),
+  revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+};
+const folderAccess = {
+  members: level.nullable(),
+  people: z.array(z.object({ email, level }).strict()).max(1_000),
+};
 const linkChange = z.enum(["turn-on", "turn-off", "reset"] satisfies [
   InviteLinkAction,
   ...InviteLinkAction[],
@@ -37,6 +51,23 @@ const agentActions = [
   z.object({ action: z.literal("letBackIn"), person }).strict(),
   z.object({ action: z.literal("link"), change: linkChange }).strict(),
   z.object({ action: z.literal("end") }).strict(),
+  // A Group's access for members. No `level` reads it; null clears the rule,
+  // so the Group takes the member level.
+  z
+    .object({ action: z.literal("group"), group, level: groupRuleLevel.nullable().optional() })
+    .strict(),
+  z
+    .object({
+      action: z.literal("folder"),
+      change: z.union([
+        z.object({ folder, ...folderAccess, create: z.literal(true).optional() }).strict(),
+        z.object({ ...ruleVersion, ...folderAccess }).strict(),
+        z.object({ folder, clear: z.literal(true) }).strict(),
+        z.object({ ...ruleVersion, clear: z.literal(true) }).strict(),
+      ]),
+    })
+    .strict(),
+  z.object({ action: z.literal("folderMarker"), folder }).strict(),
 ] as const;
 
 /** What agents send through the CLI and MCP. Leaving stays in the app. */
@@ -60,6 +91,9 @@ export const MEMBERS_CAPABILITIES = {
   link: "members.link.change",
   end: "members.end",
   leave: "members.leave",
+  group: "members.group.rule",
+  folder: "members.folder.rule",
+  folderMarker: "members.folder.marker.remove",
 } as const satisfies Record<MembersRequest["action"], CapabilityId>;
 
 const time = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable();
@@ -93,8 +127,7 @@ const InviteLinkSchema = z
 
 const FolderRuleSchema = z
   .object({
-    ruleId: z.string().regex(/^fr_[0-9a-f]{32}$/u),
-    revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    ...ruleVersion,
     members: level.nullable(),
     people: z
       .array(z.object({ email: z.string().max(MAX_MEMBER_EMAIL_CHARS), level }).strict())
@@ -119,6 +152,13 @@ const WorkspaceMembersViewSchema = z
       .strict(),
     memberLevel: level,
     inviteLink: InviteLinkSchema.nullable(),
+    groupRules: z
+      .array(
+        z
+          .object({ channelWireId: z.string().min(1).max(256), level: z.enum(GROUP_RULE_LEVELS) })
+          .strict(),
+      )
+      .nullable(),
     folderRules: z.array(FolderRuleSchema).nullable(),
     people: z.array(WorkspacePersonSchema),
   })
@@ -126,6 +166,10 @@ const WorkspaceMembersViewSchema = z
   .refine(
     (view) => (view.viewer.role !== "member") === (view.inviteLink !== null),
     "Only the owner and admins get the invite link.",
+  )
+  .refine(
+    (view) => (view.viewer.role !== "member") === (view.groupRules !== null),
+    "Only the owner and admins get Group rules.",
   )
   .refine(
     (view) => (view.viewer.role !== "member") === (view.folderRules !== null),
@@ -146,6 +190,16 @@ export const MembersResult = z.discriminatedUnion("status", [
   z.object({ status: z.literal("refused") }).strict(),
   // Leave finished. This account has no page left to show.
   z.object({ status: z.literal("done") }).strict(),
+  // One Group's access, as `dohc members group` shows it. Null is no rule:
+  // the Group takes the member level.
+  z
+    .object({
+      status: z.literal("group"),
+      name: z.string().max(1024),
+      level: groupRuleLevel.nullable(),
+      memberLevel: level,
+    })
+    .strict(),
 ]);
 export type MembersResult = z.infer<typeof MembersResult>;
 export const MEMBERS_REFUSED = "Your server does not list Members for this workspace and account.";

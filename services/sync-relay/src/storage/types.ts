@@ -1919,6 +1919,7 @@ export interface SyncRelayStorage {
   previewWorkspaceJoin: WorkspaceMembersMethod<"previewWorkspaceJoin">;
   joinWorkspace: WorkspaceMembersMethod<"joinWorkspace">;
   createWorkspaceGroup: WorkspaceMembersMethod<"createWorkspaceGroup">;
+  setWorkspaceGroupRule: WorkspaceMembersMethod<"setWorkspaceGroupRule">;
   // Folder rules (storage/folderRules.ts).
   changeFolderRule: FolderRulesMethod<"changeFolderRule">;
   removeFolderMarkers: FolderRulesMethod<"removeFolderMarkers">;

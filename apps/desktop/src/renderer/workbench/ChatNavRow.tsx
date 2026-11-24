@@ -17,6 +17,8 @@ export function NavRow(props: {
   labelTestId?: string;
   // A muted line after the name, such as a conversation's last message.
   detail?: string;
+  // A small mark right after the name, such as a Group's access.
+  mark?: ReactNode;
   // The row's tooltip, for what the row has no room to show.
   title?: string;
   trailing?: ReactNode;
@@ -88,7 +90,7 @@ export function NavRow(props: {
         <span
           data-testid={props.labelTestId}
           // With a detail, the name keeps its width and the detail truncates first.
-          className={`min-w-0 truncate text-[13px] ${props.detail ? "shrink" : "flex-1"} ${
+          className={`min-w-0 truncate text-[13px] ${props.detail || props.mark ? "shrink" : "flex-1"} ${
             props.unread
               ? "font-semibold text-ink"
               : props.active
@@ -100,8 +102,11 @@ export function NavRow(props: {
         >
           {props.label}
         </span>
+        {props.mark}
         {props.detail ? (
           <span className="min-w-0 flex-1 truncate text-[11px] text-subtle">{props.detail}</span>
+        ) : props.mark ? (
+          <span className="flex-1" />
         ) : null}
         {props.trailing}
       </button>

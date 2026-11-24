@@ -519,6 +519,8 @@ export function readError(error: unknown): ReadError {
   // sentence says what happened; the file names follow it.
   if (name === "NotVersionedError")
     return { words: message.split("\n")[0] ?? message, mapped: false, cause: null };
+  // The Explorer asks before such a move. Anywhere else the sentence says what may change.
+  if (name === "AccessChangeError") return { words: message, mapped: false, cause: null };
   if (name === "ReservedWorkspaceIdError") {
     return {
       title: RESERVED_WORKSPACE_ID_TITLE,
@@ -928,6 +930,12 @@ export function isRestorePolicyRefusal(error: unknown): boolean {
 export function notVersionedPaths(error: unknown): string[] | null {
   const { name, message } = parse(error);
   return name === "NotVersionedError" ? message.split("\n").slice(1).filter(Boolean) : null;
+}
+
+/** Why a move asked without confirming may change who can see the item, or null. */
+export function accessChangeWarning(error: unknown): string | null {
+  const { name, message } = parse(error);
+  return name === "AccessChangeError" ? message : null;
 }
 
 /** A folder move or delete refused while a page in it has live editing on. Try again reruns it. */

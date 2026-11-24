@@ -7,6 +7,7 @@ import {
   openMemberGroups,
   type MemberGroups,
 } from "./memberWorkspace";
+import type { ShareAccess } from "./model";
 import type { NamedChatAccess } from "./namedChat";
 import "./namedChat.css";
 
@@ -24,6 +25,7 @@ export type MemberListing = "loading" | "failed" | MemberGroups;
  * after the workspace opens, so an account that holds no membership reads as refused, not ended. `retry` reads them again.
  * `refresh` reads them again without showing a load, so a Group added while the workspace is open appears.
  * Given an age, it reads only when the last read is older. A refresh that fails keeps the Groups shown, and the next one tries again.
+ * `reads` counts the reads that arrived, including one that brought the same Groups.
  */
 export function useMemberListing(
   grantId: string | null,
@@ -31,55 +33,35 @@ export function useMemberListing(
   onEnded: (reason: Ended) => void,
 ) {
   const [found, setFound] = useState<MemberListing>("loading"),
+    [reads, setReads] = useState(0),
     [attempt, setAttempt] = useState(0);
   const onEndedRef = useRef(onEnded);
   onEndedRef.current = onEnded;
   // When the Groups last arrived, or null before they do.
   const readAt = useRef<number | null>(null),
-    quiet = useRef<AbortController | null>(null);
+    request = useRef<((olderThanMs: number) => void) | null>(null);
   useEffect(() => {
     setFound("loading");
     readAt.current = null;
     if (grantId === null) return;
     const controller = new AbortController();
-    void openMemberGroups(grantId, controller.signal).then(
-      (groups) => {
-        if (controller.signal.aborted) return;
-        if (groups.userId === accountId) {
-          readAt.current = Date.now();
-          setFound(groups);
-        } else setFound("failed");
-      },
-      (error: unknown) => {
-        if (controller.signal.aborted) return;
-        const reason = ended(error);
-        // The page checks whether the membership ended. If it didn't, the Groups keep their Try again.
-        if (reason) onEndedRef.current(reason);
-        setFound("failed");
-      },
-    );
-    return () => {
-      controller.abort();
-      quiet.current?.abort();
-      quiet.current = null;
-    };
-  }, [grantId, accountId, attempt]);
-  const refresh = useCallback(
-    (olderThanMs = 0) => {
-      if (
-        grantId === null ||
-        readAt.current === null ||
-        quiet.current ||
-        Date.now() - readAt.current < olderThanMs
-      )
-        return;
-      const controller = new AbortController();
-      quiet.current = controller;
+    // A rule can change while a read is out. A refresh asked for then reads once more after it,
+    // and only the newest read asked for shows, so an older answer never replaces a newer level.
+    let asked = 0,
+      pending = false;
+    const read = () => {
+      const number = asked;
+      pending = true;
       void openMemberGroups(grantId, controller.signal)
         .then(
           (groups) => {
-            if (controller.signal.aborted || groups.userId !== accountId) return;
+            if (controller.signal.aborted || number !== asked) return;
+            if (groups.userId !== accountId) {
+              if (readAt.current === null) setFound("failed");
+              return;
+            }
             readAt.current = Date.now();
+            setReads((count) => count + 1);
             // The same Groups keep the same object, so nothing open reads them again.
             setFound((current) =>
               typeof current === "object" && JSON.stringify(current) === JSON.stringify(groups)
@@ -90,16 +72,43 @@ export function useMemberListing(
           (error: unknown) => {
             if (controller.signal.aborted) return;
             const reason = ended(error);
-            if (reason) onEndedRef.current(reason);
+            // The page checks whether the membership ended. If it didn't, the Groups keep their Try again.
+            // The read it asks for here would only be refused again, so it waits for the next one.
+            if (reason) {
+              const before = asked;
+              onEndedRef.current(reason);
+              asked = before;
+            }
+            if (readAt.current === null && number === asked) setFound("failed");
           },
         )
         .finally(() => {
-          if (quiet.current === controller) quiet.current = null;
+          pending = false;
+          if (!controller.signal.aborted && number !== asked) read();
         });
-    },
-    [grantId, accountId],
-  );
-  return { found, retry: useCallback(() => setAttempt((value) => value + 1), []), refresh };
+    };
+    request.current = (olderThanMs) => {
+      if (pending) {
+        if (olderThanMs === 0) asked += 1;
+        return;
+      }
+      if (readAt.current === null || Date.now() - readAt.current < olderThanMs) return;
+      asked += 1;
+      read();
+    };
+    read();
+    return () => {
+      controller.abort();
+      request.current = null;
+    };
+  }, [grantId, accountId, attempt]);
+  const refresh = useCallback((olderThanMs = 0) => request.current?.(olderThanMs), []);
+  return {
+    found,
+    reads,
+    retry: useCallback(() => setAttempt((value) => value + 1), []),
+    refresh,
+  };
 }
 
 /**
@@ -110,20 +119,24 @@ export function useMemberListing(
  */
 export function MemberChats({
   found,
+  reads,
   onRetry,
   onUnlisted,
-  access,
   shown,
   onEnded,
   onUnread,
+  memberLevel,
 }: {
   found: MemberListing;
+  // Counts the reads of the Groups that arrived, so a follow that came back 404 starts again after one.
+  reads: number;
   onRetry(): void;
   onUnlisted(): void;
-  access: NamedChatAccess;
   shown: boolean;
   onEnded(reason: Ended): void;
   onUnread(count: number): void;
+  // A Group listed at View only for a member who can comment is closed by its own rule, so its note names who posts.
+  memberLevel: ShareAccess;
 }) {
   const [open, setOpen] = useState<string | null>(null),
     [unread, setUnread] = useState<ReadonlyMap<string, number>>(new Map());
@@ -144,16 +157,32 @@ export function MemberChats({
 
   const listedIds = useRef(new Set<string>());
   listedIds.current = new Set(opened?.groups.map((item) => item.channelWireId));
+  // A follow that came back 404 stops. If the next read of the Groups arrives, the membership still holds,
+  // so a new follow starts.
+  const followEnded = useRef(false),
+    [follows, setFollows] = useState(0);
+  const followGone = (reason: Ended) => {
+    followEnded.current = true;
+    onEndedRef.current(reason);
+  };
+  useEffect(() => {
+    if (!followEnded.current) return;
+    followEnded.current = false;
+    setFollows((count) => count + 1);
+  }, [reads]);
   // A read of the Groups that brings a new one keeps the follow, so the open Group keeps its messages.
+  // A new follow starts where the last one stopped, so All Groups keeps counting with no Group open.
   const shareId = opened?.shareId,
     userId = opened?.userId;
+  const lastHub = useRef<ReturnType<typeof createGroupFollow> | null>(null);
   const hub = useMemo(
     () =>
       shareId && userId
         ? createGroupFollow({
             shareId,
             userId,
-            onEnded: (reason) => onEndedRef.current(reason),
+            since: lastHub.current?.cursor(),
+            onEnded: followGone,
             onMessages: (counts) => {
               if ([...counts.keys()].some((wireId) => !listedIds.current.has(wireId)))
                 onUnlistedRef.current();
@@ -169,9 +198,13 @@ export function MemberChats({
             },
           })
         : null,
-    [shareId, userId],
+    [shareId, userId, follows],
   );
-  useEffect(() => () => hub?.close(), [hub]);
+  lastHub.current = hub;
+  useEffect(() => {
+    hub?.start();
+    return () => hub?.close();
+  }, [hub]);
 
   // Opening a Group, or showing the panel, reads what it holds.
   useEffect(() => {
@@ -180,7 +213,11 @@ export function MemberChats({
       current.has(open) ? new Map([...current].filter(([wireId]) => wireId !== open)) : current,
     );
   }, [open, shown]);
-  const total = [...unread.values()].reduce((sum, count) => sum + count, 0);
+  // Only listed Groups count, so a Group a rule hides takes its count with it.
+  const total = (opened?.groups ?? []).reduce(
+    (sum, item) => sum + (unread.get(item.channelWireId) ?? 0),
+    0,
+  );
   useEffect(() => onUnread(total), [total, onUnread]);
   // Focus follows the person between the list and a Group.
   useEffect(() => {
@@ -223,13 +260,17 @@ export function MemberChats({
             </span>
             <h2>{group.name ?? "Group"}</h2>
           </div>
-          {/* A Group's access is the member level, which the workspace reads again while it stays open. */}
+          {/* A Group rule can set its level apart from the member level. A changed level reaches the open Group in place. */}
           <ChannelView
-            key={`${opened.shareId}\n${group.channelWireId}`}
-            client={hub.client({ ...group, access })}
+            key={`${opened.shareId}\n${group.channelWireId}\n${follows}`}
+            client={hub.client(group)}
             name={group.name}
-            onEnded={(reason) => onEndedRef.current(reason)}
-            readOnlyNote={READ_ONLY}
+            onEnded={followGone}
+            readOnlyNote={
+              group.access === "read-only" && memberLevel !== "view"
+                ? `Only admins and the owner post in ${group.name ?? "this Group"}.`
+                : READ_ONLY
+            }
             empty={EMPTY}
             threads={group.type ?? "both"}
             draftKey={`${opened.userId}\n${opened.shareId}\ngroup\n${group.channelWireId}`}

@@ -285,7 +285,7 @@ it("makes the CLI's refresh wait for a paced retry, so its next read lists a mem
       recipientUserId: "sam",
       selector: { kind: "workspace" as const },
       access: "comment" as const,
-      memberReach: { role: "member" as const, level: "comment" as const, rules: [] },
+      memberReach: { role: "member" as const, level: "comment" as const, rules: [], groups: [] },
     };
     h.listRoster.mockResolvedValue({
       kind: "answered",

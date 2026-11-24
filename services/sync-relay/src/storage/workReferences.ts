@@ -6,7 +6,7 @@ import {
   type WorkTarget,
 } from "@dohc/workspace-engine-client/daemon";
 import { stableJsonStringify } from "../canonicalJson";
-import { notFound } from "../errors";
+import { notFound, RelayError } from "../errors";
 import { authorizeShareGrantAction, type AuthorizedShareAction } from "../shareAuthorization";
 import { createReceivedIdentity, type ReceivedRecipient } from "../receivedIdentity";
 import {
@@ -591,6 +591,17 @@ function resolveIn(
   };
 }
 
+/**
+ * The reader's authority changed during a reference collection, but they still
+ * hold it. Other routes answer it as not-found; the raw share pull rebuilds
+ * its answer, since a member's copy ends on not-found.
+ */
+export class StaleReferenceCollection extends RelayError {
+  constructor() {
+    super("not_found");
+  }
+}
+
 export async function listWorkReferences(
   storage: StorageContext,
   input: {
@@ -683,7 +694,7 @@ export async function listWorkReferences(
       : null;
   };
   const checkAuthority = () => {
-    if (authorize() !== shareVersion) throw notFound();
+    if (authorize() !== shareVersion) throw new StaleReferenceCollection();
   };
   while (admitted.length <= WORK_REFERENCE_BATCH && scanned < WORK_REFERENCE_SCAN_LIMIT) {
     const limit = Math.min(WORK_REFERENCE_BATCH, WORK_REFERENCE_SCAN_LIMIT - scanned);

@@ -1036,6 +1036,61 @@ describe("a member's Chats in a browser", () => {
   });
 });
 
+// The owner hides a Group from every member with its rule.
+async function hideGroup(h: SyncRelayHandler, wireId: string) {
+  const response = await h(
+    request(OWNER, `/sync/${WORKSPACE}/members/groups/${wireId}/rule`, {
+      ...jsonBody({ level: "none" }),
+      method: "PUT",
+    }),
+  );
+  expect(response.status, await response.clone().text()).toBe(200);
+}
+
+describe("a Group whose rule hides it, in a browser", () => {
+  it("leaves the list, the follow and a read by name, and refuses a post", async () => {
+    const { h, storage } = await seed();
+    const ana = await member(h, storage, "ana");
+    await ownerAppend(h, [
+      channel(LATER_GROUP, "later"),
+      thread("t-later", LATER_GROUP),
+      message("msg-later", "t-later", "still here"),
+    ]);
+    await hideGroup(h, GROUP);
+
+    const listed = await json(await chat(h, `channels?grantId=${ana.grantId}`, "ana"));
+    expect(
+      (listed.channels as Array<{ channelWireId: string }>).map((c) => c.channelWireId),
+    ).toEqual([LATER_GROUP]);
+    const followed = await chat(h, `messages?shareId=${ana.shareId}&since=0&limit=50`, "ana");
+    expect(followed.status).toBe(200);
+    const text = await followed.text();
+    expect(text).toContain("still here");
+    expect(text).not.toContain("welcome to the team");
+    expect(text).not.toContain(GROUP);
+    expect(
+      (await chat(h, `messages?shareId=${ana.shareId}&channelWireId=${GROUP}`, "ana")).status,
+    ).toBe(404);
+    expect(
+      (await chat(h, `messages?shareId=${ana.shareId}&channelWireId=${LATER_GROUP}`, "ana")).status,
+    ).toBe(200);
+    const posted = await chat(
+      h,
+      "messages",
+      "ana",
+      jsonBody({
+        shareId: ana.shareId,
+        channelWireId: GROUP,
+        id: "r-hidden",
+        lane: "posts",
+        body: "x",
+        authorKind: "human",
+      }),
+    );
+    expect(posted.status).toBe(404);
+  });
+});
+
 // A file's Comments are threads whose first create binds the file. The owner's
 // desktop and every member read the same threads.
 const commentThread = (threadId: string, path: string) =>

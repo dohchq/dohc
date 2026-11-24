@@ -57,6 +57,7 @@ import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
+import type { AgentMembersRequest, MembersResult } from "@dohc/cli/members";
 import { LiveDocumentEditAppliedError } from "../workspaces/engineYDocSessionIpc";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import type { QuietRunRefusal } from "../agents/chatDispatchService";
@@ -1431,6 +1432,48 @@ describe("CLI socket server", () => {
     await expect(link({ kind: "group", group: "general" })).rejects.toThrow(
       "This workspace is read-only. Make links in the owning workspace.",
     );
+  });
+
+  // A Group's access names the Group by the wire id the relay keys it by.
+  // General has no access of its own, so the CLI refuses it before asking.
+  it("sends a Group's access by its wire id, and refuses General", async () => {
+    if (!store) throw new Error("Store is not available");
+    const team = await store.createChannel({
+      workspaceId: WORKSPACE_ID,
+      name: "Team",
+      kind: "channel",
+      type: "both",
+    });
+    const teamWire = await store.getChannelWireId({
+      workspaceId: WORKSPACE_ID,
+      channelId: team.id,
+    });
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const wireId = store.getChannelWireId.bind(store);
+    vi.spyOn(store, "getChannelWireId").mockImplementation(async (input) =>
+      input.channelId === general.id ? GENERAL_CHANNEL_WIRE_ID : await wireId(input),
+    );
+    const asked: AgentMembersRequest[] = [];
+    context.members = async (request) => {
+      asked.push(request);
+      return {
+        status: "ready",
+        view: { memberLevel: "comment", groupRules: [{ channelWireId: teamWire, level: "view" }] },
+      } as unknown as MembersResult;
+    };
+    const members = (request: AgentMembersRequest) =>
+      invoke("members", { cwd: workspaceRoot, actor: "agent", request });
+    await expect(members({ action: "group", group: "Team", level: "view" })).resolves.toEqual({
+      status: "group",
+      name: "Team",
+      level: "view",
+      memberLevel: "comment",
+    });
+    expect(asked).toEqual([{ action: "group", group: teamWire, level: "view" }]);
+    await expect(members({ action: "group", group: "general" })).rejects.toThrow(
+      "has no Group access rule",
+    );
+    expect(asked).toHaveLength(1);
   });
 
   it("records once after a pending command settles and excludes concurrent and later request-id replays", async () => {

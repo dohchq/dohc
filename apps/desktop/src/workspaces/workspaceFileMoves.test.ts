@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
+import { folderMarkerText } from "@dohc/security-contract/access-rules";
 import { describe, expect, it, vi } from "vitest";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { DaemonRefusalError, VERSIONED_METHOD, type Request } from "@dohc/workspace-engine-client";
@@ -392,6 +393,29 @@ describe("agent moves and deletes", () => {
     expect(await readFile(join(f.rootPath, "dir/a.txt"), "utf8")).toBe("a");
     expect((await f.added(seen)).filter((row) => row.agentId !== undefined)).toEqual([]);
     await f.engine().stop();
+  });
+
+  it("moves an agent's file under another folder rule at once, and answers with the warning a person is asked", async () => {
+    const f = await fixture();
+    await write(f.rootPath, "Plan.txt", "plan");
+    await write(f.rootPath, "Team/.dohc-access", folderMarkerText(`fr_${"1".repeat(32)}`, 1));
+    await f.start();
+
+    expect(await f.move("Plan.txt", "Team/Plan.txt")).toMatchObject({
+      ok: true,
+      fromPath: "Plan.txt",
+      toPath: "Team/Plan.txt",
+      accessWarning:
+        "Moving Plan.txt into Team may change who can see it. People who could read it may keep a copy.",
+    });
+    expect(existsSync(join(f.rootPath, "Team/Plan.txt"))).toBe(true);
+    expect(await f.move("Team/Plan.txt", "Team/Kept.txt")).not.toHaveProperty("accessWarning");
+    // The warning reads the paths as the move does.
+    expect(await f.move("Team\\Kept.txt", "Kept.txt")).toMatchObject({
+      ok: true,
+      accessWarning:
+        "Moving Kept.txt out of Team may change who can see it. People who could read it may keep a copy.",
+    });
   });
 
   it("stops a folder delete at the file History refuses, puts the rest back, and names the files deleted", async () => {

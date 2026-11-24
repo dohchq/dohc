@@ -325,7 +325,10 @@
       "members.remove",
       "members.readmit",
       "members.link.change",
-      "members.end"
+      "members.end",
+      "members.group.rule",
+      "members.folder.rule",
+      "members.folder.marker.remove"
     ],
     "inboxList": [
       "inbox.list"
@@ -472,7 +475,10 @@
     "members member": "members.role.set",
     "members let-back-in": "members.readmit",
     "members link": "members.link.change",
+    "members folder": "members.folder.rule",
+    "members remove-folder-marker": "members.folder.marker.remove",
     "members end": "members.end",
+    "members group": "members.group.rule",
     "inbox list": "inbox.list",
     "inbox add": "inbox.add",
     "inbox archive": "inbox.archive",

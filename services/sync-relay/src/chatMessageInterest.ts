@@ -145,6 +145,49 @@ function chatPlace(
   };
 }
 
+// A message in the thread `payloadJson` names, as `shareId` serves it to
+// `userId` now, or null when that share no longer serves the thread.
+function readThroughShare(
+  storage: StorageContext,
+  userId: string,
+  shareId: string,
+  payloadJson: string,
+  resolver: ChatShareThreadResolver,
+) {
+  const authority = authorizeShareAction({ storage, actorUserId: userId, shareId, action: "read" });
+  if (!authority.ok) return null;
+  const served = filterOpForShare(
+    authority.effectiveSelector,
+    "chat.message.append",
+    payloadJson,
+    resolver,
+  );
+  return served.allowed ? { authority, served } : null;
+}
+
+/**
+ * Whether `shareId` still serves `userId` a message in `threadId`: its Group,
+ * or its file where that file now is. A Notice read through the share keeps
+ * its target only while this holds.
+ */
+export function chatNoticeReached(
+  storage: StorageContext,
+  userId: string,
+  shareId: string,
+  workspaceId: string,
+  threadId: string,
+): boolean {
+  return (
+    readThroughShare(
+      storage,
+      userId,
+      shareId,
+      JSON.stringify({ threadId }),
+      pushChatResolver(storage, workspaceId),
+    ) !== null
+  );
+}
+
 export function phoneCanShow(
   storage: StorageContext,
   userId: string,
@@ -186,20 +229,15 @@ export function pushMessageAccess(
     FROM sync_relay_shares s JOIN sync_relay_share_grants g USING (share_id) WHERE s.workspace_id = ?
     AND g.principal_user_id = ? AND g.status = 'active' ORDER BY membership DESC`)
     .all(workspaceId, userId)) {
-    const authority = authorizeShareAction({
+    const read = readThroughShare(
       storage,
-      actorUserId: userId,
-      shareId: String(row.share_id),
-      action: "read",
-    });
-    if (!authority.ok) continue;
-    const served = filterOpForShare(
-      authority.effectiveSelector,
-      "chat.message.append",
+      userId,
+      String(row.share_id),
       message.payloadJson,
       resolver,
     );
-    if (!served.allowed) continue;
+    if (!read) continue;
+    const { authority, served } = read;
     const body = (served.payload as { body?: unknown } | undefined)?.body;
     const found =
       Number(row.membership) === 1

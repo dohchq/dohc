@@ -5,7 +5,9 @@ import { SHARE_ACCESS_VALUES, shareAccessRank, type ShareAccess } from "./shareS
  * A member's reach as each of their share log pages lists it (`reach`): the
  * root's level and each folder where a rule gives the member a level other
  * than its parent's. A hidden folder is never listed, and the root is always
- * present, null when it is hidden.
+ * present, null when it is hidden. Groups list the same way: `groupDefault`
+ * for a Group no rule sets apart, and each reachable Group whose rule gives
+ * another level. A hidden Group is never listed.
  *
  * The relay keys both signatures, so they say only when the reach changed:
  * `signature` whenever the member's levels do, `visibilitySignature` only when
@@ -16,9 +18,12 @@ export interface ListedReach {
   readonly visibilitySignature: string;
   readonly rootLevel: ShareAccess | null;
   readonly folders: readonly { readonly path: string; readonly level: ShareAccess }[];
+  readonly groupDefault: ShareAccess;
+  readonly groups: readonly { readonly channelWireId: string; readonly level: ShareAccess }[];
 }
 
 const MAX_LISTED_FOLDERS = 100_000;
+const MAX_LISTED_GROUPS = 100_000;
 
 function isLevel(value: unknown): value is ShareAccess {
   return typeof value === "string" && (SHARE_ACCESS_VALUES as readonly string[]).includes(value);
@@ -55,12 +60,34 @@ export function parseListedReach(value: unknown): ListedReach | null {
     seen.add(path);
     folders.push({ path, level });
   }
+  if (!isLevel(record.groupDefault)) return null;
+  if (!Array.isArray(record.groups) || record.groups.length > MAX_LISTED_GROUPS) return null;
+  const groups: { channelWireId: string; level: ShareAccess }[] = [];
+  const seenGroups = new Set<string>();
+  for (const entry of record.groups as unknown[]) {
+    if (typeof entry !== "object" || entry === null) return null;
+    const { channelWireId, level } = entry as Record<string, unknown>;
+    if (typeof channelWireId !== "string" || channelWireId === "" || channelWireId.length > 256)
+      return null;
+    if (!isLevel(level) || seenGroups.has(channelWireId)) return null;
+    seenGroups.add(channelWireId);
+    groups.push({ channelWireId, level });
+  }
   return {
     signature: record.signature,
     visibilitySignature: record.visibilitySignature,
     rootLevel: record.rootLevel,
     folders,
+    groupDefault: record.groupDefault,
+    groups,
   };
+}
+
+/** The member's level in a Group their copy holds: its listed level, else `groupDefault`. */
+export function listedGroupLevel(reach: ListedReach, channelWireId: string): ShareAccess {
+  return (
+    reach.groups.find((group) => group.channelWireId === channelWireId)?.level ?? reach.groupDefault
+  );
 }
 
 /**
@@ -89,7 +116,7 @@ export function levelAtPath(reach: ListedReach, path: string): ShareAccess | nul
   return listedFolderLevel(reach, accessRuleFolder(path));
 }
 
-/** The highest level the member has anywhere, or null when they reach nothing. */
+/** The highest level the member has on any folder, or null when they reach none. */
 export function highestListedLevel(reach: ListedReach): ShareAccess | null {
   let highest = reach.rootLevel;
   for (const { level } of reach.folders) {

@@ -799,6 +799,15 @@ function MemberWorkspace({
   useEffect(() => {
     if (view.status === "ready") refreshListing(VIEW_LOG_HOLD_MS);
   }, [view, refreshListing]);
+  // A changed reach can change a Group's level or hide it, so it reads the Groups again at once.
+  // The first reach that arrives needs no second read: the Groups' first read starts with it.
+  const reach = files?.meta.reach,
+    readReach = useRef(reach);
+  useEffect(() => {
+    const before = readReach.current;
+    readReach.current = reach;
+    if (before !== undefined && reach !== undefined && before !== reach) refreshListing();
+  }, [reach, refreshListing]);
   // Groups and Comments share one read, so one toast reports it. Each failure raises it again.
   const [listingDismissed, setListingDismissed] = useState(false);
   useEffect(() => {
@@ -1163,12 +1172,13 @@ function MemberWorkspace({
           <div className="workspace-chats" id="workspace-chats" {...sidePanel("chats")}>
             <MemberChats
               found={listing.found}
+              reads={listing.reads}
               onRetry={listing.retry}
               onUnlisted={refreshListing}
-              access={access === "view" ? "read-only" : "read-write"}
               shown={showing === "chats"}
               onEnded={placeGone}
               onUnread={setUnread}
+              memberLevel={files.meta.access}
             />
           </div>
         </div>

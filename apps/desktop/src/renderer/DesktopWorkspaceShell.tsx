@@ -369,7 +369,7 @@ import { WhatsNewPage } from "./workbench/WhatsNewPage";
 import { openUnseenWhatsNewOnce } from "./whatsNew";
 import { ProposalReviewDialog, proposerName } from "./workbench/ProposalReviewDialog";
 // Type-only: erased at compile time, so the ChatsView chunk stays lazy.
-import type { ChatErrorNotice, ChatsInvitation } from "./workbench/ChatsView";
+import type { ChatErrorNotice, ChatsInvitation, JoinedGroupLevels } from "./workbench/ChatsView";
 import {
   INVITATION_WAIT_MS,
   invitationOutcome,
@@ -3616,10 +3616,29 @@ function WorkspaceShell(props: {
       : shareAccess === "view"
         ? "Only people who can comment post here."
         : undefined;
+  // Groups follow their own levels: a View member may post in a Group whose
+  // rule is Can post, and a Comment member reads one at View only. Before the
+  // relay lists a reach, every Group takes the member level.
+  const groupsPostingClosed = shareViewEnded
+    ? shareEndedRefusal
+    : otherAccountApplies
+      ? "Only the account that joined posts here."
+      : undefined;
+  const storedGroupLevels = membershipView ? shareView?.groupLevels : undefined;
+  const joinedGroupLevels = useMemo<JoinedGroupLevels>(
+    () => ({
+      groupDefault: storedGroupLevels?.groupDefault ?? shareAccess ?? "view",
+      groups: new Map(
+        (storedGroupLevels?.groups ?? []).map((group) => [group.channelWireId, group.level]),
+      ),
+    }),
+    [storedGroupLevels, shareAccess],
+  );
   const chatsJoinedWorkspace = membershipView
     ? {
         joinedWorkspace: {
-          ...(membershipPostingClosed ? { postingClosed: membershipPostingClosed } : {}),
+          ...(groupsPostingClosed ? { postingClosed: groupsPostingClosed } : {}),
+          groupLevels: joinedGroupLevels,
           createsGroups: !shareViewEnded && membershipRole === "admin",
           ...(shareViewEnded ? { ended: true } : {}),
         },
@@ -4888,6 +4907,11 @@ function WorkspaceShell(props: {
   // counts the user already cleared until something remounts it.
   const [chatsReadRevision, setChatsReadRevision] = useState(0);
   const [chatsThreadRevision, setChatsThreadRevision] = useState(0);
+  // Each Chats reads the Group rules for its marks. A change in one counts here.
+  const [chatsGroupAccessRevision, onChatsGroupAccessChanged] = useReducer(
+    (revision: number) => revision + 1,
+    0,
+  );
   const saveDirectName = useCallback(
     (conversationId: string, account: string, name: string) => {
       mutateWb((state) => setDirectTabName(state, conversationId, account, name));
@@ -4897,6 +4921,12 @@ function WorkspaceShell(props: {
   const chatEditors = useChatEditorTabs({
     workspaceId,
     onOpen: openVirtualTab,
+    onGone: (path) =>
+      closeTabsAfterFlush(
+        wbRef.current.editorGroups.flatMap((group) =>
+          group.tabs.filter((tab) => tab.path === path).map((tab) => ({ groupId: group.id, tab })),
+        ),
+      ),
     paths: chatPaths,
     activePaths: wb.editorGroups.flatMap((group) => (group.activeTab ? [group.activeTab] : [])),
     enabled: chatsAvailable,
@@ -5780,6 +5810,10 @@ function WorkspaceShell(props: {
       setExplorerReveal({ workspaceId, paths: [path] });
     },
     [mutateWb, workspaceId],
+  );
+  const showFolderInExplorer = useCallback(
+    (path: string) => showPathInExplorer(path, true),
+    [showPathInExplorer],
   );
 
   // Successful explorer moves/deletes re-project every path-keyed slice
@@ -7784,8 +7818,11 @@ function WorkspaceShell(props: {
     onOpenNavigator: openChatsNavigator,
     onThreadRead: onChatsThreadRead,
     onThreadStarted: onChatsThreadStarted,
+    onGroupAccessChanged: onChatsGroupAccessChanged,
+    groupAccessRevision: chatsGroupAccessRevision,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
+    onShowFolder: showFolderInExplorer,
     onError: reportChatsError,
     onClearError: clearIdentity,
     onNotice: showSuccessNotice,
@@ -7824,9 +7861,12 @@ function WorkspaceShell(props: {
     selectedNav: selectedChatsNav ?? undefined,
     readRevision: chatsReadRevision,
     threadRevision: chatsThreadRevision,
+    onGroupAccessChanged: onChatsGroupAccessChanged,
+    groupAccessRevision: chatsGroupAccessRevision,
     onOpenInTab: openChatsNavInTab,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
+    onShowFolder: showFolderInExplorer,
     onError: reportChatsError,
     onNotice: chatsNavigatorNotice,
     onClearError: clearIdentity,

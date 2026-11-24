@@ -83,6 +83,40 @@ describe("workspace summary projection", () => {
     ).not.toHaveProperty("role");
   });
 
+  // Chats offers posting in a Group only where the write gate takes it.
+  it("carries a membership's Group levels, and none to post with from a reach it can't read", () => {
+    const whole = { paths: [], versionId: null, access: "comment", wholeWorkspace: true };
+    const reach = {
+      signature: "s",
+      visibilitySignature: "v",
+      rootLevel: "comment",
+      folders: [],
+      groupDefault: "comment",
+      groups: [{ channelWireId: "wire-team", level: "view" }],
+    };
+    const levels = (stored: Record<string, unknown>) =>
+      workspaceSummaryFor(entry({ shareView: { ...shareView(whole), ...stored } })).shareView
+        ?.groupLevels;
+    expect(levels({ reach })).toEqual({
+      groupDefault: "comment",
+      groups: [{ channelWireId: "wire-team", level: "view" }],
+    });
+    // Before the relay lists a reach, Chats gives every Group the member level.
+    expect(levels({})).toBeUndefined();
+    // A copy that waits to send shows View, but its Groups keep the pinned level.
+    expect(
+      workspaceSummaryFor(
+        entry({
+          shareView: { ...shareView({ ...whole, access: "edit" }), editingNotReady: true },
+        }),
+      ).shareView,
+    ).toMatchObject({ access: "view", groupLevels: { groupDefault: "edit", groups: [] } });
+    expect(levels({ reach: { ...reach, groupDefault: "owner" } })).toEqual({
+      groupDefault: "view",
+      groups: [],
+    });
+  });
+
   it("carries durable unsaved paths to the shell", () => {
     for (const unsavedPaths of [["docs/locked.md"], null]) {
       expect(

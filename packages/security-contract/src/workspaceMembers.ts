@@ -53,6 +53,23 @@ export interface WorkspacePerson {
 }
 
 /**
+ * A Group's rule: one level for every member. Group settings shows them as
+ * "Can post", "View only" and "No access". Admins and the owner always reach
+ * every Group at Edit.
+ */
+export const GROUP_RULE_LEVELS = ["comment", "view", "none"] as const;
+export type GroupRuleLevel = (typeof GROUP_RULE_LEVELS)[number];
+
+export function isGroupRuleLevel(value: unknown): value is GroupRuleLevel {
+  return typeof value === "string" && (GROUP_RULE_LEVELS as readonly string[]).includes(value);
+}
+
+export interface WorkspaceGroupRule {
+  channelWireId: string;
+  level: GroupRuleLevel;
+}
+
+/**
  * A folder a rule covers, as the relay sees the owner's files:
  * - `covered`: the folder holds the rule's marker.
  * - `marker-missing`: the folder has files but no marker naming the rule.
@@ -60,6 +77,9 @@ export interface WorkspacePerson {
  */
 export const FOLDER_RULE_STATES = ["covered", "marker-missing", "folder-missing"] as const;
 export type FolderRuleState = (typeof FOLDER_RULE_STATES)[number];
+
+export const FOLDER_RULE_CHANGED =
+  "Someone changed this folder's access. Reload Members, check the rule, and save again.";
 
 /** A folder access rule the relay keeps (ADR 0017). */
 export interface WorkspaceFolderRule {
@@ -88,6 +108,11 @@ export interface WorkspaceMembersView {
   inviteLink: WorkspaceInviteLink | null;
   /** Present only for the owner and admins, since it names folders hidden from members. */
   folderRules: WorkspaceFolderRule[] | null;
+  /**
+   * Each Group with a rule. Present only for the owner and admins, since it
+   * names Groups hidden from members. A Group not listed takes `memberLevel`.
+   */
+  groupRules: WorkspaceGroupRule[] | null;
   /**
    * Everyone in the workspace, owner first. Members see only active entries
    * and no emails. The owner and admins also see invites and removed accounts.
@@ -137,11 +162,16 @@ export const WORKSPACE_MEMBER_ROUTES = {
   /** POST {} → WorkspaceMembersView. Ends membership for everyone. */
   end: "/sync/:workspaceId/members/end",
   /**
-   * POST {shareId, name, type?, purpose?} → {ok, channelWireId, name}. Owner
-   * or admin, through the membership share. The relay writes an ordinary
-   * Group into the owner's workspace.
+   * POST {shareId, name, type?, purpose?, level?} → {ok, channelWireId, name}.
+   * Owner or admin, through the membership share. The relay writes an
+   * ordinary Group into the owner's workspace, and `level` as its rule.
    */
   groupCreate: "/sync/members/groups",
+  /**
+   * PUT {level: GroupRuleLevel | null} → WorkspaceMembersView. Owner or
+   * admin. Null clears the rule, so the Group takes the member level.
+   */
+  groupRule: "/sync/:workspaceId/members/groups/:channelWireId/rule",
   /**
    * POST → WorkspaceMembersView. Owner or admin. One of:
    * - {folder, members, people}: a new rule for a workspace-relative folder

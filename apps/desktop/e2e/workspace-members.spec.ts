@@ -875,7 +875,9 @@ test("@two-client a member posts in a Group, follows a level change, and sees an
       .toBe("view");
     await page.getByRole("button", { name: "Close settings", exact: true }).click();
     const note = mine.getByTestId("chats-readonly-note");
-    await expect(note).toHaveText("Only people who can comment post here.", { timeout: 120_000 });
+    await expect(note).toHaveText("Only admins and the owner post in Launch team.", {
+      timeout: 120_000,
+    });
     await expect(composer).toHaveCount(0);
     // The test relay names each account by its id.
     const changed = `${OWNER.user} now lets members view only.`;

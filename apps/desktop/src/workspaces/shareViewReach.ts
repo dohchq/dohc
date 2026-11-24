@@ -2,6 +2,7 @@ import {
   highestListedLevel,
   levelAtPath,
   listedFolderLevel,
+  listedGroupLevel,
   parseListedReach,
   type ListedReach,
 } from "@dohc/security-contract/listed-reach";
@@ -22,20 +23,33 @@ import { recordedShareSelector } from "./shareViewRecords";
  * refused-write path.
  */
 export interface ShareViewLevels {
-  /**
-   * The pinned grant's level. For a joined workspace this is the member
-   * level, which a Group takes until Group rules exist.
-   */
+  /** The pinned grant's level. For a joined workspace this is the member level. */
   readonly member: ShareAccess | null;
+  /**
+   * Whether some Group takes the member's posts: the level a Group the reach
+   * doesn't name takes, or any listed Group's, is Comment or Edit.
+   */
+  readonly postsInSomeGroup: boolean;
   /** The highest level anywhere, which decides whether a write offer shows at all. */
   readonly highest: ShareAccess | null;
   /** The level at a file path: an existing file's current path, or a new file's. */
   at(path: string): ShareAccess | null;
   /** The level inside a folder, "" for the root: where a new file in it lands. */
   in(folder: string): ShareAccess | null;
+  /** The level in a Group, by its channel wire id. */
+  group(channelWireId: string): ShareAccess | null;
 }
 
-const NO_LEVELS: ShareViewLevels = { member: null, highest: null, at: () => null, in: () => null };
+const NO_LEVELS: ShareViewLevels = {
+  member: null,
+  postsInSomeGroup: false,
+  highest: null,
+  at: () => null,
+  in: () => null,
+  group: () => null,
+};
+
+const takesPosts = (level: ShareAccess | null) => level === "comment" || level === "edit";
 
 /** The reach stored with a joined workspace's share view, or null when it has none or it is unreadable. */
 export function storedShareViewReach(shareView: unknown): ListedReach | null {
@@ -78,11 +92,24 @@ export function grantLevels(
   // A stored reach that can't be read gives no level, rather than the
   // member level it may have narrowed.
   if (reach === null) return { ...NO_LEVELS, member };
-  if (reach === undefined) return { member, highest: member, at: () => member, in: () => member };
+  if (reach === undefined) {
+    return {
+      member,
+      postsInSomeGroup: takesPosts(selector.access),
+      highest: member,
+      at: () => member,
+      in: () => member,
+      group: () => selector.access,
+    };
+  }
   return {
     member,
+    // Group posts go through chat, not the file lane, so they keep their level.
+    postsInSomeGroup:
+      takesPosts(reach.groupDefault) || reach.groups.some((group) => takesPosts(group.level)),
     highest: cap(highestListedLevel(reach)),
     at: (path) => cap(levelAtPath(reach, path)),
     in: (folder) => cap(listedFolderLevel(reach, folder)),
+    group: (channelWireId) => listedGroupLevel(reach, channelWireId),
   };
 }

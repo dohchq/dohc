@@ -18,6 +18,13 @@ import {
 import type { SqliteDb } from "./types";
 import { workspaceAdminOrigin } from "../relayLogInputs";
 import { appendLogBatchInTransaction, maxOriginSeq } from "./log";
+import {
+  insertCreatedGroupRule,
+  readWorkspaceGroupRules,
+  type GroupMembersLevel,
+} from "./groupRules";
+
+export { setWorkspaceGroupRule } from "./groupRules";
 import { workspaceUsageBytes } from "./workspaces";
 
 // Workspace members (docs/engineering/plans/workspace-members.md, piece 1).
@@ -218,6 +225,8 @@ export interface WorkspaceMembersSnapshot {
   viewer: { role: WorkspaceRole; memberId: string };
   members: WorkspaceMemberRow[];
   inviteLink: WorkspaceInviteLinkRow | null;
+  /** Each Group's active rule. Only the owner and admins read it, since it names hidden Groups. */
+  groupRules: Array<{ channelWireId: string; level: GroupMembersLevel }> | null;
 }
 
 const nullableString = (value: unknown) =>
@@ -406,6 +415,7 @@ export function readWorkspaceMembers(
       viewer,
       members,
       inviteLink: membership ? inviteLinkOf(storage, workspaceId) : null,
+      groupRules: viewer.role === "member" ? null : readWorkspaceGroupRules(storage, workspaceId),
     };
   });
 }
@@ -1033,19 +1043,26 @@ export type CreateWorkspaceGroupResult =
 export function createWorkspaceGroup(
   storage: StorageContext,
   input: {
-    shareId: string;
+    /** The membership share, or, for the owner's own computer, the workspace. */
+    shareId?: string;
+    workspaceId?: string;
     actorUserId: string;
     name: string;
     slug: string;
     type: WorkspaceGroupType | undefined;
     purpose: string | undefined;
+    /** The members' level, kept as the Group's rule. Undefined leaves the Group at the member level. */
+    level?: GroupMembersLevel;
     nowMs: number;
   },
 ): CreateWorkspaceGroupResult {
   return storage.tx((): CreateWorkspaceGroupResult => {
-    const membership = getWorkspaceMembershipByShare(storage, input.shareId);
-    if (!membership) return { ok: false, reason: "not-found" };
-    const { workspaceId } = membership;
+    // The owner needs no membership record yet, so a hidden Group can exist before the first invite.
+    const workspaceId =
+      input.shareId !== undefined
+        ? getWorkspaceMembershipByShare(storage, input.shareId)?.workspaceId
+        : input.workspaceId;
+    if (workspaceId === undefined) return { ok: false, reason: "not-found" };
     const actor = workspaceRoleOf(storage, workspaceId, input.actorUserId);
     if (!actor) return { ok: false, reason: "not-found" };
     if (actor.role === "member") return { ok: false, reason: "forbidden" };
@@ -1080,6 +1097,16 @@ export function createWorkspaceGroup(
         },
       ],
     });
+    // In the create's transaction, so a Group created hidden is never served to a member.
+    if (input.level !== undefined) {
+      insertCreatedGroupRule(storage.db, {
+        workspaceId,
+        channelWireId,
+        level: input.level,
+        actorUserId: input.actorUserId,
+        nowMs: createdAtMs,
+      });
+    }
     return { ok: true, workspaceId, channelWireId };
   });
 }

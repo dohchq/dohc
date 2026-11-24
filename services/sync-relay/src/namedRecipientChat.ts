@@ -416,12 +416,20 @@ export function createNamedRecipientChat(options: {
         const chat = workspace ? null : chatSideOf(authority.effectiveSelector);
         if (!workspace && !chat) throw notFound();
         let file: CommentFile | null = null;
+        // The Group a workspace share reads or posts in, once named. A rule that hides it ends the read.
+        let group: string | null = null;
         const recheck = () => {
           const fresh = action("read");
           if (
             fresh.share.workspaceId !== share.workspaceId ||
             isWorkspaceSelector(fresh.effectiveSelector) !== workspace ||
             (chat && chatSideOf(fresh.effectiveSelector)?.channelWireId !== chat.channelWireId)
+          )
+            throw notFound();
+          if (
+            group !== null &&
+            (!isWorkspaceSelector(fresh.effectiveSelector) ||
+              !workspaceGroupReachable(fresh.effectiveSelector, group, resolver!))
           )
             throw notFound();
           if (
@@ -443,21 +451,21 @@ export function createNamedRecipientChat(options: {
             maxBodyBytes: MAX_MESSAGE_BODY_BYTES,
           };
           if (!chat) {
-            const groups = storage
-              .listChannelCreates(share.workspaceId)
-              .filter((group) => workspaceGroupReachable(group.channelWireId, resolver!));
+            const groups = storage.listChannelCreates(share.workspaceId);
             const fresh = recheck().effectiveSelector;
             if (!isWorkspaceSelector(fresh)) throw notFound();
             const files = workspaceFileReach(fresh);
             return json({
               ...listing,
-              channels: groups.map((group) => ({
-                channelWireId: group.channelWireId,
-                name: withheldLinkText(group.name, files),
-                kind: "channel",
-                type: group.type,
-                access: workspaceChatAccess(fresh, group.channelWireId),
-              })),
+              channels: groups
+                .filter((group) => workspaceGroupReachable(fresh, group.channelWireId, resolver!))
+                .map((group) => ({
+                  channelWireId: group.channelWireId,
+                  name: withheldLinkText(group.name, files),
+                  kind: "channel",
+                  type: group.type,
+                  access: workspaceChatAccess(fresh, group.channelWireId),
+                })),
             });
           }
           let writable = false;
@@ -519,9 +527,11 @@ export function createNamedRecipientChat(options: {
           channelWireId !== null &&
           (chat
             ? channelWireId !== chat.channelWireId
-            : !workspaceGroupReachable(channelWireId, resolver!))
+            : !isWorkspaceSelector(authority.effectiveSelector) ||
+              !workspaceGroupReachable(authority.effectiveSelector, channelWireId, resolver!))
         )
           throw notFound();
+        if (!chat) group = channelWireId;
         const place = file ? { path: file.filePath } : { channelWireId };
         if (posting) {
           if (channelWireId === null && !file) throw notFound();
@@ -862,7 +872,10 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
         }
         // A file's Comments are not a Group.
         const channelWireId = input.resolver.threadChannelWireId(message.threadId);
-        if (workspaceGroupReachable(channelWireId, input.resolver))
+        if (
+          isWorkspaceSelector(selector) &&
+          workspaceGroupReachable(selector, channelWireId, input.resolver)
+        )
           messages.push({ ...message, channelWireId });
       }
       return {

@@ -119,6 +119,8 @@ describe("received-share record drafts", () => {
       signature: "r1",
       visibilitySignature: "v1",
       rootLevel: "view" as const,
+      groupDefault: "view" as const,
+      groups: [],
       folders: [{ path: "trip", level: trip }],
     });
     const f = fixture();
@@ -144,6 +146,8 @@ describe("received-share record drafts", () => {
       signature: "r1",
       visibilitySignature: "v1",
       rootLevel: "edit" as const,
+      groupDefault: "edit" as const,
+      groups: [],
       folders: [],
     };
     const lowered = fixture();
@@ -153,7 +157,14 @@ describe("received-share record drafts", () => {
     });
     lowered.host.checkAuthority.mockResolvedValue({
       selector: { ...membership, access: "view" },
-      reach: { signature: "r2", visibilitySignature: "v1", rootLevel: "view", folders: [] },
+      reach: {
+        signature: "r2",
+        visibilitySignature: "v1",
+        rootLevel: "view",
+        groupDefault: "view",
+        groups: [],
+        folders: [],
+      },
     });
     await expect(createReceivedShareRecord(input, lowered.host)).rejects.toThrow(
       "This Collection does not have Edit access.",
@@ -171,6 +182,8 @@ describe("received-share record drafts", () => {
         signature: "r2",
         visibilitySignature: "v1",
         rootLevel: "view",
+        groupDefault: "view",
+        groups: [],
         folders: [{ path: "trip", level: "edit" }],
       },
     });

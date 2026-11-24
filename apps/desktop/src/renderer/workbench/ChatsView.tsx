@@ -21,8 +21,15 @@ import {
 import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
 import { showChat } from "./chatsOnScreen";
-import { NewGroupDialog, type GroupType } from "./NewGroupDialog";
+import { NewGroupDialog, type GroupType, type NewGroupAccess } from "./NewGroupDialog";
 import { ChatMembersDialog } from "./ChatMembersDialog";
+import {
+  GroupSettingsDialog,
+  groupAccessFrom,
+  othersInWorkspace,
+  type GroupAccess,
+} from "./GroupSettingsDialog";
+import type { GroupRuleLevel } from "@dohc/security-contract/workspace-members";
 import { emailKey, isEmail } from "./memberPicker";
 import { agentChatIdentity, orderAgentChats, withListedAgent } from "./agentChat";
 import { AgentThreadLines } from "./AgentThreadLines";
@@ -38,6 +45,7 @@ import {
   joinedChannelLabel,
   ComposerModeBar,
   ComposerNotice,
+  GroupAccessMark,
   AgentProblemLine,
   ArchivedLine,
   DispatchAnnouncement,
@@ -63,7 +71,7 @@ import { formatChatTime, formatShortTime } from "../time";
 import { basenameOf } from "../path";
 import { ipcErrorMessage } from "../ipcError";
 import { nameSlug } from "@dohc/workspace-contracts/names";
-import { isGroupNameTaken } from "../../ipc/errorWords";
+import { isGroupNameTaken, refusalCode, WORKSPACE_NOT_SYNCED } from "../../ipc/errorWords";
 import type { ShellError } from "../shell/useShellError";
 import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
 import { inputCount, onNextInput } from "../ui/inputCount";
@@ -103,6 +111,8 @@ import type {
   WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 import {
   type ChatMessageListHandle,
   MentionText,
@@ -198,6 +208,12 @@ type CommitLane = "overview" | "joinedShares" | "relayShares" | "relayReach";
 // An invitation a notice's Open asks Chats to show, with the input count from
 // when the person pressed Open.
 export type ChatsInvitation = { shareId: string; inputs: number };
+
+/** A joined workspace's Group levels: each listed Group's, by wire id, else `groupDefault`. */
+export interface JoinedGroupLevels {
+  groupDefault: "view" | "comment" | "edit";
+  groups: ReadonlyMap<string, "view" | "comment" | "edit">;
+}
 
 // Exported for the shell's expand-to-tab seam: the panel reports where it is
 // (onNavChange) and a freshly expanded tab starts there (initialNav).
@@ -366,6 +382,8 @@ export function ChatsView(props: {
   // The shell's normal file navigation path. Attachment chips use it when
   // present; tests/embedded surfaces may omit it and receive a titled chip.
   onOpenPath?: (path: string, headingAnchor?: string) => void;
+  // Shows a folder in Explorer, opened: Group settings links to the Group's folder.
+  onShowFolder?: (path: string) => void;
   // A retry, when given, is the failure's Try again. An archive refused for
   // live editing also names the bookmark's page. A notice can give the
   // failure a title, an identity and an action in place of Try again.
@@ -413,7 +431,14 @@ export function ChatsView(props: {
   // shows in place of every composer. createsGroups shows New group, for an
   // admin; the relay decides either way.
   // ended: the membership ended, so its Groups count no unread messages.
-  joinedWorkspace?: { postingClosed?: string; createsGroups: boolean; ended?: boolean };
+  // groupLevels: each Group's level, by wire id, else the default. A Group at
+  // View takes no post.
+  joinedWorkspace?: {
+    postingClosed?: string;
+    groupLevels?: JoinedGroupLevels;
+    createsGroups: boolean;
+    ended?: boolean;
+  };
   // Ephemeral presence/typing transport, present only under collaboration.
   collaboration?: ChatPresenceCollaboration | null;
   // Where this view lives: the side panel (default) or a full editor tab.
@@ -467,6 +492,10 @@ export function ChatsView(props: {
   // that write to the shell, which tells the persistent navigator to refetch.
   onThreadStarted?: () => void;
   threadRevision?: number;
+  // A Group's access rule changed here. The shell counts each change in
+  // groupAccessRevision, so every Chats reads the rules again for its marks.
+  onGroupAccessChanged?: () => void;
+  groupAccessRevision?: number;
   // The persistent panel navigator sets this while a Chats editor tab is
   // live: the page instance runs the same polls against the same store, so a
   // second poller doubles every chat read for nothing. Suspends the DM list
@@ -492,9 +521,23 @@ export function ChatsView(props: {
   const inJoinedWorkspace = props.joinedWorkspace !== undefined;
   const postingClosed = props.joinedWorkspace?.postingClosed;
   const createsGroups = !inJoinedWorkspace || props.joinedWorkspace?.createsGroups === true;
+  const groupLevels = props.joinedWorkspace?.groupLevels;
   const lockedLine =
     postingClosed ??
     (inJoinedWorkspace ? "Members post in Groups only." : "This Group is read-only for you.");
+  // A Group at View, by its own rule or the member level, says who posts.
+  const lockedLineFor = (channel: ChatChannelRecord) => {
+    if (
+      postingClosed !== undefined ||
+      !channel.wireId ||
+      channel.wireId === GENERAL_CHANNEL_WIRE_ID ||
+      !groupLevels
+    )
+      return lockedLine;
+    return (groupLevels.groups.get(channel.wireId) ?? groupLevels.groupDefault) === "view"
+      ? `Only admins and the owner post in ${channel.name}.`
+      : lockedLine;
+  };
   const collaboration = props.collaboration ?? null;
   // A stable fallback: a fresh [] per render would defeat the message-list
   // memo boundaries below for every roster-less host.
@@ -612,6 +655,8 @@ export function ChatsView(props: {
   // publish under the previous workspace's scope. Reset on every switch.
   const [sharesWorkspaceId, setSharesWorkspaceId] = useState<string | null>(null);
   const [sharePanelOpen, setSharePanelOpen] = useState(false);
+  // The channel whose Group settings are open, by id.
+  const [groupSettingsFor, setGroupSettingsFor] = useState<string | null>(null);
   // The session the members dialog opened in. Its adds stop once the account
   // changes, even an add that was already part of a running batch.
   const [sharePanelSession, setSharePanelSession] = useState(0);
@@ -1273,6 +1318,7 @@ export function ChatsView(props: {
       relayReach: 0,
     };
     setSharePanelOpen(false);
+    setGroupSettingsFor(null);
     setJoiningShareId(null);
     setBookmarks([]);
     setBookmarkBusy(new Set());
@@ -1472,6 +1518,7 @@ export function ChatsView(props: {
       });
       if (lane) setGroupLane(lane);
       setSharePanelOpen(false);
+      setGroupSettingsFor(null);
       setChannelThreads([]);
       setFeedPosts({});
       setDispatchState(null);
@@ -1526,6 +1573,82 @@ export function ChatsView(props: {
     [reactions, workspaceId],
   );
 
+  // A Group's access, from the Members list the relay answers this account.
+  // Until someone else is in the workspace or can join it, a Group with no rule hides nothing.
+  const loadGroupAccess = useCallback(
+    async (wireId: string): Promise<GroupAccess> => {
+      const result = await bridge().workspaceMembers({ workspaceId, request: { action: "list" } });
+      return result.status === "ready" ? groupAccessFrom(result.view, wireId) : "no-members";
+    },
+    [workspaceId],
+  );
+  // New group offers the Members picker once anyone else is in the workspace or the invite link is on.
+  // A workspace that never synced has no one else; any other failure is no
+  // connection, and the Group is made here as before.
+  const loadNewGroupAccess = useCallback(async (): Promise<NewGroupAccess> => {
+    try {
+      const result = await bridge().workspaceMembers({ workspaceId, request: { action: "list" } });
+      if (result.status !== "ready" || result.view.groupRules === null) return null;
+      return othersInWorkspace(result.view) ? { memberLevel: result.view.memberLevel } : null;
+    } catch (cause) {
+      return refusalCode(cause) === WORKSPACE_NOT_SYNCED ? null : "offline";
+    }
+  }, [workspaceId]);
+  // The owner and admins see which Groups a rule limits, from the same
+  // Members list Group settings reads. Until it answers, no Group has a mark.
+  const groupRules = useWorkspaceQuery(useWorkspaceSession(), {
+    key: `chats-group-rules:${workspaceId}:${createsGroups}`,
+    manual: !createsGroups,
+    load: async () => {
+      const result = await bridge().workspaceMembers({ workspaceId, request: { action: "list" } });
+      return result.status === "ready" ? result.view : null;
+    },
+  });
+  const retryGroupRules = groupRules.retry;
+  const { onGroupAccessChanged } = props;
+  const groupAccessChanged = useCallback(() => {
+    if (onGroupAccessChanged) onGroupAccessChanged();
+    else void retryGroupRules();
+  }, [onGroupAccessChanged, retryGroupRules]);
+  const seenGroupAccessRevision = useRef(props.groupAccessRevision);
+  useEffect(() => {
+    if (seenGroupAccessRevision.current === props.groupAccessRevision) return;
+    seenGroupAccessRevision.current = props.groupAccessRevision;
+    if (createsGroups) void retryGroupRules();
+  }, [props.groupAccessRevision, retryGroupRules, createsGroups]);
+  // The owner or another admin can change a rule on another computer, and
+  // nothing tells this one, so coming back to the window reads the rules again.
+  useEffect(() => {
+    if (!createsGroups) return;
+    const reread = () => void retryGroupRules();
+    window.addEventListener("focus", reread);
+    return () => window.removeEventListener("focus", reread);
+  }, [retryGroupRules, createsGroups]);
+  const groupAccessMark = (channel: ChatChannelRecord, size?: number) => {
+    const view = groupRules.error ? null : groupRules.value;
+    if (!view || channel.kind !== "channel" || !channel.wireId) return null;
+    if (channel.wireId === GENERAL_CHANNEL_WIRE_ID) return null;
+    const access = groupAccessFrom(view, channel.wireId);
+    if (access === "no-members" || (access.level !== "view" && access.level !== "none"))
+      return null;
+    return <GroupAccessMark level={access.level} {...(size ? { size } : {})} />;
+  };
+  const saveGroupAccess = useCallback(
+    async (wireId: string, level: GroupRuleLevel | null): Promise<string | null> => {
+      try {
+        await bridge().workspaceMembers({
+          workspaceId,
+          request: { action: "group", group: wireId, level },
+        });
+        groupAccessChanged();
+        return null;
+      } catch (error) {
+        return ipcErrorMessage(error, "dohc could not change this Group's access.");
+      }
+    },
+    [workspaceId, groupAccessChanged],
+  );
+
   // Derived lookups: a channel matches a grant by its wire id. A key
   // that is present with a null value means "asked, and this workspace holds
   // no grant" — an absent key means nobody asked, which is unknown.
@@ -1537,8 +1660,11 @@ export function ChatsView(props: {
     return map;
   }, [channelShares]);
 
+  // "read" asks whether opening a thread moves this reader's read mark. Read
+  // state is the reader's own, so a Group at View takes no post but its posts
+  // still count as read once shown.
   const channelIsLocked = useCallback(
-    (channel: ChatChannelRecord) => {
+    (channel: ChatChannelRecord, use: "post" | "read" = "post") => {
       // Share metadata is the authority for whether this local row is owned
       // or joined. If that authority is unavailable, fail closed: treating an
       // unknown joined channel as local would re-enable writes and read-cursor
@@ -1548,7 +1674,10 @@ export function ChatsView(props: {
           postingClosed !== undefined ||
           channel.kind !== "channel" ||
           !channel.wireId ||
-          channel.wireId === GENERAL_CHANNEL_WIRE_ID
+          channel.wireId === GENERAL_CHANNEL_WIRE_ID ||
+          (use === "post" &&
+            groupLevels !== undefined &&
+            (groupLevels.groups.get(channel.wireId) ?? groupLevels.groupDefault) === "view")
         );
       }
       if (channelShares === null) return true;
@@ -1563,7 +1692,7 @@ export function ChatsView(props: {
       if (answer === null) return false;
       return answer.access === "read-only" || answer.ended;
     },
-    [channelShares, joinedByWire, inJoinedWorkspace, postingClosed],
+    [channelShares, joinedByWire, inJoinedWorkspace, postingClosed, groupLevels],
   );
 
   const applyThreadSnapshot = useCallback(
@@ -1623,7 +1752,7 @@ export function ChatsView(props: {
         if (token !== liveToken.current || refreshSeq !== threadRefreshSeq.current) {
           return;
         }
-        applyThreadSnapshot(thread.id, snapshot, !channelIsLocked(channel));
+        applyThreadSnapshot(thread.id, snapshot, !channelIsLocked(channel, "read"));
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, "dohc could not load this chat."), error);
@@ -1664,7 +1793,7 @@ export function ChatsView(props: {
           if (token !== liveToken.current || refreshSeq !== threadRefreshSeq.current) {
             return;
           }
-          applyThreadSnapshot(threadId, snapshot, !channelIsLocked(nav.channel));
+          applyThreadSnapshot(threadId, snapshot, !channelIsLocked(nav.channel, "read"));
           setMessagesLoading(false);
         })
         .catch(() => {
@@ -2241,6 +2370,12 @@ export function ChatsView(props: {
     const target = tab?.kind === "chat" ? tab.target : null;
     if (!seed && target?.kind === "channel" && overview.status === "ready") {
       const channel = overview.channels.find((entry) => entry.id === target.id);
+      // A Group Chats no longer lists takes its tab with it, as a deleted file does.
+      if (!channel && props.onCloseTab) {
+        seededRef.current = true;
+        props.onCloseTab();
+        return;
+      }
       seed = channel ? { level: "channel", channel } : { level: "channels" };
     } else if (!seed && target?.kind === "dm") {
       seed = { level: "direct", conversationId: target.id };
@@ -2281,6 +2416,7 @@ export function ChatsView(props: {
     props.initialDrafts,
     props.initialNav,
     props.editorTabPath,
+    props.onCloseTab,
     overview,
     variant,
   ]);
@@ -2766,6 +2902,7 @@ export function ChatsView(props: {
         setOwed((current) => (current === null ? current : { ...current, shares: "waiting" }));
         // The members dialog holds the previous account's picks and contacts.
         setSharePanelOpen(false);
+        setGroupSettingsFor(null);
         setMessages([]);
         setMessagesLoading(false);
         setComposer("");
@@ -3225,7 +3362,12 @@ export function ChatsView(props: {
   const [groupLane, setGroupLane] = useState<"posts" | "chat">("posts");
   // The new group dialog's create. A failure stays in the dialog.
   const createChannel = useCallback(
-    async (input: { name: string; type: GroupType; purpose: string }): Promise<string | null> => {
+    async (input: {
+      name: string;
+      type: GroupType;
+      purpose: string;
+      level?: GroupRuleLevel;
+    }): Promise<string | null> => {
       const token = liveToken.current;
       try {
         const result = await bridge().createChatChannel({
@@ -3233,7 +3375,9 @@ export function ChatsView(props: {
           name: input.name,
           type: input.type,
           ...(input.purpose ? { purpose: input.purpose } : {}),
+          ...(input.level ? { level: input.level } : {}),
         });
+        if (input.level) groupAccessChanged();
         if (token !== liveToken.current) return null;
         resetGroupForm();
         setOverview((current) =>
@@ -3288,7 +3432,7 @@ export function ChatsView(props: {
         return message;
       }
     },
-    [resetGroupForm, openConversation, workspaceId],
+    [resetGroupForm, openConversation, workspaceId, groupAccessChanged],
   );
   const closeGroupDialog = useCallback(() => {
     const failure = unreportedCreateFailure.current;
@@ -4147,8 +4291,12 @@ export function ChatsView(props: {
             className="mx-auto w-full max-w-[640px] px-3 pt-2 sm:px-4"
           />
           {threadLocked ? (
-            <ComposerNotice testId="chats-readonly-note">
-              {threadJoined?.ended ? endedGroupNotice(threadJoined) : lockedLine}
+            // With no composer, the note lines up with the posts above, which sit 8px further in.
+            <ComposerNotice
+              testId="chats-readonly-note"
+              className="mx-auto w-full max-w-[640px] px-5 pb-4 pt-3 sm:px-6"
+            >
+              {threadJoined?.ended ? endedGroupNotice(threadJoined) : lockedLineFor(nav.channel)}
             </ComposerNotice>
           ) : (
             <div
@@ -4279,6 +4427,16 @@ export function ChatsView(props: {
       channelShares !== null &&
       channelJoined === null &&
       !!nav.channel.wireId;
+    // The owner, and an admin in a joined workspace, choose who among the
+    // members sees a Group. General, direct messages and agents' chats
+    // follow the member level. The relay decides either way.
+    const groupWireId =
+      nav.channel.kind === "channel" &&
+      nav.channel.wireId &&
+      nav.channel.wireId !== GENERAL_CHANNEL_WIRE_ID &&
+      (inJoinedWorkspace ? createsGroups : canShare)
+        ? nav.channel.wireId
+        : null;
     // The wide page carries the lane switch in the header. The panel can be
     // 240px, where the header's fixed controls already fill the row, so the
     // switch keeps its own row there.
@@ -4325,6 +4483,7 @@ export function ChatsView(props: {
           label={channelAgent ? channelAgent.label : nav.channel.name}
           testId="chats-channel"
           large={variant === "page"}
+          titleMark={groupAccessMark(nav.channel, variant === "page" ? 14 : 12)}
           onBack={variant === "panel" ? goBack : undefined}
           icon={
             channelAgent ? (
@@ -4363,6 +4522,20 @@ export function ChatsView(props: {
                   aria-label={`${channelAgent?.label ?? "Agent"} settings`}
                   title={`${channelAgent?.label ?? "Agent"} settings`}
                   onClick={props.onSetupAgent}
+                  className="grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-hover hover:text-ink"
+                >
+                  <Settings size={16} strokeWidth={1.9} aria-hidden />
+                </button>
+              ) : null}
+              {groupWireId ? (
+                <button
+                  type="button"
+                  data-testid="chats-group-settings"
+                  aria-label="Group settings"
+                  title="Group settings"
+                  aria-haspopup="dialog"
+                  aria-expanded={groupSettingsFor === nav.channel.id}
+                  onClick={() => setGroupSettingsFor(nav.channel.id)}
                   className="grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-hover hover:text-ink"
                 >
                   <Settings size={16} strokeWidth={1.9} aria-hidden />
@@ -4463,6 +4636,19 @@ export function ChatsView(props: {
             onClose={() => setSharePanelOpen(false)}
           />
         ) : null}
+        {groupWireId && groupSettingsFor === nav.channel.id ? (
+          <GroupSettingsDialog
+            groupName={nav.channel.name}
+            {...(nav.channel.folderPath ? { folderPath: nav.channel.folderPath } : {})}
+            load={() => loadGroupAccess(groupWireId)}
+            save={(level) => saveGroupAccess(groupWireId, level)}
+            {...(props.onShowFolder ? { onOpenFolder: props.onShowFolder } : {})}
+            {...(props.onOpenSettings
+              ? { onInviteMembers: () => props.onOpenSettings?.("members") }
+              : {})}
+            onClose={() => setGroupSettingsFor(null)}
+          />
+        ) : null}
       </>
     );
     return (
@@ -4479,6 +4665,9 @@ export function ChatsView(props: {
             workspaceId={workspaceId}
             channel={nav.channel}
             locked={channelLocked}
+            lockedLine={
+              channelJoined?.ended ? endedGroupNotice(channelJoined) : lockedLineFor(nav.channel)
+            }
             mentionCandidates={mentionCandidates}
             fileCandidates={channelFiles}
             loadFileHeadings={loadFileHeadings}
@@ -4560,12 +4749,11 @@ export function ChatsView(props: {
                 ) : channelLocked ? (
                   // Where the composer would be, so the reason is the first thing above the posts.
                   <div className="py-4">
-                    <p
-                      data-testid="chats-readonly-note"
-                      className="m-0 rounded-xl border border-line px-4 py-3 text-xs text-subtle"
-                    >
-                      {channelJoined?.ended ? endedGroupNotice(channelJoined) : lockedLine}
-                    </p>
+                    <ComposerNotice testId="chats-readonly-note">
+                      {channelJoined?.ended
+                        ? endedGroupNotice(channelJoined)
+                        : lockedLineFor(nav.channel)}
+                    </ComposerNotice>
                   </div>
                 ) : null}
               </>
@@ -4708,6 +4896,7 @@ export function ChatsView(props: {
           icon={<Hash size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />}
           label={channel.name}
           labelTestId="chats-channel-name"
+          mark={groupAccessMark(channel)}
           {...menuFor({
             key: channel.id,
             label: channel.name,
@@ -5115,7 +5304,11 @@ export function ChatsView(props: {
         />
       ) : null}
       {creatingGroup ? (
-        <NewGroupDialog onCreate={createChannel} onClose={closeGroupDialog} />
+        <NewGroupDialog
+          onCreate={createChannel}
+          access={loadNewGroupAccess}
+          onClose={closeGroupDialog}
+        />
       ) : null}
     </div>
   );

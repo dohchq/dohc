@@ -1263,7 +1263,7 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
 #[test]
 fn share_view_pages_carry_both_reach_signatures_and_their_moves() {
     let reach = json!({"signature": "r-2", "visibilitySignature": "v-1", "rootLevel": "view",
-        "folders": [{"path": "docs", "level": "edit"}]});
+        "folders": [{"path": "docs", "level": "edit"}], "groupDefault": "view", "groups": []});
     let marked = |mark: &str, seq: Option<i64>| {
         let mut op = json!({"originId": "owner", "originSeq": 1, "opKind": "moment.append", "recordedAtMs": 1,
             "payload": {"path": "docs/a.md"}, "reachMove": mark});

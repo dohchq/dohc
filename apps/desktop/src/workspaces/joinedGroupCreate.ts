@@ -1,16 +1,19 @@
 import type { ChatChannelSummary, ChatChannelType } from "@dohc/workspace-contracts/engine";
+import type { GroupRuleLevel } from "@dohc/security-contract/workspace-members";
 
 export interface JoinedGroupInput {
   name: string;
   type?: ChatChannelType;
   purpose?: string;
+  level?: GroupRuleLevel;
 }
 
 /**
- * New group in a joined workspace, for the app and for agents. The relay
- * creates the Group in the owner's workspace and decides the role; a pull
- * brings it here. This starts that pull itself, since no window may be
- * pulling the workspace, then waits for it, not for a timer.
+ * New group made by the relay, for the app and for agents: an admin's in a
+ * joined workspace, or the owner's when they pick a level. The relay creates
+ * the Group in the owner's workspace and decides the role; a pull brings it
+ * here. This starts that pull itself, since no window may be pulling the
+ * workspace, then waits for it, not for a timer.
  */
 export async function createJoinedGroup<View>(
   dependencies: {
@@ -36,6 +39,7 @@ export async function createJoinedGroup<View>(
       name: input.name,
       ...(input.type ? { type: input.type } : {}),
       ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
+      ...(input.level !== undefined ? { level: input.level } : {}),
     },
   );
   assertCurrent();

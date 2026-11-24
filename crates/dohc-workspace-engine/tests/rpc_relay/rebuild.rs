@@ -15,7 +15,7 @@ const D_BYTES: &[u8] = b"file the member moves";
 fn grant(signature: &str, visibility: &str) -> Value {
     json!({
         "paths": [], "access": "view", "wholeWorkspace": true,
-        "reach": { "signature": signature, "visibilitySignature": visibility, "rootLevel": "view", "folders": [] },
+        "reach": { "signature": signature, "visibilitySignature": visibility, "rootLevel": "view", "folders": [], "groupDefault": "view", "groups": [] },
     })
 }
 

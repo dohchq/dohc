@@ -1,5 +1,10 @@
-import { WORKSPACE_MEMBER_ROUTES } from "@dohc/security-contract/workspace-members";
+import {
+  FOLDER_RULE_CHANGED,
+  type GroupRuleLevel,
+  WORKSPACE_MEMBER_ROUTES,
+} from "@dohc/security-contract/workspace-members";
 import { MembersResult, type MembersRequest } from "@dohc/cli/members";
+import { prepareFolderRulePath } from "@dohc/security-contract/access-rules";
 import { createOwnerRelayShareOperation } from "./ownerRelayShareHandler";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { recordedShareSelector } from "../workspaces/shareViewRecords";
@@ -66,6 +71,9 @@ const PHRASES: Record<MembersRequest["action"], string> = {
   link: "change the invite link",
   leave: "leave this workspace",
   end: "end membership",
+  group: "change this Group's access",
+  folder: "change folder access",
+  folderMarker: "remove the folder marker",
 };
 
 function failure(action: MembersRequest["action"], status: number): Error {
@@ -109,10 +117,16 @@ function folderName(rootPath: string): string {
   );
 }
 
-function route(template: string, workspaceId: string, memberId?: string): string {
+function route(
+  template: string,
+  workspaceId: string,
+  memberId?: string,
+  channelWireId?: string,
+): string {
   return template
     .replace(":workspaceId", encodeURIComponent(workspaceId))
-    .replace(":memberId", encodeURIComponent(memberId ?? ""));
+    .replace(":memberId", encodeURIComponent(memberId ?? ""))
+    .replace(":channelWireId", encodeURIComponent(channelWireId ?? ""));
 }
 
 /**
@@ -157,12 +171,13 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
         const call = async (
           path: string,
           body?: unknown,
+          method: "POST" | "PUT" = "POST",
         ): Promise<{ status: number; data: unknown }> => {
           const init: RequestInit =
             body === undefined
               ? { method: "GET", headers: { accept: "application/json" } }
               : {
-                  method: "POST",
+                  method,
                   headers: { accept: "application/json", "content-type": "application/json" },
                   body: JSON.stringify(body),
                 };
@@ -184,7 +199,7 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
           } else {
             await response.body?.cancel().catch(() => undefined);
           }
-          // Every POST here is a change. Refresh before the currency check,
+          // Every POST and PUT here is a change. Refresh before the currency check,
           // because the relay made the change even if this window moved on.
           if (body !== undefined && response.status === 200)
             dependencies.sharesChanged(localWorkspaceId);
@@ -233,8 +248,12 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
           if (status !== 200) throw failure(request.action, status);
         };
 
-        const change = async (path: string, body: unknown): Promise<MembersResult> => {
-          const { status, data } = await call(path, body);
+        const change = async (
+          path: string,
+          body: unknown,
+          method?: "PUT",
+        ): Promise<MembersResult> => {
+          const { status, data } = await call(path, body, method);
           changed(status);
           return ready(data);
         };
@@ -294,6 +313,74 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
           }
           case "end":
             return change(route(WORKSPACE_MEMBER_ROUTES.end, workspaceId), {});
+          case "group":
+            // `group` is the Group's wire id here; the CLI resolves a name first.
+            if (request.level === undefined) return list();
+            return change(
+              route(WORKSPACE_MEMBER_ROUTES.groupRule, workspaceId, undefined, request.group),
+              { level: request.level },
+              "PUT",
+            );
+          case "folder": {
+            const asked = request.change;
+            let body: unknown = asked;
+            let creating = false;
+            if ("folder" in asked) {
+              const path = prepareFolderRulePath(asked.folder);
+              const explicitlyCreating = "create" in asked && asked.create;
+              let version: { ruleId: string; revision: number } | undefined;
+              if (!explicitlyCreating && path !== null) {
+                const listed = await list();
+                if (listed.status !== "ready" || listed.view.folderRules === null)
+                  throw failure(request.action, 403);
+                const matches = listed.view.folderRules.filter((rule) =>
+                  rule.folders.some((entry) => entry.path === path),
+                );
+                if (matches.length > 1)
+                  throw new Error(
+                    "More than one rule covers this folder. Use Members to choose a rule.",
+                  );
+                const match = matches[0];
+                if (match) version = { ruleId: match.ruleId, revision: match.revision };
+              }
+              if ("clear" in asked) {
+                if (!version)
+                  throw new Error("dohc found no rule for this folder. Check the folder path.");
+                body = { ...version, clear: true };
+              } else {
+                creating = version === undefined;
+                body = {
+                  ...(version ?? { folder: asked.folder }),
+                  members: asked.members,
+                  people: asked.people,
+                };
+              }
+            }
+            const { status, data } = await call(
+              route(WORKSPACE_MEMBER_ROUTES.folderRules, workspaceId),
+              body,
+            );
+            if (status === 409)
+              throw new Error(
+                creating
+                  ? "That folder already has an access rule. Reload Members to find it."
+                  : FOLDER_RULE_CHANGED,
+              );
+            changed(status);
+            return ready(data);
+          }
+          case "folderMarker": {
+            const { status, data } = await call(
+              route(WORKSPACE_MEMBER_ROUTES.folderMarkers, workspaceId),
+              {
+                folder: request.folder,
+              },
+            );
+            if (status === 404)
+              throw new Error("dohc found no unknown or unreadable marker. Check the folder path.");
+            changed(status);
+            return ready(data);
+          }
         }
       },
       assertMembersWorkspace,
@@ -306,6 +393,8 @@ export interface JoinedWorkspaceGroupInput {
   name: string;
   type?: "posts" | "chat" | "both";
   purpose?: string;
+  // The members' level, kept as the Group's rule. Absent, the Group takes the member level.
+  level?: GroupRuleLevel;
 }
 
 /**
@@ -326,51 +415,86 @@ export function createJoinedWorkspaceGroupAction<
     const credentials = await dependencies.credentials();
     if (!view?.shareId || !joinedByAccount(view, credentials))
       throw new Error(JOINED_BY_ANOTHER_ACCOUNT);
-    let response: Response;
-    try {
-      response = await dependencies.relayResponse(
-        credentials,
-        WORKSPACE_MEMBER_ROUTES.groupCreate,
-        {
-          method: "POST",
-          headers: { accept: "application/json", "content-type": "application/json" },
-          body: JSON.stringify({ shareId: view.shareId, ...input }),
-        },
-      );
-    } catch {
-      throw new Error(MEMBERS_UNREACHABLE);
-    }
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
-      switch (response.status) {
-        case 400:
-          throw new Error("Use 1 to 80 characters, including at least one letter or number.");
-        case 403:
-          throw new Error(
-            `dohc could not create ${input.name} because only admins create Groups here.`,
-          );
-        case 404:
-          throw new Error(`dohc could not create ${input.name} because your membership ended.`);
-        case 413:
-          throw new Error(
-            `dohc could not create ${input.name} because this workspace is out of space.`,
-          );
-        default:
-          throw new Error(
-            `dohc could not create ${input.name}. The server answered ${response.status}. Try again.`,
-          );
-      }
-    }
-    const data: unknown = await response.json().catch(() => null);
-    const channelWireId =
-      typeof data === "object" && data !== null
-        ? (data as { channelWireId?: unknown }).channelWireId
-        : undefined;
-    if (typeof channelWireId !== "string" || channelWireId.length === 0) {
-      throw new Error(
-        `dohc could not read your server's answer. Look for ${input.name} in Chats before you try again.`,
-      );
-    }
-    return { channelWireId };
+    return requestGroupCreate(
+      (path, init) => dependencies.relayResponse(credentials, path, init),
+      { shareId: view.shareId },
+      input,
+      "your membership ended",
+    );
   };
+}
+
+/**
+ * New group with a level, in a workspace this computer owns. A rule needs
+ * the relay, which writes the Group and its rule together; the owner's next
+ * sync brings the Group here.
+ */
+export function createOwnedWorkspaceGroupAction<Credentials>(dependencies: {
+  // The account this workspace syncs with. Rejects with why there is none.
+  credentials(workspaceId: string): Promise<Credentials>;
+  relayResponse(credentials: Credentials, path: string, init: RequestInit): Promise<Response>;
+}) {
+  return async function createOwnedWorkspaceGroup(
+    workspaceId: string,
+    input: JoinedWorkspaceGroupInput,
+  ): Promise<{ channelWireId: string }> {
+    const credentials = await dependencies.credentials(workspaceId);
+    return requestGroupCreate(
+      (path, init) => dependencies.relayResponse(credentials, path, init),
+      { workspaceId },
+      input,
+      "this workspace has not synced to your server yet. Try again once it has",
+    );
+  };
+}
+
+async function requestGroupCreate(
+  relayResponse: (path: string, init: RequestInit) => Promise<Response>,
+  place: { shareId: string } | { workspaceId: string },
+  input: JoinedWorkspaceGroupInput,
+  // Why a 404 refused it, after "because".
+  notFound: string,
+): Promise<{ channelWireId: string }> {
+  let response: Response;
+  try {
+    response = await relayResponse(WORKSPACE_MEMBER_ROUTES.groupCreate, {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/json" },
+      body: JSON.stringify({ ...place, ...input }),
+    });
+  } catch {
+    throw new Error(MEMBERS_UNREACHABLE);
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    switch (response.status) {
+      case 400:
+        throw new Error("Use 1 to 80 characters, including at least one letter or number.");
+      case 403:
+        throw new Error(
+          `dohc could not create ${input.name} because only admins create Groups here.`,
+        );
+      case 404:
+        throw new Error(`dohc could not create ${input.name} because ${notFound}.`);
+      case 413:
+        throw new Error(
+          `dohc could not create ${input.name} because this workspace is out of space.`,
+        );
+      default:
+        throw new Error(
+          `dohc could not create ${input.name}. The server answered ${response.status}. Try again.`,
+        );
+    }
+  }
+  const data: unknown = await response.json().catch(() => null);
+  const channelWireId =
+    typeof data === "object" && data !== null
+      ? (data as { channelWireId?: unknown }).channelWireId
+      : undefined;
+  if (typeof channelWireId !== "string" || channelWireId.length === 0) {
+    throw new Error(
+      `dohc could not read your server's answer. Look for ${input.name} in Chats before you try again.`,
+    );
+  }
+  return { channelWireId };
 }

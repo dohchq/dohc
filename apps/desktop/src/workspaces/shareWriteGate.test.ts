@@ -3,6 +3,7 @@ import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import {
   joinedByAccount,
   SHARE_VIEW_EMPTY_FOLDER_REFUSAL,
+  shareViewTakesPosts,
   shareViewWriteLevel,
   shareViewWriteScopeOf,
   workspaceCreateOffers,
@@ -24,7 +25,12 @@ function marker(access: ShareAccess | "unreadable", ended = false) {
 // Collection buttons, chat and the CLI. Each fails in a direction that costs
 // something, so every input is stated.
 describe("shareViewWriteLevel", () => {
-  const PLACES = [{ path: "docs/a.md" }, { folder: "docs" }, "group", "somewhere"] as const;
+  const PLACES = [
+    { path: "docs/a.md" },
+    { folder: "docs" },
+    { group: "wire-team" },
+    "somewhere",
+  ] as const;
 
   it("gives a path share's level at every place", () => {
     for (const access of ["view", "comment", "edit"] as const) {
@@ -52,7 +58,7 @@ describe("shareViewWriteLevel", () => {
     }
   });
 
-  it("gives a joined workspace each path and folder its listed level, and a Group the member level", () => {
+  it("gives a joined workspace each path, folder and Group its listed level", () => {
     const scope = shareViewWriteScopeOf(
       {
         shareId: "share-1",
@@ -66,6 +72,8 @@ describe("shareViewWriteLevel", () => {
             { path: "docs", level: "edit" },
             { path: "docs/held", level: "comment" },
           ],
+          groupDefault: "comment",
+          groups: [{ channelWireId: "wire-news", level: "view" }],
         },
       },
       null,
@@ -75,8 +83,36 @@ describe("shareViewWriteLevel", () => {
     expect(shareViewWriteLevel(scope, { path: "docs/held/a.md" })).toBe("comment");
     expect(shareViewWriteLevel(scope, { folder: "" })).toBe("view");
     expect(shareViewWriteLevel(scope, { folder: "docs" })).toBe("edit");
-    expect(shareViewWriteLevel(scope, "group")).toBe("comment");
+    expect(shareViewWriteLevel(scope, { group: "wire-team" })).toBe("comment");
+    expect(shareViewWriteLevel(scope, { group: "wire-news" })).toBe("view");
     expect(shareViewWriteLevel(scope, "somewhere")).toBe("edit");
+  });
+
+  // A Comment member whose every folder and Group is at View posts nowhere,
+  // so the workspace offers no post. One Group at Can post is enough.
+  it("takes a joined workspace's posts only where some Group or file takes them", () => {
+    const scope = (groups: { channelWireId: string; level: ShareAccess }[]) =>
+      shareViewWriteScopeOf(
+        {
+          shareId: "share-1",
+          recipientUserId: "member-1",
+          grantedSelector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
+          reach: {
+            signature: "r",
+            visibilitySignature: "v",
+            rootLevel: "view",
+            folders: [],
+            groupDefault: "view",
+            groups,
+          },
+        },
+        null,
+      )!;
+    expect(shareViewTakesPosts(scope([]))).toBe(false);
+    expect(shareViewTakesPosts(scope([{ channelWireId: "wire-news", level: "view" }]))).toBe(false);
+    expect(shareViewTakesPosts(scope([{ channelWireId: "wire-team", level: "comment" }]))).toBe(
+      true,
+    );
   });
 });
 
@@ -200,7 +236,7 @@ describe("the joined-account rule", () => {
       for (const place of [
         { path: "docs/a.md" },
         { folder: "docs" },
-        "group",
+        { group: "wire-team" },
         "somewhere",
       ] as const) {
         expect(shareViewWriteLevel(scope, place), JSON.stringify(place)).toBe(

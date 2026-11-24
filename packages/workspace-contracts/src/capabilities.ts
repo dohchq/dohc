@@ -433,6 +433,26 @@ const LISTED_CAPABILITIES = {
       mcpReason: MEMBERS_MCP_REASON,
     },
   ),
+  "members.folder.rule": capability("Set or clear access to a workspace folder.", {
+    ipc: ["workspaceMembers"],
+    mcp: {
+      owner: ["dohc_members"],
+      view: ["dohc_members"],
+      comment: ["dohc_members"],
+      edit: ["dohc_members"],
+    },
+    mcpReason: MEMBERS_MCP_REASON,
+  }),
+  "members.folder.marker.remove": capability("Remove an unreadable or unknown folder marker.", {
+    ipc: ["workspaceMembers"],
+    mcp: {
+      owner: ["dohc_members"],
+      view: ["dohc_members"],
+      comment: ["dohc_members"],
+      edit: ["dohc_members"],
+    },
+    mcpReason: MEMBERS_MCP_REASON,
+  }),
   "members.invite": capability("Invite someone to a workspace by email.", {
     ipc: ["workspaceMembers"],
     mcp: {
@@ -445,6 +465,19 @@ const LISTED_CAPABILITIES = {
   }),
   "members.level.set": capability(
     "Set what every member can do in a workspace: View, Comment, or Edit.",
+    {
+      ipc: ["workspaceMembers"],
+      mcp: {
+        owner: ["dohc_members"],
+        view: ["dohc_members"],
+        comment: ["dohc_members"],
+        edit: ["dohc_members"],
+      },
+      mcpReason: MEMBERS_MCP_REASON,
+    },
+  ),
+  "members.group.rule": capability(
+    "Show or set what members can do in one Group: post, view, or nothing.",
     {
       ipc: ["workspaceMembers"],
       mcp: {

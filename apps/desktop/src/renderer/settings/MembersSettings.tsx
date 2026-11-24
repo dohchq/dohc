@@ -23,6 +23,7 @@ import {
   UserX,
 } from "lucide-react";
 import {
+  FOLDER_RULE_CHANGED,
   memberMay,
   type MemberLevel,
   type WorkspaceMembersView,
@@ -44,6 +45,12 @@ import { ChatAvatar } from "../workbench/ChatAvatar";
 import type { CloudSettings } from "./CloudSyncSettings";
 import { SettingRow, SettingsSection, SwitchControl } from "./SettingRow";
 import { joinedByAnother } from "../../ipc/joinedAccountWords";
+import { FolderAccessSettings } from "./FolderAccessSettings";
+
+type RunMembers = (
+  request: MembersRequest,
+  onFailure?: (message: string) => void,
+) => Promise<boolean>;
 
 type ReportError = (
   message: string,
@@ -54,8 +61,8 @@ type ReportError = (
 ) => void;
 
 export const LEVEL_WORDS: Record<MemberLevel, string> = {
-  view: "Members can read everything and open apps.",
-  comment: "Members can read everything, post in Groups, and comment on files.",
+  view: "Members can read files and open apps.",
+  comment: "Members can read and comment on files, and post in Groups.",
   edit: "Members can read, comment, and edit pages and Collections.",
 };
 const ROLE_WORDS = { owner: "Owner", admin: "Admin", member: "Member" } as const;
@@ -150,6 +157,9 @@ const FALLBACK: Record<MembersRequest["action"], string> = {
   link: "dohc could not change the invite link.",
   leave: "dohc could not leave this workspace.",
   end: "dohc could not end membership.",
+  group: "dohc could not change this Group's access.",
+  folder: "dohc could not change folder access.",
+  folderMarker: "dohc could not remove the folder marker.",
 };
 
 /**
@@ -259,8 +269,8 @@ export function MembersSettings(props: {
   }, [scopeKey, attempt]);
   useEffect(() => () => report.current.onClearError?.(listIdentity), [listIdentity]);
 
-  const run = useCallback(
-    async (request: MembersRequest): Promise<boolean> => {
+  const run = useCallback<RunMembers>(
+    async (request, onFailure) => {
       if (scopeKey === null) return false;
       const token = scope.current();
       if (runningIn.current === token) return false;
@@ -277,20 +287,27 @@ export function MembersSettings(props: {
         result = await bridge().workspaceMembers({ workspaceId, request });
       } catch (cause) {
         settle();
+        const message = ipcErrorMessage(cause, FALLBACK[request.action]);
+        if (scope.isCurrent(token) && onFailure) {
+          onFailure(message);
+          return false;
+        }
         // A failure still reports when closing Settings cut it off; another
         // workspace or account never hears it.
         if (scope.isCurrent(token) || (closed.current && scope.isCutOff(token))) {
           const reportFailure = (): void =>
             fileFailure(
-              ipcErrorMessage(cause, FALLBACK[request.action]),
+              message,
               cause,
-              async () => {
-                if (!scope.isCurrent(token) && !closed.current) return;
-                // The shell takes the row back as Try again starts; while another
-                // change runs this one can't, so the notice comes back.
-                if (runningIn.current !== null) return reportFailure();
-                await run(request);
-              },
+              message === FOLDER_RULE_CHANGED
+                ? undefined
+                : async () => {
+                    if (!scope.isCurrent(token) && !closed.current) return;
+                    // The shell takes the row back as Try again starts; while another
+                    // change runs this one can't, so the notice comes back.
+                    if (runningIn.current !== null) return reportFailure();
+                    await run(request);
+                  },
               undefined,
               identity,
             );
@@ -432,7 +449,7 @@ export function MembersLoadView(props: {
   ended?: boolean;
   onRetry: () => void;
   onOpenSync: () => void;
-  run: (request: MembersRequest) => Promise<boolean>;
+  run: RunMembers;
   onMessage?: (memberId: string) => void;
 }) {
   return (
@@ -490,6 +507,7 @@ function MembersLoadState(props: Parameters<typeof MembersLoadView>[0]) {
           running={props.running}
           ended={props.ended}
           run={props.run}
+          reload={props.onRetry}
           onMessage={props.onMessage}
         />
       );
@@ -573,7 +591,8 @@ export function MembersPage(props: {
   // The change running now. Every control waits for it.
   running: MembersRequest | null;
   ended?: boolean | undefined;
-  run: (request: MembersRequest) => Promise<boolean>;
+  run: RunMembers;
+  reload: () => void;
   onMessage?: (memberId: string) => void;
 }) {
   const { view, running, run, onMessage } = props;
@@ -777,6 +796,16 @@ export function MembersPage(props: {
           />
         </SettingsSection>
       )}
+
+      {view.folderRules !== null ? (
+        <FolderAccessSettings
+          view={view}
+          rules={view.folderRules}
+          busy={waiting}
+          run={run}
+          reload={props.reload}
+        />
+      ) : null}
 
       {filtering ? (
         <div className="relative mt-8 max-w-xs">
@@ -982,8 +1011,8 @@ function MembersConfirm(props: {
           confirmLabel="Make admin"
         >
           <p className="m-0">
-            Admins can invite and remove members, change the invite link and member level, and see
-            emails.
+            Admins can invite and remove members, see their emails, and change the invite link,
+            member level, folder access, and Group access.
           </p>
         </ConfirmDialog>
       );

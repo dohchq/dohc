@@ -429,7 +429,7 @@ describe("a joined workspace", () => {
     fireEvent.click(await screen.findByTestId("activity-chats"));
     fireEvent.click(await screen.findByTestId("chats-channel"));
     const note = await screen.findByTestId("chats-readonly-note");
-    expect(note.textContent).toBe("Only people who can comment post here.");
+    expect(note.textContent).toBe("Only admins and the owner post in Launch team.");
     expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
     // The line sits above the posts, where the composer would be.
     expect(note.closest('[data-testid="chats-feed-column"]')).not.toBeNull();
@@ -488,7 +488,7 @@ describe("a joined workspace", () => {
     fireEvent.click(screen.getByTestId("activity-chats"));
     fireEvent.click(await screen.findByTestId("chats-channel"));
     expect((await screen.findByTestId("chats-readonly-note")).textContent).toBe(
-      "Only people who can comment post here.",
+      "Only admins and the owner post in Launch team.",
     );
     expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
     expect(bridge.checkSharedViewAccess).toHaveBeenCalled();

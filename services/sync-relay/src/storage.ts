@@ -1820,6 +1820,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   createWorkspaceGroup(...args: Parameters<SyncRelayStorage["createWorkspaceGroup"]>) {
     return workspaceMembersStorage.createWorkspaceGroup(this, ...args);
   }
+  setWorkspaceGroupRule(...args: Parameters<SyncRelayStorage["setWorkspaceGroupRule"]>) {
+    return workspaceMembersStorage.setWorkspaceGroupRule(this, ...args);
+  }
   changeFolderRule(...args: Parameters<SyncRelayStorage["changeFolderRule"]>) {
     return folderRulesStorage.changeFolderRule(this, ...args);
   }

@@ -112,6 +112,7 @@ const WorkspaceGrant = z.object({
     role: z.enum(["admin", "member"]),
     level: z.enum(SHARE_ACCESS_VALUES),
     rules: z.array(z.tuple([z.string(), z.enum(SHARE_ACCESS_VALUES).nullable()])),
+    groups: z.array(z.tuple([z.string(), z.enum(SHARE_ACCESS_VALUES).nullable()])),
   }),
 });
 const GrantSchema = z.union([GroupGrant, ChatGrant, FileGrant, WorkspaceGrant]);
@@ -234,12 +235,17 @@ function rosterGrantOf(grant: ListedGrant): RosterGrant {
     const { paths, versionId } = grant.selector;
     return { ...recipient, files: { paths, versionId, access: grant.access }, chat: null };
   }
-  // A membership reads every Group, and posts in them at Comment and Edit.
+  // A membership reads every Group at its level, Edit for an admin, unless
+  // the Group's rule sets another.
   if (isWorkspaceGrant(grant)) {
     return {
       ...recipient,
       files: { paths: [], versionId: null, memberReach: grant.memberReach, access: grant.access },
-      chat: { kind: "groups", canPost: grant.access !== "view" },
+      chat: {
+        kind: "groups",
+        level: grant.memberReach.role === "admin" ? "edit" : grant.access,
+        groups: grant.memberReach.groups,
+      },
     };
   }
   // A Group's read-write edits its folder and posts in its chat. Read-only

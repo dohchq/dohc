@@ -104,7 +104,9 @@ export function SegmentedControl<T extends string>(props: {
             // An icon segment is a 24px square, the smallest target WCAG 2.5.8
             // allows when targets touch.
             className={`rounded-md border transition-colors disabled:opacity-50 ${
-              Icon ? "grid size-6 place-items-center" : "flex-1 px-2.5 py-1 text-xs"
+              Icon
+                ? "grid size-6 place-items-center"
+                : "flex-1 whitespace-nowrap px-2.5 py-1 text-xs"
             } ${
               props.value === option.value
                 ? "border-transparent bg-bg text-ink shadow-sm dark:border-line/70 dark:bg-panel-2"

@@ -151,8 +151,8 @@ pub struct ShareGrant {
     /// unreadable. Neither this type nor `ShareAccess` derives `Default`, so
     /// every construction states a level.
     ///
-    /// For a membership this is the member level, which a Group takes until
-    /// Group rules exist. A path's level comes from `reach`.
+    /// For a membership this is the member level. A path's and a Group's
+    /// level come from `reach` once one is stored.
     pub access: ShareAccess,
     /// The levels the relay last listed for a membership, which the recipient
     /// stores with its view. `None` until one is stored, and for a path share:
@@ -172,6 +172,12 @@ pub struct ShareReach {
     pub root_level: Option<ShareAccess>,
     /// Each listed folder's exact path and level. The root is never listed.
     pub folders: std::collections::BTreeMap<String, ShareAccess>,
+    /// The level in a Group `groups` doesn't name.
+    pub group_default: ShareAccess,
+    /// Each Group, by wire id, whose rule gives the member a level other than
+    /// `group_default`. A Group the rule hides is never listed: the relay
+    /// serves none of it.
+    pub groups: std::collections::BTreeMap<String, ShareAccess>,
 }
 
 impl ShareAccess {
@@ -221,6 +227,20 @@ impl ShareReach {
             .chain(self.root_level)
             .max_by_key(|level| level.rank())
     }
+
+    /// The level in a Group: its listed level, else `group_default`.
+    pub fn group_level(&self, wire_id: &str) -> ShareAccess {
+        self.groups
+            .get(wire_id)
+            .copied()
+            .unwrap_or(self.group_default)
+    }
+
+    /// Whether some Group takes the member's posts.
+    pub fn posts_in_some_group(&self) -> bool {
+        self.group_default.takes_comments()
+            || self.groups.values().any(|level| level.takes_comments())
+    }
 }
 
 impl ShareGrant {
@@ -242,9 +262,21 @@ impl ShareGrant {
         }
     }
 
-    /// The level a Group takes: the member level, until Group rules exist.
-    pub fn group_level(&self) -> ShareAccess {
-        self.access
+    /// The level in a Group: the listed reach's, or the member level until
+    /// one is stored.
+    pub fn group_level(&self, wire_id: &str) -> ShareAccess {
+        match &self.reach {
+            Some(reach) => reach.group_level(wire_id),
+            None => self.access,
+        }
+    }
+
+    /// Whether some Group takes the member's posts.
+    pub fn posts_in_some_group(&self) -> bool {
+        match &self.reach {
+            Some(reach) => reach.posts_in_some_group(),
+            None => self.access.takes_comments(),
+        }
     }
 }
 
@@ -1250,6 +1282,8 @@ mod share_view_boundary_tests {
                 .iter()
                 .map(|(path, level)| ((*path).to_owned(), *level))
                 .collect(),
+            group_default: root.unwrap_or(ShareAccess::View),
+            groups: Default::default(),
         }
     }
 
@@ -1305,6 +1339,7 @@ mod share_view_boundary_tests {
         };
         assert_eq!(grant.level_at("Plans/day-1.md"), Some(ShareAccess::Comment));
         assert_eq!(grant.highest(), Some(ShareAccess::Comment));
+        assert_eq!(grant.group_level("channel_team"), ShareAccess::Comment);
         let listed = ShareGrant {
             reach: Some(reach(
                 Some(ShareAccess::View),
@@ -1314,6 +1349,24 @@ mod share_view_boundary_tests {
             ..grant
         };
         assert_eq!(listed.highest(), Some(ShareAccess::Edit));
-        assert_eq!(listed.group_level(), ShareAccess::View);
+        assert_eq!(listed.group_level("channel_team"), ShareAccess::View);
+    }
+
+    // The Rust twin of `listedGroupLevel` (`listedReach.test.ts` holds the same cases).
+    #[test]
+    fn a_group_takes_its_listed_level_or_the_default() {
+        let mut listed = reach(Some(ShareAccess::Comment), &[]);
+        listed.groups = [("channel_news".to_owned(), ShareAccess::View)].into();
+        assert_eq!(listed.group_level("channel_news"), ShareAccess::View);
+        assert_eq!(listed.group_level("channel_team"), ShareAccess::Comment);
+        assert!(listed.posts_in_some_group());
+
+        // A member at View posts only where a rule lets them.
+        listed.group_default = ShareAccess::View;
+        assert!(!listed.posts_in_some_group());
+        listed.groups = [("channel_team".to_owned(), ShareAccess::Comment)].into();
+        assert!(listed.posts_in_some_group());
+        assert_eq!(listed.group_level("channel_team"), ShareAccess::Comment);
+        assert_eq!(listed.group_level("channel_news"), ShareAccess::View);
     }
 }
