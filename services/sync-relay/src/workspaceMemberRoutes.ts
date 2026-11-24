@@ -192,6 +192,7 @@ type MemberRouteStorage = Pick<
   | "readFolderRules"
   | "listAccountWorkspaces"
   | "listJoinedWorkspaces"
+  | "workspaceRoleOf"
 >;
 
 export function createWorkspaceMemberRoutes(options: {
@@ -499,8 +500,12 @@ export function createWorkspaceMemberRoutes(options: {
       await options.claimPendingShares(userId, request.signal);
       const body: BrowserWorkspaceList = {
         ok: true,
+        // The claim waits on a lookup, so the account may be fenced by now. The role says so.
         owned: storage
           .listAccountWorkspaces(userId)
+          .filter(
+            ({ workspaceId }) => storage.workspaceRoleOf(workspaceId, userId)?.role === "owner",
+          )
           .map(({ workspaceId, name }) => ({ workspaceId, name })),
         joined: storage.listJoinedWorkspaces(userId),
       };

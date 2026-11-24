@@ -779,6 +779,32 @@ describe("a browser's list of the account's workspaces", () => {
     expect((await memberRead(h, "/sync/link/current", grantId, "cleo")).status).toBe(200);
   });
 
+  it("lists nothing for an account fenced while it waited on its invites", async () => {
+    let release!: () => void;
+    const paused = new Promise<void>((resolve) => (release = resolve));
+    let pause = false;
+    const { h, storage } = await seed(undefined, {
+      lookupVerifiedUserEmail: async (userId: string) => {
+        if (pause) await paused;
+        return `${userId}@dohc.test`;
+      },
+    });
+    await member(h, storage, "ana");
+    pause = true;
+    const listings = [list(h, OWNER), list(h, "ana")];
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const key = "account-deletion-key-at-least-32-bytes";
+    const context = storage as unknown as StorageContext;
+    initializeAccountDeletion(context, key);
+    for (const userId of [OWNER, "ana"]) fenceAccount(context, key, userId, `${userId}@dohc.test`);
+    release();
+    for (const response of await Promise.all(listings)) {
+      if (response.status === 200)
+        expect(await json(response)).toEqual({ ok: true, owned: [], joined: [] });
+      else expect(response.status).toBe(404);
+    }
+  });
+
   it("answers only share-web, with the account's cookie and the exchange key", async () => {
     const { h } = await seed();
     expect((await list(h, OWNER)).status).toBe(200);
