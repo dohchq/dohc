@@ -4,6 +4,7 @@ import https from "node:https";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { inflateSync } from "node:zlib";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { sourceCaptureAdapter } from "../../../apps/desktop/src/testing/sourceCaptureAdapter";
 import { compileClosedApp } from "../../../apps/desktop/src/workspaces/closedAppCompiler";
@@ -73,6 +74,8 @@ import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { AppProvider, copyText, print, useDatasetQuery } from "dohc/app";
 
+const rows = Array.from({ length: 120 }, (_, i) => i + 1);
+
 function App() {
   const [filter, setFilter] = useState("a");
   const [copyStatus, setCopyStatus] = useState("idle");
@@ -93,10 +96,13 @@ function App() {
   return (
     <div>
       <style>{\`
-        body { margin: 0; font: 14px sans-serif; }
+        body { margin: 0; font: 14px/24px sans-serif; }
         .no-print { padding: 8px; }
-        .tall { height: 2200px; }
-        @media print { .no-print { display: none; } }
+        #report-scroll { height: 320px; overflow: auto; }
+        @media print {
+          .no-print { display: none; }
+          #report-scroll { height: auto; overflow: visible; }
+        }
       \`}</style>
       <div className="no-print">
         <button id="copy-btn" type="button" onClick={async () => {
@@ -109,7 +115,9 @@ function App() {
         }}>Copy key</button>
         <button id="print-btn" type="button" onClick={async () => {
           try {
-            await print();
+            const box = document.getElementById("report-scroll");
+            const extra = box ? Math.max(0, box.scrollHeight - box.clientHeight) : 0;
+            await print({ height: document.documentElement.scrollHeight + extra });
             setPrintStatus("printed");
             try {
               await print();
@@ -129,8 +137,11 @@ function App() {
       <p id="print-status">{printStatus}</p>
       <p id="second-print">{secondPrint}</p>
       <p id="queries">{[q1.data?.tag, q2.data?.tag, q3.data?.tag].join(",")}</p>
-      <div className="tall">Invoice body</div>
-      <p id="invoice-end">Invoice footer</p>
+      <div id="report-scroll">
+        {rows.map((n) => (
+          <div key={n}>{n === 120 ? "ROW-120-LOCAL-END" : "LOCAL-ROW-" + n}</div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -147,14 +158,15 @@ import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { copyText, print } from "dohc/app";
 
+const rows = Array.from({ length: 120 }, (_, i) => i + 1);
+
 function SharedApp() {
   const [copyStatus, setCopyStatus] = useState("idle");
   const [printStatus, setPrintStatus] = useState("idle");
   return (
     <div>
       <style>{\`
-        body { margin: 0; font: 14px sans-serif; }
-        .tall { height: 2200px; }
+        body { margin: 0; font: 14px/24px sans-serif; }
         @media print { .no-print { display: none; } }
       \`}</style>
       <div className="no-print">
@@ -169,8 +181,11 @@ function SharedApp() {
       </div>
       <p id="copy-status">{copyStatus}</p>
       <p id="print-status">{printStatus}</p>
-      <div className="tall">Shared invoice</div>
-      <p>End of shared invoice</p>
+      <div>
+        {rows.map((n) => (
+          <div key={n}>{n === 120 ? "ROW-120-SHARED-END" : "SHARED-ROW-" + n}</div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -178,8 +193,85 @@ function SharedApp() {
 createRoot(document.getElementById("root")!).render(<SharedApp />);
 `;
 
-const countPdfPages = (buf: Buffer) =>
-  (buf.toString("latin1").match(/\/Type\s*\/Page\b/g) || []).length;
+function extractPdfText(buf: Buffer): string {
+  const raw = buf.toString("latin1");
+  const streams: string[] = [];
+  const cmap = new Map<string, string>();
+  const hexToUnicode = (hex: string) => {
+    let out = "";
+    for (let i = 0; i < hex.length; i += 4) {
+      out += String.fromCodePoint(Number.parseInt(hex.slice(i, i + 4), 16));
+    }
+    return out;
+  };
+  let pos = 0;
+  while (true) {
+    const start = raw.indexOf("stream", pos);
+    if (start < 0) break;
+    let bodyStart = start + 6;
+    if (raw[bodyStart] === "\r" && raw[bodyStart + 1] === "\n") bodyStart += 2;
+    else if (raw[bodyStart] === "\n") bodyStart += 1;
+    const end = raw.indexOf("endstream", bodyStart);
+    if (end < 0) break;
+    pos = end + 9;
+    let chunk = buf.subarray(bodyStart, end);
+    while (chunk.length > 0 && (chunk[chunk.length - 1] === 10 || chunk[chunk.length - 1] === 13)) {
+      chunk = chunk.subarray(0, chunk.length - 1);
+    }
+    let text: string;
+    try {
+      text = inflateSync(chunk).toString("latin1");
+    } catch {
+      text = chunk.toString("latin1");
+    }
+    if (text.includes("begincmap")) {
+      for (const block of text.matchAll(/beginbfchar([\s\S]*?)endbfchar/g)) {
+        for (const m of block[1]!.matchAll(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g)) {
+          cmap.set(m[1]!.toUpperCase(), hexToUnicode(m[2]!));
+        }
+      }
+      for (const block of text.matchAll(/beginbfrange([\s\S]*?)endbfrange/g)) {
+        for (const m of block[1]!.matchAll(
+          /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g,
+        )) {
+          const from = Number.parseInt(m[1]!, 16);
+          const to = Number.parseInt(m[2]!, 16);
+          const base = Number.parseInt(m[3]!, 16);
+          const width = m[1]!.length;
+          for (let code = from; code <= to; code += 1) {
+            cmap.set(
+              code.toString(16).toUpperCase().padStart(width, "0"),
+              String.fromCodePoint(base + (code - from)),
+            );
+          }
+        }
+      }
+    } else {
+      streams.push(text);
+    }
+  }
+  const decodeHex = (hex: string) => {
+    let out = "";
+    for (let i = 0; i < hex.length; i += 4) {
+      out += cmap.get(hex.slice(i, i + 4).toUpperCase()) ?? "";
+    }
+    return out;
+  };
+  const decoded: string[] = [];
+  for (const stream of streams) {
+    for (const m of stream.matchAll(/\[([^\]]+)\]\s*TJ|<([0-9A-Fa-f]{4,})>\s*Tj/g)) {
+      if (m[1]) {
+        let line = "";
+        for (const h of m[1].matchAll(/<([0-9A-Fa-f]{4,})>/g)) line += decodeHex(h[1]!);
+        if (line) decoded.push(line);
+      } else if (m[2]) {
+        const line = decodeHex(m[2]);
+        if (line) decoded.push(line);
+      }
+    }
+  }
+  return decoded.join("");
+}
 
 test.use({ trace: "off" });
 
@@ -319,7 +411,9 @@ test("local app copyText, multi-page print, anti-spam, and rapid parallel querie
       document.documentElement.style.setProperty("--dohc-print-h", h);
       document.body.classList.add("dohc-printing");
     }, printState.heights[0]!);
-    expect(countPdfPages(await page.pdf())).toBeGreaterThanOrEqual(2);
+    const localPdfText = extractPdfText(await page.pdf());
+    expect(localPdfText).toContain("LOCAL-ROW-1");
+    expect(localPdfText).toContain("ROW-120-LOCAL-END");
 
     const sandboxAttr = await page.locator("iframe").getAttribute("sandbox");
     expect(sandboxAttr).not.toContain("allow-modals");
@@ -476,7 +570,9 @@ test("share-web app copyText and multi-page print work over HTTPS without weaken
       document.documentElement.style.setProperty("--dohc-print-h", h);
       document.body.classList.add("dohc-printing");
     }, printState.height);
-    expect(countPdfPages(await page.pdf())).toBeGreaterThanOrEqual(2);
+    const sharedPdfText = extractPdfText(await page.pdf());
+    expect(sharedPdfText).toContain("SHARED-ROW-1");
+    expect(sharedPdfText).toContain("ROW-120-SHARED-END");
 
     const sandboxAttr = await page.locator("iframe").getAttribute("sandbox");
     expect(sandboxAttr).not.toContain("allow-modals");

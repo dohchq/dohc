@@ -71,27 +71,23 @@ export class AppBackendError extends Error {
   readonly refusal?: BackendRefusal;
   readonly retryAfterMs?: number;
 
-<<<<<<< HEAD
-  constructor(status: BackendStatus, refusal?: BackendRefusal, message?: string) {
-    super(message ?? refusal?.message ?? `Request failed (${status}).`);
-=======
   constructor(
     status: BackendStatus,
     refusal?: BackendRefusal,
-    details?: { readonly message?: string; readonly retryAfterMs?: number },
+    message?: string,
+    retryAfterMs?: number,
   ) {
     super(
-      refusal?.message ??
-        details?.message ??
+      message ??
+        refusal?.message ??
         (status === 429
           ? "Rate limit reached (HTTP 429). Wait a moment and try again."
           : `Request failed (${status}).`),
     );
->>>>>>> a45fcb8c9 (fix(app-runtime): add brokered copyText/print, query cancellation, and explicit 429s)
     this.name = "AppBackendError";
     this.status = status;
     this.refusal = refusal;
-    this.retryAfterMs = details?.retryAfterMs;
+    this.retryAfterMs = retryAfterMs;
   }
 
   get uncertain(): boolean {
@@ -436,7 +432,14 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
               ? (data.status as BackendStatus)
               : 503;
           const parsed = parseStatusError(status, data.error);
-          item.reject(new AppBackendError(status, parsed.refusal, parsed.details));
+          item.reject(
+            new AppBackendError(
+              status,
+              parsed.refusal,
+              parsed.details?.message,
+              parsed.details?.retryAfterMs,
+            ),
+          );
         }
       }
       pump();

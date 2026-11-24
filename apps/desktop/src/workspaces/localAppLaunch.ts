@@ -326,9 +326,11 @@ export async function createLocalAppLaunchHost(options: {
         const observe = launchOptions?.observeBroker
           ? "(event)=>{try{globalThis.__dohcVerifyObserve?.(JSON.stringify(event));}catch{}}"
           : "undefined";
-        const brokerLimits = highBudget
-          ? JSON.stringify({ maxPending, backendBurst, backendRefillMs })
-          : "undefined";
+        const brokerLimits = JSON.stringify(
+          highBudget
+            ? { maxPending, backendBurst, backendRefillMs, trustRateLimitDetails: true }
+            : { trustRateLimitDetails: true },
+        );
         const hasEvents = Boolean(
           options.backend.datasetRevisions &&
           options.backend.subscribeDatasetChanges &&

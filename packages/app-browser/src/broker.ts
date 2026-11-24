@@ -42,6 +42,7 @@ export interface AppBrokerLimits {
   readonly maxPending?: number;
   readonly backendBurst?: number;
   readonly backendRefillMs?: number;
+  readonly trustRateLimitDetails?: boolean;
 }
 
 export interface AppBrokerHostActions {
@@ -72,6 +73,7 @@ export function attachAppCollectionBroker(
   const maxPending = bounded(limits?.maxPending, 1, 16, 4),
     backendBurst = bounded(limits?.backendBurst, 1, 240, 30),
     backendRefillMs = bounded(limits?.backendRefillMs, 10, 10_000, 2000),
+    trustRateLimitDetails = limits?.trustRateLimitDetails === true,
     collectionBurst = 12,
     collectionRefillMs = 5000,
     maxCopyBytes = 65_536,
@@ -144,8 +146,6 @@ export function attachAppCollectionBroker(
     }
   };
   const defaultPrint = (options: { height?: number }) => {
-    if (typeof window === "undefined" || typeof window.print !== "function")
-      throw Error("Printing unavailable");
     let cleaned = false,
       afterFired = false,
       timer: ReturnType<typeof setTimeout> | undefined;
@@ -265,29 +265,6 @@ export function attachAppCollectionBroker(
       hostCopy = body.op === "host.copy",
       hostPrint = body.op === "host.print",
       backend = typeof body.op === "string" && body.op.startsWith("backend.");
-    if (upload) {
-      if (!(body.bytes instanceof ArrayBuffer)) return rejectLocal("invalid_keys", 400);
-      if (body.bytes.byteLength > maxFileBytes) return rejectLocal("payload_too_large", 413);
-      if (body.bytes.byteLength < 1) return rejectLocal("invalid_keys", 400);
-    }
-    let encoded: string;
-    try {
-      const checkTarget = upload
-        ? Object.fromEntries(Object.entries(body).filter(([key]) => key !== "bytes"))
-        : body;
-      encoded = JSON.stringify(checkTarget);
-    } catch {
-      return rejectLocal("unserializable", 400);
-    }
-    const requestBytes = upload
-      ? 4096
-      : hostCopy
-        ? 192 * 1024
-        : backend
-          ? 128 * 1024
-          : 16_384;
-    if (new TextEncoder().encode(encoded).byteLength > requestBytes)
-      return rejectLocal("payload_too_large", 413);
     const keys = Object.keys(body).sort().join();
     const refuseHost = (code: string, message: string, started = false) => {
       if (!started) emit({ kind: "started", id, op });
@@ -297,6 +274,11 @@ export function attachAppCollectionBroker(
     if (hostCopy) {
       if (keys !== "id,op,text" || typeof body.text !== "string")
         return rejectLocal("invalid_keys", 400);
+      if (body.text.length > maxCopyBytes * 4)
+        return rejectLocal("payload_too_large", 413, {
+          code: "payload_too_large",
+          message: `Clipboard text exceeded its limit of ${maxCopyBytes} bytes (over ${body.text.length} bytes).`,
+        });
       const textBytes = new TextEncoder().encode(body.text).byteLength;
       if (textBytes > maxCopyBytes)
         return rejectLocal("payload_too_large", 413, {
@@ -388,6 +370,23 @@ export function attachAppCollectionBroker(
       }
       return;
     }
+    if (upload) {
+      if (!(body.bytes instanceof ArrayBuffer)) return rejectLocal("invalid_keys", 400);
+      if (body.bytes.byteLength > maxFileBytes) return rejectLocal("payload_too_large", 413);
+      if (body.bytes.byteLength < 1) return rejectLocal("invalid_keys", 400);
+    }
+    let encoded: string;
+    try {
+      const checkTarget = upload
+        ? Object.fromEntries(Object.entries(body).filter(([key]) => key !== "bytes"))
+        : body;
+      encoded = JSON.stringify(checkTarget);
+    } catch {
+      return rejectLocal("unserializable", 400);
+    }
+    const requestBytes = upload ? 4096 : backend ? 128 * 1024 : 16_384;
+    if (new TextEncoder().encode(encoded).byteLength > requestBytes)
+      return rejectLocal("payload_too_large", 413);
     const validAlias =
       !Object.hasOwn(body, "dataset") || (validDatasetKey(body.dataset) && body.dataset !== "");
     const validReadOnly = !Object.hasOwn(body, "readOnly") || body.readOnly === true;
@@ -472,22 +471,86 @@ export function attachAppCollectionBroker(
         response.status === 409 &&
         response.headers.get("content-type")?.split(";", 1)[0] === "application/json";
       if (!response.ok && !refusal) {
-        await response.body?.cancel().catch(() => {});
         const status = [400, 404, 409, 413, 429].includes(response.status) ? response.status : 503;
         if (status === 429) {
-          const retryHeader = response.headers.get("retry-after")?.trim() ?? "";
-          const retrySec = /^\d{1,4}$/.test(retryHeader) ? Number(retryHeader) : null;
-          const retryAfterMs =
-            retrySec !== null && retrySec >= 1 && retrySec <= 3600 ? retrySec * 1000 : undefined;
-          reject(429, {
-            code: "rate_limited",
-            message:
-              retryAfterMs !== undefined
-                ? `Rate limit reached by app host (HTTP 429). Try again in ${formatDuration(retryAfterMs)}.`
-                : "Rate limit reached by app host (HTTP 429). Wait a moment and try again.",
-            ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
-          });
+          let trustedError: { code: string; message: string; retryAfterMs?: number } | undefined;
+          if (
+            trustRateLimitDetails &&
+            response.headers.get("content-type")?.split(";", 1)[0] === "application/json" &&
+            response.body
+          ) {
+            const reader429 = response.body.getReader();
+            const chunks429: Uint8Array[] = [];
+            let size429 = 0;
+            try {
+              while (true) {
+                const item = await reader429.read();
+                if (closed) return;
+                if (item.done) break;
+                size429 += item.value.byteLength;
+                if (size429 > 2048) throw Error();
+                chunks429.push(item.value);
+              }
+              const raw = new Uint8Array(size429);
+              let pos = 0;
+              for (const chunk of chunks429) {
+                raw.set(chunk, pos);
+                pos += chunk.byteLength;
+              }
+              const parsed: unknown = JSON.parse(
+                new TextDecoder("utf-8", { fatal: true }).decode(raw),
+              );
+              if (record(parsed)) {
+                const errKeys = Object.keys(parsed).sort().join();
+                const validMsg =
+                  parsed.code === "rate_limited" &&
+                  typeof parsed.message === "string" &&
+                  parsed.message.length > 0 &&
+                  new TextEncoder().encode(parsed.message).byteLength <= 512 &&
+                  !/[\u0000-\u001f\u007f]/.test(parsed.message);
+                if (validMsg && errKeys === "code,message") {
+                  trustedError = { code: "rate_limited", message: parsed.message as string };
+                } else if (
+                  validMsg &&
+                  errKeys === "code,message,retryAfterMs" &&
+                  typeof parsed.retryAfterMs === "number" &&
+                  Number.isSafeInteger(parsed.retryAfterMs) &&
+                  parsed.retryAfterMs >= 0 &&
+                  parsed.retryAfterMs <= 3_600_000
+                ) {
+                  trustedError = {
+                    code: "rate_limited",
+                    message: parsed.message as string,
+                    retryAfterMs: parsed.retryAfterMs,
+                  };
+                }
+              }
+            } catch {
+              if (closed) return;
+            } finally {
+              await reader429.cancel().catch(() => {});
+            }
+          } else {
+            await response.body?.cancel().catch(() => {});
+          }
+          if (trustedError) {
+            reject(429, trustedError);
+          } else {
+            const retryHeader = response.headers.get("retry-after")?.trim() ?? "";
+            const retrySec = /^\d{1,4}$/.test(retryHeader) ? Number(retryHeader) : null;
+            const retryAfterMs =
+              retrySec !== null && retrySec >= 1 && retrySec <= 3600 ? retrySec * 1000 : undefined;
+            reject(429, {
+              code: "rate_limited",
+              message:
+                retryAfterMs !== undefined
+                  ? `Rate limit reached by app host (HTTP 429). Try again in ${formatDuration(retryAfterMs)}.`
+                  : "Rate limit reached by app host (HTTP 429). Wait a moment and try again.",
+              ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+            });
+          }
         } else {
+          await response.body?.cancel().catch(() => {});
           reject(status);
         }
         return finish(status, false);

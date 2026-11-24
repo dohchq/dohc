@@ -634,9 +634,15 @@ it("forwards one-way dataset.changed push events, accepts readOnly: true, and su
 });
 
 it("surfaces explicit rate-limit details on token exhaustion and upstream Retry-After", async () => {
-  const f = harness(
-    async () =>
-      new Response("secret internal stack", { status: 429, headers: { "retry-after": "7" } }),
+  const f = harness(async () =>
+    Response.json(
+      {
+        code: "rate_limited",
+        message: "secret internal stack",
+        retryAfterMs: 7000,
+      },
+      { status: 429, headers: { "retry-after": "7" } },
+    ),
   );
   try {
     const upstream = await f.request({
@@ -659,6 +665,59 @@ it("surfaces explicit rate-limit details on token exhaustion and upstream Retry-
     expect(JSON.stringify(upstream)).not.toContain("secret");
   } finally {
     f.close();
+  }
+
+  vi.stubGlobal("MessageChannel", NodeMessageChannel);
+  const trustedFrame = new EventTarget();
+  let trustedPort!: NodeMessagePort;
+  Object.assign(trustedFrame, {
+    contentWindow: {
+      postMessage(_message: unknown, _target: string, ports: NodeMessagePort[]) {
+        trustedPort = ports[0]!;
+      },
+    },
+  });
+  const trustedLifetime = new AbortController();
+  attachAppCollectionBroker(
+    trustedFrame as HTMLIFrameElement,
+    async () =>
+      Response.json(
+        {
+          code: "rate_limited",
+          message:
+            "Rate limit reached: 120 of 120 requests used in the 6 s burst window. Try again in 50 ms.",
+          retryAfterMs: 50,
+        },
+        { status: 429, headers: { "retry-after": "1" } },
+      ),
+    trustedLifetime.signal,
+    undefined,
+    { maxPending: 12, backendBurst: 120, backendRefillMs: 50, trustRateLimitDetails: true },
+  );
+  try {
+    trustedFrame.dispatchEvent(new Event("load"));
+    const reply = once(trustedPort, "message");
+    trustedPort.postMessage({
+      id: "trusted-429",
+      op: "backend.invoke",
+      operation: "list",
+      idempotencyKey: "k-trusted",
+      input: {},
+    });
+    expect((await reply)[0]).toEqual({
+      id: "trusted-429",
+      ok: false,
+      status: 429,
+      error: {
+        code: "rate_limited",
+        message:
+          "Rate limit reached: 120 of 120 requests used in the 6 s burst window. Try again in 50 ms.",
+        retryAfterMs: 50,
+      },
+    });
+  } finally {
+    trustedLifetime.abort();
+    vi.unstubAllGlobals();
   }
 
   let now = 1_000_000;
@@ -811,6 +870,14 @@ it("gates host.copy and host.print on user activation, size bounds, and anti-spa
         message: "Clipboard text exceeded its limit of 65536 bytes (used 65537 bytes).",
       },
     });
+    const escapedText = "\u001e".repeat(33_000);
+    expect(await send({ id: "c-escaped", op: "host.copy", text: escapedText })).toEqual({
+      id: "c-escaped",
+      ok: true,
+      value: { copied: true },
+    });
+    expect(copied.pop()).toBe(escapedText);
+    now += 1000;
 
     for (let i = 0; i < 4; i++) {
       port.postMessage({
