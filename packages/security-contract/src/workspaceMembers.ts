@@ -1,3 +1,4 @@
+import { ACTOR_HUES } from "@dohc/workspace-contracts/actor-presentation";
 import { isRecord } from "@dohc/workspace-core/records";
 import type { ShareAccess } from "./shareSelector";
 
@@ -39,6 +40,11 @@ export interface WorkspacePerson {
   state: MemberState;
   /** The account's name. Null for an invite, or when the account has no name. */
   name: string | null;
+  /**
+   * The person's colour, the one presence and direct messages give the same account.
+   * An invite, which has no account yet, takes it from `memberId`.
+   */
+  paletteSlot: number;
   /** Present only when the viewer is the owner or an admin. */
   email: string | null;
   invitedAtMs: number | null;
@@ -126,6 +132,8 @@ export function isInviteLinkAction(value: unknown): value is InviteLinkAction {
 
 const isNullableString = (value: unknown): value is string | null =>
   value === null || typeof value === "string";
+export const isPaletteSlot = (value: unknown): value is number =>
+  typeof value === "number" && Number.isInteger(value) && value >= 0 && value < ACTOR_HUES.length;
 
 export function parseWorkspaceJoinPreview(value: unknown): WorkspaceJoinPreview | null {
   if (!isRecord(value)) return null;

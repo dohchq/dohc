@@ -15,6 +15,7 @@ const view = {
       role: "owner",
       state: "active",
       name: "Ice",
+      paletteSlot: 0,
       email: "ice@test",
       invitedAtMs: null,
       joinedAtMs: 1,
@@ -25,6 +26,7 @@ const view = {
       role: "admin",
       state: "active",
       name: "Ana",
+      paletteSlot: 0,
       email: "ana@test",
       invitedAtMs: 1,
       joinedAtMs: 2,
@@ -35,6 +37,7 @@ const view = {
       role: "member",
       state: "invited",
       name: null,
+      paletteSlot: 0,
       email: "bo@test",
       invitedAtMs: 3,
       joinedAtMs: null,
@@ -45,6 +48,7 @@ const view = {
       role: "member",
       state: "removed",
       name: "Cy",
+      paletteSlot: 0,
       email: "cy@test",
       invitedAtMs: 1,
       joinedAtMs: 2,
@@ -220,6 +224,7 @@ describe("dohc members", () => {
     role: "member",
     state: "active",
     name: "Sam",
+    paletteSlot: 0,
     email: null,
     invitedAtMs: 2,
     joinedAtMs: 3,
@@ -253,7 +258,7 @@ describe("dohc members", () => {
     expect(ready({ ...view, inviteLink: null })).toThrow();
   });
 
-  it("refuses an owner entry that is not the owner, an inactive owner, a link that disagrees with itself, and an unreadable level", () => {
+  it("refuses an owner entry that is not the owner, an inactive owner, a link that disagrees with itself, an unreadable level, and a colour slot outside the hues", () => {
     expect(ready({ ...view, people: [{ ...sam, memberId: "owner" }] })).toThrow();
     expect(ready({ ...view, people: [{ ...owner, memberId: "m-x" }] })).toThrow();
     expect(ready({ ...view, people: [{ ...owner, state: "removed" }] })).toThrow();
@@ -262,5 +267,6 @@ describe("dohc members", () => {
       ready({ ...view, inviteLink: { enabled: false, url: "https://share.test/join#token" } }),
     ).toThrow();
     expect(ready({ ...view, memberLevel: "Edit" })).toThrow();
+    expect(ready({ ...view, people: [owner, { ...sam, paletteSlot: 1_000 }] })).toThrow();
   });
 });

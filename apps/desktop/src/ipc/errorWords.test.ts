@@ -366,7 +366,7 @@ describe("error words", () => {
     expect(versionNameRefusal(acrossIpc(error, "desktop:create-workspace-version"))).toBe(refused);
   });
 
-  it.each(["link", "shares", "notices", "workspaces", "personal-agents", "account"])(
+  it.each(["link", "shares", "notices", "workspaces", "personal-agents", "account", "direct"])(
     "keeps the reserved-ID refusal title and body across IPC for %s",
     (workspaceId) => {
       const error = new ReservedWorkspaceIdError(workspaceId);

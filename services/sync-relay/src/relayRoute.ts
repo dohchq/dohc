@@ -42,6 +42,7 @@ import type { OutboundWebhookRoute } from "./outboundWebhookRoutes";
 import type { IncomingWebhookRoute } from "./incomingWebhookRoutes";
 import { parseShareId, parseString, parseWorkspaceId, relayPathSegments } from "./requestInputs";
 import { notFound } from "./errors";
+import { parseDirectMessageRoute, type DirectMessageRoute } from "./directMessageRoutes";
 import { MAX_ORIGIN_ID_CHARS } from "./wireLimits";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { parseWorkspaceMemberRoute, type WorkspaceMemberRoute } from "./workspaceMemberRoutes";
@@ -105,7 +106,8 @@ export type SyncRelayRoute =
   | WorkspaceProposalRoute
   | { route: "presence"; workspaceId: string }
   | { route: "share-presence"; shareId: string }
-  | WorkspaceMemberRoute;
+  | WorkspaceMemberRoute
+  | DirectMessageRoute;
 
 export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
   const parts = relayPathSegments(new URL(request.url).pathname);
@@ -257,6 +259,9 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
   if (parts[1] === "personal-agents") return parsePersonalAgentRoute(parts);
   if (parts[1] === "account")
     return parts[2] === "sessions" ? parseAccountSessionRoute(parts) : parseAccountRoute(parts);
+  // "direct" is reserved as a workspace id (parseWorkspaceId).
+  const directRoute = parseDirectMessageRoute(parts);
+  if (directRoute) return directRoute;
   // "/sync/members/join*" is read before any workspace id. No workspace route ends in "join".
   const memberRoute = parseWorkspaceMemberRoute(parts);
   if (memberRoute) return memberRoute;

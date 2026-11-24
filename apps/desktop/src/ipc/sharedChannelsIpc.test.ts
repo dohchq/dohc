@@ -116,8 +116,6 @@ async function harness(workspaceId = "workspace") {
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   const relayListing = vi.fn(async (): Promise<unknown> => ({ granted: [], received: [] }));
   const warm = vi.fn(async () => undefined);
-  const peek = vi.fn(async () => "not-dm" as const);
-  const cache = new Map<string, "dm" | "not-dm">();
   const write = vi.fn(
     async (
       workspaceId: string,
@@ -171,8 +169,6 @@ async function harness(workspaceId = "workspace") {
     relayClientForWorkspace: () => ({ pullSharedChannel: pull, push, claim }),
     projectPendingChatBookmarksAfterPull: async () => undefined,
     normalizeServerUrl: (url) => url,
-    peekedReceivedGrantKinds: cache,
-    peekReceivedGrantKindForShare: peek,
     acknowledgeWorkspaceShareSkips: acknowledge,
     notifyRenderer: notify,
     mountShareFolder: mount,
@@ -206,8 +202,6 @@ async function harness(workspaceId = "workspace") {
     helpers,
     relayListing,
     warm,
-    peek,
-    cache,
     write,
     pull,
     notify,
@@ -224,7 +218,6 @@ async function harness(workspaceId = "workspace") {
     work: [
       warm,
       relayListing,
-      peek,
       write,
       pull,
       notify,
@@ -408,8 +401,6 @@ describe("registered shared-channel handlers", () => {
       });
       await expect(result).rejects.toThrow();
       await drained;
-      expect(h.peek).not.toHaveBeenCalled();
-      expect(h.cache.size).toBe(0);
       expect(h.write).not.toHaveBeenCalled();
       expect(h.notify).not.toHaveBeenCalled();
     },
@@ -476,33 +467,6 @@ describe("registered shared-channel handlers", () => {
         shareId: "shown",
       }),
     ).rejects.toThrow("Left the Group. Its folder is still in shared-with-me/");
-  });
-
-  it("does not cache an invitation kind returned after the account changes", async () => {
-    const h = await harness();
-    h.relayListing.mockResolvedValue({
-      received: [
-        {
-          shareId: "late",
-          selector: { kind: "chat", channelWireId: "late-wire" },
-        },
-      ],
-    });
-    const started = deferred();
-    const held = deferred<"not-dm">();
-    h.peek.mockImplementation(() => {
-      started.resolve();
-      return held.promise;
-    });
-    const result = h.invoke(sharedChannelOperations.listChatChannelShares.channel, {
-      workspaceId: "workspace",
-      channelWireIds: [],
-    });
-    await started.promise;
-    h.rotateCredentials();
-    held.resolve("not-dm");
-    await expect(result).rejects.toThrow("session changed");
-    expect(h.cache.size).toBe(0);
   });
 
   it("applies the listing to the registry before answering the joined lane, and carries the removed lane", async () => {
@@ -831,18 +795,35 @@ describe("registered shared-channel handlers", () => {
     expect(h.mount).not.toHaveBeenCalled();
   });
 
-  it("keeps the shared DM helpers bound to the same live registry holders", async () => {
+  it("refuses to join a re-granted group that another workspace still holds, until that row ends", async () => {
     const h = await harness();
-    expect(() => h.helpers.assertShareNotHeldElsewhere("elsewhere", "workspace")).toThrow(
-      "already lives in other",
-    );
-    expect(() =>
-      h.helpers.assertShareNotHeldElsewhere("new-grant", "workspace", "wire-elsewhere"),
-    ).toThrow("already lives in other");
+    // A new grant, under a new share id, for the channel the other workspace holds.
+    const regrant = {
+      shareId: "new-grant",
+      granterUserId: "owner",
+      granterEmail: "owner@example.test",
+      channelWireId: "wire-elsewhere",
+      access: "read-write" as const,
+      createdAtMs: 1,
+      kind: "chat" as const,
+    };
+    const before = h.workspace.sharedChannels;
+    vi.mocked(fetchSharedChannelInfo).mockResolvedValueOnce(regrant);
+    await expect(
+      h.invoke(sharedChannelOperations.joinSharedChannel.channel, {
+        workspaceId: "workspace",
+        shareId: "new-grant",
+      }),
+    ).rejects.toThrow("already lives in other");
+    expect(h.workspace.sharedChannels).toBe(before);
+    expect(h.pull).not.toHaveBeenCalled();
     h.other.sharedChannels = [{ ...joined("elsewhere"), ended: true }];
-    expect(() =>
-      h.helpers.assertShareNotHeldElsewhere("elsewhere", "workspace", "wire-elsewhere"),
-    ).not.toThrow();
+    vi.mocked(fetchSharedChannelInfo).mockResolvedValueOnce(regrant);
+    await h.invoke(sharedChannelOperations.joinSharedChannel.channel, {
+      workspaceId: "workspace",
+      shareId: "new-grant",
+    });
+    expect(h.workspace.sharedChannels?.some((row) => row.shareId === "new-grant")).toBe(true);
   });
 });
 

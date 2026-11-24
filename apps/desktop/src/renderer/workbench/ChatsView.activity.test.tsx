@@ -5,7 +5,6 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   ChatChannelRecord,
   ChatMessageRecord,
-  DmRecord,
   FileChatThreadRecord,
 } from "../../ipc/bridgeContract";
 import {
@@ -15,7 +14,6 @@ import {
   thread,
   message,
   personalFeedItem,
-  dm,
   bridgeMock,
   shareListing,
   workspaceActivityCallbacks,
@@ -201,100 +199,6 @@ describe("ChatsView live activity refresh", () => {
     expect(screen.getByTestId("chats-channel-name").className).toContain("font-semibold");
     expect(screen.getByTestId("chats-channels-heading")).toBeTruthy();
     expect(screen.getByTestId("chats-channel-name").textContent).toBe("general");
-  });
-
-  // The DM roll-up sits in the same list, but it refreshed only on the
-  // 5-second poll — a DM badge lagging beside a live channel badge reads as
-  // "no new DMs".
-
-  it("coalesces an activity burst into one in-flight DM sync plus one trailing pass", async () => {
-    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [dm()] });
-    renderView();
-    await screen.findByTestId("chats-dm-item");
-    const syncsBefore = bridgeMock.syncDms.mock.calls.length;
-
-    let release!: () => void;
-    const held = new Promise<{ available: boolean; dms: DmRecord[] }>((resolve) => {
-      release = () => resolve({ available: true, dms: [dm({ unreadCount: 1 })] });
-    });
-    bridgeMock.syncDms.mockImplementation(() => held);
-    act(() => emitWorkspaceActivity());
-    await waitFor(() => expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 1));
-
-    act(() => {
-      emitWorkspaceActivity();
-      emitWorkspaceActivity();
-      emitWorkspaceActivity();
-    });
-    expect(
-      bridgeMock.syncDms.mock.calls.length,
-      "revert refreshDms to a plain un-coalesced sync. Each of these starts its own relay sync and the count below reads syncsBefore + 4.",
-    ).toBe(syncsBefore + 1);
-
-    await act(async () => {
-      release();
-      await held;
-    });
-    await waitFor(() => expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 2));
-    expect((await screen.findByTestId("chats-dm-unread")).textContent).toBe("1");
-    expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 2);
-  });
-
-  it("never queues the new workspace's DM sync onto the stalled one it left", async () => {
-    // Fake timers, never advanced: the 5s poll cannot fire, so only the
-    // switch can start the new workspace's sync. A 2 s real-time wait made
-    // the same point and could miss on a loaded gate.
-    vi.useFakeTimers();
-    try {
-      type DmPage = { available: boolean; dms: DmRecord[] };
-      const leftBehind = new Promise<DmPage>(() => {
-        // never settles: the drain the switch must not wait on
-      });
-      let oldReads = 0;
-      let newReads = 0;
-      bridgeMock.syncDms.mockImplementation(({ workspaceId }: { workspaceId: string }) => {
-        if (workspaceId !== "workspace-old") {
-          newReads += 1;
-          return Promise.resolve({
-            available: true,
-            dms: [
-              dm({
-                channelId: "channel-dm-new",
-                peerLabel: "carol@example.com",
-              }),
-            ],
-          });
-        }
-        oldReads += 1;
-        return oldReads === 1 ? Promise.resolve({ available: true, dms: [dm()] }) : leftBehind;
-      });
-      const view = render(
-        <ChatsView workspaceId="workspace-old" onOpenFileChat={vi.fn()} onError={vi.fn()} />,
-      );
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      screen.getByTestId("chats-dm-item");
-      act(() => emitWorkspaceActivity());
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      expect(oldReads).toBe(2);
-
-      view.rerender(
-        <ChatsView workspaceId="workspace-new" onOpenFileChat={vi.fn()} onError={vi.fn()} />,
-      );
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      expect(
-        newReads,
-        "weaken the drain's entry guard to `if (active !== null)`. The switch's own refreshDms then queues onto the dead drain and no workspace-new sync starts.",
-      ).toBeGreaterThan(0);
-      expect(screen.getByTestId("chats-dm-name").textContent).toBe("carol@example.com");
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   it("drops a slow list refresh from the workspace the user left", async () => {

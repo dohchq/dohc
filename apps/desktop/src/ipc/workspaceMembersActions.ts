@@ -34,7 +34,7 @@ const NO_PLACE =
 // Where a workspace's Members live on the relay: the workspace's own id for
 // one this computer owns, the owner's for a joined one, and null for any
 // other share view.
-function membersPlace(
+export function membersPlace(
   workspace: MembersWorkspace,
 ): { workspaceId: string; workspaceName: string } | "joined-unknown" | null {
   if (!shareViewIsPresent(workspace.shareView))

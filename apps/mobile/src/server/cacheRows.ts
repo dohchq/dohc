@@ -1,7 +1,7 @@
 import type { CacheStore, Sql } from "./keptStore";
 
-// The read cache's rows in cache.db (keptStore.ts): one row of views per workspace scope, and one workspace list per
-// account. Each scope's views are kept under SCOPE_MAX_BYTES, and all scopes' under TOTAL_MAX_BYTES, by deleting the
+// The read cache's rows in cache.db (keptStore.ts): one row of views per workspace scope, and one workspace list and
+// one chosen workspace per account. Each scope's views are kept under SCOPE_MAX_BYTES, and all scopes' under TOTAL_MAX_BYTES, by deleting the
 // scopes used least recently. Both caps count the views' JSON, not the file. Nothing here rejects: a cache that can't
 // be read or written answers as empty.
 
@@ -26,9 +26,9 @@ export interface CacheRows {
   removeAll(): Promise<void>;
   /** Deletes every scope's views but those of `scopes`, and drops the others' writes that haven't landed. */
   keep(scopes: readonly string[]): Promise<void>;
-  /** The workspace list last saved for the account `scope`, unchecked, or null. */
+  /** The workspace list, or the chosen workspace, last saved for the account `scope`, unchecked, or null. */
   readList(scope: string): Promise<unknown>;
-  /** Saves the account's workspace list now. */
+  /** Saves the account's workspace list, or its chosen workspace, now. */
   writeList(scope: string, workspaces: unknown): Promise<void>;
 }
 

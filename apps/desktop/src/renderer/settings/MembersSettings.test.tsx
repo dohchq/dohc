@@ -18,6 +18,7 @@ const person = (
   role: "member",
   state: "active",
   name: null,
+  paletteSlot: 0,
   email: null,
   invitedAtMs: 1,
   joinedAtMs: 2,
@@ -28,6 +29,7 @@ const owner = person({
   memberId: "owner",
   role: "owner",
   name: "Ice",
+  paletteSlot: 0,
   email: "ice@test",
   invitedAtMs: null,
 });
@@ -508,6 +510,7 @@ describe("Members page", () => {
     const dialog = screen.getByTestId("settings-members-confirm-remove");
     expect(dialog.textContent).toContain("Remove Bo from Community?");
     expect(dialog.textContent).toContain("Copies already on their computers stay with them.");
+    expect(dialog.textContent).toContain("Direct messages with them stay open.");
     await userEvent.click(screen.getByTestId("settings-members-confirm-cancel"));
     expect(requests()).toEqual([{ action: "list" }]);
     await openMenu("m-bo");

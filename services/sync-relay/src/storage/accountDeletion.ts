@@ -8,7 +8,10 @@ import { noticeIdFrom } from "./notices";
 import { CHAT_WAKE_RETRIES } from "./chatWakes";
 import { ACCOUNT_OPERATIONS } from "./operationRecords";
 import { revokeShareInTransaction } from "./shares";
+import { findChannelCreateKind } from "./objectIndex";
+import { isOldDirectMessageShare } from "../shareAuthorization";
 import { dropEndedWorkspaceInvitesInTransaction } from "./workspaceMembers";
+import { dropUnheldDirectConversations } from "./directMessages";
 import {
   ACCESS_ENDED,
   SERVICE_HOST_ENROLLMENTS,
@@ -169,12 +172,28 @@ export function fenceAccount(
       storage.db
         .prepare("INSERT OR IGNORE INTO sync_relay_deleted_workspaces VALUES(?)")
         .run(accountDeletionIdentity(key, "workspace:" + row.workspaceId));
+    const channelKinds = {
+      findChannelCreateKind: (workspaceId: string, channelWireId: string) =>
+        findChannelCreateKind(storage, workspaceId, channelWireId),
+    };
     for (const shareId of shareIds) {
-      const recipients = storage.db
-        .prepare(
-          "SELECT DISTINCT principal_user_id FROM sync_relay_share_grants WHERE share_id=? AND principal_kind='user' AND principal_user_id<>?",
-        )
-        .all(shareId, userId);
+      // An old direct message stays out of Received. The purge erases what
+      // says a share is one, so decide now and record no ended row for it.
+      const share = storage.db
+        .prepare("SELECT workspace_id, selector_json FROM sync_relay_shares WHERE share_id=?")
+        .get(shareId);
+      const recipients =
+        share &&
+        isOldDirectMessageShare(channelKinds, {
+          workspaceId: String(share.workspace_id),
+          selectorJson: String(share.selector_json),
+        })
+          ? []
+          : storage.db
+              .prepare(
+                "SELECT DISTINCT principal_user_id FROM sync_relay_share_grants WHERE share_id=? AND principal_kind='user' AND principal_user_id<>?",
+              )
+              .all(shareId, userId);
       for (const recipient of recipients)
         storage.db
           .prepare("INSERT OR IGNORE INTO sync_relay_ended_shares VALUES(?,?,?)")
@@ -257,6 +276,8 @@ export const RETAINED_ACCOUNT_HISTORY = new Set([
   "sync_relay_live_update_struct_provenance",
   "sync_relay_live_author_clients",
   "sync_relay_share_discussion_messages",
+  // What a deleted account said stays with the people it said it to.
+  "sync_relay_direct_messages",
 ]);
 const identifier = (value: string) => '"' + value.replaceAll('"', '""') + '"';
 export function purgeAccountRows(
@@ -416,5 +437,6 @@ export function purgeAccountRows(
           .prepare("DELETE FROM " + identifier(table) + " WHERE lower(principal_email)=?")
           .run(normalizeEmail(email));
     }
+    dropUnheldDirectConversations(storage);
   });
 }

@@ -45,7 +45,6 @@ const record = (id: string, channelId: string) => ({
 
 const listChatChannels = vi.fn();
 const listChannelThreads = vi.fn();
-const syncDms = vi.fn();
 beforeEach(() => {
   listChatChannels.mockResolvedValue({
     channels: [group, otherGroup, dm],
@@ -56,7 +55,7 @@ beforeEach(() => {
       threads: [record(`${channelId}-${lane}`, channelId)],
     }),
   );
-  vi.stubGlobal("dohcDesktop", { listChatChannels, listChannelThreads, syncDms });
+  vi.stubGlobal("dohcDesktop", { listChatChannels, listChannelThreads });
 });
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -99,14 +98,6 @@ describe("where a work link's message opens", () => {
     expect(listChannelThreads).not.toHaveBeenCalled();
   });
 
-  it("opens a DM through its canonical record at the message", async () => {
-    await expect(findNoticeChat("notes", linkTo("dm-thread", "dm-1"))).resolves.toEqual({
-      open: "dm",
-      locator: { channelId: "dm-1", threadId: "dm-thread", focusMessageId: "m-1" },
-    });
-    expect(listChannelThreads).not.toHaveBeenCalled();
-  });
-
   it("finds nothing for a chat this workspace does not list, or a thread its Group does not hold", async () => {
     await expect(findNoticeChat("notes", linkTo("group-1-chat", "group-gone"))).resolves.toBeNull();
     await expect(findNoticeChat("notes", linkTo("group-2-chat", "group-1"))).resolves.toBeNull();
@@ -137,20 +128,9 @@ describe("where a work link's chat opens", () => {
       open: "chats",
       nav: { level: "channel", channel: group },
     });
-    expect(syncDms).not.toHaveBeenCalled();
   });
 
-  it("opens a DM through its record", async () => {
-    const record = { channelId: "dm-1", name: "sam@example.com" };
-    syncDms.mockResolvedValue({ dms: [{ channelId: "dm-other" }, record] });
-    await expect(findNoticeChannel("notes", "dm-1")).resolves.toEqual({
-      open: "chats",
-      nav: { level: "dm", dm: record },
-    });
-  });
-
-  it("finds nothing for a chat this workspace does not list, or a DM without a record", async () => {
-    syncDms.mockResolvedValue({ dms: [] });
+  it("finds nothing for a chat this workspace does not list, or a direct message", async () => {
     await expect(findNoticeChannel("notes", "group-gone")).resolves.toBeNull();
     await expect(findNoticeChannel("notes", "dm-1")).resolves.toBeNull();
   });

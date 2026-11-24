@@ -5,7 +5,7 @@ import {
 } from "../../../packages/workspace-core/src/metadata";
 import { parseWorkspaceId, RESERVED_WORKSPACE_IDS } from "./requestInputs";
 
-it.each(["shares", "notices", "link", "account", "hooks"])(
+it.each(["shares", "notices", "link", "account", "direct", "hooks"])(
   "refuses the reserved workspace ID %s",
   (workspaceId) => {
     expect(() => parseWorkspaceId(workspaceId)).toThrowError(
@@ -41,6 +41,7 @@ it("uses the same reserved-ID object as desktop manifest admission", () => {
     "personal-agents",
     "account",
     "wakes",
+    "direct",
     "hooks",
   ]);
   for (const workspaceId of RESERVED_WORKSPACE_IDS) {

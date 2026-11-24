@@ -88,6 +88,59 @@ describe("CredentialSessionCache", () => {
     });
   });
 
+  it("reads the credentials, and rejects while the store can't be read so a caller doesn't take it as a sign-out", async () => {
+    const cache = new CredentialSessionCache<string>();
+    let attempts = 0;
+    const load = async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("temporary read failure");
+      return "current-session";
+    };
+
+    await expect(cache.read(load)).rejects.toThrow("temporary read failure");
+    await expect(cache.read(load)).resolves.toBe("current-session");
+    expect(attempts).toBe(2);
+  });
+
+  it("reads the load a refresh started, not the null it shows while that load reads the store", async () => {
+    const cache = new CredentialSessionCache<string>();
+    let finishFirst: (value: string | null) => void = () => {};
+    let finishSecond: (value: string | null) => void = () => {};
+    const reading = cache.read(
+      () =>
+        new Promise<string | null>((resolve) => {
+          finishFirst = resolve;
+        }),
+    );
+    const refreshing = cache.refresh(
+      () =>
+        new Promise<string | null>((resolve) => {
+          finishSecond = resolve;
+        }),
+    );
+    finishFirst("first-session");
+    let settled = false;
+    void reading.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    finishSecond("second-session");
+    await refreshing;
+    await expect(reading).resolves.toBe("second-session");
+  });
+
+  it("reads the credentials set after the load it waited on failed, not that load's error", async () => {
+    const cache = new CredentialSessionCache<string>();
+    const failing = deferred<string | null>();
+    const refreshing = cache.refresh(() => failing.promise).catch(() => cache.set("replacement"));
+    const reading = cache.read(async () => "unused");
+    failing.reject(new Error("EACCES: credentials.json"));
+    await refreshing;
+    await expect(reading).resolves.toBe("replacement");
+  });
+
   it("tells each warm caller why the load it waited on failed, even after a later load starts", async () => {
     const cache = new CredentialSessionCache<string>();
     const unreadable = new Error("EACCES: credentials.json");

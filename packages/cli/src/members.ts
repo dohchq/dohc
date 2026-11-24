@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  isPaletteSlot,
   MAX_MEMBER_EMAIL_CHARS,
   MEMBER_STATES,
   WORKSPACE_ROLES,
@@ -67,6 +68,7 @@ const WorkspacePersonSchema = z
     role: z.enum(WORKSPACE_ROLES),
     state: z.enum(MEMBER_STATES),
     name: z.string().max(1024).nullable(),
+    paletteSlot: z.number().refine(isPaletteSlot),
     email: z.string().max(MAX_MEMBER_EMAIL_CHARS).nullable(),
     invitedAtMs: time,
     joinedAtMs: time,

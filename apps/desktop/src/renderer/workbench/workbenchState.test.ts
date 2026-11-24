@@ -38,6 +38,8 @@ import {
   parseUiState,
   pruneMissingRestoredTabs,
   serializeUiState,
+  setDirectTabName,
+  MAX_DIRECT_NAMES,
   setSidebarWidth,
   setAboutWidth,
   setOpenEditorsHeight,
@@ -1321,6 +1323,75 @@ describe("recent files", () => {
     state = recordRecentFile(state, "a.md");
     expect(parseUiState(serializeUiState(state)).recentFiles).toEqual(["a.md"]);
     expect(parseUiState({ version: 1, tabs: ["a.md"], activeTab: "a.md" }).recentFiles).toEqual([]);
+  });
+});
+
+describe("direct tab names", () => {
+  const ann = "https://server#https://relay#ann";
+  const alice = chatTabPath({ kind: "dm", id: "c-alice" });
+  const sam = chatTabPath({ kind: "dm", id: "c-sam" });
+
+  it("keeps a name only while its tab is open, and saves it with the tabs", () => {
+    let state = withTabs(alice, sam);
+    state = setDirectTabName(state, "c-alice", ann, "Alice Moreno");
+    state = setDirectTabName(state, "c-sam", ann, "Sam Rivera");
+    expect(setDirectTabName(state, "c-alice", ann, "Alice Moreno")).toBe(state);
+    // A conversation with no open tab keeps no name.
+    expect(setDirectTabName(state, "c-lee", ann, "Lee Park")).toBe(state);
+    expect(parseUiState(serializeUiState(state)).directNames).toEqual({
+      "c-alice": { account: ann, name: "Alice Moreno" },
+      "c-sam": { account: ann, name: "Sam Rivera" },
+    });
+    state = closeTab(state, DEFAULT_EDITOR_GROUP_ID, alice);
+    expect(state.directNames).toEqual({ "c-sam": { account: ann, name: "Sam Rivera" } });
+    expect(parseUiState(serializeUiState(state)).directNames).toEqual({
+      "c-sam": { account: ann, name: "Sam Rivera" },
+    });
+  });
+
+  it("parse drops foreign entries, names without a tab, and entries past the cap", () => {
+    const serialized = serializeUiState(withTabs(alice));
+    expect(
+      parseUiState({
+        ...serialized,
+        directNames: {
+          "c-alice": { account: ann, name: "Alice Moreno" },
+          "c-lee": { account: ann, name: "Lee Park" },
+        },
+      }).directNames,
+    ).toEqual({ "c-alice": { account: ann, name: "Alice Moreno" } });
+    for (const entry of [
+      { account: ann },
+      { account: "", name: "A" },
+      { account: ann, name: "x".repeat(201) },
+      "Alice",
+    ]) {
+      expect(
+        parseUiState({ ...serialized, directNames: { "c-alice": entry } }).directNames,
+      ).toEqual({});
+    }
+    expect(
+      parseUiState({ ...serialized, directNames: { "c alice": { account: ann, name: "A" } } })
+        .directNames,
+    ).toEqual({});
+    const paths: string[] = [];
+    const flood: Record<string, unknown> = {};
+    for (let i = 0; i < MAX_DIRECT_NAMES + 20; i++) {
+      flood[`c-${i}`] = { account: ann, name: `Person ${i}` };
+      paths.push(chatTabPath({ kind: "dm", id: `c-${i}` }));
+    }
+    const restored = parseUiState({ ...serializeUiState(withTabs(...paths)), directNames: flood });
+    expect(Object.keys(restored.directNames).length).toBeLessThanOrEqual(MAX_DIRECT_NAMES);
+  });
+
+  it("keeps an open tab's name behind a file's worth of names for closed tabs", () => {
+    const names: Record<string, unknown> = {};
+    for (let i = 0; i < MAX_DIRECT_NAMES; i++)
+      names[`c-closed-${i}`] = { account: ann, name: `Person ${i}` };
+    names["c-alice"] = { account: ann, name: "Alice Moreno" };
+    expect(
+      parseUiState({ ...serializeUiState(withTabs(alice)), directNames: names }).directNames,
+    ).toEqual({ "c-alice": { account: ann, name: "Alice Moreno" } });
   });
 });
 

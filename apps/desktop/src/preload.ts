@@ -25,6 +25,7 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { shareCopyOperations } from "./ipc/shareCopyOperations";
 import { accessOperations } from "./ipc/accessOperations";
 import { memberOperations } from "./ipc/memberOperations";
+import { directMessageOperations, DirectChangedEvent } from "./ipc/directMessageOperations";
 import { settingsOperations } from "./ipc/settingsOperations";
 import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
 import { workspaceSecretsOperations } from "./ipc/workspaceSecretsOperations";
@@ -210,6 +211,9 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(heldChangeOperations, invoke),
   ...operationBridge(accessOperations, invoke),
   ...operationBridge(memberOperations, invoke),
+  ...operationBridge(directMessageOperations, invoke),
+  onDirectChanged: (listener) =>
+    onEvent(CHANNELS.directChanged, DirectChangedEvent, () => listener()),
   platform: process.platform,
   devTools: devToolsGranted(process.argv),
   releaseChannel: releaseChannelFromArgv(process.argv),
@@ -483,12 +487,6 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.restoreEngineMomentFile, payload),
   chatRunRecordsForThread: (payload) =>
     ipcRenderer.invoke(CHANNELS.chatRunRecordsForThread, payload),
-  syncDms: (payload) => ipcRenderer.invoke(CHANNELS.syncDms, payload),
-  acceptDm: (payload) => ipcRenderer.invoke(CHANNELS.acceptDm, payload),
-  declineDm: (payload) => ipcRenderer.invoke(CHANNELS.declineDm, payload),
-  requestDmAgain: (payload) => ipcRenderer.invoke(CHANNELS.requestDmAgain, payload),
-  startDm: (payload) => ipcRenderer.invoke(CHANNELS.startDm, payload),
-  leaveDm: (payload) => ipcRenderer.invoke(CHANNELS.leaveDm, payload),
   presencePublish: (payload) =>
     ipcRenderer.invoke(CHANNELS.presencePublish, {
       ...payload,

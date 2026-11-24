@@ -2,13 +2,16 @@ import { workspaceWords } from "@dohc/interface-words/workspace";
 import { LegendList, type LegendListRef } from "@legendapp/list/react-native";
 import * as Haptics from "expo-haptics";
 import { Stack, useRouter } from "expo-router";
-import { useCallback, useMemo, useState, type ReactNode, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode, type RefObject } from "react";
 import { View } from "react-native";
+import { useAccount } from "../account/AccountProvider";
+import { phoneWrites } from "../server/phoneWrites";
 import { views } from "../server/workspaceData";
 import type { ChatGroup } from "../server/workspaceReads";
 import { useTheme, workspaceMarkFills } from "../theme";
 import { EmptyLine, HoldRow, NoWorkspace, RetryRow } from "../workspace/ListStates";
 import { useFailureNotice, useView } from "../workspace/useView";
+import { prefetchChat, unreadPrefetch } from "./chatPrefetch";
 import { ChatRow } from "./ChatRow";
 import { ChatsHeader } from "./ChatsHeader";
 import { SectionHeader } from "./SectionHeader";
@@ -71,6 +74,7 @@ function chatRow(group: ChatGroup): ChatRowData {
 }
 
 function ServerChatList({ workspace }: { workspace: PhoneWorkspace }) {
+  const { data } = useAccount();
   const { state, retry } = useView(views.chats);
   const failed = workspaceWords.chatsFailed(workspace.name);
   useFailureNotice(`read:${workspace.id}:chats`, failed, state, retry);
@@ -84,10 +88,21 @@ function ServerChatList({ workspace }: { workspace: PhoneWorkspace }) {
       })).filter((section) => section.rows.length > 0),
     [groups],
   );
+  const prefetch = useCallback(
+    (row: ChatRowData) => {
+      if (data) prefetchChat(data, row, phoneWrites);
+    },
+    [data],
+  );
+  const [warmUnread] = useState(() => unreadPrefetch(phoneWrites));
+  useEffect(() => {
+    if (sections && data) warmUnread(data, sections);
+  }, [sections, data, warmUnread]);
   return (
     <ChatsScreen
       current={workspace}
       sections={sections}
+      onPressIn={prefetch}
       failure={state.problem ? { label: failed, onRetry: retry } : null}
       onRefresh={retry}
     />
@@ -105,6 +120,7 @@ export function ChatsScreen({
   notice,
   list,
   onRefresh,
+  onPressIn,
 }: {
   current: PhoneWorkspace | null;
   /** Null while the chats are read. */
@@ -116,6 +132,8 @@ export function ChatsScreen({
   list?: RefObject<LegendListRef | null>;
   /** Pull to refresh: reads the chats again. */
   onRefresh?: () => void;
+  /** A finger is on a chat's row, before it opens. */
+  onPressIn?: (row: ChatRowData) => void;
 }) {
   const theme = useTheme();
   const router = useRouter();
@@ -185,7 +203,7 @@ export function ChatsScreen({
                 onToggle={() => toggle(item.key.slice(2))}
               />
             ) : item.type === "row" ? (
-              <ChatRow row={item.row} onPress={open} />
+              <ChatRow row={item.row} onPress={open} onPressIn={onPressIn} />
             ) : (
               placeholder
             )

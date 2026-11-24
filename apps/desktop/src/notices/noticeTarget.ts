@@ -36,7 +36,9 @@ export type NoticeTarget =
   | { to: "privacy-settings" }
   // Settings › Agents, with the account's personal agents. `agent` is the id
   // of the personal agent whose page opens, when the notice names one.
-  | { to: "agents-settings"; agent?: string };
+  | { to: "agents-settings"; agent?: string }
+  // A direct conversation, in Chats.
+  | { to: "direct"; conversationId: string };
 
 export const CHAT_NOT_FOUND_NOTE = "dohc could not find this chat.";
 export const FILE_NOT_FOUND_NOTE = "dohc could not find this file.";

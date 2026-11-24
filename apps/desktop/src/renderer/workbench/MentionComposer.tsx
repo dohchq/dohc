@@ -70,6 +70,8 @@ import { useToastsAbove } from "./toastClearance";
 // What a control outside the composer can ask of it. Neither sends.
 export interface MentionComposerHandle {
   focus(): void;
+  // Focuses with the caret after the draft, to carry on writing it.
+  focusEnd(): void;
   // Adds @handle for a candidate to the end of the draft, as if picked from
   // the @ menu, and puts the caret after it.
   mention(candidateId: string): void;
@@ -187,6 +189,8 @@ export function MentionComposer(props: {
   placeholder: string;
   sendLabel: string;
   candidates: readonly MentionCandidate[];
+  // A composer with no one to mention, such as a direct message's, offers no Mention button.
+  noMentions?: boolean;
   fileCandidates?: readonly FileMentionCandidate[];
   loadFileHeadings?: (path: string) => Promise<readonly WorkspaceHeadingRecord[]>;
   onChange: (value: string) => void;
@@ -272,10 +276,18 @@ export function MentionComposer(props: {
   // When we complete a mention we must reposition the caret after React commits
   // the new value; this holds the pending caret target for the layout effect.
   const pendingCaret = useRef<number | null>(null);
+  const focusEnd = () => {
+    const node = textareaRef.current;
+    if (!node) return;
+    node.focus();
+    node.setSelectionRange(node.value.length, node.value.length);
+    setCaret(node.value.length);
+  };
   useImperativeHandle(
     props.handle,
     () => ({
       focus: () => textareaRef.current?.focus(),
+      focusEnd,
       mention: (candidateId) => {
         const candidate = props.candidates.find((value) => value.id === candidateId);
         const pick = rosterPick.current;
@@ -286,9 +298,7 @@ export function MentionComposer(props: {
         }
         // Already mentioned: the caret goes back to the end, as on the first press.
         if (pick?.candidate.id === candidateId && agentRosterPickIsPresent(pick, props.value)) {
-          node?.focus();
-          node?.setSelectionRange(props.value.length, props.value.length);
-          setCaret(props.value.length);
+          focusEnd();
           return;
         }
         // A mention glued to a word is not a mention; give it its own word.
@@ -1182,21 +1192,23 @@ export function MentionComposer(props: {
               )}
             />
           ) : null}
-          <button
-            type="button"
-            aria-label="Mention"
-            title="Mention a person or agent"
-            tabIndex={-1}
-            disabled={locked}
-            onMouseDown={(event) => {
-              // Insert "@" and open the roster without stealing textarea focus.
-              event.preventDefault();
-              insertAtCaret("@");
-            }}
-            className={BAR_BUTTON}
-          >
-            <AtSign size={16} strokeWidth={1.9} aria-hidden />
-          </button>
+          {props.noMentions ? null : (
+            <button
+              type="button"
+              aria-label="Mention"
+              title="Mention a person or agent"
+              tabIndex={-1}
+              disabled={locked}
+              onMouseDown={(event) => {
+                // Insert "@" and open the roster without stealing textarea focus.
+                event.preventDefault();
+                insertAtCaret("@");
+              }}
+              className={BAR_BUTTON}
+            >
+              <AtSign size={16} strokeWidth={1.9} aria-hidden />
+            </button>
+          )}
           {props.agentOffer ? <AgentOffer offer={props.agentOffer} /> : <span className="flex-1" />}
           <ComposerSendButton
             testId={`${props.testIdPrefix}-send`}

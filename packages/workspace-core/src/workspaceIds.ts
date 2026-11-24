@@ -7,6 +7,7 @@ export const RESERVED_WORKSPACE_IDS: readonly string[] = Object.freeze([
   "personal-agents",
   "account",
   "wakes",
+  "direct",
   "hooks",
 ]);
 

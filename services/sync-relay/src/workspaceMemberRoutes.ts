@@ -9,6 +9,7 @@ import {
   type WorkspaceMembersView,
   type WorkspacePerson,
 } from "@dohc/security-contract/workspace-members";
+import { actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import { normalizeEmail } from "@dohc/workspace-auth/signUp";
 import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
@@ -179,6 +180,7 @@ export function createWorkspaceMemberRoutes(options: {
       role: "owner",
       state: "active",
       name: await accountDisplayName(options.lookupUserDisplayName, snapshot.ownerUserId),
+      paletteSlot: actorHueSlot(snapshot.ownerUserId),
       email: manages ? await lookupEmail(snapshot.ownerUserId) : null,
       invitedAtMs: null,
       joinedAtMs: snapshot.membership?.createdAtMs ?? null,
@@ -193,6 +195,7 @@ export function createWorkspaceMemberRoutes(options: {
           entry.userId === null
             ? null
             : await accountDisplayName(options.lookupUserDisplayName, entry.userId),
+        paletteSlot: actorHueSlot(entry.userId ?? entry.memberId),
         email: !manages
           ? null
           : entry.userId === null

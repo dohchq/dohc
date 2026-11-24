@@ -30,7 +30,6 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import type { WorkspaceMembersView } from "@dohc/security-contract/workspace-members";
 import type {
   ChatFileMentionRecord,
@@ -1593,7 +1592,7 @@ function MemberPeopleList(props: { view: WorkspaceMembersView }) {
                 className={`${ABOUT_ROW} h-7`}
               >
                 <ChatAvatar
-                  presentation={relayPresentation(actorHueSlot(person.memberId), self)}
+                  presentation={relayPresentation(person.paletteSlot, self)}
                   name={name}
                   kind="human"
                   size="strip"
