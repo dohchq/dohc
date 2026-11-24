@@ -2687,6 +2687,152 @@ test("a saved 181-second receipt download is unmeasured in both timing checks", 
   assert.equal(completed.seconds, 450, "completed timing also includes upload and post steps");
 });
 
+for (const fixture of [
+  {
+    run: "45431027391",
+    start: "2026-11-24T15:55:12Z",
+    selectionEnd: 23,
+    reportingStart: 26,
+    waitStart: 275,
+    waitEnd: 409,
+    downloadSeconds: 5,
+    initialSeconds: 415.316,
+    completedSeconds: 421,
+    lateJob: ["JS worker 9", 300, 402],
+    lastWork: ["JS worker 7", 329, 332],
+    delay: 73,
+  },
+  {
+    run: "45434028943",
+    start: "2026-11-24T16:10:36Z",
+    selectionEnd: 28,
+    reportingStart: 31,
+    waitStart: 283,
+    waitEnd: 397,
+    downloadSeconds: 4,
+    initialSeconds: 403.091,
+    completedSeconds: 407,
+    lateJob: ["JS worker 3", 291, 393],
+    lastWork: ["JS worker 6", 303, 305],
+    delay: 90,
+  },
+]) {
+  test(`job completion delay in run ${fixture.run}`, async (t) => {
+    const parent = resolve(".agent-artifacts/verification");
+    mkdirSync(parent, { recursive: true });
+    const root = mkdtempSync(join(parent, "completion-delay-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const outputDirectory = join(root, "aggregate");
+    const at = (seconds) => new Date(Date.parse(fixture.start) + seconds * 1000).toISOString();
+    const jobs = withoutWaits();
+    const selection = jobs.find((job) => job.name === "what changed");
+    const final = jobs.find((job) => job.name === "typecheck + tests");
+    const commit = selection.head_sha;
+    Object.assign(selection, {
+      created_at: at(0),
+      started_at: at(0),
+      completed_at: at(fixture.selectionEnd),
+    });
+    for (const job of jobs.filter(
+      (job) => job.name.startsWith("JS worker ") || job.name === "shared preparation",
+    )) {
+      const [, stepEnd, jobEnd] = [fixture.lateJob, fixture.lastWork].find(
+        ([name]) => name === job.name,
+      ) ?? [job.name, 230, 233];
+      Object.assign(job, {
+        created_at: at(fixture.selectionEnd),
+        started_at: at(fixture.reportingStart),
+        completed_at: at(jobEnd),
+        steps: [{ name: "Complete job", conclusion: "success", completed_at: at(stepEnd) }],
+      });
+    }
+    Object.assign(final, {
+      created_at: at(fixture.selectionEnd),
+      started_at: at(fixture.reportingStart),
+      completed_at: at(fixture.completedSeconds),
+      steps: [
+        {
+          name: "Wait for the complete JavaScript group",
+          conclusion: "success",
+          started_at: at(fixture.waitStart),
+          completed_at: at(fixture.waitEnd),
+        },
+        {
+          name: "Run actions/download-artifact@fixture",
+          started_at: at(fixture.waitEnd),
+          completed_at: at(fixture.waitEnd + fixture.downloadSeconds),
+        },
+        { name: "Require complete proof and the JavaScript timing ceiling" },
+      ],
+    });
+    writeTimingReceipts(root, "js", commit);
+    mkdirSync(outputDirectory);
+    writeFileSync(
+      join(outputDirectory, "js-wait-finished.json"),
+      JSON.stringify({ finishedAt: at(fixture.waitEnd) }),
+    );
+
+    for (const [check, seconds] of [
+      ["initial", fixture.initialSeconds],
+      ["completed", fixture.completedSeconds],
+    ]) {
+      const run = async (rows, extraSeconds = 0) => {
+        const reporting = rows.find((job) => job.name === final.name);
+        if (check === "completed") {
+          reporting.completed_at = at(seconds + extraSeconds);
+          return completedGateTiming("js", rows, commit);
+        }
+        Object.assign(reporting, { status: "in_progress", conclusion: null, completed_at: null });
+        let clockReads = 0;
+        return aggregateCloud("js", root.replaceAll("\\", "/"), {
+          env: { GITHUB_SHA: commit },
+          outputDirectory,
+          readJobs: async () => rows,
+          now: () =>
+            Date.parse(
+              at(
+                clockReads++ === 0
+                  ? fixture.waitEnd + fixture.downloadSeconds
+                  : seconds + extraSeconds,
+              ),
+            ),
+        });
+      };
+      await t.test(`${check} check records the delay and keeps the raw span`, async () => {
+        const timing = await run(structuredClone(jobs));
+        assert.equal(timing.timing, "unmeasured");
+        assert.equal(timing.spanSeconds, seconds);
+        assert.equal(timing.seconds, seconds);
+        assert.equal(timing.completionDelaySeconds, fixture.delay);
+        assert.equal(timing.contended, true);
+        assert.match(
+          timing.warning,
+          new RegExp(`GitHub took ${fixture.delay}s to mark finished jobs complete`, "u"),
+        );
+      });
+      await t.test(`${check} check still enforces the ceiling`, async () => {
+        const rows = structuredClone(jobs);
+        const late = rows.find((job) => job.name === fixture.lateJob[0]);
+        await assert.rejects(
+          run(structuredClone(rows), 401 + fixture.delay - seconds),
+          /exceeding/u,
+        );
+        const overlap = structuredClone(rows);
+        overlap.find((job) => job.name === final.name).steps[0].started_at = at(
+          fixture.lateJob[2] - 30,
+        );
+        await assert.rejects(run(overlap), /exceeding/u);
+        late.steps[0].completed_at = late.completed_at;
+        await assert.rejects(run(structuredClone(rows)), /exceeding/u);
+        delete late.steps[0].completed_at;
+        await assert.rejects(run(structuredClone(rows)), /exceeding/u);
+        late.conclusion = "failure";
+        await assert.rejects(run(rows), /unsuccessful|did not finish successfully/u);
+      });
+    }
+  });
+}
+
 test("aggregate receipts use the same timing rule and remain incomplete", async (t) => {
   const parent = resolve(".agent-artifacts/verification");
   mkdirSync(parent, { recursive: true });

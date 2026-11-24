@@ -216,6 +216,41 @@ function archiveLateSeconds(job, metadata) {
   return Number.isFinite(late) ? Math.max(0, late) : null;
 }
 
+const CONTENTION_SECONDS = 30;
+const JS_GROUP_WAIT_STEP = "Wait for the complete JavaScript group";
+
+function jsCompletionDelay(jobs) {
+  const reporting = jobs.find((job) => job.name === "typecheck + tests");
+  const wait = Array.isArray(reporting.steps)
+    ? reporting.steps.find((step) => step.name === JS_GROUP_WAIT_STEP)
+    : null;
+  const waitStartedAt = Date.parse(wait?.started_at);
+  const waitFinishedAt = Date.parse(wait?.completed_at);
+  if (
+    wait?.conclusion !== "success" ||
+    !(waitStartedAt >= Date.parse(reporting.started_at) && waitFinishedAt >= waitStartedAt)
+  )
+    return null;
+
+  let workFinishedAt = waitStartedAt;
+  let jobsFinishedAt = waitStartedAt;
+  for (const job of jobs) {
+    if (job === reporting || job.name === "what changed") continue;
+    const step = Array.isArray(job.steps) ? job.steps.at(-1) : null;
+    const stepEnd = Date.parse(step?.completed_at);
+    const jobEnd = Date.parse(job.completed_at);
+    if (
+      step?.name !== "Complete job" ||
+      step.conclusion !== "success" ||
+      !(Date.parse(job.started_at) <= stepEnd && stepEnd <= jobEnd && jobEnd <= waitFinishedAt)
+    )
+      return null;
+    workFinishedAt = Math.max(workFinishedAt, stepEnd);
+    jobsFinishedAt = Math.max(jobsFinishedAt, jobEnd);
+  }
+  return (jobsFinishedAt - workFinishedAt) / 1000;
+}
+
 function gateTiming(scope, required, metadata = required, transferSeconds = null) {
   if (
     required.some(
@@ -246,7 +281,11 @@ function gateTiming(scope, required, metadata = required, transferSeconds = null
   const longest = jobs
     .filter((job) => job.name !== "what changed")
     .reduce((a, b) => (a.runnerWaitSeconds > b.runnerWaitSeconds ? a : b));
-  const contended = longest.runnerWaitSeconds > 30 || transferSeconds > 30,
+  const completionDelaySeconds = scope === "js" ? jsCompletionDelay(required) : null;
+  const runnerContended = longest.runnerWaitSeconds > CONTENTION_SECONDS;
+  const transferContended = transferSeconds > CONTENTION_SECONDS;
+  const completionContended = completionDelaySeconds > CONTENTION_SECONDS;
+  const contended = runnerContended || transferContended || completionContended,
     seconds = spanSeconds;
   const targetSeconds = scope === "js" ? 300 : 600;
   const budgetSeconds = scope === "js" ? 400 : 700;
@@ -254,8 +293,9 @@ function gateTiming(scope, required, metadata = required, transferSeconds = null
   // A pull request's own receipts set the transfer's size, so a slow transfer excuses only its own seconds.
   const excused =
     rerun ||
-    longest.runnerWaitSeconds > 30 ||
-    (transferSeconds > 30 && seconds - transferSeconds <= budgetSeconds);
+    runnerContended ||
+    (transferContended && seconds - transferSeconds <= budgetSeconds) ||
+    (completionContended && seconds - completionDelaySeconds <= budgetSeconds);
   const timing =
     seconds <= targetSeconds
       ? "within budget"
@@ -271,10 +311,11 @@ function gateTiming(scope, required, metadata = required, transferSeconds = null
       : "wait for GitHub to start";
   const delay = [
     rerun ? "part of the gate passed in an earlier attempt and did not run again" : null,
-    longest.runnerWaitSeconds > 30
-      ? `longest ${waitingFor} ${longest.name}: ${longest.runnerWaitSeconds}s`
+    runnerContended ? `longest ${waitingFor} ${longest.name}: ${longest.runnerWaitSeconds}s` : null,
+    transferContended ? `receipt transfer took ${transferSeconds}s` : null,
+    completionContended
+      ? `GitHub took ${completionDelaySeconds}s to mark finished jobs complete`
       : null,
-    transferSeconds > 30 ? `receipt transfer took ${transferSeconds}s` : null,
   ]
     .filter(Boolean)
     .join("; ");
@@ -284,6 +325,7 @@ function gateTiming(scope, required, metadata = required, transferSeconds = null
     targetSeconds,
     budgetSeconds,
     transferSeconds,
+    ...(scope === "js" ? { completionDelaySeconds } : {}),
     contended,
     timing,
     jobs,
@@ -303,7 +345,7 @@ function requireBudget(scope, timing) {
   if (timing.timing === "over budget")
     throw Object.assign(
       new Error(
-        `The complete ${scope} gate took ${timing.seconds}s, exceeding its ${timing.budgetSeconds}s budget including final reporting${timing.transferSeconds > 30 ? `, even without its ${timing.transferSeconds}s receipt transfer` : ""}.`,
+        `The complete ${scope} gate took ${timing.seconds}s, exceeding its ${timing.budgetSeconds}s budget including final reporting${timing.transferSeconds > CONTENTION_SECONDS ? `, even without its ${timing.transferSeconds}s receipt transfer` : ""}.`,
       ),
       { timing },
     );
@@ -316,7 +358,8 @@ function completedTransferSeconds(scope, jobs) {
   )?.steps;
   if (!Array.isArray(steps)) return null;
   const wait = steps.findIndex(
-    (step) => step.name === `Wait for the complete ${scope === "js" ? "JavaScript" : "Rust"} group`,
+    (step) =>
+      step.name === (scope === "js" ? JS_GROUP_WAIT_STEP : "Wait for the complete Rust group"),
   );
   const verify = steps.findIndex(
     (step, index) => index > wait && step.name.startsWith("Require complete proof and "),
