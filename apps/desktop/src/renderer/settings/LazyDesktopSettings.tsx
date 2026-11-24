@@ -28,6 +28,10 @@ const loadDesktopSettings: DesktopSettingsLoader = () =>
     return { default: mod.SettingsDialog };
   });
 
+export async function preloadDesktopSettings(): Promise<void> {
+  if (!loadedSettings) await loadDesktopSettings().catch(() => undefined);
+}
+
 // Where loaded Settings puts its own X, so the way out never moves.
 function CloseSettings(props: { onClose: () => void }) {
   return (

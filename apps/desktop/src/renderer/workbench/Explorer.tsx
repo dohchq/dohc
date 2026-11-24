@@ -120,6 +120,7 @@ import {
 } from "../../ipc/errorWords";
 import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
+import { preloadCollectionView, preloadViewForPath } from "../viewPreloads";
 
 // One Explorer disk operation, as the shell's onBeginChanges opens it.
 // `settle` is the deferred draft settlement runChanges awaits before it
@@ -507,6 +508,11 @@ export const TreeRow = memo(function TreeRow(props: {
       : ""
     : glyphTone(props.picked || props.active);
   const openEdge = !props.dropPreview && props.picked && props.active;
+  // The view's code loads while the pointer travels to the click.
+  const preloadView = () => {
+    if (props.collection) preloadCollectionView();
+    else if (!row.isFolder) preloadViewForPath(row.fullPath);
+  };
   const dropClass = blocked
     ? target
       ? "bg-danger/10 text-danger ring-1 ring-inset ring-danger/30"
@@ -551,7 +557,11 @@ export const TreeRow = memo(function TreeRow(props: {
         tabIndex={props.tabbable ? 0 : -1}
         ref={(el) => props.registerRef(row.fullPath, el)}
         draggable={props.movable !== false}
-        onFocus={() => props.onRowFocus(row.fullPath)}
+        onPointerEnter={preloadView}
+        onFocus={() => {
+          preloadView();
+          props.onRowFocus(row.fullPath);
+        }}
         onClick={(event) => props.onRowClick(row.fullPath, event)}
         onContextMenu={(event) => props.onRowContextMenu(row.fullPath, event)}
         onDragStart={(event) => props.onRowDragStart(row.fullPath, event)}

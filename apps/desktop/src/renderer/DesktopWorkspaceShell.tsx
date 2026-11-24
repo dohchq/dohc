@@ -95,7 +95,12 @@ import {
 import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import { hasUnacknowledgedShareSkips, shareSkipNoticeLines } from "./shareSkipNotice";
 import { useChatEditorTabs } from "./shell/useChatEditorTabs";
-import { LazyChatsView, LazyGraphView, LazySitePreviewPage } from "./shell/lazyViews";
+import {
+  LazyChatsView,
+  LazyCollectionPage,
+  LazyGraphView,
+  LazySitePreviewPage,
+} from "./shell/lazyViews";
 import type { AppViewNotices } from "./AppView";
 import { ShellAboutRail, type AboutSearchHit } from "./shell/ShellAboutRail";
 import { SIDE_PANEL_VIEWS } from "./shell/sidePanelViews";
@@ -227,6 +232,7 @@ import { FileInspector } from "./FileInspector";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import type { HeadingTarget, ScrollTarget } from "./MarkdownView";
 import { preloadMarkdownEditor } from "./editor/LazyMarkdownEditor";
+import { preloadViewForPath, scheduleIdleViewPreloads } from "./viewPreloads";
 import { sendToFocusedEditor } from "./editor/editorMenuCommands";
 import { NewFileDialog } from "./NewFileDialog";
 import { NewPage, type NewPageFile } from "./NewPage";
@@ -600,9 +606,6 @@ function scheduleMarkdownEditorPreload(): () => void {
     }
   };
 }
-const LazyCollectionPage = lazy(() =>
-  import("./CollectionPage").then((mod) => ({ default: mod.CollectionPage })),
-);
 const LazyTransactionalCollection = lazy(() =>
   import("./ConnectedTransactionalCollection").then((mod) => ({
     default: mod.ConnectedTransactionalCollection,
@@ -2300,6 +2303,7 @@ function WorkspaceShell(props: {
               groupId: restoredGroup.id,
               path: restoredGroup.activeTab,
             };
+            preloadViewForPath(restoredGroup.activeTab);
           }
           // Order matters: writeWb (which sets wbRef), THEN enable flushes — a
           // beforeunload between "loaded" and the restored state's commit
@@ -4105,7 +4109,7 @@ function WorkspaceShell(props: {
       setSearchScrollTarget(
         scrollTarget ? { ...scrollTarget, path, groupId: targetGroupId } : null,
       );
-      if (/\.(md|markdown)$/i.test(path)) preloadMarkdownEditor();
+      preloadViewForPath(path);
       const commitOpen = () => {
         if (!isCurrentRequest()) return;
         const current = wbRef.current;
@@ -5314,7 +5318,7 @@ function WorkspaceShell(props: {
         return;
       }
       setHeadingTarget(null);
-      if (/\.(md|markdown)$/i.test(path)) preloadMarkdownEditor();
+      preloadViewForPath(path);
       if (group.activeTab !== path) {
         rendererMarks.mark(fileOpenStartMark(groupId));
       }
@@ -6411,7 +6415,9 @@ function WorkspaceShell(props: {
     return scheduleMarkdownEditorPreload();
   }, [files, hasMarkdownPath]);
   useEffect(() => {
-    if (syncStatus) rendererMarks.markOnce("workspace-shell-interactive");
+    if (!syncStatus) return;
+    rendererMarks.markOnce("workspace-shell-interactive");
+    scheduleIdleViewPreloads();
   }, [syncStatus]);
 
   // Open the workspace for this renderer selection. Main admits the exact

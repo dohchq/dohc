@@ -21,6 +21,7 @@ import {
 // covers the boundary.
 vi.mock("./settings/LazyDesktopSettings", async () => ({
   LazyDesktopSettings: (await import("./settings/SettingsDialog")).SettingsDialog,
+  preloadDesktopSettings: async () => undefined,
 }));
 
 type SessionEvent = { sessionKey: string | null; phase: "changing" | "ready" };

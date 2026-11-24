@@ -1,4 +1,5 @@
 import { lazy } from "react";
+import { preloadableLazy } from "../preloadableLazy";
 
 // Views that both a side panel and an editor tab show. One lazy component per
 // view, so a chunk that already loaded does not suspend again elsewhere.
@@ -8,9 +9,12 @@ export const LazyGraphView = lazy(() =>
 export const LazySitePreviewPage = lazy(() =>
   import("../SitePreviewPage").then((mod) => ({ default: mod.SitePreviewPage })),
 );
-export const LazyChatsView = lazy(() =>
-  import("../workbench/ChatsView").then((mod) => ({ default: mod.ChatsView })),
+export const LazyChatsView = preloadableLazy(() =>
+  import("../workbench/ChatsView").then((mod) => mod.ChatsView),
 );
 export const LazySharingView = lazy(() =>
   import("../workbench/SharingView").then((mod) => ({ default: mod.SharingView })),
+);
+export const LazyCollectionPage = preloadableLazy(() =>
+  import("../CollectionPage").then((mod) => mod.CollectionPage),
 );

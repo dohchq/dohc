@@ -1,7 +1,5 @@
-import { lazy } from "react";
+import { preloadableLazy } from "./preloadableLazy";
 
-export const LazySourceCodeEditor = lazy(() =>
-  import("./SourceCodeEditor").then((mod) => ({
-    default: mod.SourceCodeEditor,
-  })),
+export const LazySourceCodeEditor = preloadableLazy(() =>
+  import("./SourceCodeEditor").then((mod) => mod.SourceCodeEditor),
 );

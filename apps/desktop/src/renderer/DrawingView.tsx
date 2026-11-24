@@ -1,16 +1,6 @@
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import type { BinaryFileData } from "@excalidraw/excalidraw/types";
-import {
-  Suspense,
-  lazy,
-  useEffect,
-  useId,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-  type LazyExoticComponent,
-} from "react";
+import { Suspense, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ExcalidrawCanvasProps } from "./ExcalidrawCanvas";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
 import {
@@ -20,6 +10,7 @@ import {
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { binaryFileDataFromArtifact } from "./excalidrawAssets";
 import { pointExcalidrawAtAppFonts } from "./excalidrawFonts";
+import { preloadableLazy } from "./preloadableLazy";
 import { EMPTY_EXCALIDRAW_DOCUMENT, parseExcalidrawDocument } from "./excalidrawDocument";
 import {
   EngineArtifactAssetsInvalidNotice,
@@ -34,10 +25,10 @@ import { StateMark } from "./ui/StateMark";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
 import { useAutosavedTextDraft, type DraftFlush } from "./useAutosavedTextDraft";
 
-const LazyExcalidrawCanvas = lazy(() => {
+export const LazyExcalidrawCanvas = preloadableLazy<ExcalidrawCanvasProps>(() => {
   pointExcalidrawAtAppFonts();
-  return import("./ExcalidrawCanvas");
-}) as LazyExoticComponent<(props: ExcalidrawCanvasProps) => React.ReactElement>;
+  return import("./ExcalidrawCanvas").then((mod) => mod.default);
+});
 
 export function DrawingView({
   body,
