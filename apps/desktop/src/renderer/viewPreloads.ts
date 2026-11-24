@@ -42,11 +42,11 @@ export function preloadCollectionView(): void {
 // period after the one before it has loaded, so a key press waits behind at
 // most one of them.
 const IDLE_PRELOADS: readonly (() => Promise<void>)[] = [
+  preloadDesktopSettings,
   preloadMarkdownReadView,
   LazyChatsView.preload,
-  preloadDesktopSettings,
-  LazySourceCodeEditor.preload,
   LazyCollectionPage.preload,
+  LazySourceCodeEditor.preload,
 ];
 let idlePreloadsStarted = false;
 

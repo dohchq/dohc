@@ -2070,6 +2070,8 @@ function WorkspaceShell(props: {
   // wait for a later read to apply the saved tabs, and a default-state write
   // can never clobber the stored one.
   const uiStateLoaded = useRef(false);
+  // The first restored view showed, so the workspace finished opening.
+  const [openingSettled, setOpeningSettled] = useState(false);
   const restoredActiveFileSurface = useRef<{
     selectionGeneration: number;
     groupId: string;
@@ -2278,6 +2280,7 @@ function WorkspaceShell(props: {
       markCurrentSwitchPhase("restored-active-surface-ready")
     ) {
       restoredActiveFileSurface.current = null;
+      setOpeningSettled(true);
     }
   };
 
@@ -2389,6 +2392,7 @@ function WorkspaceShell(props: {
       return;
     }
     markCurrentSwitchPhase("restored-active-surface-ready");
+    setOpeningSettled(true);
   }, [markCurrentSwitchPhase, restoredSurfaceCommit, workspaceSelectionGeneration]);
   const onRestoredFileSurfaceReady = useCallback(
     (path: string, groupId: string) => {
@@ -2400,6 +2404,7 @@ function WorkspaceShell(props: {
       ) {
         return;
       }
+      setOpeningSettled(true);
       if (markCurrentSwitchPhase("restored-active-surface-ready")) {
         restoredActiveFileSurface.current = null;
       }
@@ -8018,11 +8023,12 @@ function WorkspaceShell(props: {
   const oldWindow = props.oldWindow ?? null;
   // The workspace also stops in a window Forget left showing it.
   const workspaceStopped = storeUpdateRefusal !== null || oldWindow !== null;
-  // Code for views nobody opened yet loads only once the workbench takes
-  // input, so it does not compete with opening the workspace.
+  // Code for views nobody opened yet loads only once the first restored view
+  // shows, so it does not compete with opening the workspace.
   useEffect(() => {
-    if (syncStatus && workbenchRestored && !workspaceStopped) scheduleIdleViewPreloads();
-  }, [syncStatus, workbenchRestored, workspaceStopped]);
+    if (syncStatus && workbenchRestored && openingSettled && !workspaceStopped)
+      scheduleIdleViewPreloads();
+  }, [syncStatus, workbenchRestored, openingSettled, workspaceStopped]);
   // The rows filed before the stop began. Their Try again would ask the
   // stopped workspace again, which cannot succeed. Main marks a call that
   // fails on it later, so a row filed during the stop keeps its own.
