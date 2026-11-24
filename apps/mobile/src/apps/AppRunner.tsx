@@ -37,8 +37,14 @@ export function AppRunScreen() {
   useEffect(() => {
     if (!running && router.canGoBack()) router.back();
   }, [running, router]);
-  // Leaving the screen, by Back or otherwise, ends the app.
-  useEffect(() => () => runner.end(), [runner]);
+  // Leaving the screen, by Back or otherwise, ends the app, but keeps a stopped app for its review to show.
+  useEffect(
+    () => () => {
+      const kept = runner.stopped();
+      runner.end((scope) => scope !== kept);
+    },
+    [runner],
+  );
   useEffect(() => {
     if (!apps) return;
     const timer = setInterval(() => void apps.check(), CHECK_MS);

@@ -111,6 +111,10 @@ describe("a launch", () => {
     runner.stop();
     runner.end((scope) => scope.workspaceId !== "ws-1");
     expect(runner.stopped()).not.toBeNull();
+    // The runner's screen leaving keeps it (AppRunner.tsx).
+    const kept = runner.stopped();
+    runner.end((scope) => scope !== kept);
+    expect(runner.stopped()).toBe(kept);
     runner.end();
     expect(runner.stopped()).toBeNull();
   });
