@@ -426,7 +426,7 @@ pub(crate) fn validate_retirement(
         }
         return Ok(retiring(Some(through)));
     }
-    let fence = restore_fence::current_generation(conn, &doc).map_err(|error| match error {
+    restore_fence::require_open(conn, &doc).map_err(|error| match error {
         CollabError::RestoreFenced => ApplicationError::Conflict,
         error => error.into(),
     })?;
@@ -436,10 +436,9 @@ pub(crate) fn validate_retirement(
         .map(|found| serde_json::from_str::<LiveObjectBinding>(&found.binding_json))
         .transpose()
         .map_err(|_| ApplicationError::Corrupt)?;
-    let generation = fence
-        .or(bound
-            .as_ref()
-            .map(|(binding, _)| binding.restore_fence_generation))
+    let generation = bound
+        .as_ref()
+        .map(|(binding, _)| binding.restore_fence_generation)
         .or(saved
             .as_ref()
             .map(|binding| binding.restore_fence_generation));
@@ -447,10 +446,8 @@ pub(crate) fn validate_retirement(
         return Err(ApplicationError::Conflict);
     }
     match (&saved, &bound) {
-        // An adopted activation holds its exact binding, as a restore resumed it.
         (Some(saved), Some((binding, named))) => {
-            let expected = restore_fence::resumed_binding(conn, &doc)?.unwrap_or(saved.clone());
-            if *binding != expected || named.as_deref() != Some(key.activation_id.as_str()) {
+            if binding != saved || named.as_deref() != Some(key.activation_id.as_str()) {
                 return Err(ApplicationError::Conflict);
             }
         }
@@ -2293,7 +2290,7 @@ fn drop_kept_edits(
         .terminal_receipt
         .as_ref()
         .map_or(0, |receipt| receipt.journal_cursor);
-    let mut budget = super::restore_content::Budget {
+    let mut budget = super::budget::Budget {
         remaining: super::settled_base::RELEASED_CAPTURE_PROOF_BYTES,
     };
     let state = match super::accepted_history::read_state_by_identity(

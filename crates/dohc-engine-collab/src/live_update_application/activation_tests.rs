@@ -98,7 +98,7 @@ fn imported_activation_retains_original_source_without_minting_native_seed() {
         .is_none());
     assert_eq!(first.source.base_origin_id, "remote");
     assert_eq!(first.source.base_origin_seq, 7);
-    assert_eq!(first.source.base_relay_seq, 9);
+    assert_eq!(first.source.base_relay_seq, Some(9));
     assert_eq!(first.source.committed_cursor, 9);
     let seed_count: i64 = f
         .store
@@ -282,6 +282,122 @@ fn resume_imported(
         max_bytes,
         None,
     )
+}
+
+/// A text resolve installs its successor lineage with no base update, and the
+/// marker keeps its predecessor's base coordinate.
+fn resolved_fixture() -> Fixture {
+    resolved_fixture_recording(&"e".repeat(64))
+}
+
+fn resolved_fixture_recording(record_tag: &str) -> Fixture {
+    use yrs::updates::decoder::Decode;
+    use yrs::{Map, ReadTxn, Transact};
+    let seed: Value =
+        serde_json::from_str(include_str!("../../tests/owner-source/owner-source-seed.json")).unwrap();
+    let bytes: Vec<u8> = serde_json::from_value(seed["bytes"].clone()).unwrap();
+    let doc = yrs::Doc::new();
+    doc.transact_mut()
+        .apply_update(yrs::Update::decode_v1(&bytes).unwrap())
+        .unwrap();
+    doc.get_or_insert_map(crate::ydoc::ROOT_META).insert(
+        &mut doc.transact_mut(),
+        crate::LINEAGE_EPOCH_META_KEY,
+        "e".repeat(64),
+    );
+    let tagged = doc
+        .transact()
+        .encode_state_as_update_v1(&yrs::StateVector::default());
+    let f = imported_source_fixture(Fixture::with_source(
+        seed["markdown"].as_str().unwrap().to_owned(),
+        tagged,
+    ));
+    resolved_from(f, record_tag)
+}
+
+fn resolved_from(mut f: Fixture, tag: &str) -> Fixture {
+    let lineage = f.binding.lineage_claim_id.clone();
+    let TxnOutcome::Committed(predecessor) = f
+        .store
+        .write_with(&NoFaults, |tx| dohc_engine_storage::put_binary_blob(tx, &[1, 0]))
+        .unwrap()
+    else {
+        panic!("the predecessor blob is stored");
+    };
+    let resolve = serde_json::json!({
+        "workspaceId": "workspace", "targetVersionId": "main",
+        "transition": { "result": { "present": true, "objectId": "object" } },
+        "lineageTransition": {
+            "predecessorClaimId": predecessor,
+            "successor": { "lineageClaimId": lineage, "updateBlobSha256": lineage, "contentKind": "richdoc" },
+        },
+    });
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE replication_log SET payload_json=json_set(payload_json,'$.lineageClaimId',?1,'$.updateBlobSha256',?1)
+                WHERE origin_id='remote' AND origin_seq=7", [&predecessor]).map_err(write_sql)?;
+            tx.execute("UPDATE ydoc_docs SET lineage_parent_claim_id=?1,lineage_epoch_tag=?2",
+                params![predecessor, tag]).map_err(write_sql)?;
+            tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported)
+                VALUES('workspace','resolver',3,'conflict.resolve',?1,1,1)", [resolve.to_string()]).map_err(write_sql)?;
+            Ok::<_, ApplicationError>(())
+        })
+        .unwrap();
+    f
+}
+
+#[test]
+fn a_resolved_lineage_activates_from_the_resolution_that_installed_it() {
+    let mut f = resolved_fixture();
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    assert_eq!(
+        (
+            captured.source.base_origin_id.as_str(),
+            captured.source.base_origin_seq
+        ),
+        ("resolver", 3)
+    );
+    assert!(serde_json::to_value(&captured.source).unwrap()["baseRelaySeq"].is_null());
+    let resumed = resume_imported(&mut f, &captured.activation_id, 1_000_000).unwrap();
+    assert_eq!(resumed.source, captured.source);
+    f.cut.adoption_id = captured.activation_id;
+    let ack = adopt_owner_committed(
+        &mut f.store,
+        &f.handle,
+        f.cut.clone(),
+        1_000_000,
+        10,
+        4,
+        &NoFaults,
+        None,
+        |_, _, _, _| Ok(()),
+    )
+    .unwrap();
+    assert!(!ack.adoption_replayed);
+}
+
+#[test]
+fn a_resolved_lineage_whose_tag_is_not_its_record_does_not_activate() {
+    let mut f = resolved_fixture_recording(&"d".repeat(64));
+    assert!(matches!(
+        capture_imported(&mut f, 1_000_000),
+        Err(ApplicationError::Collab(CollabError::LineageEpochChanged { .. }))
+    ));
+}
+
+#[test]
+fn a_resolved_lineage_without_its_resolution_does_not_activate() {
+    let mut f = resolved_fixture();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM replication_log WHERE op_kind='conflict.resolve'", [])
+                .map_err(write_sql)
+        })
+        .unwrap();
+    assert!(matches!(
+        capture_imported(&mut f, 1_000_000),
+        Err(ApplicationError::Conflict)
+    ));
 }
 
 #[test]
@@ -659,36 +775,6 @@ fn reader_fixture_case(case: &str) -> Fixture {
     imported_source_fixture(Fixture::with_source(text, bytes))
 }
 
-#[test]
-#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
-fn reader_restore_can_fence_before_lazy_proof_dispatch() {
-    let mut f = reader_fixture_case("valid");
-    let resolver = Arc::new(reader_resolver());
-    let captured = prove_activation(&mut f, &resolver).unwrap();
-    f.cut.adoption_id = captured.activation_id;
-    reader_application_result(|| adopt_owner_committed(&mut f.store, &f.handle, f.cut.clone(), 1_000_000, 100, 10, &NoFaults, Some(&resolver), |_, _, _, _| Ok(()))).unwrap();
-    let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
-    let operation = NativeRestoreFence {
-        point: crate::live_update_application::NativeRestoreSelection { journal_cursor: 0, receipt_digest: f.binding.lineage_claim_id.clone() },
-            operation_id: "reader-restore".into(), relay_database_namespace: "namespace".into(),
-        old_binding: f.binding.clone(), host_id: "host".into(), new_fence: 1,
-        origin: RestoreDeliveryOrigin::Owner { id: f.cut.adoption_id.clone() },
-        terminal: None, applied_sequence: 0,
-    };
-    let mut receipt = None;
-    for reconnect in [false, true] {
-        let result = if reconnect {
-            f._owner.fence_restore_after_reconnect(&mut f.store, Some(&resolver), operation.clone(), coordinate.clone(), 20, &NoFaults, |_, _| Ok(()))
-        } else {
-            f._owner.fence_restore(&mut f.store, Some(&resolver), operation.clone(), coordinate.clone(), 20, &NoFaults, |_, _| Ok(()))
-        };
-        let result = result.unwrap();
-        if let Some(previous) = &receipt { assert_eq!(previous, &result); }
-        receipt = Some(result);
-        assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 1);
-        assert!(!f.handle.registration.lock().unwrap().live);
-    }
-}
 fn reader_resolver() -> crate::reader_resolver::ReaderResolver {
     let config =
         serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();

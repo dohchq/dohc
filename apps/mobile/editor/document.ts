@@ -68,22 +68,30 @@ export function mountDocument(page: PageConfig) {
     (document.activeElement as HTMLElement | null)?.blur();
     window.getSelection()?.removeAllRanges();
   };
-  const doc = page.large ? null : markdownToYDoc(page.markdown);
-  if (doc === null) {
-    body.append(element("pre", "source", page.markdown));
-  } else if (!opensFormat(doc)) {
-    refuseFormat();
-  } else {
-    // Keystroke to paint: from the browser's `beforeinput` to the frame that shows it.
-    const samples: number[] = [];
-    let pending: number | null = null;
-    body.addEventListener(
-      "beforeinput",
-      () => {
-        pending ??= performance.now();
-      },
-      { capture: true },
-    );
+  // Keystroke to paint: from the browser's `beforeinput` to the frame that shows it.
+  const samples: number[] = [];
+  let pending: number | null = null;
+  body.addEventListener(
+    "beforeinput",
+    () => {
+      pending ??= performance.now();
+    },
+    { capture: true },
+  );
+  let readOnly: ReturnType<typeof mountLiveBodyEditor> | null = null;
+  const showRead = (markdown: string) => {
+    const app = window as Window & { __dohcCopyMarkdown?: unknown; __dohcSetEditable?: unknown };
+    delete app.__dohcCopyMarkdown;
+    delete app.__dohcSetEditable;
+    readOnly?.destroy();
+    readOnly = null;
+    body.replaceChildren();
+    const doc = page.large ? null : markdownToYDoc(markdown);
+    if (doc === null) {
+      body.append(element("pre", "source", markdown));
+      return;
+    }
+    if (!opensFormat(doc)) return refuseFormat();
     // Copy as Markdown copies the page as it is now, with the person's edits.
     (window as Window & { __dohcCopyMarkdown?: () => void }).__dohcCopyMarkdown = () =>
       post("markdown", { markdown: yDocToMarkdown(doc) });
@@ -102,10 +110,7 @@ export function mountDocument(page: PageConfig) {
         return true;
       },
     });
-    if (page.live) followLive({ body, readOnly: editor, label: page.title, endEditing });
-    // Design review only: type a sentence at the end of the page, then report keystroke-to-paint.
-    if (page.autotype) autotype(body, samples);
-    typed = samples;
+    readOnly = editor;
     // The app turns editing off when the page goes read-only (offline, deleted, access ended).
     (window as Window & { __dohcSetEditable?: (value: boolean) => void }).__dohcSetEditable = (
       value,
@@ -113,6 +118,21 @@ export function mountDocument(page: PageConfig) {
       editable = value;
       editor.refresh();
     };
+  };
+  showRead(page.markdown);
+  (window as Window & { __dohcReplaceRead?: (markdown: string) => void }).__dohcReplaceRead =
+    showRead;
+  if (readOnly) {
+    if (page.live)
+      followLive({
+        body,
+        readOnly: { destroy: () => readOnly?.destroy() },
+        label: page.title,
+        endEditing,
+      });
+    // Design review only: type a sentence at the end of the page, then report keystroke-to-paint.
+    if (page.autotype) autotype(body, samples);
+    typed = samples;
   }
   // "Done" in the app's header ends editing: the caret goes, and with it the keyboard.
   (window as Window & { __dohcEndEditing?: () => void }).__dohcEndEditing = () => {
@@ -166,7 +186,16 @@ function followCaretAboveKeyboard() {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0 || !document.activeElement?.closest(".markdown"))
       return;
-    const caret = selection.getRangeAt(0).getBoundingClientRect();
+    // WebKit gives a caret on an empty line a zero rect, so the line break after the caret is measured instead, or
+    // an empty line's own element.
+    let caret = selection.getRangeAt(0).getBoundingClientRect();
+    const node = selection.focusNode;
+    if (caret.height === 0 && node instanceof Element) {
+      const after = node.childNodes[selection.focusOffset];
+      if (after instanceof HTMLBRElement) caret = after.getBoundingClientRect();
+      if (caret.height === 0 && node.textContent === "" && node !== document.activeElement)
+        caret = node.getBoundingClientRect();
+    }
     // WebKit may already shrink the visual viewport for the keyboard; take whichever edge is higher, so the
     // keyboard is never counted twice. A small margin keeps the caret clear of it. The scroll is instant, so it
     // reads the same under Reduce Motion.
@@ -181,6 +210,8 @@ function followCaretAboveKeyboard() {
   };
   (window as Window & { __dohcKeyboard?: (height: number) => void }).__dohcKeyboard = (height) => {
     covered = height;
+    const editor = document.getElementById("editor");
+    if (editor) editor.style.paddingBottom = height > 0 ? `max(40vh, ${height + 48}px)` : "";
     reveal();
   };
   document.addEventListener("selectionchange", () => requestAnimationFrame(reveal));

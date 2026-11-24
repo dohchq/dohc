@@ -1,0 +1,312 @@
+{
+  "formatVersion": 2,
+  "datasetId": "50d647a6-10b1-4956-8ae4-af35c583fd18",
+  "name": "SignalBook",
+  "tables": [
+    {
+      "name": "Series",
+      "sqlName": "series",
+      "primaryKey": "id",
+      "fields": [
+        {
+          "name": "ID",
+          "sqlColumn": "id",
+          "type": "text",
+          "required": true,
+          "unique": true
+        },
+        {
+          "name": "Slug",
+          "sqlColumn": "slug",
+          "type": "text",
+          "required": true,
+          "unique": true
+        },
+        {
+          "name": "Name",
+          "sqlColumn": "name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "Unit",
+          "sqlColumn": "unit",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "Domain",
+          "sqlColumn": "domain",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "Color",
+          "sqlColumn": "color",
+          "type": "number",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "Observations",
+      "sqlName": "observations",
+      "primaryKey": "id",
+      "fields": [
+        {
+          "name": "ID",
+          "sqlColumn": "id",
+          "type": "number",
+          "required": true,
+          "unique": true
+        },
+        {
+          "name": "Series",
+          "sqlColumn": "series_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "Observed at",
+          "sqlColumn": "observed_at",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "Value",
+          "sqlColumn": "value",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Tags",
+          "sqlColumn": "tags_json",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "Import batch",
+          "sqlColumn": "import_batch_id",
+          "type": "number",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "Import batches",
+      "sqlName": "import_batches",
+      "primaryKey": "id",
+      "fields": [
+        {
+          "name": "ID",
+          "sqlColumn": "id",
+          "type": "number",
+          "required": true,
+          "unique": true
+        },
+        {
+          "name": "Filename",
+          "sqlColumn": "filename",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "SHA-256",
+          "sqlColumn": "sha256",
+          "type": "text",
+          "required": true,
+          "unique": true
+        },
+        {
+          "name": "Rows",
+          "sqlColumn": "row_count",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Received rows",
+          "sqlColumn": "received_rows",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Imported at",
+          "sqlColumn": "imported_at_ms",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "name": "Research notes",
+      "sqlName": "research_notes",
+      "primaryKey": "id",
+      "fields": [
+        {
+          "name": "ID",
+          "sqlColumn": "id",
+          "type": "text",
+          "required": true,
+          "unique": true
+        },
+        {
+          "name": "Title",
+          "sqlColumn": "title",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "Body",
+          "sqlColumn": "body_md",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "Start",
+          "sqlColumn": "date_start",
+          "type": "date",
+          "required": true
+        },
+        {
+          "name": "End",
+          "sqlColumn": "date_end",
+          "type": "date",
+          "required": true
+        },
+        {
+          "name": "Series",
+          "sqlColumn": "series_ids_json",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "Created at",
+          "sqlColumn": "created_at_ms",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Snapshot",
+          "sqlColumn": "snapshot_json",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "Link grant",
+          "sqlColumn": "grant_id",
+          "type": "text",
+          "unique": true
+        }
+      ]
+    }
+  ],
+  "operations": [
+    {
+      "name": "overview",
+      "label": "Read inventory",
+      "table": "series",
+      "kind": "read",
+      "access": "owner",
+      "readOnly": true,
+      "fields": []
+    },
+    {
+      "name": "importChunk",
+      "label": "Commit CSV rows",
+      "table": "observations",
+      "kind": "action",
+      "access": "owner",
+      "readOnly": false,
+      "fields": []
+    },
+    {
+      "name": "seedDemo",
+      "label": "Load sample observations",
+      "table": "observations",
+      "kind": "action",
+      "access": "owner",
+      "readOnly": false,
+      "fields": []
+    },
+    {
+      "name": "rollups",
+      "label": "Read rollups",
+      "table": "observations",
+      "kind": "read",
+      "access": "owner",
+      "readOnly": true,
+      "fields": []
+    },
+    {
+      "name": "compare",
+      "label": "Compare daily means",
+      "table": "observations",
+      "kind": "read",
+      "access": "owner",
+      "readOnly": true,
+      "fields": []
+    },
+    {
+      "name": "outliers",
+      "label": "Find outliers",
+      "table": "observations",
+      "kind": "read",
+      "access": "owner",
+      "readOnly": true,
+      "fields": []
+    },
+    {
+      "name": "analyze",
+      "label": "Analyze selected series",
+      "table": "observations",
+      "kind": "read",
+      "access": "owner",
+      "readOnly": true,
+      "fields": []
+    },
+    {
+      "name": "listNotes",
+      "label": "List research notes",
+      "table": "research_notes",
+      "kind": "read",
+      "access": "owner",
+      "readOnly": true,
+      "fields": []
+    },
+    {
+      "name": "readNote",
+      "label": "Read a research note",
+      "table": "research_notes",
+      "kind": "read",
+      "access": "owner",
+      "readOnly": true,
+      "fields": []
+    },
+    {
+      "name": "saveNote",
+      "label": "Save a research note",
+      "table": "research_notes",
+      "kind": "action",
+      "access": "owner",
+      "readOnly": false,
+      "fields": []
+    },
+    {
+      "name": "setReportLink",
+      "label": "Set a report link",
+      "table": "research_notes",
+      "kind": "action",
+      "access": "owner",
+      "readOnly": false,
+      "fields": []
+    },
+    {
+      "name": "publishedReport",
+      "label": "Read the published report",
+      "table": "research_notes",
+      "kind": "read",
+      "access": "link",
+      "readOnly": true,
+      "fields": []
+    }
+  ]
+}

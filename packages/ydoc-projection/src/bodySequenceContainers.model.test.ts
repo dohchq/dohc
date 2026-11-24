@@ -3899,7 +3899,7 @@ it("gives no boundary to a line a join would take away again, and refuses the jo
   expect(view(doc)).toBe(stored);
 });
 
-it("gives no boundary to a line a delete runs into, and leaves what cannot join as a line", () => {
+it("gives no boundary to a line a delete runs into and joins away, gives one first to a line it runs into and leaves standing, and leaves what cannot join as a line", () => {
   const intoAfter = open(codeNote(), 10);
   const change = deleteRange(schema, intoAfter, 1, 1, 2, 1, String)!;
   expect(change.given).toEqual([]);
@@ -3934,12 +3934,12 @@ it("gives no boundary to a line a delete runs into, and leaves what cannot join 
   const history = bodyHistory(part, LOCAL, NEVER_ELAPSES);
   const first = readOf(part);
   const partly = deleteRange(schema, part, 0, 1, 1, 1, String)!;
-  expect(partly.given).toEqual([]);
+  expect(partly.given).toHaveLength(1);
   expect(written(part, partly)).toBe(true);
   expect(rowsRead(part)).toEqual(["codeBlock :c", `paragraph :${OBJECT}de`]);
   history.undo();
   expect(readOf(part)).toBe(first);
-  expect(linesRead(part)).toEqual(["line codeBlock:co", `spill paragraph:${OBJECT}${OBJECT}de`]);
+  expect(linesRead(part)).toEqual(["line codeBlock:co", `line paragraph:${OBJECT}${OBJECT}de`]);
 
   const below = [[IMAGE, MATH, "x"], PARAGRAPH, []] as Written;
   const apart = open(note([], [["ab", { type: "codeBlock", language: null }, []], below]), 40);
@@ -3951,6 +3951,33 @@ it("gives no boundary to a line a delete runs into, and leaves what cannot join 
   expect(storedLines(apart)).toHaveLength(kept);
   expect(written(apart, deleteRange(schema, apart, 0, 1, 1, 1, String))).toBe(true);
   expect(rowsRead(apart)).toEqual(["codeBlock :ax"]);
+});
+
+it("gives the paragraph after a code block its boundary first when a delete takes that code block and stops at the paragraph's start, so a letter someone else types there stays there when the delete is undone", () => {
+  const code = { type: "codeBlock", language: null };
+  const lines = [
+    ["cc", code, []],
+    [["kk", { inline: "hardBreak", attrs: {} }, "abc"], code, []],
+  ] as Written[];
+  const alice = open(note([], lines), 10);
+  const bob = open(note([], lines), 20);
+  const history = bodyHistory(alice, LOCAL, NEVER_ELAPSES);
+  expect(linesRead(alice)).toEqual([
+    "line codeBlock:cc",
+    "line codeBlock:kk",
+    `spill paragraph:${OBJECT}abc`,
+  ]);
+  const change = deleteRange(schema, alice, 0, 1, 2, 0, String)!;
+  expect(change.given).toHaveLength(1);
+  expect(written(alice, change)).toBe(true);
+  expect(rowsRead(alice)).toEqual(["codeBlock :c", `paragraph :${OBJECT}abc`]);
+  exchange(alice, bob);
+  expect(written(bob, typeLetters(schema, bob, 1, 0, "P", {}))).toBe(true);
+  exchange(alice, bob);
+  history.undo();
+  exchange(alice, bob);
+  expect(rowsRead(alice)).toEqual(["codeBlock :cc", "codeBlock :kk", `paragraph :P${OBJECT}abc`]);
+  expect(view(bob)).toBe(view(alice));
 });
 
 it("refuses a join or a delete that would only take away the empty first paragraph a list item needs", () => {

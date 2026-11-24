@@ -1,0 +1,11 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'app.dohc.appwebview'
+version = '1.0.0'
+
+android {
+  namespace "app.dohc.appwebview"
+}

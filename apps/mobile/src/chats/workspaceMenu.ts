@@ -29,6 +29,7 @@ export function useForgetWorkspace(workspace: PhoneWorkspace | null, waitingToSe
       tone: "success",
       title: confirmWords.forgot(workspace.name),
       action: { label: confirmWords.undo, onPress: undo },
+      holdsUndo: true,
     });
   }, [forget, showToast, waitingToSend, workspace]);
 }

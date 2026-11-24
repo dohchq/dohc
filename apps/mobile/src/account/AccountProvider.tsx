@@ -41,6 +41,7 @@ import { pendingSignOuts } from "../server/pushRegistration";
 import { createAlerts, type Alerts } from "../push/alerts";
 import { clearAlertsAtSignOut, nativeAlerts } from "../push/nativeAlerts";
 import { createReadCache, type WorkspaceData } from "../server/workspaceData";
+import { pageTimings } from "../pages/pageTimings";
 import {
   createWorkspaceList,
   type WorkspaceList,
@@ -61,6 +62,8 @@ interface AccountValue {
   readonly workspaces: WorkspaceList;
   /** The workspace open on the phone: the one chosen, or the first that shows. Null when none shows. */
   readonly currentWorkspaceId: string | null;
+  /** The workspace chosen last is still being read from this phone, so none is open yet. */
+  readonly choosingWorkspace: boolean;
   readonly data: WorkspaceData | null;
   /** The account's Notices, whichever workspace is open. */
   readonly notices: NoticeStore | null;
@@ -86,7 +89,7 @@ const Context = createContext<AccountValue | null>(null);
 
 const LOADING: WorkspaceList = { status: "loading" };
 const noList = { subscribe: () => () => undefined, state: () => LOADING };
-const NONE: OpenWorkspaceState = { currentWorkspaceId: null, data: null };
+const NONE: OpenWorkspaceState = { currentWorkspaceId: null, data: null, choosing: false };
 const noOpen = { subscribe: () => () => undefined, state: () => NONE };
 
 // A build without sample data: the phone's sign-in, the account's workspaces, and what the phone has read of the open
@@ -138,6 +141,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
 
   const [cache] = useState(() => createReadCache(createCacheRows(createCacheDatabase())));
   useEffect(() => cache.follow(account), [account, cache]);
+  useEffect(() => pageTimings?.follow(account), [account]);
 
   useEffect(() => outbox.follow(account), [account, outbox]);
   const deletion = useSyncExternalStore(outbox.subscribe, () => outbox.state().deletion);
@@ -170,7 +174,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
         : null,
     [signIn, list, cache, outbox, teardown],
   );
-  const { currentWorkspaceId, data } = useSyncExternalStore(
+  const { currentWorkspaceId, data, choosing } = useSyncExternalStore(
     (open ?? noOpen).subscribe,
     (open ?? noOpen).state,
   );
@@ -286,6 +290,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       deletion,
       workspaces,
       currentWorkspaceId,
+      choosingWorkspace: choosing,
       data,
       notices,
       wakes,
@@ -309,6 +314,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       deletion,
       workspaces,
       currentWorkspaceId,
+      choosing,
       data,
       notices,
       wakes,

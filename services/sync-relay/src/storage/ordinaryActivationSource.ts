@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { NativeOwnerActivationSource } from "@dohc/workspace-engine-client/daemon";
 import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
-import type { LiveDocumentBaselineRegistrationInput } from "./types";
+import type { LiveDocumentBaselineRegistrationInput, SqliteDb } from "./types";
 import type { StorageContext } from "./context";
-import { ORDINARY_ACTIVATION_BASES } from "./ordinaryActivationBasis";
+import { ORDINARY_ACTIVATION_BASES, beginsLineage } from "./ordinaryActivationBasis";
 import { ServerLogError } from "../serverLogWords";
 import type { OrdinaryActivationBaseline } from "./ordinaryActivationValidation";
 
@@ -44,6 +44,7 @@ const cuts = new WeakMap<
   {
     storage: StorageContext;
     source: NativeOwnerActivationSource;
+    baseRelaySeq: number;
     baseline: LiveDocumentBaselineRegistrationInput["evidence"];
   }
 >();
@@ -52,7 +53,17 @@ const hash = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).
 function requireValue(value: unknown, message: string): asserts value {
   if (!value) throw new ServerLogError(message);
 }
-function currentCut(storage: StorageContext, source: NativeOwnerActivationSource) {
+/** The log position of the row that began the source's lineage. */
+export function sourceBaseRelaySeq(db: SqliteDb, source: NativeOwnerActivationSource) {
+  if (source.baseRelaySeq !== null) return source.baseRelaySeq;
+  const row = db
+    .prepare(
+      "SELECT relay_seq FROM sync_relay_log WHERE workspace_id=? AND origin_id=? AND origin_seq=?",
+    )
+    .get(source.workspaceId, source.baseOriginId, source.baseOriginSeq);
+  return typeof row?.relay_seq === "number" ? row.relay_seq : null;
+}
+function currentCut(storage: StorageContext, source: NativeOwnerActivationSource): number {
   const current = storage.db
     .prepare(
       "SELECT replication_epoch,stream_identity FROM sync_relay_workspaces WHERE workspace_id=?",
@@ -61,20 +72,24 @@ function currentCut(storage: StorageContext, source: NativeOwnerActivationSource
   const high = storage.db
     .prepare("SELECT COALESCE(MAX(relay_seq),0) AS cursor FROM sync_relay_log WHERE workspace_id=?")
     .get(source.workspaceId);
+  const base = sourceBaseRelaySeq(storage.db, source);
   if (
     current?.replication_epoch !== source.replicationEpoch ||
     current.stream_identity !== source.streamIdentity ||
     high?.cursor !== source.committedCursor ||
-    source.baseRelaySeq > source.committedCursor ||
-    source.baseRelaySeq <= storage.getEpochLogFloor(source.workspaceId)
+    base === null ||
+    base > source.committedCursor ||
+    base <= storage.getEpochLogFloor(source.workspaceId)
   )
     throw new ServiceActivationStaleCut();
+  return base;
 }
 /**
  * Accepts a validated capture in the transaction that registers it. The capture stands when the relay's cursor, epoch
- * and stream are the ones it was taken at, and the row at its base position is this lineage's base state, at the
- * capture's origin coordinates and path, with the baseline's bytes. Anything else refuses it, so the transaction never
- * registers evidence for another cut.
+ * and stream are the ones it was taken at, and the row at its base position began this lineage, as its base state or
+ * as the conflict resolve that installed it, at the capture's origin coordinates, with the baseline's bytes. That row
+ * may name a path the note has since left; registration checks where the note is now.
+ * Anything else refuses it, so the transaction never registers evidence for another cut.
  */
 export function verifyOrdinaryActivationCut(
   storage: StorageContext,
@@ -86,39 +101,25 @@ export function verifyOrdinaryActivationCut(
   },
 ): VerifiedOrdinaryActivationCut {
   const { source, document, baselineBytes, baseline } = input;
-  currentCut(storage, source);
+  const baseRelaySeq = currentCut(storage, source);
   const base = storage.db
     .prepare(
       "SELECT origin_id,origin_seq,op_kind,payload_json,settlement_admission_json FROM sync_relay_log WHERE workspace_id=? AND relay_seq=?",
     )
-    .get(document.workspaceId, source.baseRelaySeq);
+    .get(document.workspaceId, baseRelaySeq);
   requireValue(
     base && typeof base.payload_json === "string",
     "Ordinary activation base history is unavailable.",
   );
-  const payload = JSON.parse(base.payload_json) as Record<string, unknown>;
   const admission =
     typeof base.settlement_admission_json === "string"
       ? (JSON.parse(base.settlement_admission_json) as { status?: unknown } | null)
       : null;
-  requireValue(
-    base.op_kind === "ydoc.update" &&
-      admission?.status !== "refused" &&
-      payload.versionId === document.mainVersionId &&
-      payload.objectId === document.objectId,
-    "Ordinary activation base history is unavailable.",
-  );
-  requireValue(
-    payload.path === source.currentPath &&
-      payload.contentKind === "richdoc" &&
-      payload.lineageClaimId === document.lineageClaimId,
-    "Ordinary activation history differs from the captured lineage.",
-  );
+  requireValue(admission?.status !== "refused", "Ordinary activation base history is unavailable.");
   requireValue(
     base.origin_id === source.baseOriginId &&
       base.origin_seq === source.baseOriginSeq &&
-      payload.isBaseState === true &&
-      payload.updateBlobSha256 === document.lineageClaimId,
+      beginsLineage(base.op_kind, base.payload_json, document, baseline.lineageEpoch),
     "Native activation base coordinate differs from ordinary history.",
   );
   requireValue(
@@ -141,7 +142,7 @@ export function verifyOrdinaryActivationCut(
     projectedMarkdownByteLength: baseline.projectedMarkdownByteLength,
   };
   const cut = Object.freeze({ verified: true as const });
-  cuts.set(cut, { storage, source: structuredClone(source), baseline: evidence });
+  cuts.set(cut, { storage, source: structuredClone(source), baseRelaySeq, baseline: evidence });
   return cut;
 }
 export function ordinaryActivationBaseline(
@@ -158,7 +159,7 @@ export function ordinaryActivationBaseline(
     "Ordinary activation baseline differs from its verified source.",
   );
   return {
-    relay_seq: held.source.baseRelaySeq,
+    relay_seq: held.baseRelaySeq,
     blob_sha256: held.baseline.projectedMarkdownSha256,
     byte_length: held.baseline.projectedMarkdownByteLength,
   };
@@ -169,13 +170,13 @@ function basisValues(
   cut: VerifiedOrdinaryActivationCut,
 ) {
   ordinaryActivationBaseline(storage, input, cut);
-  const { source, baseline } = cuts.get(cut)!;
+  const { source, baseRelaySeq, baseline } = cuts.get(cut)!;
   return [
     source.workspaceId,
     source.mainVersionId,
     source.objectId,
     source.lineageClaimId,
-    source.baseRelaySeq,
+    baseRelaySeq,
     source.baseOriginId,
     source.baseOriginSeq,
     source.replicationEpoch,

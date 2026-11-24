@@ -1694,6 +1694,154 @@ fn assert_conflict_child_hold_parity(
     );
 }
 
+/// A hosted note at `hosted.md`, and a resolve of a conflict between two of
+/// its edits that merges them there: its parent, its write effect, and the
+/// merged text.
+fn single_note_resolve() -> (HostedFeed, ReplicationEnvelope, ReplicationEnvelope, String) {
+    use crate::conflict_resolve_v1::{
+        ConflictResolveV1, EffectContextV1, EffectKindV1, EffectV1, HeadContentKindV1, HeadV1,
+        MetadataV1, PresentHeadV1, ResolutionV1, ResolveChoiceV1, build_conflict_resolve_v1,
+    };
+
+    let feed = HostedFeed::new();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.share("hosted-object", "hosted.md");
+    let before = "before the conflict";
+    feed.create("owner", 1, "hosted-object", "hosted.md", before);
+    let head = |moment: &str, text: &str, updated_at_ms| {
+        feed.blobs.lock().unwrap().insert(
+            dohc_engine_storage::hex_sha256(text.as_bytes()),
+            text.as_bytes().to_vec(),
+        );
+        HeadV1::Present(PresentHeadV1 {
+            path_ref: 0,
+            object_id: "hosted-object".to_owned(),
+            latest_moment_id: moment.to_owned(),
+            content_kind: HeadContentKindV1::Text,
+            blob_sha256: dohc_engine_storage::hex_sha256(text.as_bytes()),
+            byte_length: text.len() as i64,
+            updated_at_ms,
+        })
+    };
+    let merged = "merged by the owner";
+    let built = build_conflict_resolve_v1(ConflictResolveV1 {
+        workspace_id: "ws".to_owned(),
+        conflict_id: "note-conflict".to_owned(),
+        chosen_from: ResolveChoiceV1::Merged,
+        resolution: ResolutionV1::AppliedMerged,
+        target_version_id: "main".to_owned(),
+        source_version_id: "main".to_owned(),
+        paths: vec!["hosted.md".to_owned()],
+        current: head("moment-owner-1", before, 2_000),
+        incoming: head("peer-moment", "edited on the other computer", 2_050),
+        result: head("owner-moment", merged, 2_100),
+        effect_context: EffectContextV1 {
+            recorded_at_ms: 2_100,
+            metadata: MetadataV1 {
+                origin: "sync".to_owned(),
+                summary: None,
+                correlation_id: None,
+            },
+            author: None,
+            current_object_created_at_ms: Some(1),
+            result_object_created_at_ms: Some(1),
+        },
+        effects: vec![EffectV1 {
+            kind: EffectKindV1::Write,
+            moment_id: "owner-moment".to_owned(),
+            payload_sha256: String::new(),
+        }],
+        lineage_transition: None,
+        exported_before: None,
+    })
+    .unwrap();
+    let mut parent = envelope("owner", 2, "conflict.resolve", built.value.clone());
+    parent.recorded_at_ms = 2_100;
+    let mut child = envelope(
+        "owner",
+        3,
+        "moment.append",
+        built.validated.shadows[0].clone(),
+    );
+    child.recorded_at_ms = 2_100;
+    (feed, parent, child, merged.to_owned())
+}
+
+fn assert_resolved(store: &mut EngineStore, merged: &str) {
+    assert_eq!(hold(store, "hosted-object"), None);
+    assert_eq!(
+        count(
+            store,
+            "SELECT COUNT(*) FROM moments WHERE workspace_id='ws' AND moment_id='owner-moment'"
+        ),
+        1,
+        "the resolution applies once, through its parent"
+    );
+    assert!(
+        coordinates(store)
+            .iter()
+            .any(|coordinate| coordinate == &("owner".to_owned(), 2))
+    );
+    assert_eq!(
+        dohc_engine_domain::VersionedTextStore::new(store)
+            .read_text("ws", "main", "hosted.md")
+            .unwrap()
+            .unwrap()
+            .text,
+        merged
+    );
+}
+
+#[test]
+fn a_resolve_of_one_hosted_note_names_that_note_and_no_other_resolve_does() {
+    let (_feed, parent, _child, _merged) = single_note_resolve();
+    assert_eq!(
+        crate::hosted::hosted_document(&parent),
+        Some("hosted-object")
+    );
+    let mut two_paths = parent.clone();
+    two_paths.payload["paths"] = json!(["hosted.md", "other.md"]);
+    let mut other_incoming = parent.clone();
+    other_incoming.payload["transition"]["incoming"]["objectId"] = json!("other-object");
+    let mut other_result = parent.clone();
+    other_result.payload["transition"]["result"]["objectId"] = json!("other-object");
+    for op in [two_paths, other_incoming, other_result] {
+        assert_eq!(crate::hosted::hosted_document(&op), None, "{}", op.payload);
+    }
+}
+
+#[test]
+fn a_hosted_replica_imports_a_served_note_resolve_and_applies_its_effect() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let (feed, parent, child, merged) = single_note_resolve();
+    let client = RelaySyncClient::new(feed);
+    sync(&client, &mut store);
+    client.transport().append(parent);
+    client.transport().append(child);
+    sync(&client, &mut store);
+    assert_resolved(&mut store, &merged);
+}
+
+#[test]
+fn a_hosted_replica_never_journals_a_resolve_of_its_own_note() {
+    let (_scratch, _path, mut store) = hosted_store();
+    host_document(&mut store, "hosted-object");
+    let (_feed, parent, _child, _merged) = single_note_resolve();
+    assert!(matches!(
+        store.write_with(&NoFaults, |tx| journal_local_op_in_tx(
+            tx,
+            "ws",
+            "conflict.resolve",
+            &parent.payload,
+            2_100
+        )),
+        Err(SyncError::InvalidInput {
+            reason: "a hosted replica writes only its hosted documents"
+        })
+    ));
+    assert_eq!(last_outbound_seq(&store), -1);
+}
+
 fn parent_withheld() -> HostedHold {
     HostedHold::ConflictParentWithheld {
         conflict_id: "owner-conflict".to_owned(),

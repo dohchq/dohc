@@ -351,20 +351,6 @@ impl ReaderResolver {
         Ok(source)
     }
 
-    /// Expiry validates an edited prefix, but cannot authorize exact source output.
-    pub(crate) fn verify_snapshot(
-        &self,
-        conn: &Connection,
-        key: &DocKey,
-        doc: &Ydoc,
-        canonical: &str,
-        snapshot: &crate::reader_snapshot::SnapshotIdentity<'_>,
-        source: &str,
-    ) -> Result<(), CollabError> {
-        self.check_snapshot(conn, key, doc, canonical, snapshot, source)
-            .map(|_| ())
-    }
-
     pub(crate) fn check_snapshot(
         &self,
         conn: &Connection,
@@ -398,17 +384,10 @@ impl ReaderResolver {
             source: source.as_bytes().to_vec(),
             checkpoint,
         };
-        let restore_generation = if let Some(expected) = snapshot.restore_fence {
-            let current =
-                crate::live_update_application::restore_fence::latest_generation(conn, key)?
-                    .map(|row| row.0);
-            if current != Some(expected) {
-                return Err(CollabError::RestoreFenced);
-            }
-            current
-        } else {
-            crate::live_update_application::restore_generation(conn, key)?
-        };
+        if snapshot.restore_fence.is_some() {
+            return Err(CollabError::RestoreFenced);
+        }
+        let restore_generation = crate::live_update_application::restore_generation(conn, key)?;
         let fresh = self.lookup(
             Key {
                 document: key.clone(),

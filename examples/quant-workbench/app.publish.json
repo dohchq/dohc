@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "entryPath": "index.tsx",
+  "inputs": [
+    "index.tsx",
+    "workbench.tsx",
+    "charts.tsx",
+    "ingest.ts",
+    "theme.css"
+  ],
+  "dataset": {
+    "kind": "dataset",
+    "datasetPath": "quant-workbench/data/dataset.json",
+    "operations": [
+      "overview",
+      "importChunk",
+      "seedDemo",
+      "rollups",
+      "compare",
+      "outliers",
+      "analyze",
+      "listNotes",
+      "readNote",
+      "saveNote",
+      "setReportLink"
+    ]
+  }
+}
