@@ -62,7 +62,12 @@ const register = createLiveMarkdownRegistrationValidator(POLICY);
 const admit = createLiveMarkdownJournalValidator(POLICY);
 const engineReaderAdmit = createLiveMarkdownJournalValidator(POLICY, true);
 const activate = createLiveMarkdownHistoryValidator(POLICY);
-const SEEDS = Number(process.env.BODY_SEQUENCE_CHECK_SEEDS ?? 3);
+const seedsAsked = process.env.BODY_SEQUENCE_CHECK_SEEDS;
+const SEEDS = seedsAsked === undefined ? 3 : Number(seedsAsked);
+if (!Number.isSafeInteger(SEEDS) || SEEDS < 1)
+  throw new Error(
+    `BODY_SEQUENCE_CHECK_SEEDS must be a whole number of seeds, 1 or more. It is ${JSON.stringify(seedsAsked)}.`,
+  );
 
 const honest = { histories: 0, changes: 0 };
 beforeAll(() => admitBodySequenceNotes(true));
@@ -1005,9 +1010,10 @@ const table = (page: { sequence: Y.Text; records: Y.Map<unknown> }, client: numb
 
 const firstLine = (sequence: Y.Text) => firstOf(sequence, "block")!;
 
+const LONG_PATH = "a path of 90,000 ids";
 const TAKEN: readonly Case[] = [
   {
-    name: "a path of 90,000 ids",
+    name: LONG_PATH,
     change: made(({ sequence }) =>
       firstLine(sequence).setAttribute(
         "path",
@@ -1234,7 +1240,7 @@ describe("single changes no editor would send, on a relay that admits format-2 n
       const baseline = seededNote();
       const held = room(baseline);
       const next = random(seed * 2053);
-      const all = [...REFUSED, ...TAKEN].filter(({ name }) => !name.includes("300,000"));
+      const all = [...REFUSED, ...TAKEN].filter(({ name }) => name !== LONG_PATH);
       for (let step = 0; step < 14; step++) {
         const picked = all[Math.floor(next() * all.length)]!;
         const { name } = picked;

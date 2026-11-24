@@ -1489,7 +1489,7 @@
   "packages/ydoc-projection/src/bodySequenceEditorTwoSteps.test.ts": 11,
   "packages/ydoc-projection/src/bodySequenceFixtures.test.ts": 1.74,
   "packages/ydoc-projection/src/bodySequenceGrammar.test.ts": 1.832,
-  "packages/ydoc-projection/src/bodySequenceIntake.test.ts": 244.402,
+  "packages/ydoc-projection/src/bodySequenceIntake.test.ts": 108.6,
   "packages/ydoc-projection/src/bodySequenceOldEditor.test.ts": 2.01,
   "packages/ydoc-projection/src/browser-editor.test.ts": 1.904,
   "packages/ydoc-projection/src/concurrentLiveDeletes.test.ts": 1.409,
