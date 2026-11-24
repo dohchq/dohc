@@ -1,5 +1,6 @@
 import { closeSync, fstatSync, openSync, readSync, unlinkSync, writeSync } from "node:fs";
 import type { DatabaseSync, SQLInputValue, SQLOutputValue, StatementSync } from "node:sqlite";
+import { AppBackendLimitError } from "@dohc/security-contract/app-backend";
 import { HEARTBEAT_ROWS, reject } from "./persistent-protocol.js";
 
 export type MigrationPreviewValue =
@@ -98,7 +99,7 @@ function lookup(db: DatabaseSync, table: string, info: Table): StatementSync {
   );
 }
 function assertRowsBound(db: DatabaseSync, table: string, info: Table): void {
-  // SQLite evaluates length() inside the connection and returns only a boolean.
+  // SQLite evaluates length() inside the connection and returns only the row's byte count.
   // Do this before iterating full rows so a hostile text/blob cell cannot be
   // copied into a JavaScript value before we enforce the report row limit.
   const bytes =
@@ -108,8 +109,7 @@ function assertRowsBound(db: DatabaseSync, table: string, info: Table): void {
     `SELECT (${bytes}) AS bytes FROM ${quote(table)} WHERE (${bytes}) > ? LIMIT 1`,
   ).get(rawRowBytes);
   if (oversized)
-    reject(
-      "resource_limit",
+    throw new AppBackendLimitError(
       `A migration preview source row exceeds 128 KiB (${rawRowBytes} bytes). It used ${Number(oversized.bytes)} bytes. No values were omitted.`,
     );
 }
@@ -214,13 +214,11 @@ export function createMigrationPreviewReport(input: {
         };
         const encoded = Buffer.from(`${JSON.stringify(change)}\n`);
         if (encoded.length > rowBytes)
-          reject(
-            "resource_limit",
+          throw new AppBackendLimitError(
             `A migration preview row exceeds 256 KiB (${rowBytes} bytes). It used ${encoded.length} bytes. No values were omitted.`,
           );
         if (bytes + encoded.length > input.maxBytes)
-          reject(
-            "resource_limit",
+          throw new AppBackendLimitError(
             `The migration preview exceeds its byte allowance of ${input.maxBytes} bytes. It used ${bytes + encoded.length} bytes. No changes were omitted.`,
           );
         let written = 0;

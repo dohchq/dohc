@@ -254,9 +254,8 @@ so `PRAGMA hard_heap_limit=67108864` (64 MiB) rejects allocations inside SQLite'
 allocator with `SQLITE_NOMEM`. Standalone Node.js (`services/sync-relay`) ships
 `node:sqlite` with `SQLITE_DEFAULT_MEMSTATUS=0`, which ignores `PRAGMA hard_heap_limit`.
 When `DEFAULT_MEMSTATUS=0` is detected, persistent workers enable a 256 MiB peak-RSS
-ceiling (`workerMemoryBytes`) on their budget watch thread during budgeted steps
-(app code and dataset checks, polled every 25 ms and rechecked at step completion).
-Crossing the ceiling kills and recycles the worker with `worker_budget` naming the
+ceiling on their budget watch thread during budgeted steps (app code and dataset
+checks, polled every 50 ms and rechecked at step completion). Crossing the ceiling kills and recycles the worker with `worker_budget` naming the
 limit, unit, and observed peak usage. Because this watchdog observes OS RSS after
 pages fault rather than inside SQLite's allocator, it bounds sustained and completed
 allocations without replacing host memory limits. Snapshot evaluations (`child.ts`)

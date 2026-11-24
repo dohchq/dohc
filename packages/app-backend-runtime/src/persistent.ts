@@ -68,7 +68,6 @@ export interface PersistentRuntimeOptions {
   entryPath?: string;
   silenceMs?: number;
   commandCapMs?: number;
-  workerMemoryBytes?: number;
 }
 // How long a command waits for the worker by default. A loaded machine can take seconds to start a worker process.
 const WORKER_WAIT_MS = 30_000;
@@ -134,12 +133,7 @@ export async function openPersistentAppBackend(
   input: PersistentOpenInput,
   options: PersistentRuntimeOptions = {},
 ) {
-  const config = openRequest({
-    ...input,
-    ...(input.workerMemoryBytes === undefined && options.workerMemoryBytes !== undefined
-      ? { workerMemoryBytes: options.workerMemoryBytes }
-      : {}),
-  });
+  const config = openRequest(input);
   const entryPath = trustedPath(
     options.entryPath ??
       fileURLToPath(import.meta.resolve("@dohc/app-backend-runtime/persistent-child")),
@@ -234,11 +228,9 @@ export async function openPersistentAppBackend(
     if (budget.resource === "memory") {
       if (budget.limitBytes === undefined || budget.usedBytes === undefined)
         return `Collection worker memory exceeded its limit${during(active)}.`;
-      const inMiB = budget.limitBytes % MiB === 0;
-      const limit = inMiB ? budget.limitBytes / MiB : budget.limitBytes;
-      const used = inMiB ? Math.ceil(budget.usedBytes / MiB) : budget.usedBytes;
-      const unit = inMiB ? "MiB" : "bytes";
-      return `${appBackendLimit("Collection worker memory", limit, used, unit)}${during(active) ? ` Stopped${during(active)}.` : ""}`;
+      const limit = Math.round(budget.limitBytes / MiB);
+      const used = Math.ceil(budget.usedBytes / MiB);
+      return `${appBackendLimit("Collection worker memory", limit, used, "MiB")}${during(active) ? ` Stopped${during(active)}.` : ""}`;
     }
     const { kind, budgetMs } = budget;
     if (budgetMs === undefined) {

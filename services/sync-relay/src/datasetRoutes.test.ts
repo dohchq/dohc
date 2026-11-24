@@ -2007,7 +2007,7 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
   );
 });
 
-it("surfaces the SQL parameter limit as 409 and recycles standalone Node workers at the 256 MiB RSS ceiling with 503", async () => {
+it("surfaces SQL parameter, journal change, migration preview, and standalone Node RSS limits over relay HTTP routes", async () => {
   const f = await httpFixture();
   const sql136 = `SELECT ${Array.from({ length: 136 }, () => "?").join("+")} AS total`;
   const operationSource = `globalThis.operations = {
@@ -2017,24 +2017,49 @@ it("surfaces the SQL parameter limit as 409 and recycles standalone Node workers
       if (input && input.kind === "memory")
         return ctx.db.query("SELECT length(randomblob(251658240)) AS bytes");
       return ctx.db.query("SELECT * FROM requests ORDER BY id");
+    },
+    write(ctx, input) {
+      if (input && input.kind === "seed") {
+        for (let i = 0; i < 9; i++)
+          ctx.db.execute("INSERT INTO requests(id,name) VALUES(?,printf('%1048576c','a'))", ["big-" + i]);
+        return { seeded: true };
+      }
+      if (input && input.kind === "oversized_change") {
+        ctx.db.execute("UPDATE requests SET name=printf('%1048576c','b') WHERE id LIKE 'big-%'");
+        return { updated: true };
+      }
+      ctx.db.execute("INSERT INTO requests(id,name) VALUES(?,printf('%143360c','x'))", ["wide-row"]);
+      return { wide: true };
     }
   };`;
+  const customDefinition: DatasetDefinition = {
+    ...definition,
+    operations: [
+      {
+        operationId: id(6),
+        name: "read",
+        label: "Read",
+        tableId: id(2),
+        kind: "read",
+        access: "owner",
+        readOnly: true,
+        fieldIds: [id(3), id(4)],
+      },
+      {
+        operationId: id(5),
+        name: "write",
+        label: "Write",
+        tableId: id(2),
+        kind: "action",
+        access: "owner",
+        readOnly: false,
+        profile: "bulk",
+        fieldIds: [id(3), id(4)],
+      },
+    ],
+  };
   const customRevision = describeDatasetRevision({
-    definition: {
-      ...definition,
-      operations: [
-        {
-          operationId: id(6),
-          name: "read",
-          label: "Read",
-          tableId: id(2),
-          kind: "read",
-          access: "owner",
-          readOnly: true,
-          fieldIds: [id(3), id(4)],
-        },
-      ],
-    },
+    definition: customDefinition,
     revision: 1,
     schemaSql,
     operationSource,
@@ -2045,24 +2070,25 @@ it("surfaces the SQL parameter limit as 409 and recycles standalone Node workers
         revision: customRevision,
         schemaSql,
         operationSource,
+        capacityBytes: 32 * 1024 * 1024,
       })
     ).status,
   ).toBe(200);
-  const invoke = (input: unknown, idempotencyKey: string) =>
+  const invoke = (operationId: string, input: unknown, idempotencyKey: string) =>
     f.http(`${f.path}/invoke`, {
       revision: 1,
       revisionSha256: customRevision.revisionSha256,
-      operationId: id(6),
+      operationId,
       input,
       idempotencyKey,
     });
-  const paramLimit = await invoke({ kind: "params" }, "param-limit");
+  const paramLimit = await invoke(id(6), { kind: "params" }, "param-limit");
   expect(paramLimit.status).toBe(409);
   expect(await paramLimit.json()).toEqual({
     code: "resource_limit",
     message: "SQL statement exceeded its limit of 128 parameters. It used 136 parameters.",
   });
-  const memoryLimit = await invoke({ kind: "memory" }, "memory-limit");
+  const memoryLimit = await invoke(id(6), { kind: "memory" }, "memory-limit");
   expect(memoryLimit.status).toBe(503);
   expect(await memoryLimit.json()).toMatchObject({
     code: "worker_budget",
@@ -2070,7 +2096,40 @@ it("surfaces the SQL parameter limit as 409 and recycles standalone Node workers
       /^Collection worker memory exceeded its limit of 256 MiB\. It used \d+ MiB\. Stopped while running the Collection action\. Try again\.$/,
     ),
   });
-  const recovered = await invoke({}, "after-memory-limit");
+  const recovered = await invoke(id(6), {}, "after-memory-limit");
   expect(recovered.status).toBe(200);
   expect(await recovered.json()).toMatchObject({ result: [] });
+  expect((await invoke(id(5), { kind: "seed" }, "seed-big")).status).toBe(200);
+  const journalLimit = await invoke(id(5), { kind: "oversized_change" }, "oversized-change");
+  expect(journalLimit.status).toBe(413);
+  expect(await journalLimit.json()).toMatchObject({
+    error: expect.stringMatching(
+      /^Collection change exceeded its limit of 16777216 bytes\. It used \d+ bytes\.$/,
+    ),
+  });
+  expect((await invoke(id(5), { kind: "wide" }, "wide-row")).status).toBe(200);
+  const captured = (await (await f.http(`${f.path}/replica/capture`)).json()) as {
+    head: unknown;
+  };
+  const nextSchemaSql = `${schemaSql} CREATE INDEX requests_name_idx ON requests(name);`;
+  const nextRevision = describeDatasetRevision({
+    definition: customDefinition,
+    revision: 2,
+    schemaSql: nextSchemaSql,
+    operationSource,
+  });
+  const previewLimit = await f.http(`${f.path}/prepare-migration`, {
+    expected: captured.head,
+    revision: nextRevision,
+    schemaSql: nextSchemaSql,
+    operationSource,
+    migrationSql: "CREATE INDEX requests_name_idx ON requests(name);",
+  });
+  expect(previewLimit.status).toBe(409);
+  expect(await previewLimit.json()).toMatchObject({
+    code: "resource_limit",
+    message: expect.stringMatching(
+      /^A migration preview source row exceeds 128 KiB \(131072 bytes\)\. It used \d+ bytes\. No values were omitted\.$/,
+    ),
+  });
 });

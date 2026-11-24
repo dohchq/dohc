@@ -148,7 +148,7 @@ Implicit `rowid`, `oid`, and `_rowid_` reads are unavailable unless backed by a 
 Those alias names are reserved for an `INTEGER PRIMARY KEY`; use other names for ordinary fields.
 Prepare refuses deferred foreign-key violations and transactions ended by conflict handling before the host can commit a journal event.
 The persistent storage reservation defaults to 128 MiB and can be lowered. It includes internal cursor pages; other guest limits retain snapshot defaults.
-Under standalone Node.js (`DEFAULT_MEMSTATUS=0`, where SQLite ignores `PRAGMA hard_heap_limit`), persistent workers enforce a 256 MiB peak-RSS ceiling (`workerMemoryBytes`, configurable per open) on their budget watch thread during budgeted steps, terminating and recycling an over-budget worker with `worker_budget`.
+Under standalone Node.js (`DEFAULT_MEMSTATUS=0`, where SQLite ignores `PRAGMA hard_heap_limit`), persistent workers enforce a 256 MiB peak-RSS ceiling on their budget watch thread during budgeted steps, terminating and recycling an over-budget worker with `worker_budget`.
 This reservation is a bound, not a measured performance or scale guarantee.
 Electron hosts must inject their utility-process launcher and package the `persistent-child` export.
 

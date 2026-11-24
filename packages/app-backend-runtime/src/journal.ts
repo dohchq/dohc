@@ -3,7 +3,11 @@ import {
   type ApprovalAgent,
 } from "@dohc/security-contract/approval-provenance";
 import { createHash } from "node:crypto";
-import { APP_BACKEND_BULK_LIMITS, appBackendLimit } from "@dohc/security-contract/app-backend";
+import {
+  APP_BACKEND_BULK_LIMITS,
+  AppBackendLimitError,
+  appBackendLimit,
+} from "@dohc/security-contract/app-backend";
 import {
   createCheckpointStorage,
   type CheckpointStage,
@@ -301,7 +305,8 @@ function integer(value: number, min = 0, max = Number.MAX_SAFE_INTEGER): number 
 }
 function copyBytes(value: Uint8Array, max: number, label: string): Uint8Array {
   if (!(value instanceof Uint8Array)) invalid(`Invalid ${label.toLowerCase()}.`);
-  if (value.byteLength > max) invalid(appBackendLimit(label, max, value.byteLength, "bytes"));
+  if (value.byteLength > max)
+    throw new AppBackendLimitError(appBackendLimit(label, max, value.byteLength, "bytes"));
   return new Uint8Array(value);
 }
 function scope(value: DatasetScope): DatasetScope {

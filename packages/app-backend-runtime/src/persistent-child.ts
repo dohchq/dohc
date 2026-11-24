@@ -26,6 +26,7 @@ import type { JsonValue } from "./protocol.js";
 import {
   checkCursor,
   checkDigest,
+  DEFAULT_WORKER_MEMORY_BYTES,
   digest,
   openRequest,
   PersistentRuntimeError,
@@ -149,7 +150,7 @@ const memoryBudgetMarkerName=(${memoryBudgetMarkerName.toString()});
 const processPeakMemoryBytes=(${processPeakMemoryBytes.toString()});
 (${watchBudget.toString()})(new BigInt64Array(workerData.state),()=>{const used=process.cpuUsage();return BigInt(used.user+used.system);},
   ()=>processPeakMemoryBytes(process.platform,()=>process.memoryUsage.rss(),()=>process.resourceUsage().maxRSS,()=>readFileSync("/proc/self/status","utf8")),
-  (exceeded)=>writeFile(join(workerData.directory,exceeded.resource==="cpu"?budgetMarkerName(exceeded.kind,exceeded.budgetMs):memoryBudgetMarkerName(exceeded.limitBytes,exceeded.usedBytes)),"",{flag:"wx"}),()=>process.kill(process.pid,"SIGKILL"),25,250);`;
+  (exceeded)=>writeFile(join(workerData.directory,exceeded.resource==="cpu"?budgetMarkerName(exceeded.kind,exceeded.budgetMs):memoryBudgetMarkerName(exceeded.limitBytes,exceeded.usedBytes)),"",{flag:"wx"}),()=>process.kill(process.pid,"SIGKILL"),50,250);`;
 let budgetWatch: Worker | undefined;
 let exiting = false;
 process.on("exit", () => {
@@ -200,7 +201,9 @@ function budgeted<T>(kind: bigint, budget: bigint, run: () => T): T {
   const disarm = () => {
     const end = cpuMicros();
     // Check completed work too: the watch may not have polled before this step ended.
-    if (!disarmBudget(budgetState, section, end, peakMemoryBytes()))
+    if (
+      !disarmBudget(budgetState, section, end, workerMemoryLimitBytes > 0n ? peakMemoryBytes() : 0n)
+    )
       for (;;) Atomics.wait(budgetState, 0, Atomics.load(budgetState, 0));
     if (kind === APP_CODE) appCharged += end - start;
     else {
@@ -275,7 +278,7 @@ function initialize(input: OpenRequest): DatasetCursor {
     .map((row) => String(row.compile_options));
   workerMemoryLimitBytes = sqliteEnforcesHardHeapLimit(compileOptions)
     ? 0n
-    : BigInt(config.workerMemoryBytes);
+    : BigInt(DEFAULT_WORKER_MEMORY_BYTES);
   const pageSize = Number(db.prepare("PRAGMA page_size").get()!.page_size);
   db.exec(`PRAGMA max_page_count=${Math.floor(config.limits.databaseBytes / pageSize)}`);
   if (!config.checkpointPath) {
