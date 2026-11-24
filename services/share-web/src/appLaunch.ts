@@ -51,7 +51,8 @@ const PAGE_STYLE =
   // While the app runs, the empty status stays in the accessibility tree, so a screen reader announces the session ending.
   "[data-state=running] #message{position:absolute;width:1px;height:1px;min-height:0;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}" +
   // An app without its own background sits on the browser's canvas, white in light, as its author saw it.
-  "[data-state=running]{background:Canvas}";
+  "[data-state=running]{background:Canvas}" +
+  "@media print{body.dohc-printing iframe{height:var(--dohc-print-h,100vh)!important}}";
 /** Lucide's circle-alert, shown once the session stops. */
 const STOPPED_MARK = `<svg id="mark" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>`;
 const PAGE_HEAD = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Shared app</title><style>${PAGE_STYLE}</style></head>`;

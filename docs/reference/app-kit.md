@@ -8,7 +8,7 @@ dohc's closed app compiler provides a pinned set of browser modules so apps can 
 | --- | --- |
 | `react`, `react/jsx-runtime` | React 19 hooks and JSX runtime |
 | `react-dom`, `react-dom/client` | ReactDOM (`createRoot`, `createPortal`) |
-| `dohc/app` | MessageChannel backend client and hooks (`AppProvider`, `useApp`, `useDatasetQuery`, `useDatasetMutation`, `createAppClient`, `mutationKey`, `AppBackendError`) |
+| `dohc/app` | MessageChannel backend client, hooks, and host helpers (`AppProvider`, `useApp`, `useDatasetQuery`, `useDatasetMutation`, `createAppClient`, `mutationKey`, `copyText`, `print`, `AppBackendError`) |
 | `dohc/ui` | Light and dark themed layout, data, and form components (`AppShell`, `PageHeader`, `Grid`, `Stack`, `Card`, `StatCard`, `Tabs`, `DataTable`, `Badge`, `ProgressBar`, `Callout`, `EmptyState`, `Skeleton`, `Button`, `Field`, `Input`, `Select`, `Textarea`, `Checkbox`, `Modal`, plus currency/number/percent/date formatters) |
 | `dohc/charts` | Responsive SVG charts with light and dark tokens: interactive `LineChart`, `BarChart`, and `DonutChart` (single-tab-stop arrow-key navigation), plus non-interactive `Sparkline` |
 | `dohc/icons` | A curated set of [Lucide](https://lucide.dev) icons as React components (for example `Plus`, `Trash2`, `Receipt`, `Wallet`, `Plane`, `CalendarDays`). Only the icons an app imports end up in its bundle |
@@ -204,3 +204,12 @@ dohc app stage '{"workspaceId":"<workspaceId>","appRoot":"personal-control-tower
 - Operations-only updates to an existing Collection need no migration file (`migrationPath` defaults to `null`, running an in-memory `SELECT 1;` no-op migration). Pass `"migrations": { "<alias-or-datasetPath>": "<migration.sql>" }` when a Collection's schema changed.
 - Open the app in dohc and click **Review app** to inspect every new/updated Collection and app capability in one card, then click **Approve and open** (or **Discard**). Interrupted approvals resume cleanly from per-step receipts without repeating already-applied Collections.
 - See `examples/personal-control-tower` for a complete two-Collection example (`expenses` and `workouts`).
+
+## Sandbox limits, clipboard, and printing
+
+Published and local apps run inside an opaque-origin `srcdoc` iframe (`window.origin === "null"`) without `allow-same-origin` or `allow-modals`. That isolation keeps app code separate from session credentials and stops modal spam, and it puts three browser constraints on app code:
+
+- **Storage APIs.** `sessionStorage`, `localStorage`, `indexedDB`, and `document.cookie` throw `SecurityError` in an opaque origin. Keep transient UI state in React state or memory, and save durable data in an approved Collection.
+- **Clipboard.** Calling `navigator.clipboard.writeText` inside the app frame fails and logs a Chromium Permissions Policy console error, which fails `verifyFrontend`. Use `copyText(text)` from `dohc/app` inside a click or key handler instead. The trusted host bootstrap writes up to 65,536 UTF-8 bytes after a recent user click or key press, at most once per 1 s.
+- **Printing.** Calling `window.print()` inside the app frame is blocked because the sandbox omits `allow-modals`. Use `print()` from `dohc/app` inside a click or key handler so the trusted host bootstrap prints the app frame with its `@media print` styles, at most once per 5.5 s. Pass `print({ height })` (in CSS pixels, up to 50,000) if your app scrolls inside a fixed-height container rather than the document body. On mobile WebViews where the OS print sheet is unavailable, or when people need a standalone file, export HTML through `allow-downloads`.
+- **Stale queries and rate limits.** `useDatasetQuery` cancels queued superseded requests when its operation, dataset, or input changes. When a request hits a rate limit (`error.status === 429`), `error.message` names the limit, unit, usage window, and retry timing, and `error.retryAfterMs` gives the retry delay in milliseconds when known.

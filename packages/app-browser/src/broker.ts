@@ -5,6 +5,8 @@ export type AppBrokerOp =
   | "backend.attempt"
   | "backend.upload"
   | "backend.file"
+  | "host.copy"
+  | "host.print"
   | "unknown";
 
 export type AppBrokerLocalRejectionReason =
@@ -42,6 +44,11 @@ export interface AppBrokerLimits {
   readonly backendRefillMs?: number;
 }
 
+export interface AppBrokerHostActions {
+  copyText?(text: string): Promise<void>;
+  print?(options: { height?: number }): Promise<void>;
+}
+
 export interface AppBrokerHandle {
   notifyDatasetChanged(dataset: string, revision: number): void;
 }
@@ -58,18 +65,29 @@ export function attachAppCollectionBroker(
   lifetime: AbortSignal,
   observe?: (event: AppBrokerObservation) => void,
   limits?: AppBrokerLimits,
+  hostActions?: AppBrokerHostActions,
 ): AppBrokerHandle {
   const bounded = (v: unknown, min: number, max: number, fallback: number) =>
     typeof v === "number" && Number.isSafeInteger(v) && v >= min && v <= max ? v : fallback;
   const maxPending = bounded(limits?.maxPending, 1, 16, 4),
     backendBurst = bounded(limits?.backendBurst, 1, 240, 30),
-    backendRefillMs = bounded(limits?.backendRefillMs, 10, 10_000, 2000);
+    backendRefillMs = bounded(limits?.backendRefillMs, 10, 10_000, 2000),
+    collectionBurst = 12,
+    collectionRefillMs = 5000,
+    maxCopyBytes = 65_536,
+    copyCooldownMs = 1000,
+    printCooldownMs = 5500,
+    maxPrintHeight = 50_000;
   let closed = false,
     loaded = false,
     pending = 0,
     backendTokens = backendBurst,
-    collectionTokens = 12,
-    updated = Date.now();
+    collectionTokens = collectionBurst,
+    updated = Date.now(),
+    copying = false,
+    nextCopyAt = 0,
+    printing = false,
+    nextPrintAt = 0;
   const channel = new MessageChannel(),
     controller = new AbortController(),
     ids = new Set<string>();
@@ -77,6 +95,12 @@ export function attachAppCollectionBroker(
     try {
       observe?.(event);
     } catch {}
+  };
+  const formatDuration = (ms: number) => {
+    const rounded = Math.max(1, Math.ceil(ms));
+    if (rounded < 1000) return `${rounded} ms`;
+    const seconds = rounded / 1000;
+    return `${Number.isInteger(seconds) ? seconds : seconds.toFixed(1).replace(/\.0$/, "")} s`;
   };
   const validDatasetKey = (v: unknown): v is string =>
     typeof v === "string" &&
@@ -87,11 +111,73 @@ export function attachAppCollectionBroker(
     v === "backend.invoke" ||
     v === "backend.attempt" ||
     v === "backend.upload" ||
-    v === "backend.file"
+    v === "backend.file" ||
+    v === "host.copy" ||
+    v === "host.print"
       ? v
       : "unknown";
   const knownOperation = (v: unknown): string | undefined =>
     typeof v === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(v) ? v : undefined;
+  const defaultCopyText = async (text: string) => {
+    if (typeof navigator !== "undefined" && typeof navigator.clipboard?.writeText === "function") {
+      try {
+        await navigator.clipboard.writeText(text);
+        return;
+      } catch {}
+    }
+    if (typeof document === "undefined" || typeof document.execCommand !== "function")
+      throw Error("Clipboard unavailable");
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.cssText = "position:fixed;top:-9999px;left:-9999px;opacity:0;pointer-events:none";
+    document.body.append(area);
+    try {
+      area.focus({ preventScroll: true });
+      area.select();
+      if (!document.execCommand("copy")) throw Error("Clipboard copy failed");
+    } finally {
+      area.remove();
+      try {
+        frame.focus({ preventScroll: true });
+      } catch {}
+    }
+  };
+  const defaultPrint = (options: { height?: number }) => {
+    if (typeof window === "undefined" || typeof window.print !== "function")
+      throw Error("Printing unavailable");
+    let cleaned = false,
+      afterFired = false,
+      timer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      clearTimeout(timer);
+      printing = false;
+      window.removeEventListener("afterprint", onAfter);
+      lifetime.removeEventListener("abort", cleanup);
+      document.body?.classList.remove("dohc-printing");
+      document.documentElement?.style.removeProperty("--dohc-print-h");
+    };
+    const onAfter = () => {
+      afterFired = true;
+      cleanup();
+    };
+    window.addEventListener("afterprint", onAfter, { once: true });
+    lifetime.addEventListener("abort", cleanup, { once: true });
+    if (options.height !== undefined) {
+      document.documentElement?.style.setProperty("--dohc-print-h", `${options.height}px`);
+    }
+    document.body?.classList.add("dohc-printing");
+    try {
+      window.print();
+    } catch {
+      cleanup();
+      return;
+    }
+    if (afterFired) cleanup();
+    else timer = setTimeout(cleanup, 1000);
+  };
   const close = () => {
     closed = true;
     controller.abort();
@@ -151,16 +237,33 @@ export function attachAppCollectionBroker(
       return;
     }
     const id = body.id,
-      reject = (status: number) => {
-        if (!closed) channel.port1.postMessage({ id, ok: false, status });
+      reject = (
+        status: number,
+        error?: { code: string; message: string; retryAfterMs?: number },
+      ) => {
+        if (!closed)
+          channel.port1.postMessage(
+            error ? { id, ok: false, status, error } : { id, ok: false, status },
+          );
       },
-      rejectLocal = (reason: AppBrokerLocalRejectionReason, status: number) => {
-        reject(status);
+      rejectLocal = (
+        reason: AppBrokerLocalRejectionReason,
+        status: number,
+        error?: { code: string; message: string; retryAfterMs?: number },
+      ) => {
+        reject(status, error);
         emit({ kind: "rejected", reason, status, op, ...opMeta });
       };
-    if (ids.has(id)) return rejectLocal("duplicate_id", 429);
+    if (ids.has(id))
+      return rejectLocal("duplicate_id", 429, {
+        code: "duplicate_id",
+        message:
+          "Duplicate request id: at most 1 in-flight request per id (1 already active). Wait for it to finish or use a new id.",
+      });
     const maxFileBytes = 20 * 1024 * 1024;
     const upload = body.op === "backend.upload",
+      hostCopy = body.op === "host.copy",
+      hostPrint = body.op === "host.print",
       backend = typeof body.op === "string" && body.op.startsWith("backend.");
     if (upload) {
       if (!(body.bytes instanceof ArrayBuffer)) return rejectLocal("invalid_keys", 400);
@@ -176,10 +279,115 @@ export function attachAppCollectionBroker(
     } catch {
       return rejectLocal("unserializable", 400);
     }
-    const requestBytes = upload ? 4096 : backend ? 128 * 1024 : 16_384;
+    const requestBytes = upload
+      ? 4096
+      : hostCopy
+        ? 192 * 1024
+        : backend
+          ? 128 * 1024
+          : 16_384;
     if (new TextEncoder().encode(encoded).byteLength > requestBytes)
       return rejectLocal("payload_too_large", 413);
     const keys = Object.keys(body).sort().join();
+    const refuseHost = (code: string, message: string, started = false) => {
+      if (!started) emit({ kind: "started", id, op });
+      reject(409, { code, message });
+      emit({ kind: "completed", id, op, status: 409, ok: false, refusalCode: code });
+    };
+    if (hostCopy) {
+      if (keys !== "id,op,text" || typeof body.text !== "string")
+        return rejectLocal("invalid_keys", 400);
+      const textBytes = new TextEncoder().encode(body.text).byteLength;
+      if (textBytes > maxCopyBytes)
+        return rejectLocal("payload_too_large", 413, {
+          code: "payload_too_large",
+          message: `Clipboard text exceeded its limit of ${maxCopyBytes} bytes (used ${textBytes} bytes).`,
+        });
+      const now = Date.now();
+      if (!activated)
+        return refuseHost(
+          "user_activation_required",
+          "Clipboard copy requires a recent click or key press.",
+        );
+      if (copying || now < nextCopyAt) {
+        const retryAfterMs = copying ? copyCooldownMs : Math.max(1, nextCopyAt - now);
+        return rejectLocal("rate_limited", 429, {
+          code: "rate_limited",
+          message: `Rate limit reached: at most 1 clipboard copy per ${formatDuration(copyCooldownMs)} (1 already used). Try again in ${formatDuration(retryAfterMs)}.`,
+          retryAfterMs,
+        });
+      }
+      copying = true;
+      nextCopyAt = now + copyCooldownMs;
+      ids.add(id);
+      emit({ kind: "started", id, op });
+      let finished = false;
+      try {
+        await (hostActions?.copyText
+          ? hostActions.copyText(body.text)
+          : defaultCopyText(body.text));
+        if (closed) return;
+        channel.port1.postMessage({ id, ok: true, value: { copied: true } });
+        finished = true;
+        emit({ kind: "completed", id, op, status: 200, ok: true });
+      } catch {
+        if (closed) return;
+        finished = true;
+        refuseHost("clipboard_unavailable", "Clipboard copy is unavailable in this browser.", true);
+      } finally {
+        if (!finished) emit({ kind: "aborted", id, op });
+        copying = false;
+        ids.delete(id);
+      }
+      return;
+    }
+    if (hostPrint) {
+      const validPrintHeight =
+        !Object.hasOwn(body, "height") ||
+        (typeof body.height === "number" &&
+          Number.isSafeInteger(body.height) &&
+          body.height >= 1 &&
+          body.height <= maxPrintHeight);
+      if (!["id,op", "height,id,op"].includes(keys) || !validPrintHeight)
+        return rejectLocal("invalid_keys", 400);
+      const now = Date.now();
+      if (!activated)
+        return refuseHost(
+          "user_activation_required",
+          "Printing requires a recent click or key press.",
+        );
+      if (printing || now < nextPrintAt) {
+        const retryAfterMs = printing ? printCooldownMs : Math.max(1, nextPrintAt - now);
+        return rejectLocal("rate_limited", 429, {
+          code: "rate_limited",
+          message: printing
+            ? "Rate limit reached: at most 1 print dialog at a time (1 already open). Close the current print dialog, then try again."
+            : `Rate limit reached: at most 1 print request per ${formatDuration(printCooldownMs)} (1 already used). Try again in ${formatDuration(retryAfterMs)}.`,
+          retryAfterMs,
+        });
+      }
+      const printHeight = typeof body.height === "number" ? body.height : undefined;
+      if (
+        !hostActions?.print &&
+        (typeof window === "undefined" || typeof window.print !== "function")
+      )
+        return refuseHost("print_unavailable", "Printing is unavailable in this browser.");
+      printing = true;
+      nextPrintAt = now + printCooldownMs;
+      emit({ kind: "started", id, op });
+      if (!closed) channel.port1.postMessage({ id, ok: true, value: { printed: true } });
+      emit({ kind: "completed", id, op, status: 200, ok: true });
+      if (hostActions?.print) {
+        try {
+          await hostActions.print(printHeight === undefined ? {} : { height: printHeight });
+        } finally {
+          printing = false;
+        }
+      } else {
+        defaultPrint(printHeight === undefined ? {} : { height: printHeight });
+      }
+      return;
+    }
     const validAlias =
       !Object.hasOwn(body, "dataset") || (validDatasetKey(body.dataset) && body.dataset !== "");
     const validReadOnly = !Object.hasOwn(body, "readOnly") || body.readOnly === true;
@@ -213,10 +421,28 @@ export function attachAppCollectionBroker(
     if (!valid) return rejectLocal("invalid_keys", 400);
     const now = Date.now();
     backendTokens = Math.min(backendBurst, backendTokens + (now - updated) / backendRefillMs);
-    collectionTokens = Math.min(12, collectionTokens + (now - updated) / 5000);
+    collectionTokens = Math.min(
+      collectionBurst,
+      collectionTokens + (now - updated) / collectionRefillMs,
+    );
     updated = now;
-    if (pending >= maxPending || (backend ? backendTokens : collectionTokens) < 1)
-      return rejectLocal("rate_limited", 429);
+    if (pending >= maxPending)
+      return rejectLocal("rate_limited", 429, {
+        code: "rate_limited",
+        message: `Rate limit reached: at most ${maxPending} concurrent requests allowed (${pending} currently in flight). Wait for an active request to finish, then try again.`,
+      });
+    const activeTokens = backend ? backendTokens : collectionTokens;
+    if (activeTokens < 1) {
+      const burst = backend ? backendBurst : collectionBurst;
+      const refillMs = backend ? backendRefillMs : collectionRefillMs;
+      const retryAfterMs = Math.max(1, Math.ceil((1 - activeTokens) * refillMs));
+      const kind = backend ? "backend" : "collection";
+      return rejectLocal("rate_limited", 429, {
+        code: "rate_limited",
+        message: `Rate limit reached: ${burst} of ${burst} ${kind} requests used in the ${formatDuration(burst * refillMs)} burst window (refills 1 request every ${formatDuration(refillMs)}). Try again in ${formatDuration(retryAfterMs)}.`,
+        retryAfterMs,
+      });
+    }
     if (backend) backendTokens--;
     else collectionTokens--;
     pending++;
@@ -248,7 +474,22 @@ export function attachAppCollectionBroker(
       if (!response.ok && !refusal) {
         await response.body?.cancel().catch(() => {});
         const status = [400, 404, 409, 413, 429].includes(response.status) ? response.status : 503;
-        reject(status);
+        if (status === 429) {
+          const retryHeader = response.headers.get("retry-after")?.trim() ?? "";
+          const retrySec = /^\d{1,4}$/.test(retryHeader) ? Number(retryHeader) : null;
+          const retryAfterMs =
+            retrySec !== null && retrySec >= 1 && retrySec <= 3600 ? retrySec * 1000 : undefined;
+          reject(429, {
+            code: "rate_limited",
+            message:
+              retryAfterMs !== undefined
+                ? `Rate limit reached by app host (HTTP 429). Try again in ${formatDuration(retryAfterMs)}.`
+                : "Rate limit reached by app host (HTTP 429). Wait a moment and try again.",
+            ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+          });
+        } else {
+          reject(status);
+        }
         return finish(status, false);
       }
       const binaryFile = !refusal && body.op === "backend.file";

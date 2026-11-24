@@ -71,6 +71,31 @@ const BLOCK_WEBRTC_SCRIPT = `(() => {
     }
   }
 })();`;
+const VERIFY_HOST_STUB_SCRIPT = `(() => {
+  if (window !== top) return;
+  try {
+    Object.defineProperty(window, "print", {
+      value: () => {
+        dispatchEvent(new Event("beforeprint"));
+        dispatchEvent(new Event("afterprint"));
+      },
+      writable: false,
+      configurable: true,
+    });
+  } catch {}
+  try {
+    const clipboard = navigator.clipboard;
+    if (clipboard) {
+      Object.defineProperty(clipboard, "writeText", {
+        value: async (text) => {
+          if (typeof text !== "string") throw new TypeError("Expected string");
+        },
+        writable: false,
+        configurable: true,
+      });
+    }
+  } catch {}
+})();`;
 const ALLOWED_PATHS = new Set([
   "/bootstrap",
   "/session",
@@ -191,6 +216,11 @@ export function unmatchedExpectations(
   }
   return expected.filter((_, ei) => !matchedExp[ei]);
 }
+
+const clickReadyExpression = (selector: string): string => {
+  const sel = JSON.stringify(selector);
+  return `(()=>{try{const el=document.querySelector(${sel});if(!el)return "missing";if(el instanceof HTMLElement){if(("disabled" in el&&Boolean(el.disabled))||el.matches(":disabled")||el.getAttribute("aria-disabled")==="true")return "disabled";return "ok";}return "not_clickable";}catch{return "invalid";}})()`;
+};
 
 const stepExpression = (step: AppFrontendStep): string => {
   const sel = JSON.stringify(step.selector);
@@ -754,6 +784,7 @@ async function executeVerification(
     await cdp("Runtime.enable");
     await cdp("Runtime.addBinding", { name: "__dohcVerifyObserve" });
     await cdp("Page.addScriptToEvaluateOnNewDocument", { source: BLOCK_WEBRTC_SCRIPT });
+    await cdp("Page.addScriptToEvaluateOnNewDocument", { source: VERIFY_HOST_STUB_SCRIPT });
     await cdp("Log.enable");
     await cdp("Audits.enable");
     await cdp("Target.setAutoAttach", {
@@ -839,7 +870,6 @@ async function executeVerification(
       expr: string,
       stopWhen: (v: string) => boolean,
       maxMs: number,
-      onBeforeEval?: () => void,
     ): Promise<string> => {
       const end = Math.min(deadlineAt, Date.now() + maxMs);
       let last = "invalid";
@@ -849,7 +879,6 @@ async function executeVerification(
         if (evaluated && Date.now() >= end) return last;
         let res: { result?: { value?: string }; exceptionDetails?: { text?: string } };
         try {
-          onBeforeEval?.();
           res = (await cdp(
             "Runtime.evaluate",
             {
@@ -899,16 +928,33 @@ async function executeVerification(
       };
 
       let clickStartSeq = callSeq;
-      const status = await pollEval(
-        stepExpression(step),
-        step.kind === "waitFor" ? (v) => v === "ok" || v === "invalid" : (v) => v !== "missing",
-        step.kind === "waitFor" ? remainingMs() : 3000,
-        step.kind === "click"
-          ? () => {
-              clickStartSeq = callSeq;
-            }
-          : undefined,
-      );
+      let status: string;
+      if (step.kind === "click") {
+        status = await pollEval(clickReadyExpression(step.selector), (v) => v !== "missing", 3000);
+        if (status === "ok") {
+          clickStartSeq = callSeq;
+          const clickRes = (await cdp(
+            "Runtime.evaluate",
+            {
+              expression: stepExpression(step),
+              contextId: appWorld.contextId,
+              returnByValue: true,
+              awaitPromise: false,
+              userGesture: true,
+            },
+            appWorld.sessionId,
+          )) as { result?: { value?: string }; exceptionDetails?: { text?: string } };
+          if (clickRes.exceptionDetails)
+            throw new Error(clickRes.exceptionDetails.text ?? "Step evaluation failed.");
+          status = clickRes.result?.value ?? "invalid";
+        }
+      } else {
+        status = await pollEval(
+          stepExpression(step),
+          step.kind === "waitFor" ? (v) => v === "ok" || v === "invalid" : (v) => v !== "missing",
+          step.kind === "waitFor" ? remainingMs() : 3000,
+        );
+      }
       if (status !== "ok") {
         const code: keyof typeof STEP_REMEDY =
           step.kind === "waitFor" && status === "text"

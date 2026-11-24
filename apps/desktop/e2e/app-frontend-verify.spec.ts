@@ -445,6 +445,31 @@ createRoot(document.getElementById("root")!).render(
 );`,
     });
 
+    await writeApp("apps/kit-host-actions", {
+      "app.publish.json": JSON.stringify({
+        version: 1,
+        entryPath: "main.tsx",
+        inputs: ["main.tsx"],
+        packageMap: {},
+      }),
+      "main.tsx": `import { useState } from "react";
+import { createRoot } from "react-dom/client";
+import { copyText, print } from "dohc/app";
+function HostActions() {
+  const [copyStatus, setCopyStatus] = useState("idle");
+  const [printStatus, setPrintStatus] = useState("idle");
+  return (
+    <main>
+      <button id="copy-btn" type="button" onClick={async () => { await copyText("VERIFY-COPY-4517"); setCopyStatus("copied"); }}>Copy</button>
+      <button id="print-btn" type="button" onClick={async () => { await print(); setPrintStatus("printed"); }}>Print</button>
+      <p id="copy-status">{copyStatus}</p>
+      <p id="print-status">{printStatus}</p>
+    </main>
+  );
+}
+createRoot(document.getElementById("root")!).render(<HostActions />);`,
+    });
+
     await writeApp("apps/stalled-startup", {
       "app.publish.json": JSON.stringify({
         version: 1,
@@ -751,6 +776,32 @@ createRoot(document.getElementById("root")!).render(
       kind: "frontendVerified",
       ok: true,
       stage: "complete",
+    });
+
+    const hostActionsVerify = await publish(desktop.page, {
+      action: "verifyFrontend",
+      workspaceId,
+      appRoot: "apps/kit-host-actions",
+      steps: [
+        {
+          kind: "click",
+          selector: "#copy-btn",
+          expectBackend: { op: "host.copy", status: 200 },
+        },
+        { kind: "waitFor", selector: "#copy-status", textIncludes: "copied" },
+        {
+          kind: "click",
+          selector: "#print-btn",
+          expectBackend: { op: "host.print", status: 200 },
+        },
+        { kind: "waitFor", selector: "#print-status", textIncludes: "printed" },
+      ],
+    });
+    expect(hostActionsVerify, JSON.stringify(hostActionsVerify)).toMatchObject({
+      kind: "frontendVerified",
+      ok: true,
+      stage: "complete",
+      diagnostics: [],
     });
 
     // Earlier-step in-flight backend call must not satisfy a later no-op click's expectBackend
