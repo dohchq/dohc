@@ -75,7 +75,9 @@ export function parseCents(
   if (!takeSign()) return null;
   const groupText = raw("group");
   const group = /^\s$/.test(groupText) ? spaceGroup : escape(groupText);
-  const sizes = parts.filter((item) => item.type === "integer").map((item) => item.value.length);
+  const sizes = parts
+    .filter((item) => item.type === "integer")
+    .map((item) => Array.from(item.value).length);
   const secondary = sizes.length > 2 ? sizes[1]! : 3;
   const decimal = escape(trim(raw("decimal")) || ".");
   const whole = group
