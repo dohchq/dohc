@@ -114,6 +114,13 @@ pub enum RelayOperation {
         /// recipient on first read. Required: there is no unscoped pull.
         granted: dohc_engine_sync::ShareGrant,
     },
+    /// Send a membership view's own posts in Groups through the share append
+    /// lane. The grant must name the whole workspace at Comment or Edit.
+    PushShareViewGroups {
+        workspace_id: String,
+        share_id: String,
+        granted: dohc_engine_sync::ShareGrant,
+    },
     /// Record an editable share view's own replica identity once, before it
     /// can submit file changes.
     ///
@@ -201,6 +208,7 @@ impl RelayOperation {
             | Self::DownloadKeyEnvelope { workspace_id }
             | Self::PullSharedChannel { workspace_id, .. }
             | Self::PushSharedChannel { workspace_id, .. }
+            | Self::PushShareViewGroups { workspace_id, .. }
             | Self::PullShareView { workspace_id, .. }
             | Self::RecordShareViewIdentity { workspace_id, .. }
             | Self::SubmitShareProposal { workspace_id, .. }
@@ -231,6 +239,7 @@ impl RelayOperation {
             | Self::DownloadKeyEnvelope { .. }
             | Self::PullSharedChannel { .. }
             | Self::PushSharedChannel { .. }
+            | Self::PushShareViewGroups { .. }
             | Self::PullShareView { .. }
             | Self::RecordShareViewIdentity { .. }
             | Self::SubmitShareProposal { .. }
@@ -2136,6 +2145,18 @@ impl ActorHandle {
         .await
     }
 
+    pub async fn share_direct_waiting(
+        &self,
+        workspace_id: String,
+        share_id: String,
+    ) -> Result<dohc_engine_sync::DirectWritesWaiting, RuntimeError> {
+        self.run(move |store, _cache| {
+            dohc_engine_sync::read_direct_writes_waiting(store, &workspace_id, &share_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     pub async fn sync_refusal_notices(
         &self,
         workspace_id: String,
@@ -3299,6 +3320,14 @@ fn run_relay_operation(
             .push_shared_channel(store, &workspace_id, &share_id, &channel_wire_id, &NoFaults)
             .map(RelayOperationOutcome::SharedChannelPushed)
             .map_err(RuntimeError::from),
+        RelayOperation::PushShareViewGroups {
+            workspace_id,
+            share_id,
+            granted,
+        } => client
+            .push_share_view_groups(store, &workspace_id, &share_id, &granted, &NoFaults)
+            .map(RelayOperationOutcome::SharedChannelPushed)
+            .map_err(RuntimeError::from),
         RelayOperation::PullShareView {
             workspace_id,
             share_id,
@@ -4130,7 +4159,7 @@ mod hosted_refusal_tests {
         .unwrap();
         let ws = || "ws".to_owned();
         let granted = || ShareGrant {
-            paths: Vec::new(),
+            scope: dohc_engine_sync::ShareScope::Paths(Vec::new()),
             version_id: None,
             access: ShareAccess::Edit,
         };
@@ -4186,6 +4215,11 @@ mod hosted_refusal_tests {
                 workspace_id: ws(),
                 share_id: "share".into(),
                 channel_wire_id: "wire".into(),
+            },
+            RelayOperation::PushShareViewGroups {
+                workspace_id: ws(),
+                share_id: "share".into(),
+                granted: granted(),
             },
             RelayOperation::PullShareView {
                 workspace_id: ws(),

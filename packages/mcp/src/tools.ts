@@ -55,7 +55,7 @@ import {
 import { sendCliRequest } from "@dohc/cli/client";
 import { DohcCliError } from "@dohc/cli/errors";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
-import { MEMBERS_CAPABILITIES, OwnerMembersRequest } from "@dohc/cli/members";
+import { MEMBERS_CAPABILITIES, AgentMembersRequest } from "@dohc/cli/members";
 import { DATASET_CAPABILITIES, DatasetRequest } from "@dohc/cli/dataset";
 import {
   CLI_PROTOCOL_VERSION,
@@ -2357,15 +2357,11 @@ export async function publishApp(ctx: ToolContext, input: unknown) {
   return requestCli(ctx, "appPublication", { request: parsed.data });
 }
 
-// The Members page for the owner's agents. The desktop names the workspace
-// and the signed-in owner account; the relay decides.
+// The Members page for agents, in a workspace the person owns or joined.
+// The socket tells a joined workspace from any other share view, the desktop
+// names the workspace and the account, and the relay decides.
 export async function members(ctx: ToolContext, input: unknown) {
-  if (ctx.shareAccess !== undefined)
-    return {
-      ok: false as const,
-      reason: "Members requires the original workspace and its signed-in owner account.",
-    };
-  const parsed = OwnerMembersRequest.safeParse(input);
+  const parsed = AgentMembersRequest.safeParse(input);
   if (!parsed.success)
     return {
       ok: false as const,

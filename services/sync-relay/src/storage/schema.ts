@@ -60,7 +60,11 @@ import { initializeLiveRoomSchema } from "./liveRoomEdits";
 import { initializeLiveRoomPauseSchema } from "./liveRoomPauses";
 import { initializePhoneAppSchema } from "./phoneApps";
 import { initializeShareInvitationEmailSchema } from "./shareInvitationEmails";
-import { initializeWorkspaceMemberSchema } from "./workspaceMembers";
+import {
+  initializeWorkspaceLevelChanges,
+  initializeWorkspaceMemberSchema,
+} from "./workspaceMembers";
+import { initializeAccountNames } from "./accountNames";
 import { initializeWorkspaceSecretSchema } from "./workspaceSecrets";
 import { initializeOutboundWebhookSchema } from "./outboundWebhooks";
 import { initializeIncomingWebhookSchema } from "./incomingWebhooks";
@@ -1689,6 +1693,8 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   initializeLiveRoomPauseSchema(db);
   initializePhoneAppSchema(db);
   initializeShareInvitationEmailSchema(db);
+  initializeAccountNames(db);
+  initializeWorkspaceLevelChanges(db);
   initializeWorkspaceSecretSchema(db);
   initializeOutboundWebhookSchema(db);
   initializeIncomingWebhookSchema(db);

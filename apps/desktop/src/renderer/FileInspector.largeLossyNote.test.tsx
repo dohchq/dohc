@@ -119,7 +119,7 @@ async function expectWaiting() {
   expect(screen.queryByTestId("markdown-editor")).toBeNull();
   expect(screen.getByTestId("markdown-edit-toggle").getAttribute("aria-disabled")).toBe("true");
   expect(screen.getByTestId("markdown-open-state").getAttribute("title")).toBe(
-    "You can edit this document when it finishes opening.",
+    "You can edit this page when it finishes opening.",
   );
 }
 

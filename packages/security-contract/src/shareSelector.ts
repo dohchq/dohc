@@ -21,9 +21,10 @@ export const prepareSharePath = (path: string) => PreparedSharePath.prepare(path
 
 /**
  * A file scope. `wholeWorkspace` selects every tracked path on main, current
- * and future. Only the relay builds it, for a workspace member's reach; it
- * never comes from a stored or sent selector. It names no paths and no
- * version, or it selects nothing.
+ * and future. Only the relay grants it, for a workspace member's reach. A
+ * desktop keeps it as a membership's pin and sends it with each share RPC so
+ * the engine applies the same reach; the relay never reads it from a client.
+ * It names no paths and no version, or it selects nothing.
  */
 export interface ShareFileScope {
   paths: readonly string[];

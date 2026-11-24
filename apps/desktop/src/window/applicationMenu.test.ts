@@ -41,7 +41,7 @@ describe("application menu template", () => {
 
   it("clicking a custom item sends its MenuCommand to the clicked window", () => {
     const { template, sendCommand } = build();
-    const newFile = items(template, "File").find((i) => i.label === "New file");
+    const newFile = items(template, "File").find((i) => i.label === "New page");
     const fakeWindow = { id: 1 };
     (newFile?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "new-file");
@@ -92,7 +92,7 @@ describe("application menu template", () => {
   it("renderer-owned accelerators are displayed but not registered", () => {
     const { template } = build();
     for (const [menu, label, accelerator] of [
-      ["File", "New file", "CommandOrControl+N"],
+      ["File", "New page", "CommandOrControl+N"],
       ["File", "Close tab", "CommandOrControl+W"],
       ["View", "Command palette", "CommandOrControl+Shift+P"],
       ["View", "Go to", "CommandOrControl+P"],
@@ -492,6 +492,25 @@ describe("application menu template", () => {
 
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "check-updates");
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "install-update");
+  });
+
+  it("disables each File create its workspace does not offer, with its shortcut still shown", () => {
+    const template = buildMenuTemplate({
+      isDev: false,
+      platform: "win32",
+      sendCommand: vi.fn(),
+      stepZoom: vi.fn(),
+      showAbout: vi.fn(),
+      createOffers: { write: true, folder: false, collection: false },
+    });
+    const file = items(template, "File");
+    const enabled = (label: string) => file.find((entry) => entry.label === label)?.enabled;
+    expect(
+      ["New page", "New folder", "New Collection", "Import files", "Export workspace as ZIP"].map(
+        enabled,
+      ),
+    ).toEqual([true, false, false, true, true]);
+    expect(file.find((entry) => entry.label === "New page")?.accelerator).toBeDefined();
   });
 
   it("disables Help restart when no update is installable", () => {

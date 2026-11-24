@@ -90,8 +90,10 @@ export function createNamedRecipientDocuments(options: {
           actorUserId: context.userId,
           grantId,
         });
+        // The browser opens path shares only; a member opens documents in the desktop app.
         if (
           !authority.ok ||
+          "kind" in authority.effectiveSelector ||
           authority.grant.access !== "edit" ||
           authority.share.shareId !== context.shareId ||
           authority.share.workspaceId !== context.workspaceId

@@ -398,56 +398,6 @@ impl<'de> Visitor<'de> for Metadata<'_> {
     }
 }
 
-struct RestoreApplication<'a>(Metadata<'a>);
-impl<'de> DeserializeSeed<'de> for RestoreApplication<'_> {
-    type Value = String;
-    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<String, D::Error> {
-        deserializer.deserialize_map(self)
-    }
-}
-impl<'de> Visitor<'de> for RestoreApplication<'_> {
-    type Value = String;
-    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("native restore application receipt")
-    }
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<String, A::Error> {
-        let mut seen = 0u8;
-        let mut evidence = None;
-        let mut metadata = Some(self.0);
-        while let Some(key) = map.next_key::<String>()? {
-            let bit = match key.as_str() {
-                "fence" => 1,
-                "candidateDigest" => 2,
-                "nativeSourceManifestDigest" => 4,
-                "admitted" => 8,
-                "localHeadSequence" => 16,
-                "hostCoordinate" => 32,
-                "recordedAtMs" => 64,
-                _ => return Err(A::Error::custom("unknown restore application field")),
-            };
-            if seen & bit != 0 {
-                return Err(A::Error::custom("duplicate restore application field"));
-            }
-            seen |= bit;
-            if bit == 8 {
-                evidence = Some(
-                    map.next_value_seed(
-                        metadata
-                            .take()
-                            .ok_or_else(|| A::Error::custom("duplicate admitted field"))?,
-                    )?,
-                );
-            } else {
-                map.next_value::<serde::de::IgnoredAny>()?;
-            }
-        }
-        if seen != 127 {
-            return Err(A::Error::custom("missing restore application field"));
-        }
-        evidence.ok_or_else(|| A::Error::custom("missing admitted field"))
-    }
-}
-
 pub(super) struct NativeMetadata {
     pub accepted: RelayAcceptedLiveUpdate,
     pub evidence_digest: String,
@@ -463,8 +413,7 @@ fn parse(
     previous: &str,
     ordinal: i64,
 ) -> Result<NativeMetadata, ApplicationError> {
-    let application = expression == "application_json";
-    let prefix = if application { "$.admitted" } else { "$" };
+    let prefix = "$";
     let facts = format!(
         "SELECT rowid,length(CAST({expression} AS BLOB)),json_array_length({expression},'{prefix}.firstSeen'),length(CAST(json_extract({expression},'{prefix}.accepted') AS BLOB)),json_extract({expression},'{prefix}.canonicalVersion'),json_type({expression},'{prefix}.checkpointCoverage'),coalesce(json_array_length({expression},'{prefix}.firstSeenDeletes'),0)+coalesce((SELECT sum(coalesce(json_array_length(value,'$.structRanges'),0)+coalesce(json_array_length(value,'$.deletionRanges'),0)) FROM json_each({expression},'{prefix}.checkpointCoverage')),0) {source}"
     );
@@ -501,11 +450,7 @@ fn parse(
         .checked_add(usize::try_from(extra_ranges).map_err(|_| ApplicationError::Corrupt)?)
         .and_then(|n| n.checked_mul(76))
         .and_then(|n| {
-            n.checked_add(
-                NativeHistoryReconstruction::HEADER_BYTES * (if application { 2 } else { 1 })
-                    + 2 * 128 * 1024
-                    + 32,
-            )
+            n.checked_add(NativeHistoryReconstruction::HEADER_BYTES + 2 * 128 * 1024 + 32)
         })
         .ok_or(ApplicationError::Corrupt)?;
     if (canonical_version.is_some() && canonical_version != Some(2))
@@ -534,48 +479,21 @@ fn parse(
         )
         .map_err(read_sql)??;
     accepted.validate().map_err(|_| ApplicationError::Corrupt)?;
-    let evidence_digest = if application {
-        // SQLite rejects incremental handles on tables with generated columns.
-        // Borrow its value for one parse; never re-query the whole JSON per chunk.
-        conn.query_row(
-            &format!("SELECT {expression} {source}"),
-            parameters.as_slice(),
-            |r| {
-                let bytes = r.get_ref(0)?.as_str()?.as_bytes();
-                Ok(if bytes.len() != length {
-                    Err(ApplicationError::Corrupt)
-                } else {
-                    parse_evidence(
-                        SqlJson::new(bytes, length),
-                        &accepted,
-                        count,
-                        previous,
-                        ordinal,
-                        true,
-                        canonical_version,
-                    )
-                })
-            },
-        )
-        .map_err(read_sql)??
-    } else {
-        // The incremental API accepts TEXT columns as raw bytes too.
-        let blob = conn
-            .blob_open("main", table, expression, rowid, true)
-            .map_err(read_sql)?;
-        if blob.len() != length {
-            return Err(ApplicationError::Corrupt);
-        }
-        parse_evidence(
-            SqlJson::new(blob, length),
-            &accepted,
-            count,
-            previous,
-            ordinal,
-            false,
-            canonical_version,
-        )?
-    };
+    // The incremental API accepts TEXT columns as raw bytes too.
+    let blob = conn
+        .blob_open("main", table, expression, rowid, true)
+        .map_err(read_sql)?;
+    if blob.len() != length {
+        return Err(ApplicationError::Corrupt);
+    }
+    let evidence_digest = parse_evidence(
+        SqlJson::new(blob, length),
+        &accepted,
+        count,
+        previous,
+        ordinal,
+        canonical_version,
+    )?;
     Ok(NativeMetadata {
         accepted,
         evidence_digest,
@@ -590,7 +508,6 @@ fn parse_evidence(
     count: usize,
     previous: &str,
     ordinal: i64,
-    application: bool,
     canonical_version: Option<u8>,
 ) -> Result<String, ApplicationError> {
     let mut de = serde_json::Deserializer::from_reader(reader);
@@ -601,12 +518,9 @@ fn parse_evidence(
         ordinal,
         canonical_version,
     };
-    let evidence_digest = if application {
-        RestoreApplication(metadata).deserialize(&mut de)
-    } else {
-        metadata.deserialize(&mut de)
-    }
-    .map_err(|_| ApplicationError::Corrupt)?;
+    let evidence_digest = metadata
+        .deserialize(&mut de)
+        .map_err(|_| ApplicationError::Corrupt)?;
     de.end().map_err(|_| ApplicationError::Corrupt)?;
     Ok(evidence_digest)
 }
@@ -654,142 +568,6 @@ pub(super) fn metadata(
     Ok(result)
 }
 
-pub(super) fn restore_association(
-    conn: &Connection,
-    held: &Registration,
-    id: &str,
-    next: &RelayAcceptedLiveUpdate,
-    previous_generation: Option<i64>,
-    state_digest: Option<&str>,
-) -> Result<(), ApplicationError> {
-    identifier(id, 512)?;
-    let b = &next.binding;
-    let (old, generation, accepted, candidate, content):(i64,i64,String,String,String)=conn.query_row(
-        "SELECT old_generation,new_generation,json_extract(application_json,'$.admitted.accepted'),proposal_candidate_sha256,json_extract(proposal_json,'$.finalContentDigest') FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2 AND workspace_id=?3 AND main_version_id=?4 AND object_id=?5 AND application_delivery_id=?6 AND EXISTS(SELECT 1 FROM live_device_update_applications a WHERE a.relay_database_namespace=?1 AND a.delivery_id=?6) AND json_extract(input_json,'$.operationId')=?2 AND json_extract(input_json,'$.relayDatabaseNamespace')=?1 AND json_extract(input_json,'$.oldBinding')=json_extract(application_json,'$.fence.operation.oldBinding') AND json_extract(input_json,'$.newFence')=json_extract(application_json,'$.fence.operation.newFence') AND json_extract(application_json,'$.fence.operation.operationId')=?2 AND json_extract(application_json,'$.fence.operation.oldBinding.workspaceId')=?3 AND json_extract(application_json,'$.fence.operation.oldBinding.mainVersionId')=?4 AND json_extract(application_json,'$.fence.operation.oldBinding.objectId')=?5 AND json_extract(application_json,'$.fence.operation.oldBinding.lineageClaimId')=?7 AND json_extract(application_json,'$.fence.operation.oldBinding.restoreFenceGeneration')=old_generation AND json_extract(application_json,'$.fence.operation.newFence')=new_generation AND json_extract(application_json,'$.candidateDigest')=proposal_candidate_sha256 AND length(CAST(proposal_candidate_sha256 AS BLOB))=64 AND length(CAST(json_extract(proposal_json,'$.finalContentDigest') AS BLOB))=64 AND length(CAST(json_extract(application_json,'$.admitted.accepted') AS BLOB))<=?8",
-        params![held.namespace,id,b.workspace_id,b.main_version_id,b.object_id,next.receipt.delivery_id,b.lineage_claim_id,NativeHistoryReconstruction::HEADER_BYTES as i64],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).map_err(read_sql)?;
-    let saved: RelayAcceptedLiveUpdate =
-        serde_json::from_str(&accepted).map_err(|_| ApplicationError::Corrupt)?;
-    digest(&candidate)?;
-    digest(&content)?;
-    if saved != *next
-        || old < 0
-        || old.checked_add(1) != Some(generation)
-        || generation != b.restore_fence_generation
-        || previous_generation.is_some_and(|previous| previous != old)
-        || candidate != next.receipt.update_digest
-        || !matches!(
-            next.authority,
-            ServerDerivedLiveUpdateAuthority::Owner { .. }
-        )
-    {
-        return Err(ApplicationError::Corrupt);
-    }
-    // The same transaction committed this public checkpoint and the prepared
-    // final content digest. Reopen only the checkpoint, not its old proof blobs.
-    if let Some(state) = state_digest {
-        let mut budget = restore_content::Budget {
-            remaining: crate::limits::MAX_YDOC_UPDATE_BYTES,
-        };
-        let bytes = budget.blob(conn, state)?;
-        let doc = Ydoc::wire();
-        doc.apply(&bytes)?;
-        validate_baseline(conn, held, &doc, &bytes, false)?;
-        if doc.canonical_content_sha256() != content {
-            return Err(ApplicationError::Corrupt);
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn restore_metadata(
-    conn: &Connection,
-    held: &Registration,
-    id: &str,
-    count: i64,
-    evidence: &str,
-) -> Result<(), ApplicationError> {
-    let p = parameters(held);
-    let previous = if count == 1 {
-        initial_digest(&held.namespace, &held.binding)?
-    } else {
-        conn.query_row(&format!("SELECT evidence_digest FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6 AND length(CAST(evidence_digest AS BLOB))=64"),params![p[0],p[1],p[2],p[3],p[4],count-1],|r|r.get(0)).map_err(read_sql)?
-    };
-    let saved=parse(conn,"live_restore_fences","application_json","FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2 AND workspace_id=?3 AND main_version_id=?4 AND object_id=?5".into(),vec![&p[0],&id,&p[1],&p[2],&p[3]],&previous,count)?;
-    if saved.evidence_digest != evidence {
-        return Err(ApplicationError::Corrupt);
-    }
-    Ok(())
-}
-
-/// [`super::require_transition`] for native state: a restore's application,
-/// after any restores cancelled at `tip`, or the first event after them.
-pub(super) fn transition(
-    conn: &Connection,
-    held: &Registration,
-    previous: &LiveObjectBinding,
-    tip: &Tip<'_>,
-    next: &RelayAcceptedLiveUpdate,
-    evidence: &str,
-) -> Result<(), ApplicationError> {
-    let from = previous.restore_fence_generation;
-    if from == next.binding.restore_fence_generation {
-        return Ok(());
-    }
-    let fence:Option<(String,i64)>=conn.query_row("SELECT operation_id,old_generation FROM live_restore_fences WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND application_delivery_id=?5",params![held.namespace,held.binding.workspace_id,held.binding.main_version_id,held.binding.object_id,next.receipt.delivery_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(read_sql)?;
-    let Some((id, fenced)) = fence else {
-        return restore_fence::require_cancelled(
-            conn,
-            held,
-            from,
-            next.binding.restore_fence_generation,
-            tip,
-        );
-    };
-    if fenced != from {
-        restore_fence::require_cancelled(conn, held, from, fenced, tip)?;
-    }
-    restore_association(conn, held, &id, next, Some(fenced), None)?;
-    let p = parameters(held);
-    let saved=parse(conn,"live_restore_fences","application_json","FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2 AND workspace_id=?3 AND main_version_id=?4 AND object_id=?5".into(),vec![&p[0],&id,&p[1],&p[2],&p[3]],tip.evidence,tip.count+1)?;
-    if saved.accepted != *next || saved.evidence_digest != evidence {
-        return Err(ApplicationError::Corrupt);
-    }
-    Ok(())
-}
-
-pub(super) fn validate_blob_hash(conn: &Connection, digest: &str) -> Result<(), ApplicationError> {
-    let (rowid, declared, actual): (i64, i64, i64) = conn
-        .query_row(
-            "SELECT rowid,byte_length,length(bytes) FROM binary_blobs WHERE sha256=?1",
-            [digest],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .map_err(read_sql)?;
-    if declared != actual || !(1..=crate::limits::MAX_YDOC_UPDATE_BYTES as i64).contains(&actual) {
-        return Err(ApplicationError::Corrupt);
-    };
-    let mut hash = Sha256::new();
-    let mut blob = conn
-        .blob_open("main", "binary_blobs", "bytes", rowid, true)
-        .map_err(read_sql)?;
-    if blob.len() != actual as usize {
-        return Err(ApplicationError::Corrupt);
-    }
-    let mut chunk = vec![0; CHUNK];
-    let mut offset = 0usize;
-    while offset < actual as usize {
-        let count = (actual as usize - offset).min(CHUNK);
-        blob.read_exact(&mut chunk[..count])
-            .map_err(|_| ApplicationError::Corrupt)?;
-        hash.update(&chunk[..count]);
-        offset += count;
-    }
-    if dohc_engine_storage::hex(&hash.finalize()) != digest {
-        return Err(ApplicationError::Corrupt);
-    };
-    Ok(())
-}
-
 /// Accepted state through `through`. Each blob it replays is charged to
 /// `budget` before it is read, on top of each record's own bound.
 pub(super) fn read(
@@ -797,7 +575,7 @@ pub(super) fn read(
     held: &Registration,
     through: i64,
     policy: NativeHistoryReconstruction,
-    budget: &mut restore_content::Budget,
+    budget: &mut budget::Budget,
 ) -> Result<Ydoc, ApplicationError> {
     if policy.working_reserve_bytes == 0 || policy.reservation_bytes().is_none() {
         return Err(ApplicationError::ConfiguredByteBudgetExceeded);
@@ -806,7 +584,7 @@ pub(super) fn read(
         conn,
         held,
         through,
-        &mut restore_content::Budget {
+        &mut budget::Budget {
             remaining: usize::MAX,
         },
         CheckpointRead::NativeState {
@@ -834,7 +612,6 @@ pub(super) fn read(
         .map_err(read_sql)?;
     let mut count = c.event_count;
     let mut cursor = c.terminal.as_ref().map_or(0, |r| r.journal_cursor);
-    let mut terminal = c.terminal;
     let mut evidence = c.evidence_digest;
     let mut binding = c.binding;
     let mut bytes = 0;
@@ -867,18 +644,7 @@ pub(super) fn read(
         {
             return Err(ApplicationError::Corrupt);
         }
-        transition(
-            conn,
-            held,
-            &binding,
-            &Tip {
-                terminal: terminal.as_ref(),
-                count,
-                evidence: &evidence,
-            },
-            &metadata.accepted,
-            &metadata.evidence_digest,
-        )?;
+        require_same_generation(&binding, &metadata.accepted.binding)?;
         {
             let update = budget.blob(conn, &update)?;
             if update.is_empty() {
@@ -896,7 +662,6 @@ pub(super) fn read(
         cursor = next_cursor;
         evidence = metadata.evidence_digest;
         binding = metadata.accepted.binding;
-        terminal = Some(metadata.accepted.receipt);
     }
     if cursor != through {
         return Err(ApplicationError::Conflict);
@@ -1102,117 +867,5 @@ mod tests {
         let reader = SqlJson::new(blob, json.len());
         let parsed: Vec<String> = serde_json::from_reader(reader).unwrap();
         assert_eq!(parsed, vec!["🦀\"é"]);
-    }
-
-    #[test]
-    fn restore_json_with_generated_columns_uses_constant_queries_and_bounded_tokens() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE restores(application_json TEXT, generation INTEGER GENERATED ALWAYS AS (json_extract(application_json,'$.fence.generation')) VIRTUAL)").unwrap();
-        let accepted: RelayAcceptedLiveUpdate =
-            serde_json::from_str(super::super::tests::ACCEPTED_COMPLETE).unwrap();
-        let metadata = AdmittedLiveUpdateMetadata {
-            accepted,
-            first_seen: (0..60000)
-                .map(|client_id| LiveUpdateStructRange {
-                    client_id,
-                    start_clock: 0,
-                    end_clock: 1,
-                })
-                .collect(),
-
-            canonical_version: None,
-
-            author_snapshot: None,
-
-            first_seen_deletes: None,
-
-            checkpoint_coverage: None,
-        };
-        let application = serde_json::json!({
-            "fence": {"generation": 1}, "candidateDigest": "0".repeat(64),
-            "nativeSourceManifestDigest": "0".repeat(64), "admitted": metadata,
-            "localHeadSequence": 1, "hostCoordinate": {}, "recordedAtMs": 1,
-        });
-        let json = serde_json::to_string(&application).unwrap();
-        assert!(json.len() > 10 * CHUNK);
-        conn.execute(
-            "INSERT INTO restores(application_json) VALUES (?1)",
-            [&json],
-        )
-        .unwrap();
-        assert!(conn
-            .blob_open("main", "restores", "application_json", 1, true)
-            .is_err());
-        let queries = count_reads(&mut conn);
-        let previous = "0".repeat(64);
-        let parsed = parse(
-            &conn,
-            "restores",
-            "application_json",
-            "FROM restores".into(),
-            vec![],
-            &previous,
-            1,
-        )
-        .unwrap();
-        assert_eq!(
-            parsed.evidence_digest,
-            next_digest(&previous, 1, &metadata).unwrap()
-        );
-        assert!(
-            queries.load(Ordering::Relaxed) <= 4,
-            "three statements plus the coverage subquery, independent of chunks"
-        );
-        for token in [
-            serde_json::json!("x".repeat(STRING_TOKEN_BYTES + 1)),
-            serde_json::json!(10000000000000000_u64),
-        ] {
-            let mut damaged = application.clone();
-            // Ignored restore fields still pass through the token guard.
-            damaged["hostCoordinate"] = token;
-            conn.execute(
-                "UPDATE restores SET application_json=?1",
-                [damaged.to_string()],
-            )
-            .unwrap();
-            assert!(parse(
-                &conn,
-                "restores",
-                "application_json",
-                "FROM restores".into(),
-                vec![],
-                &previous,
-                1
-            )
-            .is_err());
-        }
-    }
-
-    #[test]
-    fn incremental_blob_hash_checks_length_and_content_without_chunk_queries() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE binary_blobs(sha256 TEXT PRIMARY KEY, byte_length INTEGER, bytes BLOB)",
-        )
-        .unwrap();
-        let bytes = vec![42; 12 * CHUNK + 17];
-        let digest = hex_sha256(&bytes);
-        conn.execute(
-            "INSERT INTO binary_blobs VALUES (?1,?2,?3)",
-            params![digest, bytes.len() as i64, bytes],
-        )
-        .unwrap();
-        let queries = count_reads(&mut conn);
-        validate_blob_hash(&conn, &digest).unwrap();
-        assert!(queries.load(Ordering::Relaxed) <= 2);
-        conn.execute("UPDATE binary_blobs SET byte_length=byte_length+1", [])
-            .unwrap();
-        assert!(validate_blob_hash(&conn, &digest).is_err());
-        conn.execute(
-            "UPDATE binary_blobs SET byte_length=byte_length-1,bytes=zeroblob(length(bytes))",
-            [],
-        )
-        .unwrap();
-        assert!(validate_blob_hash(&conn, &digest).is_err());
     }
 }

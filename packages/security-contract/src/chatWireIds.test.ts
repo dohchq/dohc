@@ -4,6 +4,7 @@ import {
   GENERAL_CHANNEL_WIRE_ID,
   agentChannelWireId,
   agentIdForChannelWireId,
+  isWorkspaceGroup,
 } from "./chatWireIds";
 
 describe("agentIdForChannelWireId", () => {
@@ -31,5 +32,25 @@ describe("agentIdForChannelWireId", () => {
 describe("agentChannelWireId", () => {
   it.each(["default", "terminal", `p-${"a".repeat(26)}`])("names the chat of %s", (agentId) => {
     expect(agentIdForChannelWireId(agentChannelWireId(agentId))).toBe(agentId);
+  });
+});
+
+describe("isWorkspaceGroup", () => {
+  it("names an ordinary channel a Group", () => {
+    expect(isWorkspaceGroup("wire-team", "channel")).toBe(true);
+  });
+
+  it.each([
+    [GENERAL_CHANNEL_WIRE_ID, "channel"],
+    [AGENT_CHANNEL_WIRE_ID, "channel"],
+    [agentChannelWireId("helper"), "channel"],
+    [`${AGENT_CHANNEL_WIRE_ID}_Not-An-Agent`, "channel"],
+    ["wire-team", "dm"],
+    ["wire-team", "agent"],
+    ["wire-team", null],
+    ["", "channel"],
+    [null, "channel"],
+  ])("never names %s with kind %s a Group", (wireId, kind) => {
+    expect(isWorkspaceGroup(wireId, kind)).toBe(false);
   });
 });

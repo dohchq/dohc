@@ -330,6 +330,9 @@ describe("workspace member routes", () => {
     expect(parse(`/sync/${WORKSPACE}/members/unknown`)).toBeNull();
     expect(parse(`/sync/${WORKSPACE}/members/m-1/unknown`)).toBeNull();
     expect(parse("/sync/members/other")).toBeNull();
+    expect(parseRoute({ url: "http://relay.test/sync/members/groups" })).toEqual({
+      route: "members-group-create",
+    });
     // A workspace may be called "members".
     expect(parseRoute({ url: "http://relay.test/sync/members/members" })).toEqual({
       route: "members",
@@ -432,6 +435,82 @@ describe("what a member reaches", () => {
     expect((await uploadBlob(h, "ana", shareId, "an edit")).status).toBe(200);
   });
 
+  it("lets Comment and Edit post, reply and react in a Group, never in General, a direct message or an agent chat", async () => {
+    const { h } = await seed();
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    let seq = 0;
+    // A refused batch takes no sequence numbers.
+    const append = async (ops: Array<{ opKind: string; payload: Record<string, unknown> }>) => {
+      const response = await post(h, "ana", `/sync/shares/${shareId}/log`, {
+        originId: "origin-ana-matrix",
+        ops: ops.map((op, index) => ({
+          ...op,
+          originSeq: seq + index,
+          recordedAtMs: 7000 + seq + index,
+        })),
+      });
+      if (response.status === 200) seq += ops.length;
+      return response;
+    };
+    const reply = (messageId: string, threadId: string, parentMessageId: string) =>
+      chatMessageAppend(messageId, threadId, "a reply", { authorUserId: "ana", parentMessageId });
+    const react = (threadId: string, messageId: string) => ({
+      opKind: "chat.reaction.set",
+      payload: {
+        reactionId: `r-${threadId}-${seq}`,
+        messageId,
+        threadId,
+        emoji: "👍",
+        authorId: "ana",
+        authorKind: "human",
+        authorDisplayName: "Ana",
+        state: "added",
+        atMs: 7000,
+      },
+    });
+    for (const level of ["comment", "edit"] as const) {
+      expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level })).status).toBe(
+        200,
+      );
+      const posted = await append([
+        chatMessageAppend(`m-${level}`, "t-team", "hello", { authorUserId: "ana" }),
+      ]);
+      expect(posted.status, await posted.clone().text()).toBe(200);
+      const replied = await append([reply(`m-${level}-reply`, "t-team", "msg-team")]);
+      expect(replied.status, await replied.clone().text()).toBe(200);
+      const reacted = await append([react("t-team", "msg-team")]);
+      expect(reacted.status, await reacted.clone().text()).toBe(200);
+      for (const [threadId, messageId] of [
+        ["t-general", "msg-general"],
+        ["t-dm", "msg-dm"],
+        ["t-agent", "msg-agent"],
+      ] as const) {
+        for (const ops of [
+          [chatMessageAppend(`m-${level}-${threadId}`, threadId, "hello", { authorUserId: "ana" })],
+          [reply(`m-${level}-${threadId}-reply`, threadId, messageId)],
+          [react(threadId, messageId)],
+        ]) {
+          const refused = await append(ops);
+          expect(refused.status, `${level} ${threadId} ${ops[0]!.opKind}`).toBe(403);
+          expect(await code(refused)).toBe("share_op_rejected");
+        }
+      }
+    }
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "view" })).status,
+    ).toBe(200);
+    for (const ops of [
+      [chatMessageAppend("m-view", "t-team", "hello", { authorUserId: "ana" })],
+      [reply("m-view-reply", "t-team", "msg-team")],
+      [react("t-team", "msg-team")],
+    ]) {
+      const refused = await append(ops);
+      expect(refused.status).toBe(403);
+      expect(await code(refused)).toBe("share_read_only");
+    }
+  });
+
   it("starts a thread with its first message in one batch, on a file or in a Group", async () => {
     const { h } = await seed();
     await invited(h, "ana");
@@ -507,6 +586,162 @@ describe("what a member reaches", () => {
     const text = JSON.stringify(await json(notices));
     expect(text).toContain("Name owner added you to Community");
     expect(text).not.toContain(`${OWNER}@`);
+  });
+});
+
+describe("a member's share view", () => {
+  // The owner's computer names a person with no profile name "You".
+  async function ownerPostsAsYou(h: SyncRelayHandler) {
+    await ownerAppend(h, [
+      logOp(
+        "chat.message.append",
+        chatMessageAppend("msg-you", "t-team", "from the owner", {
+          authorUserId: OWNER,
+          authorDisplayName: "You",
+        }).payload,
+      ),
+      logOp("chat.message.append", {
+        ...chatMessageAppend("msg-agent-you", "t-team", "from the owner's agent", {
+          authorUserId: OWNER,
+          authorDisplayName: "Helper",
+        }).payload,
+        authorKind: "agent",
+        authorOwnerDisplayName: "You",
+      }),
+    ]);
+  }
+  function served(ops: unknown, messageId: string): Record<string, unknown> {
+    const op = (ops as Array<{ opKind: string; payload: Record<string, unknown> }>).find(
+      (entry) => entry.opKind === "chat.message.append" && entry.payload.messageId === messageId,
+    );
+    expect(op, messageId).toBeDefined();
+    return op!.payload;
+  }
+
+  it("names every person by their account, never as the owner's computer named them", async () => {
+    const { h } = await seed();
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    await ownerPostsAsYou(h);
+    const { ops } = await json(await pull(h, "ana", shareId));
+    expect(served(ops, "msg-you")).toMatchObject({
+      authorKind: "human",
+      authorDisplayName: "Name owner",
+    });
+    expect(served(ops, "msg-agent-you")).toMatchObject({
+      authorKind: "agent",
+      authorDisplayName: "Helper",
+      authorOwnerDisplayName: "Name owner",
+    });
+    expect(served(ops, "msg-team")).toMatchObject({ authorDisplayName: "Name owner" });
+  });
+
+  it("names a person with no account name as the Members page does", async () => {
+    const { h } = await seed({
+      overrides: {
+        lookupUserDisplayName: (userId: string) => (userId === OWNER ? null : `Name ${userId}`),
+      },
+    });
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    await ownerPostsAsYou(h);
+    const { ops } = await json(await pull(h, "ana", shareId));
+    expect(served(ops, "msg-you")).toMatchObject({ authorDisplayName: "No name" });
+    expect(served(ops, "msg-agent-you")).toMatchObject({ authorOwnerDisplayName: "No name" });
+    expect(JSON.stringify(ops)).not.toContain(`${OWNER}@`);
+  });
+
+  async function info(h: SyncRelayHandler, userId: string, shareId: string) {
+    return h(request(userId, `/sync/shares/${shareId}`));
+  }
+  async function access(h: SyncRelayHandler, userId: string, shareId: string) {
+    return h(request(userId, `/sync/shares/${shareId}/access`));
+  }
+
+  it("names the workspace, the role and the level for a member", async () => {
+    const { h } = await seed();
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    const response = await info(h, "ana", shareId);
+    expect(response.status).toBe(200);
+    // A member reaches Members by the workspace's id, as the owner does.
+    expect(await json(response)).toMatchObject({
+      shareId,
+      workspaceId: WORKSPACE,
+      subjectName: "Community",
+      selector: { kind: "workspace", role: "member" },
+      access: "comment",
+    });
+    expect(await json(await access(h, "ana", shareId))).toEqual({
+      status: "current",
+      access: "comment",
+      role: "member",
+    });
+  });
+
+  it("names the admin role with Edit", async () => {
+    const { h } = await seed();
+    const ana = await invited(h, "ana");
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
+    ).toBe(200);
+    const shareId = await shareIdOf(h, "ana");
+    expect(await json(await info(h, "ana", shareId))).toMatchObject({
+      subjectName: "Community",
+      selector: { kind: "workspace", role: "admin" },
+      access: "edit",
+    });
+    expect(await json(await access(h, "ana", shareId))).toEqual({
+      status: "current",
+      access: "edit",
+      role: "admin",
+    });
+  });
+
+  // The owner's own listing, which About's Access and `dohc access object` read, names each member's role as the Members page does.
+  it("names each membership's role in the owner's listing", async () => {
+    const { h } = await seed();
+    const ana = await invited(h, "ana");
+    await invited(h, "ben");
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
+    ).toBe(200);
+    const listing = await json(await h(request(OWNER, `/sync/shares?workspaceId=${WORKSPACE}`)));
+    const memberships = (listing.granted as Array<Record<string, unknown>>).filter(
+      (row) => (row.selector as { kind?: string } | null)?.kind === "workspace",
+    );
+    expect(
+      memberships.map((row) => [row.recipientUserId, row.selector, row.access]).sort(),
+    ).toEqual([
+      ["ana", { kind: "workspace", role: "admin" }, "edit"],
+      ["ben", { kind: "workspace", role: "member" }, "comment"],
+    ]);
+  });
+
+  it("says a removed member's access was removed", async () => {
+    const { h } = await seed();
+    const ana = await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/remove`)).status).toBe(200);
+    for (const response of [await info(h, "ana", shareId), await access(h, "ana", shareId)]) {
+      expect(response.status).toBe(404);
+      expect(await code(response)).toBe("share_access_removed");
+    }
+    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/let-back-in`)).status).toBe(
+      200,
+    );
+    expect((await info(h, "ana", shareId)).status).toBe(200);
+  });
+
+  it("says access was removed when the owner ends the membership", async () => {
+    const { h } = await seed();
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/end`)).status).toBe(200);
+    for (const response of [await info(h, "ana", shareId), await access(h, "ana", shareId)]) {
+      expect(response.status).toBe(404);
+      expect(await code(response)).toBe("share_access_removed");
+    }
   });
 });
 
@@ -729,9 +964,116 @@ describe("who may change members", () => {
   });
 });
 
+describe("an admin's new Group", () => {
+  function createGroup(
+    h: SyncRelayHandler,
+    as: string,
+    shareId: string,
+    body: Record<string, unknown> = { name: "Events" },
+  ) {
+    return post(h, as, "/sync/members/groups", { shareId, ...body });
+  }
+  async function admin(h: SyncRelayHandler, userId: string) {
+    const memberId = await invited(h, userId);
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${memberId}/role`, { role: "admin" }))
+        .status,
+    ).toBe(200);
+    return { memberId, shareId: await shareIdOf(h, userId) };
+  }
+
+  it("writes the Group into the owner's log from a relay origin, and every member reaches it", async () => {
+    const { h } = await seed();
+    const ana = await admin(h, "ana");
+    await invited(h, "ben");
+    const created = await createGroup(h, "ana", ana.shareId, {
+      name: "Events",
+      type: "chat",
+      purpose: "Plan the fair",
+    });
+    expect(created.status, await created.clone().text()).toBe(200);
+    const { channelWireId, name } = (await json(created)) as {
+      channelWireId: string;
+      name: string;
+    };
+    expect(name).toBe("Events");
+    const ownerLog = await json(await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0`)));
+    const op = (
+      ownerLog.ops as Array<{ opKind: string; originId: string; payload: Record<string, unknown> }>
+    ).find(
+      (entry) => entry.opKind === "chat.channel.create" && entry.payload.wireId === channelWireId,
+    );
+    expect(op).toBeDefined();
+    expect(op!.originId).toBe(`relay:workspace-admin:${ana.memberId}`);
+    expect(op!.payload).toEqual({
+      channelId: channelWireId,
+      wireId: channelWireId,
+      name: "Events",
+      slug: "events",
+      kind: "channel",
+      type: "chat",
+      purpose: "Plan the fair",
+      createdAtMs: expect.any(Number),
+    });
+    // An ordinary Group: no invite, and a member posts in it.
+    expect(await pulledText(h, "ben", await shareIdOf(h, "ben"))).toContain(channelWireId);
+  });
+
+  it("refuses a member, a removed admin, and an admin whose owner's account is fenced", async () => {
+    const { h, storage } = await seed();
+    const ana = await admin(h, "ana");
+    const cara = await admin(h, "cara");
+    await invited(h, "ben");
+    const refusedMember = await createGroup(h, "ben", await shareIdOf(h, "ben"));
+    expect(refusedMember.status).toBe(403);
+    expect(await code(refusedMember)).toBe("members_forbidden");
+    // Another person's share names no workspace of theirs.
+    expect((await createGroup(h, "ben", ana.shareId)).status).toBe(403);
+
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${cara.memberId}/remove`)).status,
+    ).toBe(200);
+    expect((await createGroup(h, "cara", cara.shareId)).status).toBe(404);
+    const ownerLog = await json(await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0`)));
+    expect(JSON.stringify(ownerLog)).not.toContain("relay:workspace-admin:");
+
+    const key = "account-deletion-key-at-least-32-bytes";
+    const context = storage as unknown as StorageContext;
+    initializeAccountDeletion(context, key);
+    fenceAccount(context, key, OWNER, `${OWNER}@dohc.test`);
+    expect((await createGroup(h, "ana", ana.shareId)).status).toBe(404);
+  });
+
+  it("refuses a name no Group can have", async () => {
+    const { h } = await seed();
+    const ana = await admin(h, "ana");
+    for (const name of [
+      "",
+      "   ",
+      "x".repeat(81),
+      "line\nbreak",
+      "My agent",
+      "my-agent-helper",
+      "!!!",
+      7,
+    ]) {
+      expect(
+        (await createGroup(h, "ana", ana.shareId, { name })).status,
+        JSON.stringify(name),
+      ).toBe(400);
+    }
+    expect(
+      (await createGroup(h, "ana", ana.shareId, { name: "Events", type: "files" })).status,
+    ).toBe(400);
+    expect(
+      (await createGroup(h, "ana", ana.shareId, { name: "Events", purpose: "a\nb" })).status,
+    ).toBe(400);
+  });
+});
+
 describe("the invite link", () => {
   it("lets people join, and resetting or turning it off keeps everyone who joined", async () => {
-    const { h } = await seed();
+    const { h, storage } = await seed();
     const first = await inviteLink(h, OWNER, "turn-on");
     expect(first).not.toBeNull();
 
@@ -740,15 +1082,31 @@ describe("the invite link", () => {
       workspaceName: "Community",
       ownerName: "Name owner",
       alreadyMember: false,
+      grantId: null,
     });
     const joined = await join(h, "cara", first!);
     expect(joined.status).toBe(200);
-    expect(await json(joined)).toMatchObject({
-      workspaceId: WORKSPACE,
-      workspaceName: "Community",
-    });
-    expect((await join(h, "cara", first!)).status).toBe(200);
     const caraShare = await shareIdOf(h, "cara");
+    // The answer names the person's own grant, which opens the workspace in a browser.
+    const caraGrant = storage.listActiveShareGrantsForRecipient(caraShare, "cara")[0]!.grantId;
+    expect(await json(joined)).toEqual({
+      workspaceId: WORKSPACE,
+      shareId: caraShare,
+      workspaceName: "Community",
+      grantId: caraGrant,
+    });
+    expect(await json(await join(h, "cara", first!))).toMatchObject({ grantId: caraGrant });
+    expect(
+      await json(await post(h, "cara", "/sync/members/join-preview", { token: first })),
+    ).toEqual({
+      workspaceName: "Community",
+      ownerName: "Name owner",
+      alreadyMember: true,
+      grantId: caraGrant,
+    });
+    expect(
+      await json(await post(h, OWNER, "/sync/members/join-preview", { token: first })),
+    ).toMatchObject({ alreadyMember: true, grantId: null });
 
     const second = await inviteLink(h, OWNER, "reset");
     expect(second).not.toBe(first);
@@ -850,11 +1208,140 @@ describe("ending access", () => {
     await heldRead((h) => post(h, "ana", `/sync/${WORKSPACE}/members/leave`));
   });
 
-  it("ends a held read when the level changes; the member then reads at the new level", async () => {
-    await heldRead(
-      (h) => post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "view" }),
-      200,
+  it("answers a held read with one empty page marked levelChanged when the level changes", async () => {
+    const activity = new DiscussionActivityHub();
+    const { h } = await seed({ activity });
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    const first = await json(await pull(h, "ana", shareId));
+    const controller = new AbortController();
+    const held = h(
+      request("ana", `/sync/shares/${shareId}/log?limit=500&since=${first.nextCursor}&hold=30000`, {
+        signal: controller.signal,
+      }),
     );
+    try {
+      await expect.poll(() => activity.stats().waiters).toBe(1);
+      expect(
+        (await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "view" })).status,
+      ).toBe(200);
+      const response = await held;
+      expect(response.status).toBe(200);
+      expect(await json(response)).toMatchObject({
+        ops: [],
+        hasMore: false,
+        nextCursor: first.nextCursor,
+        levelChanged: true,
+      });
+      // The access check that follows names who changed it.
+      expect(await json(await h(request("ana", `/sync/shares/${shareId}/access`)))).toEqual({
+        status: "current",
+        access: "view",
+        role: "member",
+        levelChangedBy: `Name ${OWNER}`,
+      });
+      const after = await pull(h, "ana", shareId);
+      expect(after.status).toBe(200);
+      expect(await json(after)).not.toHaveProperty("levelChanged");
+    } finally {
+      controller.abort();
+      await held.catch(() => undefined);
+    }
+  });
+
+  // A level change that lands while no read waits: the next held read says
+  // the level it knew, and the relay compares that with its own record.
+  it("answers a held read at once when the level it knew is not the stored level", async () => {
+    const activity = new DiscussionActivityHub();
+    const { h } = await seed({ activity });
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    const first = await json(await pull(h, "ana", shareId));
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "edit" })).status,
+    ).toBe(200);
+    const read = (knew: string) =>
+      h(
+        request(
+          "ana",
+          `/sync/shares/${shareId}/log?limit=500&since=${first.nextCursor}&hold=30000&level=${knew}`,
+        ),
+      );
+    const response = await read("comment");
+    expect(response.status).toBe(200);
+    expect(await json(response)).toMatchObject({
+      ops: [],
+      hasMore: false,
+      nextCursor: first.nextCursor,
+      levelChanged: true,
+    });
+    expect(activity.stats().waiters).toBe(0);
+  });
+
+  it.each([
+    ["the stored level", "edit"],
+    ["an unknown level", "owner"],
+  ])("holds a read that knew %s", async (_case, knew) => {
+    const activity = new DiscussionActivityHub();
+    const { h } = await seed({ activity });
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    const first = await json(await pull(h, "ana", shareId));
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "edit" })).status,
+    ).toBe(200);
+    const controller = new AbortController();
+    const held = h(
+      request(
+        "ana",
+        `/sync/shares/${shareId}/log?limit=500&since=${first.nextCursor}&hold=30000&level=${knew}`,
+        { signal: controller.signal },
+      ),
+    );
+    try {
+      await expect.poll(() => activity.stats().waiters).toBe(1);
+    } finally {
+      controller.abort();
+      await held.catch(() => undefined);
+    }
+  });
+
+  it("names who changed the level from its own record, never from the request", async () => {
+    const { h } = await seed();
+    await invited(h, "ana");
+    const kai = await invited(h, "kai");
+    const shareId = await shareIdOf(h, "ana");
+    const access = async () => json(await h(request("ana", `/sync/shares/${shareId}/access`)));
+    // No one has changed the level yet.
+    expect(await access()).toEqual({ status: "current", access: "comment", role: "member" });
+    expect(
+      (
+        await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, {
+          level: "view",
+          levelChangedBy: "Mallory",
+          actorUserId: "kai",
+        })
+      ).status,
+    ).toBe(200);
+    expect(await access()).toEqual({
+      status: "current",
+      access: "view",
+      role: "member",
+      levelChangedBy: `Name ${OWNER}`,
+    });
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${kai}/role`, { role: "admin" })).status,
+    ).toBe(200);
+    await shareIdOf(h, "kai");
+    expect(
+      (await post(h, "kai", `/sync/${WORKSPACE}/members/level`, { level: "edit" })).status,
+    ).toBe(200);
+    expect(await access()).toEqual({
+      status: "current",
+      access: "edit",
+      role: "member",
+      levelChangedBy: "Name kai",
+    });
   });
 
   it("ends everyone's access when the owner ends the membership", async () => {

@@ -123,7 +123,7 @@ it("keeps all link levels and dependents without changing non-Edit automation re
   const steps: ReachStep[] = [
     { kind: "change-records", collection: { path: "Trip", name: "Trip" } },
     { kind: "find-records", collection: { path: "Budget", name: "Budget" } },
-    { kind: "post", group: { channelWireId: "wire", name: "Group" } },
+    { kind: "post", target: "group", group: { channelWireId: "wire", name: "Group" } },
   ];
   const automation = {
     id: "automation",

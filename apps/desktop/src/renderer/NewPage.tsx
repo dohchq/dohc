@@ -126,7 +126,9 @@ export function NewPage(props: {
               <div className={PROPERTIES_LINE} />
             </div>
           </div>
-          <div className="dohc-notion-editor">
+          {/* The measure the editor's own wrapper (.dohc-tiptap-editor) sets,
+              so the body starts on the title's left edge. */}
+          <div className="dohc-notion-editor [--dohc-editor-measure:720px]">
             {/* The empty body shows its hint while the caret is still in the
                 title, where the editor draws it, so nothing changes when the
                 caret or the editor arrives. */}

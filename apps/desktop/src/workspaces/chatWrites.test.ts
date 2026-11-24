@@ -119,7 +119,7 @@ function fixture() {
       messages: [],
       nextAfterMessageOrder: 0,
     })),
-    findThreadChannelId: vi.fn(async () => {
+    findThreadChannelId: vi.fn(async (): Promise<string | null> => {
       await reach("channel");
       return "channel";
     }),
@@ -198,6 +198,7 @@ function fixture() {
     projectChatBookmarks: vi.fn(),
     queueCloudSync: vi.fn(),
     syncSharedChannelsForChatTarget: vi.fn(async () => undefined),
+    pushShareViewChat: vi.fn(async () => undefined),
     scanChatDispatch: vi.fn(async () => undefined),
     notifyRenderer: vi.fn(),
   };
@@ -892,6 +893,168 @@ describe("chat writes", () => {
       expectNothingWritten(test);
     },
   );
+
+  describe("a joined workspace", () => {
+    const JOINED_REACH = "In a joined workspace you can post in Groups and comment on files only.";
+    function member(access: "view" | "comment" | "edit", extra: { ended?: true } = {}) {
+      const test = fixture();
+      delete test.row.remote;
+      test.row.shareView = {
+        shareId: "membership",
+        granterEmail: null,
+        genericChatWritable: false,
+        relayUrl: "https://relay.test",
+        recipientUserId: "user-1",
+        grantedSelector: { paths: [], versionId: null, access, wholeWorkspace: true },
+        ...extra,
+      };
+      return test;
+    }
+
+    it.each(["comment", "edit"] as const)(
+      "posts, replies and reacts in a Group at %s as the account that joined",
+      async (access) => {
+        for (const kind of ["send", "start", "react", "answer"] as const) {
+          const test = member(access);
+          await test.writeEach[kind]();
+          const written =
+            kind === "send" || kind === "answer"
+              ? test.store.sendMessage.mock.calls[0]?.[0]
+              : kind === "start"
+                ? test.store.startChannelThread.mock.calls[0]?.[0]
+                : undefined;
+          if (written) expect(written.authorUserId).toBe("user-1");
+          else expect(test.store.setReaction.mock.calls[0]?.[0].author.authorId).toBe("user-1");
+          await vi.waitFor(() =>
+            expect(test.effects.pushShareViewChat).toHaveBeenCalledWith("workspace"),
+          );
+          expect(test.effects.queueCloudSync).not.toHaveBeenCalled();
+        }
+      },
+    );
+
+    it.each<[string, { wire?: string; kind?: "dm" }]>([
+      ["General", { wire: "channel_wire_general_v1" }],
+      ["a direct message", { kind: "dm" }],
+      ["an agent's chat", { wire: "channel_wire_agent_v1" }],
+    ])("refuses a post in %s", async (_name, place) => {
+      const test = member("comment");
+      if (place.wire) test.store.getChannelWireId.mockResolvedValue(place.wire);
+      if (place.kind)
+        test.store.listChannels.mockResolvedValue([
+          {
+            id: "channel",
+            workspaceId: "workspace",
+            name: "Ana",
+            slug: "ana",
+            kind: place.kind,
+            type: "chat",
+            purpose: "",
+            createdAtMs: 1,
+            updatedAtMs: 1,
+            threadCount: 1,
+            unreadCount: 0,
+          },
+        ]);
+      for (const kind of ["send", "start", "react"] as const) {
+        await expect(test.writeEach[kind]()).rejects.toThrow(JOINED_REACH);
+      }
+      expectNothingWritten(test);
+    });
+
+    // A file's thread: no channel, and the file it is about.
+    function onFile(test: ReturnType<typeof member>, linked = true) {
+      test.store.findThreadChannelId.mockResolvedValue(null);
+      test.store.getThread.mockResolvedValue({
+        thread: {
+          id: "thread",
+          workspaceId: "workspace",
+          title: "Food",
+          createdAtMs: 1,
+          updatedAtMs: 1,
+          ...(linked
+            ? { linkedFile: { objectId: "object", pathHint: "plans/day-1.md", linkedAtMs: 1 } }
+            : {}),
+        },
+        channel: null,
+        messageCount: 1,
+      });
+    }
+
+    it.each(["comment", "edit"] as const)(
+      "comments on a file and replies on its thread at %s as the account that joined",
+      async (access) => {
+        const test = member(access);
+        const thread = await test.writes.createFileThread(test.place, {
+          title: "Food",
+          linkedFile: async () => ({ objectId: "object", pathHint: "plans/day-1.md" }),
+        });
+        expect(thread.linkedFile?.objectId).toBe("object");
+        await vi.waitFor(() =>
+          expect(test.effects.pushShareViewChat).toHaveBeenCalledWith("workspace"),
+        );
+        onFile(test);
+        await test.writeEach.send();
+        expect(test.store.sendMessage.mock.calls[0]?.[0].authorUserId).toBe("user-1");
+        await vi.waitFor(() => expect(test.effects.pushShareViewChat).toHaveBeenCalledTimes(2));
+        expect(test.effects.queueCloudSync).not.toHaveBeenCalled();
+      },
+    );
+
+    it("refuses a file comment signed out or as another account", async () => {
+      for (const credentials of [null, signedIn("user-2")]) {
+        const test = member("comment");
+        test.setCredentials(credentials);
+        const linkedFile = vi.fn(async () => ({ objectId: "object", pathHint: "plans/day-1.md" }));
+        await expect(
+          test.writes.createFileThread(test.place, { title: "Food", linkedFile }),
+        ).rejects.toThrow(
+          "This computer is signed in to a different account than the one the owner invited.",
+        );
+        expect(linkedFile).not.toHaveBeenCalled();
+        expectNothingWritten(test);
+      }
+    });
+
+    it("refuses a reply on a thread that is in no Group and on no file", async () => {
+      const test = member("comment");
+      onFile(test, false);
+      await expect(test.writeEach.send()).rejects.toThrow(JOINED_REACH);
+      expectNothingWritten(test);
+    });
+
+    it.each(["send", "start", "react", "answer", "answerWith", "file"] as const)(
+      "refuses %s at View and after the membership ends",
+      async (kind) => {
+        for (const [test, refusal] of [
+          [member("view"), "Only people who can comment post here."],
+          [member("comment", { ended: true }), "Your membership ended."],
+        ] as const) {
+          const write =
+            kind === "file"
+              ? test.writes.createFileThread(test.place, {
+                  title: "Notes",
+                  linkedFile: async () => ({ objectId: "o", pathHint: "n.md" }),
+                })
+              : test.writeEach[kind]();
+          await expect(write).rejects.toThrow(refusal);
+          expect(test.store.findThreadChannelId).not.toHaveBeenCalled();
+          expectNothingWritten(test);
+        }
+      },
+    );
+
+    it("refuses a post signed out or as another account", async () => {
+      for (const credentials of [null, signedIn("user-2")]) {
+        const test = member("comment");
+        test.setCredentials(credentials);
+        await expect(test.writeEach.send()).rejects.toThrow(
+          "This computer is signed in to a different account than the one the owner invited.",
+        );
+        expectNothingWritten(test);
+      }
+    });
+  });
 
   it.each(["send", "start", "react", "answer", "answerWith"] as const)(
     "requires the joined account to %s in a joined channel",

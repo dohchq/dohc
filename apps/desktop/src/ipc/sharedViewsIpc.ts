@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { normalizeRootPath } from "@dohc/workspace-core";
 import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
 import {
   type OpenSharedViewPayload,
@@ -27,9 +28,9 @@ import {
   type fetchShareViewInfo,
   type fetchShareViewAccess,
   type probeShareViewLog,
+  type ShareViewSelector,
 } from "../workspaces/shareViewInfo";
 import type { RendererWorkspaceOperationSession } from "../window/rendererWorkspaceOperation";
-import { assertMountableSelector } from "../workspaces/shareMounts";
 import {
   SHARE_VIEW_REOPEN_MESSAGE,
   shareViewIdentityIsIntact,
@@ -44,6 +45,7 @@ import {
 import { type ShareAccess, shareAccessRank } from "@dohc/security-contract/share-selector";
 import { waitForReceivedShareCaptureReady } from "../workspaces/receivedShareCaptureReady";
 import { workspaceSummaryFor } from "../workspaces/workspaceSummaryProjection";
+import { joinedByAccount } from "../workspaces/shareWriteGate";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { RegistryEntry, ShareViewIdentity } from "../workspaces/registryStore";
 import type { CreatedWorkspace } from "../workspaces/createWorkspaceFolder";
@@ -51,10 +53,14 @@ import { cloudSyncFolderCancelledError } from "../workspaces/cloudSyncFolder";
 import type { createJoinedWorkspaceRunner } from "../workspaces/createJoinedWorkspace";
 import type { WorkspaceAuthorityBinding } from "../workspaces/workspaceAuthorityOwner";
 import type { ShareViewFiles } from "../workspaces/shareViewFiles";
+import type { ShareViewPullCommitted } from "../workspaces/sharedView";
 import type { withStaleSensitiveWorkspaceOperation } from "../workspaces/workspaceAssets";
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type { setWorkspaceShareView } from "../workspaces/WorkspaceRegistry";
 import type { WorkspaceActivityScope } from "./workspaceActivityBroadcast";
+
+// How long a held pull waits at the relay, under its 30 s limit.
+const SHARE_VIEW_HOLD_MS = 25_000;
 
 export function registerSharedViewsIpcHandlers<
   Sender,
@@ -107,6 +113,7 @@ export function registerSharedViewsIpcHandlers<
   >;
   openWorkspaceActivity(workspace: CreatedWorkspace): Promise<unknown>;
   requireWorkspace(workspaceId: string): RegistryEntry;
+  listWorkspaces(): readonly RegistryEntry[];
   notifyRenderer(scope?: WorkspaceActivityScope): void;
   syncNotices(isCurrent: () => boolean): Promise<void>;
   recordShareViewStoreRefusal(
@@ -118,6 +125,9 @@ export function registerSharedViewsIpcHandlers<
   // still restore, so the view resumes. Decides for itself whether the
   // recheck is due; a refresh only says the view is ended.
   recheckRemovedShares?(workspaceId: string): Promise<void>;
+  // Whether this attachment has the document open in a live session, which
+  // shows each change as it lands.
+  showsLive(attachmentId: symbol, path: string): boolean;
 }): void {
   const {
     registerHandler,
@@ -142,6 +152,7 @@ export function registerSharedViewsIpcHandlers<
     receivedShareEngine,
     openWorkspaceActivity,
     requireWorkspace,
+    listWorkspaces,
     notifyRenderer,
     recordShareViewStoreRefusal,
     recheckRemovedShares,
@@ -256,7 +267,8 @@ export function registerSharedViewsIpcHandlers<
   // Receive side: open a pasted share code as a READ-ONLY shared view.
   // Mirrors the join flow's ordering guarantees: everything is validated
   // before local state exists, the token only ever goes to the signed-in
-  // relay, and a failed first pull rolls the whole thing back.
+  // relay, and a failed first pull rolls the whole thing back. A membership
+  // keeps what its first pull brought instead, unless it ended.
   async function openSharedView(input: OpenSharedViewPayload, context?: { event: Event }) {
     const parsed = parseShareCode(input.shareCode);
     if (!parsed) {
@@ -297,6 +309,10 @@ export function registerSharedViewsIpcHandlers<
           "dohc cannot open this share because the server did not say what it shares. Try again later.",
         );
       }
+      // fetch rejects with a TypeError when no answer arrives.
+      if (error instanceof TypeError) {
+        throw new Error("dohc could not reach the server. Check your connection.");
+      }
       throw error;
     }
     // A chat code has no file selector, so there is no scope to
@@ -304,9 +320,46 @@ export function registerSharedViewsIpcHandlers<
     // grant of "everything" (the mount path says the same through
     // assertMountableSelector).
     assertOpenIdentity();
-    assertMountableSelector(info.selector);
+    if (info.selector === null) {
+      throw new Error("This code is for a shared group. Join it from Chats instead of opening it.");
+    }
     const grantedSelector = info.selector;
     const rootPath = usableRoot(input.rootPath);
+    // A membership's first pull can be long. One that failed kept what arrived
+    // in this folder, and opening the same folder again continues it.
+    const membership = grantedSelector.wholeWorkspace === true;
+    const membershipName = info.subjectName ?? "the workspace";
+    const unfinished = (error: unknown) =>
+      new Error(
+        `dohc could not finish reading ${membershipName}: ${causeOf(error)}. What arrived stays in ${rootPath}. Try again continues from there.`,
+      );
+    const kept = membership
+      ? listWorkspaces().find(
+          (entry) =>
+            normalizeRootPath(entry.rootPath, process.platform) ===
+              normalizeRootPath(rootPath, process.platform) &&
+            entry.shareView?.shareId === parsed.shareId &&
+            entry.shareView.recipientUserId === credentials.userId &&
+            entry.shareView.ended !== true &&
+            (entry.shareView.grantedSelector as { wholeWorkspace?: unknown } | undefined)
+              ?.wholeWorkspace === true,
+        )
+      : undefined;
+    if (kept) {
+      await engineDaemonStartup();
+      try {
+        await firstPull(kept.rootPath, kept.workspaceId);
+      } catch (error) {
+        if (error instanceof ShareUnavailableError)
+          throw new Error(
+            `Your membership of ${membershipName} ended. What arrived stays in ${rootPath}.`,
+          );
+        throw unfinished(error);
+      } finally {
+        notifyRenderer();
+      }
+      return { workspace: workspaceSummaryFor(requireWorkspace(kept.workspaceId)) };
+    }
     const existingEntries = await readdir(rootPath).catch((error: unknown) => {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw error;
@@ -324,6 +377,7 @@ export function registerSharedViewsIpcHandlers<
     // arrives with the first pull below, and a shared view must never seed
     // starter files of its own.
     await mkdir(rootPath, { recursive: true });
+    let pullFailure = null as { error: unknown } | null;
     const created = await createJoinedWorkspace({
       workspaceId: randomUUID(),
       rootPath,
@@ -343,6 +397,7 @@ export function registerSharedViewsIpcHandlers<
           grantedSelector: statedEdit ? { ...grantedSelector, access: "view" } : grantedSelector,
           ...(statedEdit ? { editingNotReady: true as const } : {}),
           receivedIdentity: info.receivedIdentity,
+          ...membershipPlace(info),
           // Persist the origin relay so a later refresh signed into a different
           // relay is skipped instead of misreading a 404 as "share ended".
           relayUrl: credentials.relayUrl,
@@ -382,22 +437,12 @@ export function registerSharedViewsIpcHandlers<
           }
         }
         refreshNativeWorkspaceSurfaces();
-        const reconciled = await withStaleSensitiveWorkspaceOperation(created.rootPath, (lease) =>
-          shareViewFiles.reconcile(
-            lease,
-            { kind: "standalone", workspaceId: created.workspaceId },
-            "refresh",
-          ),
-        );
-        if (reconciled.kind !== "refresh") {
-          throw new Error("Shared view refresh returned an invalid result.");
-        }
-        const outcome = reconciled.outcome;
-        if ("ok" in outcome && !outcome.ok) {
-          throw new Error(outcome.errorMessage);
-        }
-        if (outcome.status === "ended") {
-          throw new ShareUnavailableError();
+        try {
+          await firstPull(created.rootPath, created.workspaceId);
+        } catch (error) {
+          // A membership keeps what arrived, unless it ended.
+          if (!membership || error instanceof ShareUnavailableError) throw error;
+          pullFailure = { error };
         }
       },
       rollbackLabel: "open-share",
@@ -430,8 +475,25 @@ export function registerSharedViewsIpcHandlers<
     // Through the PROJECTION, not a raw parse: the level lives under the
     // record's pinned grant, and a raw parse would strip it and hand the
     // renderer a fresh share view with no level to state.
+    if (pullFailure) throw unfinished(pullFailure.error);
     const summary = workspaceSummaryFor(requireWorkspace(created.workspaceId));
     return { workspace: summary };
+  }
+
+  async function firstPull(rootPath: string, workspaceId: string): Promise<void> {
+    const reconciled = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      shareViewFiles.reconcile(lease, { kind: "standalone", workspaceId }, "refresh"),
+    );
+    if (reconciled.kind !== "refresh") {
+      throw new Error("Shared view refresh returned an invalid result.");
+    }
+    const outcome = reconciled.outcome;
+    if ("ok" in outcome && !outcome.ok) {
+      throw new Error(outcome.errorMessage);
+    }
+    if (outcome.status === "ended") {
+      throw new ShareUnavailableError();
+    }
   }
 
   const pullCache = new Map<
@@ -444,6 +506,9 @@ export function registerSharedViewsIpcHandlers<
       relayUrl: string;
       nextCursor?: number;
       credentialGeneration: number;
+      // A membership's level as this computer knows it, which its held pull
+      // names. Cleared once the relay says it differs, until a check moves it.
+      level?: ShareViewSelector["access"];
     }
   >();
   const cacheClosers = new Map<Sender, () => void>();
@@ -458,18 +523,11 @@ export function registerSharedViewsIpcHandlers<
     credentialGeneration: number,
     share: { recipientUserId?: string; relayUrl?: string } | undefined,
   ) {
-    const isCurrent = () => {
-      const credentials = currentCredentials();
-      return (
-        session.isCurrent() &&
-        !retirement.aborted &&
-        dependencies.currentCredentialGeneration() === credentialGeneration &&
-        !!credentials?.relayUrl &&
-        share?.recipientUserId === credentials.userId &&
-        !!share.relayUrl &&
-        relayUrlsMatch(credentials.relayUrl, share.relayUrl)
-      );
-    };
+    const isCurrent = () =>
+      session.isCurrent() &&
+      !retirement.aborted &&
+      dependencies.currentCredentialGeneration() === credentialGeneration &&
+      joinedByAccount(share, currentCredentials());
     if (!isCurrent()) return;
     void dependencies.syncNotices(isCurrent);
   }
@@ -478,7 +536,9 @@ export function registerSharedViewsIpcHandlers<
     event: Event,
     input: RefreshSharedViewPayload,
     pressBurst: boolean,
+    held: boolean,
   ): Promise<RefreshSharedViewResult> {
+    const heldResult = held ? { held: true as const } : {};
     const session = dependencies.currentRendererSession(event.sender);
     const retirement =
       session &&
@@ -567,23 +627,32 @@ export function registerSharedViewsIpcHandlers<
           closed = true;
           controller.abort();
         });
-        const timeout = setTimeout(() => controller.abort(), 10_000);
+        const timeout = setTimeout(
+          () => controller.abort(),
+          held ? SHARE_VIEW_HOLD_MS + 10_000 : 10_000,
+        );
         try {
           const probe = await dependencies.probeShareViewLog({
             relay: { baseUrl: credentials.relayUrl, token: credentials.token },
             shareId: cached.shareId,
             since: cached.nextCursor,
             signal: AbortSignal.any([controller.signal, retirement!]),
+            ...(held
+              ? { hold: SHARE_VIEW_HOLD_MS, ...(cached.level ? { level: cached.level } : {}) }
+              : {}),
           });
+          if (probe.levelChanged) delete cached.level;
           controller.signal.throwIfAborted();
           scoped.assertCurrent();
-          if (probe.unchanged) {
+          if (probe.unchanged || probe.levelChanged) {
             if (pressBurst)
               syncSharedViewNotices(session!, retirement!, credentialGeneration, cached);
             return {
               ok: true,
               status: "unchanged",
               probed: true,
+              ...heldResult,
+              ...(probe.levelChanged ? { levelChanged: true } : {}),
               changedPaths: 0,
               excludedPaths: [],
               unjournalablePaths: [],
@@ -617,6 +686,27 @@ export function registerSharedViewsIpcHandlers<
           clearTimeout(timeout);
           stopClose();
         }
+      }
+    } else {
+      // Signed in as another account, a refresh asks the relay nothing and
+      // says why. Signed out, the local refresh still runs. A copy that does
+      // not record its server is checked by account alone.
+      const view = requireWorkspace(input.workspaceId).shareView;
+      const credentials = currentCredentials();
+      if (
+        view &&
+        !view.ended &&
+        credentials &&
+        shareViewIdentityIsIntact(view) &&
+        !joinedByAccount({ ...view, relayUrl: view.relayUrl || credentials.relayUrl }, credentials)
+      ) {
+        return {
+          ok: false,
+          probed: true,
+          changedPaths: 0,
+          errorKind: "unauthorized",
+          errorMessage: "Sign in to the account that received this share.",
+        };
       }
     }
     clearCache(event.sender);
@@ -788,6 +878,10 @@ export function registerSharedViewsIpcHandlers<
                   granterEmail: current.shareView.granterEmail ?? info.granterEmail,
                   subjectName: info.subjectName,
                   sharerName: info.sharerName,
+                  ...(recordedShareSelector(current.shareView.grantedSelector)?.wholeWorkspace ===
+                  true
+                    ? membershipPlace(info)
+                    : {}),
                 };
                 if (
                   identityRecorded ||
@@ -841,6 +935,7 @@ export function registerSharedViewsIpcHandlers<
           }
           let outcome;
           let nextCursor: number | undefined;
+          let pulled: ShareViewPullCommitted["changes"] = [];
           try {
             const reconciled = await withStaleSensitiveWorkspaceOperation(
               workspace.rootPath,
@@ -849,8 +944,9 @@ export function registerSharedViewsIpcHandlers<
                   lease,
                   { kind: "standalone", workspaceId: workspace.workspaceId },
                   "refresh",
-                  (cursor) => {
-                    nextCursor = cursor;
+                  (committed) => {
+                    nextCursor = committed.cursor;
+                    pulled = committed.changes;
                   },
                 ),
             );
@@ -898,6 +994,7 @@ export function registerSharedViewsIpcHandlers<
               relayUrl: workspace.shareView.relayUrl,
               nextCursor,
               credentialGeneration,
+              ...membershipLevel(workspace.shareView.grantedSelector),
             });
             const clear = () => clearCache(event.sender);
             const stopClose = dependencies.onSenderClosed(event.sender, clear);
@@ -908,6 +1005,17 @@ export function registerSharedViewsIpcHandlers<
             });
           } else clearCache(event.sender);
           if (outcome.status === "ended") refreshNativeWorkspaceSurfaces();
+          // Every change came from the pull and wrote a document open in a live
+          // session, which already shows it. Reopening that session would drop
+          // what the person types while it reconnects.
+          const shownLive =
+            outcome.changedPaths > 0 &&
+            pulled.length === outcome.changedPaths &&
+            pulled.every(
+              (change) =>
+                change.operation === "write" &&
+                dependencies.showsLive(workspace.attachmentId, change.path),
+            );
           if (
             pressBurst ||
             outcome.changedPaths > 0 ||
@@ -929,7 +1037,11 @@ export function registerSharedViewsIpcHandlers<
               editingNotReady: true,
               ...(outcome.collisionRecordQuarantined ? { collisionRecordQuarantined: true } : {}),
             });
-          return RefreshSharedViewResult.parse(outcome);
+          return RefreshSharedViewResult.parse(
+            outcome.status === "ended"
+              ? outcome
+              : { ...outcome, ...heldResult, ...(shownLive ? { shownLive: true } : {}) },
+          );
         }),
     );
   }
@@ -947,9 +1059,10 @@ export function registerSharedViewsIpcHandlers<
       openSharedView,
       refreshSharedView: async (input, { event }) => {
         const pressBurst = input.trigger === "press-burst";
-        if (pressBurst) input = { ...input, trigger: "background" };
+        const held = input.trigger === "held";
+        if (pressBurst || held) input = { ...input, trigger: "background" };
         try {
-          return await refreshSharedView(event, input, pressBurst);
+          return await refreshSharedView(event, input, pressBurst, held);
         } catch (error) {
           if (input.trigger !== "background" || !(error instanceof RelayUnauthorizedError))
             throw error;
@@ -1012,14 +1125,7 @@ export function registerSharedViewsIpcHandlers<
               if (!view || !pin) return { status: "unverified" };
               if (!shareViewIdentityIsIntact(view)) return { status: "needs-reopen" };
               if (view.ended) return { status: "ended" };
-              if (
-                !credentials?.relayUrl ||
-                !view.relayUrl ||
-                !relayUrlsMatch(credentials.relayUrl, view.relayUrl) ||
-                view.recipientUserId !== credentials.userId
-              ) {
-                return { status: "unverified" };
-              }
+              if (!joinedByAccount(view, credentials)) return { status: "unverified" };
               const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
               const readAccess = () =>
                 dependencies.fetchShareViewAccess({
@@ -1029,14 +1135,14 @@ export function registerSharedViewsIpcHandlers<
                 });
               const pinnedLevel = () =>
                 recordedShareSelector(operation.workspace.shareView?.grantedSelector)?.access;
-              let statedAccess;
+              let stated;
               let levelAtRead: ShareAccess | undefined = pin.access;
               try {
-                statedAccess = await readAccess();
+                stated = await readAccess();
                 if (pinnedLevel() !== levelAtRead) {
                   scoped.assertCurrent();
                   levelAtRead = pinnedLevel();
-                  statedAccess = await readAccess();
+                  stated = await readAccess();
                 }
               } catch (error) {
                 scoped.assertCurrent();
@@ -1070,14 +1176,48 @@ export function registerSharedViewsIpcHandlers<
                 workspace.workspaceId,
                 accessStatementsFor(workspace.workspaceId) + 1,
               );
+              const statedAccess = stated.access;
               // Preserve the file/version pin. A metadata read can narrow access,
               // but cannot expand the scope this local copy was admitted with.
+              // A membership's level is the owner's member level now, so it also
+              // rises; its whole-workspace scope stays as pinned.
               const currentView = operation.workspace.shareView;
               const currentPin = recordedShareSelector(currentView?.grantedSelector);
               if (!currentView || currentView.shareId !== view.shareId || !currentPin)
                 return { status: "unverified" };
               if (currentView.ended) return { status: "ended" };
               if (currentPin.access !== levelAtRead) return { status: "unverified" };
+              // A membership's level is the owner's member level, so it also rises.
+              // Edit waits until the copy's identity is recorded, as a refresh does.
+              if (
+                currentPin.wholeWorkspace === true &&
+                shareAccessRank(statedAccess) > shareAccessRank(currentPin.access)
+              ) {
+                const raised = { ...currentPin, access: statedAccess };
+                const ready =
+                  statedAccess !== "edit" ||
+                  (await recordShareViewIdentity({
+                    ...operation.workspace,
+                    shareView: { ...currentView, grantedSelector: raised },
+                  }).catch((error: unknown) => {
+                    console.error("[desktop] share view identity:", error);
+                    return false;
+                  }));
+                scoped.assertCurrent();
+                const latest = operation.workspace.shareView;
+                if (
+                  ready &&
+                  latest?.shareId === view.shareId &&
+                  !latest.ended &&
+                  recordedShareSelector(latest.grantedSelector)?.access === currentPin.access
+                ) {
+                  const next = { ...latest, grantedSelector: raised };
+                  delete next.editingNotReady;
+                  await setWorkspaceShareView(workspace.workspaceId, next);
+                  refreshNativeWorkspaceSurfaces();
+                  notifyRenderer({ workspaceId: workspace.workspaceId, summaryChanged: true });
+                }
+              }
               if (shareAccessRank(statedAccess) < shareAccessRank(currentPin.access)) {
                 await narrowShareViewLevel({
                   workspaceId: workspace.workspaceId,
@@ -1108,15 +1248,49 @@ export function registerSharedViewsIpcHandlers<
               const committed = operation.workspace.shareView;
               if (committed?.ended) return { status: "ended" };
               const committedPin = recordedShareSelector(committed?.grantedSelector);
-              return committed?.shareId === view.shareId && committedPin
+              if (committed?.shareId !== view.shareId || !committedPin)
+                return { status: "unverified" };
+              // Only a membership has a role, and a level that the owner changes
+              // for everyone; the window says so when this check moved it. The
+              // view keeps the role for main's menus and the window's next start.
+              if (
+                committedPin.wholeWorkspace === true &&
+                stated.role &&
+                committed.role !== stated.role
+              ) {
+                await setWorkspaceShareView(workspace.workspaceId, {
+                  ...committed,
+                  role: stated.role,
+                });
+                notifyRenderer({ workspaceId: workspace.workspaceId, summaryChanged: true });
+              }
+              const pulling = pullCache.get(event.sender);
+              if (
+                pulling?.workspaceId === workspace.workspaceId &&
+                pulling.shareId === view.shareId
+              ) {
+                Object.assign(pulling, membershipLevel(committedPin));
+              }
+              const statesMore =
+                shareAccessRank(statedAccess) > shareAccessRank(committedPin.access)
+                  ? { relayStatesMore: true as const }
+                  : {};
+              return committedPin.wholeWorkspace === true
                 ? {
                     status: "current",
                     access: committedPin.access,
-                    ...(shareAccessRank(statedAccess) > shareAccessRank(committedPin.access)
-                      ? { relayStatesMore: true as const }
+                    ...(stated.role ? { role: stated.role } : {}),
+                    ...(committedPin.access !== levelAtRead
+                      ? {
+                          levelChanged: true,
+                          ...(stated.levelChangedBy
+                            ? { levelChangedBy: stated.levelChangedBy }
+                            : {}),
+                        }
                       : {}),
+                    ...statesMore,
                   }
-                : { status: "unverified" };
+                : { status: "current", access: committedPin.access, ...statesMore };
             },
           );
         } catch {
@@ -1129,4 +1303,28 @@ export function registerSharedViewsIpcHandlers<
       },
     },
   );
+}
+
+// Where a membership sits on the relay: the role it last named, and the
+// owner's workspace id that Members routes name. Neither grants anything.
+function membershipPlace(info: {
+  role?: "owner" | "admin" | "member";
+  membersWorkspaceId?: string;
+}) {
+  return {
+    ...(info.role === "admin" || info.role === "member" ? { role: info.role } : {}),
+    ...(info.membersWorkspaceId ? { membersWorkspaceId: info.membersWorkspaceId } : {}),
+  };
+}
+
+// A membership's level follows the relay both ways, so its held pull names
+// it. A path share's pin never rises, so naming its level could only repeat.
+function membershipLevel(selector: unknown): { level?: ShareViewSelector["access"] } {
+  const pin = recordedShareSelector(selector);
+  return pin?.wholeWorkspace === true ? { level: pin.access } : {};
+}
+
+function causeOf(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/\.+$/u, "") || "the server stopped answering";
 }

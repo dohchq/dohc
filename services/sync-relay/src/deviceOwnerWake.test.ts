@@ -181,8 +181,12 @@ it("wakes document and desktop listeners when the device becomes ready and close
     becameReady = deferred<void>();
   const documentWake = vi.fn(() => becameReady.resolve()),
     desktopWake = vi.fn();
-  changes.subscribe(documentWake, document);
-  changes.subscribe(desktopWake, { workspaceId: binding.workspaceId, objectId: "waiting-object" });
+  changes.subscribe(documentWake, { kind: "applied", document });
+  changes.subscribe(desktopWake, {
+    kind: "object",
+    workspaceId: binding.workspaceId,
+    objectId: "waiting-object",
+  });
   const f = await fixture(changes);
   try {
     await becameReady.promise;

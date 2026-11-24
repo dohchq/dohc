@@ -1,3 +1,4 @@
+import type { MemberFolders } from "./shareFilter";
 import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
 import { reusePreparedStatements } from "./storage/preparedStatements";
 import * as workReferenceStorage from "./storage/workReferences";
@@ -139,6 +140,7 @@ import * as appCollectionStorage from "./storage/appCollections";
 import * as noticeStorage from "./storage/notices";
 import * as pushStorage from "./storage/pushSubscriptions";
 import * as pushDeviceStorage from "./storage/pushDevices";
+import { recordAccountName } from "./storage/accountNames";
 import * as automationHostStorage from "./storage/automationHosts";
 import * as automationWorkspaceStorage from "./storage/automationWorkspaces";
 import * as accountWorkspaceStorage from "./storage/accountWorkspaces";
@@ -380,6 +382,7 @@ export function openSyncRelayStorage(
     owner = createOwner ? createOwner(db) : new RelayWriteOwner(db);
     if (createOwner) options.opened?.("continuity");
     owner.write(() => initializeSyncRelaySchema(db));
+    watchLiveAuthorityWrites(db);
     options.opened?.("schema");
     const storage = new SqliteSyncRelayStorage(
       reusePreparedStatements(db),
@@ -672,8 +675,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       serviceHostEnrollmentStorage.ServiceHostEnrollment,
       "workspaceId" | "objectId" | "ownerUserId" | "shareId" | "path"
     >,
+    nowMs?: number,
   ) {
-    return serviceHostEnrollmentStorage.serviceHostEnrollmentCovered(this, enrollment);
+    return serviceHostEnrollmentStorage.serviceHostEnrollmentCovered(this, enrollment, nowMs);
   }
   serviceHostDocumentEnabled(document: { workspaceId: string; objectId: string }) {
     return serviceHostEnrollmentStorage.serviceHostDocumentEnabled(this, document);
@@ -944,6 +948,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     input: pushStorage.BindPushSubscriptionInput,
   ): pushStorage.PushSubscriptionRow {
     return pushStorage.bindPushSubscription(this, input);
+  }
+  recordAccountName(userId: string, name: string | null): void {
+    recordAccountName(this, userId, name);
   }
 
   removePushSubscription(input: { installationId: string; userId: string }): void {
@@ -1349,6 +1356,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   commitPersonalCollectionWrite(input: collectionWriteStorage.CommitPersonalCollectionWriteInput) {
     return collectionWriteStorage.commitPersonalCollectionWrite(this, input);
+  }
+
+  memberFolders(workspaceId: string, userId: string): MemberFolders | null {
+    return collectionWriteStorage.memberFolders(this, workspaceId, userId);
   }
 
   automationSwitchableFolder(workspaceId: string, folder: string): boolean {
@@ -1793,6 +1804,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   workspaceRoleOf(...args: Parameters<SyncRelayStorage["workspaceRoleOf"]>) {
     return workspaceMembersStorage.workspaceRoleOf(this, ...args);
   }
+  workspaceLevelChangedBy(...args: Parameters<SyncRelayStorage["workspaceLevelChangedBy"]>) {
+    return workspaceMembersStorage.workspaceLevelChangedBy(this, ...args);
+  }
+  createWorkspaceGroup(...args: Parameters<SyncRelayStorage["createWorkspaceGroup"]>) {
+    return workspaceMembersStorage.createWorkspaceGroup(this, ...args);
+  }
   readWorkspaceMembers(...args: Parameters<SyncRelayStorage["readWorkspaceMembers"]>) {
     return workspaceMembersStorage.readWorkspaceMembers(this, ...args);
   }
@@ -1972,6 +1989,24 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return objectIndexStorage.findChannelCreateKind(this, workspaceId, channelWireId);
   }
 
+  listChannelCreates(
+    workspaceId: string,
+  ): ReturnType<typeof objectIndexStorage.listChannelCreates> {
+    return objectIndexStorage.listChannelCreates(this, workspaceId);
+  }
+
+  findThreadCreateLane(workspaceId: string, threadId: string): "posts" | "chat" | undefined {
+    return objectIndexStorage.findThreadCreateLane(this, workspaceId, threadId);
+  }
+
+  findThreadFirstMessageId(workspaceId: string, threadId: string): string | undefined {
+    return objectIndexStorage.findThreadFirstMessageId(this, workspaceId, threadId);
+  }
+
+  findChannelChatThread(workspaceId: string, channelWireId: string): string | null {
+    return objectIndexStorage.findChannelChatThread(this, workspaceId, channelWireId);
+  }
+
   findChannelCreateFolderPath(
     workspaceId: string,
     channelWireId: string,
@@ -2059,21 +2094,42 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return this.owner.write(run);
   }
 
-  tx<T>(run: () => T): T {
+  /**
+   * A document limits the write to that document's journal and delivery
+   * state, which no connection on another document is authorized by. Live
+   * connections on other documents then skip their standing check.
+   * `NO_LIVE_AUTHORITY` skips every live connection's check, unless the write
+   * changed the schema or a table in `LIVE_AUTHORITY_TABLES`.
+   */
+  tx<T>(run: () => T, scope?: RelayWriteScope): T {
     if (!hasRelayWriteObservers(this)) return this.owner.write(run);
-    const revision = this.db.prepare(
-      "SELECT total_changes() AS changes,(SELECT schema_version FROM pragma_schema_version) AS schema_version",
-    );
-    const before = JSON.stringify(revision.get());
+    const revision = this.db
+      .prepare(`SELECT total_changes() AS changes,(SELECT schema_version FROM pragma_schema_version) AS schema_version,
+      ${LIVE_AUTHORITY_WRITE_COUNT} AS authority`);
+    const before = revision.get()!;
     try {
       return this.owner.write(run);
     } finally {
       // A committed write must not fail because this read did, so a failed read counts as a change.
-      let changed = true;
       try {
-        changed = this.unavailable.aborted || JSON.stringify(revision.get()) !== before;
-      } catch {}
-      if (changed) notifyRelayWrite(this);
+        const after = this.unavailable.aborted ? undefined : revision.get()!;
+        if (!after) notifyRelayWrite(this);
+        else if (
+          after.changes !== before.changes ||
+          after.schema_version !== before.schema_version
+        ) {
+          notifyRelayWrite(
+            this,
+            scope === NO_LIVE_AUTHORITY &&
+              (after.authority !== before.authority ||
+                after.schema_version !== before.schema_version)
+              ? undefined
+              : scope,
+          );
+        }
+      } catch {
+        notifyRelayWrite(this);
+      }
     }
   }
 
@@ -2258,6 +2314,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     limit: number;
   }): SyncRelayLogRow[] {
     return logStorage.fetchLogPageDescending(this, input);
+  }
+
+  fetchChannelMessages(
+    input: Parameters<typeof logStorage.fetchChannelMessages>[1],
+  ): ReturnType<typeof logStorage.fetchChannelMessages> {
+    return logStorage.fetchChannelMessages(this, input);
   }
 
   fetchChatMessages(
@@ -2757,5 +2819,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return incomingWebhookStorage.pruneExpiredIncomingWebhookDeliveries(this, nowMs, workspaceId);
   }
 }
-import { hasRelayWriteObservers, notifyRelayWrite } from "./relayWriteChanges";
+import {
+  hasRelayWriteObservers,
+  NO_LIVE_AUTHORITY,
+  notifyRelayWrite,
+  type RelayWriteScope,
+} from "./relayWriteChanges";
+import {
+  LIVE_AUTHORITY_WRITE_COUNT,
+  watchLiveAuthorityWrites,
+} from "./storage/liveAuthorityWrites";
 import { notifyDesktopReadiness } from "./desktopReadinessChanges";

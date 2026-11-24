@@ -39,12 +39,14 @@ export async function createReceivedShareRecord(
   },
 ): Promise<ReceivedRecordDraft | CreationPartial> {
   const { resolved } = host;
+  // A joined workspace's grant names the whole workspace and no paths.
   const covers = (grant: ShareViewSelector | null) =>
     grant?.access === "edit" &&
     grant.versionId === null &&
-    grant.paths.some(
-      (root) => host.collectionPath === root || host.collectionPath.startsWith(`${root}/`),
-    );
+    (grant.wholeWorkspace === true ||
+      grant.paths.some(
+        (root) => host.collectionPath === root || host.collectionPath.startsWith(`${root}/`),
+      ));
   if (resolved.kind !== "standalone")
     throw new Error("Open this share as a workspace to create a record.");
   if (resolved.ended || !resolved.shareId) throw new ShareUnavailableError();

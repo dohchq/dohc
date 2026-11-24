@@ -72,6 +72,15 @@ export interface WorkspaceFileMutationOwner<Event> {
   >;
   writeText: WorkspaceFileMutationIpcHandler<Event, WriteWorkspaceTextResult>;
   writeAsset: WorkspaceFileMutationIpcHandler<Event>;
+  /**
+   * New page in a share view, for a caller that already holds the workspace,
+   * such as an agent's `dohc document create`. Returns the created path.
+   */
+  createShareViewPage(
+    workspace: Readonly<WorkspaceFileMutationWorkspace>,
+    relativePath: string,
+    initialText: string,
+  ): Promise<string>;
 }
 
 export interface WorkspaceFileMutationWorkspace {
@@ -130,7 +139,7 @@ export function createWorkspaceFileMutationOwner<
   shareViewEdited(workspaceId: string): void;
   logError(message: string, error: unknown): void;
 }): WorkspaceFileMutationOwner<IpcEvent> {
-  const shareTarget = (workspace: Readonly<Workspace>) => ({
+  const shareTarget = (workspace: { readonly workspaceId: string }) => ({
     kind: "standalone" as const,
     workspaceId: workspace.workspaceId,
   });
@@ -228,7 +237,35 @@ export function createWorkspaceFileMutationOwner<
     work: MutationWork<Payload, Result>,
   ): Promise<Result> => runAdmittedMutation(event, admitMutation(event, payload, parse), work);
 
+  const createShareViewFile = async (
+    lease: Parameters<ShareViewFiles["change"]>[0],
+    workspace: Readonly<WorkspaceFileMutationWorkspace>,
+    path: string,
+    initialText: string,
+  ): Promise<string> => {
+    const created = editedShareViewValue(
+      workspace.workspaceId,
+      await dependencies.shareViewFiles.change(lease, shareTarget(workspace), {
+        kind: "create",
+        path,
+        initialText,
+      }),
+    );
+    if (typeof created !== "string")
+      throw new Error("Shared file create returned an invalid result.");
+    return created;
+  };
+
   return {
+    createShareViewPage: async (workspace, relativePath, initialText) => {
+      if (!shareViewIsPresent(workspace.shareView))
+        throw new Error("This workspace is not a shared view.");
+      return await withStaleSensitiveWorkspaceOperation(
+        workspace.rootPath,
+        async (lease) => await createShareViewFile(lease, workspace, relativePath, initialText),
+      );
+    },
+
     createFile: async (event, payload) => {
       return await runMutation(
         event,
@@ -238,14 +275,7 @@ export function createWorkspaceFileMutationOwner<
           if (!receivedShare) assertWritableWorkspace(workspace);
           return withStaleSensitiveWorkspaceOperation(workspace.rootPath, async (lease) => {
             const path = receivedShare
-              ? editedShareViewValue(
-                  workspace.workspaceId,
-                  await dependencies.shareViewFiles.change(lease, shareTarget(workspace), {
-                    kind: "create",
-                    path: input.relativePath,
-                    initialText: input.initialText,
-                  }),
-                )
+              ? await createShareViewFile(lease, workspace, input.relativePath, input.initialText)
               : await createFile(workspace.rootPath, input.relativePath, input.initialText, {
                   exclusive: input.exclusive,
                 });

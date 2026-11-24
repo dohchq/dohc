@@ -17,18 +17,21 @@ export function createExplorerMenuIpc<
   Operation extends { workspace: Workspace; assertCurrent(): void },
 >(dependencies: {
   sharedViewOf(workspaceId: string): ExplorerMenuScope["shareView"];
+  memberRoleOf(workspaceId: string): ExplorerMenuScope["memberRole"];
   ensureOwnedProjectionCurrent(workspace: Workspace, path: string): Promise<void>;
   shell: { showItemInFolder(path: string): void };
   platform: string;
 }) {
-  const { sharedViewOf, ensureOwnedProjectionCurrent, shell, platform } = dependencies;
+  const { sharedViewOf, memberRoleOf, ensureOwnedProjectionCurrent, shell, platform } =
+    dependencies;
   return {
     // The scope is read from main's own records: the share view this
-    // workspace is, its mounts, and whether it syncs. The renderer names only
-    // what was right-clicked.
+    // workspace is, its role, its mounts, and whether it syncs. The renderer
+    // names only what was right-clicked.
     readExplorerMenu: (input, { operation }) => {
       const workspace = operation.workspace;
       const shareView = sharedViewOf(workspace.workspaceId);
+      const memberRole = memberRoleOf(workspace.workspaceId);
       const isMountPath = shareView === null && !!input.path && isSharedWithMePath(input.path);
       const mounts = isMountPath ? storedShareMounts(workspace) : [];
       const hasMountRecord =
@@ -50,6 +53,7 @@ export function createExplorerMenuIpc<
           // dialog says how to set up sync.
           canShare: shareView === null && !isMountPath && input.kind !== "root",
           shareView,
+          ...(memberRole ? { memberRole } : {}),
         },
         platform,
       );

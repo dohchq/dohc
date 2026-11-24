@@ -87,7 +87,7 @@ describe("dohc members", () => {
     expect(() => parseCliArguments(["members", ...operands], {})).toThrow(message);
   });
 
-  it("sends the request with no workspace, and prints people, invites, and removed accounts with their ids", async () => {
+  it("sends the request with no workspace, and prints people, invites, and removed accounts by name, with their ids last", async () => {
     const request = vi.fn(async () => ({ status: "ready", view }));
     const result = await executeCli({
       argv: ["members", "list"],
@@ -107,17 +107,55 @@ describe("dohc members", () => {
         "Community: members can comment.",
         "Invite link: https://share.test/join#token",
         "",
-        "owner · Owner · Ice · ice@test",
-        "m-ana · Admin · Ana · ana@test",
+        "Ice · Owner · ice@test",
+        "Ana · Admin · ana@test · m-ana",
         "",
         "Invites (dohc sends no email; each joins when they sign in with that address)",
-        "m-bo · Invited · bo@test",
+        "bo@test · Invited · m-bo",
         "",
         "Removed (dohc members let-back-in <id>)",
-        "m-cy · Removed · Cy · cy@test",
+        "Cy · Removed · cy@test · m-cy",
         "",
       ].join("\n"),
     );
+  });
+
+  // The refusal keeps dohc as who could not, as "dohc could not reach the server." does.
+  it("says that dohc could not send the invite, and who can invite", async () => {
+    const request = async () => {
+      throw new Error("dohc could not send the invite. Only the owner and admins can invite.");
+    };
+    const result = await executeCli({
+      argv: ["members", "invite", "lee@test"],
+      cwd: "/workspace",
+      env: {},
+      request,
+    });
+    expect(result).toEqual({
+      exitCode: 1,
+      stdout: "",
+      stderr: "dohc could not send the invite. Only the owner and admins can invite.\n",
+    });
+  });
+
+  it("names the command that lists Members where the desktop says Reload Members", async () => {
+    const request = async () => {
+      throw new Error(
+        "dohc could not remove this person because Members changed first. Reload Members, then try again.",
+      );
+    };
+    const result = await executeCli({
+      argv: ["members", "remove", "m-bo"],
+      cwd: "/workspace",
+      env: {},
+      request,
+    });
+    expect(result).toEqual({
+      exitCode: 1,
+      stdout: "",
+      stderr:
+        "dohc could not remove this person because Members changed first. Run dohc members list, then try again.\n",
+    });
   });
 
   it("exits with the refusal when the server lists no Members page", async () => {

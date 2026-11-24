@@ -67,7 +67,8 @@ import { useRadioGroup } from "../ui/SegmentedControl";
 import { SkeletonLines } from "../ui/SkeletonRows";
 import { notSentWords } from "../notSentWords";
 import { useRequestSequence } from "../useRequestSequence";
-import { JOINED_WORKSPACE_LIMIT } from "../joinedWorkspaceLimit";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 import {
   ABOUT_ROW,
   AccessChecked,
@@ -78,11 +79,14 @@ import {
   type AboutNotices,
   type AccessSetup,
   type AccessView,
+  appendAccessPage,
+  awaitingCheck,
 } from "./About";
 import { accessReasonForLane, type AccessContext } from "./accessReason";
 import { neutralPresentation } from "./actorPresentation";
 import { ChatAvatar, LinkMark } from "./ChatAvatar";
 import { EMPTY_ART } from "./EmptyArt";
+import { membershipWho } from "./membershipWords";
 import { shareSubject } from "./shareSubject";
 
 // The Sharing view: what this workspace shares, by what is shared, and what
@@ -100,7 +104,12 @@ export type WaitingChanges = {
   oldestAtMs: number;
 };
 // A row, or a lane's heading when no share is named, to focus on opening.
-export type SharingFocus = { lane: SharingLane; shareId: string | null };
+export type SharingFocus = {
+  lane: SharingLane;
+  shareId: string | null;
+  // Open this share once shown, as a failed Open's Try again asked.
+  open?: { workspaceId: string; name: string };
+};
 export type CopyWhat = "code" | "invitation";
 export type ChangedAccess = { access: ShareAccess; generation: number };
 export type AccessChange = { asked: ShareAccess | null; answered: ChangedAccess | null };
@@ -812,6 +821,8 @@ export type SharingActions = {
   retune: (grant: AccessShareRow, access: ShareAccess, title: string) => void;
   share: ((target: RelayShareTarget) => void) | null;
   mount: (shareId: string) => void;
+  // Opens a membership as its own workspace, named for the error a failure reports.
+  open: (shareId: string, name: string) => void;
   unmount: (mount: ShareMount) => void;
   openToEdit: ((shareId: string) => void) | null;
   startLeave: (confirmKey: string) => void;
@@ -1448,14 +1459,7 @@ function receivedActions(
   if (row?.selector?.kind === "workspace" && entry.active)
     return {
       primary: null,
-      menu: [
-        {
-          label: "Open",
-          onSelect: () => undefined,
-          disabled: true,
-          description: JOINED_WORKSPACE_LIMIT.open,
-        },
-      ],
+      menu: [{ label: "Open", onSelect: () => actions.open(shareId, entry.subject.name) }],
     };
   const live = entry.files && entry.active;
   const openToEdit = actions.openToEdit;
@@ -1511,19 +1515,12 @@ function ReceivedRow(props: {
       : null;
   const from = entry.ended ? `From ${sender.name}` : null;
   const membership = row?.selector?.kind === "workspace" && entry.active ? row.selector : null;
-  const role: Who | null = !membership
-    ? null
-    : membership.role === "admin"
-      ? {
-          text: `Admin · ${sender.name} owns this workspace`,
-          title: `Admin · ${sender.full} owns this workspace`,
-        }
-      : access
-        ? {
-            text: `Member · ${sender.name} lets members ${verbOf(access)}`,
-            title: `Member · ${sender.full} lets members ${verbOf(access)}`,
-          }
-        : { text: `Member · from ${sender.name}`, title: `Member · from ${sender.full}` };
+  const role: Who | null = membership
+    ? {
+        text: membershipWho(membership.role, sender.name, access),
+        title: membershipWho(membership.role, sender.full, access),
+      }
+    : null;
   const note = entry.removed
     ? [row?.removalMessage, mount ? "Your copy stays readable but will not update." : null]
         .filter(Boolean)
@@ -2152,11 +2149,14 @@ export function SharingPanel(props: {
 }
 
 // One lane's read, held to the workspace it was asked for.
+// A paced refresh carries main's next check, which resolves true when it ends.
+type Refreshed = { checked: Promise<boolean> } | null;
+
 function useSharingLane(
   workspaceId: string,
   lane: SharingLane,
   notices: AboutNotices,
-  refresh: () => Promise<void>,
+  refresh: () => Promise<Refreshed>,
 ) {
   const read = useSectionRead<SharingLaneView>(
     `${workspaceId}\0${lane}`,
@@ -2165,11 +2165,12 @@ function useSharingLane(
   );
   const { begin, cancel } = read;
   const load = useCallback(
-    async (options: { refreshed?: Promise<void>; after?: AccessAnswer }) => {
+    async (options: { refreshed?: Promise<Refreshed>; after?: AccessAnswer }) => {
       const request = begin();
       try {
+        let checked: Promise<boolean> | null = null;
         if (options.refreshed) {
-          await options.refreshed;
+          checked = (await options.refreshed)?.checked ?? null;
           if (!request.current()) return;
         }
         const cursor = options.after?.nextCursor ?? undefined;
@@ -2186,9 +2187,13 @@ function useSharingLane(
         request.settle({
           status: "ready",
           answer: options.after
-            ? { ...answer, rows: [...options.after.rows, ...answer.rows] }
-            : answer,
+            ? appendAccessPage(options.after, answer)
+            : checked
+              ? awaitingCheck(answer)
+              : answer,
         });
+        // As About's Access: when main's next check ends, read again in place.
+        if (checked && (await checked) && request.current()) void load({});
       } catch (error) {
         const after = options.after;
         request.fail(
@@ -2230,18 +2235,32 @@ export function SharingView(props: {
   onFocused: () => void;
   // New notes the server has no file for until their open editor is left.
   notSentWhileOpen?: readonly string[];
+  // Hands a membership the relay still states to the shell, which asks for a folder.
+  onOpenMembership: (share: RelayShareReceivedRow) => void;
+  // Shows this view on a row, after it closed too.
+  onShowSharing: (target: SharingFocus) => void;
+  // The view took the focus's open, so showing the view again doesn't repeat it.
+  onOpenTaken: () => void;
   onShare?: (target: RelayShareTarget) => void;
   onOpenShare?: (share: OpenedShare) => void;
 }) {
-  const { workspaceId, context, onShare, onOpenShare } = props;
+  const { workspaceId, context, focus, onShare, onOpenShare } = props;
   const { facts, openSyncSettings, connect } = context;
-  const refresh = useCallback(
-    () =>
-      bridge()
-        .requestAccessRefresh({ workspaceId, reason: "sharing-open" })
-        .catch(() => undefined),
-    [workspaceId],
-  );
+  const refresh = useCallback(async (): Promise<Refreshed> => {
+    const refreshed = await bridge()
+      .requestAccessRefresh({ workspaceId, reason: "sharing-open" })
+      .catch(() => undefined);
+    if (refreshed?.status !== "paced") return null;
+    // One wait for both lists.
+    return {
+      checked: bridge()
+        .requestAccessRefresh({ workspaceId, reason: "sharing-open", wait: true })
+        .then(
+          () => true,
+          () => false,
+        ),
+    };
+  }, [workspaceId]);
   const granted = useSharingLane(workspaceId, "granted", props.notices, refresh);
   const received = useSharingLane(workspaceId, "received", props.notices, refresh);
   const [confirmKey, setConfirmKey] = useState<string | null>(null);
@@ -2257,6 +2276,56 @@ export function SharingView(props: {
     busyNow.current = next;
     setBusyShareIds(next);
   };
+  const [openTarget, setOpenTarget] = useState<{
+    workspaceId: string;
+    shareId: string;
+    name: string;
+  } | null>(null);
+  if (openTarget && openTarget.workspaceId !== workspaceId) setOpenTarget(null);
+  const opening = useWorkspaceQuery(useWorkspaceSession(), {
+    key: `${workspaceId}\0${openTarget?.shareId ?? ""}`,
+    manual: openTarget === null || openTarget.workspaceId !== workspaceId,
+    load: async () => {
+      if (!openTarget) return null;
+      const found = await bridge().getRelayReceivedShare({ shareId: openTarget.shareId });
+      if (!found.found)
+        throw new Error(found.removed?.message ?? "This workspace is no longer shared with you.");
+      if ("chats" in found) throw new Error("Join this from Chats.");
+      return found.share;
+    },
+  });
+  // Try again outlives the view, so it shows the view again to open the share.
+  const { onOpenTaken } = props;
+  useEffect(() => {
+    if (!focus?.open || focus.shareId === null || focus.open.workspaceId !== workspaceId) return;
+    setOpenTarget({ workspaceId, shareId: focus.shareId, name: focus.open.name });
+    onOpenTaken();
+  }, [focus, onOpenTaken, workspaceId]);
+  const { onOpenMembership, onShowSharing, reportError } = props;
+  useEffect(() => {
+    if (!openTarget || openTarget.workspaceId !== workspaceId) return;
+    if (opening.value) {
+      setOpenTarget(null);
+      onOpenMembership(opening.value);
+    } else if (opening.error !== null) {
+      setOpenTarget(null);
+      reportError(`dohc could not open ${openTarget.name}.`, opening.error, () =>
+        onShowSharing({
+          lane: "received",
+          shareId: openTarget.shareId,
+          open: { workspaceId: openTarget.workspaceId, name: openTarget.name },
+        }),
+      );
+    }
+  }, [
+    onOpenMembership,
+    onShowSharing,
+    openTarget,
+    opening.error,
+    opening.value,
+    reportError,
+    workspaceId,
+  ]);
   const [skipView, setSkipView] = useState<SkipView>(new Map());
   const [removedEndedCopies, setRemovedEndedCopies] = useState<RemovedEndedCopies>(new Map());
   const [accessChanges, setAccessChanges] = useState<AccessChanges>({});
@@ -2634,6 +2703,7 @@ export function SharingView(props: {
     retune: (grant, access, title) => void retune(grant, access, title),
     share: onShare ?? null,
     mount: (shareId) => void mount(shareId),
+    open: (shareId, name) => setOpenTarget({ workspaceId, shareId, name }),
     unmount: (target) => void unmount(target),
     openToEdit: onOpenShare ? (shareId) => void openToEdit(shareId, onOpenShare) : null,
     startLeave: setConfirmKey,
@@ -2660,7 +2730,7 @@ export function SharingView(props: {
       invitations={invitations}
       accessChanges={accessChanges}
       confirmKey={confirmKey}
-      busyShareIds={busyShareIds}
+      busyShareIds={openTarget ? new Set([...busyShareIds, openTarget.shareId]) : busyShareIds}
       actions={actions}
       focus={props.focus}
       onFocused={props.onFocused}

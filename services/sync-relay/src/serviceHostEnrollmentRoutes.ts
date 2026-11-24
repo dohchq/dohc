@@ -146,7 +146,7 @@ export function serviceHostEnrollmentRefusals(
     if (share.granterUserId !== ownerUserId) continue;
     const parsed = parseStoredAnyShareSelectorJson(share.selectorJson);
     const selector = parsed && effectiveShareSelector(parsed, "edit");
-    if (!selector || !isLiveEditShareSelector(selector)) continue;
+    if (!selector || !isLiveEditShareSelector(selector) || "kind" in selector) continue;
     try {
       const paths = serviceHostSharePaths(storage, {
         workspaceId,

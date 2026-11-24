@@ -573,8 +573,8 @@ Keep those files and their parent directories unwritable by the service user and
 
 ## Live editing limits
 
-The live editing profile allows 128 connections in the relay and 96 per workspace.
-The relay keeps 16 of each for workspace owners, so other people share 112 in total and 80 per workspace.
+The live editing profile allows 384 connections in the relay and 192 per workspace.
+The relay keeps 16 of each for workspace owners, so other people share 368 in total and 176 per workspace.
 Each grant allows 80 connections, each principal 12, and each editing session 6.
 Everyone using one share link counts against its link grant.
 One browser or one agent connection holding that link has its own link principal.

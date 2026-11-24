@@ -61,6 +61,8 @@ async function setup(
     workspaceId?: string;
     opened?: PushShareDirectWritesResult;
     ended?: boolean;
+    changed?: boolean;
+    membership?: boolean;
   } = {},
 ) {
   const workspaceId = options.workspaceId ?? "share-view";
@@ -70,13 +72,15 @@ async function setup(
     options.ended ? "ended" : "current",
   );
   const checkShareAccess = vi.fn(async (): Promise<ShareViewRefresh> =>
-    options.ended ? "ended" : "current",
+    options.ended ? "ended" : options.changed ? "changed" : "current",
   );
   const sendShareChanges = vi.fn(async () => undefined);
   const hook = renderHook(() =>
     useShareDirectWrites({
       workspaceId,
       sharedView: true,
+      membership: options.membership ?? false,
+      workspaceName: "Lisbon trip",
       enabled: options.enabled ?? true,
       ready: options.ready ?? true,
       ownerName: "ana@example.com",
@@ -127,6 +131,7 @@ it("subscribes only for ready shared views", async () => {
   const input = {
     workspaceId: "share-view",
     sharedView: false,
+    workspaceName: "Lisbon trip",
     enabled: false,
     ready: true,
     ownerName: "Owner",
@@ -185,6 +190,7 @@ it("waits for readiness before reporting unavailable, then shows only the access
       useShareDirectWrites({
         sharedView: true,
         workspaceId: "share-view",
+        workspaceName: "Lisbon trip",
         enabled: true,
         ready,
         ownerName: "ana@example.com",
@@ -311,9 +317,154 @@ it("reports a record name race once and tells where the losing draft is kept", a
     kind: "direct-write-stale",
     retry: null,
     message:
-      "The name packing/One.md is already taken. Your draft is saved in trip/packing/Record draft abc-2.txt on this computer. Use New record to create another.",
+      "The name packing/One.md is already taken. Your draft is saved in trip/packing/Record draft abc-2.txt on this computer. Use New record to create another record.",
   });
   expect(refreshShareView).toHaveBeenCalledOnce();
+});
+
+it("tells a member who lost a page name race to use New page", async () => {
+  const { notices } = await setup({ membership: true });
+  await answer({
+    status: "pushed",
+    writes: [
+      {
+        result: "stale",
+        paths: ["ideas/Plan.md"],
+        stalePath: "ideas/Plan.md",
+        recoveredDraftPath: "ideas/Page draft abc-2.txt",
+      },
+    ],
+  });
+  expect(notices[0]?.message).toBe(
+    "The name ideas/Plan.md is already taken. Your draft is saved in ideas/Page draft abc-2.txt on this computer. Use New page to create another page.",
+  );
+});
+
+it("keeps a member's unsent pages when their level drops, with no proposal to send", async () => {
+  const { notices, sendShareChanges } = await setup({
+    membership: true,
+    opened: { status: "unavailable" },
+    changed: true,
+  });
+  await vi.waitFor(() => expect(notices).toHaveLength(1));
+  expect(notices[0]).toEqual({
+    kind: "direct-write-unavailable",
+    tone: "warning",
+    title: "You can no longer edit Lisbon trip",
+    message: "Your unsent pages stay on this computer. They send when members can edit again.",
+    retry: null,
+    send: null,
+  });
+  expect(sendShareChanges).not.toHaveBeenCalled();
+});
+
+it("counts a member's unsent pages when the push that found the lower level counted them", async () => {
+  const { notices } = await setup({
+    membership: true,
+    changed: true,
+    opened: {
+      status: "failed",
+      writes: [],
+      errorMessage: "not edit",
+      lasting: true,
+      pagesWaiting: 2,
+    },
+  });
+  await vi.waitFor(() => expect(notices).toHaveLength(1));
+  expect(notices[0]).toMatchObject({
+    title: "You can no longer edit Lisbon trip",
+    message: "2 unsent pages stay on this computer. They send when members can edit again.",
+  });
+});
+
+it("sends a member's unsent pages without a click once they can edit again", async () => {
+  const checkShareAccess = vi.fn(async (): Promise<ShareViewRefresh> => "changed");
+  const notices: DirectWriteNotice[] = [];
+  respond({ status: "unavailable" });
+  const hook = renderHook(
+    ({ enabled }: { enabled: boolean }) =>
+      useShareDirectWrites({
+        workspaceId: "share-view",
+        sharedView: true,
+        membership: true,
+        workspaceName: "Lisbon trip",
+        enabled,
+        ready: true,
+        ownerName: "ana@example.com",
+        refreshShareView: async () => "current",
+        checkShareAccess,
+        sendShareChanges: vi.fn(async () => undefined),
+        showNotice: (notice) => notices.push(notice),
+      }),
+    { initialProps: { enabled: true } },
+  );
+  await vi.waitFor(() => expect(notices).toHaveLength(1));
+  hook.rerender({ enabled: false });
+  pushShareDirectWrites.mockClear();
+  hook.rerender({ enabled: true });
+  await vi.waitFor(() =>
+    expect(pushShareDirectWrites).toHaveBeenCalledExactlyOnceWith({ workspaceId: "share-view" }),
+  );
+  // A page whose name was taken meanwhile keeps today's draft recovery.
+  await answer({
+    status: "pushed",
+    writes: [
+      {
+        result: "stale",
+        paths: ["ideas/Plan.md"],
+        stalePath: "ideas/Plan.md",
+        recoveredDraftPath: "ideas/Page draft abc-2.txt",
+      },
+    ],
+  });
+  expect(notices[1]?.message).toBe(
+    "The name ideas/Plan.md is already taken. Your draft is saved in ideas/Page draft abc-2.txt on this computer. Use New page to create another page.",
+  );
+});
+
+it("sends nothing while another account is signed in, then sends once the joined account is back", async () => {
+  const notices: DirectWriteNotice[] = [];
+  const hook = renderHook(
+    ({ otherAccount }: { otherAccount: boolean }) =>
+      useShareDirectWrites({
+        workspaceId: "share-view",
+        sharedView: true,
+        membership: true,
+        workspaceName: "Lisbon trip",
+        enabled: true,
+        otherAccount,
+        ready: true,
+        ownerName: "ana",
+        refreshShareView: async () => "current",
+        checkShareAccess: async () => "current",
+        sendShareChanges: vi.fn(async () => undefined),
+        showNotice: (notice) => notices.push(notice),
+      }),
+    { initialProps: { otherAccount: true } },
+  );
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(pushShareDirectWrites).not.toHaveBeenCalled();
+  hook.rerender({ otherAccount: false });
+  await vi.waitFor(() =>
+    expect(pushShareDirectWrites).toHaveBeenCalledExactlyOnceWith({ workspaceId: "share-view" }),
+  );
+  expect(notices).toEqual([]);
+});
+
+it("words a push the bridge rejects in a person's words, never the engine's", async () => {
+  pushShareDirectWrites.mockRejectedValueOnce(
+    Object.assign(new Error("workspace operation failed"), {
+      name: "DaemonRefusalError",
+      wireCode: "INTERNAL",
+    }),
+  );
+  const { notices } = await setup();
+  await vi.waitFor(() => expect(notices).toHaveLength(1));
+  expect(notices[0]!.message).toBe(
+    "dohc could not send your Collection changes to ana@example.com.",
+  );
 });
 
 it("counts several refused writes and gives the first reason", async () => {
@@ -357,6 +508,7 @@ it("offers Try again for a failure that may pass, and keeps the writes answered 
     writes: [{ result: "refused", paths: ["trip/packing/automations.yaml"], reason: "" }],
     errorMessage: "The relay did not answer.",
     lasting: false,
+    pagesWaiting: null,
   });
   expect(notices.map(({ kind, send }) => ({ kind, label: send?.label }))).toEqual([
     { kind: "direct-write-refused", label: "Send as proposal" },
@@ -372,9 +524,39 @@ it("offers Try again for a failure that may pass, and keeps the writes answered 
   expect(pushShareDirectWrites).toHaveBeenCalledTimes(2);
 });
 
+it.each([
+  [1, "dohc could not send your page to ana@example.com. The relay did not answer."],
+  [2, "dohc could not send your 2 pages to ana@example.com. The relay did not answer."],
+])(
+  "names the pages a failed send left waiting when nothing else waits: %i",
+  async (pagesWaiting, message) => {
+    const { notices } = await setup({ membership: true });
+    await answer({
+      status: "failed",
+      writes: [],
+      errorMessage: "The relay did not answer.",
+      lasting: false,
+      pagesWaiting,
+    });
+    expect(notices).toEqual([
+      expect.objectContaining({
+        kind: "direct-write-failed",
+        message,
+        retry: expect.any(Function),
+      }),
+    ]);
+  },
+);
+
 it("offers Send as proposal for a lasting refusal, keeping an earlier refusal's reason in the same row", async () => {
   const { notices } = await setup();
-  await answer({ status: "failed", writes: [], errorMessage: "read only", lasting: true });
+  await answer({
+    status: "failed",
+    writes: [],
+    errorMessage: "read only",
+    lasting: true,
+    pagesWaiting: null,
+  });
   await answer({
     status: "failed",
     writes: [
@@ -386,6 +568,7 @@ it("offers Send as proposal for a lasting refusal, keeping an earlier refusal's 
     ],
     errorMessage: "read only",
     lasting: true,
+    pagesWaiting: null,
   });
   expect(notices).toEqual([
     expect.objectContaining({
@@ -451,7 +634,13 @@ it("ignores an answer that arrives after the view closed", async () => {
   const { notices, hook } = await setup();
   hook.unmount();
   await act(async () => {
-    finish({ status: "failed", writes: [], errorMessage: "late", lasting: false });
+    finish({
+      status: "failed",
+      writes: [],
+      errorMessage: "late",
+      lasting: false,
+      pagesWaiting: null,
+    });
   });
   expect(notices).toEqual([]);
 });
@@ -466,6 +655,7 @@ it("keeps an unavailable push's pending refresh when writing stops in the same w
       useShareDirectWrites({
         sharedView: true,
         workspaceId: "share-view",
+        workspaceName: "Lisbon trip",
         enabled,
         ready: true,
         ownerName: "ana@example.com",
@@ -496,6 +686,7 @@ it("discards an unavailable push's pending refresh after A to B to A", async () 
       useShareDirectWrites({
         sharedView: true,
         workspaceId,
+        workspaceName: "Lisbon trip",
         enabled: true,
         ready: true,
         ownerName: "ana@example.com",
@@ -517,7 +708,13 @@ it("discards an unavailable push's pending refresh after A to B to A", async () 
 
 it("does not retry a failure after the view closes", async () => {
   const { notices, hook } = await setup({
-    opened: { status: "failed", writes: [], errorMessage: "offline", lasting: false },
+    opened: {
+      status: "failed",
+      writes: [],
+      errorMessage: "offline",
+      lasting: false,
+      pagesWaiting: null,
+    },
   });
   expect(notices).toHaveLength(1);
   hook.unmount();
@@ -536,6 +733,7 @@ it.each(["ended", "changed"] as const)(
       useShareDirectWrites({
         sharedView: true,
         workspaceId: "share-view",
+        workspaceName: "Lisbon trip",
         enabled: false,
         ready: true,
         ownerName: "Ana",
@@ -554,6 +752,7 @@ it.each(["ended", "changed"] as const)(
             status: "failed",
             writes: [],
             lasting: false,
+            pagesWaiting: null,
             errorMessage: "access refused locally",
           },
         },
@@ -578,6 +777,7 @@ it.each(["ended", "changed"] as const)(
       status: "failed",
       writes: [{ result: "refused", paths: ["tasks/new.md"], reason: "forbidden" }],
       lasting: true,
+      pagesWaiting: null,
       errorMessage: "forbidden",
     });
     expect(checkShareAccess).toHaveBeenCalledOnce();

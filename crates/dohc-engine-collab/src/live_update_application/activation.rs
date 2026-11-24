@@ -177,7 +177,7 @@ pub(super) fn settled_at_boundary(
             (tail, Settlement::LatestAt(cursor))
         }
     };
-    let mut budget = super::restore_content::Budget {
+    let mut budget = super::budget::Budget {
         remaining: max_bytes,
     };
     let (state, _) = super::settled_base::settled_base(

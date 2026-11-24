@@ -27,7 +27,8 @@ import {
   WorkspaceSummary,
   RevealWorkspaceFolderPayload,
 } from "./bridgeContract";
-import { join } from "node:path";
+import { readdir } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { CHANNELS } from "./channels";
 
 export function createWorkspaceRootApproval(effectiveHome: () => string) {
@@ -176,15 +177,21 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
 
   // A share opened as its own view defaults to <default root>/shared/<id>.
   // The id is already restricted to [a-z0-9-] by the share code parser, so
-  // it is a safe single segment. Approving the path here is what lets the
-  // renderer open the share without a folder dialog.
-  registerHandler(CHANNELS.getDefaultShareRoot, (event, payload) => {
+  // it is a safe single segment. A membership names its workspace, and opens
+  // in <default root>/<name>, or the first free `<name> 2`. Approving the
+  // path here is what lets the renderer open the share without a folder
+  // dialog.
+  registerHandler(CHANNELS.getDefaultShareRoot, async (event, payload) => {
     assertTrustedSender(event);
     const input = DefaultShareRootPayload.parse(payload);
     if (!/^[a-z0-9][a-z0-9-]*$/u.test(input.shareId)) {
       throw new Error("Invalid share id.");
     }
-    const root = `${defaultWorkspaceRoot(effectiveHome())}/shared/${input.shareId}`;
+    const base = defaultWorkspaceRoot(effectiveHome());
+    const segment = input.name === undefined ? null : folderSegment(input.name);
+    const root =
+      (segment === null ? null : await freeFolder(base, segment)) ??
+      `${base}/shared/${input.shareId}`;
     approveRoot(root);
     return DefaultShareRootResult.parse(root);
   });
@@ -361,4 +368,28 @@ export function registerOpenWorkspaceIpcHandler<
       return status;
     });
   });
+}
+
+// A name as one folder every desktop can hold, or null when nothing usable
+// is left. Separators and characters Windows refuses become spaces.
+export function folderSegment(name: string): string | null {
+  const segment = [...name.replace(/[<>:"/\\|?*\u0000-\u001f]/gu, " ").replace(/\s+/gu, " ")]
+    .slice(0, 80)
+    .join("")
+    .replace(/^[.\s]+|[.\s]+$/gu, "");
+  if (segment.length === 0 || /^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/iu.test(segment)) return null;
+  return segment;
+}
+
+// A folder directly inside `base`, or null. The name comes from the relay.
+export async function freeFolder(base: string, segment: string): Promise<string | null> {
+  for (let attempt = 1; attempt < 100; attempt += 1) {
+    const root = `${base}/${attempt === 1 ? segment : `${segment} ${attempt}`}`;
+    if (dirname(resolve(root)) !== resolve(base)) return null;
+    const entries = await readdir(root).catch((error: NodeJS.ErrnoException) =>
+      error.code === "ENOENT" ? [] : null,
+    );
+    if (entries !== null && entries.length === 0) return root;
+  }
+  return null;
 }

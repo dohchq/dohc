@@ -1,6 +1,7 @@
 import { stat } from "node:fs/promises";
 import { normalizeRootPath } from "@dohc/workspace-core";
 import { createWorkspaceHandler } from "./rendererWorkspaceHandler";
+import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import {
   ChatRunRecordsForThreadPayload,
@@ -119,8 +120,11 @@ export function createAgentRunsIpc<
   function registerChatRunRecords(): void {
     registerHandler(
       CHANNELS.chatRunRecordsForThread,
-      workspaceHandler(async (event, payload) => {
+      workspaceHandler(async (event, payload, operation) => {
         const input = ChatRunRecordsForThreadPayload.parse(payload);
+        // Agents run only in a workspace you capture. A joined workspace has none.
+        if (shareViewIsPresent(operation.workspace.shareView))
+          return ChatRunRecordsForThreadResult.parse({ runs: {} });
         const { workspace } = await requireEngineCapture(input.workspaceId, "Chats");
         const linkedChatStore = linkedChatStoreFor(workspace);
         await linkedChatStore.ensureOpen();
@@ -260,8 +264,16 @@ export function createAgentRunsIpc<
 
     registerHandler(
       CHANNELS.chatDispatchStateForThread,
-      workspaceHandler(async (event, payload) => {
+      workspaceHandler(async (event, payload, operation) => {
         const input = ChatDispatchStateForThreadPayload.parse(payload);
+        if (shareViewIsPresent(operation.workspace.shareView)) {
+          return ChatDispatchStateForThreadResult.parse({
+            liveRunId: null,
+            liveTriggerMessageId: null,
+            pendingCount: 0,
+            paused: false,
+          });
+        }
         await requireEngineCapture(input.workspaceId, "Chats");
         return ChatDispatchStateForThreadResult.parse(
           await chatDispatchService.dispatchStateForThread(

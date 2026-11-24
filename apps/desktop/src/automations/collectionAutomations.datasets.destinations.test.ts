@@ -126,7 +126,7 @@ it.each([true])(
           recipientUserId: "editor",
           recipientEmail: "editor@example.com",
           files: { paths: ["Budget"], access: "edit", versionId: null },
-          channel: null,
+          chat: null,
         },
       ],
     });

@@ -242,3 +242,50 @@ it.each(["missing", "local-only", "share-view"] as const)(
     }
   },
 );
+
+// A member who joins less than a minute after the last listing: Access asks
+// inside the pacing window, and a caller that waits gets the retry's listing.
+it("lets a paced Access request wait for the scheduled retry, which lists a member who joined in the window", async () => {
+  const h = harness();
+  const r = h.make();
+  expect(await r.requestRefresh("w")).toBe("requested");
+  await h.advance(10_000);
+  const member = {
+    shareId: "membership",
+    grantId: "m-sam",
+    granterUserId: "owner",
+    granterEmail: null,
+    recipientUserId: "sam",
+    recipientEmail: "sam@test.dev",
+    subjectName: null,
+    sharerName: null,
+    generation: 1,
+    status: "active" as const,
+    selector: { kind: "workspace" as const },
+    access: "comment" as const,
+  };
+  const joined = { ...listing, grants: [member] } as unknown as typeof listing;
+  h.list.mockResolvedValue({ kind: "answered", listing: joined });
+  expect(await r.requestRefresh("w")).toBe("paced");
+  let settled: string | null = null;
+  const waiting = r.requestRefresh("w", { wait: true }).then((status) => {
+    settled = status;
+  });
+  await h.advance(SHARE_ROSTER_FRESH_MS - 10_000 - 1);
+  expect(settled).toBeNull();
+  expect(h.list).toHaveBeenCalledOnce();
+  await h.advance(1);
+  await waiting;
+  expect(settled).toBe("joined");
+  expect(h.list).toHaveBeenCalledTimes(2);
+  expect(r.observation("w").listing).toEqual(joined);
+  // A share change that lists sooner answers the wait, and closing the workspace ends one.
+  await h.advance(1_000);
+  const sooner = r.requestRefresh("w", { wait: true });
+  r.sharesChanged("w");
+  await expect(sooner).resolves.toBe("joined");
+  await h.advance(1_000);
+  const ended = r.requestRefresh("w", { wait: true });
+  r.close("w");
+  await expect(ended).resolves.toBe("unavailable");
+});

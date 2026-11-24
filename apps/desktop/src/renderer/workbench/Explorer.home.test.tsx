@@ -446,6 +446,39 @@ describe("Explorer Home", () => {
     expect(screen.queryByTestId("explorer-pages-empty")).toBeNull();
   });
 
+  it("shows Pages with New page in a joined workspace at Edit, and no New page below it", async () => {
+    const user = userEvent.setup();
+    const onNewPage = vi.fn();
+    const joined = { granterEmail: "sam@example.com" };
+    const view = render(
+      <Explorer
+        {...explorerProps({
+          files: [],
+          folders: [],
+          dataCollections: [],
+          collectionFolders: new Set(),
+          shareView: joined,
+          creates: { pages: true, folders: false },
+          onNewPage,
+        })}
+      />,
+    );
+    await user.click(within(section("Pages")).getByRole("button", { name: "New page" }));
+    expect(onNewPage).toHaveBeenCalledWith("");
+
+    view.rerender(
+      <Explorer
+        {...explorerProps({
+          shareView: joined,
+          creates: { pages: false, folders: false },
+          onNewPage,
+        })}
+      />,
+    );
+    expect(rowLabels("Pages").length).toBeGreaterThan(0);
+    expect(within(section("Pages")).queryByRole("button", { name: "New page" })).toBeNull();
+  });
+
   it("holds Collections' place while its list is read again, and says nothing yet", () => {
     render(
       <Explorer

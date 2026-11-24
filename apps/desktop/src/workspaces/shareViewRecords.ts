@@ -2,6 +2,7 @@ import {
   isShareAccessValue,
   isShareablePathList,
   isValidShareVersionId,
+  type ShareAccess,
 } from "@dohc/security-contract/share-selector";
 import type { ShareViewSelector } from "./shareViewInfo";
 import {
@@ -142,7 +143,19 @@ export function recordedShareSelector(value: unknown): ShareViewSelector | null 
     paths?: unknown;
     versionId?: unknown;
     access?: unknown;
+    wholeWorkspace?: unknown;
   };
+  if (candidate.wholeWorkspace !== undefined) {
+    if (
+      candidate.wholeWorkspace !== true ||
+      !Array.isArray(candidate.paths) ||
+      candidate.paths.length !== 0 ||
+      candidate.versionId !== null ||
+      !isShareAccessValue(candidate.access)
+    )
+      return null;
+    return { paths: [], versionId: null, access: candidate.access, wholeWorkspace: true };
+  }
   if (!Array.isArray(candidate.paths)) return null;
   if (!isShareablePathList(candidate.paths)) return null;
   if (candidate.versionId !== null && !isValidShareVersionId(candidate.versionId)) {
@@ -157,6 +170,30 @@ export function recordedShareSelector(value: unknown): ShareViewSelector | null 
   };
 }
 
+export type GrantedSelector = {
+  readonly paths: readonly string[];
+  readonly versionId: string | null;
+  readonly access: ShareAccess;
+  readonly wholeWorkspace?: true;
+};
+
+type EngineGrantedSelector = {
+  paths: string[];
+  versionId: string | null;
+  access: ShareAccess;
+  wholeWorkspace?: true;
+};
+
+/** The pinned grant a share RPC carries: every dimension, always. */
+export function engineGrantedSelector(selector: GrantedSelector): EngineGrantedSelector {
+  return {
+    paths: [...selector.paths],
+    versionId: selector.versionId,
+    access: selector.access,
+    ...(selector.wholeWorkspace === true ? { wholeWorkspace: true as const } : {}),
+  };
+}
+
 export function sharePinAtStatedLevel(pinned: unknown, stated: unknown): ShareViewSelector | null {
   const pin = recordedShareSelector(pinned);
   const statement = recordedShareSelector(stated);
@@ -165,6 +202,7 @@ export function sharePinAtStatedLevel(pinned: unknown, stated: unknown): ShareVi
     statement === null ||
     pin.access === statement.access ||
     pin.versionId !== statement.versionId ||
+    pin.wholeWorkspace !== statement.wholeWorkspace ||
     pin.paths.length !== statement.paths.length ||
     pin.paths.some((path, index) => path !== statement.paths[index])
   ) {

@@ -46,6 +46,9 @@ import {
 import * as Y from "yjs";
 import { getDohcProseMirrorSchema } from "./import-export.js";
 
+/** A live page as Markdown, so a browser can hand back text it could not send. */
+export { yDocToMarkdown } from "./import-export.js";
+
 const EDITOR_CHANGE = "dohcEditorChange";
 const BLOB_IMAGE = /^\/api\/view\/blob\/[a-f0-9]{64}(?:\?session=[A-Za-z0-9_-]{12})?$/u;
 

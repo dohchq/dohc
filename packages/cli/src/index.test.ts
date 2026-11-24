@@ -405,7 +405,7 @@ it("lists, saves, tries again and stops again kept edits with only the caller's 
   expect(refused).toEqual({
     exitCode: 1,
     stdout: "",
-    stderr: "dohc: dohc has no kept edits for this file.\n",
+    stderr: "dohc has no kept edits for this file.\n",
   });
 });
 

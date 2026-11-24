@@ -165,7 +165,7 @@ export interface ExplorerProps {
   // Incrementing request to begin an inline folder create at the root
   // (palette / application-menu "New Folder" route).
   newFolderRequest: number | null;
-  // New file opens a new page whose file will go in this folder ("" = root).
+  // New page opens a new page whose file will go in this folder ("" = root).
   onNewPage: (folder: string) => void;
   // Paths to select once their rows render ("Show in Explorer", or what an
   // import added). The first in the tree takes focus. The shell expands their
@@ -224,6 +224,14 @@ export interface ExplorerProps {
   // path to. The granter's copy is what the change can still be taken back
   // from, which is why the granter is named here rather than described.
   shareView: { granterEmail: string | null } | null;
+  // What a joined workspace lets this person create, from their level and
+  // role. Absent elsewhere. A folder there starts with its first page,
+  // because a shared folder exists only while it holds a file.
+  creates?: { pages: boolean; folders: boolean };
+  // False where this person can't rename, move, delete or import: a share
+  // view below Edit, or a joined workspace while another account is signed
+  // in. F2, Delete and drag then do nothing, as main's menu offers nothing.
+  changes?: boolean;
   onRefreshShareMounts: () => void;
   onUnmountShare: (path: string) => void;
   // "Share…": offered by the main-owned context menu on synced,
@@ -433,6 +441,8 @@ export const TreeRow = memo(function TreeRow(props: {
   active: boolean;
   tabbable: boolean;
   dropPreview: RowDropPreview | null;
+  // The row can be dragged to move it. Absent means it can.
+  movable?: boolean;
   registerRef: (path: string, el: HTMLButtonElement | null) => void;
   onRowFocus: (path: string) => void;
   onRowClick: (path: string, event: MouseEvent) => void;
@@ -503,7 +513,7 @@ export const TreeRow = memo(function TreeRow(props: {
         {...(row.isFolder ? { "aria-expanded": row.isExpanded } : {})}
         tabIndex={props.tabbable ? 0 : -1}
         ref={(el) => props.registerRef(row.fullPath, el)}
-        draggable
+        draggable={props.movable !== false}
         onFocus={() => props.onRowFocus(row.fullPath)}
         onClick={(event) => props.onRowClick(row.fullPath, event)}
         onContextMenu={(event) => props.onRowContextMenu(row.fullPath, event)}
@@ -899,10 +909,34 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     const next = pending.filter((change) => !pendingTreeChangeSettled(change, listingRequest));
     return next.length === pending.length ? pending : next;
   }, [pending, listingRequest]);
-  const projected = useMemo(
-    () => applyPendingTreeMoves(props.files, props.folders, unsettled),
-    [props.files, props.folders, unsettled],
+  // A new page's folder shows while the page is open and unwritten, so a
+  // folder an admin names in a joined workspace is in the tree at once,
+  // before its first page makes it. Closing the page takes it away. The
+  // folders are one key, so switching tabs does not rebuild the tree.
+  const newPageFolders = useMemo(
+    () =>
+      [
+        ...new Set(
+          props.editorGroups.flatMap((group) =>
+            group.tabs.flatMap((tab) => {
+              const parsed = parseTab(tab.path);
+              return parsed.kind === "newPage" && parsed.folder !== "" ? [parsed.folder] : [];
+            }),
+          ),
+        ),
+      ].join("\n"),
+    [props.editorGroups],
   );
+  const projected = useMemo(() => {
+    const listed = applyPendingTreeMoves(props.files, props.folders, unsettled);
+    const waiting =
+      newPageFolders === ""
+        ? []
+        : newPageFolders.split("\n").filter((folder) => !listed.folders.includes(folder));
+    return waiting.length === 0
+      ? listed
+      : { files: listed.files, folders: [...listed.folders, ...waiting] };
+  }, [props.files, props.folders, unsettled, newPageFolders]);
 
   const fileByPath = useMemo(() => {
     const map = new Map<string, WorkspaceFileEntry>();
@@ -1098,13 +1132,18 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     return isFolderPath(target) ? target : dirnameOf(target);
   }, [activeTab, focusedPath, isFolderPath, selection]);
 
-  const beginRename = useCallback((path: string, isFolder: boolean) => {
-    setEditValue(basenameOf(path));
-    setEditError(null);
-    editDone.current = false;
-    setEditPending(false);
-    setEditing({ mode: "rename", path, isFolder });
-  }, []);
+  const changes = props.changes !== false;
+  const beginRename = useCallback(
+    (path: string, isFolder: boolean) => {
+      if (!changes) return;
+      setEditValue(basenameOf(path));
+      setEditError(null);
+      editDone.current = false;
+      setEditPending(false);
+      setEditing({ mode: "rename", path, isFolder });
+    },
+    [changes],
+  );
 
   useEffect(() => {
     if (props.newFolderRequest !== null) beginCreateFolder("");
@@ -1549,19 +1588,24 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     [announce, askedNotVersioned, rowFor, runChanges, workspaceId],
   );
 
+  const startsWithPage = props.creates !== undefined;
   const commitCreateFolder = useCallback(
     (parentPath: string, value: string) => {
       const path = resolveTypedPath(value, parentPath);
       setEditing(null);
       if (!path) return;
-      const change: PendingTreeChange = { id: nextChangeId(), kind: "create-folder", path };
       for (const ancestor of ancestorsOf(path)) onSetFolderExpanded(ancestor, true);
       onSetFolderExpanded(path, true);
+      const change: PendingTreeChange = { id: nextChangeId(), kind: "create-folder", path };
+      if (startsWithPage) {
+        props.onNewPage(path);
+        return;
+      }
       void runChanges([change], async () => {
         await bridge().createWorkspaceFolder({ workspaceId, relativePath: path });
       });
     },
-    [runChanges, workspaceId, onSetFolderExpanded],
+    [runChanges, workspaceId, onSetFolderExpanded, startsWithPage, props.onNewPage],
   );
 
   const performDeletes = useCallback(
@@ -1597,11 +1641,12 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // contents, so neither the delete nor the dialog names them.
   const requestDelete = useCallback(
     (paths: string[]) => {
+      if (!changes) return;
       const tops = topLevelPaths(paths);
       if (props.shareView) setConfirmDelete(tops);
       else performDeletes(tops);
     },
-    [performDeletes, props.shareView],
+    [changes, performDeletes, props.shareView],
   );
 
   const exportZip = useCallback(
@@ -2039,6 +2084,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       targetDir: string,
       targetIsFolder: boolean,
     ): DropPreview | null => {
+      // Nothing moves or imports here, so no row or folder takes a drop.
+      if (!changes) return null;
       const sources = dragSources.current;
       if (sources) {
         const actions = sources.map((source) => planDrop(source, { parentDir: targetDir }));
@@ -2060,7 +2107,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         targetIsFolder,
       };
     },
-    [],
+    [changes],
   );
 
   const showDropPreview = useCallback((preview: DropPreview | null) => {
@@ -2111,6 +2158,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       event.preventDefault();
       event.stopPropagation();
       clearDragPreview();
+      if (!changes) return;
       if (dragSources.current) {
         const sources = dragSources.current;
         dragSources.current = null;
@@ -2127,7 +2175,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         if (paths.length > 0) props.onImportFiles(paths, targetDir);
       }
     },
-    [clearDragPreview, performMoves, props.onImportFiles],
+    [changes, clearDragPreview, performMoves, props.onImportFiles],
   );
 
   const onRowDrop = useCallback(
@@ -2501,6 +2549,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           onRowClick={onRowClick}
           onRowChevronClick={onRowChevronClick}
           onRowContextMenu={onRowContextMenu}
+          movable={changes}
           onRowDragStart={onRowDragStart}
           onRowDragOver={onRowDragOver}
           onRowDrop={onRowDrop}
@@ -2757,7 +2806,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             onRename={beginRename}
             onDelete={requestDelete}
             onShowInFiles={showInFiles}
-            drag={homeDrag}
+            drag={changes ? homeDrag : undefined}
             dropPreviewFor={dropPreviewFor}
           />
         ) : (
@@ -2792,18 +2841,22 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                     <ChevronsUp size={13} aria-hidden />
                   </SectionActionButton>
                 </span>
-                <SectionActionButton
-                  label="New file"
-                  onClick={() => props.onNewPage(creationParentPath())}
-                >
-                  <FilePlus2 size={13} aria-hidden />
-                </SectionActionButton>
-                <SectionActionButton
-                  label="New folder"
-                  onClick={() => beginCreateFolder(creationParentPath())}
-                >
-                  <FolderPlus size={13} aria-hidden />
-                </SectionActionButton>
+                {props.creates?.pages !== false ? (
+                  <SectionActionButton
+                    label="New page"
+                    onClick={() => props.onNewPage(creationParentPath())}
+                  >
+                    <FilePlus2 size={13} aria-hidden />
+                  </SectionActionButton>
+                ) : null}
+                {props.creates?.folders !== false ? (
+                  <SectionActionButton
+                    label="New folder"
+                    onClick={() => beginCreateFolder(creationParentPath())}
+                  >
+                    <FolderPlus size={13} aria-hidden />
+                  </SectionActionButton>
+                ) : null}
               </div>
             </header>
 

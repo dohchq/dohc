@@ -68,13 +68,40 @@
   line-height: 1.4;
   resize: none;
 }
+.chat-composer textarea::placeholder { color: var(--viewer-subtle); opacity: 1; }
 .chat-composer .handoff-button { min-height: 40px; padding-inline: 16px; }
 .chat-composer-status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 22px; }
 .chat-composer-status p { margin: 0; color: var(--viewer-muted); font-size: 12px; }
 .chat-composer-status .handoff-button { padding: 3px 9px; }
 .chat-read-only { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
 .chat-read-only p { margin: 0; color: var(--viewer-muted); }
-.chat-read-only textarea { display: block; width: 100%; margin-top: 8px; }
+.chat-read-only .chat-read-only-note { display: flex; align-items: center; gap: 6px; }
+.chat-read-only-note svg { flex: none; }
+/* A kept draft reads as quoted text: it can be copied, not edited. */
+.chat-read-only textarea { display: block; width: 100%; min-height: 0; margin-top: 8px; border: 0; border-left: 2px solid var(--viewer-line-strong); border-radius: 0; padding: 2px 0 2px 10px; background: transparent; }
+.chat-unsent-title { display: flex; align-items: center; gap: 8px; margin: 8px 0 0; color: var(--viewer-ink); font-size: 13px; font-weight: 500; }
+.chat-unsent-title > .icon { flex: none; color: var(--viewer-warning); }
+.chat-unsent-title > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-read-only .chat-unsent-note { margin-top: 4px; font-size: 12px; }
+.chat-unsent-discarded { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--viewer-muted); font-size: 12px; }
+.chat-unsent-discarded p { min-width: 0; flex: 1; margin: 0; }
+.chat-unsent-discarded .handoff-button { padding: 3px 9px; }
+.chat-unsent-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.chat-unsent-actions .copy-failed { order: 1; flex-basis: 100%; margin: 0; color: var(--viewer-danger); font-size: 12px; }
+.chat-unsent-actions .handoff-button { padding: 3px 9px; }
+
+/* A Group shows its lanes as the desktop does: posts with their threads, and one chat. */
+.chat-lanes { display: flex; flex: none; gap: 2px; margin: 0 16px 4px; border: 1px solid var(--viewer-line); border-radius: 8px; padding: 2px; background: var(--viewer-panel); align-self: flex-start; }
+.chat-lanes [role="tab"] { border: 0; border-radius: 6px; padding: 3px 10px; background: transparent; color: var(--viewer-muted); cursor: pointer; font-size: 12px; }
+.chat-lanes [role="tab"][aria-selected="true"] { background: var(--viewer-paper); color: var(--viewer-ink); box-shadow: 0 0 0 1px var(--viewer-line); }
+.chat-lanes [role="tab"]:focus-visible { outline: 2px solid var(--viewer-accent); outline-offset: 1px; }
+.chat-thread-head { display: flex; flex: none; align-items: center; gap: 8px; padding: 0 12px 4px 8px; }
+/* The halo sits inside the button, so it neither touches "Thread" nor hangs past the panel's edge. */
+.chat-thread-head .icon-button:focus-visible { outline-offset: -2px; }
+.chat-thread-head h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.chat-replies { display: block; margin-top: 0; border: 0; border-radius: 6px; padding: 2px 6px; margin-left: -6px; background: transparent; color: var(--viewer-accent); cursor: pointer; font-size: 12px; font-weight: 500; }
+.chat-replies:hover { background: var(--viewer-hover); }
+.chat-replies:focus-visible { outline: 2px solid var(--viewer-accent); outline-offset: 1px; }
 
 /* A share link's Group channel, in the link viewer's side column. */
 .comments-panel.link-channel { display: flex; flex-direction: column; min-height: 0; max-height: calc(100vh - 116px); padding: 0; position: sticky; top: 0; }

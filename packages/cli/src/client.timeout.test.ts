@@ -26,6 +26,8 @@ vi.mock("node:net", () => ({
 
 it.each([
   { argv: ["chat", "groups"], timeoutMs: 30_000, stderr: "dohc: desktop app did not respond\n" },
+  // A paced refresh waits for the next roster check, up to a minute away.
+  { argv: ["access", "refresh"], timeoutMs: 90_000, stderr: "dohc: desktop app did not respond\n" },
   {
     argv: ["history", "undo", "dohc-operation:11111111-1111-4111-8111-111111111111"],
     timeoutMs: 90_000,

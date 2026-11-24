@@ -2153,6 +2153,7 @@ describe("chatDispatchService", () => {
         projectChatBookmarks: () => undefined,
         queueCloudSync: () => undefined,
         syncSharedChannelsForChatTarget: async () => undefined,
+        pushShareViewChat: async () => undefined,
         scanChatDispatch: (workspaceId) => service.scanWorkspace(workspaceId),
         betweenDispatchScans: (workspaceId, write) => {
           answerQueued.resolve();

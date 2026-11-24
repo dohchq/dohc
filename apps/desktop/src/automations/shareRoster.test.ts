@@ -91,7 +91,7 @@ const anaOnRoster = {
   recipientUserId: "u-ana",
   recipientEmail: "ana@dohc.test",
   files: { paths: ["Trip"], versionId: null, access: "edit" },
-  channel: null,
+  chat: null,
 };
 
 type Page = { status: number; body: unknown } | Error;
@@ -232,20 +232,28 @@ describe("roster from the relay's listings", () => {
       kind: "owner",
       ownerUserId: "u-owner",
       grants: [
-        { ...anaOnRoster, files: null, channel: { wireId: "wire-family", canPost: true } },
+        {
+          ...anaOnRoster,
+          files: null,
+          chat: { kind: "channel", wireId: "wire-family", canPost: true },
+        },
         {
           ...anaOnRoster,
           grantId: "g-2",
           files: { paths: ["Trip"], versionId: null, access: "view" },
-          channel: { wireId: "wire-trip", canPost: false },
+          chat: { kind: "channel", wireId: "wire-trip", canPost: false },
         },
-        { ...anaOnRoster, grantId: "g-3", channel: { wireId: "wire-trip", canPost: true } },
+        {
+          ...anaOnRoster,
+          grantId: "g-3",
+          chat: { kind: "channel", wireId: "wire-trip", canPost: true },
+        },
         {
           grantId: "g-4",
           recipientUserId: null,
           recipientEmail: "cai@dohc.test",
           files: { paths: ["Trip"], versionId: null, access: "view" },
-          channel: null,
+          chat: null,
         },
         { ...anaOnRoster, grantId: "g-5" },
         { ...anaOnRoster, grantId: "g-6", files: { paths: [], versionId: "v-1", access: "edit" } },

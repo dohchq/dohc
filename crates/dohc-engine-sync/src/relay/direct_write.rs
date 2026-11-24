@@ -2,8 +2,9 @@
 //!
 //! A recipient with Edit changes `collection.yaml` and `automations.yaml`, or
 //! creates a new Collection, and the relay writes the change into the
-//! granter's workspace at once under the recipient's name. Every other change
-//! stays on proposals.
+//! granter's workspace at once under the recipient's name. A person in the
+//! granter's workspace at Edit also creates new pages this way. Every other
+//! change stays on proposals.
 //!
 //! This lane reads the same journal the proposal lane reads. Each push plans
 //! its writes once and records the plan, with each exact request, before it
@@ -116,6 +117,42 @@ pub enum DirectWriteState {
     Accepted,
     Pending,
     Refused,
+}
+
+/// What a push that stopped in transit left unsent: the recorded plan's
+/// writes the relay has not answered.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectWritesWaiting {
+    pub pages: usize,
+    pub collection_writes: usize,
+    /// The journal holds more than the plan read.
+    pub more_pending: bool,
+}
+
+pub fn read_direct_writes_waiting(
+    store: &EngineStore,
+    workspace_id: &str,
+    share_id: &str,
+) -> Result<DirectWritesWaiting, RelayError> {
+    let Some(plan) = read_direct_write_plan(store, workspace_id, share_id)? else {
+        return Ok(DirectWritesWaiting::default());
+    };
+    let mut waiting = DirectWritesWaiting {
+        more_pending: plan.more_pending,
+        ..DirectWritesWaiting::default()
+    };
+    for write in plan.writes.iter().filter(|write| write.result.is_none()) {
+        if store
+            .read_with(|conn| is_page_write(conn, workspace_id, write))
+            .map_err(local)?
+        {
+            waiting.pages += 1;
+        } else {
+            waiting.collection_writes += 1;
+        }
+    }
+    Ok(waiting)
 }
 
 /// Delivery facts for this replica's record creations, including after restart.
@@ -853,8 +890,16 @@ fn plan_direct_writes<'a>(
         });
     }
 
+    let whole_workspace = granted.scope == crate::ShareScope::Workspace;
     for (index, net) in changes.iter().enumerate() {
         if used.contains(&index) {
+            continue;
+        }
+        if whole_workspace && is_new_page(store, workspace_id, net)? {
+            groups.push(PlannedGroup {
+                new_collection: false,
+                changes: vec![net],
+            });
             continue;
         }
         let Some((folder, name)) = text_write_path(net) else {
@@ -898,6 +943,33 @@ fn text_write_path(net: &NetChange) -> Option<(&str, &str)> {
         return None;
     }
     path.rsplit_once('/')
+}
+
+/// A new Markdown page for a person in the owner's workspace: a text
+/// create, at the top level or in a folder that holds no Collection or
+/// dataset. The relay decides again, and refuses a new folder unless the
+/// writer is an admin; a refused page stays on proposals.
+fn is_new_page(
+    store: &EngineStore,
+    workspace_id: &str,
+    net: &NetChange,
+) -> Result<bool, RelayError> {
+    let change = &net.change;
+    let Some(path) = change.after_path.as_deref() else {
+        return Ok(false);
+    };
+    if change.operation != "write"
+        || change.based_on_path.is_some()
+        || change.after_content_kind.as_deref() != Some("text")
+        || change.after_blob_sha256.is_none()
+    {
+        return Ok(false);
+    }
+    let (folder, name) = path.rsplit_once('/').unwrap_or(("", path));
+    if !is_markdown(name) {
+        return Ok(false);
+    }
+    Ok(folder.is_empty() || !folder_holds_schema(store, workspace_id, folder)?)
 }
 
 /// The relay's rule: Edit on the folder itself, which is never the root.
@@ -1249,9 +1321,10 @@ fn record_direct_write_result(
     let delivered = *result == DirectWriteResult::Written;
     let outcome = store
         .write_with(faults, |tx| {
+            let page = is_page_write(tx, workspace_id, write)?;
             if matches!(result, DirectWriteResult::Stale { .. }) && write.request.changes.len() == 1
             {
-                preserve_refused_record_drafts(tx, workspace_id, write)?;
+                preserve_refused_record_drafts(tx, workspace_id, write, page)?;
             }
             tx.execute(
                 "UPDATE share_direct_write_plan SET result_json=?4 \
@@ -1272,6 +1345,9 @@ fn record_direct_write_result(
                 )?;
                 let reason = match result {
                     DirectWriteResult::Refused { reason } => Some(reason.as_str()),
+                    DirectWriteResult::Stale { .. } if page => {
+                        Some("This page name is taken. Use New page to create another page.")
+                    }
                     DirectWriteResult::Stale { .. } => {
                         Some("This record name is taken. Use New record to create another record.")
                     }
@@ -1290,13 +1366,44 @@ fn record_direct_write_result(
     crashed(outcome)
 }
 
+/// A new page rather than a Collection record: one Markdown create at the top
+/// level or in a folder this replica holds no Collection schema for.
+fn is_page_write(
+    tx: &rusqlite::Connection,
+    workspace_id: &str,
+    write: &PlannedWrite,
+) -> Result<bool, SyncError> {
+    let [change] = write.request.changes.as_slice() else {
+        return Ok(false);
+    };
+    let Some(path) = change.after_path.as_deref() else {
+        return Ok(false);
+    };
+    if change.based_on_path.is_some() || !is_markdown(path) {
+        return Ok(false);
+    }
+    let Some((folder, _)) = path.rsplit_once('/') else {
+        return Ok(true);
+    };
+    let schema: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND path=?3)",
+            params![workspace_id, MAIN_VERSION_ID, format!("{folder}/{COLLECTION_SCHEMA_FILE}")],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    Ok(!schema)
+}
+
 // A refused creation can be replaced by the winner during the next pull.
 // Keep its current bytes as an ordinary local text file, outside the record
-// index and the outbound journal. The receipt and copy commit together.
+// index and the outbound journal. The receipt and copy commit together. A
+// record keeps the text that still names its id; a page keeps its latest text.
 fn preserve_refused_record_drafts(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
     write: &PlannedWrite,
+    page: bool,
 ) -> Result<(), SyncError> {
     for change in &write.request.changes {
         let Some(path) = change.after_path.as_deref() else {
@@ -1331,12 +1438,27 @@ fn preserve_refused_record_drafts(
                     .map(str::to_owned)
             })
         };
-        let Some(submitted_id) = record_id(&submitted) else {
-            continue;
+        let text = if page {
+            snapshot.unwrap_or(submitted)
+        } else {
+            let Some(submitted_id) = record_id(&submitted) else {
+                continue;
+            };
+            snapshot
+                .filter(|text| record_id(text).as_deref() == Some(submitted_id.as_str()))
+                .unwrap_or(submitted)
         };
-        let text = snapshot
-            .filter(|text| record_id(text).as_deref() == Some(submitted_id.as_str()))
-            .unwrap_or(submitted);
+        let (label, summary) = if page {
+            (
+                "Page draft",
+                "Draft kept after another person took the page name",
+            )
+        } else {
+            (
+                "Record draft",
+                "Draft kept after another person took the record name",
+            )
+        };
         let now_ms = change.recorded_at_ms;
         let identity =
             hex_sha256(format!("{workspace_id}\0{}\0{path}", write.request.submit_id).as_bytes());
@@ -1359,7 +1481,7 @@ fn preserve_refused_record_drafts(
         };
         let mut ordinal = 1_u64;
         let recovered_path = loop {
-            let candidate = format!("{prefix}Record draft {}-{ordinal}.txt", &identity[..12]);
+            let candidate = format!("{prefix}{label} {}-{ordinal}.txt", &identity[..12]);
             let occupied: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id='main' AND path=?2)",
                 params![workspace_id,candidate], |row| row.get(0),
@@ -1381,9 +1503,7 @@ fn preserve_refused_record_drafts(
                 text,
                 moment_id,
                 metadata_origin: "sync".to_owned(),
-                metadata_summary: Some(
-                    "Draft kept after another person took the record name".to_owned(),
-                ),
+                metadata_summary: Some(summary.to_owned()),
                 metadata_correlation_id: None,
                 author_json: None,
                 now_ms,

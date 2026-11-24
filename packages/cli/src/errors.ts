@@ -17,5 +17,6 @@ function cliErrorMessage(error: unknown): string {
 
 export function cliErrorLine(error: unknown): string {
   const message = cliErrorMessage(error);
-  return `${message.startsWith("dohc:") ? message : `dohc: ${message}`}\n`;
+  // A line that already starts with dohc, as "dohc: …" or a sentence such as "dohc could not…", names it once.
+  return `${/^dohc[: ]/u.test(message) ? message : `dohc: ${message}`}\n`;
 }

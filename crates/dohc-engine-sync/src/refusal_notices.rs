@@ -198,6 +198,12 @@ fn rows(conn: &Connection, workspace_id: &str) -> Result<Vec<RefusalNotice>, Syn
                     doc.object_id,
                     doc.lineage_claim_id
                 ])
+            } else if reason == crate::SHARE_CHAT_REFUSED
+                && let Some(thread) = payload["threadId"].as_str()
+            {
+                // A refused comment is its thread's create and its first
+                // message. One notice tells of both.
+                serde_json::json!([workspace_id, "chat-thread", thread])
             } else {
                 serde_json::json!([workspace_id, "coordinate", origin_id, origin_seq])
             };

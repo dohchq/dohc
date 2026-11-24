@@ -48,7 +48,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import type { ShareUnconfirmedChanges, ShareViewSelector } from "./shareViewInfo";
-import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import {
   EngineWorkspaceSessions,
   type AttachedEngineWorkspace,
@@ -927,10 +927,9 @@ export function createCaptureLiveStores(
           })
         ).filter(
           (row) =>
-            classifyEngineFilePath(row.path).kind === "tracked" &&
-            input.grantedSelector.paths.some(
-              (path) => row.path === path || row.path.startsWith(`${path}/`),
-            ) &&
+            (input.grantedSelector.wholeWorkspace === true ||
+              input.grantedSelector.paths.length > 0) &&
+            visibleSharePath(input.grantedSelector, row.path) === row.path &&
             !(row.metadataOrigin === "sync" && row.latestMomentId.startsWith("moment-share-")),
         );
         const requester = new WorkspaceDaemonRequester(binding.client);

@@ -220,7 +220,7 @@ it.each([
 
 it("matches a mention by the phone's own account name", async () => {
   const f = await fixture();
-  f.storage.db.prepare("DELETE FROM sync_relay_push_device_names").run();
+  f.storage.db.prepare("DELETE FROM sync_relay_account_names").run();
   f.say("alice", "message", "team-thread", "@Kim I do");
   expect(f.rows()).toEqual([]);
   f.phone("owner", "Kim");

@@ -39,6 +39,8 @@ import {
   type NamedLiveBrowserSessionContext,
 } from "./namedLiveBrowserClient";
 import { createNamedLiveTicketClient } from "./namedLiveTicketClient";
+import { namedAccountCookie } from "./namedAccountCookie";
+import { createMemberLiveClient } from "./memberLiveClient";
 import { createLinkLiveClient } from "./linkLiveClient";
 import { linkRefusalBody, parseLinkRefusal } from "@dohc/security-contract/link-refusal";
 import { linkChatRefusalBody, opaqueLinkRefusal as refused } from "./linkRefusal";
@@ -170,14 +172,32 @@ interface AgentCaller {
   invalid: boolean;
 }
 
-type LinkCaller = BrowserSession | AgentCaller;
+/**
+ * A workspace member's browser, reading the workspace through the same view
+ * routes as a link. It names its grant; the relay finds the person from the
+ * account cookie.
+ */
+interface MemberCaller {
+  memberGrantId: string;
+  cookie: string;
+}
+
+type LinkCaller = BrowserSession | AgentCaller | MemberCaller;
+
+/** The view routes' session token for a member's grant. */
+export const MEMBER_SESSION_PREFIX = "member.";
+const MEMBER_GRANT = /^[A-Za-z0-9_.:-]{1,256}$/u;
 
 /**
  * The limits' identity for a caller's link. An agent's MCP request reads the
  * share first, so its grant is known before any per-link limit applies.
  */
 function linkKeyOf(caller: LinkCaller): string {
-  return "session" in caller ? caller.session.grantId : (caller.grantId ?? caller.addressKey);
+  return "session" in caller
+    ? caller.session.grantId
+    : "memberGrantId" in caller
+      ? caller.memberGrantId
+      : (caller.grantId ?? caller.addressKey);
 }
 
 function takeAgentGrant(
@@ -1145,6 +1165,15 @@ export function createShareWebApplication({
         fetchRelay,
       })
     : undefined;
+  const memberLive = namedBrowserSessionLimits
+    ? createMemberLiveClient({
+        relayUrl,
+        publicOrigin: accountAuth!.publicOrigin,
+        exchangeKey: relayExchangeKey!,
+        limits: namedBrowserSessionLimits,
+        fetchRelay,
+      })
+    : undefined;
   const workspaceJoin = namedBrowserSessionLimits
     ? createWorkspaceJoinClient({
         relayUrl,
@@ -1342,6 +1371,26 @@ export function createShareWebApplication({
     return { discriminator, token, session, staleCookie: false };
   }
 
+  // A member's view request: the member token, the account cookie, and never another site.
+  function readMember(request: Request): MemberCaller | null {
+    const token =
+      request.headers.get(LINK_SESSION_HEADER) ??
+      new URL(request.url).searchParams.get("session") ??
+      "";
+    const grantId = token.startsWith(MEMBER_SESSION_PREFIX)
+      ? token.slice(MEMBER_SESSION_PREFIX.length)
+      : "";
+    if (
+      !accountAuth ||
+      !relayExchangeKey ||
+      !MEMBER_GRANT.test(grantId) ||
+      request.headers.get("sec-fetch-site") === "cross-site"
+    )
+      return null;
+    const cookie = namedAccountCookie(request.headers.get("cookie"), accountAuth.publicOrigin);
+    return cookie ? { memberGrantId: grantId, cookie } : null;
+  }
+
   function readSession(request: Request) {
     return readBrowserSession(
       request.headers.get(LINK_SESSION_HEADER) ??
@@ -1524,7 +1573,8 @@ export function createShareWebApplication({
     call: RelayCall,
   ): Promise<Response> {
     const browser = "session" in caller ? caller : null;
-    const agent = "session" in caller ? null : caller;
+    const member = "memberGrantId" in caller ? caller : null;
+    const agent = "accessToken" in caller ? caller : null;
     const refreshed = browser
       ? await refreshSession(browser)
       : { ok: true as const, headers: {} as Record<string, string> };
@@ -1539,7 +1589,14 @@ export function createShareWebApplication({
           "x-dohc-agent-resource": agent.resource,
           "x-dohc-relay-exchange-key": relayExchangeKey ?? "",
         }
-      : { authorization: `LinkCapability ${capabilityToken}` };
+      : member
+        ? {
+            authorization: `DohcMember ${member.memberGrantId}`,
+            cookie: member.cookie,
+            origin: accountAuth?.publicOrigin ?? "",
+            "x-dohc-relay-exchange-key": relayExchangeKey ?? "",
+          }
+        : { authorization: `LinkCapability ${capabilityToken}` };
     const current = (): boolean =>
       !browser ||
       sessions.isCurrent(browser.discriminator, browser.token, capabilityToken, nowMs());
@@ -1576,7 +1633,10 @@ export function createShareWebApplication({
             sessionKey(browser.discriminator, browser.token),
             browser.session.grantId,
           )
-        : call.limiter.acquire(agent?.key ?? "", linkKeyOf(caller));
+        : call.limiter.acquire(
+            agent?.key ?? `member:${member?.memberGrantId ?? ""}`,
+            linkKeyOf(caller),
+          );
     // A full limiter is busy, not a refusal: the link still opens.
     if (!release)
       return answer(
@@ -2029,6 +2089,13 @@ export function createShareWebApplication({
       return response(result.body, { status: result.status, headers: result.headers });
     }
 
+    if (pathname === "/api/live/member-open" || pathname === "/api/live/member-ready") {
+      mark(pathname);
+      if (!memberLive) return refused();
+      const result = await memberLive(request);
+      return response(result.body, { status: result.status, headers: result.headers });
+    }
+
     if (pathname.startsWith("/api/named-chat/")) {
       mark("/api/named-chat/*");
       if (!namedChat) return refused();
@@ -2448,7 +2515,8 @@ export function createShareWebApplication({
       )
         mark(pathname);
       else if (pathname.startsWith("/api/view/blob/")) mark("/api/view/blob/:sha256");
-      const authenticated = agentCallers.get(request) ?? readSession(request);
+      const authenticated =
+        agentCallers.get(request) ?? readMember(request) ?? readSession(request);
       if (!authenticated || request.method !== "GET") return refused();
       if (pathname === "/api/view/meta") {
         // The share's answer says whether the link has a channel, so a lost one is retryable.

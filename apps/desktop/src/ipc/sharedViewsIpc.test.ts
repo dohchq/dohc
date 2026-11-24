@@ -272,7 +272,7 @@ describe("metadata-only access checks", () => {
   );
   it("publishes narrowing even when capture cannot save a file", async () => {
     const h = await harness();
-    h.fetchAccess.mockResolvedValue("view");
+    h.fetchAccess.mockResolvedValue({ access: "view" });
     h.narrow.mockImplementationOnce(async (_lease, _target, assertCurrent, commit) => {
       assertCurrent();
       await commit(["docs/locked.md"], {
@@ -340,7 +340,7 @@ describe("metadata-only access checks", () => {
   it("narrows Edit to View without expanding the pinned paths or version", async () => {
     const h = await harness();
     h.workspace.shareView!.grantedSelector.versionId = "saved-version";
-    h.fetchAccess.mockResolvedValue("view");
+    h.fetchAccess.mockResolvedValue({ access: "view" });
     expect(
       await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
     ).toEqual({ status: "current", access: "view" });
@@ -349,12 +349,116 @@ describe("metadata-only access checks", () => {
       versionId: "saved-version",
       access: "view",
     });
-    h.fetchAccess.mockResolvedValue("edit");
+    h.fetchAccess.mockResolvedValue({ access: "edit" });
     expect(
       await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
     ).toEqual({ status: "current", access: "view", relayStatesMore: true });
     expect(h.workspace.shareView!.grantedSelector.access).toBe("view");
     expect(h.reconcile).not.toHaveBeenCalled();
+  });
+  // A membership's level is the owner's member level now, not the one it
+  // opened with, so it follows the relay both ways. Its scope never moves.
+  it("follows a membership's level up and down, keeping the whole-workspace pin", async () => {
+    const h = await harness();
+    h.workspace.shareView!.grantedSelector = {
+      paths: [],
+      versionId: null,
+      access: "view",
+      wholeWorkspace: true,
+    };
+    h.fetchAccess.mockResolvedValue({ access: "edit" });
+    expect(
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
+    ).toEqual({ status: "current", access: "edit", levelChanged: true });
+    expect(h.workspace.shareView!.grantedSelector).toEqual({
+      paths: [],
+      versionId: null,
+      access: "edit",
+      wholeWorkspace: true,
+    });
+    expect(h.narrow).not.toHaveBeenCalled();
+    expect(h.notify).toHaveBeenCalledWith({ workspaceId: "existing", summaryChanged: true });
+    h.fetchAccess.mockResolvedValue({ access: "comment" });
+    expect(
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
+    ).toEqual({ status: "current", access: "comment", levelChanged: true });
+    expect(h.narrow).toHaveBeenCalledOnce();
+    expect(h.workspace.shareView!.grantedSelector).toEqual({
+      paths: [],
+      versionId: null,
+      access: "comment",
+      wholeWorkspace: true,
+    });
+    expect(
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
+    ).toEqual({ status: "current", access: "comment" });
+  });
+  it("names who changed a membership's level only when this check moved it", async () => {
+    const h = await harness();
+    h.workspace.shareView!.grantedSelector = {
+      paths: [],
+      versionId: null,
+      access: "edit",
+      wholeWorkspace: true,
+    };
+    h.fetchAccess.mockResolvedValue({ access: "view", role: "member", levelChangedBy: "Ana" });
+    expect(
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
+    ).toEqual({
+      status: "current",
+      access: "view",
+      role: "member",
+      levelChanged: true,
+      levelChangedBy: "Ana",
+    });
+    expect(
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
+    ).toEqual({ status: "current", access: "view", role: "member" });
+  });
+  it("names a membership's role, and never a path share's", async () => {
+    const h = await harness();
+    h.fetchAccess.mockResolvedValue({ access: "edit", role: "admin" });
+    expect(
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
+    ).toEqual({ status: "current", access: "edit" });
+    h.workspace.shareView!.grantedSelector = {
+      paths: [],
+      versionId: null,
+      access: "edit",
+      wholeWorkspace: true,
+    };
+    expect(
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
+    ).toEqual({ status: "current", access: "edit", role: "admin" });
+    h.fetchAccess.mockResolvedValue({ access: "edit", role: "member" });
+    expect(
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
+    ).toEqual({ status: "current", access: "edit", role: "member" });
+  });
+  // The window and main's menus read the role from the view, so they know it
+  // before the next check. The relay still decides every action.
+  it("keeps the role the relay named on a membership, and never on a path share", async () => {
+    const h = await harness();
+    h.fetchAccess.mockResolvedValue({ access: "edit", role: "admin" });
+    await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
+    expect(h.workspace.shareView).not.toHaveProperty("role");
+    h.workspace.shareView!.grantedSelector = {
+      paths: [],
+      versionId: null,
+      access: "edit",
+      wholeWorkspace: true,
+    };
+    h.notify.mockClear();
+    await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
+    expect(h.workspace.shareView!.role).toBe("admin");
+    expect(h.notify).toHaveBeenCalledWith({ workspaceId: "existing", summaryChanged: true });
+    // The same role again writes nothing.
+    h.notify.mockClear();
+    await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
+    expect(h.notify).not.toHaveBeenCalled();
+    h.fetchAccess.mockResolvedValue({ access: "edit", role: "member" });
+    await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
+    expect(h.workspace.shareView!.role).toBe("member");
   });
 
   describe("when the owner raised this person's level", () => {
@@ -368,7 +472,7 @@ describe("metadata-only access checks", () => {
       const h = await harness();
       h.workspace.shareView!.grantedSelector = { ...view };
       h.fetchInfo.mockResolvedValue({ ...info, selector: view });
-      h.fetchAccess.mockResolvedValue("view");
+      h.fetchAccess.mockResolvedValue({ access: "view" });
       await refresh(h, "background");
       for (const mock of [
         h.fetchInfo,
@@ -391,7 +495,7 @@ describe("metadata-only access checks", () => {
       async (pinned, stated) => {
         const h = await openAtView();
         h.workspace.shareView!.grantedSelector = { ...view, access: pinned };
-        h.fetchAccess.mockResolvedValue(stated);
+        h.fetchAccess.mockResolvedValue({ access: stated });
         expect(await check(h)).toEqual({
           status: "current",
           access: pinned,
@@ -412,14 +516,14 @@ describe("metadata-only access checks", () => {
     ] as const)("says nothing more for a pin at %s and a stated %s", async (pinned, stated) => {
       const h = await openAtView();
       h.workspace.shareView!.grantedSelector = { ...view, access: pinned };
-      h.fetchAccess.mockResolvedValue(stated);
+      h.fetchAccess.mockResolvedValue({ access: stated });
       expect(await check(h)).toEqual({ status: "current", access: stated });
       expect(h.fetchInfo).not.toHaveBeenCalled();
     });
 
     it("widens the pin and records the identity through the refresh the window then asks for", async () => {
       const h = await openAtView();
-      h.fetchAccess.mockResolvedValue("edit");
+      h.fetchAccess.mockResolvedValue({ access: "edit" });
       h.fetchInfo.mockResolvedValue({ ...info, selector: edit });
       expect(await check(h)).toMatchObject({ access: "view", relayStatesMore: true });
       await refresh(h, "background");
@@ -443,7 +547,7 @@ describe("metadata-only access checks", () => {
       ],
     ])("changes nothing when that refresh's read %s", async (_name, selector) => {
       const h = await openAtView();
-      h.fetchAccess.mockResolvedValue("edit");
+      h.fetchAccess.mockResolvedValue({ access: "edit" });
       h.fetchInfo.mockResolvedValue({ ...info, selector });
       expect(await check(h)).toMatchObject({ relayStatesMore: true });
       await expect(refresh(h, "manual")).resolves.toMatchObject({ ok: true });
@@ -475,7 +579,7 @@ describe("metadata-only access checks", () => {
         "stops saying it, in every window, when a check finds a copy at %s and the relay at %s",
         async (pinned, stated) => {
           const h = await marked(pinned);
-          h.fetchAccess.mockResolvedValue(stated);
+          h.fetchAccess.mockResolvedValue({ access: stated });
           await check(h);
           expect(h.workspace.shareView).not.toHaveProperty("editingNotReady");
           expect(workspaceSummaryFor(h.workspace).shareView).not.toHaveProperty("editingNotReady");
@@ -486,7 +590,7 @@ describe("metadata-only access checks", () => {
 
       it("keeps saying it when the check finds the relay still states Edit", async () => {
         const h = await marked("view");
-        h.fetchAccess.mockResolvedValue("edit");
+        h.fetchAccess.mockResolvedValue({ access: "edit" });
         expect(await check(h)).toEqual({
           status: "current",
           access: "view",
@@ -508,7 +612,7 @@ describe("metadata-only access checks", () => {
     describe("a check whose answer is older than a refresh", () => {
       async function checkDuringUpgrade() {
         const h = await openAtView();
-        const stale = deferred<"view" | "edit">();
+        const stale = deferred<{ access: "view" | "edit" }>();
         h.fetchAccess.mockReturnValueOnce(stale.promise);
         const checking = check(h);
         await vi.waitFor(() => expect(h.fetchAccess).toHaveBeenCalledOnce());
@@ -520,8 +624,8 @@ describe("metadata-only access checks", () => {
 
       it("does not undo the Edit the refresh pinned: it reads access again", async () => {
         const { h, stale, checking } = await checkDuringUpgrade();
-        h.fetchAccess.mockResolvedValue("edit");
-        stale.resolve("view");
+        h.fetchAccess.mockResolvedValue({ access: "edit" });
+        stale.resolve({ access: "view" });
         expect(await checking).toEqual({ status: "current", access: "edit" });
         expect(h.fetchAccess).toHaveBeenCalledTimes(2);
         expect(h.narrow).not.toHaveBeenCalled();
@@ -530,8 +634,8 @@ describe("metadata-only access checks", () => {
 
       it("narrows when the second reading still states View", async () => {
         const { h, stale, checking } = await checkDuringUpgrade();
-        h.fetchAccess.mockResolvedValue("view");
-        stale.resolve("view");
+        h.fetchAccess.mockResolvedValue({ access: "view" });
+        stale.resolve({ access: "view" });
         expect(await checking).toEqual({ status: "current", access: "view" });
         expect(h.fetchAccess).toHaveBeenCalledTimes(2);
         expect(h.narrow).toHaveBeenCalledOnce();
@@ -540,12 +644,12 @@ describe("metadata-only access checks", () => {
 
       it("narrows nothing and reads no third time when the pin moves again", async () => {
         const { h, stale, checking } = await checkDuringUpgrade();
-        const second = deferred<"view" | "edit">();
+        const second = deferred<{ access: "view" | "edit" }>();
         h.fetchAccess.mockReturnValueOnce(second.promise);
-        stale.resolve("view");
+        stale.resolve({ access: "view" });
         await vi.waitFor(() => expect(h.fetchAccess).toHaveBeenCalledTimes(2));
         h.workspace.shareView!.grantedSelector = { ...view, access: "comment" };
-        second.resolve("view");
+        second.resolve({ access: "view" });
         expect(await checking).toEqual({ status: "unverified" });
         expect(h.fetchAccess).toHaveBeenCalledTimes(2);
         expect(h.narrow).not.toHaveBeenCalled();
@@ -555,7 +659,7 @@ describe("metadata-only access checks", () => {
       it("ends the copy when the second reading says the share ended", async () => {
         const { h, stale, checking } = await checkDuringUpgrade();
         h.fetchAccess.mockRejectedValue(new ShareUnavailableError());
-        stale.resolve("view");
+        stale.resolve({ access: "view" });
         expect(await checking).toEqual({ status: "ended" });
         expect(h.end).toHaveBeenCalledOnce();
         expect(h.narrow).not.toHaveBeenCalled();
@@ -564,7 +668,7 @@ describe("metadata-only access checks", () => {
       it("does not narrow a pin a refresh raised while the narrowing saved unsent work", async () => {
         const h = await openAtView();
         h.workspace.shareView!.grantedSelector = { ...view, access: "comment" };
-        h.fetchAccess.mockResolvedValue("view");
+        h.fetchAccess.mockResolvedValue({ access: "view" });
         h.narrow.mockImplementationOnce(async (_lease, _target, assertCurrent, commit) => {
           assertCurrent();
           h.workspace.shareView!.grantedSelector = { ...edit };
@@ -578,7 +682,7 @@ describe("metadata-only access checks", () => {
 
     it("changes nothing when that refresh's read fails", async () => {
       const h = await openAtView();
-      h.fetchAccess.mockResolvedValue("edit");
+      h.fetchAccess.mockResolvedValue({ access: "edit" });
       h.fetchInfo.mockRejectedValue(new Error("offline"));
       expect(await check(h)).toMatchObject({ relayStatesMore: true });
       await expect(refresh(h, "manual")).rejects.toThrow("offline");
@@ -591,7 +695,7 @@ describe("metadata-only access checks", () => {
     "discards a deferred 404 after %s changes",
     async (change) => {
       const h = await harness();
-      const response = deferred<"edit" | "view">();
+      const response = deferred<{ access: "edit" | "view" }>();
       h.fetchAccess.mockReturnValueOnce(response.promise);
       const result = h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
       await vi.waitFor(() => expect(h.fetchAccess).toHaveBeenCalledTimes(1));
@@ -644,7 +748,7 @@ describe("registered received-view handlers", () => {
       workspaceId: "existing",
     });
     await started.promise;
-    if (change === "view") h.fetchAccess.mockResolvedValueOnce("view");
+    if (change === "view") h.fetchAccess.mockResolvedValueOnce({ access: "view" });
     else h.fetchAccess.mockRejectedValueOnce(new ShareUnavailableError());
     await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
       workspaceId: "existing",
@@ -676,7 +780,7 @@ describe("registered received-view handlers", () => {
       workspaceId: "existing",
     });
     await vi.waitFor(() => expect(h.fetchInfo).toHaveBeenCalledOnce());
-    h.fetchAccess.mockResolvedValueOnce("view");
+    h.fetchAccess.mockResolvedValueOnce({ access: "view" });
     await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
       workspaceId: "existing",
     });
@@ -747,12 +851,14 @@ describe("registered received-view handlers", () => {
     [new ShareUnavailableError(), "No share matches"],
     [new RelayUnauthorizedError(), "session expired"],
     [new ShareSelectorInvalidError("share"), "server did not say"],
+    // A person knows the server, not its address.
+    [new TypeError("fetch failed"), /^dohc could not reach the server\. Check your connection\.$/],
   ])("maps preflight errors without creating local state", async (error, message) => {
     const h = await harness();
     h.fetchInfo.mockRejectedValue(error);
     await expect(
       h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload),
-    ).rejects.toThrow(message as string);
+    ).rejects.toThrow(message);
     expect(h.mkdir).not.toHaveBeenCalled();
     expect(h.createFolder).not.toHaveBeenCalled();
   });
@@ -881,6 +987,113 @@ describe("registered received-view handlers", () => {
     );
     expect(h.registry.size).toBe(2);
     expect(h.open).not.toHaveBeenCalled();
+  });
+
+  // A membership can be a large workspace. A first pull that fails keeps what
+  // arrived, and opening the same folder again continues the pull.
+  describe("a membership", () => {
+    const member: ShareViewInfo = {
+      ...info,
+      subjectName: "Community",
+      role: "member",
+      selector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
+    };
+
+    it("pins the role and the workspace id Members routes name", async () => {
+      const h = await harness();
+      h.fetchInfo.mockResolvedValue({ ...member, membersWorkspaceId: "owner-workspace" });
+      await h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload);
+      const opened = [...h.registry.values()].find((entry) => entry.workspaceId !== "existing")!;
+      expect(opened.shareView).toMatchObject({
+        role: "member",
+        membersWorkspaceId: "owner-workspace",
+      });
+    });
+
+    it("follows the relay's role on refresh, and keeps a path share free of one", async () => {
+      const h = await harness();
+      h.fetchInfo.mockResolvedValue({
+        ...member,
+        role: "admin",
+        membersWorkspaceId: "owner-workspace",
+      });
+      await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
+        workspaceId: "existing",
+      });
+      expect(h.workspace.shareView).not.toHaveProperty("role");
+      expect(h.workspace.shareView).not.toHaveProperty("membersWorkspaceId");
+      h.workspace.shareView!.grantedSelector = member.selector!;
+      await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
+        workspaceId: "existing",
+      });
+      expect(h.workspace.shareView).toMatchObject({
+        role: "admin",
+        membersWorkspaceId: "owner-workspace",
+      });
+    });
+
+    it("keeps what a failed first pull brought, and Try again continues it in place", async () => {
+      const h = await harness();
+      h.fetchInfo.mockResolvedValue(member);
+      h.reconcile.mockRejectedValueOnce(new Error("relay went away"));
+      const first = h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload);
+      await expect(first).rejects.toThrow(
+        "dohc could not finish reading Community: relay went away.",
+      );
+      await expect(first).rejects.toThrow(
+        `What arrived stays in ${h.openPayload.rootPath}. Try again continues from there.`,
+      );
+      expect(h.cleanup).not.toHaveBeenCalled();
+      expect(h.registry.size).toBe(2);
+      const kept = [...h.registry.values()].find((entry) => entry.workspaceId !== "existing")!;
+      expect(kept.shareView?.grantedSelector).toEqual(member.selector);
+      // The view is usable with what arrived: it opens and the list shows it.
+      expect(h.open).toHaveBeenCalledOnce();
+      // The folder now holds what arrived, and the same folder continues the pull.
+      h.readDir.mockResolvedValue(["notes.md"]);
+      await expect(
+        h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload),
+      ).resolves.toMatchObject({
+        workspace: { workspaceId: kept.workspaceId, rootPath: h.openPayload.rootPath },
+      });
+      expect(h.createFolder).toHaveBeenCalledOnce();
+      expect(h.reconcile).toHaveBeenCalledTimes(2);
+      expect(h.registry.size).toBe(2);
+    });
+
+    it("continues only its own copy: another share or account still needs an empty folder", async () => {
+      const h = await harness();
+      h.fetchInfo.mockResolvedValue(member);
+      h.reconcile.mockRejectedValueOnce(new Error("relay went away"));
+      await expect(
+        h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload),
+      ).rejects.toThrow("Try again");
+      const kept = [...h.registry.values()].find((entry) => entry.workspaceId !== "existing")!;
+      h.readDir.mockResolvedValue(["notes.md"]);
+      kept.shareView = { ...kept.shareView!, recipientUserId: "someone-else" };
+      await expect(
+        h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload),
+      ).rejects.toThrow("empty folder");
+      kept.shareView = {
+        ...kept.shareView,
+        recipientUserId: credentials.userId,
+        shareId: "another",
+      };
+      await expect(
+        h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload),
+      ).rejects.toThrow("empty folder");
+      expect(h.createFolder).toHaveBeenCalledOnce();
+    });
+
+    it("still rolls back when the membership ended before it opened", async () => {
+      const h = await harness();
+      h.fetchInfo.mockResolvedValue(member);
+      h.reconcile.mockResolvedValue({ kind: "refresh", outcome: { ...outcome, status: "ended" } });
+      await expect(
+        h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload),
+      ).rejects.toThrow("ended before it could be opened");
+      expect(h.registry.size).toBe(1);
+    });
   });
 
   describe("opening a share for the first time", () => {
@@ -1025,7 +1238,7 @@ describe("registered received-view handlers", () => {
         workspaceId: "existing",
       });
       await vi.waitFor(() => expect(h.fetchInfo).toHaveBeenCalledOnce());
-      h.fetchAccess.mockResolvedValueOnce("edit");
+      h.fetchAccess.mockResolvedValueOnce({ access: "edit" });
       await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
         workspaceId: "existing",
       });
@@ -1053,7 +1266,7 @@ describe("registered received-view handlers", () => {
           ...(marked ? { editingNotReady: true as const } : {}),
         };
         h.reconcile.mockImplementation(async (_lease, _target, _request, onCursorCommitted) => {
-          onCursorCommitted?.(42);
+          onCursorCommitted?.({ cursor: 42, changes: [] });
           return { kind: "refresh", outcome };
         });
         const reply = deferred<ShareViewInfo>();
@@ -1065,7 +1278,7 @@ describe("registered received-view handlers", () => {
 
       it("reads the level again on the next pull after it read View and a newer check found Edit", async () => {
         const { h, reply, refreshed } = await refreshing(view, true);
-        h.fetchAccess.mockResolvedValueOnce("edit");
+        h.fetchAccess.mockResolvedValueOnce({ access: "edit" });
         await check(h);
         reply.resolve({ ...info, selector: view });
         await expect(refreshed).resolves.toMatchObject({ ok: true });
@@ -1090,7 +1303,7 @@ describe("registered received-view handlers", () => {
         ]) {
           const { h, reply, refreshed } = await refreshing(view, false);
           h.recordIdentity.mockImplementation(answer);
-          h.fetchAccess.mockResolvedValueOnce("view");
+          h.fetchAccess.mockResolvedValueOnce({ access: "view" });
           await check(h);
           reply.resolve({ ...info, selector: edit });
           await expect(refreshed).resolves.toMatchObject({ ok: true });
@@ -1105,7 +1318,7 @@ describe("registered received-view handlers", () => {
 
       it("does not lower the copy or drop its notice after it read View and a newer check found Edit", async () => {
         const { h, reply, refreshed } = await refreshing(comment, true);
-        h.fetchAccess.mockResolvedValueOnce("edit");
+        h.fetchAccess.mockResolvedValueOnce({ access: "edit" });
         await check(h);
         reply.resolve({ ...info, selector: view });
         await expect(refreshed).resolves.toMatchObject({ ok: true });
@@ -1120,7 +1333,7 @@ describe("registered received-view handlers", () => {
         const { h, reply, refreshed } = await refreshing(comment, true);
         h.narrow.mockImplementationOnce(async (_lease, _target, assertCurrent, commit) => {
           assertCurrent();
-          h.fetchAccess.mockResolvedValueOnce("edit");
+          h.fetchAccess.mockResolvedValueOnce({ access: "edit" });
           await check(h);
           await commit(["docs/draft.md"], { paths: [], unchecked: false, checked: 0 });
         });
@@ -1137,7 +1350,7 @@ describe("registered received-view handlers", () => {
 
       it("does not raise a copy to Comment after a newer check answered", async () => {
         const { h, reply, refreshed } = await refreshing(view, false);
-        h.fetchAccess.mockResolvedValueOnce("view");
+        h.fetchAccess.mockResolvedValueOnce({ access: "view" });
         await check(h);
         reply.resolve({ ...info, selector: comment });
         await expect(refreshed).resolves.toMatchObject({ ok: true });
@@ -1150,7 +1363,7 @@ describe("registered received-view handlers", () => {
         h.recordIdentity.mockReturnValueOnce(recording.promise);
         reply.resolve({ ...info, selector: edit });
         await vi.waitFor(() => expect(h.recordIdentity).toHaveBeenCalledOnce());
-        h.fetchAccess.mockResolvedValueOnce("edit");
+        h.fetchAccess.mockResolvedValueOnce({ access: "edit" });
         await check(h);
         recording.resolve({ identity: "recorded" });
         await expect(refreshed).resolves.toMatchObject({ ok: true });
@@ -1308,7 +1521,7 @@ describe("registered received-view handlers", () => {
       h.reconcile.mockImplementation(async (_lease, _target, _request, onCursorCommitted) => {
         h.steps.push("reconcile");
         pinnedAtPull.push(h.registry.get("existing")!.shareView!.grantedSelector);
-        onCursorCommitted?.(42);
+        onCursorCommitted?.({ cursor: 42, changes: [] });
         return { kind: "refresh", outcome };
       });
       return { h, pinnedAtPull };
@@ -1433,7 +1646,7 @@ describe("registered received-view handlers", () => {
       h.recordIdentity.mockReturnValueOnce(recording.promise);
       const refreshed = refresh(h);
       await vi.waitFor(() => expect(h.recordIdentity).toHaveBeenCalledOnce());
-      h.fetchAccess.mockResolvedValueOnce("view");
+      h.fetchAccess.mockResolvedValueOnce({ access: "view" });
       await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
         workspaceId: "existing",
       });
@@ -1482,7 +1695,7 @@ describe("registered received-view handlers", () => {
       h.fetchInfo.mockReturnValueOnce(response.promise);
       const refreshed = refresh(h);
       await vi.waitFor(() => expect(h.fetchInfo).toHaveBeenCalledOnce());
-      h.fetchAccess.mockResolvedValueOnce("view");
+      h.fetchAccess.mockResolvedValueOnce({ access: "view" });
       await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
         workspaceId: "existing",
       });
@@ -1526,7 +1739,7 @@ describe("registered received-view handlers", () => {
       h.fetchInfo.mockReturnValueOnce(response.promise);
       const refreshed = refresh(h);
       await vi.waitFor(() => expect(h.fetchInfo).toHaveBeenCalledOnce());
-      h.fetchAccess.mockResolvedValueOnce("view");
+      h.fetchAccess.mockResolvedValueOnce({ access: "view" });
       await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
         workspaceId: "existing",
       });
@@ -1551,7 +1764,7 @@ describe("registered received-view handlers", () => {
       });
       const refreshed = refresh(h);
       await capturing.promise;
-      h.fetchAccess.mockResolvedValueOnce("view");
+      h.fetchAccess.mockResolvedValueOnce({ access: "view" });
       await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
         workspaceId: "existing",
       });
@@ -1616,19 +1829,27 @@ describe("registered received-view handlers", () => {
           (h: Awaited<ReturnType<typeof harness>>) =>
             h.cache.set({ ...credentials, userId: "someone-else" }),
           false,
+          // The refresh is refused before it asks the server anything.
+          false,
         ],
-        ["nobody is signed in", (h: Awaited<ReturnType<typeof harness>>) => h.cache.clear(), false],
+        [
+          "nobody is signed in",
+          (h: Awaited<ReturnType<typeof harness>>) => h.cache.clear(),
+          false,
+          true,
+        ],
         [
           "the engine answers that it recorded no identity",
           (h: Awaited<ReturnType<typeof harness>>) =>
             h.recordIdentity.mockResolvedValue({ identity: "not-required" }),
           true,
+          true,
         ],
-      ])("keeps Edit when the record is not made because %s", async (_name, arrange, asked) => {
+      ])("keeps Edit when the record is not made because %s", async (_name, arrange, asked, ok) => {
         const { h } = await pinnedAt("edit");
         h.fetchInfo.mockResolvedValue({ ...info, selector: edit });
         arrange(h);
-        await expect(refresh(h, "manual")).resolves.toMatchObject({ ok: true });
+        await expect(refresh(h, "manual")).resolves.toMatchObject({ ok });
         if (asked)
           expect(h.recordIdentity).toHaveBeenCalledExactlyOnceWith({ grantedSelector: edit });
         else expect(h.recordIdentity).not.toHaveBeenCalled();
@@ -1730,7 +1951,7 @@ describe("registered received-view handlers", () => {
       h.recordIdentity.mockReturnValueOnce(recording.promise);
       const refreshed = refresh(h, "background");
       await vi.waitFor(() => expect(h.recordIdentity).toHaveBeenCalledOnce());
-      h.fetchAccess.mockResolvedValueOnce("edit");
+      h.fetchAccess.mockResolvedValueOnce({ access: "edit" });
       await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
         workspaceId: "existing",
       });
@@ -1845,12 +2066,10 @@ describe("registered received-view handlers", () => {
         workspaceId: "existing",
         trigger,
       });
-      if (trigger === "background") {
-        expect(result).toMatchObject({ ok: false, errorKind: "unauthorized" });
-        expect(h.storeFor).not.toHaveBeenCalled();
-        expect(h.reconcile).not.toHaveBeenCalled();
-      }
-      // The pull itself skips another account's share (main's resolveRelay).
+      // Neither refresh reaches the reconcile, which would capture disk edits.
+      expect(result).toMatchObject({ ok: false, errorKind: "unauthorized" });
+      expect(h.storeFor).not.toHaveBeenCalled();
+      expect(h.reconcile).not.toHaveBeenCalled();
       expect(h.fetchInfo).not.toHaveBeenCalled();
       expect(h.recordIdentity).not.toHaveBeenCalled();
       expect(h.setView).not.toHaveBeenCalled();
@@ -1879,14 +2098,24 @@ describe("registered received-view handlers", () => {
     expect(h.notify).not.toHaveBeenCalled();
   });
 
-  it("skips metadata and edit identity on another relay while retaining the local refresh path", async () => {
+  it("refuses a refresh signed in on another relay before metadata, edit identity and the local refresh", async () => {
     const h = await harness();
     h.cache.set({ ...credentials, relayUrl: "https://other.example.test" });
     await expect(
       h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" }),
-    ).resolves.toEqual(outcome);
+    ).resolves.toMatchObject({ ok: false, errorKind: "unauthorized" });
     expect(h.fetchInfo).not.toHaveBeenCalled();
     expect(h.recordIdentity).not.toHaveBeenCalled();
+    expect(h.reconcile).not.toHaveBeenCalled();
+  });
+
+  it("keeps the local refresh path while signed out", async () => {
+    const h = await harness();
+    h.cache.clear();
+    await expect(
+      h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" }),
+    ).resolves.toEqual(outcome);
+    expect(h.fetchInfo).not.toHaveBeenCalled();
     expect(h.reconcile).toHaveBeenCalledOnce();
   });
 
@@ -2011,11 +2240,104 @@ describe("background share pulls", () => {
     expect(reads).not.toHaveBeenCalled();
     noLocalWork(h);
   });
+  it("holds a membership's pull at the relay and says when its level changed", async () => {
+    const h = await primed();
+    const bodies = [
+      { ops: [], hasMore: false, nextCursor: 42 },
+      { ops: [], hasMore: false, nextCursor: 42, levelChanged: true },
+    ];
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json(bodies.shift()));
+    h.probeLog.mockImplementation((input) =>
+      probeShareViewLog({ ...input, relay: { ...input.relay, fetch } }),
+    );
+    await expect(h.invoke(channel, { ...payload, trigger: "held" })).resolves.toMatchObject({
+      ok: true,
+      status: "unchanged",
+      probed: true,
+      held: true,
+    });
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://relay.example.test/sync/shares/share/log?since=42&scan=page&hold=25000",
+      expect.anything(),
+    );
+    const changed = await h.invoke(channel, { ...payload, trigger: "held" });
+    expect(changed).toMatchObject({
+      ok: true,
+      status: "unchanged",
+      probed: true,
+      held: true,
+      levelChanged: true,
+    });
+    noLocalWork(h);
+    // A plain background pull neither holds nor asks to be held again.
+    bodies.push({ ops: [], hasMore: false, nextCursor: 42 });
+    const plain = await h.invoke(channel, payload);
+    expect(plain).not.toHaveProperty("held");
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://relay.example.test/sync/shares/share/log?since=42&scan=page",
+      expect.anything(),
+    );
+  });
+  // A level change that lands between holds: the next hold names the level
+  // this computer knows, and the relay answers at once when its own differs.
+  it("names the level a membership knows in its held pull, once until the access check moves it", async () => {
+    const h = await harness();
+    h.workspace.shareView!.grantedSelector = {
+      paths: [],
+      versionId: null,
+      access: "comment",
+      wholeWorkspace: true,
+    };
+    await h.invoke(channel, { workspaceId: "existing" });
+    vi.clearAllMocks();
+    const bodies = [
+      { ops: [], hasMore: false, nextCursor: 42, levelChanged: true },
+      { ops: [], hasMore: false, nextCursor: 42 },
+      { ops: [], hasMore: false, nextCursor: 42 },
+    ];
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json(bodies.shift()));
+    h.probeLog.mockImplementation((input) =>
+      probeShareViewLog({ ...input, relay: { ...input.relay, fetch } }),
+    );
+    const held = { ...payload, trigger: "held" };
+    await expect(h.invoke(channel, held)).resolves.toMatchObject({ levelChanged: true });
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://relay.example.test/sync/shares/share/log?since=42&scan=page&hold=25000&level=comment",
+      expect.anything(),
+    );
+    // Answered once: the next hold names no level, so a stale one cannot loop.
+    await h.invoke(channel, held);
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://relay.example.test/sync/shares/share/log?since=42&scan=page&hold=25000",
+      expect.anything(),
+    );
+    h.fetchAccess.mockResolvedValue({ access: "edit" });
+    await expect(
+      h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
+        workspaceId: "existing",
+      }),
+    ).resolves.toMatchObject({ status: "current", access: "edit" });
+    await h.invoke(channel, held);
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://relay.example.test/sync/shares/share/log?since=42&scan=page&hold=25000&level=edit",
+      expect.anything(),
+    );
+  });
+  it("asks for the next held pull after a held pull brought changes", async () => {
+    const h = await primed();
+    h.probeLog.mockResolvedValue({ unchanged: false });
+    await expect(h.invoke(channel, { ...payload, trigger: "held" })).resolves.toMatchObject({
+      ok: true,
+      status: "updated",
+      held: true,
+    });
+    expect(h.reconcile).toHaveBeenCalledOnce();
+  });
   it("runs the full path once for new ops, keeps its committed cursor and skips metadata and identity", async () => {
     const h = await primed();
     h.probeLog.mockResolvedValue({ unchanged: false });
-    h.reconcile.mockImplementation(async (_lease, _target, _request, onCursorCommitted) => {
-      onCursorCommitted?.(57);
+    h.reconcile.mockImplementation(async (_lease, _target, _request, onPullCommitted) => {
+      onPullCommitted?.({ cursor: 57, changes: [] });
       return { kind: "refresh", outcome };
     });
     const result = await h.invoke(channel, payload);
@@ -2030,6 +2352,43 @@ describe("background share pulls", () => {
     await h.invoke(channel, payload);
     expect(h.probeLog).toHaveBeenLastCalledWith(expect.objectContaining({ since: 57 }));
     expect(h.reconcile).toHaveBeenCalledOnce();
+  });
+  it("says when every change a pull wrote is to a document its live session already shows", async () => {
+    const h = await primed();
+    h.probeLog.mockResolvedValue({ unchanged: false });
+    h.showsLive.mockImplementation(
+      (attachmentId, path) => attachmentId === h.attachmentId && path === "docs/plan.md",
+    );
+    const pulled = (
+      changedPaths: number,
+      changes: { path: string; operation: "write" | "delete" }[],
+    ) =>
+      h.reconcile.mockImplementation(async (_lease, _target, _request, onPullCommitted) => {
+        onPullCommitted?.({ cursor: 57, changes });
+        return { kind: "refresh", outcome: { ...outcome, changedPaths } };
+      });
+    pulled(1, [{ path: "docs/plan.md", operation: "write" }]);
+    await expect(h.invoke(channel, { ...payload, trigger: "held" })).resolves.toMatchObject({
+      ok: true,
+      status: "updated",
+      held: true,
+      shownLive: true,
+    });
+    // Another file, a delete, or a local change the capture found still repaints.
+    for (const [changedPaths, changes] of [
+      [
+        2,
+        [
+          { path: "docs/plan.md", operation: "write" },
+          { path: "docs/other.md", operation: "write" },
+        ],
+      ],
+      [1, [{ path: "docs/plan.md", operation: "delete" }]],
+      [2, [{ path: "docs/plan.md", operation: "write" }]],
+    ] as const) {
+      pulled(changedPaths, [...changes]);
+      expect(await h.invoke(channel, payload)).not.toHaveProperty("shownLive");
+    }
   });
   it.each(["manual", "background"] as const)(
     "syncs Notices after a changed %s pull commits",
@@ -2061,8 +2420,8 @@ describe("background share pulls", () => {
   });
   it("syncs content-neutral journal changes but leaves an unchanged manual pull alone", async () => {
     const h = await primed();
-    h.reconcile.mockImplementation(async (_lease, _target, _request, cursor) => {
-      cursor?.(42);
+    h.reconcile.mockImplementation(async (_lease, _target, _request, onPullCommitted) => {
+      onPullCommitted?.({ cursor: 42, changes: [] });
       return {
         kind: "refresh",
         outcome: { ...outcome, status: "unchanged", changedPaths: 0, refusedOps: 0 },
@@ -2072,8 +2431,8 @@ describe("background share pulls", () => {
     expect(h.syncNotices).not.toHaveBeenCalled();
     expect(h.notify).toHaveBeenLastCalledWith({ workspaceId: "existing" });
     h.probeLog.mockResolvedValue({ unchanged: false });
-    h.reconcile.mockImplementation(async (_lease, _target, _request, cursor) => {
-      cursor?.(57);
+    h.reconcile.mockImplementation(async (_lease, _target, _request, onPullCommitted) => {
+      onPullCommitted?.({ cursor: 57, changes: [] });
       return {
         kind: "refresh",
         outcome: { ...outcome, status: "unchanged", changedPaths: 0, refusedOps: 0 },

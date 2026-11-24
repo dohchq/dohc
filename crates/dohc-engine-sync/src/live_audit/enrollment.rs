@@ -171,7 +171,9 @@ fn export_next(
     after: i64,
     now_ms: i64,
 ) -> Result<usize, SyncError> {
-    let [namespace, workspace, ..] = p;
+    let [namespace, workspace, version, object, _] = p;
+    let key = DocKey::new(workspace, version, object).map_err(SyncError::corrupt)?;
+    crate::ydoc_apply::require_unfenced_lineage(tx, &key)?;
     let json: String = tx
         .query_row(
             &format!(

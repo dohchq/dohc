@@ -329,7 +329,7 @@ it("reports the file open only once its session is first live, and keeps it open
   await act(async () => f.update({ status: "disconnected", reason: "authority-unavailable" }));
   expect(onOpenChange).not.toHaveBeenCalledWith(true);
   expect(body.hidden).toBe(true);
-  expect(container.textContent).toContain("dohc could not open the file for editing. Try again.");
+  expect(container.textContent).toContain("dohc could not open the file for editing.");
   await act(async () => f.update({ status: "live", reason: null }));
   expect(onOpenChange).toHaveBeenLastCalledWith(true);
   expect(body.hidden).toBe(false);

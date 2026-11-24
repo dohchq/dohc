@@ -21,6 +21,13 @@ import { retireUncoveredServiceActivations } from "./storage/serviceHostEnrollme
 import { appendLiveRoomEdit } from "./storage/liveRoomEdits";
 import * as Yjs from "yjs";
 import nativeAuthoredSettlement from "./testing/fixtures/nativeAuthoredSettlement.json";
+import {
+  noteResolve,
+  RESOLVE_BLOBS,
+  resolveShadows,
+  WITHHELD_RESOLVES,
+  type NoteResolvePayload,
+} from "./singleNoteResolve.test-helper";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -1580,4 +1587,77 @@ it("answers a push with no rows before a long history is read, and holds a blob 
   } finally {
     ended = true;
   }
+});
+
+const note = { workspaceId: ws, objectId: binding.objectId, path: "docs/a.md" };
+
+async function resolveFixture(change?: (payload: NoteResolvePayload) => void) {
+  const f = await fixture();
+  for (const { sha256, content } of Object.values(RESOLVE_BLOBS))
+    f.storage.putBlob({ workspaceId: ws, sha256, content, createdAtMs: 1 });
+  const payload = noteResolve({ ...note, recordedAtMs: 1 }, change);
+  const originSeq = f.storage.maxOriginSeq(ws, "owner-device") + 1;
+  f.append(["conflict.resolve", payload]);
+  const coordinate = async () =>
+    (await f.request("GET", `log/owner-device/${originSeq}?${identity}`)).json();
+  return { ...f, payload, coordinate };
+}
+
+it("serves a resolve of the hosted note alone, with its sides and successor bytes", async () => {
+  const f = await resolveFixture();
+  const feed = await f.read();
+  expect(feed.ops.filter((op) => op.opKind === "conflict.resolve").map((op) => op.payload)).toEqual(
+    [f.payload],
+  );
+  expect((await f.read(`&object=${binding.objectId}`)).ops.map((op) => op.opKind)).toContain(
+    "conflict.resolve",
+  );
+  expect(await f.coordinate()).toMatchObject({ status: "present", op: { payload: f.payload } });
+  for (const { sha256 } of Object.values(RESOLVE_BLOBS))
+    expect(await f.blobStatus(sha256)).toBe(200);
+  expect(f.storage.hasServiceHostConflictEffect(note)).toBe(false);
+});
+
+it.each(WITHHELD_RESOLVES)(
+  "keeps withholding a resolve with %s, and its bytes",
+  async (_shape, change) => {
+    const f = await resolveFixture(change);
+    expect((await f.read()).ops.map((op) => op.opKind)).not.toContain("conflict.resolve");
+    expect((await f.read(`&object=${binding.objectId}`)).ops.map((op) => op.opKind)).not.toContain(
+      "conflict.resolve",
+    );
+    expect(await f.coordinate()).toEqual({ ok: true, status: "absent" });
+    for (const { sha256 } of [RESOLVE_BLOBS.update, RESOLVE_BLOBS.stateVector])
+      expect(await f.blobStatus(sha256)).toBe(404);
+  },
+);
+
+it("names a conflict effect withheld only when the feed withholds its resolve", async () => {
+  const served = await resolveFixture();
+  const effect = (f: typeof served) =>
+    f.append(["moment.append", resolveShadows(f.payload).at(-1)!]);
+  effect(served);
+  expect(served.storage.hasServiceHostConflictEffect(note)).toBe(false);
+  expect(served.storage.hasServiceHostConflictEffect({ ...note, path: "docs/moved.md" })).toBe(
+    true,
+  );
+  const withheld = await resolveFixture(WITHHELD_RESOLVES[0]![1]);
+  effect(withheld);
+  expect(withheld.storage.hasServiceHostConflictEffect(note)).toBe(true);
+});
+
+it("refuses a resolve the host writes, even of its own note", async () => {
+  const f = await fixture();
+  const payload = noteResolve({ ...note, recordedAtMs: 3 });
+  const body = (await (await f.push([["conflict.resolve", payload]])).json()) as PushAnswer;
+  expect(body.refusals).toEqual([
+    {
+      originId: HOST_ORIGIN,
+      originSeq: 0,
+      opKind: "conflict.resolve",
+      reason: "outside-hosted-documents",
+    },
+  ]);
+  const scope = f.storage.readServiceHostFeedScope(ws)!;
+  expect(hostedWriteAllowed(scope, "conflict.resolve", payload)).toBe(false);
 });

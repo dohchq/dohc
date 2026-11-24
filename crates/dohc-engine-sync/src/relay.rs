@@ -33,8 +33,9 @@ use crate::{
 };
 pub use direct_write::{
     DirectWritePushOutcome, DirectWriteReport, DirectWriteResult, DirectWriteState,
-    DirectWriteStatus, ShareCollectionWriteRequest, ShareCollectionWriteResponse, collision_key,
-    read_direct_write_status, read_record_creation_statuses,
+    DirectWriteStatus, DirectWritesWaiting, ShareCollectionWriteRequest,
+    ShareCollectionWriteResponse, collision_key, read_direct_write_status,
+    read_direct_writes_waiting, read_record_creation_statuses,
 };
 use direct_write::{read_direct_write_marks, read_direct_write_open_objects};
 
@@ -503,7 +504,14 @@ pub struct SharedChannelPullOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedChannelPushOutcome {
     pub pushed: usize,
+    /// Ops the relay refused, set aside as refusals Notices shows.
+    pub set_aside: usize,
 }
+
+/// Why a pushed chat op is set aside. Keep the desktop's
+/// `SHARE_CHAT_REFUSED` equal to it.
+pub const SHARE_CHAT_REFUSED: &str =
+    "The server refused this chat message. dohc set it aside and kept sending later ones.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareViewChangedPath {
@@ -4932,14 +4940,67 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         channel_wire_id: &str,
         faults: &dyn FaultInjector,
     ) -> Result<SharedChannelPushOutcome, RelayError> {
+        let identity = read_sync_identity(store, workspace_id)
+            .map_err(local)?
+            .ok_or(RelayError::InvalidResponse)?;
+        self.push_shared_chat(
+            store,
+            workspace_id,
+            share_id,
+            &identity,
+            SharedPushScope::Channel(channel_wire_id),
+            faults,
+        )
+    }
+
+    /// Send a whole-workspace share view's own posts in its Groups to the
+    /// owner, through the share's append lane. Only a Comment or Edit grant
+    /// posts. A view that never posted has no identity and sends nothing.
+    pub fn push_share_view_groups(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        share_id: &str,
+        granted: &crate::ShareGrant,
+        faults: &dyn FaultInjector,
+    ) -> Result<SharedChannelPushOutcome, RelayError> {
+        if granted.scope != crate::share::ShareScope::Workspace
+            || granted.access == crate::share::ShareAccess::View
+        {
+            return Err(local(SyncError::InvalidInput {
+                reason: "only a Comment or Edit membership posts in its Groups",
+            }));
+        }
+        let Some(identity) = read_sync_identity(store, workspace_id).map_err(local)? else {
+            return Ok(SharedChannelPushOutcome {
+                pushed: 0,
+                set_aside: 0,
+            });
+        };
+        self.push_shared_chat(
+            store,
+            workspace_id,
+            share_id,
+            &identity,
+            SharedPushScope::WorkspaceGroups,
+            faults,
+        )
+    }
+
+    fn push_shared_chat(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        share_id: &str,
+        identity: &crate::journal::SyncIdentity,
+        scope: SharedPushScope<'_>,
+        faults: &dyn FaultInjector,
+    ) -> Result<SharedChannelPushOutcome, RelayError> {
         if store.is_passive() {
             return Err(local(SyncError::InvalidInput {
                 reason: "passive store cannot write to the relay",
             }));
         }
-        let identity = read_sync_identity(store, workspace_id)
-            .map_err(local)?
-            .ok_or(RelayError::InvalidResponse)?;
         let state = read_shared_push_state(store, workspace_id, share_id)?;
         let scanned = state.scanned_seq;
         let mut dense_seq = match state.dense_seq {
@@ -4949,7 +5010,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     store,
                     workspace_id,
                     &identity.origin_id,
-                    channel_wire_id,
+                    scope,
                     scanned,
                 )?;
                 write_shared_push_state(store, workspace_id, share_id, scanned, dense_seq, faults)?;
@@ -4959,15 +5020,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut pending = Vec::with_capacity(crate::MAX_PUSH_OPS_PER_BATCH);
         let mut last_scanned = scanned;
         let mut pushed = 0_usize;
-        let push_batch = |batch: &[(i64, ShareReplicationEnvelope)]| {
-            let push = self.transport.share_log_push(ShareLogPushRequest {
-                share_id: share_id.to_owned(),
-                origin_id: identity.origin_id.clone(),
-                ops: batch.iter().map(|(_, op)| op.clone()).collect(),
-            })?;
-            validate_share_push_response(&push, batch.len())?;
-            Ok(push.inserted)
-        };
+        let mut set_aside = 0_usize;
         let mut after = scanned;
         loop {
             let page = list_replication_ops(
@@ -4982,8 +5035,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 break;
             };
             for op in page {
-                let eligible =
-                    shared_channel_op_allowed(store, workspace_id, channel_wire_id, &op)?;
+                let eligible = shared_chat_op_allowed(store, workspace_id, scope, &op)?;
                 if eligible {
                     dense_seq = dense_seq
                         .checked_add(1)
@@ -4994,46 +5046,44 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 }
                 last_scanned = op.origin_seq;
                 if eligible {
+                    let payload = shared_chat_push_payload(
+                        store,
+                        workspace_id,
+                        scope,
+                        &op.op_kind,
+                        op.payload,
+                    )?;
                     pending.push((
                         op.origin_seq,
                         ShareReplicationEnvelope {
                             origin_id: identity.origin_id.clone(),
                             origin_seq: dense_seq,
                             op_kind: op.op_kind,
-                            payload: op.payload,
+                            payload,
                             recorded_at_ms: op.recorded_at_ms,
                         },
                     ));
                 }
                 if pending.len() == crate::MAX_PUSH_OPS_PER_BATCH {
+                    let sent =
+                        self.send_shared_batch(store, workspace_id, share_id, &pending, faults)?;
                     pushed = pushed
-                        .checked_add(push_batch(&pending)?)
+                        .checked_add(sent.pushed)
                         .ok_or(RelayError::InvalidResponse)?;
-                    write_shared_push_state(
-                        store,
-                        workspace_id,
-                        share_id,
-                        pending.last().ok_or(RelayError::InvalidResponse)?.0,
-                        dense_seq,
-                        faults,
-                    )?;
+                    set_aside += sent.set_aside;
+                    dense_seq = sent.dense_seq;
                     pending.clear();
                 }
             }
             after = page_last;
         }
         if !pending.is_empty() {
+            let sent = self.send_shared_batch(store, workspace_id, share_id, &pending, faults)?;
             pushed = pushed
-                .checked_add(push_batch(&pending)?)
+                .checked_add(sent.pushed)
                 .ok_or(RelayError::InvalidResponse)?;
-            write_shared_push_state(
-                store,
-                workspace_id,
-                share_id,
-                pending.last().ok_or(RelayError::InvalidResponse)?.0,
-                dense_seq,
-                faults,
-            )?;
+            set_aside += sent.set_aside;
+            dense_seq = sent.dense_seq;
         }
         write_shared_push_state(
             store,
@@ -5043,7 +5093,96 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             dense_seq,
             faults,
         )?;
-        Ok(SharedChannelPushOutcome { pushed })
+        Ok(SharedChannelPushOutcome { pushed, set_aside })
+    }
+
+    /// Sends one batch of chat ops, each paired with its local sequence, and
+    /// records how far the push got. The relay refuses a whole batch for one
+    /// op it won't take, such as a comment on a file the owner deleted. Then
+    /// the ops go one at a time, and each one the relay refuses is set aside
+    /// as a refusal, so it holds back no later op. A refused op takes no
+    /// relay sequence, so the ops after it stay dense.
+    fn send_shared_batch(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        share_id: &str,
+        batch: &[(i64, ShareReplicationEnvelope)],
+        faults: &dyn FaultInjector,
+    ) -> Result<SharedBatchSent, RelayError> {
+        let (Some((_, first)), Some((last_local, last))) = (batch.first(), batch.last()) else {
+            return Err(RelayError::InvalidResponse);
+        };
+        let send = |ops: Vec<ShareReplicationEnvelope>| {
+            let count = ops.len();
+            let push = self.transport.share_log_push(ShareLogPushRequest {
+                share_id: share_id.to_owned(),
+                origin_id: first.origin_id.clone(),
+                ops,
+            })?;
+            validate_share_push_response(&push, count)?;
+            Ok::<_, RelayError>(push.inserted)
+        };
+        match send(batch.iter().map(|(_, op)| op.clone()).collect()) {
+            Ok(pushed) => {
+                write_shared_push_state(
+                    store,
+                    workspace_id,
+                    share_id,
+                    *last_local,
+                    last.origin_seq,
+                    faults,
+                )?;
+                return Ok(SharedBatchSent {
+                    pushed,
+                    set_aside: 0,
+                    dense_seq: last.origin_seq,
+                });
+            }
+            Err(RelayError::ShareOperationRejected) => {}
+            Err(error) => return Err(error),
+        }
+        let mut sent = SharedBatchSent {
+            pushed: 0,
+            set_aside: 0,
+            dense_seq: first.origin_seq - 1,
+        };
+        for (local_seq, op) in batch {
+            let origin_seq = sent
+                .dense_seq
+                .checked_add(1)
+                .ok_or(RelayError::InvalidResponse)?;
+            match send(vec![ShareReplicationEnvelope {
+                origin_seq,
+                ..op.clone()
+            }]) {
+                Ok(pushed) => {
+                    sent.pushed += pushed;
+                    sent.dense_seq = origin_seq;
+                }
+                Err(RelayError::ShareOperationRejected) => {
+                    set_shared_op_aside(
+                        store,
+                        workspace_id,
+                        &op.origin_id,
+                        *local_seq,
+                        &op.op_kind,
+                        faults,
+                    )?;
+                    sent.set_aside += 1;
+                }
+                Err(error) => return Err(error),
+            }
+            write_shared_push_state(
+                store,
+                workspace_id,
+                share_id,
+                *local_seq,
+                sent.dense_seq,
+                faults,
+            )?;
+        }
+        Ok(sent)
     }
 
     /// Offer this replica's own edits to a received file share back to the
@@ -7258,6 +7397,48 @@ fn read_shared_push_state(
         .map_err(local)
 }
 
+struct SharedBatchSent {
+    pushed: usize,
+    set_aside: usize,
+    /// The relay sequence of the last op the relay took.
+    dense_seq: i64,
+}
+
+/// Keeps a chat op the relay refused as a pending refusal on its local
+/// coordinate. Notices shows it, and its chat message reads as refused.
+fn set_shared_op_aside(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    origin_id: &str,
+    origin_seq: i64,
+    op_kind: &str,
+    faults: &dyn FaultInjector,
+) -> Result<(), RelayError> {
+    let outcome = store
+        .write_with(faults, |tx| {
+            tx.execute(
+                "INSERT INTO replication_pending_refusals \
+                 (workspace_id,origin_id,origin_seq,op_kind,reason_code,reason_message) \
+                 VALUES (?1,?2,?3,?4,'invalid-input',?5) \
+                 ON CONFLICT(workspace_id,origin_id,origin_seq) DO NOTHING",
+                params![
+                    workspace_id,
+                    origin_id,
+                    origin_seq,
+                    op_kind,
+                    SHARE_CHAT_REFUSED
+                ],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<(), SyncError>(())
+        })
+        .map_err(local)?;
+    if matches!(outcome, TxnOutcome::Crashed { .. }) {
+        return Err(RelayError::Local("injected-crash".to_owned()));
+    }
+    Ok(())
+}
+
 fn write_shared_push_state(
     store: &mut EngineStore,
     workspace_id: &str,
@@ -7598,7 +7779,7 @@ fn shared_dense_seq_through(
     store: &EngineStore,
     workspace_id: &str,
     origin_id: &str,
-    channel_wire_id: &str,
+    scope: SharedPushScope<'_>,
     scanned_seq: i64,
 ) -> Result<i64, RelayError> {
     let mut dense_seq = -1_i64;
@@ -7616,7 +7797,7 @@ fn shared_dense_seq_through(
             // Eligibility only — this walk never sends anything, and building
             // a served payload per op just to drop it clones the whole
             // payload for every op in the log on every push.
-            if shared_channel_op_allowed(store, workspace_id, channel_wire_id, &op)? {
+            if shared_chat_op_allowed(store, workspace_id, scope, &op)? {
                 dense_seq = dense_seq
                     .checked_add(1)
                     .ok_or(RelayError::InvalidResponse)?;
@@ -7625,6 +7806,116 @@ fn shared_dense_seq_through(
         after = page_last;
     }
     Ok(dense_seq)
+}
+
+/// Which of this replica's own chat ops a share carries to the owner.
+#[derive(Debug, Clone, Copy)]
+enum SharedPushScope<'a> {
+    /// One joined channel, named by its wire id, including its create.
+    Channel(&'a str),
+    /// Every Group a whole-workspace share view reaches, and its Comments on
+    /// the files it holds. Never a channel's create: only the relay creates a
+    /// Group for a member.
+    WorkspaceGroups,
+}
+
+fn shared_chat_op_allowed(
+    store: &EngineStore,
+    workspace_id: &str,
+    scope: SharedPushScope<'_>,
+    op: &ReplicationEnvelope,
+) -> Result<bool, RelayError> {
+    match scope {
+        SharedPushScope::Channel(channel_wire_id) => {
+            shared_channel_op_allowed(store, workspace_id, channel_wire_id, op)
+        }
+        SharedPushScope::WorkspaceGroups => store
+            .read_with(|conn| match op.op_kind.as_str() {
+                "chat.thread.create" => match op
+                    .payload
+                    .get("channelWireId")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    Some(wire) => crate::share::wire_is_group(conn, workspace_id, wire),
+                    None => Ok(file_thread_path(conn, workspace_id, &op.payload)?.is_some()),
+                },
+                "chat.message.append"
+                | "chat.decision.set"
+                | "chat.attachment.add"
+                | "chat.reaction.set" => {
+                    let Some(thread_id) = op
+                        .payload
+                        .get("threadId")
+                        .and_then(serde_json::Value::as_str)
+                    else {
+                        return Ok(false);
+                    };
+                    match crate::share::thread_channel(conn, workspace_id, thread_id)? {
+                        Some(channel_id) => {
+                            crate::share::channel_is_group(conn, workspace_id, &channel_id)
+                        }
+                        None => thread_file_here(conn, workspace_id, thread_id),
+                    }
+                }
+                _ => Ok(false),
+            })
+            .map_err(local),
+    }
+}
+
+/// Whether a thread is about a file this view still holds.
+fn thread_file_here(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    thread_id: &str,
+) -> Result<bool, SyncError> {
+    let Some(object_id) = crate::share::thread_linked_object(conn, workspace_id, thread_id)? else {
+        return Ok(false);
+    };
+    Ok(crate::share::object_main_path(conn, workspace_id, &object_id)?.is_some())
+}
+
+/// Where the file a local file thread's create links sits in this view now.
+/// None for a thread with no file, or a file no longer here.
+fn file_thread_path(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    payload: &serde_json::Value,
+) -> Result<Option<String>, SyncError> {
+    match payload
+        .get("linkedObjectId")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(object_id) => crate::share::object_main_path(conn, workspace_id, object_id),
+        None => Ok(None),
+    }
+}
+
+/// What a share view sends for one of its own eligible chat ops. The relay
+/// knows a view's file by its path, never by the view's object token, so a
+/// file thread's create names the path the file has here now.
+fn shared_chat_push_payload(
+    store: &EngineStore,
+    workspace_id: &str,
+    scope: SharedPushScope<'_>,
+    op_kind: &str,
+    mut payload: serde_json::Value,
+) -> Result<serde_json::Value, RelayError> {
+    if !matches!(scope, SharedPushScope::WorkspaceGroups)
+        || op_kind != "chat.thread.create"
+        || payload.get("channelWireId").is_some()
+    {
+        return Ok(payload);
+    }
+    let path = store
+        .read_with(|conn| file_thread_path(conn, workspace_id, &payload))
+        .map_err(local)?
+        .ok_or(RelayError::InvalidResponse)?;
+    let fields = payload.as_object_mut().ok_or(RelayError::InvalidResponse)?;
+    fields.remove("linkedObjectId");
+    fields.remove("linkedPathHint");
+    fields.insert("linkedPath".to_owned(), serde_json::Value::String(path));
+    Ok(payload)
 }
 
 fn shared_channel_op_allowed(

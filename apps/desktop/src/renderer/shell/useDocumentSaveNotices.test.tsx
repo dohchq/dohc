@@ -50,6 +50,11 @@ import {
   useDocumentSaveNotices,
 } from "./useDocumentSaveNotices";
 import { useShellError } from "./useShellError";
+import {
+  LIVE_HOST_WAIT_REPORT_MS,
+  useLiveHostRefusalNotice,
+} from "../collab/useLiveHostRefusalNotice";
+import type { SharedDocumentOpenState } from "../../ipc/sharedDocumentOpenState";
 
 type WriteResult = Awaited<ReturnType<DohcDesktopBridge["writeWorkspaceText"]>>;
 const listeners = new Set<(event: EngineYDocSaveStateEvent) => void>();
@@ -93,6 +98,7 @@ function Shell(props: { workspaceId?: string; children?: ReactNode }) {
         notices={shell.shellErrors.map((error) => ({
           id: error.id,
           ...(error.title ? { title: error.title } : {}),
+          ...(error.tone ? { tone: error.tone } : {}),
           message: error.message,
           copy: { report: errorDetails(error.details ?? []) },
           atMs: error.atMs,
@@ -974,16 +980,17 @@ describe("document save notices", () => {
     expect(await noticeRows(REPLACED_DOCUMENT_UNSAVED)).toHaveLength(1);
 
     act(() => reportDocumentReplacement("ws-1", "notes/a.md", true, null));
-    expect(screen.getAllByTestId("workspace-shell-error")).toHaveLength(1);
-    expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.getAllByTestId("workspace-shell-notice")).toHaveLength(1);
+    expect(screen.getByTestId("workspace-shell-notice").textContent).toContain(
       REPLACED_DOCUMENT_SAVED,
     );
     await user.click(
-      within(screen.getByTestId("workspace-shell-error")).getByRole("button", {
-        name: "Dismiss workspace error",
+      within(screen.getByTestId("workspace-shell-notice")).getByRole("button", {
+        name: "Dismiss workspace notice",
       }),
     );
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
     expect(await noticeRows(REPLACED_DOCUMENT_UNSAVED)).toHaveLength(0);
     expect(await noticeRows(REPLACED_DOCUMENT_SAVED)).toHaveLength(1);
     await user.click(screen.getByTestId("notice-center-toggle"));
@@ -1030,5 +1037,257 @@ describe("document save notices", () => {
     expect(titleBar().textContent).toBe("Local · saved");
     expect(screen.queryByTestId("connection-notices")).toBeNull();
     await closeEditor(editor, document);
+  });
+  it("raises a page the server would not host once per open, keeps its row through Try again, and clears it once the page opens", async () => {
+    const user = userEvent.setup();
+    const copied = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    const retry = vi.fn();
+    const TITLE = 'dohc could not open "plan.md" for editing';
+    const BODY = "The server is editing too many pages right now. You can still read it.";
+    const refused = (): SharedDocumentOpenState => ({
+      state: "host-refused",
+      message:
+        "dohc could not open this page for editing. The server is editing too many pages right now.",
+      reason: "The server is editing too many pages right now.",
+    });
+    function Page(props: {
+      workspaceId?: string;
+      refusal: SharedDocumentOpenState | null;
+      available?: boolean;
+    }) {
+      useLiveHostRefusalNotice({
+        workspaceId: props.workspaceId ?? "ws-1",
+        path: "notes/plan.md",
+        refusal: props.refusal,
+        available: props.available ?? false,
+        retry,
+      });
+      return null;
+    }
+    const noticeRows = async () => {
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      const found = within(screen.getByRole("dialog", { name: "Notices" })).queryAllByText(TITLE, {
+        exact: false,
+      });
+      await user.keyboard("{Escape}");
+      return found;
+    };
+    // The refusal arrives after the shell is listening, as an open's answer does.
+    const view = render(<Shell />);
+    view.rerender(
+      <Shell>
+        <Page refusal={refused()} />
+      </Shell>,
+    );
+    const toast = screen.getByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(TITLE);
+    expect(toast.textContent).toContain(BODY);
+    await user.click(within(toast).getByRole("button", { name: "Details" }));
+    await user.click(within(toast).getByRole("button", { name: "Copy details" }));
+    expect(copied.mock.calls[0]![0]).toContain("File: notes/plan.md");
+    expect(await noticeRows()).toHaveLength(1);
+
+    // Try again asks the page to open again. The same answer keeps one row and raises no second toast.
+    await user.click(
+      within(screen.getByTestId("workspace-shell-error")).getByRole("button", {
+        name: "Try again",
+      }),
+    );
+    expect(retry).toHaveBeenCalledOnce();
+    view.rerender(
+      <Shell>
+        <Page refusal={refused()} />
+      </Shell>,
+    );
+    view.rerender(
+      <Shell>
+        <Page refusal={refused()} />
+      </Shell>,
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(await noticeRows()).toHaveLength(1);
+
+    // The page opens for editing: its row goes.
+    view.rerender(
+      <Shell>
+        <Page refusal={null} available />
+      </Shell>,
+    );
+    expect(screen.queryByTestId("connection-notices")).toBeNull();
+
+    // Another workspace's page files nothing here.
+    view.rerender(
+      <Shell>
+        <Page workspaceId="ws-2" refusal={refused()} />
+      </Shell>,
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+
+    // A closed page's Try again opens it.
+    view.rerender(
+      <Shell>
+        <Page refusal={refused()} />
+      </Shell>,
+    );
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain(TITLE);
+    view.rerender(<Shell />);
+    await user.click(
+      within(screen.getByTestId("workspace-shell-error")).getByRole("button", {
+        name: "Try again",
+      }),
+    );
+    expect(retry).toHaveBeenCalledOnce();
+    expect(open).toHaveBeenCalledWith("notes/plan.md");
+  });
+
+  it("raises a failed open with its reason once per open", async () => {
+    const failed = (): SharedDocumentOpenState => ({
+      state: "failed",
+      message: "dohc could not open this file for editing.",
+      reason: "The server did not start live editing for this page.",
+    });
+    function Page(props: { refusal: SharedDocumentOpenState | null }) {
+      useLiveHostRefusalNotice({
+        workspaceId: "ws-1",
+        path: "notes/plan.md",
+        refusal: props.refusal,
+        available: false,
+        retry: vi.fn(),
+      });
+      return null;
+    }
+    const view = render(<Shell />);
+    view.rerender(
+      <Shell>
+        <Page refusal={failed()} />
+      </Shell>,
+    );
+    const toast = screen.getByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain('dohc could not open "plan.md" for editing');
+    expect(toast.textContent).toContain(
+      "The server did not start live editing for this page. You can still read it.",
+    );
+    await userEvent
+      .setup()
+      .click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
+    view.rerender(
+      <Shell>
+        <Page refusal={failed()} />
+      </Shell>,
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  // A page waiting for its owner's dohc is something dohc fixes by itself.
+  // Its ring shows on the page at once; a toast and a row come only once it
+  // has waited 15 s, and never for a page that went live sooner.
+  describe("a page waiting for its owner's dohc", () => {
+    const TITLE = 'Waiting to edit "plan.md"';
+    const waiting = (): SharedDocumentOpenState => ({
+      state: "host-refused",
+      awaitsHost: true,
+      message:
+        "dohc could not open this page for editing. Editing starts once the owner's dohc is online.",
+      reason: "Editing starts once the owner's dohc is online.",
+    });
+    function Page(props: { refusal: SharedDocumentOpenState | null; available?: boolean }) {
+      useLiveHostRefusalNotice({
+        workspaceId: "ws-1",
+        path: "notes/plan.md",
+        refusal: props.refusal,
+        available: props.available ?? false,
+        retry: vi.fn(),
+      });
+      return null;
+    }
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("files no toast before 15 s, then a toast and a row, and clears the row once the page goes live", () => {
+      const view = render(<Shell />);
+      view.rerender(
+        <Shell>
+          <Page refusal={waiting()} />
+        </Shell>,
+      );
+      act(() => {
+        vi.advanceTimersByTime(LIVE_HOST_WAIT_REPORT_MS - 1);
+      });
+      // Each readiness round brings the same answer again, which does not restart the wait.
+      view.rerender(
+        <Shell>
+          <Page refusal={waiting()} />
+        </Shell>,
+      );
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+      expect(screen.queryByTestId("connection-notices")).toBeNull();
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+      const toast = screen.getByTestId("workspace-shell-notice");
+      expect(toast.textContent).toContain(TITLE);
+      expect(toast.textContent).not.toContain("could not");
+      expect(toast.textContent).toContain(
+        "Editing starts once the owner's dohc is online. You can still read it.",
+      );
+      // Waiting is a state dohc is fixing, not a failure, so it wears the warning mark.
+      expect(toast.querySelector(".text-warning")).not.toBeNull();
+      expect(toast.querySelector(".text-danger")).toBeNull();
+      expect(screen.getByTestId("connection-notices")).toBeTruthy();
+      view.rerender(
+        <Shell>
+          <Page refusal={null} available />
+        </Shell>,
+      );
+      expect(screen.queryByTestId("connection-notices")).toBeNull();
+    });
+
+    it("files nothing for a page that goes live before 15 s", () => {
+      const view = render(<Shell />);
+      view.rerender(
+        <Shell>
+          <Page refusal={waiting()} />
+        </Shell>,
+      );
+      act(() => {
+        vi.advanceTimersByTime(LIVE_HOST_WAIT_REPORT_MS - 1);
+      });
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+      view.rerender(
+        <Shell>
+          <Page refusal={null} available />
+        </Shell>,
+      );
+      act(() => {
+        vi.advanceTimersByTime(LIVE_HOST_WAIT_REPORT_MS * 2);
+      });
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+      expect(screen.queryByTestId("connection-notices")).toBeNull();
+    });
+  });
+
+  it("files nothing for a page that waits on something it shows itself", () => {
+    function Page() {
+      useLiveHostRefusalNotice({
+        workspaceId: "ws-1",
+        path: "notes/plan.md",
+        available: false,
+        retry: vi.fn(),
+        refusal: { state: "pending", message: "Record saved on this device. Waiting to send." },
+      });
+      return null;
+    }
+    const view = render(<Shell />);
+    view.rerender(
+      <Shell>
+        <Page />
+      </Shell>,
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 });

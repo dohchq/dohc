@@ -6,3 +6,8 @@ export const SETTLEMENT_BINDING_CHANGED =
 // cover several saves of one file.
 export const SETTLEMENT_ATTRIBUTION_REFUSED =
   "dohc could not verify who changed this file. The file will share without author names.";
+
+// Keep this message equal to relay::SHARE_CHAT_REFUSED: a chat message, comment
+// or reaction a joined workspace sent that the server refused.
+export const SHARE_CHAT_REFUSED =
+  "The server refused this chat message. dohc set it aside and kept sending later ones.";

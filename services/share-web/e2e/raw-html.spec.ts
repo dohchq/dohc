@@ -82,7 +82,7 @@ test("keeps shared raw HTML inert in Markdown and in HTML source", async ({
     await page.goto(`${stack.shareWebUrl}/s/#${seeded.secret}`);
 
     const navigation = page.getByRole("navigation", { name: "Shared files" });
-    await navigation.getByRole("button", { name: "raw-html.md", exact: true }).click();
+    await navigation.getByRole("treeitem", { name: "raw-html.md", exact: true }).click();
     const article = page.locator("article.markdown");
     await expect(article).toContainText(markdownText);
     await expect(
@@ -105,7 +105,7 @@ test("keeps shared raw HTML inert in Markdown and in HTML source", async ({
           response.request().method() === "GET" &&
           new URL(response.url()).pathname === `/api/view/blob/${htmlFile.blobSha256}`,
       ),
-      navigation.getByRole("button", { name: "raw.html", exact: true }).click(),
+      navigation.getByRole("treeitem", { name: "raw.html", exact: true }).click(),
     ]);
     expect(sourceResponse.status()).toBe(200);
     expect(sourceResponse.headers()["content-type"]).toBe("application/octet-stream");

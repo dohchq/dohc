@@ -642,14 +642,7 @@ pub fn append_in_tx(
     )
     .map_err(|_| OwnerOutboxError::InvalidInput("invalid document identity"))?;
     draft::require_ordinary_write(tx, &key).map_err(map_restore_error)?;
-    let current = crate::live_update_application::restore_fence::resumed_binding(tx, &key)
-        .map_err(map_restore_error)?;
-    if current
-        .as_ref()
-        .is_some_and(|binding| binding != &input.binding)
-    {
-        return Err(OwnerOutboxError::Frozen);
-    };
+    crate::live_update_application::require_restore_open(tx, &key).map_err(map_restore_error)?;
     append_with_retained_base(tx, workspace_id, input, None, None, None, None, None, false)
 }
 
@@ -695,11 +688,9 @@ fn append_with_retained_base(
                 &binding.object_id,
             )
             .map_err(|_| OwnerOutboxError::Corrupt)?;
-            let authorized =
-                crate::live_update_application::restore_fence::resumed_binding(tx, &key)
-                    .map_err(map_restore_error)?
-                    .unwrap_or(saved);
-            if authorized != binding {
+            crate::live_update_application::require_restore_open(tx, &key)
+                .map_err(map_restore_error)?;
+            if saved != binding {
                 return Err(OwnerOutboxError::ParentMismatch);
             }
             if input.limits.max_pending_bytes != bytes || input.limits.max_pending_age_ms != age {
@@ -1200,10 +1191,9 @@ fn append_adopted_entry_in_tx(
         }
         return Ok(None);
     };
-    let original: LiveObjectBinding =
+    let binding: LiveObjectBinding =
         serde_json::from_str(&binding_json).map_err(|_| map(OwnerOutboxError::Corrupt))?;
-    let binding = crate::live_update_application::restore_fence::resumed_binding(tx, key)?
-        .unwrap_or(original);
+    crate::live_update_application::require_restore_open(tx, key)?;
     if binding.workspace_id != key.workspace_id
         || binding.main_version_id != key.version_id
         || binding.object_id != key.object_id
@@ -2628,11 +2618,7 @@ pub(crate) fn retry_in_tx(
     if release::blocked_in(tx, &key)? {
         return Err(OwnerOutboxError::StopConflict);
     }
-    let resumed = crate::live_update_application::restore_fence::resumed_binding(tx, &key)
-        .map_err(map_restore_error)?;
-    if resumed.as_ref().is_some_and(|current| current != &binding) {
-        return Err(OwnerOutboxError::ParentMismatch);
-    }
+    crate::live_update_application::require_restore_open(tx, &key).map_err(map_restore_error)?;
     // The observed generation, if any, must still be this one.
     let observed = draft::read_observed_in(tx, &binding)?;
     let adopted: Option<String> = tx
@@ -2648,7 +2634,7 @@ pub(crate) fn retry_in_tx(
         )
         .optional()
         .map_err(read_sql)?;
-    if let (Some(saved), None) = (adopted, &resumed) {
+    if let Some(saved) = adopted {
         let saved: LiveObjectBinding =
             serde_json::from_str(&saved).map_err(|_| OwnerOutboxError::Corrupt)?;
         if saved != binding {

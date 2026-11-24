@@ -159,6 +159,7 @@ function input(notices: DirectWriteNotice[], order: string[] = []) {
   return {
     workspaceId: "a",
     sharedView: true,
+    workspaceName: "Trip",
     enabled: true,
     ready: true,
     ownerName: "Owner",

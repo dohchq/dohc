@@ -937,6 +937,7 @@ export function directMessageReach(chat: ChatDirectory | null, userId: string): 
   const target = chat?.directMessage(userId);
   return {
     kind: "post",
+    target: "dm",
     group:
       target && !("problem" in target)
         ? { channelWireId: target.wireId, name: target.name }
@@ -971,6 +972,7 @@ function chatReachOf(
       return [
         {
           kind: "post",
+          target: "group",
           group:
             group && !("problem" in group)
               ? { channelWireId: group.wireId, name: group.name }

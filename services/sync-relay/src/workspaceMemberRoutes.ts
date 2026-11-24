@@ -9,6 +9,7 @@ import {
   type WorkspaceMembersView,
   type WorkspacePerson,
 } from "@dohc/security-contract/workspace-members";
+import { nameSlug } from "@dohc/workspace-contracts/names";
 import { normalizeEmail } from "@dohc/workspace-auth/signUp";
 import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
 import type { DiscussionActivityHub } from "./discussionActivity";
@@ -38,7 +39,8 @@ export type WorkspaceMemberRoute =
   | { route: "members-remove"; workspaceId: string; memberId: string }
   | { route: "members-let-back-in"; workspaceId: string; memberId: string }
   | { route: "members-join-preview" }
-  | { route: "members-join" };
+  | { route: "members-join" }
+  | { route: "members-group-create" };
 
 export const WORKSPACE_MEMBER_ROUTE_PATTERNS = {
   members: "/sync/:workspaceId/members",
@@ -52,6 +54,7 @@ export const WORKSPACE_MEMBER_ROUTE_PATTERNS = {
   "members-let-back-in": "/sync/:workspaceId/members/:memberId/let-back-in",
   "members-join-preview": "/sync/members/join-preview",
   "members-join": "/sync/members/join",
+  "members-group-create": "/sync/members/groups",
 } as const satisfies Record<WorkspaceMemberRoute["route"], string>;
 
 export function isWorkspaceMemberRoute(route: { route: string }): route is WorkspaceMemberRoute {
@@ -71,12 +74,13 @@ const MEMBER_ACTIONS = {
   "let-back-in": "members-let-back-in",
 } as const;
 
-/** Parses `/sync/members/join*` and `/sync/:workspaceId/members/...`; null for any other path. */
+/** Parses `/sync/members/...` and `/sync/:workspaceId/members/...`; null for any other path. */
 export function parseWorkspaceMemberRoute(parts: readonly string[]): WorkspaceMemberRoute | null {
   if (parts[0] !== "sync") return null;
   if (parts.length === 3 && parts[1] === "members") {
     if (parts[2] === "join") return { route: "members-join" };
     if (parts[2] === "join-preview") return { route: "members-join-preview" };
+    if (parts[2] === "groups") return { route: "members-group-create" };
   }
   if (parts[2] !== "members" || parts.length < 3 || parts.length > 5) return null;
   let workspaceId: string;
@@ -93,6 +97,12 @@ export function parseWorkspaceMemberRoute(parts: readonly string[]): WorkspaceMe
   const route = MEMBER_ACTIONS[parts[4] as keyof typeof MEMBER_ACTIONS];
   return route ? { route, workspaceId, memberId: parseShareId(parts[3]) } : null;
 }
+
+const GROUP_NAME_MAX_CHARS = 80;
+const GROUP_PURPOSE_MAX_CHARS = 200;
+// The slug of the default agent's chat. It and every slug under it belong to
+// agent chats, and the owner's computer refuses a Group that takes one.
+const AGENT_CHAT_SLUG = "my-agent";
 
 const INVITE_TOKEN = /^[A-Za-z0-9_-]{16,128}$/u;
 
@@ -119,6 +129,7 @@ type MemberRouteStorage = Pick<
   | "changeWorkspaceInviteLink"
   | "previewWorkspaceJoin"
   | "joinWorkspace"
+  | "createWorkspaceGroup"
 >;
 
 export function createWorkspaceMemberRoutes(options: {
@@ -254,6 +265,44 @@ export function createWorkspaceMemberRoutes(options: {
     return name;
   };
 
+  // A Group's name, its slug, and its kind and purpose, held to the rules the
+  // owner's computer applies to a Group it receives.
+  const parseGroup = (input: Record<string, unknown>) => {
+    if (typeof input.name !== "string" || input.name.length > GROUP_NAME_MAX_CHARS * 4)
+      throw badRequest("name is invalid");
+    const name = input.name.normalize("NFC").trim();
+    // eslint-disable-next-line no-control-regex
+    if (!name || name.length > GROUP_NAME_MAX_CHARS || /[\u0000-\u001f\u007f]/u.test(name)) {
+      throw badRequest(`name must be 1 to ${GROUP_NAME_MAX_CHARS} characters`);
+    }
+    const slug = nameSlug(name);
+    if (!slug) throw badRequest("name needs a letter or a number");
+    if (slug === AGENT_CHAT_SLUG || slug.startsWith(`${AGENT_CHAT_SLUG}-`))
+      throw badRequest("name is kept for agent chats");
+    if (
+      input.type !== undefined &&
+      input.type !== "posts" &&
+      input.type !== "chat" &&
+      input.type !== "both"
+    ) {
+      throw badRequest('type must be "posts", "chat", or "both"');
+    }
+    if (
+      input.purpose !== undefined &&
+      (typeof input.purpose !== "string" ||
+        /[\n\r]/u.test(input.purpose) ||
+        input.purpose.trim().length > GROUP_PURPOSE_MAX_CHARS)
+    ) {
+      throw badRequest(`purpose is one line of at most ${GROUP_PURPOSE_MAX_CHARS} characters`);
+    }
+    return {
+      name,
+      slug,
+      type: input.type as "posts" | "chat" | "both" | undefined,
+      purpose: input.purpose?.trim(),
+    };
+  };
+
   const parseToken = (value: unknown): string => {
     if (!isWorkspaceInviteToken(value)) throw notFound();
     return value;
@@ -289,6 +338,7 @@ export function createWorkspaceMemberRoutes(options: {
           workspaceName: preview.workspaceName,
           ownerName: await accountDisplayName(options.lookupUserDisplayName, preview.ownerUserId),
           alreadyMember: preview.alreadyMember,
+          grantId: preview.grantId,
         };
         return jsonResponse(body, 200, { "cache-control": "private, no-store" });
       }
@@ -311,8 +361,34 @@ export function createWorkspaceMemberRoutes(options: {
         workspaceId: joined.workspaceId,
         shareId: joined.shareId,
         workspaceName: joined.workspaceName,
+        grantId: joined.grantId,
       };
       return jsonResponse(body, 200, { "cache-control": "private, no-store" });
+    }
+
+    if (route.route === "members-group-create") {
+      const input = await readJsonObject(request);
+      // The membership share names the workspace; the caller's role in it decides.
+      if (typeof input.shareId !== "string") throw badRequest("shareId is invalid");
+      const shareId = parseShareId(input.shareId);
+      const group = parseGroup(input);
+      const created = storage.createWorkspaceGroup({
+        shareId,
+        actorUserId: userId,
+        ...group,
+        nowMs: options.nowMs(),
+      });
+      if (!created.ok) {
+        if (created.reason === "forbidden") throw relayError("members_forbidden");
+        if (created.reason === "workspace-quota") throw relayError("quota_exceeded");
+        throw notFound();
+      }
+      options.discussionActivity.wakeLog(created.workspaceId);
+      return jsonResponse(
+        { ok: true, channelWireId: created.channelWireId, name: group.name },
+        200,
+        { "cache-control": "no-store" },
+      );
     }
 
     const { workspaceId } = route;

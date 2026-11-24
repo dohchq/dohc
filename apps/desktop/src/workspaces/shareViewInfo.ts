@@ -20,7 +20,13 @@ export interface ShareViewSelector {
   // The level the relay states for this share. Required: it is pinned
   // with the rest of the selector and travels to the engine on every pull.
   access: ShareAccess;
+  // A membership: every tracked path on main and the workspace's Groups,
+  // with no paths and no version. The relay states it as
+  // `{kind: "workspace"}`.
+  wholeWorkspace?: true;
 }
+
+export type WorkspaceRole = "admin" | "member";
 
 // A restriction's display snapshot. Capture and pull must not use these paths.
 export interface ShareUnconfirmedChanges {
@@ -39,6 +45,10 @@ export interface ShareViewInfo {
   granterUserId: string;
   granterEmail: string | null;
   genericChatWritable: boolean;
+  /** The caller's role, for a membership only. */
+  role?: WorkspaceRole;
+  /** The owner's workspace id, which Members routes name. A membership only. */
+  membersWorkspaceId?: string;
   /**
    * The effective selector composed from the relay's stored scope and grant
    * access, or null when the share grants a chat channel and has no file
@@ -100,6 +110,17 @@ function parseSelector(value: unknown, access: unknown, shareId: string): ShareV
     versionId?: unknown;
   };
   if (record.kind === "chat") return null;
+  if (record.kind === "workspace") {
+    if (
+      readWorkspaceRole(value) === null ||
+      "paths" in record ||
+      "versionId" in record ||
+      !isShareAccessValue(access)
+    ) {
+      throw new ShareSelectorInvalidError(shareId);
+    }
+    return { paths: [], versionId: null, access, wholeWorkspace: true };
+  }
   if (record.kind === "group") {
     // A group's folder half. The relay states one access for the whole
     // group: read-write edits the folder, read-only views it. The channel
@@ -155,6 +176,11 @@ function parseSelector(value: unknown, access: unknown, shareId: string): ShareV
   };
 }
 
+function readWorkspaceRole(selector: unknown): WorkspaceRole | null {
+  if (!selector || typeof selector !== "object" || !("role" in selector)) return null;
+  return selector.role === "admin" || selector.role === "member" ? selector.role : null;
+}
+
 export async function fetchShareViewInfo(input: {
   relay: SyncRelayConnection;
   shareId: string;
@@ -169,6 +195,13 @@ export async function fetchShareViewInfo(input: {
   if (typeof body.genericChatWritable !== "boolean") {
     throw new ShareSelectorInvalidError(input.shareId);
   }
+  const selector = parseSelector(body.selector, body.access, input.shareId);
+  if (
+    selector?.wholeWorkspace &&
+    (typeof body.workspaceId !== "string" || body.workspaceId.length === 0)
+  ) {
+    throw new ShareSelectorInvalidError(input.shareId);
+  }
   return {
     receivedIdentity: receivedReferencePin(body),
     shareId: String(body.shareId ?? input.shareId),
@@ -178,7 +211,10 @@ export async function fetchShareViewInfo(input: {
     sharerName: normalizeShareLabel(body.sharerName, 320),
     granterEmail: typeof body.granterEmail === "string" ? body.granterEmail : null,
     genericChatWritable: body.genericChatWritable,
-    selector: parseSelector(body.selector, body.access, input.shareId),
+    ...(selector?.wholeWorkspace
+      ? { role: readWorkspaceRole(body.selector)!, membersWorkspaceId: body.workspaceId as string }
+      : {}),
+    selector,
     createdAtMs: Number(body.createdAtMs ?? 0),
   };
 }
@@ -187,7 +223,7 @@ export async function fetchShareViewAccess(input: {
   relay: SyncRelayConnection;
   shareId: string;
   signal?: AbortSignal;
-}): Promise<ShareAccess> {
+}): Promise<{ access: ShareAccess; role?: WorkspaceRole; levelChangedBy?: string }> {
   const response = await (input.relay.fetch ?? relayApiFetch())(
     shareUrl(input.relay, `/sync/shares/${encodeURIComponent(input.shareId)}/access`),
     { headers: { authorization: `Bearer ${input.relay.token}` }, signal: input.signal },
@@ -216,20 +252,32 @@ export async function fetchShareViewAccess(input: {
   ) {
     throw new ShareSelectorInvalidError(input.shareId);
   }
-  return body.access;
+  // A membership also names its role, and the person who set its level.
+  if (!("role" in body)) return { access: body.access };
+  const role = readWorkspaceRole(body);
+  if (role === null) throw new ShareSelectorInvalidError(input.shareId);
+  if (!("levelChangedBy" in body)) return { access: body.access, role };
+  if (typeof body.levelChangedBy !== "string" || !body.levelChangedBy.trim())
+    throw new ShareSelectorInvalidError(input.shareId);
+  return { access: body.access, role, levelChangedBy: body.levelChangedBy };
 }
 
 export async function probeShareViewLog(input: {
   relay: SyncRelayConnection;
   shareId: string;
   since: number;
+  // How long the relay may wait for news before answering an empty page.
+  hold?: number;
+  // The level this computer knows. The relay answers a hold at once when its
+  // own record differs.
+  level?: ShareAccess;
   signal?: AbortSignal;
-}): Promise<{ unchanged: boolean }> {
+}): Promise<{ unchanged: boolean; levelChanged?: true }> {
   // Standalone share.view.pull reads the whole share log without channelWireId,
   // including group shares. Only shared-channel pulls pass a channel filter.
   const response = await shareFetch(
     input.relay,
-    `/sync/shares/${encodeURIComponent(input.shareId)}/log?since=${input.since}&scan=page`,
+    `/sync/shares/${encodeURIComponent(input.shareId)}/log?since=${input.since}&scan=page${input.hold ? `&hold=${input.hold}` : ""}${input.hold && input.level ? `&level=${input.level}` : ""}`,
     { signal: input.signal },
   );
   const body: unknown = await response.json();
@@ -249,7 +297,10 @@ export async function probeShareViewLog(input: {
   }
   // This cursor is only a probe. The engine commits the next cursor after
   // applying changes and recording refusals through the full refresh path.
-  return { unchanged: body.ops.length === 0 && !body.hasMore };
+  const unchanged = body.ops.length === 0 && !body.hasMore;
+  return "levelChanged" in body && body.levelChanged === true
+    ? { unchanged, levelChanged: true }
+    : { unchanged };
 }
 
 export async function fetchShareAutomationSwitchable(input: {

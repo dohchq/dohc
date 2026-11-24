@@ -79,7 +79,7 @@ export function createShareSummaries(
       return {};
     const view = chatSideOf(effective)
       ? "chat"
-      : isLiveEditShareSelector(effective)
+      : isLiveEditShareSelector(effective) && !("kind" in effective)
         ? "edit"
         : null;
     return view
@@ -152,9 +152,11 @@ export function createShareSummaries(
         : null
       : grant.principalEmail;
     const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
+    // The granter reads the label as they wrote it, so a refresh compares like with like.
+    const base = shareSummaryBase(row, "owner", selector);
     return {
-      // The granter reads the label as they wrote it, so a refresh compares like with like.
-      ...shareSummaryBase(row, "owner", selector),
+      ...base,
+      ...ownerMembershipRole(row, base.selector),
       ...(roster
         ? {
             granterUserId: share.granterUserId,
@@ -191,6 +193,20 @@ export function createShareSummaries(
     return role === "admin" || role === "member"
       ? { selector: { kind: "workspace", role } }
       : { selector: null, damaged: true as const, selectorKind: "workspace" };
+  };
+
+  // The owner's listing names each member's role, as the Members page does. A
+  // membership whose person no longer holds a role keeps its plain selector.
+  const ownerMembershipRole = (row: SyncRelayShareWithGrantRow, selector: unknown) => {
+    if (
+      !selector ||
+      typeof selector !== "object" ||
+      (selector as { kind?: unknown }).kind !== "workspace"
+    )
+      return {};
+    const userId = row.grant.principalUserId;
+    const role = userId ? storage.workspaceRoleOf(row.share.workspaceId, userId)?.role : undefined;
+    return role === "admin" || role === "member" ? { selector: { kind: "workspace", role } } : {};
   };
 
   const receivedShareSummary = (

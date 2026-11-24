@@ -722,6 +722,33 @@ describe("registered cloud handlers", () => {
     expect(h.workspace.pausedRemote).toBeUndefined();
   });
 
+  it("says whether the signed-in account is the one that joined a joined workspace", async () => {
+    const h = await harness();
+    h.login.status.mockResolvedValue({ ...credentials, connected: true });
+    await expect(
+      h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" }),
+    ).resolves.not.toHaveProperty("joinedBySignedInAccount");
+    h.workspace.shareView = {
+      shareId: "share",
+      granterEmail: null,
+      genericChatWritable: false,
+      relayUrl: credentials.relayUrl,
+      recipientUserId: credentials.userId,
+      grantedSelector: { paths: [], versionId: null, access: "edit", wholeWorkspace: true },
+    };
+    await expect(
+      h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" }),
+    ).resolves.toMatchObject({ joinedBySignedInAccount: true });
+    h.cache.set({ ...credentials, userId: "other" });
+    await expect(
+      h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" }),
+    ).resolves.toMatchObject({ joinedBySignedInAccount: false });
+    h.cache.set({ ...credentials, relayUrl: "https://other-relay.example.test" });
+    await expect(
+      h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" }),
+    ).resolves.toMatchObject({ joinedBySignedInAccount: false });
+  });
+
   it.each(["renderer", "authority"] as const)(
     "stops enrollment after a claim when its %s retires",
     async (reason) => {

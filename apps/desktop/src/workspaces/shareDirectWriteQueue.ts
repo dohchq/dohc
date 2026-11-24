@@ -40,6 +40,7 @@ export function createShareDirectWriteQueue(dependencies: {
         writes: [],
         errorMessage: error instanceof Error ? error.message : String(error),
         lasting: false,
+        pagesWaiting: null,
       };
     }
     if (result.status !== "pushed" || result.writes.length > 0) dependencies.settled?.(workspaceId);

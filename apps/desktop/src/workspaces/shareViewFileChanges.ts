@@ -64,6 +64,8 @@ interface ShareViewFileChangeScope {
   rootPath: string;
   shareViewStore: () => CaptureVersionedTextStore;
   assertPathAllowed?: (path: string) => void;
+  /** Throws when the change may no longer commit, such as after another account signed in. */
+  assertAdmitted: () => void;
   owner: ShareViewFilesOwnerCapability;
   projection: ReturnType<typeof shareViewFilesProjection>;
 }
@@ -157,6 +159,24 @@ async function materializeWithPendingRecord(
   await input.projection.clearPending(input.rootPath, paths);
 }
 
+// Marks the paths pending, then asks again whether the change may commit,
+// because the mark's await can pass while another account signs in. A refusal
+// takes back its own marks, so nothing describes a change that never ran.
+async function markPendingWhileAdmitted(
+  input: ShareViewFileChangeScope,
+  paths: readonly string[],
+): Promise<void> {
+  input.assertAdmitted();
+  if (paths.length === 0) return;
+  await input.projection.markPending(input.rootPath, paths);
+  try {
+    input.assertAdmitted();
+  } catch (error) {
+    await input.projection.clearPending(input.rootPath, paths);
+    throw error;
+  }
+}
+
 async function markMutateMaterializeAndClear(
   input: ShareViewFileChangeScope,
   targets: {
@@ -167,9 +187,7 @@ async function markMutateMaterializeAndClear(
   mutate: () => Promise<void>,
 ): Promise<void> {
   const { paths, changed } = targets;
-  if (paths.length > 0) {
-    await input.projection.markPending(input.rootPath, paths);
-  }
+  await markPendingWhileAdmitted(input, paths);
   await mutate();
   if (changed.length > 0) {
     await input.projection.materialize(input.rootPath, input.workspaceId, changed, store);
@@ -678,7 +696,7 @@ async function applyShareViewFileImport(
   const write = async (name: string, content: OwnableContent) => {
     const path = landedPath(name);
     input.assertPathAllowed?.(path);
-    await input.projection.markPending(input.rootPath, [path]);
+    await markPendingWhileAdmitted(input, [path]);
     await input.projection.writeStoreContent({
       store,
       workspaceId: input.workspaceId,

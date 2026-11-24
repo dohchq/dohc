@@ -24,6 +24,7 @@ import {
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
+import { prepareSharePath, visibleSharePath } from "@dohc/security-contract/share-selector";
 import type { WorkspacePathListing } from "../ipc/bridgeContract";
 import {
   assertActiveWorkspaceOperationLease,
@@ -45,6 +46,7 @@ import {
   type CaptureSharedViewLocalDivergenceOutcome,
   type CaptureSharedViewRefreshOutcome,
   type RefreshSharedViewOutcome,
+  type ShareViewPullCommitted,
   setAsideCollisionRecord,
   standaloneShareViewFailureOutcome,
   type StandaloneShareViewRefreshOutcome,
@@ -58,7 +60,13 @@ import {
   type UnjournalablePath,
 } from "./shareViewRecords";
 import { SHARE_VIEW_REOPEN_MESSAGE, shareViewIdentityIsIntact } from "./shareViewMarker";
-import { shareViewTakesLocalWrites } from "./shareWriteGate";
+import {
+  shareViewTakesLocalWrites,
+  shareViewWriterOf,
+  type ShareViewWriter,
+} from "./shareWriteGate";
+import { JOINED_BY_ANOTHER_ACCOUNT } from "../ipc/joinedAccountWords";
+import type { CredentialSessionCache } from "./credentialSessionCache";
 import { isEngineTransportFailure } from "./shareViewEngineFailure";
 import { resolveEngineFileTargets } from "./resolveEngineFiles";
 import { createShareViewFileChanges } from "./shareViewFileChanges";
@@ -241,7 +249,7 @@ export interface ShareViewFiles {
     target: ShareViewFilesTarget,
     request: ShareViewReconcileRequest,
     // Internal pull scheduling state; never part of the refresh result.
-    onCursorCommitted?: (cursor: number) => void,
+    onPullCommitted?: (pulled: ShareViewPullCommitted) => void,
   ): Promise<ShareViewReconcileOutcome>;
   unmount(
     lease: WorkspaceOperationLease,
@@ -251,7 +259,37 @@ export interface ShareViewFiles {
 
 export type ShareViewFilesStore = CaptureVersionedTextStore;
 
+/** The signed-in account, as main's credential cache holds it. */
+export interface ShareViewAccount {
+  userId: string;
+  relayUrl?: string;
+}
+
+export type ShareViewSignedInAccount = ShareViewFilesDependencies["signedInAccount"];
+
+/** The signed-in account as main's credential cache holds it, for ShareViewFiles. */
+export function signedInAccountFrom(
+  cache: Pick<CredentialSessionCache<ShareViewAccount>, "snapshot">,
+  warm: () => Promise<unknown>,
+): ShareViewSignedInAccount {
+  return {
+    settle: async () => {
+      await warm();
+    },
+    current: () => cache.snapshot().credentials,
+  };
+}
+
 export interface ShareViewFilesDependencies {
+  /**
+   * The account signed in now, or null. A joined workspace's change asks the
+   * write gate with it when it starts and again when it commits. `settle`
+   * waits for the credential cache, so a load's passing null admits nothing.
+   */
+  signedInAccount: {
+    settle(): Promise<void>;
+    current(): ShareViewAccount | null;
+  };
   stateFor?(target: ResolvedShareViewFilesTarget): ShareViewFilesState;
   /** Synchronous and registry-derived. It is called again after lifecycle wait. */
   resolveTarget(target: ShareViewFilesTarget): ResolvedShareViewFilesTarget | null;
@@ -381,7 +419,7 @@ function assertActiveTarget(
   }
 }
 
-function writableSelector(target: ActiveShareViewFilesTarget) {
+function writableSelector(target: ActiveShareViewFilesTarget, writer: ShareViewWriter | undefined) {
   const selector = recordedShareSelector(target.grantedSelector);
   if (selector === null) throw new SharePinInvalidError(target.shareId);
   if (target.kind === "standalone" && !shareViewIdentityIsIntact(target)) {
@@ -392,8 +430,10 @@ function writableSelector(target: ActiveShareViewFilesTarget) {
     !shareViewTakesLocalWrites({
       access: selector.access,
       ended: target.ended,
+      writer,
     })
   ) {
+    if (writer === "other") throw new SharedFileReadOnlyError(JOINED_BY_ANOTHER_ACCOUNT);
     const granter = target.granterEmail ?? "the person who shared it";
     throw new SharedFileReadOnlyError(
       `This shared view is read-only for you. Ask ${granter} for changes.`,
@@ -402,26 +442,27 @@ function writableSelector(target: ActiveShareViewFilesTarget) {
   return selector;
 }
 
+function joinedWorkspace(target: ActiveShareViewFilesTarget): boolean {
+  return (
+    target.kind === "standalone" &&
+    !target.ended &&
+    recordedShareSelector(target.grantedSelector)?.wholeWorkspace === true
+  );
+}
+
 function assertPathWithinGrant(
   selector: NonNullable<ReturnType<typeof recordedShareSelector>>,
   path: string,
 ): void {
-  const validated = validateUserWritePath(path);
-  if (!validated.ok || classifyEngineFilePath(validated.normalized).kind !== "tracked") {
+  const prepared = prepareSharePath(path);
+  if (prepared === null) {
     throw new SharedFileReadOnlyError(
       `This path is not available through the shared view: ${path}`,
     );
   }
-  const selected =
-    selector.paths.length === 0
-      ? selector.versionId !== null
-      : selector.paths.some(
-          (granted) =>
-            validated.normalized === granted || validated.normalized.startsWith(`${granted}/`),
-        );
-  if (!selected) {
+  if (visibleSharePath(selector, prepared) === null) {
     throw new SharedFileReadOnlyError(
-      `This path is outside the files shared with you: ${validated.normalized}`,
+      `This path is outside the files shared with you: ${prepared.path}`,
     );
   }
 }
@@ -725,6 +766,8 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
     change: ShareViewFileChange,
     selector: NonNullable<ReturnType<typeof recordedShareSelector>>,
     owner: ShareViewFilesOwnerCapability,
+    // Asked again when the change commits: an await can pass while another account signs in.
+    assertAdmitted: () => void,
   ): Promise<ShareViewFileChangeOutcome> {
     const lifecycle = createShareViewLifecycle(owner);
     if (change.kind === "save" || change.kind === "create") {
@@ -765,6 +808,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
             text: change.text,
             expectedContentHash: change.expectedContentHash,
             shareViewStore: storeResolver,
+            assertAdmitted,
           });
           break;
         case "create":
@@ -772,6 +816,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
             relativePath: change.path,
             initialText: change.initialText,
             shareViewStore: storeResolver,
+            assertAdmitted,
           });
           break;
         case "move":
@@ -779,12 +824,14 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
             fromPath: change.fromPath,
             toPath: change.toPath,
             shareViewStore: storeResolver,
+            assertAdmitted,
           });
           break;
         case "delete":
           value = await fileChanges.deletePath({
             relativePath: change.path,
             shareViewStore: storeResolver,
+            assertAdmitted,
           });
           break;
         case "import":
@@ -793,6 +840,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
             screenAgainstRoots: change.screenAgainstRoots,
             targetDir: change.targetDir,
             shareViewStore: storeResolver,
+            assertAdmitted,
             assertPathAllowed: (path) => assertPathWithinGrant(selector, path),
           });
           break;
@@ -874,7 +922,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
     target: ActiveShareViewFilesTarget,
     request: ShareViewReconcileRequest,
     owner: ShareViewFilesOwnerCapability,
-    onCursorCommitted?: (cursor: number) => void,
+    onPullCommitted?: (pulled: ShareViewPullCommitted) => void,
   ): Promise<ShareViewReconcileOutcome> {
     const lifecycle = createShareViewLifecycle(owner);
     if (target.kind === "mount") {
@@ -985,7 +1033,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
                   recordRefusals,
                   captured: recovered,
                   preservedPaths: target.unsavedPaths,
-                  onCursorCommitted,
+                  onPullCommitted,
                 })
               : await lifecycle.refreshCaptured({
                   rootDir: target.rootPath,
@@ -998,7 +1046,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
                   recordRefusals,
                   captured: recovered,
                   preservedPaths: target.unsavedPaths,
-                  onCursorCommitted,
+                  onPullCommitted,
                 });
         }
       }
@@ -1092,13 +1140,17 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
     }
   }
 
+  // `waits`: the journal keeps the unsent changes and sends them when Edit
+  // returns, as a membership's do when its level drops. Only what the journal
+  // could not take is then at risk.
   async function captureBeforeRestriction(
     lease: WorkspaceOperationLease,
     target: ActiveShareViewFilesTarget,
+    waits = false,
   ) {
     const unsavedPaths = await captureUnsavedPaths(lease, target);
     let snapshot: ShareUnconfirmedChanges = { paths: [], unchecked: false, checked: 0 };
-    if (target.kind === "standalone") {
+    if (target.kind === "standalone" && !waits) {
       try {
         snapshot = await unconfirmedChanges(target);
       } catch {
@@ -1140,7 +1192,11 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
         assertLease(lease, target);
         assertActiveTarget(target);
         assertCurrent();
-        const captured = await captureBeforeRestriction(lease, target);
+        const captured = await captureBeforeRestriction(
+          lease,
+          target,
+          recordedShareSelector(target.grantedSelector)?.wholeWorkspace === true,
+        );
         assertCurrent();
         await commit(captured.unsavedPaths, captured.unconfirmedChanges);
       });
@@ -1203,9 +1259,21 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
       return withCurrentTarget(requested, async (target) => {
         assertLease(lease, target);
         assertActiveTarget(target);
-        const selector = writableSelector(target);
+        // A joined workspace's level belongs to the account that joined, so
+        // the gate hears who is signed in. Signed out, a change stays here
+        // until that account is back.
+        const joined = joinedWorkspace(target);
+        if (joined) await dependencies.signedInAccount.settle();
+        const admitted = () =>
+          writableSelector(
+            target,
+            joined ? shareViewWriterOf(target, dependencies.signedInAccount.current()) : undefined,
+          );
+        const selector = admitted();
         return withOwnerCapability(lease, target, (owner) =>
-          applyChange(lease, target, change, selector, owner),
+          applyChange(lease, target, change, selector, owner, () => {
+            admitted();
+          }),
         );
       });
     },
@@ -1434,13 +1502,13 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
       });
     },
 
-    async reconcile(lease, requested, request, onCursorCommitted) {
+    async reconcile(lease, requested, request, onPullCommitted) {
       assertLease(lease);
       return withCurrentTarget(requested, async (target) => {
         assertLease(lease, target);
         assertActiveTarget(target);
         const outcome = await withOwnerCapability(lease, target, (owner) =>
-          reconcileWithOwner(lease, target, request, owner, onCursorCommitted),
+          reconcileWithOwner(lease, target, request, owner, onPullCommitted),
         );
         const settled = outcome.kind === "refresh" ? outcome.outcome : outcome;
         if ("unjournalablePaths" in settled) {

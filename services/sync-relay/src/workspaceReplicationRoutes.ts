@@ -6,6 +6,7 @@ import {
   type DiscussionActivityHub,
 } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
+import { accountDisplayName } from "./accountDisplayName";
 import { cacheLogAuthorNames } from "./logAuthorNameCache";
 import type { ReplicaWatches } from "./replicaWatches";
 import {
@@ -171,6 +172,9 @@ export function createWorkspaceReplicationRoutes(
         serviceHost: route.serviceHost !== undefined,
       });
       const ops = await parseAuthenticatedLogOps(input.ops, actor.userId, accountNames);
+      // A message's Notices name its author by the relay's record of their account.
+      if (accountNames && ops.some((op) => op.opKind === "chat.message.append"))
+        await accountDisplayName(accountNames, actor.userId);
       const workReferences = input.workReferences === undefined ? [] : input.workReferences;
       if (
         !Array.isArray(workReferences) ||

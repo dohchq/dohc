@@ -66,7 +66,7 @@ it("says dohc could not save an edit it refused for good", async () => {
     ),
   );
   expect(DOCUMENT_NOT_SAVED_DRAFT_NOTICE).toBe(
-    "dohc could not save this document. Copy your edits to keep them.",
+    "dohc could not save this page. Copy your edits to keep them.",
   );
 });
 

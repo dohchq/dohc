@@ -304,10 +304,19 @@ export function createAccessQuery() {
             : index.rows;
       if (input.shareId) {
         const matching = new Set(rows.map(key));
+        // Inside a joined workspace, its membership reaches every tracked file on main.
+        const ref = input.ref;
+        const membershipReaches =
+          ref?.kind === "path" &&
+          version(ref.versionId) === "main" &&
+          visibleSharePath({ paths: [], versionId: "main" }, ref.path) === ref.path;
         rows = index.rows.filter(
           (row) =>
             row.shareId === input.shareId &&
-            (matching.has(key(row)) || row.status === "removed" || row.status === "damaged"),
+            (matching.has(key(row)) ||
+              row.status === "removed" ||
+              row.status === "damaged" ||
+              (membershipReaches && row.status === "active" && row.selector?.kind === "workspace")),
         );
       }
       const query = digest(

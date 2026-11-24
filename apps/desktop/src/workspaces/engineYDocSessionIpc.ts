@@ -110,11 +110,13 @@ export interface EngineYDocIpcSender {
   once(event: "destroyed", listener: () => void): this;
 }
 
-// A shared view's named live provider settles on its host and has no
-// settleNow; a local capture's provider does.
+// A shared view's named live provider settles on its host: it has no
+// settleNow, and savedToHost waits until the host holds its edits. A local
+// capture's provider has settleNow.
 export type EngineYDocSessionProvider = Omit<WorkspaceEngineYDocProviderSession, "settleNow"> & {
   liveWritable?(): boolean;
   settleNow?: WorkspaceEngineYDocProviderSession["settleNow"];
+  savedToHost?(): Promise<void>;
   lineageAtOpen?: WorkspaceEngineYDocOpenedSession["lineageAtOpen"];
 };
 export interface EngineYDocSessionCapture {
@@ -401,6 +403,8 @@ export interface LiveDocumentSessions {
     path: string;
   }): Promise<{ path: string; state: Uint8Array | null }>;
   editDocument(input: LiveDocumentEdit): Promise<LiveDocumentEditOutcome>;
+  /** A shared view's note, opened through its live session on the server. The caller closes it. */
+  openSharedDocument(workspaceId: string, path: string): Promise<EngineYDocSessionProvider>;
 }
 
 type EngineYDocIpcSessionOwner = EngineYDocSessionOwner<
@@ -1239,7 +1243,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     try {
       authority.assertCurrent();
       const workspace = authority.workspace;
-      if (this.#isSharedView(workspace)) {
+      if (this.#isSharedView(workspace) && !this.#sharedCaptureFor) {
         throw new Error("Documents in a shared view change through the share, not this workspace.");
       }
       const path = await this.#markdownDocumentPath(workspace, input.path, "write");
@@ -1268,6 +1272,36 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       } finally {
         if (this.#documentEdits.get(key) === turn) this.#documentEdits.delete(key);
       }
+    } finally {
+      authority.release();
+    }
+  }
+
+  /**
+   * Opens a shared view's note through its live session on the server, for a
+   * change made from main such as an agent's record fields. It is a session
+   * of its own beside any editor's, and the server merges the two. It
+   * refuses with the reason the editor's open gives.
+   */
+  async openSharedDocument(
+    workspaceId: string,
+    requested: string,
+  ): Promise<EngineYDocSessionProvider> {
+    const authority = this.#acquireWorkspace(workspaceId);
+    try {
+      authority.assertCurrent();
+      const workspace = authority.workspace;
+      if (!this.#isSharedView(workspace) || !this.#sharedCaptureFor)
+        throw new Error("Only a shared view's notes open here.");
+      const path = await this.#markdownDocumentPath(workspace, requested, "write");
+      const capture = await this.#sharedCaptureFor(workspace);
+      authority.assertCurrent();
+      if (!capture) throw new Error("dohc could not open this page for editing.");
+      return await capture.openYDocSession({
+        path,
+        contentKind: "richdoc",
+        onRemoteUpdate: () => undefined,
+      });
     } finally {
       authority.release();
     }
@@ -1390,12 +1424,20 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     path: string,
     input: LiveDocumentEdit,
   ): Promise<AppliedEdit> {
-    let capture = this.#captureFor(workspace);
-    if (!capture) {
+    // A shared view's page opens through the share's live session on the
+    // server, as its editor does, and refuses with the editor's reason.
+    const shared = this.#isSharedView(workspace);
+    let capture = shared ? await this.#sharedCaptureFor!(workspace) : this.#captureFor(workspace);
+    if (!capture && !shared) {
       await this.#ensureCaptureFor(workspace);
       capture = this.#captureFor(workspace);
     }
-    if (!capture) throw new Error("The workspace engine is not running.");
+    if (!capture)
+      throw new Error(
+        shared
+          ? "dohc could not open this page for editing."
+          : "The workspace engine is not running.",
+      );
     const provider = await capture.openYDocSession({
       ...(input.allowLossySourceSha256
         ? { allowLossySourceSha256: input.allowLossySourceSha256 }
@@ -1411,9 +1453,9 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         throw new Error(`${path} is not a Markdown document.`);
       }
       applied = await applyDocumentEdit(provider, path, input, {
-        // No editor here holds it, but a replicated lineage is shared with
-        // other devices or share recipients, who may be typing in it.
-        keepBlocks: provider.lineageClaimId != null,
+        // No editor here holds it, but a replicated lineage or a shared
+        // view's page is shared with others, who may be typing in it.
+        keepBlocks: shared || provider.lineageClaimId != null,
         assertSame: () => undefined,
         show: () => undefined,
       });
@@ -1553,6 +1595,17 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     } finally {
       authority.release();
     }
+  }
+
+  /** Whether a shared view has the document open in a live session, which shows each change as it lands. */
+  showsLive(authorityId: symbol, path: string): boolean {
+    const owned = this.#owner.documentSession(authorityId, path)?.session;
+    return (
+      !!owned &&
+      !owned.deleted &&
+      this.#isSharedView(owned.workspace) &&
+      owned.provider.liveWritable?.() === true
+    );
   }
 
   async prepareOwnerHandoff(
@@ -1863,7 +1916,14 @@ async function applyDocumentEdit(
   input: LiveDocumentEdit,
   session: { keepBlocks: boolean; assertSame(): void; show(update: Uint8Array): void },
 ): Promise<AppliedEdit> {
-  const settleNow = provider.settleNow;
+  const savedToHost = provider.savedToHost;
+  const settleNow =
+    provider.settleNow ??
+    (savedToHost &&
+      (async () => {
+        await savedToHost.call(provider);
+        return undefined;
+      }));
   if (!settleNow) throw new Error(`${path} cannot take an edit from here.`);
   const update = await input.change(Y.encodeStateAsUpdate(provider.doc), {
     keepBlocks: session.keepBlocks,

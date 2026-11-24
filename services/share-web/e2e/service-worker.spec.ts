@@ -130,7 +130,7 @@ test("keeps a shared JavaScript file from becoming a service worker", async ({
     ).href;
 
     const navigation = page.getByRole("navigation", { name: "Shared files" });
-    await navigation.getByRole("button", { name: "worker.js", exact: true }).click();
+    await navigation.getByRole("treeitem", { name: "worker.js", exact: true }).click();
     const downloadCard = page.locator(".download-card");
     await expect(downloadCard).toBeVisible();
     await expect(downloadCard).toContainText("This file opens as a download.");

@@ -323,311 +323,23 @@ fn moment_only_record_write_and_undo_each_keep_their_field_history() {
 }
 
 #[test]
-fn restore_settlement_imported_before_the_owner_reaches_its_generation_waits_then_materializes() {
-    use dohc_engine_collab::live_object_binding::LiveObjectBinding;
-    let RestoreOwner {
-        _scratch,
-        mut store,
-        observed,
-        checkpoint,
-        initial_text,
-        initial_moment,
-    } = restore_owner();
-    let (restored, restored_text) = restored_host(&checkpoint, "restored by the owner");
-    let next = LiveObjectBinding {
-        restore_fence_generation: 1,
-        ..observed.binding.clone()
-    };
-    let retain_audit =
-        |store: &EngineStore,
-         binding: &LiveObjectBinding,
-         namespace: &str,
-         id: &str,
-         text: &str| { retain_restore_audit(store, binding, namespace, id, text, 1) };
-    let settlement = |origin: &str, id: &str, text: &str| {
-        restore_settlement(origin, id, &initial_text, &initial_moment, text)
-    };
-    let before = snapshot(&store, "object");
-
-    let changed = |change: fn(&mut LiveObjectBinding)| {
-        let mut binding = next.clone();
-        change(&mut binding);
-        binding
-    };
-    let same_generation = LiveObjectBinding {
-        selector_paths: vec!["owner.md".into(), "other.md".into()],
-        ..observed.binding.clone()
-    };
-    let other_text = "a restore with other content";
-    let restored_audit = restored_text.as_str();
-    let cases = vec![
-        ("unaudited", None),
-        (
-            "same-generation",
-            Some((same_generation, "relay", restored_audit)),
-        ),
-        (
-            "other-path",
-            Some((
-                changed(|b| b.current_path = "moved.md".into()),
-                "relay",
-                restored_audit,
-            )),
-        ),
-        (
-            "other-lineage",
-            Some((
-                changed(|b| b.lineage_claim_id = "f".repeat(64)),
-                "relay",
-                restored_audit,
-            )),
-        ),
-        (
-            "other-workspace",
-            Some((
-                changed(|b| b.workspace_id = "other".into()),
-                "relay",
-                restored_audit,
-            )),
-        ),
-        (
-            "other-namespace",
-            Some((next.clone(), "other-relay", restored_audit)),
-        ),
-        ("other-digest", Some((next.clone(), "relay", other_text))),
-    ];
-    hydrate_texts(&mut store, &[&restored_text, other_text]);
-    for (index, (origin, audit)) in cases.into_iter().enumerate() {
-        let id = format!("moment-ydoc-{index}{}", "1".repeat(63));
-        if let Some((binding, namespace, audited)) = audit {
-            retain_audit(&store, &binding, namespace, &id, audited);
-        }
-        assert!(
-            matches!(
-                apply_moment_envelope(
-                    &mut store,
-                    &settlement(origin, &id, &restored_text),
-                    &NoFaults
-                )
-                .unwrap()
-                .primary,
-                ApplyDisposition::Refused(_)
-            ),
-            "{origin} must be refused"
-        );
-    }
-    assert_eq!(
-        store.table_row_count("owner_pending_settlements").unwrap(),
-        0
-    );
-    assert_eq!(snapshot(&store, "object"), before);
-
-    let restore_id = format!("moment-ydoc-{}", "b".repeat(64));
-    retain_audit(&store, &next, "relay", &restore_id, &restored_text);
-    let forged_text = "a restore the host never accepted";
-    hydrate_texts(&mut store, &[forged_text]);
-    let forged_id = format!("moment-ydoc-{}", "c".repeat(64));
-    retain_audit(&store, &next, "relay", &forged_id, forged_text);
-    for (origin, id, text) in [
-        ("host", &restore_id, restored_text.as_str()),
-        ("forged", &forged_id, forged_text),
-    ] {
-        assert_eq!(
-            apply_moment_envelope(&mut store, &settlement(origin, id, text), &NoFaults).unwrap(),
-            ApplyOutcome::new(ApplyDisposition::Applied(0))
-        );
-    }
-    let parked: Vec<String> = store
-        .read_with(|conn| {
-            conn.prepare("SELECT binding_json FROM owner_pending_settlements ORDER BY origin_id")?
-                .query_map([], |row| row.get(0))?
-                .collect()
-        })
-        .unwrap();
-    assert_eq!(parked, vec![serde_json::to_string(&next).unwrap(); 2]);
-    assert_eq!(snapshot(&store, "object"), before);
-    let waiting =
-        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
-            .unwrap();
-    assert!(waiting.report_id.is_none());
-    assert!(waiting.changes.is_empty());
-    assert_eq!(snapshot(&store, "object"), before);
-
-    let advanced = enroll_restore(&mut store, &next, &restored, 1, &observed.limits);
-    assert_eq!(
-        (advanced.binding, advanced.accepted_cursor),
-        (next.clone(), 1)
-    );
-
-    let settled =
-        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
-            .unwrap();
-    assert_eq!(settled.changes.len(), 1);
-    assert_eq!(settled.changes[0].path, "owner.md");
-    assert_eq!(
-        snapshot(&store, "object").map(|(_, _, digest, moment)| (digest, moment)),
-        Some((text_sha(&restored_text), restore_id.clone()))
-    );
-    assert_eq!(disposition(&store, "forged").as_deref(), Some("refused"));
-    assert_ne!(disposition(&store, "host").as_deref(), Some("refused"));
-}
-
-#[test]
-fn restore_settlement_skipped_by_a_later_generation_is_refused_and_released() {
-    use dohc_engine_collab::live_object_binding::LiveObjectBinding;
-    let RestoreOwner {
-        _scratch,
-        mut store,
-        observed,
-        checkpoint,
-        initial_text,
-        initial_moment,
-    } = restore_owner();
-    let generation = |restore_fence_generation| LiveObjectBinding {
-        restore_fence_generation,
-        ..observed.binding.clone()
-    };
-    let (_, skipped_text) = restored_host(&checkpoint, "restored at generation 1");
-    let (latest, latest_text) = restored_host(&checkpoint, "restored at generation 2");
-    hydrate_texts(&mut store, &[&skipped_text, &latest_text]);
-    let skipped_id = format!("moment-ydoc-{}", "b".repeat(64));
-    let latest_id = format!("moment-ydoc-{}", "c".repeat(64));
-    retain_restore_audit(
-        &store,
-        &generation(1),
-        "relay",
-        &skipped_id,
-        &skipped_text,
-        1,
-    );
-    retain_restore_audit(&store, &generation(2), "relay", &latest_id, &latest_text, 2);
-    let skipped = restore_settlement(
-        "first-restore",
-        &skipped_id,
-        &initial_text,
-        &initial_moment,
-        &skipped_text,
-    );
-    assert_eq!(
-        apply_moment_envelope(&mut store, &skipped, &NoFaults).unwrap(),
-        ApplyOutcome::new(ApplyDisposition::Applied(0))
-    );
-    assert_eq!(
-        store.table_row_count("owner_pending_settlements").unwrap(),
-        1
-    );
-    let before = snapshot(&store, "object");
-
-    // The authenticated owner feed skips generation 1, so its settlement can
-    // never become ready. The drain refuses it instead of writing it.
-    let advanced = enroll_restore(&mut store, &generation(2), &latest, 2, &observed.limits);
-    assert_eq!(
-        (advanced.binding, advanced.accepted_cursor),
-        (generation(2), 2)
-    );
-    let report =
-        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
-            .unwrap();
-    assert!(report.changes.is_empty());
-    assert!(report.report_id.is_some());
-    assert_eq!(snapshot(&store, "object"), before);
-    assert_eq!(
-        disposition(&store, "first-restore").as_deref(),
-        Some("refused")
-    );
-    assert_eq!(
-        store
-            .read_with(|conn| conn.query_row(
-                "SELECT reason_message FROM replication_pending_refusals WHERE origin_id='first-restore'",
-                [],
-                |row| row.get::<_, String>(0)
-            ))
-            .unwrap(),
-        crate::moment_apply::pending::SUPERSEDED
-    );
-
-    let committed = crate::commit_relay_cursor(
-        &mut store,
-        "ws",
-        &crate::RelayCursor {
-            bootstrap_complete: true,
-            cursor: 1,
-            replication_epoch: "epoch".into(),
-            stream_identity: "stream".into(),
-            settlement_report_id: report.report_id,
-            ordinary_pull: None,
-        },
-        &NoFaults,
-        &NoLiveLeases,
-        4,
-    )
-    .unwrap();
-    assert!(matches!(
-        committed,
-        dohc_engine_storage::TxnOutcome::Committed(_)
-    ));
-    assert_eq!(
-        store.table_row_count("owner_pending_settlements").unwrap(),
-        0
-    );
-    assert_eq!(
-        store
-            .table_row_count("owner_pending_settlement_blobs")
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        store
-            .read_with(|conn| conn.query_row(
-                "SELECT COUNT(*) FROM replication_refused_moment_blobs \
-                 WHERE origin_id='first-restore' AND role='payload-after' AND text_sha256=?1",
-                [text_sha(&skipped_text)],
-                |row| row.get::<_, i64>(0)
-            ))
-            .unwrap(),
-        1
-    );
-
-    let latest_settlement = restore_settlement(
-        "second-restore",
-        &latest_id,
-        &initial_text,
-        &initial_moment,
-        &latest_text,
-    );
-    assert_eq!(
-        apply_moment_envelope(&mut store, &latest_settlement, &NoFaults).unwrap(),
-        ApplyOutcome::new(ApplyDisposition::Applied(0))
-    );
-    assert_eq!(
-        snapshot(&store, "object").map(|(_, _, digest, moment)| (digest, moment)),
-        Some((text_sha(&latest_text), latest_id))
-    );
-}
-
-#[test]
 fn held_settlement_current_path_recovery_is_refused_and_released() {
-    held_settlement_recovery(RecoveryBinding::Renamed, false);
+    held_settlement_recovery(RecoveryBinding::Renamed);
 }
 
 #[test]
 fn held_settlement_selector_paths_recovery_is_refused_and_released() {
-    held_settlement_recovery(RecoveryBinding::Selectors, false);
-}
-
-#[test]
-fn held_settlement_later_generation_after_rename_is_refused_and_released() {
-    held_settlement_recovery(RecoveryBinding::Renamed, true);
+    held_settlement_recovery(RecoveryBinding::Selectors);
 }
 
 #[test]
 fn held_settlement_same_binding_recovery_applies_and_releases() {
-    held_settlement_recovery(RecoveryBinding::Unchanged, false);
+    held_settlement_recovery(RecoveryBinding::Unchanged);
 }
 
 #[test]
 fn held_settlement_rename_away_and_back_applies_and_releases() {
-    held_settlement_recovery(RecoveryBinding::RenamedBack, false);
+    held_settlement_recovery(RecoveryBinding::RenamedBack);
 }
 
 #[derive(Clone, Copy)]
@@ -638,7 +350,7 @@ enum RecoveryBinding {
     RenamedBack,
 }
 
-fn held_settlement_recovery(case: RecoveryBinding, later_generation: bool) {
+fn held_settlement_recovery(case: RecoveryBinding) {
     use dohc_engine_collab::owner_outbox::{
         OwnerOutboxQuarantineInput,
         draft::append_draft_in_tx,
@@ -688,9 +400,7 @@ fn held_settlement_recovery(case: RecoveryBinding, later_generation: bool) {
     };
     let recovery_host = Ydoc::wire();
     recovery_host.apply(&checkpoint).unwrap();
-    if !later_generation {
-        recovery_host.apply(&host.encode_full_state()).unwrap();
-    }
+    recovery_host.apply(&host.encode_full_state()).unwrap();
     for (step, next) in bindings.iter().enumerate() {
         let dohc_engine_storage::TxnOutcome::Committed(parent) = store
             .write_with(&NoFaults, |tx| {
@@ -732,11 +442,7 @@ fn held_settlement_recovery(case: RecoveryBinding, later_generation: bool) {
             binding: next.clone(),
             relay_database_namespace: "relay".into(),
             captured,
-            journal_cursor: if later_generation || step + 1 < bindings.len() {
-                0
-            } else {
-                1
-            },
+            journal_cursor: if step + 1 < bindings.len() { 0 } else { 1 },
             checkpoint: recovery_host.encode_full_state(),
             host_vector: recovery_host.encode_state_vector(),
             recovery: true,
@@ -755,18 +461,6 @@ fn held_settlement_recovery(case: RecoveryBinding, later_generation: bool) {
         observed.revision = recovered.revision;
     }
     let mut next = observed.binding.clone();
-    if later_generation {
-        let waiting =
-            crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
-                .unwrap();
-        assert!(
-            waiting.report_id.is_none(),
-            "rename still waits for the cursor"
-        );
-        next.restore_fence_generation = 1;
-        let advanced = enroll_restore(&mut store, &next, &host, 0, &observed.limits);
-        assert_eq!(advanced.binding, next);
-    }
     let before = snapshot(&store, "object");
     let mut report =
         crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
@@ -833,11 +527,7 @@ fn held_settlement_recovery(case: RecoveryBinding, later_generation: bool) {
             .unwrap();
         assert_eq!(
             reason,
-            if later_generation {
-                crate::moment_apply::pending::SUPERSEDED
-            } else {
-                "This file's name, location, or sharing changed before this save arrived. Open the file to continue."
-            }
+            "This file's name, location, or sharing changed before this save arrived. Open the file to continue."
         );
         assert_eq!(snapshot(&store, "object"), before);
         assert_eq!(
@@ -850,13 +540,11 @@ fn held_settlement_recovery(case: RecoveryBinding, later_generation: bool) {
                 .unwrap(),
             0
         );
-        if !later_generation {
-            let notices = crate::list_refusal_notices(&store, "ws").unwrap();
-            assert_eq!(
-                notices[0].document.as_ref().unwrap().path.as_deref(),
-                Some(next.current_path.as_str())
-            );
-        }
+        let notices = crate::list_refusal_notices(&store, "ws").unwrap();
+        assert_eq!(
+            notices[0].document.as_ref().unwrap().path.as_deref(),
+            Some(next.current_path.as_str())
+        );
     }
     crate::commit_relay_cursor(
         &mut store,
@@ -889,32 +577,30 @@ fn held_settlement_recovery(case: RecoveryBinding, later_generation: bool) {
         "SELECT COUNT(*) FROM replication_refused_moment_blobs WHERE origin_id='host' AND role='payload-after' AND text_sha256=?1",
         [text_sha(&text)], |row| row.get::<_, i64>(0),
     )).unwrap(), 1);
-        if !later_generation {
-            let notices = crate::list_refusal_notices(&store, "ws").unwrap();
-            assert_eq!(
-                notices[0].document.as_ref().unwrap().path.as_deref(),
-                Some(next.current_path.as_str())
-            );
-            next.current_path = "moved-again.md".into();
-            store
-                .read_with(|conn| {
-                    conn.execute(
-                        "UPDATE ydoc_owner_bindings SET binding_json=?1",
-                        [serde_json::to_string(&next).unwrap()],
-                    )
-                })
-                .unwrap();
-            let notices = crate::list_refusal_notices(&store, "ws").unwrap();
-            assert_eq!(
-                notices[0].document.as_ref().unwrap().path.as_deref(),
-                Some("moved-again.md")
-            );
-            store
-                .read_with(|conn| conn.execute("DELETE FROM ydoc_owner_bindings", []))
-                .unwrap();
-            let notices = crate::list_refusal_notices(&store, "ws").unwrap();
-            assert!(notices[0].document.as_ref().unwrap().path.is_none());
-        }
+        let notices = crate::list_refusal_notices(&store, "ws").unwrap();
+        assert_eq!(
+            notices[0].document.as_ref().unwrap().path.as_deref(),
+            Some(next.current_path.as_str())
+        );
+        next.current_path = "moved-again.md".into();
+        store
+            .read_with(|conn| {
+                conn.execute(
+                    "UPDATE ydoc_owner_bindings SET binding_json=?1",
+                    [serde_json::to_string(&next).unwrap()],
+                )
+            })
+            .unwrap();
+        let notices = crate::list_refusal_notices(&store, "ws").unwrap();
+        assert_eq!(
+            notices[0].document.as_ref().unwrap().path.as_deref(),
+            Some("moved-again.md")
+        );
+        store
+            .read_with(|conn| conn.execute("DELETE FROM ydoc_owner_bindings", []))
+            .unwrap();
+        let notices = crate::list_refusal_notices(&store, "ws").unwrap();
+        assert!(notices[0].document.as_ref().unwrap().path.is_none());
     }
 }
 
@@ -927,13 +613,12 @@ struct DrainWindow {
 const CAPTURE_RELEASED_AT_MS: i64 = 20;
 
 fn drain_window() -> DrainWindow {
-    use dohc_engine_collab::live_object_binding::LiveObjectBinding;
     let mut owner = restore_owner();
-    let next = LiveObjectBinding {
-        restore_fence_generation: 1,
-        ..owner.observed.binding.clone()
-    };
-    let (restored, restored_text) = restored_host(&owner.checkpoint, "restored by the owner");
+    let next = owner.observed.binding.clone();
+    let host = Ydoc::wire();
+    host.apply(&owner.checkpoint).unwrap();
+    let accepted = host.richdoc_append_paragraph("restored by the owner");
+    let restored_text = host.project(YdocContentKind::Richdoc).unwrap().content;
     let forged_text = "a restore the host never accepted";
     hydrate_texts(&mut owner.store, &[&restored_text, forged_text]);
     let restore_id = format!("moment-ydoc-{}", "b".repeat(64));
@@ -955,7 +640,7 @@ fn drain_window() -> DrainWindow {
         assert_eq!(
             apply_moment_envelope(&mut owner.store, &settlement, &NoFaults).unwrap(),
             ApplyOutcome::new(ApplyDisposition::Applied(0)),
-            "{origin} waits for the restore generation"
+            "{origin} waits for the owner's cursor"
         );
     }
     owner
@@ -969,13 +654,7 @@ fn drain_window() -> DrainWindow {
             )
         })
         .unwrap();
-    enroll_restore(
-        &mut owner.store,
-        &next,
-        &restored,
-        1,
-        &owner.observed.limits,
-    );
+    apply_test_owner_frame(&mut owner, accepted, 1);
     owner
         .store
         .read_with(|conn| {
@@ -985,7 +664,7 @@ fn drain_window() -> DrainWindow {
                    source_moment_id,source_digest,source_byte_length,host_coordinate_json,\
                    released_at_ms,released_restore_generation,released_accepted_cursor,\
                    released_boundary_json,carried_manifest_json) \
-                 VALUES ('relay','capture','ws','main','object',?1,?2,?3,?4,?5,'{}',?6,1,1,'null','[]')",
+                 VALUES ('relay','capture','ws','main','object',?1,?2,?3,?4,?5,'{}',?6,0,1,'null','[]')",
                 params![
                     next.lineage_claim_id,
                     serde_json::to_string(&next).unwrap(),
@@ -1526,41 +1205,6 @@ fn restore_settlement(
     )
 }
 
-fn enroll_restore(
-    store: &mut EngineStore,
-    binding: &dohc_engine_collab::live_object_binding::LiveObjectBinding,
-    host: &Ydoc,
-    cursor: i64,
-    limits: &dohc_engine_collab::owner_outbox::OwnerOutboxLimits,
-) -> dohc_engine_collab::owner_outbox::draft::OwnerDraftDescriptor {
-    use dohc_engine_collab::owner_outbox::enrollment::{
-        OwnerEnrollmentInput, OwnerEnrollmentPreparation, enroll_in_tx, prepare_in,
-    };
-    let captured = match store
-        .read_with(|conn| prepare_in(conn, binding, "relay", false))
-        .unwrap()
-    {
-        OwnerEnrollmentPreparation::Capture { captured } => captured,
-        other => panic!("a restore generation captures, not {other:?}"),
-    };
-    let input = OwnerEnrollmentInput {
-        binding: binding.clone(),
-        relay_database_namespace: "relay".into(),
-        captured,
-        journal_cursor: cursor,
-        checkpoint: host.encode_full_state(),
-        host_vector: host.encode_state_vector(),
-        recovery: false,
-    };
-    let advanced = store
-        .write_with(&NoFaults, |tx| enroll_in_tx(tx, "ws", &input, limits, 3))
-        .unwrap();
-    let dohc_engine_storage::TxnOutcome::Committed(advanced) = advanced else {
-        panic!("enrollment must commit")
-    };
-    advanced
-}
-
 fn disposition(store: &EngineStore, origin: &str) -> Option<String> {
     store
         .read_with(|conn| {
@@ -1814,6 +1458,60 @@ fn direct_write_author_and_collection_file_origin_travel_only_together() {
 }
 
 #[test]
+fn direct_write_authors_create_pages_outside_collections_and_datasets() {
+    let (_scratch, mut store) = test_store();
+    seed_trip_collection(&mut store);
+    seed_text_moment(
+        &mut store,
+        "notes-page",
+        "notes/page.md",
+        "Notes",
+        "notes-page-1",
+        None,
+        true,
+    );
+    let pages = [
+        ("top-page", "Ideas.md", "Ideas"),
+        ("notes-new", "notes/new.md", "New"),
+        ("plans-first", "plans/kickoff.md", "Kickoff"),
+        ("trip-days", "trip/days/one.md", "Day one"),
+    ];
+    hydrate_texts(&mut store, &["Ideas", "New", "Kickoff", "Day one"]);
+    // Each author writes its own copy of every page.
+    let cases = direct_write_authors("grant")
+        .into_iter()
+        .enumerate()
+        .flat_map(|(round, author)| {
+            pages.map(move |(object, path, text)| {
+                let object = format!("{object}-{round}");
+                let path = path.replace(".md", &format!("-{round}.md"));
+                with_author(
+                    absent_text_payload(&object, &object, &path, text),
+                    author.clone(),
+                )
+            })
+        });
+    for (seq, payload) in (0_i64..).zip(cases) {
+        let op = envelope(NAMED_ORIGIN, seq, "ws", payload);
+        assert_eq!(
+            apply_moment_envelope(&mut store, &op, &NoFaults).expect("apply page"),
+            ApplyOutcome::new(ApplyDisposition::Applied(0)),
+            "{} {}",
+            op.payload["path"],
+            op.payload["authors"][0]["kind"]
+        );
+    }
+    for (object, _, _) in pages {
+        for round in 0..2 {
+            assert!(
+                snapshot(&store, &format!("{object}-{round}")).is_some(),
+                "{object}"
+            );
+        }
+    }
+}
+
+#[test]
 fn direct_write_authors_are_refused_outside_a_collections_own_files() {
     let (_scratch, mut store) = test_store();
     seed_trip_collection(&mut store);
@@ -1916,13 +1614,6 @@ fn direct_write_authors_are_refused_outside_a_collections_own_files() {
             "plain-automations",
             "notes/automations.yaml",
             "version: 1\n",
-        ),
-        absent_text_payload("plain-record", "plain-record", "notes/new.md", "Changed"),
-        absent_text_payload(
-            "nested-record",
-            "nested-record",
-            "trip/days/one.md",
-            "Changed",
         ),
         absent_text_payload("code", "code", "trip/stamp.js", "code"),
         present_text_payload(
@@ -2406,9 +2097,6 @@ fn stopped_binary_moment() -> (
     Vec<u8>,
 ) {
     use dohc_engine_collab::live_object_binding::LiveObjectBinding;
-    use dohc_engine_collab::live_update_application::{
-        NativeRestoreFence, NativeRestoreFenceReceipt, RestoreDeliveryOrigin,
-    };
     use dohc_engine_collab::owner_outbox::{self, OwnerOutboxAppendInput, OwnerOutboxLimits};
     let (scratch, mut store) = test_store();
     crate::adopt_join_identity(
@@ -2471,30 +2159,9 @@ fn stopped_binary_moment() -> (
         },
     )
     .expect("independent outbox owns the shared digest");
-    let operation = NativeRestoreFence {
-        point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
-            journal_cursor: 0,
-            receipt_digest: binding.lineage_claim_id.clone(),
-        },
-        operation_id: "restore".into(),
-        relay_database_namespace: "relay".into(),
-        old_binding: binding,
-        host_id: "host".into(),
-        new_fence: 1,
-        origin: RestoreDeliveryOrigin::Bootstrap {
-            id: "bootstrap".into(),
-        },
-        terminal: None,
-        applied_sequence: 0,
-    };
-    let receipt = NativeRestoreFenceReceipt {
-        operation: operation.clone(),
-        local_head_sequence: 0,
-        recorded_at_ms: 1_001,
-    };
     store.read_with(|conn| conn.execute(
-        "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('ws','main','object','relay','restore',?1,?2)",
-        params![serde_json::to_string(&operation).unwrap(), serde_json::to_string(&receipt).unwrap()],
+        "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('ws','main','object','relay','restore',?1,'{}')",
+        [json!({"oldBinding":binding,"newFence":1}).to_string()],
     )).expect("seed the durable stopped-lineage guard");
     let mut payload = present_text_payload(
         "refused-moment",

@@ -1,3 +1,4 @@
+import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
 import { recoverPublicLinkUrl } from "./linkSecurity";
 import { createReceivedIdentity } from "./receivedIdentity";
 import { readCurrentShareGrant } from "./storage/currentShareGrant";
@@ -13,7 +14,12 @@ import {
   selectorTargetsBlockedChannel,
   type AuthorizedShareAction,
 } from "./shareAuthorization";
-import { effectiveShareSelector, fileSideOf, parseStoredAnyShareSelectorJson } from "./shareFilter";
+import {
+  effectiveShareSelector,
+  fileSideOf,
+  isWorkspaceSelector,
+  parseStoredAnyShareSelectorJson,
+} from "./shareFilter";
 import { showsGranterEmail, type createShareSummaries } from "./shareSummaries";
 import type {
   SyncRelayGrantedInventoryCursor,
@@ -49,6 +55,8 @@ export function createShareInventoryRoutes(
     | "listLinkGrantsByWorkspace"
     | "lookupHistoryAccounts"
     | "listActiveIndependentShareGrants"
+    | "workspaceRoleOf"
+    | "workspaceLevelChangedBy"
   >,
   nowMs: () => number,
   claimPendingShares: (userId: string) => Promise<void>,
@@ -69,6 +77,7 @@ export function createShareInventoryRoutes(
   lookupUserEmails?: (userIds: readonly string[]) => Promise<ReadonlyMap<string, string>>,
   linkKey?: string | Uint8Array,
   shareWebOrigin?: string,
+  lookupUserDisplayName?: LookupUserDisplayName,
 ) {
   async function granterEmailFor(share: {
     granterUserId: string;
@@ -167,8 +176,31 @@ export function createShareInventoryRoutes(
       if (!accessRateLimiter.allow(actor.userId, nowMs()))
         throw relayError("share_access_rate_limited");
       const authorized = requireShareAction(route.shareId, actor.userId, "read");
+      // A membership names the role too: the level alone cannot tell an
+      // admin from a member at Edit.
+      const role = isWorkspaceSelector(authorized.effectiveSelector)
+        ? storage.workspaceRoleOf(authorized.share.workspaceId, actor.userId)?.role
+        : undefined;
+      if (
+        isWorkspaceSelector(authorized.effectiveSelector) &&
+        role !== "admin" &&
+        role !== "member"
+      )
+        throw notFound();
+      // Opening a joined workspace keeps the member's name current, so mentions find them.
+      if (role !== undefined) await accountDisplayName(lookupUserDisplayName, actor.userId);
+      // The person who set the members' level, named from the relay's own record of the change.
+      const changedBy =
+        role === "member" ? storage.workspaceLevelChangedBy(authorized.share.workspaceId) : null;
+      const levelChangedBy =
+        changedBy === null ? null : await accountDisplayName(lookupUserDisplayName, changedBy);
       return jsonResponse(
-        { status: "current", access: fileSideOf(authorized.effectiveSelector)?.access ?? "view" },
+        {
+          status: "current",
+          access: fileSideOf(authorized.effectiveSelector)?.access ?? "view",
+          ...(role === undefined ? {} : { role }),
+          ...(levelChangedBy === null ? {} : { levelChangedBy }),
+        },
         200,
         { "cache-control": "private, no-store" },
       );
@@ -302,7 +334,15 @@ export function createShareInventoryRoutes(
         ["user", actor.userId],
         authorized.share.workspaceId,
       );
-      return jsonResponse({ ok: true, ...summary, ...(receivedSource ? { receivedSource } : {}) });
+      // A member reaches Members by the workspace's id, which Members names
+      // to every member anyway. Any other share keeps it private.
+      const membership = (summary.selector as { kind?: unknown } | null)?.kind === "workspace";
+      return jsonResponse({
+        ok: true,
+        ...summary,
+        ...(membership ? { workspaceId: authorized.share.workspaceId } : {}),
+        ...(receivedSource ? { receivedSource } : {}),
+      });
     }
     throw relayError("method_not_allowed");
   }

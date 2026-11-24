@@ -8,7 +8,7 @@ fn share_view_and_shared_channel_fail_closed_outside_boundary() {
         surface: ShareSurface::ShareView,
         channel_wire_id: None,
         granted: Some(ShareGrant {
-            paths: vec!["shared/docs".to_owned()],
+            scope: crate::ShareScope::Paths(vec!["shared/docs".to_owned()]),
             version_id: None,
             access: ShareAccess::View,
         }),
@@ -1438,4 +1438,416 @@ fn shared_channel_mappings_admit_only_chat_in_the_receiving_channel() {
         *client.transport().reference_pulls.lock().unwrap(),
         [(true, None), (true, None), (true, Some("tail".into()))]
     );
+}
+
+/// A whole-workspace share view sends its own posts in Groups, and no other
+/// chat: no channel create, no post in General, a direct message, an agent's
+/// chat or a thread on neither a Group nor a file. View sends nothing, and a view that never posted
+/// has no identity to send from.
+#[test]
+fn a_membership_view_pushes_only_its_posts_in_groups() {
+    let (_scratch, _path, mut engine) = open_store();
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    let grant = |access| ShareGrant {
+        scope: crate::ShareScope::Workspace,
+        version_id: None,
+        access,
+    };
+    assert_eq!(
+        client
+            .push_share_view_groups(
+                &mut engine,
+                "ws",
+                "share",
+                &grant(ShareAccess::Comment),
+                &NoFaults
+            )
+            .expect("a view that never posted sends nothing")
+            .pushed,
+        0
+    );
+    seed_identity(&mut engine);
+    engine
+        .write_with(&NoFaults, |tx| {
+            for (channel, kind, wire, thread) in [
+                ("group", "channel", "wire-group", "t-group"),
+                ("general", "channel", dohc_engine_domain::GENERAL_CHANNEL_WIRE_ID, "t-general"),
+                ("dm", "dm", "wire-dm", "t-dm"),
+                ("agent", "agent", "channel_wire_agent_v1", "t-agent"),
+            ] {
+                tx.execute(
+                    "INSERT INTO chat_channels \
+                     (workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) \
+                     VALUES ('ws',?1,?1,?1,?2,1,1)",
+                    params![channel, kind],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "INSERT INTO chat_channel_wire_ids (workspace_id,wire_id,channel_id) \
+                     VALUES ('ws',?1,?2)",
+                    params![wire, channel],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "INSERT INTO chat_threads \
+                     (workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) \
+                     VALUES ('ws',?1,'',1,1,?2)",
+                    params![thread, channel],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            tx.execute(
+                "INSERT INTO chat_threads (workspace_id,thread_id,title,created_at_ms,updated_at_ms) \
+                 VALUES ('ws','t-file','',1,1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("membership chat fixture");
+    let ops = [
+        (
+            "chat.channel.create",
+            json!({"wireId": "wire-new", "kind": "channel"}),
+        ),
+        (
+            "chat.thread.create",
+            json!({"threadId": "t-new", "channelWireId": "wire-group"}),
+        ),
+        (
+            "chat.message.append",
+            json!({"threadId": "t-group", "messageId": "m-group"}),
+        ),
+        (
+            "chat.reaction.set",
+            json!({"threadId": "t-group", "messageId": "m-group"}),
+        ),
+        (
+            "chat.thread.create",
+            json!({"threadId": "t-new-dm", "channelWireId": "wire-dm"}),
+        ),
+        (
+            "chat.message.append",
+            json!({"threadId": "t-general", "messageId": "m-general"}),
+        ),
+        (
+            "chat.message.append",
+            json!({"threadId": "t-dm", "messageId": "m-dm"}),
+        ),
+        (
+            "chat.message.append",
+            json!({"threadId": "t-agent", "messageId": "m-agent"}),
+        ),
+        (
+            "chat.message.append",
+            json!({"threadId": "t-file", "messageId": "m-file"}),
+        ),
+        (
+            "chat.decision.set",
+            json!({"threadId": "t-group", "messageId": "m-group"}),
+        ),
+    ];
+    for (index, (kind, payload)) in ops.iter().enumerate() {
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            kind,
+            payload,
+            1_000 + i64::try_from(index).expect("index"),
+            &NoFaults,
+        )
+        .expect("journal a local chat op");
+    }
+    assert!(
+        client
+            .push_share_view_groups(
+                &mut engine,
+                "ws",
+                "share",
+                &grant(ShareAccess::View),
+                &NoFaults
+            )
+            .is_err(),
+        "View posts nothing"
+    );
+    assert_eq!(
+        client
+            .push_share_view_groups(
+                &mut engine,
+                "ws",
+                "share",
+                &grant(ShareAccess::Comment),
+                &NoFaults
+            )
+            .expect("Comment sends its Group posts")
+            .pushed,
+        4
+    );
+    let pushes = client
+        .transport()
+        .shared_pushes
+        .lock()
+        .expect("shared push calls");
+    assert_eq!(pushes.len(), 1);
+    let sent: Vec<_> = pushes[0]
+        .ops
+        .iter()
+        .map(|op| {
+            (
+                op.op_kind.as_str(),
+                op.origin_seq,
+                op.payload.get("threadId").cloned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            ("chat.thread.create", 0, Some(json!("t-new"))),
+            ("chat.message.append", 1, Some(json!("t-group"))),
+            ("chat.reaction.set", 2, Some(json!("t-group"))),
+            ("chat.decision.set", 3, Some(json!("t-group"))),
+        ]
+    );
+}
+
+/// A membership at Comment or Edit also sends its Comments on files. A file
+/// thread's create names the file by its path here, never by this view's
+/// object token, and a thread's messages follow it. A thread whose file is
+/// gone from this view sends nothing.
+#[test]
+fn a_membership_view_pushes_its_comments_on_files_by_path() {
+    let (_scratch, _path, mut engine) = open_store();
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    seed_identity(&mut engine);
+    let file = format!("share-object:v1:{}", "a".repeat(64));
+    let gone = format!("share-object:v1:{}", "b".repeat(64));
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "INSERT INTO versioned_workspaces (workspace_id,main_version_id) VALUES ('ws','main'); \
+                 INSERT INTO versions (workspace_id,version_id,kind,name,created_at_ms) \
+                 VALUES ('ws','main','main','Main',0);",
+            )
+            .map_err(SyncError::persist)?;
+            for object in [&file, &gone] {
+                tx.execute(
+                    "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) VALUES ('ws',?1,1)",
+                    params![object],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            tx.execute(
+                "INSERT INTO path_aliases (workspace_id,version_id,path,object_id) \
+                 VALUES ('ws','main','plans/day-1.md',?1)",
+                params![file],
+            )
+            .map_err(SyncError::persist)?;
+            for (thread, object) in [("t-mine", &file), ("t-owner", &file), ("t-gone", &gone)] {
+                tx.execute(
+                    "INSERT INTO chat_threads \
+                     (workspace_id,thread_id,title,created_at_ms,updated_at_ms,linked_object_id,linked_at_ms) \
+                     VALUES ('ws',?1,'',1,1,?2,1)",
+                    params![thread, object],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .expect("file comment fixture");
+    let ops = [
+        (
+            "chat.thread.create",
+            json!({"threadId": "t-mine", "title": "Food", "createdAtMs": 5, "linkedObjectId": file,
+                   "linkedAtMs": 5, "linkedPathHint": "plans/day-1.md"}),
+        ),
+        (
+            "chat.message.append",
+            json!({"threadId": "t-mine", "messageId": "m-mine"}),
+        ),
+        (
+            "chat.message.append",
+            json!({"threadId": "t-owner", "messageId": "m-owner"}),
+        ),
+        (
+            "chat.thread.create",
+            json!({"threadId": "t-lost", "title": "Old", "createdAtMs": 5, "linkedObjectId": gone,
+                   "linkedAtMs": 5, "linkedPathHint": "old.md"}),
+        ),
+        (
+            "chat.message.append",
+            json!({"threadId": "t-gone", "messageId": "m-gone"}),
+        ),
+    ];
+    for (index, (kind, payload)) in ops.iter().enumerate() {
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            kind,
+            payload,
+            1_000 + i64::try_from(index).expect("index"),
+            &NoFaults,
+        )
+        .expect("journal a local chat op");
+    }
+    let grant = ShareGrant {
+        scope: crate::ShareScope::Workspace,
+        version_id: None,
+        access: ShareAccess::Comment,
+    };
+    assert_eq!(
+        client
+            .push_share_view_groups(&mut engine, "ws", "share", &grant, &NoFaults)
+            .expect("Comment sends its Comments on files")
+            .pushed,
+        3
+    );
+    let pushes = client
+        .transport()
+        .shared_pushes
+        .lock()
+        .expect("shared push calls");
+    let sent: Vec<_> = pushes[0]
+        .ops
+        .iter()
+        .map(|op| (op.op_kind.as_str(), op.origin_seq, op.payload.clone()))
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            (
+                "chat.thread.create",
+                0,
+                json!({"threadId": "t-mine", "title": "Food", "createdAtMs": 5, "linkedAtMs": 5,
+                       "linkedPath": "plans/day-1.md"}),
+            ),
+            (
+                "chat.message.append",
+                1,
+                json!({"threadId": "t-mine", "messageId": "m-mine"}),
+            ),
+            (
+                "chat.message.append",
+                2,
+                json!({"threadId": "t-owner", "messageId": "m-owner"}),
+            ),
+        ]
+    );
+}
+
+/// The relay refuses a whole batch for one op it won't take, such as a
+/// comment on a file the owner deleted. The view sets that op aside as a
+/// refusal Notices shows, one per thread, and every later op still goes,
+/// numbered with no gap.
+#[test]
+fn a_membership_view_sets_aside_an_op_the_relay_refuses_and_keeps_pushing() {
+    let (_scratch, _path, mut engine) = open_store();
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []).refusing_threads(["t-deleted"]));
+    seed_identity(&mut engine);
+    let file = format!("share-object:v1:{}", "a".repeat(64));
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "INSERT INTO versioned_workspaces (workspace_id,main_version_id) VALUES ('ws','main'); \
+                 INSERT INTO versions (workspace_id,version_id,kind,name,created_at_ms) \
+                 VALUES ('ws','main','main','Main',0);",
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) VALUES ('ws',?1,1)",
+                params![file],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO path_aliases (workspace_id,version_id,path,object_id) \
+                 VALUES ('ws','main','plans/day-1.md',?1)",
+                params![file],
+            )
+            .map_err(SyncError::persist)?;
+            for thread in ["t-deleted", "t-owner"] {
+                tx.execute(
+                    "INSERT INTO chat_threads \
+                     (workspace_id,thread_id,title,created_at_ms,updated_at_ms,linked_object_id,linked_at_ms) \
+                     VALUES ('ws',?1,'',1,1,?2,1)",
+                    params![thread, file],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .expect("file comment fixture");
+    let journal = |engine: &mut EngineStore, index: i64, kind: &str, payload: serde_json::Value| {
+        journal_local_replication_op(
+            engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            kind,
+            &payload,
+            1_000 + index,
+            &NoFaults,
+        )
+        .expect("journal a local chat op");
+    };
+    journal(
+        &mut engine,
+        0,
+        "chat.thread.create",
+        json!({"threadId": "t-deleted", "title": "Food", "createdAtMs": 5, "linkedObjectId": file,
+               "linkedAtMs": 5, "linkedPathHint": "plans/day-1.md"}),
+    );
+    journal(
+        &mut engine,
+        1,
+        "chat.message.append",
+        json!({"threadId": "t-deleted", "messageId": "m-1"}),
+    );
+    journal(
+        &mut engine,
+        2,
+        "chat.message.append",
+        json!({"threadId": "t-owner", "messageId": "m-2"}),
+    );
+    let grant = ShareGrant {
+        scope: crate::ShareScope::Workspace,
+        version_id: None,
+        access: ShareAccess::Comment,
+    };
+    let first = client
+        .push_share_view_groups(&mut engine, "ws", "share", &grant, &NoFaults)
+        .expect("a refused op does not stop the push");
+    assert_eq!((first.pushed, first.set_aside), (1, 2));
+    let notices = crate::list_refusal_notices(&engine, "ws").expect("refusal notices");
+    assert_eq!(notices.len(), 1, "one Notice for the comment: {notices:?}");
+    assert_eq!(notices[0].reason, crate::SHARE_CHAT_REFUSED);
+    assert_eq!(notices[0].refusal_coordinates.len(), 2);
+
+    journal(
+        &mut engine,
+        3,
+        "chat.message.append",
+        json!({"threadId": "t-owner", "messageId": "m-3"}),
+    );
+    let second = client
+        .push_share_view_groups(&mut engine, "ws", "share", &grant, &NoFaults)
+        .expect("the next push goes");
+    assert_eq!((second.pushed, second.set_aside), (1, 0));
+    let pushes = client
+        .transport()
+        .shared_pushes
+        .lock()
+        .expect("shared push calls");
+    let sent: Vec<_> = pushes
+        .iter()
+        .flat_map(|push| push.ops.iter())
+        .map(|op| (op.origin_seq, op.payload["messageId"].clone()))
+        .collect();
+    assert_eq!(sent, [(0, json!("m-2")), (1, json!("m-3"))]);
 }

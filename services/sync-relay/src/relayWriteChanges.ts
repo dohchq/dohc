@@ -1,22 +1,27 @@
 import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
+import type { NamedFrameChangeScope } from "./liveHostChanges";
 export interface LiveHostChanges {
   readonly maxListeners: number;
-  subscribe(
-    changed: () => void,
-    document?: LiveDocumentKey | Pick<LiveDocumentKey, "workspaceId" | "objectId">,
-  ): () => void;
-  notify(document?: LiveDocumentKey): void;
+  subscribe(changed: () => void, scope: NamedFrameChangeScope): () => void;
+  notify(document: LiveDocumentKey): void;
+  notifyWrite(documents?: readonly LiveDocumentKey[]): void;
   notifyHost(workspaceIds: readonly string[]): void;
 }
 
-const observers = new WeakMap<object, Set<() => void>>();
-const queued = new WeakSet<object>();
+/** The documents a write was limited to, none when it changed no live authority, or undefined when it may have changed anything. */
+export type RelayWriteObserver = (documents?: readonly LiveDocumentKey[]) => void;
+/** A write that changed no table a live connection's authority is read from, such as a chat post. */
+export const NO_LIVE_AUTHORITY = "no-live-authority";
+/** What a write may have changed: one document's live state, no live authority, or, when absent, anything. */
+export type RelayWriteScope = LiveDocumentKey | typeof NO_LIVE_AUTHORITY;
+const observers = new WeakMap<object, Set<RelayWriteObserver>>();
+const pending = new WeakMap<object, Map<string, LiveDocumentKey> | "any">();
 export function hasRelayWriteObservers(storage: object): boolean {
   return observers.has(storage);
 }
 
 /** Each shared host owns one observer, released with its connection. */
-export function observeRelayWrites(storage: object, changed: () => void): () => void {
+export function observeRelayWrites(storage: object, changed: RelayWriteObserver): () => void {
   let listeners = observers.get(storage);
   if (!listeners) {
     listeners = new Set();
@@ -142,18 +147,39 @@ export function notifyNoticeChange(storage: object, recipientUserId: string): vo
   });
 }
 
-/** Notify after leaving SQLite. Ambiguous failures also require a fresh authority check. */
-export function notifyRelayWrite(storage: object): void {
-  if (!observers.has(storage) || queued.has(storage)) return;
-  queued.add(storage);
-  queueMicrotask(() => {
-    queued.delete(storage);
-    for (const listener of [...(observers.get(storage) ?? [])]) {
-      try {
-        listener();
-      } catch {
-        /* One host cannot suppress another host's wake. */
+/**
+ * Notify after leaving SQLite. Ambiguous failures also require a fresh
+ * authority check. A write names `document` only when it changed nothing a
+ * connection on another document is authorized by.
+ */
+export function notifyRelayWrite(storage: object, document?: RelayWriteScope): void {
+  if (!observers.has(storage)) return;
+  const written = pending.get(storage);
+  if (written === undefined) {
+    pending.set(storage, new Map());
+    queueMicrotask(() => {
+      const documents = pending.get(storage);
+      pending.delete(storage);
+      const scope =
+        documents === "any" || documents === undefined ? undefined : [...documents.values()];
+      for (const listener of [...(observers.get(storage) ?? [])]) {
+        try {
+          listener(scope);
+        } catch {
+          /* One host cannot suppress another host's wake. */
+        }
       }
-    }
-  });
+    });
+  }
+  const documents = pending.get(storage)!;
+  if (documents === "any" || document === NO_LIVE_AUTHORITY) return;
+  if (!document) {
+    pending.set(storage, "any");
+    return;
+  }
+  const { workspaceId, mainVersionId, objectId, lineageClaimId } = document;
+  documents.set(
+    JSON.stringify([workspaceId, mainVersionId, objectId, lineageClaimId]),
+    Object.freeze({ workspaceId, mainVersionId, objectId, lineageClaimId }),
+  );
 }

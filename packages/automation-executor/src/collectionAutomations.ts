@@ -2711,7 +2711,7 @@ export class CollectionAutomations {
         codeFiles: [],
         steps: [
           { kind: "read-group", group },
-          { kind: "post", group },
+          { kind: "post", target: "group", group },
         ],
       });
       return {

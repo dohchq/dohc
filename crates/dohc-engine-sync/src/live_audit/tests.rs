@@ -924,6 +924,38 @@ fn enrollment_exports_durable_history_across_crash_new_edits_and_reopen() {
     );
 }
 
+#[test]
+fn enrollment_holds_the_history_of_a_note_an_old_restore_stopped() {
+    let mut f = fixture(false);
+    bootstrap(&mut f, false).unwrap();
+    accept_enrollment_event(&mut f, 1);
+    contact(&mut f.store);
+    assert_eq!(count(&f.store, "live_audit_pending_exports"), 1);
+    let binding = serde_json::to_string(&f.binding).unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('ws','main','object','old-relay','old-restore',json_object('oldBinding',json(?1),'newFence',2),'{}')",
+                [binding],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    enrollment::prepare_exports(
+        &mut f.store,
+        "ws",
+        &NoFaults,
+        &crate::NoLiveLeases,
+        201,
+        &mut false,
+    )
+    .unwrap();
+    assert_eq!(count(&f.store, "live_audit_event_publications"), 0);
+    assert_eq!(count(&f.store, "live_audit_pending_exports"), 1);
+    assert_eq!(count(&f.store, "live_audit_held_exports"), 1);
+}
+
 fn import_source(f: &Fixture) -> (ScratchDir, std::path::PathBuf, EngineStore) {
     let (scratch, path, mut store) = open_store();
     store
@@ -2360,7 +2392,7 @@ fn every_file_share_level_refuses_historical_native_audit() {
             surface: crate::ShareSurface::ShareView,
             channel_wire_id: None,
             granted: Some(crate::ShareGrant {
-                paths: vec![],
+                scope: crate::ShareScope::Paths(vec![]),
                 version_id: Some("main".into()),
                 access,
             }),
@@ -3917,7 +3949,8 @@ fn copy_audit_blobs(source: &EngineStore, target: &mut EngineStore) {
         .unwrap();
 }
 
-fn malformed_restore_receipt_pull(field: &str, value: serde_json::Value) {
+#[test]
+fn a_record_carrying_a_restore_refuses_without_stalling_pull() {
     use dohc_engine_collab::live_update_application::AdmittedLiveUpdateMetadata;
     let mut f = fixture(true);
     bootstrap(&mut f, false).unwrap();
@@ -3959,31 +3992,16 @@ fn malformed_restore_receipt_pull(field: &str, value: serde_json::Value) {
         .unwrap();
     let mut metadata: AdmittedLiveUpdateMetadata =
         serde_json::from_value(record["metadata"].clone()).unwrap();
-    metadata.accepted.binding.restore_fence_generation = 1;
     metadata.accepted.receipt.journal_cursor = 2;
     let base: BasePayload = serde_json::from_value(published(&f).payload).unwrap();
     let previous = &base.record.checkpoint.evidence_digest;
     let evidence =
         hex_sha256(&serde_json::to_vec(&("accepted-event-v1", previous, 1, &metadata)).unwrap());
-    let mut terminal = json!({"deliveryId":"earlier", "updateDigest": f.binding.lineage_claim_id,
-        "journalCursor":1, "acceptingHostEpoch":1});
-    terminal[field] = value;
-    let restore: restore_record::RestoreSource = serde_json::from_value(json!({
-        "operationId":"restore", "oldGeneration":0, "origin":{"kind":"bootstrap","id":"bootstrap"},
-        "hostId":"host", "appliedSequence":1, "fenceHeadSequence":1, "fencedAtMs":100,
-        "point":{"journalCursor":0,"receiptDigest":f.binding.lineage_claim_id,
-            "markdownDigest":f.input.projected_markdown_digest,"projectionDigest":f.input.projected_markdown_digest},
-        "selected":{"eventCount":0,"terminal":null,"evidenceDigest":previous},
-        "accepted":{"eventCount":0,"terminal":terminal,"evidenceDigest":previous},
-        "originEvidenceDigest":hex_sha256(&serde_json::to_vec(&f.input).unwrap()),
-        "nativeSourceManifestDigest":f.binding.lineage_claim_id,"frozenStateDigest":f.binding.lineage_claim_id,
-        "pointStateDigest":f.binding.lineage_claim_id,"finalContentDigest":f.input.projected_markdown_digest
-    })).unwrap();
     let bytes = format!(
         "{{\"kind\":\"application\",\"relayDatabaseNamespace\":\"relay\",\"eventCount\":1,\"evidenceDigest\":\"{evidence}\",\"updateByteLength\":{},\"metadata\":{},\"sourceApplication\":{{\"localYDocSequence\":2,\"hostCoordinate\":{{\"hostId\":\"host\",\"hostEpoch\":1,\"instanceId\":\"instance\",\"connectionId\":\"connection\"}}}},\"sourceRestore\":{},\"cancelledRestores\":[],\"contentCoordinate\":{}}}",
         f.bytes.len(),
         serde_json::to_string(&metadata).unwrap(),
-        serde_json::to_string(&restore).unwrap(),
+        json!({"operationId":"restore"}),
         record["contentCoordinate"]
     );
     let dohc_engine_storage::TxnOutcome::Committed(manifest) = receiver
@@ -4048,11 +4066,6 @@ fn pull_refused_audit(receiver: &mut EngineStore, mut audit: ReplicationEnvelope
         1
     );
     assert_eq!(count(receiver, "live_audit_events"), 0);
-}
-
-#[test]
-fn malformed_restore_receipt_epoch_does_not_stall_pull() {
-    malformed_restore_receipt_pull("acceptingHostEpoch", json!(0));
 }
 
 /// An event audited before events kept their generation leaves the next

@@ -359,6 +359,7 @@
     "desktop:share-chat-channel",
     "desktop:share-direct-writes-pushed",
     "desktop:share-handoff-status",
+    "desktop:shared-view-pull-progress",
     "desktop:show-workbench-menu",
     "desktop:site-preview-replaced",
     "desktop:start-agent-run",

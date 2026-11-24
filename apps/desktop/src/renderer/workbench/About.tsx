@@ -16,6 +16,7 @@ import {
   MessageSquare,
   Pencil,
   Share2,
+  User,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -29,6 +30,8 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
+import type { WorkspaceMembersView } from "@dohc/security-contract/workspace-members";
 import type {
   ChatFileMentionRecord,
   ChatThreadRecord,
@@ -373,6 +376,17 @@ export function AboutChatRow(props: { thread: ChatThreadRecord; onOpen: () => vo
   );
 }
 
+// Main checked less than a minute ago and checks again when the minute ends.
+// Until then a fresh answer is the earlier check's: May be out of date.
+export const awaitingCheck = (answer: AccessAnswer): AccessAnswer =>
+  answer.freshness === "fresh" ? { ...answer, freshness: "stale" } : answer;
+
+// A later page keeps an earlier page's stale mark, since its rows are older.
+export const appendAccessPage = (after: AccessAnswer, answer: AccessAnswer): AccessAnswer => ({
+  ...(after.freshness === "stale" ? awaitingCheck(answer) : answer),
+  rows: [...after.rows, ...answer.rows],
+});
+
 // The answer for one workspace and file. A key that is not the current one is
 // still loading, so the first render after a switch shows nothing stale.
 type Keyed<View> = { key: string; view: View };
@@ -401,6 +415,12 @@ export function useSectionRead<View>(key: string, identity: string, notices: Abo
         if (!current()) return;
         setState({ key, view });
         notices.report({ identity, message, cause, retry });
+      },
+      // A read a newer one replaced still fills a section that shows
+      // nothing yet, so files that keep changing never keep it loading.
+      fill(view: View) {
+        if (currentKey.current !== key) return;
+        setState((shown) => (shown.key === key && shown.view !== LOADING ? shown : { key, view }));
       },
     };
   }, [identity, key, notices]);
@@ -534,7 +554,16 @@ export function AboutLinks(props: {
             subject: { path },
             ...(cursor ? { cursor } : {}),
           });
-          if (!request.current()) return;
+          if (!request.current()) {
+            if (!kept)
+              request.fill({
+                status: "ready",
+                rows: page?.entries ?? [],
+                next: page?.nextCursor ?? null,
+                gathering: 0,
+              });
+            return;
+          }
           rows = rows.concat(page?.entries ?? []);
           building ||= page?.indexBuilding ?? false;
           cursor = page?.nextCursor ?? undefined;
@@ -588,7 +617,16 @@ export function AboutLinks(props: {
             subject: { path },
             ...(cursor ? { cursor } : {}),
           });
-          if (!request.current()) return;
+          if (!request.current()) {
+            if (!from.after && !from.again)
+              request.fill({
+                status: "ready",
+                rows: page?.entries ?? [],
+                next: page?.nextCursor ?? null,
+                gathering: 0,
+              });
+            return;
+          }
           for (const row of page?.entries ?? []) rows.set(row.attachment.attachmentId, row);
           cursor = page?.nextCursor ?? undefined;
         } while (cursor && rows.size < (from.again?.rows.length ?? 0));
@@ -1365,14 +1403,14 @@ function OnlyYouRow() {
 
 // The count is who has access now: ended and damaged grants stay listed, but
 // do not count.
-function grantedCount(answer: AccessAnswer): string {
-  const active = answer.rows.filter(
-    (row) => row.kind === "collection" || row.status === "active",
-  ).length;
+function grantedCount(answer: AccessAnswer, people = 0): string {
+  const active =
+    people +
+    answer.rows.filter((row) => row.kind === "collection" || row.status === "active").length;
   return `${active}${answer.nextCursor ? "+" : ""}`;
 }
 
-function AccessRowView(props: { row: AccessRow }) {
+function AccessRowView(props: { row: AccessRow; ownName?: string }) {
   const { row } = props;
   if (row.kind === "collection") {
     return (
@@ -1412,9 +1450,10 @@ function AccessRowView(props: { row: AccessRow }) {
       {row.via === "link" ? (
         <LinkMark />
       ) : (
+        // Your own row reads "You", and its avatar takes your name's letter.
         <ChatAvatar
           presentation={row.via === "received" ? ownPresentation : neutralPresentation}
-          name={who}
+          name={row.via === "received" && props.ownName ? props.ownName : who}
           kind="human"
           size="strip"
         />
@@ -1425,12 +1464,188 @@ function AccessRowView(props: { row: AccessRow }) {
       </span>
       {row.status !== "active" ? (
         <span className="shrink-0 text-[12px] text-muted">
+          {row.selector?.kind === "workspace" && row.selector.role
+            ? `${ROLE_WORDS[row.selector.role]} · `
+            : ""}
           {row.status === "damaged" ? "Damaged" : "Ended"}
         </span>
       ) : level ? (
         <span className="shrink-0 text-[12px] text-muted">Can {level.label.toLowerCase()}</span>
       ) : null}
     </div>
+  );
+}
+
+// A level change applies at once, as it does to the composer, so the
+// membership's own row shows the level the relay last named. Once the
+// membership ends, that row says so.
+function withMembershipLevel(
+  view: AccessView,
+  level: AccessContext["membershipLevel"],
+  ended: boolean,
+): AccessView {
+  if (!level || view.status !== "ready") return view;
+  const rows = view.answer.rows.map((row) =>
+    row.kind !== "share" ||
+    row.via !== "received" ||
+    row.status !== "active" ||
+    row.selector?.kind !== "workspace"
+      ? row
+      : ended
+        ? { ...row, status: "revoked" as const }
+        : row.access !== level
+          ? { ...row, access: level }
+          : row,
+  );
+  return rows.some((row, index) => row !== view.answer.rows[index])
+    ? { ...view, answer: { ...view.answer, rows } }
+    : view;
+}
+
+const ROLE_WORDS = { owner: "Owner", admin: "Admin", member: "Member" } as const;
+// A workspace with members reaches everyone in it, so Access lists the people
+// on the Members page, as the relay names them to this account.
+type MemberPeople =
+  | { status: "loading" }
+  | { status: "failed" }
+  | { status: "refused" }
+  | { status: "ready"; view: WorkspaceMembersView };
+
+// The owner's listing names each membership as a share. Access shows them as people.
+const isMembershipRow = (row: AccessRow): boolean =>
+  row.kind === "share" && row.via !== "received" && row.selector?.kind === "workspace";
+
+// It reads while the section is open, and keeps what it read while closed.
+function useMemberPeople(
+  workspaceId: string,
+  member: boolean,
+  expanded: boolean,
+  notices: AboutNotices,
+) {
+  const [read, setRead] = useState<{ key: string; people: MemberPeople } | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const identity = `about-access-members:${workspaceId}`;
+  useEffect(() => {
+    if (!member || !expanded) return;
+    let current = true;
+    // A list already shown stays while it reads again.
+    setRead((shown) =>
+      shown?.key === workspaceId && shown.people.status === "ready"
+        ? shown
+        : { key: workspaceId, people: { status: "loading" } },
+    );
+    void (async () => {
+      let result: Awaited<ReturnType<ReturnType<typeof bridge>["workspaceMembers"]>>;
+      try {
+        result = await bridge().workspaceMembers({ workspaceId, request: { action: "list" } });
+      } catch (cause) {
+        if (!current) return;
+        setRead({ key: workspaceId, people: { status: "failed" } });
+        notices.report({
+          identity,
+          message: ipcErrorMessage(cause, "dohc could not load Members."),
+          cause,
+          retry: () => setAttempt((count) => count + 1),
+        });
+        return;
+      }
+      if (!current) return;
+      notices.clear(identity);
+      setRead({
+        key: workspaceId,
+        people:
+          result?.status === "ready"
+            ? { status: "ready", view: result.view }
+            : { status: "refused" },
+      });
+    })();
+    return () => {
+      current = false;
+    };
+  }, [attempt, expanded, identity, member, notices, workspaceId]);
+  return {
+    people: !member
+      ? null
+      : read?.key === workspaceId
+        ? read.people
+        : { status: "loading" as const },
+    retry: () => setAttempt((count) => count + 1),
+  };
+}
+
+// The people in the workspace, as the Members page lists them. The owner and
+// admins also read each email, and the members' one level.
+function MemberPeopleList(props: { view: WorkspaceMembersView }) {
+  const { view } = props;
+  const people = view.people.filter((person) => person.state === "active");
+  const manager = view.viewer.role !== "member";
+  return (
+    <>
+      <ul className="m-0 list-none p-0" data-testid="about-access-people">
+        {people.map((person) => {
+          const self = person.memberId === view.viewer.memberId;
+          const name = person.name?.trim() || person.email || "No name";
+          return (
+            <li key={person.memberId}>
+              <div
+                data-testid="about-access-person"
+                title={person.email ?? name}
+                className={`${ABOUT_ROW} h-7`}
+              >
+                <ChatAvatar
+                  presentation={relayPresentation(actorHueSlot(person.memberId), self)}
+                  name={name}
+                  kind="human"
+                  size="strip"
+                />
+                {/* "You" sits beside the name, as on the Members page, so the role reads on its own. */}
+                <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                  <span className="min-w-0 truncate text-ink">{name}</span>
+                  {self ? <span className="shrink-0 text-[11px] text-subtle">You</span> : null}
+                </span>
+                <span className="shrink-0 text-[11px] text-muted">{ROLE_WORDS[person.role]}</span>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      {manager ? (
+        <p data-testid="about-access-member-level" className="m-0 px-2 py-1 text-[11px] text-muted">
+          Members can {LEVELS[view.memberLevel].label.toLowerCase()}
+        </p>
+      ) : null}
+    </>
+  );
+}
+
+const activePeople = (view: WorkspaceMembersView) =>
+  view.people.filter((person) => person.state === "active").length;
+
+function AboutMemberAccess(props: {
+  people: Exclude<MemberPeople, { status: "refused" }>;
+  expanded: boolean;
+  onToggle: () => void;
+  onRetry: () => void;
+}) {
+  const { people } = props;
+  return (
+    <AboutSection
+      id="access"
+      label="Access"
+      count={people.status === "ready" ? String(activePeople(people.view)) : undefined}
+      expanded={props.expanded}
+      onToggle={props.onToggle}
+    >
+      {people.status === "loading" ? (
+        <SkeletonLines rows={2} className="px-2 py-1" />
+      ) : people.status === "failed" ? (
+        <RetryRow testId="about-access-failed" onRetry={props.onRetry}>
+          dohc could not load Members.
+        </RetryRow>
+      ) : (
+        <MemberPeopleList view={people.view} />
+      )}
+    </AboutSection>
   );
 }
 
@@ -1500,11 +1715,13 @@ export function AboutAccess(props: {
       const request = begin();
       const retry = () => void load({ refresh: true });
       try {
+        let paced = false;
         if (options.refresh) {
-          await bridge()
+          const refreshed = await bridge()
             .requestAccessRefresh({ workspaceId, reason: "access-expand" })
             .catch(() => undefined);
           if (!request.current()) return;
+          paced = refreshed?.status === "paced";
         }
         const cursor = options.after?.nextCursor ?? undefined;
         const answer = await bridge().getObjectAccess({
@@ -1521,9 +1738,18 @@ export function AboutAccess(props: {
         request.settle({
           status: "ready",
           answer: options.after
-            ? { ...answer, rows: [...options.after.rows, ...answer.rows] }
-            : answer,
+            ? appendAccessPage(options.after, answer)
+            : paced
+              ? awaitingCheck(answer)
+              : answer,
         });
+        // When main's next check ends, read again in place.
+        if (paced) {
+          const checked = await bridge()
+            .requestAccessRefresh({ workspaceId, reason: "access-expand", wait: true })
+            .catch(() => undefined);
+          if (checked && request.current()) void load({});
+        }
       } catch (error) {
         request.fail(
           { status: "failed" },
@@ -1562,15 +1788,57 @@ export function AboutAccess(props: {
     () => ({ reason, server, openSyncSettings, connect }),
     [connect, openSyncSettings, reason, server],
   );
+  const { membershipLevel } = props.context,
+    membershipEnded = props.context.membershipEnded === true;
+  const view = useMemo(
+    () => withMembershipLevel(read.view, membershipLevel, membershipEnded),
+    [membershipEnded, membershipLevel, read.view],
+  );
+  const joined = membershipLevel !== undefined;
+  // The owner's answer names each membership. Access then reads the people from the Members page.
+  const ownedMembers = !joined && view.status === "ready" && view.answer.rows.some(isMembershipRow);
+  // Members answers only the account that joined, so another one reads nothing a Try again could fix.
+  const otherAccount = joined ? props.context.otherAccount : undefined;
+  const members = useMemberPeople(
+    workspaceId,
+    (joined && !membershipEnded && !otherAccount) || ownedMembers,
+    props.expanded,
+    props.notices,
+  );
+  if (otherAccount && !membershipEnded) {
+    return (
+      <AboutSection id="access" label="Access" expanded={props.expanded} onToggle={props.onToggle}>
+        {/* The band says why, with Switch account. Access only says why it lists no one. */}
+        <AboutNote testId="about-access-other-account" reason="other-account" icon={User}>
+          Signed in as another account
+        </AboutNote>
+      </AboutSection>
+    );
+  }
+  // A relay that lists no Members page for this account leaves main's answer.
+  if (joined && members.people && members.people.status !== "refused") {
+    return (
+      <AboutMemberAccess
+        people={members.people}
+        expanded={props.expanded}
+        onToggle={props.onToggle}
+        onRetry={members.retry}
+      />
+    );
+  }
+  const people =
+    ownedMembers && members.people?.status === "ready" ? members.people.view : undefined;
   return (
     <AboutAccessView
-      view={read.view}
+      view={ownedMembers && members.people?.status === "loading" ? { status: "loading" } : view}
+      {...(people ? { people } : {})}
       expanded={props.expanded}
       onToggle={props.onToggle}
       onRetry={() => void load({ refresh: true })}
       onMore={(answer) => void load({ after: answer })}
       setup={setup}
       noun={noun}
+      {...(props.context.ownName ? { ownName: props.context.ownName } : {})}
       {...(sharePath !== null && share ? { onShare: () => share(sharePath) } : {})}
     />
   );
@@ -1593,6 +1861,8 @@ export function AccessChecked(props: { testId: string; answer: AccessAnswer; sco
           title={formatChatTime(answer.checkedAtMs).label}
           className="shrink-0 text-[12px] tabular-nums text-subtle"
         >
+          {/* Beside "Checked" the time reads on its own. Beside any other state it says what it is. */}
+          {answer.freshness === "fresh" ? "" : "Last checked "}
           {formatShortTime(answer.checkedAtMs)}
         </time>
       ) : null}
@@ -1721,8 +1991,22 @@ export function AboutAccessView(props: {
   setup: AccessSetup;
   noun?: AccessNoun;
   onShare?: () => void;
+  // The workspace's people, in place of the answer's membership rows.
+  people?: WorkspaceMembersView;
+  // Your display name, for your own row's avatar.
+  ownName?: string;
 }) {
-  const { view } = props;
+  const { people } = props;
+  const view: AccessView =
+    people && props.view.status === "ready"
+      ? {
+          ...props.view,
+          answer: {
+            ...props.view.answer,
+            rows: props.view.answer.rows.filter((row) => !isMembershipRow(row)),
+          },
+        }
+      : props.view;
   const noun = props.noun ?? "file";
   const empty = view.status === "ready" ? emptyWithin(view.answer, noun) : null;
   // A fresh answer with something to show says nothing about itself; its
@@ -1733,12 +2017,16 @@ export function AboutAccessView(props: {
   const listedNone = answer !== null && answer.rows.length === 0 && empty?.only === true;
   const listedAll = answer !== null && answer.coverage.complete && answer.nextCursor === null;
   const quietCheck = fresh && !(listedNone && !listedAll);
-  const onlyYou = fresh && listedNone && listedAll;
+  const onlyYou = fresh && listedNone && listedAll && !people;
   return (
     <AboutSection
       id="access"
       label="Access"
-      count={view.status === "ready" && empty !== null ? grantedCount(view.answer) : undefined}
+      count={
+        view.status === "ready" && empty !== null
+          ? grantedCount(view.answer, people ? activePeople(people) : 0)
+          : undefined
+      }
       empty={onlyYou}
       summary={onlyYou ? <OnlyYou /> : undefined}
       {...(quietCheck && answer !== null && answer.checkedAtMs !== null
@@ -1783,11 +2071,17 @@ export function AboutAccessView(props: {
               {quietCheck ? null : (
                 <AccessChecked testId="about-access-freshness" answer={view.answer} />
               )}
-              {view.answer.rows.length > 0 ? null : !empty.only ? (
+              {people ? <MemberPeopleList view={people} /> : null}
+              {view.answer.rows.length > 0 || people ? null : !empty.only ? (
                 <AboutNote testId="about-access-empty">{empty.words}</AboutNote>
-              ) : view.answer.coverage.complete && view.answer.nextCursor === null ? (
+              ) : !view.answer.coverage.complete || view.answer.nextCursor !== null ? null : view
+                  .answer.freshness === "fresh" ? (
                 <OnlyYouRow />
-              ) : null}
+              ) : (
+                // An old listing can't say nobody else has access now: someone may have joined since.
+                // The time line above says when it was checked.
+                <AboutNote testId="about-access-empty">No one else</AboutNote>
+              )}
               {view.answer.rows.length === 0 ? null : (
                 <>
                   <ul className="m-0 list-none p-0">
@@ -1799,7 +2093,10 @@ export function AboutAccessView(props: {
                             : row.principal
                         }
                       >
-                        <AccessRowView row={row} />
+                        <AccessRowView
+                          row={row}
+                          {...(props.ownName ? { ownName: props.ownName } : {})}
+                        />
                       </li>
                     ))}
                   </ul>

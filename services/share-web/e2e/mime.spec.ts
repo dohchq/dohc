@@ -111,7 +111,7 @@ test("separates viewer extensions from service byte-sniffed mime types", async (
     await expectSentinelUnchanged(page);
     expect(probe.requests).toEqual([]);
 
-    await navigation.getByRole("button", { name: "png-as.html", exact: true }).click();
+    await navigation.getByRole("treeitem", { name: "png-as.html", exact: true }).click();
     const downloadCard = page.locator(".download-card");
     await expect(downloadCard).toBeVisible();
     await expect(downloadCard).toContainText("This file opens as a download.");
@@ -134,7 +134,7 @@ test("separates viewer extensions from service byte-sniffed mime types", async (
     expect(probe.requests).toEqual([]);
 
     const signatureResponsePromise = blobResponse(page, signatureOnly.blobSha256);
-    await navigation.getByRole("button", { name: "signature-only.png", exact: true }).click();
+    await navigation.getByRole("treeitem", { name: "signature-only.png", exact: true }).click();
     const signatureResponse = await signatureResponsePromise;
     const signatureImage = page.locator("img.preview-image");
 

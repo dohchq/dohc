@@ -35,6 +35,7 @@ import { ImageView } from "./ImageView";
 import { extensionOf } from "./path";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import type { DraftFlush } from "./useAutosavedTextDraft";
+import type { LevelMark } from "./workbench/membershipWords";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
   Suspense,
@@ -50,6 +51,7 @@ import {
 import { bridge } from "./bridge";
 import { useHeldChange } from "./useHeldChange";
 import { useEngineDoc } from "./collab/useEngineDoc";
+import { useLiveHostRefusalNotice } from "./collab/useLiveHostRefusalNotice";
 import { useBoundNoteCheck, useLossyNote, warmLossyNoteCheck } from "./editor/lossyNote";
 import { useAuthorCapacityNotice } from "./collab/useAuthorCapacityNotice";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
@@ -278,6 +280,8 @@ type FileInspectorProps = {
   // and the shell opens the record's History.
   onButtonError?: ReportButtonError;
   onButtonNotice?: (message: string, undo?: () => void) => (() => void) | void;
+  // Opens account settings, for a joined page opened with another account.
+  onSwitchAccount?: () => void;
   // Closes every tab showing a file, as an Undo that removes it does first.
   onClosePath?: (path: string) => void;
   onOpenRecordHistory?: (record: RecordHistoryTarget) => void;
@@ -308,6 +312,10 @@ type FileInspectorProps = {
   onPendingUndoConsumed?: (token: number) => void;
   // Read-only shared views: every editable view refuses edits.
   readOnly?: boolean;
+  // A joined workspace at View or Comment, or one whose membership ended, which allows no editing:
+  // a page shows this mark in place of its Edit toggle, since controls the level
+  // does not allow are absent, not disabled.
+  levelMark?: LevelMark | null;
   // Live editing is paused for this note: the server refused its edits, or too many wait.
   liveEditingPaused?: "refused" | "full";
   // A share shows this new note, and the server has no file for it yet.
@@ -649,6 +657,13 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
     reportError: props.onButtonError,
     retry: retryEngineOpen,
   });
+  useLiveHostRefusalNotice({
+    workspaceId: props.workspaceId,
+    path: props.path,
+    refusal: engine.sharedWaiting ?? null,
+    available: engine.available,
+    retry: retryEngineOpen,
+  });
   // Derived, never stored. The hook keys its outcome to the request that
   // asked for it, so a refusal for the version the user just left cannot repaint
   // the one they just entered. A sticky flag here would risk that.
@@ -803,11 +818,16 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
   const closedDocumentControls = (opening: boolean) =>
     kind === "markdown" ? (
       <DocumentControls
-        toggle={{
-          label: "Edit",
-          disabled: true,
-          title: opening ? OPENING_TITLE : "dohc could not open this file.",
-        }}
+        mark={props.levelMark}
+        toggle={
+          props.levelMark
+            ? null
+            : {
+                label: "Edit",
+                disabled: true,
+                title: opening ? OPENING_TITLE : "dohc could not open this file.",
+              }
+        }
         menu={{
           workspaceId: props.workspaceId,
           path: props.path,
@@ -880,6 +900,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
           <EngineMayHoldDocumentNotice
             onRetry={retryEngineOpen}
             contentShown={false}
+            noun={kind === "markdown" ? "page" : "document"}
             message={engine.openRefusal ?? engine.sharedWaiting?.message}
             details={engine.openRefusalDetail}
           />
@@ -952,6 +973,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
             pendingUndo={pendingTextUndo}
             onPendingUndoConsumed={props.onPendingUndoConsumed}
             forceReadOnly={props.readOnly}
+            levelMark={props.levelMark}
             liveEditingPaused={props.liveEditingPaused}
             pendingShare={props.pendingShare}
             onOpenLiveDocuments={props.onOpenLiveDocuments}
@@ -1004,6 +1026,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
                 : undefined
             }
             onRetryEngineOpen={retryEngineOpen}
+            onSwitchAccount={props.onSwitchAccount}
             onReloadChangedOutside={reloadChangedOutside}
             writesRefusedRef={writesRefusedRef}
             localBuffer={localBuffer}

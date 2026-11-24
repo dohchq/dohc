@@ -160,6 +160,7 @@ export function SettingsDialog(props: {
    * shared view never has.
    */
   sharedView?: boolean;
+  membership?: boolean;
   sessionRecorderOn?: boolean;
   initialSection?: SettingsSectionId;
   // The part a Customize… command opened Settings for: its row is marked and
@@ -342,14 +343,16 @@ export function SettingsDialog(props: {
   }, [props.workspaceId, props.workspaceIsReady]);
 
   // A shared view lists no Members or Secrets: the workspace it came from does.
+  // A joined workspace lists the owner's Members.
+  const listsMembers = !props.sharedView || !!props.membership;
   const availableSections = useMemo(
     () =>
-      props.sharedView
-        ? SETTINGS_SECTIONS.filter(
-            (section) => section.id !== "members" && section.id !== "secrets",
-          )
-        : SETTINGS_SECTIONS,
-    [props.sharedView],
+      SETTINGS_SECTIONS.filter(
+        (section) =>
+          (listsMembers || section.id !== "members") &&
+          (!props.sharedView || section.id !== "secrets"),
+      ),
+    [listsMembers, props.sharedView],
   );
   const filteredSections = useMemo(
     () => availableSections.filter((section) => sectionMatches(section, query)),
@@ -929,10 +932,10 @@ export function SettingsDialog(props: {
       case "members":
         return (
           <div data-testid={settingsSectionPin("members")}>
-            {/* A shared view has no Members of its own: the original workspace lists them. */}
-            {props.sharedView ? null : (
+            {listsMembers ? (
               <MembersSettings
                 workspaceId={props.workspaceId}
+                {...(props.membership ? { joined: true } : {})}
                 workspaceName={
                   props.workspaceName ?? workspaceName({ rootPath: props.workspacePath })
                 }
@@ -945,7 +948,7 @@ export function SettingsDialog(props: {
                 {...(props.onClearError ? { onClearError: props.onClearError } : {})}
                 {...(props.serverNamed ? { serverNamed: true } : {})}
               />
-            )}
+            ) : null}
           </div>
         );
       case "apps":

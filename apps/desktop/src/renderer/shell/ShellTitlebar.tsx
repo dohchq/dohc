@@ -17,9 +17,15 @@ export function ShellTitlebar(props: {
   onManageWorkspaces?: () => void | Promise<void>;
   manageWorkspaces: () => void;
   setOpenShare: (share: "blank") => void;
+  // A joined workspace's level, for the workspace menu.
+  level?: string;
   setQuickOpenOpen: (open: boolean) => void;
   syncStatus: SyncStatusResult | null;
   failedSaves: number;
+  // A joined workspace whose account is not the one signed in.
+  otherAccount?: boolean;
+  // A membership or share that ended.
+  ended?: boolean;
   onOpenConflicts?: () => void;
   onOpenSyncSettings?: () => void;
   onConnectServer?: () => void;
@@ -50,6 +56,7 @@ export function ShellTitlebar(props: {
       workspaces={props.workspaces}
       onSwitchWorkspace={props.onSwitchWorkspace}
       onOpenShare={() => setOpenShare("blank")}
+      level={props.level}
       onManageWorkspaces={props.onManageWorkspaces ? manageWorkspaces : undefined}
       onQuickOpen={() => setQuickOpenOpen(true)}
       version={props.version}
@@ -58,6 +65,8 @@ export function ShellTitlebar(props: {
           <WorkspaceSyncStatus
             syncStatus={syncStatus}
             failedSaves={failedSaves}
+            otherAccount={props.otherAccount}
+            ended={props.ended}
             onOpenConflicts={props.onOpenConflicts}
             onOpenSyncSettings={props.onOpenSyncSettings}
             onConnectServer={props.onConnectServer}

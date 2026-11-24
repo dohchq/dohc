@@ -1025,9 +1025,9 @@ export async function startServiceLiveHost(options: {
             // Subscribed before any pull reads relay state, so no write between the two goes unnoticed.
             const stop =
               changes || config.activation
-                ? observeRelayWrites(storage, () => {
+                ? observeRelayWrites(storage, (documents) => {
                     for (const attached of attachments.values()) attached.check = true;
-                    changes?.notify();
+                    changes?.notifyWrite(documents);
                     nudgePass();
                   })
                 : () => {};
@@ -3175,6 +3175,7 @@ export async function startServiceLiveHost(options: {
               );
               const visit = async (target: ServiceActivationTarget) => {
                 const spentMark = wanted.delete(targetKey(target));
+                const blocked = activation!.blocked(target);
                 const timed: SlowPassTarget = {
                     object: shortObjectId(
                       hosted.get(JSON.stringify([target.workspaceId, target.path]))?.objectId,
@@ -3222,6 +3223,8 @@ export async function startServiceLiveHost(options: {
                 } finally {
                   timed.ms = Math.round(now() - startedAt);
                   endOpensAwaitingVisit(targetKey(target));
+                  if (activation!.blocked(target) !== blocked)
+                    changes?.notifyHost([target.workspaceId]);
                 }
               };
               let turnVisitFailed = false;

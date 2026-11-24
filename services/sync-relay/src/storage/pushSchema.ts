@@ -130,32 +130,21 @@ const WEB_COLUMNS =
 /**
  * Rebuilds the browser subscriptions as the `web` rows of the checked
  * variant. Runs inside the relay's schema transaction, after the delivery
- * schema created the account names that reference these rows; the names
- * are copied around the rebuild so dropping the old table cascades nothing.
+ * schema removed the installation account names.
  */
 export function initializePushDeviceSchema(db: SqliteDb): void {
   if (marked(db, DEVICES_MARKER)) {
     assertSchema(db, PUSH_DEVICE_SCHEMA);
     return;
   }
-  const names = "sync_relay_push_installation_names";
-  const namesSql = db.prepare("SELECT sql FROM sqlite_schema WHERE name = ?").get(names)?.sql;
-  if (typeof namesSql !== "string")
-    throw new Error("push subscription schema is missing or damaged");
   db.exec(`CREATE TEMP TABLE push_subscriptions_previous AS SELECT * FROM main.${PUSH_SUBSCRIPTIONS};
-    CREATE TEMP TABLE push_names_previous AS SELECT * FROM main.${names};
-    DROP TABLE main.${names};
     DROP TABLE main.${PUSH_SUBSCRIPTIONS};`);
   db.exec(PUSH_DEVICE_SCHEMA[PUSH_SUBSCRIPTIONS]);
   db.exec(PUSH_DEVICE_SCHEMA.idx_sync_relay_push_subscriptions_account);
   db.exec(PUSH_DEVICE_SCHEMA.idx_sync_relay_push_subscriptions_device);
-  db.exec(namesSql);
   db.exec(`INSERT INTO main.${PUSH_SUBSCRIPTIONS} (kind, ${WEB_COLUMNS})
       SELECT 'web', ${WEB_COLUMNS} FROM temp.push_subscriptions_previous;
-    INSERT INTO main.${names} (installation_id, account_name)
-      SELECT installation_id, account_name FROM temp.push_names_previous;
-    DROP TABLE temp.push_subscriptions_previous;
-    DROP TABLE temp.push_names_previous;`);
+    DROP TABLE temp.push_subscriptions_previous;`);
   assertSchema(db, PUSH_DEVICE_SCHEMA);
   db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(
     DEVICES_MARKER,

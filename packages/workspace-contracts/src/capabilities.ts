@@ -75,7 +75,7 @@ function capability(
 }
 
 const MEMBERS_MCP_REASON =
-  "The owner's tools do what the Members page does; admins use the app. Shared profiles omit this tool; the relay decides every action for the signed-in owner account.";
+  "Agents do what the Members page does, in a workspace the person owns or joined. Every profile offers the tool; the socket refuses any share view but a joined workspace, and the relay decides every action for the signed-in account's role.";
 
 const LISTED_CAPABILITIES = {
   // withDeclarations adds the IPC rows and MCP tools of the operations declared with these.
@@ -422,40 +422,88 @@ const LISTED_CAPABILITIES = {
   }),
   "members.list": capability(
     "List a workspace's people, invites, removed accounts, member level, and invite link.",
-    { ipc: ["workspaceMembers"], mcp: { owner: ["dohc_members"] }, mcpReason: MEMBERS_MCP_REASON },
+    {
+      ipc: ["workspaceMembers"],
+      mcp: {
+        owner: ["dohc_members"],
+        view: ["dohc_members"],
+        comment: ["dohc_members"],
+        edit: ["dohc_members"],
+      },
+      mcpReason: MEMBERS_MCP_REASON,
+    },
   ),
   "members.invite": capability("Invite someone to a workspace by email.", {
     ipc: ["workspaceMembers"],
-    mcp: { owner: ["dohc_members"] },
+    mcp: {
+      owner: ["dohc_members"],
+      view: ["dohc_members"],
+      comment: ["dohc_members"],
+      edit: ["dohc_members"],
+    },
     mcpReason: MEMBERS_MCP_REASON,
   }),
   "members.level.set": capability(
     "Set what every member can do in a workspace: View, Comment, or Edit.",
-    { ipc: ["workspaceMembers"], mcp: { owner: ["dohc_members"] }, mcpReason: MEMBERS_MCP_REASON },
+    {
+      ipc: ["workspaceMembers"],
+      mcp: {
+        owner: ["dohc_members"],
+        view: ["dohc_members"],
+        comment: ["dohc_members"],
+        edit: ["dohc_members"],
+      },
+      mcpReason: MEMBERS_MCP_REASON,
+    },
   ),
   "members.role.set": capability("Make a member an admin, or an admin a member.", {
     ipc: ["workspaceMembers"],
-    mcp: { owner: ["dohc_members"] },
+    mcp: {
+      owner: ["dohc_members"],
+      view: ["dohc_members"],
+      comment: ["dohc_members"],
+      edit: ["dohc_members"],
+    },
     mcpReason: MEMBERS_MCP_REASON,
   }),
   "members.remove": capability("Remove a person or an invite from a workspace.", {
     ipc: ["workspaceMembers"],
-    mcp: { owner: ["dohc_members"] },
+    mcp: {
+      owner: ["dohc_members"],
+      view: ["dohc_members"],
+      comment: ["dohc_members"],
+      edit: ["dohc_members"],
+    },
     mcpReason: MEMBERS_MCP_REASON,
   }),
   "members.readmit": capability("Let a removed account back into a workspace.", {
     ipc: ["workspaceMembers"],
-    mcp: { owner: ["dohc_members"] },
+    mcp: {
+      owner: ["dohc_members"],
+      view: ["dohc_members"],
+      comment: ["dohc_members"],
+      edit: ["dohc_members"],
+    },
     mcpReason: MEMBERS_MCP_REASON,
   }),
   "members.link.change": capability("Turn a workspace's invite link on or off, or reset it.", {
     ipc: ["workspaceMembers"],
-    mcp: { owner: ["dohc_members"] },
+    mcp: {
+      owner: ["dohc_members"],
+      view: ["dohc_members"],
+      comment: ["dohc_members"],
+      edit: ["dohc_members"],
+    },
     mcpReason: MEMBERS_MCP_REASON,
   }),
   "members.end": capability("End membership of a workspace for everyone.", {
     ipc: ["workspaceMembers"],
-    mcp: { owner: ["dohc_members"] },
+    mcp: {
+      owner: ["dohc_members"],
+      view: ["dohc_members"],
+      comment: ["dohc_members"],
+      edit: ["dohc_members"],
+    },
     mcpReason: MEMBERS_MCP_REASON,
   }),
   "members.leave": capability("Leave a workspace you are a member or an admin of.", {
@@ -828,9 +876,9 @@ const LISTED_CAPABILITIES = {
   }),
   "group.create": capability("Create a Group and its folder.", {
     ipc: ["createChatChannel"],
-    mcp: { owner: ["dohc_create_group"] },
+    mcp: { owner: ["dohc_create_group"], edit: ["dohc_create_group"] },
     mcpReason:
-      "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates.",
+      "An admin has Edit, so Edit profiles offer it for a joined workspace, where the relay checks the role. Other profiles omit it; socket admission and per-verb checks remain the gates.",
   }),
   "chat.thread.read.mark": capability("Mark a thread read through a message sequence.", {
     ipc: ["markChatThreadRead"],
@@ -881,15 +929,23 @@ const LISTED_CAPABILITIES = {
   }),
   "chat.post": capability("Start a thread in a Group.", {
     ipc: ["startChannelThread"],
-    mcp: { owner: ["dohc_start_group_chat"] },
+    mcp: {
+      owner: ["dohc_start_group_chat"],
+      comment: ["dohc_start_group_chat"],
+      edit: ["dohc_start_group_chat"],
+    },
     mcpReason:
-      "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates.",
+      "Comment and Edit profiles offer it for a joined workspace's Groups. View profiles omit it; the socket refuses other share views, General, and DMs.",
   }),
   "chat.reply": capability("Reply in a thread.", {
     ipc: ["sendChatMessage"],
-    mcp: { owner: ["dohc_reply_to_chat"] },
+    mcp: {
+      owner: ["dohc_reply_to_chat"],
+      comment: ["dohc_reply_to_chat"],
+      edit: ["dohc_reply_to_chat"],
+    },
     mcpReason:
-      "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates.",
+      "Comment and Edit profiles offer it for a joined workspace's Groups. View profiles omit it; the socket refuses other share views, General, and DMs.",
   }),
   "chat.react": capability("Add your reaction to a message, or remove it if it is already there.", {
     ipcReason: "No IPC channel carries this capability.",
@@ -981,15 +1037,15 @@ const LISTED_CAPABILITIES = {
   }),
   "collection.record.edit": capability("Edit fields on a Collection record.", {
     ipcReason: "CLI and MCP action with no IPC channel.",
-    mcp: { owner: ["dohc_set_record_fields"] },
+    mcp: { owner: ["dohc_set_record_fields"], edit: ["dohc_set_record_fields"] },
     mcpReason:
-      "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates.",
+      "Edit profiles offer it for a joined workspace, through the record's live session on the server. Other profiles omit it; the socket refuses other share views.",
   }),
   "collection.record.create": capability("Create a Collection record.", {
     ipcReason: "Hand-registered IPC channel createCollectionRecord has no operation-table row.",
-    mcp: { owner: ["dohc_create_record"] },
+    mcp: { owner: ["dohc_create_record"], edit: ["dohc_create_record"] },
     mcpReason:
-      "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates.",
+      "Edit profiles offer it for a joined workspace, through the Collection's New record. Other profiles omit it; the socket refuses other share views.",
   }),
   "file.write": capability("Write ordinary workspace files.", {
     ipcReason: "No IPC channel carries this capability.",
@@ -1046,25 +1102,29 @@ const LISTED_CAPABILITIES = {
     "Replace matching text or append Markdown through the live document.",
     {
       ipcReason: "CLI and MCP action with no IPC channel.",
-      mcp: { owner: ["dohc_edit_document"] },
+      mcp: { owner: ["dohc_edit_document"], edit: ["dohc_edit_document"] },
       mcpReason:
-        "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates.",
+        "Edit profiles offer it for a joined workspace, through the page's live session on the server. Other profiles omit it; the socket refuses other share views.",
     },
   ),
   "document.create": capability(
     "Create a Markdown document without overwriting an existing file.",
     {
       ipcReason: "CLI and MCP action with no IPC channel.",
-      mcp: { owner: ["dohc_create_document"] },
+      mcp: { owner: ["dohc_create_document"], edit: ["dohc_create_document"] },
       mcpReason:
-        "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates.",
+        "Edit profiles offer it for a joined workspace, through the view's New page. Other profiles omit it; the socket refuses other share views.",
     },
   ),
   "file.chat.start": capability("Start a chat linked to a file.", {
     ipc: ["createFileChat"],
-    mcp: { owner: ["dohc_start_file_chat"] },
+    mcp: {
+      owner: ["dohc_start_file_chat"],
+      comment: ["dohc_start_file_chat"],
+      edit: ["dohc_start_file_chat"],
+    },
     mcpReason:
-      "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates.",
+      "Comment and Edit profiles offer it for a joined workspace's files. View profiles omit it; the socket refuses other share views.",
   }),
   "automation.runs.list": capability("List an automation's runs on this computer, newest first.", {
     ipcReason:

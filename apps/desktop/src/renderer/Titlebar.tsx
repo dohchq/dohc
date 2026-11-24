@@ -1,7 +1,16 @@
 import { shortcutText } from "../shortcuts/shortcutRegistry";
 import { desktopPins } from "../testPins";
 import { DohcMark } from "@dohc/brand";
-import { Check, ChevronsUpDown, Layers, Link2, PanelLeft, PanelRight, Search } from "lucide-react";
+import {
+  Check,
+  ChevronsUpDown,
+  Layers,
+  Link2,
+  PanelLeft,
+  PanelRight,
+  Search,
+  Users,
+} from "lucide-react";
 import {
   type KeyboardEvent,
   type ReactNode,
@@ -27,6 +36,21 @@ export function workspaceName(workspace: Pick<WorkspaceSummary, "rootPath" | "sh
       .replace(/[\\/]+$/, "")
       .split(/[\\/]/)
       .pop() || "Workspace"
+  );
+}
+
+// A workspace this account joined as a member or admin.
+export function JoinedWorkspaceMark() {
+  return (
+    <span
+      data-testid="workspace-joined-mark"
+      role="img"
+      aria-label="Joined workspace"
+      title="Joined workspace"
+      className="flex shrink-0 items-center text-subtle"
+    >
+      <Users size={12} aria-hidden />
+    </span>
   );
 }
 
@@ -106,6 +130,8 @@ export function Titlebar(props: {
   workspace?: WorkspaceSummary;
   workspaces?: WorkspaceSummary[];
   onOpenShare?: () => void;
+  // A joined workspace's level, said once on its own row in the workspace menu.
+  level?: string;
   onManageWorkspaces?: () => void;
   onSwitchWorkspace?: (workspace: WorkspaceSummary) => void;
   onQuickOpen?: () => void;
@@ -318,12 +344,20 @@ export function Titlebar(props: {
                           <span className="w-3 shrink-0" aria-hidden />
                         )}
                         <span className="min-w-0 truncate">{name}</span>
+                        {candidate.shareView?.membership ? <JoinedWorkspaceMark /> : null}
                         {parent ? (
                           <span className="min-w-0 truncate text-[12px] font-normal text-subtle">
                             {parent}
                           </span>
                         ) : null}
-                        {candidate.kind === "shared" ? (
+                        {props.level && active ? (
+                          <span
+                            data-testid="workspace-switcher-level"
+                            className="ml-auto shrink-0 text-[12px] font-normal text-subtle"
+                          >
+                            {props.level}
+                          </span>
+                        ) : candidate.kind === "shared" ? (
                           <span className="ml-auto shrink-0 text-[12px] font-normal text-subtle">
                             Shared
                           </span>

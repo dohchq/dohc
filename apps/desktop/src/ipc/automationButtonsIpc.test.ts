@@ -17,6 +17,7 @@ import {
   type NamedPress,
   type PressCaller,
 } from "./automationButtonsIpc";
+import { JOINED_BY_ANOTHER_ACCOUNT } from "./joinedAccountWords";
 import { CHANNELS } from "./channels";
 import { createRemoteDatasetData } from "../workspaces/remoteDataset";
 
@@ -260,6 +261,7 @@ function fixture(
   };
   const attachmentId = Symbol("workspace");
   let account: string | null = "user-main";
+  let otherAccount = false;
   const operation = (): Operation => ({
     workspace: {
       workspaceId: WORKSPACE_ID,
@@ -301,6 +303,7 @@ function fixture(
     relayPress,
     relayInspect,
     inspectionAccount: async () => account,
+    joinedByAnotherAccount: () => otherAccount,
     inspectionChanged: () =>
       window.send(CHANNELS.collectionAutomationsChanged, { workspaceId: WORKSPACE_ID }),
     serverCollection: async () =>
@@ -377,6 +380,10 @@ function fixture(
     account = next;
     if (clear) presses.clearInspections();
   };
+  const signInElsewhere = (other: boolean) => {
+    otherAccount = other;
+    presses.clearInspections();
+  };
   const credentialsChanged = (next: string | null) => {
     account = next;
     refreshSharedButtonInspections(presses.clearInspections, [WORKSPACE_ID], (workspaceId) =>
@@ -400,6 +407,7 @@ function fixture(
     pressWindows,
     invoice,
     changeAccount,
+    signInElsewhere,
     credentialsChanged,
     serverRelay,
   };
@@ -790,6 +798,26 @@ describe("dataset operations from shared document buttons", () => {
     await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({
       buttons: [{ state: { kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED } }],
     });
+  });
+  it("disables a joined workspace's shared buttons and refuses a press while another account is signed in", async () => {
+    const f = fixture({
+      shareView: editShare(["Invoices"]),
+      files: { "Invoices/automations.yaml": PAID_FILE },
+    });
+    await vi.waitFor(async () => {
+      await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({
+        buttons: [{ state: { kind: "ready" } }],
+      });
+    });
+    f.signInElsewhere(true);
+    await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({
+      buttons: [{ state: { kind: "disabled", reason: JOINED_BY_ANOTHER_ACCOUNT } }],
+    });
+    await expect(f.named()).rejects.toThrow(JOINED_BY_ANOTHER_ACCOUNT);
+    expect(f.relayPress).not.toHaveBeenCalled();
+    f.signInElsewhere(false);
+    await expect(f.named()).resolves.toEqual({ busy: false, relayed: true });
+    expect(f.relayPress).toHaveBeenCalledTimes(1);
   });
   it("presses with the owner's Button identity returned by inspection", async () => {
     const inspect = vi.fn(async (targets: readonly RelayButtonTarget[]) =>

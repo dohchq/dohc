@@ -35,6 +35,7 @@ import {
   LiveDocumentEditAppliedError,
   type EngineYDocIpcSender,
   type EngineYDocSessionCapture,
+  type EngineYDocSessionProvider,
 } from "./engineYDocSessionIpc";
 import { CHANNELS, ENGINE_YDOC_UPDATE_MAX_BYTES } from "../ipc/channels";
 import { DOCUMENT_TOO_DENSE_WORDS } from "../ipc/errorWords";
@@ -640,9 +641,13 @@ describe("engine Y.Doc IPC adapter", () => {
     });
     h.setReadOnly(true);
     const sender = new FakeSender(7);
+    expect(h.ipc.showsLive(AUTHORITY_ID, openPayload.path)).toBe(false);
     const opened = await h.ipc.open(sender, openPayload);
     expect(opened.available).toBe(true);
     expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+    expect(h.ipc.showsLive(AUTHORITY_ID, openPayload.path)).toBe(true);
+    expect(h.ipc.showsLive(Symbol("other attachment"), openPayload.path)).toBe(false);
+    expect(h.ipc.showsLive(AUTHORITY_ID, `other-${openPayload.path}`)).toBe(false);
     const update = {
       sessionId: openPayload.sessionId,
       update: new Uint8Array([0, 0]),
@@ -653,6 +658,7 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(h.ipc.applyUpdate(sender, update)).toEqual({ accepted: true });
     expect(shared.applyLocalUpdate).toHaveBeenCalledOnce();
     live = false;
+    expect(h.ipc.showsLive(AUTHORITY_ID, openPayload.path)).toBe(false);
     expect(h.ipc.applyUpdate(sender, { ...update, seq: 2 })).toEqual({
       accepted: false,
       reason: "read-only",
@@ -778,6 +784,27 @@ describe("engine Y.Doc IPC adapter", () => {
       liveHostUnavailable: true,
     });
     expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+  });
+
+  it("keeps a named document read-only when the relay's host refuses to host it", async () => {
+    const waiting = {
+      state: "host-refused" as const,
+      message:
+        "dohc could not open this page for editing. The server is editing too many pages right now.",
+      reason: "The server is editing too many pages right now.",
+    };
+    const h = harness(providerSession(), {
+      sharedCaptureFor: async () => ({
+        openYDocSession: async () => {
+          throw new SharedDocumentWaitingError(waiting);
+        },
+      }),
+    });
+    h.setReadOnly(true);
+    expect(await h.ipc.open(new FakeSender(7), openPayload)).toEqual({
+      available: false,
+      sharedWaiting: waiting,
+    });
   });
 
   it("carries pending record delivery through a refused open", async () => {
@@ -1084,6 +1111,8 @@ describe("engine Y.Doc IPC adapter", () => {
       }),
     ).rejects.toThrow("Stop live editing is waiting.");
   });
+  // Opening and closing a note with no window starts its live history, so a
+  // server can host a note its owner never opened in dohc.
   it("opens the canonical session and applies updates through its save sequence", async () => {
     const sender = new FakeSender(7);
     const h = harness();
@@ -2696,6 +2725,95 @@ describe("engine Y.Doc IPC adapter", () => {
       },
     });
     const append = edit({ replacement: "After." });
+
+    // A joined workspace's page: the edit goes through the page's live session
+    // on the server, the one a member's editor opens, and is done once the
+    // server holds it.
+    function sharedSession(trace: string[] = []) {
+      const session = editableSession(trace);
+      const shared = Object.assign(session, {
+        savedToHost: vi.fn(async () => {
+          trace.push("saved-to-host");
+        }),
+      }) as EngineYDocSessionProvider;
+      delete shared.settleNow;
+      return shared;
+    }
+
+    it("edits a page in a joined workspace through its live session on the server", async () => {
+      const trace: string[] = [];
+      const session = sharedSession(trace);
+      const open = vi.fn(async () => session);
+      const h = harness(providerSession(), {
+        sharedCaptureFor: async () => ({ openYDocSession: open }),
+      });
+      h.setReadOnly(true);
+      keepBlocksSeen.length = 0;
+
+      await expect(h.ipc.editDocument(append)).resolves.toEqual({
+        path: "notes/a.md",
+        changed: true,
+        warning: DOCUMENT_EDIT_SHARED_WARNING,
+      });
+
+      expect(keepBlocksSeen).toEqual([true]);
+      expect(trace).toEqual(["apply", "saved-to-host", "close"]);
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe(
+        "# Plan\n\nBefore.\n\nAfter.\n",
+      );
+      expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+    });
+
+    it("gives the agent the reason the app gives when a joined workspace's page can't open for editing", async () => {
+      const waiting = {
+        state: "host-refused" as const,
+        awaitsHost: true as const,
+        message:
+          "dohc could not open this page for editing. Editing starts once the owner's dohc is online.",
+        reason: "Editing starts once the owner's dohc is online.",
+      };
+      const h = harness(providerSession(), {
+        sharedCaptureFor: async () => ({
+          openYDocSession: async () => {
+            throw new SharedDocumentWaitingError(waiting);
+          },
+        }),
+      });
+      h.setReadOnly(true);
+      await expect(h.ipc.editDocument(append)).rejects.toThrow(waiting.message);
+      const refused = harness(providerSession(), {
+        sharedCaptureFor: async () => {
+          throw new SharedDocumentWaitingError({
+            state: "access-ended",
+            message: "Your access to this share ended.",
+          });
+        },
+      });
+      refused.setReadOnly(true);
+      await expect(refused.ipc.editDocument(append)).rejects.toThrow(
+        "Your access to this share ended.",
+      );
+    });
+
+    it("opens a joined workspace's note through its live session on the server for a change from main", async () => {
+      const session = sharedSession();
+      const open = vi.fn(async () => session);
+      const h = harness(providerSession(), {
+        sharedCaptureFor: async () => ({ openYDocSession: open }),
+      });
+      await expect(h.ipc.openSharedDocument("workspace-1", "tasks/a.md")).rejects.toThrow(
+        "Only a shared view's notes open here.",
+      );
+      h.setReadOnly(true);
+      await expect(h.ipc.openSharedDocument("workspace-1", "tasks/a.md")).resolves.toBe(session);
+      expect(open).toHaveBeenCalledWith(
+        expect.objectContaining({ path: "tasks/a.md", contentKind: "richdoc" }),
+      );
+      expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+      await expect(h.ipc.openSharedDocument("workspace-1", "board.excalidraw")).rejects.toThrow(
+        "board.excalidraw is not a Markdown document.",
+      );
+    });
 
     it("refuses a lossy note before it opens a session or changes the held one", async () => {
       const session = editableSession();

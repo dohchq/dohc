@@ -1,0 +1,17 @@
+diff --git a/Libraries/Alert/Alert.js b/Libraries/Alert/Alert.js
+index 4130ec5114389a888e00b0a8afaf29077684fe16..b1f3cd22af5bbbd813ac9b54b43481768eab06b9 100644
+--- a/Libraries/Alert/Alert.js
++++ b/Libraries/Alert/Alert.js
+@@ -115,9 +115,10 @@ class Alert {
+       }
+       const constants = NativeDialogManagerAndroid.getConstants();
+ 
++      // An empty title or message still draws an empty line on Android, so send only the ones given.
+       const config: DialogOptions = {
+-        title: title || '',
+-        message: message || '',
++        ...(title ? {title} : null),
++        ...(message ? {message} : null),
+         cancelable: false,
+       };
+ 

@@ -2330,6 +2330,10 @@ async fn every_new_rpc_refuses_a_cross_workspace_handle_before_transport() {
             "share.view.pull",
             json!({ "workspaceId": "other", "shareId": "share", "grantedSelector": { "paths": ["notes"], "versionId": "shared-version", "access": "view" } }),
         ),
+        (
+            "share.view.pushChat",
+            json!({ "workspaceId": "other", "shareId": "share", "grantedSelector": { "paths": [], "wholeWorkspace": true, "access": "comment" } }),
+        ),
     ];
     for (index, (method, params)) in methods.into_iter().enumerate() {
         let error = transport

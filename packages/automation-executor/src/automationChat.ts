@@ -149,7 +149,9 @@ export function chatDirectoryOf(
           return false;
         const people = new Set(
           grants
-            .filter((grant) => grant.channel?.wireId === channel.wireId)
+            .filter(
+              (grant) => grant.chat?.kind === "channel" && grant.chat.wireId === channel.wireId,
+            )
             .map((grant) => grant.recipientUserId ?? `email:${grant.recipientEmail ?? ""}`),
         );
         return people.size === 1 && people.has(userId);
@@ -331,7 +333,7 @@ export async function readChatDirectory(
   const onePerson = (wireId: string): string | undefined => {
     const people = new Set(
       grants
-        .filter((grant) => grant.channel?.wireId === wireId)
+        .filter((grant) => grant.chat?.kind === "channel" && grant.chat.wireId === wireId)
         .map((grant) => grant.recipientUserId ?? `email:${grant.recipientEmail ?? ""}`),
     );
     const [person] = people;

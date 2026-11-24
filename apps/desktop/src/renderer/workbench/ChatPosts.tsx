@@ -10,6 +10,7 @@ import {
   Zap,
 } from "lucide-react";
 import { memo, type ReactNode, useEffect, useRef, useState } from "react";
+import { showMessage } from "./chatsOnScreen";
 import type {
   ActorPresentation,
   ChatAttachmentRecord,
@@ -592,6 +593,16 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     scrollToMessage,
     setMessageNode,
   } = props;
+  // Each message row is a jump target and shows its message.
+  const messageRef = (messageId: string) => (element: HTMLElement | null) => {
+    if (!element) return;
+    setMessageNode(messageId, element);
+    const hide = showMessage(messageId, element);
+    return () => {
+      setMessageNode(messageId, null);
+      hide();
+    };
+  };
   if (messagesLoading) {
     return <SkeletonRows label="Loading…" className="pt-4" />;
   }
@@ -678,7 +689,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     return (
       <li
         key={comment.id}
-        ref={(element) => setMessageNode(comment.id, element)}
+        ref={messageRef(comment.id)}
         data-testid="chats-message"
         data-message-id={comment.id}
         data-parent-message-id={comment.parentMessageId}
@@ -927,7 +938,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         presentation={openingMessage.presentation}
       >
         <article
-          ref={(node) => setMessageNode(openingMessage.id, node)}
+          ref={messageRef(openingMessage.id)}
           data-testid="chats-message"
           data-message-id={openingMessage.id}
           data-author-kind={openingMessage.authorKind}

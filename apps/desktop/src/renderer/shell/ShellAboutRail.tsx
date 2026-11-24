@@ -61,6 +61,8 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
   activeDocumentPath: string | null;
   aboutTabOpen: boolean;
   shareView: NonNullable<WorkspaceSummary["shareView"]> | null;
+  // Why this person cannot comment on files in a shared view.
+  fileCommentsClosed?: string | undefined;
   searchChatTarget: AboutSearchHit | null;
   onSearchHitRead: () => void;
   onSearchHitClosed: () => void;
@@ -90,6 +92,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
     activeDocumentPath,
     aboutTabOpen,
     shareView,
+    fileCommentsClosed,
     searchChatTarget,
     onSearchHitRead,
     onSearchHitClosed,
@@ -180,7 +183,10 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
                 tabPath={focusedTabPath}
                 aboutTabOpen={aboutTabOpen}
                 {...(shareView
-                  ? { shareReadOnly: true }
+                  ? {
+                      shared: true,
+                      ...(fileCommentsClosed !== undefined ? { readOnly: fileCommentsClosed } : {}),
+                    }
                   : {
                       history: {
                         revision: historyRevision,

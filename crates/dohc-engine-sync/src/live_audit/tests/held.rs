@@ -1,9 +1,5 @@
 use super::*;
-use dohc_engine_collab::live_update_application::{
-    AdmittedLiveUpdateMetadata, LiveUpdateReceipt, NativeRestoreFence, NativeRestoreSelection,
-    RestoreDeliveryOrigin, RestoreFenceCancellation, RestoreFenceCancellationOutcome,
-    cancel_restore_fence,
-};
+use dohc_engine_collab::live_update_application::AdmittedLiveUpdateMetadata;
 use dohc_engine_domain::WriteText;
 use dohc_engine_storage::TxnOutcome;
 
@@ -202,7 +198,6 @@ fn refused_audit(
         &serde_json::to_vec(&("accepted-event-v1", previous, count, &metadata)).unwrap(),
     );
     let host = restore["hostId"].as_str().unwrap().to_owned();
-    let restore: restore_record::RestoreSource = serde_json::from_value(restore).unwrap();
     let bytes = format!(
         "{{\"kind\":\"application\",\"relayDatabaseNamespace\":\"relay\",\"eventCount\":{count},\"evidenceDigest\":\"{evidence}\",\"updateByteLength\":{},\"metadata\":{},\"sourceApplication\":{{\"localYDocSequence\":2,\"hostCoordinate\":{{\"hostId\":\"{host}\",\"hostEpoch\":1,\"instanceId\":\"instance\",\"connectionId\":\"connection\"}}}},\"sourceRestore\":{},\"cancelledRestores\":[],\"contentCoordinate\":{}}}",
         record["updateByteLength"],
@@ -234,105 +229,6 @@ fn refused_audit(
     [audit, next]
 }
 
-fn cancel_owner_restore(f: &mut Fixture, activation: &str) {
-    let first: LiveUpdateReceipt = f
-        .store
-        .read_with(|c| {
-            c.query_row(
-                "SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch FROM live_device_update_applications WHERE journal_cursor=1",
-                [],
-                |r| {
-                    Ok(LiveUpdateReceipt {
-                        delivery_id: r.get(0)?,
-                        update_digest: r.get(1)?,
-                        journal_cursor: r.get(2)?,
-                        accepting_host_epoch: r.get(3)?,
-                    })
-                },
-            )
-        })
-        .unwrap();
-    let coordinate = ApplicationHostCoordinate {
-        host_id: "service-host".into(),
-        host_epoch: 1,
-        instance_id: "self-host-service".into(),
-        connection_id: "connection".into(),
-    };
-    let pushed = owner_ops(&f.store).last().unwrap().origin_seq;
-    crate::cursor::write_pushed_seq(
-        &mut f.store,
-        "ws",
-        "service-origin",
-        pushed,
-        &NoFaults,
-        &NoLiveLeases,
-        300,
-    )
-    .unwrap();
-    let applied_sequence: i64 = f
-        .store
-        .read_with(|c| {
-            c.query_row(
-                "SELECT local_ydoc_sequence FROM live_device_update_applications WHERE journal_cursor=1",
-                [],
-                |r| r.get(0),
-            )
-        })
-        .unwrap();
-    let next = f.binding.restore_fence_generation + 1;
-    f._owner
-        .fence_restore(
-            &mut f.store,
-            None,
-            NativeRestoreFence {
-                point: NativeRestoreSelection {
-                    journal_cursor: 0,
-                    receipt_digest: f.binding.lineage_claim_id.clone(),
-                },
-                operation_id: "restore".into(),
-                relay_database_namespace: "relay".into(),
-                old_binding: f.binding.clone(),
-                host_id: coordinate.host_id.clone(),
-                new_fence: next,
-                origin: RestoreDeliveryOrigin::Owner {
-                    id: activation.into(),
-                },
-                terminal: Some(first),
-                applied_sequence,
-            },
-            coordinate.clone(),
-            301,
-            &NoFaults,
-            |_, _| Ok(()),
-        )
-        .unwrap();
-    let cancelled = cancel_restore_fence(
-        &mut f.store,
-        "relay",
-        "ws",
-        &coordinate.host_id,
-        &RestoreFenceCancellation {
-            operation_id: "restore".into(),
-            object_id: "object".into(),
-            lineage_claim_id: f.binding.lineage_claim_id.clone(),
-            host_id: coordinate.host_id.clone(),
-            new_fence: next,
-        },
-        302,
-        &NoFaults,
-    )
-    .unwrap();
-    assert!(matches!(
-        cancelled,
-        RestoreFenceCancellationOutcome::FenceCancelled(_)
-    ));
-    f.binding.restore_fence_generation = next;
-    f.handle = f
-        ._owner
-        .register(&mut f.store, "relay".into(), coordinate, f.binding.clone())
-        .unwrap();
-}
-
 fn accept_edit(f: &mut Fixture, cursor: i64, text: &str) {
     let doc = dohc_engine_collab::Ydoc::wire();
     doc.apply(&f.bytes).unwrap();
@@ -340,84 +236,6 @@ fn accept_edit(f: &mut Fixture, cursor: i64, text: &str) {
         .unwrap();
     f.bytes = doc.encode_full_state();
     accept_named_event(f, cursor, format!("edit-{cursor}"));
-}
-
-fn third_replica() -> (EngineStore, ScratchDir, Vec<(ReplicationEnvelope, String)>) {
-    let (mut f, mut source, _, root) = imported_owner(false, false);
-    cancel_owner_restore(&mut f, &root.activation_id);
-    accept_edit(&mut f, 2, "Second edit.");
-    accept_edit(&mut f, 3, "Third edit.");
-    write_other(&mut f.store, "other-moment", 400);
-    source
-        .store
-        .write_with(&NoFaults, |tx| {
-            journal_live_base_in_tx(tx, "relay", &source.binding, 300)
-        })
-        .unwrap();
-    let scratch = ScratchDir::new().unwrap();
-    let mut replica =
-        EngineStore::open_passive(&scratch.path().join("replica.db"), 0, None, None).unwrap();
-    copy_blobs(&source.store, &mut replica);
-    copy_blobs(&f.store, &mut replica);
-    for op in operations(&source.store) {
-        let outcome = apply(&mut replica, &op);
-        assert!(
-            outcome == "applied" || outcome == "skipped",
-            "{}: {outcome}",
-            op.op_kind
-        );
-    }
-    let outcomes = owner_ops(&f.store)
-        .into_iter()
-        .map(|op| {
-            let outcome = apply(&mut replica, &op);
-            (op, outcome)
-        })
-        .collect();
-    assert_eq!(count(&replica, "live_audit_bases"), 1);
-    assert_eq!(count(&replica, "live_audit_base_conflicts"), 1);
-    (replica, scratch, outcomes)
-}
-
-fn report(outcomes: &[(ReplicationEnvelope, String)]) -> Vec<String> {
-    outcomes
-        .iter()
-        .map(|(op, outcome)| format!("{} {}: {outcome}", op.origin_seq, op.op_kind))
-        .collect()
-}
-
-fn assert_contained(replica: &EngineStore, outcomes: &[(ReplicationEnvelope, String)]) {
-    let (last, outcome) = outcomes.last().unwrap();
-    assert_eq!(last.op_kind, "moment.append");
-    assert_eq!(outcome, "applied", "{:#?}", report(outcomes));
-    assert_eq!(
-        crate::read_replication_acked_seq(replica, "ws", &last.origin_id).unwrap(),
-        last.origin_seq
-    );
-    let unverified: Vec<(String, i64)> = outcomes
-        .iter()
-        .filter(|(op, outcome)| {
-            op.op_kind != BASE_OP && op.op_kind.starts_with("live.audit.") && outcome != "applied"
-        })
-        .map(|(op, _)| (op.origin_id.clone(), op.origin_seq))
-        .collect();
-    assert!(!unverified.is_empty(), "{:#?}", report(outcomes));
-    assert!(
-        outcomes
-            .iter()
-            .filter(|(op, _)| unverified.contains(&(op.origin_id.clone(), op.origin_seq)))
-            .all(|(_, outcome)| outcome.starts_with("refused: ")),
-        "{:#?}",
-        report(outcomes)
-    );
-    assert_eq!(held(replica), unverified);
-}
-
-#[test]
-fn later_work_reaches_a_third_replica() {
-    let (replica, _scratch, outcomes) = third_replica();
-    assert_contained(&replica, &outcomes);
-    assert!(verified_through(&replica) < 2);
 }
 
 fn new_owner_holds() -> (Fixture, [ReplicationEnvelope; 3]) {
@@ -876,9 +694,11 @@ fn the_history_report_reads_in_small_steps() {
 /// each sync pass rereads.
 #[test]
 fn held_audits_leave_no_notice() {
-    let (replica, _scratch, _) = third_replica();
-    assert!(!held(&replica).is_empty());
-    let pending: i64 = replica
+    let (mut f, ops) = new_owner_holds();
+    apply_all(&mut f.store, &ops);
+    assert!(!held(&f.store).is_empty());
+    let pending: i64 = f
+        .store
         .read_with(|c| {
             c.query_row(
                 "SELECT count(*) FROM replication_pending_refusals p JOIN live_audit_held_records h USING(workspace_id,origin_id,origin_seq)",
@@ -889,7 +709,7 @@ fn held_audits_leave_no_notice() {
         .unwrap();
     assert_eq!(pending, 0);
     assert!(
-        crate::list_refusal_notices(&replica, "ws")
+        crate::list_refusal_notices(&f.store, "ws")
             .unwrap()
             .is_empty()
     );

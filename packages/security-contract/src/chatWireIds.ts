@@ -20,6 +20,24 @@ export function agentIdForChannelWireId(wireId: string): string | null {
   return AGENT_ID.test(agentId) && agentId !== DEFAULT_AGENT_ID ? agentId : null;
 }
 
+/**
+ * Whether a channel is a Group: an ordinary channel, never General, a direct
+ * message, or an agent chat. `kind` is the channel's kind in the owner's log.
+ * The relay's workspace reach and the automation reach check both ask this.
+ */
+export function isWorkspaceGroup(
+  wireId: string | null,
+  kind: string | null | undefined,
+): wireId is string {
+  return (
+    typeof wireId === "string" &&
+    wireId.length > 0 &&
+    wireId !== GENERAL_CHANNEL_WIRE_ID &&
+    !wireId.startsWith(AGENT_CHANNEL_WIRE_ID) &&
+    kind === "channel"
+  );
+}
+
 export const GENERAL_CHANNEL_ID = "channel-general";
 
 /** Whether a channel id is one only General or an agent's chat may hold. The engine reads it the same way. */

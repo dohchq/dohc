@@ -35,6 +35,7 @@ import { momentTextsForPath, readLiveAuditRecord, type LiveAuditRecord } from ".
 import { reserveRelayPort, type SyncRelayLinkBoundary } from "./syncRelay";
 
 const relayRoot = fileURLToPath(new URL("../../../../services/sync-relay/", import.meta.url));
+const shareWebRoot = fileURLToPath(new URL("../../../../services/share-web/", import.meta.url));
 const { DatabaseSync } = createRequire(import.meta.url)(
   "node:sqlite",
 ) as typeof import("node:sqlite");
@@ -46,7 +47,8 @@ const { DatabaseSync } = createRequire(import.meta.url)(
  * for an HTTPS loopback relay. `refuse` answers matching requests with 503
  * before they reach a service. `linkBoundary` points the live stack's share
  * links at a test share-web, which reaches the relay at `relayInnerUrl` as the
- * self-host share-web does.
+ * self-host share-web does. `shareWeb` runs the self-host share-web itself
+ * behind the same origin, routed as the self-host Caddyfile routes it.
  */
 export async function startSelfHostOnboardingStack(
   directory: string,
@@ -55,6 +57,7 @@ export async function startSelfHostOnboardingStack(
     signal: AbortSignal;
     refuse?: (method: string, path: string) => boolean;
     linkBoundary?: SyncRelayLinkBoundary;
+    shareWeb?: boolean;
   },
 ) {
   assert.ok(process.env.POSTGRES_URL, "Supply a disposable POSTGRES_URL.");
@@ -74,15 +77,27 @@ export async function startSelfHostOnboardingStack(
   const proxy = await startServerProxy(ca, options.refuse ? { refuse: options.refuse } : {});
   let account: Awaited<ReturnType<typeof startAccountServer>> | undefined;
   let relay: Awaited<ReturnType<typeof startAuthenticatedRelay>> | undefined;
+  let shareWeb: Awaited<ReturnType<typeof startShareWeb>> | undefined;
+  assert.ok(
+    !options.shareWeb || (ca && !options.linkBoundary),
+    "The stack's own share-web needs the live stack and no other link boundary.",
+  );
   try {
     // The account server applies the migrations whose tables the relay reads as it starts.
     account = await startAccountServer({ publicOrigin: proxy.origin, signal: options.signal });
     proxy.routeAuthTo(account.listenOrigin);
-    const port = ca && options.linkBoundary ? await reserveRelayPort() : 0;
-    const link =
-      ca && options.linkBoundary
-        ? { ...options.linkBoundary, innerHost: `127.0.0.1:${port}` }
-        : undefined;
+    // The stack's own share-web serves the public origin, as on a self-hosted server.
+    const boundary =
+      options.linkBoundary ??
+      (options.shareWeb
+        ? {
+            linkKey: randomBytes(32).toString("base64url"),
+            relayExchangeKey: randomBytes(32).toString("base64url"),
+            publicViewerOrigin: proxy.origin,
+          }
+        : undefined);
+    const port = ca && boundary ? await reserveRelayPort() : 0;
+    const link = ca && boundary ? { ...boundary, innerHost: `127.0.0.1:${port}` } : undefined;
     relay = await startAuthenticatedRelay(
       directory,
       proxy.origin,
@@ -90,6 +105,15 @@ export async function startSelfHostOnboardingStack(
       port,
     );
     proxy.routeRelayTo(relay.url);
+    if (options.shareWeb) {
+      shareWeb = await startShareWeb({
+        relayUrl: relay.url,
+        authUrl: account.listenOrigin,
+        origin: proxy.origin,
+        exchangeKey: link!.relayExchangeKey,
+      });
+      proxy.routeShareWebTo(shareWeb.url);
+    }
     return {
       account,
       ca,
@@ -102,6 +126,7 @@ export async function startSelfHostOnboardingStack(
       // The relay's recent console output, such as a failed service host pass,
       // for a failure report. Bearer values are removed.
       relayOutput: () => relay!.output().replace(/(bearer\s+)\S+/giu, "$1[redacted]"),
+      shareWebOutput: () => shareWeb?.output() ?? "",
       // Counts and cursors only, for a failure report: the live settlements the
       // service host made, held for export, or journaled, and those the relay holds.
       settlementEvidence: () => settlementEvidence(directory),
@@ -121,7 +146,12 @@ export async function startSelfHostOnboardingStack(
       liveHostTexts: (path: string) => liveHostTexts(directory, path),
       liveHosting: (workspaceId: string, path: string) => liveHosting(directory, workspaceId, path),
       async close() {
-        const results = await Promise.allSettled([proxy.close(), relay!.close(), account!.close()]);
+        const results = await Promise.allSettled([
+          proxy.close(),
+          shareWeb?.close(),
+          relay!.close(),
+          account!.close(),
+        ]);
         const failures = results.filter(
           (result): result is PromiseRejectedResult => result.status === "rejected",
         );
@@ -133,7 +163,7 @@ export async function startSelfHostOnboardingStack(
       },
     };
   } catch (error) {
-    await Promise.allSettled([proxy.close(), relay?.close(), account?.close()]);
+    await Promise.allSettled([proxy.close(), shareWeb?.close(), relay?.close(), account?.close()]);
     throw error;
   }
 }
@@ -234,6 +264,7 @@ export async function startServerProxy(
   let delayMs = options.delayMs ?? 0;
   let authInternalUrl: string | undefined;
   let relayUrl: string | undefined;
+  let shareWebUrl: string | undefined;
   let nextHostedLog: PendingHostedLogResponse | undefined;
   let holdingHostedLog: PendingHostedLogResponse | undefined;
   let paused = false;
@@ -241,8 +272,13 @@ export async function startServerProxy(
   let refusedUpgrades = 0;
   const upstreams = new Set<ReturnType<typeof requestHttp>>();
   const upgraded = new Set<Duplex>();
+  // With a share-web, the self-host Caddyfile's routes: account pages and sign-in to the account server, the rest to share-web.
   const route = (path: string) =>
-    path.startsWith("/sync/") || path === "/health" ? relayUrl : authInternalUrl;
+    path.startsWith("/sync/") || path === "/health"
+      ? relayUrl
+      : shareWebUrl && !ACCOUNT_PATH.test(new URL(path, "http://proxy.test").pathname)
+        ? shareWebUrl
+        : authInternalUrl;
   const delayed: RequestListener = (incoming, outgoing) => {
     const wait = delayMs;
     if (wait <= 0) {
@@ -492,6 +528,9 @@ export async function startServerProxy(
     },
     routeRelayTo(url: string) {
       relayUrl = url;
+    },
+    routeShareWebTo(url: string) {
+      shareWebUrl = url;
     },
     /** Buffers the next real hosted-log response for this workspace until released. */
     holdNextHostedLogResponse(workspaceId: string): HostedLogResponseBarrier {
@@ -1109,6 +1148,84 @@ async function startAuthenticatedRelay(
       );
       stdout.on("data", () => {
         const match = /SYNC_RELAY_LISTENING host=([^\s]+) port=(\d+)/u.exec(output);
+        if (!match) return;
+        clearTimeout(timer);
+        resolve(`http://${match[1]}:${match[2]}`);
+      });
+    });
+    return { url, close, output: () => output };
+  } catch (error) {
+    await close();
+    throw error;
+  }
+}
+
+const ACCOUNT_PATH =
+  /^\/(?:$|account(?:\/|$)|device$|api\/auth\/|\.well-known\/dohc-server$|test\/)/u;
+
+// The self-host share-web, started as the image starts it, with its own named live gateway.
+async function startShareWeb(input: {
+  relayUrl: string;
+  authUrl: string;
+  origin: string;
+  exchangeKey: string;
+}) {
+  const env = {
+    ...process.env,
+    NODE_ENV: "test",
+    DOHC_SELF_HOST_LIVE: "1",
+    DOHC_SHARE_WEB_RELAY_URL: input.relayUrl,
+    DOHC_SHARE_WEB_AUTH_URL: input.authUrl,
+    DOHC_SHARE_WEB_PUBLIC_ORIGIN: input.origin,
+    DOHC_SHARE_WEB_PUBLIC_RELAY_URL: input.origin,
+    DOHC_SHARE_WEB_PUBLIC_HOSTS: new URL(input.origin).host,
+    DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: input.exchangeKey,
+    DOHC_SHARE_WEB_INTERNAL_HOSTS: "share-web.internal",
+    DOHC_SHARE_WEB_BIND: "127.0.0.1",
+    DOHC_SHARE_WEB_PORT: "0",
+    DOHC_SHARE_WEB_DEV: undefined,
+    DOHC_SHARE_WEB_APP_DOMAIN: undefined,
+    DOHC_SHARE_WEB_TRUSTED_PROXIES: undefined,
+    DOHC_SHARE_WEB_TEST_VIEWER_ASSETS_DIR: undefined,
+    FORCE_COLOR: "0",
+  };
+  const bootstrap =
+    'process.on("message", (message) => { if (message === "SIGTERM") process.emit("SIGTERM"); }); await import("./src/main.ts");';
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", "--input-type=module", "--eval", bootstrap],
+    {
+      cwd: shareWebRoot,
+      env,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
+    },
+  );
+  const { stdout, stderr } = child;
+  assert.ok(stdout && stderr, "The share-web output pipes are configured.");
+  let output = "";
+  stdout.on("data", (chunk) => {
+    output = (output + String(chunk)).slice(-65_536);
+  });
+  stderr.on("data", (chunk) => {
+    output = (output + String(chunk)).slice(-65_536);
+  });
+  const exited = new Promise<void>((resolve) => child.once("close", () => resolve()));
+  const close = () => stopChild(child, exited);
+  try {
+    const url = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`share-web did not start. ${output}`)),
+        30_000,
+      );
+      const fail = (error: Error) => {
+        clearTimeout(timer);
+        reject(error);
+      };
+      child.once("error", fail);
+      child.once("exit", (code) => fail(new Error(`share-web exited (${code}). ${output}`)));
+      stdout.on("data", () => {
+        const match = /SHARE_WEB_LISTENING host=([^\s]+) port=(\d+)/u.exec(output);
         if (!match) return;
         clearTimeout(timer);
         resolve(`http://${match[1]}:${match[2]}`);

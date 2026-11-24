@@ -63,8 +63,9 @@ export const WORK_LINK_LOOKUP_FAILED_NOTE = "dohc could not open this link.";
 
 // Only a chat or an automation is looked up, so only they can fail this way.
 export function targetLookupFailedNote(target: NoticeTarget): string {
-  if (target.to === "chat-channel") return CHAT_LOOKUP_FAILED_NOTE;
-  return target.to === "chat" ? RUN_THREAD_LOOKUP_FAILED_NOTE : AUTOMATION_LOOKUP_FAILED_NOTE;
+  if (target.to === "chat")
+    return target.run === undefined ? CHAT_LOOKUP_FAILED_NOTE : RUN_THREAD_LOOKUP_FAILED_NOTE;
+  return target.to === "chat-channel" ? CHAT_LOOKUP_FAILED_NOTE : AUTOMATION_LOOKUP_FAILED_NOTE;
 }
 
 export const ACCESS_ENDED_NOTE =

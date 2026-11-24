@@ -204,7 +204,7 @@ describe("group lists", () => {
       "dohc: ambiguous group prefix 'ch_tr': ch_trip, ch_trap",
     );
     await expect(listGroupThreads(host, { group: "nowhere", reader: null })).rejects.toThrow(
-      "dohc: no such group: nowhere",
+      "dohc: No Group matches nowhere. Run dohc chat groups to list them.",
     );
   });
 
@@ -404,7 +404,7 @@ describe("chat", () => {
     const host = memoryHost(store);
     expect(await readChat(host, { group: "nowhere" })).toEqual({
       ok: false,
-      reason: "dohc: no such group: nowhere",
+      reason: "dohc: No Group matches nowhere. Run dohc chat groups to list them.",
     });
     store.failing.set("listGroupStream", 7);
     expect(await readChat(host, { group: "trip" })).toEqual({
@@ -690,7 +690,7 @@ describe("failure detail", () => {
     const host = memoryHost(store, { writable: false, errorDetail: "operation-only" });
     expect(await readChat(host, { group: "nowhere" })).toEqual({
       ok: false,
-      reason: "dohc: no such group: nowhere",
+      reason: "dohc: No Group matches nowhere. Run dohc chat groups to list them.",
     });
   });
 });

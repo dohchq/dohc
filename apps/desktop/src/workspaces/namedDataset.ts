@@ -11,6 +11,8 @@ import { DatasetInvocationResult } from "@dohc/cli/dataset";
 import { parseDatasetDescription } from "@dohc/security-contract/dataset";
 import type { NamedDatasetPageCache } from "./namedDatasetCache";
 import { NamedDatasetOfflineError } from "./namedDatasetTransport";
+import { JOINED_BY_ANOTHER_ACCOUNT } from "../ipc/joinedAccountWords";
+import { joinedByAccount } from "./shareWriteGate";
 
 /** Source View/Edit and Collection data permissions are separate. The relay resolves the named grant. */
 export function createNamedDatasetData(input: {
@@ -67,6 +69,12 @@ export function createNamedDatasetData(input: {
     relay.href.replace(/\/+$/, "") !== credentialsRelay.href.replace(/\/+$/, "")
   )
     throw new Error("Sign in to the server this shared workspace uses.");
+  // The relay refuses another account too; this gives the words the window shows.
+  if (
+    recordedShareSelector(marker.grantedSelector)?.wholeWorkspace === true &&
+    !joinedByAccount(marker, input.credentials)
+  )
+    throw new Error(JOINED_BY_ANOTHER_ACCOUNT);
   const shareId = marker.shareId;
   const data = createRemoteDatasetData({ ...input, shareId });
   const exposed = {
