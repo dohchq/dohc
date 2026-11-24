@@ -124,7 +124,6 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
   );
   const { mount, painted, live, stopped } = useSyncExternalStore(host.subscribe, host.state);
   const [timing] = useState(() => pageTimings?.open(name, timingOwner(signIn), tap));
-  // The mount whose script has started; the text known when its web view was made; and the text given to it later.
   const [started, setStarted] = useState<number | null>(null);
   const [early, setEarly] = useState<{
     mount: number;
@@ -214,9 +213,6 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
       if (text !== null) done?.(text);
     }
   };
-  // The web view starts before the read lands. Text known when it's made goes in before its script runs; text read
-  // later, once the script has started. Text that changes after replaces the read text in the same editor once it has
-  // drawn; with a session, a fresh editor opens the page again.
   useEffect(() => {
     const sent = sentTo(mount);
     if (started !== mount || markdown === null || sent === markdown) return;

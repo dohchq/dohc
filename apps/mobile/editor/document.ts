@@ -79,7 +79,6 @@ export function mountDocument(page: PageConfig) {
     { capture: true },
   );
   let readOnly: ReturnType<typeof mountLiveBodyEditor> | null = null;
-  // The app replaces the read text with a newer read in the same body, before any live session.
   const showRead = (markdown: string) => {
     const app = window as Window & { __dohcCopyMarkdown?: unknown; __dohcSetEditable?: unknown };
     delete app.__dohcCopyMarkdown;

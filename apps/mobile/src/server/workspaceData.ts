@@ -85,7 +85,6 @@ export interface View<T> {
   affectedBy(changes: FeedChanges, known: Known, value: T | null): boolean;
   /** What the view shows after a read, from what it showed before and what the read answered. */
   carry?(previous: T | null, next: T): T;
-  /** What a value shows a person, for a view that keeps its last text when its object goes: equal when it looks the same. */
   shownAs?(value: T | null): string | null;
   /** The messages a value shows, so the outbox can tell which of its saved writes a read now shows. */
   messages?(value: T): readonly ChatMessage[];
@@ -216,7 +215,6 @@ export interface Cached {
   readonly cursor: string;
   /** A change the feed reported may have touched it since. */
   readonly stale: boolean;
-  /** Read only by `prefetch`, never for a screen. */
   readonly prefetched?: boolean;
 }
 
@@ -396,7 +394,6 @@ export interface WorkspaceData {
   subscribe(view: View<unknown>, listener: () => void): () => void;
   /** Reads the view now, as a screen about to open it would, unless it shows a fresh value or a read is on its way. */
   prefetch(view: View<unknown>): void;
-  /** Reads the pages at `paths` that have no text yet, a few at a time while the store runs. A failure leaves one empty. */
   prefetchPages(paths: readonly string[]): void;
   retry(view: View<unknown>): void;
   feed(): FeedState;
@@ -432,7 +429,6 @@ interface Entry {
   state: ViewState<unknown>;
   readonly listeners: Set<() => void>;
   stale: boolean;
-  /** No screen has shown its value, so the page keeps no last text if it goes. */
   prefetched?: boolean;
   readonly reads: ReturnType<typeof requestGenerations>;
 }
@@ -558,7 +554,6 @@ export function createWorkspaceData(options: {
     for (const listener of target.listeners) listener();
   }
 
-  /** A screen shows the entry's value: it stays as the page's last text if the page goes. */
   function shown(target: Entry) {
     if (!target.prefetched || target.listeners.size === 0 || target.state.value === null) return;
     target.prefetched = false;
