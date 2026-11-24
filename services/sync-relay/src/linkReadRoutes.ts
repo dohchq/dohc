@@ -145,7 +145,8 @@ export function createLinkReadRoutes(
     if (!share) throw notFound();
     // Read before a read's transaction, as the account's list opens its own.
     const ownerName =
-      capability.credential.kind === "owner"
+      capability.credential.kind === "owner" &&
+      (route.route === "link-share" || route.route === "link-current")
         ? ownedWorkspaceName(capability.credential.userId, share.workspaceId)
         : null;
 

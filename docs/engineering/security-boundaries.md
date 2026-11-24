@@ -36,7 +36,9 @@ reads what the owner's computer reads. It reaches only the link read routes
 account's workspaces at `/sync/members/workspaces`. The account routes, member
 management, settings, and sharing still refuse a cookie. A browser can't post
 in the owner's chats or edit a page live. Each new read checks the session
-again, so signing the browser out ends its access.
+again, so signing the browser out ends its access. A history read already
+waiting for changes does not check the session again, so it can return the
+changes made during its wait. A member's browser behaves the same way.
 
 ## Agents act with their link's access
 

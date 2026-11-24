@@ -2,7 +2,9 @@ import { escapeHtml } from "@dohc/workspace-core/html";
 import DOMPurify, { type Config } from "dompurify";
 import { Marked, type Tokens } from "marked";
 
-const BLOB_IMAGE = /^\/api\/view\/blob\/[a-f0-9]{64}(?:\?session=[A-Za-z0-9_-]{12})?$/u;
+// A link's session, or a signed-in account's `member.<grant>` or `owner.<workspace>`.
+const BLOB_IMAGE =
+  /^\/api\/view\/blob\/[a-f0-9]{64}(?:\?session=(?:[A-Za-z0-9_-]{12}|(?:member|owner)\.[A-Za-z0-9_.:-]{1,256}))?$/u;
 const SAFE_LINK = /^(?:https?:\/\/|mailto:|\/[^/]|#|\.\.?\/)/iu;
 const HTTP_LINK = /^https?:\/\//iu;
 const MAILTO_LINK = /^mailto:/iu;

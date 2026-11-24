@@ -112,6 +112,25 @@ describe("renderSafeMarkdown", () => {
     );
   });
 
+  it("keeps a signed-in account's images, embedded by blob or by path", () => {
+    const blobSha256 = "b".repeat(64);
+    const files = new Map<string, SharedFile>([
+      ["trip/map.png", { path: "trip/map.png", blobSha256 } as SharedFile],
+    ]);
+    for (const session of ["member.grant-9", "owner.ws:1"]) {
+      for (const href of [`/api/view/blob/${blobSha256}?session=ForeignSes01`, "map.png"]) {
+        const template = document.createElement("template");
+        template.innerHTML = renderSafeMarkdown(`![map](${href})`, (value) =>
+          resolveSharedImage(value, "trip/note.md", files, session),
+        );
+        expect(
+          template.content.querySelector("img")?.getAttribute("src"),
+          `${session} ${href}`,
+        ).toBe(`/api/view/blob/${blobSha256}?session=${session}`);
+      }
+    }
+  });
+
   it("keeps ordinary text and escapes forbidden elements", () => {
     const html = renderSafeMarkdown(`
 Plain paragraph text.
