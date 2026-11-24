@@ -19,7 +19,7 @@
   --hex-fog-fill: #dedad0;
   --hex-fog-hatch: #c8c3b6;
   --hex-fog-stroke: #c4bfb2;
-  --hex-fog-ink: #757063;
+  --hex-fog-ink: #4e4a40;
   --hex-select: #1c1b18;
   --hex-target-friendly: #22645a;
   --hex-target-attack: #b43c2c;
@@ -49,7 +49,7 @@
     --hex-fog-fill: #171614;
     --hex-fog-hatch: #23211d;
     --hex-fog-stroke: #262420;
-    --hex-fog-ink: #6a665a;
+    --hex-fog-ink: #9a9588;
     --hex-select: #f6f4ee;
     --hex-target-friendly: #7bc7b8;
     --hex-target-attack: #eb7d67;
@@ -296,6 +296,33 @@
 }
 
 .hc-move-row-active {
+  border-color: var(--kit-accent);
+  background: var(--kit-panel-2);
+}
+
+.hc-move-btn {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--kit-radius-sm);
+  background: var(--kit-bg);
+  border: 1px solid var(--kit-line);
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.hc-move-btn:focus-visible {
+  outline: 2px solid var(--kit-accent);
+  outline-offset: 2px;
+}
+
+.hc-move-btn-active {
   border-color: var(--kit-accent);
   background: var(--kit-panel-2);
 }

@@ -53,6 +53,3 @@ CREATE TABLE moves (
 );
 
 CREATE INDEX idx_games_updated ON games (updated_at_ms DESC, id DESC);
-CREATE INDEX idx_players_game ON players (game_id, seat);
-CREATE INDEX idx_hex_tiles_game ON hex_tiles (game_id, q, r);
-CREATE INDEX idx_moves_game_turn ON moves (game_id, turn_number);

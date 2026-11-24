@@ -220,9 +220,7 @@ export function HexBoard({
           const isTarget = validTargets.has(key);
           const isChosenTarget = targetHex === key;
           const isOwn = tile.visible && viewerSeat !== null && tile.ownerSeat === viewerSeat;
-          const interactive = Boolean(
-            tile.visible && (isTarget || (canAct && isOwn) || tile.ownerSeat !== null),
-          );
+          const interactive = Boolean(tile.visible && (isTarget || isSelected || (canAct && isOwn)));
           const isEnemyOrNeutralTarget = isTarget && tile.ownerSeat !== viewerSeat;
           const units = tile.units ?? 0;
 
@@ -235,12 +233,12 @@ export function HexBoard({
               data-owner={tile.ownerSeat ?? "neutral"}
               data-terrain={tile.terrain ?? "fog"}
               data-interactive={interactive ? "true" : "false"}
-              role="button"
-              tabIndex={interactive ? 0 : -1}
+              role={interactive ? "button" : undefined}
+              tabIndex={interactive ? 0 : undefined}
               aria-label={tileAriaLabel(tile, isTarget)}
-              aria-pressed={isSelected || isChosenTarget}
-              onClick={() => onSelectHex(tile)}
-              onKeyDown={(event) => handleKeyDown(event, tile)}
+              aria-pressed={interactive ? isSelected || isChosenTarget : undefined}
+              onClick={interactive ? () => onSelectHex(tile) : undefined}
+              onKeyDown={interactive ? (event) => handleKeyDown(event, tile) : undefined}
             >
               <polygon
                 className="hc-hex-poly"

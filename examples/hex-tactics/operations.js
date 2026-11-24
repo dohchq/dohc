@@ -612,10 +612,11 @@
   }
 
   function listGames(ctx) {
+    const canSpectateActive = ctx.caller.kind === "owner";
     const games = ctx.db.query(
       "SELECT id,title,seed,radius,status,turn_number,active_seat,winner_player_id,win_reason,created_at_ms,updated_at_ms FROM games ORDER BY updated_at_ms DESC, id DESC LIMIT 30",
     );
-    if (games.length === 0) return { games: [] };
+    if (games.length === 0) return { games: [], canSpectateActive };
     const gameIds = games.map((g) => g.id);
     const placeholders = gameIds.map(() => "?").join(",");
     const players = ctx.db.query(
@@ -633,6 +634,7 @@
       byGame.set(p.game_id, list);
     }
     return {
+      canSpectateActive,
       games: games.map((g) => {
         const list = byGame.get(g.id) ?? [];
         return {
@@ -739,7 +741,10 @@
     const payload = input && typeof input === "object" && !Array.isArray(input) ? input : {};
     const p1Name = cleanName(ctx, payload.player1Name, "Crimson");
     const p2Name = cleanName(ctx, payload.player2Name, "Cobalt");
-    const title = cleanTitle(ctx, payload.title, p1Name + " vs " + p2Name);
+    const rawFallbackTitle = p1Name + " vs " + p2Name;
+    const fallbackTitle =
+      rawFallbackTitle.length <= 64 ? rawFallbackTitle : rawFallbackTitle.slice(0, 64).trimEnd();
+    const title = cleanTitle(ctx, payload.title, fallbackTitle);
     const seed = cleanDemoSeed(ctx, payload.seed);
     const gameId = "g_" + ctx.requestId;
     const p1Id = "p1_" + gameId;
@@ -876,6 +881,23 @@
 
     if (actionType !== "resign" && player.seat !== game.active_seat) {
       ctx.refuse("not_your_turn", "Wait for your turn before submitting a move.");
+    }
+    if (actionType !== "resign" && payload.expectedTurn !== undefined) {
+      const expectedTurn = expectSafeInt(
+        ctx,
+        payload.expectedTurn,
+        "invalid_turn",
+        "expectedTurn must be a positive integer.",
+      );
+      if (expectedTurn < 1) {
+        ctx.refuse("invalid_turn", "expectedTurn must be a positive integer.");
+      }
+      if (expectedTurn !== game.turn_number) {
+        ctx.refuse(
+          "stale_turn",
+          "Board advanced to turn " + game.turn_number + ". Refresh before acting.",
+        );
+      }
     }
 
     let fromHex = null;
@@ -1228,7 +1250,6 @@
     return {
       game: {
         id: game.id,
-        joinCode: game.join_code,
         title: game.title,
         seed: game.seed,
         radius: game.radius,

@@ -1,5 +1,5 @@
 import "./styles.css";
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { AppProvider, useApp, useDatasetMutation, useDatasetQuery } from "dohc/app";
 import {
@@ -87,7 +87,10 @@ function predictCombat(
 
 export function HexClashApp() {
   const client = useApp();
-  const gamesQuery = useDatasetQuery<{ games: GameSummary[] }>("listGames", {});
+  const gamesQuery = useDatasetQuery<{
+    games: GameSummary[];
+    canSpectateActive?: boolean;
+  }>("listGames", {});
   const startDemo = useDatasetMutation<
     { player1Name?: string; player2Name?: string; seed?: number },
     StartDemoReply
@@ -105,6 +108,7 @@ export function HexClashApp() {
       gameId: string;
       playerToken: string;
       actionType: "march" | "fortify" | "reinforce" | "pass" | "resign";
+      expectedTurn?: number;
       fromQ?: number;
       fromR?: number;
       toQ?: number;
@@ -116,6 +120,8 @@ export function HexClashApp() {
 
   const [sessions, setSessions] = useState<Record<string, StoredMatchSession>>({});
   const [activeGameId, setActiveGameId] = useState<string | null>(null);
+  const activeGameIdRef = useRef<string | null>(null);
+  activeGameIdRef.current = activeGameId;
   const [spectatorMode, setSpectatorMode] = useState(false);
 
   const [selectedHex, setSelectedHex] = useState<string | null>(null);
@@ -123,7 +129,8 @@ export function HexClashApp() {
   const [marchUnits, setMarchUnits] = useState(1);
   const [reinforceUnits, setReinforceUnits] = useState(1);
   const [notice, setNotice] = useState<string | null>(null);
-  const [copiedCode, setCopiedCode] = useState(false);
+  const [copiedCodeValue, setCopiedCodeValue] = useState<string | null>(null);
+  const copiedCodeTimerRef = useRef<number | null>(null);
   const [seatKeyFeedback, setSeatKeyFeedback] = useState<string | null>(null);
 
   const [createOpen, setCreateOpen] = useState(false);
@@ -140,6 +147,7 @@ export function HexClashApp() {
   const [resumeError, setResumeError] = useState<string | null>(null);
 
   const [seatKeyOpen, setSeatKeyOpen] = useState(false);
+  const [resignOpen, setResignOpen] = useState(false);
 
   const [replayOpen, setReplayOpen] = useState(false);
   const [replayData, setReplayData] = useState<ReplayPayload | null>(null);
@@ -147,6 +155,23 @@ export function HexClashApp() {
   const [replayError, setReplayError] = useState<string | null>(null);
   const [replayStep, setReplayStep] = useState(0);
   const [replayPlaying, setReplayPlaying] = useState(false);
+  const replayRequestSeq = useRef(0);
+
+  useEffect(() => {
+    return () => {
+      replayRequestSeq.current += 1;
+      if (copiedCodeTimerRef.current !== null) {
+        window.clearTimeout(copiedCodeTimerRef.current);
+      }
+    };
+  }, []);
+
+  const cancelPendingReplay = useCallback(() => {
+    replayRequestSeq.current += 1;
+    setReplayLoading(false);
+    setReplayError(null);
+    setReplayPlaying(false);
+  }, []);
 
   const activeSession = activeGameId ? (sessions[activeGameId] ?? null) : null;
   const activeSeatCredential = useMemo(() => {
@@ -171,6 +196,7 @@ export function HexClashApp() {
 
   const board = boardQuery.data ?? null;
   const games = gamesQuery.data?.games ?? [];
+  const canSpectateActive = gamesQuery.data?.canSpectateActive === true;
 
   const updateSession = useCallback((session: StoredMatchSession) => {
     setSessions((prev) => ({ ...prev, [session.gameId]: session }));
@@ -179,23 +205,25 @@ export function HexClashApp() {
   const switchSeat = useCallback(
     (seat: 1 | 2) => {
       if (!activeSession) return;
+      cancelPendingReplay();
       updateSession({ ...activeSession, activeSeat: seat });
       setSpectatorMode(false);
+      setReplayOpen(false);
+      setResignOpen(false);
       setSelectedHex(null);
       setTargetHex(null);
       setNotice(null);
     },
-    [activeSession, updateSession],
+    [activeSession, cancelPendingReplay, updateSession],
   );
 
   useEffect(() => {
     if (!activeGameId || replayOpen) return;
     if (!board || board.game.status === "finished") return;
     const isPassAndPlay = (activeSession?.seats.length ?? 0) === 2;
-    const waitingForOpponent =
-      board.game.status === "waiting" ||
-      (!isPassAndPlay && board.viewer.seat !== null && board.game.activeSeat !== board.viewer.seat);
-    if (!waitingForOpponent) return;
+    const needsRemoteRefresh =
+      board.game.status === "waiting" || (!isPassAndPlay && board.game.status === "active");
+    if (!needsRemoteRefresh) return;
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") {
         boardQuery.reload();
@@ -273,25 +301,134 @@ export function HexClashApp() {
       ? formatSeatKey(activeGameId, activeSeatCredential.playerToken)
       : null;
 
-  const handleStartDemo = async () => {
-    setNotice(null);
+  const applyDemoResult = (data: StartDemoReply) => {
+    cancelPendingReplay();
+    updateSession({
+      gameId: data.gameId,
+      joinCode: data.joinCode,
+      seats: data.seats,
+      activeSeat: 1,
+    });
+    setActiveGameId(data.gameId);
+    setSpectatorMode(false);
     setReplayOpen(false);
     setReplayData(null);
+    setResignOpen(false);
+    setSelectedHex(null);
+    setTargetHex(null);
+    setNotice(`Demo match ready. Join code ${data.joinCode}.`);
+    gamesQuery.reload();
+  };
+
+  const applyCreateResult = (data: CreateGameReply) => {
+    cancelPendingReplay();
+    updateSession({
+      gameId: data.gameId,
+      joinCode: data.joinCode,
+      seats: [
+        {
+          seat: 1,
+          playerId: data.playerId,
+          name: data.playerName,
+          color: "crimson",
+          playerToken: data.playerToken,
+        },
+      ],
+      activeSeat: 1,
+    });
+    setActiveGameId(data.gameId);
     setSpectatorMode(false);
-    try {
-      const reply = await startDemo.mutate({});
-      const data = reply.result;
-      updateSession({
-        gameId: data.gameId,
-        joinCode: data.joinCode,
-        seats: data.seats,
-        activeSeat: 1,
+    setReplayOpen(false);
+    setReplayData(null);
+    setResignOpen(false);
+    setSelectedHex(null);
+    setTargetHex(null);
+    setCreateOpen(false);
+    setCreateTitle("");
+    setNotice(
+      `Match created. Share join code ${data.joinCode} for Seat 2, and save your seat key.`,
+    );
+    gamesQuery.reload();
+  };
+
+  const applyJoinResult = (data: JoinGameReply) => {
+    cancelPendingReplay();
+    const seat2: SeatCredential = {
+      seat: 2,
+      playerId: data.playerId,
+      name: data.playerName,
+      color: "cobalt",
+      playerToken: data.playerToken,
+    };
+    setSessions((prev) => {
+      const existing = prev[data.gameId];
+      const seats = existing ? [...existing.seats.filter((s) => s.seat !== 2), seat2] : [seat2];
+      return {
+        ...prev,
+        [data.gameId]: {
+          gameId: data.gameId,
+          joinCode: data.joinCode,
+          seats,
+          activeSeat: 2,
+        },
+      };
+    });
+    setActiveGameId(data.gameId);
+    setSpectatorMode(false);
+    setReplayOpen(false);
+    setReplayData(null);
+    setResignOpen(false);
+    setSelectedHex(null);
+    setTargetHex(null);
+    setJoinOpen(false);
+    setJoinCodeInput("");
+    setNotice(
+      `Joined match ${data.joinCode} as Seat 2 (${data.playerName}). Save your seat key to resume after reload.`,
+    );
+    gamesQuery.reload();
+  };
+
+  const applyMoveResult = (result: SubmitMoveReply) => {
+    if (result.state.game.status === "active") {
+      setSessions((prev) => {
+        const current = prev[result.state.game.id];
+        if (!current || current.seats.length !== 2) return prev;
+        return {
+          ...prev,
+          [result.state.game.id]: {
+            ...current,
+            activeSeat: result.state.game.activeSeat,
+          },
+        };
       });
-      setActiveGameId(data.gameId);
+    }
+    if (activeGameIdRef.current === result.state.game.id) {
       setSelectedHex(null);
       setTargetHex(null);
-      setNotice(`Demo match ready. Join code ${data.joinCode}.`);
-      gamesQuery.reload();
+      setResignOpen(false);
+      setNotice(result.outcome.summary);
+      boardQuery.reload();
+    }
+    gamesQuery.reload();
+  };
+
+  const handleStartDemo = async () => {
+    setNotice(null);
+    try {
+      const reply = startDemo.uncertain ? await startDemo.retry() : await startDemo.mutate({});
+      if (!reply) return;
+      applyDemoResult(reply.result);
+    } catch {
+      return;
+    }
+  };
+
+  const handleRetryCreate = async () => {
+    setNotice(null);
+    try {
+      const reply = await createGame.retry();
+      if (!reply) return;
+      applyCreateResult(reply.result);
     } catch {
       return;
     }
@@ -301,35 +438,25 @@ export function HexClashApp() {
     event.preventDefault();
     setNotice(null);
     try {
-      const reply = await createGame.mutate({
-        title: createTitle.trim() || undefined,
-        playerName: createName.trim() || "Crimson",
-      });
-      const data = reply.result;
-      updateSession({
-        gameId: data.gameId,
-        joinCode: data.joinCode,
-        seats: [
-          {
-            seat: 1,
-            playerId: data.playerId,
-            name: data.playerName,
-            color: "crimson",
-            playerToken: data.playerToken,
-          },
-        ],
-        activeSeat: 1,
-      });
-      setActiveGameId(data.gameId);
-      setSpectatorMode(false);
-      setReplayOpen(false);
-      setReplayData(null);
-      setSelectedHex(null);
-      setTargetHex(null);
-      setCreateOpen(false);
-      setCreateTitle("");
-      setNotice(`Match created. Share join code ${data.joinCode} for Seat 2, and save your seat key.`);
-      gamesQuery.reload();
+      const reply = createGame.uncertain
+        ? await createGame.retry()
+        : await createGame.mutate({
+            title: createTitle.trim() || undefined,
+            playerName: createName.trim() || "Crimson",
+          });
+      if (!reply) return;
+      applyCreateResult(reply.result);
+    } catch {
+      return;
+    }
+  };
+
+  const handleRetryJoin = async () => {
+    setNotice(null);
+    try {
+      const reply = await joinGame.retry();
+      if (!reply) return;
+      applyJoinResult(reply.result);
     } catch {
       return;
     }
@@ -339,48 +466,25 @@ export function HexClashApp() {
     event.preventDefault();
     setNotice(null);
     try {
-      const reply = await joinGame.mutate({
-        joinCode: joinCodeInput.trim().toUpperCase(),
-        playerName: joinName.trim() || "Cobalt",
-      });
-      const data = reply.result;
-      const existing = sessions[data.gameId];
-      const seats: SeatCredential[] = existing
-        ? [
-            ...existing.seats.filter((s) => s.seat !== 2),
-            {
-              seat: 2,
-              playerId: data.playerId,
-              name: data.playerName,
-              color: "cobalt",
-              playerToken: data.playerToken,
-            },
-          ]
-        : [
-            {
-              seat: 2,
-              playerId: data.playerId,
-              name: data.playerName,
-              color: "cobalt",
-              playerToken: data.playerToken,
-            },
-          ];
-      updateSession({
-        gameId: data.gameId,
-        joinCode: data.joinCode,
-        seats,
-        activeSeat: 2,
-      });
-      setActiveGameId(data.gameId);
-      setSpectatorMode(false);
-      setReplayOpen(false);
-      setReplayData(null);
-      setSelectedHex(null);
-      setTargetHex(null);
-      setJoinOpen(false);
-      setJoinCodeInput("");
-      setNotice(`Joined match ${data.joinCode} as Seat 2 (${data.playerName}). Save your seat key to resume after reload.`);
-      gamesQuery.reload();
+      const reply = joinGame.uncertain
+        ? await joinGame.retry()
+        : await joinGame.mutate({
+            joinCode: joinCodeInput.trim().toUpperCase(),
+            playerName: joinName.trim() || "Cobalt",
+          });
+      if (!reply) return;
+      applyJoinResult(reply.result);
+    } catch {
+      return;
+    }
+  };
+
+  const handleRetryMove = async () => {
+    setNotice(null);
+    try {
+      const reply = await submitMove.retry();
+      if (!reply) return;
+      applyMoveResult(reply.result);
     } catch {
       return;
     }
@@ -413,20 +517,27 @@ export function HexClashApp() {
         color: seat === 1 ? "crimson" : "cobalt",
         playerToken: parsed.playerToken,
       };
-      const existing = sessions[parsed.gameId];
-      const seats = existing
-        ? [...existing.seats.filter((s) => s.seat !== seat), restored]
-        : [restored];
-      updateSession({
-        gameId: parsed.gameId,
-        joinCode: state.game.joinCode ?? null,
-        seats,
-        activeSeat: seat,
+      cancelPendingReplay();
+      setSessions((prev) => {
+        const existing = prev[parsed.gameId];
+        const seats = existing
+          ? [...existing.seats.filter((s) => s.seat !== seat), restored]
+          : [restored];
+        return {
+          ...prev,
+          [parsed.gameId]: {
+            gameId: parsed.gameId,
+            joinCode: state.game.joinCode ?? null,
+            seats,
+            activeSeat: seat,
+          },
+        };
       });
       setActiveGameId(parsed.gameId);
       setSpectatorMode(false);
       setReplayOpen(false);
       setReplayData(null);
+      setResignOpen(false);
       setSelectedHex(null);
       setTargetHex(null);
       setResumeOpen(false);
@@ -454,7 +565,7 @@ export function HexClashApp() {
       setTargetHex(null);
       return;
     }
-    if (tile.ownerSeat === viewerSeat) {
+    if (isMyTurn && tile.ownerSeat === viewerSeat) {
       setSelectedHex(key);
       setTargetHex(null);
       const maxMovable = Math.max(1, (tile.units ?? 1) - 1);
@@ -467,21 +578,24 @@ export function HexClashApp() {
     actionType: "march" | "fortify" | "reinforce" | "pass" | "resign",
   ) => {
     if (!activeGameId || !activeSeatCredential) return;
+    const submittedGameId = activeGameId;
     setNotice(null);
     try {
       const payload: {
         gameId: string;
         playerToken: string;
         actionType: "march" | "fortify" | "reinforce" | "pass" | "resign";
+        expectedTurn?: number;
         fromQ?: number;
         fromR?: number;
         toQ?: number;
         toR?: number;
         units?: number;
       } = {
-        gameId: activeGameId,
+        gameId: submittedGameId,
         playerToken: activeSeatCredential.playerToken,
         actionType,
+        ...(actionType !== "resign" && board ? { expectedTurn: board.game.turnNumber } : {}),
       };
       if (actionType === "march" && selectedTile && targetTile) {
         payload.fromQ = selectedTile.q;
@@ -498,27 +612,18 @@ export function HexClashApp() {
         payload.units = reinforceUnits;
       }
       const reply = await submitMove.mutate(payload);
-      setSelectedHex(null);
-      setTargetHex(null);
-      setNotice(reply.result.outcome.summary);
-      if (
-        reply.result.state.game.status === "active" &&
-        activeSession &&
-        activeSession.seats.length === 2
-      ) {
-        updateSession({
-          ...activeSession,
-          activeSeat: reply.result.state.game.activeSeat,
-        });
-      }
-      boardQuery.reload();
-      gamesQuery.reload();
+      applyMoveResult(reply.result);
     } catch {
+      if (activeGameIdRef.current === submittedGameId) {
+        boardQuery.reload();
+      }
+      gamesQuery.reload();
       return;
     }
   };
 
   const openReplay = async (gameId: string) => {
+    const requestId = ++replayRequestSeq.current;
     setReplayLoading(true);
     setReplayError(null);
     setReplayPlaying(false);
@@ -528,6 +633,7 @@ export function HexClashApp() {
         afterTurn: 0,
         limit: 200,
       });
+      if (replayRequestSeq.current !== requestId) return;
       const allMoves = [...firstPage.moves];
       let cursor = firstPage.nextAfterTurn;
       while (cursor !== null) {
@@ -536,6 +642,7 @@ export function HexClashApp() {
           afterTurn: cursor,
           limit: 200,
         });
+        if (replayRequestSeq.current !== requestId) return;
         allMoves.push(...nextPage.moves);
         cursor = nextPage.nextAfterTurn;
       }
@@ -543,21 +650,34 @@ export function HexClashApp() {
       setReplayStep(0);
       setReplayOpen(true);
     } catch (caught) {
+      if (replayRequestSeq.current !== requestId) return;
       setReplayError(caught instanceof Error ? caught.message : "Could not load match replay.");
     } finally {
-      setReplayLoading(false);
+      if (replayRequestSeq.current === requestId) {
+        setReplayLoading(false);
+      }
     }
   };
 
   const handleCopyJoinCode = async (code: string) => {
+    const requestedGameId = activeGameIdRef.current;
     if (window.origin !== "null" && typeof navigator.clipboard?.writeText === "function") {
       try {
         await navigator.clipboard.writeText(code);
-        setCopiedCode(true);
-        window.setTimeout(() => setCopiedCode(false), 1800);
+        if (activeGameIdRef.current !== requestedGameId) return;
+        if (copiedCodeTimerRef.current !== null) {
+          window.clearTimeout(copiedCodeTimerRef.current);
+        }
+        setCopiedCodeValue(code);
+        copiedCodeTimerRef.current = window.setTimeout(() => {
+          copiedCodeTimerRef.current = null;
+          setCopiedCodeValue((current) => (current === code ? null : current));
+        }, 1800);
         return;
       } catch {
-        setNotice(`Copy join code manually: ${code}`);
+        if (activeGameIdRef.current === requestedGameId) {
+          setNotice(`Copy join code manually: ${code}`);
+        }
         return;
       }
     }
@@ -662,7 +782,7 @@ export function HexClashApp() {
               loading={startDemo.pending}
               onClick={handleStartDemo}
             >
-              Start 2-Player Demo Match
+              {startDemo.uncertain ? "Retry demo match" : "Start 2-Player Demo Match"}
             </Button>
           </div>
         }
@@ -682,9 +802,94 @@ export function HexClashApp() {
             {gamesQuery.error.message}
           </Callout>
         ) : null}
-        {startDemo.error ? (
-          <Callout tone="danger" title="Could not start demo match">
-            {startDemo.error.message}
+        {startDemo.error || startDemo.uncertain ? (
+          <Callout
+            tone="danger"
+            title={startDemo.uncertain ? "Demo match status is uncertain" : "Could not start demo match"}
+            action={
+              startDemo.uncertain ? (
+                <Stack direction="horizontal" gap={6}>
+                  <Button
+                    id="retry-demo-btn"
+                    size="sm"
+                    loading={startDemo.pending}
+                    onClick={() => void handleStartDemo()}
+                  >
+                    Try again
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={startDemo.pending}
+                    onClick={startDemo.discardPending}
+                  >
+                    Discard
+                  </Button>
+                </Stack>
+              ) : undefined
+            }
+          >
+            {startDemo.uncertain
+              ? "The previous request may have already created a demo match. Try again to recover its seats, or discard to start a new one."
+              : startDemo.error?.message}
+          </Callout>
+        ) : null}
+        {createGame.uncertain && !createOpen ? (
+          <Callout
+            tone="danger"
+            title="Match creation status is uncertain"
+            action={
+              <Stack direction="horizontal" gap={6}>
+                <Button
+                  id="retry-create-banner-btn"
+                  size="sm"
+                  loading={createGame.pending}
+                  onClick={() => void handleRetryCreate()}
+                >
+                  Try again
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={createGame.pending}
+                  onClick={createGame.discardPending}
+                >
+                  Discard
+                </Button>
+              </Stack>
+            }
+          >
+            The previous match creation may have already succeeded. Try again to recover Seat 1 and
+            your join code, or discard to abandon it.
+          </Callout>
+        ) : null}
+        {joinGame.uncertain && !joinOpen ? (
+          <Callout
+            tone="danger"
+            title="Seat 2 join status is uncertain"
+            action={
+              <Stack direction="horizontal" gap={6}>
+                <Button
+                  id="retry-join-banner-btn"
+                  size="sm"
+                  loading={joinGame.pending}
+                  onClick={() => void handleRetryJoin()}
+                >
+                  Try again
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={joinGame.pending}
+                  onClick={joinGame.discardPending}
+                >
+                  Discard
+                </Button>
+              </Stack>
+            }
+          >
+            Your previous join request may have already claimed Seat 2. Try again to recover your
+            seat key before trying another code.
           </Callout>
         ) : null}
         {boardQuery.error ? (
@@ -700,9 +905,36 @@ export function HexClashApp() {
             {boardQuery.error.message}
           </Callout>
         ) : null}
-        {submitMove.error ? (
-          <Callout tone="danger" title="Move refused">
-            {submitMove.error.message}
+        {submitMove.error || submitMove.uncertain ? (
+          <Callout
+            tone="danger"
+            title={submitMove.uncertain ? "Move status is uncertain" : "Move refused"}
+            action={
+              submitMove.uncertain ? (
+                <Stack direction="horizontal" gap={6}>
+                  <Button
+                    id="retry-move-btn"
+                    size="sm"
+                    loading={submitMove.pending}
+                    onClick={() => void handleRetryMove()}
+                  >
+                    Try again
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={submitMove.pending}
+                    onClick={submitMove.discardPending}
+                  >
+                    Discard
+                  </Button>
+                </Stack>
+              ) : undefined
+            }
+          >
+            {submitMove.uncertain
+              ? "The previous order may have already committed. Try again with the same request, or discard."
+              : submitMove.error?.message}
           </Callout>
         ) : null}
         {replayError ? (
@@ -753,7 +985,7 @@ export function HexClashApp() {
                       variant="ghost"
                       onClick={() => void handleCopyJoinCode(visibleJoinCode)}
                     >
-                      {copiedCode ? "Copied" : "Copy code"}
+                      {copiedCodeValue === visibleJoinCode ? "Copied" : "Copy code"}
                     </Button>
                   </>
                 ) : null}
@@ -809,8 +1041,8 @@ export function HexClashApp() {
                     loading={replayLoading}
                     onClick={() => {
                       if (replayOpen) {
+                        cancelPendingReplay();
                         setReplayOpen(false);
-                        setReplayPlaying(false);
                       } else {
                         void openReplay(board.game.id);
                       }
@@ -1070,7 +1302,7 @@ export function HexClashApp() {
                                   size="sm"
                                   variant="primary"
                                   loading={submitMove.pending}
-                                  disabled={maxMovable < 1}
+                                  disabled={maxMovable < 1 || submitMove.uncertain}
                                   onClick={() => void executeOrder("march")}
                                 >
                                   {targetTile.ownerSeat === viewerSeat
@@ -1094,7 +1326,9 @@ export function HexClashApp() {
                               variant="secondary"
                               loading={submitMove.pending}
                               disabled={
-                                selectedTile.fortified || (currentPlayer?.gold ?? 0) < 3
+                                selectedTile.fortified ||
+                                (currentPlayer?.gold ?? 0) < 3 ||
+                                submitMove.uncertain
                               }
                               onClick={() => void executeOrder("fortify")}
                             >
@@ -1126,7 +1360,11 @@ export function HexClashApp() {
                                 size="sm"
                                 variant="secondary"
                                 loading={submitMove.pending}
-                                disabled={maxReinforce < 1 || reinforceUnits > maxReinforce}
+                                disabled={
+                                  maxReinforce < 1 ||
+                                  reinforceUnits > maxReinforce ||
+                                  submitMove.uncertain
+                                }
                                 onClick={() => void executeOrder("reinforce")}
                               >
                                 Reinforce ({reinforceUnits * 2}g)
@@ -1146,6 +1384,7 @@ export function HexClashApp() {
                           size="sm"
                           variant="secondary"
                           loading={submitMove.pending}
+                          disabled={submitMove.uncertain}
                           onClick={() => void executeOrder("pass")}
                         >
                           Pass turn
@@ -1154,8 +1393,8 @@ export function HexClashApp() {
                           id="order-resign-btn"
                           size="sm"
                           variant="danger"
-                          loading={submitMove.pending}
-                          onClick={() => void executeOrder("resign")}
+                          disabled={submitMove.pending || submitMove.uncertain}
+                          onClick={() => setResignOpen(true)}
                         >
                           Resign match
                         </Button>
@@ -1184,8 +1423,8 @@ export function HexClashApp() {
                           id="order-resign-btn"
                           size="sm"
                           variant="danger"
-                          loading={submitMove.pending}
-                          onClick={() => void executeOrder("resign")}
+                          disabled={submitMove.pending || submitMove.uncertain}
+                          onClick={() => setResignOpen(true)}
                         >
                           Resign match
                         </Button>
@@ -1208,19 +1447,21 @@ export function HexClashApp() {
                     ) : (
                       <ul className="hc-move-list">
                         {replayData.moves.map((move, index) => (
-                          <li
-                            key={move.turnNumber}
-                            className={`hc-move-row ${
-                              replayStep === index + 1 ? "hc-move-row-active" : ""
-                            }`}
-                            style={{ cursor: "pointer" }}
-                            onClick={() => {
-                              setReplayPlaying(false);
-                              setReplayStep(index + 1);
-                            }}
-                          >
-                            <span>{move.outcome.summary}</span>
-                            <span className="hc-move-turn">T{move.turnNumber}</span>
+                          <li key={move.turnNumber}>
+                            <button
+                              type="button"
+                              className={`hc-move-btn ${
+                                replayStep === index + 1 ? "hc-move-btn-active" : ""
+                              }`}
+                              aria-pressed={replayStep === index + 1}
+                              onClick={() => {
+                                setReplayPlaying(false);
+                                setReplayStep(index + 1);
+                              }}
+                            >
+                              <span>{move.outcome.summary}</span>
+                              <span className="hc-move-turn">T{move.turnNumber}</span>
+                            </button>
                           </li>
                         ))}
                       </ul>
@@ -1253,7 +1494,7 @@ export function HexClashApp() {
                     loading={startDemo.pending}
                     onClick={handleStartDemo}
                   >
-                    Start 2-Player Demo Match
+                    {startDemo.uncertain ? "Retry demo match" : "Start 2-Player Demo Match"}
                   </Button>
                   <Button variant="secondary" onClick={() => setJoinOpen(true)}>
                     Join by code
@@ -1325,9 +1566,12 @@ export function HexClashApp() {
                           size="sm"
                           variant={activeGameId === row.id ? "primary" : "secondary"}
                           onClick={() => {
+                            cancelPendingReplay();
                             setActiveGameId(row.id);
                             setSpectatorMode(false);
                             setReplayOpen(false);
+                            setReplayData(null);
+                            setResignOpen(false);
                             setSelectedHex(null);
                             setTargetHex(null);
                           }}
@@ -1339,20 +1583,23 @@ export function HexClashApp() {
                           size="sm"
                           variant="secondary"
                           onClick={() => {
-                            setJoinCodeInput("");
+                            if (!joinGame.uncertain) setJoinCodeInput("");
                             setJoinOpen(true);
                           }}
                         >
                           Enter code
                         </Button>
                       ) : null}
-                      {row.status === "finished" ? (
+                      {row.status === "finished" || (row.status === "active" && canSpectateActive) ? (
                         <Button
                           size="sm"
                           variant="ghost"
                           onClick={() => {
                             setActiveGameId(row.id);
                             setSpectatorMode(true);
+                            setReplayOpen(false);
+                            setReplayData(null);
+                            setResignOpen(false);
                             void openReplay(row.id);
                           }}
                         >
@@ -1380,9 +1627,32 @@ export function HexClashApp() {
             disabled={createGame.pending}
             style={{ border: 0, padding: 0, margin: 0, display: "grid", gap: 12 }}
           >
-            {createGame.error ? (
-              <Callout tone="danger" title="Could not create match">
-                {createGame.error.message}
+            {createGame.error || createGame.uncertain ? (
+              <Callout
+                tone="danger"
+                title={
+                  createGame.uncertain
+                    ? "Previous match creation may have succeeded"
+                    : "Could not create match"
+                }
+                action={
+                  createGame.uncertain ? (
+                    <Button
+                      id="discard-create-btn"
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      disabled={createGame.pending}
+                      onClick={createGame.discardPending}
+                    >
+                      Discard
+                    </Button>
+                  ) : undefined
+                }
+              >
+                {createGame.uncertain
+                  ? "Retry the original request to recover your seat key and join code, or discard to start over."
+                  : createGame.error?.message}
               </Callout>
             ) : null}
             <Field label="Your callsign" htmlFor="create-name">
@@ -1391,6 +1661,7 @@ export function HexClashApp() {
                 value={createName}
                 onChange={(event) => setCreateName(event.target.value)}
                 placeholder="Crimson"
+                disabled={createGame.uncertain}
                 required
               />
             </Field>
@@ -1400,6 +1671,7 @@ export function HexClashApp() {
                 value={createTitle}
                 onChange={(event) => setCreateTitle(event.target.value)}
                 placeholder="Friday skirmish"
+                disabled={createGame.uncertain}
               />
             </Field>
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
@@ -1411,8 +1683,13 @@ export function HexClashApp() {
               >
                 Cancel
               </Button>
-              <Button id="submit-create-btn" type="submit" variant="primary" loading={createGame.pending}>
-                Create match
+              <Button
+                id="submit-create-btn"
+                type="submit"
+                variant="primary"
+                loading={createGame.pending}
+              >
+                {createGame.uncertain ? "Retry create match" : "Create match"}
               </Button>
             </div>
           </fieldset>
@@ -1431,9 +1708,30 @@ export function HexClashApp() {
             disabled={joinGame.pending}
             style={{ border: 0, padding: 0, margin: 0, display: "grid", gap: 12 }}
           >
-            {joinGame.error ? (
-              <Callout tone="danger" title="Could not join match">
-                {joinGame.error.message}
+            {joinGame.error || joinGame.uncertain ? (
+              <Callout
+                tone="danger"
+                title={
+                  joinGame.uncertain ? "Previous join may have claimed Seat 2" : "Could not join match"
+                }
+                action={
+                  joinGame.uncertain ? (
+                    <Button
+                      id="discard-join-btn"
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      disabled={joinGame.pending}
+                      onClick={joinGame.discardPending}
+                    >
+                      Discard
+                    </Button>
+                  ) : undefined
+                }
+              >
+                {joinGame.uncertain
+                  ? "Retry the original join request to recover your seat key, or discard to enter a different join code."
+                  : joinGame.error?.message}
               </Callout>
             ) : null}
             <Field label="Join code" htmlFor="join-code-input">
@@ -1443,6 +1741,7 @@ export function HexClashApp() {
                 onChange={(event) => setJoinCodeInput(event.target.value.toUpperCase())}
                 placeholder="AB12CD"
                 maxLength={6}
+                disabled={joinGame.uncertain}
                 required
               />
             </Field>
@@ -1452,6 +1751,7 @@ export function HexClashApp() {
                 value={joinName}
                 onChange={(event) => setJoinName(event.target.value)}
                 placeholder="Cobalt"
+                disabled={joinGame.uncertain}
                 required
               />
             </Field>
@@ -1465,7 +1765,7 @@ export function HexClashApp() {
                 Cancel
               </Button>
               <Button id="submit-join-btn" type="submit" variant="primary" loading={joinGame.pending}>
-                Join Seat 2
+                {joinGame.uncertain ? "Retry join" : "Join Seat 2"}
               </Button>
             </div>
           </fieldset>
@@ -1555,6 +1855,63 @@ export function HexClashApp() {
                 Copy key
               </Button>
             ) : null}
+          </div>
+        </Stack>
+      </Modal>
+      <Modal
+        open={resignOpen && board?.game.status === "active"}
+        title="Resign match?"
+        onClose={() => {
+          if (!submitMove.pending) setResignOpen(false);
+        }}
+      >
+        <Stack gap={12}>
+          <span className="hc-meta-text">
+            Resigning immediately ends {board?.game.title ?? "this match"} and awards victory to
+            your opponent. This cannot be undone.
+          </span>
+          {submitMove.error || submitMove.uncertain ? (
+            <Callout
+              tone="danger"
+              title={submitMove.uncertain ? "Resign status is uncertain" : "Could not resign"}
+              action={
+                submitMove.uncertain ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    disabled={submitMove.pending}
+                    onClick={submitMove.discardPending}
+                  >
+                    Discard
+                  </Button>
+                ) : undefined
+              }
+            >
+              {submitMove.uncertain
+                ? "The previous resign request may have already completed. Retry to confirm the result."
+                : submitMove.error?.message}
+            </Callout>
+          ) : null}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <Button
+              id="cancel-resign-btn"
+              variant="secondary"
+              disabled={submitMove.pending}
+              onClick={() => setResignOpen(false)}
+            >
+              Keep playing
+            </Button>
+            <Button
+              id="confirm-resign-btn"
+              variant="danger"
+              loading={submitMove.pending}
+              onClick={() =>
+                void (submitMove.uncertain ? handleRetryMove() : executeOrder("resign"))
+              }
+            >
+              {submitMove.uncertain ? "Retry resign" : "Resign match"}
+            </Button>
           </div>
         </Stack>
       </Modal>

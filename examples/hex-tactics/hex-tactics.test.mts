@@ -113,10 +113,10 @@ async function openStagedHexClash() {
     operation: string,
     input: unknown = {},
     idempotencyKey = `op-${++callSeq}`,
-  ): Promise<{
-    status: number;
-    body: { result?: T; error?: { code: string; message: string } };
-  }> {
+  ): Promise<
+    | { ok: true; result: T }
+    | { ok: false; refusal: { code: string; message: string } }
+  > {
     try {
       const reply = (await host.apps.request(approved.publicationId, "invoke", {
         authorityRevision: approved.authorityRevision,
@@ -124,27 +124,18 @@ async function openStagedHexClash() {
         idempotencyKey,
         input,
       })) as { result: T };
-      return { status: 200, body: { result: reply.result } };
+      return { ok: true, result: reply.result };
     } catch (caught: unknown) {
       const err = caught as {
-        status?: number;
         refusal?: { code: string; message: string };
         code?: string;
         message?: string;
       };
-      const status =
-        typeof err.status === "number"
-          ? err.status
-          : err.code === "operation_refused" || err.refusal
-            ? 409
-            : 500;
       return {
-        status,
-        body: {
-          error: err.refusal ?? {
-            code: err.code ?? "error",
-            message: err.message ?? String(caught),
-          },
+        ok: false,
+        refusal: err.refusal ?? {
+          code: err.code ?? "error",
+          message: err.message ?? String(caught),
         },
       };
     }
@@ -300,9 +291,15 @@ describe("HexClash authoritative strategy game", () => {
     expect(summary.collections[0]!.name).toBe("HexClash");
     expect(approved.collectionsApplied).toHaveLength(1);
 
-    const listed = await invoke<{ games: GameSummary[] }>("listGames", {});
-    expect(listed.status).toBe(200);
-    expect(listed.body.result?.games).toEqual([]);
+    const listed = await invoke<{ games: GameSummary[]; canSpectateActive?: boolean }>(
+      "listGames",
+      {},
+    );
+    expect(listed.ok).toBe(true);
+    if (listed.ok) {
+      expect(listed.result.games).toEqual([]);
+      expect(listed.result.canSpectateActive).toBe(true);
+    }
   });
 
   it("enforces server-side Fog of War and hides seeds, join codes, opponent supply, tokens, and out-of-vision moves", async () => {
@@ -318,21 +315,43 @@ describe("HexClash authoritative strategy game", () => {
     expect(p1.joinCode).toMatch(/^[A-Z0-9]{6}$/);
     expect("seed" in p1).toBe(false);
 
-    const waitingLobby = await call<{ games: GameSummary[] }>("listGames", {}, "linkB");
+    const waitingLobby = await call<{ games: GameSummary[]; canSpectateActive?: boolean }>(
+      "listGames",
+      {},
+      "linkB",
+    );
     const waitingJson = JSON.stringify(waitingLobby);
     expect(waitingJson).not.toContain(p1.playerToken);
     expect(waitingJson).not.toContain(p1.joinCode);
+    expect(waitingLobby.canSpectateActive).toBe(false);
     expect(waitingLobby.games[0]!.seed).toBeNull();
     expect("joinCode" in waitingLobby.games[0]!).toBe(false);
 
+    const ownerLobby = await call<{ games: GameSummary[]; canSpectateActive?: boolean }>(
+      "listGames",
+      {},
+      "owner",
+    );
+    expect(ownerLobby.canSpectateActive).toBe(true);
+
+    const joinKey = "join-seat-2-retry-key";
     const p2 = await call<JoinGameReply>(
       "joinGame",
       { joinCode: p1.joinCode, playerName: "Cobalt" },
       "linkB",
+      joinKey,
     );
     expect(p2.seat).toBe(2);
     expect(p2.playerToken).toMatch(/^[a-f0-9]{64}$/);
     expect(p2.playerToken).not.toBe(p1.playerToken);
+
+    const p2Replay = await call<JoinGameReply>(
+      "joinGame",
+      { joinCode: p1.joinCode, playerName: "Cobalt" },
+      "linkB",
+      joinKey,
+    );
+    expect(p2Replay).toEqual(p2);
 
     await expect(
       call("joinGame", { joinCode: p1.joinCode, playerName: "Intruder" }, "linkB"),
@@ -532,11 +551,26 @@ describe("HexClash authoritative strategy game", () => {
     expect("capitalCaptured" in boundaryMove.outcome).toBe(false);
   }, 20_000);
 
-  it("refuses forged tokens, out-of-turn moves, illegal distance, coerced types, and invalid orders with 409 and atomic rollback", async () => {
+  it("refuses forged tokens, out-of-turn moves, stale turns, illegal distance, coerced types, and invalid orders without mutating state", async () => {
     const { invoke } = await openStagedHexClash();
+
+    const longP1 = "A".repeat(40);
+    const longP2 = "B".repeat(40);
+    const longDemo = await invoke<StartDemoReply>("startDemoMatch", {
+      player1Name: longP1,
+      player2Name: longP2,
+      seed: 1234,
+    });
+    expect(longDemo.ok).toBe(true);
+    if (!longDemo.ok) throw new Error("Expected long-name demo match to succeed");
+    expect(longDemo.result.title.length).toBeLessThanOrEqual(64);
+    expect(longDemo.result.seats[0]!.name).toBe(longP1);
+    expect(longDemo.result.seats[1]!.name).toBe(longP2);
+
     const demo = await invoke<StartDemoReply>("startDemoMatch", { seed: 7777 });
-    expect(demo.status).toBe(200);
-    const { gameId, seats } = demo.body.result!;
+    expect(demo.ok).toBe(true);
+    if (!demo.ok) throw new Error("Expected demo match to succeed");
+    const { gameId, seats } = demo.result;
     const s1 = seats[0]!;
     const s2 = seats[1]!;
 
@@ -545,16 +579,22 @@ describe("HexClash authoritative strategy game", () => {
       playerToken: "a".repeat(64),
       actionType: "pass",
     });
-    expect(forgedRes.status).toBe(409);
-    expect(forgedRes.body.error?.code).toBe("unauthorized_player");
+    expect(forgedRes).toMatchObject({ ok: false, refusal: { code: "unauthorized_player" } });
 
     const wrongTurnRes = await invoke("submitMove", {
       gameId,
       playerToken: s2.playerToken,
       actionType: "pass",
     });
-    expect(wrongTurnRes.status).toBe(409);
-    expect(wrongTurnRes.body.error?.code).toBe("not_your_turn");
+    expect(wrongTurnRes).toMatchObject({ ok: false, refusal: { code: "not_your_turn" } });
+
+    const staleTurnRes = await invoke("submitMove", {
+      gameId,
+      playerToken: s1.playerToken,
+      actionType: "pass",
+      expectedTurn: 2,
+    });
+    expect(staleTurnRes).toMatchObject({ ok: false, refusal: { code: "stale_turn" } });
 
     const badDistRes = await invoke("submitMove", {
       gameId,
@@ -566,8 +606,7 @@ describe("HexClash authoritative strategy game", () => {
       toR: 0,
       units: 2,
     });
-    expect(badDistRes.status).toBe(409);
-    expect(badDistRes.body.error?.code).toBe("not_adjacent");
+    expect(badDistRes).toMatchObject({ ok: false, refusal: { code: "not_adjacent" } });
 
     const boolUnitsRes = await invoke("submitMove", {
       gameId,
@@ -577,8 +616,7 @@ describe("HexClash authoritative strategy game", () => {
       fromR: 0,
       units: true,
     });
-    expect(boolUnitsRes.status).toBe(409);
-    expect(boolUnitsRes.body.error?.code).toBe("invalid_units");
+    expect(boolUnitsRes).toMatchObject({ ok: false, refusal: { code: "invalid_units" } });
 
     const nullCoordRes = await invoke("submitMove", {
       gameId,
@@ -587,8 +625,7 @@ describe("HexClash authoritative strategy game", () => {
       fromQ: -3,
       fromR: null,
     });
-    expect(nullCoordRes.status).toBe(409);
-    expect(nullCoordRes.body.error?.code).toBe("invalid_hex");
+    expect(nullCoordRes).toMatchObject({ ok: false, refusal: { code: "invalid_hex" } });
 
     const objectUnitsRes = await invoke("submitMove", {
       gameId,
@@ -600,8 +637,7 @@ describe("HexClash authoritative strategy game", () => {
       toR: 0,
       units: { malicious: 1 },
     });
-    expect(objectUnitsRes.status).toBe(409);
-    expect(objectUnitsRes.body.error?.code).toBe("insufficient_units");
+    expect(objectUnitsRes).toMatchObject({ ok: false, refusal: { code: "insufficient_units" } });
 
     const notOwnerRes = await invoke("submitMove", {
       gameId,
@@ -613,8 +649,7 @@ describe("HexClash authoritative strategy game", () => {
       toR: 0,
       units: 1,
     });
-    expect(notOwnerRes.status).toBe(409);
-    expect(notOwnerRes.body.error?.code).toBe("not_tile_owner");
+    expect(notOwnerRes).toMatchObject({ ok: false, refusal: { code: "not_tile_owner" } });
 
     const leaveZeroRes = await invoke("submitMove", {
       gameId,
@@ -626,8 +661,7 @@ describe("HexClash authoritative strategy game", () => {
       toR: 0,
       units: 6,
     });
-    expect(leaveZeroRes.status).toBe(409);
-    expect(leaveZeroRes.body.error?.code).toBe("insufficient_units");
+    expect(leaveZeroRes).toMatchObject({ ok: false, refusal: { code: "insufficient_units" } });
 
     const tooExpensiveReinforce = await invoke("submitMove", {
       gameId,
@@ -637,17 +671,28 @@ describe("HexClash authoritative strategy game", () => {
       fromR: 0,
       units: 5,
     });
-    expect(tooExpensiveReinforce.status).toBe(409);
-    expect(tooExpensiveReinforce.body.error?.code).toBe("insufficient_gold");
+    expect(tooExpensiveReinforce).toMatchObject({
+      ok: false,
+      refusal: { code: "insufficient_gold" },
+    });
 
     const spectator = await invoke<VisibleBoardState>("getVisibleState", {
       gameId,
       spectator: true,
     });
-    expect(spectator.status).toBe(200);
-    expect(spectator.body.result!.game.turnNumber).toBe(1);
-    expect(spectator.body.result!.players.find((p) => p.seat === 1)?.gold).toBe(4);
-    expect(spectator.body.result!.tiles.find((t) => t.q === -3 && t.r === 0)?.units).toBe(6);
+    expect(spectator.ok).toBe(true);
+    if (!spectator.ok) throw new Error("Expected spectator read to succeed");
+    expect(spectator.result.game.turnNumber).toBe(1);
+    expect(spectator.result.players.find((p) => p.seat === 1)?.gold).toBe(4);
+    expect(spectator.result.tiles.find((t) => t.q === -3 && t.r === 0)?.units).toBe(6);
+
+    const matchingTurnPass = await invoke<SubmitMoveReply>("submitMove", {
+      gameId,
+      playerToken: s1.playerToken,
+      actionType: "pass",
+      expectedTurn: 1,
+    });
+    expect(matchingTurnPass.ok).toBe(true);
   });
 
   it("plays a deterministic match to capital capture victory and reconstructs every turn identically in replay", async () => {
@@ -867,6 +912,7 @@ describe("HexClash authoritative strategy game", () => {
     const replay = await call<ReplayPayload>("replayGame", { gameId }, "linkB");
     expect(replay.moves.length).toBeGreaterThan(5);
     expect(replay.nextAfterTurn).toBeNull();
+    expect("joinCode" in replay.game).toBe(false);
 
     const pagedMoves = [];
     let cursor: number | null = 0;
@@ -1046,6 +1092,24 @@ describe("HexClash authoritative strategy game", () => {
             ).toBe("false");
 
             await reloadedFrame.locator("#order-resign-btn").click();
+            await reloadedFrame.locator("#confirm-resign-btn").waitFor({
+              state: "visible",
+              timeout: 5_000,
+            });
+            expect(await reloadedFrame.locator("#replay-toggle-btn").count()).toBe(0);
+            await reloadedFrame.locator("#cancel-resign-btn").click();
+            await reloadedFrame.locator("#confirm-resign-btn").waitFor({
+              state: "hidden",
+              timeout: 5_000,
+            });
+            expect(await reloadedFrame.locator("#replay-toggle-btn").count()).toBe(0);
+
+            await reloadedFrame.locator("#order-resign-btn").click();
+            await reloadedFrame.locator("#confirm-resign-btn").waitFor({
+              state: "visible",
+              timeout: 5_000,
+            });
+            await reloadedFrame.locator("#confirm-resign-btn").click();
             await reloadedFrame.locator("#replay-toggle-btn").waitFor({
               state: "visible",
               timeout: 15_000,
@@ -1055,6 +1119,15 @@ describe("HexClash authoritative strategy game", () => {
               state: "visible",
               timeout: 15_000,
             });
+            expect(
+              await reloadedFrame.locator('[data-hex="-3,0"]').getAttribute("data-interactive"),
+            ).toBe("false");
+            expect(
+              await reloadedFrame.locator('[data-hex="-3,0"]').getAttribute("role"),
+            ).toBeNull();
+            expect(await reloadedFrame.locator("button.hc-move-btn").count()).toBeGreaterThanOrEqual(
+              2,
+            );
 
             expect(errors).toEqual([]);
             expect(handshakeDelivered).toBe(true);

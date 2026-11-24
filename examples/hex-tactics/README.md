@@ -23,11 +23,14 @@ HexClash is a two-player turn-based hex strategy game built as a workspace examp
 ## Try it
 
 1. Copy `examples/hex-tactics` into a dohc workspace folder named `hex-tactics`.
-2. Stage and approve the app and Collection in one step (`dohc app stage` or Review app in dohc).
+2. Stage the app and Collection with `dohc app stage`, then approve the staged review with `dohc app approveStaged` using the returned `stageId` and `reviewDigest` (or use Review app in dohc).
 3. Open the app and click **Start 2-Player Demo Match**, then switch between Seat 1 and Seat 2 to watch server-side fog of war shift in real time.
 
 ## Run tests
 
+Install Playwright's Chromium binary once if it is not already present, then run the suite:
+
 ```bash
+pnpm exec playwright install chromium
 pnpm exec vitest run examples/hex-tactics/hex-tactics.test.mts
 ```
