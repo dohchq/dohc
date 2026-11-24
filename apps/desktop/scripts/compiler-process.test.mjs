@@ -33,6 +33,14 @@ const bounds = {
   maxOutputBytes: 4096,
   maxErrorBytes: 8192,
 };
+// Real compiles get the app's 1 GiB memory bound. Off a staged compiler, the
+// source worker also bundles the built-in kit, Lucide icons included.
+const compileBounds = {
+  ...bounds,
+  maxMemoryBytes: 1024 * 1024 * 1024,
+  maxInputBytes: 8192,
+  maxOutputBytes: 8192,
+};
 // dohc stages the compiler owner for Apple silicon Macs and Linux x64.
 const darwin = process.platform === "darwin" && process.arch === "arm64";
 const confined = darwin || (process.platform === "linux" && process.arch === "x64");
@@ -317,11 +325,7 @@ test(
       ],
       bounds: { maxInputFiles: 8, maxInputBytes: 4096, maxOutputBytes: 4096 },
     };
-    const pending = compileClosedAppInProcess(runtimeFor(compilerWorker()), request, {
-      ...bounds,
-      maxInputBytes: 8192,
-      maxOutputBytes: 8192,
-    });
+    const pending = compileClosedAppInProcess(runtimeFor(compilerWorker()), request, compileBounds);
     bytes.fill(0);
     request.entryPath = "changed.js";
     const result = await pending;
@@ -402,11 +406,10 @@ test(
       ],
       bounds: { maxInputFiles: 8, maxInputBytes: 4096, maxOutputBytes: 4096 },
     };
-    const processBounds = { ...bounds, maxInputBytes: 8192, maxOutputBytes: 8192 };
     const good = await compileClosedAppInProcess(
       runtimeFor(compilerWorker()),
       request,
-      processBounds,
+      compileBounds,
     );
     const { directory, runtime } = await fixture(t, "");
     // The adapter owns worker arguments, so a forged worker names its fixed test response in its own source.
@@ -446,7 +449,7 @@ test(
       change(forged);
       await writeFile(responsePath, JSON.stringify(forged));
       await assert.rejects(
-        compileClosedAppInProcess(runtime, request, processBounds),
+        compileClosedAppInProcess(runtime, request, compileBounds),
         /compiler|Compiler/,
       );
     }
