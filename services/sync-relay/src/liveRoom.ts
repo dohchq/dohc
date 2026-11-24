@@ -614,9 +614,9 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     dispose(room);
   }
   /**
-   * Applies an edit to the room's copy of the note and gives the reason it does not fit there, if
-   * it does not. The copy is built again whenever it may differ from the note, as after an edit the
-   * room did not take.
+   * Checks an edit against the room's copy of the note and gives the reason it does not fit there,
+   * if it does not. The copy is built again whenever it may differ from the note, as after an edit
+   * the room did not take.
    */
   function refusalOf(room: Room, bytes: Uint8Array) {
     if (
