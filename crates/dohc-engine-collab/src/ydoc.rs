@@ -1770,13 +1770,18 @@ impl Ydoc {
                     };
                     let changed = &blocks[start as usize..blocks.len() - end as usize];
                     let removed = frag.len(txn) - start - end;
-                    let paired = if file_fold {
-                        edit_blocks_in_place::<WIRE_SEED>(
-                            txn, &frag, start, removed, changed, inline,
-                        )
-                    } else {
-                        0
-                    };
+                    let paired = u32::from(
+                        file_fold
+                            && removed == 1
+                            && changed.len() == 1
+                            && edit_block_in_place::<WIRE_SEED>(
+                                txn,
+                                &frag,
+                                start,
+                                &changed[0],
+                                inline,
+                            ),
+                    );
                     if removed > paired {
                         frag.remove_range(txn, start + paired, removed - paired);
                     }
@@ -5393,42 +5398,29 @@ fn same_text<A: ReadTxn, B: ReadTxn>(
         })
 }
 
-fn edit_blocks_in_place<const WIRE_DEFAULTS: bool>(
+fn edit_block_in_place<const WIRE_DEFAULTS: bool>(
     txn: &mut yrs::TransactionMut<'_>,
     body: &yrs::XmlFragmentRef,
-    start: u32,
-    count: u32,
-    blocks: &[MdBlock<'_>],
+    index: u32,
+    block: &MdBlock<'_>,
     inline: bool,
-) -> u32 {
-    let utf16 = txn.doc().offset_kind() == yrs::OffsetKind::Utf16;
-    if count == 0 || count != blocks.len() as u32 || !utf16 {
-        return 0;
+) -> bool {
+    if txn.doc().offset_kind() != yrs::OffsetKind::Utf16 {
+        return false;
     }
     let old: Vec<XmlOut> = body.children(&*txn).collect();
     if old.len() as u32 != body.len(&*txn) {
-        return 0;
+        return false;
     }
     let scratch = yrs::Doc::new();
     let fresh = scratch.get_or_insert_xml_fragment(ROOT_BODY);
     let mut scratch_txn = scratch.transact_mut();
-    for block in blocks.iter().rev() {
-        insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &fresh, 0, block, inline);
-    }
-    let new: Vec<XmlOut> = fresh.children(&scratch_txn).collect();
-    if new.len() as u32 != count {
-        return 0;
-    }
-    for (offset, (old, new)) in old[start as usize..].iter().zip(&new).enumerate() {
-        if !(same_shape(&*txn, old, &scratch_txn, new)
-            && edit_in_place(txn, old, &scratch_txn, new))
-        {
-            let index = start + offset as u32;
-            body.remove_range(txn, index, 1);
-            insert_md_block::<_, WIRE_DEFAULTS>(txn, body, index, &blocks[offset], inline);
-        }
-    }
-    count
+    insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &fresh, 0, block, inline);
+    let (Some(new), 1) = (fresh.get(&scratch_txn, 0), fresh.len(&scratch_txn)) else {
+        return false;
+    };
+    let old = &old[index as usize];
+    same_shape(&*txn, old, &scratch_txn, &new) && edit_in_place(txn, old, &scratch_txn, &new)
 }
 
 fn same_shape<A: ReadTxn, B: ReadTxn>(

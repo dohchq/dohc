@@ -763,3 +763,21 @@ fn a_quote_whose_second_line_changes_kind_is_replaced_without_editing_its_first(
     let grown = clock(&doc) - start;
     assert!(grown < added.len() as u64 + 200, "grew {grown}");
 }
+
+#[test]
+fn a_save_that_shifts_paragraphs_does_not_move_a_collaborators_typing() {
+    let doc = folded("Apples.\n\nBananas.\n");
+    let peer = Ydoc::wire();
+    peer.apply(&doc.encode_full_state()).unwrap();
+    let text = peer.richdoc_block_text(0).unwrap();
+    {
+        let mut txn = peer.doc.transact_mut();
+        text.insert(&mut txn, 6, " from the orchard");
+    }
+    let markdown = "Cherries.\n\nApples in the basket.\n";
+    doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, markdown)
+        .expect(markdown);
+    doc.apply(&peer.encode_full_state()).unwrap();
+    let merged = doc.project_richdoc().unwrap();
+    assert!(!merged.contains("Cherries from the orchard"), "{merged}");
+}
