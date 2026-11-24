@@ -34,8 +34,11 @@ Rules:
 The closed app compiler bundles `.ts`, `.tsx`, `.js`, `.jsx`, and `.css` with extensionless relative imports and ships a built-in kit without needing `node_modules`:
 
 - `react`, `react-dom`, `react-dom/client`, `react/jsx-runtime`
-- `lucide-react`
-- `@dohc/app-kit` / `@dohc/ui` / `@dohc/charts` (workspace UI controls, theme tokens, and charts)
+- `dohc/app` (backend client and hooks), `dohc/ui` (themed controls and formatters), `dohc/charts` (SVG charts)
+- `dohc/icons` (a curated set of Lucide icons, such as `Plus`, `Trash2`, `Receipt`, and `Wallet`; unused icons are left out of the bundle)
+- `dohc/money` (`formatCents` and `parseCents` for exact whole-cent amounts) and `dohc/csv` (`parseCsv` and formula-safe `toCsv`)
+
+Other packages, including `lucide-react`, need their files in the app folder and a `packageMap` entry.
 
 ## Calling Collection operations (`dohc-app-channel`)
 

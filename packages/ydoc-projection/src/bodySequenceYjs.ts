@@ -37,34 +37,66 @@ function attributesOf(element: Y.XmlElement): SequenceAttrs {
   );
 }
 
+/** The block element a stored item holds, when the item is the live start of a block. */
+export function boundaryOf(item: Y.Item): Y.XmlElement | null {
+  const content = item.content;
+  return !item.deleted &&
+    content instanceof Y.ContentType &&
+    content.type instanceof Y.XmlElement &&
+    content.type.nodeName === BLOCK_ELEMENT
+    ? content.type
+    : null;
+}
+
+/**
+ * Calls `visit` for each piece from the item `first` up to the item `end`, with the number of
+ * sequence positions between `first` and the piece, and the item it was read from. `marks` is the
+ * formatting in force at `first`; afterwards it is the formatting in force at `end`.
+ *
+ * It reads the stored items, not Yjs's delta, which shows an embedded string as text and builds
+ * its attributes on an object a key named `__proto__` can reshape.
+ */
+export function visitPieces(
+  first: Y.Item | null,
+  end: Y.Item | null,
+  marks: Map<string, unknown>,
+  markNames: ReadonlySet<string> | undefined,
+  visit: (piece: SequencePiece, offset: number, item: Y.Item) => void,
+): void {
+  let offset = 0;
+  for (let item = first; item !== null && item !== end; item = item.right) {
+    if (item.deleted) continue;
+    const content = item.content;
+    if (content instanceof Y.ContentFormat) {
+      if (!markNames || markNames.has(content.key)) marks.set(content.key, content.value);
+      continue;
+    }
+    if (content instanceof Y.ContentString)
+      visit({ text: content.str, marks: Object.fromEntries(marks) }, offset, item);
+    else if (content instanceof Y.ContentType && content.type instanceof Y.XmlElement) {
+      const attrs = attributesOf(content.type);
+      visit(
+        content.type.nodeName === BLOCK_ELEMENT
+          ? { boundary: attrs }
+          : { atom: content.type.nodeName, attrs },
+        offset,
+        item,
+      );
+    }
+    offset += item.length;
+  }
+}
+
 /**
  * The pieces of a body sequence, in order: boundaries, letters with their marks, and inline items.
- * It reads the stored items, not Yjs's delta, which shows an embedded string as text and builds
- * its attributes on an object a key named `__proto__` can reshape. With `markNames`, formatting
- * under any other key is left out.
+ * With `markNames`, formatting under any other key is left out.
  */
 export function piecesOfSequence(
   sequence: StoredList,
   markNames?: ReadonlySet<string>,
 ): SequencePiece[] {
   const pieces: SequencePiece[] = [];
-  const marks = new Map<string, unknown>();
-  for (let item = sequence._start; item !== null; item = item.right) {
-    if (item.deleted) continue;
-    const content = item.content;
-    if (content instanceof Y.ContentFormat) {
-      if (!markNames || markNames.has(content.key)) marks.set(content.key, content.value);
-    } else if (content instanceof Y.ContentString)
-      pieces.push({ text: content.str, marks: Object.fromEntries(marks) });
-    else if (content instanceof Y.ContentType && content.type instanceof Y.XmlElement) {
-      const attrs = attributesOf(content.type);
-      pieces.push(
-        content.type.nodeName === BLOCK_ELEMENT
-          ? { boundary: attrs }
-          : { atom: content.type.nodeName, attrs },
-      );
-    }
-  }
+  visitPieces(sequence._start, null, new Map(), markNames, (piece) => pieces.push(piece));
   return pieces;
 }
 

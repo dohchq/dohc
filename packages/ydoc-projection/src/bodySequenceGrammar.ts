@@ -18,13 +18,14 @@ export type SequenceFrame = { type: string; id: string; attrs: SequenceAttrs };
 export type SequenceInline =
   | { text: string; marks: SequenceAttrs }
   | { atom: string; attrs: SequenceAttrs };
-export type SequenceLeaf = {
+export type SequenceBoundary = { boundary: SequenceAttrs };
+export type SequenceLeaf<Inline extends SequenceInline = SequenceInline> = {
   type: string;
   attrs: SequenceAttrs;
   path: SequenceFrame[];
-  inline: SequenceInline[];
+  inline: Inline[];
 };
-export type SequencePiece = { boundary: SequenceAttrs } | SequenceInline;
+export type SequencePiece = SequenceBoundary | SequenceInline;
 
 /**
  * The note's container records: `<id>` holds a container's node type and `<id>.<attribute>` one of
@@ -227,20 +228,24 @@ function pathOf(
   return path;
 }
 
+function startsLeaf(piece: SequencePiece): piece is SequenceBoundary {
+  return "boundary" in piece;
+}
+
 /**
  * The leaves a sequence holds. What stands before the first boundary is a paragraph with no path,
  * if any of it is a letter or an inline item the schema knows.
  */
-export function leavesOfSequence(
+export function leavesOfSequence<Inline extends SequenceInline = SequenceInline>(
   schema: Schema,
-  pieces: Iterable<SequencePiece>,
+  pieces: Iterable<SequenceBoundary | Inline>,
   containers: ContainerRecords,
-): SequenceLeaf[] {
+): SequenceLeaf<Inline>[] {
   const shape = shapeOf(schema);
-  const leaves: SequenceLeaf[] = [];
+  const leaves: SequenceLeaf<Inline>[] = [];
   const held = new Map<string, SequenceAttrs>();
   for (const piece of pieces) {
-    if ("boundary" in piece)
+    if (startsLeaf(piece))
       leaves.push({
         type:
           typeof own(piece.boundary, "type") === "string"
@@ -312,23 +317,136 @@ function marksFor(schema: Schema, holder: NodeType, raw: SequenceAttrs): readonl
   return holder.allowedMarks(marks);
 }
 
-type Open = { frame: SequenceFrame; type: NodeType; children: ProseMirrorNode[] };
+/** One block that holds no blocks, and the pieces it shows, in the order it shows them. */
+export type LeafBlock<Inline extends SequenceInline = SequenceInline> = {
+  node: ProseMirrorNode;
+  shown: Inline[];
+};
 
-function closed(open: Open, attrs: SequenceAttrs): ProseMirrorNode {
-  const content = Fragment.fromArray(open.children);
-  const missing = open.type.contentMatch.fillBefore(content, true);
-  return open.type.create(attrs, missing ? missing.append(content) : content);
+/** What one leaf reads as: its own block, and a paragraph after it for what the block cannot hold. */
+export type ReadLeaf<Inline extends SequenceInline = SequenceInline> = {
+  leaf: SequenceLeaf<Inline>;
+  own: LeafBlock<Inline>;
+  after: LeafBlock<Inline> | null;
+};
+
+/**
+ * A document, and the blocks in it that hold no blocks, in document order. For the block at one
+ * index: `starts` has where it starts in the document, `paths` the ids of the containers it sits
+ * in, outermost first, and `leaves` the index of the leaf it was read from. A paragraph the reader
+ * added in front of a container's content has the index of that container's first leaf, and the
+ * one paragraph of a note with no leaf has 0.
+ */
+export type PlacedLeaves<Inline extends SequenceInline = SequenceInline> = {
+  doc: ProseMirrorNode;
+  blocks: LeafBlock<Inline>[];
+  starts: number[];
+  leaves: number[];
+  paths: (readonly string[])[];
+};
+
+function inlineNode(
+  schema: Schema,
+  shape: Shape,
+  piece: SequenceInline,
+  holder: NodeType,
+): ProseMirrorNode | "refused" | null {
+  if ("text" in piece) {
+    if (piece.text === "") return null;
+    return holder.isTextblock
+      ? schema.text(piece.text, marksFor(schema, holder, piece.marks))
+      : "refused";
+  }
+  const type = schema.nodes[piece.atom];
+  if (!shape.inlineItem(type)) return null;
+  return shape.children.get(holder)!.has(type)
+    ? type.create(attrsFor(type, piece.attrs))
+    : "refused";
 }
 
 /**
- * The document a sequence of leaves stands for. Every sequence reads as a valid document, and
- * every letter and every inline item the schema knows is in that document once.
+ * The blocks one leaf reads as. `as` is the leaf's type where it stands, when that is not the
+ * type it names.
  */
-export function readBodyLeaves(schema: Schema, leaves: readonly SequenceLeaf[]): ProseMirrorNode {
+export function readLeaf<Inline extends SequenceInline>(
+  schema: Schema,
+  leaf: SequenceLeaf<Inline>,
+  as?: NodeType,
+): ReadLeaf<Inline> {
+  const shape = shapeOf(schema);
+  const named = schema.nodes[leaf.type];
+  const type = as ?? (shape.leafBlock(named) ? named : shape.paragraph);
+  const own: ProseMirrorNode[] = [];
+  const after: ProseMirrorNode[] = [];
+  const shown: Inline[] = [];
+  const shownAfter: Inline[] = [];
+  let spilled = false;
+  for (const piece of leaf.inline) {
+    const held = spilled ? "refused" : inlineNode(schema, shape, piece, type);
+    if (held === "refused") {
+      spilled = true;
+      const moved = inlineNode(schema, shape, piece, shape.paragraph);
+      if (moved && moved !== "refused") {
+        after.push(moved);
+        shownAfter.push(piece);
+      }
+    } else if (held) {
+      own.push(held);
+      shown.push(piece);
+    }
+  }
+  return {
+    leaf,
+    own: {
+      node: type.create(attrsFor(type, leaf.attrs), type.isTextblock ? own : undefined),
+      shown,
+    },
+    after:
+      after.length > 0
+        ? { node: shape.paragraph.create(null, Fragment.fromArray(after)), shown: shownAfter }
+        : null,
+  };
+}
+
+type Fitted = { frame: SequenceFrame; type: NodeType };
+type Open = Fitted & {
+  children: ProseMirrorNode[];
+  contentStart: number;
+  firstBlock: number;
+  firstLeaf: number;
+};
+
+const NO_FRAMES: readonly Fitted[] = [];
+const NO_PATH: readonly string[] = [];
+
+/**
+ * The document that leaves stand for, each already read, and where each of their blocks is in it.
+ * Every sequence reads as a valid document, and every letter and every inline item the schema
+ * knows is in that document once.
+ */
+export function placeLeaves<Inline extends SequenceInline>(
+  schema: Schema,
+  read: readonly ReadLeaf<Inline>[],
+): PlacedLeaves<Inline> {
   const shape = shapeOf(schema);
   const top: ProseMirrorNode[] = [];
   const stack: Open[] = [];
+  const blocks: LeafBlock<Inline>[] = [];
+  const starts: number[] = [];
+  const leaves: number[] = [];
+  const paths: (readonly string[])[] = [];
+  let pos = 0;
+  let ids = NO_PATH;
   const into = () => stack.at(-1)?.children ?? top;
+  const idsOfStack = () => (stack.length === 0 ? NO_PATH : stack.map((open) => open.frame.id));
+  const put = (block: LeafBlock<Inline>, leaf: number) => {
+    blocks.push(block);
+    starts.push(pos);
+    leaves.push(leaf);
+    paths.push(ids);
+    into().push(block.node);
+    pos += block.node.nodeSize;
+  };
   const fitted = new WeakMap<SequenceAttrs, { type: NodeType; attrs: SequenceAttrs }>();
   const frameAttrs = (type: NodeType, stored: SequenceAttrs) => {
     const known = fitted.get(stored);
@@ -338,41 +456,61 @@ export function readBodyLeaves(schema: Schema, leaves: readonly SequenceLeaf[]):
     return attrs;
   };
   const closeTo = (depth: number) => {
+    if (stack.length <= depth) return;
     while (stack.length > depth) {
       const open = stack.pop()!;
-      into().push(closed(open, frameAttrs(open.type, open.frame.attrs)));
+      const content = Fragment.fromArray(open.children);
+      const missing = open.type.contentMatch.fillBefore(content, true);
+      if (missing && missing.size > 0) {
+        const path = [...idsOfStack(), open.frame.id];
+        const added: LeafBlock<Inline>[] = [];
+        const addedStarts: number[] = [];
+        missing.descendants((node, offset) => {
+          if (!node.isTextblock && !node.isLeaf) return true;
+          added.push({ node, shown: [] });
+          addedStarts.push(open.contentStart + offset);
+          return false;
+        });
+        for (let block = open.firstBlock; block < starts.length; block++)
+          starts[block]! += missing.size;
+        blocks.splice(open.firstBlock, 0, ...added);
+        starts.splice(open.firstBlock, 0, ...addedStarts);
+        leaves.splice(open.firstBlock, 0, ...added.map(() => open.firstLeaf));
+        paths.splice(open.firstBlock, 0, ...added.map(() => path));
+        pos += missing.size;
+      }
+      into().push(
+        open.type.create(
+          frameAttrs(open.type, open.frame.attrs),
+          missing ? missing.append(content) : content,
+        ),
+      );
+      pos += 1;
     }
-  };
-  const inline = (piece: SequenceInline, holder: NodeType): ProseMirrorNode | "refused" | null => {
-    if ("text" in piece) {
-      if (piece.text === "") return null;
-      return holder.isTextblock
-        ? schema.text(piece.text, marksFor(schema, holder, piece.marks))
-        : "refused";
-    }
-    const type = schema.nodes[piece.atom];
-    if (!shape.inlineItem(type)) return null;
-    return shape.children.get(holder)!.has(type)
-      ? type.create(attrsFor(type, piece.attrs))
-      : "refused";
+    ids = idsOfStack();
   };
 
-  for (const leaf of leaves) {
-    const given = schema.nodes[leaf.type];
-    let leafType = shape.leafBlock(given) ? given : shape.paragraph;
-    const path: { frame: SequenceFrame; type: NodeType }[] = [];
+  read.forEach((given, index) => {
+    const leaf = given.leaf;
+    const named = schema.nodes[leaf.type];
+    let leafType = shape.leafBlock(named) ? named : shape.paragraph;
+    let path = NO_FRAMES;
     let parent = schema.topNodeType;
-    for (const frame of leaf.path.slice(0, MAX_SEQUENCE_DEPTH)) {
-      const type = schema.nodes[frame.type];
-      if (!shape.container(type) || !shape.children.get(parent)!.has(type)) break;
-      path.push({ frame, type });
-      parent = type;
+    if (leaf.path.length > 0) {
+      const fitted: Fitted[] = [];
+      for (const frame of leaf.path.slice(0, MAX_SEQUENCE_DEPTH)) {
+        const type = schema.nodes[frame.type];
+        if (!shape.container(type) || !shape.children.get(parent)!.has(type)) break;
+        fitted.push({ frame, type });
+        parent = type;
+      }
+      while (fitted.length > 0 && !shape.children.get(parent)!.has(leafType)) {
+        fitted.pop();
+        parent = fitted.at(-1)?.type ?? schema.topNodeType;
+      }
+      path = fitted;
     }
-    while (!shape.children.get(parent)!.has(leafType)) {
-      if (path.length === 0) leafType = shape.paragraph;
-      else path.pop();
-      parent = path.at(-1)?.type ?? schema.topNodeType;
-    }
+    if (!shape.children.get(parent)!.has(leafType)) leafType = shape.paragraph;
 
     let shared = 0;
     while (
@@ -383,27 +521,44 @@ export function readBodyLeaves(schema: Schema, leaves: readonly SequenceLeaf[]):
     )
       shared++;
     closeTo(shared);
-    for (const { frame, type } of path.slice(shared)) stack.push({ frame, type, children: [] });
-
-    const own: ProseMirrorNode[] = [];
-    const after: ProseMirrorNode[] = [];
-    let spilled = false;
-    for (const piece of leaf.inline) {
-      const held = spilled ? "refused" : inline(piece, leafType);
-      if (held === "refused") {
-        spilled = true;
-        const moved = inline(piece, shape.paragraph);
-        if (moved && moved !== "refused") after.push(moved);
-      } else if (held) own.push(held);
+    if (path.length > shared) {
+      for (const fitted of path.slice(shared)) {
+        pos += 1;
+        stack.push({
+          ...fitted,
+          children: [],
+          contentStart: pos,
+          firstBlock: blocks.length,
+          firstLeaf: index,
+        });
+      }
+      ids = idsOfStack();
     }
-    into().push(
-      leafType.create(attrsFor(leafType, leaf.attrs), leafType.isTextblock ? own : undefined),
-    );
-    if (after.length > 0) into().push(shape.paragraph.create(null, Fragment.fromArray(after)));
-  }
+
+    const fits = given.own.node.type === leafType ? given : readLeaf(schema, leaf, leafType);
+    put(fits.own, index);
+    if (fits.after) put(fits.after, index);
+  });
   closeTo(0);
-  if (top.length === 0) top.push(shape.paragraph.create());
-  return schema.topNodeType.create(null, Fragment.fromArray(top));
+  if (top.length === 0) put({ node: shape.paragraph.create(), shown: [] }, 0);
+  return {
+    doc: schema.topNodeType.create(null, Fragment.fromArray(top)),
+    blocks,
+    starts,
+    leaves,
+    paths,
+  };
+}
+
+/**
+ * The document a sequence of leaves stands for. Every sequence reads as a valid document, and
+ * every letter and every inline item the schema knows is in that document once.
+ */
+export function readBodyLeaves(schema: Schema, leaves: readonly SequenceLeaf[]): ProseMirrorNode {
+  return placeLeaves(
+    schema,
+    leaves.map((leaf) => readLeaf(schema, leaf)),
+  ).doc;
 }
 
 /**
