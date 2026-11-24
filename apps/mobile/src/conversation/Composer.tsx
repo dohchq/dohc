@@ -5,13 +5,23 @@ import * as Haptics from "expo-haptics";
 import { SymbolView } from "expo-symbols";
 import { ArrowUp, SquarePen, X } from "lucide-react-native";
 import { useMemo, useRef, useState, type ReactNode } from "react";
-import { AccessibilityInfo, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import {
+  AccessibilityInfo,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 import { KeyboardStickyView } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ChatComposerField, type ClearRequest } from "../../modules/chat-composer";
 import { ProblemLine } from "../account/ProblemLine";
 import type { OutboxState } from "../server/outbox";
 import { useTheme } from "../theme";
+import { TOUCH } from "../touch";
+import { useBackCloses } from "../backCloses";
 import { ReplyContext, replyLabel, type ReplyTo } from "./ReplyContext";
 import {
   clearedBy,
@@ -140,6 +150,9 @@ export function Composer({
   const { text, title } = draft;
   // A stream that takes only posts is always writing one.
   const mode = replies ? "reply" : lanes.send ? draft.chosen : "post";
+  // Back closes a New post's title, or the reply's context, before it leaves the chat.
+  useBackCloses(mode === "post" && lanes.send, () => choose("send"));
+  useBackCloses(replyTo !== null && onCancelReply !== undefined, () => onCancelReply?.());
   const [height, setHeight] = useState(FIELD_MIN);
   // The last clear asked of the field, and the draft it was for: null for a reply, whose clear closes nothing. Token 0
   // asks nothing. Send waits for its answer.
@@ -380,13 +393,16 @@ function Dock({
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   return (
-    <KeyboardStickyView offset={{ closed: 0, opened: insets.bottom - 6 }} style={styles.sticky}>
+    <KeyboardStickyView
+      offset={{ closed: 0, opened: insets.bottom - 6 + LIFT }}
+      style={styles.sticky}
+    >
       <View
         onLayout={(event) => onLayoutHeight?.(event.nativeEvent.layout.height)}
         style={[
           styles.bar,
           {
-            paddingBottom: Math.max(insets.bottom - 4, 6),
+            paddingBottom: Math.max(insets.bottom - 4 + LIFT, 6),
             backgroundColor: theme.bg,
             borderTopColor: theme.line,
           },
@@ -397,6 +413,10 @@ function Dock({
     </KeyboardStickyView>
   );
 }
+
+// Android's gesture handle sits lower in its inset than iOS's home indicator: the bar keeps 8 dp more above it there.
+// The keyboard's offset takes the same back, so above the keyboard the bar sits as it does on iOS.
+const LIFT = Platform.OS === "android" ? 8 : 0;
 
 const styles = StyleSheet.create({
   sticky: { position: "absolute", left: 0, right: 0, bottom: 0 },
@@ -417,9 +437,9 @@ const styles = StyleSheet.create({
   },
   row: { flexDirection: "row", alignItems: "flex-end", gap: 8 },
   round: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: TOUCH,
+    height: TOUCH,
+    borderRadius: TOUCH / 2,
     alignItems: "center",
     justifyContent: "center",
   },

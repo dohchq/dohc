@@ -3,7 +3,7 @@ import { usePathname } from "expo-router";
 import { NativeTabs } from "expo-router/native-tabs";
 import { File, Paths } from "expo-file-system";
 import { useCallback, useEffect, useState } from "react";
-import { View } from "react-native";
+import { Platform, View } from "react-native";
 import { useWorkspaces, WorkspacesProvider } from "../../src/chats/Workspaces";
 import { demoMode } from "../../src/demo";
 import { NoticesProvider, useNotices } from "../../src/notices/NoticesState";
@@ -84,7 +84,17 @@ function Tabs({ toast, onCloseToast }: { toast: ToastMessage | null; onCloseToas
   const pathname = usePathname();
   return (
     <View style={{ flex: 1 }}>
-      <NativeTabs tintColor={theme.accent}>
+      {/* Android's Material bar takes dohc's paper and ink, not the system's own palette; iOS draws Liquid Glass. */}
+      <NativeTabs
+        tintColor={theme.accent}
+        backgroundColor={Platform.OS === "android" ? theme.panel : undefined}
+        indicatorColor={theme.panel2}
+        iconColor={Platform.OS === "android" ? theme.muted : undefined}
+        labelStyle={Platform.OS === "android" ? { color: theme.muted } : undefined}
+        rippleColor={`${theme.ink}1f`}
+        badgeBackgroundColor={Platform.OS === "android" ? theme.danger : undefined}
+        badgeTextColor={theme.bg}
+      >
         <NativeTabs.Trigger name="(chats)">
           <NativeTabs.Trigger.Icon
             sf={{

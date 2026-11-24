@@ -4,12 +4,13 @@ import { chatWords } from "@dohc/interface-words/notices";
 import { DarkTheme, DefaultTheme, Stack, ThemeProvider, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useMemo } from "react";
-import { useColorScheme } from "react-native";
+import { Platform, useColorScheme } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { AccountGate, AccountProvider } from "../src/account/AccountProvider";
 import { demoMode } from "../src/demo";
 import { AlertTaps } from "../src/push/AlertTaps";
+import { ChoiceSheetHost } from "../src/ChoiceSheet";
 import { sampleBuild } from "../src/sampleBuild";
 import { WarmEditor } from "../src/pages/WarmEditor";
 import { useTheme } from "../src/theme";
@@ -41,6 +42,12 @@ export default function RootLayout() {
       },
     };
   }, [dark, theme]);
+  // iOS fills a sheet with its own material and rounds it; Android's sheet paints nothing, so it takes the raised
+  // surface and Material's 28 dp corners.
+  const sheetContent = {
+    backgroundColor: Platform.OS === "android" ? theme.raised : "transparent",
+  };
+  const sheetCorner = Platform.OS === "android" ? 28 : undefined;
   useEffect(() => {
     openTestRoute?.(router);
   }, [router]);
@@ -61,8 +68,9 @@ export default function RootLayout() {
                 presentation: "formSheet",
                 sheetAllowedDetents: "fitToContents",
                 sheetGrabberVisible: true,
+                sheetCornerRadius: sheetCorner,
                 headerShown: false,
-                contentStyle: { backgroundColor: "transparent" },
+                contentStyle: sheetContent,
               }}
             />
             <Stack.Screen name="settings" options={{ title: accountWords.settings }} />
@@ -78,8 +86,9 @@ export default function RootLayout() {
                 presentation: "formSheet",
                 sheetAllowedDetents: "fitToContents",
                 sheetGrabberVisible: true,
+                sheetCornerRadius: sheetCorner,
                 headerShown: false,
-                contentStyle: { backgroundColor: "transparent" },
+                contentStyle: sheetContent,
               }}
             />
           </Stack>
@@ -92,15 +101,21 @@ export default function RootLayout() {
       </ThemeProvider>
     </GestureHandlerRootView>
   );
-  // Any build without sample data signs in to a server first.
-  return sampleBuild ? (
-    app
-  ) : (
-    <AccountProvider>
-      <AccountGate>
-        {app}
-        <AlertTaps />
-      </AccountGate>
-    </AccountProvider>
+  // Any build without sample data signs in to a server first. Android's menu sheet sits outside the gate, so Connect's
+  // menus have it too.
+  return (
+    <>
+      {sampleBuild ? (
+        app
+      ) : (
+        <AccountProvider>
+          <AccountGate>
+            {app}
+            <AlertTaps />
+          </AccountGate>
+        </AccountProvider>
+      )}
+      {Platform.OS === "android" ? <ChoiceSheetHost /> : null}
+    </>
   );
 }

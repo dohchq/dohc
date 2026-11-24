@@ -11,9 +11,20 @@ import {
   type LucideIcon,
 } from "lucide-react-native";
 import { memo, useState } from "react";
-import { Pressable, StyleSheet, Text, View, type AccessibilityActionEvent } from "react-native";
+import {
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+  type AccessibilityActionEvent,
+} from "react-native";
 import { useAccessibilityTextSize, useLineClamp } from "../textScale";
 import { useTheme, type Theme } from "../theme";
+import { ripple } from "../touch";
+
+// iOS shades a pressed row; Android ripples instead.
+const shades = Platform.OS === "ios";
 import type { SamplePerson } from "./sample";
 
 const KIND: Record<string, LucideIcon> = {
@@ -65,8 +76,9 @@ export const ShareRow = memo(function ShareRow({
     <Pressable
       disabled={!has}
       onPress={() => onAction(null)}
-      onPressIn={() => setPressed(true)}
+      onPressIn={() => setPressed(shades)}
       onPressOut={() => setPressed(false)}
+      android_ripple={has ? ripple(theme) : undefined}
       style={[styles.row, roomy && styles.roomyRow, pressed && { backgroundColor: theme.panel2 }]}
       accessible
       accessibilityRole={has ? "button" : undefined}
@@ -174,7 +186,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 999,
     paddingHorizontal: 7,
-    height: 19,
+    minHeight: 19,
     justifyContent: "center",
   },
   pillText: { fontSize: 12 },

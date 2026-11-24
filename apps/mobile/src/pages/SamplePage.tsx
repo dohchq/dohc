@@ -419,6 +419,8 @@ export function SamplePage() {
                 removeIosKeyboardObserver
                 // The page scrolls inside its own container; the web view itself never scrolls.
                 scrollEnabled={false}
+                // The page scales its text by the system's size (`textScale`); Android's web view would scale it again.
+                textZoom={100}
                 style={[styles.web, { backgroundColor: theme.bg }]}
               />
             </PageScrollTop>

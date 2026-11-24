@@ -1,9 +1,9 @@
 import { noticesWords } from "@dohc/interface-words/notices";
 import { LegendList, type LegendListRef } from "@legendapp/list/react-native";
-import { Stack, useIsFocused } from "expo-router";
+import { Stack, useIsFocused, useScrollToTop } from "expo-router";
 import { useHeaderHeight } from "expo-router/react-navigation";
 import { Check } from "lucide-react-native";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { AccessibilityInfo, Platform, StyleSheet, Text, View } from "react-native";
 import { File, Paths } from "expo-file-system";
 import { BarBand, nativeBarBand } from "../../modules/bar-band";
@@ -20,6 +20,8 @@ import { useTheme } from "../theme";
 export function SampleNotices() {
   const theme = useTheme();
   const list = useRef<LegendListRef>(null);
+  // Tapping Notices again scrolls back to the top, on Android as on iOS.
+  useScrollToTop(list as RefObject<LegendListRef>);
   const { notices, unread, dismiss, markAllRead } = useNotices();
   // Native tabs build every tab at launch. Notices' rows wait for the first idle moment after launch, so launch
   // doesn't pay for a screen nobody sees yet, or render at once if the tab is opened first.

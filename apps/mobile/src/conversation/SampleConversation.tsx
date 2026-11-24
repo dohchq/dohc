@@ -440,7 +440,8 @@ export function SampleConversation() {
 
 const styles = StyleSheet.create({
   screen: { flex: 1 },
-  title: { alignItems: "center" },
+  // Centred under iOS's bar; Material's top app bar starts its title beside the back arrow.
+  title: { alignItems: Platform.OS === "android" ? "flex-start" : "center" },
   name: { fontSize: 17, fontWeight: "600" },
   members: { fontSize: 12 },
   dayRow: { alignItems: "center", paddingTop: 12, paddingBottom: 6 },

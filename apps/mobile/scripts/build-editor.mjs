@@ -59,7 +59,7 @@ body { font: 1rem/1.6 "Inter Variable", -apple-system, system-ui, sans-serif; }
 .properties { display: flex; flex-wrap: wrap; gap: calc(6rem / 17); margin: 0 0 18px; padding: 0; }
 .property { display: inline-flex; align-items: center; gap: calc(6rem / 17); box-sizing: border-box; min-height: calc(30rem / 17); max-width: 100%;
   padding: 3px calc(12rem / 17); border: 1px solid var(--rule); border-radius: calc(15rem / 17); font-size: calc(14rem / 17); line-height: 1.3; }
-.property dt { min-width: 0; color: var(--muted); overflow-wrap: anywhere; }
+.property dt { flex-shrink: 0; color: var(--muted); overflow-wrap: break-word; }
 .property dd { margin: 0; min-width: 0; color: var(--ink); overflow-wrap: anywhere; }
 .property.opens { position: relative; }
 /* From the padding box: 28 pt inside the borders plus 8 pt each way makes 44. */

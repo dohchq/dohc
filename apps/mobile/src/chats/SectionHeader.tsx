@@ -4,6 +4,7 @@ import { Pressable, StyleSheet, Text } from "react-native";
 import Animated, { useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
 import { useTheme } from "../theme";
 import { symbolFallback } from "../symbolFallback";
+import { ripple, slopTo } from "../touch";
 
 // Slack's section header, quieter than the chats under it: the name on the left, the chevron on the right.
 export const SectionHeader = memo(function SectionHeader({
@@ -29,7 +30,8 @@ export const SectionHeader = memo(function SectionHeader({
     <Pressable
       onPress={onToggle}
       style={[styles.header, { marginTop: first ? 6 : 10 }]}
-      hitSlop={{ top: 4, bottom: 4 }}
+      hitSlop={slopTo(36)}
+      android_ripple={ripple(theme)}
       accessibilityRole="button"
       accessibilityState={{ expanded: !collapsed }}
       accessibilityLabel={`${title}${collapsed && unread ? ", has unread" : ""}`}

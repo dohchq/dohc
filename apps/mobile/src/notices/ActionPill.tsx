@@ -1,8 +1,9 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useTheme } from "../theme";
+import { TOUCH } from "../touch";
 
-// A worded action under a notice, toast or band: a 32pt outlined pill inside a real 44pt touch area,
-// so the pill's row keeps its spacing while the whole 44pt height takes the tap. In a row too narrow for it, as beside
+// A worded action under a notice, toast or band: a 32pt outlined pill inside a real touch area as tall as TOUCH,
+// so the pill's row keeps its spacing while the whole height takes the tap. In a row too narrow for it, as beside
 // Copy and × at the largest text sizes on a narrow phone, the pill shrinks and its label wraps.
 export function ActionPill({
   label,
@@ -42,8 +43,10 @@ export function ActionPill({
   );
 }
 
+const PAD = (TOUCH - 32) / 2;
+
 const styles = StyleSheet.create({
-  target: { flexShrink: 1, paddingVertical: 6, marginVertical: -6 },
+  target: { flexShrink: 1, paddingVertical: PAD, marginVertical: -PAD },
   pill: {
     minHeight: 32,
     paddingHorizontal: 12,

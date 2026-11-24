@@ -1,7 +1,7 @@
 import { noticesWords } from "@dohc/interface-words/notices";
 import { AlertTriangle, CheckCircle2 } from "lucide-react-native";
 import { createContext, useContext, useEffect, useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Platform, StyleSheet, Text, View } from "react-native";
 import Animated, { FadeInDown, FadeOutDown } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useLineClamp } from "../textScale";
@@ -65,7 +65,7 @@ export function Toast({ message, onClose }: { message: ToastMessage; onClose(): 
       style={[
         styles.toast,
         {
-          bottom: insets.bottom + 66,
+          bottom: insets.bottom + ABOVE_TABS,
           backgroundColor: theme.raised,
           borderColor: theme.raisedLine,
         },
@@ -132,6 +132,9 @@ export function Toast({ message, onClose }: { message: ToastMessage; onClose(): 
   );
 }
 
+// The tab bar's height, and a gap above it: iOS's bar is 49pt, Material's navigation bar 80dp.
+const ABOVE_TABS = Platform.OS === "android" ? 92 : 66;
+
 // The mark column is 30pt, as in a Notices row; text lines up after it and the 10pt gap.
 const TEXT_INSET = 40;
 
@@ -148,6 +151,8 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.14,
     shadowRadius: 16,
     shadowOffset: { width: 0, height: 6 },
+    // Android draws no shadow* styles; it lifts the toast as a Material snackbar.
+    elevation: 6,
   },
   titleLine: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
   mark: { width: 30, height: 30, alignItems: "center", justifyContent: "center" },

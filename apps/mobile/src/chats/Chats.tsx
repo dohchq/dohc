@@ -1,8 +1,16 @@
 import { workspaceWords } from "@dohc/interface-words/workspace";
 import { LegendList, type LegendListRef } from "@legendapp/list/react-native";
 import * as Haptics from "expo-haptics";
-import { Stack, useRouter } from "expo-router";
-import { useCallback, useEffect, useMemo, useState, type ReactNode, type RefObject } from "react";
+import { Stack, useRouter, useScrollToTop } from "expo-router";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { View } from "react-native";
 import { useAccount } from "../account/AccountProvider";
 import { phoneWrites } from "../server/phoneWrites";
@@ -137,6 +145,11 @@ export function ChatsScreen({
 }) {
   const theme = useTheme();
   const router = useRouter();
+  // Tapping Chats again scrolls back to the top. iOS's tab bar finds the list itself; Android's looks only down the
+  // screen's first views, where the header is.
+  const own = useRef<LegendListRef>(null);
+  const listRef = list ?? own;
+  useScrollToTop(listRef as RefObject<LegendListRef>);
   const [scrolled, setScrolled] = useState(false);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const items = useMemo<Item[]>(() => {
@@ -183,7 +196,7 @@ export function ChatsScreen({
       {notice}
       {current ? (
         <LegendList
-          ref={list}
+          ref={listRef}
           data={items}
           keyExtractor={(item) => item.key}
           getItemType={(item) => item.type}
