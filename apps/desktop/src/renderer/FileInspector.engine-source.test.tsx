@@ -562,7 +562,7 @@ describe("engine markdown source view", () => {
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     const notice = await screen.findByTestId("engine-may-hold-document-notice");
-    expect(notice.textContent).toContain("dohc could not open this document for editing.");
+    expect(notice.textContent).toContain("dohc could not open this page for editing.");
     expect(notice.textContent).toContain("You can still read it.");
     expect(screen.getByTestId("view-markdown")).toBeTruthy();
     expect(
@@ -592,7 +592,7 @@ describe("engine markdown source view", () => {
 
     const notice = await screen.findByTestId("engine-may-hold-document-notice");
     expect(notice.textContent).toBe(
-      "dohc could not open this document for editing. You can still read it.Try again",
+      "dohc could not open this page for editing. You can still read it.Try again",
     );
     expect(screen.getByTestId("view-markdown").textContent).toContain("Base paragraph.");
     expect((screen.getByTestId("page-title") as HTMLTextAreaElement).readOnly).toBe(true);

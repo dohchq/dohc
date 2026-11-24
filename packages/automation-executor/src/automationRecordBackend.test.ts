@@ -646,7 +646,7 @@ describe("cross-Collection code changes", () => {
             recipientUserId: "editor",
             recipientEmail: "E",
             files: { paths: ["Source"], versionId: null, access: "edit" },
-            channel: null,
+            chat: null,
           },
         ],
       };
@@ -709,7 +709,7 @@ describe("cross-Collection code changes", () => {
               recipientUserId: "editor",
               recipientEmail: "editor@example.com",
               files: { paths: ["Source"], versionId: null, access: "edit" },
-              channel: null,
+              chat: null,
             },
           ],
         });
@@ -922,7 +922,7 @@ describe("cross-Collection code changes", () => {
             recipientUserId: "editor",
             recipientEmail: "editor@example.com",
             files: { paths: ["Source"], versionId: null, access: "edit" },
-            channel: null,
+            chat: null,
           },
         ],
       });
@@ -1032,7 +1032,7 @@ describe("cross-Collection authored actions", () => {
             recipientUserId: "person",
             recipientEmail: "person@example.com",
             files: { paths: ["Source"], access: "edit", versionId: null },
-            channel: null,
+            chat: null,
           },
         ],
       });
@@ -1052,7 +1052,7 @@ describe("cross-Collection authored actions", () => {
       recipientUserId: "person",
       recipientEmail: "person@example.com",
       files: { paths: ["Source"], versionId: null, access: "edit" as const },
-      channel: null,
+      chat: null,
     };
     const roster: ReachRoster = { kind: "owner", ownerUserId: "owner", grants: [editor] };
     f.setRoster(roster);
@@ -1194,7 +1194,7 @@ it("does not reuse another destination's grants for matching operation and field
     recipientUserId: "person",
     recipientEmail: "person@example.com",
     files: { paths: ["Source", "Target", "Other"], versionId: null, access: "edit" as const },
-    channel: null,
+    chat: null,
   };
   f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [grant] });
   const principalKey = datasetPrincipalKey("workspace", "editor", "person");
@@ -1407,7 +1407,7 @@ it.each(["host"])("does not save a stale source refusal after the %s await", asy
               recipientUserId: "person",
               recipientEmail: "person@example.com",
               files: { paths: ["Source/automations.yaml"], access: "edit", versionId: null },
-              channel: null,
+              chat: null,
             },
           ],
         };
@@ -1478,7 +1478,7 @@ it("does not save a stale destination refusal after the roster await", async () 
             recipientUserId: "person",
             recipientEmail: "person@example.com",
             files: { paths: ["Source"], access: "edit", versionId: null },
-            channel: null,
+            chat: null,
           },
         ],
       };

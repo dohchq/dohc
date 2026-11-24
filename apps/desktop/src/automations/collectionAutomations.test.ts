@@ -92,7 +92,7 @@ const editor = (email: string, paths: string[]): RosterGrant => ({
   recipientUserId: `user-${email}`,
   recipientEmail: email,
   files: { paths, versionId: null, access: "edit" },
-  channel: null,
+  chat: null,
 });
 
 interface FakeRecord {
@@ -2539,7 +2539,7 @@ describe("Collection automations that post", () => {
     recipientUserId: "user-ana",
     recipientEmail: "ana@dohc.test",
     files: null,
-    channel: { wireId: "dm-ana", canPost: true },
+    chat: { kind: "channel", wireId: "dm-ana", canPost: true },
   };
   const post = (...steps: string[]) =>
     [
@@ -2630,7 +2630,7 @@ describe("Collection automations that post", () => {
           recipientUserId: null,
           recipientEmail: "eve@dohc.test",
           files: null,
-          channel: { wireId: "dm-ana", canPost: true },
+          chat: { kind: "channel", wireId: "dm-ana", canPost: true },
         },
       ],
     });
@@ -2659,7 +2659,7 @@ describe("Collection automations that post", () => {
       recipientUserId: "user-cara",
       recipientEmail: "cara@dohc.test",
       files: null,
-      channel: { wireId: "dm-cara", canPost: true },
+      chat: { kind: "channel", wireId: "dm-cara", canPost: true },
     };
     const tellBoth = post(
       "      - direct-message: Done",
@@ -2710,7 +2710,7 @@ describe("Collection automations that notify", () => {
     recipientUserId: `user-${email}`,
     recipientEmail: email,
     files: { paths, versionId: null, access: "view" },
-    channel: null,
+    chat: null,
   });
   const notify = (to: string, text = "Done: {record.Status}") =>
     [

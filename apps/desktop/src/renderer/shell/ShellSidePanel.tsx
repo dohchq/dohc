@@ -41,6 +41,8 @@ export interface ShellSidePanelProps {
   openPathWithHeading: GraphViewProps["onOpenPath"];
   openGraphChatThread: GraphViewProps["onOpenChatThread"];
   captureAvailable: boolean;
+  // Chats can list: an owned workspace's capture, or a joined workspace.
+  chatsAvailable: boolean;
   captureDecided: boolean;
   syncStatus: SyncStatusResult | null;
   chatsNavigatorProps: ComponentProps<typeof LazyChatsView>;

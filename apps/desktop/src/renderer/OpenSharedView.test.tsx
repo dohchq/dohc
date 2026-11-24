@@ -1,5 +1,6 @@
+import type { RelayShareReceivedRow } from "../ipc/bridgeContract";
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OpenSharedView } from "./OpenSharedView";
@@ -64,6 +65,11 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
 });
+
+// The folder chip shows its path with PathLine, so the whole path is its title.
+const shownFolder = () =>
+  screen.queryByTestId("open-share-choose-folder")?.getAttribute("title") ?? null;
+const findFolder = (path: string) => waitFor(() => expect(shownFolder()).toBe(path));
 
 describe("OpenSharedView", () => {
   function expectMissingInput(reason: string | null) {
@@ -249,7 +255,7 @@ describe("OpenSharedView", () => {
 
     await user.click(screen.getByTestId("open-share-mode-separate"));
     await user.click(screen.getByTestId("open-share-choose-folder"));
-    await screen.findByText("/home/sam/dohc/shared");
+    await findFolder("/home/sam/dohc/shared");
     await user.click(screen.getByTestId("open-share-start"));
 
     expect(screen.getByTestId("open-share-start").textContent).toBe("Opening share…");
@@ -391,11 +397,11 @@ describe("OpenSharedView", () => {
     );
 
     await act(async () => rootA.resolve("/home/sam/dohc/shared/share-a"));
-    expect(screen.queryByText("/home/sam/dohc/shared/share-a")).toBeNull();
+    expect(shownFolder()).not.toBe("/home/sam/dohc/shared/share-a");
     expect(button.disabled).toBe(true);
 
     await act(async () => rootB.resolve("/home/sam/dohc/shared/share-b"));
-    await screen.findByText("/home/sam/dohc/shared/share-b");
+    await findFolder("/home/sam/dohc/shared/share-b");
     await user.click(button);
     await waitFor(() =>
       expect(bridgeMock.openSharedView).toHaveBeenCalledWith({
@@ -413,7 +419,7 @@ describe("OpenSharedView", () => {
       await screen.findByTestId("open-share-code"),
       "dohc-share:share-1:http://localhost:1788",
     );
-    await screen.findByText("/home/sam/dohc/shared/share-1");
+    await findFolder("/home/sam/dohc/shared/share-1");
     expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
     await user.click(screen.getByTestId("open-share-start"));
     const panel = await screen.findByTestId("cloud-sync-panel");
@@ -679,5 +685,121 @@ describe("OpenSharedView defaults for a pasted code", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+describe("opening a membership", () => {
+  const share = {
+    shareId: "member-1",
+    subjectName: "Community",
+    sharerName: "Ana",
+    granterEmail: "ana@example.test",
+    access: "comment",
+    selector: { kind: "workspace", role: "member" },
+    shareCode: "dohc-share:member-1:http://localhost:1788",
+  } as RelayShareReceivedRow;
+  let progress: ((event: { workspaceId: string; shareId: string; files: number }) => void) | null =
+    null;
+  const unsubscribe = vi.fn();
+  beforeEach(() => {
+    progress = null;
+    Object.assign(bridgeMock, {
+      onSharedViewPullProgress: vi.fn((listener: typeof progress) => {
+        progress = listener;
+        return unsubscribe;
+      }),
+    });
+    bridgeMock.getDefaultShareRoot.mockImplementation(
+      async ({ name }: { name?: string }) => `/home/sam/dohc/${name}`,
+    );
+  });
+  const renderMembership = (props: { onWorkspaceReady?: () => void } = {}) =>
+    render(
+      <OpenSharedView
+        onWorkspaceReady={props.onWorkspaceReady ?? (() => {})}
+        onBack={() => {}}
+        resolvedShare={{ shareId: share.shareId, shareCode: share.shareCode, share }}
+        mountInto={{ workspaceId: "host", onMounted: () => {} }}
+      />,
+    );
+
+  it("asks only for a folder named after the workspace, and states the role and level", async () => {
+    renderMembership();
+    expect(screen.getByRole("heading").textContent).toBe("Open Community");
+    expect(screen.getByTestId("open-share-summary").textContent).toBe(
+      "Member · Ana lets members comment",
+    );
+    // A whole workspace is never a folder inside another one.
+    expect(screen.queryByTestId("open-share-mode-mount")).toBeNull();
+    await findFolder("/home/sam/dohc/Community");
+    // The folder's own name stays whole however long the path is.
+    expect(
+      within(screen.getByTestId("open-share-choose-folder")).getByText("Community"),
+    ).toBeTruthy();
+    expect(bridgeMock.getDefaultShareRoot).toHaveBeenCalledWith({
+      shareId: "member-1",
+      name: "Community",
+    });
+    expect(screen.getByTestId("open-share-start").textContent).toBe("Open workspace");
+  });
+
+  it("counts the files its first pull reads", async () => {
+    const opened = deferred<{ workspace: typeof SHARED_VIEW }>();
+    bridgeMock.openSharedView.mockReturnValue(opened.promise);
+    const ready = vi.fn();
+    renderMembership({ onWorkspaceReady: ready });
+    await waitFor(() =>
+      expect(screen.getByTestId<HTMLButtonElement>("open-share-start").disabled).toBe(false),
+    );
+    fireEvent.click(screen.getByTestId("open-share-start"));
+    await waitFor(() =>
+      expect(screen.getByTestId("open-share-start").textContent).toBe("Opening workspace…"),
+    );
+    expect(bridgeMock.openSharedView).toHaveBeenCalledWith({
+      shareCode: share.shareCode,
+      rootPath: "/home/sam/dohc/Community",
+    });
+    // The folder it opens into is settled until the open ends.
+    expect(screen.getByTestId<HTMLButtonElement>("open-share-choose-folder").disabled).toBe(true);
+    // Another share's pull says nothing here.
+    act(() => progress!({ workspaceId: "w", shareId: "other", files: 9 }));
+    expect(screen.queryByTestId("open-share-progress")).toBeNull();
+    expect(
+      screen.getByText("If you go back, dohc keeps opening Community into the folder you chose."),
+    ).toBeTruthy();
+    act(() => progress!({ workspaceId: "w", shareId: "member-1", files: 1 }));
+    expect(screen.getByTestId("open-share-start").textContent).toBe("Opening workspace…");
+    expect(screen.getByTestId("open-share-progress").textContent).toBe("Copied 1 file so far.");
+    act(() => progress!({ workspaceId: "w", shareId: "member-1", files: 120 }));
+    expect(screen.getByTestId("open-share-progress").textContent).toBe("Copied 120 files so far.");
+    await act(async () => {
+      opened.resolve({ workspace: SHARED_VIEW });
+    });
+    expect(ready).toHaveBeenCalledWith(SHARED_VIEW);
+    expect(unsubscribe).toHaveBeenCalled();
+  });
+
+  it("shows the cause above Try again, which opens the same folder again", async () => {
+    bridgeMock.openSharedView.mockRejectedValueOnce(
+      new Error(
+        "dohc could not finish reading Community: relay went away. What arrived stays in /home/sam/dohc/Community. Try again continues from there.",
+      ),
+    );
+    renderMembership();
+    await waitFor(() =>
+      expect(screen.getByTestId<HTMLButtonElement>("open-share-start").disabled).toBe(false),
+    );
+    fireEvent.click(screen.getByTestId("open-share-start"));
+    const error = await screen.findByTestId("open-share-error");
+    expect(error.textContent).toContain("relay went away");
+    const retry = screen.getByTestId("open-share-start");
+    expect(retry.textContent).toBe("Try again");
+    // The cause sits above the button that acts on it.
+    expect(error.compareDocumentPosition(retry) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(retry);
+    await waitFor(() => expect(bridgeMock.openSharedView).toHaveBeenCalledTimes(2));
+    expect(bridgeMock.openSharedView.mock.calls[1]![0]).toEqual({
+      shareCode: share.shareCode,
+      rootPath: "/home/sam/dohc/Community",
+    });
   });
 });

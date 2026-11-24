@@ -71,6 +71,7 @@ import { createWorkspaceFolder } from "../workspaces/createWorkspaceFolder";
 import { realpathSync } from "node:fs";
 import { readDeleteRecovery, waitForRecovery } from "../workspaces/workspaceDeleteRecovery";
 import { openedLocalState } from "../testing/preparedLocalState";
+import type { ShareViewWriteScope } from "../workspaces/shareWriteGate";
 
 function deferred() {
   let release!: () => void;
@@ -83,6 +84,9 @@ function deferred() {
 type State = Record<string, never>;
 type Dependencies = Parameters<typeof createDesktopCliServer<State>>[0];
 type Capture = NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>;
+
+// A share view of some files, at View.
+const SHARED_VIEW: ShareViewWriteScope = { access: "view", ended: false, membership: false };
 
 function fixture(
   rootPath = resolve("cli-workspace"),
@@ -260,6 +264,7 @@ function fixture(
     projectChatBookmarks: vi.fn(),
     queueCloudSync: vi.fn(),
     syncSharedChannelsForChatTarget: async () => undefined,
+    pushShareViewChat: async () => undefined,
     scanChatDispatch: async () => undefined,
     betweenDispatchScans: (_workspaceId, write) => write(),
     notifyRenderer: () => undefined,
@@ -336,6 +341,26 @@ function fixture(
     currentDaemon: vi.fn(() => daemon),
     agentDispatchStoreHandleFor: vi.fn(() => ({ store: dispatchStore })),
     sharedViewOf: vi.fn(() => null),
+    sharedViewHistory: vi.fn(() => {
+      throw new Error("No shared view History configured");
+    }),
+    createJoinedGroup: vi.fn(
+      async (_workspace, _store, input) =>
+        ({ id: "channel_wire_joined", name: input.name }) as never,
+    ),
+    joinedPages: {
+      role: vi.fn(() => undefined),
+      folderHoldsFile: vi.fn(async () => true),
+      create: vi.fn(async (_workspace, path) => path),
+    },
+    joinedRecords: {
+      create: vi.fn(async () => {
+        throw new Error("No joined record creation configured");
+      }),
+      readText: vi.fn(async () => {
+        throw new Error("No joined record text configured");
+      }),
+    },
     shareProjection: vi.fn(async () => undefined),
     withPhysicalWorkspaceOperation: (id, work) => authorities.withOperation(id, work),
     collectionEditContextFor: vi.fn(async () => {
@@ -352,6 +377,9 @@ function fixture(
         path,
         changed: false,
       })),
+      openSharedDocument: vi.fn<Dependencies["liveDocuments"]["openSharedDocument"]>(async () => {
+        throw new Error("No shared session configured");
+      }),
     },
     trashItem: vi.fn(async () => {
       throw new Error("No system trash in tests");
@@ -863,7 +891,7 @@ describe("desktop CLI workspace context", () => {
         "  Main · main\n* Draft · draft · made from Main\n",
       );
 
-      vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
+      vi.mocked(f.dependencies.sharedViewOf).mockReturnValue(SHARED_VIEW);
       expect(await mcp("versionList")).toEqual({
         ok: false,
         reason: "Versions belong to the owning workspace. Open it to continue.",
@@ -1110,7 +1138,7 @@ describe("desktop CLI workspace context", () => {
         stderr: "dohc: A Collection write failed. Try again.\n",
       });
 
-      vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
+      vi.mocked(f.dependencies.sharedViewOf).mockReturnValue(SHARED_VIEW);
       expect(await mcp("versionCreate", { name: "Ideas" })).toEqual({
         ok: false,
         reason: "Versions belong to the owning workspace. Open it to continue.",
@@ -1120,6 +1148,60 @@ describe("desktop CLI workspace context", () => {
     }
   });
 
+  it("reads a joined workspace's History and Collections from the view", async () => {
+    const f = fixture();
+    vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({
+      ...SHARED_VIEW,
+      access: "edit",
+      membership: true,
+    });
+    const moment = {
+      id: "moment",
+      workspaceId: "workspace",
+      versionId: "main",
+      objectId: "object",
+      path: "notes.md",
+      recordedAtMs: 5,
+      operation: "update",
+      metadata: {},
+      momentOrder: 3,
+    };
+    const listMoments = vi.fn(async () => ({
+      moments: [{ ...moment, protected: false as const }],
+      startCursor: null,
+      nextCursor: null,
+      versionMarkers: [],
+      latestMomentOrder: 3,
+      activeVersionId: "main",
+    }));
+    const readMoment = vi.fn(async () => ({ protected: false as const, moment }));
+    f.dependencies.sharedViewHistory = vi.fn(() => ({ listMoments, readMoment }) as never);
+    const query = { records: [], nextCursor: null };
+    const queryCollectionRecords = vi.fn(async () => query);
+    f.dependencies.withEngineAdapter = async (_workspace, work) =>
+      work({ queryCollectionRecords } as unknown as VersionedLiveAdapter);
+    const context = await f.create().openCliWorkspace(f.workspace);
+    expect(context.joined).toBe(true);
+    await f.create().startDesktopCliServer();
+    expect(f.options().listWorkspaces()).toContainEqual({
+      workspaceId: "workspace",
+      rootPath: f.workspace.rootPath,
+      readOnly: true,
+      joined: true,
+    });
+    await expect(context.listMoments({ limit: 5, objectId: "object" })).resolves.toEqual([
+      { ...moment, workspaceId: "workspace" },
+    ]);
+    expect(listMoments).toHaveBeenCalledWith({ limit: 5, objectId: "object" });
+    await expect(context.readMoment("moment")).resolves.toEqual(moment);
+    expect(f.dependencies.sharedViewHistory).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: "workspace", attachmentId: expect.any(Symbol) }),
+    );
+    expect(f.dependencies.activity.engineCaptureFor).not.toHaveBeenCalled();
+    await expect(context.collections!.query({ collectionPath: "tasks", limit: 2 })).resolves.toBe(
+      query,
+    );
+  });
   it("runs collection fields through physical admission and the existing Y.Doc edit", async () => {
     // A field write first reads its record to check it is not a lossy note.
     const root = await createTestScratch("dohc-cli-fields-");
@@ -2555,7 +2637,7 @@ describe.each(["cli", "mcp"] as const)("live documents through %s", (door) => {
   it("refuses a received share, a received workspace, and a received marker before reaching the server", async () => {
     const shared = await liveDocumentsFixture({ caller: "shared-with-me/received" });
     const received = await liveDocumentsFixture();
-    vi.mocked(received.dependencies.sharedViewOf).mockReturnValue({});
+    vi.mocked(received.dependencies.sharedViewOf).mockReturnValue(SHARED_VIEW);
     const marked = await liveDocumentsFixture();
     marked.workspace.shareView = {} as RegistryEntry["shareView"];
     for (const f of [shared, received, marked]) {
@@ -2653,8 +2735,7 @@ it("gives CLI and MCP the IPC link answer in a share without Chats capture", asy
   const f = fixture(await createTestScratch("links-share-cli-"));
   f.setCapture(null);
   f.setDaemon(null);
-  f.dependencies.sharedViewOf = () =>
-    ({ shareId: "share" }) as ReturnType<Dependencies["sharedViewOf"]>;
+  f.dependencies.sharedViewOf = () => SHARED_VIEW;
   const resolved = {
     versionId: "main",
     results: [{ path: "target.md", fragment: "heading" }],
@@ -2712,7 +2793,7 @@ it("refuses a held change read in a shared view instead of answering that nothin
   const f = fixture(await createTestScratch("held-change-shared-"));
   const read = vi.fn(async () => null);
   f.dependencies.heldChanges.change = read;
-  vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
+  vi.mocked(f.dependencies.sharedViewOf).mockReturnValue(SHARED_VIEW);
   await f.create().startDesktopCliServer();
   const token = "a".repeat(64);
   const send = async (request: CliRequestWithoutToken) => {
@@ -2797,10 +2878,357 @@ it("lists and keeps a live note's outside change for the CLI and the MCP, only i
   expect((await fromFolder("document", "keep-outside-change", "n.md", "--json")).exitCode).toBe(0);
   expect(f.capture.keepOutsideChange).toHaveBeenLastCalledWith("drafts/n.md");
 
-  vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
+  vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({ access: "view", ended: false });
   const refused = await cli("document", "keep-outside-change", "notes.md");
   expect(refused.exitCode).not.toBe(0);
   expect(f.capture.keepOutsideChange).toHaveBeenCalledTimes(3);
+});
+
+// A joined workspace: a share view of a whole workspace, at the member level.
+// It has no capture; its files resolve through the view's own engine session.
+function joinedFixture(access: "view" | "comment" | "edit" = "comment") {
+  const f = fixture();
+  const shareView = {
+    shareId: "share-1",
+    granterUserId: "owner",
+    recipientUserId: "me",
+    relayUrl: "https://relay.test",
+    granterEmail: null,
+    genericChatWritable: false,
+    grantedSelector: { paths: [], versionId: null, access, wholeWorkspace: true as const },
+  } as unknown as NonNullable<RegistryEntry["shareView"]>;
+  const joined: RegistryEntry = { ...f.workspace, remote: undefined, shareView };
+  f.rows.set(joined.workspaceId, joined);
+  f.dependencies.sharedViewOf = vi.fn(() => ({ access, ended: false, membership: true }));
+  f.setCapture(null);
+  const resolveFiles = vi.fn(
+    async ({ targets }: { targets: ({ path: string } | { objectId: string })[] }) => ({
+      versionId: "main",
+      results: targets.map((target) =>
+        "path" in target
+          ? target.path === "notes/plan.md"
+            ? { status: "found" as const, objectId: "object-share-plan", path: target.path }
+            : { status: "absent" as const }
+          : target.objectId === "object-share-plan"
+            ? { status: "found" as const, objectId: target.objectId, path: "notes/plan.md" }
+            : { status: "absent" as const },
+      ),
+    }),
+  );
+  f.dependencies.withEngineAdapter = (async (
+    _workspace: unknown,
+    work: (adapter: VersionedLiveAdapter) => Promise<unknown>,
+  ) =>
+    await work({
+      resolveFiles,
+    } as unknown as VersionedLiveAdapter)) as Dependencies["withEngineAdapter"];
+  return { ...f, joined, shareView, resolveFiles };
+}
+
+const AGENT_ORIGIN = {
+  attribution: { actorKind: "agent" as const, onBehalfOf: "person-local", depth: 0 },
+};
+
+describe("a joined workspace through the CLI", () => {
+  it("opens without a capture and finds its files through the view's engine", async () => {
+    const f = joinedFixture();
+    const context = await f.create().openCliWorkspace(f.joined);
+    expect(context.readOnly).toBe(true);
+    expect(context.joined).toBe(true);
+    expect(await context.fileObjectIdForPath("notes/plan.md")).toBe("object-share-plan");
+    expect(await context.fileObjectIdForPath("notes/missing.md")).toBeNull();
+    expect(await context.filePathForObjectId("object-share-plan")).toBe("notes/plan.md");
+    expect(context.versions).toBeUndefined();
+  });
+
+  // New page takes the Explorer's share view create, so the relay decides it
+  // as it decides the person's own.
+  it("adds a page at Edit through the view's New page", async () => {
+    const f = joinedFixture("edit");
+    const context = await f.create().openCliWorkspace(f.joined);
+    await expect(
+      context.documents!.create({
+        path: "notes/sam.md",
+        markdown: "Sam page",
+        origin: AGENT_ORIGIN,
+      }),
+    ).resolves.toEqual({ path: "notes/sam.md" });
+    expect(vi.mocked(f.dependencies.joinedPages.create).mock.calls).toEqual([
+      [
+        expect.objectContaining({ workspaceId: "workspace", shareView: f.shareView }),
+        "notes/sam.md",
+        "Sam page",
+      ],
+    ]);
+    expect(f.dependencies.joinedPages.folderHoldsFile).toHaveBeenCalledWith("workspace", "notes");
+    expect(f.dependencies.liveDocuments.editDocument).not.toHaveBeenCalled();
+  });
+
+  // An edit takes the page's live session on the server, the one the app's
+  // editor opens, never a rewrite of the file.
+  it("edits a page at Edit through its live session, and names the level below Edit", async () => {
+    const f = joinedFixture("edit");
+    const context = await f.create().openCliWorkspace(f.joined);
+    await expect(
+      context.documents!.edit({
+        path: "notes/plan.md",
+        edit: { find: "Old", replacement: "New" },
+        origin: AGENT_ORIGIN,
+      }),
+    ).resolves.toEqual({ path: "notes/plan.md", changed: false });
+    expect(f.dependencies.liveDocuments.editDocument).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: "workspace",
+        path: "notes/plan.md",
+        origin: AGENT_ORIGIN,
+      }),
+    );
+    for (const access of ["view", "comment"] as const) {
+      const below = joinedFixture(access);
+      const reached = await below.create().openCliWorkspace(below.joined);
+      await expect(
+        reached.documents!.edit({
+          path: "notes/plan.md",
+          edit: { find: "Old", replacement: "New" },
+          origin: AGENT_ORIGIN,
+        }),
+      ).rejects.toThrow(
+        `Editing a page needs Edit. You can ${access} here. Run dohc members list to see what you can do.`,
+      );
+      expect(below.dependencies.liveDocuments.editDocument).not.toHaveBeenCalled();
+    }
+  });
+
+  // A record's fields change through its live session on the server, as a
+  // member's cell edit does; a new record goes through the share, as New
+  // record does.
+  const RECORD_ID = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const AGENT_AUTHOR = {
+    kind: "agent" as const,
+    agentId: "claude-code",
+    onBehalfOf: "person-local",
+    depth: 0,
+  };
+  function recordSession(text = `---\nid: ${RECORD_ID}\n---\n`) {
+    const doc = markdownToYDoc(text);
+    return {
+      doc,
+      text,
+      applyDecidedLocalUpdate: vi.fn(
+        async (decide: (doc: Y.Doc) => Uint8Array | null, onArmed?: () => void) => {
+          const update = decide(doc);
+          if (update === null) return false;
+          Y.applyUpdate(doc, update);
+          onArmed?.();
+          return true;
+        },
+      ),
+      savedToHost: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+    };
+  }
+
+  it("sets a record's fields at Edit through its live session, and names the level below Edit", async () => {
+    const f = joinedFixture("edit");
+    const session = recordSession();
+    vi.mocked(f.dependencies.joinedRecords.readText).mockResolvedValue({
+      text: session.text,
+      truncated: false,
+    });
+    vi.mocked(f.dependencies.liveDocuments.openSharedDocument).mockResolvedValue(session as never);
+    const context = await f.create().openCliWorkspace(f.joined);
+    await expect(
+      context.collections!.writes.setFields({
+        recordPath: "tasks/a.md",
+        fields: { status: "done" },
+        author: AGENT_AUTHOR,
+      }),
+    ).resolves.toEqual({ path: "tasks/a.md", replaced: { status: null }, kept: {} });
+    expect(session.doc.getMap("frontmatter").get("status")).toBe("done");
+    expect(f.dependencies.liveDocuments.openSharedDocument).toHaveBeenCalledWith(
+      "workspace",
+      "tasks/a.md",
+    );
+    expect(session.savedToHost).toHaveBeenCalledOnce();
+    expect(session.close).toHaveBeenCalled();
+    expect(f.dependencies.collectionEditContextFor).not.toHaveBeenCalled();
+    for (const access of ["view", "comment"] as const) {
+      const below = joinedFixture(access);
+      const reached = await below.create().openCliWorkspace(below.joined);
+      await expect(
+        reached.collections!.writes.setFields({
+          recordPath: "tasks/a.md",
+          fields: { status: "done" },
+          author: AGENT_AUTHOR,
+        }),
+      ).rejects.toThrow(
+        `Changing a Collection record needs Edit. You can ${access} here. Run dohc members list to see what you can do.`,
+      );
+      await expect(
+        reached.collections!.writes.createRecord({
+          collectionPath: "tasks",
+          name: "b",
+          author: AGENT_AUTHOR,
+        }),
+      ).rejects.toThrow(
+        `Adding a Collection record needs Edit. You can ${access} here. Run dohc members list to see what you can do.`,
+      );
+      expect(below.dependencies.liveDocuments.openSharedDocument).not.toHaveBeenCalled();
+      expect(below.dependencies.joinedRecords.create).not.toHaveBeenCalled();
+    }
+  });
+
+  it("adds a record at Edit through the share, then sets its fields", async () => {
+    const f = joinedFixture("edit");
+    const session = recordSession();
+    const created: unknown[] = [];
+    vi.mocked(f.dependencies.joinedRecords.create).mockImplementation(async (operation, input) => {
+      created.push([operation.workspace, input]);
+      return { path: "tasks/b.md", recordId: RECORD_ID, delivery: "pending" };
+    });
+    vi.mocked(f.dependencies.joinedRecords.readText).mockResolvedValue({
+      text: session.text,
+      truncated: false,
+    });
+    vi.mocked(f.dependencies.liveDocuments.openSharedDocument).mockResolvedValue(session as never);
+    const context = await f.create().openCliWorkspace(f.joined);
+    await expect(
+      context.collections!.writes.createRecord({
+        collectionPath: "tasks",
+        name: "b",
+        recordId: RECORD_ID,
+        fields: { status: "todo" },
+        author: AGENT_AUTHOR,
+      }),
+    ).resolves.toEqual({ path: "tasks/b.md", recordId: RECORD_ID, kept: {} });
+    expect(created).toEqual([
+      [
+        expect.objectContaining({ workspaceId: "workspace", shareView: f.shareView }),
+        { workspaceId: "workspace", collectionPath: "tasks", name: "b", recordId: RECORD_ID },
+      ],
+    ]);
+    expect(session.doc.getMap("frontmatter").get("status")).toBe("todo");
+    // A record the server has not taken yet keeps its fields for a retry with the same id.
+    const waiting = joinedFixture("edit");
+    vi.mocked(waiting.dependencies.joinedRecords.create).mockResolvedValue({
+      path: "tasks/c.md",
+      recordId: RECORD_ID,
+      delivery: "pending",
+    });
+    vi.mocked(waiting.dependencies.joinedRecords.readText).mockResolvedValue({
+      text: session.text,
+      truncated: false,
+    });
+    vi.mocked(waiting.dependencies.liveDocuments.openSharedDocument).mockRejectedValue(
+      new Error("Record saved on this device. Waiting to send."),
+    );
+    const reached = await waiting.create().openCliWorkspace(waiting.joined);
+    await expect(
+      reached.collections!.writes.createRecord({
+        collectionPath: "tasks",
+        name: "c",
+        recordId: RECORD_ID,
+        fields: { status: "todo" },
+        author: AGENT_AUTHOR,
+      }),
+    ).resolves.toMatchObject({
+      kind: "partial",
+      created: ["tasks/c.md"],
+      failedStage: "fields",
+      reason: "Record saved on this device. Waiting to send.",
+      retry: { mode: "resume", recordId: RECORD_ID },
+    });
+    // Without fields the record is done once the share takes it.
+    vi.mocked(waiting.dependencies.joinedRecords.create).mockResolvedValue({
+      path: "tasks/d.md",
+      recordId: RECORD_ID,
+      delivery: "pending",
+    });
+    await expect(
+      reached.collections!.writes.createRecord({
+        collectionPath: "tasks",
+        name: "d",
+        author: AGENT_AUTHOR,
+      }),
+    ).resolves.toEqual({ path: "tasks/d.md", recordId: RECORD_ID });
+    vi.mocked(waiting.dependencies.joinedRecords.create).mockResolvedValue({
+      path: "tasks/e.md",
+      recordId: RECORD_ID,
+      delivery: "refused",
+      reason: "The sync relay did not accept this record.",
+    });
+    await expect(
+      reached.collections!.writes.createRecord({
+        collectionPath: "tasks",
+        name: "e",
+        author: AGENT_AUTHOR,
+      }),
+    ).rejects.toThrow("The sync relay did not accept this record.");
+  });
+
+  // The relay creates the Group in the owner's workspace and decides the
+  // role; the view's next pull brings it here.
+  it("creates a Group through the relay", async () => {
+    const f = joinedFixture("edit");
+    const context = await f.create().openCliWorkspace(f.joined);
+    await expect(context.createGroup!({ name: "Kai group", type: "posts" })).resolves.toMatchObject(
+      { name: "Kai group" },
+    );
+    const [workspace, store, input] = vi.mocked(f.dependencies.createJoinedGroup).mock.calls[0]!;
+    expect(workspace).toMatchObject({ workspaceId: "workspace", shareView: f.shareView });
+    expect(store).toBe(f.dependencies.linkedChatStoreFor(f.joined));
+    expect(input).toEqual({ name: "Kai group", type: "posts" });
+  });
+
+  it("names the level below Edit", async () => {
+    for (const access of ["view", "comment"] as const) {
+      const f = joinedFixture(access);
+      const context = await f.create().openCliWorkspace(f.joined);
+      await expect(
+        context.documents!.create({
+          path: "notes/sam.md",
+          markdown: "Sam page",
+          origin: AGENT_ORIGIN,
+        }),
+      ).rejects.toThrow(
+        `Adding a page needs Edit. You can ${access} here. Run dohc members list to see what you can do.`,
+      );
+      expect(f.dependencies.joinedPages.create).not.toHaveBeenCalled();
+    }
+  });
+
+  it("lets only an admin add a page in a new folder", async () => {
+    const f = joinedFixture("edit");
+    vi.mocked(f.dependencies.joinedPages.folderHoldsFile).mockResolvedValue(false);
+    const context = await f.create().openCliWorkspace(f.joined);
+    await expect(
+      context.documents!.create({
+        path: "Fresh/first.md",
+        markdown: "New folder",
+        origin: AGENT_ORIGIN,
+      }),
+    ).rejects.toThrow(
+      "Only admins add a page in a new folder. Put it in a folder that has a page.",
+    );
+    expect(f.dependencies.joinedPages.create).not.toHaveBeenCalled();
+    vi.mocked(f.dependencies.joinedPages.role).mockReturnValue("admin");
+    await expect(
+      context.documents!.create({
+        path: "Fresh/first.md",
+        markdown: "New folder",
+        origin: AGENT_ORIGIN,
+      }),
+    ).resolves.toEqual({ path: "Fresh/first.md" });
+    // The top level always holds a page, at any role.
+    vi.mocked(f.dependencies.joinedPages.role).mockReturnValue("member");
+    await expect(
+      context.documents!.create({ path: "top.md", markdown: "Top", origin: AGENT_ORIGIN }),
+    ).resolves.toEqual({ path: "top.md" });
+    expect(vi.mocked(f.dependencies.joinedPages.create).mock.calls.map((call) => call[1])).toEqual([
+      "Fresh/first.md",
+      "top.md",
+    ]);
+  });
 });
 
 it("runs workspace search for CLI and MCP in the original workspace and refuses received shares and mounts", async () => {
@@ -2921,7 +3349,7 @@ it("runs workspace search for CLI and MCP in the original workspace and refuses 
   expect(searchRead).not.toHaveBeenCalled();
 
   // Standalone received share is refused before reaching the reader.
-  vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
+  vi.mocked(f.dependencies.sharedViewOf).mockReturnValue(SHARED_VIEW);
   const shareRefused = await cli(f.workspace.rootPath, "workspace", "search", "tokyo");
   expect(shareRefused.exitCode).not.toBe(0);
   expect(searchRead).not.toHaveBeenCalled();

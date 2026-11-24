@@ -18,6 +18,7 @@ import {
 } from "@dohc/workspace-engine-client/daemon";
 import {
   EngineRelayClient,
+  type EngineRelayClientOptions,
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
@@ -191,6 +192,7 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   resourcesBasePath(): string;
   onWorkspaceOpened?(workspaceId: string): void;
   onRefusalsChanged?: () => void;
+  onShareViewPullProgress?: EngineRelayClientOptions["onShareViewPullProgress"];
   serverOwnerDelivery?: ServerOwnerDelivery;
   /** Stops that took refused edits out of their queue but did not write the file. */
   ownerLiveReleases: UnwrittenReleases;
@@ -247,6 +249,8 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   ownerHasOpen?(workspaceId: string, path: string): boolean;
   // A Stop the owner-delivery pass sent again finished, as a Stop from the renderer reports.
   notifyOwnerLiveStopped?(workspaceId: string, objectId: string, path: string): void;
+  // Opens and closes a note with no window, which starts its live history on this computer.
+  startOwnerLiveHistory?(workspaceId: string, path: string): Promise<void>;
   // Runs `leave` between the edits of the editors here that edit the note at `path` live, given their unsent edits.
   // `late` gets the edits that reached them while `leave` ran.
   leaveLiveEditing?<T>(
@@ -259,6 +263,12 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   desktopMarks: Pick<typeof desktopMarksImplementation, "markOnce">;
   logLaunchMarksOnce(): void;
 }
+
+// A pass starts a document's live history again after this wait, doubled after each start.
+const OWNER_HISTORY_START_WAIT_MS = 30_000;
+const OWNER_HISTORY_START_MAX_WAIT_MS = 10 * 60_000;
+// After this many starts the server still lists, the owner sees why it can't start.
+const OWNER_HISTORY_QUIET_STARTS = 3;
 
 export function createDesktopEngine<State extends EngineAuthorityState>(
   dependencies: DesktopEngineDependencies<State>,
@@ -353,6 +363,14 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   const ownerOpenRefused = new Map<string, Set<string>>();
   // Orders each owner open against the lists passes read.
   let ownerOpenClock = 0;
+  // Documents the server cannot host until their live history starts, which a
+  // pass starts here with no window. Each waits twice as long after each
+  // start, and stops hiding its reason after a failed start or after a few
+  // starts the server still lists.
+  const ownerHistoryStarts = new Map<
+    string,
+    Map<string, { starts: number; failures: number; nextAt: number; running: boolean }>
+  >();
   const pathsOf = (paths: Map<string, Set<string>>, workspaceId: string) => {
     let set = paths.get(workspaceId);
     if (!set) paths.set(workspaceId, (set = new Set()));
@@ -708,6 +726,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     pausedOwnerDocuments.clear();
     ownerStopFailures.clear();
     liveDocumentPaths.clear();
+    ownerHistoryStarts.clear();
     ownerRoomRetryAt.clear();
     const previous = ownerDelivery;
     ownerDelivery = undefined;
@@ -778,6 +797,68 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
             if (now?.get(path) !== at) return;
             now?.delete(path);
             if (answer === "refused") refused.add(path);
+          };
+          // Starts one due document's live history, without waiting for it. Answers the
+          // documents a start may still help, whose "can't start" reason the owner doesn't see.
+          const ownerHistoryTurn = (
+            workspaceId: string,
+            rows: readonly { path: string; status: string; reason?: unknown }[],
+          ) => {
+            const start = dependencies.startOwnerLiveHistory;
+            const states =
+              ownerHistoryStarts.get(workspaceId) ??
+              new Map<
+                string,
+                { starts: number; failures: number; nextAt: number; running: boolean }
+              >();
+            ownerHistoryStarts.set(workspaceId, states);
+            const waiting = new Set(
+              rows
+                .filter(
+                  (row) =>
+                    row.status === "unavailable" && row.reason === "live-document-without-lineage",
+                )
+                .map((row) => row.path),
+            );
+            for (const path of states.keys()) if (!waiting.has(path)) states.delete(path);
+            if (!start) return new Set<string>();
+            const now = Date.now();
+            for (const path of waiting)
+              if (!states.has(path))
+                states.set(path, { starts: 0, failures: 0, nextAt: 0, running: false });
+            const due = [...waiting].find((path) => {
+              const state = states.get(path)!;
+              return !state.running && state.nextAt <= now;
+            });
+            if (due !== undefined) {
+              const path = due,
+                state = states.get(path)!;
+              state.running = true;
+              state.starts++;
+              void start(workspaceId, path)
+                .catch((error: unknown) => {
+                  state.failures++;
+                  console.error("[desktop] owner live history start failed:", error);
+                })
+                .finally(() => {
+                  state.running = false;
+                  state.nextAt =
+                    Date.now() +
+                    Math.min(
+                      OWNER_HISTORY_START_WAIT_MS * 2 ** (state.starts - 1),
+                      OWNER_HISTORY_START_MAX_WAIT_MS,
+                    );
+                });
+            }
+            return new Set(
+              [...waiting].filter((path) => {
+                const state = states.get(path)!;
+                return (
+                  state.failures === 0 &&
+                  (state.running || state.starts < OWNER_HISTORY_QUIET_STARTS)
+                );
+              }),
+            );
           };
           // A note's room runs beside the pass loop. It takes the workspace session one
           // engine call at a time, so closing the workspace never waits for it.
@@ -1117,7 +1198,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                     }
                     const documents = withoutServerPauses(workspaceId, listed);
                     syncOwnerRooms(workspaceId, documents);
-                    const { documents: rows, diverged } = response as {
+                    const { documents: listedRows, diverged } = response as {
                       documents: {
                         path: string;
                         status: string;
@@ -1139,7 +1220,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                           workspaceId,
                           signal,
                           listed: new Set(
-                            rows.flatMap((row) =>
+                            listedRows.flatMap((row) =>
                               typeof row.objectId === "string" ? [row.objectId] : [],
                             ),
                           ),
@@ -1174,11 +1255,25 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                       console.error("[desktop] owner release of retired notes failed:", error);
                     }
                     try {
-                      await ownerOpenTurn(workspaceId, session, rows, listedAt, signal, check);
+                      await ownerOpenTurn(
+                        workspaceId,
+                        session,
+                        listedRows,
+                        listedAt,
+                        signal,
+                        check,
+                      );
                     } catch (error) {
                       check();
                       console.error("[desktop] owner live open failed:", error);
                     }
+                    // A document whose live history this computer is starting reads as starting.
+                    const starting = ownerHistoryTurn(workspaceId, listedRows);
+                    const rows = listedRows.map((row) =>
+                      starting.has(row.path) && row.status === "unavailable"
+                        ? { path: row.path, status: "preparing" }
+                        : row,
+                    );
                     const preparing = rows.some((row) => row.status === "preparing");
                     // The server reports a diverged copy even after its owner stopped every document.
                     const unavailable =
@@ -1923,6 +2018,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       const sessions = rustEngineWorkspaceSessions;
       rustEngineRelayClient = new EngineRelayClient({
         onRefusalsChanged: dependencies.onRefusalsChanged,
+        onShareViewPullProgress: dependencies.onShareViewPullProgress,
         sessions,
         routes: relayTransportRoutes,
         closeWorkspaceBinding: (workspace) =>

@@ -392,6 +392,12 @@ export const WorkspaceSummary = z.object({
       access: SHARE_ACCESS.optional(),
       editingNotReady: z.literal(true).optional(),
       genericChatWritable: z.boolean().optional(),
+      // A workspace the account joined: the pin covers the whole workspace.
+      // The shell names it as a membership; the relay's grant still decides.
+      membership: z.literal(true).optional(),
+      // A membership's role as the relay last named it. It shows admin actions
+      // before the next check; the relay decides each one.
+      role: z.enum(["admin", "member"]).optional(),
       // The stored grant is unreadable. The marker still stands, because a
       // share view whose grant cannot be read must not present as an ordinary
       // workspace: the restrictive stance is what fails closed. The shell
@@ -465,6 +471,8 @@ export const DefaultWorkspaceRootResult = PATH_STRING;
 // dialog; the renderer never invents roots.
 export const DefaultShareRootPayload = z.object({
   shareId: z.string().min(1).max(128),
+  // A membership's workspace name, which names its folder.
+  name: z.string().min(1).max(320).optional(),
 });
 export type DefaultShareRootPayload = z.infer<typeof DefaultShareRootPayload>;
 export const DefaultShareRootResult = PATH_STRING;
@@ -4527,6 +4535,8 @@ export const CloudStatusResult = z.object({
   syncPause: WorkspaceSyncPauseStatus.optional(),
   // Whether that remote is pinned to the current signed-in account.
   workspaceSyncConnected: z.boolean().optional(),
+  // A joined workspace: whether the signed-in account is the one that joined it.
+  joinedBySignedInAccount: z.boolean().optional(),
   workspaceSecretState: z
     .enum(["none", "protected-key-present", "protected-key-missing"])
     .optional(),
@@ -4653,6 +4663,18 @@ const RelayShareReadableState = z.object({
   damaged: z.never().optional(),
 });
 
+// A membership this account holds: the whole workspace, at the role the
+// relay states. Only a received row carries it.
+export const RelayShareMembershipSelector = z.object({
+  kind: z.literal("workspace"),
+  role: z.enum(["admin", "member"]),
+});
+const RelayShareMembershipState = z.object({
+  selector: RelayShareMembershipSelector,
+  access: SHARE_ACCESS,
+  damaged: z.never().optional(),
+});
+
 const RelayShareDamagedState = z.object({
   selector: z.null(),
   // Damage reports carry the raw stored value so Settings can keep the
@@ -4686,7 +4708,7 @@ export const RelayShareGrantedRow = z.union([
 ]);
 export type RelayShareGrantedRow = z.infer<typeof RelayShareGrantedRow>;
 
-// A path/version share granted TO this account (the receive side). The
+// A path/version share or a membership granted TO this account (the receive side). The
 // relay deliberately omits the granter's workspace id; the selector and
 // granter identity are all a recipient ever sees.
 const RelayShareReceivedRowBase = z.object({
@@ -4703,6 +4725,7 @@ const RelayShareReceivedRowBase = z.object({
 
 export const RelayShareReceivedRow = z.union([
   RelayShareReceivedRowBase.extend(RelayShareReadableState.shape),
+  RelayShareReceivedRowBase.extend(RelayShareMembershipState.shape),
   RelayShareReceivedRowBase.extend(RelayShareDamagedState.shape),
 ]);
 export type RelayShareReceivedRow = z.infer<typeof RelayShareReceivedRow>;
@@ -4757,8 +4780,8 @@ export type RelayShareRemovedRow = z.infer<typeof RelayShareRemovedRow>;
 
 export const ListRelaySharesResult = z.object({
   granted: z.array(RelayShareGrantedRow).max(1000),
-  // Path/version shares addressed to this account (chat grants are
-  // listed through listChatChannelShares).
+  // Path/version shares and memberships addressed to this account (chat
+  // grants are listed through listChatChannelShares).
   received: z.array(RelayShareReceivedRow).max(1000).default([]),
   removed: z.array(RelayShareRemovedRow).max(1000).default([]),
 });
@@ -5707,6 +5730,8 @@ const DirectWriteRows = z.array(DirectWriteRow).max(MAX_DIRECT_WRITE_ROWS);
 // `unavailable`: the relay knows no Edit grant of this person's on the share,
 // because the owner ended the share or stopped them. `failed` keeps the writes answered before it;
 // `lasting` says trying again will not help, as when the grant is not Edit.
+// `pagesWaiting` counts the unsent writes when every one is a new page, so the
+// Notice can say pages; otherwise null.
 export const PushShareDirectWritesResult = z.discriminatedUnion("status", [
   z.object({ status: z.literal("pushed"), writes: DirectWriteRows }),
   z.object({ status: z.literal("unavailable") }),
@@ -5715,6 +5740,7 @@ export const PushShareDirectWritesResult = z.discriminatedUnion("status", [
     writes: DirectWriteRows,
     errorMessage: z.string(),
     lasting: z.boolean(),
+    pagesWaiting: z.number().int().positive().nullable(),
   }),
 ]);
 export type PushShareDirectWritesResult = z.infer<typeof PushShareDirectWritesResult>;
@@ -5998,9 +6024,20 @@ export const OpenSharedViewResult = z.object({
 });
 export type OpenSharedViewResult = z.infer<typeof OpenSharedViewResult>;
 
+// How many files a share view's pull has read so far, sent after each page
+// that brought some. The open dialog names it while a first pull runs.
+export const SharedViewPullProgressEvent = z.object({
+  workspaceId: WORKSPACE_ID,
+  shareId: OPAQUE_ID,
+  files: z.number().int().nonnegative(),
+});
+export type SharedViewPullProgressEvent = z.infer<typeof SharedViewPullProgressEvent>;
+
 export const RefreshSharedViewPayload = z.object({
   workspaceId: WORKSPACE_ID,
-  trigger: z.enum(["manual", "background", "press-burst"]).optional(),
+  // "held" is a background pull that waits at the relay for news. An open
+  // membership keeps one running in place of the 30 s poll.
+  trigger: z.enum(["manual", "background", "press-burst", "held"]).optional(),
 });
 export type RefreshSharedViewPayload = z.infer<typeof RefreshSharedViewPayload>;
 
@@ -6809,6 +6846,14 @@ const RefreshSharedViewSuccessResult = z.object({
   // The first refusal's engine message, for the banner's title attribute and
   // the log. Null when nothing was refused.
   refusedDetail: z.string().nullable(),
+  // A held pull that finished: the next one can start now.
+  held: z.literal(true).optional(),
+  // The relay ended the hold because this account's level changed. The
+  // renderer checks access again.
+  levelChanged: z.literal(true).optional(),
+  // Every change is to a document open in a live session, which already
+  // shows it. The renderer lists the files again without reopening editors.
+  shownLive: z.literal(true).optional(),
 });
 
 export const SHARE_EDITING_NOT_READY_MESSAGE =
@@ -6842,6 +6887,11 @@ export type CheckSharedViewAccessPayload = z.infer<typeof CheckSharedViewAccessP
 export const CheckSharedViewAccessResult = z.object({
   status: z.enum(["current", "ended", "unverified", "needs-reopen"]),
   access: z.enum(["view", "comment", "edit"]).optional(),
+  // A membership's role, and whether this check changed its level.
+  role: z.enum(["admin", "member"]).optional(),
+  levelChanged: z.literal(true).optional(),
+  // Who changed it, as the relay recorded the change. Only with levelChanged.
+  levelChangedBy: z.string().min(1).optional(),
   relayStatesMore: z.literal(true).optional(),
 });
 export type CheckSharedViewAccessResult = z.infer<typeof CheckSharedViewAccessResult>;
@@ -9647,6 +9697,7 @@ export interface DohcDesktopBridge
   stepWindowZoom(payload: StepWindowZoomPayload): Promise<DesktopUserSettingsResult>;
   // Cached History names changed. Subscribers re-read with workspace/request guards.
   onHistoryNamesChanged(listener: (event: WorkspaceIdPayload) => void): () => void;
+  onSharedViewPullProgress(listener: (event: SharedViewPullProgressEvent) => void): () => void;
   // Live push: main signals the renderer when the active workspace's files
   // or history changed (settled filesystem batch recorded). Main filters by
   // each window's active workspace, so a window only hears about its own

@@ -1086,7 +1086,7 @@ export function WorkspaceErrorToast(props: {
       onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) setFocus(false);
       }}
-      className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+      className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-pretty text-ink"
     >
       <span className="flex h-6 shrink-0 items-center">
         {error.tone === "success" ? (
@@ -2399,7 +2399,7 @@ export function NoticeCenter(props: {
                         if (!event.currentTarget.contains(event.relatedTarget as Node | null))
                           setSentToastPaused(false);
                       }}
-                      className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+                      className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-pretty text-ink"
                     >
                       {isHeld(sentToast.notice) ? (
                         <AlertTriangle
@@ -2486,7 +2486,7 @@ export function NoticeCenter(props: {
                       data-testid="owner-live-delivery-toast"
                       role="status"
                       aria-live="polite"
-                      className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+                      className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-pretty text-ink"
                     >
                       <liveDelivery.Icon
                         size={14}
@@ -2538,7 +2538,7 @@ export function NoticeCenter(props: {
                       data-testid="owner-live-refusals-toast"
                       role="status"
                       aria-live="polite"
-                      className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+                      className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-pretty text-ink"
                     >
                       <AlertTriangle
                         size={14}
@@ -2591,7 +2591,7 @@ export function NoticeCenter(props: {
                       data-testid="sharing-declined-toast"
                       role="status"
                       aria-live="polite"
-                      className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+                      className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-pretty text-ink"
                     >
                       <AlertTriangle
                         size={14}
@@ -2649,7 +2649,7 @@ export function NoticeCenter(props: {
                     <div
                       data-testid="crash-report-toast"
                       role="alert"
-                      className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+                      className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-pretty text-ink"
                     >
                       <AlertTriangle
                         size={14}

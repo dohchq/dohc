@@ -67,7 +67,7 @@ export function createAccessOwner<Workspace>(dependencies: {
   scope(workspace: Workspace): string;
   assertCurrent(workspace: Workspace): void;
   permissions(workspace: Workspace, datasetId: string, after?: string): Promise<unknown>;
-  refresh(workspace: Workspace): Promise<AccessRefreshResult>;
+  refresh(workspace: Workspace, options?: AccessRefreshOptions): Promise<AccessRefreshResult>;
   nowMs?: () => number;
 }) {
   const query = createAccessQuery(),
@@ -173,7 +173,15 @@ export function createAccessOwner<Workspace>(dependencies: {
         shareId: resolved.shareId,
         cursor: input.cursor,
       });
-      if (resolved.ended && answer.freshness === "fresh") answer.freshness = "stale";
+      if (resolved.ended) {
+        if (answer.freshness === "fresh") answer.freshness = "stale";
+        // The recipient's own grant no longer reaches the work, so its row says it ended rather than naming a level.
+        answer.rows = answer.rows.map((row) =>
+          row.kind === "share" && row.via === "received" && row.status === "active"
+            ? { ...row, status: "revoked" }
+            : row,
+        );
+      }
       return AccessAnswer.parse(answer);
     },
     sharing(workspace: Workspace, input: z.infer<typeof SharingAccessInput>): AccessAnswer {
@@ -195,9 +203,12 @@ export function createAccessOwner<Workspace>(dependencies: {
         }),
       );
     },
-    async refresh(workspace: Workspace): Promise<AccessRefreshResult> {
+    async refresh(
+      workspace: Workspace,
+      options?: AccessRefreshOptions,
+    ): Promise<AccessRefreshResult> {
       dependencies.assertCurrent(workspace);
-      const result = await dependencies.refresh(workspace);
+      const result = await dependencies.refresh(workspace, options);
       dependencies.assertCurrent(workspace);
       return result.status === "unavailable" && !dependencies.account()
         ? { status: "unavailable", reason: "signed-out" }
@@ -215,19 +226,26 @@ export function accessCliQueries<Workspace>(
       run((workspace) => owner.object(workspace, input)),
     sharing: (input: z.infer<typeof SharingAccessInput>) =>
       run((workspace) => owner.sharing(workspace, input)),
-    refresh: () => run((workspace) => owner.refresh(workspace)),
+    // An agent reads Access right after, so a paced refresh waits for the next check.
+    refresh: () => run((workspace) => owner.refresh(workspace, { wait: true })),
   };
 }
 
 /** The two acquisition owners supply their own pacing and coalescing. */
 export function createAccessAcquisition(dependencies: {
-  roster(workspaceId: string): Promise<AccessRefreshResult["status"]>;
+  roster(
+    workspaceId: string,
+    options?: AccessRefreshOptions,
+  ): Promise<AccessRefreshResult["status"]>;
   received(): Promise<AccessRefreshResult["status"]>;
 }) {
   return {
-    async request(workspaceId: string): Promise<AccessRefreshResult> {
+    async request(
+      workspaceId: string,
+      options?: AccessRefreshOptions,
+    ): Promise<AccessRefreshResult> {
       const statuses = await Promise.all([
-        dependencies.roster(workspaceId),
+        dependencies.roster(workspaceId, options),
         dependencies.received(),
       ]);
       for (const status of ["requested", "joined", "paced"] as const)
@@ -237,12 +255,30 @@ export function createAccessAcquisition(dependencies: {
   };
 }
 
+/** `wait` makes a paced roster request resolve when the scheduled listing ends. */
+export type AccessRefreshOptions = { wait?: boolean };
+
 export async function refreshAccessObservations(
-  operation: { workspace: { workspaceId: string }; assertCurrent(): void },
+  operation: { workspace: { workspaceId: string }; signal?: AbortSignal; assertCurrent(): void },
   warmCredentials: () => Promise<unknown>,
   acquisition: ReturnType<typeof createAccessAcquisition>,
+  options?: AccessRefreshOptions,
 ): Promise<AccessRefreshResult> {
   await warmCredentials().catch(() => undefined);
   operation.assertCurrent();
-  return acquisition.request(operation.workspace.workspaceId);
+  const requested = acquisition.request(operation.workspace.workspaceId, options);
+  const signal = operation.signal;
+  if (!options?.wait || !signal) return requested;
+  // A wait can last a minute, so it ends when the workspace's authority retires.
+  let stop!: () => void;
+  const retired = new Promise<never>((_resolve, reject) => {
+    stop = () => reject(signal.reason);
+    if (signal.aborted) stop();
+    else signal.addEventListener("abort", stop, { once: true });
+  });
+  try {
+    return await Promise.race([requested, retired]);
+  } finally {
+    signal.removeEventListener("abort", stop);
+  }
 }

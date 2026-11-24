@@ -113,6 +113,8 @@ import {
   exceedsUtf8Bytes,
 } from "../workspaces/workspaceTextLimits";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
+import { sharedWaitingLine } from "../ipc/sharedDocumentOpenState";
+import type { LevelMark } from "./workbench/membershipWords";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
@@ -324,6 +326,8 @@ export function MarkdownView(props: {
   // Read-only shared views: editing is disabled regardless of size,
   // and live collab never activates.
   forceReadOnly?: boolean;
+  // The level allows no editing here, so the page shows this mark in place of its Edit toggle.
+  levelMark?: LevelMark | null;
   // Main takes no live edits to this note from this computer until Try again
   // sends its queue or a Stop releases the note. The session stays bound, so
   // remote edits still show.
@@ -382,6 +386,8 @@ export function MarkdownView(props: {
   // Owned by the inspector, like the open itself. Required: the notice must
   // never render without its retry, and the one caller always passes it.
   onRetryEngineOpen: () => void;
+  // Opens account settings, for a joined page opened with another account.
+  onSwitchAccount?: (() => void) | undefined;
   // Reopen the note after a change outside dohc. Unlike a retry, it opens the
   // new bytes as a new note: the inspector reads and checks them again.
   onReloadChangedOutside: () => void;
@@ -2578,21 +2584,30 @@ export function MarkdownView(props: {
         }
         actions={
           <DocumentControls
-            toggle={{
-              label:
-                surfaceMode === "read" ? "Edit" : surfaceMode === "wysiwyg" ? "Source" : "Editor",
-              testId: "markdown-edit-toggle",
-              disabled: readOnly || opening,
-              title: opening ? OPENING_TITLE : readOnly ? editReason : undefined,
-              onClick: () => {
-                if (readOnly || opening) return;
-                if (mode === "source" && saveTimer.current) {
-                  clearTimeout(saveTimer.current);
-                  void saveNow();
-                }
-                toggleEditorMode();
-              },
-            }}
+            mark={props.levelMark}
+            toggle={
+              props.levelMark
+                ? null
+                : {
+                    label:
+                      surfaceMode === "read"
+                        ? "Edit"
+                        : surfaceMode === "wysiwyg"
+                          ? "Source"
+                          : "Editor",
+                    testId: "markdown-edit-toggle",
+                    disabled: readOnly || opening,
+                    title: opening ? OPENING_TITLE : readOnly ? editReason : undefined,
+                    onClick: () => {
+                      if (readOnly || opening) return;
+                      if (mode === "source" && saveTimer.current) {
+                        clearTimeout(saveTimer.current);
+                        void saveNow();
+                      }
+                      toggleEditorMode();
+                    },
+                  }
+            }
             // A truncated doc only loaded a bounded prefix into
             // serializeDraftRef — copying/exporting it would silently emit a
             // partial document. No menu until the full file is loaded (same
@@ -2645,6 +2660,7 @@ export function MarkdownView(props: {
         <EngineMayHoldDocumentNotice
           onRetry={props.onRetryHeldCapture}
           contentShown
+          noun="page"
           message={captureHeldLiveMessage(props.path)}
         >
           <OpenExternallyLink
@@ -2669,7 +2685,16 @@ export function MarkdownView(props: {
         <EngineMayHoldDocumentNotice
           onRetry={props.onRetryEngineOpen}
           contentShown
-          message={engine.openRefusal ?? engine.sharedWaiting?.message}
+          noun="page"
+          message={engine.openRefusal ?? sharedWaitingLine(engine.sharedWaiting)}
+          waiting={!engine.openRefusal && engine.sharedWaiting?.awaitsHost === true}
+          action={
+            !engine.openRefusal &&
+            engine.sharedWaiting?.state === "other-account" &&
+            props.onSwitchAccount
+              ? { label: "Switch account", run: props.onSwitchAccount }
+              : undefined
+          }
           details={engine.openRefusalDetail}
         />
       ) : null}

@@ -47,6 +47,7 @@ import {
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
 import { fileReferenceKey, resolveFileMentionNavigationTargets } from "./chatFileMentions";
+import { showMessage } from "./chatsOnScreen";
 import {
   isPersonalAgentId,
   personalAgentName,
@@ -65,11 +66,27 @@ import {
 // on its earlier messages too.
 export function chatAuthorLabel(
   author: Pick<ChatMessageRecord, "authorKind" | "authorDisplayName"> &
-    Partial<Pick<ChatMessageRecord, "authorAgentId" | "presentation">>,
+    Partial<
+      Pick<
+        ChatMessageRecord,
+        "authorAgentId" | "presentation" | "authorOwnerDisplayName" | "linkAgent"
+      >
+    >,
 ): string {
   const agentId = author.presentation?.agentId ?? author.authorAgentId;
   if (author.authorKind === "agent" && agentId !== undefined && isPersonalAgentId(agentId)) {
     return personalAgentName(agentId) ?? author.authorDisplayName;
+  }
+  // "Agent" is dohc's word for an agent that gave no name. Another person's
+  // such agent goes by whose it is.
+  if (
+    author.authorKind === "agent" &&
+    author.authorDisplayName === "Agent" &&
+    author.authorOwnerDisplayName &&
+    author.presentation?.self === false &&
+    author.linkAgent !== true
+  ) {
+    return `${author.authorOwnerDisplayName}'s agent`;
   }
   return author.authorDisplayName;
 }
@@ -1067,6 +1084,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
           role="listitem"
           aria-posinset={at + 1}
           aria-setsize={props.messages.length}
+          ref={(element) => (element ? showMessage(message.id, element) : undefined)}
           data-testid={`${props.testIdPrefix}-message`}
           data-message-id={message.id}
           data-continues={continues ? "true" : "false"}

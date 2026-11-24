@@ -31,6 +31,8 @@ import { readLocalStateFrom } from "./workspaceLocalState";
 import {
   createShareViewFiles,
   type ResolvedShareViewFilesTarget,
+  type ShareViewAccount,
+  type ShareViewSignedInAccount,
   type ShareViewFileChange,
   type ShareViewFileChangeValue,
 } from "./shareViewFiles";
@@ -187,9 +189,17 @@ export function scope(harnessed: Harness) {
   };
 }
 
+export const JOINED_RELAY_URL = "https://relay.example";
+
 export function shareViewFilesOwner(
   harnessed: Pick<Harness, "workspaceId" | "rootPath">,
   store: CaptureVersionedTextStore,
+  // A joined workspace: the whole workspace at Edit, joined by recipient-a on
+  // JOINED_RELAY_URL, with `account` as the account signed in now, or main's
+  // whole credential session.
+  joined?:
+    | { account: () => ShareViewAccount | null }
+    | { signedInAccount: ShareViewSignedInAccount },
 ) {
   const requested = {
     kind: "standalone" as const,
@@ -203,16 +213,23 @@ export function shareViewFilesOwner(
     shareId: SHARE_ID,
     recipientUserId: "recipient-a",
     granterEmail: "granter@example.com",
-    grantedSelector: {
-      paths: ["docs"],
-      versionId: null,
-      access: "edit" as const,
-    },
+    grantedSelector: joined
+      ? { paths: [], versionId: null, access: "edit" as const, wholeWorkspace: true }
+      : {
+          paths: ["docs"],
+          versionId: null,
+          access: "edit" as const,
+        },
+    ...(joined ? { relayUrl: JOINED_RELAY_URL } : {}),
     ended: false,
   };
   return {
     requested,
     files: createShareViewFiles({
+      signedInAccount:
+        joined && "signedInAccount" in joined
+          ? joined.signedInAccount
+          : { settle: async () => undefined, current: joined?.account ?? (() => null) },
       resolveTarget: (candidate) =>
         candidate.kind === requested.kind && candidate.workspaceId === requested.workspaceId
           ? resolved
@@ -507,6 +524,30 @@ export function replicationLogRows(rootPath: string): number {
   try {
     const row = database.prepare("SELECT COUNT(*) AS rows FROM replication_log").get();
     return Number(row?.rows ?? 0);
+  } finally {
+    database.close();
+  }
+}
+
+// What each journal row records, to tell which paths a change journaled.
+export function replicationLogPayloads(rootPath: string): string[] {
+  const { DatabaseSync } = requireModule("node:sqlite") as {
+    DatabaseSync: new (
+      path: string,
+      options?: { readOnly?: boolean },
+    ) => {
+      prepare(sql: string): { all(): Record<string, unknown>[] };
+      close(): void;
+    };
+  };
+  const database = new DatabaseSync(join(rootPath, ".dohc", "engine", "engine.db"), {
+    readOnly: true,
+  });
+  try {
+    return database
+      .prepare("SELECT payload_json FROM replication_log")
+      .all()
+      .map((row) => String(row.payload_json));
   } finally {
     database.close();
   }

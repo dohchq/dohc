@@ -208,15 +208,13 @@ describe("push subscriptions", () => {
     const name = () =>
       inspect(storagePath(f.storage), (db) =>
         db
-          .prepare(
-            "SELECT account_name FROM sync_relay_push_installation_names WHERE installation_id = ?",
-          )
-          .get(installation(1)),
+          .prepare("SELECT display_name, handle FROM sync_relay_account_names WHERE user_id = ?")
+          .get("alice"),
       );
-    expect(name()).toEqual({ account_name: "Alice" });
+    expect(name()).toEqual({ display_name: "Alice", handle: "alice" });
     f.auth.signIn("alice-1", "alice", 1_000_000, "Alicia");
     expect(await body(await f.subscribe("alice-1"))).toMatchObject({ generation: 1 });
-    expect(name()).toEqual({ account_name: "Alicia" });
+    expect(name()).toEqual({ display_name: "Alicia", handle: "alicia" });
   });
 
   it("binds a subscription to the caller's sign-in and keeps it across a restart", async () => {

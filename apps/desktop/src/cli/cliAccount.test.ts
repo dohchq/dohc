@@ -119,7 +119,7 @@ describe("CLI account verbs", () => {
     expect(response).toEqual({
       protocolVersion: CLI_PROTOCOL_VERSION,
       ok: false,
-      error: "dohc: dohc could not reach this server.",
+      error: "dohc could not reach this server.",
     });
   });
 });

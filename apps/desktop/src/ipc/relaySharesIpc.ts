@@ -28,6 +28,7 @@ import {
   ListRelaySharesResult,
   RelayShareReceivedRow,
   RelayShareSelector,
+  RelayShareMembershipSelector,
   RevokeRelayShareResult,
   RelayShareRevokeResponse,
   RelayShareUndoResponse,
@@ -1047,7 +1048,9 @@ export async function stopNamedOwnerLiveDocument<
 // A selector this app cannot read is shown as damaged, as the relay shows one it cannot read,
 // so one bad row does not fail the whole listing and still offers its reverse path.
 function readableOrDamaged(row: Record<string, unknown>): Record<string, unknown> {
-  return row.damaged === true || RelayShareSelector.safeParse(row.selector).success
+  return row.damaged === true ||
+    RelayShareSelector.safeParse(row.selector).success ||
+    RelayShareMembershipSelector.safeParse(row.selector).success
     ? row
     : { ...row, selector: null, damaged: true };
 }

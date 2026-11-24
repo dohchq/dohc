@@ -13,8 +13,8 @@ import {
 } from "./errors";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import {
+  browserChatWaitGroup,
   DiscussionActivityCapacityError,
-  linkLogWaitGroup,
   type DiscussionActivityHub,
 } from "./discussionActivity";
 import type { NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
@@ -32,18 +32,23 @@ import {
 } from "./relayLogInputs";
 import { parseLimit, parseString, parseLinkLogHold } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import {
   chatSideOf,
   filterOpForShare,
+  isWorkspaceSelector,
   type AnyShareSelector,
   type ChatShareThreadResolver,
 } from "./shareFilter";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
+import { commentFileOf, currentFileAt, type CommentFile } from "./storage/personalAgentChat";
 import { MAX_DISCUSSION_ACTIVITY_HOLD_MS } from "./wireLimits";
+import { workspaceChatAccess, workspaceFileReach, workspaceGroupReachable } from "./workspaceReach";
 
 const MAX_MESSAGE_BODY_BYTES = 64 * 1024;
-export const MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE = 128;
+// About 100 people with two tabs each, and room to spare.
+export const MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE = 512;
 const cacheHeaders = { "cache-control": "private, no-store" };
 
 export interface NamedChatMessage {
@@ -59,6 +64,35 @@ export interface NamedChatMessage {
   createdAtMs: number;
   body: string | null;
   bodyTooLarge: boolean;
+}
+
+/**
+ * A named reader's message names its lane, and a chat reply names the message it answers.
+ * `startsPost` marks a post's first message, so a reader whose page holds only a post's later replies
+ * does not show one of them as the post. A chat message never starts one.
+ */
+export type ThreadedChatMessage = NamedChatMessage & {
+  lane: "posts" | "chat";
+  parentMessageId: string | null;
+  startsPost: boolean;
+};
+
+/** A message in a follow of every Group a workspace share reaches names its Group. */
+type PagedChatMessage = ThreadedChatMessage & { channelWireId?: string };
+
+function threaded(
+  message: NamedChatMessage,
+  payload: unknown,
+  lane: "posts" | "chat",
+  startsPost: boolean,
+): ThreadedChatMessage {
+  const parent = (payload as { parentMessageId?: unknown }).parentMessageId;
+  return {
+    ...message,
+    lane,
+    parentMessageId: typeof parent === "string" ? parent : null,
+    startsPost: lane === "posts" && startsPost,
+  };
 }
 
 const linkId = (value: unknown): value is string =>
@@ -108,6 +142,40 @@ function linkProvenanceHolds(p: Record<string, unknown>, originId: string): bool
     (!Object.hasOwn(p, "agentConnectionId") || linkId(p.agentConnectionId)) &&
     String(p.messageId).startsWith(LINK_CHAT_MESSAGE_ID_PREFIX) &&
     !["authorUserId", "authorOwnerDisplayName", "chainDepth"].some((key) => Object.hasOwn(p, key))
+  );
+}
+
+/**
+ * Names each person by their account, as a member's desktop pull does, never by
+ * the name their own computer wrote: that computer calls a person with no
+ * profile name "You". An agent's or automation's message names the account it
+ * ran for the same way. Each account is looked up once per page.
+ */
+async function namedByAccount<Message extends NamedChatMessage>(
+  messages: Message[],
+  lookup: LogAuthorNameLookup | undefined,
+): Promise<Message[]> {
+  const names = new Map<string, Promise<string>>();
+  const nameOf = (userId: string) => {
+    let name = names.get(userId);
+    if (!name) {
+      name = accountDisplayName(lookup, userId).then((found) => found ?? "Unnamed");
+      names.set(userId, name);
+    }
+    return name;
+  };
+  return Promise.all(
+    messages.map(async (message) => {
+      if (message.authorUserId === null) return message;
+      if (message.authorKind === "human")
+        return { ...message, authorDisplayName: await nameOf(message.authorUserId) };
+      if (
+        (message.authorKind === "agent" || message.authorKind === "automation") &&
+        message.authorOwnerDisplayName !== null
+      )
+        return { ...message, authorOwnerDisplayName: await nameOf(message.authorUserId) };
+      return message;
+    }),
   );
 }
 
@@ -271,8 +339,11 @@ export function createNamedRecipientChat(options: {
           const allowed = new Set([
             "shareId",
             "channelWireId",
+            "path",
             "id",
             "threadId",
+            "lane",
+            "parentMessageId",
             "body",
             "authorKind",
             "authorDisplayName",
@@ -283,7 +354,7 @@ export function createNamedRecipientChat(options: {
         } else {
           const allowed = channels
             ? ["grantId"]
-            : ["shareId", "channelWireId", "before", "since", "hold", "limit"];
+            : ["shareId", "channelWireId", "path", "before", "since", "hold", "limit"];
           if (
             [...url.searchParams.keys()].some(
               (key) => !allowed.includes(key) || url.searchParams.getAll(key).length !== 1,
@@ -323,24 +394,64 @@ export function createNamedRecipientChat(options: {
           followsByWorkspace.set(share.workspaceId, workspaceCount + 1);
           followWorkspace = share.workspaceId;
         }
-        const authority = requireShareAction(shareId, actor.userId, "read");
-        // One channel per share. A workspace share's Groups are not followed
-        // from the browser here yet, so it has no chat side and is refused.
-        const chat = chatSideOf(authority.effectiveSelector);
-        if (!chat || authority.share.workspaceId !== share.workspaceId) throw notFound();
+        // A member's browser hears one refusal: a removed member reads like an unknown share, as the member's link reads do.
+        const membership =
+          (JSON.parse(share.selectorJson) as { kind?: unknown }).kind === "workspace";
+        const action = (kind: "read" | "append") => {
+          try {
+            return requireShareAction(shareId, actor.userId, kind);
+          } catch (error) {
+            throw membership && error instanceof RelayError && error.code === "share_access_removed"
+              ? notFound()
+              : error;
+          }
+        };
+        const authority = action("read");
+        if (authority.share.workspaceId !== share.workspaceId) throw notFound();
+        // A workspace share reaches every ordinary Group, one follow for them all.
+        // Any other share reaches one channel.
+        const workspace = isWorkspaceSelector(authority.effectiveSelector);
+        const resolver = workspace ? options.reads.chatResolverFor(share.workspaceId) : undefined;
+        const chat = workspace ? null : chatSideOf(authority.effectiveSelector);
+        if (!workspace && !chat) throw notFound();
         const recheck = () => {
-          const fresh = requireShareAction(shareId, actor.userId, "read");
+          const fresh = action("read");
           if (
             fresh.share.workspaceId !== share.workspaceId ||
-            chatSideOf(fresh.effectiveSelector)?.channelWireId !== chat.channelWireId
+            isWorkspaceSelector(fresh.effectiveSelector) !== workspace ||
+            (chat && chatSideOf(fresh.effectiveSelector)?.channelWireId !== chat.channelWireId)
           )
             throw notFound();
           controller.signal.throwIfAborted();
+          return fresh;
         };
         if (channels) {
+          const listing = {
+            shareId,
+            userId: actor.userId,
+            maxPostBytes: limits.maxRequestBytes,
+            maxBodyBytes: MAX_MESSAGE_BODY_BYTES,
+          };
+          if (!chat) {
+            const groups = storage
+              .listChannelCreates(share.workspaceId)
+              .filter((group) => workspaceGroupReachable(group.channelWireId, resolver!));
+            const fresh = recheck().effectiveSelector;
+            if (!isWorkspaceSelector(fresh)) throw notFound();
+            return json({
+              ...listing,
+              channels: groups.map((group) => ({
+                channelWireId: group.channelWireId,
+                name: group.name,
+                kind: "channel",
+                type: group.type,
+                access: workspaceChatAccess(fresh),
+              })),
+            });
+          }
           let writable = false;
           try {
-            requireShareAction(shareId, actor.userId, "append");
+            action("append");
             writable = true;
           } catch (error) {
             if (!(error instanceof RelayError && error.code === "share_read_only")) throw error;
@@ -348,28 +459,63 @@ export function createNamedRecipientChat(options: {
           const labels = storage.getShareLabels(shareId, "member");
           recheck();
           return json({
-            shareId,
-            userId: actor.userId,
-            maxPostBytes: limits.maxRequestBytes,
-            maxBodyBytes: MAX_MESSAGE_BODY_BYTES,
+            ...listing,
             channels: [
               {
                 channelWireId: chat.channelWireId,
                 name: labels.subjectName,
                 kind: storage.findChannelCreateKind(share.workspaceId, chat.channelWireId) ?? null,
+                type:
+                  storage
+                    .listChannelCreates(share.workspaceId)
+                    .find((group) => group.channelWireId === chat.channelWireId)?.type ?? "both",
                 access: writable ? "read-write" : "read-only",
               },
             ],
           });
         }
-        const channelWireId = parseString(
-          request.method === "POST" ? input.channelWireId : url.searchParams.get("channelWireId"),
-          "channelWireId",
-          256,
-        );
-        if (channelWireId !== chat.channelWireId) throw notFound();
-        if (request.method === "POST") {
-          requireShareAction(shareId, actor.userId, "append");
+        // A workspace share reads and posts on a current file's Comments by its path. File Comments follow file reach.
+        const posting = request.method === "POST";
+        let file: CommentFile | null = null;
+        if (posting ? Object.hasOwn(input, "path") : url.searchParams.has("path")) {
+          const path = posting ? input.path : url.searchParams.get("path"),
+            selector = authority.effectiveSelector;
+          file =
+            typeof path === "string" && isWorkspaceSelector(selector)
+              ? currentFileAt(storage, share.workspaceId, path)
+              : null;
+          if (
+            !file ||
+            !isWorkspaceSelector(selector) ||
+            (posting
+              ? Object.hasOwn(input, "channelWireId")
+              : url.searchParams.has("channelWireId")) ||
+            visibleSharePath(workspaceFileReach(selector), file.filePath) !== file.filePath
+          )
+            throw notFound();
+        }
+        // A workspace share follows every Group without naming one, and reads or posts in one Group by name.
+        const everyGroup = !chat && !file && following;
+        if (everyGroup && url.searchParams.has("channelWireId")) throw notFound();
+        const channelWireId =
+          everyGroup || file
+            ? null
+            : parseString(
+                posting ? input.channelWireId : url.searchParams.get("channelWireId"),
+                "channelWireId",
+                256,
+              );
+        if (
+          channelWireId !== null &&
+          (chat
+            ? channelWireId !== chat.channelWireId
+            : !workspaceGroupReachable(channelWireId, resolver!))
+        )
+          throw notFound();
+        const place = file ? { path: file.filePath } : { channelWireId };
+        if (posting) {
+          if (channelWireId === null && !file) throw notFound();
+          action("append");
           if (input.authorUserId !== undefined && input.authorUserId !== actor.userId)
             throw relayError("authorship_mismatch");
           const id = parseString(input.id, "id", 256);
@@ -394,20 +540,70 @@ export function createNamedRecipientChat(options: {
           const originId = "browser-chat";
           const storedOrigin = namedShareOrigin(shareId, actor.userId, originId);
           const messageId = `browser-message:${sha256Hex(JSON.stringify([shareId, actor.userId, id]))}`;
-          const createThread = input.threadId === undefined;
-          const threadId = createThread
-            ? `browser-thread:${sha256Hex(JSON.stringify([shareId, actor.userId, id]))}`
-            : parseString(input.threadId, "threadId", 256);
+          // A new Group message starts a post, or joins the Group's chat, which is one conversation.
+          // A reply names its thread, and a reply in the chat may name the message it answers.
+          const replying = input.threadId !== undefined;
+          if ((file || replying) && input.lane !== undefined) throw badRequest("invalid thread");
+          if (file && input.parentMessageId !== undefined) throw badRequest("invalid parent");
+          let lane: "posts" | "chat" | undefined;
+          if (!replying && !file) {
+            const type =
+              storage
+                .listChannelCreates(share.workspaceId)
+                .find((group) => group.channelWireId === channelWireId)?.type ?? "both";
+            const asked = input.lane ?? (type === "chat" ? "chat" : "posts");
+            if ((asked !== "posts" && asked !== "chat") || (type !== "both" && type !== asked))
+              throw badRequest("invalid lane");
+            lane = asked;
+          }
+          const chatThread =
+            lane === "chat"
+              ? storage.findChannelChatThread(share.workspaceId, channelWireId!)
+              : null;
+          const createThread = !replying && chatThread === null;
+          const threadId =
+            chatThread ??
+            (createThread
+              ? `browser-thread:${sha256Hex(JSON.stringify([shareId, actor.userId, id]))}`
+              : parseString(input.threadId, "threadId", 256));
           if (!threadId.isWellFormed()) throw badRequest("invalid thread id");
+          // A reply on a file joins one of that file's threads, and a reply in a Group one of that Group's.
+          if (
+            file &&
+            replying &&
+            commentFileOf(storage, share.workspaceId, threadId)?.objectId !== file.objectId
+          )
+            throw notFound();
+          if (
+            !file &&
+            replying &&
+            storage.findThreadCreateChannelWireId(share.workspaceId, threadId) !== channelWireId
+          )
+            throw notFound();
+          const threadLane = file
+            ? "posts"
+            : (lane ?? storage.findThreadCreateLane(share.workspaceId, threadId) ?? "posts");
+          const parentMessageId =
+            input.parentMessageId === undefined
+              ? undefined
+              : parseString(input.parentMessageId, "parentMessageId", 256);
+          if (
+            parentMessageId !== undefined &&
+            (!replying || threadLane !== "chat" || !parentMessageId.isWellFormed())
+          )
+            throw badRequest("invalid parent");
 
           const append = async () => {
             const createdAtMs = options.nowMs();
             const ops = [
+              // The share's write binds a new thread on a file to the file's object, as the desktop's own Comments are.
               ...(createThread
                 ? [
                     {
                       opKind: "chat.thread.create",
-                      payload: { threadId, title: "", channelWireId, lane: "chat", createdAtMs },
+                      payload: file
+                        ? { threadId, title: "", linkedPath: file.filePath, createdAtMs }
+                        : { threadId, title: "", channelWireId, lane: threadLane, createdAtMs },
                     },
                   ]
                 : []),
@@ -416,6 +612,7 @@ export function createNamedRecipientChat(options: {
                 payload: {
                   messageId,
                   threadId,
+                  ...(parentMessageId === undefined ? {} : { parentMessageId }),
                   body,
                   authorKind,
                   authorDisplayName,
@@ -425,17 +622,15 @@ export function createNamedRecipientChat(options: {
                 },
               },
             ].map((op, originSeq) => ({ ...op, originSeq, recordedAtMs: createdAtMs }));
+            const payload = ops[ops.length - 1]!.payload;
+            const draft = messageFromOp(
+              { relaySeq: Number.MAX_SAFE_INTEGER, opKind: "chat.message.append", payload },
+              storedOrigin,
+            );
             boundedJson({
               shareId,
-              channelWireId,
-              message: messageFromOp(
-                {
-                  relaySeq: Number.MAX_SAFE_INTEGER,
-                  opKind: "chat.message.append",
-                  payload: ops[ops.length - 1]!.payload,
-                },
-                storedOrigin,
-              ),
+              ...place,
+              message: draft && threaded(draft, payload, threadLane, createThread),
             });
             return options.transport(
               new Request(request.url, {
@@ -459,33 +654,47 @@ export function createNamedRecipientChat(options: {
           });
           if (!row) throw notFound();
           recheck();
+          const stored = JSON.parse(row.payloadJson) as unknown;
+          const message = messageFromOp(
+            { relaySeq: row.relaySeq, opKind: row.opKind, payload: stored },
+            row.originId,
+          );
           return json({
             shareId,
-            channelWireId,
-            message: messageFromOp(
-              { relaySeq: row.relaySeq, opKind: row.opKind, payload: JSON.parse(row.payloadJson) },
-              row.originId,
-            ),
+            ...place,
+            message:
+              message &&
+              threaded(
+                message,
+                stored,
+                threadLane,
+                message !== null &&
+                  storage.findThreadFirstMessageId(share.workspaceId, message.threadId) ===
+                    message.messageId,
+              ),
           });
         }
-        return json(
-          await readSharedChannelPage({
-            storage,
-            resolver: options.reads.chatResolverFor(share.workspaceId),
-            selector: authority.effectiveSelector,
-            workspaceId: share.workspaceId,
-            shareId,
-            channelWireId,
-            query: url.searchParams,
-            recheck,
-            activity: options.activity,
-            waiter: `named:${actor.userId}`,
-            signal: controller.signal,
-            maxResponseBytes: limits.maxResponseBytes,
-            busyCode: "share_access_rate_limited",
-            project: (message) => message,
-          }),
-        );
+        const page = await readSharedChannelPage({
+          storage,
+          resolver: resolver ?? options.reads.chatResolverFor(share.workspaceId),
+          selector: authority.effectiveSelector,
+          workspaceId: share.workspaceId,
+          shareId,
+          channelWireId,
+          query: url.searchParams,
+          comments: file && commentsOn(storage, share.workspaceId, file),
+          recheck,
+          activity: options.activity,
+          waiter: `named:${actor.userId}`,
+          signal: controller.signal,
+          maxResponseBytes: limits.maxResponseBytes,
+          busyCode: "share_access_rate_limited",
+          project: (message) => message,
+        });
+        return json({
+          ...page,
+          messages: await namedByAccount(page.messages, options.lookupUserDisplayName),
+        });
       } catch (error) {
         return controller.signal.aborted ? cancelledResponse(request) : errorResponse(error);
       } finally {
@@ -510,18 +719,53 @@ export function createNamedRecipientChat(options: {
   return handle;
 }
 
+/** A current file's Comments: the threads whose first create binds this file and no other. */
+interface FileComments {
+  path: string;
+  fetch(page: {
+    workspaceId: string;
+    cursor: number | null;
+    direction: "older" | "newer";
+    limit: number;
+  }): ReturnType<SyncRelayStorage["fetchCommentMessages"]>;
+  onFile(threadId: string): boolean;
+}
+
+function commentsOn(
+  storage: SyncRelayStorage,
+  workspaceId: string,
+  file: CommentFile,
+): FileComments {
+  return {
+    path: file.filePath,
+    fetch: (page) =>
+      storage.fetchCommentMessages({ ...page, objectId: file.objectId, path: file.filePath }),
+    onFile: (threadId) => commentFileOf(storage, workspaceId, threadId)?.objectId === file.objectId,
+  };
+}
+
 // One page of a shared channel for a browser reader, named or link: newest
-// first with `before`, or following with `since` and an optional hold.
+// first with `before`, or following with `since` and an optional hold. With
+// no channel, a follow of every Group a workspace share reaches, each message
+// naming its Group.
 // `recheck` throws once the reader's access has ended; it runs before every
 // read, including each wake of a hold, and before the page leaves.
 // `project` is the reader's view of a message, and the byte budget counts it.
+// With `comments` instead of a channel, a page of one file's Comments.
 export async function readSharedChannelPage<Message extends { relaySeq: number }>(input: {
-  storage: Pick<SyncRelayStorage, "fetchChatMessages">;
+  storage: Pick<
+    SyncRelayStorage,
+    | "fetchChatMessages"
+    | "fetchChannelMessages"
+    | "findThreadCreateLane"
+    | "findThreadFirstMessageId"
+  >;
   resolver: ChatShareThreadResolver;
   selector: AnyShareSelector;
   workspaceId: string;
   shareId: string;
-  channelWireId: string;
+  channelWireId: string | null;
+  comments?: FileComments | null;
   query: URLSearchParams;
   recheck(): void;
   activity: Pick<DiscussionActivityHub, "wait">;
@@ -529,7 +773,7 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
   signal: AbortSignal;
   maxResponseBytes: number;
   busyCode: Extract<RelayErrorCode, "share_access_rate_limited" | "link_read_rate_limited">;
-  project(message: NamedChatMessage): Message;
+  project(message: PagedChatMessage): Message;
 }) {
   const { query, recheck, project } = input;
   const following = query.has("since");
@@ -541,15 +785,39 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
   let position = following ? since : query.has("before") ? cursor(query.get("before")) : null;
   const readPage = () => {
     recheck();
-    const result = input.storage.fetchChatMessages({
+    const page = {
       workspaceId: input.workspaceId,
-      channelWireId: input.channelWireId,
       cursor: position,
-      direction: following ? "newer" : "older",
+      direction: following ? ("newer" as const) : ("older" as const),
       limit,
-    });
+    };
+    const { comments } = input;
+    const result = comments
+      ? comments.fetch(page)
+      : input.channelWireId === null
+        ? input.storage.fetchChannelMessages(page)
+        : input.storage.fetchChatMessages({ ...page, channelWireId: input.channelWireId });
     position = result.nextCursor;
-    const messages: NamedChatMessage[] = [];
+    const messages: PagedChatMessage[] = [];
+    const lanes = new Map<string, "posts" | "chat">();
+    const laneOf = (threadId: string): "posts" | "chat" => {
+      const lane =
+        lanes.get(threadId) ??
+        input.storage.findThreadCreateLane(input.workspaceId, threadId) ??
+        "posts";
+      lanes.set(threadId, lane);
+      return lane;
+    };
+    const firsts = new Map<string, string | undefined>();
+    const startsPost = (message: NamedChatMessage, lane: "posts" | "chat") => {
+      if (lane !== "posts") return false;
+      if (!firsts.has(message.threadId))
+        firsts.set(
+          message.threadId,
+          input.storage.findThreadFirstMessageId(input.workspaceId, message.threadId),
+        );
+      return firsts.get(message.threadId) === message.messageId;
+    };
     for (const row of result.rows) {
       if (row.settlementAdmission?.status === "refused") continue;
       const decision = filterOpForShare(
@@ -559,13 +827,33 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
         input.resolver,
         "chat",
       );
-      const message = decision.allowed
+      const read = decision.allowed
         ? messageFromOp(
             { relaySeq: row.relaySeq, opKind: row.opKind, payload: decision.payload },
             row.originId,
           )
         : null;
-      if (message) messages.push(message);
+      if (!read) continue;
+      // A file's Comments are posts.
+      const lane = comments ? "posts" : laneOf(read.threadId);
+      const message = threaded(
+        read,
+        decision.allowed ? decision.payload : {},
+        lane,
+        startsPost(read, lane),
+      );
+      if (comments) {
+        if (comments.onFile(message.threadId)) messages.push(message);
+        continue;
+      }
+      if (input.channelWireId !== null) {
+        messages.push(message);
+        continue;
+      }
+      // A file's Comments are not a Group.
+      const channelWireId = input.resolver.threadChannelWireId(message.threadId);
+      if (workspaceGroupReachable(channelWireId, input.resolver))
+        messages.push({ ...message, channelWireId });
     }
     return {
       messages,
@@ -582,7 +870,7 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
     const deadline = Date.now() + hold;
     while (!input.signal.aborted && Date.now() < deadline) {
       try {
-        await input.activity.wait(linkLogWaitGroup(input.workspaceId), input.waiter, {
+        await input.activity.wait(browserChatWaitGroup(input.workspaceId), input.waiter, {
           holdMs: Math.max(1, deadline - Date.now()),
           signal: input.signal,
           shouldPark: () => {
@@ -603,7 +891,15 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
     }
   }
   recheck();
-  const envelope = { shareId: input.shareId, channelWireId: input.channelWireId, ...page };
+  const envelope = {
+    shareId: input.shareId,
+    ...(input.comments
+      ? { path: input.comments.path }
+      : input.channelWireId === null
+        ? {}
+        : { channelWireId: input.channelWireId }),
+    ...page,
+  };
   const messages: Message[] = [];
   let skippedCursor: number | undefined;
   const partial = (selected: Message[]) => ({

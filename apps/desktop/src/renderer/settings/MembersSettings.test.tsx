@@ -10,7 +10,6 @@ import type { MembersRequest, MembersResult } from "@dohc/cli/members";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import type { CloudSettings } from "./CloudSyncSettings";
-import { JOINED_WORKSPACE_LIMIT } from "../joinedWorkspaceLimit";
 import { LEVEL_WORDS, MembersSettings, membersGate } from "./MembersSettings";
 
 const person = (
@@ -195,7 +194,7 @@ describe("Members page", () => {
     expect(screen.queryByTestId("settings-members-link")).toBeNull();
     expect(screen.queryByTestId("settings-members-level-control")).toBeNull();
     expect(screen.getByTestId("settings-members-level-words").textContent).toBe(
-      "Members can read, comment, and edit documents and Collections.",
+      "Members can read, comment, and edit pages and Collections.",
     );
     expect(screen.queryAllByTestId("settings-members-row-menu")).toHaveLength(0);
     expect(screen.queryByTestId("settings-members-invites")).toBeNull();
@@ -242,6 +241,91 @@ describe("Members page", () => {
       expect(bridge.workspaceMembers).not.toHaveBeenCalled();
     },
   );
+
+  describe("in a joined workspace", () => {
+    // A joined workspace has no sync of its own: the account that joined reaches the owner's Members.
+    const joined = (overrides: Partial<CloudStatusResult> = {}) =>
+      cloud({
+        status: status({
+          email: "bo@test",
+          workspaceSynced: false,
+          workspaceSyncConnected: false,
+          workspaceServerUrl: undefined,
+          ...overrides,
+        }),
+      });
+
+    it("lists names and roles for a member, with no invite, link, or row controls", async () => {
+      bridge.workspaceMembers.mockImplementation(async () => ({
+        status: "ready",
+        view: memberView(),
+      }));
+      renderMembers({ cloud: joined(), joined: true });
+      const page = await screen.findByTestId("settings-members-page");
+      expect(bridge.workspaceMembers).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        request: { action: "list" },
+      });
+      expect(page.dataset.viewerRole).toBe("member");
+      expect(page.textContent).not.toMatch(/@test/u);
+      expect(
+        within(screen.getByTestId("settings-members-people"))
+          .getAllByTestId("settings-members-row")
+          .map((entry) => entry.dataset.memberId),
+      ).toEqual(["owner", "m-ana", "m-bo"]);
+      expect(screen.queryByTestId("settings-members-invite")).toBeNull();
+      expect(screen.queryByTestId("settings-members-link")).toBeNull();
+      expect(screen.queryAllByTestId("settings-members-row-menu")).toHaveLength(0);
+    });
+
+    it("gives an admin Invite and Remove for members, and not for admins", async () => {
+      bridge.workspaceMembers.mockImplementation(async () => ({
+        status: "ready",
+        view: adminView(),
+      }));
+      renderMembers({ cloud: joined(), joined: true });
+      await screen.findByTestId("settings-members-page");
+      expect(screen.getByTestId("settings-members-invite")).toBeTruthy();
+      expect(within(row("m-ana")).queryByTestId("settings-members-row-menu")).toBeNull();
+      expect(await openMenu("m-bo")).toEqual(["Remove from workspace"]);
+    });
+
+    it("asks a signed-out person to connect before asking the server", async () => {
+      const { props } = renderMembers({ cloud: joined({ connected: false }), joined: true });
+      const gate = screen.getByTestId("settings-members-gate");
+      expect(gate.dataset.reason).toBe("signed-out");
+      expect(gate.textContent).toContain("Connect your server to see who is in this workspace.");
+      await userEvent.click(within(gate).getByRole("button", { name: "Connect server" }));
+      expect(props.cloud!.onConnect).toHaveBeenCalled();
+      expect(bridge.workspaceMembers).not.toHaveBeenCalled();
+    });
+
+    it("names the signed-in account and offers Switch account, with no Try again, before asking the server", async () => {
+      const { props } = renderMembers({
+        cloud: joined({ joinedBySignedInAccount: false }),
+        joined: true,
+      });
+      const gate = screen.getByTestId("settings-members-gate");
+      expect(gate.dataset.reason).toBe("other-account");
+      // dohc keeps only the joined account's id, so it names the account signed in now.
+      expect(gate.textContent).toBe(
+        "This computer is signed in as bo@test, not the account the owner invited.Switch account",
+      );
+      // The cause is an account, not the connection.
+      expect(gate.querySelector("svg")?.getAttribute("class")).toContain("lucide-user");
+      expect(within(gate).queryByRole("button", { name: "Try again" })).toBeNull();
+      await userEvent.click(within(gate).getByRole("button", { name: "Switch account" }));
+      expect(props.onOpenSync).toHaveBeenCalled();
+      expect(bridge.workspaceMembers).not.toHaveBeenCalled();
+      expect(membersGate(joined({ joinedBySignedInAccount: true }), true).kind).toBe("ready");
+    });
+
+    it("asks to sign in again when the server stopped accepting this computer's sign-in", () => {
+      expect(membersGate(joined(), true).kind).toBe("ready");
+      expect(membersGate(cloud({ ...joined(), signInExpired: true }), true).kind).toBe("expired");
+      expect(membersGate(joined(), false).kind).toBe("not-synced");
+    });
+  });
 
   it("loads a paused workspace, which keeps its place on the server", () => {
     expect(
@@ -730,23 +814,23 @@ describe("Members page", () => {
     expect(requests().at(-1)).toEqual({ action: "role", person: "m-bo", role: "admin" });
   });
 
-  it("tells the owner and admins that members cannot open the workspace yet, and a member only the level in words", async () => {
+  // Members open the workspace now, so no row says they cannot.
+  it("states the member level with no limit, and a member only the level in words", async () => {
     renderMembers();
-    expect((await screen.findByTestId("settings-members-limit")).textContent).toBe(
-      JOINED_WORKSPACE_LIMIT.members,
-    );
     expect(
-      within(screen.getByTestId("settings-members-level")).getByText("Member level"),
+      within(await screen.findByTestId("settings-members-level")).getByText("Member level"),
     ).toBeTruthy();
+    expect(screen.queryByTestId("settings-members-limit")).toBeNull();
     cleanup();
     bridge.workspaceMembers.mockImplementation(async () => ({
       status: "ready",
       view: adminView(),
     }));
     renderMembers();
-    expect((await screen.findByTestId("settings-members-limit")).textContent).toBe(
-      JOINED_WORKSPACE_LIMIT.members,
-    );
+    expect(
+      within(await screen.findByTestId("settings-members-level")).getByText("Member level"),
+    ).toBeTruthy();
+    expect(screen.queryByTestId("settings-members-limit")).toBeNull();
     cleanup();
     bridge.workspaceMembers.mockImplementation(async () => ({
       status: "ready",

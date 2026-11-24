@@ -811,9 +811,7 @@ Returns `{ connectionId }`.
 
 ### `dohc_members`
 
-Do what the Members page does, as the workspace owner: list people, invites, and removed accounts; invite by email (dohc sends no email: tell them to sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); turn the invite link on or off or reset it; or end membership for everyone. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the owner before you remove anyone or end membership. Requires the original workspace and its signed-in owner account.
-
-Members belong to the original workspace and its owner. Shared profiles do not offer this tool.
+Do what the Members page does, in a workspace you own or joined: list people, invites, and removed accounts; invite by email (dohc sends no email: tell them to sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); turn the invite link on or off or reset it; or end membership for everyone. The server decides what your role allows: members see names and roles; admins also invite, remove members, let them back in, set the level, and manage the invite link; only the owner changes roles or ends membership. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the person you work for before you remove anyone or end membership.
 
 - `request`: `{ action: "list" } | { action: "invite", email: string } | { action: "level", level: "view" | "comment" | "edit" } | { action: "role", person: string, role: "admin" | "member" } | { action: "remove", person: string } | { action: "letBackIn", person: string } | { action: "link", change: "turn-on" | "turn-off" | "reset" } | { action: "end" }`. Required.
 
@@ -1164,7 +1162,7 @@ Answers describe observed grants, not authorization. An empty page means no matc
 
 The object and sharing verbs return only the allowlisted AccessAnswer fields shown below, with at most 100 rows per page. They never return credentials, bearer URLs, invitation URLs, share codes, or link URLs.
 
-Share queries use the current observation. Use `dohc access refresh` to request fresh Sharing inventories through the same paced owner as opening Sharing. Its `status` is `requested`, `joined`, `paced`, or `unavailable`. Unavailable answers include `reason`: `signed-out` or `unreadable`. Requested and joined wait for started or existing attempts to settle, without promising success. Paced follows the existing refresh schedule. Read `dohc access sharing` afterward to inspect observations. `freshness` is `fresh`, `stale`, or `unknown`; `checkedAtMs` is the observation timestamp in milliseconds, or null when unknown. `coverage` names the observed scope and whether it is complete. Its `observation` is `interval`: pages do not form an atomic snapshot. `nextCursor` continues the answer, or is null at the end.
+Share queries use the current observation. Use `dohc access refresh` to request fresh Sharing inventories through the same paced owner as opening Sharing. Its `status` is `requested`, `joined`, `paced`, or `unavailable`. Unavailable answers include `reason`: `signed-out` or `unreadable`. Requested and joined wait for started or existing attempts to settle, without promising success. Within a minute of the workspace's last check, it waits for the next one. Paced means only shares with you follow the existing refresh schedule. Read `dohc access sharing` afterward to inspect observations. `freshness` is `fresh`, `stale`, or `unknown`; `checkedAtMs` is the observation timestamp in milliseconds, or null when unknown. `coverage` names the observed scope and whether it is complete. Its `observation` is `interval`: pages do not form an atomic snapshot. `nextCursor` continues the answer, or is null at the end.
 
 `unknownReason` is null when coverage is known. When visibility is `hidden` or `missing`, it is null because visibility states why the answer is unavailable. Every other answer with `coverage.kind` set to `unavailable` requires one reason. Its closed values are `signed-out`, `not-synced`, `other-account`, `other-server`, `not-listed-yet`, `changed`, and `unreadable`. Reasons describe only this device's records and account. They contain no account identity, email, server URL, share id, or path.
 
@@ -1180,7 +1178,7 @@ dohc access refresh [options]
 
 Request fresh Sharing observations with the same pacing as opening Sharing.
 
-Reports requested, joined, paced, or unavailable. Requested and joined wait for started or existing attempts to settle, without promising success. Paced follows the existing refresh schedule. Read access sharing afterward to inspect observations.
+Reports requested, joined, paced, or unavailable. Requested and joined wait for started or existing attempts to settle, without promising success. Within a minute of the workspace's last check, it waits for the next one. Paced means only shares with you follow the existing refresh schedule. Read access sharing afterward to inspect observations.
 
 With `--json`, prints `{ schemaVersion, status }` or `{ schemaVersion, status: "unavailable", reason }`. Uses socket verb `accessRefresh`.
 
@@ -1254,7 +1252,7 @@ With `--json`, prints `{ schemaVersion, connectionId }`.
 
 List, invite, and remove the workspace's members, set what they can do, and manage the invite link.
 
-Requires the original workspace and its signed-in owner account. Admins use the Members page in the app. A person is a member id from dohc members list, or the email of an invite or a person.
+Works in a workspace you own or joined, signed in with the account that owns or joined it. Your server decides what your role allows. Members see names and roles. Admins also invite people, remove members, let them back in, set the member level, and manage the invite link. Only the owner changes roles or ends membership. A person is a member id from dohc members list, or the email of an invite or a person.
 
 #### `dohc members list`
 

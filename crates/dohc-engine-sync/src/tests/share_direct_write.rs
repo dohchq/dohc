@@ -1221,3 +1221,246 @@ fn an_ordinary_imported_creation_does_not_claim_either_creation_trigger() {
         "ordinary synced creations keep the origin-device rule"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A person in the owner's workspace writes a new page directly at Edit.
+// ---------------------------------------------------------------------------
+
+fn workspace_grant() -> ShareGrant {
+    ShareGrant {
+        scope: crate::ShareScope::Workspace,
+        version_id: None,
+        access: crate::ShareAccess::Edit,
+    }
+}
+
+fn push_as_member(
+    client: &RelaySyncClient<PagedShareRelay>,
+    engine: &mut EngineStore,
+) -> DirectWritePushOutcome {
+    client
+        .push_direct_writes(engine, "ws", SHARE, &workspace_grant(), &NoFaults, 0)
+        .expect("direct push")
+}
+
+#[test]
+fn a_workspace_grant_writes_new_pages_and_leaves_other_changes_on_proposals() {
+    let (_scratch, _path, mut engine) =
+        proposal_fixture(&["v1", "v2", "page", "top", "record", "note"]);
+    hold_schema(&mut engine, "trip/packing");
+    for (index, moment) in [
+        create_moment("m-1", "object-page", "docs/idea.md", "page"),
+        create_moment("m-2", "object-top", "top.md", "top"),
+        create_moment("m-3", "object-record", "trip/packing/a.md", "record"),
+        edit_moment("m-4", "object-plan", "docs/plan.md", "v1", "v2"),
+        create_moment("m-5", "object-note", "docs/notes.txt", "note"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        journal_local_moment(&mut engine, moment, 1_001 + index as i64);
+    }
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+
+    push_as_member(&client, &mut engine);
+    let mut written = written_paths(&client);
+    written.sort();
+    assert_eq!(
+        written,
+        vec![
+            vec!["docs/idea.md".to_owned()],
+            vec!["top.md".to_owned()],
+            vec!["trip/packing/a.md".to_owned()],
+        ],
+    );
+
+    client
+        .submit_share_proposal(
+            &mut engine,
+            "ws",
+            SHARE,
+            &workspace_grant(),
+            "submit-1",
+            &NoFaults,
+            0,
+        )
+        .expect("proposal submit");
+    let mut proposed = proposed_paths(&client);
+    proposed.sort();
+    assert_eq!(proposed, vec!["docs/notes.txt", "docs/plan.md"]);
+}
+
+#[test]
+fn a_push_that_fails_in_transit_counts_the_pages_and_collection_writes_still_waiting() {
+    let (_scratch, _path, mut engine) = proposal_fixture(&["page", "top", "record"]);
+    assert_eq!(
+        crate::read_direct_writes_waiting(&engine, "ws", SHARE).expect("nothing planned"),
+        crate::DirectWritesWaiting::default(),
+    );
+    hold_schema(&mut engine, "trip/packing");
+    for (index, moment) in [
+        create_moment("m-1", "object-page", "docs/idea.md", "page"),
+        create_moment("m-2", "object-top", "top.md", "top"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        journal_local_moment(&mut engine, moment, 1_001 + index as i64);
+    }
+    let relay = PagedShareRelay::new([], []);
+    relay
+        .collection_write_answers
+        .lock()
+        .expect("answers")
+        .push_back(Err(RelayError::Partitioned));
+    let client = RelaySyncClient::new(relay);
+    assert_eq!(
+        client.push_direct_writes(&mut engine, "ws", SHARE, &workspace_grant(), &NoFaults, 0),
+        Err(RelayError::Partitioned),
+    );
+    assert_eq!(
+        crate::read_direct_writes_waiting(&engine, "ws", SHARE).expect("waiting pages"),
+        crate::DirectWritesWaiting {
+            pages: 2,
+            collection_writes: 0,
+            more_pending: false
+        },
+    );
+
+    push_as_member(&client, &mut engine);
+    journal_local_moment(
+        &mut engine,
+        &create_moment("m-3", "object-record", "trip/packing/a.md", "record"),
+        1_003,
+    );
+    journal_local_moment(
+        &mut engine,
+        &create_moment("m-4", "object-later", "docs/later.md", "page"),
+        1_004,
+    );
+    client
+        .transport()
+        .collection_write_answers
+        .lock()
+        .expect("answers")
+        .push_back(Err(RelayError::ServerInternal));
+    assert!(
+        client
+            .push_direct_writes(&mut engine, "ws", SHARE, &workspace_grant(), &NoFaults, 0)
+            .is_err()
+    );
+    assert_eq!(
+        crate::read_direct_writes_waiting(&engine, "ws", SHARE).expect("a page and a record"),
+        crate::DirectWritesWaiting {
+            pages: 1,
+            collection_writes: 1,
+            more_pending: false
+        },
+    );
+}
+
+#[test]
+fn a_path_grant_keeps_a_new_page_on_proposals() {
+    let (_scratch, _path, mut engine) = proposal_fixture(&["page"]);
+    journal_local_moment(
+        &mut engine,
+        &create_moment("m-1", "object-page", "shared/docs/idea.md", "page"),
+        1_001,
+    );
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    push(&client, &mut engine);
+    assert!(written_paths(&client).is_empty());
+    propose(&client, &mut engine, "submit-1");
+    assert_eq!(proposed_paths(&client), vec!["shared/docs/idea.md"]);
+}
+
+#[test]
+fn a_refused_page_stays_a_proposal_and_a_taken_name_keeps_its_draft() {
+    let (_scratch, _path, mut engine) = proposal_fixture(&["refused", "taken"]);
+    for (index, (object, path, text)) in [
+        ("object-refused", "drafts/idea.md", "refused"),
+        ("object-taken", "docs/idea.md", "taken"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        VersionedTextStore::new(&mut engine)
+            .write_text(
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: object.to_owned(),
+                    path: path.to_owned(),
+                    text: text.to_owned(),
+                    moment_id: format!("create-{object}"),
+                    metadata_origin: "user".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2_000 + index as i64,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("page");
+        journal_local_moment(
+            &mut engine,
+            &create_moment(&format!("create-{object}"), object, path, text),
+            2_000 + index as i64,
+        );
+    }
+    let relay = PagedShareRelay::new([], []);
+    relay.collection_write_answers.lock().unwrap().extend([
+        Ok(ShareCollectionWriteResponse::Refused {
+            reason: "share_op_rejected".to_owned(),
+        }),
+        Ok(ShareCollectionWriteResponse::Stale {
+            path: "docs/idea.md".to_owned(),
+            current_blob_sha256: Some("f".repeat(64)),
+        }),
+    ]);
+    let client = RelaySyncClient::new(relay);
+
+    let outcome = push_as_member(&client, &mut engine);
+    assert_eq!(outcome.writes.len(), 2);
+    assert_eq!(outcome.writes[0].recovered_draft_path, None);
+    let submitted = client.transport().collection_writes.lock().unwrap()[1].clone();
+    let identity = hex_sha256(format!("ws\0{}\0docs/idea.md", submitted.submit_id).as_bytes());
+    let draft = format!("docs/Page draft {}-1.txt", &identity[..12]);
+    assert_eq!(
+        outcome.writes[1].recovered_draft_path.as_deref(),
+        Some(draft.as_str())
+    );
+    assert!(push_as_member(&client, &mut engine).writes.is_empty());
+
+    engine
+        .read_with(|conn| {
+            let kept: String = conn.query_row(
+                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id='ws' AND s.path=?1",
+                [&draft], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(kept, "taken");
+            let reason: String = conn.query_row(
+                "SELECT refusal_reason FROM share_direct_write_marks WHERE workspace_id='ws' AND share_id=?1 AND object_id='object-taken'",
+                [SHARE], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(reason, "This page name is taken. Use New page to create another page.");
+            Ok::<(), SyncError>(())
+        })
+        .unwrap();
+
+    client
+        .submit_share_proposal(
+            &mut engine,
+            "ws",
+            SHARE,
+            &workspace_grant(),
+            "submit-1",
+            &NoFaults,
+            0,
+        )
+        .expect("proposal submit");
+    let mut proposed = proposed_paths(&client);
+    proposed.sort();
+    assert_eq!(proposed, vec!["docs/idea.md", "drafts/idea.md"]);
+}

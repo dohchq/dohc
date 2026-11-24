@@ -1703,6 +1703,7 @@ export async function prepareRecordBackend(
               ? [
                   {
                     kind: "post",
+                    target: effect.to.kind === "group" ? "group" : "dm",
                     group: { channelWireId: effect.channelWireId, name: effect.name },
                   },
                 ]

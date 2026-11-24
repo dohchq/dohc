@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import {
+  accessCliQueries,
   createAccessAcquisition,
   createAccessOwner,
   refreshAccessObservations,
@@ -91,7 +92,7 @@ function harness(accountState: "ready" | "signed-out" | "no-relay" = "ready") {
     wallNowMs: Date.now,
   });
   const acquisition = createAccessAcquisition({
-    roster: (id) => rosters.requestRefresh(id),
+    roster: (id, options) => rosters.requestRefresh(id, options),
     received: () => received.refresh(),
   });
   const warmCredentials = vi.fn(async () => undefined);
@@ -113,11 +114,12 @@ function harness(accountState: "ready" | "signed-out" | "no-relay" = "ready") {
     permissions: async () => {
       throw Error("unused");
     },
-    refresh: (workspaceId) =>
+    refresh: (workspaceId, options) =>
       refreshAccessObservations(
         { workspace: { workspaceId }, assertCurrent: () => undefined },
         warmCredentials,
         acquisition,
+        options,
       ),
   });
   return {
@@ -265,6 +267,73 @@ it("waits for both in-flight attempts before answering joined", async () => {
   } finally {
     roster.resolve({ kind: "answered", listing });
     received.resolve(inventory);
+    h.rosters.close("w");
+  }
+});
+
+// A member joins less than a minute after the last listing. The CLI's refresh
+// waits for the paced retry, so its next read lists them; the window's own
+// refresh still answers paced at once.
+it("makes the CLI's refresh wait for a paced retry, so its next read lists a member who joined in the window", async () => {
+  const h = harness();
+  try {
+    await h.owner.refresh("w");
+    vi.setSystemTime(110_000);
+    const sam = {
+      ...grant,
+      grantId: "sam",
+      recipientUserId: "sam",
+      selector: { kind: "workspace" as const },
+      access: "comment" as const,
+    };
+    h.listRoster.mockResolvedValue({
+      kind: "answered",
+      listing: { ...listing, grants: [grant, sam] } as never,
+    });
+    const cli = accessCliQueries(h.owner, (work) => Promise.resolve(work("w")));
+    expect(await h.owner.refresh("w")).toEqual({ status: "paced" });
+    let settled = false;
+    const refreshed = cli.refresh().then((result) => {
+      settled = true;
+      return result;
+    });
+    await vi.advanceTimersByTimeAsync(49_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await refreshed).toEqual({ status: "joined" });
+    expect(h.listRoster).toHaveBeenCalledTimes(2);
+    const read = await cli.object({
+      ref: { kind: "path", path: "notes/plan.md", versionId: null },
+    });
+    expect(read.rows.map((row) => (row.kind === "share" ? row.grantId : null))).toEqual(["sam"]);
+  } finally {
+    h.rosters.close("w");
+  }
+});
+
+// Closing the workspace retires its operations, so a refresh waiting on the
+// next check ends then instead of holding the operation for up to a minute.
+it("ends a waiting refresh when the workspace operation retires", async () => {
+  const h = harness();
+  try {
+    await h.owner.refresh("w");
+    vi.setSystemTime(110_000);
+    const retirement = new AbortController();
+    const waiting = refreshAccessObservations(
+      {
+        workspace: { workspaceId: "w" },
+        signal: retirement.signal,
+        assertCurrent: () => undefined,
+      },
+      h.warmCredentials,
+      h.acquisition,
+      { wait: true },
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    retirement.abort(new Error("The workspace closed."));
+    await expect(waiting).rejects.toThrow("The workspace closed.");
+    expect(h.listRoster).toHaveBeenCalledOnce();
+  } finally {
     h.rosters.close("w");
   }
 });

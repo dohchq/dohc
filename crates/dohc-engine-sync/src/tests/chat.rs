@@ -5023,7 +5023,7 @@ fn a_share_lane_never_takes_a_marked_record() {
         surface: ShareSurface::ShareView,
         channel_wire_id: None,
         granted: Some(ShareGrant {
-            paths: vec!["shared".to_owned()],
+            scope: ShareScope::Paths(vec!["shared".to_owned()]),
             version_id: None,
             access: ShareAccess::View,
         }),

@@ -1004,7 +1004,7 @@ describe("SettingsDialog", () => {
 
   // sharedView is a synchronous prop, but sessionRecorderOn only resolves
   // once main's openWorkspace status arrives. In that window a shared view
-  // already knows it has no chat to test, so Check must not wait on it.
+  // already knows Send test cannot run, so Check must not wait on it.
   it("turns Check off in a shared view before the recorder status resolves", async () => {
     const user = userEvent.setup();
     bridge.getUserSettings.mockResolvedValueOnce({
@@ -1709,4 +1709,22 @@ describe("SettingsDialog", () => {
       ),
     );
   });
+});
+
+it("shows Members in a joined workspace, which lists the owner's people", async () => {
+  render(
+    <SettingsDialog
+      workspaceIsReady
+      sharedView
+      membership
+      workspaceId="ws-1"
+      workspacePath="/shared/trip"
+      workspaceName="Trip"
+      onClose={() => {}}
+    />,
+  );
+  await screen.findByTestId("settings-sidebar");
+  expect(screen.getByTestId("settings-nav-members")).toBeTruthy();
+  fireEvent.change(screen.getByTestId("settings-search"), { target: { value: "invite" } });
+  expect(screen.getByTestId("settings-nav-members")).toBeTruthy();
 });

@@ -119,8 +119,8 @@ async function pendingBurst(rootPath?: string) {
     selector: { paths: ["docs"], access: "edit", versionId: null },
     createdAtMs: 1,
   });
-  f.h.reconcile.mockImplementation(async (_lease, _target, _mode, cursor) => {
-    cursor?.(42);
+  f.h.reconcile.mockImplementation(async (_lease, _target, _mode, onPullCommitted) => {
+    onPullCommitted?.({ cursor: 42, changes: [] });
     return {
       kind: "refresh",
       outcome: {
@@ -178,13 +178,13 @@ async function pendingBurst(rootPath?: string) {
         throw error;
       },
       pull: async (pressBurst) => {
-        const outcome = await f.h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
+        await f.h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
           workspaceId: "existing",
           trigger: pressBurst ? "press-burst" : "background",
         });
         opened.resolve();
         pulled.resolve();
-        return (outcome as { changedPaths: number }).changedPaths > 0;
+        return "other" as const;
       },
     }),
   );
@@ -260,6 +260,7 @@ it("keeps the burst after a changed probe and delivers a failure after six secon
     ended: false,
   };
   const files = createShareViewFiles({
+    signedInAccount: { settle: async () => undefined, current: () => null },
     resolveTarget: () => target,
     openStore: () => daemon.openStore(target),
     resolveRelay: async () => daemon.relay,

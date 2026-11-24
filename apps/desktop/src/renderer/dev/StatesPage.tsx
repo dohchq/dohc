@@ -2466,6 +2466,7 @@ const SHARING_ACTIONS: SharingActions = {
   retune: noop,
   share: noop,
   mount: noop,
+  open: noop,
   unmount: noop,
   openToEdit: noop,
   startLeave: noop,

@@ -73,12 +73,16 @@ export interface WorkspaceJoinPreview {
   ownerName: string | null;
   /** True when the signed-in account already belongs to the workspace. */
   alreadyMember: boolean;
+  /** The account's own membership grant, which opens the workspace in a browser. Null for the owner and for someone not yet in it. */
+  grantId: string | null;
 }
 
 export interface WorkspaceJoinResult {
   workspaceId: string;
   shareId: string;
   workspaceName: string;
+  /** The account's own membership grant, which opens the workspace in a browser. */
+  grantId: string;
 }
 
 export type InviteLinkAction = "turn-on" | "turn-off" | "reset";
@@ -104,6 +108,12 @@ export const WORKSPACE_MEMBER_ROUTES = {
   leave: "/sync/:workspaceId/members/leave",
   /** POST {} → WorkspaceMembersView. Ends membership for everyone. */
   end: "/sync/:workspaceId/members/end",
+  /**
+   * POST {shareId, name, type?, purpose?} → {ok, channelWireId, name}. Owner
+   * or admin, through the membership share. The relay writes an ordinary
+   * Group into the owner's workspace.
+   */
+  groupCreate: "/sync/members/groups",
   /** POST {token} → WorkspaceJoinPreview. Signed in. */
   joinPreview: "/sync/members/join-preview",
   /** POST {token} → WorkspaceJoinResult. Signed in. */
@@ -119,26 +129,29 @@ const isNullableString = (value: unknown): value is string | null =>
 
 export function parseWorkspaceJoinPreview(value: unknown): WorkspaceJoinPreview | null {
   if (!isRecord(value)) return null;
-  const { workspaceName, ownerName, alreadyMember } = value;
+  const { workspaceName, ownerName, alreadyMember, grantId } = value;
   if (
     typeof workspaceName !== "string" ||
     !isNullableString(ownerName) ||
-    typeof alreadyMember !== "boolean"
+    typeof alreadyMember !== "boolean" ||
+    !isNullableString(grantId) ||
+    (grantId !== null && !alreadyMember)
   )
     return null;
-  return { workspaceName, ownerName, alreadyMember };
+  return { workspaceName, ownerName, alreadyMember, grantId };
 }
 
 export function parseWorkspaceJoinResult(value: unknown): WorkspaceJoinResult | null {
   if (!isRecord(value)) return null;
-  const { workspaceId, shareId, workspaceName } = value;
+  const { workspaceId, shareId, workspaceName, grantId } = value;
   if (
     typeof workspaceId !== "string" ||
     typeof shareId !== "string" ||
-    typeof workspaceName !== "string"
+    typeof workspaceName !== "string" ||
+    typeof grantId !== "string"
   )
     return null;
-  return { workspaceId, shareId, workspaceName };
+  return { workspaceId, shareId, workspaceName, grantId };
 }
 
 /**

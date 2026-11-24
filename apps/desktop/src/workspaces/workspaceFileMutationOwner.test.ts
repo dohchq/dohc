@@ -725,6 +725,31 @@ describe("WorkspaceFileMutationOwner", () => {
     expect(await readdir(test.rootPath)).toEqual([]);
   });
 
+  // An agent's new page in a joined workspace: the Explorer's own create, for
+  // a caller that already holds the workspace.
+  it("creates a share view page the way New page does", async () => {
+    const test = await harness({ shareView: { granterEmail: "owner@example.com" } });
+    await expect(
+      test.owner.createShareViewPage(test.workspace, "notes/new.md", "# New\n"),
+    ).resolves.toBe("notes/new.md");
+    expect(test.change.mock.calls.map((call) => [call[1], call[2]])).toEqual([
+      [
+        { kind: "standalone", workspaceId: test.workspace.workspaceId },
+        { kind: "create", path: "notes/new.md", initialText: "# New\n" },
+      ],
+    ]);
+    expect(test.shareViewEdited.mock.calls).toEqual([[test.workspace.workspaceId]]);
+    expect(await readdir(test.rootPath)).toEqual([]);
+  });
+
+  it("refuses a share view page in a workspace this computer owns", async () => {
+    const test = await harness({});
+    await expect(
+      test.owner.createShareViewPage(test.workspace, "notes/new.md", "x"),
+    ).rejects.toThrow("This workspace is not a shared view.");
+    expect(test.change).not.toHaveBeenCalled();
+  });
+
   it("refuses empty folders and raw assets in a received share", async () => {
     const test = await harness({ shareView: { granterEmail: "owner@example.com" } });
 

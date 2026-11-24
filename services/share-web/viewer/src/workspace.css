@@ -1,0 +1,151 @@
+/* A member's workspace: its files, the open page, and its Comments or Groups side by side; four tabs on a phone. */
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+
+.workspace-page > nav { display: flex; flex-direction: column; padding: 0 4px; }
+.workspace-title { display: flex; height: 48px; flex: none; align-items: center; gap: 4px; padding: 0 8px 0 0; }
+.workspace-title .bar-mark { width: 32px; }
+.workspace-name { min-width: 0; margin: 0; overflow: hidden; font-family: inherit; font-size: 14px; font-weight: 600; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-page > nav .tree { flex: 1 0 auto; padding-bottom: 8px; }
+.workspace-empty { margin: 0; padding: 4px 8px; color: var(--viewer-muted); }
+.workspace-account { position: sticky; bottom: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 -4px; border-top: 1px solid var(--viewer-line); padding: 8px 12px; background: var(--viewer-panel); }
+.workspace-account > span { min-width: 0; flex: 1; overflow: hidden; color: var(--viewer-muted); text-overflow: ellipsis; white-space: nowrap; }
+.link-page .workspace-account .handoff-button { height: 28px; padding: 0 8px; font-size: 12px; }
+.workspace-account p { width: 100%; margin: 0; color: var(--viewer-danger); font-size: 12px; }
+
+.narrow-mark { display: none; }
+.workspace-status { display: flex; min-width: 0; align-items: center; }
+.workspace-status .named-document-status { display: flex; align-items: center; gap: 6px; }
+/* The ring says the page is waiting for its owner's dohc. */
+.live-ring { width: 10px; height: 10px; flex: none; border: 1.5px solid var(--viewer-line-strong); border-top-color: var(--viewer-muted); border-radius: 50%; animation: workspace-ring 900ms linear infinite; }
+@keyframes workspace-ring { to { transform: rotate(360deg); } }
+/* A page the member can only read says so in a band between the header and the page, where the desktop says it. */
+.page-band { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--viewer-line); padding: 4px 16px; background: var(--viewer-panel-2); color: var(--viewer-warning); font-size: 12px; line-height: 18px; }
+.page-band:empty { display: none; }
+.page-band p { display: flex; min-width: 0; align-items: center; gap: 6px; margin: 0; }
+.page-band .live-ring { border-color: color-mix(in srgb, currentColor 30%, transparent); border-top-color: currentColor; }
+.page-band button { flex: none; height: 24px; border: 1px solid var(--viewer-line-strong); border-radius: 6px; padding: 0 8px; background: var(--viewer-paper); color: var(--viewer-ink); cursor: pointer; font: inherit; font-weight: 500; white-space: nowrap; }
+.page-band button:hover { background: var(--viewer-hover); }
+
+/* Toasts land at the window's bottom right, one above another. */
+.workspace-corner { position: fixed; right: 16px; bottom: 16px; z-index: 30; display: flex; width: 380px; max-width: calc(100% - 32px); flex-direction: column; align-items: flex-end; gap: 8px; pointer-events: none; }
+/* Beside the workspace, the corner sits left of the side panel, so it never covers a Group's or a file's composer. */
+.workspace-page ~ .workspace-corner { right: calc(344px + 16px); max-width: calc(100% - 344px - 32px); }
+.workspace-corner .handoff-button { display: inline-flex; height: 28px; align-items: center; justify-content: center; border-radius: 6px; padding: 0 8px; font-size: 12px; font-weight: 500; text-decoration: none; white-space: nowrap; }
+.toast-slot { display: flex; width: 360px; max-width: 100%; flex-direction: column; gap: 8px; }
+.toast-slot:empty { display: none; }
+.toast-slot .edit-notice { display: flex; align-items: flex-start; gap: 12px; border: 1px solid var(--viewer-line); border-radius: 12px; padding: 12px; background: var(--viewer-panel); box-shadow: var(--viewer-shadow); color: var(--viewer-muted); font-size: 12px; pointer-events: auto; animation: workspace-toast 160ms ease-out both; }
+.toast-slot .edit-notice > div { min-width: 0; flex: 1; }
+/* Copy sits beside the text it copies. */
+.toast-text { display: flex; align-items: flex-start; gap: 4px; }
+.toast-text > div { min-width: 0; flex: 1; }
+.toast-copy { flex: none; min-width: 28px; height: 28px; margin-top: -4px; padding: 0; }
+.toast-close { flex: none; min-width: 28px; height: 28px; margin: -4px -4px 0 0; padding: 0; }
+/* A toast that is only its title centres it on the icon. */
+.toast-slot .edit-notice.title-only, .title-only .toast-text { align-items: center; }
+.title-only .toast-close, .title-only .toast-copy { margin-top: 0; }
+/* The mark is bare, as on the desktop's toast: a tinted tile is for a danger confirmation. It sits on the title's first line. */
+.toast-slot .edit-notice .tile { width: auto; height: 18px; background: none; }
+@keyframes workspace-toast { from { opacity: 0; transform: translateY(8px); } }
+/* Unsent live text sits in the page's flow, under the band, one compact row per page that opens in place. */
+.workspace-kept { display: flex; flex: none; flex-direction: column; gap: 8px; width: 100%; max-width: 720px; box-sizing: border-box; margin: 0 auto; padding: 8px 16px 0; text-align: start; }
+.state-page .workspace-kept { margin-top: 16px; padding: 0; }
+.workspace-kept:empty { display: none; }
+.unsent-edits { border: 1px solid var(--viewer-line); border-radius: 8px; background: var(--viewer-panel); color: var(--viewer-muted); font-size: 12px; text-wrap: pretty; }
+.unsent-edits summary { display: flex; min-height: 36px; align-items: center; gap: 8px; padding: 0 12px; color: var(--viewer-ink); cursor: pointer; font-size: 13px; font-weight: 500; list-style: none; }
+.unsent-edits summary::-webkit-details-marker { display: none; }
+.unsent-edits summary > .icon:first-child { color: var(--viewer-warning); }
+.unsent-edits summary > .icon:last-child { color: var(--viewer-subtle); transition: transform 120ms; }
+.unsent-edits[open] summary > .icon:last-child { transform: rotate(180deg); }
+.unsent-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.unsent-edits p { margin: 0 12px 8px; }
+.unsent-edits textarea { display: block; width: calc(100% - 24px); height: 160px; box-sizing: border-box; margin: 0 12px; resize: vertical; border: 1px solid var(--viewer-line); border-radius: 8px; padding: 8px; background: var(--viewer-panel-2); color: var(--viewer-ink); font: inherit; }
+.unsent-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 12px 12px; }
+/* Full contrast: these are the person's way to keep their text, not secondary chrome. */
+.unsent-actions .handoff-button.secondary, .unsent-discarded .handoff-button.secondary { height: 28px; padding: 0 8px; color: var(--viewer-ink); font-size: 12px; }
+/* The failure reads under the whole row, so Copy and Download stay side by side. */
+.unsent-actions .copy-failed { order: 1; flex-basis: 100%; margin: 0; color: var(--viewer-danger); }
+.unsent-discarded { display: flex; align-items: center; gap: 8px; border: 1px solid var(--viewer-line); border-radius: 8px; padding: 4px 4px 4px 12px; background: var(--viewer-panel); color: var(--viewer-muted); font-size: 12px; }
+.unsent-discarded p { min-width: 0; flex: 1; margin: 0; overflow-wrap: anywhere; }
+/* The files shown are the last that arrived while reads fail. */
+.workspace-dated { display: inline-flex; flex: none; align-items: center; gap: 6px; margin-right: 8px; color: var(--viewer-muted); font-size: 12px; white-space: nowrap; }
+
+.workspace-side { min-width: 0; }
+.side-tabs { display: flex; height: 48px; flex: none; align-items: center; gap: 2px; padding: 0 8px; }
+.side-tabs [role="tab"] { display: inline-flex; height: 28px; align-items: center; gap: 6px; border: 0; border-radius: 6px; padding: 0 10px; background: transparent; color: var(--viewer-muted); cursor: pointer; font-size: 13px; font-weight: 500; transition: background-color 80ms; }
+.side-tabs [role="tab"]:hover { background: var(--viewer-hover); color: var(--viewer-ink); }
+.side-tabs [role="tab"][aria-selected="true"] { background: var(--viewer-selected); color: var(--viewer-ink); }
+/* Both stay laid out, so Groups keep following and scrolling while Comments show. */
+.side-stack { display: grid; min-height: 0; flex: 1; grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
+.side-stack > div { display: flex; min-width: 0; min-height: 0; flex-direction: column; grid-area: 1 / 1; }
+.side-stack > [data-shown="false"] { visibility: hidden; }
+.comments-file { min-width: 0; overflow: hidden; color: var(--viewer-muted); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.chats-head .comments-file::before { content: "·"; margin: 0 6px 0 2px; color: var(--viewer-subtle); }
+.chats-head { display: flex; min-height: 48px; flex: none; align-items: center; gap: 4px; padding: 0 12px 0 16px; }
+.chats-head:has(> .icon-button) { padding-left: 8px; }
+.link-page .chats-head h2 { min-width: 0; margin: 0; overflow: hidden; font-family: inherit; font-size: 14px; font-weight: 600; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
+.chats-hash { display: grid; flex: none; place-items: center; color: var(--viewer-subtle); }
+.group-list { margin: 0; padding: 0 8px 8px; list-style: none; }
+.group-row { display: flex; width: 100%; height: 32px; align-items: center; gap: 8px; border: 0; border-radius: 6px; padding: 0 8px; background: transparent; color: var(--viewer-muted); cursor: pointer; font-size: 13px; text-align: left; transition: background-color 80ms; }
+.group-row:hover { background: var(--viewer-hover); color: var(--viewer-ink); }
+.group-row .icon { color: var(--viewer-subtle); }
+.group-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-row.unread { color: var(--viewer-ink); font-weight: 600; }
+.unread-count { display: inline-grid; min-width: 18px; height: 18px; place-items: center; border-radius: 999px; padding: 0 5px; background: var(--viewer-accent); color: var(--viewer-on-accent); font-size: 11px; font-weight: 600; line-height: 1; }
+
+/* The loading shape: the same three panes as the workspace, blank for the first 150 ms so a fast open never flashes it. */
+.workspace-opening > div { min-height: 0; animation: viewer-appear 1ms 150ms both; }
+.workspace-opening i { display: block; height: 12px; border-radius: 4px; background: var(--viewer-skeleton); }
+.workspace-opening-files { display: flex; width: 248px; flex: none; flex-direction: column; gap: 16px; border-right: 1px solid var(--viewer-line); padding: 0 16px; background: var(--viewer-panel); }
+.workspace-opening-files .bar-mark { display: flex; height: 48px; align-items: center; margin-bottom: -4px; }
+.workspace-opening-files i:nth-child(2) { width: 50%; }
+.workspace-opening-files i:nth-child(3) { width: 72%; margin-left: 16px; }
+.workspace-opening-files i:nth-child(4) { width: 60%; margin-left: 16px; }
+.workspace-opening-files i:nth-child(5) { width: 44%; }
+.workspace-opening-page { min-width: 0; flex: 1; padding: 96px 32px 32px; }
+.workspace-opening-side { display: flex; width: 344px; flex: none; flex-direction: column; gap: 16px; border-left: 1px solid var(--viewer-line); padding: 16px; background: var(--viewer-panel); }
+.workspace-opening-side i:nth-child(1) { width: 40%; height: 24px; margin-bottom: 16px; }
+.workspace-opening-side i:nth-child(2) { width: 30%; }
+.workspace-opening-side i:nth-child(3) { width: 86%; }
+.workspace-opening-side i:nth-child(4) { width: 64%; }
+.workspace-opening-head, .workspace-opening-tabs { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .live-ring, .toast-slot .edit-notice { animation: none; }
+}
+
+@media (max-width: 720px) {
+  .workspace-page { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
+  .workspace-page > nav, .workspace-page > .page, .workspace-page > .side-panel { grid-area: 1 / 1; min-height: 0; }
+  /* A tab out of view keeps its size, so a Group that loads meanwhile still scrolls to its newest message. */
+  .workspace-page > [data-shown="false"], .side-stack > [data-shown="false"] { visibility: hidden; }
+  .link-page.workspace-page > nav { position: static; z-index: auto; width: auto; overflow-y: auto; border: 0; box-shadow: none; }
+  .workspace-page > .side-panel, .workspace-page > .side-panel[data-open] { position: static; z-index: auto; inset: auto; width: auto; border: 0; border-radius: 0; box-shadow: none; }
+  /* A tab fills the screen, so its rows take a finger. */
+  .link-page.workspace-page > nav :is(.folder, .file), .group-row { height: 40px; }
+  .narrow-mark { display: grid; }
+  .workspace-opening-files, .workspace-opening-side { display: none; }
+  .workspace-opening-page { grid-area: 1 / 1; padding: 0 16px 16px; }
+  /* The loaded page's header and tabs, so nothing moves when the workspace arrives. */
+  .workspace-opening-head { display: flex; height: 48px; align-items: center; gap: 8px; margin: 0 -8px 16px; }
+  .workspace-opening-head .bar-mark { display: grid; }
+  .workspace-opening-head i { width: 96px; }
+  .workspace-opening-tabs { display: flex; grid-area: 2 / 1; height: 48px; align-items: center; justify-content: space-around; box-sizing: content-box;
+    border-top: 1px solid var(--viewer-line); padding-bottom: env(safe-area-inset-bottom); background: var(--viewer-panel); }
+  .workspace-opening-tabs i { width: 48px; }
+  /* Above the tabs. */
+  .workspace-corner { right: 8px; bottom: 8px; left: 8px; width: auto; max-width: none; }
+  .workspace-page ~ .workspace-corner { right: 8px; max-width: none; bottom: calc(56px + env(safe-area-inset-bottom)); }
+  .toast-slot { width: 100%; }
+  .workspace-kept { padding: 8px 8px 0; }
+  .unsent-edits textarea { height: 96px; }
+  .workspace-tabs { display: flex; grid-area: 2 / 1; border-top: 1px solid var(--viewer-line); padding-bottom: env(safe-area-inset-bottom); background: var(--viewer-panel); }
+  .workspace-tabs [role="tab"] { display: inline-flex; height: 48px; flex: 1; align-items: center; justify-content: center; gap: 6px; border: 0; background: transparent; color: var(--viewer-muted); cursor: pointer; font-size: 13px; font-weight: 500; }
+  .workspace-tabs [role="tab"][aria-selected="true"] { box-shadow: inset 0 2px 0 var(--viewer-accent); color: var(--viewer-ink); }
+  .workspace-tabs [role="tab"]:focus-visible { outline-offset: -2px; }
+}
+
+/* A list that could not load: one line, its words and Try again. */
+.load-failed { display: flex; align-items: center; gap: 8px; margin: 12px 16px; color: var(--viewer-muted); font-size: 13px; }
+.load-failed p { min-width: 0; flex: 1; margin: 0; }
+.load-failed button { flex: none; border: 0; padding: 0; background: none; color: var(--viewer-ink); cursor: pointer; font: inherit; font-weight: 600; }
+.load-failed button:hover { text-decoration: underline; }

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { GROUP_NAME_TAKEN_ERROR } from "../../ipc/errorWords";
@@ -15,8 +15,75 @@ import {
   navigatorView,
 } from "./ChatsView.testHarness";
 import { deferred } from "../../testing/deferred";
+import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 
 describe("ChatsView channels", () => {
+  describe("in a joined workspace at Comment", () => {
+    function joined(createsGroups: boolean, channels = [channel({ name: "Launch team" })]) {
+      bridgeMock.listChatChannels.mockResolvedValue({ channels, fileThreads: [] });
+      bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+      renderView(vi.fn(), vi.fn(), { joinedWorkspace: { createsGroups } });
+    }
+
+    it("shows a Group's composer and replies, with no Add people", async () => {
+      joined(false);
+      fireEvent.contextMenu(await screen.findByTestId("chats-channel"), {
+        clientX: 40,
+        clientY: 60,
+      });
+      expect(screen.queryByTestId("chat-row-menu-add-people")).toBeNull();
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+      fireEvent.click(screen.getByTestId("chats-channel"));
+      expect(await screen.findByTestId("chats-new-thread-composer")).toBeTruthy();
+      expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
+      expect(screen.queryByTestId("chats-share-channel")).toBeNull();
+    });
+
+    it("keeps General closed, as the relay does", async () => {
+      joined(false, [
+        channel({ id: "general", name: "General", wireId: "channel_wire_general_v1" }),
+      ]);
+      fireEvent.click(await screen.findByTestId("chats-channel"));
+      expect((await screen.findByTestId("chats-readonly-note")).textContent).toBe(
+        "Members post in Groups only.",
+      );
+      expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+    });
+
+    it("shows no Agents section and makes no direct-message or saved-message calls", async () => {
+      bridgeMock.listChatChannels.mockResolvedValue({
+        channels: [channel({ name: "Launch team" })],
+        fileThreads: [],
+      });
+      renderView(vi.fn(), vi.fn(), {
+        joinedWorkspace: { createsGroups: false },
+        userSettings: DEFAULT_USER_SETTINGS,
+      });
+      await screen.findByTestId("chats-channel");
+      expect(screen.queryByTestId("chats-my-agent-section")).toBeNull();
+      expect(screen.queryByText("Add an agent")).toBeNull();
+      expect(bridgeMock.syncDms).not.toHaveBeenCalled();
+      expect(bridgeMock.listChatBookmarks).not.toHaveBeenCalled();
+    });
+
+    it("offers New group to an admin only", async () => {
+      joined(true);
+      expect(await screen.findByTestId("chats-new-channel")).toBeTruthy();
+      cleanup();
+      joined(false);
+      await screen.findByTestId("chats-channel");
+      expect(screen.queryByTestId("chats-new-channel")).toBeNull();
+    });
+
+    it("puts one muted line under an empty Groups heading", async () => {
+      joined(false, []);
+      expect((await screen.findByTestId("chats-channels-empty")).textContent).toBe(
+        "No Groups yet.",
+      );
+    });
+  });
+
   it("keeps reaction writes ordered when switching away from and remounting a chat lane", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [channel({ type: "both" })],
@@ -151,6 +218,47 @@ describe("ChatsView channels", () => {
     const view = await screen.findByTestId("chats-channel-view");
     expect(view.dataset.groupType).toBe("both");
     expect(screen.getByTestId("chats-group-lane-chat")).toBeTruthy();
+  });
+  it("shows a joined workspace's Groups at View with no way to post, add people or add a Group", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ name: "Launch team" })],
+      fileThreads: [],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    const user = userEvent.setup();
+    renderView(vi.fn(), vi.fn(), {
+      joinedWorkspace: {
+        postingClosed: "Only people who can comment post here.",
+        createsGroups: false,
+      },
+    });
+    await user.click(await screen.findByTestId("chats-channel"));
+    expect((await screen.findByTestId("chats-readonly-note")).textContent).toBe(
+      "Only people who can comment post here.",
+    );
+    expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+    expect(screen.queryByTestId("chats-share-channel")).toBeNull();
+    await user.click(screen.getByTestId("chats-channel-back"));
+    await screen.findByTestId("chats-channels-heading");
+    expect(screen.queryByTestId("chats-new-channel")).toBeNull();
+  });
+
+  it("counts no unread messages in a Group the person can no longer reach once the membership ended", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ name: "Launch team", unreadCount: 3 })],
+      fileThreads: [],
+    });
+    renderView(vi.fn(), vi.fn(), {
+      joinedWorkspace: {
+        postingClosed: "Your membership ended.",
+        createsGroups: false,
+        ended: true,
+      },
+    });
+    const row = await screen.findByTestId("chats-channel");
+    expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
+    expect(row.textContent).not.toContain("3");
   });
 });
 

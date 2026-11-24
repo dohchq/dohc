@@ -16,9 +16,11 @@
 // dropped from received, where an invitation whose grant cannot be read
 // offers the recipient nothing to accept.
 //
-// A workspace membership belongs to the Members page, which ends it, and
-// leaves both lanes too. A received one whose role the relay could not read
-// arrives damaged, with only its kind.
+// A membership the owner granted belongs to the Members page, which ends
+// it. A membership this account holds stays in received: the member opens
+// it from there, and an agent finds it in the same listing.
+// A received one whose role the relay could not read arrives damaged, with
+// only its kind, and offers nothing to open, so it leaves received.
 
 type ShareRow = Record<string, unknown>;
 
@@ -28,7 +30,7 @@ export function isReadableChatChannelRow(row: ShareRow): boolean {
   return kind === "chat" || kind === "group";
 }
 
-/** A membership of a whole workspace. The Members page manages it, not Sharing. */
+/** A membership of a whole workspace. The Members page manages a granted one. */
 function isMembershipRow(row: ShareRow): boolean {
   return (row.selector as { kind?: unknown } | null | undefined)?.kind === "workspace";
 }
@@ -44,10 +46,9 @@ export function pathShareLanes(listing: { granted?: ShareRow[]; received?: Share
     received: (listing.received ?? []).filter(
       (row) =>
         !isReadableChatChannelRow(row) &&
-        !isMembershipRow(row) &&
         row.selectorKind !== "chat" &&
         row.selectorKind !== "group" &&
-        row.selectorKind !== "workspace",
+        (row.selectorKind !== "workspace" || isMembershipRow(row)),
     ),
   };
 }

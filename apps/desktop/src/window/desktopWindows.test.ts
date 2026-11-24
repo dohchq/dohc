@@ -124,6 +124,8 @@ function fixture(
   let read: Dependencies["readCachedUserSettingsFile"] = async () => structuredClone(stored);
   let ready = true;
   let canInstall = false;
+  let focused: Window | undefined;
+  const offers: Record<string, ReturnType<Dependencies["createOffersFor"]>> = {};
   let rows = [workspace("a"), workspace("b")];
   let retirement: () => Promise<void> = async () => undefined;
   const sessions = new RendererWorkspaceSessionOwner<WebContents>({
@@ -163,6 +165,9 @@ function fixture(
     process: { platform, execPath: "C:\\dohc\\dohc.exe", argv: [] },
     workspaceSummaries: workspaceSummaries ?? vi.fn(() => rows),
     currentUpdateState: vi.fn(() => ({ canInstall })),
+    focusedWindow: () => focused?.native ?? null,
+    createOffersFor: (workspaceId) =>
+      offers[workspaceId] ?? { write: true, folder: true, collection: true },
     stateDir: () => "state",
     readCachedUserSettingsFile: vi.fn((directory) => read(directory)),
     stepWindowZoom: vi.fn(async () => structuredClone(stored)),
@@ -200,6 +205,10 @@ function fixture(
     setCanInstall: (value: boolean) => {
       canInstall = value;
     },
+    setFocused: (value: Window | undefined) => {
+      focused = value;
+    },
+    offers,
     setRetirement: (value: typeof retirement) => {
       retirement = value;
     },
@@ -969,6 +978,50 @@ describe("desktop native menus", () => {
     expect(f.windows.applicationMenuCanInstallUpdate).toBe(true);
   });
 
+  it("disables File's creates the focused window's workspace refuses, and rebuilds only when they change", async () => {
+    const f = fixture();
+    const member = new Window();
+    const owned = new Window();
+    f.windows.trackWorkspaceWindow(member.native);
+    f.windows.trackWorkspaceWindow(owned.native);
+    await f.sessions.open(
+      member.webContents.native,
+      { workspaceId: "a", attachmentId: Symbol("a") },
+      "document",
+    );
+    await f.sessions.open(
+      owned.webContents.native,
+      { workspaceId: "b", attachmentId: Symbol("b") },
+      "document",
+    );
+    // A member at View, or anyone while another account is signed in.
+    f.offers.a = { write: false, folder: false, collection: false };
+    const creates = () =>
+      ["New page", "New folder", "New Collection", "Import files"].map(
+        (label) => item(f, "File", label).enabled,
+      );
+
+    f.setFocused(member);
+    f.windows.refreshApplicationMenuOffers();
+    expect(creates()).toEqual([false, false, false, false]);
+    // What reads stays.
+    expect(item(f, "File", "Export workspace as ZIP").enabled).toBe(true);
+
+    const built = f.templates.length;
+    f.windows.refreshApplicationMenuOffers();
+    expect(f.templates).toHaveLength(built);
+
+    f.setFocused(owned);
+    f.windows.refreshApplicationMenuOffers();
+    expect(creates()).toEqual([true, true, true, true]);
+
+    // A member at Edit: pages and imports, but no folder or Collection.
+    f.offers.a = { write: true, folder: false, collection: false };
+    f.setFocused(member);
+    f.windows.refreshApplicationMenuOffers();
+    expect(creates()).toEqual([true, false, false, true]);
+  });
+
   it("routes commands to the live target and opens recent workspaces through activation", () => {
     const f = fixture();
     const first = new Window();
@@ -976,7 +1029,7 @@ describe("desktop native menus", () => {
     f.windows.trackWorkspaceWindow(first.native);
     f.windows.trackWorkspaceWindow(explicit.native);
     f.windows.refreshApplicationMenu();
-    click(item(f, "File", "New file"));
+    click(item(f, "File", "New page"));
     expect(first.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "new-file");
     click(item(f, "Go", "Settings"), explicit.native);
     expect(explicit.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "settings");
@@ -1203,7 +1256,7 @@ describe("desktop native menus", () => {
     f.windows.refreshApplicationMenu();
     const appMenu = submenu(f.templates.at(-1)![0]!);
     click(appMenu.find((entry) => entry.label === "Settings…")!);
-    click(item(f, "File", "New file"));
+    click(item(f, "File", "New page"));
     click(item(f, "File", "Close tab"));
     expect(f.dependencies.createMainWindow).toHaveBeenCalledOnce();
     const created = f.all[0]!;
@@ -1229,7 +1282,7 @@ describe("desktop native menus", () => {
     const starting = new Window().startLoad();
     f.windows.trackWorkspaceWindow(starting.native);
     f.windows.refreshApplicationMenu();
-    click(item(f, "File", "New file"), starting.native);
+    click(item(f, "File", "New page"), starting.native);
     click(item(f, "File", "Close tab"));
     expect(starting.webContents.send).not.toHaveBeenCalled();
     starting.finishLoad();
@@ -1247,7 +1300,7 @@ describe("desktop native menus", () => {
     window.webContents.loading = true;
     f.windows.trackWorkspaceWindow(window.native);
     f.windows.refreshApplicationMenu();
-    click(item(f, "File", "New file"));
+    click(item(f, "File", "New page"));
     expect(window.webContents.send).not.toHaveBeenCalled();
     window.webContents.loading = false;
     window.webContents.emit("did-stop-loading");
@@ -1260,7 +1313,7 @@ describe("desktop native menus", () => {
     const f = fixture("darwin");
     const exportWindow = new Window();
     f.windows.refreshApplicationMenu();
-    click(item(f, "File", "New file"), exportWindow.native);
+    click(item(f, "File", "New page"), exportWindow.native);
     expect(exportWindow.webContents.send).not.toHaveBeenCalled();
     expect(f.dependencies.createMainWindow).toHaveBeenCalledOnce();
     expect(f.windows.workspaceWindows.allLive()).toEqual([f.all[0]!.native]);
@@ -1269,7 +1322,7 @@ describe("desktop native menus", () => {
   it("drops a window-less menu command when its new window closes before it loads", () => {
     const f = fixture("darwin");
     f.windows.refreshApplicationMenu();
-    click(item(f, "File", "New file"));
+    click(item(f, "File", "New page"));
     const closing = f.all[0]!;
     closing.destroy();
     closing.finishLoad();

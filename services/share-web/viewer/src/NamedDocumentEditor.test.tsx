@@ -158,7 +158,7 @@ it("says the file could not open, not that the connection failed, when the share
     ),
   );
   expect(container.querySelector('[role="status"]')?.textContent).toBe(
-    "dohc could not open the file for editing. Try again.",
+    "dohc could not open the file for editing.",
   );
   const button = container.querySelector("button");
   expect(button?.textContent).toBe("Try again");
@@ -280,7 +280,7 @@ it("asks the reader to check the connection when the connection failed", async (
     ),
   );
   expect(container.querySelector('[role="status"]')?.textContent).toBe(
-    "Editing paused. Check your connection, then retry.",
+    "Editing paused. Check your connection.",
   );
   expect(container.querySelector("button")?.textContent).toBe("Retry connection");
 });
@@ -319,7 +319,7 @@ it.each([
     true,
     LIVE_CONNECTION_LIMIT_MESSAGES.live_person_limit,
   ],
-  [{ reason: "paused" }, false, "Editing paused. Check your connection, then retry."],
+  [{ reason: "paused" }, false, "Editing paused. Check your connection."],
 ] as const)(
   "after it was live, a page that disconnects with %o takes typing: %s",
   async (reported, editable, words) => {

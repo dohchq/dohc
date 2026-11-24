@@ -1147,7 +1147,7 @@ describe("TurnIntoMenu on the Menu part's recipe", () => {
       fireEvent.mouseMove(options[3]!, { movementX: 0, movementY: 0 });
       expect(listbox.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
 
-      // Ctrl+N is New file and Ctrl+B the files panel. They reach the shell,
+      // Ctrl+N is New page and Ctrl+B the files panel. They reach the shell,
       // which skips a prevented key, and leave the active option alone.
       const shell = vi.fn((event: KeyboardEvent) => event.defaultPrevented);
       window.addEventListener("keydown", shell);

@@ -9,6 +9,10 @@ import {
   type StaticCommandId,
 } from "../renderer/commands/commandRows";
 import type { ZoomStep } from "../settings/userSettings";
+import type { workspaceCreateOffers } from "../workspaces/shareWriteGate";
+
+export type CreateOffers = ReturnType<typeof workspaceCreateOffers>;
+export const EVERY_CREATE_OFFER: CreateOffers = { write: true, folder: true, collection: true };
 
 // Each item's label is its palette row's label, so the menu and the palette
 // cannot disagree. The menu already groups by category, so "View: Chats" shows
@@ -42,6 +46,10 @@ export function buildMenuTemplate(options: {
   platform: NodeJS.Platform;
   recentWorkspaces?: WorkspaceSummary[];
   canInstallUpdate?: boolean;
+  // What the focused window's workspace lets its person create and import,
+  // from the rule its handlers ask. File disables the rest, as Help disables
+  // Restart to update, so no item answers a click with nothing.
+  createOffers?: CreateOffers;
   sendCommand: (window: BrowserWindow | undefined, command: MenuCommand) => void;
   // Zoom is main-owned so its accelerators keep working on windows that
   // never mount the workspace shell (first run, a broken registry).
@@ -70,6 +78,7 @@ export function buildMenuTemplate(options: {
     }));
   };
 
+  const offers = options.createOffers ?? EVERY_CREATE_OFFER;
   const recentWorkspaces = (options.recentWorkspaces ?? []).slice(0, 10);
   const recentLabel = (workspace: WorkspaceSummary): string => {
     const leaf = basename(workspace.rootPath);
@@ -148,10 +157,10 @@ export function buildMenuTemplate(options: {
     {
       label: "File",
       submenu: [
-        ...command("new-file"),
-        ...command("new-folder"),
-        ...command("new-collection"),
-        ...command("quick-capture"),
+        ...command("new-file", { enabled: offers.write }),
+        ...command("new-folder", { enabled: offers.folder }),
+        ...command("new-collection", { enabled: offers.collection }),
+        ...command("quick-capture", { enabled: offers.write }),
         { type: "separator" },
         ...command("open-workspace"),
         {
@@ -166,7 +175,7 @@ export function buildMenuTemplate(options: {
                 }))
               : [{ label: "No recent workspaces", enabled: false }],
         },
-        ...command("import-files"),
+        ...command("import-files", { enabled: offers.write }),
         ...command("export-workspace"),
         { type: "separator" },
         // macOS keeps tab switching in the Window menu.

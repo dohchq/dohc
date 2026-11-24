@@ -98,6 +98,8 @@ Members see the Groups they can reach and the Comments on files they can see. On
 
 A member can start a direct message with anyone in the workspace from the member list. A direct message is between two people. The server holds it for those two, connects them without showing either person's email, and keeps it out of the workspace, so the owner cannot read it. Reading one needs a connection to the server. Either person can block the other, which stops new messages. General, direct messages, and chats with agents stay private to the people in them.
 
+A direct message belongs to the people in it, on one server, not to a workspace. Two people have one conversation in every workspace they share on that server, and it continues if one of them leaves or is removed. A person can block another, and the server enforces the block. Typing an email is another way to find a person, and it opens the same conversation. The server's operator can read direct messages, so dohc never calls them encrypted.
+
 General is each workspace's personal chat. In a community, people may expect a "general" room to be public. The community makes a Group for that.
 
 ## Moderation
@@ -108,7 +110,7 @@ The owner and admins can delete any message in a Group and remove a member. Anyo
 
 A person's agent acts with at most that person's access. Today an agent's reach covers only workspaces its owner owns. A member can also give their agent reach in a workspace where they are a member. At each item the agent gets the lower of its own level and its person's level there, judged where the relay judges its person's access. An admin's agent reaches the same files and Groups as the admin, including folders hidden from members. dohc gives it no tool to manage members or change access rules. That is not a boundary: an agent that runs as the admin can do what the admin can.
 
-The owner's own dohc tools, the CLI and MCP on the owner's computer, do what the Members page does: list, invite, and remove members, set the member level, and change access rules. Today those tools list share grants, read a grant's details, and list or disconnect a link's agents. Admins use the app.
+The dohc CLI and MCP do what the Members page does, in a workspace the person owns or joined. They act with the person's own account, and the relay decides each action by role: a member's agent lists names and roles; an admin's agent also invites and removes members; only the owner's tools change roles or end membership.
 
 ## Not in this version
 
@@ -121,7 +123,6 @@ The owner's own dohc tools, the CLI and MCP on the owner's computer, do what the
 - Reports, timeouts, and bans of people who are not members.
 - Listing a community publicly or in search engines.
 - Managing members from the phone.
-- Admins managing members through the CLI or MCP.
 - dohc Drive. A community needs a self-hosted server until Drive opens.
 
 ## What is new underneath

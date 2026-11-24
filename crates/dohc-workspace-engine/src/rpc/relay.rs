@@ -296,6 +296,13 @@ struct ShareDirectStatusParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShareDirectWaitingParams {
+    workspace_id: String,
+    share_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ShareFileStatusesParams {
     workspace_id: String,
     share_id: String,
@@ -314,6 +321,10 @@ struct GrantedSelectorParams {
     // a narrower grant, it is an unreadable one, and `share_view_pull` below
     // refuses it rather than substituting a default.
     access: String,
+    // A membership grant: every tracked path on main and the workspace's
+    // Groups. It carries no paths and no version.
+    #[serde(default)]
+    whole_workspace: bool,
 }
 
 fn direct_write_json(write: &dohc_engine_sync::DirectWriteReport) -> Value {
@@ -815,7 +826,7 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
             "nextCursor": outcome.next_cursor,
         }),
         RelayOperationOutcome::SharedChannelPushed(outcome) => {
-            json!({ "pushed": outcome.pushed })
+            json!({ "pushed": outcome.pushed, "setAside": outcome.set_aside })
         }
         RelayOperationOutcome::ShareViewIdentity(record) => json!({
             "identity": match record {
@@ -907,8 +918,19 @@ fn share_grant(selector: GrantedSelectorParams) -> Result<dohc_engine_sync::Shar
             r#"access must be "view", "comment", or "edit""#,
         )
     })?;
+    let scope = if selector.whole_workspace {
+        if !selector.paths.is_empty() || selector.version_id.is_some() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "a whole-workspace grant names no paths and no version",
+            ));
+        }
+        dohc_engine_sync::ShareScope::Workspace
+    } else {
+        dohc_engine_sync::ShareScope::Paths(selector.paths)
+    };
     Ok(dohc_engine_sync::ShareGrant {
-        paths: selector.paths,
+        scope,
         version_id: selector.version_id,
         access,
     })
@@ -2322,6 +2344,43 @@ impl EngineService {
                 "share.channel.push",
             )
             .await?;
+        // An op the relay refused waits in Notices.
+        if matches!(&outcome, RelayOperationOutcome::SharedChannelPushed(pushed) if pushed.set_aside > 0)
+        {
+            self.events.emit_refusals_changed(&open.workspace_id);
+        }
+        relay_outcome_json(outcome)
+    }
+
+    /// Send a membership view's own posts in Groups. The engine refuses any
+    /// grant other than the whole workspace at Comment or Edit.
+    pub(super) async fn share_view_push_chat(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ShareViewParams = parse(params)?;
+        let granted = share_grant(params.granted_selector)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::PushShareViewGroups {
+                    workspace_id: open.workspace_id.clone(),
+                    share_id: params.share_id,
+                    granted,
+                },
+                "share.view.pushChat",
+            )
+            .await?;
+        // An op the relay refused waits in Notices.
+        if matches!(&outcome, RelayOperationOutcome::SharedChannelPushed(pushed) if pushed.set_aside > 0)
+        {
+            self.events.emit_refusals_changed(&open.workspace_id);
+        }
         relay_outcome_json(outcome)
     }
 
@@ -2512,6 +2571,33 @@ impl EngineService {
             WireError::new(
                 ErrorCode::Internal,
                 "direct-write-status-serialization-failed",
+            )
+        })
+    }
+
+    /// What a push that stopped in transit left unsent, so its Notice can
+    /// name what waits.
+    pub(super) async fn share_direct_waiting(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ShareDirectWaitingParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let waiting = Self::read_under_ctx(
+            &cancellation,
+            "share.direct.waiting",
+            open.actor
+                .share_direct_waiting(open.workspace_id.clone(), params.share_id),
+        )
+        .await?;
+        serde_json::to_value(waiting).map_err(|_| {
+            WireError::new(
+                ErrorCode::Internal,
+                "direct-write-waiting-serialization-failed",
             )
         })
     }
@@ -2838,6 +2924,33 @@ mod tests {
                 .await
                 .is_err()
         );
+        let waiting = json!({"workspaceId": "offline-share", "shareId": "share"});
+        assert_eq!(
+            service
+                .share_direct_waiting(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    waiting.clone()
+                )
+                .await
+                .expect("nothing waiting offline"),
+            json!({"pages": 0, "collectionWrites": 0, "morePending": false})
+        );
+        let mut other_waiting = waiting;
+        other_waiting["workspaceId"] = json!("other");
+        assert!(matches!(
+            service
+                .share_direct_waiting(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    other_waiting
+                )
+                .await,
+            Err(WireError {
+                code: ErrorCode::InvalidParams,
+                ..
+            })
+        ));
         let mut wrong_workspace = params.clone();
         wrong_workspace["workspaceId"] = json!("other");
         assert!(matches!(
@@ -4274,5 +4387,30 @@ mod tests {
         assert_eq!(edges(), 1, "the write's Collections update ran");
         drop(supervisor);
         f.close().await;
+    }
+    #[test]
+    fn a_granted_selector_reads_a_whole_workspace_grant() {
+        let read = |value: Value| {
+            serde_json::from_value::<GrantedSelectorParams>(value)
+                .map_err(|_| ())
+                .and_then(|selector| share_grant(selector).map_err(|_| ()))
+        };
+        let workspace = read(json!({
+            "paths": [], "versionId": null, "access": "comment", "wholeWorkspace": true,
+        }))
+        .expect("a membership grant reads");
+        assert_eq!(workspace.scope, dohc_engine_sync::ShareScope::Workspace);
+        let paths = read(json!({ "paths": ["docs"], "versionId": null, "access": "view" }))
+            .expect("a path grant reads");
+        assert_eq!(
+            paths.scope,
+            dohc_engine_sync::ShareScope::Paths(vec!["docs".to_owned()])
+        );
+        for refused in [
+            json!({ "paths": ["docs"], "versionId": null, "access": "view", "wholeWorkspace": true }),
+            json!({ "paths": [], "versionId": "v1", "access": "view", "wholeWorkspace": true }),
+        ] {
+            assert!(read(refused.clone()).is_err(), "{refused}");
+        }
     }
 }

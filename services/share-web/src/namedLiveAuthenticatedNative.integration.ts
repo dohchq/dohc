@@ -72,6 +72,9 @@ const routeLimits = {
   maxConnectionsPerPrincipal: 3,
   maxConnectionsPerGrant: 4,
   maxBufferedBytes: 134217728,
+  maxBufferedBytesPerPrincipal: 100663296,
+  maxBufferedBytesPerShare: 134217728,
+  maxBufferedBytesPerWorkspace: 134217728,
   maxPendingRequests: 4,
   maxRequestBytes: 4096,
   maxResponseBytes: 8192,
@@ -336,8 +339,8 @@ it("authenticates two accounts through the production browser transport and pres
     });
     const frameChanges = {
       ...sharedChanges,
-      subscribe(changed: () => void) {
-        const remove = sharedChanges.subscribe(changed);
+      subscribe(...args: Parameters<typeof sharedChanges.subscribe>) {
+        const remove = sharedChanges.subscribe(...args);
         return () => {
           remove();
           if (sharedChanges.listenerCount() === 0) released();
@@ -530,6 +533,9 @@ it("authenticates two accounts through the production browser transport and pres
           maxConnectionsPerPrincipal: 3,
           maxConnectionsPerGrant: 4,
           maxBufferedBytes: 134217728,
+          maxBufferedBytesPerPrincipal: 100663296,
+          maxBufferedBytesPerShare: 134217728,
+          maxBufferedBytesPerWorkspace: 134217728,
           maxFrameBytes: 65536,
           maxPendingBytes: 4 * 1024 * 1024,
           maxPendingFrames: 64,

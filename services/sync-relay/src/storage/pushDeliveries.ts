@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto";
 import {
-  chatMessageInterest,
   isOwnAgentMessage,
   phoneCanShow,
   pushMessageAccess,
@@ -20,14 +19,13 @@ export const PUSH_SENDER_ATTEMPTS_PER_MINUTE = 6;
 const TABLE = "sync_relay_push_deliveries";
 const MARKER = "push-deliveries-v1";
 const NATIVE_MARKER = "push-native-deliveries-v1";
+// Mentions match account names (accountNames.ts), so the names each
+// installation once kept are gone.
+const DROP_INSTALLATION_NAMES = "push-deliveries-v2";
 const schema = {
   sync_relay_push_rate: `CREATE TABLE sync_relay_push_rate (
     account_user_id TEXT NOT NULL, minute INTEGER NOT NULL, attempts INTEGER NOT NULL,
     PRIMARY KEY (account_user_id, minute)
-  ) STRICT`,
-  sync_relay_push_installation_names: `CREATE TABLE sync_relay_push_installation_names (
-    installation_id TEXT PRIMARY KEY REFERENCES sync_relay_push_subscriptions(installation_id) ON DELETE CASCADE,
-    account_name TEXT NOT NULL CHECK (length(account_name) <= 1024)
   ) STRICT`,
   [TABLE]: `CREATE TABLE sync_relay_push_deliveries (
     delivery_id TEXT PRIMARY KEY,
@@ -105,16 +103,21 @@ const mark = (db: SqliteDb, marker: string) =>
 
 export function initializePushDeliveries(db: SqliteDb): void {
   if (marked(db, MARKER)) {
+    if (!marked(db, DROP_INSTALLATION_NAMES)) {
+      db.exec("DROP TABLE IF EXISTS sync_relay_push_installation_names");
+      mark(db, DROP_INSTALLATION_NAMES);
+    }
     if (!marked(db, NATIVE_MARKER)) assertSchema(db, schema);
     return;
   }
-  for (const name of Object.keys(schema)) {
+  for (const name of [...Object.keys(schema), "sync_relay_push_installation_names"]) {
     if (db.prepare("SELECT 1 FROM sqlite_schema WHERE name = ?").get(name))
       throw Error("unmarked push delivery schema already exists");
   }
   for (const sql of Object.values(schema)) db.exec(sql);
   assertSchema(db, schema);
   mark(db, MARKER);
+  mark(db, DROP_INSTALLATION_NAMES);
 }
 
 export function initializeNativePushDeliveries(db: SqliteDb): void {
@@ -231,92 +234,84 @@ function insertDelivery(storage: StorageContext, row: DeliveryRow, nowMs: number
     dropOlderPhoneAlerts(storage, row, nowMs);
 }
 
-/** Runs inside the message append transaction. No network work may enter here. */
+/**
+ * Notes when a message arrived, so a phone alert an agent's Notice queued
+ * before its message can follow it. Runs inside the message append
+ * transaction, once per message. No network work may enter here.
+ */
+export function recordPushArrival(
+  storage: StorageContext,
+  message: PushMessage,
+  nowMs: number,
+): void {
+  if (!storage.options.apnsConfigured) return;
+  const { workspaceId, threadId, messageId, relaySeq } = message;
+  storage.db
+    .prepare("DELETE FROM sync_relay_push_arrivals WHERE arrived_at_ms <= ?")
+    .run(nowMs - PUSH_DELIVERY_EXPIRY_MS);
+  storage.db
+    .prepare(`INSERT OR IGNORE INTO sync_relay_push_arrivals
+      (workspace_id, thread_id, message_id, relay_seq, arrived_at_ms) VALUES (?, ?, ?, ?, ?)`)
+    .run(workspaceId, threadId, messageId, relaySeq, nowMs);
+  for (const row of storage.db
+    .prepare(`SELECT delivery_id, account_user_id, generation, expires_at_ms, state FROM ${TABLE}
+      WHERE workspace_id = ? AND thread_id = ? AND message_id = ? AND relay_seq IS NULL`)
+    .all(workspaceId, threadId, messageId)) {
+    const userId = String(row.account_user_id);
+    const deliveryId = String(row.delivery_id);
+    if (
+      row.state !== "pending" ||
+      Number(row.expires_at_ms) <= nowMs ||
+      !isOwnAgentMessage(message, userId) ||
+      !pushMessageAccess(storage, message, userId) ||
+      !phoneCanShow(storage, userId, workspaceId, threadId)
+    ) {
+      storage.db.prepare(`DELETE FROM ${TABLE} WHERE delivery_id = ?`).run(deliveryId);
+      continue;
+    }
+    storage.db
+      .prepare(`UPDATE ${TABLE} SET relay_seq = ?, expires_at_ms = ? WHERE delivery_id = ?`)
+      .run(relaySeq, nowMs + PUSH_DELIVERY_EXPIRY_MS, deliveryId);
+    dropOlderPhoneAlerts(
+      storage,
+      { generation: Number(row.generation), workspaceId, threadId },
+      nowMs,
+    );
+  }
+}
+
+/**
+ * Queues one recipient's alert on each of their devices: the browser for a
+ * mention, a direct message or a reply, and the owner's phone when it may show
+ * the thread. Runs inside the message append transaction. No network work may
+ * enter here.
+ */
 export function recordPushDeliveries(
   storage: StorageContext,
-  relaySeq: number,
-  nowMs = Date.now(),
+  message: PushMessage,
+  userId: string,
+  reason: ChatMessageReason,
+  nowMs: number,
 ): void {
   const { pushConfigured, apnsConfigured } = storage.options;
-  if (!pushConfigured && !apnsConfigured) return;
-  const message = readPushMessage(storage, relaySeq);
-  if (!message) return;
-  const { workspaceId, threadId, messageId } = message;
-  if (Number(firstAppendSeq(storage, workspaceId, threadId, messageId)) !== relaySeq) return;
-  if (apnsConfigured) {
-    storage.db
-      .prepare("DELETE FROM sync_relay_push_arrivals WHERE arrived_at_ms <= ?")
-      .run(nowMs - PUSH_DELIVERY_EXPIRY_MS);
-    storage.db
-      .prepare(`INSERT OR IGNORE INTO sync_relay_push_arrivals
-        (workspace_id, thread_id, message_id, relay_seq, arrived_at_ms) VALUES (?, ?, ?, ?, ?)`)
-      .run(workspaceId, threadId, messageId, relaySeq, nowMs);
-    for (const row of storage.db
-      .prepare(`SELECT delivery_id, account_user_id, generation, expires_at_ms, state FROM ${TABLE}
-        WHERE workspace_id = ? AND thread_id = ? AND message_id = ? AND relay_seq IS NULL`)
-      .all(workspaceId, threadId, messageId)) {
-      const userId = String(row.account_user_id);
-      const deliveryId = String(row.delivery_id);
-      if (
-        row.state !== "pending" ||
-        Number(row.expires_at_ms) <= nowMs ||
-        !isOwnAgentMessage(message, userId) ||
-        !pushMessageAccess(storage, message, userId) ||
-        !phoneCanShow(storage, userId, workspaceId, threadId)
-      ) {
-        storage.db.prepare(`DELETE FROM ${TABLE} WHERE delivery_id = ?`).run(deliveryId);
-        continue;
-      }
-      storage.db
-        .prepare(`UPDATE ${TABLE} SET relay_seq = ?, expires_at_ms = ? WHERE delivery_id = ?`)
-        .run(relaySeq, nowMs + PUSH_DELIVERY_EXPIRY_MS, deliveryId);
-      dropOlderPhoneAlerts(
-        storage,
-        { generation: Number(row.generation), workspaceId, threadId },
-        nowMs,
-      );
-    }
-  }
-  const recipients = storage.db
-    .prepare(`SELECT p.kind, p.installation_id, p.account_user_id, p.generation,
-      coalesce(n.account_name, d.account_name) AS account_name
-    FROM sync_relay_push_subscriptions p
-    LEFT JOIN sync_relay_push_installation_names n ON n.installation_id = p.installation_id
-    LEFT JOIN sync_relay_push_device_names d ON d.generation = p.generation
-    WHERE p.expires_at_ms > ? AND ((? AND p.kind = 'web' AND p.account_user_id IN (
-      SELECT owner_user_id FROM sync_relay_workspaces WHERE workspace_id = ? UNION
-      SELECT g.principal_user_id FROM sync_relay_share_grants g JOIN sync_relay_shares s USING(share_id)
-      WHERE s.workspace_id = ? AND g.status = 'active' AND g.principal_kind = 'user'))
-    OR (? AND p.kind = 'apns' AND p.account_user_id =
-      (SELECT owner_user_id FROM sync_relay_workspaces WHERE workspace_id = ?)))`)
-    .all(
-      nowMs,
-      pushConfigured ? 1 : 0,
-      workspaceId,
-      workspaceId,
-      apnsConfigured ? 1 : 0,
-      workspaceId,
-    );
-  const interests = new Map<string, ChatMessageReason | null>();
-  const shown = new Map<string, boolean>();
+  const { workspaceId, threadId, messageId, relaySeq } = message;
+  const native =
+    apnsConfigured && phoneCanShow(storage, userId, workspaceId, threadId)
+      ? storage.db
+          .prepare(`SELECT generation FROM sync_relay_push_subscriptions
+          WHERE kind = 'apns' AND account_user_id = ? AND expires_at_ms > ?`)
+          .all(userId, nowMs)
+      : [];
+  const web =
+    pushConfigured && reason !== "agent"
+      ? storage.db
+          .prepare(`SELECT installation_id, generation FROM sync_relay_push_subscriptions
+          WHERE kind = 'web' AND account_user_id = ? AND expires_at_ms > ?`)
+          .all(userId, nowMs)
+      : [];
+  if (native.length === 0 && web.length === 0) return;
   const sender = senderKey(storage, message);
-  for (const recipient of recipients) {
-    const userId = String(recipient.account_user_id);
-    const native = recipient.kind === "apns";
-    const interestKey = `${String(recipient.kind)}\n${userId}`;
-    if (!interests.has(interestKey))
-      interests.set(
-        interestKey,
-        chatMessageInterest(storage, message, {
-          userId,
-          accountName: String(recipient.account_name ?? ""),
-        }),
-      );
-    const reason = interests.get(interestKey);
-    if (!reason || (!native && reason === "agent")) continue;
-    if (native && !shown.has(userId))
-      shown.set(userId, phoneCanShow(storage, userId, workspaceId, threadId));
-    if (native && !shown.get(userId)) continue;
+  for (const device of [...web, ...native])
     insertDelivery(
       storage,
       {
@@ -325,8 +320,9 @@ export function recordPushDeliveries(
         messageId,
         relaySeq,
         userId,
-        installationId: native ? null : String(recipient.installation_id),
-        generation: Number(recipient.generation),
+        installationId:
+          device.installation_id === undefined ? null : String(device.installation_id),
+        generation: Number(device.generation),
         reason,
         senderKey: sender,
         noticeId: null,
@@ -334,7 +330,6 @@ export function recordPushDeliveries(
       },
       nowMs,
     );
-  }
 }
 
 export function recordNoticePushDeliveries(

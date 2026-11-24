@@ -527,7 +527,7 @@ it("persists unchanged reach verdicts after the first save fails", async () => {
         recipientUserId: "editor",
         recipientEmail: null,
         files: { paths: ["Tasks"], versionId: null, access: "edit" as const },
-        channel: null,
+        chat: null,
       },
     ],
   };
@@ -671,7 +671,7 @@ it("keeps private reach reasons out of a recipient's direct press and retry", as
         recipientUserId: "editor",
         recipientEmail: null,
         files: { paths: ["Tasks"], versionId: null, access: "edit" as const },
-        channel: null,
+        chat: null,
       },
     ],
   };

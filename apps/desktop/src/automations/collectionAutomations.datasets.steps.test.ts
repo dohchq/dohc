@@ -109,7 +109,7 @@ ${steps}`;
     recipientUserId: "u-bob",
     recipientEmail: "bob@dohc.test",
     files: null,
-    channel: { wireId: "team", canPost: true },
+    chat: { kind: "channel" as const, wireId: "team", canPost: true },
   };
 
   it("watches its Group, and runs a message from a member who cannot edit the Collection through the dataset", async () => {
@@ -525,7 +525,7 @@ describe("code steps on a dataset", () => {
       recipientUserId: "u-ana",
       recipientEmail: "ana@dohc.test",
       files: { paths: ["Budget"], versionId: null, access: "edit" as const },
-      channel: null,
+      chat: null,
     };
     const f = await world({ roster: { kind: "owner", ownerUserId: "user-owner", grants: [ana] } });
     // Ana may read the table and set Status. The code can pick any edit or create on the table, and she cannot use those.

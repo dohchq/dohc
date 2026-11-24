@@ -237,6 +237,36 @@ it("lists a received workspace membership for the account without matching it to
     parseReceivedInventory({ received: [member({ access: "read-write" })], removed: [] }),
   ).toBeNull();
 });
+// Inside the joined workspace, its own membership is what reaches each file.
+it("names a joined workspace's membership on its tracked files on main", () => {
+  const inventory = parseReceivedInventory({
+    received: [
+      {
+        ...grant("member"),
+        createdAtMs: 1,
+        genericChatWritable: false,
+        subjectName: "Community",
+        selector: { kind: "workspace", role: "member" },
+        access: "comment",
+      },
+    ],
+    removed: [],
+  })!;
+  const query = createAccessQuery(),
+    base = {
+      ...input(),
+      observation: { inventory, checkedAtMs: 100, freshness: "fresh" as const },
+      recipientUserId: "recipient",
+      coverage: "received-own-grant" as const,
+      shareId: "member",
+    };
+  expect(query.answer(base).rows).toMatchObject([
+    { shareId: "member", access: "comment", via: "received", recipientUserId: "recipient" },
+  ]);
+  expect(query.answer({ ...base, ref: { ...ref, path: "Notes/.env" } }).rows).toEqual([]);
+  expect(query.answer({ ...base, ref: { ...ref, versionId: "draft" } }).rows).toEqual([]);
+  expect(query.answer({ ...base, shareId: "other" }).rows).toEqual([]);
+});
 it("treats received Groups with missing file-scope facts as damaged copies", () => {
   expect(
     parseReceivedInventory({
@@ -349,7 +379,10 @@ it("excludes revoked named grants, former automation writers and ended links fro
 });
 
 it("answers a tracked file on main with each workspace member, and leaves memberships out of the Sharing list", () => {
-  const member = grant("member", { selector: { kind: "workspace" }, access: "edit" });
+  const member = grant("member", {
+    selector: { kind: "workspace", role: "admin" },
+    access: "edit",
+  });
   const source = readStoredRoster({
     grants: [
       grant("active"),
@@ -358,7 +391,7 @@ it("answers a tracked file on main with each workspace member, and leaves member
         grantId: "ana",
         recipientEmail: "ana@test.dev",
         access: "comment",
-        selector: { kind: "workspace" },
+        selector: { kind: "workspace", role: "member" },
       }),
     ],
     formerGrants: [
@@ -368,10 +401,11 @@ it("answers a tracked file on main with each workspace member, and leaves member
     links: [],
   })!;
   const query = createAccessQuery();
+  // Each membership names its role, as the Members page does, for the app and `dohc access object` alike.
   expect(query.answer(input(source)).rows).toMatchObject([
     { shareId: "active" },
-    { grantId: "ana", access: "comment" },
-    { grantId: "member", access: "edit" },
+    { grantId: "ana", access: "comment", selector: { kind: "workspace", role: "member" } },
+    { grantId: "member", access: "edit", selector: { kind: "workspace", role: "admin" } },
   ]);
   expect(
     query

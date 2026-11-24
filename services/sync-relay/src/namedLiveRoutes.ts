@@ -87,6 +87,10 @@ export interface NamedLiveRouteLimits {
   readonly maxResponseBytes: number;
   readonly maxPendingBytes: number;
   readonly maxBufferedBytes: number;
+  /** The frame bytes one person, one share, or the people other than the owner in one workspace may hold. */
+  readonly maxBufferedBytesPerPrincipal: number;
+  readonly maxBufferedBytesPerShare: number;
+  readonly maxBufferedBytesPerWorkspace: number;
   readonly maxFragments: number;
   readonly maxBufferedChunks: number;
   readonly upgradeTimeoutMs: number;
@@ -105,6 +109,9 @@ export function parseNamedLiveRouteLimits(value: unknown): NamedLiveRouteLimits 
     "maxRequestBytes",
     "maxResponseBytes",
     "maxBufferedBytes",
+    "maxBufferedBytesPerPrincipal",
+    "maxBufferedBytesPerShare",
+    "maxBufferedBytesPerWorkspace",
     "maxPendingBytes",
     "maxFragments",
     "maxBufferedChunks",
@@ -131,7 +138,12 @@ export function parseNamedLiveRouteLimits(value: unknown): NamedLiveRouteLimits 
       ([key, value]) => key !== "reservedOwnerConnections" && value < 1,
     ) ||
     limits.reservedOwnerConnections >=
-      Math.min(limits.maxConnections, limits.maxConnectionsPerWorkspace)
+      Math.min(limits.maxConnections, limits.maxConnectionsPerWorkspace) ||
+    Math.max(
+      limits.maxBufferedBytesPerPrincipal,
+      limits.maxBufferedBytesPerShare,
+      limits.maxBufferedBytesPerWorkspace,
+    ) > limits.maxBufferedBytes
   )
     throw new TypeError("Invalid named route limits.");
   return limits;
@@ -831,43 +843,16 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
         ]);
         if (!release) throw new Error("Live connection limit reached.");
         releaseAuthority = release;
-        const scopes: [string, number][] = [
-          [
-            principal,
-            Math.max(
-              1,
-              Math.floor(
-                limits.maxBufferedBytes *
-                  Math.min(1, limits.maxConnectionsPerPrincipal / limits.maxConnections),
-              ),
-            ),
-          ],
-        ];
+        const scopes: [string, number][] = [[principal, limits.maxBufferedBytesPerPrincipal]];
         if (kind !== "owner")
           scopes.push([
             JSON.stringify(["workspace", workspaceId]),
-            Math.max(
-              1,
-              Math.floor(
-                limits.maxBufferedBytes *
-                  Math.min(
-                    1,
-                    (limits.maxConnectionsPerWorkspace - limits.reservedOwnerConnections) /
-                      limits.maxConnections,
-                  ),
-              ),
-            ),
+            limits.maxBufferedBytesPerWorkspace,
           ]);
         if (shareId)
           scopes.push([
             JSON.stringify(["share", workspaceId, shareId]),
-            Math.max(
-              1,
-              Math.floor(
-                limits.maxBufferedBytes *
-                  Math.min(1, limits.maxConnectionsPerGrant / limits.maxConnections),
-              ),
-            ),
+            limits.maxBufferedBytesPerShare,
           ]);
         reserveBytes = (size) => buffers.reserve(size, scopes);
         validationBudget = {

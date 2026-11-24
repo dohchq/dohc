@@ -298,7 +298,7 @@ describe("named browser chat authorization and replication", () => {
     const f = await fixture();
     for (const [input, status, code] of [
       [{ authorUserId: "owner" }, 403, "authorship_mismatch"],
-      [{ threadId: "thread-private" }, 403, "share_op_rejected"],
+      [{ threadId: "thread-private" }, 404, "not_found"],
       [{ channelWireId: "wire-private" }, 404, "not_found"],
       [{ ops: [] }, 403, "share_op_rejected"],
       [{ reaction: "yes" }, 403, "share_op_rejected"],

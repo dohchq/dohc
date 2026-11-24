@@ -318,6 +318,25 @@ describe("chat authorship display", () => {
     }
   });
 
+  it("names another person's unnamed agent by whose it is", () => {
+    const theirs = { group: "agent-share", hue: null, self: false } as const;
+    const agent = {
+      authorKind: "agent" as const,
+      authorDisplayName: "Agent",
+      authorOwnerDisplayName: "Sam",
+      presentation: theirs,
+    };
+    expect(chatAuthorLabel(agent)).toBe("Sam's agent");
+    // An agent's own name stays; its badge names the owner.
+    expect(chatAuthorLabel({ ...agent, authorDisplayName: "Nova" })).toBe("Nova");
+    // Your own agent, an agent with no owner, and a link's agent keep "Agent".
+    expect(chatAuthorLabel({ ...agent, presentation: { ...theirs, self: true } })).toBe("Agent");
+    expect(
+      chatAuthorLabel({ authorKind: "agent", authorDisplayName: "Agent", presentation: theirs }),
+    ).toBe("Agent");
+    expect(chatAuthorLabel({ ...agent, linkAgent: true })).toBe("Agent");
+  });
+
   it('renders agent messages as "their stored name" and humans by name', () => {
     expect(chatAuthorLabel({ authorKind: "agent", authorDisplayName: "Sam" })).toBe("Sam");
     expect(chatAuthorLabel({ authorKind: "human", authorDisplayName: "Sam" })).toBe("Sam");

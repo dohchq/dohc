@@ -61,7 +61,7 @@ export const SIDE_PANEL_VIEWS: Readonly<Record<ViewId, SidePanelView>> = {
     ...VIEW_IDENTITY.chats,
     customize: "chats",
     actions: (context) =>
-      context.captureAvailable && !(parseTab(context.focusedTabPath)?.kind === "chat") ? (
+      context.chatsAvailable && !(parseTab(context.focusedTabPath)?.kind === "chat") ? (
         <HeaderButton
           testId="chats-open-tab"
           label="Open Chats in tab"
@@ -76,16 +76,16 @@ export const SIDE_PANEL_VIEWS: Readonly<Record<ViewId, SidePanelView>> = {
       // Every loading state here puts its lines at the top of the panel, so
       // each one takes over from the last without blinking.
       <SkeletonSlot>
-        {context.captureAvailable ? (
+        {context.chatsAvailable ? (
           <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading Chats…" />}>
             <LazyChatsView key={context.workspaceId} {...context.chatsNavigatorProps} />
           </Suspense>
         ) : context.captureDecided ? (
           // Main's capture cannot serve chats here, so mounting the list
           // would issue calls it refuses. The view states the fact, with the
-          // one next step that can change it. A shared view never shows this
-          // view: it has chat per file, in About, and no workspace-wide
-          // listing.
+          // one next step that can change it. Only a joined workspace among
+          // shared views shows this view; the others have chat per file, in
+          // About, and no workspace-wide listing (the shape #627 came from).
           <div
             data-testid="chats-off"
             className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"

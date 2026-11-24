@@ -1,3 +1,4 @@
+import type { MemberFolders } from "../shareFilter";
 import type { ShareLabels } from "@dohc/security-contract/share-labels";
 import type { ShareLabelReader } from "../shareFilter";
 import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
@@ -929,6 +930,7 @@ export interface SyncRelayStorage {
       import("./serviceHostEnrollment").ServiceHostEnrollment,
       "workspaceId" | "objectId" | "ownerUserId" | "shareId" | "path"
     >,
+    nowMs?: number,
   ): boolean;
   serviceHostDocumentEnabled(document: { workspaceId: string; objectId: string }): boolean;
   /** The document's open retirement obligation, if Stop recorded one its activation has not completed. */
@@ -975,6 +977,8 @@ export interface SyncRelayStorage {
   bindPushSubscription(
     input: import("./pushSubscriptions").BindPushSubscriptionInput,
   ): import("./pushSubscriptions").PushSubscriptionRow;
+  // The account's current display name, which mentions match (storage/accountNames.ts).
+  recordAccountName(userId: string, name: string | null): void;
   removePushSubscription(input: { installationId: string; userId: string }): void;
   readPushDevice(input: {
     userId: string;
@@ -1205,6 +1209,8 @@ export interface SyncRelayStorage {
   commitPersonalCollectionWrite(
     input: import("./collectionWrites").CommitPersonalCollectionWriteInput,
   ): import("./collectionWrites").CommittedCollectionWrite;
+  /** The folders a person in the workspace may write pages in, or null without a role. */
+  memberFolders(workspaceId: string, userId: string): MemberFolders | null;
   automationSwitchableFolder(workspaceId: string, folder: string): boolean;
   readOwnerCollectionWrites(
     input: import("./ownerCollectionWrites").OwnerCollectionWritesInput,
@@ -1517,6 +1523,12 @@ export interface SyncRelayStorage {
   fetchChatMessages(input: {
     workspaceId: string;
     channelWireId: string;
+    cursor: number | null;
+    direction: "older" | "newer";
+    limit: number;
+  }): FetchLogPageResult & { latestCursor: number };
+  fetchChannelMessages(input: {
+    workspaceId: string;
     cursor: number | null;
     direction: "older" | "newer";
     limit: number;
@@ -1876,6 +1888,7 @@ export interface SyncRelayStorage {
   // Workspace members (storage/workspaceMembers.ts).
   workspaceMemberGrantIsCurrent: WorkspaceMembersMethod<"workspaceMemberGrantIsCurrent">;
   workspaceRoleOf: WorkspaceMembersMethod<"workspaceRoleOf">;
+  workspaceLevelChangedBy: WorkspaceMembersMethod<"workspaceLevelChangedBy">;
   readWorkspaceMembers: WorkspaceMembersMethod<"readWorkspaceMembers">;
   getWorkspaceMembershipByShare: WorkspaceMembersMethod<"getWorkspaceMembershipByShare">;
   inviteWorkspaceMember: WorkspaceMembersMethod<"inviteWorkspaceMember">;
@@ -1889,6 +1902,7 @@ export interface SyncRelayStorage {
   inviteLinkAdmitsSignUp: WorkspaceMembersMethod<"inviteLinkAdmitsSignUp">;
   previewWorkspaceJoin: WorkspaceMembersMethod<"previewWorkspaceJoin">;
   joinWorkspace: WorkspaceMembersMethod<"joinWorkspace">;
+  createWorkspaceGroup: WorkspaceMembersMethod<"createWorkspaceGroup">;
   shareHasActiveGrants(shareId: string): boolean;
   getShareLabels(shareId: string, reader: ShareLabelReader): ShareLabels;
   setShareLabels(shareId: string, labels: ShareLabels, updatedAtMs: number): void;
@@ -1980,6 +1994,13 @@ export interface SyncRelayStorage {
     workspaceId: string,
     channelWireId: string,
   ): string | null | undefined;
+  /** Each channel's earliest create, in log order: its wire id and its name. */
+  listChannelCreates(
+    workspaceId: string,
+  ): { channelWireId: string; name: string; type: "posts" | "chat" | "both" }[];
+  findThreadCreateLane(workspaceId: string, threadId: string): "posts" | "chat" | undefined;
+  findThreadFirstMessageId(workspaceId: string, threadId: string): string | undefined;
+  findChannelChatThread(workspaceId: string, channelWireId: string): string | null;
   // The file a thread is about, as claimed by the earliest
   // chat.thread.create for this threadId. Earliest-wins for the same reason
   // the channel binding uses it: a later forged re-create must not re-bind an

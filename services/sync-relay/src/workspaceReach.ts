@@ -1,9 +1,9 @@
-import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
+import { isWorkspaceGroup } from "@dohc/security-contract/chat-wire-ids";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import type { ChatShareAccess } from "@dohc/security-contract/share-grant";
 
 // What a person in a workspace reaches through the workspace share. Every
-// surface asks these functions and nothing else, so access rules (piece 3 of
+// surface asks these functions and nothing else, so access rules (piece 4 of
 // docs/engineering/plans/workspace-members.md) narrow reach here once.
 //
 // Files: every tracked path on main, current and future. The engine path
@@ -37,9 +37,7 @@ export function workspaceGroupReachable(
 ): channelWireId is string {
   return (
     typeof channelWireId === "string" &&
-    channelWireId.length > 0 &&
-    channelWireId !== GENERAL_CHANNEL_WIRE_ID &&
-    chat?.channelKind(channelWireId) === "channel"
+    isWorkspaceGroup(channelWireId, chat?.channelKind(channelWireId))
   );
 }
 

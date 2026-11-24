@@ -88,6 +88,7 @@ import {
   UpdateStateEvent,
   WorkbenchMenuCommand,
   WorkspaceIdPayload,
+  SharedViewPullProgressEvent,
   WorkspaceActivated,
   WorkspacePathOpenFailedEvent,
   WindowFocusedEvent,
@@ -350,6 +351,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.findAutomationCollection, payload),
   onHistoryNamesChanged: (listener) =>
     onEvent(CHANNELS.historyNamesChanged, WorkspaceIdPayload, listener),
+  onSharedViewPullProgress: (listener) =>
+    onEvent(CHANNELS.sharedViewPullProgress, SharedViewPullProgressEvent, listener),
   onCollectionAutomationsChanged: (listener) =>
     onEvent(CHANNELS.collectionAutomationsChanged, WorkspaceIdPayload, listener),
   onCollectionRulesChanged: (listener) =>

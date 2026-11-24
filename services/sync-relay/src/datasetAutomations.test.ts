@@ -694,7 +694,7 @@ async function executorFor(
                 versionId: null,
                 access: "edit" as const,
               },
-              channel: null,
+              chat: null,
             },
           ]
         : [],

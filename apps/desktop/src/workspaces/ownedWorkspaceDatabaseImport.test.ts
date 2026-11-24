@@ -62,7 +62,9 @@ function ownerFiles(input: {
     | "assertProjectionRoot"
     | "createMount"
     | "removeMount"
+    | "signedInAccount"
   > = {
+    signedInAccount: { settle: async () => undefined, current: () => null },
     resolveRelay: async () => null,
     pull: async () => {
       throw new Error("Unexpected pull");

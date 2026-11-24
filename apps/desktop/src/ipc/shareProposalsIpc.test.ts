@@ -13,6 +13,7 @@ import {
 import { shareProposalOperations } from "./shareOperations";
 import { registerOperations } from "./operationTable";
 import { createShareProposalsIpc } from "./shareProposalsIpc";
+import { JOINED_BY_ANOTHER_ACCOUNT } from "./joinedAccountWords";
 import { CredentialSessionCache } from "../workspaces/credentialSessionCache";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { RegistryEntry } from "../workspaces/registryStore";
@@ -27,6 +28,7 @@ import {
 } from "../window/rendererWorkspaceOperation";
 import { withStaleSensitiveWorkspaceOperation } from "../workspaces/workspaceAssets";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
+import { DaemonRefusalError } from "@dohc/workspace-engine-client";
 import { deferred } from "../testing/deferred";
 import { sharedViewRefusal } from "../testing/sharedViewRefusal.fixture";
 
@@ -145,15 +147,22 @@ async function harness() {
     writes: [],
     morePending: false,
   }));
+  const waiting = vi.fn<EngineRelayWorkspaceClient["directWritesWaiting"]>(async () => ({
+    pages: 0,
+    collectionWrites: 0,
+    morePending: false,
+  }));
   const relayFor = vi.fn<Dependencies["receivedShareEngine"]["relayFor"]>(
     () =>
       ({
         submitShareProposal: submit,
         pushDirectWrites: pushDirect,
+        directWritesWaiting: waiting,
       }) as unknown as EngineRelayWorkspaceClient,
   );
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   const reported = vi.fn<Dependencies["reportDirectWrites"]>(() => true);
+  const account = { other: false };
   const directWrites = createShareProposalsIpc<Operation>({
     warmCredentialCache: warm,
     withWorkspaceAuthority: (id, work) => authorities.withOperation(id, work),
@@ -174,6 +183,7 @@ async function harness() {
     withStaleSensitiveWorkspaceOperation,
     shareViewFiles: { reconcile },
     receivedShareEngine: { relayFor },
+    joinedByAnotherAccount: () => account.other,
   });
   registerOperations<typeof shareProposalOperations, Event, Operation>(
     {
@@ -229,12 +239,14 @@ async function harness() {
     reconcile,
     submit,
     pushDirect,
+    waiting,
     relayFor,
     handlers,
     invoke,
     recipient,
     reported,
     directWrites,
+    account,
     work: [
       warm,
       list,
@@ -671,6 +683,7 @@ describe("registered share proposal handlers", () => {
       ],
       errorMessage: "offline",
       lasting: false,
+      pagesWaiting: null,
     });
     h.pushDirect.mockRejectedValueOnce(new SharedFileReadOnlyError());
     await expect(
@@ -696,6 +709,41 @@ describe("registered share proposal handlers", () => {
       h.invoke(shareProposalOperations.pushShareDirectWrites.channel),
     ).resolves.toBeUndefined();
     expect(h.reported.mock.calls.at(-1)?.[1]).toMatchObject({ status: "failed", lasting: false });
+  });
+
+  it.each([
+    [{ pages: 2, collectionWrites: 0, morePending: false }, 2],
+    [{ pages: 1, collectionWrites: 1, morePending: false }, null],
+    [{ pages: 1, collectionWrites: 0, morePending: true }, null],
+    [{ pages: 0, collectionWrites: 0, morePending: false }, null],
+  ])(
+    "counts the pages a failed push left waiting when nothing else waits: %j",
+    async (left, pagesWaiting) => {
+      const h = await harness();
+      h.recipient();
+      h.pushDirect.mockRejectedValueOnce(new Error("offline"));
+      h.waiting.mockResolvedValueOnce(left);
+      await expect(
+        h.invoke(shareProposalOperations.pushShareDirectWrites.channel),
+      ).resolves.toBeUndefined();
+      expect(h.waiting).toHaveBeenCalledWith({ shareId: "pinned-share" });
+      expect(h.reported.mock.calls.at(-1)?.[1]).toMatchObject({ status: "failed", pagesWaiting });
+    },
+  );
+
+  it("reports a failed push without a page count when it cannot read what waits", async () => {
+    const h = await harness();
+    h.recipient();
+    h.pushDirect.mockRejectedValueOnce(new Error("offline"));
+    h.waiting.mockRejectedValueOnce(new Error("engine closed"));
+    await expect(
+      h.invoke(shareProposalOperations.pushShareDirectWrites.channel),
+    ).resolves.toBeUndefined();
+    expect(h.reported.mock.calls.at(-1)?.[1]).toMatchObject({
+      status: "failed",
+      errorMessage: "offline",
+      pagesWaiting: null,
+    });
   });
 
   it("says when the share is unavailable, and asks the relay again on the next push", async () => {
@@ -790,6 +838,91 @@ describe("registered share proposal handlers", () => {
     expect(first.status === "pushed" && first.writes).toHaveLength(2_500);
     expect(result.status).toBe("pushed");
     expect(result.writes).toHaveLength(2);
+  });
+
+  it("sends and reports nothing while another account is signed in, on open or after a save", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = await harness();
+      h.recipient();
+      h.account.other = true;
+      await expect(
+        h.invoke(shareProposalOperations.pushShareDirectWrites.channel),
+      ).resolves.toBeUndefined();
+      h.directWrites.shareViewEdited("workspace");
+      await vi.advanceTimersByTimeAsync(800);
+      expect(h.pushDirect).not.toHaveBeenCalled();
+      expect(h.reported).not.toHaveBeenCalled();
+      // The joined account is back: what waits goes.
+      h.account.other = false;
+      h.pushDirect.mockResolvedValueOnce({
+        writes: [
+          { paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" },
+        ],
+        morePending: false,
+      });
+      await expect(
+        h.invoke(shareProposalOperations.pushShareDirectWrites.channel),
+      ).resolves.toBeUndefined();
+      expect(h.pushDirect).toHaveBeenCalledTimes(1);
+      expect(h.reported).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refuses to list, send or take back changes while another account is signed in, before relay work", async () => {
+    const h = await harness();
+    h.recipient();
+    h.account.other = true;
+    await expect(h.invoke(shareProposalOperations.listMyShareChanges.channel)).rejects.toThrow(
+      JOINED_BY_ANOTHER_ACCOUNT,
+    );
+    await expect(h.invoke(shareProposalOperations.submitShareChanges.channel)).rejects.toThrow(
+      JOINED_BY_ANOTHER_ACCOUNT,
+    );
+    await expect(
+      h.invoke(shareProposalOperations.withdrawShareChanges.channel, {
+        workspaceId: "workspace",
+        proposalId: "proposal",
+      }),
+    ).rejects.toThrow(JOINED_BY_ANOTHER_ACCOUNT);
+    expect(h.listMine).not.toHaveBeenCalled();
+    expect(h.reconcile).not.toHaveBeenCalled();
+    expect(h.submit).not.toHaveBeenCalled();
+    expect(h.withdraw).not.toHaveBeenCalled();
+    h.account.other = false;
+    await expect(
+      h.invoke(shareProposalOperations.withdrawShareChanges.channel, {
+        workspaceId: "workspace",
+        proposalId: "proposal",
+      }),
+    ).resolves.toEqual({ state: "withdrawn" });
+  });
+
+  it("gives a failed push's cause in a person's words, and no engine message", async () => {
+    const h = await harness();
+    h.recipient();
+    h.pushDirect.mockRejectedValueOnce(
+      new DaemonRefusalError(
+        { code: "INTERNAL", message: "workspace operation failed", retry: "no" },
+        null,
+      ),
+    );
+    await expect(
+      h.invoke(shareProposalOperations.pushShareDirectWrites.channel),
+    ).resolves.toBeUndefined();
+    expect(h.reported.mock.calls.at(-1)?.[1]).toMatchObject({ status: "failed", errorMessage: "" });
+    h.pushDirect.mockRejectedValueOnce(
+      new DaemonRefusalError({ code: "OVERLOADED", message: "busy", retry: "afterBackoff" }, null),
+    );
+    await expect(
+      h.invoke(shareProposalOperations.pushShareDirectWrites.channel),
+    ).resolves.toBeUndefined();
+    expect(h.reported.mock.calls.at(-1)?.[1]).toMatchObject({
+      status: "failed",
+      errorMessage: "dohc is busy. Try again in a moment.",
+    });
   });
 
   it.each(["view", "comment"] as const)("pushes nothing from a %s share", async (access) => {

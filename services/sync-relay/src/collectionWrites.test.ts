@@ -10,6 +10,8 @@ import { normalizeLinkRefusal } from "./linkRefusal";
 import { guardRelayResponses } from "./relayResponseStanding";
 import { pathCollisionKey } from "./pathCollisionKey";
 import { streamsRequestBody, type SyncRelayHandler } from "./server";
+import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
+import type { StorageContext } from "./storage/context";
 import {
   filterCollectionWriteForShare,
   type ProposedChange,
@@ -1760,3 +1762,205 @@ it.each([3])(
     expect((await write(r, [create(`${folder}/automations.yaml`, one)])).status).toBe(200);
   },
 );
+
+// A person in the owner's workspace writes a new page straight into it at
+// Edit. The relay reads their role from storage; an admin may also start a
+// folder with its first page.
+describe("a new page in the owner's workspace", () => {
+  async function workspace() {
+    const r = await relay();
+    await r.owner.write("object-plan", "docs/plan.md", "the plan");
+    return r;
+  }
+
+  async function member(r: Relay, userId: string, role: "member" | "admin" = "member") {
+    const invited = await r.h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/members/invites`,
+        jsonBody({ email: `${userId}@dohc.test`, workspaceName: "Trip" }),
+      ),
+    );
+    expect(invited.status, await invited.clone().text()).toBe(200);
+    const memberId = (
+      (await json(invited)).people as Array<{ memberId: string; email: string | null }>
+    ).find((person) => person.email === `${userId}@dohc.test`)!.memberId;
+    if (role === "admin") {
+      const promoted = await r.h(
+        request(OWNER, `/sync/${WORKSPACE}/members/${memberId}/role`, jsonBody({ role: "admin" })),
+      );
+      expect(promoted.status).toBe(200);
+    }
+    const shares = await json(await r.h(request(userId, "/sync/shares")));
+    const shareId = (
+      shares.received as Array<{ shareId: string; selector: { kind?: string } }>
+    ).find((row) => row.selector.kind === "workspace")!.shareId;
+    const grantId = r.storage.listActiveShareGrantsForRecipient(shareId, userId)[0]!.grantId;
+    return { userId, memberId, shareId, grantId };
+  }
+
+  async function membersAt(r: Relay, level: "view" | "comment" | "edit") {
+    expect(
+      (await r.h(request(OWNER, `/sync/${WORKSPACE}/members/level`, jsonBody({ level })))).status,
+    ).toBe(200);
+  }
+
+  async function uploadAs(r: Relay, who: { userId: string; shareId: string }, text: string) {
+    const uploaded = await r.h(
+      request(who.userId, `/sync/shares/${who.shareId}/blobs/${sha256(text)}`, {
+        method: "PUT",
+        body: new TextEncoder().encode(text),
+      }),
+    );
+    expect(uploaded.status, await uploaded.clone().text()).toBe(200);
+  }
+
+  async function page(
+    r: Relay,
+    who: { userId: string; shareId: string },
+    path: string,
+    text: string,
+  ) {
+    await uploadAs(r, who, text);
+    return r.h(
+      request(
+        who.userId,
+        `/sync/shares/${who.shareId}/collection-writes`,
+        jsonBody({ submitId: `page-${path}`, changes: [create(path, text)] }),
+      ),
+    );
+  }
+
+  it("writes a member's page into the owner's log under the member's name", async () => {
+    const r = await workspace();
+    const ana = await member(r, "ana");
+    await membersAt(r, "edit");
+    const created = await page(r, ana, "docs/idea.md", "# An idea\n");
+    expect(created.status, await created.clone().text()).toBe(200);
+    expect((await page(r, ana, "top.md", "# Top\n")).status).toBe(200);
+    const moments = await r.owner.directMoments();
+    expect(moments.map((op) => op.payload.path)).toEqual(["docs/idea.md", "top.md"]);
+    expect(moments[0]!.originId).toBe(`relay:collection-file:${ana.grantId}`);
+    expect(moments[0]!.payload.authors).toEqual([
+      expect.objectContaining({ kind: "named", userId: "ana", grantId: ana.grantId }),
+    ]);
+  });
+
+  it("refuses a spelling the owner already has, a file or a folder", async () => {
+    const r = await workspace();
+    const ana = await member(r, "ana", "admin");
+    await expectCode(await page(r, ana, "docs/PLAN.md", "mine"), 409, "stale");
+    await expectCode(await page(r, ana, "Docs/idea.md", "mine"), 409, "stale");
+    await expectCode(await page(r, ana, "docs/plan.md/idea.md", "mine"), 409, "stale");
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it("answers stale with the owner's file when the owner made the page first", async () => {
+    const r = await workspace();
+    const ana = await member(r, "ana");
+    await membersAt(r, "edit");
+    await r.owner.write("object-idea", "docs/idea.md", "the owner's idea");
+    const body = await expectCode(await page(r, ana, "docs/idea.md", "my idea"), 409, "stale");
+    expect(JSON.stringify(body)).toContain(sha256("the owner's idea"));
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it("lets an admin start a folder with its first page, and answers a member's new folder as a folder out of reach", async () => {
+    const r = await workspace();
+    const ana = await member(r, "ana", "admin");
+    const ben = await member(r, "ben");
+    await membersAt(r, "edit");
+    expect((await page(r, ana, "plans/2027/idea.md", "# Next year\n")).status).toBe(200);
+    expect((await r.owner.directMoments()).map((op) => op.payload.path)).toEqual([
+      "plans/2027/idea.md",
+    ]);
+
+    const newFolder = await page(r, ben, "drafts/idea.md", "mine");
+    const hidden = await page(r, ben, ".dohc/idea.md", "mine");
+    expect(newFolder.status).toBe(403);
+    expect(await newFolder.text()).toBe(await hidden.text());
+    // The folder the admin started is now a folder a member writes in.
+    expect((await page(r, ben, "plans/2027/another.md", "# More\n")).status).toBe(200);
+  });
+
+  it("refuses an admin's new folder once the owner makes them a member mid-request", async () => {
+    const r = await workspace();
+    const ana = await member(r, "ana", "admin");
+    await membersAt(r, "edit");
+    const text = "# Next year\n";
+    await uploadAs(r, ana, text);
+    const changes = [create("plans/idea.md", text)];
+    const decision = filterCollectionWriteForShare(
+      { kind: "workspace", access: "edit" },
+      changes,
+      undefined,
+      r.storage.memberFolders(WORKSPACE, "ana"),
+    );
+    if (!decision.allowed) throw new Error("expected the admin's page to be allowed");
+    expect(decision.write.kind).toBe("new-page");
+    const generation = r.storage.getShareGrant(ana.grantId)!.generation;
+    expect(
+      (
+        await r.h(
+          request(
+            OWNER,
+            `/sync/${WORKSPACE}/members/${ana.memberId}/role`,
+            jsonBody({ role: "member" }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    expect(r.storage.getShareGrant(ana.grantId)!.generation).toBe(generation);
+    expect(() =>
+      r.storage.commitCollectionWrite({
+        shareId: ana.shareId,
+        grantId: ana.grantId,
+        grantGeneration: generation,
+        writer: { kind: "named", userId: "ana", humanName: "Ana" },
+        submitId: "submit-1",
+        rawChanges: changes,
+        write: decision.write,
+        nowMs: CLOCK,
+        newId: () => "id",
+      }),
+    ).toThrow(expect.objectContaining({ code: "share_op_rejected" }));
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it("refuses every page while the owner's account is fenced", async () => {
+    const r = await workspace();
+    const ana = await member(r, "ana", "admin");
+    const text = "# An idea\n";
+    await uploadAs(r, ana, text);
+    const key = "account-deletion-key-at-least-32-bytes";
+    const context = r.storage as unknown as StorageContext;
+    initializeAccountDeletion(context, key);
+    fenceAccount(context, key, OWNER, `${OWNER}@dohc.test`);
+    expect(r.storage.memberFolders(WORKSPACE, "ana")).toBeNull();
+    const refused = await r.h(
+      request(
+        "ana",
+        `/sync/shares/${ana.shareId}/collection-writes`,
+        jsonBody({ submitId: "fenced", changes: [create("docs/idea.md", text)] }),
+      ),
+    );
+    expect(refused.status).not.toBe(200);
+  });
+
+  it("keeps a page out of the lane at View and Comment", async () => {
+    const r = await workspace();
+    const ana = await member(r, "ana");
+    for (const level of ["view", "comment"] as const) {
+      await membersAt(r, level);
+      const response = await r.h(
+        request(
+          "ana",
+          `/sync/shares/${ana.shareId}/collection-writes`,
+          jsonBody({ submitId: `at-${level}`, changes: [create("docs/idea.md", "mine")] }),
+        ),
+      );
+      expect(response.status).not.toBe(200);
+    }
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+});

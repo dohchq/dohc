@@ -353,7 +353,7 @@ describe("Explorer kind glyphs", () => {
     });
     render(<Explorer {...props} />);
     fireEvent.click(treeRow("Trip/plan.md"));
-    fireEvent.click(screen.getByRole("button", { name: "New file" }));
+    fireEvent.click(screen.getByRole("button", { name: "New page" }));
     expect(props.onNewPage).toHaveBeenCalledWith("Trip");
     expect(screen.queryByTestId("tree-edit-input")).toBeNull();
   });

@@ -2451,7 +2451,7 @@ fn verify_direct_write_author(
     }
     // A version this device has not imported yet is a retry, not a refusal.
     require_version(tx, &envelope.workspace_id, &payload.version_id)?;
-    if !writes_collection_own_file(tx, &envelope.workspace_id, payload)? {
+    if !writes_collection_own_file(tx, &envelope.workspace_id, payload, true)? {
         return Err(SyncError::InvalidInput {
             reason: "direct-write author may write only a Collection's own files",
         });
@@ -2501,7 +2501,7 @@ fn verify_personal_collection_author(
         });
     }
     require_version(tx, &envelope.workspace_id, &payload.version_id)?;
-    if !writes_collection_own_file(tx, &envelope.workspace_id, payload)? {
+    if !writes_collection_own_file(tx, &envelope.workspace_id, payload, false)? {
         return Err(SyncError::InvalidInput {
             reason: "personal agent may write only a Collection's own files",
         });
@@ -2513,16 +2513,18 @@ fn verify_personal_collection_author(
 /// beside it or `dataset.json`, or the creation of a record directly inside a folder that holds
 /// `collection.yaml`. A new Collection's `collection.yaml` goes only into a
 /// folder that holds nothing yet, and has to arrive before its records.
+/// With `pages`, also the creation of a Markdown page at the top level or in
+/// a folder that holds neither `collection.yaml` nor `dataset.json`: a person
+/// in the workspace with Edit creates pages this way, and the relay decides
+/// who may.
 fn writes_collection_own_file(
     tx: &Transaction<'_>,
     workspace_id: &str,
     payload: &MomentAppendPayload,
+    pages: bool,
 ) -> Result<bool, SyncError> {
     let path = payload.path.as_str();
     let version_id = payload.version_id.as_str();
-    let Some((folder, file_name)) = path.rsplit_once('/') else {
-        return Ok(false);
-    };
     let in_place = |side: Option<&str>| side.is_none_or(|side| side == path);
     if payload.operation != "write"
         || payload.payload_after_path != path
@@ -2548,6 +2550,19 @@ fn writes_collection_own_file(
     if !object_agrees {
         return Ok(false);
     }
+    let creates_page = creates && is_collection_markdown_path(path);
+    let Some((folder, file_name)) = path.rsplit_once('/') else {
+        return Ok(pages && creates_page);
+    };
+    let folder_holds_dataset = || {
+        select_snapshot_by_path(
+            tx,
+            workspace_id,
+            version_id,
+            &format!("{folder}/dataset.json"),
+        )
+        .map(|dataset| dataset.is_some())
+    };
     let folder_holds_schema = || {
         select_snapshot_by_path(
             tx,
@@ -2563,17 +2578,8 @@ fn writes_collection_own_file(
         COLLECTION_SCHEMA_FILENAME => {
             !creates || !folder_holds_any_file(tx, workspace_id, version_id, folder)?
         }
-        AUTOMATIONS_FILENAME => {
-            folder_holds_schema()?
-                || select_snapshot_by_path(
-                    tx,
-                    workspace_id,
-                    version_id,
-                    &format!("{folder}/dataset.json"),
-                )?
-                .is_some()
-        }
-        _ => creates && is_collection_markdown_path(path) && folder_holds_schema()?,
+        AUTOMATIONS_FILENAME => folder_holds_schema()? || folder_holds_dataset()?,
+        _ => creates_page && (folder_holds_schema()? || pages && !folder_holds_dataset()?),
     })
 }
 

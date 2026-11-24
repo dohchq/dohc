@@ -504,6 +504,7 @@ export async function checkPlannedMessages(
             effect,
             step: {
               kind: "post",
+              target: effect.to.kind === "group" ? "group" : "dm",
               group: { channelWireId: effect.channelWireId, name: effect.name },
             },
           },

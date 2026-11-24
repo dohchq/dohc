@@ -37,7 +37,7 @@ import type {
 import { CreationPartial } from "./creation";
 import { DATASET_CAPABILITIES, DatasetRequest, DatasetResult } from "./dataset";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
-import { MEMBERS_CAPABILITIES, MembersResult, OwnerMembersRequest } from "./members";
+import { MEMBERS_CAPABILITIES, MembersResult, AgentMembersRequest } from "./members";
 import { OwnerAppResponsesRequest, OwnerAppResponsesResult } from "./appResponses";
 import {
   ServerAccountDeletionPreview,
@@ -980,7 +980,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
     .object({
       ...requestBase,
       verb: z.literal("members"),
-      args: z.object({ ...argsBase, request: OwnerMembersRequest }).strict(),
+      args: z.object({ ...argsBase, request: AgentMembersRequest }).strict(),
     })
     .strict(),
   z

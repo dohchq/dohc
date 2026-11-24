@@ -141,7 +141,7 @@ export async function createSharedViewsIpcHarness(
   const probeLog = vi.fn<Dependencies["probeShareViewLog"]>(async () => ({ unchanged: true }));
   const registryRead = vi.fn((id: string) => registry.get(id)!);
   const workspaceOperation = vi.fn(withRendererWorkspaceOperation);
-  const fetchAccess = vi.fn<Dependencies["fetchShareViewAccess"]>(async () => "edit");
+  const fetchAccess = vi.fn<Dependencies["fetchShareViewAccess"]>(async () => ({ access: "edit" }));
   const readDir = vi.fn(async (_root: string) => [] as string[]);
   const mkdir = vi.fn(async () => {
     steps.push("mkdir");
@@ -222,12 +222,13 @@ export async function createSharedViewsIpcHarness(
       >,
   );
   const reconcile = vi.fn<Dependencies["shareViewFiles"]["reconcile"]>(
-    async (_lease, _target, _request, onCursorCommitted) => {
+    async (_lease, _target, _request, onPullCommitted) => {
       steps.push("reconcile");
-      onCursorCommitted?.(42);
+      onPullCommitted?.({ cursor: 42, changes: [] });
       return { kind: "refresh", outcome };
     },
   );
+  const showsLive = vi.fn<Dependencies["showsLive"]>(() => false);
   const end = vi.fn<Dependencies["shareViewFiles"]["end"]>(
     async (_lease, target, assertCurrent) => {
       assertCurrent();
@@ -291,9 +292,11 @@ export async function createSharedViewsIpcHarness(
     receivedShareEngine: { relayFor, storeFor },
     openWorkspaceActivity: open,
     requireWorkspace: registryRead,
+    listWorkspaces: () => [...registry.values()],
     notifyRenderer: notify,
     recordShareViewStoreRefusal: recordRefusal,
     syncNotices,
+    showsLive,
   });
   const invoke = (channel: string, payload: unknown, trusted = true) =>
     Promise.resolve().then(() => handlers.get(channel)!({ sender: "window", trusted }, payload));
@@ -325,6 +328,7 @@ export async function createSharedViewsIpcHarness(
     storeFor,
     reconcile,
     syncNotices,
+    showsLive,
     probeLog,
     registryRead,
     workspaceOperation,

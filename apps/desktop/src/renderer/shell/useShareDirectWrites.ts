@@ -4,6 +4,7 @@ import type {
   PushShareDirectWritesResult,
   ShareDirectWriteAnswerDelivery,
 } from "../../ipc/bridgeContract";
+import { readError } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 
 export type DirectWriteNoticeKind =
@@ -14,10 +15,14 @@ export type DirectWriteNoticeKind =
 
 // How a shared-view refresh left the view: refreshed (or not a shared view),
 // found the share ended, or failed, was damaged, or was overtaken.
-export type ShareViewRefresh = "current" | "ended" | "changed" | "stale";
+// "held" and "level-changed" come only from a held pull; see SharedViewPulled.
+export type ShareViewRefresh = "current" | "ended" | "changed" | "stale" | "held" | "level-changed";
 
 export interface DirectWriteNotice {
   kind: DirectWriteNoticeKind;
+  // A state that needs the person, though nothing failed, shows as a warning with a title.
+  tone?: "warning";
+  title?: string;
   message: string;
   retry: (() => void) | null;
   send: { label: string; run: () => void } | null;
@@ -34,8 +39,14 @@ export interface DirectWriteNotice {
 export function useShareDirectWrites(input: {
   workspaceId: string;
   sharedView: boolean;
+  // A joined workspace, where a member's new pages take this path too.
+  membership?: boolean;
+  workspaceName: string;
   // An Edit share view that has not ended and whose grant is readable.
   enabled: boolean;
+  // A joined workspace while another account is signed in. Main sends
+  // nothing then, so the view pushes when the joined account is back.
+  otherAccount?: boolean;
   ready: boolean;
   ownerName: string;
   refreshShareView(): Promise<ShareViewRefresh>;
@@ -67,8 +78,9 @@ export function useShareDirectWrites(input: {
         await report({
           status: "failed",
           writes: [],
-          errorMessage: error instanceof Error ? error.message : String(error),
+          errorMessage: readError(error).words ?? "",
           lasting: false,
+          pagesWaiting: null,
         });
       }
     };
@@ -78,15 +90,40 @@ export function useShareDirectWrites(input: {
       delivery?: ShareDirectWriteAnswerDelivery,
     ): Promise<void> => {
       if (!isCurrent() || !latest.current.ready) return;
-      const { ownerName, refreshShareView, sendShareChanges } = latest.current;
+      const { ownerName, refreshShareView, sendShareChanges, membership, workspaceName } =
+        latest.current;
       const notices: DirectWriteNotice[] = [];
       const showNotice = (notice: DirectWriteNotice) => {
         notices.push(notice);
       };
       let refresh = false;
       try {
+        const sendAsProposal = {
+          label: "Send as proposal",
+          run: () => {
+            if (!isCurrent()) return;
+            if (!latest.current.enabled) void report({ status: "unavailable" });
+            else void sendShareChanges();
+          },
+        };
         const reportAccess = (access: ShareViewRefresh): boolean => {
           if (!isCurrent() || (access !== "ended" && access !== "changed")) return false;
+          // A member's unsent pages wait in the journal. The relay takes
+          // them only at Edit, so they go when Edit returns and the view
+          // pushes again.
+          if (membership && access === "changed") {
+            // A push the relay refused counts what waits. One the view never sent, at a level below Edit, cannot.
+            const pages = result.status === "failed" ? result.pagesWaiting : null;
+            showNotice({
+              kind: "direct-write-unavailable",
+              tone: "warning",
+              title: `You can no longer edit ${workspaceName}`,
+              message: `${pages === null ? "Your unsent pages stay" : pages === 1 ? "1 unsent page stays" : `${pages} unsent pages stay`} on this computer. They send when members can edit again.`,
+              retry: null,
+              send: null,
+            });
+            return true;
+          }
           showNotice({
             kind: "direct-write-unavailable",
             message:
@@ -108,14 +145,6 @@ export function useShareDirectWrites(input: {
             .catch((): ShareViewRefresh => "stale");
           if (!isCurrent() || reportAccess(access)) return;
         }
-        const sendAsProposal = {
-          label: "Send as proposal",
-          run: () => {
-            if (!isCurrent()) return;
-            if (!latest.current.enabled) void report({ status: "unavailable" });
-            else void sendShareChanges();
-          },
-        };
         if (needsCheck && (result.status === "unavailable" || !latest.current.enabled)) {
           // Any 404 on the way to the relay reads as unavailable, so only the
           // access check can say the share ended. It then shows it ended.
@@ -139,7 +168,7 @@ export function useShareDirectWrites(input: {
           showNotice({
             kind: "direct-write-stale",
             message: draft
-              ? `The name ${writeLabel(stale[0]!)} is already taken. Your draft is saved in ${draft} on this computer. Use New record to create another.`
+              ? `The name ${writeLabel(stale[0]!)} is already taken. Your draft is saved in ${draft} on this computer. ${draftNext(draft)}`
               : `${stale.length === 1 ? "The file" : "The files"} ${writesLabel(stale)} changed before your update reached ${ownerName}. Check the new version, or send yours as a proposal.`,
             retry: draft ? null : () => void push(),
             send: sendAsProposal,
@@ -167,7 +196,7 @@ export function useShareDirectWrites(input: {
               }
             : {
                 kind: "direct-write-failed",
-                message: `dohc could not send your Collection changes to ${ownerName}.${result.errorMessage ? ` ${result.errorMessage}` : ""}`,
+                message: `dohc could not send ${waitingLabel(result.pagesWaiting)} to ${ownerName}.${result.errorMessage ? ` ${result.errorMessage}` : ""}`,
                 retry: () => void push(),
                 send: null,
               },
@@ -208,8 +237,9 @@ export function useShareDirectWrites(input: {
 
   useEffect(() => {
     // Anything a closed view left unsent goes once this workspace is ready.
-    if (input.sharedView && input.enabled && input.ready) void pushOnOpen.current?.();
-  }, [input.sharedView, input.enabled, input.ready, input.workspaceId]);
+    if (input.sharedView && input.enabled && input.ready && !input.otherAccount)
+      void pushOnOpen.current?.();
+  }, [input.sharedView, input.enabled, input.ready, input.workspaceId, input.otherAccount]);
 
   useLayoutEffect(() => {
     // A committed Notice is shown even if readiness or workspace changed.
@@ -234,6 +264,11 @@ function refusalSentence(
     : `The server did not accept your change to ${writesLabel(refused)}.`;
 }
 
+function waitingLabel(pages: number | null): string {
+  if (pages === null) return "your Collection changes";
+  return pages === 1 ? "your page" : `your ${pages} pages`;
+}
+
 // The name a person knows a write by: its Collection's folder for a new
 // Collection, else the folder and file, as "packing/automations.yaml".
 function writeLabel(write: DirectWriteRow): string {
@@ -242,6 +277,14 @@ function writeLabel(write: DirectWriteRow): string {
   }
   const path = write.result === "stale" ? write.stalePath : write.paths[0]!;
   return path.split("/").slice(-2).join("/");
+}
+
+// The engine names a page's kept draft "Page draft …" and a record's
+// "Record draft …", so the next step follows the draft.
+function draftNext(draft: string): string {
+  return draft.slice(draft.lastIndexOf("/") + 1).startsWith("Page draft ")
+    ? "Use New page to create another page."
+    : "Use New record to create another record.";
 }
 
 function writesLabel(writes: readonly DirectWriteRow[]): string {

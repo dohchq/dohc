@@ -664,7 +664,7 @@ export class LiveCommittedDeliveryStore {
       const row = this.#ownerRow(host, document);
       integrity(row);
       this.#advanceOwnerTip(host, document, row, receipt, ack);
-    });
+    }, document);
   }
   // Moves the owner tip to the next accepted receipt, whose ACK the caller matched.
   #advanceOwnerTip(
@@ -1462,7 +1462,8 @@ export class LiveCommittedDeliveryStore {
     input: unknown,
   ): void {
     const ack = parseLiveUpdateHostApplicationAck(input),
-      previous = predecessor === null ? null : parseLiveUpdateReceipt(predecessor);
+      previous = predecessor === null ? null : parseLiveUpdateReceipt(predecessor),
+      scope = this.#drains.get(drain);
     this.#storage.tx(() => {
       const capture = this.#capture(drain),
         progress = this.#progress(capture);
@@ -1541,7 +1542,7 @@ export class LiveCommittedDeliveryStore {
           inserted.local_ydoc_sequence === ack.localYDocSequence,
       );
       capture.progress = { predecessor: expected, tip: inserted };
-    });
+    }, scope?.document);
   }
   close(drain: CommittedDeliveryDrain): void {
     this.#drains.delete(drain);

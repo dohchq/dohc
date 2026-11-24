@@ -78,7 +78,11 @@ export interface NamedFrameRoomHost extends NamedFrameHostSession {
 }
 import { RelayError } from "./errors.js";
 import { createLogLineCap } from "./logLineCap.js";
-export { createNamedFrameChanges, type NamedFrameChanges } from "./liveHostChanges.js";
+export {
+  createNamedFrameChanges,
+  type NamedFrameChangeScope,
+  type NamedFrameChanges,
+} from "./liveHostChanges.js";
 
 export interface NamedFrameNativeHost {
   readonly client: Pick<
@@ -486,13 +490,16 @@ function captureLiveFrameHost(options: {
   native.invalidated.addEventListener("abort", close, { once: true });
   storage.unavailable.addEventListener("abort", close, { once: true });
   try {
-    unsubscribe = native.changes.subscribe(() => {
-      try {
-        check();
-      } catch {
-        /* check invalidates this capture. */
-      }
-    });
+    unsubscribe = native.changes.subscribe(
+      () => {
+        try {
+          check();
+        } catch {
+          /* check invalidates this capture. */
+        }
+      },
+      { kind: "standing", document },
+    );
     check();
   } catch (error) {
     close();
@@ -504,7 +511,7 @@ function captureLiveFrameHost(options: {
     const promise = new Promise<void>((done) => {
       resolve = done;
     });
-    const remove = native.changes.subscribe(resolve, document);
+    const remove = native.changes.subscribe(resolve, { kind: "applied", document });
     signal.addEventListener("abort", resolve, { once: true });
     if (signal.aborted) resolve();
     return {

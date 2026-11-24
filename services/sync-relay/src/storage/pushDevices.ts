@@ -2,6 +2,7 @@ import type { ApnsEnvironment } from "@dohc/workspace-contracts/push-subscriptio
 import type { StorageContext } from "./context";
 import { notFound } from "../errors";
 import { accountIsFenced } from "./accountDeletion";
+import { saveAccountName } from "./accountNames";
 import { SyncRelayConflictError } from "./errors";
 import { PUSH_REVOKED_SESSIONS, PUSH_SUBSCRIPTIONS } from "./pushSchema";
 import { nextGeneration, PUSH_INSTALLATIONS_PER_ACCOUNT } from "./pushSubscriptions";
@@ -83,6 +84,8 @@ export function bindPushDevice(storage: StorageContext, input: BindPushDeviceInp
       .prepare(`INSERT INTO sync_relay_push_device_names (generation, account_name) VALUES (?, ?)
         ON CONFLICT(generation) DO UPDATE SET account_name = excluded.account_name`)
       .run(row.generation, (input.accountName ?? "").slice(0, 1024));
+    // Mentions match the account's name, as a browser's subscription keeps it.
+    saveAccountName(storage, input.userId, input.accountName ?? null, input.nowMs);
     return row;
   };
   return storage.tx(() => {

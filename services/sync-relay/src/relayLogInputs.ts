@@ -34,6 +34,14 @@ export function linkChatOrigin(principalId: string): string {
   return `${LINK_CHAT_ORIGIN_PREFIX}${principalId}`;
 }
 
+// A Group an admin creates in the owner's workspace, one origin per member
+// entry. Only the relay writes it, after it reads the admin's role.
+export const WORKSPACE_ADMIN_ORIGIN_PREFIX = "relay:workspace-admin:";
+
+export function workspaceAdminOrigin(memberId: string): string {
+  return `${WORKSPACE_ADMIN_ORIGIN_PREFIX}${memberId}`;
+}
+
 // A desktop stores a received share's op under `shared:<shareId>:<source>` and
 // checks a link post against its source, so no client may write from it.
 export const SHARED_REPLAY_ORIGIN_PREFIX = "shared:";
@@ -129,6 +137,9 @@ function assertUnreservedLogOrigin(originId: string, serviceHost: boolean): void
   }
   if (originId.startsWith(LINK_CHAT_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for link posts");
+  }
+  if (originId.startsWith(WORKSPACE_ADMIN_ORIGIN_PREFIX)) {
+    throw badRequest("originId is reserved for an admin's new Group");
   }
   if (originId.startsWith(SHARED_REPLAY_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for replayed share ops");

@@ -524,7 +524,7 @@ type IdleClock = { nowMs: () => number; schedule: (atMs: number, fire: () => voi
 async function completedServiceOwner(
   options: {
     empty?: boolean;
-    frameChanges?: boolean;
+    frameChanges?: boolean | ReturnType<typeof createNamedFrameChanges>;
     maxDocumentsPerPass?: number;
     polling?: boolean;
     adopted?: boolean;
@@ -1690,7 +1690,12 @@ async function completedServiceOwner(
   };
   const host = await startServiceLiveHost({
     ...f,
-    ...(options.frameChanges ? { frameChanges: createNamedFrameChanges(16) } : {}),
+    ...(options.frameChanges
+      ? {
+          frameChanges:
+            options.frameChanges === true ? createNamedFrameChanges(16) : options.frameChanges,
+        }
+      : {}),
     ...(options.idleClock ? { idleClock: options.idleClock } : {}),
     ...options.paced?.timers,
     ...(options.nowMs ? { nowMs: options.nowMs } : {}),
@@ -1826,6 +1831,12 @@ it("logs drains that waited over 100 ms for their document once a minute, with f
   ]);
 });
 
+const withoutLineage = () =>
+  new EngineRequestError(1, {
+    code: "CONFLICT",
+    message: "live-document-without-lineage",
+    retry: "no",
+  } as never);
 const unready = () =>
   new EngineRequestError(1, {
     code: "CONFLICT",
@@ -1857,7 +1868,7 @@ const appendDocumentRow = (
 
 async function emptyServiceHost(
   options: {
-    frameChanges?: boolean;
+    frameChanges?: boolean | ReturnType<typeof createNamedFrameChanges>;
     maxDocumentsPerPass?: number;
     adopted?: boolean;
     maxApplications?: number;
@@ -4553,6 +4564,31 @@ it.each(["another document", "no document"] as const)(
 // any that capture saw. A moment, or another document's update, does not lift
 // it. It then activates and stops reporting the block.
 
+// Proves: a document's block for lack of lineage wakes a member's open that
+// waits on the document, so the open answers at once instead of waiting out
+// its timeout. Its lift wakes the readiness wait the same way.
+it("wakes the document's waiting opens when it blocks for lack of lineage, and again when it activates", async () => {
+  const changes = createNamedFrameChanges(16);
+  const o = await emptyServiceHost({ frameChanges: changes }),
+    workspaces = [o.workspace];
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const seen: (string | undefined)[] = [];
+  changes.subscribe(
+    () => {
+      seen.push(o.host.blocked(o.sibling));
+    },
+    { kind: "object", workspaceId: o.sibling.workspaceId, objectId: o.sibling.objectId },
+  );
+  o.refuseCapture(withoutLineage());
+  await o.host.update({ workspaces, documents: [o.sibling], ...stay });
+  await vi.waitFor(() => expect(o.host.blocked(o.sibling)).toBe("without-lineage"));
+  await vi.waitFor(() => expect(seen).toContain("without-lineage"));
+  o.refuseCapture(undefined);
+  appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
+  await vi.waitFor(() => expect(o.host.blocked(o.sibling)).toBeUndefined());
+  await vi.waitFor(() => expect(seen.at(-1)).toBeUndefined());
+});
+
 // Proves: a document still without lineage after the update that lifted its
 // block blocks again, at that update, so it captures once per new update. One
 // whose retry meets another conflict is no longer blocked and waits.
@@ -7223,7 +7259,11 @@ const openIdleOwnerConnection = async (o: Enrolled) => {
         .readNextLiveApplied(request(), opened.position, 10_000, signal)
         .catch(() => {});
     };
-    const unsubscribe = native.changes.subscribe(read, o.document);
+    const unsubscribe = native.changes.subscribe(read, {
+      kind: "object",
+      workspaceId: o.document.workspaceId,
+      objectId: o.document.objectId,
+    });
     read();
     return () => {
       unsubscribe();

@@ -12,6 +12,7 @@ import {
   type GroupShareSelector,
   type ShareSelector,
   type StoredAnyShareSelector,
+  type WorkspaceShareSelector,
 } from "./shareFilter";
 import type {
   SyncRelayShareGrantRow,
@@ -81,7 +82,7 @@ type ShareGrantAuthorizationInput = {
 };
 
 export type NamedLiveEditShareGrantResult =
-  | AuthorizedShareAction<ShareSelector>
+  | AuthorizedShareAction<ShareSelector | WorkspaceShareSelector>
   | { ok: false; reason: "not-authorized" | "stale-selector" };
 
 export function authorizeNamedLiveEditShareGrant(input: {

@@ -2090,7 +2090,7 @@ export function commitLiveUpdateJournal(
           admitted,
         },
       };
-    });
+    }, document);
   } catch (error) {
     const code =
       typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";

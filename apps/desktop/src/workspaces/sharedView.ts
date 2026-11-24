@@ -56,6 +56,12 @@ import {
 
 export type SharedViewRefreshStatus = "updated" | "unchanged" | "ended";
 
+/** A pull whose cursor is committed: the next cursor and what the pull changed. Scheduling state, never part of the refresh result. */
+export interface ShareViewPullCommitted {
+  cursor: number;
+  changes: readonly { path: string; operation: "write" | "delete" }[];
+}
+
 export interface RefreshSharedViewOutcome {
   status: SharedViewRefreshStatus;
   changedPaths: number;
@@ -2428,7 +2434,7 @@ async function refreshSharedViewOnce(
     // past it is committed, and idempotent by origin coordinate, because a
     // re-fetched page repeats refusals the record already holds.
     recordRefusals: (refusals: ShareViewRefusal[]) => Promise<void>;
-    onCursorCommitted?: (cursor: number) => void;
+    onPullCommitted?: (pulled: ShareViewPullCommitted) => void;
     excludeFromMaterialization?: ReadonlySet<string>;
     // Excluded paths whose files hold local work capture keeps aside, such as
     // preserved paths and ones it could not capture. Nothing removes or rewrites
@@ -2662,7 +2668,10 @@ async function refreshSharedViewOnce(
     await clearPullInFlightMarker(records);
   }
   await pull.commitCursor();
-  input.onCursorCommitted?.(pull.nextCursor);
+  input.onPullCommitted?.({
+    cursor: pull.nextCursor,
+    changes: pull.changedPaths.map(({ path, operation }) => ({ path, operation })),
+  });
   // Logged one line per refusal, because the count alone cannot be diagnosed.
   // The engine's message names the constraint, and for a version refusal its
   // limit, unit and observed usage.

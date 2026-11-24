@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { GENERAL_CHANNEL_WIRE_ID, agentChannelWireId } from "@dohc/security-contract/chat-wire-ids";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import {
   checkAutomationReach,
@@ -33,7 +34,7 @@ function grant(
       versionId: files.versionId ?? null,
       access: files.access,
     },
-    channel,
+    chat: channel && { kind: "channel", ...channel },
   };
 }
 
@@ -57,6 +58,16 @@ const change = (collection: ReachCollection): ReachStep => ({ kind: "change-reco
 const find = (collection: ReachCollection): ReachStep => ({ kind: "find-records", collection });
 const post = (channelWireId: string | null, name = "Family"): ReachStep => ({
   kind: "post",
+  target: "group",
+  group: { channelWireId, name },
+});
+const directMessage = (channelWireId: string | null): ReachStep => ({
+  kind: "post",
+  target: "dm",
+  group: { channelWireId, name: "your direct message" },
+});
+const readGroup = (channelWireId: string | null, name = "Family"): ReachStep => ({
+  kind: "read-group",
   group: { channelWireId, name },
 });
 const notify = (userId: string, name = "Someone"): ReachStep => ({
@@ -531,6 +542,99 @@ describe("reach check", () => {
   });
 });
 
+describe("Groups a workspace membership reaches", () => {
+  // A membership covers every file on main and every Group. View reads a
+  // Group; Comment and Edit also post.
+  function member(
+    who: { userId: string; email: string },
+    access: "view" | "comment" | "edit",
+  ): RosterGrant {
+    return {
+      grantId: `m-${who.userId}`,
+      recipientUserId: who.userId,
+      recipientEmail: who.email,
+      files: { paths: [], versionId: null, wholeWorkspace: true, access },
+      chat: { kind: "groups", canPost: access !== "view" },
+    };
+  }
+
+  it("posts in a Group for members at Comment and Edit, and stops for a member at View", () => {
+    expect(check(owner(member(ana, "edit")), post("wire-family"))).toEqual(allowed);
+    expect(check(owner(member(ana, "comment")), post("wire-family"))).toEqual(allowed);
+    // Ben edits Trip through a file grant, so he is an editor, and his
+    // membership is at View.
+    const benAtView = owner(
+      member(ana, "edit"),
+      grant(ben, { paths: ["Trip"], access: "edit" }),
+      member(ben, "view"),
+    );
+    expect(check(benAtView, post("wire-family"))).toEqual(
+      stopped("ben@dohc.test cannot post in Family."),
+    );
+    // A member at View with no other grant edits nothing, so stops nothing.
+    expect(check(owner(member(ana, "edit"), member(ben, "view")), post("wire-family"))).toEqual(
+      allowed,
+    );
+  });
+
+  it("posts for an admin, whose grant is Edit while other members are at View", () => {
+    const admin = member(ana, "edit");
+    expect(check(owner(admin, member(ben, "view")), post("wire-family"))).toEqual(allowed);
+    expect(check(owner(admin), readGroup("wire-family"))).toEqual(allowed);
+  });
+
+  it("lets a Group's messages start an automation for a member at any level", () => {
+    expect(check(owner(member(ana, "edit")), readGroup("wire-family"))).toEqual(allowed);
+    // Ben edits Trip through a file grant and is a member at View: he reads the Group.
+    expect(
+      check(
+        owner(grant(ben, { paths: ["Trip"], access: "edit" }), member(ben, "view")),
+        readGroup("wire-family"),
+      ),
+    ).toEqual(allowed);
+  });
+
+  it("never reaches a direct message through a membership", () => {
+    expect(check(owner(member(ana, "edit")), directMessage("dm-ana"))).toEqual(
+      stopped("ana@dohc.test cannot post in your direct message."),
+    );
+    expect(
+      check(
+        owner(member(ana, "edit"), grant(ana, null, { wireId: "dm-ana", canPost: true })),
+        directMessage("dm-ana"),
+      ),
+    ).toEqual(allowed);
+  });
+
+  it("never reaches General, an agent chat, or a Group that has not synced", () => {
+    for (const wireId of [
+      GENERAL_CHANNEL_WIRE_ID,
+      agentChannelWireId("default"),
+      agentChannelWireId("helper"),
+      null,
+    ]) {
+      expect(check(owner(member(ana, "edit")), post(wireId))).toEqual(
+        stopped("ana@dohc.test cannot post in Family."),
+      );
+      expect(check(owner(member(ana, "edit")), readGroup(wireId))).toEqual(
+        stopped("ana@dohc.test cannot read Family."),
+      );
+    }
+  });
+
+  it("reads a direct message grant only for a direct message", () => {
+    const inDm = grant(
+      ana,
+      { paths: ["Trip"], access: "edit" },
+      { wireId: "dm-ana", canPost: true },
+    );
+    expect(check(owner(inDm), directMessage("dm-ana"))).toEqual(allowed);
+    expect(check(owner(inDm), directMessage("dm-ben"))).toEqual(
+      stopped("ana@dohc.test cannot post in your direct message."),
+    );
+  });
+});
+
 describe("share links as editors", () => {
   function linkGrant(
     grantId: string,
@@ -542,7 +646,7 @@ describe("share links as editors", () => {
       recipientUserId: null,
       recipientEmail: null,
       files: { paths, versionId: null, access },
-      channel: null,
+      chat: null,
     };
   }
 

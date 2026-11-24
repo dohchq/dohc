@@ -20,6 +20,8 @@ import type { ConnectionNoticeHost } from "./shell/connectionNotices";
 import { ShellErrorReporter, type ReportShellFailure } from "./shell/useShellError";
 import { IconButton, PrimaryButton, SectionLabel } from "./ui/controls";
 import { FolderChip } from "./ui/Step";
+import { shareSenderParts } from "./ShareSender";
+import { membershipWho } from "./workbench/membershipWords";
 
 // "Open a share": the receive side of an external share grant. One card:
 // the code someone sent, where it goes, and Open. Signing in is dohc's
@@ -84,13 +86,20 @@ function isWindows(): boolean {
 }
 
 // Edit on the live version is the grant a separate view can edit. A folder
-// added to a workspace is read-only at every level.
+// added to a workspace is read-only at every level. A membership does not
+// edit live yet.
 export function opensForLiveEditing(share: RelayShareReceivedRow): boolean {
   return (
     share.access === "edit" &&
     share.selector !== null &&
+    "paths" in share.selector &&
     (share.selector.versionId === null || share.selector.versionId === "main")
   );
+}
+
+// A whole workspace the account joined, or null for a share of files.
+function membershipOf(share: RelayShareReceivedRow | null) {
+  return share?.selector && "kind" in share.selector ? share.selector : null;
 }
 
 export function shareLevel(share: RelayShareReceivedRow | null): ShareAccess | null {
@@ -170,6 +179,8 @@ export function OpenSharedView(
   const signInPanel = useRef<HTMLDivElement>(null);
   const [opening, setOpening] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // How many files the open's first pull has read, while it runs.
+  const [readFiles, setReadFiles] = useState<number | null>(null);
   const reportShellError = useContext(ShellErrorReporter);
   useMouseBackButton(props.onBack);
   const sessionRef = useRequestSequence();
@@ -217,7 +228,14 @@ export function OpenSharedView(
     : shareId === null
       ? null
       : (pastedLevels.get(shareId) ?? null);
-  const mode = pickedMode ?? (props.mountInto && level !== "edit" ? "mount" : "separate");
+  const membership = preview?.shareId === shareId ? membershipOf(preview) : null;
+  const membershipName = membership ? (preview?.subjectName ?? null) : null;
+  // Edit defaults to Open separately, as the browser handoff does, because
+  // a folder added to this workspace cannot be edited. A membership is a
+  // whole workspace, so it only opens as its own.
+  const mode = membership
+    ? "separate"
+    : (pickedMode ?? (props.mountInto && level !== "edit" ? "mount" : "separate"));
   const mounting = mode === "mount" && !!props.mountInto;
 
   // Only a pasted code has an unknown grant, and only a signed-in session
@@ -262,7 +280,7 @@ export function OpenSharedView(
     setSettledSuggestionShareId(null);
     if (mounting || shareId === null) return;
     void bridge()
-      .getDefaultShareRoot({ shareId })
+      .getDefaultShareRoot(membershipName ? { shareId, name: membershipName } : { shareId })
       .then((root) => {
         if (suggestRequestRef.isCurrent(request)) setSuggested({ shareId, root });
       })
@@ -273,7 +291,15 @@ export function OpenSharedView(
         if (suggestRequestRef.isCurrent(request)) setSettledSuggestionShareId(shareId);
       });
     // suggestRequestRef is a stable ref holder.
-  }, [mounting, shareId]);
+  }, [mounting, shareId, membershipName]);
+
+  // The first pull's count, for this share only, while Open runs.
+  useEffect(() => {
+    if (!opening || shareId === null) return;
+    return bridge().onSharedViewPullProgress?.((event) => {
+      if (event.shareId === shareId) setReadFiles(event.files);
+    });
+  }, [opening, shareId]);
 
   const folder = chosen ?? (!mounting && suggested?.shareId === shareId ? suggested.root : null);
   const checkingDefaultFolder =
@@ -296,6 +322,7 @@ export function OpenSharedView(
     const actionRequest = actionRequests.next();
     setOpening(true);
     setError(null);
+    setReadFiles(null);
     const adding = mounting && props.mountInto ? props.mountInto : null;
     const name = (preview?.shareId === shareId ? preview.subjectName : null) ?? null;
     try {
@@ -370,65 +397,74 @@ export function OpenSharedView(
         <IconButton aria-label="Back" onClick={props.onBack} className="shrink-0">
           <ArrowLeft size={13} aria-hidden />
         </IconButton>
-        <h2 className="m-0 text-[15px] font-semibold text-ink">Open a share</h2>
+        <h2 className="m-0 text-[15px] font-semibold text-ink">
+          {membership ? `Open ${membershipName ?? "workspace"}` : "Open a share"}
+        </h2>
       </div>
 
-      <div className="flex flex-col gap-1.5">
-        <SectionLabel>Share code</SectionLabel>
-        {props.resolvedShare ? (
-          <div className="flex h-9 w-full items-center gap-2.5 rounded-md border border-line bg-bg px-3">
-            <code className="min-w-0 flex-1 truncate font-mono text-[13px] text-ink">
-              {props.resolvedShare.shareId}
-            </code>
-            <Check size={13} strokeWidth={2.2} aria-hidden className="shrink-0 text-success" />
-          </div>
-        ) : (
-          <div className="flex h-9 w-full items-center gap-2.5 rounded-md border border-line bg-bg px-3 transition-colors focus-within:border-ink">
-            <input
-              data-testid="open-share-code"
-              data-framed-input=""
-              aria-label="Share code"
-              value={code}
-              onChange={(event) => {
-                setCode(event.currentTarget.value);
-                setError(null);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !isComposingKey(event)) void open();
-              }}
-              placeholder="dohc-share:…"
-              spellCheck={false}
-              autoCapitalize="off"
-              autoCorrect="off"
-              autoFocus
-              className="min-w-0 flex-1 border-0 bg-transparent p-0 font-mono text-[13px] text-ink outline-none placeholder:text-subtle"
-            />
-            {shareId !== null ? (
-              <Check
-                size={13}
-                strokeWidth={2.2}
-                aria-label="Valid share code"
-                className="shrink-0 text-success"
+      {membership && props.resolvedShare ? null : (
+        <div className="flex flex-col gap-1.5">
+          <SectionLabel>Share code</SectionLabel>
+          {props.resolvedShare ? (
+            <div className="flex h-9 w-full items-center gap-2.5 rounded-md border border-line bg-bg px-3">
+              <code className="min-w-0 flex-1 truncate font-mono text-[13px] text-ink">
+                {props.resolvedShare.shareId}
+              </code>
+              <Check size={13} strokeWidth={2.2} aria-hidden className="shrink-0 text-success" />
+            </div>
+          ) : (
+            <div className="flex h-9 w-full items-center gap-2.5 rounded-md border border-line bg-bg px-3 transition-colors focus-within:border-ink">
+              <input
+                data-testid="open-share-code"
+                data-framed-input=""
+                aria-label="Share code"
+                value={code}
+                onChange={(event) => {
+                  setCode(event.currentTarget.value);
+                  setError(null);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !isComposingKey(event)) void open();
+                }}
+                placeholder="dohc-share:…"
+                spellCheck={false}
+                autoCapitalize="off"
+                autoCorrect="off"
+                autoFocus
+                className="min-w-0 flex-1 border-0 bg-transparent p-0 font-mono text-[13px] text-ink outline-none placeholder:text-subtle"
               />
-            ) : null}
-          </div>
-        )}
-      </div>
-
-      {preview?.shareId === shareId && (
-        <div data-testid="open-share-summary" className="flex flex-col gap-0.5">
-          <p className="m-0 truncate text-[13px] font-medium text-ink">
-            {preview.subjectName ?? shareSubjectFallback(preview.selector)}
-          </p>
-          <p className="m-0 text-[12px] leading-4 text-muted [overflow-wrap:anywhere]">
-            {preview.damaged
-              ? `${shareAccessLabel(preview.access)} access`
-              : SHARE_ACCESS_WORDS[preview.access]}{" "}
-            · From {shareSenderLabel(preview.sharerName, preview.granterEmail)}
-          </p>
+              {shareId !== null ? (
+                <Check
+                  size={13}
+                  strokeWidth={2.2}
+                  aria-label="Valid share code"
+                  className="shrink-0 text-success"
+                />
+              ) : null}
+            </div>
+          )}
         </div>
       )}
-      {props.mountInto ? (
+
+      {preview?.shareId === shareId &&
+        (membership ? (
+          <p data-testid="open-share-summary" className="m-0 text-[13px] text-ink">
+            {membershipWho(membership.role, displaySender(preview), preview.access)}
+          </p>
+        ) : (
+          <div data-testid="open-share-summary" className="flex flex-col gap-0.5">
+            <p className="m-0 truncate text-[13px] font-medium text-ink">
+              {preview.subjectName ?? shareSubjectFallback(preview.selector)}
+            </p>
+            <p className="m-0 text-[12px] leading-4 text-muted [overflow-wrap:anywhere]">
+              {preview.damaged
+                ? `${shareAccessLabel(preview.access)} access`
+                : SHARE_ACCESS_WORDS[preview.access]}{" "}
+              · From {shareSenderLabel(preview.sharerName, preview.granterEmail)}
+            </p>
+          </div>
+        ))}
+      {props.mountInto && !membership ? (
         <div className="flex flex-col gap-1.5">
           <SectionLabel>How to open</SectionLabel>
           <div
@@ -467,18 +503,24 @@ export function OpenSharedView(
           // Plain text, not a chip: there is nothing to change here.
           <p className="m-0 flex h-9 items-center gap-2 px-0.5 text-[13px]">
             <FolderOpen size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
-            <code className="font-sans text-ink">shared-with-me{isWindows() ? "\\" : "/"}</code>
+            <span className="text-ink">shared-with-me{isWindows() ? "\\" : "/"}</span>
           </p>
         ) : (
           <FolderChip
             folder={folder ? displayPath(folder) : null}
             placeholder="Choose an empty folder"
             testId="open-share-choose-folder"
+            disabled={opening}
             onClick={() => void chooseFolder()}
           />
         )}
       </div>
 
+      {error ? (
+        <p data-testid="open-share-error" role="alert" className="m-0 text-xs text-danger">
+          {error}
+        </p>
+      ) : null}
       <div className="flex flex-col gap-2">
         <PrimaryButton
           type="button"
@@ -494,10 +536,16 @@ export function OpenSharedView(
             : opening
               ? mounting
                 ? "Adding share…"
-                : "Opening share…"
-              : mounting
-                ? "Add share"
-                : "Open share"}
+                : membership
+                  ? "Opening workspace…"
+                  : "Opening share…"
+              : membership
+                ? error
+                  ? "Try again"
+                  : "Open workspace"
+                : mounting
+                  ? "Add share"
+                  : "Open share"}
         </PrimaryButton>
         {missingInputReason ? (
           <p id="open-share-missing-input" className="m-0 text-xs leading-relaxed text-muted">
@@ -526,18 +574,28 @@ export function OpenSharedView(
           />
         </div>
       ) : null}
+      {opening && readFiles !== null ? (
+        <p
+          data-testid="open-share-progress"
+          role="status"
+          className="m-0 text-xs tabular-nums text-muted"
+        >
+          {`Copied ${readFiles} ${readFiles === 1 ? "file" : "files"} so far.`}
+        </p>
+      ) : null}
       {opening ? (
         <p className="m-0 text-xs text-subtle">
           {mounting
             ? "If you go back, dohc keeps adding the share to shared-with-me/."
-            : "If you go back, dohc keeps opening the share into the folder you chose."}
-        </p>
-      ) : null}
-      {error ? (
-        <p data-testid="open-share-error" role="alert" className="m-0 text-xs text-danger">
-          {error}
+            : `If you go back, dohc keeps opening ${membership ? (membershipName ?? "the workspace") : "the share"} into the folder you chose.`}
         </p>
       ) : null}
     </div>
   );
+}
+
+// The sender as Sharing's row names them: a name when there is one.
+function displaySender(share: RelayShareReceivedRow): string {
+  const parts = shareSenderParts(share.sharerName, share.granterEmail);
+  return parts.displayName ?? parts.full;
 }
