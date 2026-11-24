@@ -748,12 +748,10 @@ it("serves authenticated POST /events long-poll with alias revisions and aborts 
   const opened = (await (await post("/session", { handoff })).json()) as { proof: string };
   const headers = { "x-dohc-app-proof": opened.proof };
 
-  // Unauthenticated and malformed requests are rejected.
   expect((await post("/events", { since: {} })).status).toBe(404);
   expect((await post("/events", { since: {}, holdMs: -1 }, headers)).status).toBe(400);
   expect((await post("/events", { since: { BadAlias: 1 } }, headers)).status).toBe(400);
 
-  // Initial seed returns current alias revisions.
   const initial = await post("/events", { since: {}, holdMs: 0 }, headers);
   expect(initial.status).toBe(200);
   expect(await initial.json()).toEqual({
@@ -763,7 +761,6 @@ it("serves authenticated POST /events long-poll with alias revisions and aborts 
     ],
   });
 
-  // Long-poll parks until a commit advances a bound alias.
   const parked = post("/events", { since: { expenses: 2, workouts: 1 }, holdMs: 10_000 }, headers);
   await expect.poll(() => listeners.size).toBe(1);
   revisions.expenses = 3;
@@ -775,7 +772,6 @@ it("serves authenticated POST /events long-poll with alias revisions and aborts 
   });
   expect(listeners.size).toBe(0);
 
-  // Caps concurrent /events polls at 2 without blocking /backend.
   const hold1 = post("/events", { since: { expenses: 3, workouts: 1 }, holdMs: 10_000 }, headers);
   const hold2 = post("/events", { since: { expenses: 3, workouts: 1 }, holdMs: 10_000 }, headers);
   await expect.poll(() => listeners.size).toBe(2);
@@ -783,7 +779,6 @@ it("serves authenticated POST /events long-poll with alias revisions and aborts 
     (await post("/events", { since: { expenses: 3, workouts: 1 }, holdMs: 1000 }, headers)).status,
   ).toBe(429);
 
-  // Local owner-session budget handles 8 concurrent /backend requests alongside parked /events.
   const burst = await Promise.all(
     Array.from({ length: 8 }, (_, index) =>
       post("/backend", { ...invoke, id: `burst-${index}`, readOnly: true }, headers),
@@ -791,7 +786,6 @@ it("serves authenticated POST /events long-poll with alias revisions and aborts 
   );
   expect(burst.every((res) => res.status === 200)).toBe(true);
 
-  // Publication withdrawal wakes and aborts parked /events with 404 and ends the session.
   authority++;
   wakeAll();
   const [r1, r2] = await Promise.all([hold1, hold2]);

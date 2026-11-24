@@ -1372,7 +1372,6 @@ describe("local app write attribution", () => {
     const opened = (await (await post("/session", { handoff })).json()) as { proof: string };
     const headers = { "x-dohc-app-proof": opened.proof };
 
-    // Naming a write operation ("submit") in a readOnly query is refused by the host with zero commit.
     const refusedWrite = await post(
       "/backend",
       {
@@ -1403,7 +1402,6 @@ describe("local app write attribution", () => {
     expect(beforeRows.revision).toBe(0);
     expect(beforeRows.result.rows).toHaveLength(0);
 
-    // Park /events waiting for revision > 0, then perform an external owner/CLI write via host.invoke.
     const parked = post("/events", { since: { "": 0 }, holdMs: 10_000 }, headers);
     await expect.poll(() => subscribedCount).toBe(1);
     await f.host.invoke({
@@ -1424,7 +1422,6 @@ describe("local app write attribution", () => {
     });
     expect(JSON.stringify(eventPayload)).not.toContain(f.revision.datasetId);
 
-    // Next read reflects the external write at revision 1.
     const afterRows = (await (
       await post(
         "/backend",
@@ -1442,7 +1439,6 @@ describe("local app write attribution", () => {
     expect(afterRows.revision).toBe(1);
     expect(afterRows.result.rows).toHaveLength(1);
 
-    // Withdrawing the publication aborts a parked /events long-poll cleanly.
     const parkedBeforeWithdraw = post("/events", { since: { "": 1 }, holdMs: 10_000 }, headers);
     await expect.poll(() => subscribedCount).toBe(1);
     await f.host.apps.withdraw(published.publicationId, published.authorityRevision);

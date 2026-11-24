@@ -1345,13 +1345,11 @@ describe("dohc/ui and dohc/charts", () => {
 
     loadingHistory.length = 0;
 
-    // Stale revision <= 2 is skipped with zero fetches.
     fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: 2 });
     await Promise.resolve();
     await Promise.resolve();
     expect(fake.sent).toHaveLength(3);
 
-    // Rapid burst of revisions coalesces into a single background refresh for expenses only.
     fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: 3 });
     fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: 4 });
     fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: 5 });
@@ -1361,7 +1359,6 @@ describe("dohc/ui and dohc/charts", () => {
     expect(fake.sent[3]!.readOnly).toBe(true);
     expect(loadingHistory.every((value) => value === false)).toBe(true);
 
-    // Another revision arriving while rev 5 refresh is in flight coalesces to one trailing refresh.
     fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: 6 });
     fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: 7 });
     fake.reply({
@@ -1377,7 +1374,6 @@ describe("dohc/ui and dohc/charts", () => {
     });
     await waitFor(() => expect(screen.getByTestId("exp").textContent).toBe("7@7"));
 
-    // No spinner flash occurred on any background live refresh, workouts and live: false stayed untouched.
     expect(loadingHistory.every((value) => value === false)).toBe(true);
     expect(screen.getByTestId("wrk").textContent).toBe("1@2");
     expect(screen.getByTestId("snap").textContent).toBe("1@2");
@@ -1412,7 +1408,6 @@ describe("dohc/ui and dohc/charts", () => {
       </AppProvider>,
     );
 
-    // All 8 widgets dispatch concurrently when maxInFlight is 8.
     expect(fake.sent).toHaveLength(8);
     for (const msg of fake.sent) {
       fake.reply({
@@ -1459,7 +1454,6 @@ describe("dohc/ui and dohc/charts", () => {
       expect(screen.getByTestId("w-7").textContent).toBe(String(currentWrkRev));
     });
 
-    // Coalescing kept total refreshes well below uncoalesced 20 * 4 = 80, with zero loading flashes.
     expect(fake.sent.length).toBeLessThan(8 + 80);
     expect(backgroundLoadingFlashes).toBe(0);
     client.close();
@@ -1497,11 +1491,9 @@ describe("dohc/ui and dohc/charts", () => {
     await waitFor(() => expect(screen.getByTestId("val").textContent).toBe("1@1"));
     loadingStates.length = 0;
 
-    // Revision 2 arrives while live is false: no fetch while paused.
     fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: 2 });
     expect(fake.sent).toHaveLength(1);
 
-    // Resuming live catches up in the background without flashing loading.
     rerender(
       <AppProvider client={client}>
         <LiveToggle live={true} />
@@ -1516,14 +1508,12 @@ describe("dohc/ui and dohc/charts", () => {
     });
     await waitFor(() => expect(screen.getByTestId("val").textContent).toBe("2@2"));
 
-    // A 429 on background refresh retains the pending revision and retries cleanly.
     fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: 3 });
     await waitFor(() => expect(fake.sent).toHaveLength(3));
     fake.reply({ id: fake.sent[2]!.id, ok: false, status: 429 });
     await waitFor(() => expect(screen.getByTestId("err").textContent).toBe("429"));
     expect(screen.getByTestId("val").textContent).toBe("2@2");
 
-    // Newer revision 4 arrives during backoff and coalesces into the scheduled retry.
     fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: 4 });
     expect(fake.sent).toHaveLength(3);
     await waitFor(() => expect(fake.sent).toHaveLength(4), { timeout: 2000 });
