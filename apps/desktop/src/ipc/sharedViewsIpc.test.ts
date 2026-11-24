@@ -507,6 +507,31 @@ describe("metadata-only access checks", () => {
     expect(h.workspace.shareView!.grantedSelector.access).toBe("edit");
     expect(h.workspace.shareView!.reach).toEqual(viewOnly("r2"));
   });
+  // The answer agrees with the write gates and the summary: a membership that
+  // waits to send is at View, and the relay states more, so the window
+  // refreshes and enrolls again.
+  it("answers View for a membership at Edit until it can send", async () => {
+    const h = await harness();
+    const reach = {
+      signature: "r1",
+      visibilitySignature: "v1",
+      rootLevel: "edit" as const,
+      folders: [],
+      groupDefault: "edit" as const,
+      groups: [],
+    };
+    Object.assign(h.workspace.shareView!, {
+      grantedSelector: { paths: [], versionId: null, access: "edit", wholeWorkspace: true },
+      reach,
+      editingNotReady: true,
+    });
+    h.fetchAccess.mockResolvedValue({ access: "edit" });
+    h.fetchReach.mockResolvedValue(reach);
+    expect(
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
+    ).toEqual({ status: "current", access: "view", relayStatesMore: true });
+    expect(h.workspace.shareView).toMatchObject({ editingNotReady: true });
+  });
   // The window runs the check beside a pull, and the pull can close the copy
   // for a rebuild while the reach is read. The check then leaves the record
   // to the rebuild.
