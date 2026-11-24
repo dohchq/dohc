@@ -173,7 +173,9 @@ it("rejects cursor substitution and oversized bodies", async () => {
     /another Collection history/,
   );
   f.relayResponse.mockResolvedValueOnce(new Response("x".repeat(1024 * 1024 + 1)));
-  await expect(f.source.capture()).rejects.toThrow(/exceeds limit/);
+  await expect(f.source.capture()).rejects.toThrow(
+    /exceeded its limit of 1048576 bytes.*1048577 bytes/,
+  );
   f.relayResponse.mockResolvedValueOnce(new Response(new Uint8Array(4)));
   await expect(f.source.blob({ record: f.checkpoint, offset: 0, length: 3 })).rejects.toThrow(
     /exceeds its limit/,
