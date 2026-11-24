@@ -709,7 +709,18 @@ const relayApplication = createSyncRelayHandler({
   ...(resolveAccountSession ? { resolveAccountSession } : {}),
   ...(resolvePhoneCapableAccountSession ? { resolvePhoneCapableAccountSession } : {}),
   ...(accountResolvers.sessions ? { accountSessions: accountResolvers.sessions } : {}),
-  ownerLiveSockets: () => ownerLive,
+  ownerLiveSockets: () =>
+    ownerLive || desktopLive
+      ? {
+          stopSession: (userId, sessionId) => {
+            ownerLive?.stopSession(userId, sessionId);
+            desktopLive?.stopSession(userId, sessionId);
+          },
+          stopPhoneWorkspace: (userId, workspaceId) => {
+            ownerLive?.stopPhoneWorkspace(userId, workspaceId);
+          },
+        }
+      : undefined,
   ...(credentialFence ? { credentialFence } : {}),
   ...(pushVapidPublicKey ? { pushVapidPublicKey } : {}),
   ...(pushConfig ? { pushHosts: pushConfig.hosts } : {}),
@@ -1540,6 +1551,9 @@ if (namedLiveConfig) {
       rooms,
       kind: "named",
       desktopBearer: true,
+      ...(resolveAccountSession && accountResolvers.sessions
+        ? { resolveAccountSession, accountSessions: accountResolvers.sessions }
+        : {}),
       storage,
       lookupUserDisplayName,
       hosts,

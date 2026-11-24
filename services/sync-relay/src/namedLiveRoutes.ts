@@ -3,6 +3,7 @@ import {
   LiveConnectionLimitError,
   type LiveConnectionLimitCode,
 } from "@dohc/live-session-contract/live-connection";
+import { randomBytes } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type {
   AccountSessions,
@@ -169,6 +170,9 @@ interface LiveRouteOptions {
 type BrowserRouteOptions = LiveRouteOptions & {
   kind: "named" | "link";
   desktopBearer?: boolean;
+  /** Desktop Bearer sign-in and uncached session table, paired so keepalive cannot outlive sign-out. */
+  resolveAccountSession?: ResolveAccountSession;
+  accountSessions?: Pick<AccountSessions, "read">;
   sessions: {
     resolve(
       request: Request,
@@ -205,7 +209,7 @@ export interface OwnerLiveSockets {
   stopPhoneWorkspace(userId: string, workspaceId: string): void;
 }
 
-/** How often a phone's sign-in is read again, and how long that read may take before it counts as failed. */
+/** How often a phone or desktop sign-in is read again, and how long that read may take before it counts as failed. */
 export const OWNER_SESSION_CHECK_MS = 60_000;
 const OWNER_SESSION_READ_DEADLINE_MS = 30_000;
 const MAX_TIMER_MS = 2_147_483_647;
@@ -218,7 +222,7 @@ interface OwnerSession {
 interface ConnectionScope {
   readonly userId?: string;
   readonly workspaceId: string;
-  /** An owner's sign-in, and a check of the page it has open. */
+  /** An owner or desktop sign-in, and a check of the page it has open. */
   readonly session?: OwnerSession;
   readonly recheck?: () => void;
 }
@@ -285,9 +289,18 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
     hosts = new Set(options.hosts);
   const kind = options.kind;
   const desktop = options.kind === "named" && options.desktopBearer === true;
+  if (options.kind !== "owner" && options.kind !== "personal") {
+    if (!desktop && (options.resolveAccountSession || options.accountSessions))
+      throw new TypeError("Only desktop live routes check account sessions.");
+    if (desktop && Boolean(options.resolveAccountSession) !== Boolean(options.accountSessions))
+      throw new TypeError(
+        "Desktop live routes require both resolveAccountSession and accountSessions.",
+      );
+  }
   const routeKind = desktop ? "desktop" : kind;
   // Browsers reach named (not desktop) and link routes through the share page's
-  // gateway, which pings them; share-web's agent client opens link routes directly and does not ping.
+  // gateway, which pings them; desktop sockets are pinged from here, while
+  // share-web's agent client opens link routes directly and keeps the idle close.
   const gatewayFronted = !desktop && (kind === "named" || kind === "link");
   if (kind !== "named" && kind !== "link" && kind !== "owner" && kind !== "personal")
     throw new TypeError("Explicit live route kind required.");
@@ -335,38 +348,42 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
   // Each connection's stop, under the account, sign-in, and workspace it was opened for.
   const connectionScopes = new Map<() => void, ConnectionScope>();
   const shutdown = new AbortController();
-  const accountSessions = options.kind === "owner" ? options.accountSessions : undefined;
+  const accountSessions = options.kind === "owner" || desktop ? options.accountSessions : undefined;
+  const desktopResolveAccountSession = desktop ? options.resolveAccountSession : undefined;
   const ownerTickets = options.kind === "owner" ? options.tickets : undefined;
-  // A phone's sign-in is read again on this schedule however busy its connection is. A read that fails closes them all.
-  async function checkPhoneSessions() {
-    const phones = [...connectionScopes].flatMap(([stop, scope]) =>
-      scope.session?.clientKind === "phone" && scope.userId
+  // A phone or desktop sign-in is read again on this schedule however busy its connection is. A read that fails closes them all.
+  async function checkTrackedSessions() {
+    const tracked = [...connectionScopes].flatMap(([stop, scope]) =>
+      scope.session && scope.userId && (desktop || scope.session.clientKind === "phone")
         ? [{ stop, userId: scope.userId, session: scope.session, recheck: scope.recheck }]
         : [],
     );
-    if (!phones.length) return;
+    if (!tracked.length) return;
     let stored: Map<string, StoredAccountSession> | undefined;
     try {
       stored = await untilAborted(
-        accountSessions!.read([...new Set(phones.map(({ session }) => session.sessionId))]),
+        accountSessions!.read([...new Set(tracked.map(({ session }) => session.sessionId))]),
         AbortSignal.timeout(OWNER_SESSION_READ_DEADLINE_MS),
       );
     } catch {
       stored = undefined;
     }
-    for (const { stop, userId, session, recheck } of phones) {
+    for (const { stop, userId, session, recheck } of tracked) {
       try {
-        if (!sessionStands(stored?.get(session.sessionId), userId, session)) throw new Error();
+        if (
+          !sessionStands(stored?.get(session.sessionId), userId, session) ||
+          accountIsFenced(storage, userId)
+        )
+          throw new Error();
         recheck?.();
       } catch {
         stop();
       }
     }
   }
-  const sessionChecks =
-    kind === "owner"
-      ? setInterval(() => void checkPhoneSessions(), OWNER_SESSION_CHECK_MS)
-      : undefined;
+  const sessionChecks = accountSessions
+    ? setInterval(() => void checkTrackedSessions(), OWNER_SESSION_CHECK_MS)
+    : undefined;
   sessionChecks?.unref();
   const storage = options.storage,
     editors = liveEditors(storage);
@@ -759,8 +776,9 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
     let unregister: (() => void) | undefined,
       personalDocument: { workspaceId: string; objectId: string } | undefined;
     let timer = setTimeout(stop, limits.upgradeTimeoutMs);
-    // A phone's connection ends when its sign-in does, whether or not a frame arrives.
     let sessionExpiry: ReturnType<typeof setTimeout> | undefined;
+    let keepalive: ReturnType<typeof setInterval> | undefined;
+    let trackedDesktop: { readonly userId: string; readonly session: OwnerSession } | undefined;
     async function release() {
       if (opening || !done) return;
       await session?.settled();
@@ -817,6 +835,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
       done = true;
       clearTimeout(timer);
       clearTimeout(sessionExpiry);
+      clearInterval(keepalive);
       lifetime.abort();
       signal.removeEventListener("abort", stop);
       host?.invalidated.removeEventListener("abort", stop);
@@ -1128,10 +1147,42 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           stop();
           return;
         }
+        if (desktopResolveAccountSession) {
+          const account = await bearerAccountSession(
+            storage,
+            desktopResolveAccountSession,
+            authenticated,
+          );
+          signal.throwIfAborted();
+          check();
+          if (context.kind !== "named" || account.userId !== context.userId) {
+            stop();
+            return;
+          }
+          trackedDesktop = {
+            userId: account.userId,
+            session: {
+              sessionId: account.sessionId,
+              clientKind: account.clientKind,
+              expiresAtMs: account.expiresAtMs,
+            },
+          };
+        }
+        // Registered before the ticket is spent, so a sign-out from here on ends this connection.
         connectionScopes.set(stop, {
           workspaceId: context.workspaceId,
           ...(context.kind === "named" ? { userId: context.userId } : {}),
+          ...(trackedDesktop
+            ? { session: trackedDesktop.session, recheck: () => host?.assertCurrent() }
+            : {}),
         });
+        if (trackedDesktop) {
+          const remainingMs = Math.max(0, trackedDesktop.session.expiresAtMs - Date.now());
+          if (remainingMs <= MAX_TIMER_MS) {
+            sessionExpiry = setTimeout(stop, remainingMs);
+            sessionExpiry.unref();
+          }
+        }
         const principalKey =
           context.kind === "named"
             ? context.userId
@@ -1189,6 +1240,25 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           context.kind === "named" ? await accountSnapshot(context.userId) : undefined;
         signal.throwIfAborted();
         check();
+        if (trackedDesktop) {
+          const stored = await untilAborted(
+            accountSessions!.read([trackedDesktop.session.sessionId]),
+            signal,
+          );
+          signal.throwIfAborted();
+          check();
+          if (
+            !sessionStands(
+              stored.get(trackedDesktop.session.sessionId),
+              trackedDesktop.userId,
+              trackedDesktop.session,
+            ) ||
+            accountIsFenced(storage, trackedDesktop.userId)
+          ) {
+            stop();
+            return;
+          }
+        }
         const captured = captureNamedLiveFrameHost({
           ticket,
           actor: liveBrowserActor(context),
@@ -1242,9 +1312,6 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
             stop();
             return;
           }
-          // The share page's gateway pings an idle editor to keep it open. Each of
-          // its pings reads the editor's standing again first, so an expired link
-          // session closes within one ping. Direct clients keep today's idle close.
           if (gatewayFronted) {
             try {
               host!.assertCurrent();
@@ -1275,6 +1342,55 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
             stop();
           }
         });
+        if (desktop) {
+          let pendingPing: Buffer | undefined;
+          accepted.on("pong", (bytes) => {
+            if (done || !pendingPing || !Buffer.isBuffer(bytes) || !bytes.equals(pendingPing))
+              return;
+            pendingPing = undefined;
+            try {
+              if (
+                trackedDesktop &&
+                (Date.now() >= trackedDesktop.session.expiresAtMs ||
+                  accountIsFenced(storage, trackedDesktop.userId))
+              )
+                throw new Error();
+              host!.assertCurrent();
+            } catch {
+              stop();
+              return;
+            }
+            touch();
+          });
+          keepalive = setInterval(
+            () => {
+              if (done || accepted.readyState !== WebSocket.OPEN) {
+                stop();
+                return;
+              }
+              if (pendingPing || accepted.bufferedAmount > limits.maxPendingBytes - 8) return;
+              const nonce = randomBytes(8);
+              let releasePing: () => void;
+              try {
+                releasePing = reserveBytes(nonce.length);
+              } catch {
+                return;
+              }
+              pendingPing = nonce;
+              try {
+                accepted.ping(nonce, undefined, (error) => {
+                  releasePing();
+                  if (error) stop();
+                });
+              } catch {
+                releasePing();
+                stop();
+              }
+            },
+            Math.max(1, Math.floor(limits.idleTimeoutMs / 2)),
+          );
+          keepalive.unref();
+        }
         session = createNamedLiveFrameSession({
           host: host!,
           frames,

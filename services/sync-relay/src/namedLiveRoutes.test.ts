@@ -18,10 +18,11 @@ import type { StorageContext } from "./storage/context.js";
 import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
 import { once } from "node:events";
 import { createHash } from "node:crypto";
+import * as Y from "yjs";
 import { WebSocket } from "ws";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { LiveRooms } from "./liveRoom.js";
+import { createLiveRooms, type LiveRooms } from "./liveRoom.js";
 import type { NamedFrameRoomHost } from "./namedLiveFrameHost.js";
 import {
   createLiveFrameSession,
@@ -29,11 +30,11 @@ import {
   type LiveFrame,
 } from "@dohc/live-session-contract/live-frame";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
-import { OWNER_SESSION_CHECK_MS } from "./namedLiveRoutes.js";
+import { createNamedLiveRoutes, OWNER_SESSION_CHECK_MS } from "./namedLiveRoutes.js";
 import { hashLinkBearer, hashLinkProfileSecret } from "./linkSecurity.js";
 import { createNamedLiveProvider } from "@dohc/ydoc-projection/named-live-provider";
 import { liveBrowserActor } from "./liveBrowserContext.js";
-import { captureNamedLiveFrameHost } from "./namedLiveFrameHost.js";
+import { captureNamedLiveFrameHost, captureOwnerLiveFrameHost } from "./namedLiveFrameHost.js";
 import { createNamedFrameChanges, type NamedFrameNativeHost } from "./namedLiveFrameHost.js";
 import { audience, binding, host, key, scope, seedLinkAgent } from "./liveTickets.test-helper.js";
 import type { LiveUpdateJournalCut } from "./storage/types.js";
@@ -2442,3 +2443,367 @@ it.each([""])(
     expect(await hidden.text()).toBe(await missing.text());
   },
 );
+
+function waitForPings(ws: WebSocket, count: number) {
+  return new Promise<number>((resolve, reject) => {
+    let seen = 0;
+    const onPing = () => {
+      if (++seen >= count) {
+        cleanup();
+        resolve(seen);
+      }
+    };
+    const onClose = () => {
+      cleanup();
+      reject(new Error(`Socket closed after ${seen} of ${count} pings`));
+    };
+    const cleanup = () => {
+      ws.off("ping", onPing);
+      ws.off("close", onClose);
+    };
+    ws.on("ping", onPing);
+    ws.once("close", onClose);
+  });
+}
+
+it("keeps an invited desktop editor live past idleTimeoutMs via server pings and closes when pongs stop", async () => {
+  const routeLimits = { ...limits, idleTimeoutMs: 600 };
+  const f = await fixture(routeLimits, false, undefined, false, true);
+  const desktop = f.connect((await f.mint()).token);
+  expect(await desktop.status).toBe(101);
+  const enoughPings = waitForPings(desktop.ws, 5);
+  const { provider, until } = await startProvider(desktop);
+  await until(() => provider.state().status === "live");
+  expect(await enoughPings).toBe(5);
+  expect(desktop.ws.readyState).toBe(WebSocket.OPEN);
+  expect(provider.state().status).toBe("live");
+  const silent = f.connect((await f.mint()).token, undefined, {}, "", undefined, false);
+  expect(await silent.status).toBe(101);
+  const spoof = setInterval(() => {
+    if (silent.ws.readyState === WebSocket.OPEN) silent.ws.pong(Buffer.alloc(8, 7));
+  }, 100);
+  try {
+    await silent.closed;
+  } finally {
+    clearInterval(spoof);
+  }
+  expect(silent.ws.readyState).toBe(WebSocket.CLOSED);
+});
+
+it("keeps an active invited desktop socket open while an earlier ping is still in flight", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  try {
+    const routeLimits = { ...limits, idleTimeoutMs: 2_000 };
+    const f = await fixture(routeLimits, false, undefined, false, true);
+    const socket = f.connect((await f.mint()).token, undefined, {}, "", undefined, false);
+    expect(await socket.status).toBe(101);
+    const ping = new Promise<Buffer>((resolve) => socket.ws.once("ping", resolve));
+    await vi.advanceTimersByTimeAsync(routeLimits.idleTimeoutMs / 2);
+    const nonce = await ping;
+    await openProductionSync(f, socket);
+    await vi.advanceTimersByTimeAsync(routeLimits.idleTimeoutMs / 2);
+    expect(socket.ws.readyState).toBe(WebSocket.OPEN);
+    socket.ws.pong(nonce);
+    expect(await pingOutcome(socket)).toBe("pong");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("closes an idle invited desktop socket on the next pong when its grant is revoked without a write wake", async () => {
+  const routeLimits = { ...limits, idleTimeoutMs: 400 };
+  const f = await fixture(routeLimits, false, undefined, false, true);
+  const desktop = f.connect((await f.mint()).token);
+  expect(await desktop.status).toBe(101);
+  const { provider, until } = await startProvider(desktop);
+  await until(() => provider.state().status === "live");
+  expect(
+    f.storage.revokeShareGrant({
+      shareId: scope.shareId,
+      grantId: scope.grantId,
+      revokedAtMs: 2000,
+    }).ok,
+  ).toBe(true);
+  await desktop.closed;
+  expect(desktop.ws.readyState).toBe(WebSocket.CLOSED);
+});
+
+it("keeps delivering live room edits after quiet idle cycles and keeps editing after Can edit -> Can view -> Can edit", async () => {
+  const routeLimits = { ...limits, idleTimeoutMs: 400 };
+  let liveRooms: LiveRooms | undefined;
+  const f = await fixture(
+    routeLimits,
+    false,
+    undefined,
+    false,
+    true,
+    undefined,
+    0,
+    0,
+    false,
+    undefined,
+    undefined,
+    undefined,
+    {
+      join: (captured: NamedFrameRoomHost) => liveRooms!.join(captured),
+    } as unknown as LiveRooms,
+    true,
+  );
+  f.sessionRows.set("session-other-user", {
+    userId: "other-user",
+    expiresAtMs: 8e12,
+    clientKind: "desktop",
+  });
+  liveRooms = createLiveRooms({
+    storage: f.storage,
+    maxUpdateBytes: 1 << 20,
+    maxNoteBytes: 1 << 22,
+    maxAppliedBytes: 1 << 20,
+    saveEveryMs: 3_600_000,
+    log() {},
+    openSaver: async () =>
+      captureOwnerLiveFrameHost({
+        authenticatedUserId: "owner-1",
+        storage: f.storage,
+        native: f.native,
+        bounds,
+        validate: ({ retainStateUpdate: _retainStateUpdate, ...input }) =>
+          createLiveMarkdownJournalValidator(policy)(input),
+      }),
+  });
+  cleanups.push(async () => liveRooms!.close());
+
+  f.raw
+    .prepare(
+      `INSERT INTO sync_relay_share_grants (grant_id, share_id, principal_kind, principal_user_id, access, status, generation, created_at_ms)
+       VALUES ('edit-peer', ?, 'user', 'other-user', 'edit', 'active', 1, 1)`,
+    )
+    .run(scope.shareId);
+  const openDesktop = async (authorization: string) => {
+    const response = await f.post(
+      "/sync/live/desktop-open",
+      { shareId: scope.shareId, path: binding.currentPath },
+      undefined,
+      { authorization },
+    );
+    expect(response.status).toBe(200);
+    const admitted = (await response.json()) as {
+      discriminator: string;
+      ticket: { token: string };
+    };
+    const socket = f.connect(
+      admitted.ticket.token,
+      undefined,
+      { authorization },
+      "",
+      admitted.discriminator,
+    );
+    expect(await socket.status).toBe(101);
+    const peer = await startProvider(socket);
+    await peer.until(() => peer.provider.state().status === "live");
+    return { socket, ...peer };
+  };
+
+  const editorA = await openDesktop("Bearer peer-token");
+  const editorBSocket = f.connect((await f.mint()).token);
+  expect(await editorBSocket.status).toBe(101);
+  const editorBPeer = await startProvider(editorBSocket);
+  await editorBPeer.until(() => editorBPeer.provider.state().status === "live");
+  const editorB = { socket: editorBSocket, ...editorBPeer };
+
+  const appendParagraph = (doc: Y.Doc, text: string) => {
+    const paragraph = new Y.XmlElement("paragraph");
+    paragraph.insert(0, [new Y.XmlText(text)]);
+    const body = doc.getXmlFragment("body");
+    body.insert(body.length, [paragraph]);
+  };
+  const waitForText = (doc: Y.Doc, needle: string) =>
+    doc.getXmlFragment("body").toString().includes(needle)
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => {
+          const onUpdate = () => {
+            if (doc.getXmlFragment("body").toString().includes(needle)) {
+              doc.off("update", onUpdate);
+              resolve();
+            }
+          };
+          doc.on("update", onUpdate);
+        });
+
+  editorA.provider.doc.transact(() => appendParagraph(editorA.provider.doc, "ZERO_QUIET"));
+  await waitForText(editorB.provider.doc, "ZERO_QUIET");
+
+  await Promise.all([waitForPings(editorA.socket.ws, 6), waitForPings(editorB.socket.ws, 6)]);
+  expect(editorA.socket.ws.readyState).toBe(WebSocket.OPEN);
+  expect(editorB.socket.ws.readyState).toBe(WebSocket.OPEN);
+  editorA.provider.doc.transact(() => appendParagraph(editorA.provider.doc, "AFTER_QUIET"));
+  await waitForText(editorB.provider.doc, "AFTER_QUIET");
+
+  f.raw
+    .prepare(
+      "UPDATE sync_relay_share_grants SET access = 'view', generation = generation + 1 WHERE grant_id = ?",
+    )
+    .run(scope.grantId);
+  editorB.provider.doc.transact(() => appendParagraph(editorB.provider.doc, "DURING_VIEW"));
+  await editorB.socket.closed;
+  expect(editorA.provider.doc.getXmlFragment("body").toString()).not.toContain("DURING_VIEW");
+  expect(
+    (await f.post("/sync/live/desktop-open", { shareId: scope.shareId, path: binding.currentPath }))
+      .status,
+  ).toBe(404);
+
+  f.raw
+    .prepare(
+      "UPDATE sync_relay_share_grants SET access = 'edit', generation = generation + 1 WHERE grant_id = ?",
+    )
+    .run(scope.grantId);
+  const editorB2 = await openDesktop("Bearer reader-token");
+  await waitForPings(editorB2.socket.ws, 4);
+  expect(editorB2.socket.ws.readyState).toBe(WebSocket.OPEN);
+  expect(editorB2.provider.state().status).toBe("live");
+  editorB2.provider.doc.transact(() => appendParagraph(editorB2.provider.doc, "AFTER_ROUNDTRIP"));
+  await waitForText(editorA.provider.doc, "AFTER_ROUNDTRIP");
+});
+
+describe("desktop account session standing", () => {
+  const desktopSessionFixture = (routeLimits = limits) =>
+    fixture(
+      routeLimits,
+      false,
+      undefined,
+      false,
+      true,
+      undefined,
+      0,
+      0,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+
+  it("requires resolveAccountSession and accountSessions to be paired and desktop-only", async () => {
+    const f = await fixture(limits, false, undefined, false, true);
+    const base = {
+      storage: f.storage,
+      hosts: new Set([relayHost]),
+      publicOrigin: audience,
+      exchangeKey: "0123456789abcdef0123456789abcdef",
+      frames,
+      bounds,
+      limits,
+      validate: createLiveMarkdownJournalValidator(policy),
+      sessions: f.desktopAdmission!,
+      tickets: f.tickets,
+      captureNative: f.captureNative,
+    };
+    expect(() =>
+      createNamedLiveRoutes({
+        ...base,
+        kind: "named",
+        desktopBearer: true,
+        resolveAccountSession: f.accountSession,
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      createNamedLiveRoutes({
+        ...base,
+        kind: "named",
+        desktopBearer: true,
+        accountSessions: { read: f.readSessions },
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      createNamedLiveRoutes({
+        ...base,
+        kind: "named",
+        desktopBearer: false,
+        resolveAccountSession: f.accountSession,
+        accountSessions: { read: f.readSessions },
+      }),
+    ).toThrow(TypeError);
+  });
+
+  it("rejects unknown desktop discriminators without calling resolveAccountSession", async () => {
+    const f = await desktopSessionFixture();
+    const ticket = await f.mint();
+    f.accountSession.mockClear();
+    const unknown = f.connect(ticket.token, undefined, {}, "", "unknown12345");
+    expect(await unknown.status).toBe(404);
+    expect(f.accountSession).not.toHaveBeenCalled();
+  });
+
+  it("stops an open desktop socket immediately on stopSession and rejects upgrade if revoked during capture", async () => {
+    const f = await desktopSessionFixture({ ...limits, idleTimeoutMs: 600 });
+    const desktop = f.connect((await f.mint()).token);
+    expect(await desktop.status).toBe(101);
+    await desktop.until(() => desktop.received.some((frame) => frame.kind === "welcome"));
+    f.routes.stopSession(scope.userId, `session-${scope.userId}`);
+    await desktop.closed;
+    expect(desktop.ws.readyState).toBe(WebSocket.CLOSED);
+
+    f.captureNative.mockImplementationOnce(async () => {
+      f.sessionRows.delete(`session-${scope.userId}`);
+      return f.native;
+    });
+    const racing = f.connect((await f.mint()).token);
+    expect(await racing.status).toBe(404);
+  });
+
+  it.each(["deleted", "unreadable", "standing"] as const)(
+    "reads desktop sign-ins each minute and closes when %s",
+    async (state) => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      try {
+        const f = await desktopSessionFixture({
+          ...limits,
+          idleTimeoutMs: OWNER_SESSION_CHECK_MS * 4,
+        });
+        const desktop = f.connect((await f.mint()).token);
+        expect(await desktop.status).toBe(101);
+        await desktop.until(() => desktop.received.some((frame) => frame.kind === "welcome"));
+        f.readSessions.mockClear();
+        if (state === "deleted") f.sessionRows.delete(`session-${scope.userId}`);
+        if (state === "unreadable") f.readSessions.mockRejectedValueOnce(new Error("unreadable"));
+        await vi.advanceTimersByTimeAsync(OWNER_SESSION_CHECK_MS);
+        expect(f.readSessions).toHaveBeenCalledOnce();
+        expect(f.readSessions).toHaveBeenCalledWith([`session-${scope.userId}`]);
+        if (state === "standing") expect(desktop.ws.readyState).toBe(WebSocket.OPEN);
+        else await desktop.closed;
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("closes a desktop socket when its sign-in expires, and not before", async () => {
+    const f = await desktopSessionFixture();
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    try {
+      const expiresAtMs = Date.now() + 5_000;
+      f.accountSession.mockResolvedValue({
+        userId: scope.userId,
+        sessionId: `session-${scope.userId}`,
+        expiresAtMs,
+        clientKind: "desktop",
+      });
+      f.sessionRows.set(`session-${scope.userId}`, {
+        userId: scope.userId,
+        expiresAtMs,
+        clientKind: "desktop",
+      });
+      const desktop = f.connect((await f.mint()).token);
+      expect(await desktop.status).toBe(101);
+      await desktop.until(() => desktop.received.some((frame) => frame.kind === "welcome"));
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(desktop.ws.readyState).toBe(WebSocket.OPEN);
+      await vi.advanceTimersByTimeAsync(1);
+      await desktop.closed;
+      expect(desktop.ws.readyState).toBe(WebSocket.CLOSED);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

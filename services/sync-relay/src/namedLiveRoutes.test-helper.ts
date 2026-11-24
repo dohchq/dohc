@@ -150,6 +150,7 @@ export async function fixture(
   shareId = defaultScope.shareId,
   population?: { people: number; documents: number },
   rooms?: LiveRooms,
+  desktopSessions = false,
 ) {
   const liveProfile = selfHostLiveProfile();
   const frames = production ? liveProfile.frames : defaultFrames,
@@ -299,6 +300,14 @@ export async function fixture(
   });
   const sessionRows = new Map<string, StoredAccountSession>([
     ["phone-session", { userId: "owner-1", expiresAtMs: 8e12, clientKind: "phone" }],
+    ...(desktopSessions
+      ? ([
+          [
+            `session-${scope.userId}`,
+            { userId: scope.userId, expiresAtMs: 8e12, clientKind: "desktop" },
+          ],
+        ] as [string, StoredAccountSession][])
+      : []),
   ]);
   const readSessions = vi.fn(
     async (ids: readonly string[]) =>
@@ -385,6 +394,9 @@ export async function fixture(
     : createNamedLiveRoutes({
         kind: link ? "link" : "named",
         desktopBearer: desktop,
+        ...(desktop && desktopSessions
+          ? { resolveAccountSession: accountSession, accountSessions: { read: readSessions } }
+          : {}),
         ...(rooms ? { rooms } : {}),
         membership: memberships,
         storage: state.storage,
@@ -545,6 +557,7 @@ export async function fixture(
     extra: Record<string, string> = {},
     ownerQuery = "",
     session = discriminator,
+    autoPong = true,
   ) {
     const target = owner
       ? `/sync/workspaces/${binding.workspaceId}/live/owner?objectId=${binding.objectId}&lineageClaimId=${binding.lineageClaimId}${ownerQuery}`
@@ -566,6 +579,7 @@ export async function fixture(
                 ...extra,
               },
         perMessageDeflate: false,
+        autoPong,
       },
     );
     sockets.push(ws);
