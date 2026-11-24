@@ -92,7 +92,8 @@ export interface LocalAppLaunchSession {
 // tab. This page's own words, before the app opens and after it ends, get dohc's colors.
 const BOOTSTRAP_STYLE =
   `body{margin:0}iframe{background:Canvas}body:not(:has(iframe)){background:${palette.light.bg};color:${palette.light.ink}}` +
-  `@media (prefers-color-scheme:dark){body:not(:has(iframe)){background:${palette.dark.bg};color:${palette.dark.ink}}}`;
+  `@media (prefers-color-scheme:dark){body:not(:has(iframe)){background:${palette.dark.bg};color:${palette.dark.ink}}}` +
+  `@media print{#status{display:none!important}body.dohc-printing iframe{height:var(--dohc-print-h,100vh)!important}}`;
 const MAX_SESSIONS = 16,
   HANDOFF_MS = 30_000,
   SESSION_MS = 30 * 60_000,
@@ -295,12 +296,24 @@ export async function createLocalAppLaunchHost(options: {
           "x-content-type-options": "nosniff",
           "cross-origin-resource-policy": "same-origin",
         };
-        const reply = (response: ServerResponse, status: number, body?: unknown) => {
+        const reply = (
+          response: ServerResponse,
+          status: number,
+          body?: unknown,
+          extraHeaders?: Record<string, string>,
+        ) => {
           response.writeHead(status, {
             ...common,
             ...(body === undefined ? {} : { "content-type": "application/json" }),
+            ...extraHeaders,
           });
           response.end(body === undefined ? undefined : JSON.stringify(body));
+        };
+        const formatRateLimitDuration = (ms: number) => {
+          const rounded = Math.max(1, Math.ceil(ms));
+          if (rounded < 1000) return `${rounded} ms`;
+          const seconds = rounded / 1000;
+          return `${Number.isInteger(seconds) ? seconds : seconds.toFixed(1).replace(/\.0$/, "")} s`;
         };
         const current = () => {
           requestSignal.throwIfAborted();
@@ -313,9 +326,11 @@ export async function createLocalAppLaunchHost(options: {
         const observe = launchOptions?.observeBroker
           ? "(event)=>{try{globalThis.__dohcVerifyObserve?.(JSON.stringify(event));}catch{}}"
           : "undefined";
-        const brokerLimits = highBudget
-          ? JSON.stringify({ maxPending, backendBurst, backendRefillMs })
-          : "undefined";
+        const brokerLimits = JSON.stringify(
+          highBudget
+            ? { maxPending, backendBurst, backendRefillMs, trustRateLimitDetails: true }
+            : { trustRateLimitDetails: true },
+        );
         const hasEvents = Boolean(
           options.backend.datasetRevisions &&
           options.backend.subscribeDatasetChanges &&
@@ -501,7 +516,24 @@ export async function createLocalAppLaunchHost(options: {
             const now = Date.now();
             tokens = Math.min(backendBurst, tokens + (now - updated) / backendRefillMs);
             updated = now;
-            if (pending >= maxPending || tokens < 1) return reply(response, 429);
+            if (pending >= maxPending)
+              return reply(response, 429, {
+                code: "rate_limited",
+                message: `Rate limit reached: at most ${maxPending} concurrent requests allowed (${pending} currently in flight). Wait for an active request to finish, then try again.`,
+              });
+            if (tokens < 1) {
+              const retryAfterMs = Math.max(1, Math.ceil((1 - tokens) * backendRefillMs));
+              return reply(
+                response,
+                429,
+                {
+                  code: "rate_limited",
+                  message: `Rate limit reached: ${backendBurst} of ${backendBurst} requests used in the ${formatRateLimitDuration(backendBurst * backendRefillMs)} burst window (refills 1 request every ${formatRateLimitDuration(backendRefillMs)}). Try again in ${formatRateLimitDuration(retryAfterMs)}.`,
+                  retryAfterMs,
+                },
+                { "retry-after": String(Math.max(1, Math.ceil(retryAfterMs / 1000))) },
+              );
+            }
             tokens--;
             pending++;
             admitted = true;
@@ -750,7 +782,7 @@ export async function createLocalAppLaunchHost(options: {
         });
         server.requestTimeout = 15_000;
         server.headersTimeout = 10_000;
-        server.maxConnections = 16;
+        server.maxConnections = highBudget ? 24 : 16;
         let stopped: Promise<void> | undefined;
         const stop = () =>
           (stopped ??= Promise.resolve().then(async () => {

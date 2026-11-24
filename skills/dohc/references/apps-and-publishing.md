@@ -91,7 +91,15 @@ window.addEventListener("message", (event) => {
 // });
 ```
 
-Other channel operations: `backend.upload` (`name`, `contentType`, `bytes` as a transferred `ArrayBuffer` up to 20 MiB, `idempotencyKey`), `backend.file` (`fileId`, `operation`, `input`; replies `{ file, bytes }` with `bytes` as a transferred `ArrayBuffer`), `backend.attempt` (`operation`, `request`), and for document-Collection share-link apps: `collection.list` and `collection.create`.
+Other channel operations: `backend.upload` (`name`, `contentType`, `bytes` as a transferred `ArrayBuffer` up to 20 MiB, `idempotencyKey`), `backend.file` (`fileId`, `operation`, `input`; replies `{ file, bytes }` with `bytes` as a transferred `ArrayBuffer`), `backend.attempt` (`operation`, `request`), `host.copy` (`text`, up to 65,536 UTF-8 bytes, user-activated), `host.print` (optional `height`, 1 to 50,000 CSS pixels, user-activated), and for document-Collection share-link apps: `collection.list` and `collection.create`.
+
+## Sandbox constraints (`window.origin === "null"`)
+
+Every app runs in a sandboxed `srcdoc` iframe with an opaque origin (`window.origin === "null"`), without `allow-same-origin` or `allow-modals`:
+
+- Do not read or write `sessionStorage`, `localStorage`, `indexedDB`, or `document.cookie`. They throw `SecurityError` in an opaque origin. Keep UI state in memory and persist data in Collections.
+- Do not call `navigator.clipboard.writeText(...)` directly inside the app frame. Chromium logs a Permissions Policy `console.error` even inside `try/catch`, which fails `verifyFrontend`. Import `copyText(text)` from `dohc/app` (or send `host.copy` over `dohc-app-channel`) from a click or key handler.
+- Do not call `window.print()` directly inside the app frame. Chromium ignores it without `allow-modals`. Import `print()` from `dohc/app` (or send `host.print` over `dohc-app-channel`) from a click or key handler. When the printable area scrolls inside a fixed-height container, expand it in `@media print` (`height: auto; overflow: visible`) and pass `{ height }` with the container's full scroll height so rows below the viewport are not clipped. For standalone offline exports, generate a Blob download via `allow-downloads`.
 
 ## Verifying an app frontend (`dohc_publish_app` `verifyFrontend`)
 

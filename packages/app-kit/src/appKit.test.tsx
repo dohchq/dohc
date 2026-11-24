@@ -1567,4 +1567,138 @@ describe("dohc/ui and dohc/charts", () => {
     unmount();
     client.close();
   });
+
+  it("cancels queued superseded useDatasetQuery requests on rapid scope changes and surfaces structured 429 details", async () => {
+    const fake = makeFakePort();
+    const client = createAppClient({ port: fake.port, maxInFlight: 2 });
+
+    function MultiFilterView({ filter }: { filter: string }) {
+      const a = useDatasetQuery<{ filter: string }>("rollups", { filter });
+      const b = useDatasetQuery<{ filter: string }>("corr", { filter });
+      const c = useDatasetQuery<{ filter: string }>("outliers", { filter });
+      return (
+        <div>
+          <span data-testid="a">{a.data?.filter ?? a.error?.message ?? "loading"}</span>
+          <span data-testid="b">{b.data?.filter ?? b.error?.message ?? "loading"}</span>
+          <span data-testid="c">{c.data?.filter ?? c.error?.message ?? "loading"}</span>
+        </div>
+      );
+    }
+
+    const { rerender } = render(
+      <AppProvider client={client}>
+        <MultiFilterView filter="7d" />
+      </AppProvider>,
+    );
+    expect(fake.sent).toHaveLength(2);
+    const initialIds = fake.sent.map((m) => m.id);
+
+    rerender(
+      <AppProvider client={client}>
+        <MultiFilterView filter="30d" />
+      </AppProvider>,
+    );
+    rerender(
+      <AppProvider client={client}>
+        <MultiFilterView filter="90d" />
+      </AppProvider>,
+    );
+
+    for (const id of initialIds) {
+      fake.reply({
+        id,
+        ok: true,
+        value: { result: { filter: "7d" }, revision: 1, replayed: false },
+      });
+    }
+    await waitFor(() => expect(fake.sent).toHaveLength(4));
+    const afterInitial = fake.sent.slice(2);
+    expect(afterInitial.every((m) => (m.input as { filter: string }).filter === "90d")).toBe(true);
+
+    fake.reply({
+      id: fake.sent[2]!.id,
+      ok: true,
+      value: { result: { filter: "90d" }, revision: 2, replayed: false },
+    });
+    await waitFor(() => expect(fake.sent).toHaveLength(5));
+    expect((fake.sent[4]!.input as { filter: string }).filter).toBe("90d");
+    fake.reply({
+      id: fake.sent[3]!.id,
+      ok: false,
+      status: 429,
+      error: {
+        code: "rate_limited",
+        message:
+          "Rate limit reached: 30 of 30 backend requests used in the 60 s burst window. Try again in 2 s.",
+        retryAfterMs: 2000,
+      },
+    });
+    fake.reply({
+      id: fake.sent[4]!.id,
+      ok: true,
+      value: { result: { filter: "90d" }, revision: 2, replayed: false },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("a").textContent).toBe("90d");
+      expect(screen.getByTestId("b").textContent).toContain("30 of 30 backend requests");
+      expect(screen.getByTestId("c").textContent).toBe("90d");
+    });
+    expect(new AppBackendError(429).message).toContain("Rate limit reached");
+    client.close();
+  });
+
+  it("sends host.copy and host.print immediately ahead of queued backend calls and parses 413/429 host errors", async () => {
+    const fake = makeFakePort();
+    const client = createAppClient({ port: fake.port, maxInFlight: 1 });
+
+    const slowRead = client.read("slow");
+    const queuedRead = client.read("queued");
+    expect(fake.sent).toHaveLength(1);
+
+    const copyPromise = client.copyText!("SEAT-KEY-42");
+    expect(fake.sent).toHaveLength(2);
+    expect(Object.keys(fake.sent[1]!).sort()).toEqual(["id", "op", "text"]);
+    expect(fake.sent[1]!.op).toBe("host.copy");
+    fake.reply({ id: fake.sent[1]!.id, ok: true, value: { copied: true } });
+    await expect(copyPromise).resolves.toBeUndefined();
+
+    const printPromise = client.print!({ height: 2400 });
+    expect(fake.sent).toHaveLength(3);
+    expect(Object.keys(fake.sent[2]!).sort()).toEqual(["height", "id", "op"]);
+    expect(fake.sent[2]!.op).toBe("host.print");
+    fake.reply({ id: fake.sent[2]!.id, ok: true, value: { printed: true } });
+    await expect(printPromise).resolves.toBeUndefined();
+
+    const bigCopy = client.copyText!("x".repeat(70_000));
+    fake.reply({
+      id: fake.sent[3]!.id,
+      ok: false,
+      status: 413,
+      error: {
+        code: "payload_too_large",
+        message: "Clipboard text exceeded its limit of 65536 bytes (used 70000 bytes).",
+      },
+    });
+    await expect(bigCopy).rejects.toMatchObject({
+      status: 413,
+      message: "Clipboard text exceeded its limit of 65536 bytes (used 70000 bytes).",
+    });
+
+    await expect(client.print!({ height: 0 })).rejects.toMatchObject({ status: 400 });
+
+    fake.reply({
+      id: fake.sent[0]!.id,
+      ok: true,
+      value: { result: "ok", revision: 1, replayed: false },
+    });
+    await expect(slowRead).resolves.toBe("ok");
+    await waitFor(() => expect(fake.sent).toHaveLength(5));
+    fake.reply({
+      id: fake.sent[4]!.id,
+      ok: true,
+      value: { result: "q", revision: 1, replayed: false },
+    });
+    await expect(queuedRead).resolves.toBe("q");
+    client.close();
+  });
 });

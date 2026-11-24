@@ -877,9 +877,70 @@ it("keeps conservative concurrency and broker limits on server-backed launches",
     post("/backend", { ...invoke, id: `s-${index}`, readOnly: true }, headers),
   );
   await expect.poll(() => started).toBe(4);
-  expect(
-    (await post("/backend", { ...invoke, id: "s-overflow", readOnly: true }, headers)).status,
-  ).toBe(429);
+  const overflow = await post("/backend", { ...invoke, id: "s-overflow", readOnly: true }, headers);
+  expect(overflow.status).toBe(429);
+  expect(await overflow.json()).toEqual({
+    code: "rate_limited",
+    message:
+      "Rate limit reached: at most 4 concurrent requests allowed (4 currently in flight). Wait for an active request to finish, then try again.",
+  });
   release();
   expect((await Promise.all(held)).every((res) => res.status === 200)).toBe(true);
+});
+
+it("returns structured 429 rate-limit limit, unit, usage, and retry timing on token exhaustion", async () => {
+  let now = 5_000_000;
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  const lifetime = new AbortController(),
+    session = new AbortController();
+  const bytes = Buffer.from("document.getElementById('root').textContent='Server app';");
+  const backend = {
+    browserPublication: () => ({
+      authorityRevision: 1,
+      files: [
+        {
+          path: "bundle.js",
+          contentType: "text/javascript; charset=utf-8",
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          byteLength: bytes.length,
+          bytes,
+        },
+      ],
+    }),
+    assertBrowserPublication: () => {},
+    request: vi.fn(async () => ({ result: null, revision: 1, replayed: false })),
+    readBrowserFile: vi.fn(async () => ({})),
+    localBudget: () => false,
+  };
+  const host = await createLocalAppLaunchHost({ backend, lifetime: lifetime.signal });
+  hosts.push(host);
+  const url = await host.launch(publicationId, session.signal);
+  const origin = new URL(url).origin,
+    handoff = new URL(url).hash.slice(1);
+  const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
+    fetch(origin + path, {
+      method: "POST",
+      headers: { origin, "content-type": "application/json", ...headers },
+      body: JSON.stringify(body),
+    });
+  const opened = (await (await post("/session", { handoff })).json()) as { proof: string };
+  const headers = { "x-dohc-app-proof": opened.proof };
+  for (let i = 0; i < 30; i++) {
+    expect(
+      (await post("/backend", { ...invoke, id: `tok-${i}`, readOnly: true }, headers)).status,
+    ).toBe(200);
+  }
+  const limited = await post("/backend", { ...invoke, id: "tok-over", readOnly: true }, headers);
+  expect(limited.status).toBe(429);
+  expect(limited.headers.get("retry-after")).toBe("2");
+  expect(await limited.json()).toEqual({
+    code: "rate_limited",
+    message:
+      "Rate limit reached: 30 of 30 requests used in the 60 s burst window (refills 1 request every 2 s). Try again in 2 s.",
+    retryAfterMs: 2000,
+  });
+  now += 2000;
+  expect(
+    (await post("/backend", { ...invoke, id: "tok-after", readOnly: true }, headers)).status,
+  ).toBe(200);
 });

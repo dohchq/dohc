@@ -309,12 +309,22 @@ it("bounds requests, pending messages and repeated request ids", async () => {
       id: "held",
       ok: false,
       status: 429,
+      error: {
+        code: "duplicate_id",
+        message:
+          "Duplicate request id: at most 1 in-flight request per id (1 already active). Wait for it to finish or use a new id.",
+      },
     });
     for (const id of ["b", "c", "d"]) f.port.postMessage({ id, op: "collection.list", limit: 1 });
     expect(await f.request({ id: "overflow", op: "collection.list", limit: 1 })).toEqual({
       id: "overflow",
       ok: false,
       status: 429,
+      error: {
+        code: "rate_limited",
+        message:
+          "Rate limit reached: at most 4 concurrent requests allowed (4 currently in flight). Wait for an active request to finish, then try again.",
+      },
     });
   } finally {
     f.close();
@@ -618,6 +628,352 @@ it("forwards one-way dataset.changed push events, accepts readOnly: true, and su
     expect(received).toHaveLength(1);
     expect((received[0] as Record<string, unknown>).readOnly).toBe(true);
   } finally {
+    lifetime.abort();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("surfaces explicit rate-limit details on token exhaustion and upstream Retry-After", async () => {
+  const f = harness(async () =>
+    Response.json(
+      {
+        code: "rate_limited",
+        message: "secret internal stack",
+        retryAfterMs: 7000,
+      },
+      { status: 429, headers: { "retry-after": "7" } },
+    ),
+  );
+  try {
+    const upstream = await f.request({
+      id: "up-429",
+      op: "backend.invoke",
+      operation: "list",
+      idempotencyKey: "k-up",
+      input: {},
+    });
+    expect(upstream).toEqual({
+      id: "up-429",
+      ok: false,
+      status: 429,
+      error: {
+        code: "rate_limited",
+        message: "Rate limit reached by app host (HTTP 429). Try again in 7 s.",
+        retryAfterMs: 7000,
+      },
+    });
+    expect(JSON.stringify(upstream)).not.toContain("secret");
+  } finally {
+    f.close();
+  }
+
+  vi.stubGlobal("MessageChannel", NodeMessageChannel);
+  const trustedFrame = new EventTarget();
+  let trustedPort!: NodeMessagePort;
+  Object.assign(trustedFrame, {
+    contentWindow: {
+      postMessage(_message: unknown, _target: string, ports: NodeMessagePort[]) {
+        trustedPort = ports[0]!;
+      },
+    },
+  });
+  const trustedLifetime = new AbortController();
+  attachAppCollectionBroker(
+    trustedFrame as HTMLIFrameElement,
+    async () =>
+      Response.json(
+        {
+          code: "rate_limited",
+          message:
+            "Rate limit reached: 120 of 120 requests used in the 6 s burst window. Try again in 50 ms.",
+          retryAfterMs: 50,
+        },
+        { status: 429, headers: { "retry-after": "1" } },
+      ),
+    trustedLifetime.signal,
+    undefined,
+    { maxPending: 12, backendBurst: 120, backendRefillMs: 50, trustRateLimitDetails: true },
+  );
+  try {
+    trustedFrame.dispatchEvent(new Event("load"));
+    const reply = once(trustedPort, "message");
+    trustedPort.postMessage({
+      id: "trusted-429",
+      op: "backend.invoke",
+      operation: "list",
+      idempotencyKey: "k-trusted",
+      input: {},
+    });
+    expect((await reply)[0]).toEqual({
+      id: "trusted-429",
+      ok: false,
+      status: 429,
+      error: {
+        code: "rate_limited",
+        message:
+          "Rate limit reached: 120 of 120 requests used in the 6 s burst window. Try again in 50 ms.",
+        retryAfterMs: 50,
+      },
+    });
+  } finally {
+    trustedLifetime.abort();
+    vi.unstubAllGlobals();
+  }
+
+  let now = 1_000_000;
+  const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+  const f2 = harness();
+  try {
+    for (let i = 0; i < 30; i++) {
+      expect(
+        (
+          await f2.request({
+            id: `b-${i}`,
+            op: "backend.invoke",
+            operation: "list",
+            idempotencyKey: `k-${i}`,
+            input: {},
+          })
+        ).ok,
+      ).toBe(true);
+    }
+    const limited = await f2.request({
+      id: "b-over",
+      op: "backend.invoke",
+      operation: "list",
+      idempotencyKey: "k-over",
+      input: {},
+    });
+    expect(limited).toMatchObject({
+      id: "b-over",
+      ok: false,
+      status: 429,
+      error: {
+        code: "rate_limited",
+        retryAfterMs: 2000,
+      },
+    });
+    expect(limited.error.message).toContain("30 of 30 backend requests");
+    expect(limited.error.message).toContain("60 s burst window");
+    expect(limited.error.message).toContain("Try again in 2 s");
+    now += 2000;
+    expect(
+      (
+        await f2.request({
+          id: "b-after",
+          op: "backend.invoke",
+          operation: "list",
+          idempotencyKey: "k-after",
+          input: {},
+        })
+      ).ok,
+    ).toBe(true);
+  } finally {
+    nowSpy.mockRestore();
+    f2.close();
+  }
+});
+
+it("gates host.copy and host.print on user activation, size bounds, and anti-spam cooldowns without consuming backend slots", async () => {
+  vi.stubGlobal("MessageChannel", NodeMessageChannel);
+  let isActive = false;
+  vi.stubGlobal("navigator", {
+    userActivation: {
+      get isActive() {
+        return isActive;
+      },
+    },
+  });
+  let now = 2_000_000;
+  const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+  const frame = new EventTarget();
+  let port!: NodeMessagePort;
+  Object.assign(frame, {
+    contentWindow: {
+      postMessage(_message: unknown, _target: string, ports: NodeMessagePort[]) {
+        port = ports[0]!;
+      },
+    },
+  });
+  const copied: string[] = [];
+  const printed: Array<{ height?: number }> = [];
+  let releasePrint!: () => void;
+  let releaseBackend!: () => void;
+  const backendGate = new Promise<void>((resolve) => {
+    releaseBackend = resolve;
+  });
+  const lifetime = new AbortController();
+  const events: unknown[] = [];
+  attachAppCollectionBroker(
+    frame as HTMLIFrameElement,
+    async () => {
+      await backendGate;
+      return Response.json({ result: null, revision: 1, replayed: false });
+    },
+    lifetime.signal,
+    (event) => events.push(event),
+    undefined,
+    {
+      copyText: async (text) => {
+        copied.push(text);
+      },
+      print: async (options) => {
+        printed.push(options);
+        await new Promise<void>((resolve) => {
+          releasePrint = resolve;
+        });
+      },
+    },
+  );
+  try {
+    frame.dispatchEvent(new Event("load"));
+    const send = (body: unknown) => {
+      const reply = once(port, "message");
+      port.postMessage(body);
+      return reply.then(([value]) => value);
+    };
+
+    expect(await send({ id: "c-no-act", op: "host.copy", text: "secret" })).toEqual({
+      id: "c-no-act",
+      ok: false,
+      status: 409,
+      error: {
+        code: "user_activation_required",
+        message: "Clipboard copy requires a recent click or key press.",
+      },
+    });
+    expect(await send({ id: "p-no-act", op: "host.print" })).toEqual({
+      id: "p-no-act",
+      ok: false,
+      status: 409,
+      error: {
+        code: "user_activation_required",
+        message: "Printing requires a recent click or key press.",
+      },
+    });
+    expect(copied).toEqual([]);
+    expect(printed).toEqual([]);
+
+    isActive = true;
+    expect(await send({ id: "c-bad-key", op: "host.copy", text: "ok", extra: 1 })).toEqual({
+      id: "c-bad-key",
+      ok: false,
+      status: 400,
+    });
+    const oversize = await send({ id: "c-big", op: "host.copy", text: "a".repeat(65_537) });
+    expect(oversize).toEqual({
+      id: "c-big",
+      ok: false,
+      status: 413,
+      error: {
+        code: "payload_too_large",
+        message: "Clipboard text exceeded its limit of 65536 bytes (used 65537 bytes).",
+      },
+    });
+    const escapedText = "\u001e".repeat(33_000);
+    expect(await send({ id: "c-escaped", op: "host.copy", text: escapedText })).toEqual({
+      id: "c-escaped",
+      ok: true,
+      value: { copied: true },
+    });
+    expect(copied.pop()).toBe(escapedText);
+    now += 1000;
+
+    for (let i = 0; i < 4; i++) {
+      port.postMessage({
+        id: `hold-${i}`,
+        op: "backend.invoke",
+        operation: "slow",
+        idempotencyKey: `s-${i}`,
+        input: {},
+      });
+    }
+    expect(await send({ id: "c-ok", op: "host.copy", text: "JOIN-1234" })).toEqual({
+      id: "c-ok",
+      ok: true,
+      value: { copied: true },
+    });
+    expect(copied).toEqual(["JOIN-1234"]);
+
+    const copySpam = await send({ id: "c-spam", op: "host.copy", text: "SECOND" });
+    expect(copySpam).toMatchObject({
+      id: "c-spam",
+      ok: false,
+      status: 429,
+      error: { code: "rate_limited", retryAfterMs: 1000 },
+    });
+    now += 1000;
+    expect(await send({ id: "c-ok-2", op: "host.copy", text: "KEY-5678" })).toEqual({
+      id: "c-ok-2",
+      ok: true,
+      value: { copied: true },
+    });
+
+    expect(await send({ id: "p-bad-h", op: "host.print", height: 0 })).toEqual({
+      id: "p-bad-h",
+      ok: false,
+      status: 400,
+    });
+    expect(await send({ id: "p-ok", op: "host.print", height: 2400 })).toEqual({
+      id: "p-ok",
+      ok: true,
+      value: { printed: true },
+    });
+    expect(printed).toEqual([{ height: 2400 }]);
+
+    const printWhileOpen = await send({ id: "p-nested", op: "host.print" });
+    expect(printWhileOpen).toMatchObject({
+      id: "p-nested",
+      ok: false,
+      status: 429,
+      error: { code: "rate_limited" },
+    });
+    expect(printWhileOpen.error.message).toContain("at most 1 print dialog at a time");
+
+    releasePrint();
+    await Promise.resolve();
+    now += 1000;
+    const printSameClick = await send({ id: "p-cooldown", op: "host.print" });
+    expect(printSameClick).toMatchObject({
+      id: "p-cooldown",
+      ok: false,
+      status: 429,
+      error: { code: "rate_limited", retryAfterMs: 4500 },
+    });
+    expect(printSameClick.error.message).toContain("5.5 s");
+
+    now += 4500;
+    expect(await send({ id: "p-ok-2", op: "host.print" })).toEqual({
+      id: "p-ok-2",
+      ok: true,
+      value: { printed: true },
+    });
+    releasePrint();
+    expect(events).toContainEqual({
+      kind: "completed",
+      id: "c-no-act",
+      op: "host.copy",
+      status: 409,
+      ok: false,
+      refusalCode: "user_activation_required",
+    });
+    expect(events).toContainEqual({
+      kind: "completed",
+      id: "c-ok",
+      op: "host.copy",
+      status: 200,
+      ok: true,
+    });
+    expect(events).toContainEqual({
+      kind: "completed",
+      id: "p-ok",
+      op: "host.print",
+      status: 200,
+      ok: true,
+    });
+  } finally {
+    releaseBackend();
+    nowSpy.mockRestore();
     lifetime.abort();
     vi.unstubAllGlobals();
   }

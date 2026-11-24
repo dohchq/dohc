@@ -62,15 +62,32 @@ export interface AttemptResult {
   readonly attempt: RetainedAttempt | null;
 }
 
+export interface PrintOptions {
+  readonly height?: number;
+}
+
 export class AppBackendError extends Error {
   readonly status: BackendStatus;
   readonly refusal?: BackendRefusal;
+  readonly retryAfterMs?: number;
 
-  constructor(status: BackendStatus, refusal?: BackendRefusal, message?: string) {
-    super(message ?? refusal?.message ?? `Request failed (${status}).`);
+  constructor(
+    status: BackendStatus,
+    refusal?: BackendRefusal,
+    message?: string,
+    retryAfterMs?: number,
+  ) {
+    super(
+      message ??
+        refusal?.message ??
+        (status === 429
+          ? "Rate limit reached (HTTP 429). Wait a moment and try again."
+          : `Request failed (${status}).`),
+    );
     this.name = "AppBackendError";
     this.status = status;
     this.refusal = refusal;
+    this.retryAfterMs = retryAfterMs;
   }
 
   get uncertain(): boolean {
@@ -92,12 +109,18 @@ export interface AppClient {
     operation: string,
     input?: unknown,
     idempotencyKey?: string,
-    options?: { readonly readOnly?: boolean },
+    options?: { readonly readOnly?: boolean; readonly signal?: AbortSignal },
   ): Promise<InvokeReply<T>>;
-  read<T = unknown>(operation: string, input?: unknown): Promise<T>;
+  read<T = unknown>(
+    operation: string,
+    input?: unknown,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<T>;
   upload(file: File | FileUploadInput, idempotencyKey: string): Promise<UploadReply>;
   file(fileId: string, operation: string, input?: unknown): Promise<FileReply>;
   attempt(operation: string, request: AttemptRequest): Promise<AttemptResult>;
+  copyText?(text: string): Promise<void>;
+  print?(options?: PrintOptions): Promise<void>;
   dataset(alias: string): AppClient;
   subscribe?(listener: (event: DatasetChangeEvent) => void): () => void;
   close(): void;
@@ -151,21 +174,58 @@ const isAttemptResult = (value: unknown): value is AttemptResult => {
   );
 };
 
-function parseRefusal(status: BackendStatus, error: unknown): BackendRefusal | undefined {
-  if (
-    status !== 409 ||
-    !isRecord(error) ||
-    Object.keys(error).sort().join() !== "code,message" ||
-    typeof error.code !== "string" ||
-    !/^[a-z][a-z0-9_]{0,63}$/.test(error.code) ||
-    typeof error.message !== "string" ||
-    error.message.length === 0 ||
-    new TextEncoder().encode(error.message).byteLength > 1024 ||
-    /[\u0000-\u001f\u007f]/.test(error.message)
-  ) {
-    return undefined;
+function parseStatusError(
+  status: BackendStatus,
+  error: unknown,
+): { refusal?: BackendRefusal; details?: { message?: string; retryAfterMs?: number } } {
+  if (!isRecord(error)) return {};
+  const keys = Object.keys(error).sort().join();
+  const validCode = typeof error.code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(error.code);
+  const validMessage =
+    typeof error.message === "string" &&
+    error.message.length > 0 &&
+    new TextEncoder().encode(error.message).byteLength <= 1024 &&
+    !/[\u0000-\u001f\u007f]/.test(error.message);
+  if (!validCode || !validMessage) return {};
+  if (status === 409) {
+    return keys === "code,message"
+      ? { refusal: { code: error.code as string, message: error.message as string } }
+      : {};
   }
-  return { code: error.code, message: error.message };
+  if (status === 413) {
+    return keys === "code,message" ? { details: { message: error.message as string } } : {};
+  }
+  if (status === 429) {
+    if (keys === "code,message") return { details: { message: error.message as string } };
+    if (
+      keys === "code,message,retryAfterMs" &&
+      typeof error.retryAfterMs === "number" &&
+      Number.isSafeInteger(error.retryAfterMs) &&
+      error.retryAfterMs >= 0 &&
+      error.retryAfterMs <= 3_600_000
+    ) {
+      return {
+        details: { message: error.message as string, retryAfterMs: error.retryAfterMs },
+      };
+    }
+  }
+  return {};
+}
+
+const MAX_PRINT_HEIGHT = 50_000;
+
+function measurePrintHeight(): number | undefined {
+  if (typeof document === "undefined") return undefined;
+  const raw = Math.max(
+    document.documentElement?.scrollHeight ?? 0,
+    document.body?.scrollHeight ?? 0,
+  );
+  if (!Number.isFinite(raw) || raw < 1) return undefined;
+  return Math.min(MAX_PRINT_HEIGHT, Math.ceil(raw));
+}
+
+function abortError(): Error {
+  return new DOMException("The request was aborted.", "AbortError");
 }
 
 function safeFileName(name: string, contentType: string): string {
@@ -258,6 +318,10 @@ type Pending = {
   message: Record<string, unknown>;
   transfer?: Transferable[];
   timeoutMs: number;
+  counted: boolean;
+  aborted: boolean;
+  signal?: AbortSignal;
+  onAbort?: () => void;
   check(value: unknown): boolean;
   resolve(value: unknown): void;
   reject(error: Error): void;
@@ -275,6 +339,7 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
   let closed = false;
   let inFlight = 0;
   const waiting: Pending[] = [];
+  const waitingImmediate: Pending[] = [];
   const sent = new Map<string, Pending>();
   const latestRevisions = new Map<string, number>();
   const listeners = new Set<(event: DatasetChangeEvent) => void>();
@@ -289,33 +354,47 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
     }
   };
 
+  const detachAbort = (item: Pending) => {
+    if (item.signal && item.onAbort) {
+      item.signal.removeEventListener("abort", item.onAbort);
+      item.onAbort = undefined;
+    }
+  };
+
   const fail = (item: Pending, status: BackendStatus) => {
     clearTimeout(item.timer);
-    item.reject(new AppBackendError(status));
+    detachAbort(item);
+    if (!item.aborted) item.reject(new AppBackendError(status));
+  };
+
+  const dispatch = (item: Pending) => {
+    const id = item.message.id as string;
+    clearTimeout(item.timer);
+    if (item.counted) inFlight += 1;
+    sent.set(id, item);
+    item.timer = setTimeout(() => {
+      if (sent.delete(id)) {
+        if (item.counted) inFlight -= 1;
+        fail(item, 503);
+        pump();
+      }
+    }, item.timeoutMs);
+    try {
+      if (item.transfer?.length) port!.postMessage(item.message, item.transfer);
+      else port!.postMessage(item.message);
+    } catch {
+      sent.delete(id);
+      if (item.counted) inFlight -= 1;
+      fail(item, 503);
+    }
   };
 
   const pump = () => {
+    while (port && !closed && waitingImmediate.length > 0) {
+      dispatch(waitingImmediate.shift()!);
+    }
     while (port && !closed && inFlight < maxInFlight && waiting.length > 0) {
-      const item = waiting.shift()!;
-      const id = item.message.id as string;
-      clearTimeout(item.timer);
-      inFlight += 1;
-      sent.set(id, item);
-      item.timer = setTimeout(() => {
-        if (sent.delete(id)) {
-          inFlight -= 1;
-          fail(item, 503);
-          pump();
-        }
-      }, item.timeoutMs);
-      try {
-        if (item.transfer?.length) port.postMessage(item.message, item.transfer);
-        else port.postMessage(item.message);
-      } catch {
-        sent.delete(id);
-        inFlight -= 1;
-        fail(item, 503);
-      }
+      dispatch(waiting.shift()!);
     }
   };
 
@@ -341,16 +420,27 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
       const item = sent.get(data.id);
       if (!item) return;
       sent.delete(data.id);
-      inFlight -= 1;
+      if (item.counted) inFlight -= 1;
       clearTimeout(item.timer);
-      if (data.ok === true && item.check(data.value)) {
-        item.resolve(data.value);
-      } else {
-        const status: BackendStatus =
-          data.ok !== true && VALID_STATUSES.includes(data.status as number)
-            ? (data.status as BackendStatus)
-            : 503;
-        item.reject(new AppBackendError(status, parseRefusal(status, data.error)));
+      detachAbort(item);
+      if (!item.aborted) {
+        if (data.ok === true && item.check(data.value)) {
+          item.resolve(data.value);
+        } else {
+          const status: BackendStatus =
+            data.ok !== true && VALID_STATUSES.includes(data.status as number)
+              ? (data.status as BackendStatus)
+              : 503;
+          const parsed = parseStatusError(status, data.error);
+          item.reject(
+            new AppBackendError(
+              status,
+              parsed.refusal,
+              parsed.details?.message,
+              parsed.details?.retryAfterMs,
+            ),
+          );
+        }
       }
       pump();
     };
@@ -370,29 +460,57 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
     message: Record<string, unknown>,
     timeoutMs: number,
     check: (value: unknown) => boolean,
-    transfer?: Transferable[],
+    sendOptions?: {
+      readonly immediate?: boolean;
+      readonly signal?: AbortSignal;
+      readonly transfer?: Transferable[];
+    },
   ): Promise<unknown> =>
     new Promise((resolve, reject) => {
       if (closed) {
         reject(new AppBackendError(503));
         return;
       }
+      const signal = sendOptions?.signal;
+      if (signal?.aborted) {
+        reject(abortError());
+        return;
+      }
+      const queue = sendOptions?.immediate ? waitingImmediate : waiting;
       const item: Pending = {
         message: { id: crypto.randomUUID(), ...message },
-        ...(transfer?.length ? { transfer } : {}),
+        ...(sendOptions?.transfer?.length ? { transfer: sendOptions.transfer } : {}),
         timeoutMs,
+        counted: !sendOptions?.immediate,
+        aborted: false,
+        signal,
         check,
         resolve,
         reject,
       };
+      if (signal) {
+        const onAbort = () => {
+          if (item.aborted) return;
+          item.aborted = true;
+          detachAbort(item);
+          const index = queue.indexOf(item);
+          if (index >= 0) {
+            queue.splice(index, 1);
+            clearTimeout(item.timer);
+          }
+          reject(abortError());
+        };
+        item.onAbort = onAbort;
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
       item.timer = setTimeout(() => {
-        const index = waiting.indexOf(item);
+        const index = queue.indexOf(item);
         if (index >= 0) {
-          waiting.splice(index, 1);
+          queue.splice(index, 1);
           fail(item, 503);
         }
       }, timeoutMs);
-      waiting.push(item);
+      queue.push(item);
       pump();
     });
 
@@ -402,10 +520,11 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
     closed = true;
     hostPortWaiters.delete(bindPort);
     port?.close();
-    for (const item of [...sent.values(), ...waiting]) {
+    for (const item of [...sent.values(), ...waitingImmediate, ...waiting]) {
       fail(item, 503);
     }
     sent.clear();
+    waitingImmediate.length = 0;
     waiting.length = 0;
     listeners.clear();
   };
@@ -416,7 +535,7 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
         operation: string,
         input: unknown = {},
         idempotencyKey = `read:${crypto.randomUUID()}`,
-        invokeOptions?: { readonly readOnly?: boolean },
+        invokeOptions?: { readonly readOnly?: boolean; readonly signal?: AbortSignal },
       ): Promise<InvokeReply<T>> {
         const readOnly = invokeOptions?.readOnly === true ? { readOnly: true } : {};
         return send(
@@ -427,11 +546,17 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
             "result" in value &&
             typeof value.revision === "number" &&
             typeof value.replayed === "boolean",
+          invokeOptions?.signal ? { signal: invokeOptions.signal } : undefined,
         ) as Promise<InvokeReply<T>>;
       },
-      async read<T = unknown>(operation: string, input: unknown = {}): Promise<T> {
+      async read<T = unknown>(
+        operation: string,
+        input: unknown = {},
+        readOptions?: { readonly signal?: AbortSignal },
+      ): Promise<T> {
         const reply = await this.invoke<T>(operation, input, `read:${crypto.randomUUID()}`, {
           readOnly: true,
+          ...(readOptions?.signal ? { signal: readOptions.signal } : {}),
         });
         return reply.result;
       },
@@ -449,7 +574,7 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
           transferTimeoutMs,
           (value) =>
             isRecord(value) && isFileMeta(value.file) && typeof value.replayed === "boolean",
-          [payload.bytes],
+          { transfer: [payload.bytes] },
         ) as Promise<UploadReply>;
       },
       async file(fileId: string, operation: string, input: unknown = {}): Promise<FileReply> {
@@ -476,6 +601,37 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
           invokeTimeoutMs,
           isAttemptResult,
         ) as Promise<AttemptResult>;
+      },
+      async copyText(text: string): Promise<void> {
+        if (typeof text !== "string") throw new AppBackendError(400);
+        await send(
+          { op: "host.copy", text },
+          invokeTimeoutMs,
+          (value) => isRecord(value) && value.copied === true,
+          { immediate: true },
+        );
+      },
+      async print(printOptions?: PrintOptions): Promise<void> {
+        let height: number | undefined;
+        if (printOptions?.height !== undefined) {
+          if (
+            typeof printOptions.height !== "number" ||
+            !Number.isSafeInteger(printOptions.height) ||
+            printOptions.height < 1 ||
+            printOptions.height > MAX_PRINT_HEIGHT
+          ) {
+            throw new AppBackendError(400);
+          }
+          height = printOptions.height;
+        } else {
+          height = measurePrintHeight();
+        }
+        await send(
+          { op: "host.print", ...(height !== undefined ? { height } : {}) },
+          invokeTimeoutMs,
+          (value) => isRecord(value) && value.printed === true,
+          { immediate: true },
+        );
       },
       dataset(alias: string): AppClient {
         const checked = assertDatasetAlias(alias);
@@ -538,6 +694,14 @@ function getSharedAppClient(options: AppClientOptions = {}): AppClient {
 export function createAppClient(options: AppClientOptions = {}): AppClient {
   if (options.port) return createManagedClient(options, false);
   return getSharedAppClient(options);
+}
+
+export function copyText(text: string): Promise<void> {
+  return getSharedAppClient().copyText!(text);
+}
+
+export function print(options?: PrintOptions): Promise<void> {
+  return getSharedAppClient().print!(options);
 }
 
 const AppClientContext = createContext<AppClient | null>(null);
@@ -680,7 +844,8 @@ export function useDatasetQuery<T = unknown>(
       currentRev: number | null = null,
       wantedRev: number | null = null,
       retryDelay = 250,
-      retryTimer: ReturnType<typeof setTimeout> | undefined;
+      retryTimer: ReturnType<typeof setTimeout> | undefined,
+      activeController: AbortController | null = null;
     const clearRetry = () => {
       if (retryTimer !== undefined) {
         clearTimeout(retryTimer);
@@ -693,6 +858,9 @@ export function useDatasetQuery<T = unknown>(
     const runFetch = (background: boolean) => {
       if (!alive) return;
       clearRetry();
+      activeController?.abort();
+      const controller = new AbortController();
+      activeController = controller;
       const token = ++generation.current;
       inFlight = true;
       if (!background) {
@@ -703,53 +871,55 @@ export function useDatasetQuery<T = unknown>(
             : { scope, data: undefined, revision: null, loading: true, error: null },
         );
       }
-      target.invoke<T>(operation, parsedInput, undefined, { readOnly: true }).then(
-        (reply) => {
-          if (!alive || token !== generation.current) return;
-          inFlight = false;
-          retryDelay = 250;
-          currentRev = reply.revision;
-          setState({
-            scope,
-            data: reply.result,
-            revision: reply.revision,
-            loading: false,
-            error: null,
-          });
-          const wanted = latestWanted();
-          if (wanted <= reply.revision) wantedRev = null;
-          else if (liveRef.current) {
-            wantedRev = wanted;
-            runFetch(true);
-          }
-        },
-        (caught: unknown) => {
-          if (!alive || token !== generation.current) return;
-          inFlight = false;
-          const error = caught instanceof AppBackendError ? caught : new AppBackendError(503);
-          setState((current) =>
-            background && current.scope === scope
-              ? { ...current, loading: false, error }
-              : { scope, data: undefined, revision: null, loading: false, error },
-          );
-          if (
-            background &&
-            error.uncertain &&
-            liveRef.current &&
-            wantedRev !== null &&
-            (currentRev === null || wantedRev > currentRev)
-          ) {
-            const delay = retryDelay;
-            retryDelay = Math.min(4_000, retryDelay * 2);
-            retryTimer = setTimeout(() => {
-              retryTimer = undefined;
-              if (alive && liveRef.current && !inFlight) runFetch(true);
-            }, delay);
-          } else if (!background || !error.uncertain) {
-            wantedRev = null;
-          }
-        },
-      );
+      target
+        .invoke<T>(operation, parsedInput, undefined, { readOnly: true, signal: controller.signal })
+        .then(
+          (reply) => {
+            if (!alive || token !== generation.current || controller.signal.aborted) return;
+            inFlight = false;
+            retryDelay = 250;
+            currentRev = reply.revision;
+            setState({
+              scope,
+              data: reply.result,
+              revision: reply.revision,
+              loading: false,
+              error: null,
+            });
+            const wanted = latestWanted();
+            if (wanted <= reply.revision) wantedRev = null;
+            else if (liveRef.current) {
+              wantedRev = wanted;
+              runFetch(true);
+            }
+          },
+          (caught: unknown) => {
+            if (!alive || token !== generation.current || controller.signal.aborted) return;
+            inFlight = false;
+            const error = caught instanceof AppBackendError ? caught : new AppBackendError(503);
+            setState((current) =>
+              background && current.scope === scope
+                ? { ...current, loading: false, error }
+                : { scope, data: undefined, revision: null, loading: false, error },
+            );
+            if (
+              background &&
+              error.uncertain &&
+              liveRef.current &&
+              wantedRev !== null &&
+              (currentRev === null || wantedRev > currentRev)
+            ) {
+              const delay = Math.max(retryDelay, Math.min(10_000, error.retryAfterMs ?? 0));
+              retryDelay = Math.min(4_000, retryDelay * 2);
+              retryTimer = setTimeout(() => {
+                retryTimer = undefined;
+                if (alive && liveRef.current && !inFlight) runFetch(true);
+              }, delay);
+            } else if (!background || !error.uncertain) {
+              wantedRev = null;
+            }
+          },
+        );
     };
     syncLiveRef.current = () => {
       if (!alive) return;
@@ -773,6 +943,8 @@ export function useDatasetQuery<T = unknown>(
     runFetch(false);
     return () => {
       alive = false;
+      activeController?.abort();
+      activeController = null;
       syncLiveRef.current = null;
       clearRetry();
       unsubscribe?.();
