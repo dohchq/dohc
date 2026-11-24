@@ -56,7 +56,7 @@ These limits come from dohc, not from this example. The example works inside the
 | --- | --- | --- |
 | Operation input | 64 KiB of JSON | Posting batches and bank batches stay under 60 KiB. |
 | JSON structure | 16,384 nodes | Bank batches stop at 500 rows, well under it. |
-| One query result | 1,000 rows, 256 KiB | Bank review pages at 100 rows so worst-case 300-character JSON-escaped descriptions fit; ledgers page at 200 (max 500). |
+| One query result | 1,000 rows, 256 KiB | Bank review pages at 100 rows so worst-case 300-character JSON-escaped descriptions fit; ledgers page at 50 in the UI (max 500). |
 | SQL parameters | 128 per statement, each under 64 KiB | Bulk inserts send rows as one JSON parameter, in chunks. |
 | `json_each` | Refused | Operations read JSON arrays with a recursive query instead. |
 | App backend calls | 30 at once, then 1 every 2 seconds, per app session | Quick clicking can run out. The app then says to wait a few seconds. |

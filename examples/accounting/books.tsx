@@ -1012,7 +1012,28 @@ function BankReview({ accounts }: { accounts: Account[] }) {
                         ),
                       },
                     ]
-                  : [{ key: "hash", header: "Row SHA-256", render: (row: BankRow) => <code className="books-hash">{row.rowHash.slice(0, 12)}</code> }]),
+                  : status === "ignored"
+                    ? [
+                        {
+                          key: "restore",
+                          header: "",
+                          render: (row: BankRow) => (
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              loading={pending}
+                              onClick={() =>
+                                void act("setBankRowsIgnored", { ids: [row.id], ignored: false }, () => {
+                                  if (offset > 0 && rows.length <= 1) setOffset(Math.max(0, offset - PAGE_SIZE));
+                                })
+                              }
+                            >
+                              Restore
+                            </Button>
+                          ),
+                        },
+                      ]
+                    : [{ key: "hash", header: "Row SHA-256", render: (row: BankRow) => <code className="books-hash">{row.rowHash.slice(0, 12)}</code> }]),
             ]}
           />
           {offset > 0 || data?.nextOffset !== null ? (
@@ -1420,10 +1441,16 @@ function InvoiceView({ id, onBack }: { id: string; onBack: () => void }) {
 }
 
 function InvoicesPanel() {
+  const PAGE_SIZE = 100;
   const [open, setOpen] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const { data, loading, error, reload } = useBooks<{ invoices: InvoiceSummary[] }>("listInvoices", { limit: 500 });
+  const [offset, setOffset] = useState(0);
+  const { data, loading, error, reload } = useBooks<{ invoices: InvoiceSummary[]; nextOffset: number | null }>("listInvoices", {
+    limit: PAGE_SIZE,
+    offset,
+  });
   if (open) return <InvoiceView id={open} onBack={() => setOpen(null)} />;
+  const invoices = data?.invoices ?? [];
   return (
     <Stack gap={12}>
       <Stack direction="horizontal" justify="space-between" align="center">
@@ -1432,7 +1459,7 @@ function InvoicesPanel() {
       </Stack>
       {error ? <Failure error={error} retry={reload} /> : null}
       <DataTable
-        rows={data?.invoices ?? []}
+        rows={invoices}
         loading={loading}
         rowKey={(row) => row.id}
         onRowClick={(row) => setOpen(row.id)}
@@ -1455,6 +1482,28 @@ function InvoicesPanel() {
           },
         ]}
       />
+      {offset > 0 || data?.nextOffset !== null ? (
+        <Stack direction="horizontal" justify="space-between" align="center" gap={8}>
+          <span className="books-muted">
+            Showing {invoices.length ? offset + 1 : 0}-{offset + invoices.length}
+          </span>
+          <Stack direction="horizontal" gap={8}>
+            <Button size="sm" variant="secondary" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}>
+              Previous
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={data?.nextOffset === null || data?.nextOffset === undefined}
+              onClick={() => {
+                if (data?.nextOffset !== null && data?.nextOffset !== undefined) setOffset(data.nextOffset);
+              }}
+            >
+              Next
+            </Button>
+          </Stack>
+        </Stack>
+      ) : null}
       {creating ? (
         <InvoiceEditor
           onClose={(id) => {
@@ -1473,6 +1522,9 @@ function SetupPanel() {
   const { act, pending, error } = useAction();
   const [draft, setDraft] = useState({ id: "", name: "", type: "expense" as AccountType, isBank: false });
   const nextYear = periods.data?.length ? Number(periods.data[periods.data.length - 1]!.endDate.slice(0, 4)) + 1 : Number(today().slice(0, 4));
+  const [yearInput, setYearInput] = useState("");
+  const chosenYear = yearInput.trim() ? Number(yearInput) : nextYear;
+  const validYear = Number.isInteger(chosenYear) && chosenYear >= 1900 && chosenYear <= 2998;
   const firstOpen = periods.data?.find((period) => period.status === "open");
   return (
     <Stack gap={16}>
@@ -1481,9 +1533,25 @@ function SetupPanel() {
         title="Fiscal periods"
         subtitle="Lock a month once it is closed. Locked months refuse new entries, reversals, and receipts. Locking cannot be undone."
         action={
-          <Button size="sm" variant="secondary" loading={pending} onClick={() => void act("addFiscalYear", { year: nextYear })}>
-            Open {nextYear}
-          </Button>
+          <Stack direction="horizontal" align="center" gap={8}>
+            <Input
+              aria-label="Fiscal year to open"
+              inputMode="numeric"
+              placeholder={String(nextYear)}
+              value={yearInput}
+              onChange={(event) => setYearInput(event.target.value)}
+              style={{ width: 96 }}
+            />
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={!validYear}
+              loading={pending}
+              onClick={() => void act("addFiscalYear", { year: chosenYear }, () => setYearInput(""))}
+            >
+              Open {validYear ? chosenYear : "year"}
+            </Button>
+          </Stack>
         }
       >
         {periods.error ? (

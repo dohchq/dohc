@@ -334,7 +334,7 @@ function LedgerView({ accountId, currency, from, to, onState }: {
         <LedgerPage
           key={`${accountId}:${currency}:${from}:${to}:${index}`}
           pageIndex={index}
-          input={{ accountId, currency, from, to, limit: 200, after }}
+          input={{ accountId, currency, from, to, limit: 50, after }}
           first={index === 0}
           onPageState={onPageState}
           onMore={

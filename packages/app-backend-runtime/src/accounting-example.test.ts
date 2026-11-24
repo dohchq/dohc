@@ -378,6 +378,7 @@ describe("accounting example on the real dataset host", () => {
         ["2026-05-30", "Signed debit", "+4.00", ""],
         ["2026-05-30", "Paren debit", "(5.50)", ""],
         ["2026-05-30", "Signed credit", "", "+12.00"],
+        ["2026-05-30", "Both sides", "100.00", "25.00"],
       ],
       { date: 0, description: 1, amount: 2, credit: 3 },
       "ymd",
@@ -388,7 +389,7 @@ describe("accounting example on the real dataset host", () => {
         ["2026-05-30", "Paren debit", "-5.50"],
         ["2026-05-30", "Signed credit", "12.00"],
       ],
-      errors: [],
+      errors: ["Row 4 has amounts in both money-in and money-out columns."],
     });
 
     const longRows = Array.from({ length: 100 }, (_, index) => [

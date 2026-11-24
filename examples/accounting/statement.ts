@@ -75,17 +75,20 @@ export function mapStatement(
   rows.forEach((row, index) => {
     const date = isoDate(row[columns.date] ?? "", order);
     const description = (row[columns.description] ?? "").trim().slice(0, 300);
-    let value: string | null;
+    let value: string | null = null;
+    let ambiguous = false;
     if (columns.credit < 0) value = amount(row[columns.amount]);
     else {
       const moneyOut = amount(row[columns.amount]);
       const moneyIn = amount(row[columns.credit]);
       const hasIn = moneyIn !== null && !isZeroAmount(moneyIn);
       const hasOut = moneyOut !== null && !isZeroAmount(moneyOut);
-      value = hasIn ? unsignedAmount(moneyIn!) : hasOut ? `-${unsignedAmount(moneyOut!)}` : null;
+      if (hasIn && hasOut) ambiguous = true;
+      else value = hasIn ? unsignedAmount(moneyIn!) : hasOut ? `-${unsignedAmount(moneyOut!)}` : null;
     }
     if (value && isZeroAmount(value)) value = null;
     if (!date) errors.push(`Row ${index + 1} has no date in the chosen format.`);
+    else if (ambiguous) errors.push(`Row ${index + 1} has amounts in both money-in and money-out columns.`);
     else if (!value) errors.push(`Row ${index + 1} needs a nonzero amount with at most two decimals.`);
     else out.push([date, description, value]);
   });
