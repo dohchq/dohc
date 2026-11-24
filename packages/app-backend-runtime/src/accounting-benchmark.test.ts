@@ -390,8 +390,8 @@ describe("accounting example at 10,000 journal lines", () => {
           ),
         };
         report.ceilings = ceilings;
-        expect(ceilings.input65KiB).toMatch(/byte bound/i);
-        expect(ceilings.jsonNodes16801).toMatch(/structural bound/i);
+        expect(ceilings.input65KiB).toMatch(/65536 bytes/);
+        expect(ceilings.jsonNodes16801).toMatch(/16384 JSON nodes/);
         expect(ceilings.bankBatch501).toBe("refusal invalid_input: Send 1 to 500 rows at a time.");
         expect(ceilings.postBatch500).toBe("accepted");
         expect(ceilings.postBatch501).toBe(
