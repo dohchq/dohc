@@ -63,7 +63,6 @@ const admit = createLiveMarkdownJournalValidator(POLICY);
 const engineReaderAdmit = createLiveMarkdownJournalValidator(POLICY, true);
 const activate = createLiveMarkdownHistoryValidator(POLICY);
 const seedsAsked = process.env.BODY_SEQUENCE_CHECK_SEEDS;
-/** How many seeds the random runs go by: 3, or the whole number `BODY_SEQUENCE_CHECK_SEEDS` asks for. */
 const SEEDS = seedsAsked === undefined ? 3 : Number(seedsAsked);
 if (!Number.isSafeInteger(SEEDS) || SEEDS < 1)
   throw new Error(
