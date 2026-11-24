@@ -585,6 +585,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
           .map(([reason, step]) => `\`${reason}\`: ${step}`)
           .join(" ") +
         " `failure` `{ word, since }` is the server's word for why a row isn't live and when that began, as on `live-start-failing` rows." +
+        " `record` is the server's record of the note: `state` (`off`, `starting`, `live`, or `stopping`), `reason` and `cause` for an off note, `generation`, `since`, and `changedBy`. `movedTo` is the path a note moved to; it can't resume until its file moves back." +
         " `deferredStop` `{ unsentEdits, editable }` is a Stop that waits for unsent edits. `quarantine` is the `recovery` of edits the server refused, with `storedOn` and `incident` as in `keptEdits`; `stopping` means a Stop waits for the server. Pass `nextCursor` as `cursor` until it is null. Owner workspace only.",
       inputSchema: { cursor: z.string().min(1).max(4096).optional() },
     },

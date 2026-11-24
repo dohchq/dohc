@@ -597,6 +597,95 @@ describe("owner live document enrollment", () => {
     ]);
   });
 
+  it("takes Resume from the server's actions when it sends its record, and keeps a row whose record this build can't read", async () => {
+    const h = harness();
+    const record = (state: string, reason: string | null = null) => ({
+      generation: 2,
+      state,
+      reason,
+      cause: null,
+      since: "2026-11-13T01:00:00.000Z",
+      changedBy: "person:owner",
+    });
+    h.request.mockImplementation(async (_credentials, path) =>
+      path.includes("retired=1")
+        ? {
+            ok: true,
+            documents: [
+              {
+                path: "stopped.md",
+                objectId: "stopped",
+                status: "retired",
+                stopped: true,
+                record: record("off", "stopped"),
+                actions: ["resume"],
+              },
+              {
+                path: "moved.md",
+                objectId: "moved",
+                status: "retired",
+                stopped: true,
+                record: record("off", "stopped"),
+                actions: [],
+                movedTo: "renamed.md",
+              },
+            ],
+            nextCursor: null,
+          }
+        : {
+            ok: true,
+            documents: [
+              {
+                path: "starting.md",
+                objectId: "starting",
+                status: "preparing",
+                record: record("starting"),
+                actions: ["stop"],
+              },
+              {
+                path: "newer.md",
+                objectId: "newer",
+                status: "paused",
+                record: record("off", "a-reason-from-a-newer-server"),
+                actions: ["stop", "resume"],
+              },
+            ],
+          },
+    );
+    await expect(
+      h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, { workspaceId }),
+    ).resolves.toEqual({
+      documents: [
+        {
+          path: "stopped.md",
+          objectId: "stopped",
+          status: "retired",
+          stopped: true,
+          record: record("off", "stopped"),
+          canResume: true,
+        },
+        {
+          path: "moved.md",
+          objectId: "moved",
+          status: "retired",
+          stopped: true,
+          record: record("off", "stopped"),
+          movedTo: "renamed.md",
+          canResume: false,
+        },
+        {
+          path: "starting.md",
+          objectId: "starting",
+          status: "preparing",
+          record: record("starting"),
+          canResume: false,
+        },
+        { path: "newer.md", objectId: "newer", status: "paused", canResume: true },
+      ],
+      nextCursor: null,
+    });
+  });
+
   it("says a note never started is too large to edit live, and its Resume asks the server for nothing", async () => {
     const h = harness();
     const notStarted = (path: string) => ({

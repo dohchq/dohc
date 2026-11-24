@@ -482,7 +482,7 @@ const LIVE_REASON_WORDS = {
 } as const;
 const LIVE_STATUS_WORDS = {
   ready: "live",
-  preparing: "preparing",
+  preparing: "starting",
   paused: "paused",
   unavailable: "unavailable",
   retired: "stopped",
@@ -497,11 +497,13 @@ function renderLiveDocuments(
     ...page.documents.map((row) =>
       [
         lineSafe(row.path),
-        row.reason
-          ? LIVE_REASON_WORDS[row.reason]
-          : row.status === "retired" && row.stopped === false
-            ? "not live"
-            : LIVE_STATUS_WORDS[row.status],
+        row.movedTo
+          ? `moved to ${lineSafe(row.movedTo)}`
+          : row.reason
+            ? LIVE_REASON_WORDS[row.reason]
+            : row.status === "retired" && row.stopped === false
+              ? "not live"
+              : LIVE_STATUS_WORDS[row.status],
         ...(row.failure ? [`server's reason ${row.failure.word} since ${row.failure.since}`] : []),
         ...(row.canResume && !row.saveOnly ? ["can resume"] : []),
         ...(row.deferredStop

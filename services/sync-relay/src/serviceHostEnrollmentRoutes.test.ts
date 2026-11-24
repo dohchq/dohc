@@ -41,6 +41,10 @@ afterEach(async () => {
   for (const close of cleanup.splice(0).reverse()) await close();
 });
 const identity = { replicationEpoch: "epoch", streamIdentity: "stream" };
+const noted = (actions: string[], state = "starting", reason: string | null = null) => ({
+  record: expect.objectContaining({ state, reason }),
+  actions,
+});
 const queue = (outboxId: string, of = identity) => ({
   workspaceId: scope.workspaceId,
   identity: of,
@@ -625,7 +629,13 @@ it("discovers rich documents in folders, skips other content, and preserves a pa
     "docs/b.md",
   ]);
   expect(await (await f.handle(f.request("DELETE", { path: binding.currentPath }))).json()).toEqual(
-    { ok: true, path: binding.currentPath, objectId: binding.objectId, status: "paused" },
+    {
+      ok: true,
+      path: binding.currentPath,
+      objectId: binding.objectId,
+      status: "paused",
+      ...noted(["stop", "resume"], "off", "paused"),
+    },
   );
   discoverServiceHostDocuments(f.storage);
   expect(f.storage.listServiceHostEnrollments()[0]!.ownerStop).toBe("pause");
@@ -682,7 +692,7 @@ it("reports ready only with completed retained activation and the current native
       "replicationEpoch",
       "streamIdentity",
     ])
-      expect(text).not.toContain(secret);
+      expect(text.replaceAll('"changedBy":"person:owner-1"', "")).not.toContain(secret);
     return JSON.parse(text).documents[0];
   };
   f.host.ready.mockReturnValue(true);
@@ -690,6 +700,7 @@ it("reports ready only with completed retained activation and the current native
     path: binding.currentPath,
     objectId: binding.objectId,
     status: "preparing",
+    ...noted(["stop"]),
   });
   retainServiceActivation(f.raw, namespace);
   expect((await state()).status).toBe("preparing");
@@ -713,6 +724,7 @@ it("reports ready only with completed retained activation and the current native
     status: "ready",
     document: { binding, relayDatabaseNamespace: namespace },
     head: 0,
+    ...noted(["stop"], "live"),
   });
   // `head` is the note's last accepted journal position; another note's edit leaves it alone.
   const accept = (deliveryId: string, objectId: string) =>
@@ -770,6 +782,7 @@ it.each([0, 1] as const)(
           status: "retired",
           stopped: true,
           reason: "conflict-parent-withheld",
+          ...noted([], "off", "stopped"),
         },
       ],
       nextCursor: null,
@@ -831,7 +844,7 @@ it("reports only a conflict-parent hold, after document state and existing block
     enrolled = f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input });
   const state = async () => (await (await f.handle(f.request())).json()).documents[0];
   const base = { path: binding.currentPath, objectId: binding.objectId };
-  expect(await state()).toEqual({ ...base, status: "preparing" });
+  expect(await state()).toEqual({ ...base, status: "preparing", ...noted(["stop"]) });
   for (const hold of [
     undefined,
     "hosted-backfill-work-waiting",
@@ -841,15 +854,16 @@ it("reports only a conflict-parent hold, after document state and existing block
   ] as const) {
     f.host.holdReason.mockReturnValue(hold);
     f.host.unavailable = true;
-    expect(await state()).toEqual({ ...base, status: "unavailable" });
+    expect(await state()).toEqual({ ...base, status: "unavailable", ...noted(["stop"]) });
     f.host.unavailable = false;
-    expect(await state()).toEqual({ ...base, status: "preparing" });
+    expect(await state()).toEqual({ ...base, status: "preparing", ...noted(["stop"]) });
   }
   f.host.holdReason.mockReturnValue("hosted-conflict-parent-withheld");
   expect(await state()).toEqual({
     ...base,
     status: "unavailable",
     reason: "conflict-parent-withheld",
+    ...noted(["stop"]),
   });
   for (const [block, reason] of [
     ["without-lineage", "live-document-without-lineage"],
@@ -858,30 +872,51 @@ it("reports only a conflict-parent hold, after document state and existing block
     ["history-over-budget", "live-history-over-budget"],
   ] as const) {
     f.host.block(enrolled.objectId, block);
-    expect(await state()).toEqual({ ...base, status: "unavailable", reason });
+    expect(await state()).toEqual({
+      ...base,
+      status: "unavailable",
+      reason,
+      ...noted(["stop", "resume"]),
+    });
   }
   f.host.unblock(enrolled);
   f.host.holdReason.mockReturnValue(undefined);
-  expect(await state()).toEqual({ ...base, status: "preparing" });
+  expect(await state()).toEqual({ ...base, status: "preparing", ...noted(["stop"]) });
   f.host.holdReason.mockReturnValue("hosted-conflict-parent-withheld");
   f.storage.setServiceHostEnrollmentEnabled({ ...f.input, enabled: false });
-  expect(await state()).toEqual({ ...base, status: "paused" });
+  expect(await state()).toEqual({
+    ...base,
+    status: "paused",
+    ...noted(["stop", "resume"], "off", "paused"),
+  });
   f.host.diverged.mockReturnValue(true);
   expect(await state()).toEqual({
     ...base,
     status: "unavailable",
     reason: "session-host-diverged",
+    ...noted([], "off", "paused"),
   });
   f.host.diverged.mockReturnValue(false);
   f.storage.ensureOwnedLiveDocument({ intent: "owner-resume", ...f.input });
   f.raw
     .prepare("UPDATE sync_relay_object_moments SET path='moved.md' WHERE workspace_id=?")
     .run(scope.workspaceId);
-  expect(await state()).toEqual({ ...base, status: "unavailable", reason: "document-unavailable" });
+  const moved = { ...noted(["stop"]), movedTo: "moved.md" };
+  expect(await state()).toEqual({
+    ...base,
+    status: "unavailable",
+    reason: "document-unavailable",
+    ...moved,
+  });
   f.raw
     .prepare("UPDATE sync_relay_workspaces SET replication_epoch='rotated' WHERE workspace_id=?")
     .run(scope.workspaceId);
-  expect(await state()).toEqual({ ...base, status: "unavailable", reason: "workspace-changed" });
+  expect(await state()).toEqual({
+    ...base,
+    status: "unavailable",
+    reason: "workspace-changed",
+    ...moved,
+  });
 });
 
 it("reports a document whose live start keeps failing, after a down host, every hold and every block", async () => {
@@ -898,9 +933,10 @@ it("reports a document whose live start keeps failing, after a down host, every 
     status: "unavailable",
     reason: "live-start-failing",
     failure: { word: "engine-refused", since: "2026-11-13T01:00:00.000Z" },
+    ...noted(["stop", "resume"]),
   });
   f.host.unavailable = true;
-  expect(await state()).toEqual({ ...base, status: "unavailable" });
+  expect(await state()).toEqual({ ...base, status: "unavailable", ...noted(["stop"]) });
   f.host.unavailable = false;
   for (const hold of [
     "hosted-backfill-work-waiting",
@@ -910,13 +946,14 @@ it("reports a document whose live start keeps failing, after a down host, every 
     "released-lineage-unsettled",
   ] as const) {
     f.host.holdReason.mockReturnValue(hold);
-    expect(await state()).toEqual({ ...base, status: "preparing" });
+    expect(await state()).toEqual({ ...base, status: "preparing", ...noted(["stop"]) });
   }
   f.host.holdReason.mockReturnValue("hosted-conflict-parent-withheld");
   expect(await state()).toEqual({
     ...base,
     status: "unavailable",
     reason: "conflict-parent-withheld",
+    ...noted(["stop"]),
   });
   f.host.holdReason.mockReturnValue(undefined);
   for (const [block, reason] of [
@@ -926,11 +963,16 @@ it("reports a document whose live start keeps failing, after a down host, every 
     ["history-over-budget", "live-history-over-budget"],
   ] as const) {
     f.host.block(enrolled.objectId, block);
-    expect(await state()).toEqual({ ...base, status: "unavailable", reason });
+    expect(await state()).toEqual({
+      ...base,
+      status: "unavailable",
+      reason,
+      ...noted(["stop", "resume"]),
+    });
   }
   f.host.unblock(enrolled);
   f.host.failing.mockReturnValue(undefined);
-  expect(await state()).toEqual({ ...base, status: "preparing" });
+  expect(await state()).toEqual({ ...base, status: "preparing", ...noted(["stop"]) });
 });
 
 function deferredBody(method: string, url: string, headers: Record<string, string>) {
@@ -1088,6 +1130,7 @@ it("retires an owner document, lists it separately, and resumes its retained ide
     status: "retired",
     acceptedCursor: 0,
     changed: true,
+    ...noted(["resume"], "off", "stopped"),
   });
   expect(await (await f.handle(f.request())).json()).toEqual({
     ok: true,
@@ -1098,7 +1141,15 @@ it("retires an owner document, lists it separately, and resumes its retained ide
   expect(f.storage.listServiceHostEnrollments()).toEqual([]);
   expect(await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).toEqual({
     ok: true,
-    documents: [{ path: first.path, objectId: first.objectId, status: "retired", stopped: true }],
+    documents: [
+      {
+        path: first.path,
+        objectId: first.objectId,
+        status: "retired",
+        stopped: true,
+        ...noted(["resume"], "off", "stopped"),
+      },
+    ],
     nextCursor: null,
   });
   // Stopped but undrained: the host's credential still reads the empty scope, and its release ends it.
@@ -1162,7 +1213,13 @@ it("serves a finished retirement's F and journal to the workspace owner alone", 
     ).documents;
   // Still retiring: the host has not published its last output.
   expect(await retired()).toEqual([
-    { path: enrolled.path, objectId: enrolled.objectId, status: "retired", stopped: true },
+    {
+      path: enrolled.path,
+      objectId: enrolled.objectId,
+      status: "retired",
+      stopped: true,
+      ...noted(["resume"], "off", "stopped"),
+    },
   ]);
   const waiting = await journal();
   expect(waiting.status).toBe(409);
@@ -1179,6 +1236,7 @@ it("serves a finished retirement's F and journal to the workspace owner alone", 
       status: "retired",
       stopped: true,
       acceptedCursor: 0,
+      ...noted(["resume"], "off", "stopped"),
     },
   ]);
   expect(await (await journal()).json()).toEqual({
@@ -1243,7 +1301,14 @@ it("drops a retired document's row once it is deleted, and lists it again when r
     .run(scope.workspaceId, deleted.path);
   moment(moved.objectId, 2, "docs/c.md");
   expect((await retired()).documents).toEqual([
-    { path: "docs/b.md", objectId: moved.objectId, status: "retired", stopped: false },
+    {
+      path: "docs/b.md",
+      objectId: moved.objectId,
+      status: "retired",
+      stopped: false,
+      ...noted([], "off", "access-ended"),
+      movedTo: "docs/c.md",
+    },
   ]);
   // Restoring from History records a moment with the path again.
   moment(deleted.objectId, 3, deleted.path);
@@ -1313,6 +1378,7 @@ it("waits to stop a hosted document until its pending edit is delivered, then re
     status: "retired",
     acceptedCursor: cursor,
     changed: true,
+    ...noted(["resume"], "off", "stopped"),
   });
   expect(retirement()).toMatchObject({ objectId: binding.objectId, acceptedThrough: cursor });
   expect(f.storage.serviceHostDocumentEnabled(enrolled)).toBe(false);
@@ -1463,7 +1529,13 @@ it("reports a Stop whose reply was lost as done and replays it without preparing
   expect(
     (await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).documents,
   ).toEqual([
-    { path: binding.currentPath, objectId: binding.objectId, status: "retired", stopped: true },
+    {
+      path: binding.currentPath,
+      objectId: binding.objectId,
+      status: "retired",
+      stopped: true,
+      ...noted(["resume"], "off", "stopped"),
+    },
   ]);
   const fence = readServiceActivationRetirement(f.storage as StorageContext, enrolled)!;
   const replayed = await stop();
@@ -1476,6 +1548,7 @@ it("reports a Stop whose reply was lost as done and replays it without preparing
     status: "retired",
     acceptedCursor: fence.acceptedThrough,
     changed: false,
+    ...noted(["resume"], "off", "stopped"),
   });
   expect(f.host.prepared).toHaveLength(1);
   expect(readServiceActivationRetirement(f.storage as StorageContext, enrolled)).toEqual(fence);
@@ -1526,6 +1599,7 @@ it("answers a note whose start failed with why, keeps it off on the owner's open
       status: "unavailable",
       reason,
       changed: false,
+      ...noted(["resume"], "off", "start-failed"),
     });
     expect(
       f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath),
@@ -1535,13 +1609,101 @@ it("answers a note whose start failed with why, keeps it off on the owner's open
     });
     expect(await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).toEqual({
       ok: true,
-      documents: [{ ...base, status: "retired", stopped: false, reason }],
+      documents: [
+        {
+          ...base,
+          status: "retired",
+          stopped: false,
+          reason,
+          ...noted(["resume"], "off", "start-failed"),
+        },
+      ],
       nextCursor: null,
     });
     const resumed = await f.handle(f.request("POST", { path: binding.currentPath }));
-    expect(await resumed.json()).toEqual({ ok: true, ...base, status: "preparing", changed: true });
+    expect(await resumed.json()).toEqual({
+      ok: true,
+      ...base,
+      status: "preparing",
+      changed: true,
+      ...noted(["stop"]),
+    });
     expect(
       f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath),
     ).toMatchObject({ retired: false, note: { state: "starting", reason: null, generation: 2 } });
   }
+});
+
+it("answers the owner with each note's record and the actions that work, and a moved note with its path and no Resume", async () => {
+  const f = await fixture(),
+    enrolled = f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input });
+  const base = { path: binding.currentPath, objectId: binding.objectId };
+  const record = (state: string, reason: string | null) => ({
+    generation: 1,
+    state,
+    reason,
+    cause: null,
+    since: expect.stringMatching(/^\d{4}-\d\d-\d\dT.*Z$/),
+    changedBy: "person:owner-1",
+  });
+  expect(await (await f.handle(f.request())).json()).toEqual({
+    ok: true,
+    diverged: false,
+    documents: [
+      { ...base, status: "preparing", record: record("starting", null), actions: ["stop"] },
+    ],
+  });
+  expect(enrolled.note.sinceMs).toBe(10);
+  const stop = await f.handle(
+    f.request("DELETE", {
+      path: binding.currentPath,
+      retire: true,
+      restoreFenceGeneration: binding.restoreFenceGeneration,
+    }),
+  );
+  expect(await stop.json()).toEqual({
+    ok: true,
+    ...base,
+    status: "retired",
+    acceptedCursor: 0,
+    changed: true,
+    record: record("off", "stopped"),
+    actions: ["resume"],
+  });
+  const open = await f.handle(f.request("POST", { path: binding.currentPath, open: true }));
+  expect(await open.json()).toEqual({
+    ok: true,
+    ...base,
+    changed: false,
+    status: "paused",
+    record: record("off", "stopped"),
+    actions: ["resume"],
+  });
+  f.raw
+    .prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+      VALUES (?,?,2,'moment-renamed','main','docs/renamed.md',?,'text',1,40)`)
+    .run(scope.workspaceId, binding.objectId, "b".repeat(64));
+  const moved = { record: record("off", "stopped"), actions: [], movedTo: "docs/renamed.md" };
+  expect(await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).toEqual({
+    ok: true,
+    documents: [{ ...base, status: "retired", stopped: true, ...moved }],
+    nextCursor: null,
+  });
+  for (const path of [binding.currentPath, "docs/renamed.md"]) {
+    const resume = await f.handle(f.request("POST", { path }));
+    expect(resume.status).toBe(409);
+    expect(await resume.json()).toMatchObject({ ok: false, code: "conflict", ...base, ...moved });
+  }
+  f.raw
+    .prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+      VALUES (?,?,3,'moment-back','main',?,?,'text',1,50)`)
+    .run(scope.workspaceId, binding.objectId, binding.currentPath, "b".repeat(64));
+  const back = await f.handle(f.request("POST", { path: binding.currentPath }));
+  expect(back.status).toBe(202);
+  expect(await back.json()).toMatchObject({
+    ...base,
+    changed: true,
+    record: { generation: 2, state: "starting", reason: null },
+    actions: ["stop"],
+  });
 });

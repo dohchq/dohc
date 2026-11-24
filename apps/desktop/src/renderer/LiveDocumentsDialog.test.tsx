@@ -454,6 +454,7 @@ describe("LiveDocumentsDialog", () => {
           canResume: false,
         }),
         row("docs/stopped-gone.md", { status: "retired" }),
+        row("docs/renamed.md", { status: "retired", movedTo: "docs/new name.md" }),
       ]),
     );
     render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
@@ -464,7 +465,7 @@ describe("LiveDocumentsDialog", () => {
       .map((element) => element.children[1]?.textContent);
     expect(labels).toEqual([
       "Live",
-      "Preparing",
+      "Starting",
       "Paused",
       "Paused",
       "File moved or removed",
@@ -477,6 +478,7 @@ describe("LiveDocumentsDialog", () => {
       "Cannot resume",
       "Stopped",
       "Stopped",
+      "Moved to docs/new name.md",
     ]);
     const edited =
       "The server has not applied an edit to this document. Resume live editing to try again.";
@@ -517,6 +519,7 @@ describe("LiveDocumentsDialog", () => {
     expect(actions("docs/unopened.md")).toEqual(["Resume live editing", "Stop live editing"]);
     expect(actions("docs/stopped.md")).toEqual(["Resume live editing"]);
     expect(actions("docs/stopped-gone.md")).toEqual([]);
+    expect(actions("docs/renamed.md")).toEqual([]);
   });
 
   it("makes a copy of a held file, once at a time, says what it leaves out, and offers none once it stopped", async () => {

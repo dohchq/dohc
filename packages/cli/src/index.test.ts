@@ -95,6 +95,22 @@ it("lists live documents with each state and reason, and pages with the list's c
         canResume: false,
         stopped: false,
       },
+      {
+        path: "renamed.md",
+        objectId: "object-renamed",
+        status: "retired",
+        canResume: false,
+        stopped: true,
+        record: {
+          generation: 1,
+          state: "off",
+          reason: "stopped",
+          cause: null,
+          since: "2026-11-13T01:00:00.000Z",
+          changedBy: "person:owner",
+        },
+        movedTo: "notes/renamed.md",
+      },
     ],
   };
   const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async () => live);
@@ -110,6 +126,7 @@ it("lists live documents with each state and reason, and pages with the list's c
         "failing.md · can't start · server's reason engine-refused since 2026-11-13T01:00:00.000Z · can resume",
         "old.md · stopped · can resume · Stop waits for 1 unsent edit",
         "ended.md · not live",
+        "renamed.md · moved to notes/renamed.md",
         "More documents; use --cursor notes/old.md",
       ].join("\n") + "\n",
     stderr: "",

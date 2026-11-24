@@ -90,7 +90,7 @@ function liveDeliveryLabel(
   delivery: NonNullable<SyncStatusResult["ownerLiveDelivery"]>,
   reason: SyncStatusResult["ownerLiveDeliveryReason"],
 ): string {
-  if (delivery === "preparing") return "Preparing live editing";
+  if (delivery === "preparing") return "Starting live editing";
   if (delivery === "active") return "Live editing active";
   // A named reason is a state that stays until someone acts on it; an
   // unnamed one is a connection dohc is still dialling.

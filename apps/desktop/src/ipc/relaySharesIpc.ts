@@ -84,16 +84,22 @@ import { isSharedWithMePath } from "@dohc/workspace-core";
 import type { createPresencePollRegistry } from "../collab/presencePollRegistry";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/change-author";
 import { liveChangeOutcome, type LiveDocumentStatus } from "@dohc/workspace-contracts/live-changes";
+import { LiveNoteAction } from "@dohc/workspace-contracts/live-note";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
 
 const RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS = 35_000;
-const liveDocumentStatus = OwnerLiveDocument.omit({ canResume: true }).strip();
+const liveDocumentStatus = OwnerLiveDocument.omit({ canResume: true })
+  .extend({ actions: z.array(LiveNoteAction).optional() })
+  .strip();
 const rawLiveDocuments = z
   .array(
     liveDocumentStatus.extend({
       status: z.string(),
       reason: z.string().optional(),
       failure: z.unknown().optional(),
+      record: z.unknown().optional(),
+      actions: z.unknown().optional(),
+      movedTo: z.unknown().optional(),
     }),
   )
   .max(64);
@@ -104,9 +110,9 @@ function knownLiveDocuments<Row extends z.ZodType>(
   return rows.flatMap((row) => {
     const parsed = schema.safeParse(row);
     if (parsed.success) return [parsed.data];
-    // A reason this build doesn't know, from a newer server, leaves the row by its status alone, so the row never disappears.
-    const { reason, failure, ...generic } = row;
-    const known = reason === undefined ? parsed : schema.safeParse(generic);
+    // A reason or record this build doesn't know, from a newer server, leaves the row by its status alone, so the row never disappears.
+    const { reason, failure, record, actions, movedTo, ...generic } = row;
+    const known = schema.safeParse(generic);
     return known.success ? [known.data] : [];
   });
 }
@@ -289,7 +295,12 @@ function liveStopWaits(refusal: LiveStopRefusal): boolean {
   );
 }
 
-function ownerLiveDocumentCanResume(document: { reason?: string; status: string }): boolean {
+function ownerLiveDocumentCanResume(document: {
+  reason?: string;
+  status: string;
+  actions?: readonly LiveNoteAction[];
+}): boolean {
+  if (document.actions) return document.actions.includes("resume");
   return (
     document.reason === "session-host-refused" ||
     document.reason === "live-document-without-lineage" ||
@@ -919,12 +930,9 @@ export function createOwnerLiveDocumentActions<
         // edit can apply. For one whose start keeps failing, or whose history is
         // too long to check, Resume tries now.
         const documents = new Map(
-          [...stopped.documents, ...current.documents].map((document) => [
+          [...stopped.documents, ...current.documents].map(({ actions, ...document }) => [
             document.path,
-            {
-              ...document,
-              canResume: ownerLiveDocumentCanResume(document),
-            },
+            { ...document, canResume: ownerLiveDocumentCanResume({ ...document, actions }) },
           ]),
         );
         // A deferred Stop finishes through Resume, unless the server's copy diverged: then Resume cannot work.
@@ -947,6 +955,7 @@ export function createOwnerLiveDocumentActions<
             (stop) => stop.document.objectId === row.objectId,
           )?.deferred;
           const startable =
+            !row.movedTo &&
             row.reason !== "session-host-diverged" &&
             row.reason !== "conflict-parent-withheld" &&
             row.reason !== "live-document-too-large";

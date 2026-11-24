@@ -9,6 +9,7 @@ import type { workspaceSecretsOperations } from "./workspaceSecretsOperations";
 import type { incomingWebhooksOperations } from "./incomingWebhooksOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { OutsideChange } from "@dohc/workspace-contracts/outside-changes";
+import { LiveNoteRecord } from "@dohc/workspace-contracts/live-note";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
 import { shareCopyOperations } from "./shareCopyOperations";
 export type { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
@@ -651,6 +652,8 @@ export const OwnerLiveDocument = z
       .strict()
       .optional(),
     canResume: z.boolean(),
+    record: LiveNoteRecord.optional(),
+    movedTo: SAFE_RELATIVE_PATH.optional(),
     // A retired row's: its owner's Pause or Stop retired it. One the server released without either goes live again when its owner opens it.
     stopped: z.boolean().optional(),
     deferredStop: z

@@ -7,6 +7,7 @@ import {
 import { DRAIN_TIMEOUT_HEADER, readBoundedJson } from "@dohc/service-http";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
+import type { LiveNoteAction, LiveNoteRecord } from "@dohc/workspace-contracts/live-note";
 import type { SyncRelayStorage } from "./storage";
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 import type {
@@ -407,6 +408,13 @@ const START_FAILED: Readonly<Record<LiveNoteStartFailure, string>> = {
   "no-lineage": "live-document-without-lineage",
   failing: "session-host-refused",
 };
+const RESUMABLE = new Set([
+  "session-host-refused",
+  "live-document-without-lineage",
+  "live-edit-unadmitted",
+  "live-history-over-budget",
+  "live-start-failing",
+]);
 export function serviceHostReadiness(options: {
   storage: SyncRelayStorage;
   history: LiveJournalHistoryAuthority;
@@ -535,6 +543,31 @@ export function createServiceHostEnrollmentRoutes(options: {
       },
     };
   }
+  function answered<Document extends { path: string; reason?: string | undefined }>(
+    row: ServiceHostEnrollment,
+    document: Document,
+  ) {
+    const { sinceMs, ...stored } = row.note;
+    const at = storage.objectMoment({
+      workspaceId: row.workspaceId,
+      objectId: row.objectId,
+      versionId: "main",
+    })?.path;
+    const moved = at !== row.path;
+    const record: LiveNoteRecord = { ...stored, since: new Date(sinceMs).toISOString() };
+    const actions: LiveNoteAction[] = [];
+    if (!row.retired && !diverged(row)) actions.push("stop");
+    if (
+      !moved &&
+      !changed(row) &&
+      !diverged(row) &&
+      (row.note.state === "off"
+        ? document.reason !== "conflict-parent-withheld"
+        : RESUMABLE.has(document.reason ?? ""))
+    )
+      actions.push("resume");
+    return { ...document, record, actions, ...(moved && at ? { movedTo: at } : {}) };
+  }
   const response = (body: unknown, status = 200) =>
     Response.json(body, { status, headers: { "cache-control": "private, no-store" } });
   return async (request: Request): Promise<Response> => {
@@ -646,23 +679,26 @@ export function createServiceHostEnrollmentRoutes(options: {
         // `stopped`: the owner's Pause or Stop retired it, so only their Resume hosts it again. Any open re-enrolls one retired without one.
         return response({
           ok: true,
-          documents: page.documents.map((row) => ({
-            path: row.path,
-            objectId: row.objectId,
-            status: "retired",
-            stopped: row.ownerStop !== null,
-            // F once the retirement finished, the journal cursor the owner's desktop lets go at.
-            ...((cursor) => (cursor === null ? {} : { acceptedCursor: cursor }))(
-              storage.retiredAcceptedCursor(workspaceId, row.objectId),
-            ),
-            ...(diverged(row)
-              ? { reason: "session-host-diverged" }
+          documents: page.documents.map((row) => {
+            const reason = diverged(row)
+              ? "session-host-diverged"
               : row.note.reason === "start-failed"
-                ? { reason: START_FAILED[row.note.cause!] }
+                ? START_FAILED[row.note.cause!]
                 : !changed(row) && storage.hasServiceHostConflictEffect(row)
-                  ? { reason: "conflict-parent-withheld" }
-                  : {}),
-          })),
+                  ? "conflict-parent-withheld"
+                  : undefined;
+            return answered(row, {
+              path: row.path,
+              objectId: row.objectId,
+              status: "retired",
+              stopped: row.ownerStop !== null,
+              // F once the retirement finished, the journal cursor the owner's desktop lets go at.
+              ...((cursor) => (cursor === null ? {} : { acceptedCursor: cursor }))(
+                storage.retiredAcceptedCursor(workspaceId, row.objectId),
+              ),
+              ...(reason ? { reason } : {}),
+            });
+          }),
           nextCursor: page.nextCursor,
         });
       }
@@ -690,12 +726,15 @@ export function createServiceHostEnrollmentRoutes(options: {
           // note it has already applied. A position, never content; only the owner reads this list.
           documents: storage.listServiceHostEnrollments(workspaceId).map((row) => {
             const document = state(row);
-            return document.status === "ready"
-              ? {
-                  ...document,
-                  head: storage.automationRecordJournalCursor(document.document.binding),
-                }
-              : document;
+            return answered(
+              row,
+              document.status === "ready"
+                ? {
+                    ...document,
+                    head: storage.automationRecordJournalCursor(document.document.binding),
+                  }
+                : document,
+            );
           }),
           ...(kept.keptEdits.length
             ? { keptEdits: kept.keptEdits.map((row) => keptView(row, identity)) }
@@ -803,15 +842,18 @@ export function createServiceHostEnrollmentRoutes(options: {
         host.reconcile();
         return response({
           ok: true,
-          ...(input.retire === true
-            ? {
-                path: row.path,
-                objectId: row.objectId,
-                status: "retired",
-                acceptedCursor: row.acceptedCursor,
-                changed: row.changed === true,
-              }
-            : state(row)),
+          ...answered(
+            row,
+            input.retire === true
+              ? {
+                  path: row.path,
+                  objectId: row.objectId,
+                  status: "retired",
+                  acceptedCursor: row.acceptedCursor,
+                  changed: row.changed === true,
+                }
+              : state(row),
+          ),
         });
       }
       // `{shareId}` enrolls the share's documents, and with `retry` only those that have no row. `{path}` is the owner's
@@ -847,7 +889,7 @@ export function createServiceHostEnrollmentRoutes(options: {
           })),
         );
         host.reconcile();
-        const documents = rows.map(state);
+        const documents = rows.map((row) => answered(row, state(row)));
         return response(
           { ok: true, documents },
           documents.every((row) => row.status === "ready") ? 200 : 202,
@@ -873,26 +915,45 @@ export function createServiceHostEnrollmentRoutes(options: {
           row = storage.ensureOwnedLiveDocument({ ...common, intent: "owner-open" });
         } catch (error) {
           if (!(error instanceof LiveHostingRefusal)) throw error;
-          return response(
-            {
-              ok: true,
-              path: retained?.path ?? path,
-              ...(retained ? { objectId: retained.objectId } : {}),
-              changed: false,
-              ...(error.reason === "paused"
-                ? { status: "paused" }
-                : { status: "unavailable", reason: error.reason }),
-            },
-            202,
-          );
+          const refusal = {
+            path: retained?.path ?? path,
+            ...(retained ? { objectId: retained.objectId } : {}),
+            changed: false,
+            ...(error.reason === "paused"
+              ? { status: "paused" }
+              : { status: "unavailable", reason: error.reason }),
+          };
+          return response({ ok: true, ...(retained ? answered(retained, refusal) : refusal) }, 202);
         }
       } else {
         const held = retained?.ownerUserId === actor.userId ? heldActivation(retained) : undefined;
-        row = storage.ensureOwnedLiveDocument({
-          ...common,
-          intent: "owner-resume",
-          ...(held ? { held } : {}),
-        });
+        try {
+          row = storage.ensureOwnedLiveDocument({
+            ...common,
+            intent: "owner-resume",
+            ...(held ? { held } : {}),
+          });
+        } catch (error) {
+          const objectId = storage.objectIdAtPathInVersion({
+            workspaceId,
+            versionId: "main",
+            path,
+          });
+          const note =
+            retained ??
+            (objectId === undefined
+              ? null
+              : storage.readServiceHostEnrollmentByObjectId(workspaceId, objectId));
+          const moved =
+            error instanceof RelayError && error.code === "conflict" && note
+              ? answered(note, { path: note.path, objectId: note.objectId })
+              : undefined;
+          if (!moved?.movedTo) throw error;
+          return response(
+            { ok: false, code: "conflict", error: (error as Error).message, ...moved },
+            409,
+          );
+        }
       }
       // A Resume gives a blocked document one more attempt in the store it has. It changed live editing
       // when it enabled the document or ended that block; a document already hosted is unchanged. An open unblocks nothing.
@@ -900,7 +961,7 @@ export function createServiceHostEnrollmentRoutes(options: {
       host.reconcile();
       const document = state(row);
       return response(
-        { ok: true, ...document, changed: enabled || unblocked },
+        { ok: true, ...answered(row, document), changed: enabled || unblocked },
         document.status === "ready" ? 200 : 202,
       );
     } catch (error) {
