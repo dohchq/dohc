@@ -85,11 +85,11 @@ pub(super) fn settled_base(
         || binding.main_version_id != key.version_id
         || binding.object_id != key.object_id
         || binding.lineage_claim_id != lineage
-        || binding.current_path != path
         || !super::settlement::moment_renames_from_in(
             conn,
             key,
             path,
+            &binding.current_path,
             source_digest,
             moment,
             &settled_moment,

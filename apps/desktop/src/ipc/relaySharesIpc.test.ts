@@ -746,6 +746,53 @@ describe("owner live document enrollment", () => {
     expect(h.request.mock.calls.map((call) => call[2]?.method ?? "GET")).toEqual(["GET", "GET"]);
   });
 
+  it("resumes a moved stopped note when the server responds with its new path", async () => {
+    const h = harness();
+    h.request.mockImplementation(async (_credentials, path, init) =>
+      init?.method === "POST"
+        ? {
+            ok: true,
+            objectId: "moved-obj",
+            path: "docs/renamed.md",
+            status: "preparing",
+            changed: true,
+          }
+        : path.includes("retired=1")
+          ? {
+              ok: true,
+              documents: [
+                {
+                  path: "docs/old.md",
+                  objectId: "moved-obj",
+                  status: "retired",
+                  stopped: true,
+                  movedTo: "docs/renamed.md",
+                  actions: ["resume"],
+                },
+              ],
+              nextCursor: null,
+            }
+          : { ok: true, documents: [] },
+    );
+    h.liveDocument.mockResolvedValue({
+      mainVersionId: "main",
+      objectId: "moved-obj",
+      currentPath: "docs/renamed.md",
+    });
+    await expect(
+      h.invoke(liveNoteOperations.resumeOwnerLiveDocument.channel, {
+        workspaceId,
+        path: "docs/old.md",
+      }),
+    ).resolves.toEqual({});
+    expect(h.ownerLiveStop).toHaveBeenCalledWith(
+      h.workspace,
+      "clear",
+      "docs/renamed.md",
+      expect.objectContaining({ objectId: "moved-obj", currentPath: "docs/renamed.md" }),
+    );
+  });
+
   describe("edits the server refused", () => {
     const released =
       (

@@ -2177,7 +2177,7 @@ fn require_historical(
 /// the walk reached; any other move ends the proof. The walk ends once it has
 /// proved each path in `needed`, and refuses rather than read more than
 /// `max_events` renames.
-fn renamed_from(
+pub fn renamed_from(
     conn: &Connection,
     key: &DocKey,
     to: &str,
@@ -2189,11 +2189,15 @@ fn renamed_from(
         return Ok(proved);
     }
     let mut query = conn
-        .prepare(
-            "SELECT payload_before_path,path,after_content_kind='text' AND after_blob_sha256 IS before_blob_sha256
-             FROM moments WHERE workspace_id=?1 AND object_id=?2 AND version_id=?3 AND operation='rename'
-             ORDER BY moment_order DESC LIMIT ?4",
-        )
+        .prepare(concat!(
+            "SELECT COALESCE(before_path,payload_before_path),path,COALESCE(payload_after_path,path),\
+             COALESCE(before_present=2 AND before_content_kind='text' AND after_content_kind='text' \
+             AND before_blob_sha256 IS NOT NULL AND after_blob_sha256 IS before_blob_sha256,0) \
+             FROM moments WHERE workspace_id=?1 AND object_id=?2 AND version_id=?3 \
+             AND COALESCE(sync_record_only,0)=0 AND ",
+            dohc_engine_domain::exclude_capture_recovery_sql!(),
+            " AND operation='rename' ORDER BY moment_order DESC LIMIT ?4"
+        ))
         .map_err(read_sql)?;
     let limit = i64::try_from(max_events)
         .map_err(|_| ApplicationError::Corrupt)?
@@ -2212,12 +2216,13 @@ fn renamed_from(
         if read > max_events {
             return Err(over_budget());
         }
-        let (before, after, kept): (Option<String>, String, bool) = (
+        let (before, after, payload_after, kept): (Option<String>, String, String, bool) = (
             row.get(0).map_err(read_sql)?,
             row.get(1).map_err(read_sql)?,
             row.get(2).map_err(read_sql)?,
+            row.get(3).map_err(read_sql)?,
         );
-        let Some(before) = before.filter(|_| kept && after == path) else {
+        let Some(before) = before.filter(|_| kept && after == path && payload_after == path) else {
             break;
         };
         if needed.contains(before.as_str()) && proved.insert(before.clone()) {

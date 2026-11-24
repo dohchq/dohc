@@ -328,7 +328,7 @@ fn publication_source_before_in_tx(
     let b = &record.binding;
     if record.previous_cursor == 0
         && let origin_record::OriginRecord::Bootstrap { source, .. } =
-            origin_record::read(tx, &record.relay_database_namespace, b)?
+            origin_record::read_for_settlement(tx, &record.relay_database_namespace, b)?
     {
         source.validate().map_err(SyncError::corrupt)?;
         return tx.query_row(
@@ -455,6 +455,7 @@ fn publication_source_before_in_tx(
                 tx,
                 &key,
                 &b.current_path,
+                &b.current_path,
                 next_digest,
                 next_moment,
                 prev_moment,
@@ -484,8 +485,15 @@ fn imported_event_zero_before_in_tx(
         .map_err(SyncError::corrupt)?;
     let base: BaseRecord = serde_json::from_str(&json).map_err(SyncError::corrupt)?;
     base.validate(&b.workspace_id)?;
+    let base_binding = &base.checkpoint.binding;
+    let moved_base = base_binding.workspace_id == b.workspace_id
+        && base_binding.main_version_id == b.main_version_id
+        && base_binding.object_id == b.object_id
+        && base_binding.lineage_claim_id == b.lineage_claim_id
+        && base_binding.restore_fence_generation == b.restore_fence_generation
+        && base_binding.current_path != b.current_path;
     if base.relay_database_namespace != record.relay_database_namespace
-        || base.checkpoint.binding != *b
+        || (*base_binding != *b && !moved_base)
     {
         return Err(invalid("settlement event zero binding differs"));
     }
@@ -499,7 +507,7 @@ fn imported_event_zero_before_in_tx(
     if !imported {
         return Ok(None);
     }
-    if disposition != "applied" || path != b.current_path {
+    if disposition != "applied" || path != base_binding.current_path {
         return Err(invalid("settlement event zero was not applied at its path"));
     }
     require_base_blob(tx, &base)?;
@@ -520,17 +528,53 @@ fn imported_event_zero_before_in_tx(
         .preserved_markdown_source(&projected)
         .unwrap_or(projected);
     let digest = hex_sha256(markdown.as_bytes());
-    // Base import may reuse an already matching file head rather than create
-    // a projection moment. Find that artifact within this exact object.
-    tx.query_row(
-        concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
-         FROM moments m JOIN blobs t ON t.sha256=m.after_blob_sha256
-         WHERE ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4
-           AND m.after_content_kind='text' AND m.after_blob_sha256=?5 AND t.byte_length=?6
-         ORDER BY m.moment_order LIMIT 1"),
-        params![b.workspace_id,b.main_version_id,b.object_id,b.current_path,digest,markdown.len() as i64],
-        portable_before_from_row,
-    ).map(Some).map_err(SyncError::corrupt)
+    if !moved_base {
+        return tx.query_row(
+            concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
+             FROM moments m JOIN blobs t ON t.sha256=m.after_blob_sha256
+             WHERE ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4
+               AND m.after_content_kind='text' AND m.after_blob_sha256=?5 AND t.byte_length=?6
+             ORDER BY m.moment_order LIMIT 1"),
+            params![b.workspace_id,b.main_version_id,b.object_id,b.current_path,digest,markdown.len() as i64],
+            portable_before_from_row,
+        ).map(Some).map_err(SyncError::corrupt);
+    }
+    let _origin_moment: String = tx
+        .query_row(
+            concat!(
+                "SELECT m.moment_id FROM moments m JOIN blobs t ON t.sha256=m.after_blob_sha256
+             WHERE ",
+                dohc_engine_domain::exclude_capture_recovery_sql!("m"),
+                " AND m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4
+               AND m.after_content_kind='text' AND m.after_blob_sha256=?5 AND t.byte_length=?6
+             ORDER BY m.moment_order LIMIT 1"
+            ),
+            params![
+                b.workspace_id,
+                b.main_version_id,
+                b.object_id,
+                base_binding.current_path,
+                digest,
+                markdown.len() as i64
+            ],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)
+        .map_err(SyncError::corrupt)?;
+    let needed = std::collections::HashSet::from([base_binding.current_path.as_str()]);
+    let proved = dohc_engine_collab::live_update_application::paths_renamed_from_in(
+        tx,
+        &key,
+        &b.current_path,
+        &needed,
+        1024,
+    )
+    .map_err(SyncError::corrupt)?;
+    if proved.contains(&base_binding.current_path) {
+        return Ok(None);
+    }
+    Err(SyncError::corrupt(rusqlite::Error::QueryReturnedNoRows))
 }
 
 pub(super) fn apply_settlement_envelope(
@@ -1172,5 +1216,356 @@ mod tests {
                 reason: "settlement follows activations with different sources",
             })
         ));
+    }
+
+    #[test]
+    fn a_cursor_zero_settlement_follows_a_moved_owner_activation() {
+        use dohc_engine_domain::RenameTextFile;
+
+        let (_scratch, mut store, original_binding) = cursor_zero_store(&[2]);
+        let body = SOURCES[2].1;
+        let digest = hex_sha256(body.as_bytes());
+        VersionedTextStore::new(&mut store)
+            .rename_text_file(
+                &RenameTextFile {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    from_path: "note.md".into(),
+                    to_path: "moved.md".into(),
+                    moment_id: "rename-to-moved".into(),
+                    request_id: None,
+                    metadata_origin: "user".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 10,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        let moved_binding = LiveObjectBinding {
+            current_path: "moved.md".into(),
+            selector_paths: vec!["moved.md".into()],
+            ..original_binding.clone()
+        };
+        let moved_json = serde_json::to_string(&moved_binding).unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE live_owner_activations SET released_at_ms=20,released_restore_generation=0,\
+                     released_accepted_cursor=terminal_cursor,carried_manifest_json='[]',\
+                     released_boundary_json=json_object('terminalReceipt',json(terminal_receipt_json),\
+                     'eventCount',0,'historyEvidenceDigest',evidence_digest) \
+                     WHERE activation_id='activation-0'",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "INSERT INTO live_owner_activations (relay_database_namespace,activation_id,\
+                     workspace_id,main_version_id,object_id,lineage_claim_id,origin_adoption_id,\
+                     predecessor_activation_id,binding_json,source_moment_id,source_digest,\
+                     source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,\
+                     host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,\
+                     local_ydoc_sequence,terminal_cursor,terminal_receipt_json,max_pending_bytes,\
+                     max_pending_age_ms) VALUES ('relay','activation-1','ws','main','object',?1,\
+                     'activation-0','activation-0',?2,'rename-to-moved',?3,?4,1,1,'{}',\
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',\
+                     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',0,1,0,\
+                     'null',1,1)",
+                    params![
+                        moved_binding.lineage_claim_id,
+                        moved_json,
+                        digest,
+                        body.len() as i64
+                    ],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        let emitted = before_payload(&mut store, &moved_binding, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(emitted["beforeLatestMomentId"], "rename-to-moved");
+        assert_eq!(emitted["beforePath"], "moved.md");
+        assert_eq!(emitted["payloadBeforePath"], "moved.md");
+        assert_eq!(emitted["payloadBeforeBlobSha256"], digest);
+
+        let (_scratch_imported, mut imported_store, imported_binding) = cursor_zero_store(&[2]);
+        let base_text: String = imported_store
+            .read_with(|conn| {
+                let bytes: Vec<u8> = conn
+                    .query_row(
+                        "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+                        [&imported_binding.lineage_claim_id],
+                        |r| r.get(0),
+                    )
+                    .map_err(SyncError::corrupt)?;
+                let doc = dohc_engine_collab::Ydoc::wire();
+                doc.apply(&bytes).map_err(SyncError::corrupt)?;
+                let projected = doc
+                    .project(ContentKind::Richdoc)
+                    .map_err(SyncError::corrupt)?
+                    .content;
+                Ok::<_, SyncError>(
+                    doc.preserved_markdown_source(&projected)
+                        .unwrap_or(projected),
+                )
+            })
+            .unwrap();
+        let base_digest = hex_sha256(base_text.as_bytes());
+        let base_len = base_text.len() as i64;
+        VersionedTextStore::new(&mut imported_store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    object_id: "object".into(),
+                    path: "note.md".into(),
+                    text: base_text,
+                    moment_id: "imported-base-moment".into(),
+                    request_id: None,
+                    metadata_origin: "sync".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 11,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        VersionedTextStore::new(&mut imported_store)
+            .rename_text_file(
+                &RenameTextFile {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    from_path: "note.md".into(),
+                    to_path: "moved.md".into(),
+                    moment_id: "rename-imported-to-moved".into(),
+                    request_id: None,
+                    metadata_origin: "sync".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 12,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        imported_store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE replication_log SET imported=1,apply_disposition='applied' \
+                     WHERE workspace_id='ws' AND op_kind='ydoc.update'",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "UPDATE live_owner_activations SET released_at_ms=20,released_restore_generation=0,\
+                     released_accepted_cursor=terminal_cursor,carried_manifest_json='[]',\
+                     released_boundary_json=json_object('terminalReceipt',json(terminal_receipt_json),\
+                     'eventCount',0,'historyEvidenceDigest',evidence_digest) \
+                     WHERE activation_id='activation-0'",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "INSERT INTO live_owner_activations (relay_database_namespace,activation_id,\
+                     workspace_id,main_version_id,object_id,lineage_claim_id,origin_adoption_id,\
+                     predecessor_activation_id,binding_json,source_moment_id,source_digest,\
+                     source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,\
+                     host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,\
+                     local_ydoc_sequence,terminal_cursor,terminal_receipt_json,max_pending_bytes,\
+                     max_pending_age_ms) VALUES ('relay','activation-1','ws','main','object',?1,\
+                     'activation-0','activation-0',?2,'rename-imported-to-moved',?3,?4,1,1,'{}',\
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',\
+                     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',0,1,0,\
+                     'null',1,1)",
+                    params![
+                        moved_binding.lineage_claim_id,
+                        moved_json,
+                        base_digest,
+                        base_len
+                    ],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        let imported_emitted = before_payload(&mut imported_store, &moved_binding, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            imported_emitted["beforeLatestMomentId"],
+            "rename-imported-to-moved"
+        );
+        assert_eq!(imported_emitted["beforePath"], "moved.md");
+        assert_eq!(imported_emitted["payloadBeforeBlobSha256"], base_digest);
+
+        let (_scratch_edited, mut edited_store, edited_binding) = cursor_zero_store(&[2]);
+        let edited_text = "Edited before move.";
+        let edited_digest = hex_sha256(edited_text.as_bytes());
+        let base_text_edited: String = edited_store
+            .read_with(|conn| {
+                let bytes: Vec<u8> = conn
+                    .query_row(
+                        "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+                        [&edited_binding.lineage_claim_id],
+                        |r| r.get(0),
+                    )
+                    .map_err(SyncError::corrupt)?;
+                let doc = dohc_engine_collab::Ydoc::wire();
+                doc.apply(&bytes).map_err(SyncError::corrupt)?;
+                let projected = doc
+                    .project(ContentKind::Richdoc)
+                    .map_err(SyncError::corrupt)?
+                    .content;
+                Ok::<_, SyncError>(
+                    doc.preserved_markdown_source(&projected)
+                        .unwrap_or(projected),
+                )
+            })
+            .unwrap();
+        VersionedTextStore::new(&mut edited_store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    object_id: "object".into(),
+                    path: "note.md".into(),
+                    text: base_text_edited,
+                    moment_id: "imported-origin-moment".into(),
+                    request_id: None,
+                    metadata_origin: "sync".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 11,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        VersionedTextStore::new(&mut edited_store)
+            .rename_text_file(
+                &RenameTextFile {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    from_path: "note.md".into(),
+                    to_path: "moved.md".into(),
+                    moment_id: "rename-cycle-out".into(),
+                    request_id: None,
+                    metadata_origin: "user".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 12,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        VersionedTextStore::new(&mut edited_store)
+            .rename_text_file(
+                &RenameTextFile {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    from_path: "moved.md".into(),
+                    to_path: "note.md".into(),
+                    moment_id: "rename-cycle-back".into(),
+                    request_id: None,
+                    metadata_origin: "user".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 13,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        VersionedTextStore::new(&mut edited_store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    object_id: "object".into(),
+                    path: "note.md".into(),
+                    text: edited_text.into(),
+                    moment_id: "ordinary-edit-before-move".into(),
+                    request_id: None,
+                    metadata_origin: "user".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 14,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        VersionedTextStore::new(&mut edited_store)
+            .rename_text_file(
+                &RenameTextFile {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    from_path: "note.md".into(),
+                    to_path: "moved.md".into(),
+                    moment_id: "rename-edited-to-moved".into(),
+                    request_id: None,
+                    metadata_origin: "user".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 15,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        edited_store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE replication_log SET imported=1,apply_disposition='applied' \
+                     WHERE workspace_id='ws' AND op_kind='ydoc.update'",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "UPDATE live_owner_activations SET released_at_ms=20,released_restore_generation=0,\
+                     released_accepted_cursor=terminal_cursor,carried_manifest_json='[]',\
+                     released_boundary_json=json_object('terminalReceipt',json(terminal_receipt_json),\
+                     'eventCount',0,'historyEvidenceDigest',evidence_digest) \
+                     WHERE activation_id='activation-0'",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "INSERT INTO live_owner_activations (relay_database_namespace,activation_id,\
+                     workspace_id,main_version_id,object_id,lineage_claim_id,origin_adoption_id,\
+                     predecessor_activation_id,binding_json,source_moment_id,source_digest,\
+                     source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,\
+                     host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,\
+                     local_ydoc_sequence,terminal_cursor,terminal_receipt_json,max_pending_bytes,\
+                     max_pending_age_ms) VALUES ('relay','activation-1','ws','main','object',?1,\
+                     'activation-0','activation-0',?2,'rename-edited-to-moved',?3,?4,1,1,'{}',\
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',\
+                     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',0,1,0,\
+                     'null',1,1)",
+                    params![
+                        moved_binding.lineage_claim_id,
+                        moved_json,
+                        edited_digest,
+                        edited_text.len() as i64
+                    ],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        let edited_emitted = before_payload(&mut edited_store, &moved_binding, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            edited_emitted["beforeLatestMomentId"],
+            "rename-edited-to-moved"
+        );
+        assert_eq!(edited_emitted["beforePath"], "moved.md");
+        assert_eq!(edited_emitted["payloadBeforeBlobSha256"], edited_digest);
     }
 }

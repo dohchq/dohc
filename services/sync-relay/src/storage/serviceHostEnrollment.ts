@@ -26,6 +26,10 @@ import { canonicalLiveSelector, currentLiveDocumentMoment } from "./liveDocument
 import { assertWorkspaceQuota } from "./workspaces";
 import { SyncRelayQuotaExceededError } from "./errors";
 import { forgetServiceHostUploads } from "./serviceHostUploads";
+import { hasServiceHostConflictEffect } from "./serviceHostFeed";
+import { ORDINARY_ACTIVATION_BASES } from "./ordinaryActivationBasis";
+import { LIVE_ROOM_EDITS } from "./liveRoomEdits";
+import { LIVE_ROOM_PAUSES } from "./liveRoomPauses";
 import {
   listServiceActivationRetirements,
   OPEN_RETIREMENT,
@@ -1000,6 +1004,142 @@ export function hasKeptServiceHostEnrollment(
 }
 const CAPACITY_FULL = "Service host enrollment capacity is full.";
 const MOVED = "Service host enrollment document moved from its retained path.";
+const RETRY_MOVED =
+  "Live editing is still finishing Stop for this document. Wait a moment, then try again.";
+
+function movedEnrollmentRebindState(
+  storage: StorageContext,
+  enrollment: ServiceHostEnrollment,
+  targetPath: string,
+): "ok" | "retryable" | "refused" {
+  if (
+    targetPath === enrollment.path ||
+    liveDocumentKindForPath(targetPath) !== "richdoc" ||
+    enrollment.note.state !== "off"
+  )
+    return "refused";
+  if (
+    storage.objectIdAtPathInVersion({
+      workspaceId: enrollment.workspaceId,
+      versionId: "main",
+      path: targetPath,
+    }) !== enrollment.objectId
+  )
+    return "refused";
+  if (read(storage, enrollment.workspaceId, targetPath) !== null) return "refused";
+  if (
+    hasServiceHostConflictEffect(storage, enrollment) ||
+    hasServiceHostConflictEffect(storage, { ...enrollment, path: targetPath })
+  )
+    return "refused";
+  const currentLineage = storage.db
+    .prepare(
+      "SELECT lineage_claim_id FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current'",
+    )
+    .get(enrollment.workspaceId, enrollment.objectId);
+  if (
+    currentLineage &&
+    !storage.db
+      .prepare(
+        `SELECT 1 FROM ${ORDINARY_ACTIVATION_BASES} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=?`,
+      )
+      .get(enrollment.workspaceId, enrollment.objectId, currentLineage.lineage_claim_id)
+  )
+    return "refused";
+  if (
+    enrollment.hostDrainedAtMs === null ||
+    storage.db
+      .prepare(
+        `SELECT 1 FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND retired_at_ms IS NULL
+         UNION ALL SELECT 1 FROM ${LIVE_ROOM_EDITS} WHERE workspace_id=? AND main_version_id='main' AND object_id=?
+         UNION ALL SELECT 1 FROM ${LIVE_ROOM_PAUSES} WHERE workspace_id=? AND main_version_id='main' AND object_id=? LIMIT 1`,
+      )
+      .get(
+        enrollment.workspaceId,
+        enrollment.objectId,
+        enrollment.workspaceId,
+        enrollment.objectId,
+        enrollment.workspaceId,
+        enrollment.objectId,
+      ) !== undefined
+  )
+    return "retryable";
+  return "ok";
+}
+
+export function canResumeMovedServiceHostEnrollment(
+  storage: StorageContext,
+  enrollment: ServiceHostEnrollment,
+  targetPath: string,
+): boolean {
+  storage.captureStanding();
+  let normalized: string;
+  try {
+    normalized = canonicalPath(targetPath);
+  } catch {
+    return false;
+  }
+  return movedEnrollmentRebindState(storage, enrollment, normalized) === "ok";
+}
+
+function rebindMovedEnrollmentInTransaction(
+  storage: StorageContext,
+  enrollment: ServiceHostEnrollment,
+  targetPath: string,
+): ServiceHostEnrollment {
+  const jsonBytes = (value: string) => Buffer.byteLength(JSON.stringify(value));
+  const targetBytes = jsonBytes(targetPath);
+  const enrollmentDelta = targetBytes - jsonBytes(enrollment.path);
+  const liveDoc = storage.db
+    .prepare(
+      "SELECT lineage_claim_id,current_path FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current'",
+    )
+    .get(enrollment.workspaceId, enrollment.objectId);
+  const docDelta = liveDoc ? targetBytes - jsonBytes(String(liveDoc.current_path)) : 0;
+  const basis = liveDoc
+    ? storage.db
+        .prepare(
+          `SELECT current_path FROM ${ORDINARY_ACTIVATION_BASES} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=?`,
+        )
+        .get(enrollment.workspaceId, enrollment.objectId, liveDoc.lineage_claim_id)
+    : undefined;
+  const basisDelta = basis ? targetBytes - jsonBytes(String(basis.current_path)) : 0;
+  const delta = enrollmentDelta + docDelta + basisDelta;
+  if (delta > 0) assertWorkspaceQuota(storage, enrollment.workspaceId, delta);
+  storage.db
+    .prepare(
+      `UPDATE ${SERVICE_HOST_ENROLLMENTS} SET path=?,accounted_bytes=accounted_bytes+? WHERE workspace_id=? AND object_id=?`,
+    )
+    .run(targetPath, enrollmentDelta, enrollment.workspaceId, enrollment.objectId);
+  if (liveDoc) {
+    storage.db
+      .prepare(
+        "UPDATE sync_relay_live_documents SET current_path=? WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=?",
+      )
+      .run(targetPath, enrollment.workspaceId, enrollment.objectId, liveDoc.lineage_claim_id);
+  }
+  if (liveDoc && basis) {
+    storage.db
+      .prepare(
+        `UPDATE ${ORDINARY_ACTIVATION_BASES} SET current_path=?,accounted_bytes=accounted_bytes+? WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=?`,
+      )
+      .run(
+        targetPath,
+        basisDelta,
+        enrollment.workspaceId,
+        enrollment.objectId,
+        liveDoc.lineage_claim_id,
+      );
+  }
+  if (delta !== 0) {
+    storage.db
+      .prepare(
+        "UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?",
+      )
+      .run(delta, enrollment.workspaceId);
+  }
+  return readByObject(storage, enrollment.workspaceId, enrollment.objectId)!;
+}
 /** Whether a share covers the enrollment or its owner asked for it. Neither counts against the agent-only caps. */
 function agentOnly(
   storage: StorageContext,
@@ -1396,19 +1536,66 @@ function ensureInsideTransaction(
       ? new LiveHostingRefusal("live_host_full")
       : relayError("quota_exceeded", CAPACITY_FULL);
   const held = input.intent === "owner-resume" ? input.held : undefined;
-  const current = read(storage, workspaceId, path);
+  let effectivePath = path;
+  let current = read(storage, workspaceId, path);
   const moved = (objectId: string | undefined) =>
     objectId !== undefined &&
     storage.db
       .prepare(`SELECT 1 FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=?`)
       .get(workspaceId, objectId) !== undefined;
-  // Resume acts only on a document hosted before. An owner's open may enroll one for the first time.
-  if (!current && input.intent === "owner-resume") {
-    if (moved(storage.objectIdAtPathInVersion({ workspaceId, versionId: "main", path })))
-      throw relayError("conflict", MOVED);
-    throw notFound();
+  if (input.intent === "owner-resume") {
+    let rebindCandidate: { enrollment: ServiceHostEnrollment; targetPath: string } | null = null;
+    if (current) {
+      const objectAtPath = storage.objectIdAtPathInVersion({
+        workspaceId,
+        versionId: "main",
+        path,
+      });
+      if (objectAtPath !== current.objectId) {
+        if (objectAtPath)
+          throw relayError("conflict", "Service host enrollment path belongs to another document.");
+        const at = storage.objectMoment({
+          workspaceId,
+          objectId: current.objectId,
+          versionId: "main",
+        })?.path;
+        if (at && at !== current.path) {
+          rebindCandidate = { enrollment: current, targetPath: at };
+        }
+      }
+    } else {
+      const objectAtPath = storage.objectIdAtPathInVersion({
+        workspaceId,
+        versionId: "main",
+        path,
+      });
+      const existing = objectAtPath ? readByObject(storage, workspaceId, objectAtPath) : null;
+      if (!existing) throw notFound();
+      rebindCandidate = { enrollment: existing, targetPath: path };
+    }
+    if (rebindCandidate) {
+      assertCurrent(storage, rebindCandidate.enrollment, ownerUserId);
+      const rebind = movedEnrollmentRebindState(
+        storage,
+        rebindCandidate.enrollment,
+        rebindCandidate.targetPath,
+      );
+      if (rebind === "retryable") throw relayError("conflict", RETRY_MOVED);
+      if (rebind !== "ok") throw relayError("conflict", MOVED);
+      if (
+        currentMainDocument(storage, { workspaceId, path: rebindCandidate.targetPath }) !==
+        rebindCandidate.enrollment.objectId
+      )
+        throw relayError("conflict", MOVED);
+      current = rebindMovedEnrollmentInTransaction(
+        storage,
+        rebindCandidate.enrollment,
+        rebindCandidate.targetPath,
+      );
+      effectivePath = rebindCandidate.targetPath;
+    }
   }
-  const objectId = currentMainDocument(storage, { workspaceId, path }, opening);
+  const objectId = currentMainDocument(storage, { workspaceId, path: effectivePath }, opening);
   if (current) {
     assertCurrent(storage, current, ownerUserId);
     if (current.objectId !== objectId)
@@ -1471,7 +1658,7 @@ function ensureInsideTransaction(
         !memberTakes && memberOpened(storage, current),
       );
     input.changed?.(enabling);
-    return read(storage, workspaceId, path)!;
+    return read(storage, workspaceId, effectivePath)!;
   }
   // A document retained at its old path is never rebound here. An owner's open hears that as an answer.
   if (moved(objectId))

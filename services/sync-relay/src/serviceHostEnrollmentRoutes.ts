@@ -558,12 +558,13 @@ export function createServiceHostEnrollmentRoutes(options: {
     const actions: LiveNoteAction[] = [];
     if (!row.retired && !diverged(row)) actions.push("stop");
     if (
-      !moved &&
       !changed(row) &&
       !diverged(row) &&
-      (row.note.state === "off"
-        ? !storage.hasServiceHostConflictEffect(row)
-        : RESUMABLE.has(document.reason ?? ""))
+      (moved
+        ? Boolean(at && storage.canResumeMovedServiceHostEnrollment(row, at))
+        : row.note.state === "off"
+          ? !storage.hasServiceHostConflictEffect(row)
+          : RESUMABLE.has(document.reason ?? ""))
     )
       actions.push("resume");
     return { ...document, record, actions, ...(moved && at ? { movedTo: at } : {}) };
@@ -680,11 +681,21 @@ export function createServiceHostEnrollmentRoutes(options: {
         return response({
           ok: true,
           documents: page.documents.map((row) => {
+            const at = storage.objectMoment({
+              workspaceId: row.workspaceId,
+              objectId: row.objectId,
+              versionId: "main",
+            })?.path;
+            const conflictEffect =
+              storage.hasServiceHostConflictEffect(row) ||
+              (typeof at === "string" &&
+                at !== row.path &&
+                storage.hasServiceHostConflictEffect({ ...row, path: at }));
             const reason = diverged(row)
               ? "session-host-diverged"
               : row.note.reason === "start-failed"
                 ? START_FAILED[row.note.cause!]
-                : !changed(row) && storage.hasServiceHostConflictEffect(row)
+                : !changed(row) && conflictEffect
                   ? "conflict-parent-withheld"
                   : undefined;
             return answered(row, {

@@ -66,13 +66,14 @@ fn is_ydoc_settlement_moment_id(moment_id: &str) -> bool {
 pub fn moment_renames_from_in(
     conn: &Connection,
     key: &DocKey,
-    path: &str,
+    head_path: &str,
+    target_path: &str,
     digest: &str,
     head_moment: &str,
     target_moment: &str,
 ) -> Result<bool, StorageError> {
     if head_moment == target_moment {
-        return Ok(true);
+        return Ok(head_path == target_path);
     }
     let mut step = conn
         .prepare(concat!(
@@ -88,7 +89,7 @@ pub fn moment_renames_from_in(
         ))
         .map_err(StorageError::persist_public)?;
     let mut current_moment = head_moment.to_owned();
-    let mut current_path = path.to_owned();
+    let mut current_path = head_path.to_owned();
     let mut prev_order: Option<i64> = None;
     loop {
         let next: Option<(i64, String, String)> = step
@@ -112,7 +113,7 @@ pub fn moment_renames_from_in(
             return Ok(false);
         }
         if before_moment == target_moment {
-            if before_path != path {
+            if before_path != target_path {
                 return Ok(false);
             }
             let target_matches: bool = conn
@@ -129,7 +130,7 @@ pub fn moment_renames_from_in(
                         target_moment,
                         key.version_id,
                         key.object_id,
-                        path,
+                        target_path,
                         digest,
                         order,
                     ],
@@ -138,7 +139,7 @@ pub fn moment_renames_from_in(
                 .map_err(StorageError::persist_public)?;
             return Ok(target_matches);
         }
-        if before_path == path
+        if before_path == target_path
             && is_ydoc_settlement_moment_id(&before_moment)
             && is_ydoc_settlement_moment_id(target_moment)
         {
@@ -170,8 +171,8 @@ pub fn moment_renames_from_in(
                 |(prior_id, op, prior_path, prior_after_path, kind, prior_digest)| {
                     prior_id == target_moment
                         && op != "delete"
-                        && prior_path == path
-                        && prior_after_path == path
+                        && prior_path == target_path
+                        && prior_after_path == target_path
                         && kind == "text"
                         && prior_digest.as_deref() == Some(digest)
                 },
@@ -184,6 +185,8 @@ pub fn moment_renames_from_in(
         current_path = before_path;
     }
 }
+
+const MAX_RENAME_CHAIN_STEPS: usize = 1024;
 
 fn audit_error(error: ApplicationError) -> ApplicationError {
     match error {
@@ -278,18 +281,18 @@ impl LiveSettlementAudit {
         };
         let binding: LiveObjectBinding =
             serde_json::from_str(&binding).map_err(StorageError::persist_public)?;
-        validate_historical_binding(&binding, b).map_err(audit_error)?;
+        same_lineage_generation(&binding, b).map_err(audit_error)?;
         if saved_markdown != markdown || sequence > self.sequence {
             return Ok(false);
         }
         if saved_moment == moment {
-            return Ok(true);
+            return Ok(binding.current_path == b.current_path);
         }
         if !empty
             && saved_terminal == self.terminal_cursor
             && saved_kind == "ordinary"
             && saved_restore_op.is_none()
-            && binding == *b
+            && (binding == *b || binding.current_path != b.current_path)
         {
             let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)
                 .map_err(|_| StorageError::StateCorrupt { source: None })?;
@@ -297,6 +300,7 @@ impl LiveSettlementAudit {
                 conn,
                 &key,
                 &b.current_path,
+                &binding.current_path,
                 markdown,
                 moment,
                 &saved_moment,
@@ -354,15 +358,14 @@ impl LiveSettlementAudit {
         let b = &self.binding;
         let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)
             .map_err(|_| StorageError::StateCorrupt { source: None })?;
-        let binding_json = serde_json::to_string(b).map_err(StorageError::persist_public)?;
         store.read_with(|conn| {
-            let (id, saved_moment): (String, String) = conn
+            let (id, saved_moment, saved_binding_json): (String, String, String) = conn
                 .query_row(
-                    "SELECT settlement_id,moment_id FROM live_device_settlements \
+                    "SELECT settlement_id,moment_id,binding_json FROM live_device_settlements \
                      WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 \
                        AND object_id=?4 AND lineage_claim_id=?5 AND terminal_cursor=?6 \
                        AND markdown_digest=?7 AND restore_operation_id IS NULL \
-                       AND settlement_kind='ordinary' AND binding_json=?8",
+                       AND settlement_kind='ordinary'",
                     params![
                         self.namespace,
                         b.workspace_id,
@@ -371,16 +374,23 @@ impl LiveSettlementAudit {
                         b.lineage_claim_id,
                         self.terminal_cursor,
                         markdown,
-                        binding_json,
                     ],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .map_err(StorageError::persist_public)?;
-            if saved_moment != moment
+            let saved_binding: LiveObjectBinding =
+                serde_json::from_str(&saved_binding_json).map_err(StorageError::persist_public)?;
+            same_lineage_generation(&saved_binding, b)
+                .map_err(|_| StorageError::StateCorrupt { source: None })?;
+            if saved_binding.current_path == b.current_path && saved_binding != *b {
+                return Err(StorageError::StateCorrupt { source: None });
+            }
+            if (saved_moment != moment || saved_binding.current_path != b.current_path)
                 && !moment_renames_from_in(
                     conn,
                     &key,
                     &b.current_path,
+                    &saved_binding.current_path,
                     markdown,
                     moment,
                     &saved_moment,
@@ -470,10 +480,12 @@ impl LiveSettlementAudit {
         if !matches_projection {
             return Err(corrupt());
         }
-        let settlement_id_for = |recorded_moment: &str| -> Result<String, ApplicationError> {
+        let settlement_id_for = |recorded_binding: &LiveObjectBinding,
+                                 recorded_moment: &str|
+         -> Result<String, ApplicationError> {
             let identities = serde_json::to_vec(&(
                 &self.namespace,
-                b,
+                recorded_binding,
                 self.previous_cursor,
                 self.terminal_cursor,
                 self.previous_sequence,
@@ -486,14 +498,29 @@ impl LiveSettlementAudit {
             .map_err(StorageError::persist_public)?;
             Ok(format!("live-settlement-{}", hex_sha256(&identities)))
         };
-        let existing: Option<(String,String,String,String,i64,i64)> = tx.query_row(
-            "SELECT settlement_id,moment_id,markdown_digest,interval_digest,application_count,local_ydoc_sequence FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND terminal_cursor=?6 AND restore_operation_id IS NULL AND settlement_kind='ordinary' AND binding_json=?7 AND source_state_vector_digest=?8",
-            params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.terminal_cursor,serde_json::to_string(b).map_err(StorageError::persist_public)?,vector],
-            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?))).optional().map_err(StorageError::persist_public)?;
-        if let Some((saved, saved_moment, saved_markdown, saved_interval, count, sequence)) =
-            existing
+        type ExistingSettlement = (String, String, String, String, i64, i64, String);
+        let existing: Option<ExistingSettlement> = tx.query_row(
+            "SELECT settlement_id,moment_id,markdown_digest,interval_digest,application_count,local_ydoc_sequence,binding_json FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND terminal_cursor=?6 AND restore_operation_id IS NULL AND settlement_kind='ordinary' AND source_state_vector_digest=?7",
+            params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.terminal_cursor,vector],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?))).optional().map_err(StorageError::persist_public)?;
+        if let Some((
+            saved,
+            saved_moment,
+            saved_markdown,
+            saved_interval,
+            count,
+            sequence,
+            saved_binding_json,
+        )) = existing
         {
-            let same_moment = saved_moment == moment
+            let saved_binding: LiveObjectBinding =
+                serde_json::from_str(&saved_binding_json).map_err(StorageError::persist_public)?;
+            same_lineage_generation(&saved_binding, b).map_err(audit_error)?;
+            if saved_binding.current_path == b.current_path && saved_binding != *b {
+                return Err(corrupt());
+            }
+            let same_moment = (saved_binding.current_path == b.current_path
+                && saved_moment == moment)
                 || (saved_markdown == markdown && {
                     let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)
                         .map_err(|_| corrupt())?;
@@ -501,12 +528,13 @@ impl LiveSettlementAudit {
                         tx,
                         &key,
                         &b.current_path,
+                        &saved_binding.current_path,
                         markdown,
                         moment,
                         &saved_moment,
                     )?
                 });
-            let expected_id = settlement_id_for(&saved_moment)?;
+            let expected_id = settlement_id_for(&saved_binding, &saved_moment)?;
             if !same_moment
                 || saved != expected_id
                 || saved_markdown != markdown
@@ -518,7 +546,7 @@ impl LiveSettlementAudit {
             }
             return Ok(saved);
         }
-        let id = settlement_id_for(moment)?;
+        let id = settlement_id_for(b, moment)?;
         // Stored settlements may start where they end. A new one must not.
         if self.previous_cursor >= self.terminal_cursor {
             return Err(invalid("a new settlement must cover an accepted edit"));
@@ -1095,6 +1123,22 @@ pub(super) fn private_tail(
     })
 }
 
+fn same_lineage_generation(
+    historical: &LiveObjectBinding,
+    current: &LiveObjectBinding,
+) -> Result<(), ApplicationError> {
+    validate_historical_binding(historical, historical)?;
+    if historical.workspace_id != current.workspace_id
+        || historical.main_version_id != current.main_version_id
+        || historical.object_id != current.object_id
+        || historical.lineage_claim_id != current.lineage_claim_id
+        || historical.restore_fence_generation != current.restore_fence_generation
+    {
+        return Err(ApplicationError::Conflict);
+    }
+    Ok(())
+}
+
 pub(super) fn validate_historical_binding(
     historical: &LiveObjectBinding,
     current: &LiveObjectBinding,
@@ -1185,6 +1229,7 @@ fn visit_interval(
         ])
         .map_err(read_sql)?;
     let mut count = 0;
+    let mut proved_paths = std::collections::HashSet::new();
     while let Some(row) = rows.next().map_err(read_sql)? {
         if Some(count) == max {
             return Err(invalid("settlement application limit exceeded"));
@@ -1200,7 +1245,26 @@ fn visit_interval(
             restore_fence_generation: row.get(7).map_err(read_sql)?,
             ..b.clone()
         };
-        validate_historical_binding(&historical, b)?;
+        if historical.current_path == b.current_path {
+            validate_historical_binding(&historical, b)?;
+        } else {
+            same_lineage_generation(&historical, b)?;
+            if !proved_paths.contains(&historical.current_path) {
+                let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
+                let needed = std::collections::HashSet::from([historical.current_path.as_str()]);
+                let proved = adoption::renamed_from(
+                    conn,
+                    &key,
+                    &b.current_path,
+                    &needed,
+                    MAX_RENAME_CHAIN_STEPS,
+                )?;
+                if !proved.contains(&historical.current_path) {
+                    return Err(ApplicationError::Conflict);
+                }
+                proved_paths.extend(proved);
+            }
+        }
         let binding_digest =
             hex_sha256(&serde_json::to_vec(&historical).map_err(|_| ApplicationError::Corrupt)?);
         visit((
@@ -1540,20 +1604,46 @@ mod publication_state_tests {
         let (mut store, digest) = seed("engine.db");
         let check = |store: &EngineStore, head: &str, target: &str| {
             store
-                .read_with(|conn| moment_renames_from_in(conn, &key, "a.md", &digest, head, target))
+                .read_with(|conn| {
+                    moment_renames_from_in(conn, &key, "a.md", "a.md", &digest, head, target)
+                })
                 .unwrap()
         };
         assert!(check(&store, &m1, &m1));
         assert!(check(&store, "m4", &m1));
         assert!(!check(&store, "m3", &m1));
-        assert!(!store
-            .read_with(|conn| moment_renames_from_in(conn, &key, "b.md", &digest, "m4", &m1))
+        assert!(store
+            .read_with(|conn| {
+                moment_renames_from_in(conn, &key, "b.md", "a.md", &digest, "m2", &m1)
+            })
+            .unwrap());
+        assert!(store
+            .read_with(|conn| {
+                moment_renames_from_in(conn, &key, "c.md", "a.md", &digest, "m3", &m1)
+            })
             .unwrap());
         assert!(!store
             .read_with(|conn| {
-                moment_renames_from_in(conn, &key, "a.md", &hex_sha256(b"other"), "m4", &m1)
+                moment_renames_from_in(conn, &key, "b.md", "b.md", &digest, "m4", &m1)
             })
             .unwrap());
+        assert!(!store
+            .read_with(|conn| {
+                moment_renames_from_in(conn, &key, "b.md", "a.md", &digest, &m1, &m1)
+            })
+            .unwrap());
+        assert!(!store
+            .read_with(|conn| {
+                moment_renames_from_in(conn, &key, "a.md", "a.md", &hex_sha256(b"other"), "m4", &m1)
+            })
+            .unwrap());
+        let needed = std::collections::HashSet::from(["c.md", "b.md", "a.md"]);
+        let proved = store
+            .read_with(|conn| {
+                adoption::renamed_from(conn, &key, "a.md", &needed, MAX_RENAME_CHAIN_STEPS)
+            })
+            .unwrap();
+        assert!(proved.contains("c.md") && proved.contains("b.md") && proved.contains("a.md"));
 
         for (case, sql) in [
             (

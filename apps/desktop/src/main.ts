@@ -2197,8 +2197,11 @@ function relayShareErrorCopy(
     case "ambiguous_selector":
       return "A Group is shared as it is now, not at a version. Share it without choosing a version.";
     default:
-      return typeof data?.movedTo === "string" && typeof data.path === "string"
-        ? `Live editing could not resume because this file moved to ${data.movedTo}. Move it back to ${data.path} to resume.`
+      return typeof data?.movedTo === "string"
+        ? data.error ===
+          "Live editing is still finishing Stop for this document. Wait a moment, then try again."
+          ? data.error
+          : `Live editing could not resume for ${data.movedTo}. Refresh Live documents and try again.`
         : (data?.error ?? "dohc could not update this share. Try again.");
   }
 }

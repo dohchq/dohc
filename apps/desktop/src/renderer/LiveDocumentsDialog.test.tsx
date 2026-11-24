@@ -1040,3 +1040,22 @@ it.each(
     expect(h.saveRecoveryCopy).toHaveBeenCalledExactlyOnceWith("ws", "held.md", "kept-1");
   }
 });
+
+it("resumes a moved stopped note using its current movedTo path", async () => {
+  const h = harness(),
+    user = userEvent.setup();
+  h.load.mockResolvedValue(
+    page([
+      row("docs/old.md", {
+        status: "retired",
+        movedTo: "docs/new name.md",
+        canResume: true,
+      }),
+    ]),
+  );
+  render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+  await user.click(
+    await screen.findByRole("button", { name: "Resume live editing for docs/new name.md" }),
+  );
+  expect(h.resume).toHaveBeenCalledExactlyOnceWith("ws", "docs/new name.md");
+});

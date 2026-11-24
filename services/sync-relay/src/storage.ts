@@ -578,6 +578,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   ) {
     return serviceHostFeedStorage.hasServiceHostConflictEffect(this, input);
   }
+  canResumeMovedServiceHostEnrollment(
+    enrollment: Parameters<
+      typeof serviceHostEnrollmentStorage.canResumeMovedServiceHostEnrollment
+    >[1],
+    targetPath: string,
+  ) {
+    return serviceHostEnrollmentStorage.canResumeMovedServiceHostEnrollment(
+      this,
+      enrollment,
+      targetPath,
+    );
+  }
   putServiceHostBlob(input: Parameters<typeof serviceHostUploadStorage.putServiceHostBlob>[1]) {
     return serviceHostUploadStorage.putServiceHostBlob(this, input);
   }

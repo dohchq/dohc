@@ -1308,7 +1308,7 @@ it("drops a retired document's row once it is deleted, and lists it again when r
       objectId: moved.objectId,
       status: "retired",
       stopped: false,
-      ...noted([], "off", "access-ended"),
+      ...noted(["resume"], "off", "access-ended"),
       movedTo: "docs/c.md",
     },
   ]);
@@ -1717,5 +1717,68 @@ it("answers the owner with each note's record and the actions that work, and a m
     changed: true,
     record: { generation: 2, state: "starting", reason: null },
     actions: ["stop"],
+  });
+});
+
+it("offers Resume on a stopped, drained, moved note and rebinds it directly at its new path", async () => {
+  const f = await fixture();
+  const enrolled = f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input });
+  const stop = await f.handle(
+    f.request("DELETE", {
+      path: binding.currentPath,
+      retire: true,
+      restoreFenceGeneration: binding.restoreFenceGeneration,
+    }),
+  );
+  expect(stop.status).toBe(200);
+  f.release(binding.objectId);
+  f.raw
+    .prepare(
+      `INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+       VALUES (?,?,2,'moment-renamed','main','docs/renamed.md',?,'text',1,40)`,
+    )
+    .run(scope.workspaceId, enrolled.objectId, "b".repeat(64));
+  f.raw
+    .prepare(
+      `INSERT INTO sync_relay_live_document_ordinary_bases(workspace_id,main_version_id,object_id,lineage_claim_id,base_relay_seq,base_origin_id,base_origin_seq,replication_epoch,stream_identity,current_path,projected_sha256,projected_byte_length,accounted_bytes)
+       VALUES (?,'main',?,?,1,'origin-1',0,'epoch','stream',?,?,1,128)`,
+    )
+    .run(
+      scope.workspaceId,
+      binding.objectId,
+      binding.lineageClaimId,
+      binding.currentPath,
+      "b".repeat(64),
+    );
+  expect(await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).toEqual({
+    ok: true,
+    documents: [
+      expect.objectContaining({
+        path: binding.currentPath,
+        objectId: binding.objectId,
+        status: "retired",
+        stopped: true,
+        actions: ["resume"],
+        movedTo: "docs/renamed.md",
+      }),
+    ],
+    nextCursor: null,
+  });
+  const resumed = await f.handle(f.request("POST", { path: "docs/renamed.md" }));
+  expect(resumed.status).toBe(202);
+  expect(await resumed.json()).toMatchObject({
+    ok: true,
+    path: "docs/renamed.md",
+    objectId: binding.objectId,
+    changed: true,
+    actions: ["stop"],
+  });
+  const retried = await f.handle(f.request("POST", { path: "docs/renamed.md" }));
+  expect(retried.status).toBe(202);
+  expect(await retried.json()).toMatchObject({
+    ok: true,
+    path: "docs/renamed.md",
+    objectId: binding.objectId,
+    changed: false,
   });
 });

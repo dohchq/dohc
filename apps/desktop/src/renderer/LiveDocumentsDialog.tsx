@@ -930,8 +930,8 @@ export function LiveDocumentsDialog({
                     data-live-document-pending-action={
                       pendingStops.has(row.objectId) ? "" : undefined
                     }
-                    aria-label={`Resume live editing for ${row.path}`}
-                    onClick={() => perform({ kind: "resume", path: row.path })}
+                    aria-label={`Resume live editing for ${row.movedTo ?? row.path}`}
+                    onClick={() => perform({ kind: "resume", path: row.movedTo ?? row.path })}
                   >
                     Resume live editing
                   </SecondaryButton>
