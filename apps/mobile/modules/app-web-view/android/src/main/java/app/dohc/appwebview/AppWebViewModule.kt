@@ -2,6 +2,7 @@ package app.dohc.appwebview
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
 import android.os.Message
@@ -66,6 +67,8 @@ class AppWebView(context: Context, appContext: AppContext) : ExpoView(context, a
       setSupportMultipleWindows(true)
       javaScriptCanOpenWindowsAutomatically = false
     }
+    // The screen's own background shows until the bootstrap paints, so dark mode doesn't flash white.
+    view.setBackgroundColor(Color.TRANSPARENT)
     CookieManager.getInstance().setAcceptThirdPartyCookies(view, false)
     view.webViewClient = object : WebViewClient() {
       override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = true
