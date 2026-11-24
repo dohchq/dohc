@@ -11,7 +11,6 @@ import {
   getShareCopyDetails,
   listLinkAgents,
   listLiveDocuments,
-  resumeLiveEditing,
   stopLiveEditing,
   type ToolContext,
 } from "./tools";
@@ -1443,21 +1442,18 @@ describe("live documents profile admission", () => {
         shareAccess,
         request,
       });
-      for (const [name, call] of [
-        ["dohc_stop_live_editing", stopLiveEditing],
-        ["dohc_resume_live_editing", resumeLiveEditing],
-      ] as const) {
+      for (const name of ["dohc_stop_live_editing", "dohc_resume_live_editing"]) {
         expect(names).not.toContain(name);
         expect(await client.callTool({ name, arguments: { path: "plan.md" } })).toMatchObject({
           isError: true,
         });
-        expect(
-          await call(
-            { root: "/workspace", home: "/state", shareAccess, request },
-            { path: "plan.md" },
-          ),
-        ).toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
       }
+      expect(
+        await stopLiveEditing(
+          { root: "/workspace", home: "/state", shareAccess, request },
+          { path: "plan.md" },
+        ),
+      ).toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
       expect(request).not.toHaveBeenCalled();
     },
   );

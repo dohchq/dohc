@@ -114,7 +114,7 @@ export type LiveDocumentsDialogProps = {
     objectId: string,
     again?: LiveDocumentStopAgain,
   ) => Promise<LiveDocumentStopResult>;
-  resume: (workspaceId: string, path: string) => Promise<void>;
+  resume: (workspaceId: string, path: string) => Promise<unknown>;
   /** Told when a Stop wrote refused edits into the file, or kept them on this computer. */
   onStopped?: (path: string, keptEdits: "recovered" | "kept") => void;
   /** A Stop refused after its dialog closed; the shell owns its retry and notice. */

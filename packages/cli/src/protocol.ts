@@ -700,7 +700,6 @@ const liveDocumentsArgsSchema = z
 const liveStopArgsSchema = z
   .object({ ...argsBase, path: documentPathArg, objectId: liveDocumentObjectIdSchema.optional() })
   .strict();
-const liveResumeArgsSchema = z.object({ ...argsBase, path: documentPathArg }).strict();
 
 const heldNoteChangeArgsSchema = z.discriminatedUnion("action", [
   z.object({ ...argsBase, path: documentPathArg, action: z.literal("review") }).strict(),
@@ -1219,7 +1218,6 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
     .object({ ...requestBase, verb: z.literal("liveDocuments"), args: liveDocumentsArgsSchema })
     .strict(),
   z.object({ ...requestBase, verb: z.literal("liveStop"), args: liveStopArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("liveResume"), args: liveResumeArgsSchema }).strict(),
   z
     .object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema })
     .strict(),
@@ -1352,7 +1350,6 @@ export const CLI_CAPABILITIES = distinct(
     heldNoteChange: ["document.held.change"],
     liveDocuments: ["share.live.documents.list"],
     liveStop: ["share.live.document.stop"],
-    liveResume: ["share.live.document.resume"],
     documentEdit: ["document.edit"],
     documentCreate: ["document.create"],
     fileChatStart: ["file.chat.start"],
@@ -2450,17 +2447,6 @@ const liveStopResultSchema = z.discriminatedUnion("ok", [
     .strict(),
   rawFailureSchema,
 ]);
-const liveResumeResultSchema = z.discriminatedUnion("ok", [
-  z
-    .object({
-      ok: z.literal(true),
-      path: z.string().min(1),
-      already: z.literal(true).optional(),
-      ended: z.literal(true).optional(),
-    })
-    .strict(),
-  rawFailureSchema,
-]);
 
 // The Live documents dialog's rows. status is the server's; reason says why a
 // document is not live; canResume says whether Resume can start it again.
@@ -3073,7 +3059,6 @@ export const cliResultSchemas = distinct(
     heldNoteChange: heldNoteChangeResultSchema,
     liveDocuments: liveDocumentsResultSchema,
     liveStop: liveStopResultSchema,
-    liveResume: liveResumeResultSchema,
     documentEdit: documentEditResultSchema,
     documentCreate: documentCreateResultSchema,
     fileChatStart: fileChatStartResultSchema,

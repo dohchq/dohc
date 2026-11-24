@@ -4,6 +4,7 @@ import { linksOperations } from "./ipc/linksOperations";
 import { retrievalOperations } from "./ipc/retrievalOperations";
 import {
   agentRunUndoOperations,
+  liveNoteOperations,
   protectedCopyOperations,
   stoppedRunOperations,
 } from "./ipc/writeOperations";
@@ -609,6 +610,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(stoppedRunOperations, invoke),
   ...operationBridge(protectedCopyOperations, invoke),
   ...operationBridge(agentRunUndoOperations, invoke),
+  ...operationBridge(liveNoteOperations, invoke),
   ...operationBridge(inboxReadOperations, invoke),
   ...operationBridge(inboxWriteOperations, invoke),
   ...operationBridge(inboxDesktopOperations, invoke),

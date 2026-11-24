@@ -1,4 +1,5 @@
 import type { relayShareOperations } from "./shareOperations";
+import type { liveNoteOperations } from "./writeOperations";
 import {
   readLiveStopRefusal,
   liveStopHostCopy,
@@ -20,7 +21,6 @@ import {
   SaveOwnerLiveRecoveryCopyResult,
   ListOwnerLiveRecoveryPackagesResult,
   type StopOwnerLiveDocumentResult,
-  type ResumeOwnerLiveDocumentResult,
   CreateRelayShareResult,
   InvitationEmail,
   InvitationEmailLimit,
@@ -84,7 +84,10 @@ import { isSharedWithMePath } from "@dohc/workspace-core";
 import type { createPresencePollRegistry } from "../collab/presencePollRegistry";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/change-author";
 import { liveChangeOutcome, type LiveDocumentStatus } from "@dohc/workspace-contracts/live-changes";
-import { LiveNoteAction } from "@dohc/workspace-contracts/live-note";
+import {
+  LiveNoteAction,
+  type ResumeOwnerLiveDocumentResult,
+} from "@dohc/workspace-contracts/live-note";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
 
 const RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS = 35_000;
@@ -1100,8 +1103,12 @@ export function createRelaySharesIpcHandlers<
     // shares so a share the owner restored resumes.
     reconcileReceivedShares(listing: unknown): Promise<void>;
   },
-): OperationHandlers<typeof relayShareOperations, Event, Operation> {
-  type Handlers = OperationHandlers<typeof relayShareOperations, Event, Operation>;
+): OperationHandlers<typeof relayShareOperations & typeof liveNoteOperations, Event, Operation> {
+  type Handlers = OperationHandlers<
+    typeof relayShareOperations & typeof liveNoteOperations,
+    Event,
+    Operation
+  >;
   const {
     remoteForWorkspace,
     currentCredentialGeneration,
@@ -2060,9 +2067,8 @@ export function createRelaySharesIpcHandlers<
         { ...input, author: dependencies.person?.() },
         operation,
       ),
-    resumeOwnerLiveDocument: async (input, { operation }) => {
-      await ownerLiveDocuments.resume({ ...input, author: dependencies.person?.() }, operation);
-    },
+    resumeOwnerLiveDocument: (input, { operation }) =>
+      ownerLiveDocuments.resume({ ...input, author: dependencies.person?.() }, operation),
     retryOwnerLiveQuarantine: async (input, { operation }) => {
       operation.assertCurrent();
       assertOriginalWorkspace(operation.workspace);

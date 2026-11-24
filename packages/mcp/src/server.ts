@@ -108,7 +108,6 @@ import {
   keepOutsideChange,
   listLiveDocuments,
   stopLiveEditing,
-  resumeLiveEditing,
   listRetainedCopies,
   deleteRetainedCopies,
   searchWorkspaceFiles,
@@ -603,16 +602,6 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       },
     },
     async (args) => text(await stopLiveEditing(ctx, args)),
-  );
-
-  register(
-    "dohc_resume_live_editing",
-    {
-      description:
-        "Resume live editing for a document, as Resume does in Live documents. Accepts a row whose `canResume` is true in dohc_list_live_documents. dohc sends this computer's unsent changes first, and records the Resume as this agent's when the server says this request resumed it; `already: true` means it was already live, and dohc records no one. `ended: true` means its file was moved, deleted or replaced: the server's pause of it ended and live editing stays off. Then read dohc_list_live_documents: `preparing` until the server starts the document, then `ready`. Owner workspace only.",
-      inputSchema: { path: z.string().min(1).max(4096) },
-    },
-    async (args) => text(await resumeLiveEditing(ctx, args)),
   );
 
   register(

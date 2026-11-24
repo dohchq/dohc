@@ -101,7 +101,6 @@ type CliCommandBody =
   | { verb: "retryKeptEdits" | "stopAgain"; path: string; incident: string }
   | { verb: "liveDocuments"; cursor?: string }
   | { verb: "liveStop"; path: string; objectId?: string }
-  | { verb: "liveResume"; path: string }
   | {
       verb: "fileChatStart";
       path: string;
@@ -881,22 +880,12 @@ const DOCUMENT_VERBS = {
       return { verb: "liveStop", path, ...(objectId ? { objectId } : {}) };
     },
   },
-  resume: {
-    capabilityId: "share.live.document.resume",
-    summary: "Resume live editing for a document, as Resume does in Live documents.",
-    operands: "<path>",
-    notes: [
-      "Accepts a document whose canResume is true in live. dohc sends this computer's unsent changes first, and records the Resume as this agent's when the server says this request resumed it.",
-      "already is true when the document was already live. Then dohc records no one.",
-      "Run live again to follow it: preparing until the server starts the document, then ready.",
-    ],
-    parse: (input) => {
-      const [path, ...extra] = input.operands;
-      if (!path) fail("document resume requires a path");
-      noExtraArgs(extra, "document resume");
-      return { verb: "liveResume", path };
-    },
-  },
+  resume: declaredWrite("liveResume", ({ operands }) => {
+    const [path, ...extra] = operands;
+    if (!path) fail("document resume requires a path");
+    noExtraArgs(extra, "document resume");
+    return { path };
+  }),
 } satisfies Record<string, CliVerbSpec>;
 
 const workFlags: readonly CliFlag[] = [

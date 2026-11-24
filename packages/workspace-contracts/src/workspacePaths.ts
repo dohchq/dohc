@@ -154,6 +154,16 @@ function hasMaterializeHazard(segment: string): boolean {
   );
 }
 
+// Lexically safe workspace-relative path: forward-slashed, no null bytes, no
+// backslashes, no empty/dot/dot-dot segments, not absolute. Main validates
+// containment before sending; this is the closed gate the preload re-applies
+// to every path that crosses main→renderer.
+export function isSafeRelativePath(value: string): boolean {
+  if (value.includes("\0") || value.includes("\\")) return false;
+  if (value.startsWith("/") || /^[A-Za-z]:/.test(value)) return false;
+  return value.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
+}
+
 export type WritePathValidation =
   | { ok: true; normalized: string }
   | {

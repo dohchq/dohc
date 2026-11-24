@@ -421,9 +421,7 @@ function makeBaseBridge(
         packages: [],
       }),
     ),
-    resumeOwnerLiveDocument: vi.fn(
-      async (_payload: OwnerLiveDocumentActionPayload): Promise<void> => undefined,
-    ),
+    resumeOwnerLiveDocument: vi.fn(async (_payload: OwnerLiveDocumentActionPayload) => ({})),
     retryOwnerLiveDelivery: vi.fn(
       async (_payload: { workspaceId: string }): Promise<void> => undefined,
     ),

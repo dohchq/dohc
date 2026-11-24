@@ -405,12 +405,6 @@ function buildCliRequest(
           ...(command.objectId === undefined ? {} : { objectId: command.objectId }),
         },
       };
-    case "liveResume":
-      return {
-        verb: command.verb,
-        protocolVersion: common.protocolVersion,
-        args: { cwd: common.cwd, actor: common.actor, path: command.path },
-      };
     case "documentEdit":
     case "documentCreate": {
       const args = {
@@ -771,7 +765,6 @@ const REFUSING_VERBS = new Set([
   "keepOutsideChange",
   "liveDocuments",
   "liveStop",
-  "liveResume",
   "automationRuns",
   "automationRun",
   "automationRetry",

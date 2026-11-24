@@ -1,4 +1,5 @@
 import { relayShareOperations } from "./shareOperations";
+import { liveNoteOperations } from "./writeOperations";
 import { registerOperations } from "./operationTable";
 import { describe, expect, it, vi } from "vitest";
 import { createRelaySharesIpcHandlers } from "./relaySharesIpc";
@@ -47,6 +48,8 @@ const activityResult = {
   principals: [],
   linkCommentsPaused: false,
 };
+
+const ownerOperations = { ...relayShareOperations, ...liveNoteOperations };
 
 function harness() {
   const workspace: Workspace = { workspaceId, attachmentId: Symbol("attachment") };
@@ -209,7 +212,7 @@ function harness() {
   const ownerHandlers = createRelaySharesIpcHandlers<Sender, Event, Workspace, Operation>(
     ownerHandlersDependencies,
   );
-  registerOperations<typeof relayShareOperations, Event, Operation>(
+  registerOperations<typeof ownerOperations, Event, Operation>(
     {
       handle: (channel, handler) => {
         expect(handlers.has(channel)).toBe(false);
@@ -221,7 +224,7 @@ function harness() {
         return withRendererWorkspaceOperation(event.sender, requestedWorkspaceId, message, work);
       },
     },
-    relayShareOperations,
+    ownerOperations,
     ownerHandlers,
   );
   const invoke = async (channel: string, payload?: unknown, senderId = 1) => {
@@ -733,7 +736,7 @@ describe("owner live document enrollment", () => {
     });
     h.request.mockClear();
     await expect(
-      h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel, {
+      h.invoke(liveNoteOperations.resumeOwnerLiveDocument.channel, {
         workspaceId,
         path: "large.md",
       }),
@@ -981,7 +984,7 @@ describe("owner live document enrollment", () => {
       status: "unavailable",
     });
     await expect(
-      h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel, {
+      h.invoke(liveNoteOperations.resumeOwnerLiveDocument.channel, {
         workspaceId,
         path: "live.md",
       }),
@@ -1117,13 +1120,27 @@ describe("registered relay share handlers", () => {
   it("ends the server's pause of a note whose file is gone from its path, and starts nothing there", async () => {
     const h = harness();
     h.resumeOwnerLivePause.mockResolvedValueOnce("ended");
-    await h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel, {
-      workspaceId,
-      path: "live.md",
-    });
+    await expect(
+      h.invoke(liveNoteOperations.resumeOwnerLiveDocument.channel, {
+        workspaceId,
+        path: "live.md",
+      }),
+    ).resolves.toEqual({ ended: true });
     expect(h.resumeOwnerLivePause).toHaveBeenCalledWith(expect.anything(), "live.md");
     expect(h.request).not.toHaveBeenCalled();
     expect(h.ownerLiveStop).not.toHaveBeenCalled();
+  });
+
+  it("refuses a Resume path that leaves the workspace before any work", async () => {
+    const h = harness();
+    await expect(
+      h.invoke(liveNoteOperations.resumeOwnerLiveDocument.channel, {
+        workspaceId,
+        path: "../secret.md",
+      }),
+    ).rejects.toThrow("path must be a safe workspace-relative path");
+    expect(h.resumeOwnerLivePause).not.toHaveBeenCalled();
+    expect(h.request).not.toHaveBeenCalled();
   });
 
   it("lists a note the server paused as paused, so the window and agents can resume it", async () => {
@@ -1190,7 +1207,6 @@ describe("registered relay share handlers", () => {
       relayShareOperations.listOwnerLiveRefusals.channel,
       relayShareOperations.retryOwnerLiveShare.channel,
       relayShareOperations.stopOwnerLiveDocument.channel,
-      relayShareOperations.resumeOwnerLiveDocument.channel,
       relayShareOperations.retryOwnerLiveQuarantine.channel,
       relayShareOperations.saveOwnerLiveRecoveryCopy.channel,
       relayShareOperations.listOwnerLiveRecoveryPackages.channel,
@@ -1221,6 +1237,7 @@ describe("registered relay share handlers", () => {
       relayShareOperations.retuneRelayShareGrant.channel,
       relayShareOperations.resendRelayShareInvitation.channel,
       relayShareOperations.revokeRelayShareGrant.channel,
+      liveNoteOperations.resumeOwnerLiveDocument.channel,
     ]);
     expect(h.handlers.size).toBe(35);
     for (const channel of h.handlers.keys()) {
@@ -1235,7 +1252,7 @@ describe("registered relay share handlers", () => {
   it.each([
     [relayShareOperations.listOwnerLiveDocuments.channel, { workspaceId }],
     [relayShareOperations.stopOwnerLiveDocument.channel, { workspaceId, path: "live.md" }],
-    [relayShareOperations.resumeOwnerLiveDocument.channel, { workspaceId, path: "live.md" }],
+    [liveNoteOperations.resumeOwnerLiveDocument.channel, { workspaceId, path: "live.md" }],
     [relayShareOperations.createRelayShareLink.channel, linkInput],
     [
       relayShareOperations.promoteRelayShareGrant.channel,
@@ -1644,8 +1661,8 @@ const ownerInputs = {
   revokeRelayShareGrant: { workspaceId, shareId: "share", grantId: "grant" },
   saveOwnerLiveRecoveryCopy: { workspaceId, path: "notes/a.md" },
   listOwnerLiveRecoveryPackages: { workspaceId },
-} satisfies Record<keyof typeof relayShareOperations, unknown>;
-const ownerRows = Object.entries(relayShareOperations).map(([name, row]) => ({
+} satisfies Record<keyof typeof ownerOperations, unknown>;
+const ownerRows = Object.entries(ownerOperations).map(([name, row]) => ({
   name,
   row,
   input: ownerInputs[name as keyof typeof ownerInputs],

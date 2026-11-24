@@ -377,10 +377,8 @@ const LISTED_CAPABILITIES = {
       "Only the original workspace stops its live editing. Shared profiles omit this owner action; main admits the workspace, checks kept edits for Stop again, and refuses while an editor holds the document.",
   }),
   "share.live.document.resume": capability("Resume live editing for a document.", {
-    ipc: ["resumeOwnerLiveDocument"],
-    mcp: { owner: ["dohc_resume_live_editing"] },
-    mcpReason:
-      "Only the original workspace resumes its live editing. Shared profiles omit this owner action; main admits the workspace and the relay checks the owner's account.",
+    ipc: [],
+    mcp: {},
   }),
   "share.live.document.retry": capability(
     "Try once more to send a document's edits the server refused.",

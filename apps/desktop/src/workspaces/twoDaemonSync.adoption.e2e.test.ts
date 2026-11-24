@@ -60,6 +60,7 @@ import { runNativeOwnerDeliveryPass } from "./nativeOwnerDelivery";
 import { readyOwnerDeliveryDocuments } from "./serverOwnerDelivery";
 import { startServerOwnerDelivery } from "./serverOwnerDelivery";
 import { relayShareOperations } from "../ipc/shareOperations";
+import { liveNoteOperations } from "../ipc/writeOperations";
 
 import { registerOperations } from "../ipc/operationTable";
 import { createRelaySharesIpcHandlers } from "../ipc/relaySharesIpc";
@@ -882,7 +883,7 @@ it.skipIf(engine.missing).each(["existing id", stopQuarantineCase])(
               return work({ workspace: source.workspace, assertCurrent() {} });
             },
           },
-          relayShareOperations,
+          { ...relayShareOperations, ...liveNoteOperations },
           ownerHandlers,
         );
         const stop = () =>
@@ -894,7 +895,7 @@ it.skipIf(engine.missing).each(["existing id", stopQuarantineCase])(
           );
         const resume = () =>
           Promise.resolve(
-            handlers.get(relayShareOperations.resumeOwnerLiveDocument.channel)!(
+            handlers.get(liveNoteOperations.resumeOwnerLiveDocument.channel)!(
               { sender: { id: 1 } },
               { workspaceId, path },
             ),

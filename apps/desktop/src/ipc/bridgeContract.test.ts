@@ -1,6 +1,7 @@
 import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { describe, expect, it } from "vitest";
+import { isSafeRelativePath } from "@dohc/workspace-contracts/workspace-paths";
 import {
   activityPathsAffectWorkspaceListing,
   WorkspacePathOpenFailure,
@@ -181,7 +182,6 @@ import {
   EngineYDocRemoteUpdateEvent,
   EngineYDocSaveStateEvent,
   ExplorerMenuCommand,
-  isSafeRelativePath,
   MenuCommand,
   SearchResultsEvent,
   WorkbenchMenuCommand,
