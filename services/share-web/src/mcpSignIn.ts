@@ -9,6 +9,7 @@ import {
   isAgentRedirectUri,
   LINK_SECRET_PATTERN,
 } from "@dohc/security-contract/wire-patterns";
+import { PERSONAL_AGENT_JOINED_NOTE as JOINED_NOTE } from "@dohc/security-contract/workspace-members";
 import { isAgentHue, type AgentHue } from "@dohc/workspace-contracts/agent-hues";
 import { handleForName } from "@dohc/workspace-contracts/chat-mentions";
 import { asRecord } from "@dohc/workspace-core";
@@ -181,6 +182,7 @@ h1{margin:0;font-size:18px;font-weight:600;overflow-wrap:anywhere}
 .row{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--line)}
 .row:last-child,.opt:last-child{border-bottom:0}
 .k{flex:1;min-width:140px;overflow-wrap:anywhere}
+.reach>.k{flex-basis:100%}
 dt{flex:none;width:64px;color:var(--muted)}
 dd{margin:0}
 .av{display:grid;place-items:center;flex:none;width:24px;height:24px;border-radius:7px;background:var(--panel);color:var(--muted);font-size:11.5px;font-weight:600}
@@ -204,6 +206,7 @@ button,input{font:inherit;color:inherit}
 .tick{flex:none;width:16px;height:16px;border:1.5px solid var(--subtle);border-radius:50%}
 .opt[aria-pressed=true] .tick{border:5px solid var(--accent)}
 .sub{color:var(--muted)}
+.pill{display:inline-block;margin-left:8px;padding:0 8px;border:1px solid var(--line);border-radius:999px;background:var(--panel);color:var(--muted);font-size:11px;line-height:18px;vertical-align:1px}
 .seg{position:relative;display:inline-flex;padding:2px;border:1px solid var(--line);border-radius:9px;background:var(--panel)}
 .seg input{position:absolute;width:1px;height:1px;margin:0;opacity:0}
 .seg label{padding:3px 10px;border-radius:7px;color:var(--muted);font-size:12.5px;cursor:pointer}
@@ -524,6 +527,14 @@ function levelMeaning(level: PersonalLevel, liveDocuments: boolean): string {
 }
 const isLevel = (value: unknown): value is PersonalLevel =>
   (LEVELS as readonly unknown[]).includes(value);
+type WorkspaceRole = "owner" | "admin" | "member";
+const ROLE_MARKS: Readonly<Record<WorkspaceRole, string | null>> = {
+  owner: null,
+  admin: "Admin",
+  member: "Member",
+};
+const isRole = (value: unknown): value is WorkspaceRole =>
+  value === "owner" || value === "admin" || value === "member";
 
 interface PersonalConsent {
   reportedClientName: string | null;
@@ -532,7 +543,7 @@ interface PersonalConsent {
   /** The workspace in the agent's address. */
   workspaceId: string;
   levels: PersonalLevel[];
-  workspaces: Array<{ workspaceId: string; name: string | null }>;
+  workspaces: Array<{ workspaceId: string; name: string | null; role: WorkspaceRole }>;
   agents: Array<{
     agentId: string;
     name: string;
@@ -564,10 +575,11 @@ function parsePersonalConsent(value: Record<string, unknown> | null): PersonalCo
     if (
       !workspace ||
       typeof workspace.workspaceId !== "string" ||
-      (workspace.name !== null && name === null)
+      (workspace.name !== null && name === null) ||
+      !isRole(workspace.role)
     )
       return null;
-    workspaces.push({ workspaceId: workspace.workspaceId, name });
+    workspaces.push({ workspaceId: workspace.workspaceId, name, role: workspace.role });
   }
   const agents: PersonalConsent["agents"] = [];
   for (const entry of value.agents) {
@@ -606,6 +618,15 @@ function parsePersonalConsent(value: Record<string, unknown> | null): PersonalCo
   };
 }
 
+/** The levels a workspace's row offers: no Edit in one the person joined. */
+function offeredIn(consent: PersonalConsent, workspaceId: string): PersonalLevel[] {
+  const workspace = consent.workspaces.find((entry) => entry.workspaceId === workspaceId);
+  if (!workspace) return [];
+  return workspace.role === "owner"
+    ? consent.levels
+    : consent.levels.filter((level) => level !== "edit");
+}
+
 type ConsentRead =
   | { ok: true; consent: PersonalConsent }
   | { ok: false; status: number; code: string | null };
@@ -637,12 +658,11 @@ function startingChoice(
       name: agent.name,
       reach: new Map([...agent.reach].filter(([workspaceId]) => listed.has(workspaceId))),
     };
-  const initialLevel = consent.levels[0];
+  // A first sign-in starts at the lowest level this workspace offers.
+  const initialLevel = offeredIn(consent, consent.workspaceId)[0];
   return {
     name: consent.reportedClientName ?? "",
-    reach: new Map(
-      initialLevel && listed.has(consent.workspaceId) ? [[consent.workspaceId, initialLevel]] : [],
-    ),
+    reach: new Map(initialLevel ? [[consent.workspaceId, initialLevel]] : []),
   };
 }
 
@@ -757,10 +777,12 @@ function consentContent(
       .map((workspace, index) => {
         const id = `w-${String(index)}`;
         const level = view.reach.get(workspace.workspaceId);
-        const current = level !== undefined && consent.levels.includes(level) ? level : "none";
+        const levels = offeredIn(consent, workspace.workspaceId);
+        const current = level !== undefined && levels.includes(level) ? level : "none";
+        const mark = ROLE_MARKS[workspace.role];
         const radios = [
           { value: "none", label: "None" },
-          ...consent.levels.map((offered) => ({ value: offered, label: LEVEL_LABELS[offered] })),
+          ...levels.map((offered) => ({ value: offered, label: LEVEL_LABELS[offered] })),
         ]
           .map(({ value, label }) => {
             const checked = value === current;
@@ -771,7 +793,12 @@ function consentContent(
           })
           .join("");
         return (
-          `<div class="row"><bdi class="k" id="${id}">${escapeHtml(workspace.name ?? workspace.workspaceId)}</bdi>` +
+          // A joined workspace's mark sits beside its name, as on the desktop. The
+          // name sits above the levels in every row (`.reach`), since a row with
+          // Edit is wider and would wrap where the others do not.
+          `<div class="row reach"><span class="k"><bdi id="${id}">${escapeHtml(workspace.name ?? workspace.workspaceId)}</bdi>` +
+          (mark ? `<span class="pill">${mark}</span>` : "") +
+          "</span>" +
           `<span class="seg" role="radiogroup" aria-labelledby="${id}">${radios}</span></div>`
         );
       })
@@ -780,7 +807,10 @@ function consentContent(
   const meanings =
     consent.levels.length === 0
       ? ""
-      : `<p class="cap">${consent.levels.map((level) => levelMeaning(level, liveDocuments)).join(" ")}</p>`;
+      : `<p class="cap">${consent.levels.map((level) => levelMeaning(level, liveDocuments)).join(" ")}</p>` +
+        (consent.workspaces.some((workspace) => workspace.role !== "owner")
+          ? `<p class="cap">${JOINED_NOTE}</p>`
+          : "");
   const allow =
     '<button type="submit" name="decision" value="allow" class="btn primary">Allow</button>';
   return (
@@ -869,10 +899,10 @@ function signInPage(
   );
 }
 
-// The browser's account doesn't own the workspace in the agent's address.
-// Right after the relay began the request that is the only reason it can
-// refuse; later the request may also have ended, which the relay doesn't
-// tell apart.
+// The browser's account neither owns nor is a member of the workspace in the
+// agent's address. Right after the relay began the request that is the only
+// reason it can refuse; later the request may also have ended, which the
+// relay doesn't tell apart.
 function ownershipPage(
   origin: string,
   returnQuery: string,
@@ -880,9 +910,9 @@ function ownershipPage(
   justBegun: boolean,
 ): Response {
   const message = justBegun
-    ? `${email} does not own the workspace in this agent's link. Sign in as the workspace's owner to continue.`
-    : `${email} does not own the workspace in this agent's link, or this sign-in request ended. ` +
-      `Sign in as the workspace's owner, or ${START_AGAIN.charAt(0).toLowerCase()}${START_AGAIN.slice(1)}`;
+    ? `${email} is not in the workspace in this agent's link. Sign in as its owner or a member to continue.`
+    : `${email} is not in the workspace in this agent's link, or this sign-in request ended. ` +
+      `Sign in as its owner or a member, or ${START_AGAIN.charAt(0).toLowerCase()}${START_AGAIN.slice(1)}`;
   return page(
     origin,
     { title: "dohc could not sign in this agent" },
@@ -1614,11 +1644,12 @@ export function createMcpSignIn(options: {
     let listChanged = false;
     for (const [key, value] of form) {
       if (!key.startsWith("w:") || value === "none") continue;
+      const workspaceId = key.slice("w:".length);
       if (!isLevel(value) || !consent.levels.includes(value))
         return errorPage(origin, `dohc could not read this choice. ${START_AGAIN}`);
-      const workspaceId = key.slice("w:".length);
-      if (listed.has(workspaceId)) reach.set(workspaceId, value);
-      else listChanged = true;
+      if (!listed.has(workspaceId)) listChanged = true;
+      else if (offeredIn(consent, workspaceId).includes(value)) reach.set(workspaceId, value);
+      else return errorPage(origin, `dohc could not read this choice. ${START_AGAIN}`);
     }
     const typedName = agent ? agent.name : (form.get("name") ?? "");
     const named = agent ? null : nameChoice(typedName);

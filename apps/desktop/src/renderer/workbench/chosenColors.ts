@@ -1,3 +1,5 @@
+import { isPersonalAgentId } from "@dohc/workspace-contracts/actor-presentation";
+export { isPersonalAgentId };
 import { firstAgent, listAgents, type DesktopUserSettings } from "../../settings/userSettings";
 import type { AgentHue, IdentityHue } from "@dohc/workspace-contracts/agent-hues";
 
@@ -66,10 +68,6 @@ export function chosenHue(kind: "human" | "agent"): IdentityHue | null {
 export function settingsAgentHue(agentId: string): IdentityHue | null | undefined {
   if (isPersonalAgentId(agentId)) return personal === null ? null : personal.get(agentId)?.hue;
   return chosen.agents === null ? null : chosen.agents.get(agentId);
-}
-
-export function isPersonalAgentId(agentId: string): boolean {
-  return agentId.startsWith("p-");
 }
 
 /** Your personal agents' names and hues, or null when no roster has been read. */

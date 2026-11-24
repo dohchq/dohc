@@ -103,6 +103,7 @@ function memberRemove(
 export function commentsClient(comments: NamedChatComments, moderates: boolean): ChatChannelClient {
   return {
     access: comments.access,
+    readerUserId: comments.userId,
     remove: memberRemove(comments, moderates),
     readHistory: (before, signal) => readNamedChatHistory(comments, before, signal),
     follow: (since, holdMs, signal) => followNamedChat(comments, since, holdMs, signal),
@@ -354,6 +355,7 @@ export function createGroupFollow(options: {
     client(group: NamedChatChannel, moderates: boolean): ChatChannelClient {
       return {
         access: group.access,
+        readerUserId: group.userId,
         remove: memberRemove(group, moderates),
         readHistory: (before, signal) => readNamedChatHistory(group, before, signal),
         follow: (since, _holdMs, signal) => followGroup(group.channelWireId, since, signal),

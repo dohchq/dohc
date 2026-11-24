@@ -301,6 +301,7 @@ it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")(
         },
         publicOrigin: SHARE_WEB_ORIGIN,
         personalAgents: { readFence },
+        refreshAccountEmail: async () => undefined,
         linkKey: key,
         publicEditRelease: { version: 1 },
         relayExchangeKeyConfigured: true,

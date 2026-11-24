@@ -39,10 +39,12 @@ export interface PersonalAgentRosterCache {
   revisionSeen(accountKey: string, revision: number): void;
   // The signed-in account may have changed.
   accountChanged(): void;
+  // `what` names the change for a failure's words, such as "rename Sprout".
   change(
     accountKey: string,
     agentId: string,
     change: PersonalAgentChange,
+    what: string,
   ): Promise<PersonalAgentChangeResult>;
 }
 
@@ -111,7 +113,7 @@ function requestFor(
       ? { name: change.name }
       : change.kind === "hue"
         ? { hue: change.hue }
-        : { reach: change.reach };
+        : { reach: change.reach, revision: change.revision };
   return {
     path: `${base}/${change.kind}`,
     init: {
@@ -135,7 +137,8 @@ function failureWords(error: unknown, host: string, what: string): string {
     error instanceof TypeError ||
     (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"))
   ) {
-    return `dohc could not reach ${host}. Check your connection.`;
+    // Like dohc's other connection failures, it says what didn't happen, not the server's address.
+    return `dohc could not ${what}. Check your connection.`;
   }
   return `${host} could not ${what}.`;
 }
@@ -214,6 +217,7 @@ export function createPersonalAgentRoster(deps: {
           workspaces: answer.workspaces.map((workspace) => ({
             workspaceId: workspace.workspaceId,
             name: workspace.name,
+            role: workspace.role,
           })),
         },
         failure: null,
@@ -250,12 +254,14 @@ export function createPersonalAgentRoster(deps: {
   }
 
   // Puts a change answer into the cache. When the cache missed a revision in
-  // between, it keeps its old revision and reads the whole roster again.
+  // between, it keeps its old revision and reads the whole roster again. An
+  // answer at or below the cached revision is already in the roster.
   function apply(key: string, answer: z.infer<typeof RelayChange>): void {
     if (!cached || cached.key !== key || !cached.roster) {
       void refresh();
       return;
     }
+    if (answer.revision <= cached.roster.revision) return;
     changes++;
     const agent = toAgent(answer.agent);
     const others = cached.roster.agents.filter((entry) => entry.agentId !== answer.agent.agentId);
@@ -295,7 +301,7 @@ export function createPersonalAgentRoster(deps: {
       void refresh();
     },
 
-    async change(accountKey, agentId, change) {
+    async change(accountKey, agentId, change, what) {
       const session = await deps.session();
       if (!session || session.key !== accountKey) return { ok: false, error: OTHER_ACCOUNT };
       const host = hostOf(session.origin);
@@ -312,7 +318,13 @@ export function createPersonalAgentRoster(deps: {
           errors: {
             400: () => new Refusal(invalidWords(change, host), change.kind === "reach"),
             404: () => new Refusal(`dohc could not find ${name} on ${host}.`, true),
-            409: () => new Refusal(`Sign out ${name} before you remove it.`, true),
+            409: () =>
+              new Refusal(
+                change.kind === "reach"
+                  ? `What ${name} can reach changed. Check it and try again.`
+                  : `Sign out ${name} before you remove it.`,
+                true,
+              ),
             503: () =>
               new Refusal(`${host} could not change ${name} right now. Try again shortly.`, false),
           },
@@ -330,7 +342,7 @@ export function createPersonalAgentRoster(deps: {
           if (error.refresh) void refresh();
           return { ok: false, error: error.message };
         }
-        return { ok: false, error: failureWords(error, host, `change ${name}`) };
+        return { ok: false, error: failureWords(error, host, what) };
       }
     },
   };

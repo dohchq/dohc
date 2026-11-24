@@ -101,6 +101,9 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
         ? {
             membership: true as const,
             ...(raw.role === "admin" || raw.role === "member" ? { role: raw.role } : {}),
+            ...(boundedString(raw.membersWorkspaceId, 1, 200) !== null
+              ? { membersWorkspaceId: raw.membersWorkspaceId }
+              : {}),
             ...storedGroupLevels(raw, pinned, level),
           }
         : {}),

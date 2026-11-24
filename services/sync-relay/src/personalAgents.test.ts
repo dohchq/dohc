@@ -1,10 +1,8 @@
 import type { StorageContext } from "./storage/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
-import { agentChannelWireId } from "@dohc/security-contract/chat-wire-ids";
+import { agentChannelWireId, GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 
-import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
-import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import type { RelayNoticePage } from "@dohc/workspace-contracts/relay";
 import type {
   ConsentCredentials,
@@ -20,7 +18,6 @@ import {
   type ResolveAccountSession,
 } from "@dohc/workspace-auth/session";
 
-import type { AutomationReplica } from "./automationReplicas";
 import { PERSONAL_WRITE_WORKSPACE_HEADER } from "./collectionWriteRoutes";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { errorResponse, notFound } from "./errors";
@@ -34,7 +31,6 @@ import {
   PERSONAL_THREAD_ID_PREFIX,
 } from "./relayLogInputs";
 import type { createSyncRelayHandler } from "./server";
-import { startServerCopies, type ServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
 
 import {
@@ -58,6 +54,7 @@ import {
   reopenTestStorage,
   request,
   resolveTestAccountSession,
+  resolveTestActor,
   sequenced,
   SHARE_WEB_ORIGIN,
   storagePath,
@@ -81,6 +78,7 @@ const SESSIONS: Record<string, string> = {
   "owner-session": OWNER,
   "owner-new-session": OWNER,
   "other-session": OTHER,
+  "joiner-session": "joiner-account",
 };
 
 type Handler = ReturnType<typeof createSyncRelayHandler>;
@@ -505,8 +503,16 @@ async function roster(f: Fixture, userId = OWNER) {
       lastActionAtMs: number | null;
       reach: Reach;
     }[];
-    workspaces: { workspaceId: string; name: string | null }[];
+    workspaces: {
+      workspaceId: string;
+      name: string | null;
+      role: "owner" | "admin" | "member" | "ended";
+    }[];
   };
+}
+
+function reachOf(list: Awaited<ReturnType<typeof roster>>, agentId: string): Reach | undefined {
+  return list.agents.find((agent) => agent.agentId === agentId)?.reach;
 }
 
 function count(f: Fixture, table: string, where = "1", ...params: unknown[]): number {
@@ -542,8 +548,8 @@ describe("personal agent sign-in", () => {
       workspaceId: WS_A,
       levels: ["view", "comment", "edit"],
       workspaces: [
-        { workspaceId: WS_A, name: null },
-        { workspaceId: WS_B, name: null },
+        { workspaceId: WS_A, name: null, role: "owner" },
+        { workspaceId: WS_B, name: null, role: "owner" },
       ],
       agents: [],
     });
@@ -994,6 +1000,7 @@ describe("the owner's controls", () => {
         await owner(f, `${path}/reach`, {
           method: "PUT",
           body: {
+            revision: (await roster(f)).revision,
             reach: [
               { workspaceId: WS_A, level: "comment" },
               { workspaceId: WS_B, level: "view" },
@@ -1045,8 +1052,11 @@ describe("the owner's controls", () => {
   it("sets reach only to the account's own workspaces, at View, Comment, or Edit", async () => {
     const f = await fixture();
     const agent = await signIn(f);
-    const setReach = (reach: unknown) =>
-      owner(f, `/${agent.agentId}/reach`, { method: "PUT", body: { reach } });
+    const setReach = async (reach: unknown) =>
+      owner(f, `/${agent.agentId}/reach`, {
+        method: "PUT",
+        body: { reach, revision: (await roster(f)).revision },
+      });
     expect((await setReach([{ workspaceId: OTHER_WS, level: "view" }])).status).toBe(400);
     expect((await setReach([{ workspaceId: WS_A, level: "admin" }])).status).toBe(400);
     expect(
@@ -1061,6 +1071,25 @@ describe("the owner's controls", () => {
     expect((await owner(f, `/${agent.agentId}/reach`, { method: "POST" })).status).toBe(405);
     expect((await roster(f)).agents[0]?.reach).toEqual([{ workspaceId: WS_A, level: "view" }]);
     await ok(await setReach([{ workspaceId: WS_A, level: "edit" }]));
+    expect((await roster(f)).agents[0]?.reach).toEqual([{ workspaceId: WS_A, level: "edit" }]);
+  });
+
+  it("refuses a reach save made from an older roster, such as one shown before a rejoin dropped reach", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    const shown = (await roster(f)).revision;
+    await ok(
+      await owner(f, `/${agent.agentId}/name`, { method: "PUT", body: { name: "Research" } }),
+    );
+    const save = (revision: unknown) =>
+      owner(f, `/${agent.agentId}/reach`, {
+        method: "PUT",
+        body: { reach: [{ workspaceId: WS_A, level: "edit" }], revision },
+      });
+    await expectCode(await save(shown), 409, "conflict");
+    expect((await save("1")).status).toBe(400);
+    expect((await roster(f)).agents[0]?.reach).toEqual([{ workspaceId: WS_A, level: "view" }]);
+    await ok(await save(shown + 1));
     expect((await roster(f)).agents[0]?.reach).toEqual([{ workspaceId: WS_A, level: "edit" }]);
   });
 
@@ -1215,8 +1244,9 @@ function setOwner(f: Fixture, workspaceId: string, userId: string): void {
   }
 }
 
-function setReach(f: Fixture, agent: Signed, reach: Reach): Promise<Response> {
-  return owner(f, `/${agent.agentId}/reach`, { method: "PUT", body: { reach } });
+async function setReach(f: Fixture, agent: Signed, reach: Reach): Promise<Response> {
+  const { revision } = await roster(f);
+  return owner(f, `/${agent.agentId}/reach`, { method: "PUT", body: { reach, revision } });
 }
 
 const BOTH_VIEW: Reach = [
@@ -1687,164 +1717,43 @@ describe("a personal agent's tools", () => {
  * identity, so a copy can open; by default every workspace the fixture claims
  * does. Syncs can be held.
  */
-async function withCopies(identified: readonly string[] = [WS_A, WS_B, OTHER_WS]) {
-  let copies: ServerCopies | undefined;
-  const f = await fixture({ serverCopies: () => copies });
-  for (const workspaceId of identified) {
-    f.storage.claimWorkspaceIdentity({
-      workspaceId,
-      replicationEpoch: "epoch",
-      streamIdentity: "stream",
-    });
-  }
-  const engine = new ChatsLoopbackEngine();
-  const syncs: string[] = [];
-  let held: Promise<void> | null = null;
-  let requestId = 0;
-  const lifetime = new AbortController();
-  const started = await startServerCopies({
-    storage: f.storage,
-    root: "unused",
-    engineExecutable: "unused",
-    relayOrigin: "https://relay.example.test",
-    key: new Uint8Array(32),
-    namespace: "test",
-    startReplicas: async (hooks) => {
-      const open = new Map<string, AutomationReplica>();
-      const pass = () => {
-        const wanted = hooks.wanted();
-        for (const [workspaceId, reasons] of wanted) {
-          const row = f.storage.joinAutomationWorkspace({ workspaceId, nowMs: 1, reasons });
-          if (!row || open.has(workspaceId)) continue;
-          open.set(workspaceId, {
-            workspaceId,
-            ownerUserId: row.ownerUserId,
-            incarnation: row.incarnation,
-            reasons: row.reasons,
-            startedAtMs: 1,
-            pulledHead: 0,
-            root: "unused",
-            metadataDir: "unused",
-            client: engine as unknown as EngineClient,
-            workspace: workspaceId,
-            signal: lifetime.signal,
-            nextRequestId: () => ++requestId,
-            withRecordWork: (work) => work(),
-            step: async () => true,
-            sync: async () => {
-              syncs.push(workspaceId);
-              await held;
-            },
-          });
-          hooks.onChanged?.(workspaceId);
-        }
-        for (const workspaceId of [...open.keys()])
-          if (!wanted.has(workspaceId)) open.delete(workspaceId);
-      };
-      return {
-        unavailable: false,
-        replica: (id) => open.get(id),
-        reconcile: () => queueMicrotask(pass),
-        deleteWorkspaces: async () => undefined,
-        failedSyncs: () => new Map(),
-        settled: async () => undefined,
-        close: async () => undefined,
-      };
-    },
-  });
-  copies = started;
-  cleanup.push(async () => {
-    lifetime.abort();
-    await started.close();
-  });
-  return {
-    f,
-    engine,
-    syncs,
-    holdSyncs() {
-      let releaseSyncs!: () => void;
-      held = new Promise((resolve) => {
-        releaseSyncs = resolve;
-      });
-      return () => {
-        held = null;
-        releaseSyncs();
-      };
-    },
-  };
-}
-
-function seedChats(engine: ChatsLoopbackEngine, workspace: string, agentId: string): void {
-  engine.seedChannel({
-    workspace,
-    channelId: "channel-planning",
-    name: "Planning",
-    purpose: "Where we go",
-    wireId: "wire-planning",
-  });
-  engine.seedChannel({ workspace, channelId: "channel-drafts", name: "Drafts", wireId: null });
-  engine.seedChannel({
-    workspace,
-    channelId: "channel-people",
-    name: "Ada and Ben",
-    kind: "dm",
-    wireId: "wire-people",
-  });
-  engine.seedChannel({
-    workspace,
-    channelId: `personal-dm:${agentId}`,
-    name: "Helper",
-    kind: "agent",
-    wireId: agentChannelWireId(agentId),
-  });
-}
-
 describe("a personal agent's Groups", () => {
-  it("lists the workspace's Groups through the server's copy at View, and never a DM", async () => {
-    const { f, engine, syncs } = await withCopies();
+  it("lists the workspace's Groups from the relay at View, and never General, a DM or an agent chat", async () => {
+    const f = await fixture();
     const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }] });
-    seedChats(engine, WS_A, agent.agentId);
+    fromComputer(f, WS_A, [
+      chatChannelCreate("wire-planning", { name: "Planning", purpose: "Where we go" }),
+      chatChannelCreate(GENERAL_CHANNEL_WIRE_ID, { name: "General" }),
+      chatChannelCreate("wire-people", { name: "Ada and Ben", kind: "dm" }),
+      chatChannelCreate(agentChannelWireId(agent.agentId), { name: "Helper", kind: "agent" }),
+    ]);
 
     expect(await ok(await tool(f, agent, "groups", { workspaceId: WS_A }))).toEqual({
       ok: true,
       workspaceId: WS_A,
       groups: [{ channelWireId: "wire-planning", name: "Planning", purpose: "Where we go" }],
     });
-    expect(syncs).toEqual([WS_A]);
-    fromComputer(f, WS_A, [chatChannelCreate("wire-planning")]);
     await ok(await tool(f, agent, "chat", { workspaceId: WS_A, channelWireId: "wire-planning" }));
 
     for (const body of [{}, { workspaceId: WS_A, group: "planning" }]) {
       expect((await tool(f, agent, "groups", body)).status, JSON.stringify(body)).toBe(400);
     }
-    expect(syncs).toEqual([WS_A]);
+    await expectCode(
+      await tool(f, agent, "groups", { workspaceId: WS_B }),
+      403,
+      "personal_agent_out_of_reach",
+    );
   });
 
-  const midCall: Array<[string, (f: Fixture, agent: Signed) => Promise<void>]> = [
-    [
-      "the agent signs out",
-      async (f, agent) => {
-        await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" }));
-      },
-    ],
-  ];
-
-  it.each(midCall)(
-    "ends with not-found, and no Group, when %s while the copy syncs",
-    async (_, revoke) => {
-      const { f, engine, holdSyncs, syncs } = await withCopies();
-      const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }] });
-      seedChats(engine, WS_A, agent.agentId);
-      const release = holdSyncs();
-      const pending = tool(f, agent, "groups", { workspaceId: WS_A });
-      await vi.waitFor(() => expect(syncs).toEqual([WS_A]));
-      await revoke(f, agent);
-      release();
-      const response = await pending;
-      expect(await response.clone().text()).not.toContain("Planning");
-      await expectRefused(response);
-    },
-  );
+  it("ends with not-found, and no Group, once the agent signs out", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }] });
+    fromComputer(f, WS_A, [chatChannelCreate("wire-planning", { name: "Planning" })]);
+    await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" }));
+    const response = await tool(f, agent, "groups", { workspaceId: WS_A });
+    expect(await response.clone().text()).not.toContain("Planning");
+    await expectRefused(response);
+  });
 });
 
 describe("a personal agent's wait", () => {
@@ -2204,6 +2113,1095 @@ describe("a personal agent's reads", () => {
     const reset = await open();
     f.fence.changePassword(OWNER);
     await expect(reset.read()).rejects.toMatchObject({ code: "not_found" });
+  });
+});
+
+// The agent's person is a member of OTHER's workspace, which members know as "Community".
+const COMMUNITY = OTHER_WS;
+const MEMBER_ID = "member-ada";
+type FolderRule = { members: Level | null; people: Array<{ email: string; level: Level }> };
+// Hides its folder from every member but ben, whom the relay can't match to the person.
+const HIDING_RULE: FolderRule = {
+  members: null,
+  people: [{ email: "ben@dohc.test", level: "edit" }],
+};
+
+function joinCommunity(f: Fixture, input: { level?: Level; role?: "admin" } = {}): void {
+  expect(
+    f.storage.inviteWorkspaceMember({
+      workspaceId: COMMUNITY,
+      actorUserId: OTHER,
+      workspaceName: "Community",
+      email: "ada@dohc.test",
+      recipientUserId: OWNER,
+      newMemberId: () => MEMBER_ID,
+      newGrantId: () => "grant-ada",
+      newShareId: () => "share-community",
+      nowMs: 5,
+    }),
+  ).toMatchObject({ ok: true });
+  if (input.level) memberLevel(f, input.level);
+  if (input.role)
+    expect(
+      f.storage.setWorkspaceMemberRole({
+        workspaceId: COMMUNITY,
+        actorUserId: OTHER,
+        memberId: MEMBER_ID,
+        role: input.role,
+      }),
+    ).toEqual({ ok: true });
+}
+
+function memberLevel(f: Fixture, level: Level): void {
+  expect(
+    f.storage.setWorkspaceMemberLevel({
+      workspaceId: COMMUNITY,
+      actorUserId: OTHER,
+      level,
+      workspaceName: undefined,
+      newShareId: () => "unused-share",
+      nowMs: 6,
+    }),
+  ).toEqual({ ok: true });
+}
+
+const communitySeqs = new WeakMap<SyncRelayStorage, number>();
+
+/** OTHER writes a file in the community; its object id is `object-<path>`. */
+async function communityWrite(f: Fixture, path: string, text: string): Promise<string> {
+  const sha = await putBlob(f.h, OTHER, COMMUNITY, text);
+  const originSeq = communitySeqs.get(f.storage) ?? 0;
+  communitySeqs.set(f.storage, originSeq + 1);
+  await appendLog(f.h, OTHER, COMMUNITY, [
+    moment(path, text, { originSeq, objectId: `object-${path}` }),
+  ]);
+  return sha;
+}
+
+function communityGroups(f: Fixture): void {
+  fromComputer(f, COMMUNITY, [
+    chatChannelCreate("wire-team", { name: "Team", purpose: "Day to day" }),
+    chatThreadCreate("thread-team", "wire-team"),
+    chatChannelCreate("wire-news", { name: "Announcements" }),
+    chatThreadCreate("thread-news", "wire-news"),
+    chatChannelCreate("wire-secret", { name: "Secret" }),
+    chatThreadCreate("thread-secret", "wire-secret"),
+  ]);
+}
+
+/** OTHER sets a Group's rule, as Members does. */
+async function groupRule(f: Fixture, channelWireId: string, level: "none" | "view" | "comment") {
+  const response = await f.h(
+    request(OTHER, `/sync/${COMMUNITY}/members/groups/${channelWireId}/rule`, {
+      ...jsonBody({ level }),
+      method: "PUT",
+    }),
+  );
+  expect(response.status, await response.clone().text()).toBe(200);
+}
+
+/** OTHER sets a folder's rule, as Members settings does. */
+async function folderRule(f: Fixture, folder: string, rule: FolderRule): Promise<void> {
+  const response = await f.h(
+    request(OTHER, `/sync/${COMMUNITY}/members/folder-rules`, jsonBody({ folder, ...rule })),
+  );
+  expect(response.status, await response.clone().text()).toBe(200);
+}
+
+async function removeFromCommunity(f: Fixture): Promise<void> {
+  const response = await f.h(
+    request(OTHER, `/sync/${COMMUNITY}/members/${MEMBER_ID}/remove`, jsonBody({})),
+  );
+  expect(response.status, await response.clone().text()).toBe(200);
+}
+
+const BOTH_COMMENT: Reach = [
+  { workspaceId: WS_A, level: "comment" },
+  { workspaceId: COMMUNITY, level: "comment" },
+];
+
+describe("a personal agent in a workspace its person joined", () => {
+  it("signs in at a joined workspace for a member who owns none, again once signed out, and never once the membership ends", async () => {
+    const f = await fixture();
+    expect(
+      f.storage.inviteWorkspaceMember({
+        workspaceId: COMMUNITY,
+        actorUserId: OTHER,
+        workspaceName: "Community",
+        email: "joiner@dohc.test",
+        recipientUserId: "joiner-account",
+        newMemberId: () => "member-joiner",
+        newGrantId: () => "grant-joiner",
+        newShareId: () => "share-community",
+        nowMs: 5,
+      }),
+    ).toMatchObject({ ok: true });
+    const session = "joiner-session";
+    const reach: Reach = [{ workspaceId: COMMUNITY, level: "comment" }];
+    const clientId = await registerClient(f);
+    const asked = await beginRequest(f, clientId, COMMUNITY);
+    expect(await ok(await consent(f, asked, session))).toMatchObject({
+      workspaceId: COMMUNITY,
+      workspaces: [{ workspaceId: COMMUNITY, name: "Community", role: "member" }],
+    });
+    await expectRefused(await consent(f, asked));
+    const agent = await signIn(f, { clientId, workspaceId: COMMUNITY, session, reach });
+    expect((await ok(await tool(f, agent, "workspaces", {}))).workspaces).toEqual([
+      expect.objectContaining({ workspaceId: COMMUNITY, role: "member" }),
+    ]);
+
+    await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" }, "joiner-account"));
+    const again = await signIn(f, {
+      clientId,
+      workspaceId: COMMUNITY,
+      session,
+      reach,
+      agent: { kind: "existing", agentId: agent.agentId },
+    });
+    expect(again.agentId).toBe(agent.agentId);
+
+    const response = await f.h(
+      request(OTHER, `/sync/${COMMUNITY}/members/member-joiner/remove`, jsonBody({})),
+    );
+    expect(response.status, await response.clone().text()).toBe(200);
+    const ended = await beginRequest(f, clientId, COMMUNITY);
+    await expectRefused(await consent(f, ended, session));
+    await expectRefused(await allow(f, ended, { session, reach }));
+  });
+
+  it("names its person on its post and in another member's browser, whatever name the agent took, and serves the page under the rule in force once a missing name is found", async () => {
+    let held: Promise<void> | null = null;
+    let looking!: () => void;
+    let found = true;
+    let invisible = false;
+    const f = await fixture({
+      namedBrowserSessionLimits: {
+        maxSessions: 8,
+        retentionMs: 60_000,
+        maxPendingRequests: 8,
+        maxRequestBytes: 100_000,
+        maxResponseBytes: 200_000,
+        timeoutMs: 1000,
+      },
+      lookupUserDisplayName: async (userId: string) => {
+        if (held) {
+          looking();
+          await held;
+        }
+        if (!found) return null;
+        if (invisible) return "ㅤ​";
+        return userId === OWNER ? "Ada" : userId === OTHER ? "Olive" : null;
+      },
+      // A browser's cookie names its person; a test request's bearer names its own.
+      resolveActor: (incoming, workspaceId) => {
+        const sessionId = /^session=([\w-]+)$/u.exec(incoming.headers.get("cookie") ?? "")?.[1];
+        if (sessionId === undefined) return resolveTestActor(incoming, workspaceId);
+        const userId = SESSIONS[sessionId];
+        if (!userId) throw new UnauthorizedError();
+        return { userId, workspaceId };
+      },
+    });
+    joinCommunity(f);
+    communityGroups(f);
+    expect(
+      f.storage.inviteWorkspaceMember({
+        workspaceId: COMMUNITY,
+        actorUserId: OTHER,
+        workspaceName: "Community",
+        email: "joiner@dohc.test",
+        recipientUserId: "joiner-account",
+        newMemberId: () => "member-joiner",
+        newGrantId: () => "grant-joiner",
+        newShareId: () => "share-community",
+        nowMs: 5,
+      }),
+    ).toMatchObject({ ok: true });
+    const agent = await signIn(f, { reach: [{ workspaceId: COMMUNITY, level: "comment" }] });
+    // Named after the workspace's owner, the post still names Ada.
+    await ok(await owner(f, `/${agent.agentId}/name`, { method: "PUT", body: { name: "Olive" } }));
+    await ok(await post(f, agent, { workspaceId: COMMUNITY, channelWireId: "wire-team" }));
+    // The relay writes the person's name on the post, so every desktop can show it.
+    expect(payloadOf(logOf(f, COMMUNITY).at(-1)!)).toMatchObject({
+      authorKind: "agent",
+      authorDisplayName: "Olive",
+      authorOwnerDisplayName: "Ada",
+    });
+
+    const read = () =>
+      f.h(
+        new Request(
+          `http://relay.test/sync/named-chat/messages?shareId=share-community&channelWireId=wire-team`,
+          {
+            headers: {
+              cookie: "session=joiner-session",
+              origin: SHARE_WEB_ORIGIN,
+              "x-dohc-relay-exchange-key": RELAY_EXCHANGE_KEY,
+            },
+          },
+        ),
+      );
+    expect((await ok(await read())).messages).toEqual([
+      expect.objectContaining({
+        authorKind: "agent",
+        authorDisplayName: "Olive",
+        authorUserId: OWNER,
+        authorOwnerDisplayName: "Ada",
+      }),
+    ]);
+
+    // A post written while no name was found is named when read. A folder
+    // hidden during that lookup is withheld in the answer.
+    await communityWrite(f, "later/c.md", "for now");
+    found = false;
+    await ok(
+      await post(f, agent, {
+        workspaceId: COMMUNITY,
+        channelWireId: "wire-team",
+        body: "read @[later/c.md#Secret]",
+        idempotencyKey: "post-2",
+      }),
+    );
+    expect(payloadOf(logOf(f, COMMUNITY).at(-1)!)).not.toHaveProperty("authorOwnerDisplayName");
+    found = true;
+    let release!: () => void;
+    held = new Promise<void>((resolve) => (release = resolve));
+    const entered = new Promise<void>((resolve) => (looking = resolve));
+    const answered = read();
+    await entered;
+    held = null;
+    await folderRule(f, "later", HIDING_RULE);
+    release();
+    const answer = await ok(await answered);
+    expect(answer.messages).toEqual([
+      expect.objectContaining({
+        body: "read (a file not shared here)",
+        authorOwnerDisplayName: "Ada",
+      }),
+      expect.objectContaining({ body: "from the agent", authorOwnerDisplayName: "Ada" }),
+    ]);
+    expect(JSON.stringify(answer)).not.toContain("later/");
+
+    // A name with nothing the engine shows is left off, since the engine
+    // refuses a post that carries one.
+    invisible = true;
+    await ok(
+      await post(f, agent, {
+        workspaceId: COMMUNITY,
+        channelWireId: "wire-team",
+        idempotencyKey: "post-3",
+      }),
+    );
+    expect(payloadOf(logOf(f, COMMUNITY).at(-1)!)).not.toHaveProperty("authorOwnerDisplayName");
+  });
+
+  it("takes a joined workspace into reach, never one its person isn't a member of, and appends no chat there", async () => {
+    const f = await fixture();
+    joinCommunity(f);
+    await claimWorkspace(f.h, OTHER, "workspace-third");
+    const before = logOf(f, COMMUNITY).length;
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+    expect((await roster(f)).agents[0]?.reach).toEqual(BOTH_COMMENT);
+    await ok(await setReach(f, agent, [{ workspaceId: COMMUNITY, level: "view" }]));
+    expect((await roster(f)).agents[0]?.reach).toEqual([{ workspaceId: COMMUNITY, level: "view" }]);
+    expect(
+      (await setReach(f, agent, [{ workspaceId: "workspace-third", level: "view" }])).status,
+    ).toBe(400);
+    expect(logOf(f, COMMUNITY)).toHaveLength(before);
+    expect((await roster(f)).workspaces).toEqual([
+      { workspaceId: WS_A, name: null, role: "owner" },
+      { workspaceId: WS_B, name: null, role: "owner" },
+      { workspaceId: COMMUNITY, name: "Community", role: "member" },
+    ]);
+  });
+
+  it("deletes its own message in a joined workspace at View, and not in a Group a rule hides from its person", async () => {
+    const f = await fixture();
+    joinCommunity(f);
+    communityGroups(f);
+    const agent = await signIn(f, { reach: [{ workspaceId: COMMUNITY, level: "comment" }] });
+    const posted = async (idempotencyKey: string) =>
+      (
+        (await ok(
+          await post(f, agent, {
+            workspaceId: COMMUNITY,
+            channelWireId: "wire-team",
+            idempotencyKey,
+          }),
+        )) as { message: { messageId: string; threadId: string } }
+      ).message;
+    const first = await posted("post-1");
+    const second = await posted("post-2");
+    const remove = (message: { messageId: string; threadId: string }) =>
+      tool(f, agent, "delete", {
+        workspaceId: COMMUNITY,
+        threadId: message.threadId,
+        messageId: message.messageId,
+      });
+
+    memberLevel(f, "view");
+    expect(await ok(await remove(first))).toMatchObject({ messageId: first.messageId });
+    await groupRule(f, "wire-team", "none");
+    await expectRefused(await remove(second));
+    expect(
+      logOf(f, COMMUNITY)
+        .filter((row) => row.opKind === "chat.message.delete")
+        .map((row) => payloadOf(row).messageId),
+    ).toEqual([first.messageId]);
+  });
+
+  it("acts at the lower of its own level and its person's, in the workspace and in a Group", async () => {
+    const f = await fixture();
+    joinCommunity(f, { level: "view" });
+    communityGroups(f);
+    const agent = await signIn(f, {
+      reach: [
+        { workspaceId: WS_A, level: "view" },
+        { workspaceId: COMMUNITY, level: "comment" },
+      ],
+    });
+    expect((await ok(await tool(f, agent, "workspaces", {}))).workspaces).toContainEqual({
+      workspaceId: COMMUNITY,
+      name: "Community",
+      level: "view",
+      role: "member",
+      dmChannelWireId: null,
+    });
+    await expectCode(
+      await post(f, agent, { workspaceId: COMMUNITY, channelWireId: "wire-team" }),
+      403,
+      "personal_agent_view_only",
+    );
+
+    memberLevel(f, "edit");
+    await groupRule(f, "wire-team", "comment");
+    await ok(await setReach(f, agent, [{ workspaceId: COMMUNITY, level: "view" }]));
+    await ok(await tool(f, agent, "chat", { workspaceId: COMMUNITY, channelWireId: "wire-team" }));
+    await expectCode(
+      await post(f, agent, {
+        workspaceId: COMMUNITY,
+        channelWireId: "wire-team",
+        idempotencyKey: "post-2",
+      }),
+      403,
+      "personal_agent_view_only",
+    );
+    await ok(await setReach(f, agent, [{ workspaceId: COMMUNITY, level: "comment" }]));
+    const { message } = (await ok(
+      await post(f, agent, {
+        workspaceId: COMMUNITY,
+        channelWireId: "wire-team",
+        idempotencyKey: "post-3",
+      }),
+    )) as { message: Record<string, unknown> };
+    expect(message).toMatchObject({ channelWireId: "wire-team", authorDisplayName: "Helper" });
+    expect(payloadOf(logOf(f, COMMUNITY).at(-1)!)).toMatchObject({
+      authorUserId: OWNER,
+      authorAgentId: agent.agentId,
+    });
+  });
+
+  it("keeps a hidden folder's files, bytes and Comments and a hidden Group out of reach, and posts nowhere members only read", async () => {
+    const f = await fixture();
+    joinCommunity(f);
+    communityGroups(f);
+    await groupRule(f, "wire-secret", "none");
+    await groupRule(f, "wire-news", "view");
+    const open = await communityWrite(f, "plans/a.md", "open plan");
+    await folderRule(f, "hidden", HIDING_RULE);
+    const hidden = await communityWrite(f, "hidden/b.md", "hidden plan");
+    fromComputer(f, COMMUNITY, [
+      fileThread("thread-open", { linkedObjectId: "object-plans/a.md" }),
+      ownerSays("on-open", "thread-open", "a note"),
+      fileThread("thread-hidden", { linkedObjectId: "object-hidden/b.md" }),
+      ownerSays("on-hidden", "thread-hidden", "a secret note"),
+    ]);
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+    const read = (action: string, fields: Record<string, unknown>) =>
+      tool(f, agent, action, { workspaceId: COMMUNITY, ...fields });
+    const postIn = (fields: Record<string, unknown>) =>
+      post(f, agent, {
+        workspaceId: COMMUNITY,
+        idempotencyKey: `post-${JSON.stringify(fields)}`,
+        ...fields,
+      });
+
+    const listed = await ok(await read("files", {}));
+    expect(listed.files).toEqual([
+      expect.objectContaining({ path: "plans/a.md", blobSha256: open }),
+    ]);
+    expect(JSON.stringify(listed)).not.toContain("hidden/");
+    expect(await (await read("blob", { sha256: open })).text()).toBe("open plan");
+    await expectRefused(await read("blob", { sha256: hidden }));
+
+    expect(await ok(await read("groups", {}))).toEqual({
+      ok: true,
+      workspaceId: COMMUNITY,
+      groups: [
+        { channelWireId: "wire-team", name: "Team", purpose: "Day to day" },
+        { channelWireId: "wire-news", name: "Announcements", purpose: null },
+      ],
+    });
+    await expectRefused(await read("chat", { channelWireId: "wire-secret" }));
+    await expectRefused(await postIn({ channelWireId: "wire-secret" }));
+    await expectRefused(await postIn({ threadId: "thread-secret" }));
+    await ok(await read("chat", { channelWireId: "wire-news" }));
+    await expectCode(await postIn({ channelWireId: "wire-news" }), 403, "personal_agent_view_only");
+
+    expect(
+      ids((await ok(await read("discussion", { threadId: "thread-open" }))) as ChatPage),
+    ).toEqual(["on-open"]);
+    await expectRefused(await read("discussion", { threadId: "thread-hidden" }));
+    await expectRefused(await read("discussion", { filePath: "hidden/b.md" }));
+    await expectRefused(await postIn({ threadId: "thread-hidden" }));
+    await expectRefused(await postIn({ filePath: "hidden/b.md" }));
+    await ok(await postIn({ filePath: "plans/a.md" }));
+  });
+
+  // The person's own reads apply a new verified email within a minute; the
+  // agent's must too, or a rule that named the old address keeps reaching it.
+  it("follows its person's current verified email within a minute, as the person's reads do", async () => {
+    let email = "ada@dohc.test";
+    const f = await fixture({
+      lookupVerifiedUserEmail: async (userId: string) =>
+        userId === OWNER ? email : `${userId}@dohc.test`,
+    });
+    joinCommunity(f);
+    await folderRule(f, "named", {
+      members: null,
+      people: [{ email: "ada@dohc.test", level: "view" }],
+    });
+    await communityWrite(f, "named/a.md", "for ada");
+    // The person's own read stored the address the rule names.
+    f.storage.refreshAccountEmail(OWNER, { verifiedEmail: email }, f.now.value);
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+    const paths = async () =>
+      (
+        (await ok(await tool(f, agent, "files", { workspaceId: COMMUNITY }))).files as Array<{
+          path: string;
+        }>
+      ).map((file) => file.path);
+
+    expect(await paths()).toEqual(["named/a.md"]);
+    email = "another@dohc.test";
+    expect(await paths()).toEqual(["named/a.md"]);
+    f.now.value += 60_000;
+    expect(await paths()).toEqual([]);
+  });
+
+  it("downloads a file whose bytes many hidden files that sort before it also hold", async () => {
+    const f = await fixture();
+    joinCommunity(f);
+    await folderRule(f, "hidden", HIDING_RULE);
+    for (let index = 0; index < 17; index += 1)
+      await communityWrite(f, `hidden/${String(index).padStart(2, "0")}.md`, "template");
+    const sha = await communityWrite(f, "plans/a.md", "template");
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+
+    const listed = await ok(await tool(f, agent, "files", { workspaceId: COMMUNITY }));
+    expect(listed.files).toEqual([
+      expect.objectContaining({ path: "plans/a.md", blobSha256: sha }),
+    ]);
+    const response = await tool(f, agent, "blob", { workspaceId: COMMUNITY, sha256: sha });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("template");
+  });
+
+  it("withholds a file link its person can't read, in a Group, in Comments, and in a wait answered after a rule hid it", async () => {
+    const f = await fixture();
+    joinCommunity(f);
+    communityGroups(f);
+    await communityWrite(f, "plans/a.md", "open plan");
+    await folderRule(f, "hidden", HIDING_RULE);
+    await communityWrite(f, "hidden/b.md", "hidden plan");
+    await communityWrite(f, "later/c.md", "for now");
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+    fromComputer(f, COMMUNITY, [
+      fileThread("thread-open", { linkedObjectId: "object-plans/a.md" }),
+      ownerSays("in-team", "thread-team", "@Helper see @[hidden/b.md#Layoffs] and @[plans/a.md]", {
+        authorDisplayName: "Ada @[hidden/b.md]",
+      }),
+      ownerSays("on-open", "thread-open", "@Helper compare @[hidden/b.md]"),
+    ]);
+    const team = {
+      messageId: "in-team",
+      authorDisplayName: "Ada (a file not shared here)",
+      body: "@Helper see (a file not shared here) and @[plans/a.md]",
+    };
+    const comment = { messageId: "on-open", body: "@Helper compare (a file not shared here)" };
+    const read = async (action: string, fields: Record<string, unknown>) =>
+      ((await ok(await tool(f, agent, action, { workspaceId: COMMUNITY, ...fields }))) as ChatPage)
+        .messages;
+
+    expect(await read("chat", { channelWireId: "wire-team" })).toEqual([
+      expect.objectContaining(team),
+    ]);
+    expect(await read("discussion", { filePath: "plans/a.md" })).toEqual([
+      expect.objectContaining(comment),
+    ]);
+    expect(await read("discussion", { threadId: "thread-open" })).toEqual([
+      expect.objectContaining(comment),
+    ]);
+    const answer = await waitOnce(f, agent);
+    expect(answer.messages).toEqual(
+      expect.arrayContaining([expect.objectContaining(team), expect.objectContaining(comment)]),
+    );
+    expect(JSON.stringify(answer)).not.toContain("hidden/");
+
+    // A folder hidden after the wait's scan read the message is withheld in its answer.
+    fromComputer(f, COMMUNITY, [
+      ownerSays("to-later", "thread-team", "@Helper read @[later/c.md]"),
+    ]);
+    const fresh = f.h.linkAuthority.freshPersonal.bind(f.h.linkAuthority);
+    let entered!: () => void;
+    let release!: () => void;
+    const holding = new Promise<void>((resolve) => (entered = resolve));
+    const released = new Promise<void>((resolve) => (release = resolve));
+    vi.spyOn(f.h.linkAuthority, "freshPersonal").mockImplementationOnce(async (authority) => {
+      entered();
+      await released;
+      return await fresh(authority);
+    });
+    const answered = tool(f, agent, "wait", { cursor: answer.cursor, timeoutMs: 0 });
+    await holding;
+    await folderRule(f, "later", HIDING_RULE);
+    release();
+    expect(((await ok(await answered)) as WaitAnswer).messages).toEqual([
+      expect.objectContaining({
+        messageId: "to-later",
+        body: "@Helper read (a file not shared here)",
+      }),
+    ]);
+  });
+
+  it("answers not-found for General, a direct message and its own chat id in a joined workspace, and reads another agent's chat in an owned one without posting there", async () => {
+    const f = await fixture();
+    joinCommunity(f);
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+    const own = agentChannelWireId(agent.agentId);
+    fromComputer(f, COMMUNITY, [
+      chatChannelCreate(GENERAL_CHANNEL_WIRE_ID, { name: "General" }),
+      chatThreadCreate("thread-general", GENERAL_CHANNEL_WIRE_ID),
+      chatChannelCreate("wire-people", { kind: "dm" }),
+      chatThreadCreate("thread-people", "wire-people"),
+      chatChannelCreate(own, { kind: "agent" }),
+      chatThreadCreate("thread-own", own),
+    ]);
+    const before = logOf(f, COMMUNITY).length;
+    for (const [channelWireId, threadId] of [
+      [GENERAL_CHANNEL_WIRE_ID, "thread-general"],
+      ["wire-people", "thread-people"],
+      [own, "thread-own"],
+    ] as const) {
+      await expectRefused(await tool(f, agent, "chat", { workspaceId: COMMUNITY, channelWireId }));
+      await expectRefused(
+        await post(f, agent, {
+          workspaceId: COMMUNITY,
+          channelWireId,
+          idempotencyKey: `post-${channelWireId}`,
+        }),
+      );
+      await expectRefused(
+        await post(f, agent, {
+          workspaceId: COMMUNITY,
+          threadId,
+          idempotencyKey: `post-${threadId}`,
+        }),
+      );
+    }
+    expect(logOf(f, COMMUNITY)).toHaveLength(before);
+
+    const another = agentChannelWireId(`p-${"b".repeat(26)}`);
+    fromComputer(f, WS_A, [
+      chatChannelCreate(another, { kind: "agent" }),
+      chatThreadCreate("thread-another", another),
+      ownerSays("for-another", "thread-another", "hello"),
+    ]);
+    expect(
+      ids(
+        (await ok(
+          await tool(f, agent, "chat", { workspaceId: WS_A, channelWireId: another }),
+        )) as ChatPage,
+      ),
+    ).toEqual(["for-another"]);
+    const owned = logOf(f, WS_A).length;
+    await expectCode(
+      await post(f, agent, { channelWireId: another, idempotencyKey: "post-another" }),
+      403,
+      "personal_agent_view_only",
+    );
+    await expectCode(
+      await post(f, agent, { threadId: "thread-another", idempotencyKey: "post-thread" }),
+      403,
+      "personal_agent_view_only",
+    );
+    expect(logOf(f, WS_A)).toHaveLength(owned);
+  });
+
+  it("answers not-found for a direct message in an owned workspace, and its wait never answers one", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
+    fromComputer(f, WS_A, [
+      chatChannelCreate("wire-people", { name: "Ada and Ben", kind: "dm" }),
+      chatThreadCreate("thread-people", "wire-people"),
+      ownerSays("in-dm", "thread-people", "@Helper a private word"),
+    ]);
+    await expectRefused(
+      await tool(f, agent, "chat", { workspaceId: WS_A, channelWireId: "wire-people" }),
+    );
+    expect(ids(await waitOnce(f, agent))).toEqual([]);
+  });
+
+  it("lists a member's agent the files it reads up to the limit, past hidden files that sort first", async () => {
+    const f = await fixture({ linkCurrentFileLimit: 2 });
+    joinCommunity(f);
+    await folderRule(f, "hidden", HIDING_RULE);
+    await communityWrite(f, "hidden/b.md", "hidden plan");
+    await communityWrite(f, "open/c.md", "plan");
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+    expect(await ok(await tool(f, agent, "files", { workspaceId: COMMUNITY }))).toMatchObject({
+      files: [expect.objectContaining({ path: "open/c.md" })],
+      truncated: false,
+    });
+    await communityWrite(f, "open/d.md", "plan");
+    await communityWrite(f, "open/e.md", "plan");
+    const listed = await ok(await tool(f, agent, "files", { workspaceId: COMMUNITY }));
+    expect((listed.files as { path: string }[]).map((file) => file.path)).toEqual([
+      "open/c.md",
+      "open/d.md",
+    ]);
+    expect(listed.truncated).toBe(true);
+  });
+
+  it("shows an admin's agent a folder hidden from members, and never its folder marker", async () => {
+    const f = await fixture();
+    joinCommunity(f, { role: "admin" });
+    await folderRule(f, "hidden", HIDING_RULE);
+    await communityWrite(f, "hidden/b.md", "hidden plan");
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+    const paths = async (workspaceId: string) =>
+      ((await ok(await tool(f, agent, "files", { workspaceId }))).files as { path: string }[]).map(
+        (file) => file.path,
+      );
+    expect(await paths(COMMUNITY)).toEqual(["hidden/b.md"]);
+    expect((await ok(await tool(f, agent, "workspaces", {}))).workspaces).toContainEqual(
+      expect.objectContaining({ workspaceId: COMMUNITY, role: "admin", level: "comment" }),
+    );
+  });
+
+  it("ends a file's stream at the next chunk once a rule hides its folder", async () => {
+    const f = await fixture();
+    joinCommunity(f);
+    const content = "z".repeat(200_000);
+    const sha = await communityWrite(f, "plans/large.md", content);
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+    const response = await tool(f, agent, "blob", { workspaceId: COMMUNITY, sha256: sha });
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    expect((await reader.read()).value?.byteLength).toBe(64 * 1024);
+    await folderRule(f, "plans", HIDING_RULE);
+    await expect(reader.read()).rejects.toMatchObject({ code: "not_found" });
+  });
+
+  it("answers a held wait without a message whose Group or file was hidden while it held", async () => {
+    const f = await fixture();
+    joinCommunity(f);
+    communityGroups(f);
+    await communityWrite(f, "plans/a.md", "plan");
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+    fromComputer(f, COMMUNITY, [
+      fileThread("thread-plan", { linkedObjectId: "object-plans/a.md" }),
+      ownerSays("in-team", "thread-team", "@Helper in the team"),
+      ownerSays("in-news", "thread-news", "@Helper in the news"),
+      ownerSays("on-plan", "thread-plan", "@Helper on the plan"),
+    ]);
+    // The wait's last fresh read, after its scan found the messages, waits for the test.
+    const fresh = f.h.linkAuthority.freshPersonal.bind(f.h.linkAuthority);
+    let entered!: () => void;
+    let release!: () => void;
+    const holding = new Promise<void>((resolve) => (entered = resolve));
+    const released = new Promise<void>((resolve) => (release = resolve));
+    vi.spyOn(f.h.linkAuthority, "freshPersonal").mockImplementationOnce(async (authority) => {
+      entered();
+      await released;
+      return await fresh(authority);
+    });
+    const answered = tool(f, agent, "wait", { timeoutMs: 0 });
+    await holding;
+    await groupRule(f, "wire-team", "none");
+    await folderRule(f, "plans", HIDING_RULE);
+    release();
+    expect(ids((await ok(await answered)) as WaitAnswer)).toEqual(["in-news"]);
+  });
+
+  it("answers a held wait with a Comment's file where it is now, not a folder hidden since", async () => {
+    const f = await fixture();
+    joinCommunity(f);
+    await communityWrite(f, "plans/a.md", "plan");
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+    fromComputer(f, COMMUNITY, [
+      fileThread("thread-plan", { linkedObjectId: "object-plans/a.md" }),
+      ownerSays("on-plan", "thread-plan", "@Helper on the plan"),
+    ]);
+    const fresh = f.h.linkAuthority.freshPersonal.bind(f.h.linkAuthority);
+    let entered!: () => void;
+    let release!: () => void;
+    const holding = new Promise<void>((resolve) => (entered = resolve));
+    const released = new Promise<void>((resolve) => (release = resolve));
+    vi.spyOn(f.h.linkAuthority, "freshPersonal").mockImplementationOnce(async (authority) => {
+      entered();
+      await released;
+      return await fresh(authority);
+    });
+    const answered = tool(f, agent, "wait", { timeoutMs: 0 });
+    await holding;
+    // The file moves out of plans, then a rule hides plans.
+    const originSeq = communitySeqs.get(f.storage) ?? 0;
+    communitySeqs.set(f.storage, originSeq + 1);
+    await appendLog(f.h, OTHER, COMMUNITY, [
+      moment("open/a.md", "plan", {
+        originSeq,
+        objectId: "object-plans/a.md",
+        operation: "rename",
+        beforePath: "plans/a.md",
+        beforeContent: "plan",
+      }),
+    ]);
+    await folderRule(f, "plans", HIDING_RULE);
+    release();
+    const { messages } = (await ok(await answered)) as WaitAnswer;
+    expect(messages.map((message) => [message.messageId, message.filePath])).toEqual([
+      ["on-plan", "open/a.md"],
+    ]);
+  });
+
+  it("answers a parked wait once a rule hides a Group it reads", async () => {
+    const f = await fixture();
+    joinCommunity(f);
+    communityGroups(f);
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+    const { cursor } = await waitOnce(f, agent);
+    const answered = tool(f, agent, "wait", { cursor });
+    await parked(f, 2);
+    await groupRule(f, "wire-team", "none");
+    expect(await ok(await answered)).toMatchObject({ messages: [], more: false });
+    expect(f.activity.stats().waiters).toBe(0);
+    // Under the waiter's own 25-second timer, so only the rule's wake can answer in time.
+  }, 10_000);
+
+  it("spans owned and joined workspaces, and once its person is removed answers not-found there and ends a running wait", async () => {
+    const f = await fixture();
+    joinCommunity(f);
+    communityGroups(f);
+    const sha = await communityWrite(f, "plans/a.md", "plan");
+    fromComputer(f, COMMUNITY, [
+      fileThread("thread-plan", { linkedObjectId: "object-plans/a.md" }),
+    ]);
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+    chats(f, WS_A, agent.agentId);
+    expect((await ok(await tool(f, agent, "workspaces", {}))).workspaces).toEqual([
+      expect.objectContaining({
+        workspaceId: WS_A,
+        level: "comment",
+        role: "owner",
+        dmChannelWireId: agentChannelWireId(agent.agentId),
+      }),
+      {
+        workspaceId: COMMUNITY,
+        name: "Community",
+        level: "comment",
+        role: "member",
+        dmChannelWireId: null,
+      },
+    ]);
+    fromComputer(f, WS_A, [ownerSays("in-a", "thread-dm", "hello")]);
+    fromComputer(f, COMMUNITY, [ownerSays("in-community", "thread-team", "@Helper hello")]);
+    const answer = await waitOnce(f, agent);
+    expect(ids(answer).sort()).toEqual(["in-a", "in-community"]);
+    expect(Object.keys(answer.cursor.seqs).sort()).toEqual([WS_A, COMMUNITY].sort());
+
+    const running = tool(f, agent, "wait", { cursor: answer.cursor });
+    await parked(f, 2);
+    await removeFromCommunity(f);
+    const ended = (await ok(await running)) as WaitAnswer;
+    expect(ended.messages).toEqual([]);
+    expect(Object.keys(ended.cursor.seqs)).toEqual([WS_A]);
+    expect(f.activity.stats().waiters).toBe(0);
+
+    expect((await ok(await tool(f, agent, "workspaces", {}))).workspaces).toEqual([
+      expect.objectContaining({ workspaceId: WS_A }),
+    ]);
+    for (const [action, fields] of [
+      ["files", {}],
+      ["blob", { sha256: sha }],
+      ["groups", {}],
+      ["chat", { channelWireId: "wire-team" }],
+      ["discussion", { threadId: "thread-plan" }],
+      ["discussion", { filePath: "plans/a.md" }],
+    ] as const) {
+      await expectRefused(await tool(f, agent, action, { workspaceId: COMMUNITY, ...fields }));
+    }
+    await expectRefused(
+      await post(f, agent, {
+        workspaceId: COMMUNITY,
+        channelWireId: "wire-team",
+        idempotencyKey: "post-after",
+      }),
+    );
+    expect((await roster(f)).workspaces).toContainEqual({
+      workspaceId: COMMUNITY,
+      name: "Community",
+      role: "ended",
+    });
+
+    // A membership started again for others never tells the ended member its new name.
+    expect(
+      f.storage.endWorkspaceMembership({ workspaceId: COMMUNITY, actorUserId: OTHER, nowMs: 8 }),
+    ).toEqual({ ok: true });
+    expect(
+      f.storage.inviteWorkspaceMember({
+        workspaceId: COMMUNITY,
+        actorUserId: OTHER,
+        workspaceName: "Private new project",
+        email: "joiner@dohc.test",
+        recipientUserId: "joiner-account",
+        newMemberId: () => "member-joiner",
+        newGrantId: () => "grant-joiner",
+        newShareId: () => "share-community-new",
+        nowMs: 9,
+      }),
+    ).toMatchObject({ ok: true });
+    expect((await roster(f)).workspaces).toContainEqual({
+      workspaceId: COMMUNITY,
+      name: null,
+      role: "ended",
+    });
+
+    // A change elsewhere keeps the ended workspace as it was, never higher, and Remove drops it.
+    const keeping = (level: "comment" | "edit"): Reach => [
+      { workspaceId: WS_A, level: "view" },
+      { workspaceId: COMMUNITY, level },
+    ];
+    expect((await setReach(f, agent, keeping("edit"))).status).toBe(400);
+    expect((await setReach(f, agent, keeping("comment"))).status).toBe(200);
+    expect((await setReach(f, agent, [{ workspaceId: WS_A, level: "view" }])).status).toBe(200);
+    expect((await roster(f)).workspaces.map((workspace) => workspace.workspaceId)).not.toContain(
+      COMMUNITY,
+    );
+    expect((await setReach(f, agent, keeping("comment"))).status).toBe(400);
+  });
+
+  it("reaches nothing in a workspace its person rejoins until the person chooses its reach again", async () => {
+    const f = await fixture();
+    joinCommunity(f);
+    communityGroups(f);
+    const reach: Reach = [
+      { workspaceId: WS_A, level: "view" },
+      { workspaceId: COMMUNITY, level: "comment" },
+    ];
+    const agent = await signIn(f, { reach });
+    // Codes allowed under the earlier membership, for this agent and for a new one.
+    const reconnect = await approve(f, {
+      clientId: agent.clientId,
+      agent: { kind: "existing", agentId: agent.agentId },
+      reach,
+    });
+    const otherClient = await registerClient(f);
+    const added = await approve(f, { clientId: otherClient, reach });
+    const ownedOnly = await approve(f, {
+      clientId: otherClient,
+      reach: [{ workspaceId: WS_A, level: "view" }],
+    });
+    await removeFromCommunity(f);
+    expect((await roster(f)).agents[0]?.reach).toEqual(reach);
+    const revision = (await roster(f)).revision;
+
+    const back = await f.h(
+      request(OTHER, `/sync/${COMMUNITY}/members/${MEMBER_ID}/let-back-in`, jsonBody({})),
+    );
+    expect(back.status, await back.clone().text()).toBe(200);
+    expect((await roster(f)).revision).toBeGreaterThan(revision);
+    await expectRefused(await redeem(f, { clientId: agent.clientId, ...reconnect }));
+    await expectRefused(await redeem(f, { clientId: otherClient, ...added }));
+    expect((await roster(f)).agents).toEqual([
+      expect.objectContaining({ agentId: agent.agentId, reach: [reach[0]] }),
+    ]);
+    // A code that names no rejoined workspace still signs in.
+    await ok(await redeem(f, { clientId: otherClient, ...ownedOnly }));
+    expect((await roster(f)).workspaces).toContainEqual({
+      workspaceId: COMMUNITY,
+      name: "Community",
+      role: "member",
+    });
+    expect(reachOf(await roster(f), agent.agentId)).toEqual([{ workspaceId: WS_A, level: "view" }]);
+    expect((await ok(await tool(f, agent, "workspaces", {}))).workspaces).toEqual([
+      expect.objectContaining({ workspaceId: WS_A }),
+    ]);
+    await expectCode(
+      await tool(f, agent, "chat", { workspaceId: COMMUNITY, channelWireId: "wire-team" }),
+      403,
+      "personal_agent_out_of_reach",
+    );
+
+    await ok(await setReach(f, agent, reach));
+    await ok(await tool(f, agent, "chat", { workspaceId: COMMUNITY, channelWireId: "wire-team" }));
+
+    // Leaving, then an invite back, starts over too.
+    const leave = async () => {
+      const left = await f.h(request(OWNER, `/sync/${COMMUNITY}/members/leave`, jsonBody({})));
+      expect(left.status, await left.clone().text()).toBe(200);
+    };
+    const inviteBack = (memberId: string) =>
+      expect(
+        f.storage.inviteWorkspaceMember({
+          workspaceId: COMMUNITY,
+          actorUserId: OTHER,
+          workspaceName: undefined,
+          email: "ada@dohc.test",
+          recipientUserId: OWNER,
+          newMemberId: () => memberId,
+          newGrantId: () => `grant-${memberId}`,
+          newShareId: () => "unused-share",
+          nowMs: 7,
+        }),
+      ).toMatchObject({ ok: true });
+    await leave();
+    expect(reachOf(await roster(f), agent.agentId)).toEqual(reach);
+    inviteBack("member-ada-again");
+    expect(reachOf(await roster(f), agent.agentId)).toEqual([{ workspaceId: WS_A, level: "view" }]);
+
+    // A rejoin that drops nothing still moves the revision, so a reach sheet
+    // opened under the earlier membership starts over.
+    await leave();
+    const before = (await roster(f)).revision;
+    inviteBack("member-ada-third");
+    expect((await roster(f)).revision).toBe(before + 1);
+  });
+
+  it("starts over when its person rejoins by the invite link or by claiming an email invite", async () => {
+    const f = await fixture();
+    joinCommunity(f);
+    const reach: Reach = [
+      { workspaceId: WS_A, level: "view" },
+      { workspaceId: COMMUNITY, level: "comment" },
+    ];
+    const agent = await signIn(f, { reach });
+    const leave = async () => {
+      const left = await f.h(request(OWNER, `/sync/${COMMUNITY}/members/leave`, jsonBody({})));
+      expect(left.status, await left.clone().text()).toBe(200);
+    };
+    const rejoins: Array<[string, () => Promise<void>]> = [
+      [
+        "invite link",
+        async () => {
+          const linked = await f.h(
+            request(
+              OTHER,
+              `/sync/${COMMUNITY}/members/invite-link`,
+              jsonBody({ action: "turn-on", workspaceName: "Community" }),
+            ),
+          );
+          const { url } = ((await ok(linked)) as { inviteLink: { url: string } }).inviteLink;
+          const token = url.slice(url.indexOf("#") + 1);
+          await ok(await f.h(request(OWNER, "/sync/members/join", jsonBody({ token }))));
+        },
+      ],
+      [
+        "email invite",
+        async () => {
+          expect(
+            f.storage.inviteWorkspaceMember({
+              workspaceId: COMMUNITY,
+              actorUserId: OTHER,
+              workspaceName: undefined,
+              email: "ada@dohc.test",
+              recipientUserId: null,
+              newMemberId: () => "member-ada-by-email",
+              newGrantId: () => "grant-ada-by-email",
+              newShareId: () => "unused-share",
+              nowMs: 7,
+            }),
+          ).toMatchObject({ ok: true });
+          f.storage.claimPendingSharesForEmail("ada@dohc.test", OWNER);
+        },
+      ],
+    ];
+    for (const [how, rejoin] of rejoins) {
+      await ok(await setReach(f, agent, reach));
+      const reconnect = await approve(f, {
+        clientId: agent.clientId,
+        agent: { kind: "existing", agentId: agent.agentId },
+        reach,
+      });
+      await leave();
+      expect(reachOf(await roster(f), agent.agentId), how).toEqual(reach);
+      await rejoin();
+      expect(reachOf(await roster(f), agent.agentId), how).toEqual([reach[0]]);
+      await expectRefused(await redeem(f, { clientId: agent.clientId, ...reconnect }));
+    }
+  });
+
+  it("never takes Edit in a joined workspace, by consent or a reach change, and refuses a Collection write there even from an Edit row", async () => {
+    const f = await fixture();
+    joinCommunity(f, { level: "edit", role: "admin" });
+    const SCHEMA = "name: Packing\nfields:\n  Title:\n    type: text\n";
+    await communityWrite(f, "trip/packing/collection.yaml", SCHEMA);
+    const joinedEdit: Reach = [
+      { workspaceId: WS_A, level: "edit" },
+      { workspaceId: COMMUNITY, level: "edit" },
+    ];
+    const clientId = await registerClient(f);
+    await expectRefused(
+      await allow(f, await beginRequest(f, clientId, COMMUNITY), { reach: joinedEdit }),
+    );
+    const agent = await signIn(f, {
+      clientId,
+      reach: [
+        { workspaceId: WS_A, level: "edit" },
+        { workspaceId: COMMUNITY, level: "comment" },
+      ],
+    });
+    expect((await setReach(f, agent, joinedEdit)).status).toBe(400);
+    expect((await roster(f)).agents[0]?.reach).toEqual([
+      { workspaceId: WS_A, level: "edit" },
+      { workspaceId: COMMUNITY, level: "comment" },
+    ]);
+
+    // A row no route writes any more still writes nothing.
+    const db = inspectDatabase(f.dbPath);
+    db.prepare(
+      "UPDATE sync_relay_personal_agent_reach SET level = 'edit' WHERE workspace_id = ?",
+    ).run(COMMUNITY);
+    db.close();
+    const before = logOf(f, COMMUNITY).length;
+    await expectCode(
+      await tool(
+        f,
+        agent,
+        "collection-writes",
+        {
+          workspaceId: COMMUNITY,
+          submitId: "submit-1",
+          changes: [
+            {
+              basedOnPath: null,
+              basedOnBlobSha256: null,
+              operation: "write",
+              afterPath: "trip/packing/Socks.md",
+              afterContentKind: "text",
+              afterContentBase64: Buffer.from(
+                "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\nSocks\n",
+              ).toString("base64"),
+              recordedAtMs: 1,
+            },
+          ],
+        },
+        undefined,
+        { [PERSONAL_WRITE_WORKSPACE_HEADER]: encodeURIComponent(COMMUNITY) },
+      ),
+      403,
+      "personal_agent_out_of_reach",
+    );
+    expect(logOf(f, COMMUNITY)).toHaveLength(before);
   });
 });
 

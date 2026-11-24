@@ -103,12 +103,6 @@ const REFUSALS: Readonly<Record<string, Refused>> = {
     code: "busy",
     error: "dohc is busy reading this workspace. Try again shortly.",
   },
-  server_copies_off: {
-    status: 404,
-    code: "no_server_copies",
-    error:
-      "This server doesn't keep workspace copies, so it can't list Groups. The DM still works.",
-  },
 };
 
 // What a tool says when the relay finds nothing, refuses its input, or fails
@@ -133,7 +127,8 @@ const reachSchema = z.object({
       workspaceId: z.string(),
       name: z.string().nullable(),
       level: z.enum(["view", "comment", "edit"]),
-      dmChannelWireId: z.string(),
+      role: z.enum(["owner", "admin", "member"]),
+      dmChannelWireId: z.string().nullable(),
     }),
   ),
 });
@@ -259,8 +254,8 @@ export async function servePersonalMcp(
     await probe?.body?.cancel().catch(() => undefined);
     return refusal(503, UNAVAILABLE);
   }
-  // Only a write needs a large body, and only a workspace at Edit takes one.
-  const writes = reach.workspaces.some((entry) => entry.level === "edit");
+  // Only a write needs a large body, and only an owned workspace at Edit takes one.
+  const writes = reach.workspaces.some((entry) => entry.role === "owner" && entry.level === "edit");
   const admitLarge = writes ? () => options.admitLargeBody(reach.agent.agentId) : null;
   const body =
     request.method === "POST"
@@ -359,6 +354,8 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
       description:
         "List the workspaces your owner lets you reach, with your level in each: view reads, comment also posts in its chat and on its files, " +
         "and edit also changes its Collections. " +
+        "role is owner in your owner's own workspaces. In one your owner joined it is member or admin: there you read and post with at most your owner's access, " +
+        "a folder or Group may allow less than your level, you never change Collections, and there is no dmChannel. " +
         "dmChannel is your direct messages with your owner in that workspace, for dohc_read_channel and dohc_post_channel. " +
         "agent is your name as your posts show it, and the handle people mention you by, written after an @. " +
         "Pass a workspace's id as workspace to the other tools. Your owner changes this list in Settings › Agents.",
@@ -372,6 +369,7 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
           workspace: entry.workspaceId,
           name: entry.name,
           level: entry.level,
+          role: entry.role,
           dmChannel: entry.dmChannelWireId,
         })),
       }),

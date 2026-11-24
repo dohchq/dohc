@@ -1651,7 +1651,7 @@ export interface SyncRelayStorage {
     credential: import("./personalAgentChat").PersonalCredential,
     workspaceId: string,
     nowMs: number,
-  ): import("./personalAgents").PersonalReach | null;
+  ): import("./personalAgentChat").PersonalReachRead;
   readPersonalWorkspaces(
     credential: import("./personalAgentChat").PersonalCredential,
     nowMs: number,
@@ -1683,6 +1683,8 @@ export interface SyncRelayStorage {
     versionId: string;
     selectorPaths: readonly string[];
     limit: number;
+    /** Lists only files at a path this passes, paging past the rest. */
+    visible?: (path: string) => boolean;
   }): CurrentFileStateSnapshot;
   currentFileBlobByteLength(input: {
     workspaceId: string;
@@ -1691,6 +1693,7 @@ export interface SyncRelayStorage {
     sha256: string;
     epochLogFloor: number;
     visible?: (path: string) => boolean;
+    pastHidden?: true;
   }): number | null;
   listLinkRevisionLogRows(input: {
     workspaceId: string;
@@ -2034,10 +2037,13 @@ export interface SyncRelayStorage {
     workspaceId: string,
     channelWireId: string,
   ): string | null | undefined;
-  /** Each channel's earliest create, in log order: its wire id and its name. */
-  listChannelCreates(
-    workspaceId: string,
-  ): { channelWireId: string; name: string; type: "posts" | "chat" | "both" }[];
+  /** Each channel's earliest create, in log order: its wire id, name, type, and purpose, null when it has none. */
+  listChannelCreates(workspaceId: string): {
+    channelWireId: string;
+    name: string;
+    type: "posts" | "chat" | "both";
+    purpose: string | null;
+  }[];
   findThreadCreateLane(workspaceId: string, threadId: string): "posts" | "chat" | undefined;
   findThreadFirstMessageId(workspaceId: string, threadId: string): string | undefined;
   findChannelChatThread(workspaceId: string, channelWireId: string): string | null;

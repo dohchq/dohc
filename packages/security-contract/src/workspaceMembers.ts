@@ -44,6 +44,12 @@ export const MESSAGE_DELETE_FAILED = "dohc could not delete the message.";
 export const MESSAGE_DELETE_REFUSED = "It is gone, or your role does not let you delete it.";
 export const MESSAGE_DELETE_OFFLINE = "Deleting needs a connection.";
 
+// What a member's personal agent can do in a workspace its person joined, on
+// the desktop's agent page and the browser's sign-in page. The relay caps it
+// at the person's access and takes no Collection change from it there.
+export const PERSONAL_AGENT_JOINED_NOTE =
+  "In a workspace you joined, it reads and posts with at most your access, and changes no Collections.";
+
 export interface WorkspacePerson {
   /** Stable id of this entry. The owner's entry uses `"owner"`. */
   memberId: string;

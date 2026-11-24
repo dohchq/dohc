@@ -405,6 +405,8 @@ export const WorkspaceSummary = z.object({
       // A membership's role as the relay last named it. It shows admin actions
       // before the next check; the relay decides each one.
       role: z.enum(["admin", "member"]).optional(),
+      // The owner's workspace id on the relay, which a membership's agent link names.
+      membersWorkspaceId: OPAQUE_ID.optional(),
       // A membership's Group levels from its stored reach: each listed Group's,
       // else `groupDefault`. Chats locks a Group's composer at View. Main
       // refuses the post either way.
@@ -2713,6 +2715,9 @@ export const ChatThreadWorkRecord = ChatWorkReportRecord.extend({
 });
 export type ChatThreadWorkRecord = z.infer<typeof ChatThreadWorkRecord>;
 
+// A personal agent's id, as the relay names it.
+export const PERSONAL_AGENT_ID = /^p-[a-z2-7]{26}$/u;
+
 export const ChatMessageRecord = z
   .object({
     id: OPAQUE_ID,
@@ -2726,8 +2731,9 @@ export const ChatMessageRecord = z
     authorUserId: z.string().min(1).max(256).optional(),
     authorReported: ChatReportedAgentRecord.optional(),
     work: ChatWorkReportRecord.optional(),
-    // The agent in Settings that wrote it, which only main records.
-    authorAgentId: AgentId.optional(),
+    // The agent in Settings that wrote it, which only main records, or the
+    // personal agent the relay names on its post.
+    authorAgentId: z.union([AgentId, z.string().regex(PERSONAL_AGENT_ID)]).optional(),
     parentMessageId: OPAQUE_ID.optional(),
     origin: z.literal("cli").optional(),
     // Empty once the relay deleted the message.
@@ -8741,7 +8747,6 @@ export const agentsListeningOperations = {
 
 // The personal agents of the server account this computer is signed in to,
 // as main caches them from the relay. A removed agent is left out.
-export const PERSONAL_AGENT_ID = /^p-[a-z2-7]{26}$/u;
 export const PERSONAL_AGENT_REACH_LIMIT = 20;
 export const PersonalAgentLevel = z.enum(["view", "comment", "edit"]);
 export type PersonalAgentLevel = z.infer<typeof PersonalAgentLevel>;
@@ -8769,11 +8774,14 @@ export type PersonalAgent = z.infer<typeof PersonalAgent>;
 export const PersonalAgentRoster = z.strictObject({
   revision: z.number().int().nonnegative(),
   agents: z.array(PersonalAgent),
-  // The workspaces the account owns on the server, which a reach can name.
+  // The workspaces a reach can name: those the account owns on the server,
+  // then those it joined as a member or admin. Last come workspaces an agent
+  // still reaches whose membership ended, which a reach can only drop.
   workspaces: z.array(
     z.strictObject({
       workspaceId: RelayWorkspaceId,
       name: z.string().min(1).max(1_024).nullable(),
+      role: z.enum(["owner", "admin", "member", "ended"]),
     }),
   ),
 });
@@ -8797,6 +8805,8 @@ export const PersonalAgentChange = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("reach"),
     reach: z.array(PersonalAgentReach).max(PERSONAL_AGENT_REACH_LIMIT),
+    // The roster revision the choice was made from. The relay refuses a stale one.
+    revision: z.number().int().nonnegative(),
   }),
   z.strictObject({ kind: z.literal("sign-out") }),
   z.strictObject({ kind: z.literal("remove") }),
@@ -8826,6 +8836,8 @@ export const personalAgentsOperations = {
       accountKey: z.string().min(1),
       agentId: z.string().regex(PERSONAL_AGENT_ID),
       change: PersonalAgentChange,
+      // What the change does, in the words a failure names it by: "rename Sprout".
+      what: z.string().min(1).max(2_000),
     }),
     result: PersonalAgentChangeResult,
     guard: "trusted-sender",

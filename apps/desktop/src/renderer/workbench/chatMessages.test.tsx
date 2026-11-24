@@ -19,7 +19,7 @@ import { scanChatLinks } from "@dohc/workspace-contracts/chat-mentions";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { AgentSettingsProvider } from "./AgentBadge";
 
-import { setChosenColors } from "./chosenColors";
+import { resetChosenColorsForTests, setChosenColors, setPersonalAgents } from "./chosenColors";
 
 // Real implementations, spied: every message-body render runs the file-token
 // scan, so its call count shows whether a message actually re-rendered.
@@ -336,6 +336,91 @@ describe("chat authorship display", () => {
       chatAuthorLabel({ authorKind: "agent", authorDisplayName: "Agent", presentation: theirs }),
     ).toBe("Agent");
     expect(chatAuthorLabel({ ...agent, linkAgent: true })).toBe("Agent");
+  });
+
+  it("names whose agent a personal agent is beside the name it took, as a member's browser does", () => {
+    const post = (id: string, fields: Partial<ChatMessageRecord>): ChatMessageRecord => ({
+      presentation: { group: "agent-share", hue: null, self: false },
+      id,
+      threadId: "thread-1",
+      authorKind: "agent",
+      authorDisplayName: "Olive",
+      authorAgentId: "p-aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      body: "Report ready.",
+      createdAtMs: 1_700_000_000_000,
+      ...fields,
+    });
+    render(
+      <ChatMessageList
+        testIdPrefix="test-chat"
+        messages={[
+          post("named", { authorOwnerDisplayName: "Ada" }),
+          // A desktop agent's owner shows in its badge, as before.
+          post("desktop", {
+            authorDisplayName: "Nova",
+            authorAgentId: "agent-desktop",
+            authorOwnerDisplayName: "Sam",
+            authorUserId: "sam",
+            createdAtMs: 1_700_000_600_000,
+          }),
+        ]}
+        loading={false}
+        emptyLabel="No messages"
+        listRef={createRef<ChatMessageListHandle>()}
+      />,
+    );
+    expect(screen.getAllByTestId("test-chat-message-author").map((n) => n.textContent)).toEqual([
+      "Olive",
+      "Nova",
+    ]);
+    expect(screen.getAllByTestId("test-chat-message-person").map((n) => n.textContent)).toEqual([
+      "Ada's agent",
+    ]);
+  });
+
+  it("names the viewer's own personal agent Your agent", () => {
+    const own = "p-bbbbbbbbbbbbbbbbbbbbbbbbbb";
+    setPersonalAgents([{ agentId: own, name: "Sprout", hue: "olive" }]);
+    try {
+      render(
+        <ChatMessageList
+          testIdPrefix="test-chat"
+          messages={[
+            {
+              presentation: { group: "agent-share", hue: null, self: false },
+              id: "own",
+              threadId: "thread-1",
+              authorKind: "agent",
+              authorDisplayName: "Sprout",
+              authorAgentId: own,
+              authorOwnerDisplayName: "Sam Rivera",
+              body: "Report ready.",
+              createdAtMs: 1_700_000_000_000,
+            },
+            {
+              presentation: { group: "agent-share", hue: null, self: false },
+              id: "other",
+              threadId: "thread-1",
+              authorKind: "agent",
+              authorDisplayName: "Olive",
+              authorAgentId: "p-aaaaaaaaaaaaaaaaaaaaaaaaaa",
+              authorOwnerDisplayName: "Ada",
+              body: "Also ready.",
+              createdAtMs: 1_700_000_600_000,
+            },
+          ]}
+          loading={false}
+          emptyLabel="No messages"
+          listRef={createRef<ChatMessageListHandle>()}
+        />,
+      );
+      expect(screen.getAllByTestId("test-chat-message-person").map((n) => n.textContent)).toEqual([
+        "Your agent",
+        "Ada's agent",
+      ]);
+    } finally {
+      resetChosenColorsForTests();
+    }
   });
 
   it('renders agent messages as "their stored name" and humans by name', () => {

@@ -17,8 +17,21 @@ const REACH = {
   ok: true,
   agent: { agentId: "p-aaaaaaaaaaaaaaaaaaaaaaaaaa", name: "Trip helper", handle: "Triphelper" },
   workspaces: [
-    { workspaceId: "trip", name: "Trip", level: "comment", dmChannelWireId: "wire-dm" },
-    { workspaceId: "fundraiser", name: null, level: "view", dmChannelWireId: "wire-dm" },
+    {
+      workspaceId: "trip",
+      name: "Trip",
+      level: "comment",
+      role: "owner",
+      dmChannelWireId: "wire-dm",
+    },
+    // One its person joined: no DM there.
+    {
+      workspaceId: "fundraiser",
+      name: "Fundraiser",
+      level: "view",
+      role: "member",
+      dmChannelWireId: null,
+    },
   ],
 };
 const GROUPS = [
@@ -204,8 +217,14 @@ it("lists the workspaces from the reach check that starts each request", async (
     ok: true,
     agent: { name: "Trip helper", handle: "Triphelper" },
     workspaces: [
-      { workspace: "trip", name: "Trip", level: "comment", dmChannel: "wire-dm" },
-      { workspace: "fundraiser", name: null, level: "view", dmChannel: "wire-dm" },
+      { workspace: "trip", name: "Trip", level: "comment", role: "owner", dmChannel: "wire-dm" },
+      {
+        workspace: "fundraiser",
+        name: "Fundraiser",
+        level: "view",
+        role: "member",
+        dmChannel: null,
+      },
     ],
   });
   // The request's own reach check answers the list.
@@ -261,7 +280,7 @@ it("deletes one of the agent's own messages through the relay, and says when it 
   ]);
 });
 
-it("lists a workspace's Groups, each by the channel the other tools take, and says when the server is busy or keeps no copies", async () => {
+it("lists a workspace's Groups, each by the channel the other tools take, and says when the server is busy", async () => {
   const f = fixture();
   const client = await f.connect();
   const listed = await client.callTool({
@@ -289,17 +308,6 @@ it("lists a workspace's Groups, each by the channel the other tools take, and sa
     error: "dohc is busy reading this workspace. Try again shortly.",
   });
   expect(textOf(busy)).not.toContain("relay words");
-
-  const noCopies = await (
-    await fixture({ answer: refusedBy("server_copies_off", 404) }).connect()
-  ).callTool({ name: "dohc_list_groups", arguments: { workspace: "trip" } });
-  expect(noCopies.isError).toBe(true);
-  expect(structured(noCopies)).toEqual({
-    ok: false,
-    code: "no_server_copies",
-    error:
-      "This server doesn't keep workspace copies, so it can't list Groups. The DM still works.",
-  });
 });
 
 it("lists a workspace's files and reads one as text or base64", async () => {

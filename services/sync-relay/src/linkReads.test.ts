@@ -737,6 +737,7 @@ describe("relay capability reads", () => {
         /SEARCH sync_relay_current_files USING COVERING INDEX idx_sync_relay_current_files_blob/u,
       );
       expect(blobDetails).toMatch(/SEARCH blob USING INDEX sqlite_autoindex_sync_relay_blobs_1/u);
+      expect(blobDetails).not.toContain("TEMP B-TREE");
     } finally {
       inspection.close();
     }

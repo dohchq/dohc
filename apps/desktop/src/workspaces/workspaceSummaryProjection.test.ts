@@ -69,11 +69,20 @@ describe("workspace summary projection", () => {
     ).toBeUndefined();
   });
 
-  it("carries a membership's role, and no other view's", () => {
+  it("carries a membership's role and its workspace id on the relay, and no other view's", () => {
     const whole = { paths: [], versionId: null, access: "edit", wholeWorkspace: true };
     expect(
-      workspaceSummaryFor(entry({ shareView: { ...shareView(whole), role: "admin" } })).shareView,
-    ).toMatchObject({ membership: true, role: "admin" });
+      workspaceSummaryFor(
+        entry({
+          shareView: { ...shareView(whole), role: "admin", membersWorkspaceId: "workspace-owner" },
+        }),
+      ).shareView,
+    ).toMatchObject({ membership: true, role: "admin", membersWorkspaceId: "workspace-owner" });
+    expect(
+      workspaceSummaryFor(
+        entry({ shareView: { ...shareView(goodSelector), membersWorkspaceId: "workspace-owner" } }),
+      ).shareView,
+    ).not.toHaveProperty("membersWorkspaceId");
     expect(
       workspaceSummaryFor(entry({ shareView: { ...shareView(whole), role: "owner" } })).shareView,
     ).not.toHaveProperty("role");

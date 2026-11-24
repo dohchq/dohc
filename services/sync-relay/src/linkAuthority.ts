@@ -152,6 +152,11 @@ export function createLinkAuthorityResolver(input: {
   /** share-web's origin, which a member's request names. */
   publicOrigin: string | undefined;
   personalAgents: Pick<PersonalAgents, "readFence">;
+  /**
+   * Stores the account's current verified email when the stored one is older
+   * than the person's own reads allow. A personal agent's reach follows it.
+   */
+  refreshAccountEmail: (userId: string) => Promise<void>;
   linkKey: string | Uint8Array | undefined;
   publicEditRelease: PublicEditRelease | undefined;
   relayExchangeKeyConfigured: boolean;
@@ -347,6 +352,9 @@ export function createLinkAuthorityResolver(input: {
     const connection = storage.authenticatePersonalAuthority(check, fenceEpoch, nowMs());
     if (!connection || (connectionId !== undefined && connection.connectionId !== connectionId))
       throw invalidLinkCapability();
+    // Reach reads the stored email. Without this, a rule that named the
+    // person's old address keeps reaching their agent.
+    await input.refreshAccountEmail(connection.ownerUserId);
     return {
       kind: "personal",
       agentId: connection.agentId,

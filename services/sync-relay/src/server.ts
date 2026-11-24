@@ -1166,6 +1166,9 @@ export function createSyncRelayHandler({
         await claimPendingShares(actor.userId, request.signal, MEMBER_IDENTITY_MAX_AGE_MS);
       return actor;
     },
+    // A personal agent's requests refresh its person's email on the same terms.
+    refreshAccountEmail: (userId) =>
+      claimPendingShares(userId, undefined, MEMBER_IDENTITY_MAX_AGE_MS),
     publicOrigin: shareWebOrigin,
   });
   const respondToLinkCollectionWrites = linkKey
@@ -1295,7 +1298,7 @@ export function createSyncRelayHandler({
     limiter: linkReadRateLimiter,
     admitBlobBytes: admitLinkBlobBytes,
     maxFiles: linkCurrentFileLimit,
-    copies: serverCopies,
+    lookupUserDisplayName,
     collectionWrites: createPersonalCollectionWriteRoute({
       storage,
       rateLimiter: collectionWriteRateLimiter,

@@ -2278,6 +2278,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     versionId: string;
     selectorPaths: readonly string[];
     limit: number;
+    /** Lists only files at a path this passes, paging past the rest. */
+    visible?: (path: string) => boolean;
   }): CurrentFileStateSnapshot {
     return currentFilesStorage.readCurrentFileState(this, input);
   }
@@ -2289,6 +2291,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     sha256: string;
     epochLogFloor: number;
     visible?: (path: string) => boolean;
+    pastHidden?: true;
   }): number | null {
     return currentFilesStorage.currentFileBlobByteLength(this, input);
   }
@@ -2674,7 +2677,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     credential: personalAgentChatStorage.PersonalCredential,
     workspaceId: string,
     nowMs: number,
-  ): personalAgentStorage.PersonalReach | null {
+  ): personalAgentChatStorage.PersonalReachRead {
     return personalAgentChatStorage.readPersonalReach(this, credential, workspaceId, nowMs);
   }
 

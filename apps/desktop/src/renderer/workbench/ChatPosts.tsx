@@ -43,6 +43,7 @@ import {
   DeletedMessageLine,
   MessageReactions,
   TOOLBAR_BUTTON,
+  AgentPerson,
   chatAuthorLabel,
   continuesRun,
   usePersonalAgentNames,
@@ -796,6 +797,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                   <AgentColorName>{chatAuthorLabel(comment)}</AgentColorName>
                 </AgentName>
               </span>
+              <AgentPerson author={comment} testId="chats-comment-person" />
               {isAgent && !continues ? (
                 <AgentBadge
                   testIdPrefix="chats-comment"
@@ -1002,6 +1004,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                   <AgentColorName>{chatAuthorLabel(openingMessage)}</AgentColorName>
                 </AgentName>
               </span>
+              <AgentPerson author={openingMessage} testId="chats-message-person" />
               {openingIsAgent ? (
                 <AgentBadge
                   testIdPrefix="chats-message"

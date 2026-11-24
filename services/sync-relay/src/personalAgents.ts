@@ -330,8 +330,14 @@ export function createPersonalAgents(input: {
     }
     if (request.method !== "PUT") throw relayError("method_not_allowed");
     const body = await readOwnerBody(request);
-    if (Object.keys(body).join() !== action) throw badRequest("invalid request");
-    if (action === "reach") return { kind: "reach", reach: reachChoices(body.reach) };
+    const keys = action === "reach" ? "reach,revision" : action;
+    if (Object.keys(body).sort().join() !== keys) throw badRequest("invalid request");
+    if (action === "reach") {
+      const revision = body.revision;
+      if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0)
+        throw badRequest("revision is invalid");
+      return { kind: "reach", reach: reachChoices(body.reach), revision };
+    }
     if (action === "hue") {
       if (!isAgentHue(body.hue)) throw badRequest("hue is invalid");
       return { kind: "hue", hue: body.hue };

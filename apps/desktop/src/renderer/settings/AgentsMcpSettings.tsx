@@ -13,6 +13,8 @@ import { AgentList } from "./AgentList";
 
 export function AgentsMcpSettings(props: {
   workspaceId: string;
+  // A joined workspace's id on the relay, which its agent link names.
+  membersWorkspaceId?: string;
   workspaceName: string;
   openAgent?: { agentId: string };
   onError?: (
@@ -177,6 +179,7 @@ export function AgentsMcpSettings(props: {
     <div className="flex flex-col">
       <AgentList
         workspaceId={workspaceId}
+        {...(props.membersWorkspaceId ? { membersWorkspaceId: props.membersWorkspaceId } : {})}
         workspaceName={props.workspaceName}
         {...(props.openAgent ? { openAgent: props.openAgent } : {})}
         settings={props.settings}

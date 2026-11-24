@@ -293,9 +293,10 @@ export function createPersonalLiveDocumentRoute(input: {
     if (!ended.signal.aborted) return answerResponse(settled ?? { status: "preparing" });
     // Its access changed while it waited, so it is read again before any answer leaves.
     const fresh = await linkAuthority.freshPersonal(current);
-    const reach = storage.readPersonalReach(credential(fresh), workspaceId, nowMs());
-    if (!reach) throw relayError("personal_agent_out_of_reach");
-    if (reach.level !== "edit") throw relayError("personal_agent_edit_needed");
+    const read = storage.readPersonalReach(credential(fresh), workspaceId, nowMs());
+    // Live documents stay owned only: a member's agent never edits one in a joined workspace.
+    if (!read.ok || !read.reach.owned) throw relayError("personal_agent_out_of_reach");
+    if (read.reach.listedLevel !== "edit") throw relayError("personal_agent_edit_needed");
     return answerResponse(evaluate(row.workspaceId, row.objectId) ?? { status: "preparing" });
   }
 

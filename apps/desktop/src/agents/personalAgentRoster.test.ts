@@ -26,6 +26,7 @@ interface FakeRelay {
   revision: number;
   agents: RelayAgent[];
   requests: string[];
+  bodies: unknown[];
   refuse: number | null;
   holdReads: boolean;
   held: Array<() => void>;
@@ -54,6 +55,7 @@ function fakeRelay(agents: RelayAgent[] = [relayAgent()]): FakeRelay {
     revision: 3,
     agents,
     requests: [],
+    bodies: [],
     refuse: null,
     holdReads: false,
     held: [],
@@ -68,7 +70,7 @@ function fakeRelay(agents: RelayAgent[] = [relayAgent()]): FakeRelay {
           ok: true,
           revision: relay.revision,
           agents: relay.agents.map((agent) => ({ ...agent })),
-          workspaces: [{ workspaceId: "ws-1", name: "Trip" }],
+          workspaces: [{ workspaceId: "ws-1", name: "Trip", role: "owner" }],
         };
         if (relay.holdReads) await new Promise<void>((resolve) => relay.held.push(resolve));
         return Response.json(answer);
@@ -78,7 +80,13 @@ function fakeRelay(agents: RelayAgent[] = [relayAgent()]): FakeRelay {
       const [, id, kind] = /^\/sync\/personal-agents\/([^/]+)\/([a-z-]+)$/u.exec(path) ?? [];
       const agent = relay.agents.find((entry) => entry.agentId === decodeURIComponent(id ?? ""));
       if (!agent) return Response.json({ ok: false, error: "not found" }, { status: 404 });
-      const body = request.method === "PUT" ? ((await request.json()) as Partial<RelayAgent>) : {};
+      const body =
+        request.method === "PUT"
+          ? ((await request.json()) as Partial<RelayAgent> & { revision?: number })
+          : {};
+      if (request.method === "PUT") relay.bodies.push(body);
+      if (kind === "reach" && body.revision !== relay.revision)
+        return Response.json({ ok: false, error: "conflict" }, { status: 409 });
       if (kind === "name" && body.name) agent.name = body.name;
       if (kind === "hue" && body.hue) agent.hue = body.hue;
       if (kind === "reach" && body.reach) agent.reach = body.reach;
@@ -148,7 +156,7 @@ describe("the personal agents roster in main", () => {
     relay.holdReads = true;
     roster.revisionSeen(KEY, 9);
     await vi.waitFor(() => expect(relay.held).toHaveLength(1));
-    await roster.change(KEY, AGENT_ID, { kind: "name", name: "Iris" });
+    await roster.change(KEY, AGENT_ID, { kind: "name", name: "Iris" }, "rename Grok Bot");
     const renamedAt = pushed.length;
     expect(names(pushed.at(-1)!)).toEqual(["Iris"]);
 
@@ -159,18 +167,85 @@ describe("the personal agents roster in main", () => {
     expect(pushed.slice(renamedAt).every((view) => names(view).join() === "Iris")).toBe(true);
   });
 
+  it("keeps a newer roster when a change's answer arrives after it", async () => {
+    const relay = fakeRelay();
+    const { roster, pushed } = setup(relay);
+    await roster.read(false);
+
+    // The change lands at revision 4, then another device clears the reach at
+    // revision 5, and the roster reads that before the change's answer arrives.
+    const relayFetch = relay.fetch;
+    relay.fetch = async (input, init) => {
+      const answer = await relayFetch(input, init);
+      if (new Request(input, init).method !== "PUT") return answer;
+      relay.agents[0]!.reach = [];
+      relay.revision += 1;
+      roster.revisionSeen(KEY, relay.revision);
+      await vi.waitFor(() => expect(roster.view().accounts[0]?.roster?.revision).toBe(5));
+      return answer;
+    };
+    await roster.change(KEY, AGENT_ID, { kind: "name", name: "Iris" }, "rename Grok Bot");
+
+    const readAt = pushed.findIndex((view) => view.accounts[0]?.roster?.revision === 5);
+    expect(
+      pushed.slice(readAt).map((view) => view.accounts[0]?.roster?.agents[0]?.reach),
+    ).not.toContainEqual([{ workspaceId: "ws-1", level: "view" }]);
+  });
+
   it("drops a removed agent and brings it back signed out on undo", async () => {
     const relay = fakeRelay([relayAgent({ status: "signed_out" })]);
     const { roster } = setup(relay);
     await roster.read(false);
 
-    const removed = await roster.change(KEY, AGENT_ID, { kind: "remove" });
+    const removed = await roster.change(KEY, AGENT_ID, { kind: "remove" }, "remove Grok Bot");
     expect(removed.ok && removed.personalAgents.accounts[0]?.roster?.agents).toEqual([]);
-    const restored = await roster.change(KEY, AGENT_ID, { kind: "restore" });
+    const restored = await roster.change(KEY, AGENT_ID, { kind: "restore" }, "bring back Grok Bot");
     expect(
       restored.ok &&
         restored.personalAgents.accounts[0]?.roster?.agents.map((agent) => agent.status),
     ).toEqual(["signed_out"]);
+  });
+
+  it("says what the caller was doing when the relay is out of reach", async () => {
+    const relay = fakeRelay();
+    const { roster } = setup(relay);
+    await roster.read(false);
+
+    relay.offline = true;
+    const result = await roster.change(
+      KEY,
+      AGENT_ID,
+      { kind: "reach", reach: [], revision: 0 },
+      "remove Garden club from Sprout's reach",
+    );
+    expect(result).toEqual({
+      ok: false,
+      error: "dohc could not remove Garden club from Sprout's reach. Check your connection.",
+    });
+  });
+
+  it("asks for a reach saved from an older roster to be checked again, and reads the roster again", async () => {
+    const relay = fakeRelay();
+    const { roster } = setup(relay);
+    await roster.read(false);
+    relay.revision += 1;
+    relay.requests.length = 0;
+
+    const reach = [{ workspaceId: "ws-1", level: "edit" as const }];
+    expect(
+      await roster.change(
+        KEY,
+        AGENT_ID,
+        { kind: "reach", reach, revision: 3 },
+        "change what Grok Bot can reach",
+      ),
+    ).toEqual({ ok: false, error: "What Grok Bot can reach changed. Check it and try again." });
+    expect(relay.bodies).toEqual([{ reach, revision: 3 }]);
+    // The roster read again and kept the reach the relay holds.
+    await vi.waitFor(() => expect(roster.view().accounts[0]?.roster?.revision).toBe(4));
+    expect(roster.view().accounts[0]?.roster?.agents[0]?.reach).toEqual([
+      { workspaceId: "ws-1", level: "view" },
+    ]);
   });
 
   it("ends the session when the relay refuses its token", async () => {
@@ -179,7 +254,7 @@ describe("the personal agents roster in main", () => {
     await roster.read(false);
 
     relay.refuse = 401;
-    expect(await roster.change(KEY, AGENT_ID, { kind: "sign-out" })).toEqual({
+    expect(await roster.change(KEY, AGENT_ID, { kind: "sign-out" }, "sign out Grok Bot")).toEqual({
       ok: false,
       error: "Your server session expired. Sign in again, then retry.",
     });
@@ -191,9 +266,12 @@ describe("the personal agents roster in main", () => {
     const { roster } = setup(relay);
 
     expect(
-      await roster.change("https://server.test#https://relay.test#bo", AGENT_ID, {
-        kind: "sign-out",
-      }),
+      await roster.change(
+        "https://server.test#https://relay.test#bo",
+        AGENT_ID,
+        { kind: "sign-out" },
+        "sign out Grok Bot",
+      ),
     ).toEqual({
       ok: false,
       error: "Sign in to the account this agent belongs to, then try again.",
