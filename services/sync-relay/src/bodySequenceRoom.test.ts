@@ -208,7 +208,7 @@ it("saves two changes of 90,000 values each as one batch, and the note is not pa
   saved.destroy();
 });
 
-it("a room refuses one change of 400,000 values at once, keeps taking others, and saves without a pause", async () => {
+it("a room refuses one change of 400,000 values at once for capacity, keeps taking others, and saves without a pause", async () => {
   const { baseline, f, room } = noteInARoom();
   const session = join(f, room, [{ kind: "human", humanId: "ana", humanName: "Ana" }]);
   await session.openSync(Y.encodeStateVector(new Y.Doc()), signal);
@@ -219,7 +219,10 @@ it("a room refuses one change of 400,000 values at once, keeps taking others, an
     ),
   )!;
   expect(large.length).toBeLessThan(1 << 20);
-  expect(await submitted(session, large)).toEqual({ result: "refused", reason: "invalid-update" });
+  expect(await submitted(session, large)).toEqual({
+    result: "refused",
+    reason: "capacity-refused",
+  });
   const typed = changeMadeBy(baseline, 78, ({ sequence }) => sequence.insert(2, "kept"))!;
   expect(await submitted(session, typed)).toMatchObject({ result: "success" });
   session.close();
