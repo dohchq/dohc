@@ -557,13 +557,13 @@ export function createWorkspaceData(options: {
   function read(target: Entry, prefetch = false) {
     const request = target.reads.next();
     const from = cursor;
-    const unseen = target.prefetched;
+    const unseen = target.prefetched || target.state.value === null;
     if (!prefetch) set(target, { ...target.state, loading: true });
     return target.view.read(signIn.client, workspaceId, everything.signal).then(
       (answer) => {
         if (!live() || !target.reads.isLatest(request)) return;
         target.stale = false;
-        target.prefetched = target.listeners.size === 0;
+        target.prefetched = unseen && target.listeners.size === 0;
         const previous = unseen ? null : target.state.value;
         const value = target.view.carry ? target.view.carry(previous, answer.value) : answer.value;
         const saved = { view: target.view, value, cursor: answer.cursor, stale: false };

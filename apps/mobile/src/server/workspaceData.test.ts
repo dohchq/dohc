@@ -1053,6 +1053,42 @@ describe("prefetching pages", () => {
     );
   });
 
+  it("keeps a shown page's last text when its deletion lands after the screen closed", async () => {
+    const deletion = deferred<Answer>();
+    const missing = (cursor: string) =>
+      ops({ ok: false, reason: "dohc: No document.", refusal: "missing" }, cursor);
+    const server = serve(
+      "ws-prefetch-left",
+      page("Seen text"),
+      () => deletion.promise,
+      missing("0.3.1"),
+    );
+    const first = deferred<Answer>();
+    const second = deferred<Answer>();
+    server.on("GET", feedPath("ws-prefetch-left", "0.1.1"), () => first.promise);
+    server.on("GET", feedPath("ws-prefetch-left", "0.2.1"), () => second.promise);
+    server.on("GET", feedPath("ws-prefetch-left", "0.3.1"), held);
+    const { data } = open(server, "ws-prefetch-left");
+    const close = data.subscribe(views.page("a.md"), () => {});
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "Seen text" }),
+    );
+    first.resolve(feed({ cursor: "0.2.1", changed: { files: ["object-a"] } }));
+    await vi.waitFor(() => expect(reads(server)).toBe(2));
+    close();
+    deletion.resolve(missing("0.2.1"));
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({ kind: "missing", last: "Seen text" }),
+    );
+    second.resolve(feed({ cursor: "0.3.1", changed: { files: ["object-a"] } }));
+    await vi.waitFor(() => expect(count(server, feedPath("ws-prefetch-left", "0.3.1"))).toBe(1));
+
+    data.subscribe(views.page("a.md"), () => {});
+    await vi.waitFor(() => expect(reads(server)).toBe(3));
+    await settled();
+    expect(data.state(views.page("a.md")).value).toEqual({ kind: "missing", last: "Seen text" });
+  });
+
   it("keeps ten prefetched pages through a file change, and reads none of them again until opened", async () => {
     const server = serve("ws-prefetch-ten", page("Read ahead"));
     const change = deferred<Answer>();
