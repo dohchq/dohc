@@ -1,6 +1,7 @@
 import { jsonResponse, readBoundedJson, type TokenBucketLimiter } from "@dohc/service-http";
 import { agentChannelWireId } from "@dohc/security-contract/chat-wire-ids";
 import { MESSAGE_DELETE_ID_MAX_CHARS } from "@dohc/security-contract/workspace-members";
+import { chatMentionTokens } from "@dohc/workspace-contracts/chat-mentions";
 import {
   AGENT_CHAT_MAX_WAIT_MS,
   AGENT_CHAT_WAIT_MAX_RESPONSE_BYTES,
@@ -15,7 +16,11 @@ import {
   ownerLogWaitGroup,
   type DiscussionActivityHub,
 } from "./discussionActivity";
-import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
+import {
+  accountDisplayName,
+  type LookupUserDisplayName,
+  type RefreshMentionAccountNames,
+} from "./accountDisplayName";
 import { shownName } from "./chatWakes";
 import { badRequest, notFound, relayError, type RelayError } from "./errors";
 import type { LinkAuthorityResolver, PersonalAuthority } from "./linkAuthority";
@@ -233,6 +238,7 @@ export function createPersonalAgentToolRoutes(input: {
   maxResponseBytes?: number;
   /** Names the person on each of their agent's posts. */
   lookupUserDisplayName?: LookupUserDisplayName;
+  refreshMentionAccountNames?: RefreshMentionAccountNames;
   /** A Collection write at Edit, which reads its own body. */
   collectionWrites: (
     request: Request,
@@ -332,11 +338,12 @@ export function createPersonalAgentToolRoutes(input: {
 
   // The relay writes the post from the agent's origin. The storage write reads
   // the agent's authority, reach, and ownership again inside its transaction.
-  function post(
+  async function post(
     authority: PersonalAuthority,
     body: Record<string, unknown>,
     person: string | null,
-  ): Response {
+    signal: AbortSignal,
+  ): Promise<Response> {
     fields(
       body,
       ["workspaceId", "body", "idempotencyKey"],
@@ -354,8 +361,17 @@ export function createPersonalAgentToolRoutes(input: {
           : { channelWireId: parseString(body.channelWireId, "channelWireId", CHAT_ID_CHARS) };
     if (typeof body.body !== "string" || typeof body.idempotencyKey !== "string")
       throw badRequest("chat message is invalid");
+    let current = authority;
+    if (input.refreshMentionAccountNames && chatMentionTokens(body.body).length > 0) {
+      const read = storage.readPersonalReach(credential(current), workspaceId, nowMs());
+      if (read.ok) {
+        await input.refreshMentionAccountNames(workspaceId, [body.body]);
+        signal.throwIfAborted();
+        current = await linkAuthority.freshPersonal(authority);
+      }
+    }
     const result = storage.appendPersonalChatPost({
-      ...credential(authority),
+      ...credential(current),
       now: nowMs,
       workspaceId,
       target,
@@ -983,7 +999,12 @@ export function createPersonalAgentToolRoutes(input: {
         // The engine refuses a post whose name shows nothing, so such a name is left off.
         const name = await accountDisplayName(input.lookupUserDisplayName, authority.ownerUserId);
         const person = shownName(name ?? "") || null;
-        return post(await linkAuthority.freshPersonal(authority), body, person);
+        return await post(
+          await linkAuthority.freshPersonal(authority),
+          body,
+          person,
+          request.signal,
+        );
       }
       case "delete":
         return deleteMessage(await linkAuthority.freshPersonal(authority), body);

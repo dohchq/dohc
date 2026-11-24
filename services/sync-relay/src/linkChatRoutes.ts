@@ -1,5 +1,6 @@
 import { readBoundedJson, type TokenBucketLimiter } from "@dohc/service-http";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
+import type { RefreshMentionAccountNames } from "./accountDisplayName";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
 import { linkRefusal } from "./linkRefusal";
@@ -12,7 +13,7 @@ import {
   type NamedChatMessage,
 } from "./namedRecipientChat";
 import { parseString } from "./requestInputs";
-import { projectChatFileLinks } from "@dohc/workspace-contracts/chat-mentions";
+import { projectChatFileLinks, chatMentionTokens } from "@dohc/workspace-contracts/chat-mentions";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import { fileSideOf, type AnyShareSelector } from "./shareFilter";
 import { authorizeLinkChatAction } from "./shareAuthorization";
@@ -126,6 +127,7 @@ export function createLinkChatRoutes(options: {
   followLimiters: { capability: TokenBucketLimiter; grant: TokenBucketLimiter };
   activity: Pick<DiscussionActivityHub, "wait" | "wake" | "wakeLog">;
   reads: Pick<ReturnType<typeof createShareReadQueries>, "chatResolverFor">;
+  refreshMentionAccountNames?: RefreshMentionAccountNames;
   maxResponseBytes?: number;
 }) {
   const { storage } = options;
@@ -187,9 +189,22 @@ export function createLinkChatRoutes(options: {
     )
       throw badRequest("invalid request");
     const channelWireId = parseString(input.channelWireId, "channelWireId", 256);
-    const fresh = options.linkAuthority.fresh(capability);
+    let fresh = options.linkAuthority.fresh(capability);
     // An agent posts through agent chat, under its connection.
     if (fresh.credential.kind !== "holder") throw notFound();
+    if (options.refreshMentionAccountNames && chatMentionTokens(body).length > 0) {
+      const authorized = authorizeLinkChatAction({
+        storage,
+        grantId: fresh.grantId,
+        action: "append",
+      });
+      if (authorized.ok && authorized.effectiveSelector.channelWireId === channelWireId) {
+        await options.refreshMentionAccountNames(authorized.share.workspaceId, [body]);
+        request.signal.throwIfAborted();
+        fresh = options.linkAuthority.fresh(capability);
+        if (fresh.credential.kind !== "holder") throw notFound();
+      }
+    }
     const result = storage.appendLinkChatPost({
       capabilityHash: fresh.credential.capability.session.capabilityHash,
       profileTokenHash: hashLinkProfileSecret(secret, options.linkKey),

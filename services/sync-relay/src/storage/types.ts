@@ -978,7 +978,15 @@ export interface SyncRelayStorage {
     input: import("./pushSubscriptions").BindPushSubscriptionInput,
   ): import("./pushSubscriptions").PushSubscriptionRow;
   // The account's current display name, which mentions match (storage/accountNames.ts).
-  recordAccountName(userId: string, name: string | null): void;
+  beginAccountNameLookup(): import("./accountNames").AccountNameLookupToken;
+  recordAccountName(userId: string, name: string | null, nowMs?: number, generation?: number): void;
+  recordAccountNames(
+    entries: Iterable<readonly [string, string | null]>,
+    nowMs?: number,
+    generation?: number,
+  ): void;
+  workspaceAccountIds(workspaceId: string, limit?: number): string[];
+  unnamedAccountIds(limit: number, afterUserId?: string): string[];
   removePushSubscription(input: { installationId: string; userId: string }): void;
   readPushDevice(input: {
     userId: string;

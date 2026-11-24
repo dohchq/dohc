@@ -1,5 +1,9 @@
 import { parsePublicEditRelease } from "@dohc/security-contract";
-import { accountDisplayName } from "./accountDisplayName";
+import {
+  accountDisplayName,
+  backfillUnnamedAccounts,
+  type LookupUserDisplayNames,
+} from "./accountDisplayName";
 import {
   APP_PUBLICATION_MAX_FILES,
   APP_PUBLICATION_MAX_METADATA_BYTES,
@@ -475,6 +479,7 @@ let resolveUserIdByEmail: (email: string) => Promise<string | null> | string | n
 let lookupUserEmail: (userId: string) => Promise<string | null> | string | null;
 let lookupVerifiedUserEmail: (userId: string) => Promise<string | null> | string | null;
 let lookupUserDisplayName: (userId: string) => Promise<string | null> | string | null;
+let lookupUserDisplayNames: LookupUserDisplayNames;
 // The test seam has no browser sign-ins, so it serves no push subscriptions
 // and no personal agent sign-in. Its Bearer identities are desktop sign-ins.
 const accountResolvers: {
@@ -617,6 +622,8 @@ const automationReplication = automationReplicaKey
       activity: discussionActivity,
       authorize: (input) =>
         authorizeAutomationReplication(storage, { ...automationReplicaKey, ...input }),
+      lookupUserDisplayName: (userId) => lookupUserDisplayName(userId),
+      lookupUserDisplayNames: (userIds) => lookupUserDisplayNames(userIds),
     })
   : undefined;
 // One limit per person for notices to others, shared by the route and this server's automations.
@@ -639,6 +646,7 @@ const serviceReplication =
           authorize: (input) =>
             authorizeServiceHostReplication(storage, { ...credential, ...input }),
           lookupUserDisplayName: (userId) => lookupUserDisplayName(userId),
+          lookupUserDisplayNames: (userIds) => lookupUserDisplayNames(userIds),
         });
       })()
     : undefined;
@@ -673,6 +681,7 @@ if (testAuthSeam) {
   lookupUserEmail = (userId) => `${userId}${TEST_EMAIL_SUFFIX}`;
   lookupVerifiedUserEmail = lookupUserEmail;
   lookupUserDisplayName = (userId) => userId;
+  lookupUserDisplayNames = (userIds) => new Map(userIds.map((id) => [id, id]));
 } else {
   // Better Auth's canonical table/column names on the shared Postgres.
   ({ resolveUserIdByEmail, lookupVerifiedUserEmail } = createVerifiedEmailLookups(pool!));
@@ -689,6 +698,15 @@ if (testAuthSeam) {
       [userId],
     );
     return result.rows[0]?.name ?? null;
+  };
+  lookupUserDisplayNames = async (userIds) => {
+    if (userIds.length === 0) return new Map();
+    const result = await pool!.query<{ id: string; name: string | null }>({
+      text: 'SELECT id, name FROM "user" WHERE id = ANY($1::text[])',
+      values: [userIds],
+      query_timeout: 5_000,
+    } as QueryConfig & { query_timeout: number });
+    return new Map(result.rows.map((row) => [row.id, row.name]));
   };
 }
 
@@ -734,6 +752,7 @@ const relayApplication = createSyncRelayHandler({
       }
     : {}),
   lookupUserDisplayName: (userId) => lookupUserDisplayName(userId),
+  lookupUserDisplayNames: (userIds) => lookupUserDisplayNames(userIds),
   presence,
   linkKey,
   shareWebOrigin,
@@ -1759,11 +1778,20 @@ const stopJournalCheck = () => journalCheck?.close();
 process.once("SIGINT", stopJournalCheck);
 process.once("SIGTERM", stopJournalCheck);
 server.once("close", stopJournalCheck);
+const accountNameBackfillAbort = new AbortController();
+let accountNameBackfill: Promise<unknown> | undefined;
 server.listen(requestedPort, host, () => {
   // First, so the work this callback starts is not counted as binding the port.
   startTimeline.done("listening");
   journalCheck = startLiveJournalCheck((storage as StorageContext).db);
   pushSender.start();
+  accountNameBackfill = backfillUnnamedAccounts({
+    storage,
+    lookupUserDisplayNames,
+    signal: accountNameBackfillAbort.signal,
+    onError: (error) =>
+      console.error("[sync-relay] account name backfill failed:", serverLogLine(error)),
+  });
   void (async () => {
     for (const job of pendingDeletions.splice(0))
       await deletions
@@ -1796,6 +1824,8 @@ installShutdown(server, {
     if (!deployment)
       await rm(datasetDirectory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
     // The fence listener holds a pool client, so it closes before the pool ends.
+    accountNameBackfillAbort.abort();
+    await accountNameBackfill;
     await relayApplication.dispose();
     storage.close();
     try {

@@ -128,7 +128,11 @@ import {
 } from "./personalAgents";
 import type { CredentialFence } from "@dohc/workspace-auth/credentialFence";
 import type { SendEmail } from "@dohc/workspace-auth/smtp";
-import { accountDisplayName } from "./accountDisplayName";
+import {
+  accountDisplayName,
+  createMentionAccountNameRefresher,
+  type LookupUserDisplayNames,
+} from "./accountDisplayName";
 import { createDiscussionRoutes } from "./discussionRoutes";
 import { shareSenderLabel as formatShareSender } from "@dohc/security-contract/share-labels";
 import { createShareReadQueries } from "./shareReadQueries";
@@ -234,6 +238,7 @@ export interface CreateSyncRelayHandlerOptions {
   sendShareInvitationEmail?: SendEmail;
   // Better Auth display name for discussion authorship; never used for authz.
   lookupUserDisplayName?: (userId: string) => Promise<string | null> | string | null;
+  lookupUserDisplayNames?: LookupUserDisplayNames;
   newShareId?: () => string;
   newGrantId?: () => string;
   // Ids the relay mints — proposal ids, and the moment and object
@@ -340,6 +345,7 @@ export function createSyncRelayHandler({
   lookupUserEmails,
   sendShareInvitationEmail,
   lookupUserDisplayName: lookupAccountDisplayName,
+  lookupUserDisplayNames,
   newShareId = () => randomUUID(),
   newGrantId = () => randomUUID(),
   newId = () => randomUUID(),
@@ -460,10 +466,21 @@ export function createSyncRelayHandler({
   const lookupUserDisplayName =
     lookupAccountDisplayName &&
     (async (userId: string) => {
-      const name = await lookupAccountDisplayName(userId);
-      storage.recordAccountName(userId, name);
-      return name;
+      const token = storage.beginAccountNameLookup();
+      try {
+        const name = await lookupAccountDisplayName(userId);
+        storage.recordAccountName(userId, name, nowMs(), token.generation);
+        return name;
+      } finally {
+        token.finish();
+      }
     });
+  const refreshMentionAccountNames = createMentionAccountNameRefresher({
+    storage,
+    lookupUserDisplayNames,
+    lookupUserDisplayName: lookupAccountDisplayName,
+    nowMs,
+  });
   const publicEditRelease = parsePublicEditRelease(releaseInput);
   const respondToDataset = datasetHost
     ? createDatasetRoutes(datasetHost, storage, {
@@ -648,7 +665,9 @@ export function createSyncRelayHandler({
     refreshedAt.delete(userId);
     refreshedAt.set(userId, startedAt);
     if (refreshedAt.size > 10_000) refreshedAt.delete(refreshedAt.keys().next().value!);
-    if (email) storage.claimPendingSharesForEmail(email, userId);
+    if (email && storage.claimPendingSharesForEmail(email, userId) > 0) {
+      await accountDisplayName(lookupUserDisplayName, userId);
+    }
   };
   // Returns the shared refresh itself, adding no awaits of its own.
   const claimPendingShares = (
@@ -739,6 +758,7 @@ export function createSyncRelayHandler({
       discussionActivity,
       replicaWatches,
       lookupUserDisplayName,
+      refreshMentionAccountNames,
     );
 
   const respondToWorkspaceBlobs = createWorkspaceBlobRoutes(storage, nowMs);
@@ -938,6 +958,7 @@ export function createSyncRelayHandler({
     discussionActivity,
     lookupUserDisplayName,
     linkKey,
+    refreshMentionAccountNames,
   );
 
   const namedChat = namedBrowserSessionLimits
@@ -1287,6 +1308,7 @@ export function createSyncRelayHandler({
     nowMs,
     activity: discussionActivity,
     reads: { chatResolverFor },
+    refreshMentionAccountNames,
   });
 
   const respondToPersonalAgentTools = createPersonalAgentToolRoutes({
@@ -1299,6 +1321,7 @@ export function createSyncRelayHandler({
     admitBlobBytes: admitLinkBlobBytes,
     maxFiles: linkCurrentFileLimit,
     lookupUserDisplayName,
+    refreshMentionAccountNames,
     collectionWrites: createPersonalCollectionWriteRoute({
       storage,
       rateLimiter: collectionWriteRateLimiter,
@@ -1320,6 +1343,7 @@ export function createSyncRelayHandler({
     followLimiters: { capability: linkLogReadRateLimiter, grant: linkGrantLogReadRateLimiter },
     activity: discussionActivity,
     reads: { chatResolverFor },
+    refreshMentionAccountNames,
   });
 
   const respondToLinkRead = createLinkReadRoutes(

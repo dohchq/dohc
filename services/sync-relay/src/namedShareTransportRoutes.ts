@@ -2,7 +2,11 @@ import { isShareAccessValue } from "@dohc/security-contract/share-selector";
 import { jsonResponse } from "@dohc/service-http";
 import { randomBytes } from "node:crypto";
 import { sha256Hex } from "@dohc/workspace-core/hash";
-import { accountDisplayName } from "./accountDisplayName";
+import {
+  accountDisplayName,
+  chatMentionBodies,
+  type RefreshMentionAccountNames,
+} from "./accountDisplayName";
 import {
   DiscussionActivityCapacityError,
   linkLogWaitGroup,
@@ -158,6 +162,7 @@ export function createNamedShareTransportRoutes(
   discussionActivity: Pick<DiscussionActivityHub, "wakeLog" | "wait">,
   lookupUserDisplayName?: LogAuthorNameLookup,
   identityKey?: string | Uint8Array,
+  refreshMentionAccountNames?: RefreshMentionAccountNames,
 ) {
   // A relay without a link key runs only in development or test. Its reach
   // signatures change at each start, which costs a member a rebuild.
@@ -566,6 +571,11 @@ export function createNamedShareTransportRoutes(
             }
           }
         }
+      }
+      if (refreshMentionAccountNames) {
+        const mentionBodies = chatMentionBodies(ops);
+        if (mentionBodies.length > 0)
+          await refreshMentionAccountNames(share.workspaceId, mentionBodies);
       }
       const batch = {
         workspaceId: share.workspaceId,

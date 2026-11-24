@@ -6,7 +6,11 @@ import {
   type DiscussionActivityHub,
 } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
-import { accountDisplayName } from "./accountDisplayName";
+import {
+  accountDisplayName,
+  chatMentionBodies,
+  type RefreshMentionAccountNames,
+} from "./accountDisplayName";
 import { cacheLogAuthorNames } from "./logAuthorNameCache";
 import type { ReplicaWatches } from "./replicaWatches";
 import {
@@ -82,6 +86,7 @@ export function createWorkspaceReplicationRoutes(
   discussionActivity: Pick<DiscussionActivityHub, "wakeLog" | "wait">,
   replicaWatches: Pick<ReplicaWatches, "watched">,
   lookupUserDisplayName?: LogAuthorNameLookup,
+  refreshMentionAccountNames?: RefreshMentionAccountNames,
 ) {
   const accountNames = lookupUserDisplayName && cacheLogAuthorNames(lookupUserDisplayName, nowMs);
   async function respondToWorkspaceRegistration(
@@ -196,6 +201,11 @@ export function createWorkspaceReplicationRoutes(
         { workspaceId: route.workspaceId, originId, ops },
         request.signal,
       );
+      if (refreshMentionAccountNames) {
+        const mentionBodies = chatMentionBodies(ops);
+        if (mentionBodies.length > 0)
+          await refreshMentionAccountNames(route.workspaceId, mentionBodies);
+      }
       const datasetAccess = route.serviceHost
         ? undefined
         : await storage.prepareWorkReferenceRegistration({

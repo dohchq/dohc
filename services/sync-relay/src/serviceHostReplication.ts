@@ -1,3 +1,7 @@
+import {
+  createMentionAccountNameRefresher,
+  type LookupUserDisplayNames,
+} from "./accountDisplayName";
 import { createWorkspaceReplicationRoutes } from "./workspaceReplicationRoutes";
 import { createWorkspaceBlobRoutes } from "./workspaceBlobRoutes";
 import { createServiceHostFeed } from "./serviceHostFeed";
@@ -28,13 +32,33 @@ export function createServiceHostReplication(options: {
   hostedFeed?: boolean;
   // The owner's account name for the history of the hosted feed's edits.
   lookupUserDisplayName?: LogAuthorNameLookup;
+  lookupUserDisplayNames?: LookupUserDisplayNames;
 }) {
+  const recordAuthorDisplayName =
+    options.lookupUserDisplayName &&
+    (async (userId: string) => {
+      const token = options.storage.beginAccountNameLookup();
+      try {
+        const name = await options.lookupUserDisplayName!(userId);
+        options.storage.recordAccountName(userId, name, undefined, token.generation);
+        return name;
+      } finally {
+        token.finish();
+      }
+    });
+  const refreshMentionAccountNames = createMentionAccountNameRefresher({
+    storage: options.storage,
+    lookupUserDisplayNames: options.lookupUserDisplayNames,
+    lookupUserDisplayName: options.lookupUserDisplayName,
+  });
   // It passes no session reauthentication, so a held log read answers at once.
   const replication = createWorkspaceReplicationRoutes(
     options.storage,
     Date.now,
     { wakeLog: (workspaceId) => options.activity.wakeLog(workspaceId), wait: async () => {} },
     { watched: () => false },
+    recordAuthorDisplayName,
+    refreshMentionAccountNames,
   );
   const blobs = createWorkspaceBlobRoutes(options.storage, Date.now);
   const feed = options.hostedFeed

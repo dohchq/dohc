@@ -514,6 +514,7 @@ export function createWorkspaceMemberRoutes(options: {
         throw relayError("member_exists");
       }
       options.discussionActivity.wakeLog(joined.workspaceId);
+      await accountDisplayName(options.lookupUserDisplayName, userId);
       const body: WorkspaceJoinResult = {
         workspaceId: joined.workspaceId,
         shareId: joined.shareId,

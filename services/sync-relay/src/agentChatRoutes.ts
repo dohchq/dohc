@@ -4,6 +4,7 @@ import {
   handleForName,
   normalizeHandle,
 } from "@dohc/workspace-contracts/chat-mentions";
+import type { RefreshMentionAccountNames } from "./accountDisplayName";
 import {
   DiscussionActivityCapacityError,
   linkLogWaitGroup,
@@ -131,6 +132,7 @@ export function createAgentChatRoutes(input: {
   nowMs: () => number;
   activity: Pick<DiscussionActivityHub, "wait" | "wakeLog">;
   reads: Pick<ReturnType<typeof createShareReadQueries>, "chatResolverFor">;
+  refreshMentionAccountNames?: RefreshMentionAccountNames;
   maxResponseBytes?: number;
 }) {
   const { storage, linkKey, nowMs } = input;
@@ -184,7 +186,7 @@ export function createAgentChatRoutes(input: {
     return { connection, authorized };
   };
 
-  function post(body: Record<string, unknown>): Response {
+  async function post(body: Record<string, unknown>, signal: AbortSignal): Promise<Response> {
     fields(body, ["accessToken", "resource", "body", "idempotencyKey"], ["threadId"]);
     if (
       typeof body.body !== "string" ||
@@ -192,8 +194,25 @@ export function createAgentChatRoutes(input: {
       (body.threadId !== undefined && typeof body.threadId !== "string")
     )
       throw new Refused();
+    const agent = credential(body);
+    if (input.refreshMentionAccountNames && chatMentionTokens(body.body).length > 0) {
+      const connection = storage.authenticateAgentAuthority(agent, nowMs());
+      const authorized =
+        connection &&
+        authorizeLinkChatAction({ storage, grantId: connection.grantId, action: "append" });
+      if (
+        connection &&
+        authorized &&
+        authorized.ok &&
+        authorized.grant.generation === connection.generation &&
+        authorized.share.shareId === connection.shareId
+      ) {
+        await input.refreshMentionAccountNames(authorized.share.workspaceId, [body.body]);
+        if (signal.aborted) throw new Refused();
+      }
+    }
     const result = storage.appendAgentChatPost({
-      agent: credential(body),
+      agent,
       now: nowMs,
       threadId: body.threadId ?? null,
       body: body.body,
@@ -352,7 +371,9 @@ export function createAgentChatRoutes(input: {
   ): Promise<Response> {
     try {
       const body = await readInternal(request);
-      return route.action === "post" ? post(body) : await wait(body, request.signal);
+      return route.action === "post"
+        ? await post(body, request.signal)
+        : await wait(body, request.signal);
     } catch (error) {
       if (error instanceof Refused) return errorResponse(notFound());
       if (error instanceof RelayError) return errorResponse(error);
