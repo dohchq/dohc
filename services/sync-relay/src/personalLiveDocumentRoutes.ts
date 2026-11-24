@@ -51,7 +51,7 @@ const REFUSAL_MESSAGES: Record<string, string> = {
   "live-history-over-budget":
     "This document's edit history is too long for this server to check, so live editing can't start for it.",
   "live-start-failing":
-    "The server can't start live editing for this document. It keeps trying, and its owner can resume it to try now.",
+    "The server can't start live editing for this document. Its owner can resume it to try again.",
 };
 const REFUSED = "This server cannot continue this document until its owner tries again.";
 
@@ -128,7 +128,7 @@ export function createPersonalLiveDocumentRoute(input: {
     if (!row) return { status: "refused", reason: "document-unavailable" };
     if (row.ownerStop !== null) return { status: "refused", reason: "live_paused_by_owner" };
     // Retired without a Stop while it waited: nothing hosts it until the next open enrolls it again.
-    if (row.retired) return { status: "preparing" };
+    if (row.retired && row.note.reason !== "start-failed") return { status: "preparing" };
     const state = readiness!.state(row);
     if (state.status === "ready")
       return { status: "ready", objectId: state.objectId, binding: state.document.binding };

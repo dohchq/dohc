@@ -244,7 +244,6 @@ export function queueLiveHostRequests(
     sendLiveApplication: 2,
     sendLiveOwnerAdoption: 3,
     captureOwnerActivation: 3,
-    sendLiveRestore: 4,
     openLiveAppliedSync: 3,
     readNextLiveApplied: 3,
     readLiveApplicationAck: 2,

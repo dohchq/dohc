@@ -9,7 +9,6 @@ const state = vi.hoisted(() => ({
   drain: vi.fn(),
   settle: vi.fn(),
   settleWanted: vi.fn(),
-  restore: vi.fn(),
   madeOwner: false,
   registration: undefined as unknown,
   unregistered: false,
@@ -65,14 +64,6 @@ vi.mock("./ownerCommittedDelivery.js", () => ({
     adoptionSeedApplied(...args: unknown[]) {
       return state.seedApplied(...args);
     }
-    documentForRestore() {
-      return {
-        workspaceId: "workspace",
-        mainVersionId: "main",
-        objectId: "object",
-        lineageClaimId: "a".repeat(64),
-      };
-    }
     drain(...args: unknown[]) {
       return state.drain(...args);
     }
@@ -81,15 +72,6 @@ vi.mock("./ownerCommittedDelivery.js", () => ({
     }
     settleWanted(...args: unknown[]) {
       return state.settleWanted(...args);
-    }
-    stopRestore(...args: unknown[]) {
-      return state.restore(...args);
-    }
-    prepareRestore(...args: unknown[]) {
-      return state.restore(...args);
-    }
-    completeRestore(...args: unknown[]) {
-      return state.restore(...args);
     }
   },
 }));

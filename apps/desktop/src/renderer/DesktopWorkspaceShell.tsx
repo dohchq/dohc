@@ -146,7 +146,6 @@ import { useCollectionCopiesLeftNotice } from "./shell/useCollectionCopiesLeftNo
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
 import { useMergeRemovalNotices } from "./shell/useMergeRemovalNotices";
-import { useSharedRestore } from "./shell/useSharedRestore";
 import { useVersionMergeNotices } from "./shell/useVersionMergeNotices";
 import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
 import {
@@ -234,6 +233,8 @@ import { registerPendingEditorDraft } from "./pendingEditorDrafts";
 import { nextPagePath, pageFileStem } from "./workbench/new-file-name";
 import type { NewRecordOptions } from "./CollectionPage";
 import { NewCollectionDialog } from "./collections/NewCollectionDialog";
+import { QuickCaptureDialog, type QuickCaptureOutcome } from "./QuickCaptureDialog";
+import { INBOX_COLLECTION_PATH } from "@dohc/workspace-contracts/inbox";
 import { type ShareViewRefresh, useShareDirectWrites } from "./shell/useShareDirectWrites";
 import { useSharedViewAccess } from "./shell/useSharedViewAccess";
 import { disposeAutomationButtons } from "./collections/useAutomationButtons";
@@ -815,6 +816,7 @@ function WorkspaceShell(props: {
   // The New collection dialog: null = closed, otherwise the folder to
   // create inside ("" = workspace root).
   const [newCollectionFolder, setNewCollectionFolder] = useState<string | null>(null);
+  const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
   const [recoveryWorkspaceId, setRecoveryWorkspaceId] = useState<string | null>(null);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
   const [cloudOpen, setCloudOpen] = useState(false);
@@ -3752,12 +3754,102 @@ function WorkspaceShell(props: {
   // Where the import began. An Explorer import selects what landed in the
   // Explorer. The palette and the start surface may show no Explorer, so a
   // notice says what landed.
+  const handleInboxCaptureOutcome = useCallback(
+    (outcome: QuickCaptureOutcome) => {
+      if (outcome.items.length > 0) {
+        void (async () => {
+          if (outcome.createdInbox) await refreshCollections();
+          else void refreshCollections();
+          await refreshFiles();
+        })().catch((error) => {
+          if (workspaceIdRef.current === workspaceId)
+            reportShellError("dohc could not refresh workspace files.", error);
+        });
+      }
+      const secretSkips = outcome.skippedSources.filter((entry) => entry.reason === "secret-file");
+      if (secretSkips.length > 0) {
+        const names = secretSkips.map((entry) => entry.name).join(", ");
+        reportShellFailure({
+          message: `Skipped ${names}. Secret files cannot be captured into Inbox.`,
+          kind: "import-files",
+        });
+      } else if (outcome.skipped > 0 && outcome.items.length === 0) {
+        reportShellFailure({
+          message:
+            outcome.skipped === 1
+              ? "Skipped 1 file that could not be captured into Inbox."
+              : `Skipped ${outcome.skipped} files that could not be captured into Inbox.`,
+          kind: "import-files",
+        });
+      }
+      if (outcome.items.length === 0) return;
+
+      const createdPaths = [
+        ...outcome.items.map((item) => item.path),
+        ...outcome.items.flatMap((item) => item.attachments),
+      ];
+      const label =
+        outcome.items.length === 1
+          ? `Captured "${outcome.items[0]!.title}" to Inbox`
+          : `Captured ${outcome.items.length} items to Inbox`;
+      const skipNote = outcome.skipped > 0 ? ` (${outcome.skipped} skipped)` : "";
+      showSuccessNotice(`${label}${skipNote}`, () => {
+        void (async () => {
+          for (const relativePath of createdPaths) {
+            await bridge().deleteWorkspacePath({ workspaceId, relativePath });
+          }
+          void refreshCollections();
+          void refreshFiles().catch(() => undefined);
+        })().catch((error) => {
+          reportShellError("dohc could not undo the Inbox capture.", error);
+        });
+      });
+    },
+    [
+      refreshCollections,
+      refreshFiles,
+      reportShellError,
+      reportShellFailure,
+      showSuccessNotice,
+      workspaceId,
+    ],
+  );
+
+  const captureDroppedToInbox = useCallback(
+    async (droppedPaths: string[]) => {
+      if (droppedPaths.length === 0) return;
+      if (droppedPaths.length > DROP_IMPORT_LIMITS.items) {
+        reportShellFailure({
+          message: `dohc could not capture files. ${DROP_IMPORT_REFUSALS.items}`,
+          kind: "import-files",
+        });
+        return;
+      }
+      try {
+        const outcome = await bridge().inboxCaptureFiles({ workspaceId, droppedPaths });
+        handleInboxCaptureOutcome(outcome);
+      } catch (error) {
+        reportShellError("dohc could not capture files to Inbox.", error);
+      }
+    },
+    [handleInboxCaptureOutcome, reportShellError, reportShellFailure, workspaceId],
+  );
+
   const importFiles = useCallback(
     async (
       from: "explorer" | "palette" | "start-surface",
       droppedPaths?: string[],
       targetDir?: string,
     ) => {
+      if (
+        !shareView &&
+        targetDir === INBOX_COLLECTION_PATH &&
+        droppedPaths &&
+        droppedPaths.length > 0
+      ) {
+        await captureDroppedToInbox(droppedPaths);
+        return;
+      }
       const reveal = from === "explorer" ? ++revealRequest.current : 0;
       // Try again on a failed import refreshes the shared view first, since
       // some files may have landed, then asks for files for the same folder.
@@ -5137,20 +5229,6 @@ function WorkspaceShell(props: {
     [openMomentDiffTab, workspaceId],
   );
   const takeRestoreRequest = useCallback(() => setRestoreRequest(null), []);
-  const sharedRestore = useSharedRestore({
-    workspaceId,
-    // Unfinished shared restores get no Notices row. Retry on one says "File
-    // restored" but never reaches the file, and Decline doesn't bring live
-    // editing back.
-    enabled: false,
-    onBeforeRestore: beginLineageOperation,
-    onRestored: onHistoryRestored,
-    openChange: openMomentDiffTab,
-    reportRestoreError,
-    reportShellFailure,
-    showSuccessNotice,
-    clearIdentity,
-  });
   const activateEditorTab = useCallback(
     (groupId: string, path: string) => {
       const current = wbRef.current;
@@ -6609,6 +6687,7 @@ function WorkspaceShell(props: {
       "new-drawing": () => void createUntitledDrawing(),
       "new-folder": requestExplorerFolder,
       "new-collection": () => setNewCollectionFolder(""),
+      "quick-capture": () => setQuickCaptureOpen(true),
       "quick-open": () => setQuickOpenOpen(true),
       "open-workspace": () => void openWorkspaceFolder(),
       "import-files": () => void importFiles("palette"),
@@ -6722,13 +6801,17 @@ function WorkspaceShell(props: {
     }),
     [commandContext, commandHandlers, createUntitledDrawing],
   );
+  const resolveDroppedPaths = useCallback(
+    (dropped: File[]) => bridge().getDroppedFilePaths(dropped),
+    [],
+  );
   // Files dropped on the start surface land at the workspace root.
   const importDroppedFiles = useCallback(
     (dropped: File[]) => {
-      const paths = bridge().getDroppedFilePaths(dropped);
+      const paths = resolveDroppedPaths(dropped);
       if (paths.length > 0) void importFiles("start-surface", paths);
     },
-    [importFiles],
+    [importFiles, resolveDroppedPaths],
   );
 
   useEffect(() => {
@@ -6833,6 +6916,7 @@ function WorkspaceShell(props: {
                 ? `Shared view from ${shareGranterName}. Files are read-only here. Continue commenting in the browser where you opened the link.`
                 : `Shared view from ${shareGranterName}, read-only. Ask ${shareView.granterEmail ?? "the owner"} for changes.`;
   const [shareRefreshing, setShareRefreshing] = useState(false);
+  const [shareContentEpoch, setShareContentEpoch] = useState(0);
   const [shareExclusions, setShareExclusions] = useState<{
     workspaceId: string;
     paths: UnjournalableSharePath[];
@@ -6930,7 +7014,7 @@ function WorkspaceShell(props: {
         const repaintAfterChange = async () => {
           await refreshFiles();
           if (!isCurrent()) return;
-          advanceReopenKey(workspaceId);
+          setShareContentEpoch((epoch) => epoch + 1);
         };
         const bestEffortRepaint = async () => {
           try {
@@ -8864,15 +8948,19 @@ function WorkspaceShell(props: {
                                       workspaceId={workspaceId}
                                       path={path}
                                       fileOpenStartMark={fileOpenStartMark(editorGroup.id)}
-                                      // History growth, version switches, and share-mount pulls all
+                                      // History growth, version switches, and share pulls all
                                       // re-read the open file (every counter only ever increases).
                                       refreshKey={
-                                        historyRefreshCounter + versionEpoch + mountContentEpoch
+                                        historyRefreshCounter +
+                                        versionEpoch +
+                                        mountContentEpoch +
+                                        shareContentEpoch
                                       }
                                       // The engine editor re-binds to the new version's Y.Doc lineage
                                       // only on an active-version change: versionEpoch alone, not
                                       // history growth (which must not churn the live session).
                                       engineVersionKey={versionEpoch}
+                                      sharePullKey={shareContentEpoch}
                                       onOpenPath={openPathWithHeading}
                                       drawingCollaboration={chatCollaboration}
                                       // A search or heading jump opens the file's tab, never a record's body.
@@ -9512,6 +9600,23 @@ function WorkspaceShell(props: {
                                                               : null
                                                           }
                                                           onAutomationFocused={clearAutomationFocus}
+                                                          onQuickCapture={
+                                                            shareView
+                                                              ? undefined
+                                                              : () => setQuickCaptureOpen(true)
+                                                          }
+                                                          onDropToInbox={
+                                                            shareView
+                                                              ? undefined
+                                                              : (files) => {
+                                                                  const paths =
+                                                                    resolveDroppedPaths(files);
+                                                                  if (paths.length > 0)
+                                                                    void captureDroppedToInbox(
+                                                                      paths,
+                                                                    );
+                                                                }
+                                                          }
                                                         />
                                                       </Suspense>
                                                     </SkeletonSlot>
@@ -9755,7 +9860,10 @@ function WorkspaceShell(props: {
                                 openMoment={openMomentDiffTab}
                                 openHistory={openHistoryView}
                                 linksRevision={
-                                  historyRefreshCounter + versionEpoch + mountContentEpoch
+                                  historyRefreshCounter +
+                                  versionEpoch +
+                                  mountContentEpoch +
+                                  shareContentEpoch
                                 }
                                 openPathAtLine={openPathAtLine}
                                 openChatMention={openChatMention}
@@ -10166,6 +10274,17 @@ function WorkspaceShell(props: {
                             }}
                           />
                         ) : null}
+                        {quickCaptureOpen && !shareView ? (
+                          <QuickCaptureDialog
+                            workspaceId={props.workspace.workspaceId}
+                            resolveDroppedFilePaths={resolveDroppedPaths}
+                            onClose={() => setQuickCaptureOpen(false)}
+                            onCaptured={(outcome) => {
+                              setQuickCaptureOpen(false);
+                              handleInboxCaptureOutcome(outcome);
+                            }}
+                          />
+                        ) : null}
                         {newCollectionFolder !== null && (!shareView || shareViewWritable) ? (
                           <NewCollectionDialog
                             workspaceId={props.workspace.workspaceId}
@@ -10220,7 +10339,6 @@ function WorkspaceShell(props: {
                             onClose={closeConflictReview}
                           />
                         ) : null}
-                        {sharedRestore.dialog}
                         {agentRunUndoTarget &&
                         agentRunUndoTarget.workspaceId === workspaceId &&
                         canUndoAgentRun ? (

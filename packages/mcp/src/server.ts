@@ -376,10 +376,9 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     );
   }
   for (const { mcp, socket } of Object.values(DECLARED_WRITE_TOOLS)) {
-    register(
-      mcp.tool,
-      { description: mcp.description, inputSchema: (mcp.input ?? socket.input).shape },
-      async (args) => text(await requestDeclaredWriteTool(ctx, mcp.tool, args)),
+    const schema = "input" in mcp && mcp.input ? mcp.input : socket.input;
+    register(mcp.tool, { description: mcp.description, inputSchema: schema.shape }, async (args) =>
+      text(await requestDeclaredWriteTool(ctx, mcp.tool, args)),
     );
   }
   register(

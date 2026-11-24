@@ -325,6 +325,7 @@ type FileInspectorProps = {
   receivedShare?: boolean;
   onOpenToEdit?: () => void;
   accessEnded?: boolean;
+  sharePullKey?: number;
   // Capture holds this file's outside edit, and Try again asks it to retry.
   captureHeld?: boolean;
   onRetryHeldCapture?: (path: string) => void;
@@ -556,6 +557,11 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
     retryKey: engineRetryNonce,
     accessEnded: props.accessEnded,
   });
+  const [seenSharePull, setSeenSharePull] = useState(props.sharePullKey);
+  if (props.sharePullKey !== seenSharePull && !engine.opening) {
+    setSeenSharePull(props.sharePullKey);
+    if (engine.documentUnavailable || engine.readOnlyWhileEditing) retryEngineOpen();
+  }
   useEffect(() => setBound(engine.available), [engine.available]);
   const boundSource = engine.doc?.getMap("meta").get("dohcMarkdownSourceSha256");
   const editingAnyway =

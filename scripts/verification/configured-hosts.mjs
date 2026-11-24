@@ -28,18 +28,17 @@ const nativeInputs = [
 
 export function readConfiguredHostProof(kind, tests, evidence, binary, sha256) {
   assert(["service", "device"].includes(kind), "Unknown configured host proof.");
-  const expectedCases = kind === "service" ? 2 : 1;
   const result = JSON.parse(readFileSync(tests, "utf8"));
   assert.equal(result.success, true);
-  assert.equal(result.numTotalTests, expectedCases);
-  assert.equal(result.numPassedTests, expectedCases);
+  assert.equal(result.numTotalTests, 1);
+  assert.equal(result.numPassedTests, 1);
   assert.equal(result.numFailedTests, 0);
   assert.equal(result.numPendingTests, 0);
   assert.equal(result.numTodoTests, 0);
   const cases = readdirSync(evidence, { withFileTypes: true }).filter(
     (entry) => entry.isDirectory() && entry.name.startsWith("case-"),
   );
-  assert.equal(cases.length, expectedCases);
+  assert.equal(cases.length, 1);
   for (const entry of cases) {
     const proof = JSON.parse(readFileSync(join(evidence, entry.name, "result.json"), "utf8"));
     assert.equal(proof.verdict, "PASS", entry.name);

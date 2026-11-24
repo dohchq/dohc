@@ -193,7 +193,10 @@ export function CollectionAttachmentCell(props: {
 }
 
 export function CollectionRelationInput(
-  props: InputProps & { resolve: NonNullable<CollectionResources["resolveRelation"]> },
+  props: InputProps & {
+    resolve: NonNullable<CollectionResources["resolveRelation"]>;
+    initialLabels?: ReadonlyMap<string, string>;
+  },
 ) {
   const [search, setSearch] = useState(""),
     [options, setOptions] = useState<CollectionRelationOption[]>([]),
@@ -308,7 +311,11 @@ export function CollectionRelationInput(
       </div>
       {values.map((value) => (
         <div key={JSON.stringify(value)} className="flex items-center gap-2 text-[12px] text-ink">
-          <span>{options.find((option) => option.value === value)?.label ?? String(value)}</span>
+          <span>
+            {options.find((option) => option.value === value)?.label ??
+              props.initialLabels?.get(JSON.stringify(value)) ??
+              String(value)}
+          </span>
           <SecondaryButton
             aria-label={`Remove ${String(value)} from ${props.field.name}`}
             onClick={() => {

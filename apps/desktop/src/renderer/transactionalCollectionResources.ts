@@ -26,7 +26,7 @@ export interface CollectionFileRequest extends CollectionResourceScope {
 export interface CollectionRelationRequest extends CollectionResourceScope {
   fieldId: string;
   search: string;
-  limit: 20;
+  limit: 20 | 100;
 }
 export interface CollectionRelationOption {
   value: string | number;

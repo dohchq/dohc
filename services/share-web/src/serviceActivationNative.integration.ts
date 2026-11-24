@@ -398,7 +398,6 @@ it("resumes a real configured service activation after a lost native adoption re
       relayExchangeKey: exchangeKey,
       resolveActor: createSessionActorResolver(relayAuth),
       namedBrowserSessionLimits: { ...browserLimits, maxSessions: 4, retentionMs: 120000 },
-      ownerRestoreHost: () => active,
     });
     // The service host replicates through its scoped feed, with the credential this relay derives for it.
     const serviceKey = { key: Buffer.from(ticketKey), namespace: history.namespace };
@@ -612,7 +611,6 @@ it("resumes a real configured service activation after a lost native adoption re
           targets: [{ workspaceId: "workspace", path: "docs/a.md" }],
           validation: validationPolicy,
           maxCaptureBytes: 1_000_000,
-          maxActivationHistoryEntries: 8,
           maxEntriesPerDrain: 8,
           maxBytesPerDrain: 1_000_000,
           maxDocumentsPerPass: 1,

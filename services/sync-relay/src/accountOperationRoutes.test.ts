@@ -43,7 +43,6 @@ import { closeTestStorages, denialBytes, json, testHandler, testStorage } from "
 import { PhoneWriteEngine, seedPhoneChats } from "./testing/phoneWriteEngine";
 import { PUBLICATION_DEADLINE_MS } from "./operationPublication";
 import { notifyChatWakeChange } from "./relayWriteChanges";
-import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -792,37 +791,6 @@ describe("pages the relay hosts live", () => {
     expect(await answer(await read())).toEqual(edited);
     expect(f.journalRows().journal).toHaveLength(journal);
     expect(new Set(engine.methods())).toEqual(new Set(["versions.active", "versionedText.read"]));
-  });
-
-  it("answers restore-in-progress, not the older file, while a restore keeps the relay from cutting the page", async () => {
-    const { f, read, edit } = await livePage();
-    edit();
-    const document = f.input.evidence.document;
-    const plan = f.storage.readStopRestorePlan({
-      operationId: "restore",
-      ownerUserId: "owner",
-      document,
-      shareId: "share",
-      grantId: "grant",
-      restorePointCursor: 0,
-      restorePointReceiptDigest: document.lineageClaimId,
-      maxOutputBytes: MAX_PAYLOAD_JSON_BYTES,
-    });
-    f.storage.beginStopRestore(plan.intent, 100);
-    expect(
-      f.storage.advanceStopRestoreFence(
-        { workspaceId: "workspace", ownerUserId: "owner", operationId: "restore" },
-        110,
-      ).phase,
-    ).toBe("fenced");
-    const response = await read();
-    expect(response.status).toBe(409);
-    // This route's own words, not the code's default, which is live editing's.
-    expect(await json(response)).toEqual({
-      ok: false,
-      code: "restore-in-progress",
-      error: "This page is being restored. Try again once it finishes.",
-    });
   });
 });
 

@@ -157,7 +157,7 @@ describe("a workspace's reads", () => {
     expect(data.state(views.files).value).toHaveLength(2);
   });
 
-  it("answer a page that's gone, one too large to read, and one being restored", async () => {
+  it("answer a page that's gone and one too large to read", async () => {
     const server = testServer();
     server.on("POST", "/sync/ws-a/ops/documentRead", ({ body }) => {
       const path = (body as { path: string }).path;
@@ -168,27 +168,14 @@ describe("a workspace's reads", () => {
         );
       if (path === "odd.md")
         return ops({ ok: false, reason: "dohc: No document at odd.md." }, "0.1.1");
-      if (path === "big.md")
-        return ops(
-          { ok: false, reason: "dohc: This page is too large to open here.", refusal: "too-large" },
-          "0.1.1",
-        );
-      return {
-        status: 409,
-        body: {
-          ok: false,
-          error: "This page is being restored. Try again once it finishes.",
-          code: "restore-in-progress",
-        },
-      };
+      return ops(
+        { ok: false, reason: "dohc: This page is too large to open here.", refusal: "too-large" },
+        "0.1.1",
+      );
     });
     server.on("GET", feedPath("ws-a", "0.1.1"), held);
     const { data } = open(server);
-    for (const path of ["gone.md", "odd.md", "big.md", "restoring.md"])
-      data.subscribe(views.page(path), () => {});
-    await vi.waitFor(() =>
-      expect(data.state(views.page("restoring.md")).problem).toBe("restoring"),
-    );
+    for (const path of ["gone.md", "odd.md", "big.md"]) data.subscribe(views.page(path), () => {});
     await vi.waitFor(() =>
       expect(data.state(views.page("big.md")).value).toEqual({ kind: "too-large" }),
     );

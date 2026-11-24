@@ -284,9 +284,8 @@ describe("main inventories", () => {
       expect(row).not.toHaveProperty("handlerCheck");
     }
   });
-  it("records the nine remaining relay operation rows with their existing admission", () => {
+  it("records the eight remaining relay operation rows with their existing admission", () => {
     const workspaceChannels = [
-      "owner-restore",
       "stop-owner-live-document",
       "resume-owner-live-document",
       "poll-relay-share-discussion-activity",

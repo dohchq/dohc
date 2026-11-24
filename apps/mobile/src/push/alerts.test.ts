@@ -7,7 +7,14 @@ import { keptDisk, type KeptDisk } from "../server/testKeptDisk";
 import { deferred, testServer, type Answer } from "../server/testServer";
 import { createReadCache } from "../server/workspaceData";
 import { createWorkspaceList } from "../server/workspaceList";
-import { alertTarget, createAlerts, openTap, type NativeAlerts, type Permission } from "./alerts";
+import {
+  alertTarget,
+  createAlerts,
+  openTap,
+  tapData,
+  type NativeAlerts,
+  type Permission,
+} from "./alerts";
 
 const TOKEN = "ab".repeat(32);
 const PATH = "/sync/push/devices";
@@ -316,6 +323,20 @@ describe("a tapped alert", () => {
     expect(alertTarget({ ...data, workspaceId: "ws-3" }, 4, list)).toBeNull();
     expect(alertTarget({ ...data, messageId: "" }, 4, list)).toBeNull();
     expect(alertTarget({ ...data, generation: "4" }, 4, list)).toBeNull();
+  });
+
+  it("reads an iOS alert's IDs from its push payload, which content.data leaves out", () => {
+    const aps = { alert: { title: "Trip", body: "Done." }, sound: "default", "thread-id": "k" };
+    const ios = { content: { data: null }, trigger: { type: "push", payload: { aps, ...data } } };
+    expect(alertTarget(tapData(ios), 4, list)).toEqual({
+      workspaceId: "ws-1",
+      threadId: "t-1",
+      messageId: "m-1",
+    });
+    const android = { content: { data }, trigger: { type: "push", remoteMessage: {} } };
+    expect(tapData(android)).toBe(data);
+    const nested = { content: { data }, trigger: { type: "push", payload: { aps, body: data } } };
+    expect(tapData(nested)).toBe(data);
   });
 
   function tapping() {

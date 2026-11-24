@@ -28,6 +28,7 @@ import { useRequestSequence } from "../useRequestSequence";
 import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
 import { useWorkspaceSession } from "../workspace/workspaceSession";
 import { RUN_TIME, Sentence, StatusLine } from "./AutomationParts";
+import { HttpStepEditor } from "./HttpStepEditor";
 import {
   automationTableOf,
   conditionFormula,
@@ -215,6 +216,17 @@ const DIAGNOSTIC_SENTENCES: Partial<Record<AutomationDiagnostic["code"], string>
   "invalid-timezone": "Choose a time zone by its name, such as Europe/London.",
   "invalid-path":
     "Write the path inside its folder, with / between folders, and no .. or leading /.",
+  "invalid-http-url":
+    "Enter a public https:// URL on port 443 with no braces, credentials, or fragment, or choose a Secret URL.",
+  "invalid-http-method": "Webhook steps only support POST.",
+  "invalid-secret-name":
+    "Secret names use 1 to 64 uppercase letters, digits, and underscores, starting with a letter.",
+  "invalid-http-header-name":
+    "Header names use letters, digits, and hyphens with no spaces or control characters.",
+  "forbidden-http-header":
+    "This header is managed by dohc or restricted (such as Host, Cookie, Content-Length, or X-Dohc-*).",
+  "too-many-http-headers": "A webhook step can send at most 16 headers.",
+  "too-many-http-steps": "An automation can have at most 3 webhook steps.",
 };
 
 /** What a file contract code means for a person building an automation. */
@@ -1199,12 +1211,26 @@ function placeOf(
                 kind === "direct-message" ||
                 kind === "wake-agent"
               ? "message"
-              : kind === "group" || kind === "to" || kind === "as" || kind === "records"
+              : kind === "group" ||
+                  kind === "to" ||
+                  kind === "as" ||
+                  kind === "records" ||
+                  kind === "http" ||
+                  kind === "headers" ||
+                  kind === "secret-headers" ||
+                  kind === "body"
                 ? kind
                 : null;
       return {
         key:
           control !== null && edits(entry) ? `step-${entry.key}/${control}` : `step-${entry.key}`,
+        name: null,
+        step: entry.step.kind,
+      };
+    }
+    if (kind === "http" || kind === "headers" || kind === "secret-headers" || kind === "body") {
+      return {
+        key: edits(entry) ? `step-${entry.key}/${kind}` : `step-${entry.key}`,
         name: null,
         step: entry.step.kind,
       };
@@ -1233,6 +1259,9 @@ function verdictOf(places: readonly number[], reach: Reach | null): string | nul
     const verdict = reach.steps[place];
     if (verdict?.verdict === "stopped") return verdict.reason;
     if (verdict?.verdict === "held") {
+      if (verdict.action === "send-http") {
+        return `This step sends a webhook to ${verdict.target}, and waits for you to allow it.`;
+      }
       const reached = automationReachCopy(verdict);
       return `This step can now ${reached}, and waits for someone who can edit this Collection to allow it.`;
     }
@@ -1424,8 +1453,9 @@ export function AutomationBuilder(props: {
   const [attempted, setAttempted] = useState(false);
   const [checking, setChecking] = useState(false);
   const [saveChosen, setSaveChosen] = useState(false);
+  const workspaceSession = useWorkspaceSession();
   // The Collections a step can reach, for both kinds of Collection. A new workspace or Collection starts over.
-  const listed = useWorkspaceQuery(useWorkspaceSession(), {
+  const listed = useWorkspaceQuery(workspaceSession, {
     key: JSON.stringify([workspaceId, collectionPath]),
     load: async (): Promise<Target[] | null> => {
       const result = await bridge().listAutomationTargets({ workspaceId, collectionPath });
@@ -1757,10 +1787,24 @@ export function AutomationBuilder(props: {
     do: draft.steps.map(stepOf),
   };
   const full = ordered.length >= MAX_STEPS;
+  const httpStepCount = ordered.filter(({ entry }) => entry.step.kind === "http").length;
+  const secretsQuery = useWorkspaceQuery(workspaceSession, {
+    key: JSON.stringify(["workspace-secrets", workspaceId, httpStepCount > 0]),
+    manual: httpStepCount === 0,
+    load: () => bridge().listWorkspaceSecrets({ workspaceId }),
+  });
+  const workspaceSecrets = secretsQuery.value?.kind === "ready" ? secretsQuery.value.secrets : null;
+  const workspaceSecretsUnavailable =
+    secretsQuery.value?.kind === "unavailable"
+      ? secretsQuery.value.message
+      : secretsQuery.error
+        ? "Could not load workspace secrets."
+        : null;
   const edits = (entry: StepEntry) =>
     entry.step.kind === "if" ||
     entry.step.kind === "run" ||
     entry.step.kind === "run-file" ||
+    entry.step.kind === "http" ||
     entry.step.kind === "post" ||
     entry.step.kind === "notify" ||
     entry.step.kind === "direct-message" ||
@@ -2152,6 +2196,14 @@ export function AutomationBuilder(props: {
         ? step
         : ownWake(step);
     if (message?.text.trim() === "") problems.set(`step-${key}/message`, "Write a message.");
+    if (step.kind === "http") {
+      if (step.url.kind === "literal" && step.url.url.trim() === "") {
+        problems.set(`step-${key}/http`, "Enter an HTTPS webhook URL.");
+      } else if (step.url.kind === "secret" && step.url.secret.trim() === "") {
+        problems.set(`step-${key}/http`, "Choose a webhook URL secret.");
+      }
+      continue;
+    }
     if (step.kind === "run" || step.kind === "run-file") {
       if (step.kind === "run" && step.code.trim() === "")
         problems.set(`step-${key}/source`, "Write the code this step runs.");
@@ -2981,7 +3033,9 @@ export function AutomationBuilder(props: {
                                 ? wake !== null
                                   ? "Wake your agent"
                                   : "Wake an agent"
-                                : `Step ${number}`}
+                                : step.kind === "http"
+                                  ? "Send a webhook"
+                                  : `Step ${number}`}
           </span>
           <IconButton
             aria-label={`Move step ${number} up`}
@@ -3290,6 +3344,16 @@ export function AutomationBuilder(props: {
             (text) => setStep(key, (current) => ({ ...current, step: { ...wake, text } })),
             `step-${key}-first`,
           )
+        ) : step.kind === "http" ? (
+          <HttpStepEditor
+            number={number}
+            stepKey={key}
+            step={step}
+            secrets={workspaceSecrets}
+            secretsUnavailable={workspaceSecretsUnavailable}
+            problem={problem}
+            onChange={(next) => setStep(key, (current) => ({ ...current, step: next }))}
+          />
         ) : step.kind === "wake-agent" ? (
           // Another person's agent step acts as them, so its words stay theirs. Moving or removing it keeps its verdict.
           <div className="flex flex-col gap-1.5">
@@ -3684,6 +3748,24 @@ export function AutomationBuilder(props: {
               Wake your agent
             </SecondaryButton>
           ) : null}
+          <SecondaryButton
+            size="compact"
+            className="flex items-center gap-1"
+            disabled={full || httpStepCount >= 3}
+            onClick={() =>
+              addStep(listId, {
+                kind: "http",
+                url: { kind: "literal", url: "" },
+                method: "POST",
+                headers: [],
+                secretHeaders: [],
+                body: null,
+              })
+            }
+          >
+            <Plus size={12} aria-hidden />
+            Send a webhook
+          </SecondaryButton>
         </div>
         {full ? (
           <p className="m-0 text-[12px] text-muted">

@@ -5,19 +5,6 @@ import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-author
 import type { ServiceActivationAccess } from "./serviceActivationAccess";
 import type { ServiceActivationStore } from "./serviceActivation";
 import type { LiveCommittedDeliveryStore } from "./liveCommittedDelivery";
-import type {
-  OwnerRestoreOptions,
-  OwnerRestoreOptionsInput,
-  OwnerRestoreStatus,
-  OwnerUnfinishedRestores,
-} from "./ownerRestoreOptions";
-import type {
-  StopRestoreIntent,
-  StopRestoreLookup,
-  StopRestoreOperation,
-  StopRestorePlan,
-  StopRestorePlanInput,
-} from "./liveRestoreOperation";
 import type { LiveJournalHistoryAuthority } from "./liveJournalHistory";
 import type {
   AdmittedLiveUpdate,
@@ -647,7 +634,6 @@ export interface LiveUpdateJournalCut {
 }
 export type AcceptedLiveDocument =
   | { readonly kind: "cut"; readonly cut: LiveUpdateJournalCut }
-  | { readonly kind: "restoring" }
   | { readonly kind: "none" };
 /** Where reading a journal cut spent its time, in milliseconds, added across reads. */
 export interface JournalCutReadTiming {
@@ -777,6 +763,17 @@ export interface SyncRelayStorage {
     objectId: string;
     nowMs: number;
   }): boolean;
+  /** Moves one note's live record. See `moveLiveNote` in `serviceHostEnrollment`. */
+  moveLiveNote(
+    input: import("./serviceHostEnrollment").MoveLiveNoteInput,
+  ): import("./serviceHostEnrollment").MoveLiveNoteResult;
+  /** Moves each note still starting past its start period to off (start-failed). Returns those it moved. */
+  failLapsedLiveNoteStarts(
+    nowMs: number,
+    cause: (
+      enrollment: import("./serviceHostEnrollment").ServiceHostEnrollment,
+    ) => import("./serviceHostEnrollment").LiveNoteStartFailure,
+  ): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
   /** Reclaims the documents only recorded demand keeps that went unused for the retention period. Returns those it reclaimed. */
   reclaimIdleLiveDocuments(
     nowMs: number,
@@ -923,7 +920,7 @@ export interface SyncRelayStorage {
   serviceHostEnrollmentsCoveredByShare(
     shareId: string,
   ): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
-  /** Whether an Edit grant of its owner, or the owner's restore that kept its live session, keeps the enrolled document live. */
+  /** Whether an Edit grant of its owner keeps the enrolled document live. */
   serviceHostEnrollmentCovered(
     enrollment: Pick<
       import("./serviceHostEnrollment").ServiceHostEnrollment,
@@ -931,12 +928,7 @@ export interface SyncRelayStorage {
     >,
     nowMs?: number,
   ): boolean;
-  /** With `restoring`, the owner's unfinished restore that kept the live session also counts. Live admission never passes it. */
-  serviceHostDocumentEnabled(
-    document: { workspaceId: string; objectId: string },
-    owner?: { userId: string },
-    restoring?: boolean,
-  ): boolean;
+  serviceHostDocumentEnabled(document: { workspaceId: string; objectId: string }): boolean;
   /** The document's open retirement obligation, if Stop recorded one its activation has not completed. */
   serviceActivationRetirement(document: {
     workspaceId: string;
@@ -948,8 +940,6 @@ export interface SyncRelayStorage {
   ): import("./serviceActivationRetirement").ServiceActivationRetirement[];
   /** Whether the relay holds a Y.Doc update for the document on main, so some computer has opened it live. */
   mainLiveLineageExists(document: { workspaceId: string; objectId: string }): boolean;
-  /** Whether the document has a restore that has neither resumed nor been declined. */
-  serviceRestoreInProgress(document: { workspaceId: string; objectId: string }): boolean;
   serviceActivationRetirementDecision(
     document: { workspaceId: string; objectId: string },
     activation: import("./serviceActivationRetirement").RetirableServiceActivation,
@@ -967,7 +957,7 @@ export interface SyncRelayStorage {
     receipts: import("@dohc/live-session-contract/live-update-admission").LiveUpdateReceipt[];
     absent: string[];
   };
-  /** Opens the retirement of a live session the owner's restore kept, once nothing covers its document. Returns whether it opened one. */
+  /** Opens the retirement of a live session once nothing covers its document. Returns whether it opened one. */
   endLapsedServiceHostRun(
     enrollment: import("./serviceHostEnrollment").ServiceHostEnrollment,
     nowMs: number,
@@ -1309,18 +1299,6 @@ export interface SyncRelayStorage {
     file: import("@dohc/security-contract/app-publication").AppPublicationCandidate["files"][number];
     bytes: Uint8Array;
   };
-  readOwnerRestoreOptions(input: OwnerRestoreOptionsInput): OwnerRestoreOptions;
-  readOwnerRestoreStatus(input: StopRestoreLookup): OwnerRestoreStatus;
-  readOwnerUnfinishedRestores(input: {
-    workspaceId: string;
-    ownerUserId: string;
-    after?: string;
-  }): OwnerUnfinishedRestores;
-  readStopRestorePlan(input: StopRestorePlanInput): StopRestorePlan;
-  beginStopRestore(input: StopRestoreIntent, now: number): StopRestoreOperation;
-  advanceStopRestoreFence(input: StopRestoreLookup, now: number): StopRestoreOperation;
-  declineStopRestore(input: StopRestoreLookup, now: number): StopRestoreOperation;
-  readStopRestore(input: StopRestoreLookup): StopRestoreOperation | null;
   readonly unavailable: AbortSignal;
   captureStanding(): () => void;
   createLiveCommittedDeliveryStore(
@@ -1369,8 +1347,7 @@ export interface SyncRelayStorage {
   ): { binding: LiveObjectBinding } | null;
   /**
    * The accepted state of the live document now at `path` in main: its
-   * journal cut, "restoring" while a restore keeps the relay from cutting it,
-   * or "none" when the settled file is the page.
+   * journal cut, or "none" when the settled file is the page.
    */
   readAcceptedLiveDocument(workspaceId: string, path: string): AcceptedLiveDocument;
   automationRecordJournalCursor(binding: LiveObjectBinding): number;
@@ -2130,6 +2107,109 @@ export interface SyncRelayStorage {
   // proposal accept needs it because a proposal's changes carry no
   // coordinates: they were never a log, so the relay numbers them.
   maxOriginSeq(workspaceId: string, originId: string): number;
+  listWorkspaceSecrets(
+    workspaceId: string,
+  ): import("@dohc/workspace-contracts/workspace-secrets").WorkspaceSecretSummary[];
+  readWorkspaceSecretForExecution(
+    workspaceId: string,
+    name: string,
+  ): import("./workspaceSecrets").StoredWorkspaceSecret | null;
+  upsertWorkspaceSecret(
+    input: Parameters<typeof import("./workspaceSecrets").upsertWorkspaceSecret>[1],
+  ): import("./workspaceSecrets").UpsertWorkspaceSecretResult;
+  deleteWorkspaceSecret(
+    workspaceId: string,
+    ownerUserId: string,
+    name: string,
+  ): import("./workspaceSecrets").DeleteWorkspaceSecretResult;
+  listWorkspaceHttpStepApprovals(workspaceId: string): string[];
+  hasWorkspaceHttpStepApproval(workspaceId: string, approvalDigest: string): boolean;
+  approveWorkspaceHttpStep(
+    input: Parameters<typeof import("./outboundWebhooks").approveWorkspaceHttpStep>[1],
+  ): import("./outboundWebhooks").ApproveWorkspaceHttpStepResult;
+  reserveWorkspaceHttpDispatch<Refusal = never>(input: {
+    readonly workspaceId: string;
+    readonly ownerUserId: string;
+    readonly deliveryId: string;
+    readonly nowMs: number;
+    readonly beforeReserve?: () => Refusal | null;
+  }): import("./outboundWebhooks").ReserveWorkspaceHttpDispatchResult<Refusal>;
+  listActiveWorkspaceShareGrants(
+    workspaceId: string,
+  ): import("./outboundWebhooks").ActiveWorkspaceShareGrantRow[];
+  finalizeWorkspaceHttpDispatch(
+    input: Parameters<typeof import("./outboundWebhooks").finalizeWorkspaceHttpDispatch>[1],
+  ): void;
+  readCommittedWorkspaceTextFile(
+    workspaceId: string,
+    versionId: string,
+    path: string,
+    maxBytes: number,
+  ): string | null;
+  committedWorkspaceFileExists(workspaceId: string, versionId: string, path: string): boolean;
+  listIncomingWebhooks(
+    workspaceId: string,
+  ): import("@dohc/workspace-contracts/incoming-webhooks").IncomingWebhookSummary[];
+  createIncomingWebhook(
+    input: Parameters<typeof import("./incomingWebhooks").createIncomingWebhook>[1],
+  ): import("./incomingWebhooks").CreateIncomingWebhookResult;
+  updateIncomingWebhook(
+    input: Parameters<typeof import("./incomingWebhooks").updateIncomingWebhook>[1],
+  ): import("./incomingWebhooks").UpdateIncomingWebhookResult;
+  rotateIncomingWebhookToken(
+    input: Parameters<typeof import("./incomingWebhooks").rotateIncomingWebhookToken>[1],
+  ): import("./incomingWebhooks").RotateIncomingWebhookResult;
+  deleteIncomingWebhook(
+    workspaceId: string,
+    ownerUserId: string,
+    webhookId: string,
+  ): import("./incomingWebhooks").DeleteIncomingWebhookResult;
+  lookupActiveIncomingWebhookByToken(
+    linkKey: string | Uint8Array,
+    token: string,
+  ): import("./incomingWebhooks").ResolvedIncomingWebhook | null;
+  precheckIncomingWebhookBudgets(
+    webhookId: string,
+    workspaceId: string,
+    nowMs: number,
+    deliveryKey?: string | null,
+  ): ReturnType<typeof import("./incomingWebhooks").precheckIncomingWebhookBudgets>;
+  enqueueIncomingWebhookDelivery(
+    input: Parameters<typeof import("./incomingWebhooks").enqueueIncomingWebhookDelivery>[1],
+  ): import("./incomingWebhooks").EnqueueIncomingWebhookDeliveryResult;
+  claimNextIncomingWebhookDelivery(
+    input: Parameters<typeof import("./incomingWebhooks").claimNextIncomingWebhookDelivery>[1],
+  ): import("./incomingWebhooks").ClaimedIncomingWebhookDelivery | null;
+  verifyIncomingWebhookPublicationAuthority(
+    input: Parameters<
+      typeof import("./incomingWebhooks").verifyIncomingWebhookPublicationAuthority
+    >[1],
+  ): ReturnType<typeof import("./incomingWebhooks").verifyIncomingWebhookPublicationAuthority>;
+  settleIncomingWebhookDelivery(
+    input: Parameters<typeof import("./incomingWebhooks").settleIncomingWebhookDelivery>[1],
+  ): boolean;
+  releaseAcceptedIncomingWebhookDelivery(
+    input: Parameters<
+      typeof import("./incomingWebhooks").releaseAcceptedIncomingWebhookDelivery
+    >[1],
+  ): void;
+  recoverAcceptedIncomingWebhookDeliveries(
+    input: Parameters<
+      typeof import("./incomingWebhooks").recoverAcceptedIncomingWebhookDeliveries
+    >[1],
+  ): number;
+  recordFailedIncomingWebhookAttempt(
+    input: Parameters<typeof import("./incomingWebhooks").recordFailedIncomingWebhookAttempt>[1],
+  ): ReturnType<typeof import("./incomingWebhooks").recordFailedIncomingWebhookAttempt>;
+  hasPendingIncomingWebhookDeliveries(
+    workspaceId: string,
+    nowMs?: number,
+    ownerUserId?: string,
+    leaseId?: string,
+  ): boolean;
+  nextIncomingWebhookRetryAtMs(workspaceId: string, ownerUserId?: string): number | null;
+  workspacesWithIncomingWebhooks(): string[];
+  pruneExpiredIncomingWebhookDeliveries(nowMs: number, workspaceId?: string): number;
 }
 
 // The two wire shapes a file-linked thread create carries, kept apart because

@@ -9,11 +9,11 @@ function refusal(run: () => unknown): string | undefined {
   }
   return undefined;
 }
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
+import { observeDesktopReadiness } from "../desktopReadinessChanges";
 import {
   fixture as ticketFixture,
   binding,
-  keptByOwnerRestore,
   retainServiceActivation,
   scope,
 } from "../liveTickets.test-helper";
@@ -24,8 +24,9 @@ import {
   serviceHostReplicationRoute,
 } from "../serviceHostCredential";
 import { liveEditors } from "../liveEditors";
-import { RECLAIM_RETENTION_MS } from "../liveHostingLimits";
+import { LIVE_NOTE_START_MAX_MS, RECLAIM_RETENTION_MS } from "../liveHostingLimits";
 import {
+  type LiveNoteMove,
   serviceHostDocumentEnabled,
   SERVICE_HOST_ENROLLMENTS,
   ServiceHostRetirementConflict,
@@ -161,6 +162,14 @@ it("retains original document, share and credential across pause, new invitation
     updatedAtMs: 30,
     ownerDemand: true,
     demandAtMs: 30,
+    note: {
+      generation: 2,
+      state: "starting",
+      reason: null,
+      cause: null,
+      sinceMs: 30,
+      changedBy: "person:owner-1",
+    },
   });
   expect(deriveServiceHostBearer(resumed, key)).toBe(bearer);
   const reopened = openSyncRelayStorage(f.path, f.config);
@@ -386,6 +395,7 @@ function downgradeToV1(
     DELETE FROM sync_relay_migrations WHERE migration_id='service-host-enrollments-v2';
     DELETE FROM sync_relay_migrations WHERE migration_id='service-host-enrollments-v3';
     DELETE FROM sync_relay_migrations WHERE migration_id='service-host-enrollments-v4';
+    DELETE FROM sync_relay_migrations WHERE migration_id='service-host-enrollments-v5';
     COMMIT;`);
   if (marker)
     f.raw
@@ -404,6 +414,7 @@ function downgradeToV2(f: Awaited<ReturnType<typeof fixture>>) {
     CREATE INDEX idx_sync_relay_service_host_enrollments_retired ON ${SERVICE_HOST_ENROLLMENTS}(workspace_id,path) WHERE retired=1;
     DELETE FROM sync_relay_migrations WHERE migration_id='service-host-enrollments-v3';
     DELETE FROM sync_relay_migrations WHERE migration_id='service-host-enrollments-v4';
+    DELETE FROM sync_relay_migrations WHERE migration_id='service-host-enrollments-v5';
     COMMIT;`);
 }
 
@@ -477,6 +488,8 @@ const V3_SQL = `CREATE TABLE ${SERVICE_HOST_ENROLLMENTS} (
 ) STRICT`;
 const V3_COLUMNS =
   "workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,owner_stop,enabled,retired,created_at_ms,updated_at_ms,host_drained_at_ms,accounted_bytes";
+const V4_COLUMNS =
+  "workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,owner_stop,enabled,retired,created_at_ms,updated_at_ms,host_drained_at_ms,owner_demand,demand_at_ms,accounted_bytes";
 function downgradeToV3(f: Awaited<ReturnType<typeof fixture>>, sql = V3_SQL) {
   f.raw.exec(`BEGIN;
     ALTER TABLE ${SERVICE_HOST_ENROLLMENTS} RENAME TO enrollments_v4;
@@ -486,6 +499,7 @@ function downgradeToV3(f: Awaited<ReturnType<typeof fixture>>, sql = V3_SQL) {
     CREATE INDEX idx_sync_relay_service_host_enrollments_active ON ${SERVICE_HOST_ENROLLMENTS}(workspace_id,path) WHERE retired=0;
     CREATE INDEX idx_sync_relay_service_host_enrollments_retired ON ${SERVICE_HOST_ENROLLMENTS}(workspace_id,path) WHERE retired=1;
     DELETE FROM sync_relay_migrations WHERE migration_id='service-host-enrollments-v4';
+    DELETE FROM sync_relay_migrations WHERE migration_id='service-host-enrollments-v5';
     COMMIT;`);
 }
 
@@ -507,7 +521,7 @@ it("migrates v3 enrollments with their shares and no hosting demand, and refuses
   f.release("paused-object");
   f.stop({ path: "docs/retired.md" });
   const rows = (db: { prepare(sql: string): { all(): Array<Record<string, unknown>> } }) =>
-    db.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} ORDER BY path`).all();
+    db.prepare(`SELECT ${V4_COLUMNS} FROM ${SERVICE_HOST_ENROLLMENTS} ORDER BY path`).all();
   const usage = () =>
     f.raw
       .prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id=?")
@@ -557,6 +571,7 @@ it("migrates v3 enrollments with their shares and no hosting demand, and refuses
     "service-host-enrollments-v2",
     "service-host-enrollments-v3",
     "service-host-enrollments-v4",
+    "service-host-enrollments-v5",
   ]);
   downgradeToV3(damaged, V3_SQL.replace("STRICT", ""));
   expect(() => openSyncRelayStorage(damaged.path, damaged.config)).toThrow(
@@ -643,6 +658,7 @@ it("migrates v1 enrollments in place and keeps the enabled document hosted", asy
     "service-host-enrollments-v2",
     "service-host-enrollments-v3",
     "service-host-enrollments-v4",
+    "service-host-enrollments-v5",
   ]);
 });
 
@@ -839,62 +855,6 @@ const withHistory = <T extends SyncRelayStorage>(storage: T): T => {
   );
   return storage;
 };
-async function kept() {
-  const f = await activated(),
-    restore = keptByOwnerRestore(f.raw, key.namespace);
-  withHistory(f.storage);
-  const enrolled = () =>
-    f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)!;
-  const enabled = (owner?: { userId: string }, restoring = false) =>
-    serviceHostDocumentEnabled(f.storage as StorageContext, binding, owner, restoring);
-  const asOwner = { userId: "owner-1" };
-  const covered = (storage: SyncRelayStorage = f.storage) =>
-    storage.serviceHostEnrollmentCovered(
-      storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)!,
-    );
-  const retireKept = () =>
-    f.raw
-      .prepare(`UPDATE sync_relay_service_activations SET retired_at_ms=retire_requested_at_ms,retired_boundary_json='{}',state_bytes=NULL
-    WHERE activation_id=?`)
-      .run(restore.activationId);
-  const afterRestart = () => {
-    const reopened = withHistory(openSyncRelayStorage(f.path, f.config));
-    try {
-      return {
-        covered: covered(reopened),
-        owner: serviceHostDocumentEnabled(reopened as StorageContext, binding, asOwner),
-      };
-    } finally {
-      reopened.close();
-    }
-  };
-  return { ...f, restore, enrolled, enabled, asOwner, covered, retireKept, afterRestart };
-}
-
-it("keeps a note live for its owner after their restore, and for no one else", async () => {
-  const f = await kept();
-  expect(f.retirement()).toBeNull();
-  expect(f.covered()).toBe(true);
-  expect(f.enabled(f.asOwner)).toBe(true);
-  expect(f.enabled()).toBe(false);
-  expect(f.enabled({ userId: scope.userId })).toBe(false);
-  expect(f.release()).toBeNull();
-  expect(f.enrolled()).toMatchObject({
-    enabled: true,
-    retired: false,
-    ownerStop: null,
-    runToken: 10,
-  });
-  expect(f.afterRestart()).toEqual({ covered: true, owner: true });
-  expect(f.storage.getShareGrant(scope.grantId)).toMatchObject({ status: "revoked" });
-  expect(
-    f.storage.resolveCurrentLiveDocumentBinding({
-      document,
-      actor: { kind: "named", userId: scope.userId, grantId: scope.grantId },
-    }).kind,
-  ).toBe("refused");
-});
-
 // Proves: Stop opens a new retirement only with the host's preparation of
 // exactly that activation and restore generation, checked while the
 // connection that prepared it still stands. A refused Stop fences nothing.
@@ -979,9 +939,19 @@ const reclaimed = {
   ownerDemand: false,
   demandAtMs: null,
 };
-async function demandedOnly(owner = false) {
+async function demandedOnly(owner = false, started = true) {
   const f = await fixture();
   f.enroll();
+  if (started)
+    expect(
+      f.storage.moveLiveNote({
+        workspaceId: scope.workspaceId,
+        objectId: binding.objectId,
+        generation: noteOf(f.storage).generation,
+        nowMs: 10,
+        move: "started",
+      }).moved,
+    ).toBe(true);
   if (owner) ownerOpen(f, 10);
   else
     expect(
@@ -1031,26 +1001,343 @@ it("reclaims an agent-only note idle past retention, and keeps it while a live c
   expect(stored(f)).toHaveLength(before.length);
 });
 
-it("never reclaims a note the owner's restore kept live, and reclaims it once the restore keeps nothing", async () => {
-  const f = await kept(),
+it("leaves a note that never started to its start clock, not to idle reclaim", async () => {
+  const f = await demandedOnly(false, false),
     past = 10 + RECLAIM_RETENTION_MS + 1;
+  expect(f.sweep(past)).toEqual([]);
   expect(
-    f.storage.renewPersonalSessionDemand({
+    f.storage.failLapsedLiveNoteStarts(past, () => "failing").map((row) => row.note),
+  ).toMatchObject([{ state: "off", reason: "start-failed", cause: "failing" }]);
+  expect(f.sweep(past + 1)).toEqual([]);
+});
+
+const V4_SQL = `CREATE TABLE ${SERVICE_HOST_ENROLLMENTS} (
+  workspace_id TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  owner_user_id TEXT NOT NULL,
+  share_id TEXT,
+  replication_epoch TEXT NOT NULL,
+  stream_identity TEXT NOT NULL,
+  owner_stop TEXT CHECK (owner_stop IN ('pause','retire')),
+  enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),
+  retired INTEGER NOT NULL DEFAULT 0 CHECK (retired IN (0,1) AND (retired=0 OR enabled=0)),
+  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+  updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+  host_drained_at_ms INTEGER CHECK (host_drained_at_ms IS NULL OR host_drained_at_ms >= 0),
+  owner_demand INTEGER NOT NULL DEFAULT 0 CHECK (owner_demand IN (0,1)),
+  demand_at_ms INTEGER CHECK (demand_at_ms IS NULL OR demand_at_ms >= 0),
+  accounted_bytes INTEGER NOT NULL CHECK (accounted_bytes BETWEEN 1 AND 9007199254740991),
+  CHECK (enabled=1 OR retired=1 OR owner_stop='pause'),
+  PRIMARY KEY (workspace_id, object_id),
+  UNIQUE (workspace_id, path),
+  FOREIGN KEY (workspace_id) REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+  FOREIGN KEY (share_id) REFERENCES sync_relay_shares(share_id)
+) STRICT`;
+function downgradeToV4(f: Fixture) {
+  f.raw.exec(`BEGIN;
+    ALTER TABLE ${SERVICE_HOST_ENROLLMENTS} RENAME TO enrollments_v5;
+    ${V4_SQL};
+    INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(${V4_COLUMNS}) SELECT ${V4_COLUMNS} FROM enrollments_v5;
+    DROP TABLE enrollments_v5;
+    CREATE INDEX idx_sync_relay_service_host_enrollments_active ON ${SERVICE_HOST_ENROLLMENTS}(workspace_id,path) WHERE retired=0;
+    CREATE INDEX idx_sync_relay_service_host_enrollments_retired ON ${SERVICE_HOST_ENROLLMENTS}(workspace_id,path) WHERE retired=1;
+    DELETE FROM sync_relay_migrations WHERE migration_id='service-host-enrollments-v5';
+    COMMIT;`);
+}
+const noteOf = (storage: SyncRelayStorage, path = binding.currentPath) =>
+  storage.readServiceHostEnrollment(scope.workspaceId, path)!.note;
+const move = (
+  f: Fixture,
+  change: LiveNoteMove,
+  generation = noteOf(f.storage).generation,
+  nowMs = 40,
+) =>
+  f.storage.moveLiveNote({
+    workspaceId: scope.workspaceId,
+    objectId: binding.objectId,
+    generation,
+    nowMs,
+    ...change,
+  });
+
+it("fills the live note record from v4 enrollments, and keeps a live note live and served", async () => {
+  const f = await fixture(),
+    pending = await fixture(),
+    live = f.enroll();
+  retainServiceActivation(f.raw, key.namespace, true);
+  for (const name of ["paused", "pausing", "stopped", "uncovered"]) {
+    f.seed(scope.workspaceId, `${name}-object`, `docs/${name}.md`, `${name}-share`);
+    f.enroll({ path: `docs/${name}.md`, shareId: `${name}-share` });
+  }
+  for (const path of ["docs/paused.md", "docs/pausing.md"])
+    f.storage.setServiceHostEnrollmentEnabled({ ...f.input, path, enabled: false, nowMs: 20 });
+  f.release("paused-object");
+  f.stop({ path: "docs/stopped.md" });
+  f.raw.exec("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=20");
+  expect(f.release("uncovered-object")).toMatchObject({ retired: true, ownerStop: null });
+  f.raw
+    .prepare(
+      "UPDATE sync_relay_share_grants SET status='active',revoked_at_ms=NULL WHERE share_id=?",
+    )
+    .run(scope.shareId);
+  pending.enroll();
+  retainServiceActivation(pending.raw, key.namespace);
+  downgradeToV4(f);
+  downgradeToV4(pending);
+  const before = Date.now(),
+    reopened = withHistory(openSyncRelayStorage(f.path, f.config)),
+    reopenedPending = openSyncRelayStorage(pending.path, pending.config);
+  try {
+    const filled = (path: string) => {
+      const enrollment = reopened.readServiceHostEnrollment(scope.workspaceId, path)!;
+      const { sinceMs, ...note } = enrollment.note;
+      return { ...note, since: sinceMs === enrollment.updatedAtMs ? "updated" : sinceMs };
+    };
+    const off = (reason: string, changedBy = "person:owner-1") => ({
+      generation: 1,
+      state: "off",
+      reason,
+      cause: null,
+      since: "updated",
+      changedBy,
+    });
+    expect(
+      Object.fromEntries(
+        ["a", "paused", "pausing", "stopped", "uncovered"].map((name) => [
+          name,
+          filled(`docs/${name}.md`),
+        ]),
+      ),
+    ).toEqual({
+      a: {
+        generation: 1,
+        state: "live",
+        reason: null,
+        cause: null,
+        since: "updated",
+        changedBy: "server",
+      },
+      paused: off("paused"),
+      pausing: off("paused"),
+      stopped: off("stopped"),
+      uncovered: off("access-ended", "server"),
+    });
+    expect(reopened.readServiceHostEnrollment(scope.workspaceId, "docs/pausing.md")).toMatchObject({
+      enabled: true,
+      ownerStop: "pause",
+    });
+    const starting = noteOf(reopenedPending);
+    expect(starting).toMatchObject({
+      generation: 1,
+      state: "starting",
+      reason: null,
+      changedBy: "server",
+    });
+    expect(starting.sinceMs).toBeGreaterThanOrEqual(before);
+    expect(serviceHostDocumentEnabled(reopened as StorageContext, binding)).toBe(true);
+    expect(
+      authorizeServiceHostReplication(reopened, {
+        ...key,
+        workspaceId: scope.workspaceId,
+        bearer: deriveServiceHostBearer(live, key),
+        method: "GET",
+        pathname: `/sync/${scope.workspaceId}/hosted/log`,
+      }),
+    ).toBe("owner-1");
+    expect(reopened.hasKeptServiceHostEnrollment(scope.workspaceId, "docs/uncovered.md")).toBe(
+      false,
+    );
+  } finally {
+    reopened.close();
+    reopenedPending.close();
+  }
+  const again = openSyncRelayStorage(f.path, f.config);
+  try {
+    expect(noteOf(again)).toMatchObject({ generation: 1, state: "live" });
+  } finally {
+    again.close();
+  }
+});
+
+it("moves a note only from the state and generation each move leaves, and answers a refusal with the record", async () => {
+  const f = await fixture(),
+    runToken = f.enroll().runToken;
+  retainServiceActivation(f.raw, key.namespace);
+  const start = { move: "start", by: "person:owner-1" } as const,
+    started = { move: "started" } as const,
+    failed = { move: "start-failed", cause: "no-lineage" } as const;
+  const refuses = (...changes: LiveNoteMove[]) => {
+    const before = f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)!;
+    for (const change of changes) {
+      expect(move(f, change)).toEqual({ moved: false, record: before.note });
+      expect(move(f, change, before.note.generation - 1)).toEqual({
+        moved: false,
+        record: before.note,
+      });
+    }
+    expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toEqual(
+      before,
+    );
+  };
+  expect(noteOf(f.storage)).toEqual({
+    generation: 1,
+    state: "starting",
+    reason: null,
+    cause: null,
+    sinceMs: 10,
+    changedBy: "person:owner-1",
+  });
+  refuses(start);
+  expect(move(f, failed, 0)).toMatchObject({ moved: false, record: { generation: 1 } });
+  expect(move(f, failed)).toEqual({
+    moved: true,
+    record: {
+      generation: 1,
+      state: "off",
+      reason: "start-failed",
+      cause: "no-lineage",
+      sinceMs: 40,
+      changedBy: "server",
+    },
+  });
+  const ended = f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)!;
+  expect(ended).toMatchObject({ enabled: false, retired: true, ownerStop: null });
+  expect(ended.runToken).toBeGreaterThan(runToken);
+  expect(readServiceActivationRetirement(f.storage as StorageContext, binding)).toMatchObject({
+    requestedAtMs: 40,
+  });
+  refuses(started, failed);
+  expect(move(f, start, 0)).toMatchObject({ moved: false });
+  expect(move(f, start, 1, 50)).toEqual({
+    moved: true,
+    record: {
+      generation: 2,
+      state: "starting",
+      reason: null,
+      cause: null,
+      sinceMs: 50,
+      changedBy: "person:owner-1",
+    },
+  });
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject(
+    { enabled: true, retired: false, ownerStop: null, hostDrainedAtMs: null },
+  );
+  refuses(start);
+  expect(move(f, started, 2, 60)).toEqual({
+    moved: true,
+    record: {
+      generation: 2,
+      state: "live",
+      reason: null,
+      cause: null,
+      sinceMs: 60,
+      changedBy: "server",
+    },
+  });
+  refuses(start, started, failed);
+  f.raw.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET state='stopping'`).run();
+  refuses(start, started, failed);
+  f.raw.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET state='live'`).run();
+  f.setEnabled(false);
+  expect(noteOf(f.storage)).toEqual({
+    generation: 2,
+    state: "off",
+    reason: "paused",
+    cause: null,
+    sinceMs: 60,
+    changedBy: "person:owner-1",
+  });
+  refuses(started, failed);
+  expect(move(f, start, 2, 70)).toMatchObject({
+    moved: true,
+    record: { generation: 3, state: "starting", sinceMs: 70 },
+  });
+  expect(
+    f.storage.moveLiveNote({
       workspaceId: scope.workspaceId,
-      objectId: binding.objectId,
-      nowMs: 10,
+      objectId: "missing-object",
+      generation: 0,
+      nowMs: 40,
+      ...started,
     }),
-  ).toBe(true);
-  expect(f.storage.reclaimIdleLiveDocuments(past)).toEqual([]);
-  expect(f.enrolled()).toMatchObject({ enabled: true, retired: false, demandAtMs: 10 });
-  expect(f.retirement()).toBeNull();
-  f.restore.update("intent_json=json_remove(intent_json,'$.keptRun')");
-  expect(f.storage.reclaimIdleLiveDocuments(past)).toMatchObject([
-    { objectId: binding.objectId, ...reclaimed },
-  ]);
-  expect(f.retirement()).toMatchObject({
-    activationId: f.restore.activationId,
-    requestedAtMs: past,
+  ).toEqual({ moved: false, record: null });
+});
+
+it("starts a note once per start on every way in, and leaves one whose start failed off until Resume", async () => {
+  const f = await fixture();
+  expect(f.enroll().note).toEqual({
+    generation: 1,
+    state: "starting",
+    reason: null,
+    cause: null,
+    sinceMs: 10,
+    changedBy: "person:owner-1",
+  });
+  f.enroll({ nowMs: 15 });
+  ownerOpen(f);
+  f.resume({ nowMs: 30 });
+  expect(noteOf(f.storage)).toMatchObject({ generation: 1, state: "starting", sinceMs: 10 });
+  f.pause();
+  f.enroll({ nowMs: 40 });
+  expect(() => ownerOpen(f, 40)).toThrow();
+  expect(noteOf(f.storage)).toMatchObject({ generation: 1, state: "off", reason: "paused" });
+  f.resume({ nowMs: 50 });
+  f.resume({ nowMs: 55 });
+  expect(noteOf(f.storage)).toMatchObject({
+    generation: 2,
+    state: "starting",
+    sinceMs: 50,
+    changedBy: "person:owner-1",
+  });
+  f.stop();
+  expect(noteOf(f.storage)).toMatchObject({ generation: 2, state: "off", reason: "stopped" });
+  f.enroll({ nowMs: 60 });
+  f.resume({ nowMs: 70 });
+  f.enroll({ nowMs: 75 });
+  expect(noteOf(f.storage)).toMatchObject({ generation: 3, state: "starting", sinceMs: 70 });
+  for (const cause of ["failing", "refused"] as const) {
+    move(f, { move: "start-failed", cause });
+    expect(f.enroll({ nowMs: 80 }).note).toMatchObject({ state: "off", reason: "start-failed" });
+    expect(ownerOpen(f, 85).note).toMatchObject({ state: "off", reason: "start-failed", cause });
+    expect(f.storage.hasKeptServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toBe(
+      true,
+    );
+    const generation = noteOf(f.storage).generation;
+    f.resume({ nowMs: 90 });
+    f.resume({ nowMs: 95 });
+    expect(noteOf(f.storage)).toMatchObject({
+      generation: generation + 1,
+      state: "starting",
+      sinceMs: 90,
+    });
+  }
+  move(f, { move: "start-failed", cause: "no-lineage" });
+  expect(f.enroll({ nowMs: 100 }).note).toMatchObject({ generation: 5, state: "off" });
+  ownerOpen(f, 110);
+  ownerOpen(f, 115);
+  expect(noteOf(f.storage)).toMatchObject({ generation: 6, state: "starting", sinceMs: 110 });
+});
+
+it("starts a reclaimed note again on its next open, once", async () => {
+  const f = await demandedOnly(),
+    past = 10 + RECLAIM_RETENTION_MS + 1;
+  expect(f.sweep(past)).toHaveLength(1);
+  expect(f.read().note).toEqual({
+    generation: 1,
+    state: "off",
+    reason: "access-ended",
+    cause: null,
+    sinceMs: past,
+    changedBy: "server",
+  });
+  ownerOpen(f, past + 1);
+  ownerOpen(f, past + 2);
+  expect(f.read().note).toMatchObject({
+    generation: 2,
+    state: "starting",
+    sinceMs: past + 1,
+    changedBy: "person:owner-1",
   });
 });
 
@@ -1130,9 +1417,7 @@ it("hosts a document a member at Edit opens and records the open as demand", asy
     demandAtMs: 30,
   });
   expect(heard).toEqual([true]);
-  expect(
-    serviceHostDocumentEnabled(f.storage as StorageContext, binding, undefined, false, 30),
-  ).toBe(true);
+  expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding, 30)).toBe(true);
   // A second open renews the demand and changes nothing else.
   expect(
     memberOpen(f, {
@@ -1324,9 +1609,7 @@ it("retires a member-opened page once the owner ends the membership", async () =
     }),
   ).toEqual({ ok: true });
   expect(f.storage.serviceHostEnrollmentCovered(enrolled(f)!, 40)).toBe(false);
-  expect(
-    serviceHostDocumentEnabled(f.storage as StorageContext, binding, undefined, false, 40),
-  ).toBe(false);
+  expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding, 40)).toBe(false);
   expect(
     f.storage.releaseServiceHostEnrollment({
       workspaceId: scope.workspaceId,
@@ -1388,8 +1671,6 @@ it("counts and lapses a member open that revives a retired page or takes over on
       serviceHostDocumentEnabled(
         f.storage as StorageContext,
         { workspaceId: scope.workspaceId, objectId },
-        undefined,
-        false,
         stale,
       ),
     ).toBe(false);
@@ -1433,4 +1714,99 @@ it("counts a member's Edit grant as covering an enrolled document", async () => 
   setMemberLevel(f, "comment");
   expect(f.storage.serviceHostEnrollmentCovered(enrolled(f)!)).toBe(false);
   expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(false);
+});
+
+it("leaves a starting note whose Edit access ended to its release, which records why", async () => {
+  const f = await fixture();
+  f.enroll();
+  expect(
+    f.storage.revokeShareGrant({ shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 20 })
+      .ok,
+  ).toBe(true);
+  expect(f.storage.failLapsedLiveNoteStarts(10 + LIVE_NOTE_START_MAX_MS, () => "failing")).toEqual(
+    [],
+  );
+  expect(noteOf(f.storage).state).toBe("starting");
+  f.release(binding.objectId);
+  expect(noteOf(f.storage)).toMatchObject({ state: "off", reason: "access-ended", cause: null });
+});
+
+it("tells the waits of a note its start clock turned off, even when a later note's turn fails", async () => {
+  const f = await fixture();
+  f.enroll();
+  f.seed(scope.workspaceId, "b-object", "docs/b.md", "b-share");
+  f.enroll({ path: "docs/b.md", shareId: "b-share" });
+  const changed = vi.fn();
+  const stops = [binding.currentPath, "docs/b.md"].map((path) =>
+    observeDesktopReadiness(
+      f.storage,
+      { shareId: `wait:${path}`, workspaceId: scope.workspaceId, path },
+      changed,
+    ),
+  );
+  try {
+    let calls = 0;
+    expect(() =>
+      f.storage.failLapsedLiveNoteStarts(10 + LIVE_NOTE_START_MAX_MS, () => {
+        if (calls++ > 0) throw new Error("No cause.");
+        return "failing";
+      }),
+    ).toThrow("No cause.");
+    await Promise.resolve();
+    expect(changed).toHaveBeenCalledTimes(1);
+  } finally {
+    for (const stop of stops) stop();
+  }
+});
+
+it.each([
+  ["retiring", "retire_requested_at_ms=5,retire_restore_generation=0,retire_accepted_cursor=1"],
+  [
+    "retired",
+    "retire_requested_at_ms=5,retire_restore_generation=0,retire_accepted_cursor=1,retired_at_ms=6,retired_boundary_json='{}',state_bytes=NULL",
+  ],
+])("fills a note whose completed activation is %s as starting, not live", async (_, retire) => {
+  const f = await fixture();
+  f.enroll();
+  retainServiceActivation(f.raw, key.namespace, true);
+  f.raw.exec(`UPDATE sync_relay_service_activations SET ${retire}`);
+  downgradeToV4(f);
+  const reopened = openSyncRelayStorage(f.path, f.config);
+  try {
+    expect(noteOf(reopened)).toMatchObject({ generation: 1, state: "starting" });
+  } finally {
+    reopened.close();
+  }
+});
+
+it("fails a start 10 minutes after the start the record holds, also across a relay restart", async () => {
+  const f = await fixture();
+  f.enroll();
+  retainServiceActivation(f.raw, key.namespace);
+  const cause = () => "failing" as const;
+  expect(f.storage.failLapsedLiveNoteStarts(10 + LIVE_NOTE_START_MAX_MS - 1, cause)).toEqual([]);
+  expect(noteOf(f.storage).state).toBe("starting");
+  const restarted = withHistory(openSyncRelayStorage(f.path, f.config));
+  try {
+    expect(restarted.failLapsedLiveNoteStarts(10 + LIVE_NOTE_START_MAX_MS - 1, cause)).toEqual([]);
+    expect(
+      restarted.failLapsedLiveNoteStarts(10 + LIVE_NOTE_START_MAX_MS, cause).map((row) => row.note),
+    ).toEqual([
+      {
+        generation: 1,
+        state: "off",
+        reason: "start-failed",
+        cause: "failing",
+        sinceMs: 10 + LIVE_NOTE_START_MAX_MS,
+        changedBy: "server",
+      },
+    ]);
+    expect(
+      restarted.readServiceHostEnrollment(scope.workspaceId, binding.currentPath),
+    ).toMatchObject({ enabled: false, retired: true });
+    expect(readServiceActivationRetirement(restarted as StorageContext, binding)).not.toBeNull();
+    expect(restarted.failLapsedLiveNoteStarts(10 + 2 * LIVE_NOTE_START_MAX_MS, cause)).toEqual([]);
+  } finally {
+    restarted.close();
+  }
 });
