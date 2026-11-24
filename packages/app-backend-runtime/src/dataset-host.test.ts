@@ -270,6 +270,7 @@ it("commits an owner bulk import and restores its receipts and 10,000 journal li
       { name: "importStatement", kind: "action", profile: "bulk" },
       { name: "trialBalance", kind: "read", profile: "bulk" },
       { name: "archiveReport", kind: "action", profile: "bulk" },
+      { name: "archiveQuotes", kind: "action", profile: "bulk" },
       { name: "standardReport", kind: "read" },
       { name: "standardImport", kind: "action" },
     ].map((op) => ({ ...op, table: "journal_lines" })),
@@ -284,6 +285,7 @@ it("commits an owner bulk import and restores its receipts and 10,000 journal li
   const definition = parseDatasetDefinition(bulkDefinition);
   const source = `${bulkFixture}; Object.assign(globalThis.operations, {
     archiveReport: globalThis.operations.trialBalance,
+    archiveQuotes() { return '"'.repeat(2096800); },
     standardReport: globalThis.operations.trialBalance,
     standardImport: globalThis.operations.importStatement,
   });`;
@@ -330,6 +332,8 @@ it("commits an owner bulk import and restores its receipts and 10,000 journal li
   expect(lines.reduce((sum, line) => sum + line.debit - line.credit, 0)).toBe(0);
   const archived = await f.host.invoke("owner", request("archiveReport"));
   expect(archived.result).toEqual(report.result);
+  const quoted = await f.host.invoke("owner", request("archiveQuotes"));
+  expect(Buffer.byteLength(JSON.stringify(quoted.result))).toBe(4_193_602);
   const recovery = await f.host.exportRecovery("owner", scope);
   try {
     const restored = await fixture();
@@ -356,6 +360,10 @@ it("commits an owner bulk import and restores its receipts and 10,000 journal li
     });
     await expect(restored.host.invoke("owner", request("archiveReport"))).resolves.toMatchObject({
       result: report.result,
+      replayed: true,
+    });
+    await expect(restored.host.invoke("owner", request("archiveQuotes"))).resolves.toMatchObject({
+      result: quoted.result,
       replayed: true,
     });
     await expect(restored.host.invoke("owner", request("trialBalance"))).resolves.toMatchObject({

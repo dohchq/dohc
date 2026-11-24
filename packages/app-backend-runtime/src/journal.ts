@@ -414,6 +414,28 @@ function checkpointHash(
 }
 export const JOURNAL_RECORD_BYTES = 2 * APP_BACKEND_BULK_LIMITS.resultBytes + 64 * 1024;
 
+export function journalEventStorageBytes(
+  expected: DatasetCursor,
+  metadata: Omit<JournalEvent, "cursor" | "previousDigest" | "changeset">,
+  changesetBytes: number,
+): number {
+  return (
+    changesetBytes +
+    Buffer.byteLength(JSON.stringify([expected, metadata])) +
+    Buffer.byteLength(
+      JSON.stringify([
+        expected.workspaceId,
+        expected.datasetId,
+        metadata.callerKey,
+        metadata.idempotencyKey,
+        metadata.payloadSha256,
+        metadata.resultJson,
+      ]),
+    ) +
+    1024
+  );
+}
+
 function resultText(value: string, limit = 256 * 1024): string {
   if (typeof value !== "string") invalid("A Collection action must return JSON.");
   const used = Buffer.byteLength(value);
@@ -1551,21 +1573,9 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         attachedFileIds,
         recordedAtMs,
       };
-      const storageBytes =
-        changeset.byteLength +
-        Buffer.byteLength(JSON.stringify([expected, metadata])) +
-        Buffer.byteLength(
-          JSON.stringify([
-            expected.workspaceId,
-            expected.datasetId,
-            callerKey,
-            idempotencyKey,
-            payloadSha256,
-            resultJson,
-          ]),
-        ) +
-        1024;
-      if (storageBytes > maxEvent) invalid("This change is too large to save.");
+      const storageBytes = journalEventStorageBytes(expected, metadata, changeset.byteLength);
+      if (storageBytes > maxEvent)
+        invalid(appBackendLimit("Collection change", maxEvent, storageBytes, "bytes"));
       return tx(() => {
         callback(authorize);
         const h = storedHead(expected);

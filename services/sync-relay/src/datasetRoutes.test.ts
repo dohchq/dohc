@@ -14,7 +14,7 @@ import {
   type AppPublicationLimits,
 } from "@dohc/security-contract/app-publication";
 import { fixture, limits, pushFile } from "./datasetTestFixture";
-import { createSyncRelayHandler, streamsRequestBody } from "./server";
+import { createSyncRelayHandler, maxRequestBodyBytes, streamsRequestBody } from "./server";
 import { hashLinkBearer } from "./linkSecurity";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
 import { encodeRecoveryManifest } from "@dohc/app-backend-runtime/recovery";
@@ -198,6 +198,34 @@ const schemaSql =
   "CREATE TABLE requests(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL,receipt TEXT);";
 const operationSource = `globalThis.operations={submit(ctx,input){if(input.fileId)ctx.files.attach(input.fileId);if(!input.name)ctx.refuse('missing_name','A name is required.');ctx.db.execute('INSERT INTO requests VALUES(?,?,?)',[ctx.requestId,input.name,input.fileId??null]);return {accepted:true};},read(ctx){return ctx.db.query('SELECT * FROM requests ORDER BY id');},receipt(ctx,input){const row=ctx.db.query('SELECT receipt FROM requests WHERE receipt=?',[input.fileId])[0];if(!row)ctx.refuse('missing_receipt','Receipt unavailable.');return {fileId:row.receipt};}};`;
 const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource });
+
+it("returns the helper's request limit over the real HTTP adapter", async () => {
+  const f = await httpFixture();
+  expect((await f.activate()).status).toBe(200);
+  const server = serveFetchHandler({
+    handler: guardRelayResponses(f.storage, f.handler),
+    maxBodyBytes: maxRequestBodyBytes,
+    streamBody: streamsRequestBody,
+    oversized: () => new Response(null, { status: 413 }),
+    failure: () => new Response(null, { status: 500 }),
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  cleanups.push(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw Error("Missing server address.");
+  const response = await fetch(`http://127.0.0.1:${address.port}/sync/${f.path}/invoke`, {
+    method: "POST",
+    headers: { authorization: "Bearer helper", "content-type": "application/json" },
+    body: JSON.stringify({ input: "x".repeat(400_000) }),
+  });
+  expect(response.status).toBe(413);
+  expect(await response.json()).toMatchObject({
+    error: expect.stringMatching(/131072 bytes.*\d+ bytes/),
+  });
+});
 
 it("serves a bulk result and journal blob only for an approved owner operation", async () => {
   const f = await httpFixture();

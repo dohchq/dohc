@@ -1,6 +1,7 @@
 import { parseApprovalAgent } from "@dohc/security-contract/approval-provenance";
 import { createHash } from "node:crypto";
-import { APP_BACKEND_BULK_LIMITS } from "@dohc/security-contract/app-backend";
+import { APP_BACKEND_BULK_LIMITS, appBackendLimit } from "@dohc/security-contract/app-backend";
+import { journalEventStorageBytes } from "./journal.js";
 import type { DatasetCursor, JournalExportRecord } from "./journal.js";
 
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -198,10 +199,7 @@ export function parseRecoveryJournalRecord(
     ) !== c.digest
   )
     return invalidRecovery("event digest differs.");
-  return {
-    kind,
-    cursor: c,
-    previousDigest,
+  const metadata = {
     proposalId,
     operation,
     callerKey,
@@ -211,6 +209,15 @@ export function parseRecoveryJournalRecord(
     changesetSha256,
     attachedFileIds,
     recordedAtMs,
-    byteLength,
   };
+  const storageBytes = journalEventStorageBytes(
+    { ...c, revision: c.revision - 1, digest: previousDigest },
+    metadata,
+    byteLength,
+  );
+  if (storageBytes > maxEventBytes)
+    return invalidRecovery(
+      appBackendLimit("Collection change", maxEventBytes, storageBytes, "bytes"),
+    );
+  return { kind, cursor: c, previousDigest, ...metadata, byteLength };
 }

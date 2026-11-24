@@ -8,8 +8,9 @@ import type { SyncRelayStorage } from "./storage";
 import { createAppBackendAdmission, type AppBackendAdmissionLimits } from "./appBackendAdmission";
 import { badRequest, notFound, relayError, RelayError } from "./errors";
 
-/** A page cursor, or a checkpoint record with its source and schema. */
-export const DATASET_REPLICA_REQUEST_BYTES = 1024 * 1024;
+export function datasetReplicaRequestBytes(action: DatasetReplicaRoute["action"]): number {
+  return action === "blob" ? JOURNAL_RECORD_BYTES + 4096 : 1024 * 1024;
+}
 
 export interface DatasetReplicaRoute {
   route: "dataset-replica";
@@ -51,9 +52,7 @@ export function createDatasetReplicaRoutes(
       if (request.headers.get("content-type")?.split(";")[0] !== "application/json")
         throw badRequest("Collection copy requests require JSON.");
       try {
-        const max =
-          route.action === "blob" ? JOURNAL_RECORD_BYTES + 4096 : DATASET_REPLICA_REQUEST_BYTES;
-        body = await readBoundedJson(request, max, signal);
+        body = await readBoundedJson(request, datasetReplicaRequestBytes(route.action), signal);
       } catch (error) {
         if (error instanceof RangeError) throw relayError("payload_too_large", error.message);
         throw badRequest("Invalid Collection copy request.");

@@ -161,7 +161,7 @@ async function fixture() {
     db.close();
     await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
   });
-  function add(value: string) {
+  function add(value: string, resultJson = "null") {
     const session = seed.createSession({ table: "items" });
     seed.prepare("INSERT INTO items(value,secret) VALUES(?,'private')").run(value);
     const changeset = session.changeset();
@@ -173,7 +173,8 @@ async function fixture() {
       callerKey: "owner",
       idempotencyKey: value,
       payloadSha256: hash(value),
-      resultJson: "null",
+      resultJson,
+      ...(resultJson !== "null" ? { profile: "bulk" } : {}),
       changeset,
       changesetSha256: hash(changeset),
       attachedFileIds: [],
@@ -218,6 +219,14 @@ async function fixture() {
     },
   };
 }
+it("keeps a copy current across a committed bulk receipt larger than 1 MiB", async () => {
+  const f = await fixture();
+  f.add("bulk", JSON.stringify("x".repeat(2 * 1024 * 1024)));
+  const replica = await f.open();
+  await replica.catchUp(f.remote);
+  expect(replica.state()?.cursor).toEqual(f.head());
+  expect((await replica.read(f.read)).result).toEqual([{ id: 1, value: "bulk" }]);
+});
 it("inspects approved fields offline after restart, catches up across a writer checkpoint, and refuses writes", async () => {
   const f = await fixture();
   f.add("first");

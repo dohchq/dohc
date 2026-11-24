@@ -2,7 +2,10 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { CircleSlash, LoaderCircle } from "lucide-react";
 import {
   parseAppBackendJson,
+  APP_BACKEND_BULK_LIMITS,
   APP_BACKEND_INPUT_BYTES,
+  APP_BACKEND_RESULT_BYTES,
+  AppBackendLimitError,
   type AppBackendJson,
 } from "@dohc/security-contract/app-backend";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
@@ -33,6 +36,7 @@ function ScopedAction(props: CollectionActionDialogProps) {
   const operation = props.dataset.operations.find(
     (candidate) => candidate.operationId === props.operationId && candidate.kind === "action",
   );
+  const profile = operation?.profile;
   const [input, setInput] = useState("{}"),
     [invalid, setInvalid] = useState<string | null>(null);
   const [busy, setBusy] = useState(false),
@@ -71,7 +75,11 @@ function ScopedAction(props: CollectionActionDialogProps) {
     try {
       const response = await props.invoke(request, abort.signal);
       if (!alive.current) return;
-      const json = parseAppBackendJson(response.result);
+      const json = parseAppBackendJson(
+        response.result,
+        profile === "bulk" ? APP_BACKEND_BULK_LIMITS.resultBytes : APP_BACKEND_RESULT_BYTES,
+        profile,
+      );
       uncertain.current = null;
       setPending(null);
       setCompletedAfterCancel(abort.signal.aborted);
@@ -109,9 +117,13 @@ function ScopedAction(props: CollectionActionDialogProps) {
     if (!operation || locked.current || uncertain.current) return;
     let json: AppBackendJson;
     try {
-      json = parseAppBackendJson(JSON.parse(input), APP_BACKEND_INPUT_BYTES);
-    } catch {
-      setInvalid("Enter valid JSON up to 64 KB.");
+      json = parseAppBackendJson(
+        JSON.parse(input),
+        profile === "bulk" ? APP_BACKEND_BULK_LIMITS.inputBytes : APP_BACKEND_INPUT_BYTES,
+        profile,
+      );
+    } catch (error) {
+      setInvalid(error instanceof AppBackendLimitError ? error.message : "Enter valid JSON.");
       return;
     }
     void execute({
