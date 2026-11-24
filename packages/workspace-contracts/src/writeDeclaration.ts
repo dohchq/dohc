@@ -30,8 +30,10 @@ const READ_ONLY_RULES = [
 // run proven by its secret as the agent, and lets it write only in its own workspace.
 const RUN_RULES = ["may-name-its-run", "never-a-run"] as const;
 // Whether the socket resolves the caller's folder before the handler runs, and
-// refuses a folder it cannot resolve.
-const PATH_RULES = ["from-callers-folder", "none"] as const;
+// refuses a folder it cannot resolve. "rebases-path" also rebases the input's
+// path from that folder as a write path, and MCP first refuses a path whose
+// symlink leads into a reserved area.
+const PATH_RULES = ["from-callers-folder", "rebases-path", "none"] as const;
 
 export interface SocketAdmission {
   readonly receivedShare: (typeof RECEIVED_SHARE_RULES)[number];

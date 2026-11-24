@@ -152,7 +152,6 @@ export const MCP_TOOL_CAPABILITIES = distinct(
     dohc_keep_outside_change: ["capture.outside.keep"],
     dohc_list_live_documents: ["share.live.documents.list"],
     dohc_stop_live_editing: ["share.live.document.stop"],
-    dohc_resume_live_editing: ["share.live.document.resume"],
     dohc_list_retained_copies: ["file.retained.list"],
     dohc_delete_retained_copies: ["file.retained.delete"],
     dohc_link: ["work.reference.make"],
@@ -2186,7 +2185,8 @@ const WRITE_TOOL_SHAPES: {
 };
 
 // Sends a declared write's tool call as its socket verb, with the run's id
-// when the declaration lets a request name its run.
+// when the declaration lets a request name its run. A path the socket rebases
+// is refused first when its symlink leads into a reserved area.
 export async function requestDeclaredWriteTool(
   ctx: ToolContext,
   tool: DeclaredWriteTool,
@@ -2199,10 +2199,16 @@ export async function requestDeclaredWriteTool(
         fromSocket?: (result: unknown) => Record<string, unknown>;
       })
     : undefined;
+  let input = shape ? shape.toSocket(args) : (args as object);
+  if (socket.admission.paths === "rebases-path") {
+    const resolved = await safeResolve(ctx, (input as { path: string }).path, "write");
+    if (!resolved.ok) return { ok: false, reason: resolved.reason };
+    input = { ...input, path: resolved.normalized };
+  }
   const namesRun = socket.admission.run === "may-name-its-run" && ctx.runId !== undefined;
   const result = (await requestCli(ctx, socket.verb, {
     ...(namesRun ? { runId: ctx.runId } : {}),
-    ...(shape ? shape.toSocket(args) : (args as object)),
+    ...input,
   } as never)) as Record<string, unknown> | null;
   return shape?.fromSocket ? shape.fromSocket(result) : result;
 }
@@ -2857,14 +2863,6 @@ export async function stopLiveEditing(ctx: ToolContext, args: { path: string; ob
     path: resolved.normalized,
     ...(args.objectId === undefined ? {} : { objectId: args.objectId }),
   });
-}
-
-export async function resumeLiveEditing(ctx: ToolContext, args: { path: string }) {
-  if (ctx.shareAccess !== undefined)
-    return { ok: false as const, reason: "Open the owning workspace to resume live editing." };
-  const resolved = await safeResolve(ctx, args.path, "write");
-  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  return requestCli(ctx, "liveResume", { path: resolved.normalized });
 }
 
 // Old file copies kept on a drive that cannot tell dohc whether a program

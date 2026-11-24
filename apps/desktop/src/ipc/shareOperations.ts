@@ -38,7 +38,6 @@ import {
   OwnerLiveDocumentsResult,
   ListOwnerLiveRefusalsPayload,
   OwnerLiveRefusalsResult,
-  OwnerLiveDocumentActionPayload,
   StopOwnerLiveDocumentPayload,
   StopOwnerLiveDocumentResult,
   RetryOwnerLiveQuarantinePayload,
@@ -328,14 +327,6 @@ export const relayShareOperations = {
     inactiveMessage: "Live editing stopped because this window changed workspaces.",
     payload: StopOwnerLiveDocumentPayload,
     result: StopOwnerLiveDocumentResult,
-  },
-  resumeOwnerLiveDocument: {
-    capabilityId: "share.live.document.resume",
-    channel: "desktop:resume-owner-live-document",
-    scope: "workspace",
-    guard: "active-workspace",
-    inactiveMessage: "Live editing stopped because this window changed workspaces.",
-    payload: OwnerLiveDocumentActionPayload,
   },
   // The owner's Try again for one document whose edits the server refused.
   retryOwnerLiveQuarantine: {

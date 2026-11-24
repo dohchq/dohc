@@ -3,7 +3,7 @@ import {
   getShareCopyDetails,
   listLinkAgents,
   listLiveDocuments,
-  resumeLiveEditing,
+  requestDeclaredWriteTool,
   retryKeptEdits,
   saveRecoveryCopy,
   stopAgain as stopAgainTool,
@@ -2587,7 +2587,7 @@ async function liveDocumentsFixture(
       list: () => listLiveDocuments(ctx, {}),
       stop: (path: string, objectId?: string) =>
         stopLiveEditing(ctx, objectId === undefined ? { path } : { path, objectId }),
-      resume: (path: string) => resumeLiveEditing(ctx, { path }),
+      resume: (path: string) => requestDeclaredWriteTool(ctx, "dohc_resume_live_editing", { path }),
     },
   };
   return { ...f, h, activity, authors, answer, documents, transport, doors };
@@ -2699,6 +2699,69 @@ describe.each(["cli", "mcp"] as const)("live documents through %s", (door) => {
       expect(f.authors).toEqual([]);
     }
   });
+  it("refuses Resume in a joined workspace before reaching the server", async () => {
+    const f = await liveDocumentsFixture();
+    vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({
+      access: "edit",
+      ended: false,
+      membership: true,
+    });
+    f.workspace.shareView = {} as RegistryEntry["shareView"];
+    expect(await f.doors[door].resume("notes/plan.md")).toEqual({
+      ok: false,
+      reason: expect.stringContaining("only in the original workspace"),
+    });
+    expect(f.h.relay).not.toHaveBeenCalled();
+    expect(f.authors).toEqual([]);
+  });
+  it("refuses a Resume path outside the workspace or under shared-with-me", async () => {
+    const f = await liveDocumentsFixture();
+    await mkdir(join(f.root, "shared-with-me", "received"), { recursive: true });
+    for (const [path, reason] of [
+      ["../x.md", "path rejected (traversal): ../x.md"],
+      ["shared-with-me/received/plan.md", "path rejected (reserved)"],
+    ]) {
+      expect(await f.doors[door].resume(path)).toEqual({
+        ok: false,
+        reason: expect.stringContaining(reason),
+      });
+    }
+    expect(f.h.relay).not.toHaveBeenCalled();
+    expect(f.authors).toEqual([]);
+  });
+  it("answers a moved note's refusal and keeps its local Stop", async () => {
+    const f = await liveDocumentsFixture();
+    const served = f.h.relay.getMockImplementation()!;
+    f.h.relay.mockImplementation(async (credentials, path, init) => {
+      if (init?.method === "POST")
+        throw new Error("This note moved to notes/renamed.md. Move it back to resume.");
+      return served(credentials, path, init);
+    });
+    expect(await f.doors[door].resume("notes/plan.md")).toEqual({
+      ok: false,
+      reason: expect.stringContaining("This note moved to notes/renamed.md."),
+    });
+    expect(f.h.ownerLiveStop.mock.calls.map((call) => call[1])).not.toContain("clear");
+  });
+});
+
+it("credits a Resume from a run proven by its secret to the run's agent", async () => {
+  const f = await liveDocumentsFixture();
+  const runSecret = "b".repeat(64);
+  vi.mocked(f.dependencies.activity.dispatchedRunSecret).mockReturnValue(runSecret as never);
+  vi.mocked(f.dependencies.activity.dispatchedAgent).mockReturnValue("codex" as never);
+  vi.mocked(f.dependencies.activity.dispatchedRunId).mockReturnValue("run-1" as never);
+  expect(
+    await f.transport({
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      verb: "liveResume",
+      args: { cwd: f.root, actor: "agent", path: "notes/plan.md" },
+      runSecret,
+    } as CliRequestWithoutToken),
+  ).toEqual({ ok: true, path: "notes/plan.md" });
+  expect(f.authors).toEqual([
+    { kind: "agent", agentId: "codex", onBehalfOf: expect.any(String), depth: 0 },
+  ]);
 });
 
 describe.each(["mcp"] as const)("who stopped or resumed live editing, through %s", (door) => {

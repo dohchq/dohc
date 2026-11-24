@@ -71,11 +71,11 @@ import { assertOriginalWorkspace } from "../ipc/ownerRelayShareHandler";
 import type {
   OwnerLiveDocumentsResult,
   OwnerLiveQuarantine,
-  ResumeOwnerLiveDocumentResult,
   SaveOwnerLiveRecoveryCopyResult,
   StopOwnerLiveDocumentResult,
   SyncStatusResult,
 } from "../ipc/bridgeContract";
+import type { ResumeOwnerLiveDocumentResult } from "@dohc/workspace-contracts/live-note";
 import type { OwnerLiveStopAgain } from "../ipc/relaySharesIpc";
 import type {
   DisconnectRelayShareLinkAgentResult,

@@ -10,6 +10,7 @@ import type { incomingWebhooksOperations } from "./incomingWebhooksOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { OutsideChange } from "@dohc/workspace-contracts/outside-changes";
 import { LiveNoteRecord } from "@dohc/workspace-contracts/live-note";
+import { isSafeRelativePath } from "@dohc/workspace-contracts/workspace-paths";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
 import { shareCopyOperations } from "./shareCopyOperations";
 export type { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
@@ -179,6 +180,7 @@ import type { explorerMenuOperations } from "./explorerMenuOperations";
 import type { OperationBridge, OperationTable } from "./operationTable";
 import type {
   agentRunUndoOperations,
+  liveNoteOperations,
   protectedCopyOperations,
   stoppedRunOperations,
 } from "./writeOperations";
@@ -237,15 +239,6 @@ export const WORKSPACE_ID = z
   .max(200)
   .regex(/^[a-z0-9][a-z0-9-]*$/, "workspace id must be lowercase alphanumeric/hyphens");
 const PATH_STRING = z.string().min(1).max(4096);
-// Lexically safe workspace-relative path: forward-slashed, no null bytes, no
-// backslashes, no empty/dot/dot-dot segments, not absolute. Main validates
-// containment before sending; this is the closed gate the preload re-applies
-// to every path that crosses main→renderer.
-export function isSafeRelativePath(value: string): boolean {
-  if (value.includes("\0") || value.includes("\\")) return false;
-  if (value.startsWith("/") || /^[A-Za-z]:/.test(value)) return false;
-  return value.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
-}
 const SAFE_RELATIVE_PATH = PATH_STRING.refine(
   isSafeRelativePath,
   "path must be a safe workspace-relative path",
@@ -9491,6 +9484,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof stoppedRunOperations>,
     OperationBridge<typeof protectedCopyOperations>,
     OperationBridge<typeof agentRunUndoOperations>,
+    OperationBridge<typeof liveNoteOperations>,
     OperationBridge<typeof inboxReadOperations>,
     OperationBridge<typeof inboxWriteOperations>,
     OperationBridge<typeof inboxDesktopOperations>,

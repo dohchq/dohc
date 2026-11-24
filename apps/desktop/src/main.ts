@@ -245,7 +245,11 @@ import { createSettingsIpc } from "./ipc/settingsIpc";
 import { createChatScopeCapability } from "./ipc/chatScope";
 import { registerChatsIpcHandlers } from "./ipc/chatsIpc";
 import { protectedCopyHandlers, workspaceVersionHandlers } from "./ipc/workspaceVersionsIpc";
-import { agentRunUndoOperations, protectedCopyOperations } from "./ipc/writeOperations";
+import {
+  agentRunUndoOperations,
+  liveNoteOperations,
+  protectedCopyOperations,
+} from "./ipc/writeOperations";
 import { createInboxIpcHandlers } from "./ipc/inboxIpc";
 import {
   inboxDesktopOperations,
@@ -10928,6 +10932,7 @@ function registerIpcHandlers(): void {
     reconcileReceivedShares,
   });
   registerOperations(operationBoundary, relayShareOperations, relayShareHandlers);
+  registerOperations(operationBoundary, liveNoteOperations, relayShareHandlers);
 
   let installedAppCompiler: ReturnType<typeof createInstalledAppCompiler> | undefined;
   const ownerPublicationDependencies = {

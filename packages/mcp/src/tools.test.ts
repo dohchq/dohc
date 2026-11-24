@@ -31,6 +31,7 @@ import {
   readChange,
   readChat,
   readWorkspaceFile,
+  requestDeclaredWriteTool,
   safeResolve,
   searchWorkspaceFiles,
   testApp,
@@ -1259,6 +1260,25 @@ describe("mcp tools operate on allowed paths", () => {
         });
         expect(request).not.toHaveBeenCalled();
         expect(await readdir(join(ctx.root, reserved))).toEqual([]);
+      });
+    },
+  );
+
+  it.each([".dohc", "shared-with-me"])(
+    "dohc_resume_live_editing refuses an alias into %s before the socket",
+    async (reserved) => {
+      await withWorkspace(async (ctx) => {
+        await mkdir(join(ctx.root, reserved));
+        await symlink(join(ctx.root, reserved), join(ctx.root, "alias"), "junction");
+        const request = vi.fn<NonNullable<ToolContext["request"]>>();
+        ctx.request = request;
+        await expect(
+          requestDeclaredWriteTool(ctx, "dohc_resume_live_editing", { path: "alias/plan.md" }),
+        ).resolves.toEqual({
+          ok: false,
+          reason: expect.stringContaining("path rejected (symlink resolves into"),
+        });
+        expect(request).not.toHaveBeenCalled();
       });
     },
   );

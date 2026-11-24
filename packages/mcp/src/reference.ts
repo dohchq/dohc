@@ -198,8 +198,8 @@ const DOCUMENT_RESULTS: Record<string, CliSocketVerb> = {
   "keep-outside-change": "keepOutsideChange",
   live: "liveDocuments",
   stop: "liveStop",
-  resume: "liveResume",
   "outside-changes": "outsideChanges",
+  ...declaredWriteSocketVerbs("document"),
 };
 
 // The socket verb whose result each `dohc automation` verb prints.
@@ -405,7 +405,6 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = dist
     dohc_keep_outside_change: { cli: "keepOutsideChange" },
     dohc_list_live_documents: { cli: "liveDocuments" },
     dohc_stop_live_editing: { cli: "liveStop" },
-    dohc_resume_live_editing: { cli: "liveResume" },
     dohc_list_retained_copies: { cli: "retainedCopies" },
     dohc_delete_retained_copies: { cli: "deleteRetainedCopies" },
     dohc_read_document: { cli: "documentRead" },

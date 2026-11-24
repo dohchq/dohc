@@ -2258,13 +2258,18 @@ const REQUEST_PATH_FIELDS = [
 ];
 // The socket rebases a path from the caller's folder, and checks it, in a
 // hand-written case for each verb. A declared write has no such case, so its
-// input cannot name a path.
+// input names a path only as its path rule's `path`.
 for (const { socket } of Object.values<DeclaredWrite>(DECLARED_WRITES)) {
-  const field = REQUEST_PATH_FIELDS.find((path) => Object.hasOwn(socket.input.shape, path));
+  const rebased = socket.admission.paths === "rebases-path" ? "path" : undefined;
+  const field = REQUEST_PATH_FIELDS.find(
+    (path) => path !== rebased && Object.hasOwn(socket.input.shape, path),
+  );
   if (field)
     throw new Error(
-      `${socket.verb} input names ${field}. The socket rebases no path of a declared write.`,
+      `${socket.verb} input names ${field}. The socket rebases only the path of a write whose path rule says so.`,
     );
+  if (rebased && !Object.hasOwn(socket.input.shape, rebased))
+    throw new Error(`${socket.verb} rebases a path its input does not name.`);
 }
 
 function validateRequestPathSpellings(request: CliRequest): void {
@@ -2483,6 +2488,7 @@ type OwnAnswerVerb = {
 const DECLARED_OWN_ANSWERS: { readonly [Verb in OwnAnswerVerb]: { answer: unknown } } = {
   // Protected copies stay on the computer of the workspace that kept them.
   restoreProtectedCopy: { answer: keptCopiesUnavailable() },
+  liveResume: liveDocumentsInOwner,
 };
 const DECLARED_WRITE_SHARE_RULES = mapNamed(
   DECLARED_WRITES,
@@ -2586,7 +2592,6 @@ const HAND_WRITTEN_SHARE_RULES: {
   discardProtectedCopy: { answer: keptCopiesUnavailable() },
   liveDocuments: liveDocumentsInOwner,
   liveStop: liveDocumentsInOwner,
-  liveResume: liveDocumentsInOwner,
   documentHeld: { answer: heldChangesUnavailable() },
   syncFailure: syncStatusInOwner,
   historyOperation: { answer: { ok: false as const, reason: HISTORY_IN_OWNER } },
@@ -2678,7 +2683,7 @@ async function dispatch(
     "keptCopies",
     "saveKeptCopy",
     ...Object.values<DeclaredWrite>(DECLARED_WRITES)
-      .filter(({ socket }) => socket.admission.paths === "from-callers-folder")
+      .filter(({ socket }) => socket.admission.paths !== "none")
       .map(({ socket }) => socket.verb),
     "discardProtectedCopy",
     "liveKeptEdits",
@@ -2688,7 +2693,6 @@ async function dispatch(
     "keepOutsideChange",
     "liveDocuments",
     "liveStop",
-    "liveResume",
     "fileWrite",
     "fileMove",
     "fileDelete",
@@ -2856,12 +2860,6 @@ async function dispatch(
           args: { ...request.args, path: paths.rebase(request.args.path, "write") },
         };
         break;
-      case "liveResume":
-        rebased = {
-          ...request,
-          args: { ...request.args, path: paths.rebase(request.args.path, "write") },
-        };
-        break;
       case "documentCreate":
         rebased = {
           ...request,
@@ -2985,7 +2983,17 @@ async function dispatch(
         break;
       }
       default:
-        rebased = request;
+        rebased =
+          isDeclaredWriteRequest(request) &&
+          DECLARED_WRITES[request.verb].socket.admission.paths === "rebases-path"
+            ? ({
+                ...request,
+                args: {
+                  ...request.args,
+                  path: paths.rebase((request.args as { path: string }).path, "write"),
+                },
+              } as CliRequest)
+            : request;
     }
   } catch (error) {
     const reason = error instanceof Error ? error.message : "path rejected";
@@ -3238,6 +3246,22 @@ const DECLARED_WRITERS: {
       return { ok: true as const, ...result };
     } catch (error) {
       return pathFreeFailure(error, "dohc could not move this Inbox item.");
+    }
+  },
+  liveResume: async (request, context, options) => {
+    const live = context.liveDocuments;
+    if (!live || context.readOnly) return liveDocumentsUnavailable();
+    try {
+      const resumed = await live.resume(request.args.path, liveChangeAuthor(context, options));
+      await notifyWrite(options, context);
+      return {
+        ok: true as const,
+        path: request.args.path,
+        ...(resumed.already ? { already: true as const } : {}),
+        ...(resumed.ended ? { ended: true as const } : {}),
+      };
+    } catch (error) {
+      return mcpFailure(error, `failed to resume live editing for ${request.args.path}`);
     }
   },
 };
@@ -4415,23 +4439,6 @@ async function dispatchWorkspace(
         };
       } catch (error) {
         return mcpFailure(error, `failed to stop live editing for ${request.args.path}`);
-      }
-    }
-
-    case "liveResume": {
-      const live = context.liveDocuments;
-      if (!live || context.readOnly) return liveDocumentsUnavailable();
-      try {
-        const resumed = await live.resume(request.args.path, liveChangeAuthor(context, options));
-        await notifyWrite(options, context);
-        return {
-          ok: true as const,
-          path: request.args.path,
-          ...(resumed.already ? { already: true as const } : {}),
-          ...(resumed.ended ? { ended: true as const } : {}),
-        };
-      } catch (error) {
-        return mcpFailure(error, `failed to resume live editing for ${request.args.path}`);
       }
     }
 

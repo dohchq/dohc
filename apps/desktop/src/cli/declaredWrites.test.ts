@@ -30,6 +30,31 @@ it("refuses a declared write whose socket input names a path", async () => {
     };
   });
   await expect(import("./cliServer")).rejects.toThrow(
-    "restoreProtectedCopy input names path. The socket rebases no path of a declared write.",
+    "restoreProtectedCopy input names path. The socket rebases only the path of a write whose path rule says so.",
+  );
+});
+
+it("refuses a declared write that rebases a path its input does not name", async () => {
+  vi.resetModules();
+  vi.doMock("@dohc/workspace-contracts/all-write-declarations", async (importOriginal) => {
+    const { WRITE_DECLARATION_FAMILIES: families } = await importOriginal<WriteFamilies>();
+    const { restoreProtectedCopy } = families.protectedCopy;
+    return {
+      WRITE_DECLARATION_FAMILIES: {
+        ...families,
+        protectedCopy: {
+          restoreProtectedCopy: {
+            ...restoreProtectedCopy,
+            socket: {
+              ...restoreProtectedCopy.socket,
+              admission: { ...restoreProtectedCopy.socket.admission, paths: "rebases-path" },
+            },
+          },
+        },
+      },
+    };
+  });
+  await expect(import("./cliServer")).rejects.toThrow(
+    "restoreProtectedCopy rebases a path its input does not name.",
   );
 });
