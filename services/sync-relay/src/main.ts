@@ -1034,6 +1034,11 @@ setInterval(() => {
   } catch (error) {
     console.error("[sync-relay] phone alert sweep failed:", serverLogLine(error));
   }
+  try {
+    storage.pruneExpiredIncomingWebhookDeliveries(Date.now());
+  } catch (error) {
+    console.error("[sync-relay] incoming webhook delivery prune failed:", serverLogLine(error));
+  }
   pruneAutomationPresses(storage, Date.now()).catch((error: unknown) => {
     console.error("[sync-relay] automation press prune failed:", serverLogLine(error));
   });

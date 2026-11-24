@@ -330,5 +330,10 @@
   "workspace.trust.request",
   "workspace.trust.restrict",
   "workspace.ui.read",
-  "workspace.ui.write"
+  "workspace.ui.write",
+  "workspace.webhooks.create",
+  "workspace.webhooks.delete",
+  "workspace.webhooks.list",
+  "workspace.webhooks.rotate",
+  "workspace.webhooks.update"
 ]

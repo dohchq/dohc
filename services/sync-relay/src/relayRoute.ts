@@ -40,6 +40,7 @@ import type { CollectionWriteRoute, OwnerCollectionWriteRoute } from "./collecti
 import { parsePersonalAgentRoute, type PersonalAgentRoute } from "./personalAgents";
 import type { WorkspaceSecretRoute } from "./workspaceSecretRoutes";
 import type { OutboundWebhookRoute } from "./outboundWebhookRoutes";
+import type { IncomingWebhookRoute } from "./incomingWebhookRoutes";
 import { parseShareId, parseString, parseWorkspaceId, relayPathSegments } from "./requestInputs";
 import { notFound } from "./errors";
 import { MAX_ORIGIN_ID_CHARS } from "./wireLimits";
@@ -91,6 +92,7 @@ export type SyncRelayRoute =
   | { route: "keys"; workspaceId: string }
   | WorkspaceSecretRoute
   | OutboundWebhookRoute
+  | IncomingWebhookRoute
   | WorkspaceShareCreationRoute
   | ShareInventoryRoute
   | ShareGrantTransitionRoute
@@ -246,6 +248,12 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     throw notFound();
   }
   if (parts[1] === "wakes") return parseChatWakeRoute(parts);
+  if (parts[1] === "hooks") {
+    if (parts.length === 3 && parts[2]) {
+      return { route: "incoming-webhook", token: parts[2] };
+    }
+    throw notFound();
+  }
   if (parts[1] === "personal-agents") return parsePersonalAgentRoute(parts);
   if (parts[1] === "account")
     return parts[2] === "sessions" ? parseAccountSessionRoute(parts) : parseAccountRoute(parts);
@@ -576,11 +584,28 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     throw notFound();
   }
   if (parts[2] === "webhooks") {
+    if (parts.length === 3) {
+      return { route: "workspace-webhooks", workspaceId };
+    }
     if (parts.length === 4 && parts[3] === "http-approvals") {
       return { route: "workspace-http-approvals", workspaceId };
     }
     if (parts.length === 4 && parts[3] === "outbound-dispatch") {
       return { route: "workspace-outbound-dispatch", workspaceId };
+    }
+    if (parts.length === 4 && parts[3]) {
+      return {
+        route: "workspace-webhook",
+        workspaceId,
+        webhookId: parseString(parts[3], "webhookId", 64),
+      };
+    }
+    if (parts.length === 5 && parts[3] && parts[4] === "rotate") {
+      return {
+        route: "workspace-webhook-rotate",
+        workspaceId,
+        webhookId: parseString(parts[3], "webhookId", 64),
+      };
     }
     throw notFound();
   }

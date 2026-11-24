@@ -27,6 +27,7 @@ import { accessOperations } from "./ipc/accessOperations";
 import { settingsOperations } from "./ipc/settingsOperations";
 import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
 import { workspaceSecretsOperations } from "./ipc/workspaceSecretsOperations";
+import { incomingWebhooksOperations } from "./ipc/incomingWebhooksOperations";
 import { explorerMenuOperations } from "./ipc/explorerMenuOperations";
 import { devToolsGranted } from "./ipc/devToolsIpc";
 import { insecureLoopbackServersForTests } from "./workspaces/cloudConfiguration";
@@ -588,6 +589,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(noticeOperations, invoke),
   ...operationBridge(scheduleHostOperations, invoke),
   ...operationBridge(workspaceSecretsOperations, invoke),
+  ...operationBridge(incomingWebhooksOperations, invoke),
   ...operationBridge(chatDispatchNoticeOperations, invoke),
   onNoticesChanged: (listener) =>
     onEvent(CHANNELS.noticesChanged, NoticesChangedEvent, () => listener()),

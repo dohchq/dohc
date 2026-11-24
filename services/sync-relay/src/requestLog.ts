@@ -93,6 +93,10 @@ export const RELAY_ROUTE_PATTERNS = {
   "workspace-secret": "/sync/:workspaceId/secrets/:name",
   "workspace-http-approvals": "/sync/:workspaceId/webhooks/http-approvals",
   "workspace-outbound-dispatch": "/sync/:workspaceId/webhooks/outbound-dispatch",
+  "incoming-webhook": "/sync/hooks/:token",
+  "workspace-webhooks": "/sync/:workspaceId/webhooks",
+  "workspace-webhook": "/sync/:workspaceId/webhooks/:webhookId",
+  "workspace-webhook-rotate": "/sync/:workspaceId/webhooks/:webhookId/rotate",
   "share-link-agents": "/sync/:workspaceId/shares/:shareId/links/:grantId/agents",
   "share-link-agent-disconnect":
     "/sync/:workspaceId/shares/:shareId/links/:grantId/agents/:connectionId/disconnect",

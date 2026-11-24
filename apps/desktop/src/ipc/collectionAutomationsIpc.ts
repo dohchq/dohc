@@ -34,6 +34,7 @@ import {
   ResolveAutomationControlsPayload,
   type ResolveAutomationControlsResult,
   type AutomationShareImpactResult,
+  type IncomingWebhookSharePause,
   type CheckCollectionAutomationResult,
   type FindDatasetCollectionResult,
   type FindAutomationCollectionResult,
@@ -107,6 +108,11 @@ export function registerCollectionAutomationsIpc<
   serverRuns: ServerRuns;
   /** Whether a request failed because the relay could not be reached, as offline. */
   relayUnreachable(error: unknown): boolean;
+  /** Active incoming webhooks that creating this share would automatically pause. */
+  incomingWebhookShareStops?(
+    workspaceId: string,
+    paths: readonly string[],
+  ): Promise<IncomingWebhookSharePause[]>;
 }): void {
   const { serverRuns } = dependencies;
   // Offline, the server's lists have nothing to show; a relay that answered
@@ -500,16 +506,30 @@ export function registerCollectionAutomationsIpc<
       event.sender,
       input.workspaceId,
       stale,
-      async (operation): Promise<AutomationShareImpactResult> => ({
-        stops: dependencies.sharedViewOf(input.workspaceId)
-          ? []
-          : await operation.state.collectionAutomations.shareImpact({
-              paths: input.paths,
-              versionId: null,
-              access: input.access,
-              recipientEmail: input.recipientEmail,
-            }),
-      }),
+      async (operation): Promise<AutomationShareImpactResult> => {
+        if (dependencies.sharedViewOf(input.workspaceId)) {
+          return { stops: [] };
+        }
+        const [stops, pausedWebhooks] = await Promise.all([
+          input.access === "edit"
+            ? operation.state.collectionAutomations.shareImpact({
+                paths: input.paths,
+                versionId: null,
+                access: input.access,
+                recipientEmail: input.recipientEmail,
+              })
+            : Promise.resolve([]),
+          dependencies.incomingWebhookShareStops
+            ? dependencies
+                .incomingWebhookShareStops(input.workspaceId, input.paths)
+                .catch(unlessOffline([]))
+            : Promise.resolve([]),
+        ]);
+        return {
+          stops,
+          ...(pausedWebhooks.length > 0 ? { pausedWebhooks } : {}),
+        };
+      },
     );
   });
 

@@ -6,6 +6,7 @@ import type { linksOperations } from "./linksOperations";
 import type { retrievalOperations } from "./retrievalOperations";
 import { heldChangeOperations } from "./heldChangeOperations";
 import type { workspaceSecretsOperations } from "./workspaceSecretsOperations";
+import type { incomingWebhooksOperations } from "./incomingWebhooksOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { OutsideChange } from "@dohc/workspace-contracts/outside-changes";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
@@ -6621,7 +6622,15 @@ export const AutomationShareImpactPayload = z.object({
   access: SHARE_ACCESS,
 });
 export type AutomationShareImpactPayload = z.infer<typeof AutomationShareImpactPayload>;
-export type AutomationShareImpactResult = { stops: CollectionAutomationShareStop[] };
+export interface IncomingWebhookSharePause {
+  webhookId: string;
+  name: string;
+  collectionPath: string;
+}
+export type AutomationShareImpactResult = {
+  stops: CollectionAutomationShareStop[];
+  pausedWebhooks?: IncomingWebhookSharePause[];
+};
 
 // The fields in one Collection that switched-on automations set, for the
 // ⚡ marks on the table and the record's properties. A document Collection
@@ -9405,6 +9414,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof noticeOperations>,
     OperationBridge<typeof scheduleHostOperations>,
     OperationBridge<typeof workspaceSecretsOperations>,
+    OperationBridge<typeof incomingWebhooksOperations>,
     OperationBridge<typeof chatDispatchNoticeOperations>,
     OperationBridge<typeof agentRunStateOperations>,
     OperationBridge<typeof stoppedRunOperations>,
