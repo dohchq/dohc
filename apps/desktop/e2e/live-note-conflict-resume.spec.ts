@@ -5,6 +5,7 @@ import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { activityPin, settingsNavPin } from "../src/testPins";
 import { launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
+import { ownerEnrollment } from "./helpers/engineDb";
 import { readHistoryMoments } from "./helpers/history";
 import {
   approveDesktop,
@@ -255,6 +256,13 @@ test("@c-proof-2701 a live-shared note whose version conflict is resolved resume
     };
 
     let link: Awaited<ReturnType<Api["createRelayShareLink"]>> | undefined;
+    let enrolled:
+      | NonNullable<
+          ReturnType<Awaited<ReturnType<typeof startSelfHostOnboardingStack>>["ownerLiveBinding"]>
+        >
+      | undefined;
+    const outside = async (on: Page) =>
+      (await call(on, "getSyncStatus", { workspaceId })).outsideChanges ?? [];
     await test.step("1. the note shared with an Edit link is live", async () => {
       await expect(async () => {
         link = await call(page, "createRelayShareLink", {
@@ -266,6 +274,11 @@ test("@c-proof-2701 a live-shared note whose version conflict is resolved resume
       const sharedAt = Date.now();
       await expect.poll(status, { timeout: 180_000, intervals: [1000] }).toBe("ready");
       await note("1-live-after-share", { ms: Date.now() - sharedAt });
+      await expect
+        .poll(() => (enrolled = stack!.ownerLiveBinding(workspaceId, PATH) ?? undefined), {
+          timeout: 60_000,
+        })
+        .toBeTruthy();
       await recordRows("1-row-live", "step1-owner-row-live");
       const marker = `before${randomBytes(4).toString("hex")}`;
       const typedAt = Date.now();
@@ -305,7 +318,19 @@ test("@c-proof-2701 a live-shared note whose version conflict is resolved resume
           },
         )
         .toBe(true);
-      await note("2-settled-before-outage", { text: await firstFile() });
+      const bindings = () => ({
+        first: ownerEnrollment(firstTemp.rootPath, enrolled!.binding) !== null,
+        second: ownerEnrollment(secondTemp.rootPath, enrolled!.binding) !== null,
+      });
+      const boundAtSettle = bindings();
+      await expect
+        .poll(bindings, {
+          message: "neither computer still binds the stopped note live",
+          timeout: 120_000,
+          intervals: [1000],
+        })
+        .toEqual({ first: false, second: false });
+      await note("2-settled-before-outage", { text: await firstFile(), boundAtSettle });
       let beforeFirst = 0;
       let beforeSecond = 0;
       await expect(async () => {
@@ -315,10 +340,24 @@ test("@c-proof-2701 a live-shared note whose version conflict is resolved resume
       stack!.pause();
       await writeWorkspaceFiles(firstTemp, [{ path: PATH, contents: FIRST_TEXT }]);
       await writeWorkspaceFiles(secondTemp, [{ path: PATH, contents: SECOND_TEXT }]);
-      await expect.poll(() => momentCount(page), { timeout: 60_000 }).toBeGreaterThan(beforeFirst);
       await expect
-        .poll(() => momentCount(secondPage), { timeout: 60_000 })
-        .toBeGreaterThan(beforeSecond);
+        .poll(
+          async () =>
+            (await momentCount(page)) > beforeFirst &&
+            (await momentCount(secondPage)) > beforeSecond,
+          { message: "each computer records its offline edit", timeout: 60_000 },
+        )
+        .toBe(true)
+        .catch(async (error: unknown) => {
+          await note("2-offline-edit-not-recorded", {
+            firstMoments: [beforeFirst, await momentCount(page)],
+            secondMoments: [beforeSecond, await momentCount(secondPage)],
+            firstOutside: await outside(page),
+            secondOutside: await outside(secondPage),
+            bindings: bindings(),
+          });
+          throw error;
+        });
       const backAt = Date.now();
       stack!.resume();
       await expect
