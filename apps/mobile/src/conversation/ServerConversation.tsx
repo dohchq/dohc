@@ -74,7 +74,9 @@ import {
   localMessage,
   type ConversationItem,
   serverMessage,
+  withMentions,
 } from "./serverMessages";
+import { phoneMentions } from "./mentionDraft";
 import type { Author, Message } from "./types";
 import { useChatWakes } from "./useChatWakes";
 import { useVisible } from "./useVisible";
@@ -930,10 +932,14 @@ function Conversation({
   const [composerHeight, setComposerHeight] = useState(90);
   const list = useRef<LegendListRef>(null);
   const { bar, reveal } = useRevealAboveComposer(list);
-  const items = useMemo(
-    () => (messages ? conversationItems(messages, Date.now(), local) : []),
-    [messages, local],
-  );
+  const mentions = wakes?.mentions;
+  const items = useMemo(() => {
+    if (!messages) return [];
+    const candidates = mentions?.length ? phoneMentions(mentions) : null;
+    const drawn = (list: readonly Message[]) =>
+      candidates ? list.map((entry) => withMentions(entry, candidates)) : list;
+    return conversationItems(drawn(messages), Date.now(), local && drawn(local));
+  }, [messages, local, mentions]);
   // Where the list opens: at the anchored message when this read has it, else at the end.
   const anchorIndex =
     anchor === null

@@ -1,8 +1,10 @@
 import { workspaceWords } from "@dohc/interface-words/workspace";
+import { chatMentions } from "@dohc/workspace-contracts/chat-mentions";
 import type { ChatMessage } from "../server/workspaceReads";
 import { decisionOf } from "./decisionAnswers";
+import type { PhoneMention } from "./mentionDraft";
 import type { LocalRow } from "./outboxMessages";
-import type { Author, Message } from "./types";
+import type { Author, Message, Segment } from "./types";
 
 // A chat's messages from the server, as the conversation draws them: under a line for each day, with a follow-up
 // from the same author within 5 minutes drawn without its avatar and byline.
@@ -87,6 +89,30 @@ export function localMessage(row: LocalRow, you: Author): Message {
         }
       : {}),
   };
+}
+
+/** `body` with each `@handle` that names one of `candidates` drawn as a mention, as the desktop's chat draws it. */
+export function mentionSegments(body: string, candidates: readonly PhoneMention[]): Segment[] {
+  const segments: Segment[] = [];
+  let at = 0;
+  for (const { start, end, candidate } of chatMentions(body, candidates)) {
+    if (start > at) segments.push({ text: body.slice(at, start) });
+    segments.push({
+      mention: body.slice(start + 1, end),
+      ...(candidate.kind === "agent" ? { agent: true } : {}),
+    });
+    at = end;
+  }
+  if (at < body.length || segments.length === 0) segments.push({ text: body.slice(at) });
+  return segments;
+}
+
+/** The message with its mentions of `candidates` drawn, or the same message when its text names none. */
+export function withMentions(message: Message, candidates: readonly PhoneMention[]): Message {
+  const [only] = message.body;
+  if (message.body.length !== 1 || only === undefined || !("text" in only)) return message;
+  const body = mentionSegments(only.text, candidates);
+  return body.some((segment) => "mention" in segment) ? { ...message, body } : message;
 }
 
 const dayKey = (ms: number) => new Date(ms).toDateString();
