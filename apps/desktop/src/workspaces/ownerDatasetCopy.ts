@@ -168,7 +168,7 @@ async function prefetch(
  */
 export async function createOwnerDatasetCopy(
   options: Parameters<typeof createDatasetReplica>[0] & {
-    onChanged?(): void;
+    onChanged?(change?: { revision?: number }): void;
     /** Opened with no one signed in: it shows what this computer kept, asks the server nothing, and changes nothing. */
     signedOut?: boolean;
     retryMs?: number;
@@ -358,8 +358,8 @@ export async function createOwnerDatasetCopy(
       Date.now() - confirmed.atMs < FRESH_AFTER_CHANGE_MS
     );
   };
-  const tellChanged = () => {
-    if (!closing) onChanged?.();
+  const tellChanged = (revision?: number) => {
+    if (!closing) onChanged?.(revision === undefined ? undefined : { revision });
   };
   const scheduleRetry = () => {
     if (retry !== undefined || closing || denied) return;
@@ -469,15 +469,17 @@ export async function createOwnerDatasetCopy(
     slow = false;
     if (reachable === false || updateFailed) scheduleRetry();
     const cursor = replica.state()?.cursor;
+    const cursorChanged =
+      before.cursor && cursor
+        ? !equalRecoveryCursor(before.cursor, cursor)
+        : before.cursor !== cursor;
     if (
       shownOffline !== offlineNow() ||
       shownUpdateFailed !== notUpdated() ||
       before.archived !== (archived !== null) ||
-      (before.cursor && cursor
-        ? !equalRecoveryCursor(before.cursor, cursor)
-        : before.cursor !== cursor)
+      cursorChanged
     )
-      tellChanged();
+      tellChanged(cursorChanged ? cursor?.revision : undefined);
   };
   // Brings the copy up to date from the server, one update at a time. It never
   // fails: `failure` and `reachable` say how it went.
@@ -610,7 +612,7 @@ export async function createOwnerDatasetCopy(
           if (head && alone && mine === changes) {
             confirmed = { cursor: head, atMs: Date.now() };
             // Windows showing the copy read it again, as for a change an agent made.
-            tellChanged();
+            tellChanged(head.revision);
           }
           // An update that starts after this change brings it in, and says so.
           else void (updating ?? Promise.resolve()).then(update);

@@ -13,6 +13,8 @@ export function createLocalApps(
   dataset: ReturnType<typeof createLocalDatasetApps>,
   collection: ReturnType<typeof createLocalCollectionApps>,
   unconnected: ReturnType<typeof createLocalUnconnectedApps>,
+  onPublicationChanged?: () => void,
+  localBudget?: () => boolean,
 ) {
   const kind = (publicationId: string, expected?: number) => {
     const row = store.row(publicationId, expected);
@@ -52,6 +54,17 @@ export function createLocalApps(
         throw new Error("This app cannot read Collection files.");
       return dataset.readBrowserFile(publicationId, input, signal);
     },
+    datasetRevisions(publicationId, authorityRevision) {
+      return kind(publicationId, authorityRevision) === "dataset"
+        ? dataset.datasetRevisions(publicationId, authorityRevision)
+        : null;
+    },
+    subscribeDatasetChanges(publicationId, authorityRevision, onWake) {
+      return kind(publicationId, authorityRevision) === "dataset"
+        ? dataset.subscribeDatasetChanges(publicationId, authorityRevision, onWake)
+        : () => {};
+    },
+    ...(localBudget ? { localBudget } : {}),
   };
   return {
     ...backend,
@@ -60,9 +73,13 @@ export function createLocalApps(
       // Replacing a Collection app first settles the responses it admitted.
       await collection.settleRoot(candidate.appRoot);
       const declared = candidate.capabilities[0];
-      if (!declared) return unconnected.activate(prepared, signal, agent, displace);
-      if (declared.kind !== "collection-create") return dataset.activate(prepared, signal, agent);
-      return collection.activate(prepared, signal, agent, displace);
+      const result = !declared
+        ? unconnected.activate(prepared, signal, agent, displace)
+        : declared.kind !== "collection-create"
+          ? await dataset.activate(prepared, signal, agent)
+          : await collection.activate(prepared, signal, agent, displace);
+      onPublicationChanged?.();
+      return result;
     },
     has: (publicationId: string) => store.has(publicationId),
     verificationPublication(publicationId: string) {
@@ -86,6 +103,7 @@ export function createLocalApps(
     /** Confirmed only when no admitted response can still be saved. Repeat at the returned revision to confirm. */
     async withdraw(publicationId: string, expected: number) {
       const ended = store.withdraw(publicationId, expected, displace);
+      onPublicationChanged?.();
       const unresolvedCreates =
         ended.kind === "collection" ? await collection.confirm(publicationId) : 0;
       return unresolvedCreates

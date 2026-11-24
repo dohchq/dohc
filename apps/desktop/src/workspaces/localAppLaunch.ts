@@ -23,7 +23,7 @@ import {
 } from "@dohc/security-contract/app-publication";
 import { isAppCollectionPageRequest } from "@dohc/security-contract/app-collection-checks";
 import { palette } from "../renderer/tokens";
-export type LocalAppAction = "invoke" | "upload" | "attempt" | "list" | "create";
+export type LocalAppAction = "invoke" | "query" | "upload" | "attempt" | "list" | "create";
 /** The workspace engine cannot answer now. The app may retry; this is not a refusal. */
 export class LocalAppUnavailableError extends Error {}
 export interface LocalAppLaunchBackend {
@@ -56,6 +56,16 @@ export interface LocalAppLaunchBackend {
     },
     signal?: AbortSignal,
   ): Promise<unknown>;
+  datasetRevisions?(
+    publicationId: string,
+    authorityRevision: number,
+  ): Record<string, number> | null;
+  subscribeDatasetChanges?(
+    publicationId: string,
+    authorityRevision: number,
+    onWake: () => void,
+  ): () => void;
+  localBudget?(): boolean;
 }
 export interface LocalAppLaunchHost {
   launch(publicationId: string, signal: AbortSignal): Promise<string>;
@@ -82,7 +92,50 @@ const BOOTSTRAP_STYLE =
 const MAX_SESSIONS = 16,
   HANDOFF_MS = 30_000,
   SESSION_MS = 30 * 60_000,
-  IDLE_MS = 90_000;
+  IDLE_MS = 90_000,
+  LOCAL_MAX_PENDING = 12,
+  LOCAL_BACKEND_BURST = 120,
+  LOCAL_BACKEND_REFILL_MS = 50,
+  MAX_EVENTS_PENDING = 2,
+  MAX_EVENTS_HOLD_MS = 25_000;
+const validEventAlias = (key: string) =>
+  key === "" ||
+  (/^[a-z][a-z0-9_-]{0,63}$/.test(key) &&
+    key !== "__proto__" &&
+    key !== "prototype" &&
+    key !== "constructor");
+function parseEventsRequest(
+  value: unknown,
+): { since: Record<string, number>; holdMs: number } | null {
+  if (
+    !exact(value, ["since"], ["holdMs"]) ||
+    !value.since ||
+    typeof value.since !== "object" ||
+    Array.isArray(value.since)
+  )
+    return null;
+  const entries = Object.entries(value.since as Record<string, unknown>);
+  if (entries.length > 32) return null;
+  const since: Record<string, number> = {};
+  for (const [key, rev] of entries) {
+    if (!validEventAlias(key) || typeof rev !== "number" || !Number.isSafeInteger(rev) || rev < 0)
+      return null;
+    since[key] = rev;
+  }
+  const holdMs = Object.hasOwn(value, "holdMs") ? value.holdMs : MAX_EVENTS_HOLD_MS;
+  if (
+    typeof holdMs !== "number" ||
+    !Number.isSafeInteger(holdMs) ||
+    holdMs < 0 ||
+    holdMs > MAX_EVENTS_HOLD_MS
+  )
+    return null;
+  return { since, holdMs };
+}
+const diffDatasetRevisions = (revisions: Record<string, number>, since: Record<string, number>) =>
+  Object.entries(revisions)
+    .filter(([dataset, rev]) => rev > (Object.hasOwn(since, dataset) ? since[dataset]! : 0))
+    .map(([dataset, revision]) => ({ dataset, revision }));
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const token = () => randomBytes(32).toString("base64url");
 const exact = (
@@ -200,10 +253,15 @@ export async function createLocalAppLaunchHost(options: {
           controller = new AbortController(),
           ended = new AbortController();
         const requestSignal = AbortSignal.any([signal, options.lifetime, controller.signal]);
+        const highBudget = options.backend.localBudget ? options.backend.localBudget() : true;
+        const maxPending = highBudget ? LOCAL_MAX_PENDING : 4,
+          backendBurst = highBudget ? LOCAL_BACKEND_BURST : 30,
+          backendRefillMs = highBudget ? LOCAL_BACKEND_REFILL_MS : 2000;
         let handoffDigest: string | null = digest(handoff),
           origin = "",
           pending = 0,
-          tokens = 30,
+          eventsPending = 0,
+          tokens = backendBurst,
           updated = Date.now();
         let expires = Date.now() + HANDOFF_MS,
           hardExpires = expires;
@@ -229,7 +287,18 @@ export async function createLocalAppLaunchHost(options: {
           ? ""
           : `const poll=async()=>{if(stopped)return;try{const r=await fetch('/status',{method:'POST',headers:{'x-dohc-app-proof':proof},signal:lifetime.signal});if(!r.ok){stop();return;}}catch{stop();return;}setTimeout(poll,15000);};setTimeout(poll,15000);setTimeout(stop,${SESSION_MS});`;
         const observe = launchOptions?.observeBroker
-          ? ",(event)=>{try{globalThis.__dohcVerifyObserve?.(JSON.stringify(event));}catch{}}"
+          ? "(event)=>{try{globalThis.__dohcVerifyObserve?.(JSON.stringify(event));}catch{}}"
+          : "undefined";
+        const brokerLimits = highBudget
+          ? JSON.stringify({ maxPending, backendBurst, backendRefillMs })
+          : "undefined";
+        const hasEvents = Boolean(
+          options.backend.datasetRevisions &&
+          options.backend.subscribeDatasetChanges &&
+          options.backend.datasetRevisions(publicationId, authorityRevision) !== null,
+        );
+        const eventLoop = hasEvents
+          ? `let since={},backoff=500;const watch=async()=>{while(!stopped&&!lifetime.signal.aborted){try{const er=await fetch('/events',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof},body:JSON.stringify({since,holdMs:${MAX_EVENTS_HOLD_MS}}),signal:lifetime.signal});if(er.status===204||er.status===404)return;if(!er.ok)throw Error();const payload=await er.json();if(stopped)return;backoff=500;if(Array.isArray(payload?.changed)){for(const item of payload.changed){if(item&&typeof item.dataset==='string'&&typeof item.revision==='number'){since[item.dataset]=Math.max(since[item.dataset]||0,item.revision);broker.notifyDatasetChanged(item.dataset,item.revision);}}}}catch{if(stopped||lifetime.signal.aborted)return;await new Promise(ok=>{const t=setTimeout(ok,backoff);lifetime.signal.addEventListener('abort',()=>{clearTimeout(t);ok();},{once:true});});backoff=Math.min(5000,backoff*2);}}};void watch();`
           : "";
         const script = `(()=>{
           const handoff=location.hash.slice(1),key='dohc-local-app-proof';history.replaceState(null,'','/bootstrap');
@@ -243,9 +312,10 @@ export async function createLocalAppLaunchHost(options: {
           const request=proof?fetch('/resume',{method:'POST',headers:{'x-dohc-app-proof':proof},signal:lifetime.signal}):fetch('/session',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({handoff}),signal:lifetime.signal});
           request.then(async r=>{if(!r.ok)throw Error();const value=await r.json();if(stopped)return;proof=value.proof;saveProof(proof);
             frame=document.createElement('iframe');frame.title='Local app';frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox';frame.style='display:block;border:0;width:100%;height:100vh';
-            (${attachAppCollectionBroker.toString()})(frame,(body,signal,request)=>fetch('/backend',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof,'x-dohc-app-activated':request.activated?'1':'0'},body:JSON.stringify(body),signal}),lifetime.signal${observe});
+            const broker=(${attachAppCollectionBroker.toString()})(frame,(body,signal,request)=>fetch('/backend',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof,'x-dohc-app-activated':request.activated?'1':'0'},body:JSON.stringify(body),signal}),lifetime.signal,${observe},${brokerLimits});
             addEventListener('message',event=>{const scheme=event.data?.kind==='dohc-color-scheme'?event.data.scheme:null;if(event.source===frame.contentWindow&&(scheme==='light'||scheme==='dark'))frame.style.colorScheme=scheme;},{signal:lifetime.signal});
             frame.srcdoc=value.html;document.body.append(frame);const status=document.getElementById('status');status.textContent='';status.style.margin='0';
+            ${eventLoop}
             ${browserLifetime}
           }).catch(()=>{if(!stopped)stop();});
         })();`;
@@ -258,14 +328,19 @@ export async function createLocalAppLaunchHost(options: {
         const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Local app</title><style>${BOOTSTRAP_STYLE}</style></head><body><p id="status" role="status">Opening app</p><script>${script}</script></body></html>`;
         const server = createServer(async (request, response) => {
           const abort = new AbortController(),
-            requestAborted = () => abort.abort();
+            requestAborted = () => abort.abort(),
+            responseClosed = () => {
+              if (!response.writableEnded) abort.abort();
+            };
           request.once("aborted", requestAborted);
-          const activeSignal = AbortSignal.any([
+          response.once("close", responseClosed);
+          let activeSignal = AbortSignal.any([
             requestSignal,
             abort.signal,
             AbortSignal.timeout(15_000),
           ]);
-          let admitted = false;
+          let admitted = false,
+            eventsAdmitted = false;
           try {
             const url = new URL(request.url ?? "/", origin);
             if (
@@ -273,9 +348,15 @@ export async function createLocalAppLaunchHost(options: {
               url.origin !== origin ||
               url.search ||
               url.hash ||
-              !["/bootstrap", "/session", "/resume", "/backend", "/status", "/close"].includes(
-                url.pathname,
-              )
+              ![
+                "/bootstrap",
+                "/session",
+                "/resume",
+                "/backend",
+                "/events",
+                "/status",
+                "/close",
+              ].includes(url.pathname)
             )
               return reply(response, 404);
             current();
@@ -292,7 +373,7 @@ export async function createLocalAppLaunchHost(options: {
             if (request.method !== "POST" || request.headers.origin !== origin)
               return reply(response, 404);
             if (url.pathname === "/session") {
-              if (!handoffDigest || pending >= 4) return reply(response, 404);
+              if (!handoffDigest || pending >= maxPending) return reply(response, 404);
               pending++;
               admitted = true;
               const body = await readJson(request, 1024, activeSignal);
@@ -328,12 +409,70 @@ export async function createLocalAppLaunchHost(options: {
               ? Infinity
               : Math.min(hardExpires, Date.now() + IDLE_MS);
             if (url.pathname === "/status") return reply(response, 204);
+            if (url.pathname === "/events") {
+              if (eventsPending >= MAX_EVENTS_PENDING) return reply(response, 429);
+              eventsPending++;
+              eventsAdmitted = true;
+              activeSignal = AbortSignal.any([
+                requestSignal,
+                abort.signal,
+                AbortSignal.timeout(MAX_EVENTS_HOLD_MS + 5_000),
+              ]);
+              const parsed = parseEventsRequest(await readJson(request, 4096, activeSignal));
+              if (!parsed) return reply(response, 400);
+              if (!options.backend.datasetRevisions || !options.backend.subscribeDatasetChanges)
+                return reply(response, 204);
+              const deadline = Date.now() + parsed.holdMs;
+              let woken = false,
+                wake: (() => void) | null = null;
+              const unsubscribe = options.backend.subscribeDatasetChanges(
+                publicationId,
+                authorityRevision,
+                () => {
+                  woken = true;
+                  wake?.();
+                },
+              );
+              try {
+                for (;;) {
+                  woken = false;
+                  activeSignal.throwIfAborted();
+                  current();
+                  const revisions = options.backend.datasetRevisions(
+                    publicationId,
+                    authorityRevision,
+                  );
+                  if (revisions === null) return reply(response, 204);
+                  const changed = diffDatasetRevisions(revisions, parsed.since);
+                  const remaining = deadline - Date.now();
+                  if (changed.length > 0 || remaining <= 0)
+                    return reply(response, 200, { changed });
+                  if (woken) continue;
+                  await new Promise<void>((resolve) => {
+                    const finish = () => {
+                      wake = null;
+                      clearTimeout(timer);
+                      activeSignal.removeEventListener("abort", finish);
+                      resolve();
+                    };
+                    wake = finish;
+                    const timer = setTimeout(finish, remaining);
+                    timer.unref?.();
+                    activeSignal.addEventListener("abort", finish, { once: true });
+                    if (woken || activeSignal.aborted) finish();
+                  });
+                }
+              } finally {
+                wake = null;
+                unsubscribe();
+              }
+            }
             if (url.pathname !== "/backend" && url.pathname !== "/resume")
               return reply(response, 404);
             const now = Date.now();
-            tokens = Math.min(30, tokens + (now - updated) / 2000);
+            tokens = Math.min(backendBurst, tokens + (now - updated) / backendRefillMs);
             updated = now;
-            if (pending >= 4 || tokens < 1) return reply(response, 429);
+            if (pending >= maxPending || tokens < 1) return reply(response, 429);
             tokens--;
             pending++;
             admitted = true;
@@ -428,8 +567,14 @@ export async function createLocalAppLaunchHost(options: {
               );
             } else if (
               row.op === "backend.invoke" &&
-              exact(row, ["id", "op", "operation", "idempotencyKey", "input"], ["dataset"])
+              exact(
+                row,
+                ["id", "op", "operation", "idempotencyKey", "input"],
+                ["dataset", "readOnly"],
+              )
             ) {
+              if (Object.hasOwn(row, "readOnly") && row.readOnly !== true)
+                return reply(response, 400);
               const input = parseAppBackendInvokeRequest({
                 authorityRevision: authorityRevision,
                 operation: row.operation,
@@ -439,7 +584,7 @@ export async function createLocalAppLaunchHost(options: {
               });
               result = await options.backend.request(
                 publicationId,
-                "invoke",
+                row.readOnly === true ? "query" : "invoke",
                 input,
                 activeSignal,
                 activated,
@@ -509,6 +654,12 @@ export async function createLocalAppLaunchHost(options: {
               return reply(response, 503);
             return reply(response, 200, result);
           } catch (error) {
+            if (
+              eventsAdmitted &&
+              !abort.signal.aborted &&
+              !(error instanceof LocalAppUnavailableError)
+            )
+              isAlive();
             if (!response.headersSent && !response.destroyed) {
               if (isAppBackendRuntimeError(error)) {
                 try {
@@ -528,7 +679,9 @@ export async function createLocalAppLaunchHost(options: {
             }
           } finally {
             request.removeListener("aborted", requestAborted);
+            response.removeListener("close", responseClosed);
             if (admitted) pending--;
+            if (eventsAdmitted) eventsPending--;
           }
         });
         server.requestTimeout = 15_000;

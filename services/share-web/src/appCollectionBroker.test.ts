@@ -525,3 +525,79 @@ it("observes handshake, pre-forward rejections, and post-validation outcomes wit
     vi.unstubAllGlobals();
   }
 });
+
+it("forwards one-way dataset.changed push events, accepts readOnly: true, and supports local session limits", async () => {
+  vi.stubGlobal("MessageChannel", NodeMessageChannel);
+  const frame = new EventTarget();
+  let port!: NodeMessagePort;
+  let handshake: unknown;
+  Object.assign(frame, {
+    contentWindow: {
+      postMessage(message: unknown, _target: string, ports: NodeMessagePort[]) {
+        handshake = message;
+        port = ports[0]!;
+      },
+    },
+  });
+  const received: unknown[] = [];
+  const lifetime = new AbortController();
+  const broker = attachAppCollectionBroker(
+    frame as HTMLIFrameElement,
+    async (body) => {
+      received.push(body);
+      return Response.json({ result: { ok: true }, revision: 1, replayed: false });
+    },
+    lifetime.signal,
+    undefined,
+    { maxPending: 12, backendBurst: 120, backendRefillMs: 50 },
+  );
+  try {
+    broker.notifyDatasetChanged("expenses", 2);
+    broker.notifyDatasetChanged("BadAlias", 9);
+    broker.notifyDatasetChanged("expenses", -1);
+    frame.dispatchEvent(new Event("load"));
+    expect(handshake).toEqual({ kind: "dohc-app-channel", version: 1, maxInFlight: 8 });
+
+    const liveEvent = once(port, "message");
+    broker.notifyDatasetChanged("BadAlias", 9);
+    broker.notifyDatasetChanged("expenses", -1);
+    broker.notifyDatasetChanged("workouts", 3);
+    expect((await liveEvent)[0]).toEqual({
+      kind: "dataset.changed",
+      dataset: "workouts",
+      revision: 3,
+    });
+
+    const send = (body: unknown) => {
+      const reply = once(port, "message");
+      port.postMessage(body);
+      return reply.then(([value]) => value);
+    };
+    expect(
+      await send({
+        id: "ro-ok",
+        op: "backend.invoke",
+        operation: "listExpenses",
+        idempotencyKey: "read-1",
+        input: {},
+        dataset: "expenses",
+        readOnly: true,
+      }),
+    ).toMatchObject({ id: "ro-ok", ok: true });
+    expect(
+      await send({
+        id: "ro-false",
+        op: "backend.invoke",
+        operation: "listExpenses",
+        idempotencyKey: "read-2",
+        input: {},
+        readOnly: false,
+      }),
+    ).toEqual({ id: "ro-false", ok: false, status: 400 });
+    expect(received).toHaveLength(1);
+    expect((received[0] as Record<string, unknown>).readOnly).toBe(true);
+  } finally {
+    lifetime.abort();
+    vi.unstubAllGlobals();
+  }
+});

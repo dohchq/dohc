@@ -449,7 +449,45 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           "This development Collection store predates per-Collection storage accounting. Export it with the previous build before resetting the store.",
         );
     });
-    const journal = createDatasetJournal({ db, transaction });
+    const changeListeners = new Set<(datasetId: string | null) => void>();
+    const serverRevisions = new Map<string, number>();
+    const notifyChange = (datasetId: string | null, revision?: number) => {
+      if (closed) return;
+      if (datasetId !== null && revision !== undefined)
+        serverRevisions.set(datasetId, Math.max(serverRevisions.get(datasetId) ?? 0, revision));
+      for (const listener of [...changeListeners])
+        try {
+          listener(datasetId);
+        } catch {}
+    };
+    const subscribeDatasets = (datasetIds: readonly string[], onWake: () => void) => {
+      const wanted = new Set(datasetIds);
+      const listener = (id: string | null) => {
+        if (id === null || wanted.has(id)) onWake();
+      };
+      changeListeners.add(listener);
+      return () => changeListeners.delete(listener);
+    };
+    const localDatasetRevision = (datasetId: string) =>
+      Number(
+        (
+          db
+            .prepare(
+              "SELECT revision FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=? AND active=1",
+            )
+            .get(workspaceId, datasetId) as { revision: number } | undefined
+        )?.revision ?? 0,
+      );
+    const rawJournal = createDatasetJournal({ db, transaction });
+    const journal: typeof rawJournal = {
+      ...rawJournal,
+      commitOperation(input) {
+        const result = rawJournal.commitOperation(input);
+        if (result.kind === "committed")
+          notifyChange(result.event.cursor.datasetId, result.event.cursor.revision);
+        return result;
+      },
+    };
     const attempts = createDatasetAttempts({
       db,
       transaction,
@@ -1098,7 +1136,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     };
     // After a change to which rules a dataset runs, or whether it runs.
     const changed = <T>(value: T): T => {
-      if (!closed) options.onDatasetsChanged?.();
+      if (!closed) {
+        options.onDatasetsChanged?.();
+        notifyChange(null);
+      }
       return value;
     };
     const local = {
@@ -1705,9 +1746,18 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           return host.automationClaims.pressed(workspaceId, pressId);
         },
       },
+      notifyExternalDatasetChanged(datasetId: string, revision?: number): void {
+        notifyChange(datasetId, revision);
+      },
       close(): Promise<void> {
         return (closePromise ??= (async () => {
           closed = true;
+          for (const listener of [...changeListeners]) {
+            try {
+              listener(null);
+            } catch {}
+          }
+          changeListeners.clear();
           pending.clear();
           migrations.clear();
           lifetime.abort();
@@ -1815,6 +1865,8 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           },
         );
       },
+      datasetRevision: localDatasetRevision,
+      subscribeDatasets,
     });
     const onServer = createServerDatasetApps({
       store: appStore,
@@ -1822,6 +1874,9 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       assertCurrent,
       agentRun: () => options.agentRun?.() ?? null,
       lifetime: lifetime.signal,
+      datasetRevision: (datasetId) => serverRevisions.get(datasetId) ?? 0,
+      subscribeDatasets,
+      onDatasetRevision: notifyChange,
       server: {
         approve: (candidate, signal) => serverApps().approve(candidate, signal),
         withdraw: (datasetId, publicationId, signal) =>
@@ -1845,12 +1900,16 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       describe: (...args) => pick().describe(...args),
       request: (...args) => pick().request(...args),
       readBrowserFile: (...args) => pick().readBrowserFile(...args),
+      datasetRevisions: (...args) => pick().datasetRevisions(...args),
+      subscribeDatasetChanges: (...args) => pick().subscribeDatasetChanges(...args),
     };
     localApps = createLocalApps(
       appStore,
       datasetApps,
       collections,
       createLocalUnconnectedApps({ store: appStore, workspaceId, assertCurrent }),
+      () => notifyChange(null),
+      () => !options.collectionsServer?.(),
     );
     return { ...local, apps: localApps };
   } catch (error) {

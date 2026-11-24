@@ -1140,10 +1140,17 @@ export function createDatasetAppRoutes(
         if (route.action !== "invoke") throw notFound();
         // The owner's computer names the agent that drives an app the owner approved there.
         let agent: ReturnType<typeof owningAgent>,
+          readOnly = false,
           request: unknown = raw;
         if (published.local && raw && typeof raw === "object" && Object.hasOwn(raw, "agent")) {
           const { agent: named, ...rest } = raw as Record<string, unknown>;
           agent = owningAgent(named);
+          request = rest;
+        }
+        if (request && typeof request === "object" && Object.hasOwn(request, "readOnly")) {
+          const { readOnly: flag, ...rest } = request as Record<string, unknown>;
+          if (flag !== true) throw badRequest("Invalid app operation.");
+          readOnly = true;
           request = rest;
         }
         let body;
@@ -1155,7 +1162,7 @@ export function createDatasetAppRoutes(
         }
         if (body.authorityRevision !== authorityRevision) throw notFound();
         const operation = targetCapability.operations.find(
-          (operation) => operation.name === body.operation,
+          (operation) => operation.name === body.operation && (!readOnly || operation.readOnly),
         );
         if (!operation) throw notFound();
         return invocationResponse(

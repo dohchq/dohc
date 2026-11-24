@@ -113,6 +113,8 @@ export function createLocalDatasetApps(options: {
     >,
     request: DatasetAttemptRequest,
   ): unknown;
+  datasetRevision?(datasetId: string): number;
+  subscribeDatasets?(datasetIds: readonly string[], onWake: () => void): () => void;
 }) {
   const { db } = options;
   const contexts = new WeakSet<LocalDatasetAppContext>();
@@ -376,7 +378,10 @@ export function createLocalDatasetApps(options: {
         async (context) => {
           const { capabilities } = current(publicationId, input.authorityRevision);
           const cap = selectDatasetCapability(capabilities, input.dataset);
-          const operation = cap.operations.find((operation) => operation.name === input.operation);
+          const operation = cap.operations.find(
+            (operation) =>
+              operation.name === input.operation && (action !== "query" || operation.readOnly),
+          );
           if (!operation) throw new Error("This action is not approved for the app.");
           return options.invoke(context, {
             workspaceId: options.workspaceId,
@@ -392,6 +397,18 @@ export function createLocalDatasetApps(options: {
         },
       );
     },
+    datasetRevisions: (publicationId: string, expected: number) =>
+      Object.fromEntries(
+        current(publicationId, expected).capabilities.map((cap) => [
+          cap.alias ?? "",
+          options.datasetRevision?.(cap.datasetId) ?? 0,
+        ]),
+      ),
+    subscribeDatasetChanges: (publicationId: string, expected: number, onWake: () => void) =>
+      options.subscribeDatasets?.(
+        current(publicationId, expected).capabilities.map((cap) => cap.datasetId),
+        onWake,
+      ) ?? (() => {}),
     readBrowserFile(
       publicationId: string,
       raw: {

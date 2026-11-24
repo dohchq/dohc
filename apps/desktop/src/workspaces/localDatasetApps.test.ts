@@ -1335,4 +1335,117 @@ describe("local app write attribution", () => {
       ],
     });
   });
+
+  it("wakes parked /events on external writes, enforces readOnly on query reads, and aborts cleanly on withdrawal", async () => {
+    const f = await fixture();
+    const readWriteApp = await f.prepareApp("app-live", [id(6), id(7)]);
+    const published = await f.host.apps.activate(readWriteApp, new AbortController().signal);
+    const lifetime = new AbortController();
+    let subscribedCount = 0;
+    const watchedBackend = {
+      ...f.host.apps,
+      subscribeDatasetChanges(pubId: string, rev: number, onWake: () => void) {
+        subscribedCount++;
+        const unsub = f.host.apps.subscribeDatasetChanges!(pubId, rev, onWake);
+        return () => {
+          subscribedCount--;
+          unsub();
+        };
+      },
+    };
+    const launcher = await createLocalAppLaunchHost({
+      backend: watchedBackend,
+      lifetime: lifetime.signal,
+    });
+    launchers.push(launcher);
+    const session = await launcher.launchSession(published.publicationId, lifetime.signal, {
+      keepAlive: true,
+    });
+    const origin = new URL(session.url).origin,
+      handoff = new URL(session.url).hash.slice(1);
+    const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
+      fetch(origin + path, {
+        method: "POST",
+        headers: { origin, "content-type": "application/json", ...headers },
+        body: JSON.stringify(body),
+      });
+    const opened = (await (await post("/session", { handoff })).json()) as { proof: string };
+    const headers = { "x-dohc-app-proof": opened.proof };
+
+    const refusedWrite = await post(
+      "/backend",
+      {
+        id: "ro-write",
+        op: "backend.invoke",
+        operation: "submit",
+        idempotencyKey: "read-submit-1",
+        input: { values: { [id(4)]: "ShouldNotWrite" } },
+        readOnly: true,
+      },
+      headers,
+    );
+    expect(refusedWrite.status).toBe(404);
+    const beforeRows = (await (
+      await post(
+        "/backend",
+        {
+          id: "ro-list-1",
+          op: "backend.invoke",
+          operation: "list",
+          idempotencyKey: "read-list-1",
+          input: {},
+          readOnly: true,
+        },
+        headers,
+      )
+    ).json()) as { result: { rows: unknown[] }; revision: number };
+    expect(beforeRows.revision).toBe(0);
+    expect(beforeRows.result.rows).toHaveLength(0);
+
+    const parked = post("/events", { since: { "": 0 }, holdMs: 10_000 }, headers);
+    await expect.poll(() => subscribedCount).toBe(1);
+    await f.host.invoke({
+      datasetId: f.revision.datasetId,
+      revision: f.revision.revision,
+      revisionSha256: f.revision.revisionSha256,
+      operationId: id(6),
+      idempotencyKey: "external-cli-write-1",
+      input: { values: { [id(4)]: "FromCLI" } },
+    });
+    const woken = await parked;
+    expect(woken.status).toBe(200);
+    const eventPayload = (await woken.json()) as {
+      changed: Array<{ dataset: string; revision: number }>;
+    };
+    expect(eventPayload).toEqual({
+      changed: [{ dataset: "", revision: 1 }],
+    });
+    expect(JSON.stringify(eventPayload)).not.toContain(f.revision.datasetId);
+
+    const afterRows = (await (
+      await post(
+        "/backend",
+        {
+          id: "ro-list-2",
+          op: "backend.invoke",
+          operation: "list",
+          idempotencyKey: "read-list-2",
+          input: {},
+          readOnly: true,
+        },
+        headers,
+      )
+    ).json()) as { result: { rows: Array<Record<string, unknown>> }; revision: number };
+    expect(afterRows.revision).toBe(1);
+    expect(afterRows.result.rows).toHaveLength(1);
+
+    const parkedBeforeWithdraw = post("/events", { since: { "": 1 }, holdMs: 10_000 }, headers);
+    await expect.poll(() => subscribedCount).toBe(1);
+    await f.host.apps.withdraw(published.publicationId, published.authorityRevision);
+    const withdrawnRes = await parkedBeforeWithdraw;
+    expect(withdrawnRes.status).toBe(404);
+    expect(session.ended.aborted).toBe(true);
+    expect(session.ended.reason).toBe("needs-approval");
+    expect(subscribedCount).toBe(0);
+  });
 });
