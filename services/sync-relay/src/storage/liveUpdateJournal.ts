@@ -496,8 +496,21 @@ export function assertJournalCheckpointPosition(
     .get(...documentParams(binding), receipt.journalCursor);
   if (predecessor)
     journalIntegrity(
-      predecessor.current_path === binding.currentPath &&
-        predecessor.restore_fence_generation === binding.restoreFenceGeneration,
+      predecessor.restore_fence_generation === binding.restoreFenceGeneration &&
+        (predecessor.current_path === binding.currentPath ||
+          db
+            .prepare(
+              `SELECT 1 FROM sync_relay_service_activations
+               WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=?
+                 AND object_id=? AND lineage_claim_id=? AND retired_at_ms IS NOT NULL
+                 AND retire_accepted_cursor=? AND json_extract(binding_json,'$.currentPath')=? LIMIT 1`,
+            )
+            .get(
+              row.history.namespace,
+              ...documentParams(binding),
+              predecessor.journal_cursor,
+              predecessor.current_path,
+            ) !== undefined),
     );
   const previous = db
     .prepare(`SELECT journal_cursor FROM ${LIVE_JOURNAL_TABLE} WHERE ${JOURNAL_DOCUMENT_WHERE}

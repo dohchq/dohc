@@ -1835,10 +1835,27 @@ export function recordedLiveBinding(
     recorded.workspaceId !== current.workspaceId ||
     recorded.mainVersionId !== current.mainVersionId ||
     recorded.objectId !== current.objectId ||
-    recorded.lineageClaimId !== current.lineageClaimId ||
-    recorded.currentPath !== current.currentPath
+    recorded.lineageClaimId !== current.lineageClaimId
   )
     return null;
+  if (recorded.currentPath !== current.currentPath) {
+    if (
+      !activation ||
+      activation.retired_at_ms === null ||
+      !storage.db
+        .prepare(
+          `SELECT 1 FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=? AND path=? AND state='starting'`,
+        )
+        .get(current.workspaceId, current.objectId, current.currentPath)
+    )
+      return null;
+    return parseLiveObjectBinding({
+      ...recorded,
+      currentPath: current.currentPath,
+      selectorPaths: [current.currentPath],
+      restoreFenceGeneration: current.restoreFenceGeneration,
+    });
+  }
   return parseLiveObjectBinding({
     ...recorded,
     restoreFenceGeneration: current.restoreFenceGeneration,

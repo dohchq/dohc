@@ -1010,3 +1010,276 @@ it.each([
     f.close();
   }
 });
+
+it.each([
+  { name: "stays at the renamed path", finalPath: "docs/renamed.md" },
+  { name: "moves back to the original path", finalPath: "docs/note.md" },
+])("anchors a projection-neutral gap across a moved path that $name", async ({ finalPath }) => {
+  const f = registered({ deployment: true });
+  try {
+    const first = publication(f, "first");
+    await prepare(f, [first.op]);
+    expect(append(f, [first.op]).settlementRefusals).toBeUndefined();
+    const originalPath = first.record.binding.currentPath;
+    const movedPath = "docs/renamed.md";
+    const row = f.raw
+      .prepare(
+        "SELECT relay_database_namespace FROM sync_relay_live_update_journal WHERE journal_cursor=?",
+      )
+      .get(first.receipt.journalCursor)!;
+    const namespace = String(row.relay_database_namespace);
+    const retireAndMove = (
+      retiredId: string,
+      fromPath: string,
+      cursor: number,
+      predecessor: string | null,
+      nextId: string,
+      toPath: string,
+      seq: number,
+    ) => {
+      const db = (f.storage as StorageContext).db;
+      const fromBound = {
+        ...first.record.binding,
+        currentPath: fromPath,
+        selectorPaths: [fromPath],
+      };
+      const toBound = { ...first.record.binding, currentPath: toPath, selectorPaths: [toPath] };
+      db.prepare(
+        `INSERT OR REPLACE INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,predecessor_activation_id,source_json,binding_json,state_digest,state_bytes,owner_user_id,completion_json,accounted_bytes,retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor,retired_at_ms,retired_boundary_json)
+         VALUES (?,?,?,?,?,?,?,'{}',?,?,NULL,'owner','{}',128,1,?,?,2,'{}')`,
+      ).run(
+        namespace,
+        retiredId,
+        fromBound.workspaceId,
+        fromBound.mainVersionId,
+        fromBound.objectId,
+        fromBound.lineageClaimId,
+        predecessor,
+        JSON.stringify(fromBound),
+        fromBound.lineageClaimId,
+        fromBound.restoreFenceGeneration,
+        cursor,
+      );
+      db.prepare(
+        `INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,predecessor_activation_id,source_json,binding_json,state_digest,state_bytes,owner_user_id,completion_json,accounted_bytes)
+         VALUES (?,?,?,?,?,?,?,'{}',?,?,?,'owner','{}',128)`,
+      ).run(
+        namespace,
+        nextId,
+        toBound.workspaceId,
+        toBound.mainVersionId,
+        toBound.objectId,
+        toBound.lineageClaimId,
+        retiredId,
+        JSON.stringify(toBound),
+        toBound.lineageClaimId,
+        Buffer.from([0, 0]),
+      );
+      db.prepare(
+        "UPDATE sync_relay_live_documents SET current_path=? WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=?",
+      ).run(toPath, toBound.workspaceId, toBound.objectId, toBound.lineageClaimId);
+      db.prepare(
+        `UPDATE sync_relay_object_moments SET path=?
+         WHERE workspace_id=? AND object_id=? AND relay_seq=(
+           SELECT baseline_moment_relay_seq FROM sync_relay_live_documents
+           WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=?
+         )`,
+      ).run(
+        toPath,
+        toBound.workspaceId,
+        toBound.objectId,
+        toBound.workspaceId,
+        toBound.objectId,
+        toBound.lineageClaimId,
+      );
+      f.storage.appendLogBatch({
+        workspaceId: toBound.workspaceId,
+        originId: "owner-rename",
+        ops: [
+          {
+            originSeq: seq,
+            opKind: "moment.append",
+            recordedAtMs: 20 + seq,
+            payloadJson: stableJsonStringify({
+              momentId: `moment-move-${seq}`,
+              objectId: toBound.objectId,
+              versionId: "main",
+              path: toPath,
+              operation: "rename",
+              payloadBeforePath: fromPath,
+              payloadAfterPath: toPath,
+              payloadBeforeContentKind: "text",
+              payloadBeforeBlobSha256: first.markdownSha,
+              payloadAfterBlobSha256: first.markdownSha,
+              payloadAfterByteLength: 1,
+              payloadAfterContentKind: "text",
+              recordedAtMs: 20 + seq,
+            }),
+          },
+        ],
+      });
+    };
+    const commitAt = (
+      id: string,
+      path: string,
+      previous: number,
+      before: string,
+      originSeq: number,
+      update?: Uint8Array,
+    ) => {
+      const captured = f.capture(update ?? f.update("title", id), id, {
+        kind: "owner",
+        userId: "owner",
+      });
+      const movedBinding = captured.metadata.binding;
+      expect(movedBinding.currentPath).toBe(path);
+      const accepted = f.storage.commitLiveUpdateJournal({
+        ...captured,
+        trustedAccount: { accountId: "owner", name: "Owner" },
+        metadata: {
+          ...captured.metadata,
+          authorContext: {
+            kind: "account",
+            accountId: "owner",
+            agent: { agentId: "trip", agentName: "Trip", onBehalfOf: "owner", depth: 2 },
+          },
+        },
+      });
+      expect(accepted.result).toMatchObject({ kind: "accepted" });
+      const receipt = accepted.admitted!.metadata.accepted.receipt;
+      const bytes = encodeStateAsUpdate(f.doc);
+      const stateSha = hash(bytes);
+      const projected = normalize({
+        document: f.input.evidence.document,
+        currentPath: path,
+        checkpoint: bytes,
+      });
+      if (projected.kind !== "accepted") throw new Error(JSON.stringify(projected));
+      const markdown = new TextEncoder().encode(projected.evidence.projectedMarkdown);
+      const markdownSha = hash(markdown);
+      for (const [sha, content] of [
+        [stateSha, bytes],
+        [markdownSha, markdown],
+      ] as const) {
+        f.storage.putBlob({ workspaceId: "workspace", sha256: sha, content, createdAtMs: 1 });
+      }
+      const jRow = f.raw
+        .prepare("SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?")
+        .get(receipt.journalCursor)!;
+      const pRow = f.raw
+        .prepare("SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?")
+        .get(previous)!;
+      const acceptedEventCount =
+        Number(jRow.accepted_event_count) - Number(pRow.accepted_event_count);
+      const record = {
+        settlementId: "",
+        relayDatabaseNamespace: namespace,
+        binding: movedBinding,
+        hostCoordinate: {
+          hostId: "host",
+          hostEpoch: 1,
+          instanceId: "instance",
+          connectionId: "connection",
+        },
+        previousCursor: previous,
+        terminalCursor: receipt.journalCursor,
+        previousYdocSequence: 0,
+        localYdocSequence: 1,
+        applicationCount: acceptedEventCount,
+        nativeIntervalDigest: hash(`native-interval-${id}`),
+        acceptedEventCount,
+        acceptedIntervalDigest: hash(
+          JSON.stringify([
+            "live-settlement-accepted-interval-v1",
+            [
+              namespace,
+              movedBinding.workspaceId,
+              movedBinding.mainVersionId,
+              movedBinding.objectId,
+              movedBinding.lineageClaimId,
+            ],
+            [Number(pRow.accepted_event_count), previous, String(pRow.accepted_evidence_digest)],
+            [
+              Number(jRow.accepted_event_count),
+              receipt.journalCursor,
+              String(jRow.accepted_evidence_digest),
+            ],
+          ]),
+        ),
+        momentId: id,
+        markdownDigest: markdownSha,
+        sourceStateVectorDigest: hash(encodeStateAsUpdate(f.doc)),
+        acceptedStateBlobSha256: stateSha,
+        recordedAtMs: 1,
+        restoreOperationId: null,
+      };
+      record.settlementId = nativeSettlementId(record);
+      const payload = {
+        momentId: id,
+        objectId: movedBinding.objectId,
+        versionId: "main",
+        path,
+        operation: "write",
+        payloadBeforePath: path,
+        payloadAfterPath: path,
+        payloadBeforeContentKind: "text",
+        payloadBeforeBlobSha256: before,
+        payloadAfterBlobSha256: markdownSha,
+        payloadAfterByteLength: markdown.length,
+        payloadAfterContentKind: "text",
+        recordedAtMs: 1,
+        settlementReference: {
+          formatVersion: 1,
+          recordDigest: settlementRecordDigest(record),
+          record,
+        },
+      };
+      return {
+        receipt,
+        markdownSha,
+        op: {
+          originSeq,
+          opKind: "moment.append",
+          recordedAtMs: 1,
+          payloadJson: stableJsonStringify(payload),
+        },
+      };
+    };
+
+    retireAndMove("act-1", originalPath, first.receipt.journalCursor, null, "act-2", movedPath, 0);
+    f.doc.clientID = 8654321;
+    const neutral = commitAt(
+      "neutral-moved",
+      movedPath,
+      first.receipt.journalCursor,
+      first.markdownSha,
+      1,
+      f.update("title", "first"),
+    );
+    expect(neutral.markdownSha).toBe(first.markdownSha);
+    if (finalPath !== movedPath) {
+      retireAndMove(
+        "act-2",
+        movedPath,
+        neutral.receipt.journalCursor,
+        "act-1",
+        "act-3",
+        finalPath,
+        1,
+      );
+    }
+    f.doc.clientID = 8654322;
+    const next = commitAt(
+      "visible-after-gap",
+      finalPath,
+      neutral.receipt.journalCursor,
+      first.markdownSha,
+      1,
+    );
+    await prepare(f, [next.op]);
+    expect(append(f, [next.op]).settlementRefusals).toBeUndefined();
+    expect(refusedChecks()).toEqual([]);
+  } finally {
+    f.close();
+  }
+});

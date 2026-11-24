@@ -342,8 +342,18 @@ function prepareBindingBase(storage: StorageContext, p: Prepared, budget: Restor
     budget,
   );
   require(metadata, "base-metadata");
-  require(metadata.accepted.binding.restoreFenceGeneration === p.binding.restoreFenceGeneration &&
-    !isDeepStrictEqual(metadata.accepted.binding, p.binding), "base-binding-change");
+  require(metadata.accepted.binding.restoreFenceGeneration ===
+    p.binding.restoreFenceGeneration, "base-binding-change");
+  if (isDeepStrictEqual(metadata.accepted.binding, p.binding)) {
+    const prior = storage.db
+      .prepare(
+        `SELECT terminal_cursor FROM ${SETTLEMENT_BINDINGS} WHERE ${where} ORDER BY terminal_cursor DESC LIMIT 1`,
+      )
+      .get(...documentParams(p.binding));
+    require(prior &&
+      integer(prior.terminal_cursor, "published-terminal-cursor") <
+        p.previous, "base-binding-change");
+  }
   p.baseBindingJson = stableJsonStringify(metadata.accepted.binding);
 }
 function ownerSavedSince(
@@ -392,14 +402,14 @@ function requirePublicationPredecessor(
   // the relay's own Markdown at both ends, compared with itself.
   const cut = storage.db
     .prepare(
-      `SELECT j.relay_database_namespace,j.current_path,j.selector_paths_json,j.restore_fence_generation,c.markdown_sha256,
+      `SELECT j.relay_database_namespace,j.restore_fence_generation,c.markdown_sha256,
       (SELECT prior.markdown_sha256 FROM ${SETTLEMENT_CUTS} prior WHERE prior.journal_cursor=?) AS prior_markdown,
       EXISTS(SELECT 1 FROM sync_relay_live_update_journal gap
         WHERE gap.workspace_id=j.workspace_id AND gap.main_version_id=j.main_version_id
           AND gap.object_id=j.object_id AND gap.lineage_claim_id=j.lineage_claim_id
           AND gap.journal_cursor>? AND gap.journal_cursor<=j.journal_cursor
-          AND (gap.relay_database_namespace<>? OR gap.current_path<>? OR json(gap.selector_paths_json)<>json(?)
-            OR gap.restore_fence_generation<>? OR gap.restore_operation_id IS NOT NULL)) AS changed_binding
+          AND (gap.relay_database_namespace<>? OR gap.restore_fence_generation<>?
+            OR gap.restore_operation_id IS NOT NULL)) AS changed_binding
       FROM sync_relay_live_update_journal j JOIN ${SETTLEMENT_CUTS} c USING(journal_cursor)
       WHERE j.workspace_id=? AND j.main_version_id=? AND j.object_id=? AND j.lineage_claim_id=? AND j.journal_cursor=?`,
     )
@@ -407,8 +417,6 @@ function requirePublicationPredecessor(
       prior.terminal,
       prior.terminal,
       p.namespace,
-      b.currentPath,
-      JSON.stringify(b.selectorPaths),
       b.restoreFenceGeneration,
       ...documentParams(b),
       p.previous,
@@ -416,9 +424,7 @@ function requirePublicationPredecessor(
   require(cut &&
     !cut.changed_binding &&
     cut.relay_database_namespace === p.namespace &&
-    cut.current_path === b.currentPath &&
     cut.restore_fence_generation === b.restoreFenceGeneration &&
-    isDeepStrictEqual(JSON.parse(String(cut.selector_paths_json)), b.selectorPaths) &&
     cut.prior_markdown != null &&
     cut.markdown_sha256 === cut.prior_markdown, "predecessor-unchanged-gap");
 }
@@ -462,6 +468,15 @@ function anchor(storage: StorageContext, p: Prepared, budget?: RestoreHistoryBud
     selectorPaths: JSON.parse(String(base.selector_paths_json)),
     restoreFenceGeneration: base.restore_fence_generation,
   }) === p.baseBindingJson, "base-binding");
+  if (p.baseBindingJson === stableJsonStringify(p.binding)) {
+    require(prior, "base-binding-change");
+    requirePublicationPredecessor(storage, p, {
+      terminal: integer(prior.terminal_cursor, "published-terminal-cursor"),
+      markdown: String(prior.markdown_sha256),
+      namespace: String(prior.namespace),
+      settled: { originId: String(prior.origin_id), originSeq: Number(prior.origin_seq) },
+    });
+  }
 }
 type ProvedSettlement = Omit<Prepared, "before" | "pushMovedFile"> & {
   events: ReturnType<typeof readAcceptedHistoryInterval>;

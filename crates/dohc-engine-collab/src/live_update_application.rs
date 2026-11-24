@@ -82,6 +82,7 @@ pub use settled_base::{
     released_capture, ReleasedCapture, SettledBaseEvidence, RELEASED_CAPTURE_PROOF_BYTES,
 };
 mod settlement;
+pub use adoption::renamed_from as paths_renamed_from_in;
 pub use bootstrap::{
     bootstrap_committed, BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck,
 };

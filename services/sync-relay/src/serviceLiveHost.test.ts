@@ -2915,6 +2915,11 @@ it("activates a retired activation's successor after Resume, which admits edits 
   o.stop();
   await o.depart();
   await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  o.f.storage.releaseServiceHostEnrollment({
+    workspaceId: "workspace",
+    objectId: o.document.objectId,
+    nowMs: 34,
+  });
   o.engine.capture = {
     ...o.engine.capture,
     activationId: SUCCESSOR,
@@ -2971,6 +2976,81 @@ it("activates a retired activation's successor after Resume, which admits edits 
     expect.any(AbortSignal),
   );
   expect(o.acceptEdit("after")).toMatchObject({ journalCursor: tip.journalCursor + 1 });
+});
+
+it("rebinds a retired moved document on Resume and accepts journal edits at its new path", async () => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const tip = o.tip();
+  const movedPath = "docs/renamed.md";
+  o.stop();
+  await o.depart();
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  o.f.storage.releaseServiceHostEnrollment({
+    workspaceId: "workspace",
+    objectId: o.document.objectId,
+    nowMs: 34,
+  });
+
+  o.raw
+    .prepare(
+      `INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+       VALUES (?,?,99,'moment-moved','main',?,?,'text',1,35)`,
+    )
+    .run("workspace", o.document.objectId, movedPath, "b".repeat(64));
+  o.raw
+    .prepare("UPDATE sync_relay_current_files SET path=? WHERE workspace_id=? AND path=?")
+    .run(movedPath, "workspace", o.sibling.path);
+  o.raw
+    .prepare(
+      `INSERT OR IGNORE INTO sync_relay_live_document_ordinary_bases(workspace_id,main_version_id,object_id,lineage_claim_id,base_relay_seq,base_origin_id,base_origin_seq,replication_epoch,stream_identity,current_path,projected_sha256,projected_byte_length,accounted_bytes)
+       VALUES (?,'main',?,?,1,'origin-1',0,'epoch-1','stream-1',?,?,1,128)`,
+    )
+    .run(
+      "workspace",
+      o.document.objectId,
+      o.document.lineageClaimId,
+      o.sibling.path,
+      "b".repeat(64),
+    );
+
+  o.engine.capture = {
+    ...o.engine.capture,
+    activationId: SUCCESSOR,
+    source: {
+      ...o.engine.capture.source,
+      predecessorActivationId: ACTIVATION,
+      currentPath: movedPath,
+    },
+  };
+  o.engine.adoption = { activationId: SUCCESSOR, throughCursor: null };
+
+  const resumed = o.f.storage.ensureOwnedLiveDocument({
+    intent: "owner-resume",
+    workspaceId: "workspace",
+    ownerUserId: "owner",
+    path: movedPath,
+    nowMs: 40,
+    guard() {},
+  });
+  expect(resumed.path).toBe(movedPath);
+
+  await o.host.update({
+    workspaces: [o.workspace],
+    documents: [{ ...o.sibling, path: movedPath }],
+    ...stay,
+  });
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const resolved = o.f.storage.resolveCurrentLiveDocumentBinding({
+    document: o.document,
+    actor: { kind: "owner", userId: "owner" },
+  });
+  expect(resolved.kind).toBe("current");
+  if (resolved.kind === "current") {
+    expect(resolved.binding.currentPath).toBe(movedPath);
+    expect(resolved.binding.selectorPaths).toEqual([movedPath]);
+  }
+  expect(o.acceptEdit("after-move")).toMatchObject({ journalCursor: tip.journalCursor + 1 });
 });
 
 // Proves: a session host may still hold the copy it had at Stop, ready but

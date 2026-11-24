@@ -1837,3 +1837,220 @@ it("fails a start 10 minutes after the start the record holds, also across a rel
     restarted.close();
   }
 });
+
+it("rebinds a stopped, drained, moved enrollment on Resume by new or old path with exact usage accounting", async () => {
+  for (const resumePath of ["docs/moved-to-a-much-longer-name.md", binding.currentPath] as const) {
+    const f = await fixture();
+    const targetPath = "docs/moved-to-a-much-longer-name.md";
+    const first = f.enroll();
+    const currentUsage = () =>
+      Number(
+        f.raw
+          .prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id=?")
+          .get(scope.workspaceId)!.usage_bytes,
+      );
+    const moveTo = (path: string, seq = 2) => {
+      f.raw
+        .prepare(
+          `INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+           VALUES (?,?,?,?,'main',?,?,'text',1,20)`,
+        )
+        .run(scope.workspaceId, first.objectId, seq, `moment-moved-${seq}`, path, "b".repeat(64));
+      f.raw
+        .prepare("UPDATE sync_relay_current_files SET path=? WHERE workspace_id=? AND path=?")
+        .run(path, scope.workspaceId, binding.currentPath);
+    };
+    const ordinaryBasisCharge = (path: string) =>
+      Buffer.byteLength(
+        JSON.stringify([
+          scope.workspaceId,
+          "main",
+          first.objectId,
+          document.lineageClaimId,
+          1,
+          "origin-1",
+          0,
+          "epoch",
+          "stream",
+          path,
+          "b".repeat(64),
+          1,
+        ]),
+      );
+    f.raw
+      .prepare(
+        `INSERT INTO sync_relay_live_document_ordinary_bases(workspace_id,main_version_id,object_id,lineage_claim_id,base_relay_seq,base_origin_id,base_origin_seq,replication_epoch,stream_identity,current_path,projected_sha256,projected_byte_length,accounted_bytes)
+         VALUES (?,'main',?,?,1,'origin-1',0,'epoch','stream',?,?,1,?)`,
+      )
+      .run(
+        scope.workspaceId,
+        first.objectId,
+        document.lineageClaimId,
+        binding.currentPath,
+        "b".repeat(64),
+        ordinaryBasisCharge(binding.currentPath),
+      );
+    f.storage.setServiceHostEnrollmentEnabled({
+      ...f.input,
+      enabled: false,
+      retire: true,
+      nowMs: 20,
+    });
+    moveTo(targetPath);
+
+    expect(
+      f.storage.canResumeMovedServiceHostEnrollment(
+        f.storage.readServiceHostEnrollmentByObjectId(scope.workspaceId, first.objectId)!,
+        targetPath,
+      ),
+    ).toBe(false);
+    expect(() => f.resume({ path: resumePath, nowMs: 30 })).toThrow("still finishing Stop");
+
+    f.release();
+    const drained = f.storage.readServiceHostEnrollmentByObjectId(
+      scope.workspaceId,
+      first.objectId,
+    )!;
+    expect(f.storage.canResumeMovedServiceHostEnrollment(drained, targetPath)).toBe(true);
+    expect(
+      refusal(() =>
+        f.storage.ensureOwnedLiveDocument({
+          intent: "owner-open",
+          workspaceId: scope.workspaceId,
+          ownerUserId: "owner-1",
+          path: targetPath,
+          nowMs: 30,
+          guard() {},
+        }),
+      ),
+    ).toBe("document-unavailable");
+    expect(() => f.enroll({ path: targetPath, nowMs: 30 })).toThrow("moved");
+
+    const usageBefore = currentUsage();
+    const resumed = f.resume({ path: resumePath, nowMs: 30 });
+    expect(resumed).toMatchObject({
+      objectId: first.objectId,
+      path: targetPath,
+      enabled: true,
+      retired: false,
+      ownerStop: null,
+      note: expect.objectContaining({ state: "starting" }),
+    });
+    expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toBeNull();
+    expect(
+      f.raw
+        .prepare(
+          "SELECT current_path FROM sync_relay_live_documents WHERE workspace_id=? AND object_id=? AND lineage_state='current'",
+        )
+        .get(scope.workspaceId, first.objectId),
+    ).toEqual({ current_path: targetPath });
+    expect(
+      f.raw
+        .prepare(
+          "SELECT current_path,accounted_bytes FROM sync_relay_live_document_ordinary_bases WHERE workspace_id=? AND object_id=?",
+        )
+        .get(scope.workspaceId, first.objectId),
+    ).toEqual({
+      current_path: targetPath,
+      accounted_bytes: ordinaryBasisCharge(targetPath),
+    });
+    const pathDelta =
+      Buffer.byteLength(JSON.stringify(targetPath)) -
+      Buffer.byteLength(JSON.stringify(binding.currentPath));
+    expect(currentUsage() - usageBefore).toBe(pathDelta * 3);
+
+    let changedOnRetry = true;
+    const retried = f.storage.ensureOwnedLiveDocument({
+      intent: "owner-resume",
+      workspaceId: scope.workspaceId,
+      ownerUserId: "owner-1",
+      path: targetPath,
+      nowMs: 35,
+      guard() {},
+      changed: (value) => {
+        changedOnRetry = value;
+      },
+    });
+    expect(changedOnRetry).toBe(false);
+    expect(retried.path).toBe(targetPath);
+  }
+});
+
+it("refuses moving a stopped enrollment onto an occupied, non-richdoc, or unbacked path", async () => {
+  const f = await fixture();
+  const first = f.enroll();
+  f.stop();
+  f.release();
+  f.seed(scope.workspaceId, "other-object", "docs/taken.md", "other-share");
+  f.enroll({ path: "docs/taken.md", shareId: "other-share" });
+
+  f.raw
+    .prepare(
+      `INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+       VALUES (?,?,2,'moment-bin','main','docs/data.csv',?,'text',1,20)`,
+    )
+    .run(scope.workspaceId, first.objectId, "b".repeat(64));
+  const drained = f.storage.readServiceHostEnrollmentByObjectId(scope.workspaceId, first.objectId)!;
+  expect(f.storage.canResumeMovedServiceHostEnrollment(drained, "docs/data.csv")).toBe(false);
+  expect(() => f.resume({ path: binding.currentPath, nowMs: 30 })).toThrow("moved");
+
+  f.raw
+    .prepare(
+      `INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+       VALUES (?,?,3,'moment-md','main','docs/no-basis.md',?,'text',1,21)`,
+    )
+    .run(scope.workspaceId, first.objectId, "b".repeat(64));
+  expect(f.storage.canResumeMovedServiceHostEnrollment(drained, "docs/no-basis.md")).toBe(false);
+  expect(() => f.resume({ path: "docs/no-basis.md", nowMs: 30 })).toThrow("moved");
+});
+
+it("charges only the path delta when resuming a moved member-opened enrollment", async () => {
+  const f = await fixture();
+  addMember(f);
+  const targetPath = "docs/moved-member-note.md";
+  const opened = memberOpen(f);
+  f.raw
+    .prepare(
+      `INSERT INTO sync_relay_live_document_ordinary_bases(workspace_id,main_version_id,object_id,lineage_claim_id,base_relay_seq,base_origin_id,base_origin_seq,replication_epoch,stream_identity,current_path,projected_sha256,projected_byte_length,accounted_bytes)
+       VALUES (?,'main',?,?,1,'origin-1',0,'epoch','stream',?,?,1,128)`,
+    )
+    .run(
+      scope.workspaceId,
+      opened.objectId,
+      document.lineageClaimId,
+      binding.currentPath,
+      "b".repeat(64),
+    );
+  f.storage.setServiceHostEnrollmentEnabled({
+    ...f.input,
+    enabled: false,
+    retire: true,
+    nowMs: 35,
+  });
+  f.release();
+  f.raw
+    .prepare(
+      `INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+       VALUES (?,?,2,'moment-member-moved','main',?,?,'text',1,40)`,
+    )
+    .run(scope.workspaceId, opened.objectId, targetPath, "b".repeat(64));
+  f.raw
+    .prepare("UPDATE sync_relay_current_files SET path=? WHERE workspace_id=? AND path=?")
+    .run(targetPath, scope.workspaceId, binding.currentPath);
+  const usageBefore = Number(
+    f.raw
+      .prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id=?")
+      .get(scope.workspaceId)!.usage_bytes,
+  );
+  const resumed = f.resume({ path: targetPath, nowMs: 45 });
+  expect(resumed).toMatchObject({ path: targetPath, shareId: null, enabled: true, retired: false });
+  const pathDelta =
+    Buffer.byteLength(JSON.stringify(targetPath)) -
+    Buffer.byteLength(JSON.stringify(binding.currentPath));
+  const usageAfter = Number(
+    f.raw
+      .prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id=?")
+      .get(scope.workspaceId)!.usage_bytes,
+  );
+  expect(usageAfter - usageBefore).toBe(pathDelta * 3);
+});

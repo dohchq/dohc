@@ -135,6 +135,23 @@ pub(super) fn read(
     namespace: &str,
     binding: &LiveObjectBinding,
 ) -> Result<OriginRecord, SyncError> {
+    read_with(conn, namespace, binding, false)
+}
+
+pub(super) fn read_for_settlement(
+    conn: &Connection,
+    namespace: &str,
+    binding: &LiveObjectBinding,
+) -> Result<OriginRecord, SyncError> {
+    read_with(conn, namespace, binding, true)
+}
+
+fn read_with(
+    conn: &Connection,
+    namespace: &str,
+    binding: &LiveObjectBinding,
+    allow_moved_owner: bool,
+) -> Result<OriginRecord, SyncError> {
     let p = scope(namespace, binding);
     let bootstrap:Option<(String,String,String,i64)>=conn.query_row(&format!("SELECT json_object('bootstrapId',bootstrap_id,'bootstrapMomentId',bootstrap_moment_id,'baselineMomentRelaySequence',baseline_moment_relay_sequence,'baselineRegisteredAtMs',baseline_registered_at_ms,'baselineDigest',baseline_digest,'baselineByteLength',baseline_byte_length,'projectedMarkdownDigest',projected_markdown_digest,'projectedMarkdownByteLength',projected_markdown_byte_length),binding_json,host_coordinate_json,local_ydoc_sequence FROM live_device_bootstraps WHERE {SCOPE}"),p,|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(SyncError::corrupt)?;
     let (source, stored_binding) = if let Some((source, binding, host, sequence)) = bootstrap {
@@ -157,7 +174,16 @@ pub(super) fn read(
     };
     let stored: LiveObjectBinding =
         serde_json::from_str(&stored_binding).map_err(SyncError::corrupt)?;
-    if stored != *binding {
+    let moved_owner_ok = allow_moved_owner
+        && matches!(source, OriginRecord::Owner { .. })
+        && stored.validate_canonical().is_ok()
+        && stored.workspace_id == binding.workspace_id
+        && stored.main_version_id == binding.main_version_id
+        && stored.object_id == binding.object_id
+        && stored.lineage_claim_id == binding.lineage_claim_id
+        && stored.restore_fence_generation == binding.restore_fence_generation
+        && stored.current_path != binding.current_path;
+    if stored != *binding && !moved_owner_ok {
         return Err(invalid("historical origin binding differs"));
     }
     Ok(source)

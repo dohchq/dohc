@@ -828,6 +828,10 @@ export interface SyncRelayStorage {
     objectId: string;
     path: string;
   }): boolean;
+  canResumeMovedServiceHostEnrollment(
+    enrollment: import("./serviceHostEnrollment").ServiceHostEnrollment,
+    targetPath: string,
+  ): boolean;
   /** Stores blob bytes the service host uploaded, with its proof of holding them. */
   putServiceHostBlob(input: {
     workspaceId: string;

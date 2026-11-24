@@ -9,6 +9,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -2191,8 +2192,12 @@ async function openSelfHostProof(name: string) {
         doc.destroy();
       }
     };
-    const route = async (method: "GET" | "POST" | "DELETE", body?: Record<string, unknown>) => {
-      const response = await fetch(`${relayUrl}/sync/workspace/live-host`, {
+    const route = async (
+      method: "GET" | "POST" | "DELETE",
+      body?: Record<string, unknown>,
+      query = "",
+    ) => {
+      const response = await fetch(`${relayUrl}/sync/workspace/live-host${query}`, {
         method,
         headers: {
           authorization: `Bearer ${bearer}`,
@@ -2227,6 +2232,18 @@ async function openSelfHostProof(name: string) {
       reports,
       ownerDocument,
       ownerEdit: first.edit,
+      ownerRename: async (fromPath: string, toPath: string) => {
+        const hold = await rpc("capture.hold", {});
+        mkdirSync(dirname(join(ownerRoot, toPath)), { recursive: true });
+        renameSync(join(ownerRoot, fromPath), join(ownerRoot, toPath));
+        await rpc(
+          "versionedText.rename",
+          { versionId: mainVersionId, fromPath, toPath, origin: "api", captureHoldId: hold.holdId },
+          randomUUID(),
+        );
+        await rpc("capture.release", { holdId: hold.holdId });
+        await push();
+      },
       objectId,
       ownerUserId: ownerUser.id,
       route,
@@ -4664,4 +4681,110 @@ it(
       };
     }),
   120000,
+);
+
+it(
+  "resumes a stopped, renamed live note directly at its new path for owner and collaborator edits",
+  () =>
+    withSelfHostProof("self-host-resume-moved-note", async (proof) => {
+      await vi.waitFor(
+        async () => expect(await proof.documents()).toEqual([proof.ready("docs/a.md")]),
+        { timeout: 30000 },
+      );
+      const beforeStop = await proof.liveEdit("beforeStop", "live");
+      await vi.waitFor(
+        () =>
+          expect(proof.settlement()).toEqual({
+            applied: beforeStop.journalCursor,
+            settled: beforeStop.journalCursor,
+          }),
+        { timeout: 30000 },
+      );
+
+      expect(await proof.route("DELETE", { path: "docs/a.md", retire: true })).toMatchObject({
+        status: 200,
+        body: { ok: true, path: "docs/a.md", objectId: proof.objectId, status: "retired" },
+      });
+      await vi.waitFor(
+        () => {
+          expect(proof.activations()[0]).toMatchObject({ retired: 1 });
+          expect(
+            proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")?.hostDrainedAtMs,
+          ).not.toBeNull();
+        },
+        { timeout: 30000 },
+      );
+
+      await proof.ownerRename("docs/a.md", "docs/b.md");
+      await vi.waitFor(
+        async () => {
+          const { body } = await proof.route("GET", undefined, "?retired=1");
+          expect(body.documents).toContainEqual(
+            expect.objectContaining({
+              path: "docs/a.md",
+              movedTo: "docs/b.md",
+              actions: ["resume"],
+            }),
+          );
+        },
+        { timeout: 30000 },
+      );
+
+      expect(await proof.route("POST", { path: "docs/b.md" })).toMatchObject({
+        status: 202,
+        body: {
+          ok: true,
+          path: "docs/b.md",
+          objectId: proof.objectId,
+          status: "preparing",
+          changed: true,
+        },
+      });
+      await vi.waitFor(
+        async () => expect(await proof.documents()).toEqual([proof.ready("docs/b.md")]),
+        { timeout: 30000 },
+      );
+      const movedActivation = proof.activation("docs/b.md")!;
+      expect(movedActivation.binding.currentPath).toBe("docs/b.md");
+      expect(movedActivation.binding.selectorPaths).toEqual(["docs/b.md"]);
+
+      const ownerAfter = await proof.liveEdit("afterMoveOwner", "live");
+      const collabAfter = await proof.liveEdit(
+        "afterMoveCollaborator",
+        "named",
+        undefined,
+        "collaborator",
+      );
+      await vi.waitFor(
+        () =>
+          expect(proof.settlement()).toEqual({
+            applied: collabAfter.journalCursor,
+            settled: collabAfter.journalCursor,
+          }),
+        { timeout: 30000 },
+      );
+      await vi.waitFor(
+        () => {
+          const text = readFileSync(join(proof.store, "docs/b.md"), "utf8");
+          expect(text).toContain("beforeActivation: ordinary-owner");
+          expect(text).toContain("beforeStop: live");
+          expect(text).toContain("afterMoveOwner: live");
+          expect(text).toContain("afterMoveCollaborator: named");
+        },
+        { timeout: 15000 },
+      );
+
+      await proof.stopSupervisor();
+      await proof.startSupervisor();
+      await vi.waitFor(
+        async () => expect(await proof.documents()).toEqual([proof.ready("docs/b.md")]),
+        { timeout: 30000 },
+      );
+      return {
+        beforeStop: beforeStop.journalCursor,
+        ownerAfter: ownerAfter.journalCursor,
+        collabAfter: collabAfter.journalCursor,
+      };
+    }),
+  180000,
 );

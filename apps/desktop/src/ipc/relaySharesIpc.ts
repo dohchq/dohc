@@ -389,7 +389,9 @@ export function createOwnerLiveDocumentActions<
       ];
       return (
         rows.find((row) =>
-          "objectId" in match ? row.objectId === match.objectId : row.path === match.path,
+          "objectId" in match
+            ? row.objectId === match.objectId
+            : row.path === match.path || row.movedTo === match.path,
         ) ?? null
       );
     } catch {
@@ -809,7 +811,7 @@ export function createOwnerLiveDocumentActions<
             .object({
               ok: z.literal(true),
               objectId: OwnerLiveDocument.shape.objectId,
-              path: z.literal(input.path),
+              path: OwnerLiveDocument.shape.path,
               status: z.enum(["ready", "preparing", "unavailable"]),
             })
             .parse(result);
@@ -945,7 +947,7 @@ export function createOwnerLiveDocumentActions<
           (row) => row.reason === "live-document-without-lineage",
         );
         const large = await Promise.all(
-          notStarted.map((row) => tooLarge(operation.workspace, row.path)),
+          notStarted.map((row) => tooLarge(operation.workspace, row.movedTo ?? row.path)),
         );
         session.assertCurrent();
         notStarted.forEach((row, index) => {
@@ -958,7 +960,7 @@ export function createOwnerLiveDocumentActions<
             (stop) => stop.document.objectId === row.objectId,
           )?.deferred;
           const startable =
-            !row.movedTo &&
+            (!row.movedTo || row.canResume) &&
             row.reason !== "session-host-diverged" &&
             row.reason !== "conflict-parent-withheld" &&
             row.reason !== "live-document-too-large";
