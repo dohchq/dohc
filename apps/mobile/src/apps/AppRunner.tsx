@@ -12,7 +12,8 @@ import type { RunningApp } from "./appStore";
 import { offerLink } from "./offerLink";
 
 // The running app, full screen in its own web view. Native Back closes it, and the
-// screen leaves whenever the runner ends the app. While it runs, the workspace's apps are read again every CHECK_MS
+// screen leaves whenever the runner ends the app. When its web process dies, the runner stops it, and its review says so
+// (AppReview.tsx). While it runs, the workspace's apps are read again every CHECK_MS
 // and on each return to the foreground, so a revoke on another phone or a withdrawn publication closes it within that
 // time; the server has already ended the app's access.
 //
@@ -57,16 +58,29 @@ export function AppRunScreen() {
           key={running.key}
           app={running}
           serverOrigin={origin}
-          onEnd={() => runner.end()}
+          onEnd={() => runner.stop()}
         />
       ) : running ? (
-        <AppView key={running.key} app={running} serverOrigin={origin} />
+        <AppView
+          key={running.key}
+          app={running}
+          serverOrigin={origin}
+          onStopped={() => runner.stop()}
+        />
       ) : null}
     </View>
   );
 }
 
-function AppView({ app, serverOrigin }: { app: RunningApp; serverOrigin: string }) {
+function AppView({
+  app,
+  serverOrigin,
+  onStopped,
+}: {
+  app: RunningApp;
+  serverOrigin: string;
+  onStopped(): void;
+}) {
   const [allows] = useState(() => createNavigationRule(app.action));
   return (
     <WebView
@@ -88,6 +102,7 @@ function AppView({ app, serverOrigin }: { app: RunningApp; serverOrigin: string 
         if (url) offerLink(url);
       }}
       onFileDownload={ignore}
+      onContentProcessDidTerminate={onStopped}
       mediaCapturePermissionGrantType="deny"
       allowsLinkPreview={false}
       allowsPictureInPictureMediaPlayback={false}

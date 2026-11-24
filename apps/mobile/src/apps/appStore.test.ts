@@ -100,6 +100,16 @@ describe("a launch", () => {
     expect(runner.state()).toBeNull();
   });
 
+  it("remembers an app whose web process died until the next launch", async () => {
+    const { server, runner, apps } = await running();
+    runner.stop();
+    expect(runner.state()).toBeNull();
+    expect(runner.stopped()).toMatchObject({ publicationId: A, workspaceId: "ws-1" });
+    answerLaunch(server);
+    expect(await apps.open(app, still)).toBe(true);
+    expect(runner.stopped()).toBeNull();
+  });
+
   it("opens nothing in a build that can't run apps", async () => {
     const { server, runner, apps } = setup({ canOpen: false });
     answerLaunch(server);

@@ -2,7 +2,7 @@ import { appWords } from "@dohc/interface-words/apps";
 import type { ServerProblemKind } from "@dohc/interface-words/account";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { ChevronRight, FileCode, ShieldCheck, ShieldQuestion } from "lucide-react-native";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useAccount } from "../account/AccountProvider";
 import { Button } from "../account/Button";
@@ -15,7 +15,7 @@ import { phoneWrites } from "../server/phoneWrites";
 import { useTheme } from "../theme";
 import { HoldRow, ScreenFailure } from "../workspace/ListStates";
 import { useProblemText } from "../workspace/useView";
-import type { WorkspaceApps } from "./appStore";
+import type { AppRunner, WorkspaceApps } from "./appStore";
 import { canOpenApps } from "./canOpenApps";
 
 // An app's review, from Home: its version, who published it, what it can reach, its declared source, and Approve, Open
@@ -27,9 +27,11 @@ const publishedOn = (ms: number) =>
   new Date(ms).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 export function AppReviewScreen() {
   const { id } = useLocalSearchParams<{ id?: string }>();
-  const { apps } = useAccount();
+  const { apps, runner } = useAccount();
   if (!apps || !id) return <ScreenFailure text={appWords.reviewFailed} />;
-  return <Review key={`${apps.workspaceId}:${id}`} apps={apps} publicationId={id} />;
+  return (
+    <Review key={`${apps.workspaceId}:${id}`} apps={apps} runner={runner} publicationId={id} />
+  );
 }
 
 type Loaded<T> = { readonly value: T | null; readonly problem: ServerProblemKind | null };
@@ -52,7 +54,15 @@ function useLatest<T>(apps: WorkspaceApps, read: () => Promise<T>) {
   return { state, load };
 }
 
-function Review({ apps, publicationId }: { apps: WorkspaceApps; publicationId: string }) {
+function Review({
+  apps,
+  runner,
+  publicationId,
+}: {
+  apps: WorkspaceApps;
+  runner: AppRunner;
+  publicationId: string;
+}) {
   const theme = useTheme();
   const router = useRouter();
   const problemText = useProblemText();
@@ -101,6 +111,12 @@ function Review({ apps, publicationId }: { apps: WorkspaceApps; publicationId: s
     act(appWords.openFailed, async (app) => {
       if (await apps.open({ ...app, name }, leaving.signal)) router.push("/app-run");
     });
+  // This app's web process died while it ran: the runner's screen has left, and Try again opens it again.
+  const stopped = useSyncExternalStore(runner.subscribe, runner.stopped);
+  useEffect(() => {
+    if (stopped?.publicationId === publicationId && stopped.workspaceId === apps.workspaceId)
+      setFailure({ text: appWords.stopped, retry: () => void open() });
+  }, [stopped]);
   const revoke = async () => {
     if (
       await confirm({
