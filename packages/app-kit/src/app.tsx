@@ -37,13 +37,14 @@ export interface UploadReply {
 
 export interface FileReply {
   readonly file: UploadedFileMeta;
-  readonly bytesBase64: string;
+  readonly bytes: ArrayBuffer;
+  blob(): Blob;
 }
 
 export interface FileUploadInput {
   readonly name: string;
   readonly contentType: string;
-  readonly bytesBase64: string;
+  readonly bytes: ArrayBuffer | Uint8Array;
 }
 
 export type AttemptRequest =
@@ -65,8 +66,8 @@ export class AppBackendError extends Error {
   readonly status: BackendStatus;
   readonly refusal?: BackendRefusal;
 
-  constructor(status: BackendStatus, refusal?: BackendRefusal) {
-    super(refusal?.message ?? `Request failed (${status}).`);
+  constructor(status: BackendStatus, refusal?: BackendRefusal, message?: string) {
+    super(message ?? refusal?.message ?? `Request failed (${status}).`);
     this.name = "AppBackendError";
     this.status = status;
     this.refusal = refusal;
@@ -196,16 +197,46 @@ function safeFileName(name: string, contentType: string): string {
   return "upload.bin";
 }
 
-async function normalizeUpload(file: File | FileUploadInput): Promise<FileUploadInput> {
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+
+async function normalizeUpload(
+  file: File | FileUploadInput,
+): Promise<{ name: string; contentType: string; bytes: ArrayBuffer }> {
   if (typeof File !== "undefined" && file instanceof File) {
+    if (file.size < 1)
+      throw new AppBackendError(400, undefined, "Attachment upload cannot be empty.");
+    if (file.size > MAX_UPLOAD_BYTES) {
+      throw new AppBackendError(
+        413,
+        undefined,
+        `Attachment upload exceeded its limit of ${MAX_UPLOAD_BYTES} bytes. It used ${file.size} bytes.`,
+      );
+    }
     const contentType = file.type || "application/octet-stream";
     return {
       name: safeFileName(file.name, contentType),
       contentType,
-      bytesBase64: encodeBase64(new Uint8Array(await file.arrayBuffer())),
+      bytes: await file.arrayBuffer(),
     };
   }
-  return file as FileUploadInput;
+  const input = file as FileUploadInput;
+  const raw = input.bytes;
+  const copy =
+    raw instanceof Uint8Array
+      ? raw.slice().buffer
+      : raw instanceof ArrayBuffer
+        ? raw.slice(0)
+        : null;
+  if (!copy || copy.byteLength < 1)
+    throw new AppBackendError(400, undefined, "Attachment upload cannot be empty.");
+  if (copy.byteLength > MAX_UPLOAD_BYTES) {
+    throw new AppBackendError(
+      413,
+      undefined,
+      `Attachment upload exceeded its limit of ${MAX_UPLOAD_BYTES} bytes. It used ${copy.byteLength} bytes.`,
+    );
+  }
+  return { name: input.name, contentType: input.contentType, bytes: copy };
 }
 
 export function mutationKey(kind: string): string {
@@ -245,6 +276,7 @@ installHostChannelCapture();
 
 type Pending = {
   message: Record<string, unknown>;
+  transfer?: Transferable[];
   timeoutMs: number;
   check(value: unknown): boolean;
   resolve(value: unknown): void;
@@ -297,7 +329,8 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
         }
       }, item.timeoutMs);
       try {
-        port.postMessage(item.message);
+        if (item.transfer?.length) port.postMessage(item.message, item.transfer);
+        else port.postMessage(item.message);
       } catch {
         sent.delete(id);
         inFlight -= 1;
@@ -357,6 +390,7 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
     message: Record<string, unknown>,
     timeoutMs: number,
     check: (value: unknown) => boolean,
+    transfer?: Transferable[],
   ): Promise<unknown> =>
     new Promise((resolve, reject) => {
       if (closed) {
@@ -365,6 +399,7 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
       }
       const item: Pending = {
         message: { id: crypto.randomUUID(), ...message },
+        ...(transfer?.length ? { transfer } : {}),
         timeoutMs,
         check,
         resolve,
@@ -429,20 +464,31 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
             idempotencyKey,
             name: payload.name,
             contentType: payload.contentType,
-            bytesBase64: payload.bytesBase64,
+            bytes: payload.bytes,
           },
           transferTimeoutMs,
           (value) =>
             isRecord(value) && isFileMeta(value.file) && typeof value.replayed === "boolean",
+          [payload.bytes],
         ) as Promise<UploadReply>;
       },
-      file(fileId: string, operation: string, input: unknown = {}): Promise<FileReply> {
-        return send(
+      async file(fileId: string, operation: string, input: unknown = {}): Promise<FileReply> {
+        const raw = (await send(
           { op: "backend.file", ...scope, fileId, operation, input },
           transferTimeoutMs,
           (value) =>
-            isRecord(value) && isFileMeta(value.file) && typeof value.bytesBase64 === "string",
-        ) as Promise<FileReply>;
+            isRecord(value) &&
+            isFileMeta(value.file) &&
+            value.bytes instanceof ArrayBuffer &&
+            value.bytes.byteLength === value.file.byteLength,
+        )) as { file: UploadedFileMeta; bytes: ArrayBuffer };
+        return {
+          file: raw.file,
+          bytes: raw.bytes,
+          blob() {
+            return new Blob([raw.bytes], { type: raw.file.contentType });
+          },
+        };
       },
       attempt(operation: string, request: AttemptRequest): Promise<AttemptResult> {
         return send(

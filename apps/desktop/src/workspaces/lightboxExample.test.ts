@@ -131,7 +131,7 @@ it("stages the Lightbox studio and client portal, and a portal can read a photo 
     idempotencyKey: "photo",
     name: "IMG_2041.jpg",
     contentType: "image/jpeg",
-    bytesBase64: jpeg.toString("base64"),
+    bytes: Uint8Array.from(jpeg),
   })) as { file: { fileId: string } };
   const asset = await call<{ id: string; published: boolean }>(studio, "uploadAsset", {
     shootId: positano.id,
@@ -150,7 +150,7 @@ it("stages the Lightbox studio and client portal, and a portal can read a photo 
     });
   const portalInput = { code: positano.accessCode, assetId: asset.id };
   expect(await read(studio, "studioFileAccess", { assetId: asset.id })).toMatchObject({
-    bytesBase64: jpeg.toString("base64"),
+    bytes: Uint8Array.from(jpeg),
   });
   await expect(read(portal, "assetFileAccess", portalInput)).rejects.toThrow(
     "isn't in the gallery",
@@ -161,7 +161,7 @@ it("stages the Lightbox studio and client portal, and a portal can read a photo 
 
   await call(studio, "publishAsset", { assetIds: [asset.id], published: true });
   expect(await read(portal, "assetFileAccess", portalInput)).toMatchObject({
-    bytesBase64: jpeg.toString("base64"),
+    bytes: Uint8Array.from(jpeg),
   });
 
   const gallery = await call<{ assets: { id: string }[] }>(portal, "listPublishedAssets", {

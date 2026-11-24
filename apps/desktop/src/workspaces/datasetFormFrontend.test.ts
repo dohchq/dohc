@@ -397,24 +397,21 @@ describe("dataset form frontend", () => {
   });
 
   it("uploads once, retries the same upload after uncertainty, then submits its file ID", async () => {
-    vi.stubGlobal(
-      "FileReader",
-      class {
-        result = "data:application/pdf;base64,JVBERg==";
-        onload?: () => void;
-        readAsDataURL() {
-          this.onload?.();
-        }
-      },
-    );
+    const fileWithBuffer = (bytes: Uint8Array, name: string, type: string) =>
+      Object.assign(new File([bytes.slice().buffer], name, { type }), {
+        arrayBuffer: async () => bytes.slice().buffer,
+      });
     const app = mount([field("receipt", "attachment", { required: true })]);
     await app.connect();
     Object.defineProperty(document.querySelector("input")!, "files", {
-      value: [new File(["%PDF"], "receipt.pdf", { type: "application/pdf" })],
+      value: [fileWithBuffer(new Uint8Array([37, 80, 68, 70]), "receipt.pdf", "application/pdf")],
     });
     await app.submit();
     await Promise.resolve();
-    expect(app.requests[0]).toMatchObject({ op: "backend.upload", bytesBase64: "JVBERg==" });
+    expect(app.requests[0]).toMatchObject({ op: "backend.upload" });
+    expect(new Uint8Array((app.requests[0] as unknown as { bytes: ArrayBuffer }).bytes)).toEqual(
+      new Uint8Array([37, 80, 68, 70]),
+    );
     await vi.advanceTimersByTimeAsync(30000);
     await app.submit();
     expect(app.requests[1]!.idempotencyKey).toBe(app.requests[0]!.idempotencyKey);
@@ -432,20 +429,14 @@ describe("dataset form frontend", () => {
   });
 
   it("allows replacing a refused upload before any create attempt", async () => {
-    vi.stubGlobal(
-      "FileReader",
-      class {
-        result = "data:application/pdf;base64,JVBERg==";
-        onload?: () => void;
-        readAsDataURL() {
-          this.onload?.();
-        }
-      },
-    );
     const app = mount([field("receipt", "attachment")]);
     await app.connect();
     Object.defineProperty(document.querySelector("input")!, "files", {
-      value: [new File(["%PDF"], "receipt.pdf", { type: "application/pdf" })],
+      value: [
+        Object.assign(new File(["%PDF"], "receipt.pdf", { type: "application/pdf" }), {
+          arrayBuffer: async () => new Uint8Array([37, 80, 68, 70]).buffer,
+        }),
+      ],
     });
     await app.submit();
     await Promise.resolve();
@@ -460,7 +451,7 @@ describe("dataset form frontend", () => {
     const input = document.querySelector("input")!;
     Object.defineProperty(input, "files", {
       configurable: true,
-      value: [{ size: 5 * 1024 * 1024 + 1 }],
+      value: [{ size: 20 * 1024 * 1024 + 1 }],
     });
     await app.submit();
     expect(app.requests).toHaveLength(0);

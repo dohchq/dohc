@@ -5,8 +5,10 @@ import {
   type AppPublicationCandidate,
 } from "@dohc/security-contract/app-publication";
 import {
+  assertAppBackendUploadBytes,
+  parseAppBackendFile,
   parseAppBackendInvokeRequest,
-  parseAppBackendUploadRequest,
+  parseAppBackendUploadMeta,
 } from "@dohc/security-contract/app-backend";
 import { parseDatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 import type { ApprovalAgent } from "@dohc/security-contract/approval-provenance";
@@ -414,7 +416,17 @@ export function createServerDatasetApps(options: {
         );
       }
       if (action === "upload") {
-        const { authorityRevision, ...upload } = parseAppBackendUploadRequest(raw);
+        if (
+          !raw ||
+          typeof raw !== "object" ||
+          Array.isArray(raw) ||
+          !("bytes" in raw) ||
+          !(raw.bytes instanceof Uint8Array)
+        )
+          throw new Error("Invalid app upload.");
+        const { bytes, ...meta } = raw as Record<string, unknown> & { bytes: Uint8Array };
+        assertAppBackendUploadBytes(bytes.byteLength);
+        const { authorityRevision, ...upload } = parseAppBackendUploadMeta(meta);
         if (
           !selectDatasetCapability(
             current(publicationId, authorityRevision).capabilities,
@@ -422,7 +434,13 @@ export function createServerDatasetApps(options: {
           ).operations.some((candidate) => !candidate.readOnly)
         )
           throw new Error("This app cannot upload files.");
-        return send(publicationId, authorityRevision, "upload", upload, signal);
+        return send(
+          publicationId,
+          authorityRevision,
+          "upload",
+          { ...upload, bytesBase64: Buffer.from(bytes).toString("base64") },
+          signal,
+        );
       }
       const { authorityRevision, ...input } = parseAppBackendInvokeRequest(raw);
       const cap = selectDatasetCapability(
@@ -519,7 +537,22 @@ export function createServerDatasetApps(options: {
           ...(input.dataset === undefined ? {} : { dataset: input.dataset }),
         },
         signal,
-      );
+      ).then((reply) => {
+        if (
+          !reply ||
+          typeof reply !== "object" ||
+          Array.isArray(reply) ||
+          !("file" in reply) ||
+          !("bytesBase64" in reply) ||
+          typeof reply.bytesBase64 !== "string"
+        )
+          throw new Error("Invalid Collection file response.");
+        const file = parseAppBackendFile(reply.file);
+        const bytes = Buffer.from(reply.bytesBase64, "base64");
+        if (bytes.byteLength !== file.byteLength)
+          throw new Error("Invalid Collection file response.");
+        return { file, bytes };
+      });
     },
   };
 }

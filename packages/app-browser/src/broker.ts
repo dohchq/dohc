@@ -159,15 +159,24 @@ export function attachAppCollectionBroker(
         emit({ kind: "rejected", reason, status, op, ...opMeta });
       };
     if (ids.has(id)) return rejectLocal("duplicate_id", 429);
+    const maxFileBytes = 20 * 1024 * 1024;
+    const upload = body.op === "backend.upload",
+      backend = typeof body.op === "string" && body.op.startsWith("backend.");
+    if (upload) {
+      if (!(body.bytes instanceof ArrayBuffer)) return rejectLocal("invalid_keys", 400);
+      if (body.bytes.byteLength > maxFileBytes) return rejectLocal("payload_too_large", 413);
+      if (body.bytes.byteLength < 1) return rejectLocal("invalid_keys", 400);
+    }
     let encoded: string;
     try {
-      encoded = JSON.stringify(body);
+      const checkTarget = upload
+        ? Object.fromEntries(Object.entries(body).filter(([key]) => key !== "bytes"))
+        : body;
+      encoded = JSON.stringify(checkTarget);
     } catch {
       return rejectLocal("unserializable", 400);
     }
-    const upload = body.op === "backend.upload",
-      backend = typeof body.op === "string" && body.op.startsWith("backend.");
-    const requestBytes = upload ? 8 * 1024 * 1024 : backend ? 128 * 1024 : 16_384;
+    const requestBytes = upload ? 4096 : backend ? 128 * 1024 : 16_384;
     if (new TextEncoder().encode(encoded).byteLength > requestBytes)
       return rejectLocal("payload_too_large", 413);
     const keys = Object.keys(body).sort().join();
@@ -192,8 +201,8 @@ export function attachAppCollectionBroker(
               ? ["id,op,operation,request", "dataset,id,op,operation,request"].includes(keys)
               : body.op === "backend.upload"
                 ? [
-                    "bytesBase64,contentType,id,idempotencyKey,name,op",
-                    "bytesBase64,contentType,dataset,id,idempotencyKey,name,op",
+                    "bytes,contentType,id,idempotencyKey,name,op",
+                    "bytes,contentType,dataset,id,idempotencyKey,name,op",
                   ].includes(keys)
                 : body.op === "backend.file"
                   ? [
@@ -249,11 +258,36 @@ export function attachAppCollectionBroker(
       }
       const chunks: Uint8Array[] = [];
       let size = 0;
-      const responseBytes = refusal
-        ? 8192
-        : upload || body.op === "backend.file"
-          ? 8 * 1024 * 1024
-          : 1024 * 1024;
+      const binaryFile = !refusal && body.op === "backend.file";
+      const responseBytes = refusal ? 8192 : binaryFile ? maxFileBytes : 1024 * 1024;
+      let fileMeta: Record<string, unknown> | undefined;
+      if (binaryFile) {
+        const mime = response.headers.get("content-type")?.split(";", 1)[0];
+        const rawMeta = response.headers.get("x-dohc-app-file");
+        if (mime !== "application/octet-stream" || !rawMeta || rawMeta.length > 4096) {
+          await response.body?.cancel().catch(() => {});
+          reject(503);
+          return finish(503, false);
+        }
+        const parsedMeta: unknown = JSON.parse(decodeURIComponent(rawMeta));
+        if (
+          !record(parsedMeta) ||
+          Object.keys(parsedMeta).sort().join() !== "byteLength,contentType,fileId,name,sha256" ||
+          typeof parsedMeta.fileId !== "string" ||
+          typeof parsedMeta.name !== "string" ||
+          typeof parsedMeta.contentType !== "string" ||
+          typeof parsedMeta.sha256 !== "string" ||
+          typeof parsedMeta.byteLength !== "number" ||
+          !Number.isSafeInteger(parsedMeta.byteLength) ||
+          parsedMeta.byteLength < 1 ||
+          parsedMeta.byteLength > maxFileBytes
+        ) {
+          await response.body?.cancel().catch(() => {});
+          reject(503);
+          return finish(503, false);
+        }
+        fileMeta = parsedMeta;
+      }
       try {
         while (true) {
           const item = await reader.read();
@@ -271,6 +305,18 @@ export function attachAppCollectionBroker(
       for (const chunk of chunks) {
         bytes.set(chunk, offset);
         offset += chunk.byteLength;
+      }
+      if (binaryFile) {
+        if (!fileMeta || size !== fileMeta.byteLength) {
+          reject(503);
+          return finish(503, false);
+        }
+        if (!closed)
+          channel.port1.postMessage(
+            { id, ok: true, value: { file: fileMeta, bytes: bytes.buffer } },
+            [bytes.buffer],
+          );
+        return finish(200, true);
       }
       const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
       if (refusal) {

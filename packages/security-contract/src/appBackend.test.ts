@@ -181,9 +181,21 @@ describe("staged file wire contract", () => {
     },
   );
 
-  it("rejects oversized bytes before decoding them", () => {
+  it("rejects oversized bytes with limit, unit, and actual usage before decoding them", () => {
+    expect(APP_BACKEND_UPLOAD_BYTES).toBe(20 * 1024 * 1024);
     const bytesBase64 = Buffer.alloc(APP_BACKEND_UPLOAD_BYTES + 1).toString("base64");
-    expect(() => parseAppBackendUploadRequest({ ...upload(), bytesBase64 })).toThrow();
+    expect(() => parseAppBackendUploadRequest({ ...upload(), bytesBase64 })).toThrow(
+      /20971520 bytes.*bytes/,
+    );
+    expect(() =>
+      parseAppBackendFile({
+        fileId: "file_0123456789abcdef",
+        name: "huge.pdf",
+        contentType: "application/pdf",
+        byteLength: APP_BACKEND_UPLOAD_BYTES + 1,
+        sha256: "a".repeat(64),
+      }),
+    ).toThrow(/20971520 bytes.*20971521 bytes/);
   });
 
   it.each([

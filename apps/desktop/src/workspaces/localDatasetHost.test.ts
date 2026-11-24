@@ -980,7 +980,7 @@ describe("local dataset owner adapter", () => {
     for (const bytesBase64 of [
       "broken",
       Buffer.from("wrong signature").toString("base64"),
-      Buffer.alloc(5 * 1024 * 1024 + 1).toString("base64"),
+      Buffer.alloc(20 * 1024 * 1024 + 1).toString("base64"),
     ]) {
       await expect(host.upload({ ...input, bytesBase64 })).rejects.toThrow();
     }

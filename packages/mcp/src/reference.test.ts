@@ -184,11 +184,27 @@ describe("CLI, MCP, and app channel reference", () => {
         },
       },
     });
+    const fileMeta = {
+      fileId: "file_0123456789abcdef",
+      name: "receipt.pdf",
+      contentType: "application/pdf",
+      byteLength: 4,
+      sha256: "a".repeat(64),
+    };
     const lifetime = new AbortController();
     attachAppCollectionBroker(
       frame as unknown as HTMLIFrameElement,
       async (body) => {
         forwarded.push(body);
+        if ((body as { op?: string }).op === "backend.file") {
+          return new Response(new Uint8Array([37, 80, 68, 70]), {
+            status: 200,
+            headers: {
+              "content-type": "application/octet-stream",
+              "x-dohc-app-file": encodeURIComponent(JSON.stringify(fileMeta)),
+            },
+          });
+        }
         return Response.json({});
       },
       lifetime.signal,
@@ -196,11 +212,34 @@ describe("CLI, MCP, and app channel reference", () => {
     frame.dispatchEvent(new Event("load"));
     try {
       for (const [index, { example }] of APP_CHANNEL_REQUESTS.entries()) {
-        const body = { id: `request-${index}`, ...example };
+        const bytes = example.bytes instanceof ArrayBuffer ? example.bytes.slice(0) : undefined;
+        const body = { id: `request-${index}`, ...example, ...(bytes ? { bytes } : {}) };
         const reply = once(port!, "message");
-        port!.postMessage(body);
-        expect((await reply)[0], String(example.op)).toEqual({ id: body.id, ok: true, value: {} });
-        expect(forwarded.at(-1)).toEqual(body);
+        port!.postMessage(body, bytes ? [bytes] : []);
+        const received = (await reply)[0] as { id: string; ok: boolean; value?: unknown };
+        if (example.op === "backend.file") {
+          expect(received.id).toBe(body.id);
+          expect(received.ok).toBe(true);
+          const value = received.value as { file: unknown; bytes: ArrayBuffer };
+          expect(value.file).toEqual(fileMeta);
+          expect(Array.from(new Uint8Array(value.bytes))).toEqual([37, 80, 68, 70]);
+        } else {
+          expect(received, String(example.op)).toEqual({ id: body.id, ok: true, value: {} });
+        }
+        if (example.op === "backend.upload") {
+          expect(forwarded.at(-1)).toMatchObject({
+            id: body.id,
+            op: "backend.upload",
+            name: example.name,
+            contentType: example.contentType,
+            idempotencyKey: example.idempotencyKey,
+          });
+          expect(
+            Array.from(new Uint8Array((forwarded.at(-1) as { bytes: ArrayBuffer }).bytes)),
+          ).toEqual([37, 80, 68, 70]);
+        } else {
+          expect(forwarded.at(-1)).toEqual(body);
+        }
       }
     } finally {
       lifetime.abort();

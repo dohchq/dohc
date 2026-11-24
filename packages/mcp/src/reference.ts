@@ -474,10 +474,10 @@ export const APP_CHANNEL_REQUESTS: {
       op: "backend.upload",
       name: "receipt.pdf",
       contentType: "application/pdf",
-      bytesBase64: "JVBERg==",
+      bytes: new Uint8Array([37, 80, 68, 70]).buffer,
       idempotencyKey: "upload-1",
     },
-    does: "Uploads one file, at most 5 MiB, for a later operation to attach.",
+    does: "Uploads one file, at most 20 MiB, as a transferred `ArrayBuffer` for a later operation to attach.",
     returns: "`{ file, replayed }`",
   },
   {
@@ -488,7 +488,7 @@ export const APP_CHANNEL_REQUESTS: {
       input: {},
     },
     does: "Reads an uploaded file through an exposed read operation.",
-    returns: "`{ file, bytesBase64 }`",
+    returns: "`{ file, bytes }` (`bytes` is a transferred `ArrayBuffer`)",
   },
   {
     example: { op: "backend.attempt", operation: "register", request: { action: "get" } },

@@ -333,6 +333,21 @@ globalThis.unmountBrokerTest = () => root.unmount();`,
       frame,
       async (body) => {
         forwarded.push(body as Record<string, unknown>);
+        if ((body as { op?: string }).op === "backend.file") {
+          const meta = {
+            fileId: "file_0123456789abcdef",
+            name: "a.txt",
+            contentType: "text/plain",
+            byteLength: 1,
+            sha256: "a".repeat(64),
+          };
+          return new Response(new Uint8Array([97]), {
+            headers: {
+              "content-type": "application/octet-stream",
+              "x-dohc-app-file": encodeURIComponent(JSON.stringify(meta)),
+            },
+          });
+        }
         return Response.json({ ok: true });
       },
       controller.signal,
@@ -366,7 +381,7 @@ globalThis.unmountBrokerTest = () => root.unmount();`,
           dataset: "workouts",
           name: "a.txt",
           contentType: "text/plain",
-          bytesBase64: "YQ==",
+          bytes: new Uint8Array([97]).buffer,
           idempotencyKey: "k2",
         }),
       ).toEqual({ id: "req-2", ok: true, value: { ok: true } });
@@ -379,7 +394,7 @@ globalThis.unmountBrokerTest = () => root.unmount();`,
           operation: "read",
           input: {},
         }),
-      ).toEqual({ id: "req-3", ok: true, value: { ok: true } });
+      ).toMatchObject({ id: "req-3", ok: true });
       expect(
         await ask({
           id: "req-4",

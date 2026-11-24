@@ -7,14 +7,47 @@ import {
 import {
   APP_BACKEND_REQUEST_BYTES,
   APP_BACKEND_RESULT_BYTES,
+  APP_BACKEND_UPLOAD_BYTES,
   APP_BACKEND_UPLOAD_REQUEST_BYTES,
   APP_BACKEND_REFUSAL_BYTES,
+  assertAppBackendUploadBytes,
   parseAppBackendFile,
   parseAppBackendInvokeRequest,
   parseAppBackendJson,
+  parseAppBackendUploadMeta,
   parseAppBackendUploadRequest,
   parseAppBackendRefusal,
 } from "@dohc/security-contract/app-backend";
+
+async function readBoundedBytes(
+  request: Request,
+  maxBytes: number,
+  signal: AbortSignal,
+): Promise<Uint8Array> {
+  const reader = request.body?.getReader();
+  if (!reader) return new Uint8Array();
+  const parts: Uint8Array[] = [];
+  let length = 0;
+  const cancel = () => {
+    void reader.cancel().catch(() => {});
+  };
+  signal.addEventListener("abort", cancel, { once: true });
+  try {
+    while (true) {
+      signal.throwIfAborted();
+      const next = await reader.read();
+      signal.throwIfAborted();
+      if (next.done) break;
+      length += next.value.byteLength;
+      if (length > maxBytes) throw new RangeError("App upload is too large.");
+      parts.push(next.value);
+    }
+    return Buffer.concat(parts, length);
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    await reader.cancel().catch(() => {});
+  }
+}
 
 const responseHeaders = {
   "cache-control": "private, no-store",
@@ -44,10 +77,20 @@ export async function forwardAppBackend(input: {
   fetchRelay(request: Request): Promise<Response>;
 }): Promise<Response> {
   const error = input.capability ? (_status: number) => opaqueLinkRefusal() : appError;
-  if (input.request.headers.get("content-type") !== "application/json") return error(400);
+  const contentType = input.request.headers.get("content-type");
+  const isBinaryUpload = contentType === "application/octet-stream";
+  if (!isBinaryUpload && contentType !== "application/json") return error(400);
   let body: unknown;
+  let uploadBytes: Uint8Array | undefined;
   try {
-    body = await readBoundedJson(input.request, APP_BACKEND_UPLOAD_REQUEST_BYTES, input.signal);
+    if (isBinaryUpload) {
+      const rawMeta = input.request.headers.get("x-dohc-app-meta");
+      if (!rawMeta || rawMeta.length > 4096) return error(400);
+      body = JSON.parse(decodeURIComponent(rawMeta));
+      uploadBytes = await readBoundedBytes(input.request, APP_BACKEND_UPLOAD_BYTES, input.signal);
+    } else {
+      body = await readBoundedJson(input.request, APP_BACKEND_REQUEST_BYTES, input.signal);
+    }
   } catch (cause) {
     return error(cause instanceof RangeError ? 413 : 400);
   }
@@ -60,13 +103,25 @@ export async function forwardAppBackend(input: {
     return error(400);
   let action: "invoke" | "upload" | "file" | "attempt", payload: unknown;
   try {
-    if (
-      body.op !== "backend.upload" &&
-      new TextEncoder().encode(JSON.stringify(body)).byteLength > APP_BACKEND_REQUEST_BYTES
-    )
-      return error(413);
     const datasetField = Object.hasOwn(body, "dataset") ? { dataset: body.dataset } : {};
-    if (body.op === "backend.invoke") {
+    if (isBinaryUpload) {
+      if (
+        body.op !== "backend.upload" ||
+        !uploadBytes ||
+        !exact(body, ["id", "op", "idempotencyKey", "name", "contentType"], ["dataset"])
+      )
+        return error(400);
+      assertAppBackendUploadBytes(uploadBytes.byteLength);
+      action = "upload";
+      const parsedMeta = parseAppBackendUploadMeta({
+        authorityRevision: input.authorityRevision,
+        idempotencyKey: body.idempotencyKey,
+        name: body.name,
+        contentType: body.contentType,
+        ...datasetField,
+      });
+      payload = { ...parsedMeta, bytesBase64: Buffer.from(uploadBytes).toString("base64") };
+    } else if (body.op === "backend.invoke") {
       if (
         !exact(
           body,
@@ -101,24 +156,6 @@ export async function forwardAppBackend(input: {
         ...(checked.dataset === undefined ? {} : { dataset: checked.dataset }),
         ...parseDatasetAttemptRequest(body.request),
       };
-    } else if (body.op === "backend.upload") {
-      if (
-        !exact(
-          body,
-          ["id", "op", "idempotencyKey", "name", "contentType", "bytesBase64"],
-          ["dataset"],
-        )
-      )
-        return error(400);
-      action = "upload";
-      payload = parseAppBackendUploadRequest({
-        authorityRevision: input.authorityRevision,
-        idempotencyKey: body.idempotencyKey,
-        name: body.name,
-        contentType: body.contentType,
-        bytesBase64: body.bytesBase64,
-        ...datasetField,
-      });
     } else if (body.op === "backend.file") {
       if (
         !exact(body, ["id", "op", "fileId", "operation", "input"], ["dataset"]) ||
@@ -233,13 +270,16 @@ export async function forwardAppBackend(input: {
         contentType: file.contentType,
         bytesBase64: value.bytesBase64,
       });
-      const padding = checked.bytesBase64.endsWith("==")
-        ? 2
-        : checked.bytesBase64.endsWith("=")
-          ? 1
-          : 0;
-      if ((checked.bytesBase64.length / 4) * 3 - padding !== file.byteLength) return error(503);
-      result = { file, bytesBase64: checked.bytesBase64 };
+      const rawBytes = Buffer.from(checked.bytesBase64, "base64");
+      if (rawBytes.byteLength !== file.byteLength) return error(503);
+      input.signal.throwIfAborted();
+      return new Response(rawBytes, {
+        headers: {
+          ...responseHeaders,
+          "content-type": "application/octet-stream",
+          "x-dohc-app-file": encodeURIComponent(JSON.stringify(file)),
+        },
+      });
     }
     input.signal.throwIfAborted();
     return Response.json(result, { headers: responseHeaders });

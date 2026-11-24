@@ -10,10 +10,10 @@ export const APP_BACKEND_CATCH_UP_BYTES = 1024 * 1024;
  * A header, so a server without this ignores it and the copy catches up as before.
  */
 export const APP_BACKEND_CATCH_UP_HEADER = "x-dohc-copy-after";
-export const APP_BACKEND_UPLOAD_BYTES = 5 * 1024 * 1024;
+export const APP_BACKEND_UPLOAD_BYTES = 20 * 1024 * 1024;
 /** Maximum file metadata entries admitted to one operation by local and shared hosts. */
 export const APP_BACKEND_OPERATION_FILES = 32;
-export const APP_BACKEND_UPLOAD_REQUEST_BYTES = 8 * 1024 * 1024;
+export const APP_BACKEND_UPLOAD_REQUEST_BYTES = 28 * 1024 * 1024;
 export const APP_BACKEND_REFUSAL_BYTES = 8 * 1024;
 export const APP_BACKEND_JSON_MAX_DEPTH = 32;
 export const APP_BACKEND_JSON_MAX_NODES = 16_384;
@@ -70,13 +70,15 @@ export interface AppBackendInvokeRequest {
   input: AppBackendJson;
   dataset?: string;
 }
-export interface AppBackendUploadRequest {
+export interface AppBackendBinaryUploadMeta {
   authorityRevision: number;
   idempotencyKey: string;
   name: string;
   contentType: string;
-  bytesBase64: string;
   dataset?: string;
+}
+export interface AppBackendUploadRequest extends AppBackendBinaryUploadMeta {
+  bytesBase64: string;
 }
 export interface AppBackendFile {
   fileId: string;
@@ -328,6 +330,30 @@ export function parseAppBackendInvokeRequest(
   return request;
 }
 
+export function assertAppBackendUploadBytes(byteLength: number): void {
+  if (!Number.isSafeInteger(byteLength) || byteLength < 1)
+    throw new Error("Attachment upload cannot be empty.");
+  if (byteLength > APP_BACKEND_UPLOAD_BYTES)
+    throw new AppBackendLimitError(
+      appBackendLimit("Attachment upload", APP_BACKEND_UPLOAD_BYTES, byteLength, "bytes"),
+    );
+}
+
+export function parseAppBackendUploadMeta(value: unknown): AppBackendBinaryUploadMeta {
+  const row = exact(
+    value,
+    ["authorityRevision", "idempotencyKey", "name", "contentType"],
+    ["dataset"],
+  );
+  return {
+    authorityRevision: revision(row.authorityRevision),
+    idempotencyKey: idempotencyKey(row.idempotencyKey),
+    name: filename(row.name),
+    contentType: contentType(row.contentType),
+    ...(Object.hasOwn(row, "dataset") ? { dataset: datasetAlias(row.dataset) } : {}),
+  };
+}
+
 export function parseAppBackendUploadRequest(value: unknown): AppBackendUploadRequest {
   const row = exact(
     value,
@@ -335,27 +361,30 @@ export function parseAppBackendUploadRequest(value: unknown): AppBackendUploadRe
     ["dataset"],
   );
   const encoded = row.bytesBase64;
-  if (
-    typeof encoded !== "string" ||
-    !encoded.length ||
-    encoded.length > 4 * Math.ceil(APP_BACKEND_UPLOAD_BYTES / 3) ||
-    encoded.length % 4 !== 0 ||
-    !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)
-  )
+  if (typeof encoded !== "string" || !encoded.length)
+    throw new Error("Invalid app backend upload encoding.");
+  const maxEncoded = 4 * Math.ceil(APP_BACKEND_UPLOAD_BYTES / 3);
+  if (encoded.length > maxEncoded) {
+    throw new AppBackendLimitError(
+      appBackendLimit(
+        "Attachment upload",
+        APP_BACKEND_UPLOAD_BYTES,
+        Math.floor((encoded.length * 3) / 4),
+        "bytes",
+        true,
+      ),
+    );
+  }
+  if (encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded))
     throw new Error("Invalid app backend upload encoding.");
   const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
   const byteLength = (encoded.length / 4) * 3 - padding;
+  assertAppBackendUploadBytes(byteLength);
   const last = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".indexOf(
     encoded[encoded.length - padding - 1]!,
   );
-  if (
-    byteLength > APP_BACKEND_UPLOAD_BYTES ||
-    last < 0 ||
-    (padding === 2 && (last & 15) !== 0) ||
-    (padding === 1 && (last & 3) !== 0)
-  ) {
+  if (last < 0 || (padding === 2 && (last & 15) !== 0) || (padding === 1 && (last & 3) !== 0))
     throw new Error("Invalid app backend upload size or padding.");
-  }
   const request: AppBackendUploadRequest = {
     authorityRevision: revision(row.authorityRevision),
     idempotencyKey: idempotencyKey(row.idempotencyKey),
@@ -364,8 +393,11 @@ export function parseAppBackendUploadRequest(value: unknown): AppBackendUploadRe
     bytesBase64: encoded,
     ...(Object.hasOwn(row, "dataset") ? { dataset: datasetAlias(row.dataset) } : {}),
   };
-  if (bytes(JSON.stringify(request)) > APP_BACKEND_UPLOAD_REQUEST_BYTES)
-    throw new Error("App backend upload request exceeds its byte bound.");
+  const used = bytes(JSON.stringify(request));
+  if (used > APP_BACKEND_UPLOAD_REQUEST_BYTES)
+    throw new AppBackendLimitError(
+      appBackendLimit("Attachment upload request", APP_BACKEND_UPLOAD_REQUEST_BYTES, used, "bytes"),
+    );
   return request;
 }
 
@@ -385,10 +417,13 @@ export function parseAppBackendFile(value: unknown): AppBackendFile {
     !/^[A-Za-z0-9_-]{16,128}$/.test(fileId) ||
     typeof row.byteLength !== "number" ||
     !Number.isSafeInteger(row.byteLength) ||
-    row.byteLength < 1 ||
-    row.byteLength > APP_BACKEND_UPLOAD_BYTES
+    row.byteLength < 1
   )
     throw new Error("Invalid app backend file.");
+  if (row.byteLength > APP_BACKEND_UPLOAD_BYTES)
+    throw new AppBackendLimitError(
+      appBackendLimit("Attachment file", APP_BACKEND_UPLOAD_BYTES, row.byteLength, "bytes"),
+    );
   return {
     fileId,
     name: filename(row.name),

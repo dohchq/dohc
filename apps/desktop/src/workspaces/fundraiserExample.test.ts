@@ -141,7 +141,7 @@ function fakeClient(overrides: Partial<FundraiserClient> = {}): FundraiserClient
     totals: vi.fn<FundraiserClient["totals"]>(async () => []),
     receipt: vi.fn<FundraiserClient["receipt"]>(async () => ({
       file: uploaded.file,
-      bytesBase64: "iVBORw0KGgo=",
+      bytes: Uint8Array.from(Buffer.from("iVBORw0KGgo=", "base64")).buffer,
     })),
     close: vi.fn(),
     ...overrides,

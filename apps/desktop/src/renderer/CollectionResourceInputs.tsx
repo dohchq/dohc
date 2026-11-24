@@ -97,7 +97,7 @@ export function CollectionAttachmentInput(
           event.target.value = "";
           if (!selected) return;
           if (selected.size < 1 || selected.size > APP_BACKEND_UPLOAD_BYTES) {
-            setInvalid("Choose a non-empty file up to 5 MB.");
+            setInvalid("Choose a non-empty file up to 20 MiB.");
             return;
           }
           void upload({

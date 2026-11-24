@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { decodeBase64, isAppBackendError, useApp, type AppClient } from "dohc/app";
+import { isAppBackendError, useApp, type AppClient } from "dohc/app";
 
 export const UPLOAD_LIMIT_BYTES = 5 * 1024 * 1024;
 export const IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
@@ -408,9 +408,8 @@ export function acquirePhotoFileUrl(
     revokeOnRelease: false,
   };
   const task = runPacedFile(priority, () =>
-    client.file(fileId, operation, input).then(({ bytesBase64 }) => {
-      const bytes = decodeBase64(bytesBase64);
-      const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: mimeType }));
+    client.file(fileId, operation, input).then(({ bytes }) => {
+      const url = URL.createObjectURL(new Blob([bytes], { type: mimeType }));
       if (entry.revokeOnRelease && entry.refs <= 0) {
         URL.revokeObjectURL(url);
         return url;

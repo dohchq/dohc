@@ -486,8 +486,7 @@ function ReceiptPreview({ entryId, fileId }: { entryId: string; fileId: string }
     setState({ loading: true });
     try {
       const reply = await app.file(fileId, "receiptAccess", { entryId });
-      const bytes = Uint8Array.from(atob(reply.bytesBase64), (char) => char.charCodeAt(0));
-      const url = URL.createObjectURL(new Blob([bytes], { type: reply.file.contentType }));
+      const url = URL.createObjectURL(reply.blob());
       setState({ url, type: reply.file.contentType, name: reply.file.name });
     } catch (failure) {
       setState({ error: problem(failure) });
