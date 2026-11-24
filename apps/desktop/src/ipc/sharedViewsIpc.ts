@@ -220,11 +220,12 @@ export function registerSharedViewsIpcHandlers<
   const accessStatements = new Map<string, number>();
   const accessStatementsFor = (workspaceId: string) => accessStatements.get(workspaceId) ?? 0;
 
-  // True when the copy can take its level: it has the identity, or its levels
-  // list no Edit, so it sends no file changes and needs none.
+  // Truthy when the copy can take its level: "recorded" when it has the
+  // identity, "unneeded" when its levels list no Edit, so it sends no file
+  // changes and needs none. Only "recorded" proves the copy can send.
   async function recordShareViewIdentity(
     workspace: RegistryEntry & { attachmentId: symbol },
-  ): Promise<boolean> {
+  ): Promise<"recorded" | "unneeded" | false> {
     await warmCredentialCache().catch(() => undefined);
     const credentials = currentCredentials();
     if (
@@ -234,7 +235,7 @@ export function registerSharedViewsIpcHandlers<
       workspace.shareView.ended
     )
       return false;
-    if (!shareViewSendsFiles(workspace.shareView)) return true;
+    if (!shareViewSendsFiles(workspace.shareView)) return "unneeded";
     const grantedSelector = shareViewIdentitySelector({
       shareView: workspace.shareView,
       relayUrl: credentials.relayUrl,
@@ -252,25 +253,25 @@ export function registerSharedViewsIpcHandlers<
         grantedSelector,
         reach: storedShareViewReach(workspace.shareView),
       });
-    return recorded.identity !== "not-required";
+    return recorded.identity === "not-required" ? false : "recorded";
   }
 
   // A membership that can send says editing is not ready until its identity
-  // is recorded, and every write gate reads the mark. A path share's mark
-  // follows its pinned level instead.
-  async function markSendingReady(workspaceId: string, recorded: boolean): Promise<void> {
+  // is recorded, and every write gate reads the mark. Each change that first
+  // gives a membership Edit sets the mark; a recorded identity clears it. A
+  // failed or skipped record leaves it, so a copy already enrolled keeps
+  // editing while signed out. A path share's mark follows its pinned level.
+  async function markSendingReady(workspaceId: string): Promise<void> {
     const view = requireWorkspace(workspaceId).shareView;
     if (
       !view ||
       view.ended ||
       recordedShareSelector(view.grantedSelector)?.wholeWorkspace !== true ||
-      !shareViewSendsFiles(view) ||
-      (view.editingNotReady === true) !== recorded
+      view.editingNotReady !== true
     )
       return;
     const next = { ...view };
-    if (recorded) delete next.editingNotReady;
-    else next.editingNotReady = true;
+    delete next.editingNotReady;
     await setWorkspaceShareView(workspaceId, next);
     refreshNativeWorkspaceSurfaces();
     notifyRenderer({ workspaceId, summaryChanged: true });
@@ -632,7 +633,8 @@ export function registerSharedViewsIpcHandlers<
             delete pinnedAtEdit.editingNotReady;
             await setWorkspaceShareView(created.workspaceId, pinnedAtEdit);
           }
-        } else if (waitsToSend) await markSendingReady(created.workspaceId, recorded);
+        } else if (waitsToSend && recorded === "recorded")
+          await markSendingReady(created.workspaceId);
         refreshNativeWorkspaceSurfaces();
         try {
           await firstPull(created.rootPath, created.workspaceId, relay);
@@ -1031,7 +1033,7 @@ export function registerSharedViewsIpcHandlers<
           // Refresh the relay-derived chat fact for the banner's next step. It
           // does not grant desktop generic-chat writes. Keep the share identity
           // current for the separate Edit proposal lane.
-          let identityRecorded = false;
+          let identityRecorded: Awaited<ReturnType<typeof recordShareViewIdentity>> = false;
           let identityFailure: unknown;
           let editStatedForCopyBelowEdit = false;
           let saysEditingNotReady = false;
@@ -1137,13 +1139,15 @@ export function registerSharedViewsIpcHandlers<
                     ? membershipPlace(info)
                     : {}),
                 };
-                // A membership that can send keeps its mark until the identity
-                // below is recorded.
+                // A membership that can send keeps its mark until an identity
+                // is recorded. A record that found no Edit on an older read
+                // proves nothing about levels installed since.
                 if (
-                  identityRecorded ||
-                  (!membershipWaitsToSend(current.shareView, nextShareView) &&
-                    ((widenedPin?.access ?? pinnedLevel(current.shareView)) === "edit" ||
-                      (statedLevel !== undefined && statedLevel !== "edit" && !overtaken)))
+                  (identityRecorded === "recorded" ||
+                    !membershipWaitsToSend(current.shareView, nextShareView)) &&
+                  (identityRecorded ||
+                    (widenedPin?.access ?? pinnedLevel(current.shareView)) === "edit" ||
+                    (statedLevel !== undefined && statedLevel !== "edit" && !overtaken))
                 )
                   delete nextShareView.editingNotReady;
                 await setWorkspaceShareView(workspace.workspaceId, nextShareView);
@@ -1171,8 +1175,8 @@ export function registerSharedViewsIpcHandlers<
             }
             if (!identityRecorded && identityFailure === undefined) {
               try {
-                const recorded = await recordShareViewIdentity(refreshedWorkspace);
-                await markSendingReady(workspace.workspaceId, recorded);
+                if ((await recordShareViewIdentity(refreshedWorkspace)) === "recorded")
+                  await markSendingReady(workspace.workspaceId);
               } catch (error) {
                 console.error("[desktop] share view enrolment:", error);
                 identityFailure = error;
@@ -1187,7 +1191,6 @@ export function registerSharedViewsIpcHandlers<
                   currentShareView: () => operation.workspace.shareView,
                   assertCurrent: () => operation.assertCurrent(),
                 });
-                await markSendingReady(workspace.workspaceId, false);
                 refreshNativeWorkspaceSurfaces();
               }
             }
@@ -1226,10 +1229,10 @@ export function registerSharedViewsIpcHandlers<
               const recorded = await recordShareViewIdentity(currentShareViewWorkspace()).catch(
                 (error: unknown) => {
                   console.error("[desktop] share view enrolment:", error);
-                  return false;
+                  return false as const;
                 },
               );
-              await markSendingReady(workspace.workspaceId, recorded);
+              if (recorded === "recorded") await markSendingReady(workspace.workspaceId);
             };
             if (
               reachRelay &&
@@ -1304,7 +1307,14 @@ export function registerSharedViewsIpcHandlers<
             notifyPull(changedSummary);
             return RefreshSharedViewResult.parse(outcome);
           }
-          const editingNotReady = saysEditingNotReady && outcome.status !== "ended";
+          // A membership still marked is not cached either, so the next
+          // background refresh enrolls again.
+          const marked = requireWorkspace(input.workspaceId).shareView;
+          const editingNotReady =
+            (saysEditingNotReady ||
+              (recordedShareSelector(marked?.grantedSelector)?.wholeWorkspace === true &&
+                marked?.editingNotReady === true)) &&
+            outcome.status !== "ended";
           if (
             outcome.status !== "ended" &&
             !updatingAccess(input.workspaceId) &&
@@ -1593,9 +1603,10 @@ export function registerSharedViewsIpcHandlers<
                   recordedShareSelector(latest.grantedSelector)?.access === currentPin.access
                 ) {
                   const next = { ...latest, grantedSelector: raised, ...latestReach };
-                  // A raise to Edit recorded the identity. One below Edit
-                  // recorded none, so a copy that can send waits for a refresh.
-                  if (statedAccess !== "edit" && membershipWaitsToSend(latest, next))
+                  // A raise to Edit that recorded the identity can send. Any
+                  // other raise recorded none, so a copy that can send waits
+                  // for a refresh.
+                  if (ready !== "recorded" && membershipWaitsToSend(latest, next))
                     next.editingNotReady = true;
                   else delete next.editingNotReady;
                   await setWorkspaceShareView(workspace.workspaceId, next);

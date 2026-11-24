@@ -65,7 +65,15 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
     // Identity and the pinned grant must be readable before this copy can sync.
     const shareId = boundedString(raw.shareId, 1, 200);
     const recipientUserId = boundedString(raw.recipientUserId, 1, 200);
-    const level = readableShareLevel(raw.grantedSelector);
+    const pinned = readableShareLevel(raw.grantedSelector);
+    // A membership that waits to send takes View where its pin says Edit, as
+    // every write gate does (shareViewReach.ts).
+    const level =
+      pinned === "edit" &&
+      raw.editingNotReady === true &&
+      recordedShareSelector(raw.grantedSelector)?.wholeWorkspace === true
+        ? "view"
+        : pinned;
     const genericChatWritable = raw.genericChatWritable === true;
     const damaged = level === null || !shareViewIdentityIsIntact(raw);
     // Ancillary metadata normalizes FAIL-SOFT and independently: each field
