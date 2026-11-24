@@ -2159,7 +2159,13 @@ async function recordSyncedIfNeeded(workspace: RegistryEntry): Promise<void> {
 // only ever goes to the relay this machine signed in with.
 function relayShareErrorCopy(
   _status: number,
-  data: { error?: string; code?: string; sessionHost?: unknown; path?: unknown } | null,
+  data: {
+    error?: string;
+    code?: string;
+    sessionHost?: unknown;
+    path?: unknown;
+    movedTo?: unknown;
+  } | null,
 ): string {
   switch (data?.code) {
     case "host-paused":
@@ -2187,7 +2193,9 @@ function relayShareErrorCopy(
     case "ambiguous_selector":
       return "A Group is shared as it is now, not at a version. Share it without choosing a version.";
     default:
-      return data?.error ?? "dohc could not update this share. Try again.";
+      return typeof data?.movedTo === "string" && typeof data.path === "string"
+        ? `Live editing could not resume because this file moved to ${data.movedTo}. Move it back to ${data.path} to resume.`
+        : (data?.error ?? "dohc could not update this share. Try again.");
   }
 }
 

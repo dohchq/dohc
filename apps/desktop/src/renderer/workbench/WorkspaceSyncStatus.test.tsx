@@ -308,7 +308,7 @@ describe("sync status surface", () => {
   });
 
   it.each([
-    { delivery: "preparing" as const, reason: undefined, label: "Preparing live editing" },
+    { delivery: "preparing" as const, reason: undefined, label: "Starting live editing" },
     { delivery: "active" as const, reason: undefined, label: "Live editing active" },
     { delivery: "retrying" as const, reason: undefined, label: "Live editing retrying" },
     {
@@ -429,7 +429,7 @@ describe("sync status surface", () => {
 
     rerender(<WorkspaceSyncStatus syncStatus={liveDeliveryStatus("preparing")} failedSaves={0} />);
     expect(screen.getByTestId("owner-live-delivery-status").textContent).toBe(
-      "Preparing live editing",
+      "Starting live editing",
     );
     rerender(<WorkspaceSyncStatus syncStatus={liveDeliveryStatus("active")} failedSaves={0} />);
     expect(screen.getByTestId("owner-live-delivery-status").textContent).toBe(

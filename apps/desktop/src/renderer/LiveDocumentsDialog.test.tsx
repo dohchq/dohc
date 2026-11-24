@@ -427,6 +427,19 @@ describe("LiveDocumentsDialog", () => {
           reason: "session-host-refused",
           canResume: true,
         }),
+        row("docs/start-failed.md", {
+          status: "unavailable",
+          reason: "session-host-refused",
+          canResume: true,
+          record: {
+            generation: 1,
+            state: "off",
+            reason: "start-failed",
+            cause: "failing",
+            since: "2026-11-13T01:00:00.000Z",
+            changedBy: "server",
+          },
+        }),
         row("docs/unopened.md", {
           status: "unavailable",
           reason: "live-document-without-lineage",
@@ -454,6 +467,7 @@ describe("LiveDocumentsDialog", () => {
           canResume: false,
         }),
         row("docs/stopped-gone.md", { status: "retired" }),
+        row("docs/renamed.md", { status: "retired", movedTo: "docs/new name.md" }),
       ]),
     );
     render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
@@ -464,12 +478,13 @@ describe("LiveDocumentsDialog", () => {
       .map((element) => element.children[1]?.textContent);
     expect(labels).toEqual([
       "Live",
-      "Preparing",
+      "Starting",
       "Paused",
       "Paused",
       "File moved or removed",
       "Workspace changed",
       "Stopped by the server",
+      "Cannot start",
       "Not started",
       "Too large",
       "Server copy does not match",
@@ -477,6 +492,7 @@ describe("LiveDocumentsDialog", () => {
       "Cannot resume",
       "Stopped",
       "Stopped",
+      "Moved to docs/new name.md",
     ]);
     const edited =
       "The server has not applied an edit to this document. Resume live editing to try again.";
@@ -517,6 +533,7 @@ describe("LiveDocumentsDialog", () => {
     expect(actions("docs/unopened.md")).toEqual(["Resume live editing", "Stop live editing"]);
     expect(actions("docs/stopped.md")).toEqual(["Resume live editing"]);
     expect(actions("docs/stopped-gone.md")).toEqual([]);
+    expect(actions("docs/renamed.md")).toEqual([]);
   });
 
   it("makes a copy of a held file, once at a time, says what it leaves out, and offers none once it stopped", async () => {

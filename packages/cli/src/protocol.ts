@@ -9,6 +9,7 @@ import {
 } from "@dohc/workspace-contracts/operation-declaration";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import { HeldChange } from "@dohc/workspace-contracts/held-changes";
+import { LiveNoteRecord } from "@dohc/workspace-contracts/live-note";
 import {
   COLLECTION_SCHEMA_REASON_CODES,
   FIELD_VALUE_REASON_CODES,
@@ -2482,6 +2483,8 @@ const liveDocumentsResultSchema = z.discriminatedUnion("ok", [
               .strict()
               .optional(),
             canResume: z.boolean(),
+            record: LiveNoteRecord.optional(),
+            movedTo: z.string().min(1).optional(),
             stopped: z.boolean().optional(),
             deferredStop: z
               .object({ unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean() })
