@@ -97,7 +97,6 @@ export function parseServiceActivationConfig(value: unknown) {
     "targets",
     "validation",
     "maxCaptureBytes",
-    "maxActivationHistoryEntries",
     "maxEntriesPerDrain",
     "maxBytesPerDrain",
     "maxDocumentsPerPass",
@@ -128,7 +127,6 @@ export function parseServiceActivationConfig(value: unknown) {
     validateActivation: liveValidation.ordinaryActivation(validation),
     validateAdmission: liveValidation.validator(validation),
     maxCaptureBytes: positive(row.maxCaptureBytes),
-    maxActivationHistoryEntries: positive(row.maxActivationHistoryEntries),
     maxEntriesPerDrain: positive(row.maxEntriesPerDrain),
     maxBytesPerDrain: positive(row.maxBytesPerDrain),
     maxDocumentsPerPass: positive(row.maxDocumentsPerPass),
@@ -1453,7 +1451,6 @@ export class ServiceActivationDriver {
             validate: c.validateActivation,
             bounds: {
               maxCaptureBytes: c.maxCaptureBytes,
-              maxHistoryEntries: c.maxActivationHistoryEntries,
               maxBytesPerDrain: c.maxBytesPerDrain,
             },
           });

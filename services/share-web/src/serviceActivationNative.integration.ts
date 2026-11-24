@@ -609,7 +609,6 @@ it("resumes a real configured service activation after a lost native adoption re
           targets: [{ workspaceId: "workspace", path: "docs/a.md" }],
           validation: validationPolicy,
           maxCaptureBytes: 1_000_000,
-          maxActivationHistoryEntries: 8,
           maxEntriesPerDrain: 8,
           maxBytesPerDrain: 1_000_000,
           maxDocumentsPerPass: 1,
