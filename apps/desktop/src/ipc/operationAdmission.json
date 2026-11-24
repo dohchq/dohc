@@ -253,5 +253,10 @@
   "desktop:inbox-capture-files": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "inboxHandlers.currentWorkspaceOperation" } },
   "desktop:inbox-move": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:inbox-undo-archive": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
-  "desktop:inbox-undo-move": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
+  "desktop:inbox-undo-move": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:list-incoming-webhooks": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "incomingWebhooksHandlers.currentRendererSession" } },
+  "desktop:create-incoming-webhook": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "incomingWebhooksHandlers.currentRendererSession" } },
+  "desktop:update-incoming-webhook": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "incomingWebhooksHandlers.currentRendererSession" } },
+  "desktop:rotate-incoming-webhook": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "incomingWebhooksHandlers.currentRendererSession" } },
+  "desktop:delete-incoming-webhook": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "incomingWebhooksHandlers.currentRendererSession" } }
 }

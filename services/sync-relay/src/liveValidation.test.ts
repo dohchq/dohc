@@ -8,7 +8,6 @@ import {
   createValidatorFailureLog,
   LiveValidatorFailure,
 } from "./liveValidation.js";
-import { LiveRestoreTooLarge } from "./liveRestoreValidation.js";
 import { nestedEmphasis } from "./liveValidation.fixture.js";
 
 import {
@@ -129,19 +128,6 @@ it("bounds concurrent work, cancels active jobs, and closes without dangling req
   await expect(validate(input)).rejects.toThrow("closed");
 });
 
-let heapCheckpoint: Uint8Array | undefined;
-function heapExhaustionCheckpoint() {
-  if (!heapCheckpoint) {
-    const doc = markdownToYDoc("a\n\n".repeat(80_000));
-    try {
-      heapCheckpoint = encodeStateAsUpdate(doc);
-    } finally {
-      doc.destroy();
-    }
-  }
-  return heapCheckpoint;
-}
-
 // A busy activation's wait for capacity must not end on any slot's release, or a host waking on it would
 // capture again each time a live edit finished while the auxiliary slot stayed taken.
 // Proves: the wait outlasts a live edit's completion and ends only once the auxiliary child has exited, when an activation runs.
@@ -171,34 +157,6 @@ it("keeps a busy activation waiting through live edits until the auxiliary slot 
   await waiting;
   expect(await activate({ ...work, baselineBytes: input.checkpoint })).toMatchObject({
     kind: "accepted",
-  });
-}, 60_000);
-
-function restorePoint(input: ReturnType<typeof fixture>["input"], checkpoint: Uint8Array) {
-  return {
-    binding: { ...input.document, currentPath: input.currentPath },
-    checkpoint: { bytes: checkpoint },
-    events: [],
-    point: { journalCursor: 0, receiptDigest: "a".repeat(64) },
-    artifact: () => undefined,
-    assertCurrent() {},
-  };
-}
-
-it("refuses restore work whose child runs out of heap, and validates the next restore", async () => {
-  const { input } = fixture(),
-    pool = createLiveValidationExecutor(128);
-  pools.push(pool);
-  const restore = pool.restore(policy),
-    validate = pool.validator(policy);
-  const checkpoint = heapExhaustionCheckpoint();
-  await expect(restore.point(restorePoint(input, checkpoint))).rejects.toBeInstanceOf(
-    LiveRestoreTooLarge,
-  );
-  expect(validate.hasCapacity?.()).toBe(true);
-  expect(await restore.point(restorePoint(input, input.checkpoint))).toMatchObject({
-    journalCursor: 0,
-    receiptDigest: "a".repeat(64),
   });
 }, 60_000);
 

@@ -46,16 +46,8 @@ import {
   type OrdinaryActivationValidator,
 } from "../../../services/sync-relay/src/storage/ordinaryActivationValidation.js";
 import { createLiveValidationExecutor } from "../../../services/sync-relay/src/liveValidation.js";
-import {
-  requireStopRestoreOwnerOrigin,
-  type StopRestoreBasis,
-  type StopRestoreIntent,
-} from "../../../services/sync-relay/src/storage/liveRestoreOperation.js";
 import type { StorageContext } from "../../../services/sync-relay/src/storage/context.js";
-import {
-  openServiceActivationRetirement,
-  readServiceActivationRetirement,
-} from "../../../services/sync-relay/src/storage/serviceActivationRetirement.js";
+import { readServiceActivationRetirement } from "../../../services/sync-relay/src/storage/serviceActivationRetirement.js";
 import {
   allowsServiceActivation,
   type ServiceActivationAccess,
@@ -77,8 +69,6 @@ import {
 } from "../../../services/sync-relay/src/storage/hostedSettlement.js";
 import { nativeBaseRecord } from "../../../services/sync-relay/src/storage/serviceActivationPublication.js";
 import type { SqliteDb } from "../../../services/sync-relay/src/storage/types.js";
-import type { OwnerRestoreHost } from "../../../services/sync-relay/src/ownerRestoreRoutes.js";
-import { testHandler } from "../../../services/sync-relay/src/testing/index.js";
 import { preparedStop } from "../../../services/sync-relay/src/liveTickets.test-helper.js";
 import { registered, cleanupLiveDeliveryFixtures } from "./liveCommittedDeliveryTestSupport.js";
 import nativeAuthoredSettlement from "../../../services/sync-relay/src/testing/fixtures/nativeAuthoredSettlement.json";
@@ -109,7 +99,6 @@ const host = {
 };
 const actor = { kind: "owner" as const, userId: "owner" };
 const bounds = { maxCaptureBytes: 1_000_000, maxBytesPerDrain: 1_000_000 };
-const stop = { operationId: "restore", workspaceId: "workspace", ownerUserId: "owner" };
 // A `large` note is not validated here; its projections are placeholders that only a finished validation would refuse.
 function fixture(note = "Original", large = false, clientID?: number) {
   const root = mkdtempSync(join(tmpdir(), "dohc-service-activation-")),
@@ -554,70 +543,6 @@ it("preflights retained byte reads and rejects damaged bytes", async () => {
   }
 });
 
-async function ownerCapture(f: ReturnType<typeof fixture>) {
-  await f.prepare();
-  const access = f.store.pending(f.document, host),
-    delivery = f.storage.createLiveCommittedDeliveryStore(f.history, access);
-  const capture = delivery.captureOwnerCut({
-    host,
-    document: f.document,
-    actor,
-    adoptionId: f.capture.activationId,
-    expectedLocalSequence: f.capture.source.nativeHeadSequence,
-    maxBytes: 1_000_000,
-    maxEvents: 100,
-    throughCursor: 0,
-  });
-  const acknowledge = () =>
-    delivery.acknowledgeOwnerAdoption(capture, {
-      adoptionId: f.capture.activationId,
-      localYDocSequence: f.capture.source.nativeHeadSequence,
-      terminalCursor: 0,
-      adoptionReplayed: false,
-    });
-  return { capture, delivery, acknowledge };
-}
-
-it("checks the frozen service origin separately from the original baseline when guarding restore", async () => {
-  const f = fixture();
-  try {
-    const owner = await ownerCapture(f);
-    owner.acknowledge();
-    const row = f.raw.prepare("SELECT * FROM sync_relay_live_documents").get()!;
-    const origin = f.raw.prepare("SELECT origin_json FROM sync_relay_live_delivery_owners").get()!;
-    const basis: StopRestoreBasis = {
-      binding: owner.capture.binding,
-      ownerBinding: owner.capture.binding,
-      baselineDigest: f.document.lineageClaimId,
-      baselineByteLength: f.capture.baselineBytes.length,
-      projectedDigest: String(row.baseline_projected_sha256),
-      projectedLength: Number(row.baseline_projected_byte_length),
-      baselineSequence: Number(row.baseline_moment_relay_seq),
-      registeredAtMs: Number(row.registered_at_ms),
-      namespace: f.history.namespace,
-      hostMode: "service",
-      hostId: host.hostId,
-      ownerOrigin: String(origin.origin_json),
-    };
-    expect(basis.projectedDigest).not.toBe(f.capture.source.sourceDigest);
-    expect(() => requireStopRestoreOwnerOrigin(f.storage as StorageContext, basis)).not.toThrow();
-    const tampered = JSON.parse(basis.ownerOrigin!);
-    tampered.sourceMomentId = "unrelated-source";
-    expect(() =>
-      requireStopRestoreOwnerOrigin(f.storage as StorageContext, {
-        ...basis,
-        ownerOrigin: JSON.stringify(tampered),
-      }),
-    ).toThrow();
-    f.raw.exec(
-      "UPDATE sync_relay_service_activations SET source_json=json_set(source_json,'$.nativeHeadSequence',99)",
-    );
-    expect(() => requireStopRestoreOwnerOrigin(f.storage as StorageContext, basis)).toThrow();
-  } finally {
-    f.close();
-  }
-});
-
 it("requires exact seed application ACK and supports lost completion responses", async () => {
   const f = fixture();
   try {
@@ -697,24 +622,6 @@ it("requires exact seed application ACK and supports lost completion responses",
     expect(f.storage.resolveCurrentLiveDocumentBinding({ document: f.document, actor }).kind).toBe(
       "current",
     );
-    // While its activated native session is held, stopping access uses that session's verified owner transport.
-    const drain = vi
-      .spyOn(OwnerCommittedDelivery.prototype, "drain")
-      .mockResolvedValue({ kind: "done" } as never);
-    try {
-      const active = activationDriver(
-        f,
-        vi.fn(async () => f.capture),
-      );
-      expect(
-        await active.driver.activate(active.target, new AbortController().signal),
-      ).toMatchObject({ kind: "done" });
-      expect(active.driver.restoreConsumer(f.document, stop)).toBe(
-        active.driver.consumer(f.document).consumer,
-      );
-    } finally {
-      drain.mockRestore();
-    }
     f.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2");
     expect(() =>
       f.store.resume({
@@ -725,13 +632,6 @@ it("requires exact seed application ACK and supports lost completion responses",
         guard() {},
       }),
     ).toThrow();
-    f.raw.exec("UPDATE sync_relay_live_documents SET admission_state='closed'");
-    // Without that session, a restore needs its operation to name the retained adoption, and refuses without one.
-    const capture = vi.fn();
-    expect(() => activationDriver(f, capture).driver.restoreConsumer(f.document, stop)).toThrow(
-      "Service restore owner adoption is unavailable.",
-    );
-    expect(capture).not.toHaveBeenCalled();
   } finally {
     f.close();
   }
@@ -899,7 +799,7 @@ function deferred() {
   });
   return { promise, resolve };
 }
-// The relay row change advanceStopRestoreFence commits, and its exact reversal.
+// A relay row change that closes admission at the next fence generation, and its exact reversal.
 function fenceRestore(f: ReturnType<typeof fixture>, fence: number) {
   f.raw
     .prepare(
@@ -1166,61 +1066,6 @@ it.each([["a fenced", true]] as const)(
       expect(d.driver.workspaceReady("workspace")).toBe(false);
     } finally {
       vi.restoreAllMocks();
-      f.close();
-    }
-  },
-);
-
-// Proves: a restore cannot start while the document's service activation is
-// pending, before or after native adoption. Once fenced, that activation could
-// never complete, and the service restore consumer requires a completed one.
-it.each([["after", true]] as const)(
-  "refuses to start a restore while service activation is pending %s native adoption",
-  async (_when, adopted) => {
-    const f = fixture();
-    try {
-      if (adopted) (await ownerCapture(f)).acknowledge();
-      else await f.prepare();
-      f.raw.exec(
-        "INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)",
-      );
-      expect(() =>
-        f.storage.readStopRestorePlan({
-          document: f.document,
-          ownerUserId: "owner",
-          operationId: "restore",
-          shareId: "share",
-          grantId: "grant",
-          restorePointCursor: 0,
-          restorePointReceiptDigest: f.document.lineageClaimId,
-          maxOutputBytes: 1_000_000,
-        }),
-      ).toThrow("Live editing is still starting.");
-      const intent: StopRestoreIntent = {
-        deliveryKind: adopted ? "owner" : "bootstrap",
-        operationId: "restore",
-        ownerUserId: "owner",
-        document: f.document,
-        shareId: "share",
-        grantId: "grant",
-        expectedGrantGeneration: 1,
-        expectedDependentGrantIds: [],
-        expectedFence: 1,
-        restorePointCursor: 0,
-        restorePointReceiptDigest: f.document.lineageClaimId,
-      };
-      expect(() => f.storage.beginStopRestore(intent, 40)).toThrow(
-        "Live editing is still starting.",
-      );
-      expect(f.storage.getShareGrant("grant")).toMatchObject({ status: "active", generation: 1 });
-      expect(
-        f.raw
-          .prepare(
-            "SELECT admission_state,restore_fence_generation AS fence FROM sync_relay_live_documents",
-          )
-          .get(),
-      ).toEqual({ admission_state: "open", fence: 1 });
-    } finally {
       f.close();
     }
   },
@@ -2256,69 +2101,6 @@ it("keeps the hosted credential and settling scope through the release of a stop
   }
 });
 
-// Proves: a restore that advanced the generation after the obligation opened
-// carries the obligation to it, so the old key no longer completes it, and
-// defers completion at the carried key while it is unfinished. Nothing is
-// archived or refunded.
-it("defers completing a retirement while a restore that advanced its generation is unfinished", async () => {
-  const f = fixture();
-  try {
-    enroll(f);
-    await completeActivation(f);
-    const fence = generation(f);
-    f.storage.beginStopRestore(
-      {
-        deliveryKind: "owner",
-        operationId: "restore",
-        ownerUserId: "owner",
-        document: f.document,
-        shareId: "share",
-        grantId: "grant",
-        expectedGrantGeneration: 1,
-        expectedDependentGrantIds: [],
-        expectedFence: fence,
-        restorePointCursor: 0,
-        restorePointReceiptDigest: f.document.lineageClaimId,
-      },
-      20,
-    );
-    // The shared retirement path can open an obligation while a restore runs.
-    const open = (f.storage as StorageContext).tx(() =>
-      openServiceActivationRetirement(f.storage as StorageContext, f.document, 30),
-    )!;
-    expect(open.restoreFenceGeneration).toBe(fence);
-    f.storage.advanceStopRestoreFence(
-      { operationId: "restore", workspaceId: "workspace", ownerUserId: "owner" },
-      40,
-    );
-    expect(generation(f)).toBe(fence + 1);
-    const rows = () =>
-      f.raw
-        .prepare(`SELECT (SELECT usage_bytes FROM sync_relay_workspace_usage) AS usage,(SELECT count(*) FROM sync_relay_live_delivery_owners) AS owners,
-      (SELECT count(*) FROM sync_relay_live_delivery_owner_history) AS archived,(SELECT retired_at_ms FROM sync_relay_service_activations) AS retired`)
-        .get();
-    const before = rows(),
-      carried = { ...open, restoreFenceGeneration: fence + 1 };
-    expect(retirement(f.storage)).toEqual(carried);
-    const complete = (key: ReturnType<typeof keyOf>) =>
-      f.store.completeRetirement({
-        workspaceId: "workspace",
-        key,
-        boundary: ownerBoundary(f),
-        host,
-        registeredAtMs: 50,
-        nowMs: 50,
-        guard() {},
-      });
-    expect(() => complete(keyOf(open))).toThrow("Service activation retirement is unavailable.");
-    expect(complete(keyOf(carried))).toEqual({ status: "pending", reason: "restore" });
-    expect(rows()).toEqual({ ...before, owners: 1, archived: 0, retired: null });
-    expect(retirement(f.storage)).toEqual(carried);
-  } finally {
-    f.close();
-  }
-});
-
 const SUCCESSOR = `ordinary-activation-${"b".repeat(64)}`;
 // A completed activation retired at the seed its owner applied. The edit accepted after it, at F, waits for a successor.
 async function retirePredecessor(f: ReturnType<typeof fixture>) {
@@ -2767,103 +2549,6 @@ it("adopts a successor on another host than its predecessor's, funded only there
     expect(unaccounted(f)).toBe(ledger);
     expect(f.storage.registerLiveHost({ ...other, updatedAtMs: 80, guard() {} }).ok).toBe(true);
     expect(unaccounted(f)).toBe(ledger);
-  } finally {
-    f.close();
-  }
-});
-
-// Proves: a Stop restore of a service activation's lineage on a host with no
-// owner adoption there is refused before it revokes anything. Committed
-// delivery refuses that lineage's bootstrap, so the operation could not finish.
-// The owner reads why in each step, and the choices are refused the same way.
-it("refuses a bootstrap Stop restore of a service activation's lineage before it revokes the grant", async () => {
-  const f = fixture();
-  try {
-    await completeActivation(f);
-    f.raw.exec(
-      "INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)",
-    );
-    const restoreHost: OwnerRestoreHost = {
-      restoreConfigured: true,
-      prepareRestore: vi.fn(),
-      reviewRestore: vi.fn(),
-      confirmRestore: vi.fn(),
-      declineRestore: vi.fn(),
-    };
-    const handler = testHandler(f.storage, {
-      ownerRestoreHost: () => restoreHost,
-      newId: () => "restore",
-    });
-    const post = (suffix: string, body: unknown) =>
-      handler(
-        new Request(`https://relay.test/sync/workspace/live-restores${suffix}`, {
-          method: "POST",
-          headers: { authorization: "Bearer user:owner", "content-type": "application/json" },
-          body: JSON.stringify(body),
-        }),
-      );
-    const offered = await post("/options", { path: "docs/a.md" });
-    expect(offered.status).toBe(200);
-    expect((await offered.json()).grants).toMatchObject([{ grantId: "grant" }]);
-    const b = transitionHost(f, host, "device", "other-b");
-    expect(f.storage.registerLiveHost({ ...b, updatedAtMs: 50, guard() {} }).ok).toBe(true);
-    const message =
-      "Stop access isn't available for this file on this session host. Access hasn't changed. Switch back to the session host this file used before, then try again.";
-    expect(() =>
-      f.storage.readStopRestorePlan({
-        document: f.document,
-        ownerUserId: "owner",
-        operationId: "restore",
-        shareId: "share",
-        grantId: "grant",
-        restorePointCursor: 0,
-        restorePointReceiptDigest: f.document.lineageClaimId,
-        maxOutputBytes: 1_000_000,
-      }),
-    ).toThrow(message);
-    const intent: StopRestoreIntent = {
-      deliveryKind: "bootstrap",
-      operationId: "restore",
-      ownerUserId: "owner",
-      document: f.document,
-      shareId: "share",
-      grantId: "grant",
-      expectedGrantGeneration: 1,
-      expectedDependentGrantIds: [],
-      expectedFence: 1,
-      restorePointCursor: 0,
-      restorePointReceiptDigest: f.document.lineageClaimId,
-    };
-    expect(() => f.storage.beginStopRestore(intent, 60)).toThrow(message);
-    const { ownerUserId: _owner, ...publicIntent } = intent;
-    for (const [suffix, body] of [
-      ["/options", { path: "docs/a.md" }],
-      [
-        "/plan",
-        {
-          document: f.document,
-          shareId: "share",
-          grantId: "grant",
-          restorePointCursor: 0,
-          restorePointReceiptDigest: f.document.lineageClaimId,
-        },
-      ],
-      ["", { intent: publicIntent }],
-    ] as const) {
-      const refused = await post(suffix, body);
-      expect(refused.status).toBe(409);
-      expect(await refused.json()).toEqual({ ok: false, code: "conflict", error: message });
-    }
-    expect(f.storage.getShareGrant("grant")).toMatchObject({ status: "active", generation: 1 });
-    expect(f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all()).toEqual([]);
-    expect(
-      f.raw
-        .prepare(
-          "SELECT admission_state,restore_fence_generation AS fence FROM sync_relay_live_documents",
-        )
-        .get(),
-    ).toEqual({ admission_state: "open", fence: 1 });
-    expect(restoreHost.prepareRestore).not.toHaveBeenCalled();
   } finally {
     f.close();
   }

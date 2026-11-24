@@ -250,6 +250,16 @@ import {
   inboxReadOperations,
   inboxWriteOperations,
 } from "./ipc/inboxOperations";
+import {
+  IncomingWebhookCreatedResult,
+  IncomingWebhookSummary,
+  MAX_INCOMING_WEBHOOKS_PER_WORKSPACE,
+  type IncomingWebhookCreateInput,
+  type IncomingWebhookUpdateInput,
+  type IncomingWebhooksState,
+} from "@dohc/workspace-contracts/incoming-webhooks";
+import { incomingWebhooksHandlers } from "./ipc/incomingWebhooksIpc";
+import { incomingWebhooksOperations } from "./ipc/incomingWebhooksOperations";
 import { prepareMoveWorkspacePathAs } from "./workspaces/workspaceFileMoves";
 import { listInboxItems, type WorkspaceInboxHost } from "./workspaces/workspaceInbox";
 import { createShareProposalsIpc } from "./ipc/shareProposalsIpc";
@@ -388,7 +398,11 @@ import { createBackgroundLiveStart } from "./workspaces/backgroundLiveStart";
 import { createShowOnPhone } from "./workspaces/showOnPhone";
 import { holdsDeliveries } from "./workspaces/ownerLivePause";
 import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
-import { createLocalChangeAuthor, isReservedPath } from "@dohc/workspace-core";
+import {
+  createLocalChangeAuthor,
+  isReservedPath,
+  stripWindowsAliasSuffix,
+} from "@dohc/workspace-core";
 import { CreateCollectionRecordPayload } from "./ipc/bridgeContract";
 import {
   collectionRecordWrites,
@@ -6018,6 +6032,285 @@ async function workspaceSecretsState(
   return parseRelaySecretsResponse(listed.body);
 }
 
+async function resolveIncomingWebhooksRelay(workspaceId: string, requireWritable: boolean) {
+  const entry = findWorkspace(workspaceId);
+  if (entry === null || entry.shareView !== undefined) {
+    if (requireWritable) {
+      throw new Error("Incoming webhooks are available only in workspaces you own.");
+    }
+    return { kind: "none" as const };
+  }
+  if (entry.remote === undefined && entry.pausedRemote !== undefined) {
+    const message = "Sync is paused for this workspace. Resume sync to manage incoming webhooks.";
+    if (requireWritable) throw new Error(message);
+    return { kind: "unavailable" as const, message };
+  }
+  if (entry.remote === undefined) {
+    const message =
+      "Incoming webhooks require a synced workspace (dohc Drive or your self-hosted server). Turn on sync to create a webhook URL.";
+    if (requireWritable) throw new Error(message);
+    return { kind: "unavailable" as const, message };
+  }
+  let credentials: CloudSessionCredentials;
+  let credentialGeneration: number;
+  try {
+    ({ credentials, credentialGeneration } = await remoteForWorkspace(entry));
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Sign in to your server to manage this workspace's incoming webhooks.";
+    if (requireWritable) throw new Error(message);
+    return { kind: "unavailable" as const, message };
+  }
+  if (credentialCacheGeneration !== credentialGeneration) {
+    throw new Error("Your account changed while dohc accessed incoming webhooks.");
+  }
+  return {
+    kind: "connected" as const,
+    credentials,
+    credentialGeneration,
+    serverOrigin: new URL(credentials.serverUrl).origin,
+  };
+}
+
+function parseIncomingWebhooksList(body: unknown, serverOrigin: string): IncomingWebhooksState {
+  if (!body || typeof body !== "object") {
+    throw new Error("dohc could not read this workspace's incoming webhooks.");
+  }
+  const rawWebhooks = (body as { webhooks?: unknown }).webhooks;
+  const rawLimit = (body as { limit?: unknown }).limit;
+  if (!Array.isArray(rawWebhooks)) {
+    throw new Error("dohc could not read this workspace's incoming webhooks.");
+  }
+  const webhooks = rawWebhooks.map((item) => IncomingWebhookSummary.parse(item));
+  const limit =
+    typeof rawLimit === "number" && Number.isInteger(rawLimit) && rawLimit >= 1
+      ? rawLimit
+      : MAX_INCOMING_WEBHOOKS_PER_WORKSPACE;
+  return { kind: "ready", serverOrigin, webhooks, limit };
+}
+
+function relayErrorMessage(body: unknown, fallback: string): string {
+  return body && typeof (body as { error?: unknown }).error === "string"
+    ? (body as { error: string }).error
+    : fallback;
+}
+
+async function listIncomingWebhooksState(workspaceId: string): Promise<IncomingWebhooksState> {
+  const connection = await resolveIncomingWebhooksRelay(workspaceId, false);
+  if (connection.kind !== "connected") return connection;
+  const { credentials, credentialGeneration, serverOrigin } = connection;
+  const basePath = `/sync/${encodeURIComponent(workspaceId)}/webhooks`;
+  const listed = await relayShareResponseWithCredentials(credentials, basePath, {
+    method: "GET",
+    signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS),
+  })
+    .then(async (response) => ({
+      status: response.status,
+      body: await response.json().catch(() => undefined),
+    }))
+    .catch((error: unknown) => {
+      if (relayUnreachable(error)) return null;
+      throw error;
+    });
+  if (listed === null) {
+    return {
+      kind: "unavailable",
+      message: "dohc could not reach your server to load incoming webhooks.",
+    };
+  }
+  if (credentialCacheGeneration !== credentialGeneration) {
+    throw new Error("Your account changed while dohc loaded incoming webhooks.");
+  }
+  if (listed.status === 503) {
+    return {
+      kind: "unavailable",
+      message: relayErrorMessage(
+        listed.body,
+        "This server is not configured for incoming webhooks.",
+      ),
+    };
+  }
+  if (listed.status !== 200) {
+    throw new Error(
+      relayErrorMessage(listed.body, "dohc could not load this workspace's incoming webhooks."),
+    );
+  }
+  return parseIncomingWebhooksList(listed.body, serverOrigin);
+}
+
+async function createIncomingWebhookState(
+  workspaceId: string,
+  input: IncomingWebhookCreateInput,
+): Promise<IncomingWebhookCreatedResult> {
+  const connection = await resolveIncomingWebhooksRelay(workspaceId, true);
+  if (connection.kind !== "connected") {
+    throw new Error("Incoming webhooks are unavailable for this workspace.");
+  }
+  const { credentials, credentialGeneration } = connection;
+  const response = await relayShareResponseWithCredentials(
+    credentials,
+    `/sync/${encodeURIComponent(workspaceId)}/webhooks`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: input.name, collectionPath: input.collectionPath }),
+      signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS),
+    },
+  );
+  const body: unknown = await response.json().catch(() => undefined);
+  if (credentialCacheGeneration !== credentialGeneration) {
+    throw new Error("Your account changed while dohc created an incoming webhook.");
+  }
+  if (response.status !== 201) {
+    throw new Error(relayErrorMessage(body, "dohc could not create this incoming webhook."));
+  }
+  if (!body || typeof body !== "object") {
+    throw new Error("dohc could not read the new incoming webhook.");
+  }
+  const raw = body as Record<string, unknown>;
+  return IncomingWebhookCreatedResult.parse({
+    webhook: raw.webhook,
+    token: raw.token,
+    endpointUrl: raw.endpointUrl,
+    webhooks: raw.webhooks,
+    limit: raw.limit,
+  });
+}
+
+async function updateIncomingWebhookState(
+  workspaceId: string,
+  input: IncomingWebhookUpdateInput,
+): Promise<IncomingWebhooksState> {
+  const connection = await resolveIncomingWebhooksRelay(workspaceId, true);
+  if (connection.kind !== "connected") {
+    throw new Error("Incoming webhooks are unavailable for this workspace.");
+  }
+  const { credentials, credentialGeneration, serverOrigin } = connection;
+  const response = await relayShareResponseWithCredentials(
+    credentials,
+    `/sync/${encodeURIComponent(workspaceId)}/webhooks/${encodeURIComponent(input.webhookId)}`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...(input.name !== undefined ? { name: input.name } : {}),
+        ...(input.paused !== undefined ? { paused: input.paused } : {}),
+      }),
+      signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS),
+    },
+  );
+  const body: unknown = await response.json().catch(() => undefined);
+  if (credentialCacheGeneration !== credentialGeneration) {
+    throw new Error("Your account changed while dohc updated this incoming webhook.");
+  }
+  if (response.status !== 200) {
+    throw new Error(relayErrorMessage(body, "dohc could not update this incoming webhook."));
+  }
+  return parseIncomingWebhooksList(body, serverOrigin);
+}
+
+async function rotateIncomingWebhookState(
+  workspaceId: string,
+  webhookId: string,
+): Promise<IncomingWebhookCreatedResult> {
+  const connection = await resolveIncomingWebhooksRelay(workspaceId, true);
+  if (connection.kind !== "connected") {
+    throw new Error("Incoming webhooks are unavailable for this workspace.");
+  }
+  const { credentials, credentialGeneration } = connection;
+  const response = await relayShareResponseWithCredentials(
+    credentials,
+    `/sync/${encodeURIComponent(workspaceId)}/webhooks/${encodeURIComponent(webhookId)}/rotate`,
+    {
+      method: "POST",
+      signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS),
+    },
+  );
+  const body: unknown = await response.json().catch(() => undefined);
+  if (credentialCacheGeneration !== credentialGeneration) {
+    throw new Error("Your account changed while dohc rotated this incoming webhook.");
+  }
+  if (response.status !== 200) {
+    throw new Error(relayErrorMessage(body, "dohc could not rotate this incoming webhook."));
+  }
+  if (!body || typeof body !== "object") {
+    throw new Error("dohc could not read the rotated incoming webhook.");
+  }
+  const raw = body as Record<string, unknown>;
+  return IncomingWebhookCreatedResult.parse({
+    webhook: raw.webhook,
+    token: raw.token,
+    endpointUrl: raw.endpointUrl,
+    webhooks: raw.webhooks,
+    limit: raw.limit,
+  });
+}
+
+async function deleteIncomingWebhookState(
+  workspaceId: string,
+  webhookId: string,
+): Promise<IncomingWebhooksState> {
+  const connection = await resolveIncomingWebhooksRelay(workspaceId, true);
+  if (connection.kind !== "connected") {
+    throw new Error("Incoming webhooks are unavailable for this workspace.");
+  }
+  const { credentials, credentialGeneration, serverOrigin } = connection;
+  const response = await relayShareResponseWithCredentials(
+    credentials,
+    `/sync/${encodeURIComponent(workspaceId)}/webhooks/${encodeURIComponent(webhookId)}`,
+    {
+      method: "DELETE",
+      signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS),
+    },
+  );
+  const body: unknown = await response.json().catch(() => undefined);
+  if (credentialCacheGeneration !== credentialGeneration) {
+    throw new Error("Your account changed while dohc deleted this incoming webhook.");
+  }
+  if (response.status !== 200) {
+    throw new Error(relayErrorMessage(body, "dohc could not delete this incoming webhook."));
+  }
+  return parseIncomingWebhooksList(body, serverOrigin);
+}
+
+function looseSharePathKey(rawPath: string): string {
+  return rawPath
+    .trim()
+    .replaceAll("\\", "/")
+    .replace(/^\/+|\/+$/gu, "")
+    .normalize("NFC")
+    .split("/")
+    .map((segment) =>
+      stripWindowsAliasSuffix(segment).toLowerCase().toUpperCase().toLowerCase().normalize("NFC"),
+    )
+    .join("/");
+}
+
+async function incomingWebhookShareStops(
+  workspaceId: string,
+  sharePaths: readonly string[],
+): Promise<Array<{ webhookId: string; name: string; collectionPath: string }>> {
+  const state = await listIncomingWebhooksState(workspaceId).catch(() => null);
+  if (!state || state.kind !== "ready") return [];
+  const normalizedPaths = sharePaths.map((path) => looseSharePathKey(path));
+  return state.webhooks
+    .filter((webhook) => {
+      if (webhook.paused) return false;
+      const hookPath = looseSharePathKey(webhook.collectionPath);
+      return normalizedPaths.some(
+        (path) =>
+          path === "" || path === "." || hookPath === path || hookPath.startsWith(`${path}/`),
+      );
+    })
+    .map((webhook) => ({
+      webhookId: webhook.webhookId,
+      name: webhook.name,
+      collectionPath: webhook.collectionPath,
+    }));
+}
+
 function workspaceHttpApprovalsFor(workspaceId: string): CollectionHttpApprovalGate {
   const readApprovedDigests = async (): Promise<ReadonlySet<string> | null> => {
     const entry = findWorkspace(workspaceId);
@@ -11020,6 +11313,7 @@ function registerIpcHandlers(): void {
       pressWindows.watch(workspaceId, claimId, sender, null),
     serverRuns,
     relayUnreachable,
+    incomingWebhookShareStops,
   });
 
   const buttonsIpc = registerAutomationButtonsIpc<
@@ -11855,6 +12149,21 @@ function registerIpcHandlers(): void {
         workspaceSecretsState(workspaceId, { kind: "set", secret }),
       deleteWorkspaceSecret: (workspaceId, name) =>
         workspaceSecretsState(workspaceId, { kind: "delete", name }),
+    }),
+  );
+
+  registerOperations(
+    operationBoundary,
+    incomingWebhooksOperations,
+    incomingWebhooksHandlers<WebContents, IpcMainInvokeEvent>({
+      currentRendererSession: (sender) => rendererWorkspaceSessions.current(sender),
+      listIncomingWebhooks: (workspaceId) => listIncomingWebhooksState(workspaceId),
+      createIncomingWebhook: (workspaceId, input) => createIncomingWebhookState(workspaceId, input),
+      updateIncomingWebhook: (workspaceId, input) => updateIncomingWebhookState(workspaceId, input),
+      rotateIncomingWebhook: (workspaceId, webhookId) =>
+        rotateIncomingWebhookState(workspaceId, webhookId),
+      deleteIncomingWebhook: (workspaceId, webhookId) =>
+        deleteIncomingWebhookState(workspaceId, webhookId),
     }),
   );
 

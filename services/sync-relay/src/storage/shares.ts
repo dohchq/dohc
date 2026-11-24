@@ -21,6 +21,7 @@ import {
   type SyncRelayIndependentGrantInventoryPage,
 } from "./types";
 import { accountIsFenced } from "./accountDeletion";
+import { pauseIncomingWebhooksForShareInTx } from "./incomingWebhooks";
 import { advanceNoticeHead } from "./notices";
 import { type StorageContext } from "./context";
 import { nextShareDiscussionRevision } from "./discussion";
@@ -44,7 +45,6 @@ import {
 import {
   retireUncoveredServiceActivations,
   serviceHostEnrollmentsCoveredByShare,
-  type KeptServiceActivation,
 } from "./serviceHostEnrollment";
 import { retireAgentConnectionsInTransaction } from "./agentConnections";
 
@@ -81,6 +81,15 @@ export function createShare(
     if (recipient !== null && accountIsFenced(storage, recipient)) return false;
     insertShare(storage, input.share);
     insertShareGrant(storage, input.grant);
+    pauseIncomingWebhooksForShareInTx(storage, {
+      workspaceId: input.share.workspaceId,
+      granterUserId: input.share.granterUserId,
+      principalKind: input.grant.principalKind,
+      principalUserId: input.grant.principalUserId,
+      selectorJson: input.share.selectorJson,
+      access: input.grant.access,
+      nowMs: input.grant.createdAtMs,
+    });
     // A named grant tells its person the share arrived. The waiting row
     // commits with the grant, so a crash cannot lose the notice, and an
     // email grant waits until an account claims it.
@@ -130,6 +139,15 @@ export function createFileLinkShare(
     insertShare(storage, share);
     insertShareGrant(storage, grant);
     insertLinkCredential(storage, credential);
+    pauseIncomingWebhooksForShareInTx(storage, {
+      workspaceId: share.workspaceId,
+      granterUserId: share.granterUserId,
+      principalKind: grant.principalKind,
+      principalUserId: grant.principalUserId,
+      selectorJson: share.selectorJson,
+      access: grant.access,
+      nowMs: grant.createdAtMs,
+    });
     if (input.operation)
       storage.db
         .prepare(
@@ -179,9 +197,19 @@ export function createLinkGrant(
            LIMIT 1`,
       )
       .get(grant.shareId);
-    if (!storage.getShare(grant.shareId) || !activeShare) return false;
+    const existingShare = storage.getShare(grant.shareId);
+    if (!existingShare || !activeShare) return false;
     insertShareGrant(storage, grant);
     insertLinkCredential(storage, credential);
+    pauseIncomingWebhooksForShareInTx(storage, {
+      workspaceId: existingShare.workspaceId,
+      granterUserId: existingShare.granterUserId,
+      principalKind: grant.principalKind,
+      principalUserId: grant.principalUserId,
+      selectorJson: existingShare.selectorJson,
+      access: grant.access,
+      nowMs: grant.createdAtMs,
+    });
     return true;
   });
 }
@@ -475,11 +503,9 @@ export function revokeShareGrant(
 }
 
 // The caller owns the synchronous relay transaction.
-/** `keep` is only for the owner's restore that revokes the grant; see `retireUncoveredServiceActivations`. */
 export function revokeShareGrantInTransaction(
   storage: StorageContext,
   input: RevokeShareGrantInput,
-  keep?: KeptServiceActivation,
 ): LinkGrantTransitionResult {
   input.guard?.();
   const grant = storage.getShareGrant(input.grantId);
@@ -530,7 +556,7 @@ export function revokeShareGrantInTransaction(
         AND NOT EXISTS (SELECT 1 FROM sync_relay_share_grants
           WHERE share_id = ? AND status = 'active' AND revoked_at_ms IS NULL)`)
     .run(grant.shareId, grant.shareId);
-  retireUncoveredServiceActivations(storage, covered, revokedAtMs, keep);
+  retireUncoveredServiceActivations(storage, covered, revokedAtMs);
   return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
 }
 

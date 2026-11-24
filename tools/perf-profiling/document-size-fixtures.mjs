@@ -91,24 +91,6 @@ export function documentMatrix(options) {
   );
 }
 
-export function restoreReservation(
-  payloadBytes,
-  { maxEvents, headerBytes, reserveBytes, relayAggregateBytes, nativeAggregateBytes },
-) {
-  // Supported 64-bit targets: ceil(2*sizeof(String)/3)+4 = 20.
-  const relayBytes = 16 * payloadBytes + reserveBytes;
-  const nativeBytes = 20 * payloadBytes + 4 * maxEvents * headerBytes + reserveBytes + 128 * 1024;
-  return {
-    payloadBytes,
-    relayBytes,
-    nativeBytes,
-    relayAggregateBytes,
-    nativeAggregateBytes,
-    fitsCurrentRelay: relayBytes <= relayAggregateBytes,
-    fitsNative: nativeBytes <= nativeAggregateBytes,
-  };
-}
-
 // Uncalibrated. The pilot's pair, seed and relay times replace these rates.
 export function runtimeEstimate() {
   // Separate/4 seeds four documents across two workers so its 240 timed updates end at the checkpoint.

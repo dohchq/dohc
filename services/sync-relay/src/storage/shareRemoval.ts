@@ -5,6 +5,7 @@ import { notFound, relayError } from "../errors";
 import type { StorageContext } from "./context";
 import type { LinkGrantTransitionResult, SyncRelayShareGrantRow } from "./types";
 import { revokeShareInTransaction, revokeShareGrantInTransaction } from "./shares";
+import { pauseIncomingWebhooksForShareInTx } from "./incomingWebhooks";
 import { parseStoredAnyShareSelectorJson } from "../shareFilter";
 
 export const SHARE_REMOVAL_UNDO_MS = 10 * 60 * 1000;
@@ -274,6 +275,22 @@ export function undoShareRemoval(
         .prepare(`UPDATE sync_relay_share_grants
       SET status = 'active', revoked_at_ms = NULL, generation = generation + 1 WHERE grant_id = ?`)
         .run(grant.grantId);
+    const share = storage.getShare(input.shareId);
+    if (share !== null) {
+      for (const expected of grants) {
+        const restored = storage.getShareGrant(expected.grantId);
+        if (!restored) continue;
+        pauseIncomingWebhooksForShareInTx(storage, {
+          workspaceId: share.workspaceId,
+          granterUserId: share.granterUserId,
+          principalKind: restored.principalKind,
+          principalUserId: restored.principalUserId,
+          selectorJson: share.selectorJson,
+          access: restored.access,
+          nowMs: input.nowMs,
+        });
+      }
+    }
     for (const credential of credentials)
       storage.db
         .prepare(`UPDATE sync_relay_link_credentials

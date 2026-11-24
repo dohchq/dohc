@@ -16,8 +16,6 @@ import {
 import { parseWorkspaceId } from "../requestInputs";
 import { SERVICE_HOST_ORIGIN_PREFIX, isOwnerLogOrigin } from "../relayLogInputs";
 import { canonicalLiveSelector, currentLiveDocumentMoment } from "./liveDocumentAuthority";
-import { LIVE_RESTORE_OPERATIONS, UNFINISHED_RESTORE } from "./liveRestoreOperationSchema";
-import { attachedLiveJournalHistoryNamespace } from "./liveJournalHistory";
 import { assertWorkspaceQuota } from "./workspaces";
 import { SyncRelayQuotaExceededError } from "./errors";
 import { forgetServiceHostUploads } from "./serviceHostUploads";
@@ -1110,16 +1108,16 @@ const activationPending = (
 /**
  * When the document was last used, if only its recorded demand keeps it and
  * that use is before `idleBefore`: the later of its demand and its last
- * admitted update. Null while anything else keeps it: an Edit grant, the
- * owner's restore, a Pause or Stop, a live connection open in this relay
- * process, or an activation, retirement or restore that is still open.
+ * admitted update. Null while anything else keeps it: an Edit grant, a Pause
+ * or Stop, a live connection open in this relay process, or an activation or
+ * retirement that is still open.
  */
 function idleSince(
   storage: StorageContext,
   enrollment: ServiceHostEnrollment,
   idleBefore: number,
 ): number | null {
-  const { workspaceId, objectId, demandAtMs } = enrollment;
+  const { demandAtMs } = enrollment;
   if (
     enrollment.retired ||
     enrollment.ownerStop !== null ||
@@ -1132,10 +1130,8 @@ function idleSince(
   const since = Math.max(demandAtMs, lastAdmittedAtMs(storage, enrollment));
   return since < idleBefore &&
     !coveredByEditGrant(storage, enrollment) &&
-    !serviceHostOwnerRetains(storage, enrollment) &&
     !serviceActivationRetirementOpen(storage, enrollment) &&
-    !activationPending(storage, enrollment) &&
-    !restoreInProgress(storage, workspaceId, objectId)
+    !activationPending(storage, enrollment)
     ? since
     : null;
 }
@@ -1504,12 +1500,6 @@ export function renewPersonalSessionDemand(
   });
 }
 export const HELD_CHANGED = "This document changed while live editing was resuming. Try again.";
-export const restoreInProgress = (storage: StorageContext, workspaceId: string, objectId: string) =>
-  storage.db
-    .prepare(
-      `SELECT 1 FROM ${LIVE_RESTORE_OPERATIONS} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND ${UNFINISHED_RESTORE}`,
-    )
-    .get(workspaceId, objectId) !== undefined;
 /**
  * A Resume of a document the host holds for an unadmitted live edit retires
  * the held activation before enabling it, as Stop does: its live session
@@ -1537,11 +1527,6 @@ function retireHeldActivation(
   ) {
     throw relayError("conflict", HELD_CHANGED);
   }
-  if (restoreInProgress(storage, enrollment.workspaceId, enrollment.objectId))
-    throw relayError(
-      "restore-in-progress",
-      "This document is being restored. Resume live editing once it finishes.",
-    );
   openServiceActivationRetirement(storage, enrollment, nowMs);
 }
 export function listServiceHostEnrollments(
@@ -1746,11 +1731,6 @@ export function setServiceHostEnrollmentEnabled(
       return null;
     let acceptedCursor: number | undefined;
     if (input.retire) {
-      if (restoreInProgress(storage, workspaceId, current.objectId))
-        throw relayError(
-          "restore-in-progress",
-          "Stop live editing is waiting. You can keep editing.",
-        );
       if (
         input.restoreFenceGeneration !== undefined &&
         (!Number.isSafeInteger(input.restoreFenceGeneration) || input.restoreFenceGeneration < 0)
@@ -1821,7 +1801,6 @@ export function setServiceHostEnrollmentEnabled(
         workspaceId,
         current.objectId,
       );
-    // Stop ends the run, so nothing the restore kept continues after it. Pause keeps the run.
     if (input.retire) endServiceHostRun(storage, current, nowMs);
     // Stop retires at once, so the release that clears upload proof never sees this row. The retirement it opened keeps that proof until it completes.
     forgetIdleServiceHostUploads(storage, workspaceId);
@@ -1900,40 +1879,17 @@ export function serviceHostEnrollmentsCoveredByShare(
     .filter((enrollment) => coversEnrolledPath(share, enrollment.path));
 }
 /**
- * The owner's restore that keeps the document's live session through its own
- * revocation: its exact document and activation. Every other document the
- * revocation leaves uncovered still retires.
- */
-export interface KeptServiceActivation {
-  readonly workspaceId: string;
-  readonly objectId: string;
-  readonly activationId: string;
-  /** Runs inside the transaction once the revocation kept that activation. */
-  kept(): void;
-}
-/**
  * Records, inside the change's transaction, the end of the run and the
  * retirement of each document's activation that no Edit grant on any of its
- * owner's shares covers now. `keep` leaves its own activation running
- * instead, but never one whose retirement is already open: that stands.
+ * owner's shares covers now.
  */
 export function retireUncoveredServiceActivations(
   storage: StorageContext,
   enrollments: readonly ServiceHostEnrollment[],
   nowMs: number,
-  keep?: KeptServiceActivation,
 ): void {
   for (const enrollment of enrollments) {
     if (coveredByEditGrant(storage, enrollment) || demanded(storage, enrollment)) continue;
-    // Null while a retirement is open.
-    if (
-      keep?.workspaceId === enrollment.workspaceId &&
-      keep.objectId === enrollment.objectId &&
-      retirableServiceActivation(storage, enrollment)?.activationId === keep.activationId
-    ) {
-      keep.kept();
-      continue;
-    }
     endServiceHostRun(storage, enrollment, nowMs);
     openServiceActivationRetirement(storage, enrollment, nowMs);
   }
@@ -1949,80 +1905,10 @@ export function endServiceHostRun(
     WHERE workspace_id=? AND object_id=?`)
     .run(timestamp(nowMs), timestamp(nowMs), document.workspaceId, document.objectId);
 }
-/** Where the owner's restore records, in its stored intent, the live session it kept. The request never carries it. */
-export const KEPT_RUN = "keptRun";
-/** The enrollment run and owner, and the activation the owner's restore kept through its own revocation. */
-export interface KeptServiceRun {
-  readonly runToken: number;
-  readonly ownerUserId: string;
-  readonly activationId: string;
-}
 type CoveredEnrollment = Pick<
   ServiceHostEnrollment,
   "workspaceId" | "objectId" | "ownerUserId" | "shareId" | "path"
 >;
-/**
- * Whether the owner's restore kept this enrolled document's live session
- * through its own revocation, and that still holds: the document's latest
- * restore names the enrollment's current run and owner, under the
- * workspace's current owner and identity, at the document's current lineage
- * and path. Any ordinary end of Edit access, and Stop, end the run; Pause
- * keeps it. With `resumed` the restore must have resumed at the document's
- * current fence; without it an unfinished restore also counts.
- */
-function keptByRestore(
-  storage: StorageContext,
-  enrollment: CoveredEnrollment,
-  resumed: boolean,
-): boolean {
-  const { workspaceId, objectId, path, ownerUserId } = enrollment;
-  const run = storage.db
-    .prepare(`SELECT e.created_at_ms FROM ${SERVICE_HOST_ENROLLMENTS} e JOIN sync_relay_workspaces w USING(workspace_id)
-    WHERE e.workspace_id=? AND e.object_id=? AND e.path=? AND e.owner_user_id=? AND w.owner_user_id=e.owner_user_id
-      AND w.replication_epoch=e.replication_epoch AND w.stream_identity=e.stream_identity`)
-    .get(workspaceId, objectId, path, ownerUserId);
-  if (!run) return false;
-  const restore = latestRestore(storage, workspaceId, objectId);
-  if (!restore || typeof restore.kept !== "string" || restore.phase === "declined") return false;
-  const document = storage.db
-    .prepare(`SELECT restore_fence_generation AS fence FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id='main'
-    AND object_id=? AND lineage_claim_id=? AND lineage_state='current' AND current_path=?`)
-    .get(workspaceId, objectId, restore.lineage_claim_id, path);
-  if (
-    !document ||
-    (restore.phase === "resumed" ? restore.new_fence !== document.fence : resumed) ||
-    storage.objectIdAtPathInVersion({ workspaceId, versionId: "main", path }) !== objectId
-  )
-    return false;
-  const kept: Partial<KeptServiceRun> = JSON.parse(restore.kept);
-  return kept.runToken === Number(run.created_at_ms) && kept.ownerUserId === ownerUserId;
-}
-const RESTORE_ROW = `SELECT phase,new_fence,lineage_claim_id,json_extract(intent_json,'$.${KEPT_RUN}') AS kept FROM ${LIVE_RESTORE_OPERATIONS}`;
-/** The statements that find a document's latest restore, each along an index of the restore table. */
-export const LATEST_RESTORE = {
-  // A document has at most one unfinished restore, and no other can begin after it.
-  unfinished: `${RESTORE_ROW} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND ${UNFINISHED_RESTORE}`,
-  // Each fence is one past the one before, so the highest is the latest fenced restore. Every fence is at least 2.
-  fenced: `${RESTORE_ROW} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id='main' AND object_id=? AND new_fence>0
-    ORDER BY new_fence DESC LIMIT 1`,
-} as const;
-/**
- * The document's unfinished restore, or else its latest fenced restore in the
- * attached history. A later restore that ended before its fence is not read:
- * its revocation ended the run, or kept it and ending the restore ended it,
- * or left the run as it found it.
- */
-function latestRestore(storage: StorageContext, workspaceId: string, objectId: string) {
-  const unfinished = storage.db.prepare(LATEST_RESTORE.unfinished).get(workspaceId, objectId);
-  if (unfinished) return unfinished;
-  const namespace = attachedLiveJournalHistoryNamespace(storage);
-  return namespace === undefined
-    ? undefined
-    : storage.db.prepare(LATEST_RESTORE.fenced).get(namespace, workspaceId, objectId);
-}
-/** Whether the host keeps a document the owner's restore kept live, from its revocation on. It admits no edit before the restore resumed. */
-export const serviceHostOwnerRetains = (storage: StorageContext, enrollment: CoveredEnrollment) =>
-  keptByRestore(storage, enrollment, false);
 /** Whether an open or Resume recorded hosting demand on the enrollment as the caller knows it. */
 function demanded(
   storage: StorageContext,
@@ -2038,13 +1924,10 @@ function demanded(
   );
 }
 const covered = (storage: StorageContext, enrollment: CoveredEnrollment) =>
-  coveredByEditGrant(storage, enrollment) ||
-  demanded(storage, enrollment) ||
-  serviceHostOwnerRetains(storage, enrollment);
+  coveredByEditGrant(storage, enrollment) || demanded(storage, enrollment);
 /**
  * Whether the host keeps the enrolled document: an active Edit grant on any
- * of the owner's shares still covers it, an open or Resume asked for it, or
- * the owner's restore kept its live session.
+ * of the owner's shares still covers it, or an open or Resume asked for it.
  */
 export function serviceHostEnrollmentCovered(
   storage: StorageContext,
@@ -2054,10 +1937,10 @@ export function serviceHostEnrollmentCovered(
   return covered(storage, enrollment);
 }
 /**
- * Ends the run of a live session the owner's restore kept, once nothing
- * covers the enrolled document, and opens its activation's retirement. The
- * host then retires the activation before it lets the document go. Every
- * other end of Edit access opened a retirement already, and that one stands.
+ * Ends the run of a live session once nothing covers the enrolled document,
+ * and opens its activation's retirement. The host then retires the
+ * activation before it lets the document go. Every other end of Edit access
+ * opened a retirement already, and that one stands.
  * Returns whether it opened one.
  */
 export function endLapsedServiceHostRun(
@@ -2082,7 +1965,7 @@ export function endLapsedServiceHostRun(
 /**
  * Called once the service host no longer holds the document. Applies the
  * owner's pending Pause, and retires an enrollment that no active Edit
- * grant covers and no owner's restore kept live. Returns null when neither applies.
+ * grant covers. Returns null when neither applies.
  */
 export function releaseServiceHostEnrollment(
   storage: StorageContext,
@@ -2150,18 +2033,12 @@ export function serviceHostDocumentEnrolled(
 /**
  * Absence preserves explicitly configured hosts. A retained enrollment fences
  * its document once its owner pauses or stops it, its workspace changes, or no
- * Edit grant of its owner covers its enrolled path. Only `owner`, the
- * enrollment's own owner, continues where the owner's restore kept the live
- * session, once that restore resumed. With `restoring`, the host also keeps
- * it while that restore is unfinished; live admission never passes it. An
- * open retirement fences it until its activation retires, whatever its
- * enrollment.
+ * Edit grant of its owner covers its enrolled path. An open retirement fences
+ * it until its activation retires, whatever its enrollment.
  */
 export function serviceHostDocumentEnabled(
   storage: StorageContext,
   document: { workspaceId: string; objectId: string },
-  owner?: { userId: string },
-  restoring = false,
 ): boolean {
   if (serviceActivationRetirementOpen(storage, document)) return false;
   const value = storage.db
@@ -2185,9 +2062,7 @@ export function serviceHostDocumentEnabled(
     value.owner_user_id === value.current_owner &&
     value.replication_epoch === value.current_epoch &&
     value.stream_identity === value.current_stream &&
-    (value.demand_at_ms !== null ||
-      coveredByEditGrant(storage, enrollment) ||
-      (owner?.userId === enrollment.ownerUserId && keptByRestore(storage, enrollment, !restoring)))
+    (value.demand_at_ms !== null || coveredByEditGrant(storage, enrollment))
   );
 }
 

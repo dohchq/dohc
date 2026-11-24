@@ -495,7 +495,6 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
       relayExchangeKey: exchangeKey,
       resolveActor: createSessionActorResolver(relayAuth),
       namedBrowserSessionLimits: profile.browserSessions,
-      ownerRestoreHost: () => active,
     });
     const relayHttp = serveFetchHandler({
       handler: (request) =>
@@ -1871,7 +1870,6 @@ async function openSelfHostProof(name: string) {
         relayExchangeKey: exchangeKey,
         resolveActor,
         namedBrowserSessionLimits: profile.browserSessions,
-        ownerRestoreHost: () => supervisor?.current(),
       });
       activations = storage.createServiceActivationStore(history);
     };

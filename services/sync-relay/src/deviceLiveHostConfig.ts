@@ -7,8 +7,6 @@ import {
 import type { DeviceControlLimits } from "@dohc/live-session-contract/device-control";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveSettlementConfig } from "./liveSettlementConfig.js";
-import { parseLiveRestoreConfig } from "./liveRestorePreparation.js";
-import { DEFAULT_MAX_BLOB_BYTES } from "@dohc/workspace-engine-client/daemon";
 import { parseNativeLiveSyncConfig } from "./liveSyncConfig.js";
 
 export function configRecord(
@@ -69,7 +67,7 @@ export function readDeviceLiveHostConfig(file: string, limits: DeviceControlLimi
       "maxQueuedBytes",
       "shutdownGraceMs",
     ],
-    ["settlement", "restore", "sync", "reader"],
+    ["settlement", "sync", "reader"],
   );
   if (
     row.version !== 1 ||
@@ -111,14 +109,6 @@ export function readDeviceLiveHostConfig(file: string, limits: DeviceControlLimi
         manifest: path(readerRow.manifest, false),
       })
     : undefined;
-  const restoreRow =
-    row.restore === undefined ? undefined : configRecord(row.restore, ["maxBytes", "maxEvents"]);
-  const restore = restoreRow
-    ? Object.freeze({
-        maxBytes: integer(restoreRow.maxBytes, 5, DEFAULT_MAX_BLOB_BYTES),
-        maxEvents: integer(restoreRow.maxEvents),
-      })
-    : undefined;
   const applicationWorkingReserveBytes = integer(ingress.applicationWorkingReserveBytes, 0);
   if (applicationWorkingReserveBytes === 0)
     throw new TypeError(
@@ -128,7 +118,6 @@ export function readDeviceLiveHostConfig(file: string, limits: DeviceControlLimi
     version: 1 as const,
     engineExecutable: path(row.engineExecutable, false),
     settlement,
-    restore,
     reader,
     sync: parseNativeLiveSyncConfig(row.sync, integer(ingress.aggregateBytes)),
     shutdownGraceMs: integer(row.shutdownGraceMs),
@@ -151,11 +140,13 @@ export function readRelayDeviceDeliveryConfig(file: string, limits: DeviceContro
   return parseRelayDeviceDeliveryConfig(read(file), limits);
 }
 export function parseRelayDeviceDeliveryConfig(value: unknown, limits: DeviceControlLimits) {
-  const row = configRecord(
-    value,
-    ["version", "workspaceIds", "client", "maxQueuedBytes", "maxActiveDrains"],
-    ["restore"],
-  );
+  const row = configRecord(value, [
+    "version",
+    "workspaceIds",
+    "client",
+    "maxQueuedBytes",
+    "maxActiveDrains",
+  ]);
   if (
     row.version !== 1 ||
     !Array.isArray(row.workspaceIds) ||
@@ -178,7 +169,6 @@ export function parseRelayDeviceDeliveryConfig(value: unknown, limits: DeviceCon
     version: 1 as const,
     workspaceIds: Object.freeze(workspaceIds),
     maxActiveDrains: integer(row.maxActiveDrains),
-    restore: parseLiveRestoreConfig(row.restore),
     maxQueuedBytes: integer(
       row.maxQueuedBytes,
       Math.max(limits.maxPayloadBytes + 16, maxFrameBytes + 20 + 16),

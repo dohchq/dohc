@@ -3,7 +3,6 @@ import { observeDesktopReadiness } from "../desktopReadinessChanges";
 import {
   fixture as ticketFixture,
   binding,
-  keptByOwnerRestore,
   retainServiceActivation,
   scope,
 } from "../liveTickets.test-helper";
@@ -840,62 +839,6 @@ const withHistory = <T extends SyncRelayStorage>(storage: T): T => {
   );
   return storage;
 };
-async function kept() {
-  const f = await activated(),
-    restore = keptByOwnerRestore(f.raw, key.namespace);
-  withHistory(f.storage);
-  const enrolled = () =>
-    f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)!;
-  const enabled = (owner?: { userId: string }, restoring = false) =>
-    serviceHostDocumentEnabled(f.storage as StorageContext, binding, owner, restoring);
-  const asOwner = { userId: "owner-1" };
-  const covered = (storage: SyncRelayStorage = f.storage) =>
-    storage.serviceHostEnrollmentCovered(
-      storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)!,
-    );
-  const retireKept = () =>
-    f.raw
-      .prepare(`UPDATE sync_relay_service_activations SET retired_at_ms=retire_requested_at_ms,retired_boundary_json='{}',state_bytes=NULL
-    WHERE activation_id=?`)
-      .run(restore.activationId);
-  const afterRestart = () => {
-    const reopened = withHistory(openSyncRelayStorage(f.path, f.config));
-    try {
-      return {
-        covered: covered(reopened),
-        owner: serviceHostDocumentEnabled(reopened as StorageContext, binding, asOwner),
-      };
-    } finally {
-      reopened.close();
-    }
-  };
-  return { ...f, restore, enrolled, enabled, asOwner, covered, retireKept, afterRestart };
-}
-
-it("keeps a note live for its owner after their restore, and for no one else", async () => {
-  const f = await kept();
-  expect(f.retirement()).toBeNull();
-  expect(f.covered()).toBe(true);
-  expect(f.enabled(f.asOwner)).toBe(true);
-  expect(f.enabled()).toBe(false);
-  expect(f.enabled({ userId: scope.userId })).toBe(false);
-  expect(f.release()).toBeNull();
-  expect(f.enrolled()).toMatchObject({
-    enabled: true,
-    retired: false,
-    ownerStop: null,
-    runToken: 10,
-  });
-  expect(f.afterRestart()).toEqual({ covered: true, owner: true });
-  expect(f.storage.getShareGrant(scope.grantId)).toMatchObject({ status: "revoked" });
-  expect(
-    f.storage.resolveCurrentLiveDocumentBinding({
-      document,
-      actor: { kind: "named", userId: scope.userId, grantId: scope.grantId },
-    }).kind,
-  ).toBe("refused");
-});
-
 // Proves: Stop opens a new retirement only with the host's preparation of
 // exactly that activation and restore generation, checked while the
 // connection that prepared it still stands. A refused Stop fences nothing.
@@ -1050,29 +993,6 @@ it("leaves a note that never started to its start clock, not to idle reclaim", a
     f.storage.failLapsedLiveNoteStarts(past, () => "failing").map((row) => row.note),
   ).toMatchObject([{ state: "off", reason: "start-failed", cause: "failing" }]);
   expect(f.sweep(past + 1)).toEqual([]);
-});
-
-it("never reclaims a note the owner's restore kept live, and reclaims it once the restore keeps nothing", async () => {
-  const f = await kept(),
-    past = 10 + RECLAIM_RETENTION_MS + 1;
-  expect(
-    f.storage.renewPersonalSessionDemand({
-      workspaceId: scope.workspaceId,
-      objectId: binding.objectId,
-      nowMs: 10,
-    }),
-  ).toBe(true);
-  expect(f.storage.reclaimIdleLiveDocuments(past)).toEqual([]);
-  expect(f.enrolled()).toMatchObject({ enabled: true, retired: false, demandAtMs: 10 });
-  expect(f.retirement()).toBeNull();
-  f.restore.update("intent_json=json_remove(intent_json,'$.keptRun')");
-  expect(f.storage.reclaimIdleLiveDocuments(past)).toMatchObject([
-    { objectId: binding.objectId, ...reclaimed },
-  ]);
-  expect(f.retirement()).toMatchObject({
-    activationId: f.restore.activationId,
-    requestedAtMs: past,
-  });
 });
 
 const V4_SQL = `CREATE TABLE ${SERVICE_HOST_ENROLLMENTS} (
