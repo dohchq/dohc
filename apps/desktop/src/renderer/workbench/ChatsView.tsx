@@ -698,6 +698,7 @@ export function ChatsView(props: {
   // request sequence separate from the workspace/navigation liveness token so
   // an older activity response can never overwrite a newer one.
   const threadRefreshSeq = useRef(0);
+  const markedRead = useRef(new Map<string, number>());
   const channelRefreshSeq = useRef(0);
   // Each Home item's Add reaction trigger, by message id: where focus goes
   // when the activated pill was the viewer's only row and unmounts.
@@ -1714,6 +1715,10 @@ export function ChatsView(props: {
         setChannelThreads((current) =>
           current.map((entry) => (entry.id === threadId ? { ...entry, unreadCount: 0 } : entry)),
         );
+        const marked = markedRead.current;
+        const key = `${workspaceId}\u0000${threadId}`;
+        if ((marked.get(key) ?? -1) >= upToSequence) return;
+        marked.set(key, upToSequence);
         void bridge()
           .markChatThreadRead({ workspaceId, threadId, upToSequence })
           .then(
@@ -1723,6 +1728,7 @@ export function ChatsView(props: {
             () => {
               // Mark-read is best-effort; the badge re-appears on next refresh
               // if the cursor write did not land.
+              if (marked.get(key) === upToSequence) marked.delete(key);
             },
           );
       }
@@ -2918,6 +2924,9 @@ export function ChatsView(props: {
   // answer clears the previous account's rows without any manual refresh.
   useEffect(() => {
     return bridge().onCloudSessionChanged(({ sessionKey, phase }) => {
+      // A read marked before this session may not be published yet; let the
+      // next refresh send it again.
+      markedRead.current.clear();
       // A rotation within the same session — same server, relay, and user;
       // the key deliberately excludes the token — invalidates nothing: the
       // rows stay (an outage during rotation must not hide them), in-flight

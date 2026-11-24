@@ -19,6 +19,7 @@ import {
   shareListing,
   workspaceActivityCallbacks,
   emitWorkspaceActivity,
+  emitCloudSessionChanged,
   renderView,
   navigatorView,
 } from "./ChatsView.testHarness";
@@ -779,6 +780,51 @@ describe("ChatsView read cursors", () => {
     });
     await user.click(screen.getByTestId("chats-thread-back"));
     await waitFor(() => expect(screen.getAllByTestId("chats-thread-unread")).toHaveLength(1));
+  });
+
+  it("an open thread's refresh marks it read again only when it shows more messages", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ messageCount: 2, lastReadSequence: 1, unreadCount: 1 })],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [message(), message({ id: "m2" })],
+    });
+    renderView();
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await waitFor(() => expect(bridgeMock.markChatThreadRead).toHaveBeenCalledTimes(1));
+
+    for (let refresh = 0; refresh < 3; refresh += 1) {
+      const reads = bridgeMock.listChatMessages.mock.calls.length;
+      act(() => emitWorkspaceActivity());
+      await waitFor(() =>
+        expect(bridgeMock.listChatMessages.mock.calls.length).toBeGreaterThan(reads),
+      );
+      await act(async () => {});
+    }
+    expect(bridgeMock.markChatThreadRead).toHaveBeenCalledTimes(1);
+
+    // A read marked while signed out is published only when the owner marks it again.
+    act(() => emitCloudSessionChanged("session-b", "ready"));
+    act(() => emitWorkspaceActivity());
+    await waitFor(() => expect(bridgeMock.markChatThreadRead).toHaveBeenCalledTimes(2));
+    expect(bridgeMock.markChatThreadRead).toHaveBeenLastCalledWith({
+      workspaceId: "workspace-a",
+      threadId: "thread-1",
+      upToSequence: 2,
+    });
+
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [message(), message({ id: "m2" }), message({ id: "m3" })],
+    });
+    act(() => emitWorkspaceActivity());
+    await waitFor(() => expect(bridgeMock.markChatThreadRead).toHaveBeenCalledTimes(3));
+    expect(bridgeMock.markChatThreadRead).toHaveBeenLastCalledWith({
+      workspaceId: "workspace-a",
+      threadId: "thread-1",
+      upToSequence: 3,
+    });
   });
 });
 
