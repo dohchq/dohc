@@ -92,7 +92,7 @@ if (late.length)
 writeFileSync(`${out}/logcat.txt`, adb("logcat", "-d"));
 if (failed || late.length) {
   console.error(
-    `${failed} of ${screens.length * 2} screens failed${late.length ? ", and the app crashed after the last" : ""}.`,
+    `${failed} of ${screens.length * 2} screens failed${late.length ? ", and the app logged an error after the last" : ""}.`,
   );
   process.exit(1);
 }
