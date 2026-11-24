@@ -1,4 +1,4 @@
-import { readBoundedJson } from "@dohc/service-http";
+import { readBoundedBytes, readBoundedJson } from "@dohc/service-http";
 import { opaqueLinkRefusal, relayLinkRefusal } from "./linkRefusal";
 import {
   parseDatasetAttemptRequest,
@@ -18,36 +18,6 @@ import {
   parseAppBackendUploadRequest,
   parseAppBackendRefusal,
 } from "@dohc/security-contract/app-backend";
-
-async function readBoundedBytes(
-  request: Request,
-  maxBytes: number,
-  signal: AbortSignal,
-): Promise<Uint8Array> {
-  const reader = request.body?.getReader();
-  if (!reader) return new Uint8Array();
-  const parts: Uint8Array[] = [];
-  let length = 0;
-  const cancel = () => {
-    void reader.cancel().catch(() => {});
-  };
-  signal.addEventListener("abort", cancel, { once: true });
-  try {
-    while (true) {
-      signal.throwIfAborted();
-      const next = await reader.read();
-      signal.throwIfAborted();
-      if (next.done) break;
-      length += next.value.byteLength;
-      if (length > maxBytes) throw new RangeError("App upload is too large.");
-      parts.push(next.value);
-    }
-    return Buffer.concat(parts, length);
-  } finally {
-    signal.removeEventListener("abort", cancel);
-    await reader.cancel().catch(() => {});
-  }
-}
 
 const responseHeaders = {
   "cache-control": "private, no-store",
@@ -81,13 +51,11 @@ export async function forwardAppBackend(input: {
   const isBinaryUpload = contentType === "application/octet-stream";
   if (!isBinaryUpload && contentType !== "application/json") return error(400);
   let body: unknown;
-  let uploadBytes: Uint8Array | undefined;
   try {
     if (isBinaryUpload) {
       const rawMeta = input.request.headers.get("x-dohc-app-meta");
       if (!rawMeta || rawMeta.length > 4096) return error(400);
       body = JSON.parse(decodeURIComponent(rawMeta));
-      uploadBytes = await readBoundedBytes(input.request, APP_BACKEND_UPLOAD_BYTES, input.signal);
     } else {
       body = await readBoundedJson(input.request, APP_BACKEND_REQUEST_BYTES, input.signal);
     }
@@ -107,12 +75,9 @@ export async function forwardAppBackend(input: {
     if (isBinaryUpload) {
       if (
         body.op !== "backend.upload" ||
-        !uploadBytes ||
         !exact(body, ["id", "op", "idempotencyKey", "name", "contentType"], ["dataset"])
       )
         return error(400);
-      assertAppBackendUploadBytes(uploadBytes.byteLength);
-      action = "upload";
       const parsedMeta = parseAppBackendUploadMeta({
         authorityRevision: input.authorityRevision,
         idempotencyKey: body.idempotencyKey,
@@ -120,6 +85,13 @@ export async function forwardAppBackend(input: {
         contentType: body.contentType,
         ...datasetField,
       });
+      const uploadBytes = await readBoundedBytes(
+        input.request,
+        APP_BACKEND_UPLOAD_BYTES,
+        input.signal,
+      );
+      assertAppBackendUploadBytes(uploadBytes.byteLength);
+      action = "upload";
       payload = { ...parsedMeta, bytesBase64: Buffer.from(uploadBytes).toString("base64") };
     } else if (body.op === "backend.invoke") {
       if (
@@ -180,8 +152,8 @@ export async function forwardAppBackend(input: {
         ...(checked.dataset === undefined ? {} : { dataset: checked.dataset }),
       };
     } else return error(400);
-  } catch {
-    return error(400);
+  } catch (cause) {
+    return error(cause instanceof RangeError ? 413 : 400);
   }
 
   const url = new URL(

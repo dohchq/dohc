@@ -168,23 +168,6 @@ function parseRefusal(status: BackendStatus, error: unknown): BackendRefusal | u
   return { code: error.code, message: error.message };
 }
 
-export function encodeBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (let start = 0; start < bytes.length; start += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(start, start + 0x8000));
-  }
-  return btoa(binary);
-}
-
-export function decodeBase64(value: string): Uint8Array {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return bytes;
-}
-
 function safeFileName(name: string, contentType: string): string {
   const cleaned = name
     .replace(/[\\/\u0000-\u001f\u007f]/g, "_")
@@ -221,21 +204,18 @@ async function normalizeUpload(
   }
   const input = file as FileUploadInput;
   const raw = input.bytes;
-  const copy =
-    raw instanceof Uint8Array
-      ? raw.slice().buffer
-      : raw instanceof ArrayBuffer
-        ? raw.slice(0)
-        : null;
-  if (!copy || copy.byteLength < 1)
+  if (!(raw instanceof Uint8Array) && !(raw instanceof ArrayBuffer))
     throw new AppBackendError(400, undefined, "Attachment upload cannot be empty.");
-  if (copy.byteLength > MAX_UPLOAD_BYTES) {
+  if (raw.byteLength < 1)
+    throw new AppBackendError(400, undefined, "Attachment upload cannot be empty.");
+  if (raw.byteLength > MAX_UPLOAD_BYTES) {
     throw new AppBackendError(
       413,
       undefined,
-      `Attachment upload exceeded its limit of ${MAX_UPLOAD_BYTES} bytes. It used ${copy.byteLength} bytes.`,
+      `Attachment upload exceeded its limit of ${MAX_UPLOAD_BYTES} bytes. It used ${raw.byteLength} bytes.`,
     );
   }
+  const copy = raw instanceof Uint8Array ? raw.slice().buffer : raw.slice(0);
   return { name: input.name, contentType: input.contentType, bytes: copy };
 }
 

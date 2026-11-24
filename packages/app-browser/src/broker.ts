@@ -251,25 +251,20 @@ export function attachAppCollectionBroker(
         reject(status);
         return finish(status, false);
       }
-      const reader = response.body?.getReader();
-      if (!reader) {
-        reject(503);
-        return finish(503, false);
-      }
-      const chunks: Uint8Array[] = [];
-      let size = 0;
       const binaryFile = !refusal && body.op === "backend.file";
       const responseBytes = refusal ? 8192 : binaryFile ? maxFileBytes : 1024 * 1024;
       let fileMeta: Record<string, unknown> | undefined;
       if (binaryFile) {
         const mime = response.headers.get("content-type")?.split(";", 1)[0];
         const rawMeta = response.headers.get("x-dohc-app-file");
-        if (mime !== "application/octet-stream" || !rawMeta || rawMeta.length > 4096) {
-          await response.body?.cancel().catch(() => {});
-          reject(503);
-          return finish(503, false);
+        let parsedMeta: unknown = null;
+        if (mime === "application/octet-stream" && rawMeta && rawMeta.length <= 4096) {
+          try {
+            parsedMeta = JSON.parse(decodeURIComponent(rawMeta));
+          } catch {
+            parsedMeta = null;
+          }
         }
-        const parsedMeta: unknown = JSON.parse(decodeURIComponent(rawMeta));
         if (
           !record(parsedMeta) ||
           Object.keys(parsedMeta).sort().join() !== "byteLength,contentType,fileId,name,sha256" ||
@@ -288,6 +283,13 @@ export function attachAppCollectionBroker(
         }
         fileMeta = parsedMeta;
       }
+      const reader = response.body?.getReader();
+      if (!reader) {
+        reject(503);
+        return finish(503, false);
+      }
+      const chunks: Uint8Array[] = [];
+      let size = 0;
       try {
         while (true) {
           const item = await reader.read();

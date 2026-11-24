@@ -1290,7 +1290,7 @@ test("every gateway bounds relay bodies at the relay's largest cap, except Colle
       config.indexOf("reverse_proxy sync-relay"),
     );
     const bounded =
-      /@relayBounded not path_regexp (\S+)\n\s+request_body @relayBounded \{\s+max_size 21MiB\s+\}/.exec(
+      /@relayBounded not path_regexp (\S+)\n\s+request_body @relayBounded \{\s+max_size 28MiB\s+\}/.exec(
         relay,
       );
     assert.ok(bounded, file);

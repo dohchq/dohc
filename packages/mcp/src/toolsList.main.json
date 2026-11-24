@@ -1170,7 +1170,7 @@
                   },
                   "bytesBase64": {
                     "type": "string",
-                    "maxLength": 6990508
+                    "maxLength": 27962028
                   }
                 },
                 "required": [

@@ -91,7 +91,7 @@ window.addEventListener("message", (event) => {
 // });
 ```
 
-Other channel operations: `backend.upload` (`name`, `contentType`, `bytesBase64`, `idempotencyKey`), `backend.file` (`fileId`, `operation`, `input`), `backend.attempt` (`operation`, `request`), and for document-Collection share-link apps: `collection.list` and `collection.create`.
+Other channel operations: `backend.upload` (`name`, `contentType`, `bytes` as a transferred `ArrayBuffer` up to 20 MiB, `idempotencyKey`), `backend.file` (`fileId`, `operation`, `input`; replies `{ file, bytes }` with `bytes` as a transferred `ArrayBuffer`), `backend.attempt` (`operation`, `request`), and for document-Collection share-link apps: `collection.list` and `collection.create`.
 
 ## Verifying an app frontend (`dohc_publish_app` `verifyFrontend`)
 

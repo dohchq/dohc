@@ -96,8 +96,14 @@ export function CollectionAttachmentInput(
           const selected = event.target.files?.[0];
           event.target.value = "";
           if (!selected) return;
-          if (selected.size < 1 || selected.size > APP_BACKEND_UPLOAD_BYTES) {
-            setInvalid("Choose a non-empty file up to 20 MiB.");
+          if (selected.size < 1) {
+            setInvalid("Choose a non-empty file.");
+            return;
+          }
+          if (selected.size > APP_BACKEND_UPLOAD_BYTES) {
+            setInvalid(
+              `File exceeded the ${APP_BACKEND_UPLOAD_BYTES} bytes (${Math.round(APP_BACKEND_UPLOAD_BYTES / 1024 / 1024)} MiB) limit. It used ${selected.size} bytes.`,
+            );
             return;
           }
           void upload({
@@ -130,7 +136,9 @@ export function CollectionAttachmentInput(
           </SecondaryButton>
         </div>
       ) : (
-        <span className="text-[12px] text-subtle">Up to 5 MB</span>
+        <span className="text-[12px] text-subtle">
+          Up to {Math.round(APP_BACKEND_UPLOAD_BYTES / 1024 / 1024)} MiB
+        </span>
       )}
       {invalid ? <FieldError id={errorId}>{invalid}</FieldError> : null}
     </div>

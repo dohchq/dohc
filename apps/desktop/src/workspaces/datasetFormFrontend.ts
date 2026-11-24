@@ -269,7 +269,8 @@ const readDraft = () => {
     }
     if (typeof value === "string" && value.length > 2000) message = "Use 2000 characters or fewer.";
     if (field.type === "attachment" && value !== null) {
-      if (value.size < 1 || value.size > definition.uploadBytes) message = "Choose a nonempty file up to 20 MiB.";
+      if (value.size < 1) message = "Choose a nonempty file.";
+      else if (value.size > definition.uploadBytes) message = "File exceeded the " + definition.uploadBytes + " bytes (" + Math.round(definition.uploadBytes / 1024 / 1024) + " MiB) limit. It used " + value.size + " bytes.";
       else uploads.push({ fieldId: field.fieldId, file: value });
     } else if (!(value === null && field.omitWhenEmpty)) values[field.fieldId] = value;
     if (message) {

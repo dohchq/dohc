@@ -24,7 +24,7 @@
     # whole Collection and bounds itself.
     @relayBounded not path_regexp ^/sync/[^/]+/datasets/[^/]+/imports/[^/]+$
     request_body @relayBounded {
-      max_size 21MiB
+      max_size 28MiB
     }
     reverse_proxy sync-relay:1788
   }
