@@ -1346,6 +1346,57 @@ describe("registered received-view handlers", () => {
       expect(h.steps.indexOf("identity")).toBeLessThan(h.steps.indexOf("reconcile"));
     });
 
+    // An edit made with no identity would never be sent, so every gate gives
+    // View until one is recorded.
+    const levelIn = (view: unknown, path: string) =>
+      shareViewWriteLevel(shareViewWriteScopeOf(view, null)!, { path });
+
+    it("takes no Edit until a failed enrolment at open is recorded by a refresh", async () => {
+      const h = await harness();
+      const viewer = { ...member.selector!, access: "view" as const };
+      h.fetchInfo.mockResolvedValue({ ...member, selector: viewer });
+      h.fetchReach.mockResolvedValue({
+        signature: "r1",
+        visibilitySignature: "v1",
+        rootLevel: "view",
+        folders: [{ path: "Notes", level: "edit" }],
+      });
+      h.recordIdentity.mockRejectedValueOnce(new Error("offline"));
+      await h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload);
+      const opened = [...h.registry.values()].find((entry) => entry.workspaceId !== "existing")!;
+      expect(opened.shareView).toMatchObject({ editingNotReady: true });
+      expect(levelIn(opened.shareView, "Notes/a.md")).toBe("view");
+      // The window refreshes the copy it has open.
+      h.workspace.shareView = opened.shareView;
+      await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
+        workspaceId: "existing",
+      });
+      expect(h.workspace.shareView).not.toHaveProperty("editingNotReady");
+      expect(levelIn(h.workspace.shareView, "Notes/a.md")).toBe("edit");
+    });
+
+    it("takes no Edit from installed levels until it enrols for them", async () => {
+      const h = await harness();
+      const viewer = { ...member.selector!, access: "view" as const };
+      h.fetchInfo.mockResolvedValue({ ...member, selector: viewer });
+      const viewOnly = { ...stored, rootLevel: "view" as const };
+      Object.assign(h.workspace.shareView!, { grantedSelector: viewer, reach: viewOnly });
+      h.fetchReach.mockResolvedValue({
+        ...viewOnly,
+        signature: "r2",
+        folders: [{ path: "Notes", level: "edit" as const }],
+      });
+      h.reconcile.mockImplementationOnce(async () =>
+        stoppedPull({ signature: "r2", visibilitySignature: "v1" }),
+      );
+      h.recordIdentity.mockRejectedValue(new Error("offline"));
+      await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
+        workspaceId: "existing",
+      });
+      expect(h.workspace.shareView).toMatchObject({ editingNotReady: true });
+      expect(levelIn(h.workspace.shareView, "Notes/a.md")).toBe("view");
+    });
+
     // The levels moved, and the visibility moved before the pull that follows
     // them: the engine closes the copy on that second pull.
     it("marks the view as updating access when the pull after new levels closes the copy", async () => {

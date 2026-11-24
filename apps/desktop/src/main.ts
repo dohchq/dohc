@@ -758,7 +758,11 @@ import { createServerOwnerConnection } from "./workspaces/serverOwnerConnection"
 import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
 import { shareRecordStatuses } from "./workspaces/shareRecordStatus";
 import { createReceivedShareRecord } from "./workspaces/receivedShareRecordCreation";
-import { engineGrantedSelector, recordedShareSelector } from "./workspaces/shareViewRecords";
+import {
+  engineGrantedSelector,
+  membershipWaitsToSend,
+  recordedShareSelector,
+} from "./workspaces/shareViewRecords";
 import { WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import type { ActiveAgentRun } from "./agents/activeAgentRun";
@@ -11247,12 +11251,15 @@ function registerIpcHandlers(): void {
       const view = findWorkspace(workspaceId)?.shareView;
       if (view?.rebuild?.rebuildId !== rebuildId) return;
       const { rebuild: _rebuilt, ...rest } = view;
-      await setWorkspaceShareView(workspaceId, {
+      const next = {
         ...rest,
         ...(result
           ? { reach: result.reach, ...(result.recovered ? { accessSaved: result.recovered } : {}) }
           : {}),
-      });
+      };
+      // The refresh after the rebuild records the identity and clears the mark.
+      if (membershipWaitsToSend(rest, next)) next.editingNotReady = true;
+      await setWorkspaceShareView(workspaceId, next);
     },
     notice: (workspaceId, notice) => {
       const view = findWorkspace(workspaceId)?.shareView;
