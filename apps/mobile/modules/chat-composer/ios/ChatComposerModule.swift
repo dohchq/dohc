@@ -82,7 +82,7 @@ private struct FieldState: Equatable {
 /// VoiceOver doesn't read, since the text view carries the field's own name. Return is a new line. It keeps its text,
 /// reports each change to its text, selection and composition, and the height its text needs, and scrolls inside itself
 /// once the screen caps its height.
-final class ChatComposerView: ExpoView, UITextViewDelegate {
+final class ChatComposerView: ExpoView, UITextViewDelegate, UIGestureRecognizerDelegate {
   let textView = ComposerTextView()
   private let placeholder = UILabel()
   private var clearToken = 0
@@ -125,6 +125,18 @@ final class ChatComposerView: ExpoView, UITextViewDelegate {
     placeholder.numberOfLines = 1
     addSubview(textView)
     addSubview(placeholder)
+    let tap = UITapGestureRecognizer(target: self, action: #selector(focusText))
+    tap.delegate = self
+    addGestureRecognizer(tap)
+  }
+
+  /// A tap in the space above or below the text, outside the text view, starts typing as a tap on the text does.
+  @objc private func focusText() {
+    if textView.isEditable && !textView.isFirstResponder { textView.becomeFirstResponder() }
+  }
+
+  func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+    touch.view === self
   }
 
   func setPlaceholder(_ text: String) {
