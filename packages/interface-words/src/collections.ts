@@ -11,6 +11,8 @@ export const collectionWords = {
   // TransactionalCollectionPage.tsx
   recordsFailed: (table: string) => `dohc could not load ${table}.`,
   noRecords: "No records yet.",
+  // A record with no name. RecordPanel.tsx and BoardView.tsx.
+  untitledRecord: "Untitled",
   // CollectionResourceInputs.tsx, for a file whose name the server doesn't have.
   attachedFile: "Attached file",
 

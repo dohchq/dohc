@@ -248,7 +248,7 @@ const RecordRow = memo(function RecordRow(props: {
   const lead = leadField(table);
   const name =
     (lead && rowText(shownValue(lead, record.values[lead.fieldId], files), lead.name)) ??
-    String(record.id);
+    collectionWords.untitledRecord;
   const details = table.fields
     .filter((field) => field !== lead)
     .flatMap(
@@ -330,7 +330,7 @@ export function RecordScreen() {
   const lead = leadField(table);
   const title =
     (lead && rowText(shownValue(lead, record.values[lead.fieldId], files), lead.name)) ??
-    String(record.id);
+    collectionWords.untitledRecord;
   const edit = (fieldId: string, value?: RecordValue) =>
     router.push({
       pathname: "/collection-field",
