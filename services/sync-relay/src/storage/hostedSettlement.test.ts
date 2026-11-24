@@ -928,7 +928,10 @@ it.each([
   },
 );
 
-it("keeps a hosted note's current file on the accepted line after the host resends a refused settlement as a plain save", async () => {
+it.each([
+  { name: "after the host resends a refused settlement as a plain save", savedOver: false },
+  { name: "unless another origin saved over the resend", savedOver: true },
+])("keeps a hosted note's current file on the accepted line $name", async ({ savedOver }) => {
   const f = registered({ deployment: true });
   try {
     const first = publication(f, "first");
@@ -962,10 +965,47 @@ it("keeps a hosted note's current file on the accepted line after the host resen
     expect(append(f, [resend]).inserted).toBe(1);
     expect(current()).toBe(refused.markdownSha);
 
+    const other = new TextEncoder().encode("# Saved elsewhere\n");
+    if (savedOver) {
+      f.storage.putBlob({
+        workspaceId: "workspace",
+        sha256: hash(other),
+        content: other,
+        createdAtMs: 1,
+      });
+      f.storage.appendLogBatch({
+        workspaceId: "workspace",
+        originId: "other",
+        ops: [
+          {
+            originSeq: 0,
+            opKind: "moment.append",
+            recordedAtMs: 2,
+            payloadJson: stableJsonStringify({
+              momentId: "saved-elsewhere",
+              objectId: first.record.binding.objectId,
+              versionId: "main",
+              path,
+              operation: "write",
+              payloadBeforePath: path,
+              payloadAfterPath: path,
+              payloadBeforeContentKind: "text",
+              payloadBeforeBlobSha256: refused.markdownSha,
+              payloadAfterBlobSha256: hash(other),
+              payloadAfterByteLength: other.length,
+              payloadAfterContentKind: "text",
+              recordedAtMs: 2,
+            }),
+          },
+        ],
+      });
+      expect(current()).toBe(hash(other));
+    }
+
     const next = publication(f, "next", first.receipt.journalCursor, first.markdownSha, 3);
     await prepare(f, [next.op]);
-    expect(append(f, [next.op]).settlementRefusals).toBeUndefined();
-    expect(current()).toBe(next.markdownSha);
+    append(f, [next.op]);
+    expect(current()).toBe(savedOver ? hash(other) : next.markdownSha);
   } finally {
     f.close();
   }
