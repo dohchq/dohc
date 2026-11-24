@@ -5,8 +5,7 @@ use dohc_engine_collab::DocKey;
 use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::{
     AdmittedLiveUpdate, ApplicationError, ApplicationHostCoordinate, ApplicationResult,
-    BootstrapResult, LiveApplicationBootstrap, NativeRestoreFence, RetiredActivations,
-    UnloadPending,
+    BootstrapResult, LiveApplicationBootstrap, RetiredActivations, UnloadPending,
 };
 use dohc_engine_protocol::cancel::CancelSignal;
 use dohc_engine_protocol::error::{ErrorCode, WireError};
@@ -21,7 +20,6 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
-pub(crate) mod restore;
 pub(crate) mod sync;
 
 fn forwarded_owner_consent(
@@ -163,7 +161,6 @@ impl Registry {
 pub enum LiveApplicationInput {
     Replica(Box<super::replica::ReplicaInput>),
     Admitted(Box<AdmittedApplicationInput>),
-    Restore(Box<restore::RestoreInput>),
     Owner(Box<super::owner_delivery::OwnerInput>),
 }
 
@@ -755,282 +752,6 @@ impl EngineService {
         })
     }
 
-    pub(super) async fn live_application_fence_restore(
-        &self,
-        ctx: RequestContext,
-        request: Request,
-    ) -> Result<ServiceResponse, WireError> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Params {
-            operation: NativeRestoreFence,
-        }
-        if request.idempotency_key.is_some()
-            || request
-                .params
-                .get("operation")
-                .and_then(|value| value.get("terminal"))
-                .is_none()
-        {
-            return Err(WireError::new(
-                ErrorCode::InvalidParams,
-                "invalid-native-restore-fence",
-            ));
-        }
-        require_caller_deadline(&request)?;
-        let params: Params = serde_json::from_value(request.params).map_err(|_| {
-            WireError::new(ErrorCode::InvalidParams, "invalid-native-restore-fence")
-        })?;
-        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
-        let workspace = request
-            .workspace
-            .as_ref()
-            .ok_or_else(workspace_unavailable)?;
-        let host = lock(&self.live_applications)
-            .hosts
-            .get(workspace)
-            .cloned()
-            .ok_or_else(workspace_unavailable)?;
-        if !host.current(connection)
-            || params.operation.relay_database_namespace != host.namespace
-            || params.operation.host_id != host.coordinate.host_id
-            || params.operation.old_binding.workspace_id != host.open.workspace_id
-        {
-            return Err(workspace_unavailable());
-        }
-        let cancellation = super::request::OperationCancellation::new(&ctx);
-        let check_interruption = || {
-            if ctx.cancel.is_cancelled() {
-                Err(WireError::new(
-                    ErrorCode::Cancelled,
-                    "native restore fence cancelled",
-                ))
-            } else if ctx.deadline.is_some_and(|end| Instant::now() >= end) {
-                Err(WireError::new(
-                    ErrorCode::DeadlineExceeded,
-                    "native restore fence deadline elapsed",
-                ))
-            } else {
-                Ok(())
-            }
-        };
-        check_interruption()?;
-        let serial = tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => {
-                return Err(cancellation.interruption("native restore fence (queued)"));
-            }
-            serial = Arc::clone(&host.open.session_ops).lock_owned() => serial,
-        };
-        // The fence keeps the checkpoints of the binding it stops.
-        let permit = tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => {
-                return Err(cancellation.interruption("native restore fence (queued)"));
-            }
-            permit = self.reconstruction_permit() => permit,
-        };
-        check_interruption()?;
-        if !host.current(connection) || !Arc::ptr_eq(&self.open(Some(workspace))?, &host.open) {
-            return Err(workspace_unavailable());
-        }
-        let now_ms = super::request::now_ms()?;
-        let object_id = params.operation.old_binding.object_id.clone();
-        let old_binding = params.operation.old_binding.clone();
-        let retired_binding = old_binding.clone();
-        let sessions = Arc::clone(&self.sessions);
-        let guard = Arc::new(HostOutputGuard {
-            host: host.clone(),
-            cancel: ctx.cancel.clone(),
-            deadline: ctx.deadline,
-            read: false,
-        });
-        let mut retirement = RetireOnCancellation(Some(host.clone()));
-        let worker_host = host.clone();
-        let operation = tokio::spawn(async move {
-            let (_serial, _permit) = (serial, permit);
-            let receipt = worker_host
-                .owner
-                .fence_restore_after_reconnect(
-                    params.operation,
-                    worker_host.coordinate.clone(),
-                    now_ms,
-                    Arc::new(NoFaults),
-                )
-                .await?;
-            // Retire sessions before releasing session_ops, including when the caller
-            // has stopped awaiting the committed fence. Historical retries spare new generations.
-            lock(&sessions).retain(|_, session| {
-                session.key.workspace_id != retired_binding.workspace_id
-                    || session.key.version_id != retired_binding.main_version_id
-                    || session.key.object_id != retired_binding.object_id
-                    || session.restore_generation.is_some_and(|generation| {
-                        generation > retired_binding.restore_fence_generation
-                    })
-            });
-            for registration in lock(&worker_host.output_fence)
-                .iter()
-                .filter_map(Weak::upgrade)
-            {
-                if registration.binding.main_version_id == retired_binding.main_version_id
-                    && registration.object_id == retired_binding.object_id
-                    && registration.binding.restore_fence_generation
-                        <= retired_binding.restore_fence_generation
-                {
-                    registration.retired.cancel();
-                }
-            }
-            Ok::<_, dohc_engine_runtime::RuntimeError>(receipt)
-        });
-        let outcome = operation.await;
-        retirement.0 = None;
-        let receipt = match outcome
-            .map_err(|_| WireError::new(ErrorCode::Internal, "live-application-interrupted"))?
-        {
-            Ok(receipt) => receipt,
-            // Nothing committed. The host publishes ordinary work, or waits for
-            // a deferred update's dependency, and asks again.
-            Err(dohc_engine_runtime::RuntimeError::LiveApplication(
-                pending @ (dohc_engine_collab::live_update_application::ApplicationError::PublicationPending
-                | dohc_engine_collab::live_update_application::ApplicationError::AcceptedStateIncomplete),
-            )) => {
-                let reason = match pending {
-                    dohc_engine_collab::live_update_application::ApplicationError::PublicationPending => {
-                        "publication-pending"
-                    }
-                    _ => "accepted-state-incomplete",
-                };
-                return Ok(ServiceResponse {
-                    response: Response {
-                        id: request.id,
-                        result: json!({"status":"pending", "reason":reason}),
-                    },
-                    blob_egress: None,
-                    output_guard: Some(guard),
-                });
-            }
-            Err(dohc_engine_runtime::RuntimeError::LiveApplication(
-                dohc_engine_collab::live_update_application::ApplicationError::RestoreRefused(
-                    refusal,
-                ),
-            )) => {
-                return Ok(ServiceResponse {
-                    response: Response {
-                        id: request.id,
-                        result: json!({"status":"refused", "refusal":refusal}),
-                    },
-                    blob_egress: None,
-                    output_guard: Some(guard),
-                });
-            }
-            Err(error) => return Err(map_runtime(error)),
-        };
-        {
-            let mut registry = lock(&self.live_applications);
-            let _fence = lock(&host.output_fence);
-            registry.registrations.retain(|_, registration| {
-                if Arc::ptr_eq(&registration.host, &host)
-                    && registration.object_id == object_id
-                    && registration.binding.main_version_id == old_binding.main_version_id
-                    && registration.binding.restore_fence_generation
-                        <= old_binding.restore_fence_generation
-                {
-                    registration.retired.cancel();
-                    false
-                } else {
-                    true
-                }
-            });
-        }
-        // The fence committed: answer it, and let the writer withhold the
-        // answer when its guard is no longer current.
-        Ok(ServiceResponse {
-            response: Response {
-                id: request.id,
-                result: json!({"status":"fenced", "receipt":receipt}),
-            },
-            blob_egress: None,
-            output_guard: Some(guard),
-        })
-    }
-
-    /// `liveApplication.cancelRestoreFence`: end a restore the relay fenced
-    /// before its admission. The params name the operation's fence:
-    /// `{operationId, objectId, lineageClaimId, hostId, newFence}`. `hostId`
-    /// is the host that fenced it and must be this one. The current host
-    /// fixes the namespace and workspace; no param names them. The answer is
-    /// durable before it is sent, and names the generation and binding the
-    /// relay's retirement key takes:
-    /// - `{"status":"cancelled","hostId":...,"generation":newFence-1,"binding":...}`:
-    ///   no fence of the operation committed, and none ever will, even one
-    ///   in flight or replayed. `generation` is the base of the cancelled
-    ///   operation. `binding` is the document's binding at that generation;
-    ///   null means the document holds none there now, released or moved on
-    ///   by a later restore, and the relay must not record it.
-    /// - `{"status":"fenceCancelled","hostId":...,"generation":newFence,"binding":...,"receipt":...}`:
-    ///   the fence committed and this cancellation ended it before any
-    ///   application. The document stays at `newFence`, live application
-    ///   unavailable, under `binding`, the fence's stopped binding; its
-    ///   content and accepted endpoint are as the fence left them.
-    ///   `receipt` is the terminal cancellation the relay journal carries to
-    ///   passive replicas. Prepare, apply and fence of the operation refuse
-    ///   from then on.
-    ///
-    /// A replay answers the same. Another key for the operation, another
-    /// host, a key the document's generation has passed or does not hold, or
-    /// a restore already admitted answers `CONFLICT`.
-    pub(super) async fn live_application_cancel_restore_fence(
-        &self,
-        ctx: &RequestContext,
-        workspace: Option<WorkspaceHandle>,
-        params: Value,
-    ) -> Result<Value, WireError> {
-        use dohc_engine_collab::live_update_application::{
-            RestoreFenceCancellation, RestoreFenceCancellationOutcome,
-        };
-        let input: RestoreFenceCancellation = serde_json::from_value(params).map_err(|_| {
-            WireError::new(
-                ErrorCode::InvalidParams,
-                "invalid-restore-fence-cancellation",
-            )
-        })?;
-        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
-        let workspace = workspace.ok_or_else(workspace_unavailable)?;
-        let host = lock(&self.live_applications)
-            .hosts
-            .get(&workspace)
-            .cloned()
-            .ok_or_else(workspace_unavailable)?;
-        if !host.current(connection) || !Arc::ptr_eq(&self.open(Some(&workspace))?, &host.open) {
-            return Err(workspace_unavailable());
-        }
-        let now_ms = super::request::now_ms()?;
-        let host_id = input.host_id.clone();
-        let outcome = host
-            .owner
-            .cancel_restore_fence(
-                host.namespace.clone(),
-                host.coordinate.host_id.clone(),
-                input,
-                now_ms,
-            )
-            .await
-            .map_err(map_runtime)?;
-        Ok(match outcome {
-            RestoreFenceCancellationOutcome::Cancelled {
-                generation,
-                binding,
-            } => {
-                json!({"status":"cancelled","hostId":host_id,"generation":generation,"binding":binding})
-            }
-            RestoreFenceCancellationOutcome::FenceCancelled(receipt) => {
-                json!({"status":"fenceCancelled","hostId":host_id,
-                    "generation":receipt.binding.restore_fence_generation,
-                    "binding":receipt.binding,"receipt":receipt})
-            }
-        })
-    }
-
     /// Trusted host setup. No RPC derives these fields from a caller's event.
     #[doc(hidden)]
     pub async fn provision_live_application(
@@ -1369,7 +1090,6 @@ impl EngineService {
         Ok(match pending {
             None => json!({"status": "unloaded"}),
             Some(reason) => json!({"status": "pending", "reason": match reason {
-                UnloadPending::Restore => "restore-pending",
                 UnloadPending::Delivery => "delivery-pending",
                 UnloadPending::Settlement => "settlement-pending",
                 UnloadPending::Materialization => "materialization-pending",
@@ -2001,22 +1721,6 @@ mod tests {
     use dohc_engine_protocol::wire::BlobStart;
     use dohc_engine_storage::hex_sha256;
 
-    fn fence_request(
-        workspace: &WorkspaceHandle,
-        binding: &LiveObjectBinding,
-        namespace: &str,
-    ) -> Request {
-        Request {
-            id: 81,
-            method: "liveApplication.fenceRestore".into(),
-            workspace: Some(workspace.clone()),
-            deadline_ms: Some(60_000),
-            idempotency_key: None,
-            progress: false,
-            params: json!({"operation":{"point":{"journalCursor":0,"receiptDigest":binding.lineage_claim_id},"operationId":"restore-rpc","relayDatabaseNamespace":namespace,"oldBinding":binding,"hostId":"host","newFence":binding.restore_fence_generation+1,"origin":{"kind":"bootstrap","id":"bootstrap"},"terminal":null,"appliedSequence":0}}),
-        }
-    }
-
     /// Owner deliveries come from the outbox at the registration's exact
     /// binding: not one at an earlier restore generation, nor one a
     /// succession retired at an earlier path, nor one at its path with other
@@ -2156,70 +1860,6 @@ mod tests {
         let mut ctx = RequestContext::unbounded();
         ctx.connection = Some(owner.handle());
         assert!(service.call(ctx, request()).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn fence_wire_refuses_missing_terminal_extra_fields_and_foreign_host() {
-        let (_scratch, service, owner, workspace, registration, binding) = fixture().await;
-        let workspace = WorkspaceHandle(workspace);
-        assert!(
-            service
-                .call(
-                    RequestContext::unbounded(),
-                    fence_request(&workspace, &binding, "relay-history")
-                )
-                .await
-                .is_err()
-        );
-        for variant in 0..5 {
-            let mut request = fence_request(&workspace, &binding, "relay-history");
-            match variant {
-                0 => {
-                    request.params["operation"]
-                        .as_object_mut()
-                        .unwrap()
-                        .remove("terminal");
-                }
-                1 => request.params["operation"]["extra"] = json!(true),
-                2 => request.params["operation"]["hostId"] = json!("foreign"),
-                3 => request.params["operation"]["relayDatabaseNamespace"] = json!("foreign"),
-                _ => request.idempotency_key = Some("unexpected".into()),
-            }
-            let mut ctx = RequestContext::unbounded();
-            ctx.connection = Some(owner.handle());
-            assert!(
-                service.call(ctx, request).await.is_err(),
-                "variant {variant}"
-            );
-            assert!(
-                service
-                    .live_application_registration(&owner.handle(), Some(&workspace), registration)
-                    .is_ok()
-            );
-        }
-        let host = lock(&service.live_applications)
-            .hosts
-            .get(&workspace)
-            .unwrap()
-            .clone();
-        let guard = HostOutputGuard {
-            host: host.clone(),
-            cancel: RequestContext::unbounded().cancel,
-            deadline: None,
-            read: false,
-        };
-        assert!(guard.is_current());
-        host.retire();
-        assert!(!guard.is_current());
-        let mut ctx = RequestContext::unbounded();
-        ctx.connection = Some(owner.handle());
-        assert!(
-            service
-                .call(ctx, fence_request(&workspace, &binding, "relay-history"))
-                .await
-                .is_err()
-        );
-        service.workspace_close(Some(workspace)).await.unwrap();
     }
 
     /// A held read whose host retires while its connection lasts is told its
@@ -2397,7 +2037,7 @@ mod tests {
         }
     }
 
-    async fn actor_interruption(deadline: bool, restore_fence: bool) {
+    async fn actor_interruption(deadline: bool) {
         let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
         let configuration = serde_json::from_value(json!({
             "version": 1, "relayNamespace": "cancel-test",
@@ -2461,18 +2101,14 @@ mod tests {
                 Some(tokio::time::Instant::now().into_std() + std::time::Duration::from_secs(60));
         }
         let cancel = ctx.cancel.clone();
-        let request = if restore_fence {
-            fence_request(&workspace, &binding, "cancel-test")
-        } else {
-            Request {
-                id: 72,
-                method: "liveApplication.settle".into(),
-                workspace: Some(workspace.clone()),
-                deadline_ms: Some(60_000),
-                idempotency_key: None,
-                progress: false,
-                params: json!({"registrationId":registration,"terminalReceipt":null}),
-            }
+        let request = Request {
+            id: 72,
+            method: "liveApplication.settle".into(),
+            workspace: Some(workspace.clone()),
+            deadline_ms: Some(60_000),
+            idempotency_key: None,
+            progress: false,
+            params: json!({"registrationId":registration,"terminalReceipt":null}),
         };
         let mut waiting = Box::pin(service.call(ctx, request));
         std::future::poll_fn(|cx| {
@@ -2502,7 +2138,7 @@ mod tests {
             "actor work keeps session exclusion while it runs"
         );
         assert!(
-            restore_fence || ingress.settlement_admission(4).unwrap().reserve().is_err(),
+            ingress.settlement_admission(4).unwrap().reserve().is_err(),
             "actor work keeps its admission charge while it runs"
         );
         release_tx.send(()).unwrap();
@@ -2510,32 +2146,21 @@ mod tests {
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
             .await
             .expect("the request answers once its actor work ends");
-        if restore_fence {
-            // The fence takes no token, so it ran: the answer is its own.
-            let fenced = result.expect("a fence that ran answers fenced");
-            assert_eq!(fenced.response.result["status"], "fenced");
-            // Paused time does not move the clock the guard reads.
-            assert!(
-                deadline || !fenced.output_guard.as_ref().unwrap().is_current(),
-                "the writer withholds an answer its caller stopped waiting for"
-            );
-        } else {
-            assert_eq!(
-                result.unwrap_err().code,
-                if deadline {
-                    ErrorCode::DeadlineExceeded
-                } else {
-                    ErrorCode::Cancelled
-                },
-                "a settlement stopped before it ran answers as interrupted"
-            );
-            assert!(
-                service
-                    .live_application_registration(&owner.handle(), Some(&workspace), registration)
-                    .is_ok(),
-                "a settlement that never ran keeps the host"
-            );
-        }
+        assert_eq!(
+            result.unwrap_err().code,
+            if deadline {
+                ErrorCode::DeadlineExceeded
+            } else {
+                ErrorCode::Cancelled
+            },
+            "a settlement stopped before it ran answers as interrupted"
+        );
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), registration)
+                .is_ok(),
+            "a settlement that never ran keeps the host"
+        );
         assert!(open.session_ops.try_lock().is_ok());
         assert!(ingress.settlement_admission(4).unwrap().reserve().is_ok());
         service.workspace_close(Some(workspace)).await.unwrap();
@@ -2543,7 +2168,7 @@ mod tests {
 
     #[tokio::test]
     async fn settle_actor_deadline_answers_deadline_once_its_actor_work_ends() {
-        actor_interruption(true, false).await;
+        actor_interruption(true).await;
     }
 
     #[tokio::test]
@@ -3520,266 +3145,6 @@ mod tests {
         assert_eq!(waiting.await.unwrap_err().code, ErrorCode::Conflict);
         assert_eq!(teardown(&service, &owner, &workspace, document), before);
         assert_eq!(before.1, Some(Some("successor".into())));
-        service.workspace_close(Some(workspace)).await.unwrap();
-    }
-
-    fn cancel_fence_request(workspace: &WorkspaceHandle, params: Value) -> Request {
-        Request {
-            id: 98,
-            method: "liveApplication.cancelRestoreFence".into(),
-            workspace: Some(workspace.clone()),
-            deadline_ms: None,
-            idempotency_key: None,
-            progress: false,
-            params,
-        }
-    }
-
-    /// Only the current host cancels a restore fence, and it fixes the
-    /// namespace and workspace: a param naming either refuses, and so does a
-    /// fence another host holds. A fence that never landed answers cancelled
-    /// at the generation before it, on replay too. One that committed ends
-    /// only while its document still holds what the fence left.
-    #[tokio::test]
-    async fn a_restore_fence_cancellation_names_the_generation_the_relay_keeps() {
-        use dohc_engine_collab::live_update_application::{
-            NativeRestoreFence, NativeRestoreFenceReceipt, RestoreDeliveryOrigin,
-        };
-        let (_scratch, service, owner, workspace, _, _) = unload_fixture().await;
-        let params = json!({"operationId":"restore","objectId":"document","lineageClaimId":lineage(),"hostId":"host","newFence":1});
-        let mut unnamed = params.clone();
-        unnamed.as_object_mut().unwrap().remove("hostId");
-        assert_eq!(
-            service
-                .call(
-                    host_context(&owner),
-                    cancel_fence_request(&workspace, unnamed)
-                )
-                .await
-                .unwrap_err()
-                .code,
-            ErrorCode::InvalidParams
-        );
-        let mut elsewhere = params.clone();
-        elsewhere["hostId"] = json!("elsewhere");
-        assert_eq!(
-            service
-                .call(
-                    host_context(&owner),
-                    cancel_fence_request(&workspace, elsewhere)
-                )
-                .await
-                .unwrap_err()
-                .code,
-            ErrorCode::Conflict
-        );
-        let stranger = dohc_engine_protocol::transport::ConnectionOwner::authenticated();
-        assert_eq!(
-            service
-                .call(
-                    host_context(&stranger),
-                    cancel_fence_request(&workspace, params.clone())
-                )
-                .await
-                .unwrap_err()
-                .code,
-            ErrorCode::WorkspaceUnavailable
-        );
-        for (field, value) in [
-            ("relayDatabaseNamespace", "unload-test"),
-            ("workspaceId", "workspace"),
-        ] {
-            let mut named = params.clone();
-            named[field] = json!(value);
-            assert_eq!(
-                service
-                    .call(
-                        host_context(&owner),
-                        cancel_fence_request(&workspace, named)
-                    )
-                    .await
-                    .unwrap_err()
-                    .code,
-                ErrorCode::InvalidParams,
-                "{field}"
-            );
-        }
-        let cancelled = json!({"status":"cancelled","hostId":"host","generation":0,
-            "binding":unload_binding("document")});
-        for _ in 0..2 {
-            let answered = service
-                .call(
-                    host_context(&owner),
-                    cancel_fence_request(&workspace, params.clone()),
-                )
-                .await
-                .unwrap();
-            assert_eq!(answered.response.result, cancelled);
-        }
-        let mut wrong = params.clone();
-        wrong["newFence"] = json!(2);
-        assert_eq!(
-            service
-                .call(
-                    host_context(&owner),
-                    cancel_fence_request(&workspace, wrong)
-                )
-                .await
-                .unwrap_err()
-                .code,
-            ErrorCode::Conflict
-        );
-        // A fence of the sibling that committed before its reply was lost.
-        let fence = NativeRestoreFence {
-            point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
-                journal_cursor: 0,
-                receipt_digest: unload_binding("sibling").lineage_claim_id,
-            },
-            operation_id: "fenced".into(),
-            relay_database_namespace: "unload-test".into(),
-            old_binding: unload_binding("sibling"),
-            host_id: "host".into(),
-            new_fence: 1,
-            origin: RestoreDeliveryOrigin::Owner {
-                id: "activation".into(),
-            },
-            terminal: None,
-            applied_sequence: 0,
-        };
-        let receipt = NativeRestoreFenceReceipt {
-            operation: fence.clone(),
-            local_head_sequence: 0,
-            recorded_at_ms: 1,
-        };
-        shape(
-            &service,
-            &workspace,
-            &format!(
-                "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,
-                   operation_id,input_json,receipt_json) VALUES ('workspace','main','sibling','unload-test','fenced','{}','{}')",
-                serde_json::to_string(&fence).unwrap(),
-                serde_json::to_string(&receipt).unwrap()
-            ),
-        );
-        // The sibling still holds its live binding at generation 0, not the
-        // stopped one the fence left, so nothing proves the fence's terminal
-        // binding: the cancellation refuses and records nothing.
-        let fenced = json!({"operationId":"fenced","objectId":"sibling","lineageClaimId":lineage(),"hostId":"host","newFence":1});
-        assert_eq!(
-            service
-                .call(
-                    host_context(&owner),
-                    cancel_fence_request(&workspace, fenced)
-                )
-                .await
-                .unwrap_err()
-                .code,
-            ErrorCode::Conflict
-        );
-        let open = service.open(Some(&workspace)).unwrap();
-        let recorded: bool = rusqlite::Connection::open(open.actor.database_path())
-            .unwrap()
-            .query_row(
-                "SELECT cancelled_json IS NOT NULL FROM live_restore_fences WHERE operation_id='fenced'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert!(!recorded);
-        service.workspace_close(Some(workspace)).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn a_committed_fence_answers_its_terminal_cancellation() {
-        use dohc_engine_collab::live_update_application::NativeRestoreCancellationReceipt;
-        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
-        let configuration = serde_json::from_value(json!({
-            "version": 1, "relayNamespace": "cancel-test",
-            "host": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
-            "workspaces": [{"root":scratch.path(),"workspaceId":"workspace","maxRegistrations":4}],
-            "ingress": {"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":1,"uploadDeadlineMs":30_000},
-            "settlement": {"maxApplicationsPerSettlement":4}
-        })).unwrap();
-        let (service, owner, _ingress) = EngineService::configured_live_host(configuration)
-            .await
-            .unwrap();
-        let workspace = lock(&service.handles).keys().next().unwrap().clone();
-        let open = service.open(Some(&workspace)).unwrap();
-        open.actor
-            .ensure_main_version(
-                "workspace".into(),
-                0,
-                Arc::new(NoFaults),
-                dohc_engine_runtime::CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-        let binding = LiveObjectBinding {
-            workspace_id: "workspace".into(),
-            main_version_id: "main".into(),
-            object_id: "document".into(),
-            lineage_claim_id: hex_sha256(&fixture_baseline().0),
-            current_path: "document.md".into(),
-            selector_paths: vec!["document.md".into()],
-            restore_fence_generation: 0,
-        };
-        let registration = service
-            .live_application_register(
-                &host_context(&owner),
-                Some(workspace.clone()),
-                json!({"binding": binding}),
-            )
-            .await
-            .unwrap()["registrationId"]
-            .as_u64()
-            .unwrap();
-        bootstrap_baseline(&service, &owner, &workspace, registration).await;
-        let fenced = service
-            .call(
-                host_context(&owner),
-                fence_request(&workspace, &binding, "cancel-test"),
-            )
-            .await
-            .unwrap();
-        assert_eq!(fenced.response.result["status"], "fenced");
-        let params = json!({"operationId":"restore-rpc","objectId":"document",
-            "lineageClaimId":binding.lineage_claim_id,"hostId":"host","newFence":1});
-        let mut stopped = binding.clone();
-        stopped.restore_fence_generation = 1;
-        let answered = service
-            .call(
-                host_context(&owner),
-                cancel_fence_request(&workspace, params.clone()),
-            )
-            .await
-            .unwrap()
-            .response
-            .result;
-        let receipt: NativeRestoreCancellationReceipt =
-            serde_json::from_value(answered["receipt"].clone()).unwrap();
-        assert_eq!(
-            answered,
-            json!({"status":"fenceCancelled","hostId":"host","generation":1,
-                "binding":stopped,"receipt":receipt})
-        );
-        assert_eq!(receipt.binding, stopped);
-        assert_eq!(receipt.fence.operation.operation_id, "restore-rpc");
-        assert_eq!(
-            (
-                receipt.endpoint.event_count,
-                receipt.endpoint.terminal_receipt
-            ),
-            (0, None),
-            "nothing was accepted after the bootstrap"
-        );
-        let replayed = service
-            .call(
-                host_context(&owner),
-                cancel_fence_request(&workspace, params),
-            )
-            .await
-            .unwrap();
-        assert_eq!(replayed.response.result, answered);
         service.workspace_close(Some(workspace)).await.unwrap();
     }
 

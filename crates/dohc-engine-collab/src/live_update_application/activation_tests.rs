@@ -775,36 +775,6 @@ fn reader_fixture_case(case: &str) -> Fixture {
     imported_source_fixture(Fixture::with_source(text, bytes))
 }
 
-#[test]
-#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
-fn reader_restore_can_fence_before_lazy_proof_dispatch() {
-    let mut f = reader_fixture_case("valid");
-    let resolver = Arc::new(reader_resolver());
-    let captured = prove_activation(&mut f, &resolver).unwrap();
-    f.cut.adoption_id = captured.activation_id;
-    reader_application_result(|| adopt_owner_committed(&mut f.store, &f.handle, f.cut.clone(), 1_000_000, 100, 10, &NoFaults, Some(&resolver), |_, _, _, _| Ok(()))).unwrap();
-    let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
-    let operation = NativeRestoreFence {
-        point: crate::live_update_application::NativeRestoreSelection { journal_cursor: 0, receipt_digest: f.binding.lineage_claim_id.clone() },
-            operation_id: "reader-restore".into(), relay_database_namespace: "namespace".into(),
-        old_binding: f.binding.clone(), host_id: "host".into(), new_fence: 1,
-        origin: RestoreDeliveryOrigin::Owner { id: f.cut.adoption_id.clone() },
-        terminal: None, applied_sequence: 0,
-    };
-    let mut receipt = None;
-    for reconnect in [false, true] {
-        let result = if reconnect {
-            f._owner.fence_restore_after_reconnect(&mut f.store, Some(&resolver), operation.clone(), coordinate.clone(), 20, &NoFaults, |_, _| Ok(()))
-        } else {
-            f._owner.fence_restore(&mut f.store, Some(&resolver), operation.clone(), coordinate.clone(), 20, &NoFaults, |_, _| Ok(()))
-        };
-        let result = result.unwrap();
-        if let Some(previous) = &receipt { assert_eq!(previous, &result); }
-        receipt = Some(result);
-        assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 1);
-        assert!(!f.handle.registration.lock().unwrap().live);
-    }
-}
 fn reader_resolver() -> crate::reader_resolver::ReaderResolver {
     let config =
         serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();

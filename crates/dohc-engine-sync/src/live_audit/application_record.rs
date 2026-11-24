@@ -2,9 +2,9 @@ use super::chunks::{ChunkReader, ChunkWriter, Manifest};
 use super::*;
 use dohc_engine_collab::live_update_application::{
     AdmittedLiveUpdateMetadata, ApplicationHostCoordinate, LiveAuthorEntry,
-    LiveCheckpointAuthorCoverage, LiveUpdateReceipt, LiveUpdateStructRange, MAX_CANCELLED_RESTORES,
-    NativeRestoreCancellationReceipt, RelayAcceptedLiveUpdate, RetainedPrefixBody,
-    ServerDerivedLiveUpdateAuthority, one_author, validate_checkpoint_coverage,
+    LiveCheckpointAuthorCoverage, LiveUpdateReceipt, LiveUpdateStructRange,
+    RelayAcceptedLiveUpdate, RetainedPrefixBody, ServerDerivedLiveUpdateAuthority, one_author,
+    validate_checkpoint_coverage,
 };
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use std::cell::RefCell;
@@ -35,54 +35,9 @@ struct SourceApplication {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Suffix {
     source_application: Option<SourceApplication>,
-    source_restore: Option<restore_record::RestoreSource>,
-    /// The restores cancelled after their fences that carried the lineage
-    /// from the event before's generation to this event's, or to the
-    /// generation its restore fenced from.
-    cancelled_restores: Vec<CancelledRestore>,
+    source_restore: Option<Retired>,
+    cancelled_restores: Vec<Retired>,
     content_coordinate: BaseCoordinate,
-}
-
-/// A restore cancelled after its fence, and the origin adoption of the owner
-/// activation that fenced it, when one did. A successor fences under its own
-/// ID and host; the source checked them against that activation, current at
-/// the generation it fenced from, before it exported this.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CancelledRestore {
-    origin_adoption_id: Option<String>,
-    cancellation: NativeRestoreCancellationReceipt,
-}
-
-/// The cancellations an event crosses, bounded while they parse.
-struct CancelledRestores(Vec<CancelledRestore>);
-
-impl<'de> Deserialize<'de> for CancelledRestores {
-    fn deserialize<D: serde::Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
-        struct Bounded;
-        impl<'de> Visitor<'de> for Bounded {
-            type Value = CancelledRestores;
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("the restore cancellations one event crosses")
-            }
-            fn visit_seq<A: SeqAccess<'de>>(
-                self,
-                mut sequence: A,
-            ) -> Result<Self::Value, A::Error> {
-                let mut chain = Vec::new();
-                while let Some(cancelled) = sequence.next_element()? {
-                    if chain.len() == MAX_CANCELLED_RESTORES {
-                        return Err(serde::de::Error::custom(
-                            "live audit cancellations exceed one event's crossing",
-                        ));
-                    }
-                    chain.push(cancelled);
-                }
-                Ok(CancelledRestores(chain))
-            }
-        }
-        decoder.deserialize_seq(Bounded)
-    }
 }
 
 struct ParsedRecord {
@@ -188,90 +143,6 @@ fn preceding(conn: &Connection, p: [&str; 5], count: i64) -> Result<Preceding, S
     })
 }
 
-/// The cancellations `chain` carried the lineage from the event before's
-/// generation to `target`: one for each generation, each a restore of this
-/// lineage in `namespace` fenced by its origin, ending at the event before.
-/// The imported history holds no fence rows, so this checks the history it
-/// has.
-fn verify_cancelled(
-    conn: &Connection,
-    namespace: &str,
-    binding: &LiveObjectBinding,
-    preceding: &Preceding,
-    chain: &[CancelledRestore],
-    target: i64,
-) -> Result<(), SyncError> {
-    let mut generation = preceding.generation;
-    if !chain.is_empty() {
-        let origin = base(conn, scope(namespace, binding))?.origin;
-        for CancelledRestore {
-            origin_adoption_id,
-            cancellation: cancelled,
-        } in chain
-        {
-            let operation = &cancelled.fence.operation;
-            cancelled
-                .validate()
-                .map_err(|_| invalid("invalid historical restore cancellation"))?;
-            if operation.relay_database_namespace != namespace
-                || scope(namespace, &cancelled.binding) != scope(namespace, binding)
-                || operation.old_binding.restore_fence_generation != generation
-                || cancelled.endpoint != preceding.endpoint
-                || !origin.fenced(
-                    origin_adoption_id.as_deref(),
-                    &operation.origin,
-                    &operation.host_id,
-                )
-            {
-                return Err(invalid("historical restore cancellation differs"));
-            }
-            generation = cancelled.binding.restore_fence_generation;
-        }
-    }
-    if generation != target {
-        return Err(invalid("live audit generation step is unexplained"));
-    }
-    Ok(())
-}
-
-/// The origin adoption of the owner activation that fenced `cancelled`'s
-/// restore, when one did: the activation it names, of this lineage, on its
-/// host, and current at the generation it fenced from.
-fn fencing_adoption(
-    conn: &Connection,
-    namespace: &str,
-    cancelled: &NativeRestoreCancellationReceipt,
-) -> Result<Option<String>, SyncError> {
-    use dohc_engine_collab::live_update_application::RestoreDeliveryOrigin;
-    let operation = &cancelled.fence.operation;
-    let RestoreDeliveryOrigin::Owner { id } = &operation.origin else {
-        return Ok(None);
-    };
-    let p = scope(namespace, &operation.old_binding);
-    let activation: Option<(Option<String>, String, String, Option<i64>)> = conn
-        .query_row(
-            &format!("SELECT origin_adoption_id,host_coordinate_json,binding_json,released_restore_generation FROM live_owner_activations WHERE {SCOPE} AND activation_id=?6"),
-            params![p[0], p[1], p[2], p[3], p[4], id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .optional()
-        .map_err(SyncError::corrupt)?;
-    let Some((Some(adoption), host, binding, released)) = activation else {
-        return Err(invalid("restore cancellation activation is unavailable"));
-    };
-    let host: ApplicationHostCoordinate =
-        serde_json::from_str(&host).map_err(SyncError::corrupt)?;
-    let binding: LiveObjectBinding = serde_json::from_str(&binding).map_err(SyncError::corrupt)?;
-    let generation = operation.old_binding.restore_fence_generation;
-    if host.host_id != operation.host_id
-        || binding.restore_fence_generation > generation
-        || released.is_some_and(|released| released < generation)
-    {
-        return Err(invalid("restore cancellation activation differs"));
-    }
-    Ok(Some(adoption))
-}
-
 fn next_field<'de, A: MapAccess<'de>, T: Deserialize<'de>>(
     map: &mut A,
     name: &str,
@@ -343,12 +214,10 @@ impl<'de> Visitor<'de> for RecordVisitor<'_> {
             canonical: &mut canonical,
         })?;
         let source_application = next_field(&mut map, "sourceApplication")?;
-        let source_restore = next_field(&mut map, "sourceRestore")?;
-        let CancelledRestores(cancelled_restores) = next_field(&mut map, "cancelledRestores")?;
         let suffix = Suffix {
             source_application,
-            source_restore,
-            cancelled_restores,
+            source_restore: next_field(&mut map, "sourceRestore")?,
+            cancelled_restores: next_field(&mut map, "cancelledRestores")?,
             content_coordinate: next_field(&mut map, "contentCoordinate")?,
         };
         end_fields(&mut map)?;
@@ -361,36 +230,11 @@ impl<'de> Visitor<'de> for RecordVisitor<'_> {
                 .validate()
                 .map_err(serde::de::Error::custom)?;
         }
-        if let Some(restore) = &suffix.source_restore {
-            let source = suffix
-                .source_application
-                .as_ref()
-                .ok_or_else(|| serde::de::Error::custom("restore application source missing"))?;
-            restore
-                .verify(
-                    self.conn,
-                    &header.relay_database_namespace,
-                    header.event_count,
-                    &accepted,
-                    source.local_ydoc_sequence,
-                    &source.host_coordinate.host_id,
-                )
-                .map_err(|error| decode_failure(error, self.storage_failure))?;
+        if preceding.generation != accepted.binding.restore_fence_generation {
+            return Err(serde::de::Error::custom(
+                "live audit generation step is unexplained",
+            ));
         }
-        verify_cancelled(
-            self.conn,
-            &header.relay_database_namespace,
-            &accepted.binding,
-            &preceding,
-            &suffix.cancelled_restores,
-            suffix
-                .source_restore
-                .as_ref()
-                .map_or(accepted.binding.restore_fence_generation, |restore| {
-                    restore.old_generation()
-                }),
-        )
-        .map_err(|error| decode_failure(error, self.storage_failure))?;
         crate::model::bounded(
             &suffix.content_coordinate.origin_id,
             "invalid live audit content origin",
@@ -875,8 +719,7 @@ fn insert_event(
             .iter()
             .all(|saved| saved == &manifest.record_digest));
     }
-    // restore_markdown_digest is the relay writer's digest of the point, kept as its claim; no check reads it.
-    tx.execute("INSERT INTO live_audit_events(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count,record_digest,evidence_digest,journal_cursor,delivery_id,accepting_host_epoch,restore_operation_id,restore_markdown_digest,canonical_version,restore_generation) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",params![p[0],p[1],p[2],p[3],p[4],record.header.event_count,manifest.record_digest,record.header.evidence_digest,record.accepted.receipt.journal_cursor,record.accepted.receipt.delivery_id,record.accepted.receipt.accepting_host_epoch,record.suffix.source_restore.as_ref().map(|s|&s.operation_id),record.suffix.source_restore.as_ref().map(|s|&s.point.markdown_digest),record.canonical_version,record.accepted.binding.restore_fence_generation]).map_err(SyncError::persist)?;
+    tx.execute("INSERT INTO live_audit_events(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count,record_digest,evidence_digest,journal_cursor,delivery_id,accepting_host_epoch,restore_operation_id,restore_markdown_digest,canonical_version,restore_generation) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",params![p[0],p[1],p[2],p[3],p[4],record.header.event_count,manifest.record_digest,record.header.evidence_digest,record.accepted.receipt.journal_cursor,record.accepted.receipt.delivery_id,record.accepted.receipt.accepting_host_epoch,None::<String>,None::<String>,record.canonical_version,record.accepted.binding.restore_fence_generation]).map_err(SyncError::persist)?;
     Ok(true)
 }
 
@@ -1408,33 +1251,9 @@ pub fn journal_live_event_in_tx(
     {
         return Err(invalid("native audit source identity differs"));
     }
-    let source_restore = restore_record::read(tx, namespace, &accepted)?;
-    let target = source_restore
-        .as_ref()
-        .map_or(accepted.binding.restore_fence_generation, |restore| {
-            restore.old_generation()
-        });
-    let cancelled_restores = dohc_engine_collab::live_update_application::cancelled_restores(
-        tx,
-        namespace,
-        &accepted.binding,
-        (preceding.generation, target),
-        &preceding.endpoint,
-    )
-    .map_err(|error| match error {
-        dohc_engine_collab::live_update_application::ApplicationError::Storage(error) => {
-            SyncError::Storage(error)
-        }
-        _ => invalid("native restore cancellations differ"),
-    })?
-    .into_iter()
-    .map(|cancellation| {
-        Ok(CancelledRestore {
-            origin_adoption_id: fencing_adoption(tx, namespace, &cancellation)?,
-            cancellation,
-        })
-    })
-    .collect::<Result<Vec<_>, SyncError>>()?;
+    if preceding.generation != accepted.binding.restore_fence_generation {
+        return Err(invalid("live audit generation step is unexplained"));
+    }
     let path = accepted.binding.current_path;
     let header = Header {
         kind: "application".into(),
@@ -1484,8 +1303,8 @@ pub fn journal_live_event_in_tx(
     let source_application=tx.query_row("SELECT local_ydoc_sequence,applied_host_id,applied_host_epoch,applied_instance_id,applied_connection_id FROM live_device_update_applications WHERE relay_database_namespace=?1 AND delivery_id=?2",params![namespace,delivery],|r|Ok(SourceApplication{local_ydoc_sequence:r.get(0)?,host_coordinate:ApplicationHostCoordinate{host_id:r.get(1)?,host_epoch:r.get(2)?,instance_id:r.get(3)?,connection_id:r.get(4)?}})).optional().map_err(SyncError::corrupt)?;
     let suffix = Suffix {
         source_application,
-        source_restore,
-        cancelled_restores,
+        source_restore: None,
+        cancelled_restores: Vec::new(),
         content_coordinate,
     };
     let mut writer = ChunkWriter::new(tx);

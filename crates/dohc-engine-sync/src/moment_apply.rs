@@ -988,37 +988,13 @@ fn apply_moment_append(
             {
                 return Err(SyncError::LiveDocumentBindingActive);
             }
-            let Some(cursor) = crate::live_audit::owner_settlement_cursor_in(
+            let cursor = crate::live_audit::owner_settlement_cursor_in(
                 tx,
                 &owner,
                 &payload.moment_id,
                 &payload.payload_after_blob_sha256,
             )?
-            else {
-                // Ordinary sync can import a restore's settlement before the
-                // authenticated owner feed reaches the restore generation.
-                // Wait for that exact binding; the replay repeats every check.
-                let (binding, cursor) = crate::live_audit::restore_successor_settlement_in(
-                    tx,
-                    &owner,
-                    &payload.moment_id,
-                    &payload.payload_after_blob_sha256,
-                )?
-                .ok_or(SyncError::LiveDocumentBindingActive)?;
-                pending::enqueue(
-                    tx,
-                    envelope,
-                    payload,
-                    &owner.relay_database_namespace,
-                    &binding,
-                    cursor,
-                )?;
-                return Ok(MomentApplyResult {
-                    conflicts_opened: 0,
-                    materialization_changes: Vec::new(),
-                    record_facts: None,
-                });
-            };
+            .ok_or(SyncError::LiveDocumentBindingActive)?;
             if cursor > owner.accepted_cursor {
                 pending::enqueue(
                     tx,

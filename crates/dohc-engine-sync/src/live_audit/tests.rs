@@ -3917,7 +3917,8 @@ fn copy_audit_blobs(source: &EngineStore, target: &mut EngineStore) {
         .unwrap();
 }
 
-fn malformed_restore_receipt_pull(field: &str, value: serde_json::Value) {
+#[test]
+fn a_record_carrying_a_restore_refuses_without_stalling_pull() {
     use dohc_engine_collab::live_update_application::AdmittedLiveUpdateMetadata;
     let mut f = fixture(true);
     bootstrap(&mut f, false).unwrap();
@@ -3959,31 +3960,16 @@ fn malformed_restore_receipt_pull(field: &str, value: serde_json::Value) {
         .unwrap();
     let mut metadata: AdmittedLiveUpdateMetadata =
         serde_json::from_value(record["metadata"].clone()).unwrap();
-    metadata.accepted.binding.restore_fence_generation = 1;
     metadata.accepted.receipt.journal_cursor = 2;
     let base: BasePayload = serde_json::from_value(published(&f).payload).unwrap();
     let previous = &base.record.checkpoint.evidence_digest;
     let evidence =
         hex_sha256(&serde_json::to_vec(&("accepted-event-v1", previous, 1, &metadata)).unwrap());
-    let mut terminal = json!({"deliveryId":"earlier", "updateDigest": f.binding.lineage_claim_id,
-        "journalCursor":1, "acceptingHostEpoch":1});
-    terminal[field] = value;
-    let restore: restore_record::RestoreSource = serde_json::from_value(json!({
-        "operationId":"restore", "oldGeneration":0, "origin":{"kind":"bootstrap","id":"bootstrap"},
-        "hostId":"host", "appliedSequence":1, "fenceHeadSequence":1, "fencedAtMs":100,
-        "point":{"journalCursor":0,"receiptDigest":f.binding.lineage_claim_id,
-            "markdownDigest":f.input.projected_markdown_digest,"projectionDigest":f.input.projected_markdown_digest},
-        "selected":{"eventCount":0,"terminal":null,"evidenceDigest":previous},
-        "accepted":{"eventCount":0,"terminal":terminal,"evidenceDigest":previous},
-        "originEvidenceDigest":hex_sha256(&serde_json::to_vec(&f.input).unwrap()),
-        "nativeSourceManifestDigest":f.binding.lineage_claim_id,"frozenStateDigest":f.binding.lineage_claim_id,
-        "pointStateDigest":f.binding.lineage_claim_id,"finalContentDigest":f.input.projected_markdown_digest
-    })).unwrap();
     let bytes = format!(
         "{{\"kind\":\"application\",\"relayDatabaseNamespace\":\"relay\",\"eventCount\":1,\"evidenceDigest\":\"{evidence}\",\"updateByteLength\":{},\"metadata\":{},\"sourceApplication\":{{\"localYDocSequence\":2,\"hostCoordinate\":{{\"hostId\":\"host\",\"hostEpoch\":1,\"instanceId\":\"instance\",\"connectionId\":\"connection\"}}}},\"sourceRestore\":{},\"cancelledRestores\":[],\"contentCoordinate\":{}}}",
         f.bytes.len(),
         serde_json::to_string(&metadata).unwrap(),
-        serde_json::to_string(&restore).unwrap(),
+        json!({"operationId":"restore"}),
         record["contentCoordinate"]
     );
     let dohc_engine_storage::TxnOutcome::Committed(manifest) = receiver
@@ -4048,11 +4034,6 @@ fn pull_refused_audit(receiver: &mut EngineStore, mut audit: ReplicationEnvelope
         1
     );
     assert_eq!(count(receiver, "live_audit_events"), 0);
-}
-
-#[test]
-fn malformed_restore_receipt_epoch_does_not_stall_pull() {
-    malformed_restore_receipt_pull("acceptingHostEpoch", json!(0));
 }
 
 /// An event audited before events kept their generation leaves the next

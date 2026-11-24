@@ -40,46 +40,6 @@ pub(crate) fn owner_settlement_cursor_in(
     Ok(None)
 }
 
-/// An audited settlement at a later restore generation of the owner's binding.
-/// It shows only that the owner has not yet observed that generation, so the
-/// moment waits for the authenticated binding to reach it.
-pub(crate) fn restore_successor_settlement_in(
-    conn: &Connection,
-    owner: &dohc_engine_collab::owner_outbox::draft::OwnerDraftDescriptor,
-    moment_id: &str,
-    markdown_digest: &str,
-) -> Result<Option<(LiveObjectBinding, i64)>, SyncError> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT json_extract(record_json,'$.binding'),json_extract(record_json,'$.terminalCursor')
-             FROM live_audit_settlements
-             WHERE workspace_id=?1 AND json_extract(record_json,'$.momentId')=?2 AND markdown_digest=?3
-               AND json_extract(record_json,'$.relayDatabaseNamespace')=?4
-               AND json_extract(record_json,'$.binding.restoreFenceGeneration')>?5
-             ORDER BY json_extract(record_json,'$.terminalCursor')",
-        )
-        .map_err(SyncError::corrupt)?;
-    let mut rows = stmt
-        .query(params![
-            owner.binding.workspace_id,
-            moment_id,
-            markdown_digest,
-            owner.relay_database_namespace,
-            owner.binding.restore_fence_generation
-        ])
-        .map_err(SyncError::corrupt)?;
-    while let Some(row) = rows.next().map_err(SyncError::corrupt)? {
-        let binding: LiveObjectBinding =
-            serde_json::from_str(&row.get::<_, String>(0).map_err(SyncError::corrupt)?)
-                .map_err(SyncError::corrupt)?;
-        if dohc_engine_collab::owner_outbox::enrollment::restore_successor(&owner.binding, &binding)
-        {
-            return Ok(Some((binding, row.get(1).map_err(SyncError::corrupt)?)));
-        }
-    }
-    Ok(None)
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SettlementRecord {
@@ -100,7 +60,7 @@ struct SettlementRecord {
     source_state_vector_digest: String,
     accepted_state_blob_sha256: String,
     recorded_at_ms: i64,
-    restore_operation_id: Option<String>,
+    restore_operation_id: Option<super::Retired>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -118,9 +78,6 @@ impl SettlementRecord {
             .validate()
             .map_err(SyncError::corrupt)?;
         crate::model::bounded(&self.moment_id, "invalid settlement moment")?;
-        if let Some(operation) = &self.restore_operation_id {
-            crate::model::bounded(operation, "invalid settlement restore operation")?;
-        }
         if self.binding.workspace_id != workspace
             || self.relay_database_namespace.is_empty()
             || self.relay_database_namespace.len() > 1024
@@ -247,34 +204,15 @@ fn require_projection(conn: &Connection, sha: &str) -> Result<(), SyncError> {
     Ok(())
 }
 
-fn require_restore_application(
-    conn: &Connection,
-    record: &SettlementRecord,
-) -> Result<(), SyncError> {
-    let Some(operation) = &record.restore_operation_id else {
-        return Ok(());
-    };
-    let p = scope(&record.relay_database_namespace, &record.binding);
-    // The point's Markdown digest is the relay writer's; the settlement's is the engine's.
-    let proof:Option<Option<String>>=conn.query_row(&format!("SELECT restore_operation_id FROM live_audit_events WHERE {SCOPE} AND journal_cursor=?6"),params![p[0],p[1],p[2],p[3],p[4],record.terminal_cursor],|r|r.get(0)).optional().map_err(SyncError::corrupt)?;
-    let proof = proof.ok_or(SyncError::RetryableState {
-        reason: "settlement restore application is unavailable",
-    })?;
-    if proof.as_ref() != Some(operation) {
-        return Err(invalid("settlement restore provenance differs"));
-    }
-    Ok(())
-}
-
 fn read_native_metadata(
     conn: &Connection,
     workspace: &str,
     id: &str,
 ) -> Result<SettlementRecord, SyncError> {
-    let record=conn.query_row("SELECT relay_database_namespace,binding_json,host_coordinate_json,previous_cursor,terminal_cursor,previous_ydoc_sequence,local_ydoc_sequence,application_count,interval_digest,moment_id,markdown_digest,source_state_vector_digest,recorded_at_ms,restore_operation_id FROM live_device_settlements WHERE workspace_id=?1 AND settlement_id=?2",params![workspace,id],|row|{
+    let record=conn.query_row("SELECT relay_database_namespace,binding_json,host_coordinate_json,previous_cursor,terminal_cursor,previous_ydoc_sequence,local_ydoc_sequence,application_count,interval_digest,moment_id,markdown_digest,source_state_vector_digest,recorded_at_ms FROM live_device_settlements WHERE workspace_id=?1 AND settlement_id=?2 AND restore_operation_id IS NULL",params![workspace,id],|row|{
         let binding=serde_json::from_str(&row.get::<_,String>(1)?).map_err(|error|rusqlite::Error::FromSqlConversionFailure(1,rusqlite::types::Type::Text,Box::new(error)))?;
         let host_coordinate=serde_json::from_str(&row.get::<_,String>(2)?).map_err(|error|rusqlite::Error::FromSqlConversionFailure(2,rusqlite::types::Type::Text,Box::new(error)))?;
-        Ok(SettlementRecord{settlement_id:id.into(),relay_database_namespace:row.get(0)?,binding,host_coordinate,previous_cursor:row.get(3)?,terminal_cursor:row.get(4)?,previous_ydoc_sequence:row.get(5)?,local_ydoc_sequence:row.get(6)?,application_count:row.get(7)?,native_interval_digest:row.get(8)?,accepted_event_count:0,accepted_interval_digest:String::new(),moment_id:row.get(9)?,markdown_digest:row.get(10)?,source_state_vector_digest:row.get(11)?,accepted_state_blob_sha256:String::new(),recorded_at_ms:row.get(12)?,restore_operation_id:row.get(13)?})
+        Ok(SettlementRecord{settlement_id:id.into(),relay_database_namespace:row.get(0)?,binding,host_coordinate,previous_cursor:row.get(3)?,terminal_cursor:row.get(4)?,previous_ydoc_sequence:row.get(5)?,local_ydoc_sequence:row.get(6)?,application_count:row.get(7)?,native_interval_digest:row.get(8)?,accepted_event_count:0,accepted_interval_digest:String::new(),moment_id:row.get(9)?,markdown_digest:row.get(10)?,source_state_vector_digest:row.get(11)?,accepted_state_blob_sha256:String::new(),recorded_at_ms:row.get(12)?,restore_operation_id:None})
     }).map_err(SyncError::corrupt)?;
     record.binding.validate_canonical().map_err(invalid)?;
     Ok(record)
@@ -300,7 +238,6 @@ fn read_native(
     record.accepted_event_count = count;
     record.accepted_interval_digest = digest;
     record.validate(workspace)?;
-    require_restore_application(conn, &record)?;
     require_projection(conn, &record.markdown_digest)?;
     Ok(record)
 }
@@ -388,9 +325,6 @@ fn publication_source_before_in_tx(
     tx: &Transaction<'_>,
     record: &SettlementRecord,
 ) -> Result<Option<crate::outbound::PortableBefore>, SyncError> {
-    if record.restore_operation_id.is_some() {
-        return Ok(None);
-    }
     let b = &record.binding;
     if record.previous_cursor == 0
         && let origin_record::OriginRecord::Bootstrap { source, .. } =
@@ -458,9 +392,7 @@ fn publication_source_before_in_tx(
             let historical: LiveObjectBinding =
                 serde_json::from_str(&json).map_err(SyncError::corrupt)?;
             historical.validate_canonical().map_err(invalid)?;
-            if historical == *b
-                || dohc_engine_collab::owner_outbox::enrollment::restore_successor(&historical, b)
-            {
+            if historical == *b {
                 break row.get(0).map_err(SyncError::corrupt)?;
             }
         };
@@ -532,11 +464,7 @@ fn imported_event_zero_before_in_tx(
     let base: BaseRecord = serde_json::from_str(&json).map_err(SyncError::corrupt)?;
     base.validate(&b.workspace_id)?;
     if base.relay_database_namespace != record.relay_database_namespace
-        || !(base.checkpoint.binding == *b
-            || dohc_engine_collab::owner_outbox::enrollment::restore_successor(
-                &base.checkpoint.binding,
-                b,
-            ))
+        || base.checkpoint.binding != *b
     {
         return Err(invalid("settlement event zero binding differs"));
     }
@@ -603,7 +531,6 @@ pub(super) fn apply_settlement_envelope(
         ) {
             return Err(invalid("historical settlement interval differs"));
         }
-        require_restore_application(tx, &record)?;
         require_projection(tx, &record.markdown_digest)?;
         let prior: Option<String> = tx
             .query_row(
@@ -730,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn a_note_keeps_saving_after_a_cancelled_restore_when_an_earlier_save_needs_review() {
+    fn a_note_keeps_saving_when_an_earlier_save_needs_review() {
         let (_scratch, _, mut store) = dohc_engine_testkit::open_store();
         let mut text = VersionedTextStore::new(&mut store);
         text.ensure_main_version("ws", "main", 1, &NoFaults)
@@ -758,7 +685,7 @@ mod tests {
             )
             .unwrap();
         }
-        let mut binding = LiveObjectBinding {
+        let binding = LiveObjectBinding {
             workspace_id: "ws".into(),
             main_version_id: "main".into(),
             object_id: "object".into(),
@@ -768,8 +695,7 @@ mod tests {
             restore_fence_generation: 0,
         };
         let adopted = serde_json::to_string(&binding).unwrap();
-        binding.restore_fence_generation = 1;
-        let current = serde_json::to_string(&binding).unwrap();
+        let current = adopted.clone();
         let accepted = hex_sha256(b"Accepted note.");
         store.write_with(&NoFaults, |tx| {
             dohc_engine_storage::put_binary_blob(tx, b"lineage")?;
@@ -1056,7 +982,6 @@ mod tests {
                 relay_database_namespace: "relay".into(),
                 checkpoint: NativeAcceptedCheckpoint {
                     canonical_version: None,
-                    restore_operation_id: None,
                     event_count: 0,
                     terminal: None,
                     binding: binding.clone(),

@@ -29,9 +29,9 @@ const MAX_CHUNK_BYTES: usize = 256 * 1024;
 // An initial sync carries the host vector beside its update.
 const MAX_OWNER_BODY_BYTES: usize = MAX_YDOC_UPDATE_BYTES * 2;
 mod adoption;
+#[cfg(test)]
+mod applied_sync_tests;
 mod replica;
-mod restore;
-pub(crate) use restore::RestoreConfig;
 
 #[derive(Clone)]
 pub struct LiveApplicationIngressConfig {
@@ -366,7 +366,6 @@ pub struct LiveApplicationIngress {
     released: Arc<Notify>,
     owner_turn: Arc<tokio::sync::Mutex<()>>,
     uploads: HashMap<u64, Upload>,
-    restores: HashMap<u64, restore::Upload>,
     last_stream_id: Option<u64>,
 }
 
@@ -492,7 +491,6 @@ impl LiveApplicationIngress {
             owner_turn: Arc::new(tokio::sync::Mutex::new(())),
             config,
             uploads: HashMap::new(),
-            restores: HashMap::new(),
             last_stream_id: None,
         })
     }
@@ -503,9 +501,6 @@ impl LiveApplicationIngress {
         connection: &ConnectionHandle,
     ) -> Result<(), WireError> {
         self.service.guard_replica_request(&mut request)?;
-        if restore::is_method(&request.method) {
-            return restore::begin(self, request, connection);
-        }
         if !matches!(
             request.method.as_str(),
             "replica.applyJournalPage"
@@ -522,11 +517,11 @@ impl LiveApplicationIngress {
         {
             return Err(invalid("invalid-live-application-request"));
         }
-        if self.uploads.contains_key(&request.id) || self.restores.contains_key(&request.id) {
+        if self.uploads.contains_key(&request.id) {
             return Err(invalid("duplicate-live-request"));
         }
         // Headers remain bounded even when the body admission budget is exhausted.
-        if self.uploads.len() + self.restores.len() >= self.config.max_uploads {
+        if self.uploads.len() >= self.config.max_uploads {
             return Err(overloaded());
         }
         let (metadata, registration_id, update, ranges, range_count) = if request
@@ -772,9 +767,6 @@ impl LiveApplicationIngress {
     }
 
     pub fn start(&mut self, start: BlobStart) -> Result<(), WireError> {
-        if let Some(upload) = self.restores.get_mut(&start.request_id) {
-            return upload.start(&start);
-        }
         let upload = self
             .uploads
             .get_mut(&start.request_id)
@@ -800,13 +792,6 @@ impl LiveApplicationIngress {
         fin: bool,
         bytes: &[u8],
     ) -> Result<Option<UploadCompletion>, WireError> {
-        if self
-            .restores
-            .values()
-            .any(|upload| upload.stream_id() == stream_id)
-        {
-            return restore::chunk(self, stream_id, fin, bytes);
-        }
         let id = self
             .uploads
             .iter()
@@ -989,41 +974,29 @@ impl LiveApplicationIngress {
     }
 
     pub fn cancel(&mut self, request_id: u64) -> bool {
-        self.uploads.remove(&request_id).is_some() | self.restores.remove(&request_id).is_some()
+        self.uploads.remove(&request_id).is_some()
     }
 
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.uploads
-            .values()
-            .map(|upload| upload.deadline)
-            .chain(self.restores.values().map(|upload| upload.deadline()))
-            .min()
+        self.uploads.values().map(|upload| upload.deadline).min()
     }
 
     pub fn expire(&mut self) -> Vec<u64> {
         let now = Instant::now();
-        let mut expired: Vec<_> = self
+        let expired: Vec<_> = self
             .uploads
             .iter()
             .filter(|(_, upload)| upload.deadline <= now)
             .map(|(id, _)| *id)
             .collect();
-        expired.extend(
-            self.restores
-                .iter()
-                .filter(|(_, upload)| upload.deadline() <= now)
-                .map(|(id, _)| *id),
-        );
         for id in &expired {
             self.uploads.remove(id);
-            self.restores.remove(id);
         }
         expired
     }
 
     pub fn clear(&mut self) {
         self.uploads.clear();
-        self.restores.clear();
     }
 }
 
