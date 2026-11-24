@@ -29,9 +29,21 @@ export function linkRefusal(code: LinkRefusalCode): Response {
  */
 export type SessionHostBlock = "held" | "stopped";
 
+/** Where a note stands in going live, as its record says, while it is not live. */
+export type LiveNoteStanding = "starting" | "off";
+
 /** What a link holder is told about a blocked document. */
 export function sessionHostRefusal(block: SessionHostBlock): Response {
   return linkRefusal(block === "held" ? "link_live_stopped" : "link_live_unavailable");
+}
+
+/** What a link holder is told about a document with no binding. */
+export function unboundLinkRefusal(
+  note: LiveNoteStanding | undefined,
+  block: SessionHostBlock | undefined,
+): Response {
+  if (note === "starting" && block !== "held") return linkRefusal("link_live_starting");
+  return sessionHostRefusal(note === "off" ? "held" : (block ?? "stopped"));
 }
 
 /** What an invited editor is told about a held document. */
@@ -49,14 +61,11 @@ export async function normalizeLinkRefusal(
 ): Promise<Response> {
   if (!isLinkEndpointPath(path)) return response;
   if (response.status >= 500) {
-    // A live route's own answer that only the owner can lift goes through. Every other outage reads the same.
-    if (
-      liveEditing &&
-      response.status === LINK_REFUSALS.link_live_stopped.status &&
-      parseLinkRefusal(await response.json().catch(() => null), response.status) ===
-        "link_live_stopped"
-    )
-      return linkRefusal("link_live_stopped");
+    // A live route's own answer that the note is starting or off goes through. Every other outage reads the same.
+    const code = liveEditing
+      ? parseLinkRefusal(await response.json().catch(() => null), response.status)
+      : null;
+    if (code === "link_live_stopped" || code === "link_live_starting") return linkRefusal(code);
     await response.body?.cancel().catch(() => undefined);
     return linkRefusal(liveEditing ? "link_live_unavailable" : "link_unavailable");
   }

@@ -61,12 +61,16 @@ import {
 } from "./namedLiveFrameSession.js";
 import type { createLiveMembershipRegistry, LiveMembershipSession } from "./liveMembership.js";
 import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
-import { authorizeLinkShareAction } from "./shareAuthorization";
+import { authorizeLinkShareAction, authorizeNamedLiveEditShareGrant } from "./shareAuthorization";
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
+import type { NamedLiveBrowserContext } from "./namedLiveBrowserAuth";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import {
   linkRefusal,
   namedLiveStoppedRefusal,
   sessionHostRefusal,
+  unboundLinkRefusal,
+  type LiveNoteStanding,
   type SessionHostBlock,
 } from "./linkRefusal";
 import { personalLiveRefusal } from "./personalLiveDocumentRoutes";
@@ -181,6 +185,8 @@ type BrowserRouteOptions = LiveRouteOptions & {
     workspaceId: string;
     objectId: string;
   }) => SessionHostBlock | undefined;
+  /** Where the note stands while it is not live, when its record answers. */
+  liveNote?: (document: { workspaceId: string; objectId: string }) => LiveNoteStanding | undefined;
 };
 type OwnerRouteOptions = LiveRouteOptions & {
   kind: "owner";
@@ -367,6 +373,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
   const captureNative = options.captureNative.bind(options),
     validate = options.validate;
   const sessionHostBlocked = options.kind === "owner" ? undefined : options.sessionHostBlocked;
+  const liveNote = "liveNote" in options ? options.liveNote : undefined;
   const accountSnapshot = async (accountId: string): Promise<TrustedLiveAccount> => ({
     accountId,
     name: (await accountDisplayName(options.lookupUserDisplayName, accountId)) ?? "Unnamed",
@@ -375,6 +382,28 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
   // Whether the caller's scope reaches a current binding of the document, as a ticket for it needs.
   const reaches = (scope: LiveTicketScope, objectId: string) =>
     storage.resolveLiveObjectHostBinding(scope, objectId).kind === "current";
+  // Whether an invited editor's share shows the note where it is now, with or without a binding.
+  const namedReaches = (
+    context: NamedLiveBrowserContext,
+    document: { workspaceId: string; objectId: string },
+  ) => {
+    const authority = authorizeNamedLiveEditShareGrant({
+      storage,
+      actorUserId: context.userId,
+      grantId: context.grantId,
+    });
+    if (!authority.ok || "kind" in authority.effectiveSelector) return false;
+    const path = storage.objectMoment({ ...document, versionId: "main" })?.path;
+    return (
+      !!path &&
+      visibleSharePath(authority.effectiveSelector, path) !== null &&
+      storage.objectIdAtPathInVersion({
+        workspaceId: document.workspaceId,
+        versionId: "main",
+        path,
+      }) === document.objectId
+    );
+  };
 
   let closed = false,
     pendingRequests = 0;
@@ -526,11 +555,8 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
         check();
         if (!context || context.kind !== kind) return refusal();
         vouched = true;
-        const blocked = () =>
-          sessionHostBlocked?.({
-            workspaceId: context.workspaceId,
-            objectId: objectId as string,
-          });
+        const document = { workspaceId: context.workspaceId, objectId: objectId as string };
+        const blocked = () => sessionHostBlocked?.(document);
         if (context.kind === "link") {
           const authority = authorizeLinkShareAction({
             storage,
@@ -562,10 +588,19 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           if (binding.kind === "refused") {
             if (binding.reason !== "host-unavailable" && binding.reason !== "stale-document")
               return refusal();
-            const block = blocked() ?? "stopped";
-            toldToTryAgain(`the note has no binding (${binding.reason}), host says ${block}`);
-            return sessionHostRefusal(block);
+            const block = blocked(),
+              note = liveNote?.(document);
+            toldToTryAgain(
+              `the note has no binding (${binding.reason}), host says ${block ?? "stopped"}`,
+            );
+            return unboundLinkRefusal(note, block);
           }
+        } else {
+          const note = liveNote?.(document);
+          if (note && !reaches(context, document.objectId) && namedReaches(context, document))
+            return note === "starting" && blocked() !== "held"
+              ? linkRefusal("link_live_starting")
+              : namedLiveStoppedRefusal();
         }
         const block = blocked();
         if (block && context.kind === "link") toldToTryAgain(`the host says ${block}`);

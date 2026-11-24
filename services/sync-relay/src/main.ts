@@ -1280,6 +1280,15 @@ const sessionHostBlocked = selfHost
         ? selfHost.sessionBlock(document)
         : undefined
   : undefined;
+const liveNote = selfHost
+  ? (document: { workspaceId: string; objectId: string }) => {
+      if (storage.getLiveHostControl()?.configuredMode !== "service") return undefined;
+      const state =
+        storage.readServiceHostEnrollmentByObjectId(document.workspaceId, document.objectId)?.note
+          .state ?? "starting";
+      return state === "live" ? undefined : state === "starting" ? "starting" : "off";
+    }
+  : undefined;
 if (selfHost && deployment)
   serviceEnrollment = createServiceHostEnrollmentRoutes({
     storage,
@@ -1417,6 +1426,7 @@ if (namedLiveConfig) {
     membership,
     admission,
     sessionHostBlocked: editorsBlocked,
+    liveNote,
   });
   if (linkLiveEnabled && publicEditRelease) {
     const hosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
@@ -1442,6 +1452,7 @@ if (namedLiveConfig) {
       rooms,
       admission,
       sessionHostBlocked: editorsBlocked,
+      liveNote,
     });
     linkLiveHttp = createLinkLiveHttp({
       storage,
@@ -1452,6 +1463,7 @@ if (namedLiveConfig) {
       linkKey: linkKey!,
       publicEditRelease,
       sessionHostBlocked: editorsBlocked,
+      liveNote,
       linkAuthority: relayApplication.linkAuthority,
       readAwakeState,
       frames: namedLiveConfig.frames.receive,

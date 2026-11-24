@@ -76,20 +76,29 @@ it("refuses link-only authentication and extra upstream authority data", async (
   );
   expect((await f.mint(request())).status).toBe(404);
 });
-// Only the exact answer passes. Anything else from the relay stays the plain refusal.
+// Only the exact answers pass. Anything else from the relay stays the plain refusal.
 const stopped = {
   ok: false,
   code: "live-edit-unadmitted",
   error: "Live editing of this file stopped on the server. Only its owner can start it again.",
 };
+const starting = {
+  ok: false,
+  code: "link_live_starting",
+  error: "Live editing of this file is starting. Try again in a moment.",
+};
 it.each([
+  [503, starting, 503, starting],
+  [503, { ...starting, extra: true }, 404, { ok: false, error: "not found" }],
+  [404, starting, 404, { ok: false, error: "not found" }],
+  [503, { ok: false, error: "busy" }, 404, { ok: false, error: "not found" }],
   [404, stopped, 404, stopped],
   [404, { ...stopped, extra: true }, 404, { ok: false, error: "not found" }],
   [404, { ...stopped, error: "Something else." }, 404, { ok: false, error: "not found" }],
   [503, stopped, 404, { ok: false, error: "not found" }],
   [404, { ok: false, error: "not found" }, 404, { ok: false, error: "not found" }],
 ] as const)(
-  "tells an invited editor only that live editing stopped on the server (relay %s)",
+  "tells an invited editor only that live editing stopped or is starting (relay %s)",
   async (relayStatus, relayBody, status, body) => {
     const f = fixture();
     f.fetchRelay.mockResolvedValueOnce(

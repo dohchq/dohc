@@ -1,5 +1,4 @@
 import { liveConnectionLimitMessage } from "@dohc/live-session-contract/live-connection";
-import { LINK_REFUSALS } from "@dohc/security-contract/link-refusal";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -28,8 +27,9 @@ const IS_MAC =
 const MOD_KEY = IS_MAC ? "⌘" : "Ctrl+";
 const MOD_ALT_KEY = IS_MAC ? "⌘⌥" : "Ctrl+Alt+";
 const MOD_SHIFT_KEY = IS_MAC ? "⌘⇧" : "Ctrl+Shift+";
-// Trying again can't change these, so the page offers no Try again.
-const FINAL = ["access-removed", "link-full"];
+// Trying again can't change these, or the page tries by itself, so the page offers no Try again.
+const FINAL = ["access-removed", "link-full", "live-starting", "live-stopped", "document-gone"];
+export const LIVE_OFF = "Live editing of this file is off. Only its owner can start it again.";
 /** Editing stopped with a change the page will not send again by itself. */
 export function draftNeedsReview(state: NamedLiveBrowserState): boolean {
   return (
@@ -73,7 +73,12 @@ function statusText(state: NamedLiveBrowserState, link: boolean, band: boolean):
   if (state.reason === "link-full")
     return "This link cannot take more people. Ask the owner for a new link.";
   if (state.reason === "authority-unavailable") return "dohc could not open the file for editing.";
-  if (state.reason === "live-stopped") return LINK_REFUSALS.link_live_stopped.error;
+  if (state.reason === "live-starting") return "Live editing is starting.";
+  if (state.reason === "live-stopped") return LIVE_OFF;
+  if (state.reason === "document-gone")
+    return link
+      ? "This file moved or was removed. Ask its owner for a new link."
+      : "This file moved or was removed. Ask its owner to share it again.";
   if (state.reason === "host-unavailable")
     return "The server could not open the file for editing. dohc keeps trying.";
   return takesEdits
@@ -287,7 +292,9 @@ export function NamedDocumentEditor({
     editorRef.current?.focus();
   }, [link, editable, bodyHidden]);
   const working =
-    state.status === "live" || (OPENING.includes(state.status) && !state.pendingUpdates);
+    state.status === "live" ||
+    state.reason === "live-starting" ||
+    (OPENING.includes(state.status) && !state.pendingUpdates);
   const status = (
     <p
       className={working ? "named-document-status" : "named-document-status stopped"}
@@ -299,7 +306,6 @@ export function NamedDocumentEditor({
   const retryLabel =
     state.reason === "authority-unavailable" ||
     state.reason === "host-unavailable" ||
-    state.reason === "live-stopped" ||
     liveConnectionLimitMessage(state.reason)
       ? "Try again"
       : "Retry connection";

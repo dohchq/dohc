@@ -4,13 +4,15 @@ import type { NamedLiveBrowserState } from "@dohc/ydoc-projection/named-live-bro
 import {
   draftNeedsReview,
   DraftReview,
+  LIVE_OFF,
   NamedDocumentEditor,
   type NamedDocumentSession,
 } from "./NamedDocumentEditor";
 import { DiscardDraft } from "./DiscardDraft";
 import { Icon } from "./icons";
 import { openLinkDocument } from "./linkLive";
-import { LINK_REFUSALS } from "@dohc/security-contract/link-refusal";
+import { linkRefusalCode } from "./namedRecipient";
+import { LINK_REFUSALS, type LinkRefusalCode } from "@dohc/security-contract/link-refusal";
 
 const COULD_NOT_OPEN =
   "dohc could not open this file for editing. Retry in a moment. If it keeps happening, ask the owner.";
@@ -45,7 +47,7 @@ export function LinkDocumentEditor({
   const retainedDraft = useRef(false);
   const [session, setSession] = useState<NamedDocumentSession | null>(null);
   const [busy, setBusy] = useState(false),
-    [error, setError] = useState<string | null>(null);
+    [error, setError] = useState<LinkRefusalCode | "could-not-open" | null>(null);
   const [review, setReview] = useState(false),
     [leaving, setLeaving] = useState<(() => void) | null>(null);
   // A session exists before it is authorized and synced. Its text is there once it has the host's early state or
@@ -81,12 +83,7 @@ export function LinkDocumentEditor({
       })
       .catch((error: unknown) => {
         if (!controller.signal.aborted && request.current === controller)
-          setError(
-            error instanceof Error &&
-              Object.values(LINK_REFUSALS).some((value) => value.error === error.message)
-              ? error.message
-              : COULD_NOT_OPEN,
-          );
+          setError(linkRefusalCode(error) ?? "could-not-open");
       })
       .finally(() => {
         if (!controller.signal.aborted) setBusy(false);
@@ -138,10 +135,7 @@ export function LinkDocumentEditor({
       setLeaving(() => action);
     else action();
   };
-  // The server gives one answer whether the page is still being prepared or will never go live,
-  // so this says what the person can still do and keeps Try again.
-  const unavailable = error === LINK_REFUSALS.link_live_unavailable.error;
-  const stopped = error === LINK_REFUSALS.link_live_stopped.error;
+  const readable = error === "link_live_unavailable" || error === "link_live_stopped";
   const bar = (
     <>
       {busy && (
@@ -169,9 +163,15 @@ export function LinkDocumentEditor({
           </span>
           <div>
             <p className="edit-notice-title">
-              {unavailable ? "dohc could not start editing this page." : error}
+              {error === "could-not-open"
+                ? COULD_NOT_OPEN
+                : error === "link_live_unavailable"
+                  ? "dohc could not start editing this page."
+                  : error === "link_live_stopped"
+                    ? LIVE_OFF
+                    : LINK_REFUSALS[error].error}
             </p>
-            {(unavailable || stopped) && <p>You can still read and comment here.</p>}
+            {readable && <p>You can still read and comment here.</p>}
             <div className="edit-notice-actions">
               {available && (
                 <button className="handoff-button secondary" onClick={open}>

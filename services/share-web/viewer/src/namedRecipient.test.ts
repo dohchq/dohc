@@ -1,7 +1,9 @@
 import { afterEach, expect, it, vi } from "vitest";
 import {
   LiveAuthorityUnavailableError,
+  LiveDocumentGoneError,
   LiveHostUnavailableError,
+  LiveStartingError,
   LiveStoppedError,
 } from "@dohc/ydoc-projection/named-live-browser-transport";
 import {
@@ -9,7 +11,12 @@ import {
   linkRefusalBody,
   type LinkRefusalCode,
 } from "@dohc/security-contract/link-refusal";
-import { AccountSetupRequiredError, namedRequest, ShareAccessRemovedError } from "./namedRecipient";
+import {
+  AccountSetupRequiredError,
+  linkRefusalCode,
+  namedRequest,
+  ShareAccessRemovedError,
+} from "./namedRecipient";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -87,6 +94,28 @@ it("tells a page that live editing stopped until the owner starts it again", asy
   expect(error).toBeInstanceOf(LiveStoppedError);
   expect(error).toHaveProperty("message", LINK_REFUSALS.link_live_stopped.error);
   expect(error).not.toBeInstanceOf(LiveHostUnavailableError);
+});
+
+it("tells a page that live editing is starting, by its code", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => Response.json(linkRefusalBody("link_live_starting"), { status: 503 })),
+  );
+  const error = await namedRequest("/api/live/link-ticket", new AbortController().signal).catch(
+    (cause: unknown) => cause,
+  );
+  expect(error).toBeInstanceOf(LiveStartingError);
+  expect(linkRefusalCode(error)).toBe("link_live_starting");
+});
+
+it("tells an open link page whose ticket is not found that its file moved or was removed", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => Response.json({ ok: false, error: "not found" }, { status: 404 })),
+  );
+  await expect(
+    namedRequest("/api/live/link-ticket", new AbortController().signal),
+  ).rejects.toBeInstanceOf(LiveDocumentGoneError);
 });
 
 it("shows removal for the verified named recipient", async () => {

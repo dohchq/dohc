@@ -14,11 +14,12 @@ import {
 } from "@dohc/live-session-contract/live-frame";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import { NAMED_LIVE_STOPPED } from "@dohc/security-contract/link-refusal";
+import { NAMED_LIVE_STOPPED, linkRefusalBody } from "@dohc/security-contract/link-refusal";
 import { draftNeedsReview } from "./NamedDocumentEditor";
 import {
   createNamedLiveBrowserTransport,
   LiveHostUnavailableError,
+  namedLiveEditable,
   type NamedLiveBrowserLimits,
   type NamedLiveSelection,
 } from "@dohc/ydoc-projection/named-live-browser-transport";
@@ -551,7 +552,7 @@ describe("named browser transport", () => {
     await f.value.reconnect();
     expect(f.value.state()).toMatchObject({
       status: "disconnected",
-      reason: "authority-unavailable",
+      reason: "document-gone",
       pendingUpdates: 1,
       lastApplied: null,
     });
@@ -1217,7 +1218,7 @@ it("keeps an invited editor trying while its invitation names the file, and stop
   expect(f.requests).toHaveLength(asked);
   expect(vi.getTimerCount()).toBe(0);
 });
-it("tells an invited editor that live editing stopped, keeps the edit, and sends it once Try again finds the file live", async () => {
+it("keeps an invited editor's page read-only while live editing is off, checks every 30 seconds while it is visible, and sends the kept edit once the file is live", async () => {
   const f = await live();
   vi.useFakeTimers();
   edit(f.value, " draft");
@@ -1228,6 +1229,7 @@ it("tells an invited editor that live editing stopped, keeps the edit, and sends
       ? Response.json(NAMED_LIVE_STOPPED, { status: 404 })
       : undefined,
   );
+  const tickets = () => f.requests.filter(({ path }) => path === "/api/live/named-ticket").length;
   f.socket.close();
   await vi.advanceTimersByTimeAsync(250);
   expect(f.value.state()).toMatchObject({
@@ -1235,32 +1237,71 @@ it("tells an invited editor that live editing stopped, keeps the edit, and sends
     reason: "live-stopped",
     pendingUpdates: 1,
   });
-  const asked = f.requests.length;
-  await vi.advanceTimersByTimeAsync(20_000);
-  expect(f.requests).toHaveLength(asked);
-  expect(vi.getTimerCount()).toBe(0);
-
-  await f.value.reconnect();
-  expect(f.value.state()).toMatchObject({ reason: "live-stopped", pendingUpdates: 1 });
-  expect(
-    f.requests.slice(asked).filter(({ path }) => path === "/api/live/named-ticket"),
-  ).toHaveLength(1);
-  expect(f.sockets).toHaveLength(1);
-  const retried = f.requests.length;
-  await vi.advanceTimersByTimeAsync(20_000);
-  expect(f.requests).toHaveLength(retried);
-  expect(vi.getTimerCount()).toBe(0);
+  expect(edit(f.value, " more")).toBe(false);
+  const asked = tickets();
+  vi.stubGlobal("document", { visibilityState: "hidden" });
+  try {
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(tickets()).toBe(asked);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(tickets()).toBe(asked + 1);
+  expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "live-stopped" });
+  expect(edit(f.value, " more")).toBe(false);
 
   stopped = false;
-  const reconnecting = f.value.reconnect();
+  await vi.advanceTimersByTimeAsync(30_000);
   const socket = await f.socketAt(1),
     peer = host(socket, f.value, 2);
   socket.open();
-  await reconnecting;
   await peer.greet();
+  expect(edit(f.value, " more")).toBe(false);
   await peer.initial(f.doc, binding, 1);
   const retry = await peer.submitted();
   expect(retry.bytes).toEqual(first.bytes);
+});
+it("waits while live editing of the file is starting, takes no typing, and joins by itself once it is live", async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  let starting = true;
+  f.intercept((path) =>
+    starting && path === "/api/live/named-ticket"
+      ? Response.json(linkRefusalBody("link_live_starting"), { status: 503 })
+      : undefined,
+  );
+  await f.value.reconnect();
+  expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "live-starting" });
+  expect(namedLiveEditable(f.value.state())).toBe(false);
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(f.value.state()).toMatchObject({ reason: "live-starting" });
+  starting = false;
+  while (!f.sockets.length) await vi.advanceTimersByTimeAsync(250);
+  const socket = await f.socketAt(0),
+    peer = host(socket, f.value);
+  socket.open();
+  await peer.greet();
+  await peer.initial(document("base"));
+  await waitState(f.value, (state) => state.status === "live");
+  expect(edit(f.value, " typed")).toBe(true);
+});
+it("tells an invited editor whose file left the invitation that it moved or was removed, and stops asking", async () => {
+  const f = await live();
+  vi.useFakeTimers();
+  f.intercept((path) =>
+    path === "/api/live/named-ticket"
+      ? new Response(null, { status: 404 })
+      : path === "/api/live/named-documents"
+        ? Response.json({ access: "edit", grantId: "grant", files: [] })
+        : undefined,
+  );
+  f.socket.close();
+  await vi.advanceTimersByTimeAsync(250);
+  expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "document-gone" });
+  const asked = f.requests.length;
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(f.requests).toHaveLength(asked);
 });
 it.each([false, true])(
   "keeps trying through refusals for five minutes after the file was last open, then stops; invitation readable=%s",

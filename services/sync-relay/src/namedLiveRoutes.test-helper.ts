@@ -43,7 +43,7 @@ import {
   scope,
 } from "./liveTickets.test-helper.js";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import type { SessionHostBlock } from "./linkRefusal";
+import type { LiveNoteStanding, SessionHostBlock } from "./linkRefusal";
 
 import { decodeLiveFrame } from "@dohc/live-session-contract/live-frame";
 import { request as httpRequest } from "node:http";
@@ -260,6 +260,10 @@ export async function fixture(
     (_document: { workspaceId: string; objectId: string }): SessionHostBlock | undefined =>
       undefined,
   );
+  const liveNote = vi.fn(
+    (_document: { workspaceId: string; objectId: string }): LiveNoteStanding | undefined =>
+      undefined,
+  );
   const actor = vi.fn(async (request: Request, workspaceId: string) => {
     if (owner || desktop) {
       const bearer = request.headers.get("authorization");
@@ -406,6 +410,7 @@ export async function fixture(
         captureNative,
         admission,
         sessionHostBlocked,
+        liveNote,
       });
   const http = serveFetchHandler({
     handler: (request) =>
@@ -700,6 +705,7 @@ export async function fixture(
     routes,
     desktopAdmission,
     sessionHostBlocked,
+    liveNote,
     useCredentials,
   };
 }
