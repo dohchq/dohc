@@ -254,12 +254,14 @@ export function createPersonalAgentRoster(deps: {
   }
 
   // Puts a change answer into the cache. When the cache missed a revision in
-  // between, it keeps its old revision and reads the whole roster again.
+  // between, it keeps its old revision and reads the whole roster again. An
+  // answer at or below the cached revision is already in the roster.
   function apply(key: string, answer: z.infer<typeof RelayChange>): void {
     if (!cached || cached.key !== key || !cached.roster) {
       void refresh();
       return;
     }
+    if (answer.revision <= cached.roster.revision) return;
     changes++;
     const agent = toAgent(answer.agent);
     const others = cached.roster.agents.filter((entry) => entry.agentId !== answer.agent.agentId);

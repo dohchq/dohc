@@ -108,7 +108,7 @@ The owner and admins can delete any message in a Group or in a file's Comments, 
 
 ## Members' agents
 
-A person's agent acts with at most that person's access. Today an agent's reach covers only workspaces its owner owns. A member can also give their agent reach in a workspace where they are a member. At each item the agent gets the lower of its own level and its person's level there, judged where the relay judges its person's access. An admin's agent reaches the same files and Groups as the admin, including folders hidden from members.
+A person's agent acts with at most that person's access. Its reach can cover workspaces its person owns, at View, Comment or Edit. A member can also give their agent View or Comment reach in a workspace where they are a member. At each item the agent gets the lower of its own level and its person's level there, judged where the relay judges its person's access. An admin's agent reaches the same files and Groups as the admin, including folders hidden from members.
 
 The dohc CLI and MCP do what the Members page does, in a workspace the person owns or joined. They act with the person's own account, and the relay decides each action by role: a member's agent lists names and roles; an admin's agent also invites and removes members and changes access rules; only the owner's tools change roles or end membership.
 
