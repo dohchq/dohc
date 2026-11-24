@@ -8,6 +8,8 @@ import {
   createWorkspaceData,
   FEED_FAILURES_SHOWN,
   FEED_RETRY_MS,
+  PREFETCH_AT_ONCE,
+  PREFETCH_MAX,
   views,
   type ReadCache,
 } from "./workspaceData";
@@ -917,5 +919,123 @@ describe("a chat read before it opens", () => {
     await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.6.2"))).toBe(1));
     data.prefetch(view);
     await vi.waitFor(() => expect(count(server, "/sync/ws-a/ops/chat")).toBe(2));
+  });
+});
+
+describe("prefetching pages", () => {
+  const page = (markdown: string) => ops({ ok: true, path: "p.md", markdown }, "0.1.1");
+  const reads = (server: Server) =>
+    server.calls.filter((call) => call.path.endsWith("/ops/documentRead")).length;
+  function serve(workspaceId: string, ...answers: Parameters<Server["on"]>[2][]) {
+    const server = testServer();
+    server.on("POST", `/sync/${workspaceId}/ops/documentRead`, ...answers);
+    server.on("GET", feedPath(workspaceId, "0.1.1"), held);
+    return server;
+  }
+  const paths = (count: number) => Array.from({ length: count }, (_, index) => `p${index}.md`);
+
+  it("reads only views with no value, two at a time, and ten per workspace in a run", async () => {
+    const waiting: ReturnType<typeof deferred<Answer>>[] = [];
+    const server = serve("ws-prefetch-cap", () => {
+      const answer = deferred<Answer>();
+      waiting.push(answer);
+      return answer.promise;
+    });
+    const cache = createReadCache();
+    const { data } = open(server, "ws-prefetch-cap", cache);
+    const close = data.subscribe(views.page("p0.md"), () => {});
+    await vi.waitFor(() => expect(reads(server)).toBe(1));
+    waiting.shift()!.resolve(page("Shown"));
+    await vi.waitFor(() => expect(data.state(views.page("p0.md")).value).not.toBeNull());
+    close();
+
+    data.prefetchPages(paths(14));
+    await settled();
+    expect(reads(server)).toBe(1 + PREFETCH_AT_ONCE);
+    while (waiting.length > 0) {
+      waiting.shift()!.resolve(page("Read ahead"));
+      await settled();
+      expect(waiting.length).toBeLessThanOrEqual(PREFETCH_AT_ONCE);
+    }
+    expect(reads(server)).toBe(1 + PREFETCH_MAX);
+    expect(data.state(views.page("p1.md")).value).toEqual({ kind: "page", markdown: "Read ahead" });
+    expect(data.state(views.page("p0.md")).value).toEqual({ kind: "page", markdown: "Shown" });
+
+    data.stop();
+    const again = open(server, "ws-prefetch-cap", cache).data;
+    again.prefetchPages(["other.md"]);
+    await settled();
+    expect(reads(server)).toBe(1 + PREFETCH_MAX);
+  });
+
+  it("leaves a view empty, with no problem, when its prefetch fails, and the open reads it", async () => {
+    const busy: Answer = { status: 503, body: { ok: false, error: "busy", code: "server_busy" } };
+    const server = serve("ws-prefetch-fail", busy, page("Read on open"));
+    const { data } = open(server, "ws-prefetch-fail");
+    data.prefetchPages(["a.md"]);
+    await vi.waitFor(() => expect(reads(server)).toBe(1));
+    await settled();
+    expect(data.state(views.page("a.md"))).toEqual({
+      value: null,
+      loading: false,
+      problem: null,
+      failures: 0,
+    });
+    data.subscribe(views.page("a.md"), () => {});
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({
+        kind: "page",
+        markdown: "Read on open",
+      }),
+    );
+  });
+
+  it("drops a prefetched page's text when the open's reread finds it gone", async () => {
+    const gone = ops({ ok: false, reason: "dohc: No document.", refusal: "missing" }, "0.1.1");
+    const server = serve("ws-prefetch-gone", page("Hidden text"), gone);
+    const cache = createReadCache();
+    const { data } = open(server, "ws-prefetch-gone", cache);
+    data.prefetchPages(["a.md"]);
+    await vi.waitFor(() => expect(data.state(views.page("a.md")).value).not.toBeNull());
+    data.subscribe(views.page("a.md"), () => {});
+    data.retry(views.page("a.md"));
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({ kind: "missing" }),
+    );
+
+    const saved = cache.entries(cacheScope(signInTo(server), "ws-prefetch-gone"));
+    expect(JSON.stringify(saved)).not.toContain("Hidden text");
+  });
+
+  it("keeps a page's last text once a screen's own read has shown it", async () => {
+    const gone = ops({ ok: false, reason: "dohc: No document.", refusal: "missing" }, "0.1.1");
+    const server = serve("ws-prefetch-opened", page("Seen text"), page("Seen text"), gone);
+    const { data } = open(server, "ws-prefetch-opened");
+    data.prefetchPages(["a.md"]);
+    await vi.waitFor(() => expect(data.state(views.page("a.md")).value).not.toBeNull());
+    data.subscribe(views.page("a.md"), () => {});
+    data.retry(views.page("a.md"));
+    await vi.waitFor(() => expect(reads(server)).toBe(2));
+    await settled();
+    data.retry(views.page("a.md"));
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({ kind: "missing", last: "Seen text" }),
+    );
+  });
+
+  it("reads nothing while the store is in the background or after it stops", async () => {
+    const server = serve("ws-prefetch-paused", page("Later"));
+    const { data } = open(server, "ws-prefetch-paused");
+    data.pause();
+    data.prefetchPages(["a.md"]);
+    await settled();
+    expect(reads(server)).toBe(0);
+    data.resume();
+    await vi.waitFor(() => expect(reads(server)).toBe(1));
+
+    data.stop();
+    data.prefetchPages(["b.md"]);
+    await settled();
+    expect(reads(server)).toBe(1);
   });
 });

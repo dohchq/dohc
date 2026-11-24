@@ -29,6 +29,7 @@ import { documentActions } from "./documentActions";
 import { editorFolderUri, editorHtmlUri, isOutOfSpace } from "./editorFile";
 import { createPageHost } from "./pageHost";
 import { createPageLive, holdsPage, holdsUnsent, liveMark, type PageLiveState } from "./pageLive";
+import { pageTimings } from "./pageTimings";
 import {
   explanationOf,
   labelOf,
@@ -108,6 +109,10 @@ function PageScreen({ path }: { path: string }) {
     createPageHost({ inject: (script) => web.current?.injectJavaScript(script) }),
   );
   const { mount, painted, live, stopped } = useSyncExternalStore(host.subscribe, host.state);
+  const [timing] = useState(() => pageTimings?.open(name));
+  // The mount whose script has started, and the text given to it.
+  const [started, setStarted] = useState<number | null>(null);
+  const given = useRef<{ mount: number; markdown: string } | null>(null);
   useEffect(() => () => host.gone(), [host]);
   // The account's teardown reaches the page from the start, before any session opens.
   const workspaceId = data?.workspaceId;
@@ -138,18 +143,12 @@ function PageScreen({ path }: { path: string }) {
   );
   const holding = live !== null && holdsPage(liveState);
 
-  // Text that changes after the first mounts a fresh editor, which covers itself with the loading lines until it paints.
-  const shown = useRef(read);
-  useEffect(() => {
-    if (holding || shown.current === read) return;
-    const first = shown.current === null;
-    shown.current = read;
-    if (first || read === null) return;
-    host.gone();
-  }, [read, holding]);
   // A page a live session holds keeps the text its editor mounted with. A later read the phone can't show (too large,
   // missing) never takes the editor away, with edits only its provider has.
-  const markdown = holding ? shown.current : read;
+  const markdown = holding ? (given.current?.markdown ?? read) : read;
+  useEffect(() => {
+    if (markdown !== null) timing?.("read");
+  }, [markdown, timing]);
   const reopen = () => {
     setLostPage(false);
     setUri(null);
@@ -174,7 +173,9 @@ function PageScreen({ path }: { path: string }) {
     }
     if (typeof data !== "object" || data === null || !("kind" in data)) return;
     if (data.kind === "live") live?.receive(data);
+    if (data.kind === "started") setStarted(from);
     if (data.kind === "painted") host.painted(from);
+    if (data.kind === "started" || data.kind === "painted") timing?.(data.kind);
     // The page's fonts didn't load, so it didn't draw: Try again mounts a fresh page.
     if (data.kind === "fontsFailed") setLostPage("failed");
     if (data.kind === "unsupportedFormat") setNeedsNewer(true);
@@ -187,18 +188,27 @@ function PageScreen({ path }: { path: string }) {
       if (text !== null) done?.(text);
     }
   };
-  const injected =
-    markdown === null
-      ? undefined
-      : `window.__dohcPage = ${JSON.stringify({
-          title: pageTitle(path),
-          properties: [],
-          markdown,
-          large: false,
-          editable: false,
-          live: editsLive,
-          textScale: PixelRatio.getFontScale(),
-        })}; true;`;
+  // The web view starts before the read lands, and gets the page once both are ready. Text that changes later replaces
+  // the read text in the same editor once it has drawn; with a session, a fresh editor opens the page again.
+  useEffect(() => {
+    const sent = given.current?.mount === mount ? given.current.markdown : null;
+    if (started !== mount || markdown === null || sent === markdown) return;
+    if (sent !== null && live) return host.gone();
+    if (sent !== null && !painted) return;
+    const page = {
+      title: pageTitle(path),
+      properties: [],
+      markdown,
+      large: false,
+      editable: false,
+    };
+    given.current = { mount, markdown };
+    web.current?.injectJavaScript(
+      sent === null
+        ? `window.__dohcPage = ${JSON.stringify({ ...page, live: editsLive, textScale: PixelRatio.getFontScale() })}; true;`
+        : `window.__dohcReplaceRead?.(${JSON.stringify(markdown)}); true;`,
+    );
+  }, [started, mount, markdown, painted, live, editsLive, path, host]);
 
   // Copy as Markdown copies the live document once the page shows it, edits included; otherwise the text as it was read.
   const copying = useRef<((text: string) => void) | null>(null);
@@ -260,7 +270,7 @@ function PageScreen({ path }: { path: string }) {
     />
   ) : null;
   // A session whose web view is gone has no provider left: it ends, and the next web view to draw opens the page again.
-  const webShown = failure === null && uri !== null && injected !== undefined;
+  const webShown = failure === null && uri !== null;
   useEffect(() => {
     if (!webShown) host.gone();
   }, [webShown]);
@@ -375,7 +385,6 @@ function PageScreen({ path }: { path: string }) {
                 // Read access to the editor's folder only: the page never reads the rest of the app's files.
                 allowingReadAccessToURL={editorFolderUri}
                 allowFileAccess
-                injectedJavaScriptBeforeContentLoaded={injected}
                 onMessage={(event) => handleMessage(event.nativeEvent.data, mount)}
                 onError={() => setLostPage("failed")}
                 onContentProcessDidTerminate={() => setLostPage("failed")}

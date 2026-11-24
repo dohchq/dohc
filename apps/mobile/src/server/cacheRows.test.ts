@@ -399,6 +399,34 @@ describe("a relaunch", () => {
     expect(server.calls.filter((call) => call.method === "POST")).toHaveLength(reads);
   });
 
+  it("drops a page only prefetched before the relaunch when the open's reread finds it gone", async () => {
+    const server = serverWithA();
+    server.on(
+      "POST",
+      "/sync/ws-a/ops/documentRead",
+      ops({ ok: true, path: "a.md", markdown: "# A" }, "0.6.2"),
+      ops({ ok: false, reason: "dohc: No document at a.md.", refusal: "missing" }, "0.6.2"),
+    );
+    server.on("GET", feedPath("ws-a", "0.6.2"), held);
+    const disk = keptDisk();
+    const first = launch(disk);
+    const before = open(server, first.cache);
+    before.prefetchPages(["a.md"]);
+    await vi.waitFor(() => expect(before.state(views.page("a.md")).value).not.toBeNull());
+    await first.files.flush();
+    before.stop();
+
+    const data = open(server, launch(disk).cache);
+    data.subscribe(views.page("a.md"), () => {});
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "# A" }),
+    );
+    data.retry(views.page("a.md"));
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({ kind: "missing" }),
+    );
+  });
+
   it("paints the loading state before the row is read, and asks the server nothing until it is", async () => {
     const server = serverWithA();
     const disk = keptDisk();

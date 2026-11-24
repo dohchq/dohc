@@ -68,22 +68,28 @@ export function mountDocument(page: PageConfig) {
     (document.activeElement as HTMLElement | null)?.blur();
     window.getSelection()?.removeAllRanges();
   };
-  const doc = page.large ? null : markdownToYDoc(page.markdown);
-  if (doc === null) {
-    body.append(element("pre", "source", page.markdown));
-  } else if (!opensFormat(doc)) {
-    refuseFormat();
-  } else {
-    // Keystroke to paint: from the browser's `beforeinput` to the frame that shows it.
-    const samples: number[] = [];
-    let pending: number | null = null;
-    body.addEventListener(
-      "beforeinput",
-      () => {
-        pending ??= performance.now();
-      },
-      { capture: true },
-    );
+  // Keystroke to paint: from the browser's `beforeinput` to the frame that shows it.
+  const samples: number[] = [];
+  let pending: number | null = null;
+  body.addEventListener(
+    "beforeinput",
+    () => {
+      pending ??= performance.now();
+    },
+    { capture: true },
+  );
+  let readOnly: ReturnType<typeof mountLiveBodyEditor> | null = null;
+  // The app replaces the read text with a newer read in the same body, before any live session.
+  const showRead = (markdown: string) => {
+    readOnly?.destroy();
+    readOnly = null;
+    body.replaceChildren();
+    const doc = page.large ? null : markdownToYDoc(markdown);
+    if (doc === null) {
+      body.append(element("pre", "source", markdown));
+      return;
+    }
+    if (!opensFormat(doc)) return refuseFormat();
     // Copy as Markdown copies the page as it is now, with the person's edits.
     (window as Window & { __dohcCopyMarkdown?: () => void }).__dohcCopyMarkdown = () =>
       post("markdown", { markdown: yDocToMarkdown(doc) });
@@ -102,10 +108,7 @@ export function mountDocument(page: PageConfig) {
         return true;
       },
     });
-    if (page.live) followLive({ body, readOnly: editor, label: page.title, endEditing });
-    // Design review only: type a sentence at the end of the page, then report keystroke-to-paint.
-    if (page.autotype) autotype(body, samples);
-    typed = samples;
+    readOnly = editor;
     // The app turns editing off when the page goes read-only (offline, deleted, access ended).
     (window as Window & { __dohcSetEditable?: (value: boolean) => void }).__dohcSetEditable = (
       value,
@@ -113,6 +116,21 @@ export function mountDocument(page: PageConfig) {
       editable = value;
       editor.refresh();
     };
+  };
+  showRead(page.markdown);
+  (window as Window & { __dohcReplaceRead?: (markdown: string) => void }).__dohcReplaceRead =
+    showRead;
+  if (readOnly) {
+    if (page.live)
+      followLive({
+        body,
+        readOnly: { destroy: () => readOnly?.destroy() },
+        label: page.title,
+        endEditing,
+      });
+    // Design review only: type a sentence at the end of the page, then report keystroke-to-paint.
+    if (page.autotype) autotype(body, samples);
+    typed = samples;
   }
   // "Done" in the app's header ends editing: the caret goes, and with it the keyboard.
   (window as Window & { __dohcEndEditing?: () => void }).__dohcEndEditing = () => {

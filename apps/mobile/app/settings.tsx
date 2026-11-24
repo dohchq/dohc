@@ -21,6 +21,7 @@ import { confirm } from "../src/confirm";
 import { recoveryRows } from "../src/conversation/outboxMessages";
 import { useOutboxState } from "../src/conversation/useOutbox";
 import { OutboxError } from "../src/server/outbox";
+import { pageTimings } from "../src/pages/pageTimings";
 import { phoneWrites } from "../src/server/phoneWrites";
 import type { SignIn } from "../src/server/account";
 import {
@@ -385,6 +386,17 @@ function SettingsScreen() {
           <Text style={[styles.signOutLabel, { color: theme.danger }]}>{accountWords.signOut}</Text>
         </Pressable>
       </Section>
+      {pageTimings ? (
+        <Section title="Page opens">
+          {pageTimings.opens().map((open, index) => (
+            <Row
+              key={index}
+              title={open.name}
+              detail={`read ${open.read ?? "-"}, editor ${open.started ?? "-"}, painted ${open.painted ?? "-"} ms`}
+            />
+          ))}
+        </Section>
+      ) : null}
     </ScrollView>
   );
 }
