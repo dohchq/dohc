@@ -10,7 +10,7 @@ import {
   useSyncExternalStore,
   type ComponentRef,
 } from "react";
-import { EllipsisVertical } from "lucide-react-native";
+import { Check, EllipsisVertical } from "lucide-react-native";
 import { Alert, PixelRatio, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { useKeyboardState } from "react-native-keyboard-controller";
 import { useReducedMotion } from "react-native-reanimated";
@@ -18,7 +18,7 @@ import { WebView } from "react-native-webview";
 import { PageScrollTop } from "../../modules/page-scroll-top";
 import { useAccount, useSignIn } from "../account/AccountProvider";
 import { HeaderButton } from "../AndroidHeader";
-import { copyText } from "../copy";
+import { copyText, useCopiedMark } from "../copy";
 import { pageTitle } from "../home/homeModel";
 import { phoneWrites } from "../server/phoneWrites";
 import { views } from "../server/workspaceData";
@@ -228,9 +228,11 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
 
   // Copy as Markdown copies the live document once the page shows it, edits included; otherwise the text as it was read.
   const copying = useRef<((text: string) => void) | null>(null);
+  const [copied, markCopied] = useCopiedMark();
   const copyMarkdown = (then?: () => void) => {
     const done = (text: string) => {
       copyText(text);
+      markCopied();
       then?.();
     };
     if (web.current && live && liveState.phase !== "ended" && liveState.shown) {
@@ -359,7 +361,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
                     <HeaderButton label="Done" onPress={endEditing} />
                   ) : (
                     <HeaderButton
-                      icon={EllipsisVertical}
+                      icon={copied ? Check : EllipsisVertical}
                       label={documentWords.documentActions}
                       onPress={() => void documentActions(() => copyMarkdown())}
                     />
@@ -376,7 +378,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
           ) : null}
           <Stack.Toolbar.Menu
             hidden={typing}
-            icon="ellipsis"
+            icon={copied ? "checkmark" : "ellipsis"}
             accessibilityLabel={documentWords.documentActions}
           >
             <Stack.Toolbar.MenuAction icon="doc.on.doc" onPress={() => copyMarkdown()}>
