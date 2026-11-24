@@ -1982,24 +1982,113 @@ it("refuses moving a stopped enrollment onto an occupied, non-richdoc, or unback
   f.stop();
   f.release();
   f.seed(scope.workspaceId, "other-object", "docs/taken.md", "other-share");
-  f.enroll({ path: "docs/taken.md", shareId: "other-share" });
+  const other = f.enroll({ path: "docs/taken.md", shareId: "other-share" });
+  f.storage.setServiceHostEnrollmentEnabled({
+    ...f.input,
+    path: "docs/taken.md",
+    enabled: false,
+    retire: true,
+    nowMs: 18,
+  });
+  f.release(other.objectId);
+  f.raw
+    .prepare(
+      `INSERT INTO sync_relay_live_document_ordinary_bases(workspace_id,main_version_id,object_id,lineage_claim_id,base_relay_seq,base_origin_id,base_origin_seq,replication_epoch,stream_identity,current_path,projected_sha256,projected_byte_length,accounted_bytes)
+       VALUES (?,'main',?,?,1,'origin-1',0,'epoch','stream',?,?,1,128)`,
+    )
+    .run(
+      scope.workspaceId,
+      first.objectId,
+      document.lineageClaimId,
+      binding.currentPath,
+      "b".repeat(64),
+    );
+  f.raw
+    .prepare(
+      `INSERT INTO sync_relay_live_documents(workspace_id,main_version_id,object_id,lineage_claim_id,current_path,baseline_moment_relay_seq,
+         baseline_projected_sha256,baseline_projected_byte_length,baseline_digest,baseline_bytes,lineage_state,admission_state,restore_fence_generation,registered_at_ms)
+       VALUES (?,'main',?,?,'docs/taken.md',1,?,1,?,x'0000','current','open',7,0)`,
+    )
+    .run(
+      scope.workspaceId,
+      other.objectId,
+      document.lineageClaimId,
+      "b".repeat(64),
+      document.lineageClaimId,
+    );
+  f.raw
+    .prepare(
+      `INSERT INTO sync_relay_live_document_ordinary_bases(workspace_id,main_version_id,object_id,lineage_claim_id,base_relay_seq,base_origin_id,base_origin_seq,replication_epoch,stream_identity,current_path,projected_sha256,projected_byte_length,accounted_bytes)
+       VALUES (?,'main',?,?,1,'origin-1',0,'epoch','stream','docs/taken.md',?,1,128)`,
+    )
+    .run(scope.workspaceId, other.objectId, document.lineageClaimId, "b".repeat(64));
 
   f.raw
     .prepare(
       `INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
-       VALUES (?,?,2,'moment-bin','main','docs/data.csv',?,'text',1,20)`,
+       VALUES (?,?,2,'moment-other-away','main','docs/elsewhere.md',?,'text',1,19)`,
+    )
+    .run(scope.workspaceId, other.objectId, "b".repeat(64));
+  f.raw
+    .prepare(
+      `INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+       VALUES (?,?,3,'moment-into-taken','main','docs/taken.md',?,'text',1,19)`,
     )
     .run(scope.workspaceId, first.objectId, "b".repeat(64));
+  f.raw
+    .prepare(
+      "UPDATE sync_relay_current_files SET path='docs/elsewhere.md' WHERE workspace_id=? AND path='docs/taken.md'",
+    )
+    .run(scope.workspaceId);
+  f.raw
+    .prepare(
+      "UPDATE sync_relay_current_files SET path='docs/taken.md' WHERE workspace_id=? AND path=?",
+    )
+    .run(scope.workspaceId, binding.currentPath);
   const drained = f.storage.readServiceHostEnrollmentByObjectId(scope.workspaceId, first.objectId)!;
+  expect(f.storage.canResumeMovedServiceHostEnrollment(drained, "docs/taken.md")).toBe(false);
+  expect(() => f.resume({ path: binding.currentPath, nowMs: 25 })).toThrow("moved");
+  expect(() => f.resume({ path: "docs/taken.md", nowMs: 25 })).toThrow("another document");
+  expect(
+    f.storage.readServiceHostEnrollmentByObjectId(scope.workspaceId, first.objectId),
+  ).toMatchObject({
+    path: binding.currentPath,
+    retired: true,
+    enabled: false,
+  });
+  expect(
+    f.storage.readServiceHostEnrollmentByObjectId(scope.workspaceId, other.objectId),
+  ).toMatchObject({
+    path: "docs/taken.md",
+    retired: true,
+    enabled: false,
+  });
+
+  f.raw
+    .prepare(
+      `INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+       VALUES (?,?,4,'moment-bin','main','docs/data.csv',?,'text',1,20)`,
+    )
+    .run(scope.workspaceId, first.objectId, "b".repeat(64));
   expect(f.storage.canResumeMovedServiceHostEnrollment(drained, "docs/data.csv")).toBe(false);
   expect(() => f.resume({ path: binding.currentPath, nowMs: 30 })).toThrow("moved");
 
   f.raw
     .prepare(
+      `DELETE FROM sync_relay_live_document_ordinary_bases WHERE workspace_id=? AND object_id=?`,
+    )
+    .run(scope.workspaceId, first.objectId);
+  f.raw
+    .prepare(
       `INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
-       VALUES (?,?,3,'moment-md','main','docs/no-basis.md',?,'text',1,21)`,
+       VALUES (?,?,5,'moment-md','main','docs/no-basis.md',?,'text',1,21)`,
     )
     .run(scope.workspaceId, first.objectId, "b".repeat(64));
+  f.raw
+    .prepare(
+      "UPDATE sync_relay_current_files SET path='docs/no-basis.md' WHERE workspace_id=? AND path='docs/taken.md'",
+    )
+    .run(scope.workspaceId);
   expect(f.storage.canResumeMovedServiceHostEnrollment(drained, "docs/no-basis.md")).toBe(false);
   expect(() => f.resume({ path: "docs/no-basis.md", nowMs: 30 })).toThrow("moved");
 });

@@ -2233,6 +2233,20 @@ async function openSelfHostProof(name: string) {
       ownerDocument,
       ownerEdit: first.edit,
       ownerRename: async (fromPath: string, toPath: string) => {
+        for (let page = 0; page < 8; page++) {
+          const pulled = await rpc("sync.applyPull", {
+            workspaceId: "workspace",
+            pageToken: (await rpc("sync.fetchPull", { workspaceId: "workspace" })).pageToken,
+          });
+          expect(pulled.refusals ?? []).toEqual([]);
+          if (pulled.pendingCursor) {
+            const cursor = { workspaceId: "workspace", pendingCursor: pulled.pendingCursor };
+            expect((await rpc("sync.materializePendingCursor", cursor)).materialized).toBe(true);
+            expect((await rpc("sync.commitCursor", cursor)).committed).toBe(true);
+          }
+          if (!pulled.hasMore) break;
+          if (page === 7) throw new Error("Owner pull exceeded its eight-page bound.");
+        }
         const hold = await rpc("capture.hold", {});
         mkdirSync(dirname(join(ownerRoot, toPath)), { recursive: true });
         renameSync(join(ownerRoot, fromPath), join(ownerRoot, toPath));
@@ -4701,19 +4715,7 @@ it(
         { timeout: 30000 },
       );
 
-      expect(await proof.route("DELETE", { path: "docs/a.md", retire: true })).toMatchObject({
-        status: 200,
-        body: { ok: true, path: "docs/a.md", objectId: proof.objectId, status: "retired" },
-      });
-      await vi.waitFor(
-        () => {
-          expect(proof.activations()[0]).toMatchObject({ retired: 1 });
-          expect(
-            proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")?.hostDrainedAtMs,
-          ).not.toBeNull();
-        },
-        { timeout: 30000 },
-      );
+      await stopLiveEditing(proof);
 
       await proof.ownerRename("docs/a.md", "docs/b.md");
       await vi.waitFor(

@@ -1546,10 +1546,14 @@ function ensureInsideTransaction(
   if (input.intent === "owner-resume") {
     let rebindCandidate: { enrollment: ServiceHostEnrollment; targetPath: string } | null = null;
     if (current) {
-      if (
-        storage.objectIdAtPathInVersion({ workspaceId, versionId: "main", path }) !==
-        current.objectId
-      ) {
+      const objectAtPath = storage.objectIdAtPathInVersion({
+        workspaceId,
+        versionId: "main",
+        path,
+      });
+      if (objectAtPath !== current.objectId) {
+        if (objectAtPath)
+          throw relayError("conflict", "Service host enrollment path belongs to another document.");
         const at = storage.objectMoment({
           workspaceId,
           objectId: current.objectId,
