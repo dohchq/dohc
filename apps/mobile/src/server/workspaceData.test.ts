@@ -900,6 +900,18 @@ describe("a chat read before it opens", () => {
     expect(count(server, "/sync/ws-a/ops/chat")).toBe(1);
   });
 
+  it("never marks a chat read ahead as a page no screen has shown", async () => {
+    const server = testServer();
+    server.on("POST", "/sync/ws-a/ops/chat", stream("channel-1"));
+    server.on("GET", feedPath("ws-a", "0.5.2"), held);
+    const cache = createReadCache();
+    const { data } = open(server, "ws-a", cache);
+    const view = views.stream("channel-1");
+    data.prefetch(view);
+    await vi.waitFor(() => expect(data.state(view).value).toMatchObject({ kind: "stream" }));
+    expect(cache.get(cacheScope(signInTo(server), "ws-a"), view.id)?.prefetched).toBeUndefined();
+  });
+
   it("reads again only once a change makes it stale", async () => {
     const server = testServer();
     server.on("POST", "/sync/ws-a/ops/chat", stream("channel-1"));

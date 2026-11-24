@@ -563,7 +563,8 @@ export function createWorkspaceData(options: {
       (answer) => {
         if (!live() || !target.reads.isLatest(request)) return;
         target.stale = false;
-        target.prefetched = unseen && target.listeners.size === 0;
+        target.prefetched =
+          unseen && target.listeners.size === 0 && target.view.carry !== undefined;
         const previous = unseen ? null : target.state.value;
         const value = target.view.carry ? target.view.carry(previous, answer.value) : answer.value;
         const saved = { view: target.view, value, cursor: answer.cursor, stale: false };
