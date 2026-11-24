@@ -82,6 +82,7 @@ export function createInMemoryWorkspaceActivity(
         preserveStatus?: boolean;
         notify?: boolean;
         expectedRootPath?: string;
+        ignoreFailure?: (error: unknown) => boolean;
       },
     ) => {
       const authority = authorities.get(workspaceId);

@@ -13,8 +13,9 @@ use dohc_engine_sync::{
     HostedScopeDocument, KeyEnvelopeDownloadRequest, KeyEnvelopeRequest, LogCoordinateRequest,
     LogCoordinateResponse, NoLiveLeases, ObservedBytes, ProbeRequest, PullRequest, RelayError,
     RelaySyncClient, RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareLogPushRequest,
-    ShareReplicationEnvelope, ShareViewRequest, SharedChannelRequest, SyncPassOutcome,
-    blob_ceiling, journal_local_replication_op, read_pushed_seq, read_relay_cursor,
+    ShareReachSignatures, ShareReplicationEnvelope, ShareViewRequest, SharedChannelRequest,
+    SyncPassOutcome, blob_ceiling, journal_local_replication_op, read_pushed_seq,
+    read_relay_cursor,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use dohc_engine_testkit::open_store;
@@ -1250,6 +1251,125 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
     );
     assert!(seen.contains("TARGET /sync/shares/share-1/log?since=1&limit=500&channelWireId=wire-1&originId=member&referenceAfter=mapping-tail&includeReferences=false"));
     assert!(seen.contains("TARGET /sync/shares/share-1/log?since=1&limit=500&referenceAfter=mapping-tail&includeReferences=false"));
+}
+
+// A membership's share log pages list the reach the relay selected them
+// under, and the pull compares both signatures with the stored reach. A path
+// share's pages list none. A reach without both signatures can't be compared,
+// so it is refused rather than read as "no reach". The page names the log's
+// head beside the reach, and the newest seq it marks as a move across the
+// reach's edge. A mark the engine can't read or place, one on a page with no
+// reach, or a reach without a head, is refused.
+#[test]
+fn share_view_pages_carry_both_reach_signatures_and_their_moves() {
+    let reach = json!({"signature": "r-2", "visibilitySignature": "v-1", "rootLevel": "view",
+        "folders": [{"path": "docs", "level": "edit"}]});
+    let marked = |mark: &str, seq: Option<i64>| {
+        let mut op = json!({"originId": "owner", "originSeq": 1, "opKind": "moment.append", "recordedAtMs": 1,
+            "payload": {"path": "docs/a.md"}, "reachMove": mark});
+        if let Some(seq) = seq {
+            op["relaySeq"] = json!(seq);
+        }
+        op
+    };
+    let page = |ops: Vec<Value>, reach: Option<Value>, head: Option<i64>| {
+        let mut body = json!({"ok": true, "ops": ops, "nextCursor": 1, "hasMore": false});
+        if let Some(reach) = reach {
+            body["reach"] = reach;
+        }
+        if let Some(head) = head {
+            body["logHead"] = json!(head);
+        }
+        TestResponse::json(200, body)
+    };
+    let pages = Arc::new(Mutex::new(VecDeque::from([
+        page(Vec::new(), Some(reach.clone()), Some(9)),
+        page(
+            vec![marked("departure", Some(3)), marked("arrival", Some(7))],
+            Some(reach.clone()),
+            Some(9),
+        ),
+        page(
+            vec![marked("arrival", Some(9))],
+            Some(reach.clone()),
+            Some(9),
+        ),
+        log_page(Vec::new(), 0, false),
+        page(Vec::new(), Some(json!({"signature": "r-2"})), Some(9)),
+        page(
+            Vec::new(),
+            Some(json!({"visibilitySignature": "v-1"})),
+            Some(9),
+        ),
+        page(
+            vec![marked("sideways", Some(3))],
+            Some(reach.clone()),
+            Some(9),
+        ),
+        page(vec![marked("departure", Some(3))], None, None),
+        page(Vec::new(), Some(reach.clone()), None),
+        page(
+            vec![marked("departure", None)],
+            Some(reach.clone()),
+            Some(9),
+        ),
+        page(
+            vec![marked("departure", Some(10))],
+            Some(reach.clone()),
+            Some(9),
+        ),
+    ])));
+    let served = Arc::clone(&pages);
+    let server = FakeServer::start(move |_| {
+        served
+            .lock()
+            .expect("pages")
+            .pop_front()
+            .expect("planned page")
+    });
+    let transport = transport(&server);
+    let pull = || {
+        transport.share_view_pull(ShareViewRequest {
+            include_work_references: false,
+            reference_after: None,
+            share_id: "share-1".to_owned(),
+            cursor: 0,
+            limit: 500,
+        })
+    };
+    let listed = |newest_move| {
+        Some(ShareReachSignatures {
+            signature: "r-2".to_owned(),
+            visibility_signature: "v-1".to_owned(),
+            log_head: 9,
+            newest_move,
+        })
+    };
+    assert_eq!(
+        pull().expect("membership page").reach_signatures,
+        listed(None)
+    );
+    assert_eq!(pull().expect("two moves").reach_signatures, listed(Some(7)));
+    assert_eq!(
+        pull().expect("a move at the head").reach_signatures,
+        listed(Some(9))
+    );
+    assert_eq!(pull().expect("path share page").reach_signatures, None);
+    for refused in [
+        "level signature alone",
+        "visibility signature alone",
+        "an unknown mark",
+        "a mark without a reach",
+        "a reach without a head",
+        "a mark without a seq",
+        "a mark past the head",
+    ] {
+        assert_eq!(
+            pull().expect_err(refused),
+            RelayError::InvalidResponse,
+            "{refused}"
+        );
+    }
 }
 
 #[test]

@@ -506,6 +506,48 @@ pub fn commit_share_cursor(
     })
 }
 
+/// The relay log's head that this share view's first page named, if a page has
+/// named one.
+pub(crate) fn read_share_view_fence(
+    store: &EngineStore,
+    workspace_id: &str,
+    share_id: &str,
+) -> Result<Option<i64>, SyncError> {
+    store.read_with(|conn| {
+        conn.query_row(
+            "SELECT log_head FROM share_view_fences WHERE workspace_id=?1 AND share_id=?2",
+            params![workspace_id, share_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)
+    })
+}
+
+/// Store the head a share view's first page named. A stored head stays.
+pub(crate) fn record_share_view_fence(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    share_id: &str,
+    log_head: i64,
+    faults: &dyn FaultInjector,
+) -> Result<TxnOutcome<()>, SyncError> {
+    if !(0..=crate::MAX_WIRE_INTEGER).contains(&log_head) {
+        return Err(SyncError::InvalidInput {
+            reason: "log head is outside the wire integer range",
+        });
+    }
+    store.write_with(faults, |tx| {
+        tx.execute(
+            "INSERT INTO share_view_fences (workspace_id,share_id,log_head) VALUES (?1,?2,?3) \
+             ON CONFLICT(workspace_id,share_id) DO NOTHING",
+            params![workspace_id, share_id, log_head],
+        )
+        .map_err(SyncError::persist)?;
+        Ok::<(), SyncError>(())
+    })
+}
+
 fn share_cursor_table(kind: CursorKind) -> Result<&'static str, SyncError> {
     match kind {
         CursorKind::SharedChannel => Ok("shared_channel_cursors"),

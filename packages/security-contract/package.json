@@ -29,6 +29,7 @@
     "./wire-patterns": "./src/wirePatterns.ts",
     "./workspace-members": "./src/workspaceMembers.ts",
     "./access-rules": "./src/accessRules.ts",
+    "./listed-reach": "./src/listedReach.ts",
     "./direct-messages": "./src/directMessages.ts",
     "./app-collection-checks": "./src/appCollectionChecks.ts"
   },

@@ -13,11 +13,13 @@ import {
   ShareUnavailableError,
   RelayUnauthorizedError,
   type PullShareViewResult,
+  type ShareReachSignatures,
   type ShareViewChangedPath,
   type ShareViewRefusal,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
-import { shareViewTakesLocalWrites } from "./shareWriteGate";
+import { grantLevels } from "./shareViewReach";
+import { shareViewWriteLevel, writeScopeOfLevels } from "./shareWriteGate";
 import type { ShareViewSelector } from "./shareViewInfo";
 import {
   type WorkspaceOperationLease,
@@ -74,6 +76,12 @@ export interface RefreshSharedViewOutcome {
   // The first refusal's message, for the UI. It names the constraint the op
   // broke; the whole list goes to the log.
   refusedDetail: string | null;
+  // Set when the relay now selects this view under other levels or another
+  // visible set. The pull applied nothing and the caller reads the reach.
+  reachChanged?: ShareReachSignatures;
+  // Set when the visible set changed: the engine closed the copy, and only
+  // this rebuild reads it until the new copy is swapped in.
+  rebuildId?: string;
 }
 
 export type StandaloneShareViewRefreshOutcome =
@@ -1735,7 +1743,8 @@ async function captureSharedViewLocalDivergence(
     rootDir: string;
     workspaceId: string;
     store: CaptureVersionedTextStore;
-    allowLocalJournaling: boolean;
+    // Whether an edit at this path is journaled to send, or put back.
+    journalsAt: (path: string) => boolean;
     shareId: string;
     beforeCaptureWrite?: (path: string) => Promise<void>;
     paths?: readonly string[];
@@ -1750,7 +1759,7 @@ async function captureSharedViewLocalDivergence(
     rootDir,
     workspaceId,
     store,
-    allowLocalJournaling,
+    journalsAt,
     shareId,
     beforeCaptureWrite,
     paths,
@@ -1857,11 +1866,16 @@ async function captureSharedViewLocalDivergence(
       collisionRecordQuarantined: true,
     };
   }
-  if (!allowLocalJournaling) {
+  {
     // Keep blocked paths apart before capture or pull can write them.
     const blocked: string[] = [];
     for (const entry of tracked) {
-      if (preserved.has(entry.path) || collisionRecordedPaths.has(entry.path)) continue;
+      if (
+        journalsAt(entry.path) ||
+        preserved.has(entry.path) ||
+        collisionRecordedPaths.has(entry.path)
+      )
+        continue;
       const blockedPath = await healTamperedProjectionPath(realRoot, entry.path);
       if (blockedPath === null) continue;
       blocked.push(blockedPath);
@@ -2246,7 +2260,7 @@ async function captureSharedViewLocalDivergence(
         workspaceLease,
         async (resolvedTarget) => {
           const observation = await observeLocked(work, row, resolvedTarget, ordinaryPreLock);
-          const verdict = classifyCaptureObservation(observation, allowLocalJournaling);
+          const verdict = classifyCaptureObservation(observation, journalsAt(work.path));
           if ("reportMissingTracked" in verdict && verdict.reportMissingTracked) {
             console.error(
               `[desktop] shared view store lost tracked path ${work.path} ` +
@@ -2367,6 +2381,10 @@ async function captureStandaloneShareViewDivergence(
     workspaceId: string;
     store: CaptureVersionedTextStore;
     pinnedSelector: unknown;
+    // The reach stored with a joined workspace's share view, which gives each
+    // path its level.
+    reach?: unknown;
+    editingNotReady?: true;
     shareId: string;
     ended: boolean;
     paths?: readonly string[];
@@ -2379,16 +2397,18 @@ async function captureStandaloneShareViewDivergence(
 ): Promise<CaptureSharedViewRefreshOutcome> {
   const grantedSelector = recordedShareSelector(input.pinnedSelector);
   if (grantedSelector === null) throw new SharePinInvalidError(input.shareId);
-  const allowLocalJournaling = shareViewTakesLocalWrites({
-    access: grantedSelector.access,
-    ended: input.ended,
-  });
+  // An edit outside the app is journaled only where the level takes it. One
+  // at a view-only path is put back, as the app would have refused it.
+  const writes = writeScopeOfLevels(
+    grantLevels(grantedSelector, input.reach, input.editingNotReady === true),
+    input.ended,
+  );
   return captureSharedViewLocalDivergence(
     {
       rootDir: input.rootDir,
       workspaceId: input.workspaceId,
       store: input.store,
-      allowLocalJournaling,
+      journalsAt: (path) => shareViewWriteLevel(writes, { path }) === "edit",
       shareId: input.shareId,
       paths: input.paths,
       preservedPaths: input.preservedPaths,
@@ -2510,6 +2530,21 @@ async function refreshSharedViewOnce(
       };
     }
     throw error;
+  }
+  // The engine closed the copy for a rebuild and answers only that rebuild
+  // now, so nothing here can read it. Its pull-in-flight marker stays: the
+  // rebuild replaces what it guards.
+  if (pull.rebuildId !== undefined && pull.reachChanged) {
+    return {
+      status: "unchanged",
+      changedPaths: 0,
+      excludedPaths: [],
+      unjournalablePaths: [...(input.unjournalablePaths ?? [])],
+      refusedOps: pull.refusalCount,
+      refusedDetail: pull.refusals[0]?.detail ?? null,
+      reachChanged: pull.reachChanged,
+      rebuildId: pull.rebuildId,
+    };
   }
   const materializationExclusions = new Set(input.excludeFromMaterialization ?? []);
   if (recordChangedPaths) {
@@ -2688,6 +2723,7 @@ async function refreshSharedViewOnce(
     unjournalablePaths: unjournalablePaths.filter((entry) => !releasedPaths.has(entry.path)),
     refusedOps: pull.refusalCount,
     refusedDetail: pull.refusals[0]?.detail ?? null,
+    ...(pull.reachChanged ? { reachChanged: pull.reachChanged } : {}),
   };
 }
 

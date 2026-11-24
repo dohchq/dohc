@@ -22,6 +22,7 @@ import {
   MAX_REPORTED_REFUSALS,
   type RecordShareViewIdentityResult,
   type PullShareViewResult,
+  type ShareReachSignatures,
   type ShareViewRefusal,
   type SharingDeclined,
   type PullWorkspaceFromRelayResult,
@@ -36,6 +37,7 @@ import {
 } from "@dohc/workspace-contracts/relay";
 
 import { engineGrantedSelector, type GrantedSelector } from "./shareViewRecords";
+import type { ListedReach } from "@dohc/security-contract/listed-reach";
 import {
   DaemonRefusalError,
   decodeKeyEnvelopeResult,
@@ -80,6 +82,22 @@ interface RelayOpenConfiguration {
   baseUrl: string;
   bearerToken: string;
   allowInsecureLoopbackForTests?: boolean;
+}
+
+/**
+ * The relay configuration an engine request with no open workspace carries,
+ * as the route guard gives `workspace.open`.
+ */
+export function relayOpenConfiguration(
+  relay: Pick<SyncRelayConnection, "baseUrl" | "token">,
+): RelayOpenConfiguration {
+  return {
+    baseUrl: normalizedRelayUrl(relay.baseUrl),
+    bearerToken: relay.token,
+    ...(allowInsecureLoopbackRelayForTests(relay.baseUrl)
+      ? { allowInsecureLoopbackForTests: true }
+      : {}),
+  };
 }
 
 interface RelayRoute {
@@ -359,6 +377,19 @@ function booleanField(
   return field;
 }
 
+// The reach signatures a share view page names, or undefined for none.
+function reachSignatures(
+  value: JsonValue | undefined,
+  label: string,
+): ShareReachSignatures | undefined {
+  if (value === undefined || value === null) return undefined;
+  const record = resultRecord(value, `${label}.reachChanged`);
+  return {
+    signature: stringField(record, "signature", `${label}.reachChanged`),
+    visibilitySignature: stringField(record, "visibilitySignature", `${label}.reachChanged`),
+  };
+}
+
 function assertRelayPullProgress(
   label: string,
   previousCursor: number | null,
@@ -556,10 +587,12 @@ export interface EngineRelayWorkspaceClient {
     shareId: string;
     channelWireId: string;
   }): Promise<PushSharedChannelResult>;
-  // A joined workspace's own posts in its Groups, at Comment or Edit.
+  // A joined workspace's own posts in its Groups and comments on its files,
+  // with Comment or Edit somewhere.
   pushShareViewChat(input: {
     shareId: string;
     grantedSelector: GrantedSelector;
+    reach?: ListedReach | null;
   }): Promise<PushSharedChannelResult>;
   pullShareView(input: {
     shareId: string;
@@ -567,6 +600,9 @@ export interface EngineRelayWorkspaceClient {
     // Required, because the engine has no unscoped pull: a caller that cannot
     // resolve a selector must skip its refresh, not widen it.
     grantedSelector: GrantedSelector;
+    // A membership's stored reach. A page the relay selected under another
+    // reach applies nothing, and the pull stops with `reachChanged`.
+    reach?: ListedReach | null;
     // Called with each page's refusals BEFORE that page's cursor is
     // committed. A refusal is a durable fact — the commit moves permanently
     // past the op — so it has to be recorded first, or a later page that
@@ -598,6 +634,7 @@ export interface EngineRelayWorkspaceClient {
   // record, so nothing here has to remember an id between calls.
   recordShareViewIdentity(input: {
     grantedSelector: GrantedSelector;
+    reach?: ListedReach | null;
   }): Promise<RecordShareViewIdentityResult>;
 
   // This replica's own edits of the shared files, offered to the
@@ -606,6 +643,7 @@ export interface EngineRelayWorkspaceClient {
   submitShareProposal(input: {
     shareId: string;
     grantedSelector: GrantedSelector;
+    reach?: ListedReach | null;
     // The idempotency key for one submit. The caller owns it so a retry of
     // the same intent answers with the proposal the relay already holds
     // instead of opening a second one.
@@ -618,6 +656,7 @@ export interface EngineRelayWorkspaceClient {
   pushDirectWrites(input: {
     shareId: string;
     grantedSelector: GrantedSelector;
+    reach?: ListedReach | null;
   }): Promise<PushDirectWritesResult>;
 
   // What a push that stopped in transit left unsent. A local read.
@@ -999,12 +1038,12 @@ export class EngineRelayClient {
           pushed: numberField(result, "pushed", "share.channel.push"),
         };
       },
-      pushShareViewChat: async ({ shareId, grantedSelector }) => {
+      pushShareViewChat: async ({ shareId, grantedSelector, reach }) => {
         const result = resultRecord(
           await request("share.view.pushChat", {
             workspaceId: workspace.workspaceId,
             shareId,
-            grantedSelector: engineGrantedSelector(grantedSelector),
+            grantedSelector: engineGrantedSelector(grantedSelector, reach),
           }),
           "share.view.pushChat",
         );
@@ -1012,11 +1051,11 @@ export class EngineRelayClient {
           pushed: numberField(result, "pushed", "share.view.pushChat"),
         };
       },
-      recordShareViewIdentity: async ({ grantedSelector }) => {
+      recordShareViewIdentity: async ({ grantedSelector, reach }) => {
         const result = resultRecord(
           await request("share.view.recordIdentity", {
             workspaceId: workspace.workspaceId,
-            grantedSelector: engineGrantedSelector(grantedSelector),
+            grantedSelector: engineGrantedSelector(grantedSelector, reach),
           }),
           "share.view.recordIdentity",
         );
@@ -1035,12 +1074,12 @@ export class EngineRelayClient {
         }
         return { identity };
       },
-      submitShareProposal: async ({ shareId, grantedSelector, submitId }) => {
+      submitShareProposal: async ({ shareId, grantedSelector, reach, submitId }) => {
         const result = resultRecord(
           await request("share.proposal.submit", {
             workspaceId: workspace.workspaceId,
             shareId,
-            grantedSelector: engineGrantedSelector(grantedSelector),
+            grantedSelector: engineGrantedSelector(grantedSelector, reach),
             submitId,
           }),
           "share.proposal.submit",
@@ -1064,13 +1103,13 @@ export class EngineRelayClient {
           morePending: booleanField(result, "morePending", "share.proposal.submit"),
         };
       },
-      pushDirectWrites: async ({ shareId, grantedSelector }) => {
+      pushDirectWrites: async ({ shareId, grantedSelector, reach }) => {
         const method = "share.direct.push";
         const result = resultRecord(
           await request(method, {
             workspaceId: workspace.workspaceId,
             shareId,
-            grantedSelector: engineGrantedSelector(grantedSelector),
+            grantedSelector: engineGrantedSelector(grantedSelector, reach),
           }),
           method,
         );
@@ -1097,6 +1136,7 @@ export class EngineRelayClient {
       pullShareView: async ({
         shareId,
         grantedSelector,
+        reach,
         recordRefusals,
         recordCollisions,
         recordChangedPaths,
@@ -1115,6 +1155,7 @@ export class EngineRelayClient {
         let nextCursor = 0;
         let previousCursor: number | null = null;
         let finalCursor: Record<string, JsonValue | undefined> | null = null;
+        let reachChanged: ShareReachSignatures | undefined;
         const changed = new Map<
           string,
           {
@@ -1132,16 +1173,44 @@ export class EngineRelayClient {
               // that selects everything under a version; dropping the version
               // leaves one the engine refuses outright; dropping the level
               // leaves one the engine cannot read and refuses too.
-              grantedSelector: engineGrantedSelector(grantedSelector),
+              grantedSelector: engineGrantedSelector(grantedSelector, reach),
             }),
             "share.view.pull",
           );
+          // The engine closed the copy: the visibility changed, and the old
+          // store answers only its rebuild now. Nothing applied and no cursor
+          // commits.
+          if (result.rebuildId !== undefined) {
+            const closedReach = reachSignatures(result.reachChanged, "share.view.pull");
+            if (!closedReach) {
+              throw new Error("Rust engine share.view.pull closed the copy without a reach.");
+            }
+            return {
+              fetched,
+              applied,
+              skipped,
+              refusals,
+              refusalCount,
+              changedPaths: [...changed.values()],
+              nextCursor,
+              reachChanged: closedReach,
+              rebuildId: stringField(result, "rebuildId", "share.view.pull"),
+              commitCursor: async () => {},
+            };
+          }
           const cursor = pendingCursor(result.pendingCursor, "share.view.pull");
           const pageCursor = numberField(result, "nextCursor", "share.view.pull");
           const hasMore = booleanField(result, "hasMore", "share.view.pull");
           assertRelayPullProgress("share.view.pull", previousCursor, pageCursor, hasMore);
           previousCursor = pageCursor;
           nextCursor = pageCursor;
+          // A page the relay selected under another reach applied nothing, and
+          // its cursor is where the last page left it.
+          reachChanged = reachSignatures(result.reachChanged, "share.view.pull");
+          if (reachChanged) {
+            finalCursor = cursor;
+            break;
+          }
           fetched += numberField(result, "fetched", "share.view.pull");
           applied += numberField(result, "applied", "share.view.pull");
           skipped += numberField(result, "skipped", "share.view.pull");
@@ -1194,6 +1263,7 @@ export class EngineRelayClient {
           refusalCount,
           changedPaths: [...changed.values()],
           nextCursor,
+          ...(reachChanged ? { reachChanged } : {}),
           // Share-view pulls do not surface `sharingDeclined` (out of scope
           // for share views) — discard the richer relay-cursor result the
           // shared `commitCursor` closure now returns.

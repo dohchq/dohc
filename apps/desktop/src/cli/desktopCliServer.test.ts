@@ -71,7 +71,7 @@ import { createWorkspaceFolder } from "../workspaces/createWorkspaceFolder";
 import { realpathSync } from "node:fs";
 import { readDeleteRecovery, waitForRecovery } from "../workspaces/workspaceDeleteRecovery";
 import { openedLocalState } from "../testing/preparedLocalState";
-import type { ShareViewWriteScope } from "../workspaces/shareWriteGate";
+import { shareViewWriteScopeOf, type ShareViewWriteScope } from "../workspaces/shareWriteGate";
 
 function deferred() {
   let release!: () => void;
@@ -254,6 +254,7 @@ function fixture(
   };
   const chatWrites = createChatWrites({
     findWorkspace: (id) => rows.get(id) ?? null,
+    currentPathOf: async () => null,
     warmCredentials: async () => undefined,
     currentCredentialGeneration: () => 0,
     currentCredentials: () => null,
@@ -482,6 +483,43 @@ describe("desktop CLI workspace context", () => {
       "This workspace changed while this ran. Try again.",
     );
     expect(publish).toHaveBeenCalledOnce();
+  });
+
+  // A joined copy the engine closed for its access answers the CLI in words,
+  // not with the engine's refusal code.
+  it.each([
+    [
+      "is updating",
+      undefined,
+      "dohc is updating your access to this workspace. Run this again once it opens in dohc.",
+    ],
+    [
+      "waits for the server",
+      { reason: "waiting" as const, detail: "dohc could not reach the server. It keeps trying." },
+      "dohc is updating your access to this workspace. Run this again once it opens in dohc.",
+    ],
+    // It reopens only once someone chooses Try again.
+    [
+      "stopped and waits for Try again",
+      { reason: "failed" as const, detail: "dohc could not update access." },
+      "dohc stopped updating your access to this workspace. Open it in dohc, then choose Try again.",
+    ],
+    [
+      "belongs to a membership that ended",
+      {
+        reason: "ended" as const,
+        detail:
+          "Your membership ended. This copy stays on this computer. Ask the owner to invite you again to keep working in it.",
+      },
+      "Your membership ended. This copy stays on this computer. Ask the owner to invite you again to keep working in it.",
+    ],
+  ])("refuses a closed copy that %s before activity admission", async (_state, stopped, words) => {
+    const f = fixture();
+    f.workspace.shareView = {
+      rebuild: { rebuildId: "rebuild-1", ...(stopped ? { stopped } : {}) },
+    } as unknown as RegistryEntry["shareView"];
+    await expect(f.create().openCliWorkspace(f.workspace)).rejects.toThrow(words);
+    expect(f.dependencies.openWorkspaceActivity).not.toHaveBeenCalled();
   });
 
   it("stops showing history the workspace's current policy no longer tracks, to the CLI and the MCP", async () => {
@@ -3164,6 +3202,83 @@ describe("a joined workspace through the CLI", () => {
         author: AGENT_AUTHOR,
       }),
     ).rejects.toThrow("The sync relay did not accept this record.");
+  });
+
+  // The levels main gives the CLI and MCP come from the same marker and the
+  // same rule as the app's own writes (`shareViewLevels`), so each folder
+  // answers with its own listed level.
+  it("takes each path's level from the stored reach", async () => {
+    const f = joinedFixture("view");
+    const shareView = {
+      ...f.shareView,
+      reach: {
+        signature: "r1",
+        visibilitySignature: "v1",
+        rootLevel: "view" as const,
+        folders: [
+          { path: "tasks", level: "edit" as const },
+          { path: "notes", level: "comment" as const },
+        ],
+      },
+    };
+    const joined: RegistryEntry = { ...f.joined, shareView };
+    f.rows.set("workspace", joined);
+    f.dependencies.sharedViewOf = vi.fn(() => shareViewWriteScopeOf(shareView, null));
+    vi.mocked(f.dependencies.joinedRecords.create).mockResolvedValue({
+      path: "tasks/Hidden/b.md",
+      recordId: RECORD_ID,
+      delivery: "pending",
+    });
+    const context = await f.create().openCliWorkspace(joined);
+    await expect(
+      context.collections!.writes.setFields({
+        recordPath: "notes/a.md",
+        fields: { status: "done" },
+        author: AGENT_AUTHOR,
+      }),
+    ).rejects.toThrow("Changing a Collection record needs Edit. You can comment here.");
+    await expect(
+      context.collections!.writes.createRecord({
+        collectionPath: "archive",
+        name: "b",
+        author: AGENT_AUTHOR,
+      }),
+    ).rejects.toThrow("Adding a Collection record needs Edit. You can view here.");
+    // A folder the relay did not list takes its nearest listed folder's level.
+    await expect(
+      context.collections!.writes.createRecord({
+        collectionPath: "tasks/Hidden",
+        name: "b",
+        author: AGENT_AUTHOR,
+      }),
+    ).resolves.toEqual({ path: "tasks/Hidden/b.md", recordId: RECORD_ID });
+  });
+
+  // No level is given when the membership ended or another account is
+  // signed in; the refusal names that, not a level.
+  it("says why a membership that ended, or another account, changes nothing", async () => {
+    for (const [change, refusal] of [
+      [{ ended: true }, "Adding a Collection record isn't possible here. Your membership ended."],
+      [
+        { writer: "other" },
+        "Adding a Collection record isn't possible here. This computer is signed in to a different account than the one the owner invited.",
+      ],
+    ] as const) {
+      const f = joinedFixture("edit");
+      f.dependencies.sharedViewOf = vi.fn(() => ({
+        ...shareViewWriteScopeOf(f.shareView, null)!,
+        ...change,
+      }));
+      const context = await f.create().openCliWorkspace(f.joined);
+      await expect(
+        context.collections!.writes.createRecord({
+          collectionPath: "tasks",
+          name: "b",
+          author: AGENT_AUTHOR,
+        }),
+      ).rejects.toThrow(refusal);
+      expect(f.dependencies.joinedRecords.create).not.toHaveBeenCalled();
+    }
   });
 
   // The relay creates the Group in the owner's workspace and decides the

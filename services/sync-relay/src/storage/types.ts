@@ -1714,6 +1714,8 @@ export interface SyncRelayStorage {
     relaySeq: number;
   }): boolean;
   readShareTx<T>(read: () => T): T;
+  /** The workspace log's newest relay seq, read in the caller's share read when there is one. */
+  shareLogHead(workspaceId: string): number;
   memberReach(
     workspaceId: string,
     userId: string,

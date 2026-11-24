@@ -2143,6 +2143,7 @@ describe("chatDispatchService", () => {
       };
       const writes = createChatWrites({
         findWorkspace: () => ({}),
+        currentPathOf: async () => null,
         warmCredentials: async () => undefined,
         currentCredentials: () => null,
         currentCredentialGeneration: () => 0,

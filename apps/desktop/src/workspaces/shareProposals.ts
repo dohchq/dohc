@@ -1,8 +1,10 @@
 import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
 import { recordedShareSelector } from "./shareViewRecords";
 import type { ShareViewSelector } from "./shareViewInfo";
-import { shareViewIdentityIsIntact, shareViewIsPresent } from "./shareViewMarker";
-import { shareViewTakesLocalWrites } from "./shareWriteGate";
+import { shareViewIsPresent } from "./shareViewMarker";
+import { shareViewWriteLevel, shareViewWriteScopeOf } from "./shareWriteGate";
+import { storedShareViewReach } from "./shareViewReach";
+import type { ListedReach } from "@dohc/security-contract/listed-reach";
 
 // The two lanes of share proposals, and the rule that keeps a workspace in
 // exactly one of them.
@@ -33,6 +35,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export interface ShareViewProposalScope {
   shareId: string;
   grant: ShareViewSelector;
+  // A joined workspace's stored reach, which the engine checks each page against.
+  reach: ListedReach | null;
 }
 
 /** Whether two resolved scopes still address the same effective grant. */
@@ -43,6 +47,8 @@ export function sameShareViewProposalScope(
   if (
     left.shareId !== right.shareId ||
     left.grant.access !== right.grant.access ||
+    left.reach?.signature !== right.reach?.signature ||
+    left.reach?.visibilitySignature !== right.reach?.visibilitySignature ||
     left.grant.versionId !== right.grant.versionId ||
     left.grant.paths.length !== right.grant.paths.length
   ) {
@@ -81,7 +87,7 @@ export function requireShareViewMembership(shareView: unknown): ShareViewProposa
   if (!grant) throw new SharedFileReadOnlyError();
   const shareId = typeof marker.shareId === "string" ? marker.shareId : "";
   if (!shareId) throw new SharedFileReadOnlyError();
-  return { shareId, grant };
+  return { shareId, grant, reach: storedShareViewReach(shareView) };
 }
 
 /**
@@ -90,14 +96,10 @@ export function requireShareViewMembership(shareView: unknown): ShareViewProposa
  */
 export function requireShareViewProposalScope(shareView: unknown): ShareViewProposalScope {
   const scope = requireShareViewMembership(shareView);
-  const marker = isRecord(shareView) ? shareView : {};
-  if (
-    !shareViewIdentityIsIntact(marker) ||
-    !shareViewTakesLocalWrites({
-      access: scope.grant.access,
-      ended: marker.ended === true,
-    })
-  ) {
+  const writes = shareViewWriteScopeOf(shareView, null);
+  // What waits was judged at its own path when it was made, and the relay
+  // judges it again; sending needs Edit somewhere.
+  if (!writes || shareViewWriteLevel(writes, "somewhere") !== "edit") {
     throw new SharedFileReadOnlyError();
   }
   return scope;

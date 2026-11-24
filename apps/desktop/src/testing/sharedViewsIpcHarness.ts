@@ -105,6 +105,8 @@ export async function createSharedViewsIpcHarness(
   );
   let rendererCurrent = true;
   let rendererClosed = false;
+  // After a restart, Updating access shows with no workspace open in its window.
+  let rendererSession = true;
   const session = {
     workspaceId: "existing",
     attachmentId,
@@ -124,7 +126,7 @@ export async function createSharedViewsIpcHarness(
     object,
     typeof session
   >({
-    currentSession: () => session,
+    currentSession: () => (rendererSession ? session : undefined),
     withPhysicalOperation: (id, work) => authorities.withOperation(id, work),
   });
   const cache = new CredentialSessionCache<CloudCredentials>();
@@ -142,6 +144,10 @@ export async function createSharedViewsIpcHarness(
   const registryRead = vi.fn((id: string) => registry.get(id)!);
   const workspaceOperation = vi.fn(withRendererWorkspaceOperation);
   const fetchAccess = vi.fn<Dependencies["fetchShareViewAccess"]>(async () => ({ access: "edit" }));
+  const fetchReach = vi.fn<Dependencies["fetchShareViewReach"]>(async () => {
+    steps.push("reach");
+    return { signature: "r1", visibilitySignature: "v1", rootLevel: "edit", folders: [] };
+  });
   const readDir = vi.fn(async (_root: string) => [] as string[]);
   const mkdir = vi.fn(async () => {
     steps.push("mkdir");
@@ -229,6 +235,15 @@ export async function createSharedViewsIpcHarness(
     },
   );
   const showsLive = vi.fn<Dependencies["showsLive"]>(() => false);
+  // Main's rebuild of a closed copy. By default it stops, so the copy stays
+  // closed as it was.
+  const rebuild = vi.fn<Dependencies["rebuildShareView"]>(async () => ({
+    kind: "failed",
+    error: new Error("the engine stopped"),
+  }));
+  // The rebuild the engine holds a copy closed for. By default none.
+  const readRebuild = vi.fn<Dependencies["readShareViewRebuild"]>(async () => null);
+  const finishRebuild = vi.fn<Dependencies["finishShareViewRebuild"]>(async () => undefined);
   const end = vi.fn<Dependencies["shareViewFiles"]["end"]>(
     async (_lease, target, assertCurrent) => {
       assertCurrent();
@@ -247,7 +262,7 @@ export async function createSharedViewsIpcHarness(
   });
   const recordRefusal = vi.fn<Dependencies["recordShareViewStoreRefusal"]>();
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
-  registerSharedViewsIpcHandlers<string, Event, Operation, Lease>({
+  const { resumeRebuilds } = registerSharedViewsIpcHandlers<string, Event, Operation, Lease>({
     registerHandler: (channel, handler) => {
       expect(handlers.has(channel)).toBe(false);
       handlers.set(channel, handler);
@@ -261,7 +276,7 @@ export async function createSharedViewsIpcHarness(
     warmCredentialCache: warm,
     currentCredentials: () => cache.snapshot().credentials,
     engineDaemonStartup: startup,
-    currentRendererSession: () => session,
+    currentRendererSession: () => (rendererSession ? session : undefined),
     probeShareViewLog: probeLog,
     currentCredentialGeneration: () => cache.snapshot().generation,
     onSenderClosed: (_sender, close) => {
@@ -272,6 +287,7 @@ export async function createSharedViewsIpcHarness(
     },
     fetchShareViewInfo: fetchInfo,
     fetchShareViewAccess: fetchAccess,
+    fetchShareViewReach: fetchReach,
     usableRoot: roots.usableRoot,
     readdir: readDir,
     mkdir,
@@ -297,6 +313,9 @@ export async function createSharedViewsIpcHarness(
     recordShareViewStoreRefusal: recordRefusal,
     syncNotices,
     showsLive,
+    rebuildShareView: rebuild,
+    readShareViewRebuild: readRebuild,
+    finishShareViewRebuild: finishRebuild,
   });
   const invoke = (channel: string, payload: unknown, trusted = true) =>
     Promise.resolve().then(() => handlers.get(channel)!({ sender: "window", trusted }, payload));
@@ -329,6 +348,10 @@ export async function createSharedViewsIpcHarness(
     reconcile,
     syncNotices,
     showsLive,
+    rebuild,
+    readRebuild,
+    finishRebuild,
+    resumeRebuilds,
     probeLog,
     registryRead,
     workspaceOperation,
@@ -336,6 +359,7 @@ export async function createSharedViewsIpcHarness(
     end,
     narrow,
     fetchAccess,
+    fetchReach,
     closed,
     recordRefusal,
     handlers,
@@ -348,6 +372,9 @@ export async function createSharedViewsIpcHarness(
     },
     retireRenderer: () => {
       rendererCurrent = false;
+    },
+    withoutRendererSession: () => {
+      rendererSession = false;
     },
   };
 }

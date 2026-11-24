@@ -8,9 +8,18 @@ import type {
   ResolvedShareViewFilesTarget,
 } from "./shareViewFiles";
 import { recordedShareSelector } from "./shareViewRecords";
+import { grantLevels } from "./shareViewReach";
+import { shareViewWriteLevel, shareViewWriteScopeOf } from "./shareWriteGate";
 import type { ShareViewSelector } from "./shareViewInfo";
 import type { WorkspaceOperationLease } from "./workspaceAssets";
 import type { CreationPartial } from "@dohc/cli/creation";
+import type { ListedReach } from "@dohc/security-contract/listed-reach";
+
+/** The relay's grant now and, for a joined workspace, its reach now. */
+export interface LiveShareGrant {
+  selector: ShareViewSelector;
+  reach?: ListedReach;
+}
 
 export interface ReceivedRecordDraft {
   path: string;
@@ -27,7 +36,7 @@ export async function createReceivedShareRecord(
     resolved: ResolvedShareViewFilesTarget;
     collectionPath: string;
     files: Pick<ShareViewFiles, "read" | "change">;
-    checkAuthority(): Promise<ShareViewSelector | null>;
+    checkAuthority(): Promise<LiveShareGrant | null>;
     recordStatus(path: string): Promise<{
       state: "pending" | "accepted" | "refused";
       originalRecordId?: string;
@@ -39,25 +48,41 @@ export async function createReceivedShareRecord(
   },
 ): Promise<ReceivedRecordDraft | CreationPartial> {
   const { resolved } = host;
-  // A joined workspace's grant names the whole workspace and no paths.
-  const covers = (grant: ShareViewSelector | null) =>
-    grant?.access === "edit" &&
-    grant.versionId === null &&
-    (grant.wholeWorkspace === true ||
-      grant.paths.some(
-        (root) => host.collectionPath === root || host.collectionPath.startsWith(`${root}/`),
-      ));
+  // A joined workspace's grant names the whole workspace and no paths. A new
+  // record lands in the Collection's folder, so it takes the level there, by
+  // the stored marker and reach, and by the relay's grant and reach now: the
+  // relay can lower the member below the reach this copy stored.
+  const writes = shareViewWriteScopeOf(
+    {
+      shareId: resolved.shareId,
+      recipientUserId: resolved.recipientUserId,
+      grantedSelector: resolved.grantedSelector,
+      ...(resolved.reach === undefined ? {} : { reach: resolved.reach }),
+      ...(resolved.editingNotReady ? { editingNotReady: true } : {}),
+    },
+    null,
+  );
+  const covers = (grant: ShareViewSelector | null, reach: unknown) =>
+    grant?.versionId === null &&
+    (grant.wholeWorkspace === true
+      ? writes !== null &&
+        shareViewWriteLevel(writes, { folder: host.collectionPath }) === "edit" &&
+        grantLevels(grant, reach).in(host.collectionPath) === "edit"
+      : grant.access === "edit" &&
+        grant.paths.some(
+          (root) => host.collectionPath === root || host.collectionPath.startsWith(`${root}/`),
+        ));
   if (resolved.kind !== "standalone")
     throw new Error("Open this share as a workspace to create a record.");
   if (resolved.ended || !resolved.shareId) throw new ShareUnavailableError();
-  if (!covers(recordedShareSelector(resolved.grantedSelector))) {
+  if (!covers(recordedShareSelector(resolved.grantedSelector), resolved.reach)) {
     throw new SharedFileReadOnlyError("This Collection does not have Edit access.");
   }
   let prepared = prepareCollectionRecord({ ...input, collectionPath: host.collectionPath });
   // A missing connection permits a local draft. A server refusal never does.
   const live = await host.checkAuthority();
   host.assertCurrent();
-  if (live !== null && !covers(live))
+  if (live !== null && !covers(live.selector, live.reach))
     throw new SharedFileReadOnlyError("This Collection does not have Edit access.");
   const schema = await host.files.read(host.target, {
     kind: "text",

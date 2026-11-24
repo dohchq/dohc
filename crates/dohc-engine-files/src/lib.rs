@@ -57,12 +57,13 @@ pub use materialize::{
     AtomicReplacer, CheckThenRenameFailed, DurabilityPolicy, JobOutcome, JobResult, KeptCopySave,
     MaterializeError, MaterializeOptions, NoBackoff, Placement, PlacementHolds, ProjectionProbe,
     ProjectionTargetKind, ProjectionTargetStamp, ProjectionTargetState, ReplaceBackoff, StdBackoff,
-    StdReplacer, backoff_delay, complete_secret_job_unrun, materialize_one,
-    materialize_secret_delete_one, materialize_secret_one, materialize_write_conflict,
-    move_file_no_replace, path_is_displaced, path_is_held, placement_is_held_in,
-    probe_projection_target, recover_displacements, recover_path_displacements,
-    remove_empty_directory_target, remove_file_holding, run_pending_jobs, save_kept_displacement,
-    workspace_lacks_atomic_placement, workspace_recovery_unavailable,
+    StdReplacer, backoff_delay, complete_secret_job_unrun, ensure_target_symlink_free,
+    materialize_one, materialize_secret_delete_one, materialize_secret_one,
+    materialize_write_conflict, move_file_no_replace, path_is_displaced, path_is_held,
+    placement_is_held_in, probe_projection_target, recover_displacements,
+    recover_path_displacements, remove_empty_directory_target, remove_file_holding,
+    run_pending_jobs, save_kept_displacement, workspace_lacks_atomic_placement,
+    workspace_recovery_unavailable,
 };
 pub use policy::{
     MAX_CANONICAL_WORKSPACE_PATH_BYTES, PathClassification,
@@ -89,3 +90,19 @@ pub use tokio_util::sync::CancellationToken;
 
 #[cfg(unix)]
 pub mod retained;
+
+/// The filesystem `path` lives on: the volume serial number on Windows, the
+/// device id elsewhere. Two paths with the same identity can be renamed into
+/// each other without a copy.
+pub fn filesystem_identity(path: &std::path::Path) -> std::io::Result<u64> {
+    #[cfg(windows)]
+    {
+        let handle = winapi_util::Handle::from_path_any(path)?;
+        Ok(winapi_util::file::information(&handle)?.volume_serial_number())
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(std::fs::metadata(path)?.dev())
+    }
+}

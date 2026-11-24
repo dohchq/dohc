@@ -1843,7 +1843,7 @@ fn read_capture_policy(root: &Path) -> PolicyState {
 
 /// Whether a known policy narrows `path` out of engine ownership (the secret
 /// floor is policy-independent and never narrowed).
-fn policy_excludes(
+pub(crate) fn policy_excludes(
     policy: &Option<Vec<dohc_engine_runtime::search::FilesPolicyRule>>,
     path: &str,
 ) -> bool {

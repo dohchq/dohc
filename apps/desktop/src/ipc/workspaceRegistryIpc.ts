@@ -97,6 +97,8 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
   // row. The folder on disk is left alone.
   forgetWorkspace(workspaceId: string): Promise<void>;
   showItemInFolder(path: string): void;
+  /** Stop filing the notice for the folder an update of access saved into. */
+  forgetAccessSaved(workspaceId: string): Promise<void>;
   openWorkspaceWindow(workspace: WorkspaceSummary): Promise<unknown>;
   openWorkspaceManager(): unknown;
   closeWindowOf(event: Event): void;
@@ -285,6 +287,13 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     const input = RevealWorkspaceFolderPayload.parse(payload);
     const workspace = workspaceSummaries().find((entry) => entry.workspaceId === input.workspaceId);
     if (!workspace) throw new Error("That workspace is not in the registry.");
+    if (input.accessSaved) {
+      const saved = workspace.shareView?.accessSaved;
+      if (!saved)
+        throw new Error("This workspace has no recovery folder from an update of access.");
+      showItemInFolder(join(workspace.rootPath, saved.folder));
+      return dependencies.forgetAccessSaved(workspace.workspaceId);
+    }
     showItemInFolder(
       input.recoveryCopies
         ? join(workspace.rootPath, ".dohc", "engine", "displaced")

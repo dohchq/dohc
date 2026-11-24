@@ -419,6 +419,20 @@ export async function listKeptTyping(
   return kept;
 }
 
+/**
+ * Finishes a joined copy's rebuild, then deletes the live drafts `finish`
+ * says its recovery folder now holds. A finish that fails deletes none.
+ */
+export async function finishRebuildDrafts(
+  directory: string,
+  workspaceId: string,
+  finish: () => Promise<readonly unknown[]>,
+): Promise<void> {
+  for (const recordId of await finish()) {
+    if (typeof recordId === "string") await removeKeptTyping(directory, workspaceId, recordId);
+  }
+}
+
 export async function removeKeptTyping(
   directory: string,
   workspaceId: string,

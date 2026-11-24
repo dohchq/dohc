@@ -4890,10 +4890,7 @@ fn walk_target_components(
 /// aliased directories, even when the alias resolves elsewhere inside the
 /// workspace. This validator shares the component walk with projection probes
 /// and parent creation.
-pub(super) fn ensure_target_symlink_free(
-    root: &Path,
-    target: &Path,
-) -> Result<(), MaterializeError> {
+pub fn ensure_target_symlink_free(root: &Path, target: &Path) -> Result<(), MaterializeError> {
     walk_target_components(root, target, reject_link_or_reparse)
 }
 

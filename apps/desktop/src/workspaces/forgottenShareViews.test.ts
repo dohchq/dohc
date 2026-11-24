@@ -120,6 +120,37 @@ describe("forgotten share views", () => {
     expect(registered[0]?.shareView).toMatchObject({ shareId: "share-1", ended: true, skippedOps });
   });
 
+  // Without the reach it was built under, the next refresh would take the
+  // listed reach as a first one and never rebuild a copy whose visible items
+  // changed while it was forgotten.
+  it("opens a membership with the reach its copy was built under", async () => {
+    const { file, workspace, register, registered, saved } = await setup();
+    const membership: ShareViewIdentity = {
+      ...shareView,
+      grantedSelector: { paths: [], versionId: null, access: "view", wholeWorkspace: true },
+      reach: {
+        signature: "sig-1",
+        visibilitySignature: "vis-1",
+        rootLevel: "view",
+        folders: [{ path: "team", level: "edit" }],
+      },
+    };
+    const store = createForgottenShareViews({ file });
+    await store.remember(workspace, membership);
+    await store.reopen(workspace, register);
+    expect(registered[0]?.shareView?.reach).toEqual(membership.reach);
+
+    // A record whose reach dohc can't read matches nothing, so the folder
+    // opens as it is.
+    await store.remember(workspace, membership);
+    const [record] = (await saved()) as [Record<string, unknown>];
+    await writeFile(
+      file,
+      JSON.stringify({ version: 1, forgotten: [{ ...record, reach: { signature: "sig-1" } }] }),
+    );
+    expect(await store.reopen(workspace, register)).toEqual(workspace);
+  });
+
   it.each([{ counted: {} }, { ops: [null] }])(
     "opens the share without its skip notice when the skip record is damaged: %o",
     async (damage) => {

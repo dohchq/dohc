@@ -1397,7 +1397,7 @@ describe("ShareViewFiles", () => {
         rootDir: "unused",
         workspaceId: "unused",
         store: forgedStore,
-        allowLocalJournaling: true,
+        journalsAt: () => true,
         shareId: "unused",
       }),
     ).toThrow("ownership admission is inactive");
@@ -3085,6 +3085,51 @@ describe("ShareViewFiles", () => {
     await expect(create("ideas/new.md")).resolves.toMatchObject({ status: "committed" });
     await expect(readFile(join(rootPath, "ideas/new.md"), "utf8")).resolves.toBe("Idea\n");
     await expect(create(".env/secret.md")).rejects.toBeInstanceOf(SharedFileReadOnlyError);
+  });
+
+  // The relay lists each folder's level. A file takes the level of the
+  // nearest listed folder at or above its path, and the relay decides again.
+  it("writes a joined workspace's file at the level its folder lists", async () => {
+    const rootPath = await workspaceRoot();
+    const store = mutableTextStore({ initial: [{ path: "ideas/old.md", text: "Old\n" }] });
+    const joined = {
+      ...target(rootPath),
+      grantedSelector: {
+        paths: [],
+        versionId: null,
+        access: "view" as const,
+        wholeWorkspace: true as const,
+      },
+      reach: {
+        signature: "r1",
+        visibilitySignature: "v1",
+        rootLevel: "edit",
+        folders: [{ path: "plans", level: "view" }],
+      },
+    };
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => joined,
+      openStore: () => store,
+    });
+    const change = (input: Parameters<typeof files.change>[2]) =>
+      withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(lease, { kind: "standalone", workspaceId: "workspace-a" }, input),
+      );
+
+    await expect(
+      change({ kind: "create", path: "ideas/new.md", initialText: "Idea\n" }),
+    ).resolves.toMatchObject({ status: "committed" });
+    // A folder the relay keeps hidden takes the level of the listed folder above it.
+    await expect(
+      change({ kind: "create", path: "plans/Secret/new.md", initialText: "Idea\n" }),
+    ).rejects.toThrow(
+      "plans/Secret/new.md is read-only for you. Ask granter@example.com for Edit.",
+    );
+    await expect(
+      change({ kind: "move", fromPath: "ideas/old.md", toPath: "plans/old.md" }),
+    ).rejects.toBeInstanceOf(SharedFileReadOnlyError);
+    expect(store.writeTextFile).toHaveBeenCalledOnce();
   });
 
   it("keeps a mount store warm across canonical reads and listings", async () => {

@@ -198,6 +198,8 @@ export type ReportShellFailure = (failure: {
   title?: string;
   message: string;
   cause?: unknown;
+  // Files the row with no toast, for a failure its own surface already shows.
+  quiet?: boolean;
   retry?: (() => void) | null;
   action?: ShellError["action"];
   target?: NoticeTarget;
@@ -524,7 +526,12 @@ export function useShellError(
     [clearKind],
   );
 
+  // Only a switch clears: a part that files a notice as it mounts runs its
+  // effect before this one, and a first mount has nothing to clear.
+  const clearedFor = useRef(workspaceId);
   useEffect(() => {
+    if (clearedFor.current === workspaceId) return;
+    clearedFor.current = workspaceId;
     setShellErrors([]);
     shownOutsideCopies.current = new Map();
     shownKeptCopies.current = new Set();

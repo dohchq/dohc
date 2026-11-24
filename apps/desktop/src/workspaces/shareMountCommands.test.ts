@@ -670,6 +670,19 @@ describe("share mount commands", () => {
     expect(h.mounts).toEqual([]);
   });
 
+  // A membership is a whole workspace and opens as its own. The mount record
+  // meets assertMountableSelector however a mount is stored, so no mount can
+  // hold one.
+  it("never stores a mount that holds a membership", async () => {
+    const h = harness();
+    const target = preparedTarget({ grantedSelector: { ...SELECTOR, wholeWorkspace: true } });
+    await expect(
+      withLiveMountOwner(target, (owner) => h.commands.filesLifecycle.createMount(owner, target)),
+    ).rejects.toThrow("Open it as its own workspace");
+    expect(h.events).toEqual([]);
+    expect(h.mounts).toEqual([]);
+  });
+
   it("turns registry-write plus projection-remove failure into rollback evidence", async () => {
     const h = harness();
     h.dependencies.updateMounts = async () => {
