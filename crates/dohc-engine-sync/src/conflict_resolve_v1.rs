@@ -2978,7 +2978,7 @@ fn close_reviews_of_the_same_merge(
     };
     let closed = tx
         .prepare(
-            "UPDATE conflicts SET status='resolved',updated_at_ms=?5,              chosen_from=CASE WHEN current_blob_sha256=?4 THEN 'current'                WHEN incoming_blob_sha256=?4 THEN 'incoming' ELSE 'merged' END,              resolution=CASE WHEN current_blob_sha256=?4 THEN 'kept-current'                WHEN incoming_blob_sha256=?4 THEN 'applied-incoming' ELSE 'applied-merged' END              WHERE workspace_id=?1 AND target_version_id=?2 AND status='open' AND metadata_origin='sync'                AND current_object_id=?3 AND incoming_object_id=?3 AND current_path=?7 AND incoming_path=?7                AND current_blob_sha256=?6 AND incoming_latest_moment_id GLOB 'moment-ydoc-*'                AND EXISTS(SELECT 1 FROM replication_log m WHERE m.workspace_id=?1 AND m.op_kind='moment.append' AND m.apply_disposition='applied'                  AND json_extract(m.payload_json,'$.momentId')=conflicts.incoming_latest_moment_id                  AND ?8=(SELECT CASE WHEN u.op_kind='ydoc.update' AND u.apply_disposition='applied' THEN json_extract(u.payload_json,'$.lineageClaimId') END                    FROM replication_log u WHERE u.workspace_id=m.workspace_id AND u.origin_id=m.origin_id AND u.origin_seq<m.origin_seq                      AND u.op_kind IN ('ydoc.update','moment.append')                      AND json_extract(u.payload_json,'$.versionId')=?2 AND json_extract(u.payload_json,'$.objectId')=?3                    ORDER BY u.origin_seq DESC LIMIT 1))              RETURNING conflict_id",
+            "UPDATE conflicts SET status='resolved',updated_at_ms=?5,              chosen_from=CASE WHEN current_blob_sha256=?4 THEN 'current'                WHEN incoming_blob_sha256=?4 THEN 'incoming' ELSE 'merged' END,              resolution=CASE WHEN current_blob_sha256=?4 THEN 'kept-current'                WHEN incoming_blob_sha256=?4 THEN 'applied-incoming' ELSE 'applied-merged' END              WHERE workspace_id=?1 AND target_version_id=?2 AND status='open' AND metadata_origin='sync'                AND current_object_id=?3 AND incoming_object_id=?3 AND current_path=?7 AND incoming_path=?7                AND current_blob_sha256=?6                AND EXISTS(SELECT 1 FROM replication_log m JOIN replication_log u ON u.workspace_id=m.workspace_id AND u.origin_id=m.origin_id AND u.origin_seq<m.origin_seq                  WHERE m.workspace_id=?1 AND m.op_kind='moment.append' AND m.apply_disposition='applied'                    AND json_extract(m.payload_json,'$.momentId')=conflicts.incoming_latest_moment_id                    AND u.op_kind='ydoc.update' AND u.apply_disposition='applied'                    AND json_extract(u.payload_json,'$.momentId')=conflicts.incoming_latest_moment_id                    AND json_extract(u.payload_json,'$.lineageClaimId')=?8                    AND json_extract(u.payload_json,'$.versionId')=?2 AND json_extract(u.payload_json,'$.objectId')=?3)              RETURNING conflict_id",
         )
         .map_err(SyncError::corrupt)?
         .query_map(
@@ -5288,17 +5288,14 @@ mod tests {
         AnotherFile,
         DiskEdit,
         DiskAfterLive,
-        RefusedBetween,
+        RefusedSettlement,
+        OtherLineage,
     }
 
     fn review_after_decision(case: OtherReview) -> Vec<(String, String, String, Option<String>)> {
         let (_scratch, mut store, built) = text_keep_receiver_fixture();
         let mut payload = built.validated.payload;
-        let incoming = if case == OtherReview::DiskAfterLive {
-            "disk-edit".to_owned()
-        } else {
-            format!("moment-ydoc-{}", "e".repeat(64))
-        };
+        let incoming = format!("moment-{}", "e".repeat(64));
         if case != OtherReview::PlainNote {
             payload.lineage_transition = Some(LineageTransitionV1 {
                 predecessor_claim_id: "a".repeat(64),
@@ -5324,21 +5321,30 @@ mod tests {
                     other.latest_moment_id = incoming.clone();
                     other.blob_sha256 = "b".repeat(64);
                 }
-                let mut writes = vec![
-                    ("ydoc.update", json!({"lineageClaimId": "a".repeat(64)}), "applied"),
-                    ("moment.append", json!({"momentId": incoming}), "applied"),
-                ];
-                match case {
-                    OtherReview::DiskEdit => writes.insert(
-                        1,
-                        ("moment.append", json!({"momentId": "settled-before"}), "applied"),
-                    ),
-                    OtherReview::RefusedBetween => writes.insert(
-                        1,
-                        ("ydoc.update", json!({"lineageClaimId": "d".repeat(64)}), "refused"),
-                    ),
-                    _ => {}
-                }
+                let settle = |moment: &str, lineage: String, disposition| {
+                    let write = json!({"lineageClaimId": lineage, "momentId": moment});
+                    ("ydoc.update", write, disposition)
+                };
+                let moment = |moment: &str| ("moment.append", json!({"momentId": moment}), "applied");
+                let live = "a".repeat(64);
+                let writes = match case {
+                    OtherReview::DiskEdit => vec![
+                        settle("settled-before", live, "applied"),
+                        moment("settled-before"),
+                        moment(&incoming),
+                    ],
+                    OtherReview::DiskAfterLive => vec![
+                        ("ydoc.update", json!({"lineageClaimId": live}), "applied"),
+                        moment(&incoming),
+                    ],
+                    OtherReview::RefusedSettlement => {
+                        vec![settle(&incoming, live, "refused"), moment(&incoming)]
+                    }
+                    OtherReview::OtherLineage => {
+                        vec![settle(&incoming, "d".repeat(64), "applied"), moment(&incoming)]
+                    }
+                    _ => vec![settle(&incoming, live, "applied"), moment(&incoming)],
+                };
                 for (seq, (kind, mut write, disposition)) in writes.into_iter().enumerate() {
                     write["versionId"] = json!(payload.target_version_id);
                     write["objectId"] = json!(payload.result.present().unwrap().object_id);
@@ -5384,7 +5390,8 @@ mod tests {
             OtherReview::AnotherFile,
             OtherReview::DiskEdit,
             OtherReview::DiskAfterLive,
-            OtherReview::RefusedBetween,
+            OtherReview::RefusedSettlement,
+            OtherReview::OtherLineage,
         ] {
             assert_eq!(
                 review_after_decision(case)
