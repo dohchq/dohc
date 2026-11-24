@@ -1,0 +1,25 @@
+{
+  "extends": "../../apps/desktop/tsconfig.json",
+  "compilerOptions": {
+    "types": ["react", "react-dom"],
+    "typeRoots": ["../../apps/desktop/node_modules/@types"],
+    "incremental": false,
+    "noEmit": true,
+    "paths": {
+      "react": ["../../apps/desktop/node_modules/@types/react"],
+      "react/*": ["../../apps/desktop/node_modules/@types/react/*"],
+      "react-dom": ["../../apps/desktop/node_modules/@types/react-dom"],
+      "react-dom/*": ["../../apps/desktop/node_modules/@types/react-dom/*"],
+      "dohc/app": ["../../packages/app-kit/src/app.tsx"],
+      "dohc/ui": ["../../packages/app-kit/src/ui.tsx"],
+      "dohc/charts": ["../../packages/app-kit/src/charts.tsx"]
+    }
+  },
+  "include": [
+    "../../packages/app-kit/src/css.d.ts",
+    "*.ts",
+    "*.tsx",
+    "spectator/*.ts",
+    "spectator/*.tsx"
+  ]
+}
