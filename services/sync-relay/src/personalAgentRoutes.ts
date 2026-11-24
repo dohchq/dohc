@@ -21,7 +21,7 @@ import {
   type LookupUserDisplayName,
   type RefreshMentionAccountNames,
 } from "./accountDisplayName";
-import { shownName } from "./chatWakes";
+import { shownName } from "@dohc/workspace-contracts/names";
 import { badRequest, notFound, relayError, type RelayError } from "./errors";
 import type { LinkAuthorityResolver, PersonalAuthority } from "./linkAuthority";
 import { linkChatMessage, LINK_CHAT_MAX_POST_BYTES, type LinkChatMessage } from "./linkChatRoutes";
