@@ -35,6 +35,8 @@ export interface RuntimeLimits {
   datasetCheckCpuMsPerMiB: number;
 }
 
+export const SQLITE_HARD_HEAP_LIMIT_BYTES = 64 * 1024 * 1024;
+
 export const DEFAULT_LIMITS: Readonly<RuntimeLimits> = Object.freeze({
   sourceBytes: 256 * 1024,
   inputBytes: 64 * 1024,

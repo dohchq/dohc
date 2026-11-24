@@ -249,17 +249,21 @@ offline shared writes. Cross-dataset transactions are unsupported.
 See the [runtime contract](../../packages/app-backend-runtime/README.md).
 
 Persistent Collection workers isolate SQLite memory differently by host runtime.
-Desktop Electron utility processes link SQLite with `SQLITE_DEFAULT_MEMSTATUS=1`,
-so `PRAGMA hard_heap_limit=67108864` (64 MiB) rejects allocations inside SQLite's
-allocator with `SQLITE_NOMEM`. Standalone Node.js (`services/sync-relay`) ships
-`node:sqlite` with `SQLITE_DEFAULT_MEMSTATUS=0`, which ignores `PRAGMA hard_heap_limit`.
-When `DEFAULT_MEMSTATUS=0` is detected, persistent workers enable a 256 MiB peak-RSS
-ceiling on their budget watch thread during budgeted steps (app code and dataset
-checks, polled every 50 ms and rechecked at step completion). Crossing the ceiling kills and recycles the worker with `worker_budget` naming the
-limit, unit, and observed peak usage. Because this watchdog observes OS RSS after
-pages fault rather than inside SQLite's allocator, it bounds sustained and completed
-allocations without replacing host memory limits. Snapshot evaluations (`child.ts`)
-on standalone Node rely on `deadlineMs` and `PRAGMA max_page_count`.
+Desktop Electron utility processes and Node.js builds linked against a shared SQLite
+with `SQLITE_DEFAULT_MEMSTATUS=1` (such as Homebrew Node on macOS) enforce
+`PRAGMA hard_heap_limit=67108864` (64 MiB) inside SQLite's allocator, returning
+`SQLITE_NOMEM`, which the worker surfaces as a `resource_limit` refusal naming the
+64 MiB SQLite memory limit without killing the worker. Official standalone Node.js
+builds (`services/sync-relay`) bundle `node:sqlite` with `SQLITE_DEFAULT_MEMSTATUS=0`,
+which ignores `PRAGMA hard_heap_limit`. When `DEFAULT_MEMSTATUS=0` is detected,
+persistent workers enable a 256 MiB peak-RSS ceiling on their budget watch thread
+during budgeted steps (app code and dataset checks, polled every 50 ms and rechecked
+at step completion). Crossing the ceiling kills and recycles the worker with
+`worker_budget` naming the limit, unit, and observed peak usage. Because this
+watchdog observes OS RSS after pages fault rather than inside SQLite's allocator, it
+bounds sustained and completed allocations without replacing host memory limits.
+Snapshot evaluations (`child.ts`) on standalone Node with `DEFAULT_MEMSTATUS=0` rely
+on `deadlineMs` and `PRAGMA max_page_count`.
 
 ## Automation edits do not widen access
 

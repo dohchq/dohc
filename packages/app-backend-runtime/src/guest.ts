@@ -8,7 +8,7 @@ import {
   StaticLifetime,
 } from "quickjs-emscripten";
 import type { JSValue, JSValuePointer, QuickJSHandle, QuickJSWASMModule } from "quickjs-emscripten";
-import { AppBackendRuntimeError, boundedText } from "./protocol.js";
+import { AppBackendRuntimeError, boundedText, SQLITE_HARD_HEAP_LIMIT_BYTES } from "./protocol.js";
 import { AppBackendLimitError, appBackendLimit } from "@dohc/security-contract/app-backend";
 import type { AppOperationRefusal, ChildRequest } from "./protocol.js";
 
@@ -181,7 +181,8 @@ export function authorize(
 
 const MiB = 1024 * 1024,
   WASM_PAGE_BYTES = 64 * 1024,
-  MAX_SQL_PARAMETERS = 128;
+  MAX_SQL_PARAMETERS = 128,
+  SQLITE_NOMEM = 7;
 let quickjsCode: Promise<WebAssembly.Module> | undefined;
 const compiledQuickJS = () =>
   (quickjsCode ??= readFile(
@@ -434,6 +435,17 @@ function run(
         return reply(output);
       } catch (error) {
         if (error instanceof AppBackendLimitError) resourceLimit = error;
+        else if (
+          error &&
+          typeof error === "object" &&
+          (error as { code?: unknown; errcode?: unknown }).code === "ERR_SQLITE_ERROR" &&
+          (error as { errcode?: unknown }).errcode === SQLITE_NOMEM
+        ) {
+          resourceLimit = new AppBackendLimitError(
+            `SQL statement exceeded its ${SQLITE_HARD_HEAP_LIMIT_BYTES / MiB} MiB SQLite memory limit.`,
+          );
+          return fail(resourceLimit.message);
+        }
         return fail(
           error instanceof Error ? error.message.slice(0, 1024) : "App database operation failed.",
         );

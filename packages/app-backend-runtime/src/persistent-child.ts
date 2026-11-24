@@ -21,7 +21,11 @@ import {
   appBackendLimit,
   parseAppBackendJson,
 } from "@dohc/security-contract/app-backend";
-import { AppBackendRuntimeError, operationLimits } from "./protocol.js";
+import {
+  AppBackendRuntimeError,
+  operationLimits,
+  SQLITE_HARD_HEAP_LIMIT_BYTES,
+} from "./protocol.js";
 import type { JsonValue } from "./protocol.js";
 import {
   checkCursor,
@@ -270,7 +274,7 @@ function initialize(input: OpenRequest): DatasetCursor {
   progress("opening the records");
   db = new DatabaseSync(path, databaseOptions);
   db.exec(
-    "PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; PRAGMA hard_heap_limit=67108864; PRAGMA busy_timeout=0; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
+    `PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; PRAGMA hard_heap_limit=${SQLITE_HARD_HEAP_LIMIT_BYTES}; PRAGMA busy_timeout=0; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;`,
   );
   const compileOptions = db
     .prepare("PRAGMA compile_options")

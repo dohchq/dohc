@@ -68,7 +68,11 @@ try {
         const recoveredDirectory=join(app.getPath('userData'),'recovered');mkdirSync(recoveredDirectory);
         const recovered=await openPersistentAppBackend({...config,directory:recoveredDirectory,checkpointPath:checkpoint.path,cursor:checkpoint.cursor},options);
         let recoveredResult;
+        let sqliteMemoryRefusal;
         try {
+          sqliteMemoryRefusal=await recovered.prepare({expected:checkpoint.cursor,caller:{kind:'owner'},operation:'memory',readOnly:true,
+            source:"globalThis.operations={memory(ctx){return ctx.db.query('SELECT length(randomblob(285212672)) AS bytes');}}",input:{},requestId:'memory-limit',nowMs:2})
+            .then(()=>null,error=>({code:error.code,refusal:error.refusal}));
           recoveredResult=(await recovered.prepare({expected:checkpoint.cursor,caller:{kind:'owner'},operation:'read',readOnly:true,
             source:"globalThis.operations={read(ctx){return ctx.db.query('SELECT * FROM items');}}",input:{},requestId:'recovered',nowMs:2})).result;
         } finally {await recovered.close();}
@@ -98,7 +102,7 @@ try {
         let formulaResult;
         try {formulaResult=await evaluator.evaluate({trigger:{kind:'record-added'},person:null,now:'2026-09-25T09:30:00.000+08:00'},[{kind:'expression',source:'dateAdd(today(), 3, "days")'}]);}
         finally {await evaluator.close();}
-        writeFileSync(${JSON.stringify(resultPath)},JSON.stringify({result:accepted.result,changesetBytes:accepted.changeset.byteLength,persistentResult,recoveredResult,bulkResult,budgetResult,formulaResult,electron:process.versions.electron}));
+        writeFileSync(${JSON.stringify(resultPath)},JSON.stringify({result:accepted.result,changesetBytes:accepted.changeset.byteLength,persistentResult,recoveredResult,sqliteMemoryRefusal,bulkResult,budgetResult,formulaResult,electron:process.versions.electron}));
         app.exit(0);
       } catch(error) {writeFileSync(${JSON.stringify(resultPath)},JSON.stringify({error:String(error)}));app.exit(1);}
     });`;
@@ -166,6 +170,13 @@ try {
   assert.ok(result.changesetBytes > 0);
   assert.deepEqual(result.persistentResult, [{ id: "persistent-fuse-proof", value: 43 }]);
   assert.deepEqual(result.recoveredResult, result.persistentResult);
+  assert.deepEqual(result.sqliteMemoryRefusal, {
+    code: "operation_refused",
+    refusal: {
+      code: "resource_limit",
+      message: "SQL statement exceeded its 64 MiB SQLite memory limit.",
+    },
+  });
   assert.equal(result.bulkResult.imported, 2500);
   assert.equal(result.bulkResult.reported, 10_000);
   assert.match(result.bulkResult.standard, /1000 rows.*1001 rows/);

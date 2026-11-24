@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { appBackendLimit } from "@dohc/security-contract/app-backend";
-import { AppBackendRuntimeError } from "./protocol.js";
+import { AppBackendRuntimeError, SQLITE_HARD_HEAP_LIMIT_BYTES } from "./protocol.js";
 import type { ChildReply, ChildRequest } from "./protocol.js";
 import { authorize, evaluate } from "./guest.js";
 import { assertReplayableSchema, verifyDatasetSchema } from "./migration.js";
@@ -57,7 +57,7 @@ async function handle(request: ChildRequest): Promise<ChildReply> {
   let transaction = false;
   try {
     db.exec(
-      "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; PRAGMA hard_heap_limit=67108864;",
+      `PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; PRAGMA hard_heap_limit=${SQLITE_HARD_HEAP_LIMIT_BYTES};`,
     );
     const pageSize = Number(db.prepare("PRAGMA page_size").get()!.page_size);
     db.exec(`PRAGMA max_page_count=${Math.floor(request.limits.databaseBytes / pageSize)}`);
