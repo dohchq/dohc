@@ -14,6 +14,7 @@ import { LIVE_TICKET_LIFETIME_MS } from "@dohc/live-session-contract/live-ticket
 import { selfHostLiveProfile } from "./selfHostLiveProfile";
 import { observeRelayWrites } from "./relayWriteChanges";
 import { WORKSPACE_SHARE_SELECTOR_JSON } from "./storage/workspaceMembers";
+import type { StorageContext } from "./storage/context.js";
 import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
 import { once } from "node:events";
 import { createHash } from "node:crypto";
@@ -2358,5 +2359,49 @@ it.each([
     expect(await refused.status).toBe(101);
     expect(await refused.closed).toEqual([LIVE_CONNECTION_LIMIT_CLOSE_CODE, code]);
     expect(f.captureNative).toHaveBeenCalledTimes(5);
+  },
+);
+
+it.each([""])(
+  "ends a member's standing live writer when its folder rule becomes %j",
+  async (rule) => {
+    const f = await fixture(limits, false, undefined, false, true);
+    f.raw
+      .prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?")
+      .run(WORKSPACE_SHARE_SELECTOR_JSON, scope.shareId);
+    f.raw
+      .prepare(
+        `INSERT INTO sync_relay_workspace_memberships (workspace_id,share_id,member_level,workspace_name,created_at_ms) VALUES (?,?,'edit','Workspace',0)`,
+      )
+      .run(scope.workspaceId, scope.shareId);
+    f.raw
+      .prepare(`INSERT INTO sync_relay_workspace_members (member_id,workspace_id,grant_id,user_id,email,role,state,invited_at_ms,joined_at_ms)
+    VALUES ('member',?,?,?,NULL,'member','active',0,0)`)
+      .run(scope.workspaceId, scope.grantId, scope.userId);
+    const ticket = await f.mint();
+    const socket = f.connect(ticket.token);
+    expect(await socket.status).toBe(101);
+    await socket.until(() => socket.received.some((frame) => frame.kind === "credit"));
+    const stop = observeRelayWrites(f.storage, (documents) => f.changes.notifyWrite(documents));
+    cleanups.push(async () => stop());
+    (f.storage as StorageContext).tx(() =>
+      (f.storage as StorageContext).db
+        .prepare(
+          `INSERT INTO sync_relay_access_rules (workspace_id,folder,rule_text,from_seq,to_seq) VALUES (?,'docs',?,100,NULL)`,
+        )
+        .run(scope.workspaceId, rule),
+    );
+    await vi.waitFor(() => expect(socket.ws.readyState).toBe(WebSocket.CLOSED));
+    expect((await socket.closed)[0]).not.toBe(1000);
+    const hidden = await f.post("/sync/live/desktop-open", {
+      shareId: scope.shareId,
+      path: binding.currentPath,
+    });
+    const missing = await f.post("/sync/live/desktop-open", {
+      shareId: scope.shareId,
+      path: "docs/missing.md",
+    });
+    expect(hidden.status).toBe(404);
+    expect(await hidden.text()).toBe(await missing.text());
   },
 );

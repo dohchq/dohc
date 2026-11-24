@@ -6,14 +6,18 @@ import {
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import { createHmac } from "node:crypto";
+import { asRecord } from "@dohc/workspace-core";
+import { readAuthorized } from "./shareAuthorization";
 import { COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX } from "./relayLogInputs";
 import {
+  boundaryMove,
   filterOpForShare,
   groupChannelIsOrdinary,
   hasValidShareMomentShape,
   fileSideOf,
   isGroupSelector,
   parseShareOpPayloadWithReferencedPaths,
+  pathLevel,
   pathVisibleThroughShare,
   targetVersionId,
   type AnyShareSelector,
@@ -63,6 +67,7 @@ export function createShareReadQueries(
     | "isCurrentFileState"
     | "listCurrentFileLogRowsByBlob"
     | "indexReceivedWorkTargets"
+    | "readShareTx"
   >,
   linkFreshnessPageSize: number,
   linkKey?: string | Uint8Array,
@@ -125,68 +130,19 @@ export function createShareReadQueries(
   ): unknown | null => {
     if (row.opKind !== "moment.append") return null;
     if (isGroupSelector(selector) && !groupChannelIsOrdinary(selector, chatResolver)) return null;
-    const fileSelector = fileSideOf(selector);
-    if (!fileSelector) return null;
-    selector = fileSelector;
-    const parsed = parseShareOpPayloadWithReferencedPaths(row.payloadJson);
-    if (!parsed) return null;
-    const { payload } = parsed;
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-      return null;
-    }
-    const record = payload as Record<string, unknown>;
-    if (!hasValidShareMomentShape(record)) return null;
-    if (record.operation !== "rename") return null;
-    const beforePath = record.payloadBeforePath;
-    const afterPath = record.payloadAfterPath;
-    if (typeof beforePath !== "string" || typeof afterPath !== "string") {
-      return null;
-    }
-    const projectedBeforePath = projection.projectPath(beforePath);
-    const projectedAfterPath = projection.projectPath(afterPath);
-
-    if (projectedBeforePath !== null && projectedAfterPath === null) {
-      // Re-run the visible half as a delete so the existing filter validates
-      // its version and before-path, then emits the standard minimal payload.
-      const deletion = filterOpForShare(
-        selector,
-        row.opKind,
-        JSON.stringify({
-          operation: "delete",
-          versionId: record.versionId,
-          path: beforePath,
-          payloadBeforeBlobSha256: record.payloadBeforeBlobSha256,
-          payloadBeforePath: beforePath,
-          ...(record.beforePath === beforePath ? { beforePath } : {}),
-        }),
-        chatResolver,
-      );
-      return deletion.allowed ? projection.projectPayload(deletion.payload) : null;
-    }
-
-    if (projectedBeforePath === null && projectedAfterPath !== null) {
-      // The accountless replica never held the private predecessor, so expose
-      // only the visible half as a create. The normal filter validates the
-      // version and after-path and rebuilds the minimal replay payload.
-      const arrival = filterOpForShare(
-        selector,
-        row.opKind,
-        JSON.stringify({
-          operation: "write",
-          versionId: record.versionId,
-          path: afterPath,
-          payloadAfterBlobSha256: record.payloadAfterBlobSha256,
-          payloadAfterPath: afterPath,
-          ...(record.payloadAfterContentKind === "binary"
-            ? { payloadAfterContentKind: "binary" }
-            : {}),
-        }),
-        chatResolver,
-      );
-      return arrival.allowed ? projection.projectPayload(arrival.payload) : null;
-    }
-
-    return null;
+    const files = fileSideOf(selector);
+    const parsed = files && parseShareOpPayloadWithReferencedPaths(row.payloadJson);
+    const record = parsed && asRecord(parsed.payload);
+    if (!files || !record || !hasValidShareMomentShape(record)) return null;
+    // The accountless replica never held what lies outside it, so it gets
+    // only the half it sees.
+    const moved = boundaryMove(
+      files,
+      record,
+      (path) => projection.projectPath(path) !== null,
+      chatResolver,
+    );
+    return moved?.decision.allowed ? projection.projectPayload(moved.decision.payload) : null;
   };
 
   // Below Edit a recipient reads current files only. A moment or fork
@@ -206,25 +162,56 @@ export function createShareReadQueries(
       relaySeq: row.relaySeq,
     });
 
-  // Rewrites a served file op for a recipient below Edit, or drops it. A
-  // replaced write is dropped. A replaced rename becomes a delete of its old
+  // History needs Edit on the file. A member's level differs by folder, so
+  // it is judged at each path, never once for the reader.
+  const editAt = (selector: ShareSelector, path: unknown) =>
+    typeof path === "string" && pathLevel(selector, path) === "edit";
+  // A member also needs to have seen the path when the op was made. A folder
+  // opened later shows only its current files, so its hidden drafts and names
+  // stay out and the desktop first hears of each file at its current path.
+  const momentAtEdit = (
+    selector: ShareSelector,
+    served: Record<string, unknown>,
+    row: Pick<SyncRelayLogRow, "payloadJson">,
+  ) => {
+    const paths = [served.path, served.payloadBeforePath, served.payloadAfterPath].filter(
+      (path) => path != null,
+    );
+    if (served.path == null || !paths.every((path) => editAt(selector, path))) return false;
+    const reach = "reach" in selector ? selector.reach : undefined;
+    if (!reach) return true;
+    const { objectId, momentId } = JSON.parse(row.payloadJson) as Record<string, unknown>;
+    return (
+      typeof objectId === "string" &&
+      typeof momentId === "string" &&
+      paths.every((path) => reach.pathVisibleBeforeMoment(objectId, momentId, path as string))
+    );
+  };
+  // One level everywhere: a named path share or a link.
+  const levelEverywhere = (selector: ShareSelector) =>
+    "access" in selector && !selector.levelAt ? selector.access : null;
+
+  // Rewrites a served file op the recipient may not read as history, or drops it.
+  // A replaced write is dropped. A replaced rename becomes a delete of its old
   // path, so a recipient that already holds that path loses it. A delete is
   // served without content: the engine records the deleted content as its
-  // after-hash. No served op keeps a before-hash.
+  // after-hash. No such op keeps a before-hash.
   const currentFilesOp = (
     workspaceId: string,
     selector: ShareSelector,
-    row: Pick<SyncRelayLogRow, "relaySeq" | "opKind">,
+    row: Pick<SyncRelayLogRow, "relaySeq" | "opKind" | "payloadJson">,
     served: Record<string, unknown>,
   ): Record<string, unknown> | null => {
     if (row.opKind === "version.create") {
       const snapshots = Array.isArray(served.forkSnapshots) ? served.forkSnapshots : [];
-      served.forkSnapshots = snapshots.filter((snapshot: Record<string, unknown>) =>
-        isCurrentState(workspaceId, selector, row, snapshot.path),
+      served.forkSnapshots = snapshots.filter(
+        (snapshot: Record<string, unknown>) =>
+          editAt(selector, snapshot.path) ||
+          isCurrentState(workspaceId, selector, row, snapshot.path),
       );
       return served;
     }
-    if (row.opKind !== "moment.append") return served;
+    if (row.opKind !== "moment.append" || momentAtEdit(selector, served, row)) return served;
     served.payloadBeforeBlobSha256 = null;
     if (served.operation === "delete") {
       delete served.payloadAfterBlobSha256;
@@ -248,7 +235,7 @@ export function createShareReadQueries(
   const filteredLogPage = (
     workspaceId: string,
     shareId: string,
-    selector: AnyShareSelector,
+    authorize: () => AnyShareSelector,
     since: number,
     limit: number,
     audience: "authenticated" | "accountless",
@@ -266,176 +253,186 @@ export function createShareReadQueries(
       string,
       Parameters<SyncRelayStorage["indexReceivedWorkTargets"]>[0][number]
     >();
-    const identity = createReceivedIdentity(
-      linkKey,
-      (recipient, workspaceId, objectId, objectToken) => {
-        const sourceHandle = identity.source(recipient, workspaceId);
-        if (sourceHandle)
-          observed.set(objectToken, {
-            recipient,
-            workspaceId,
-            objectId,
-            objectToken,
-            sourceHandle,
-          });
-      },
-    );
-    const chatResolver = chatResolverFor(workspaceId);
-    const fileSelector = fileSideOf(selector);
-    const accountlessProjection =
-      audience === "accountless" && fileSelector
-        ? createAccountlessPathProjection(fileSelector)
-        : null;
-    const currentFiles = new Map<string, ReturnType<typeof storage.currentObjectFile>>();
-    const currentFilesSelector =
-      audience === "authenticated" && fileSelector?.access !== "edit" ? fileSelector : null;
-    const page = scanFilteredLog(
-      storage,
-      {
-        workspaceId,
-        since,
-        limit,
-        maxRawRows,
-      },
-      (row) => {
-        // A departed publication names a path its document no longer holds.
-        if (row.settlementAdmission?.status === "refused" || row.relayAdmission !== undefined)
-          return null;
-        if (audience === "accountless" && !ACCOUNTLESS_FILE_REPLAY_OP_KINDS.has(row.opKind)) {
-          return null;
-        }
-        const decision = filterOpForShare(
-          selector,
-          row.opKind,
-          row.payloadJson,
-          chatResolver,
-          half,
-        );
-        let payload = decision.allowed
-          ? accountlessProjection
-            ? accountlessProjection.projectPayload(decision.payload)
-            : decision.payload
-          : accountlessProjection
-            ? matchRefusedBoundaryMove(selector, accountlessProjection, row, chatResolver)
-            : null;
-        if (payload === null) return null;
-        const authenticatedMoment = audience === "authenticated" && row.opKind === "moment.append";
-        const original =
-          recipient || authenticatedMoment
-            ? (JSON.parse(row.payloadJson) as Record<string, unknown>)
-            : undefined;
-        if (recipient && original)
-          tokenizeReceivedPayload({
-            identity,
-            recipient,
-            workspaceId,
-            selector,
-            chat: chatResolver,
-            opKind: row.opKind,
-            original,
-            served: payload as Record<string, unknown>,
-            ...(accountlessProjection ? { projectPath: accountlessProjection.projectPath } : {}),
-          });
-        if (currentFilesSelector) {
-          payload = currentFilesOp(
-            workspaceId,
-            currentFilesSelector,
-            row,
-            payload as Record<string, unknown>,
-          );
-          if (payload === null) return null;
-        }
-        if (currentOnly) {
-          if (!fileSelector || !accountlessProjection || !recipient) return null;
-          const reset = { relaySeq: row.relaySeq, opKind: "files.reset", payload: {} };
-          if (row.opKind === "version.create") return reset;
-          if (row.opKind !== "moment.append") return null;
-          const objectId = original?.objectId;
-          const receivedObject = identity.object(recipient, workspaceId, objectId);
-          if (typeof objectId !== "string" || !receivedObject) return reset;
-          const versionId = targetVersionId(fileSelector);
-          if (!currentFiles.has(objectId)) {
-            currentFiles.set(
+    const page = readAuthorized(storage, authorize, (selector) => {
+      const identity = createReceivedIdentity(
+        linkKey,
+        (recipient, workspaceId, objectId, objectToken) => {
+          const sourceHandle = identity.source(recipient, workspaceId);
+          if (sourceHandle)
+            observed.set(objectToken, {
+              recipient,
+              workspaceId,
               objectId,
-              storage.currentObjectFile({ workspaceId, versionId, objectId, epochLogFloor }),
-            );
+              objectToken,
+              sourceHandle,
+            });
+        },
+      );
+      const chatResolver = chatResolverFor(workspaceId);
+      const fileSelector = fileSideOf(selector);
+      const accountlessProjection =
+        audience === "accountless" && fileSelector
+          ? createAccountlessPathProjection(fileSelector)
+          : null;
+      const currentFiles = new Map<string, ReturnType<typeof storage.currentObjectFile>>();
+      // A named recipient and a member's browser read history only where they
+      // have Edit. A link keeps its own revision rule.
+      const currentFilesSelector =
+        fileSelector &&
+        levelEverywhere(fileSelector) !== "edit" &&
+        (audience === "authenticated" || (!currentOnly && "reach" in fileSelector))
+          ? fileSelector
+          : null;
+      return scanFilteredLog(
+        storage,
+        {
+          workspaceId,
+          since,
+          limit,
+          maxRawRows,
+        },
+        (row) => {
+          // A departed publication names a path its document no longer holds.
+          if (row.settlementAdmission?.status === "refused" || row.relayAdmission !== undefined)
+            return null;
+          if (audience === "accountless" && !ACCOUNTLESS_FILE_REPLAY_OP_KINDS.has(row.opKind)) {
+            return null;
           }
-          const current = currentFiles.get(objectId)!;
-          if (current === "reset") return reset;
-          const projected =
-            current === null || visibleSharePath(fileSelector, current.path) === null
-              ? null
-              : accountlessProjection.projectPath(current.path);
-          return {
-            relaySeq: row.relaySeq,
-            opKind: "file.current",
-            payload: {
-              objectId: receivedObject,
-              file:
-                current && projected !== null
-                  ? {
-                      objectId: receivedObject,
-                      path: projected,
-                      blobSha256: current.blobSha256,
-                      contentKind: current.contentKind,
-                    }
-                  : null,
-            },
-          };
-        }
-        if (authenticatedMoment && original) {
-          (payload as Record<string, unknown>).authors = sharedMomentAuthors(
-            row.admittedAuthorSnapshot,
+          const decision = filterOpForShare(
+            selector,
+            row.opKind,
+            row.payloadJson,
+            chatResolver,
+            half,
           );
-          const mark = original.attributionUnavailable;
-          if (mark && typeof mark === "object" && !Array.isArray(mark)) {
-            const unavailable = mark as Record<string, unknown>;
-            if (
-              typeof unavailable.settlementId === "string" &&
-              unavailable.settlementId.length > 0 &&
-              unavailable.settlementId.length <= 512 &&
-              typeof unavailable.reason === "string" &&
-              unavailable.reason.length > 0 &&
-              unavailable.reason.length <= 4096 &&
-              typeof original.momentId === "string" &&
-              storage.hasRefusedSettlement({
-                workspaceId,
-                originId: row.originId,
-                originSeq: row.originSeq,
-                momentId: original.momentId,
-                settlementId: unavailable.settlementId,
-                reason: unavailable.reason,
-              })
-            ) {
-              (payload as Record<string, unknown>).metadata = {
-                origin: "sync",
-                summary: "Attribution unavailable",
-              };
+          let payload = decision.allowed
+            ? accountlessProjection
+              ? accountlessProjection.projectPayload(decision.payload)
+              : decision.payload
+            : accountlessProjection
+              ? matchRefusedBoundaryMove(selector, accountlessProjection, row, chatResolver)
+              : null;
+          if (payload === null) return null;
+          const authenticatedMoment =
+            audience === "authenticated" && row.opKind === "moment.append";
+          const original =
+            recipient || authenticatedMoment
+              ? (JSON.parse(row.payloadJson) as Record<string, unknown>)
+              : undefined;
+          if (recipient && original)
+            tokenizeReceivedPayload({
+              identity,
+              recipient,
+              workspaceId,
+              selector,
+              chat: chatResolver,
+              opKind: row.opKind,
+              original,
+              served: payload as Record<string, unknown>,
+              ...(accountlessProjection ? { projectPath: accountlessProjection.projectPath } : {}),
+            });
+          if (currentFilesSelector) {
+            payload = currentFilesOp(
+              workspaceId,
+              currentFilesSelector,
+              row,
+              payload as Record<string, unknown>,
+            );
+            if (payload === null) return null;
+          }
+          if (currentOnly) {
+            if (!fileSelector || !accountlessProjection || !recipient) return null;
+            const reset = { relaySeq: row.relaySeq, opKind: "files.reset", payload: {} };
+            if (row.opKind === "version.create") return reset;
+            if (row.opKind !== "moment.append") return null;
+            const objectId = original?.objectId;
+            const receivedObject = identity.object(recipient, workspaceId, objectId);
+            if (typeof objectId !== "string" || !receivedObject) return reset;
+            const versionId = targetVersionId(fileSelector);
+            if (!currentFiles.has(objectId)) {
+              currentFiles.set(
+                objectId,
+                storage.currentObjectFile({ workspaceId, versionId, objectId, epochLogFloor }),
+              );
+            }
+            const current = currentFiles.get(objectId)!;
+            if (current === "reset") return reset;
+            const projected =
+              current === null || visibleSharePath(fileSelector, current.path) === null
+                ? null
+                : accountlessProjection.projectPath(current.path);
+            return {
+              relaySeq: row.relaySeq,
+              opKind: "file.current",
+              payload: {
+                objectId: receivedObject,
+                file:
+                  current && projected !== null
+                    ? {
+                        objectId: receivedObject,
+                        path: projected,
+                        blobSha256: current.blobSha256,
+                        contentKind: current.contentKind,
+                      }
+                    : null,
+              },
+            };
+          }
+          if (authenticatedMoment && original) {
+            (payload as Record<string, unknown>).authors = sharedMomentAuthors(
+              row.admittedAuthorSnapshot,
+            );
+            const mark = original.attributionUnavailable;
+            if (mark && typeof mark === "object" && !Array.isArray(mark)) {
+              const unavailable = mark as Record<string, unknown>;
+              if (
+                typeof unavailable.settlementId === "string" &&
+                unavailable.settlementId.length > 0 &&
+                unavailable.settlementId.length <= 512 &&
+                typeof unavailable.reason === "string" &&
+                unavailable.reason.length > 0 &&
+                unavailable.reason.length <= 4096 &&
+                typeof original.momentId === "string" &&
+                storage.hasRefusedSettlement({
+                  workspaceId,
+                  originId: row.originId,
+                  originSeq: row.originSeq,
+                  momentId: original.momentId,
+                  settlementId: unavailable.settlementId,
+                  reason: unavailable.reason,
+                })
+              ) {
+                (payload as Record<string, unknown>).metadata = {
+                  origin: "sync",
+                  summary: "Attribution unavailable",
+                };
+              }
             }
           }
-        }
-        const collectionOriginPrefix = row.originId.startsWith(COLLECTION_FILE_ORIGIN_PREFIX)
-          ? COLLECTION_FILE_ORIGIN_PREFIX
-          : row.originId.startsWith(COLLECTION_CREATE_ORIGIN_PREFIX)
-            ? COLLECTION_CREATE_ORIGIN_PREFIX
-            : undefined;
-        return {
-          relaySeq: row.relaySeq,
-          ...(audience === "authenticated"
-            ? {
-                originId:
-                  collectionOriginPrefix !== undefined
-                    ? `${collectionOriginPrefix}${createHmac("sha256", shareId).update(row.originId).digest("hex")}`
-                    : row.originId,
-              }
-            : {}),
-          originSeq: row.originSeq,
-          opKind: row.opKind,
-          payload,
-          recordedAtMs: row.recordedAtMs,
-        };
-      },
-    );
+          const collectionOriginPrefix = row.originId.startsWith(COLLECTION_FILE_ORIGIN_PREFIX)
+            ? COLLECTION_FILE_ORIGIN_PREFIX
+            : row.originId.startsWith(COLLECTION_CREATE_ORIGIN_PREFIX)
+              ? COLLECTION_CREATE_ORIGIN_PREFIX
+              : undefined;
+          return {
+            relaySeq: row.relaySeq,
+            ...(audience === "authenticated"
+              ? {
+                  originId:
+                    collectionOriginPrefix !== undefined
+                      ? `${collectionOriginPrefix}${createHmac("sha256", shareId).update(row.originId).digest("hex")}`
+                      : row.originId,
+                }
+              : {}),
+            originSeq: row.originSeq,
+            opKind: row.opKind,
+            payload,
+            recordedAtMs: row.recordedAtMs,
+            ...(decision.allowed && decision.reachMove ? { reachMove: decision.reachMove } : {}),
+          };
+        },
+      );
+    });
     if (observed.size) storage.indexReceivedWorkTargets([...observed.values()]);
     return { ops: page.items, nextCursor: page.nextCursor, hasMore: page.hasMore };
   };
@@ -488,10 +485,10 @@ export function createShareReadQueries(
   };
 
   // A named recipient's blob: the after-content of an op the log would serve.
-  // Edit reads any op the filter admits. Below Edit the op must have produced
-  // a current file, so the search starts from the current files: a cap on
-  // historical candidates could hide a current file whose bytes many newer
-  // objects once held, and the recipient's pull would stop at it.
+  // Every readable level reads a current file, so the search starts from the
+  // current files: a cap on historical candidates could hide a current file
+  // whose bytes many newer objects once held, and the recipient's pull would
+  // stop at it. An earlier version needs Edit where the op wrote it.
   const namedShareBlob = (
     workspaceId: string,
     selector: AnyShareSelector,
@@ -508,7 +505,8 @@ export function createShareReadQueries(
     selector = fileSelector;
     const versionId = targetVersionId(selector);
     const chatResolver = chatResolverFor(workspaceId);
-    if (selector.access !== "edit") {
+    const level = levelEverywhere(selector);
+    if (level !== "edit") {
       // Page past rows the share filter refuses, so they cannot hide an admitted file.
       const produced = ({ path, row }: { path: string; row: SyncRelayLogRow }) => {
         const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
@@ -530,9 +528,10 @@ export function createShareReadQueries(
           ...(afterPath === undefined ? {} : { afterPath }),
         });
         if (page.some(produced)) return storage.getBlob(workspaceId, sha256);
-        if (page.length < SHARED_BLOB_CANDIDATE_LIMIT) return null;
+        if (page.length < SHARED_BLOB_CANDIDATE_LIMIT) break;
         afterPath = page.at(-1)!.path;
       }
+      if (level !== null) return null;
     }
     const candidates = [
       ...storage.listObjectMomentLogRowsByBlob({
@@ -548,7 +547,15 @@ export function createShareReadQueries(
       .slice(0, SHARED_BLOB_CANDIDATE_LIMIT);
     const reachable = candidates.some((row) => {
       const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
-      return decision.allowed && decision.blobSha256s.includes(sha256);
+      if (!decision.allowed || !decision.blobSha256s.includes(sha256)) return false;
+      if (level === "edit") return true;
+      const served = decision.payload as Record<string, unknown>;
+      return row.opKind === "version.create"
+        ? (Array.isArray(served.forkSnapshots) ? served.forkSnapshots : []).some(
+            (snapshot: Record<string, unknown>) =>
+              snapshot.blobSha256 === sha256 && editAt(selector, snapshot.path),
+          )
+        : momentAtEdit(selector, served, row);
     });
     return reachable ? storage.getBlob(workspaceId, sha256) : null;
   };
@@ -565,6 +572,8 @@ export function createShareReadQueries(
     sha256: string,
     epochLogFloor: number,
   ): number | null => {
+    if ("reach" in selector && selector.reach)
+      return namedShareBlob(workspaceId, selector, sha256)?.byteLength ?? null;
     const versionId = targetVersionId(selector);
     const candidates = [
       ...storage.listLinkRevisionLogRows({
@@ -618,9 +627,27 @@ export function createShareReadQueries(
   return {
     chatResolverFor,
     filteredLogPage,
-    newestFilteredOpFreshness,
-    namedShareBlob,
-    linkRevisionByteLength,
+    newestFilteredOpFreshness: (
+      workspaceId: string,
+      authorize: () => AnyShareSelector,
+      epochLogFloor: number,
+    ) =>
+      readAuthorized(storage, authorize, (selector) =>
+        newestFilteredOpFreshness(workspaceId, selector, epochLogFloor),
+      ),
+    namedShareBlob: (workspaceId: string, authorize: () => AnyShareSelector, sha256: string) =>
+      readAuthorized(storage, authorize, (selector) =>
+        namedShareBlob(workspaceId, selector, sha256),
+      ),
+    linkRevisionByteLength: (
+      workspaceId: string,
+      authorize: () => ShareSelector,
+      sha256: string,
+      epochLogFloor: number,
+    ) =>
+      readAuthorized(storage, authorize, (selector) =>
+        linkRevisionByteLength(workspaceId, selector, sha256, epochLogFloor),
+      ),
   };
 }
 

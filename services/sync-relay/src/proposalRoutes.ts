@@ -5,9 +5,15 @@ import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
 import { parseString, readJsonObject } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
-import { filterProposedChangeForShare, targetVersionId, type ShareSelector } from "./shareFilter";
+import {
+  filterProposedChangeForShare,
+  isWorkspaceSelector,
+  targetVersionId,
+  type ShareSelector,
+} from "./shareFilter";
 import { destinationPath, proposalBase, proposalMomentPayload } from "./recipientMoments";
 import { PROPOSAL_ORIGIN_PREFIX } from "./shareProposals";
+import { assertMemberChanges } from "./memberActions";
 import {
   SyncRelayBlobMissingError,
   type ShareProposalOpRow,
@@ -162,6 +168,7 @@ export function createProposalRoutes(
         );
       }
       const ops: ShareProposalOpRow[] = [];
+      assertMemberChanges(storage, share.selector, actorUserId, input.ops, nowMs(), true);
       // One net change per file, proven here rather than trusted. The
       // recipient consolidates before it submits — it knows its own object
       // ids — but a proposal carrying two changes for one file would give
@@ -210,6 +217,7 @@ export function createProposalRoutes(
             // unresolvable base refuses the whole submit rather than
             // dropping one change out of an intent the recipient stated as
             // a unit. It names the file because the recipient chose it.
+            if (isWorkspaceSelector(share.selector)) throw relayError("share_op_rejected");
             throw badRequest(
               `no file is shared at ${change.basedOnPath} any more, so this change ` +
                 `has nothing to build on; refresh the share and send again`,
@@ -270,13 +278,15 @@ export function createProposalRoutes(
       const share = authorized.share;
       return jsonResponse({
         ok: true,
-        proposals: storage.listShareProposalsForShare(share.shareId).map((proposal) => ({
-          proposalId: proposal.proposalId,
-          state: proposal.state,
-          createdAtMs: proposal.createdAtMs,
-          settledAtMs: proposal.settledAtMs,
-          ops: proposal.opCount,
-        })),
+        proposals: storage
+          .listShareProposalsForShare(share.shareId, actorUserId)
+          .map((proposal) => ({
+            proposalId: proposal.proposalId,
+            state: proposal.state,
+            createdAtMs: proposal.createdAtMs,
+            settledAtMs: proposal.settledAtMs,
+            ops: proposal.opCount,
+          })),
       });
     }
     if (route.route === "share-proposals") throw relayError("method_not_allowed");
@@ -286,11 +296,14 @@ export function createProposalRoutes(
       const authorized = requireShareAction(route.shareId, actorUserId, "withdraw-proposal");
       const share = authorized.share;
       const proposal = storage.getShareProposal(route.proposalId);
-      // A proposal of another share is the same generic 404 as one that
-      // never existed — and that is also what makes it this person's:
-      // `authorizeShareAction` proved the caller is this share's recipient, and
-      // a path share has exactly one.
-      if (!proposal || proposal.shareId !== share.shareId) throw notFound();
+      // A proposal of another share, or another person's on a workspace's one
+      // share, is the same generic 404 as one that never existed.
+      if (
+        !proposal ||
+        proposal.shareId !== share.shareId ||
+        proposal.proposedByUserId !== actorUserId
+      )
+        throw notFound();
       if (!storage.settleShareProposal(route.proposalId, "withdrawn", nowMs())) {
         throw relayError("conflict", "these changes were already accepted, declined, or withdrawn");
       }

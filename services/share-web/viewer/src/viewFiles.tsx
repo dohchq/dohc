@@ -1,4 +1,5 @@
 import { fetchShareWeb } from "./apiVersion";
+import { LINK_REFUSALS, parseLinkRefusal } from "@dohc/security-contract/link-refusal";
 import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
 import {
   Component,
@@ -27,6 +28,7 @@ import {
   resolveSharedImage,
   type FileAccumulator,
   type RelayOp,
+  type ShareAccess,
   type SharedFile,
   type ViewMeta,
 } from "./model";
@@ -66,6 +68,20 @@ export interface LoadedLog {
 
 export interface LoadedCurrentState extends LoadedLog {
   meta: ViewMeta;
+  /** A member's level on each file the current read listed, which varies by folder. */
+  levels: ReadonlyMap<string, ShareAccess>;
+}
+
+const LEVELS: readonly unknown[] = ["view", "comment", "edit"];
+function fileLevels(files: unknown): Map<string, ShareAccess> {
+  const levels = new Map<string, ShareAccess>();
+  if (!Array.isArray(files)) return levels;
+  for (const file of files as unknown[]) {
+    const { path, access } = (file ?? {}) as Record<string, unknown>;
+    if (typeof path === "string" && LEVELS.includes(access))
+      levels.set(path, access as ShareAccess);
+  }
+  return levels;
 }
 
 export class ViewResponseError extends Error {
@@ -94,6 +110,24 @@ export async function versionMismatch(response: Response): Promise<VersionMismat
     (body.code === "api_version_too_old" || body?.code === "api_version_too_new") &&
     typeof body.error === "string"
     ? new VersionMismatchError(body.error)
+    : null;
+}
+
+// A member's workspace holds more files than a browser lists. The grant still opens.
+export class TooManyFilesError extends Error {
+  constructor() {
+    super("too many files");
+  }
+}
+
+async function tooManyFiles(response: Response): Promise<TooManyFilesError | null> {
+  if (response.status !== LINK_REFUSALS.link_too_many_files.status) return null;
+  const body: unknown = await response
+    .clone()
+    .json()
+    .catch(() => null);
+  return parseLinkRefusal(body, response.status) === "link_too_many_files"
+    ? new TooManyFilesError()
     : null;
 }
 
@@ -348,7 +382,8 @@ export function viewMeta(value: unknown): ViewMeta | null {
   const access = record.access;
   if (
     (access !== "view" && access !== "comment" && access !== "edit") ||
-    selectorRecord.access !== access ||
+    // A member's selector names no level: theirs varies by folder.
+    ("access" in selectorRecord && selectorRecord.access !== access) ||
     !Array.isArray(selectorRecord.paths) ||
     selectorRecord.paths.some((path) => typeof path !== "string") ||
     (selectorRecord.versionId !== null && typeof selectorRecord.versionId !== "string") ||
@@ -378,6 +413,7 @@ export function viewMeta(value: unknown): ViewMeta | null {
     ...(typeof record.levelChangedBy === "string" && record.levelChangedBy.trim()
       ? { levelChangedBy: record.levelChangedBy.trim() }
       : {}),
+    ...(typeof record.reach === "string" ? { reach: record.reach } : {}),
   };
 }
 
@@ -387,7 +423,11 @@ export async function loadCurrentProjection(
 ): Promise<LoadedCurrentState> {
   const response = await apiWithThrottleRetry(session, "/api/view/current", signal);
   if (!response.ok)
-    throw (await versionMismatch(response)) ?? new ViewResponseError(response.status);
+    throw (
+      (await versionMismatch(response)) ??
+      (await tooManyFiles(response)) ??
+      new ViewResponseError(response.status)
+    );
   const body = (await response.json()) as Record<string, unknown>;
   const meta = viewMeta(body);
   const fileAccumulator = accumulatorFromCurrentFiles(body.files);
@@ -408,6 +448,7 @@ export async function loadCurrentProjection(
   return {
     meta,
     fileAccumulator,
+    levels: fileLevels(body.files),
     nextCursor: body.nextCursor,
     epochLogFloor: body.epochLogFloor,
   };
@@ -429,7 +470,7 @@ export async function loadCurrentState(
         signal,
         projection.epochLogFloor,
       );
-      return { ...caughtUp, meta: projection.meta };
+      return { ...caughtUp, meta: projection.meta, levels: projection.levels };
     } catch (error: unknown) {
       if (error instanceof ViewResponseError && error.status === 404) {
         const meta = await loadMeta(session, signal);
@@ -879,7 +920,7 @@ export function DownloadCard(props: { file: SharedFile; session: string }) {
 
 /** A page that stands alone: the mark, what happened, and the next step when there is one. */
 export function StatePage(props: {
-  icon: "unlink" | "alert" | "refresh";
+  icon: "unlink" | "alert" | "refresh" | "users" | "info";
   failed?: boolean;
   title: string;
   children?: ReactNode;

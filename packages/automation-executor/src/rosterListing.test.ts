@@ -457,6 +457,7 @@ describe("workspace members on the roster", () => {
       recipientEmail: `${access}@dohc.test`,
       selector: { kind: "workspace" },
       access,
+      memberReach: { role: "member", level: access, rules: [] },
       ...overrides,
     });
   const trip = { path: "Trip", name: "Trip" };
@@ -480,8 +481,18 @@ describe("workspace members on the roster", () => {
     const edit = await rosterOf([membership("edit"), membership("view")]);
     if (edit.kind !== "owner") throw new Error("expected an owner roster");
     expect(edit.grants.map((grant) => grant.files)).toEqual([
-      { paths: [], versionId: null, access: "edit", wholeWorkspace: true },
-      { paths: [], versionId: null, access: "view", wholeWorkspace: true },
+      {
+        paths: [],
+        versionId: null,
+        access: "edit",
+        memberReach: { role: "member", level: "edit", rules: [] },
+      },
+      {
+        paths: [],
+        versionId: null,
+        access: "view",
+        memberReach: { role: "member", level: "view", rules: [] },
+      },
     ]);
     expect(
       checkAutomationReach(edit, {
@@ -534,23 +545,30 @@ describe("workspace members on the roster", () => {
       },
     ];
     // An admin's grant is Edit even when the workspace's member level is View.
-    const roster = await rosterOf([membership("edit"), membership("view")]);
-    expect(
-      checkAutomationReach(roster, { id: "a", collection: trip, codeFiles: [], steps }),
-    ).toEqual([
-      { allowed: true },
-      { allowed: true },
-      {
-        allowed: false,
-        reason: "edit@dohc.test cannot post in General.",
-        person: "edit@dohc.test",
-      },
-      {
-        allowed: false,
-        reason: "edit@dohc.test cannot post in your direct message with Edit.",
-        person: "edit@dohc.test",
-      },
-    ]);
+    // An Edit member who wrote automations still edits every file, so they are
+    // no former editor.
+    for (const automationsGeneration of [null, 2]) {
+      const roster = await rosterOf([
+        membership("edit", { automationsGeneration }),
+        membership("view"),
+      ]);
+      expect(
+        checkAutomationReach(roster, { id: "a", collection: trip, codeFiles: [], steps }),
+      ).toEqual([
+        { allowed: true },
+        { allowed: true },
+        {
+          allowed: false,
+          reason: "edit@dohc.test cannot post in General.",
+          person: "edit@dohc.test",
+        },
+        {
+          allowed: false,
+          reason: "edit@dohc.test cannot post in your direct message with Edit.",
+          person: "edit@dohc.test",
+        },
+      ]);
+    }
   });
 
   it("keeps a member who wrote automations and dropped to View as a former editor of every file", async () => {
@@ -563,6 +581,24 @@ describe("workspace members on the roster", () => {
         steps: [actsAsOwner],
       }),
     ).toEqual([{ allowed: true, formerStops: [{ evidence: "g-view#2", name: "view@dohc.test" }] }]);
+  });
+
+  it("keeps a member who wrote automations and lost Edit on a folder through its rule as a former editor", async () => {
+    const budget = { path: "Budget", name: "Budget" };
+    const roster = await rosterOf([
+      membership("edit", {
+        automationsGeneration: 2,
+        memberReach: { role: "member", level: "edit", rules: [["Budget", "view"]] },
+      }),
+    ]);
+    expect(
+      checkAutomationReach(roster, {
+        id: "a",
+        collection: budget,
+        codeFiles: [],
+        steps: [actsAsOwner],
+      }),
+    ).toEqual([{ allowed: true, formerStops: [{ evidence: "g-edit#2", name: "edit@dohc.test" }] }]);
   });
 });
 

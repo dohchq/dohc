@@ -128,7 +128,10 @@ function hasActiveNonOwnerEditGrantForPaths(
     const effective = effectiveShareSelector(storedSelector, grant.access);
     if (effective === null) return true;
     const fileSide = fileSideOf(effective);
-    if (fileSide === null || fileSide.access !== "edit") continue;
+    if (fileSide === null) continue;
+    // Only a workspace share builds a reach with a level per path, and its grant returned above.
+    if (!("access" in fileSide)) return true;
+    if (fileSide.access !== "edit") continue;
     for (const granted of fileSide.paths) {
       const looseGranted = loosePathKey(granted);
       if (looseSources.some((source) => pathWithinFolder(source, looseGranted))) {

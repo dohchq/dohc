@@ -1,10 +1,15 @@
+import { parseAccessRule } from "@dohc/security-contract/access-rules";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
+import type { WorkspaceMembersView } from "@dohc/security-contract/workspace-members";
+import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { pushMessageAccess, readPushMessage } from "./chatMessageInterest";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE } from "./namedRecipientChat";
 import type { SyncRelayHandler } from "./server";
 import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
+import { recordAccountName } from "./storage/accountNames";
 import type { StorageContext } from "./storage/context";
 import type { SyncRelayStorage } from "./storage";
 import {
@@ -92,7 +97,8 @@ async function ownerAppend(h: SyncRelayHandler, ops: unknown[]) {
   expect(response.status, await response.clone().text()).toBe(200);
 }
 
-async function ownerWrite(h: SyncRelayHandler, path: string, text: string) {
+// `before` is the content a write replaces.
+async function ownerWrite(h: SyncRelayHandler, path: string, text: string, before?: string) {
   const sha = await putBlob(h, OWNER, WORKSPACE, text);
   const seq = ownerSeq++;
   await ownerAppend(h, [
@@ -103,15 +109,44 @@ async function ownerWrite(h: SyncRelayHandler, path: string, text: string) {
       path,
       recordedAtMs: 1000 + seq,
       operation: "write",
-      payloadBeforeBlobSha256: null,
-      payloadBeforePath: null,
+      payloadBeforeBlobSha256: before === undefined ? null : sha256(before),
+      payloadBeforePath: before === undefined ? null : path,
       payloadAfterBlobSha256: sha,
       payloadAfterPath: path,
       metadata: { origin: "user" },
-      beforePresent: "null",
+      beforePresent: before === undefined ? "null" : "present",
     }),
   ]);
   return sha;
+}
+
+// The owner sets, changes or clears a folder's rule as Members settings does.
+async function ownerRule(
+  h: SyncRelayHandler,
+  folder: string,
+  text: string | null,
+): Promise<string> {
+  const covers = (rule: { folders: Array<{ path: string }> }) =>
+    rule.folders.some((entry) => entry.path === folder);
+  const view = (await json(
+    await h(request(OWNER, `/sync/${WORKSPACE}/members`)),
+  )) as unknown as WorkspaceMembersView;
+  const held = view.folderRules!.find(covers);
+  const rule = text === null ? null : parseAccessRule(text)!;
+  const response = await post(h, OWNER, `/sync/${WORKSPACE}/members/folder-rules`, {
+    ...(held ? { ruleId: held.ruleId, revision: held.revision } : { folder }),
+    ...(rule === null
+      ? { clear: true }
+      : {
+          members: rule.members,
+          people: [...rule.people].map(([email, level]) => ({ email, level })),
+        }),
+  });
+  expect(response.status, await response.clone().text()).toBe(200);
+  return (
+    held?.ruleId ??
+    ((await response.json()) as WorkspaceMembersView).folderRules!.find(covers)!.ruleId
+  );
 }
 
 // The cookie names the person, as the account service would. Nothing else does.
@@ -124,7 +159,10 @@ function resolveActor(incoming: Request, workspaceId: string) {
   return resolveTestActor(incoming, workspaceId);
 }
 
-async function seed(activity = new DiscussionActivityHub()) {
+async function seed(
+  activity = new DiscussionActivityHub(),
+  overrides: Partial<Parameters<typeof testHandler>[1]> = {},
+) {
   resetOpSeq();
   ownerSeq = 0;
   const storage = await testStorage();
@@ -134,6 +172,7 @@ async function seed(activity = new DiscussionActivityHub()) {
     namedBrowserSessionLimits: limits,
     relayExchangeKey: RELAY_EXCHANGE_KEY,
     resolveActor,
+    ...overrides,
   });
   expect(
     (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
@@ -205,7 +244,7 @@ function memberRead(
 const refusalBytes = async (response: Response) => `${response.status}:${await response.text()}`;
 
 describe("a member reads the workspace through the link read routes", () => {
-  it("reads the workspace's name and files at View, Comment and Edit, and the history only at Edit", async () => {
+  it("reads the workspace's name, reached files, and log at View, Comment and Edit", async () => {
     const { h, storage, planSha } = await seed();
     const ana = await member(h, storage, "ana");
     for (const level of ["view", "comment", "edit"] as const) {
@@ -237,7 +276,7 @@ describe("a member reads the workspace through the link read routes", () => {
       );
       expect(currentLog.status).toBe(200);
       const log = await memberRead(h, "/sync/link/log?since=0&limit=500", ana.grantId, "ana");
-      expect(log.status, level).toBe(level === "edit" ? 200 : 404);
+      expect(log.status, level).toBe(200);
     }
   });
 
@@ -254,6 +293,39 @@ describe("a member reads the workspace through the link read routes", () => {
     );
   });
 
+  // A rule's folder names stay on the relay, and a new account email reaches
+  // browser reads within a minute, as it does the feed.
+  it("never names a hidden folder in a share's answer, and follows the member's account email", async () => {
+    let email = "ana@dohc.test",
+      now = 10_000;
+    const { h, storage } = await seed(undefined, {
+      nowMs: () => now,
+      lookupVerifiedUserEmail: async (userId: string) =>
+        userId === "ana" ? email : `${userId}@dohc.test`,
+    });
+    const ana = await member(h, storage, "ana");
+    await ownerRule(h, "Hidden Plans", "people:\n  ben@dohc.test: edit\n");
+    await ownerRule(h, "docs", "people:\n  ana@dohc.test: edit\n");
+    const paths = async () =>
+      (
+        (await json(await memberRead(h, "/sync/link/current", ana.grantId, "ana"))).files as Array<{
+          path: string;
+        }>
+      ).map((file) => file.path);
+    for (const route of ["/sync/link/share", "/sync/link/current"]) {
+      const body = await memberRead(h, route, ana.grantId, "ana");
+      expect(body.status).toBe(200);
+      const text = await body.text();
+      expect(text).not.toContain("Hidden Plans");
+      expect(JSON.parse(text).effectiveSelector).not.toHaveProperty("reach");
+    }
+    expect(await paths()).toEqual(["docs/plan.md"]);
+    email = "another@dohc.test";
+    expect(await paths()).toEqual(["docs/plan.md"]);
+    now += 60_000;
+    expect(await paths()).toEqual([]);
+  });
+
   it("serves files the owner adds after the member joined", async () => {
     const { h, storage } = await seed();
     const ana = await member(h, storage, "ana");
@@ -263,6 +335,98 @@ describe("a member reads the workspace through the link read routes", () => {
       "docs/plan.md",
       "later/new.md",
     ]);
+  });
+
+  // A browser offers the editor and the composer by the file's own level, and reads its files again when its reach changes.
+  it("names each listed file's own level and a reach that changes with the folder rules", async () => {
+    const { h, storage } = await seed();
+    const ana = await member(h, storage, "ana");
+    await setLevel(h, "comment");
+    await ownerRule(h, "open", "members: edit\n");
+    await ownerWrite(h, "open/a.md", "open");
+    await ownerRule(h, "view", "members: view\n");
+    await ownerWrite(h, "view/b.md", "view");
+    const read = async () => {
+      const current = await json(await memberRead(h, "/sync/link/current", ana.grantId, "ana"));
+      const share = await json(await memberRead(h, "/sync/link/share", ana.grantId, "ana"));
+      expect(typeof current.reach).toBe("string");
+      expect(share.reach).toBe(current.reach);
+      return {
+        reach: current.reach as string,
+        levels: Object.fromEntries(
+          (current.files as Array<{ path: string; access: string }>).map((file) => [
+            file.path,
+            file.access,
+          ]),
+        ),
+      };
+    };
+    const before = await read();
+    expect(before.levels).toEqual({
+      "docs/plan.md": "comment",
+      "open/a.md": "edit",
+      "view/b.md": "view",
+    });
+    await ownerRule(h, "open", "members: view\n");
+    const after = await read();
+    expect(after.levels).toMatchObject({ "open/a.md": "view" });
+    expect(after.reach).not.toBe(before.reach);
+    // An admin edits every file, and no folder marker is listed.
+    const role = await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana.memberId}/role`, {
+      role: "admin",
+    });
+    expect(role.status, await role.clone().text()).toBe(200);
+    const admin = await read();
+    expect(admin.levels).toMatchObject({ "open/a.md": "edit" });
+    expect(Object.keys(admin.levels).filter((path) => path.endsWith(".dohc-access"))).toEqual([]);
+  });
+
+  // A browser tells a workspace too large to list apart from a lost membership, and names the desktop app.
+  it("refuses a workspace over the file limit with its own code, and a removed member with an unknown grant's bytes", async () => {
+    const { h, storage } = await seed(undefined, { linkCurrentFileLimit: 1 });
+    const ana = await member(h, storage, "ana");
+    const ben = await member(h, storage, "ben");
+    await ownerWrite(h, "later/new.md", "new work");
+    const large = await memberRead(h, "/sync/link/current", ana.grantId, "ana");
+    expect(large.status).toBe(413);
+    expect(await json(large)).toEqual(linkRefusalBody("link_too_many_files"));
+    // The grant still opens, so the browser can tell the two apart.
+    expect((await memberRead(h, "/sync/link/share", ana.grantId, "ana")).status).toBe(200);
+    const unknown = await refusalBytes(
+      await memberRead(h, "/sync/link/current", "grant-never", "ana"),
+    );
+    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/${ben.memberId}/remove`)).status).toBe(
+      200,
+    );
+    expect(await refusalBytes(await memberRead(h, "/sync/link/current", ben.grantId, "ben"))).toBe(
+      unknown,
+    );
+  });
+
+  // The size answer must not tell a member how much work is hidden from them.
+  it("counts only a member's readable files against the file limit, and refuses a scan past its cap generically", async () => {
+    const { h, storage } = await seed(undefined, { linkCurrentFileLimit: 1 });
+    const ana = await member(h, storage, "ana");
+    const ben = await member(h, storage, "ben");
+    await ownerRule(h, "hidden", "people:\n  ben@dohc.test: edit\n");
+    await ownerWrite(h, "hidden/x.md", "private");
+    const one = await memberRead(h, "/sync/link/current", ana.grantId, "ana");
+    expect(one.status, await one.clone().text()).toBe(200);
+    expect(((await json(one)).files as Array<{ path: string }>).map((file) => file.path)).toEqual([
+      "docs/plan.md",
+    ]);
+    // Ben reads the hidden folder too, so his own list is over the limit.
+    const many = await memberRead(h, "/sync/link/current", ben.grantId, "ben");
+    expect(many.status).toBe(413);
+    expect(await json(many)).toEqual(linkRefusalBody("link_too_many_files"));
+    // Past the cap on what the relay reads, a member gets an unknown grant's answer, whatever they can read.
+    for (let index = 0; index < 8; index++) await ownerWrite(h, `hidden/${index}.md`, "private");
+    const unknown = await refusalBytes(
+      await memberRead(h, "/sync/link/current", "grant-never", "ana"),
+    );
+    expect(await refusalBytes(await memberRead(h, "/sync/link/current", ana.grantId, "ana"))).toBe(
+      unknown,
+    );
   });
 
   it("refuses a removed member, an ended membership, a fenced owner and a forged person with the bytes of an unknown grant", async () => {
@@ -372,6 +536,73 @@ describe("a member reads the workspace through the link read routes", () => {
         await memberRead(h, `/sync/link/blobs/${sha256("never stored")}`, ana.grantId, "ana"),
       ),
     ).toBe(unknown);
+  });
+
+  // docs/engineering/security-boundaries.md, "Share history needs Edit".
+  it("reads a file's earlier versions only where the member has Edit on it, on every route", async () => {
+    const { h, storage, planSha } = await seed();
+    const ana = await member(h, storage, "ana");
+    await ownerWrite(h, "docs/plan.md", "the new plan", "the plan");
+    await ownerRule(h, "view", "members: view\n");
+    const viewOld = await ownerWrite(h, "view/a.md", "view old");
+    const viewCurrent = await ownerWrite(h, "view/a.md", "view current", "view old");
+    const routes = {
+      named: (path: string) => h(request("ana", `/sync/shares/${ana.shareId}/${path}`)),
+      link: (path: string) => memberRead(h, `/sync/link/${path}`, ana.grantId, "ana"),
+    };
+    const reads = async () =>
+      Object.fromEntries(
+        await Promise.all(
+          Object.entries(routes).map(async ([name, read]) => {
+            const log = await read("log?since=0&limit=500");
+            expect(log.status, name).toBe(200);
+            const text = await log.text();
+            const blobs = [];
+            for (const sha of [planSha, viewOld, viewCurrent])
+              blobs.push((await read(`blobs/${sha}`)).status);
+            return [name, { old: text.includes(planSha), viewOld: text.includes(viewOld), blobs }];
+          }),
+        ),
+      );
+    const history = { old: true, viewOld: false, blobs: [200, 404, 200] };
+    const current = { old: false, viewOld: false, blobs: [404, 404, 200] };
+    await setLevel(h, "edit");
+    expect(await reads()).toEqual({ named: history, link: history });
+    await setLevel(h, "view");
+    expect(await reads()).toEqual({ named: current, link: current });
+    const role = await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana.memberId}/role`, {
+      role: "admin",
+    });
+    expect(role.status, await role.clone().text()).toBe(200);
+    expect((await reads()).named).toMatchObject({ old: true, blobs: [200, 200, 200] });
+  });
+
+  // A workspace label is read with its reader's reach. A folder marker stays
+  // out of it for everyone but the owner.
+  it("keeps the file links its reader reaches in the workspace's label", async () => {
+    const { h, storage } = await seed();
+    const ana = await member(h, storage, "ana");
+    await ownerRule(h, "hidden", "people:\n  ben@dohc.test: edit\n");
+    await ownerWrite(h, "hidden/x.md", "hidden work");
+    storage.setShareLabels(
+      ana.shareId,
+      {
+        subjectName: "Community @[docs/plan.md] @[hidden] @[hidden/x.md] @[hidden/.dohc-access]",
+      },
+      0,
+    );
+    const subject = async () =>
+      (await json(await memberRead(h, "/sync/link/share", ana.grantId, "ana"))).subjectName;
+    expect(await subject()).toBe(
+      "Community @[docs/plan.md] (a file not shared here) (a file not shared here) (a file not shared here)",
+    );
+    const role = await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana.memberId}/role`, {
+      role: "admin",
+    });
+    expect(role.status, await role.clone().text()).toBe(200);
+    expect(await subject()).toBe(
+      "Community @[docs/plan.md] @[hidden] @[hidden/x.md] (a file not shared here)",
+    );
   });
 });
 
@@ -574,6 +805,83 @@ describe("a member's Chats in a browser", () => {
         parentMessageId: "msg-chat",
       }),
     ]);
+  });
+
+  it("withholds a Group name's link to a folder the member can't see, in the list and a push", async () => {
+    const { h, storage } = await seed();
+    await ownerRule(h, "hidden", "people:\n  ben@dohc.test: edit\n");
+    await ownerWrite(h, "hidden/x.md", "hidden work");
+    await ownerAppend(h, [
+      logOp(
+        "chat.channel.create",
+        chatChannelCreate("wire-plans", {
+          channelId: "chan-plans",
+          name: "Plans @[hidden] @[hidden/x.md] @[docs/plan.md]",
+          slug: "plans",
+          kind: "channel",
+          type: "both",
+          purpose: "",
+          folderPath: "plans",
+        }).payload,
+      ),
+      laneThread("t-plans", "wire-plans"),
+      message("msg-plans", "t-plans", "hello"),
+    ]);
+    const ana = await member(h, storage, "ana");
+    const named = "Plans (a file not shared here) (a file not shared here) @[docs/plan.md]";
+    const listed = await json(await chat(h, `channels?grantId=${ana.grantId}`, "ana"));
+    expect(listed.channels).toContainEqual(
+      expect.objectContaining({ channelWireId: "wire-plans", name: named }),
+    );
+    const context = storage as unknown as StorageContext;
+    const row = context.db
+      .prepare(
+        "SELECT relay_seq FROM sync_relay_log WHERE op_kind = 'chat.message.append' AND json_extract(payload_json, '$.messageId') = 'msg-plans'",
+      )
+      .get();
+    const pushed = readPushMessage(context, Number(row!.relay_seq))!;
+    expect(pushMessageAccess(context, pushed, "ana")?.place).toBe(named);
+    expect(pushMessageAccess(context, pushed, OWNER)?.place).toContain("@[hidden]");
+  });
+
+  it("withholds a link to a folder the member can't see from their Notice's title and body", async () => {
+    const { h, storage } = await seed();
+    await member(h, storage, "ana");
+    await ownerRule(h, "hidden", "people:\n  ben@dohc.test: edit\n");
+    await ownerWrite(h, "hidden/x.md", "hidden work");
+    recordAccountName(storage as unknown as StorageContext, "ana", "Ana");
+    await ownerAppend(h, [
+      channel("wire-notice", "Team @[hidden]"),
+      thread("t-notice", "wire-notice"),
+      message("msg-notice", "t-notice", "@Ana see @[hidden] and @[docs/plan.md]"),
+    ]);
+    const response = await h(request("ana", "/sync/notices"));
+    expect(response.status, await response.clone().text()).toBe(200);
+    const { notices } = (await response.json()) as { notices: { title: string }[] };
+    expect(notices.find((row) => row.title.includes("mentioned you"))).toMatchObject({
+      title: expect.stringContaining("#Team (a file not shared here)"),
+      body: "@Ana see (a file not shared here) and @[docs/plan.md]",
+    });
+  });
+
+  it("withholds a Group message's link to a folder the member can't see", async () => {
+    const { h, storage } = await seed();
+    await ownerRule(h, "hidden", "people:\n  ben@dohc.test: edit\n");
+    await ownerWrite(h, "hidden/x.md", "hidden work");
+    await ownerAppend(h, [
+      laneThread("t-links", GROUP),
+      message("msg-links", "t-links", "see @[hidden] and @[docs/plan.md]"),
+    ]);
+    const ana = await member(h, storage, "ana");
+    const page = await json(
+      await chat(h, `messages?shareId=${ana.shareId}&since=0&limit=50`, "ana"),
+    );
+    expect(page.messages).toContainEqual(
+      expect.objectContaining({
+        messageId: "msg-links",
+        body: "see (a file not shared here) and @[docs/plan.md]",
+      }),
+    );
   });
 
   it("starts a post, replies in a reached Group's threads, and refuses a reply to a thread outside the Group", async () => {
@@ -998,4 +1306,29 @@ describe("a member's file Comments in a browser", () => {
     );
     expect((await held).status).toBe(404);
   });
+});
+
+it("filters member browser feeds and blobs and stops an open download when folder reach changes", async () => {
+  const { h, storage, planSha } = await seed();
+  const ana = await member(h, storage, "ana");
+  const download = await memberRead(h, `/sync/link/blobs/${planSha}`, ana.grantId, "ana");
+  expect(download.status).toBe(200);
+  const context = storage as StorageContext;
+  context.tx(() =>
+    context.db
+      .prepare(
+        `INSERT INTO sync_relay_access_rules (workspace_id,folder,rule_text,from_seq,to_seq) VALUES (?,'docs','',100,NULL)`,
+      )
+      .run(WORKSPACE),
+  );
+  await expect(download.text()).rejects.toThrow();
+  const current = await json(await memberRead(h, "/sync/link/current", ana.grantId, "ana"));
+  expect(current.files).toEqual([]);
+  const feed = await json(
+    await memberRead(h, "/sync/link/log?since=0&limit=500", ana.grantId, "ana"),
+  );
+  expect(JSON.stringify(feed)).not.toContain("docs/plan.md");
+  const hidden = await memberRead(h, `/sync/link/blobs/${planSha}`, ana.grantId, "ana");
+  const missing = await memberRead(h, `/sync/link/blobs/${sha256("missing")}`, ana.grantId, "ana");
+  expect(await refusalBytes(hidden)).toBe(await refusalBytes(missing));
 });

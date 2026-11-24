@@ -12,7 +12,7 @@ interface NamedLiveBrowserSession {
   readonly context: NamedLiveBrowserContext;
   readonly expiresAtMs: number;
   readonly grantGeneration: number;
-  readonly grantAccess: "edit";
+  readonly grantAccess: string;
   /** A session unused until this elapsed time is removed. */
   idleUntilMs: number;
   windowMs: number;
@@ -129,7 +129,6 @@ export function createNamedLiveBrowserSessions(
         current.grant.grantId !== grantId ||
         current.share.shareId !== shareId ||
         current.share.workspaceId !== workspaceId ||
-        current.grant.access !== "edit" ||
         !Number.isSafeInteger(current.grant.generation) ||
         current.grant.generation <= 0
       ) {

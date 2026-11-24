@@ -40,7 +40,10 @@ import type {
   SyncRelayStorage,
 } from "./storage.js";
 import type { LiveRoomAuthority } from "./storage/types.js";
-import { snapshotCurrentBindingRequest } from "./storage/liveDocumentAuthority.js";
+import {
+  snapshotCurrentBindingRequest,
+  resolveReadableMemberLiveDocumentBinding,
+} from "./storage/liveDocumentAuthority.js";
 import type { CapacityLiveAdmissionValidator, LiveCheckTiming } from "./ownerOutboxDelivery.js";
 import type { JournalCutReadTiming } from "./storage/types.js";
 import {
@@ -438,7 +441,8 @@ function captureLiveFrameHost(options: {
   const standing = storage.captureStanding();
   const lifetime = new AbortController();
   let opened = false,
-    submitting = false;
+    submitting = false,
+    editable = true;
   let unsubscribe: (() => void) | undefined;
   const close = () => {
     lifetime.abort(new Error("Named host capture closed."));
@@ -456,7 +460,14 @@ function captureLiveFrameHost(options: {
       // A recipient's share stands while it covers the document under the same
       // grant generation. The session also ends when what that share shows
       // changes, so reopening shows the new view.
-      const current = storage.resolveCurrentLiveDocumentBinding({ document, actor });
+      let current = storage.resolveCurrentLiveDocumentBinding({ document, actor });
+      editable = current.kind === "current";
+      if (!editable && wireBinding && actor.kind === "named") {
+        current = resolveReadableMemberLiveDocumentBinding(storage as StorageContext, {
+          document,
+          actor,
+        });
+      }
       if (current.kind === "current") wireBinding ??= current.view;
       if (
         native.invalidated.aborted ||
@@ -528,6 +539,7 @@ function captureLiveFrameHost(options: {
     timing: SubmitTiming,
   ): Promise<NamedFrameSubmissionResult> {
     check(caller);
+    if (!editable) return { result: "refused", reason: "authority-refused" };
     if (submitting) throw new Error("A named submission already owns admission.");
     let releaseBytes: (() => void) | undefined, releaseValidation: (() => void) | undefined;
     const releaseValidationBytes = () => {
@@ -804,6 +816,8 @@ function captureLiveFrameHost(options: {
       },
       sender(context) {
         check();
+        // A member who lost Edit keeps reading here but no longer writes.
+        if (!editable) return null;
         const authorContext =
           context === undefined || freshRead ? undefined : parseLiveAuthorContext(context);
         if (claimsPersonalAgent(authorContext)) return null;

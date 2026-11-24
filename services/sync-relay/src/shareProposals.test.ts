@@ -962,7 +962,7 @@ describe("who may do what", () => {
         `a ${label} landing inside the write lock must roll the submit back`,
       ).toBe(expected);
       expect(
-        storage.listShareProposalsForShare(shareId).length,
+        storage.listShareProposalsForShare(shareId, RECIPIENT).length,
         `a lost ${label} race must store nothing`,
       ).toBe(0);
     }

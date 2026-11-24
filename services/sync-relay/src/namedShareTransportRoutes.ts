@@ -1,5 +1,6 @@
 import { isShareAccessValue } from "@dohc/security-contract/share-selector";
 import { jsonResponse } from "@dohc/service-http";
+import { randomBytes } from "node:crypto";
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import { accountDisplayName } from "./accountDisplayName";
 import {
@@ -28,7 +29,6 @@ import type { AuthorizedShareAction } from "./shareAuthorization";
 import {
   chatSideFor,
   chatSideOf,
-  fileSideOf,
   filterOpForShareAppend,
   isGroupSelector,
   isWorkspaceSelector,
@@ -39,7 +39,11 @@ import {
 import { PROPOSAL_ORIGIN_PREFIX } from "./shareProposals";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
+import type { MemberReach } from "./storage/memberReach";
 import { MAX_BLOB_BYTES, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
+
+/** How old a member's stored account email may be when their feed or browser reads. */
+export const MEMBER_IDENTITY_MAX_AGE_MS = 60_000;
 
 export type NamedShareTransportRoute =
   | { route: "share-log"; shareId: string }
@@ -47,6 +51,10 @@ export type NamedShareTransportRoute =
 
 /** What a share reaches, without its level. */
 function shareScopeKey(selector: AnyShareSelector): string {
+  if (isWorkspaceSelector(selector))
+    return JSON.stringify({ kind: "workspace", role: selector.role });
+  if (!("access" in selector))
+    return JSON.stringify({ paths: selector.paths, versionId: selector.versionId });
   const { access: _access, ...scope } = selector;
   return JSON.stringify(scope);
 }
@@ -124,7 +132,7 @@ export function createNamedShareTransportRoutes(
     | "listWorkReferences"
   >,
   nowMs: () => number,
-  claimPendingShares: (userId: string) => Promise<void>,
+  claimPendingShares: (userId: string, signal?: AbortSignal, maxAgeMs?: number) => Promise<void>,
   requireShareAction: (
     shareId: string,
     actorUserId: string,
@@ -142,6 +150,9 @@ export function createNamedShareTransportRoutes(
   lookupUserDisplayName?: LogAuthorNameLookup,
   identityKey?: string | Uint8Array,
 ) {
+  // A relay without a link key runs only in development or test. Its reach
+  // signatures change at each start, which costs a member a rebuild.
+  const reachKey = identityKey ?? randomBytes(32);
   return async function respondToNamedShareTransport(
     request: Request,
     route: NamedShareTransportRoute,
@@ -150,6 +161,7 @@ export function createNamedShareTransportRoutes(
   ): Promise<Response> {
     if (route.route === "share-log" && request.method === "GET") {
       let authorized: AuthorizedShareAction;
+      let claimed = false;
       try {
         authorized = requireShareAction(route.shareId, actor.userId, "read");
       } catch (error) {
@@ -159,6 +171,12 @@ export function createNamedShareTransportRoutes(
         )
           throw error;
         await claimPendingShares(actor.userId);
+        claimed = true;
+        authorized = requireShareAction(route.shareId, actor.userId, "read");
+      }
+      if (!claimed && isWorkspaceSelector(authorized.effectiveSelector)) {
+        // A member's feed polls often; an email change applies within a minute.
+        await claimPendingShares(actor.userId, undefined, MEMBER_IDENTITY_MAX_AGE_MS);
         authorized = requireShareAction(route.shareId, actor.userId, "read");
       }
       const share = { ...authorized.share, selector: authorized.effectiveSelector };
@@ -200,10 +218,19 @@ export function createNamedShareTransportRoutes(
         : undefined;
       // Both routes share selector filtering and cursor behavior. The
       // accountless route applies a narrower metadata boundary afterward.
+      // A member's page carries their keyed reach signature, read in the
+      // page's own transaction: a change tells the member to look again.
+      let reach: MemberReach | undefined;
+      const signed = () => (reach ? { reach: { signature: reach.keyedSignature(reachKey) } } : {});
+      const authorizeRead = () => {
+        const selector = requireShareAction(route.shareId, actor.userId, "read").effectiveSelector;
+        reach = isWorkspaceSelector(selector) ? selector.reach : undefined;
+        return pullSelector(selector);
+      };
       let page = filteredLogPage(
         share.workspaceId,
         share.shareId,
-        readSelector,
+        authorizeRead,
         since,
         limit,
         "authenticated",
@@ -224,7 +251,12 @@ export function createNamedShareTransportRoutes(
       if (
         hold > 0 &&
         isShareAccessValue(knew) &&
-        knew !== (fileSideOf(authorized.effectiveSelector)?.access ?? "view")
+        knew !==
+          (isWorkspaceSelector(authorized.effectiveSelector)
+            ? authorized.effectiveSelector.reach.evaluated.level
+            : "access" in authorized.effectiveSelector
+              ? authorized.effectiveSelector.access
+              : "view")
       ) {
         return jsonResponse({
           ok: true,
@@ -233,6 +265,7 @@ export function createNamedShareTransportRoutes(
           hasMore: false,
           ownOriginId,
           levelChanged: true,
+          ...signed(),
         });
       }
       if (hold > 0 && page.ops.length === 0 && !page.hasMore && page.nextCursor === since) {
@@ -257,7 +290,7 @@ export function createNamedShareTransportRoutes(
           const next = filteredLogPage(
             share.workspaceId,
             share.shareId,
-            pullSelector(fresh.effectiveSelector),
+            authorizeRead,
             scanSince,
             limit,
             "authenticated",
@@ -296,7 +329,7 @@ export function createNamedShareTransportRoutes(
           if (levelChanged || page.ops.length > 0 || page.hasMore) break;
         }
         if (levelChanged) {
-          requireShareAction(route.shareId, actor.userId, "read");
+          authorizeRead();
           return jsonResponse({
             ok: true,
             ops: [],
@@ -304,6 +337,7 @@ export function createNamedShareTransportRoutes(
             hasMore: false,
             ownOriginId,
             levelChanged: true,
+            ...signed(),
           });
         }
       }
@@ -343,6 +377,7 @@ export function createNamedShareTransportRoutes(
         ...page,
         ops,
         ownOriginId,
+        ...signed(),
       });
     }
 
@@ -495,7 +530,17 @@ export function createNamedShareTransportRoutes(
         // in standing, and still a selector that accepts appends at its
         // current level on the same workspace bucket — a level
         // narrowed mid-flight loses the race the same way a revoke does.
-        guard: shareActionGuard(route.shareId, actor.userId, "append", share.workspaceId),
+        guard: () => {
+          shareActionGuard(route.shareId, actor.userId, "append", share.workspaceId)();
+          const fresh = requireShareAction(route.shareId, actor.userId, "append");
+          for (const op of ops) {
+            if (
+              !filterOpForShareAppend(fresh.effectiveSelector, op.opKind, op.payloadJson, resolver)
+                .allowed
+            )
+              throw relayError("share_op_rejected");
+          }
+        },
       };
       const result =
         browserMessageId === undefined
@@ -526,7 +571,11 @@ export function createNamedShareTransportRoutes(
       // ciphertext blob, a random hash — is the same generic 404 as a
       // nonexistent share.
       // Chat shares expose no blob because their filter decisions name none.
-      const blob = namedShareBlob(share.workspaceId, share.selector, route.sha256);
+      const blob = namedShareBlob(
+        share.workspaceId,
+        () => requireShareAction(route.shareId, actor.userId, "read").effectiveSelector,
+        route.sha256,
+      );
       if (!blob) throw notFound();
       // Re-check revocation immediately before returning the blob body: a
       // revoke that raced with this in-flight read must abort rather than

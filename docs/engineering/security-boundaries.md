@@ -296,6 +296,12 @@ narrowed grant loses history on its next read. Bytes a device already holds stay
 An Edit grant reads the share's retained history. A named Edit recipient reads
 every version that an op admitted by its selector names, with no epoch floor and
 no grant-time cutoff.
+A workspace member's level differs by folder, so the relay judges it at the
+path each version was written to. A member reads a version only if they have
+Edit at that path. A version written where they have View or Comment reaches
+them as current content only. A version written where they have Edit stays
+readable after the file moves into a View folder, as it does for a named Edit
+recipient.
 A link with Edit reads earlier revisions only while the same file remains
 continuously inside its share and the revision remains above the workspace's
 epoch floor. Deletion or movement outside the share withdraws that file's

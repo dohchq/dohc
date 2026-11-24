@@ -1716,6 +1716,33 @@ it("counts a member's Edit grant as covering an enrolled document", async () => 
   expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(false);
 });
 
+it("enrolls at a folder's Edit above the member default and ends coverage when that folder narrows", async () => {
+  const f = await fixture();
+  addMember(f, "comment");
+  f.raw
+    .prepare(
+      "UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=25 WHERE grant_id=?",
+    )
+    .run(scope.grantId);
+  const context = f.storage as StorageContext;
+  context.tx(() =>
+    context.db
+      .prepare(
+        `INSERT INTO sync_relay_access_rules (workspace_id,folder,rule_text,from_seq,to_seq) VALUES (?,'docs','members: edit',100,NULL)`,
+      )
+      .run(scope.workspaceId),
+  );
+  expect(memberOpen(f)).toMatchObject({ enabled: true, shareId: "members-share" });
+  expect(serviceHostDocumentEnabled(context, binding, 30)).toBe(true);
+  context.tx(() =>
+    context.db
+      .prepare("UPDATE sync_relay_access_rules SET rule_text='members: view' WHERE workspace_id=?")
+      .run(scope.workspaceId),
+  );
+  expect(serviceHostDocumentEnabled(context, binding, 30)).toBe(false);
+  expect(() => memberOpen(f, { nowMs: 31 })).toThrow("not found");
+});
+
 it("leaves a starting note whose Edit access ended to its release, which records why", async () => {
   const f = await fixture();
   f.enroll();

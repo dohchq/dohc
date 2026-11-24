@@ -1,6 +1,7 @@
 import { RelayError, relayError } from "./errors";
 import { readBoundedJson } from "@dohc/service-http";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
 import { createNamedLiveBrowserResolver } from "./namedLiveBrowserAuth";
 import { authorizeNamedLiveEditShareGrant } from "./shareAuthorization";
@@ -108,7 +109,12 @@ export function createNamedRecipientDocuments(options: {
         if (snapshot.tooMany) return refuse();
         const files: { objectId: string; path: string }[] = [];
         for (const file of snapshot.files) {
-          if (file.contentKind !== "text" || !/\.md$/i.test(file.path)) continue;
+          if (
+            file.contentKind !== "text" ||
+            !/\.md$/i.test(file.path) ||
+            visibleSharePath(authority.effectiveSelector, file.path) === null
+          )
+            continue;
           const objectId = storage.objectIdAtPathInVersion({
             workspaceId: context.workspaceId,
             versionId: "main",

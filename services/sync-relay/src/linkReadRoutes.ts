@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { createReceivedIdentity } from "./receivedIdentity";
 import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
 import type { TokenBucketLimiter } from "@dohc/service-http";
@@ -12,13 +13,15 @@ import { notFound, relayError } from "./errors";
 import type { createLinkResponseStreams } from "./linkResponseStreams";
 import {
   isMemberRequest,
+  type LinkAuthority,
   type LinkAuthorityResolver,
   type LinkJsonResponse,
 } from "./linkAuthority";
+import { linkRefusal } from "./linkRefusal";
 import type { LinkEgressRateLimiter } from "./linkSecurity";
 import { assertSha256, parseCursor, parseLimit, parseLinkLogHold } from "./requestInputs";
 import { authorizeLinkChatAction } from "./shareAuthorization";
-import { targetVersionId } from "./shareFilter";
+import { pathLevel, targetVersionId, type ShareSelector } from "./shareFilter";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
 import { MAX_BLOB_BYTES } from "./wireLimits";
@@ -28,6 +31,10 @@ export type LinkReadRoute =
   | { route: "link-current" }
   | { route: "link-log" }
   | { route: "link-blob"; sha256: string };
+
+// The current files are read before reach filters them, so the read is capped at this many times the listing limit.
+// Past the cap the relay refuses as for an unknown grant: the answer must not say how much work a member cannot see.
+const CURRENT_SCAN_FACTOR = 10;
 
 export function createLinkReadRoutes(
   storage: Pick<
@@ -47,6 +54,7 @@ export function createLinkReadRoutes(
     | "indexReceivedWorkTargets"
     | "workspaceRoleOf"
     | "workspaceLevelChangedBy"
+    | "readShareTx"
   >,
   nowMs: () => number,
   linkCurrentFileLimit: number,
@@ -67,6 +75,14 @@ export function createLinkReadRoutes(
   lookupUserDisplayName?: LookupUserDisplayName,
 ) {
   const identity = createReceivedIdentity(linkKey);
+  // A member's answers carry their keyed reach signature. A change tells the browser to read the files again.
+  const reachKey = linkKey ?? randomBytes(32);
+  const memberReach = (fresh: LinkAuthority) =>
+    fresh.credential.kind === "member" &&
+    "reach" in fresh.effectiveSelector &&
+    fresh.effectiveSelector.reach
+      ? { reach: fresh.effectiveSelector.reach.keyedSignature(reachKey) }
+      : {};
 
   // A Group link also reads, or with read-write access posts in, the Group's
   // channel. The share's answer and its files' answer both name it.
@@ -82,8 +98,10 @@ export function createLinkReadRoutes(
       : {};
   };
   // A membership's share names its workspace; a link's share keeps its own label.
-  const subjectName = (shareId: string, request: Request) =>
-    storage.getShareLabels(shareId, isMemberRequest(request) ? "member" : "link").subjectName ??
+  // A member reads the label's file links through their own fresh reach.
+  const subjectName = (shareId: string, request: Request, readerFiles: ShareSelector) =>
+    storage.getShareLabels(shareId, isMemberRequest(request) ? "member" : "link", readerFiles)
+      .subjectName ??
     (isMemberRequest(request)
       ? storage.getWorkspaceMembershipByShare(shareId)?.workspaceName
       : null) ??
@@ -116,7 +134,7 @@ export function createLinkReadRoutes(
       const epochLogFloor = storage.getEpochLogFloor(share.workspaceId);
       const freshness = newestFilteredOpFreshness(
         share.workspaceId,
-        capability.effectiveSelector,
+        () => requireFresh().effectiveSelector,
         epochLogFloor,
       );
       const fresh = requireFresh();
@@ -125,15 +143,17 @@ export function createLinkReadRoutes(
         fresh.credential.kind === "member"
           ? await levelChangedBy(share.workspaceId, fresh.credential.userId)
           : {};
+      requireFresh();
       return linkJsonResponse(
         fresh,
         {
           ...changed,
+          ...memberReach(fresh),
           ok: true,
           receivedSource: identity.source(["link", fresh.grantId], share.workspaceId),
           effectiveSelector: presentation.selector,
           access: fresh.access,
-          subjectName: subjectName(fresh.shareId, request),
+          subjectName: subjectName(fresh.shareId, request, fresh.effectiveSelector),
           ...linkChannel(fresh.grantId),
           ...freshness,
           // share-web learns a holder's grant at exchange. It learns an agent's
@@ -145,39 +165,48 @@ export function createLinkReadRoutes(
     }
 
     if (route.route === "link-current") {
+      // A member hears that the list is too long, once their grant proves fresh. A link holder's
+      // refusal stays generic.
+      const tooManyFiles = () => {
+        if (requireFresh().credential.kind !== "member") throw notFound();
+        return linkRefusal("link_too_many_files");
+      };
       // The page reads the files again after a level change, so this answer names who made it too.
       const changed =
         capability.credential.kind === "member"
           ? await levelChangedBy(share.workspaceId, capability.credential.userId)
           : {};
-      const snapshot = storage.readCurrentFileState({
-        workspaceId: share.workspaceId,
-        versionId: targetVersionId(capability.effectiveSelector),
-        selectorPaths: capability.effectiveSelector.paths,
-        limit: linkCurrentFileLimit,
-      });
-      if (snapshot.tooMany) throw notFound();
-      const freshness = newestFilteredOpFreshness(
-        share.workspaceId,
-        capability.effectiveSelector,
-        snapshot.epochLogFloor,
-      );
-      const fresh = requireFresh();
-      const presentation = createAccountlessPathProjection(fresh.effectiveSelector);
-      const requestedFolder = new URL(request.url).searchParams.get("collectionPath");
       const observed: Parameters<SyncRelayStorage["indexReceivedWorkTargets"]>[0][number][] = [];
-      const identity = createReceivedIdentity(
-        linkKey,
-        (recipient, workspaceId, objectId, objectToken) => {
-          const sourceHandle = identity.source(recipient, workspaceId);
-          if (sourceHandle)
-            observed.push({ recipient, workspaceId, objectId, objectToken, sourceHandle });
-        },
-      );
-      // The listing selects by path prefix; a folder marker under it stays hidden.
-      const files = snapshot.files
-        .filter((file) => visibleSharePath(fresh.effectiveSelector, file.path) !== null)
-        .map((file) => {
+      const read = () => {
+        const snapshot = storage.readCurrentFileState({
+          workspaceId: share.workspaceId,
+          versionId: targetVersionId(capability.effectiveSelector),
+          selectorPaths: capability.effectiveSelector.paths,
+          limit: linkCurrentFileLimit * CURRENT_SCAN_FACTOR,
+        });
+        if (snapshot.tooMany) throw notFound();
+        const freshness = newestFilteredOpFreshness(
+          share.workspaceId,
+          () => requireFresh().effectiveSelector,
+          snapshot.epochLogFloor,
+        );
+        const fresh = requireFresh();
+        const presentation = createAccountlessPathProjection(fresh.effectiveSelector);
+        const requestedFolder = new URL(request.url).searchParams.get("collectionPath");
+        const identity = createReceivedIdentity(
+          linkKey,
+          (recipient, workspaceId, objectId, objectToken) => {
+            const sourceHandle = identity.source(recipient, workspaceId);
+            if (sourceHandle)
+              observed.push({ recipient, workspaceId, objectId, objectToken, sourceHandle });
+          },
+        );
+        // The listing selects by path prefix; a folder marker under it stays hidden.
+        const visible = snapshot.files.filter(
+          (file) => visibleSharePath(fresh.effectiveSelector, file.path) !== null,
+        );
+        if (visible.length > linkCurrentFileLimit) return tooManyFiles();
+        const files = visible.map((file) => {
           const path = presentation.projectPath(file.path);
           if (path === null) throw notFound();
           return {
@@ -193,16 +222,20 @@ export function createLinkReadRoutes(
             ),
             blobSha256: file.blobSha256,
             contentKind: file.contentKind,
+            ...(fresh.credential.kind === "member"
+              ? { access: pathLevel(fresh.effectiveSelector, file.path) }
+              : {}),
             ...(requestedFolder !== null && path === `${requestedFolder}/automations.yaml`
               ? {
                   automationSwitchable:
-                    fresh.access === "edit" &&
+                    pathLevel(fresh.effectiveSelector, file.path) === "edit" &&
                     fresh.effectiveSelector.versionId === null &&
-                    fresh.effectiveSelector.paths.some(
-                      (root) =>
-                        file.path.slice(0, -"/automations.yaml".length) === root ||
-                        file.path.startsWith(`${root}/`),
-                    ) &&
+                    (fresh.effectiveSelector.wholeWorkspace === true ||
+                      fresh.effectiveSelector.paths.some(
+                        (root) =>
+                          file.path.slice(0, -"/automations.yaml".length) === root ||
+                          file.path.startsWith(`${root}/`),
+                      )) &&
                     storage.automationSwitchableFolder(
                       share.workspaceId,
                       file.path.slice(0, -"/automations.yaml".length),
@@ -211,33 +244,39 @@ export function createLinkReadRoutes(
               : {}),
           };
         });
+        return linkJsonResponse(
+          fresh,
+          {
+            ...changed,
+            ok: true,
+            ...memberReach(fresh),
+            effectiveSelector: presentation.selector,
+            access: fresh.access,
+            subjectName: subjectName(fresh.shareId, request, fresh.effectiveSelector),
+            ...linkChannel(fresh.grantId),
+            files,
+            nextCursor: snapshot.nextCursor,
+            epochLogFloor: snapshot.epochLogFloor,
+            ...freshness,
+          },
+          request.signal,
+        );
+      };
+      const response = capability.credential.kind === "member" ? storage.readShareTx(read) : read();
       storage.indexReceivedWorkTargets(observed);
-      return linkJsonResponse(
-        fresh,
-        {
-          ...changed,
-          ok: true,
-          effectiveSelector: presentation.selector,
-          access: fresh.access,
-          subjectName: subjectName(fresh.shareId, request),
-          ...linkChannel(fresh.grantId),
-          files,
-          nextCursor: snapshot.nextCursor,
-          epochLogFloor: snapshot.epochLogFloor,
-          ...freshness,
-        },
-        request.signal,
-      );
+      return response;
     }
 
     const epochLogFloor = storage.getEpochLogFloor(share.workspaceId);
     if (route.route === "link-log") {
       const url = new URL(request.url);
       const currentOnly = url.searchParams.get("current") === "true";
-      if (!currentOnly && capability.access !== "edit") throw notFound();
+      if (!currentOnly && capability.credential.kind !== "member" && capability.access !== "edit")
+        throw notFound();
       const freshRead = () => {
         const fresh = requireFresh();
-        if (!currentOnly && fresh.access !== "edit") throw notFound();
+        if (!currentOnly && fresh.credential.kind !== "member" && fresh.access !== "edit")
+          throw notFound();
         return fresh;
       };
       const requestedSince = parseCursor(url.searchParams.get("since"));
@@ -247,7 +286,7 @@ export function createLinkReadRoutes(
       let page = filteredLogPage(
         share.workspaceId,
         share.shareId,
-        capability.effectiveSelector,
+        () => freshRead().effectiveSelector,
         since,
         limit,
         "accountless",
@@ -279,13 +318,12 @@ export function createLinkReadRoutes(
                 signal: request.signal,
                 shouldPark: () => {
                   try {
-                    const fresh = freshRead();
                     const currentEpochLogFloor = storage.getEpochLogFloor(share.workspaceId);
                     if (currentEpochLogFloor !== epochLogFloor) return false;
                     const checked = filteredLogPage(
                       share.workspaceId,
                       share.shareId,
-                      fresh.effectiveSelector,
+                      () => freshRead().effectiveSelector,
                       scanSince,
                       limit,
                       "accountless",
@@ -312,12 +350,11 @@ export function createLinkReadRoutes(
             throw error;
           }
 
-          const fresh = freshRead();
           const currentEpochLogFloor = storage.getEpochLogFloor(share.workspaceId);
           page = filteredLogPage(
             share.workspaceId,
             share.shareId,
-            fresh.effectiveSelector,
+            () => freshRead().effectiveSelector,
             Math.max(scanSince, currentEpochLogFloor),
             limit,
             "accountless",
@@ -348,12 +385,11 @@ export function createLinkReadRoutes(
             );
           }
         }
-        const fresh = freshRead();
         const currentEpochLogFloor = storage.getEpochLogFloor(share.workspaceId);
         page = filteredLogPage(
           share.workspaceId,
           share.shareId,
-          fresh.effectiveSelector,
+          () => freshRead().effectiveSelector,
           Math.max(scanSince, currentEpochLogFloor),
           limit,
           "accountless",
@@ -399,10 +435,10 @@ export function createLinkReadRoutes(
     });
     const byteLength =
       currentByteLength ??
-      (capability.access === "edit"
+      (capability.credential.kind === "member" || capability.access === "edit"
         ? linkRevisionByteLength(
             share.workspaceId,
-            capability.effectiveSelector,
+            () => requireFresh().effectiveSelector,
             route.sha256,
             epochLogFloor,
           )
@@ -432,11 +468,16 @@ export function createLinkReadRoutes(
       const blob = storage.getBlob(share.workspaceId, route.sha256);
       if (!blob || blob.byteLength !== byteLength) throw notFound();
       const fresh = requireFresh();
-      if (currentByteLength === null && fresh.access !== "edit") throw notFound();
+      if (
+        currentByteLength === null &&
+        fresh.credential.kind !== "member" &&
+        fresh.access !== "edit"
+      )
+        throw notFound();
       // An agent's download checks its token before every chunk, so it stops
       // once the token expires or its connection or link ends.
       const guard =
-        capability.credential.kind === "agent"
+        capability.credential.kind === "agent" || capability.credential.kind === "member"
           ? () => {
               requireFresh();
             }

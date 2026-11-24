@@ -1,4 +1,4 @@
-import { visibleSharePath } from "@dohc/security-contract/share-selector";
+import { visibleSharePath, type ShareAccess } from "@dohc/security-contract/share-selector";
 import { CHAT_FILE_LINK_WITHHELD } from "@dohc/workspace-contracts/chat-mentions";
 import { describe, expect, it } from "vitest";
 import {
@@ -28,6 +28,27 @@ import {
   type ShareSelector,
   type WorkspaceShareSelector,
 } from "./shareFilter";
+import type { MemberReach } from "./storage/memberReach";
+
+// A member whose rules give `level` everywhere.
+function memberAt(level: ShareAccess): WorkspaceShareSelector {
+  const reach: MemberReach = {
+    evaluated: { role: "member", level, rules: [] },
+    signature: () => "test",
+    keyedSignature: () => "test",
+    levelAt: () => level,
+    folderLevel: () => level,
+    pathExists: () => true,
+    hasLevel: (wanted) => wanted === level,
+    groupLevel: () => level,
+    hasGroupLevel: (wanted) => wanted === level,
+    nearestRule: () => "",
+    pathVisibleBeforeMoment: () => true,
+    objectVisible: () => true,
+    objectPath: () => null,
+  };
+  return { kind: "workspace", role: "member", reach };
+}
 
 // A resolver that knows no file-linked thread and no object. Channel-share
 // cases carry it so their fixtures state the file half explicitly instead of
@@ -145,17 +166,15 @@ describe("share selector validation", () => {
 
   it("requires a nonempty main-version file selector, or the whole workspace, at exact Edit access", () => {
     expect(isLiveEditShareSelector({ ...pathShare, access: "edit" })).toBe(true);
-    expect(isLiveEditShareSelector({ kind: "workspace", access: "edit", role: "member" })).toBe(
-      true,
-    );
+    expect(isLiveEditShareSelector(memberAt("edit"))).toBe(true);
     for (const selector of [
       pathShare,
       { ...pathShare, access: "comment" as const },
       { ...pathShare, access: "edit" as const, versionId: "pinned-version" },
       { ...pathShare, access: "edit" as const, paths: [] },
       { kind: "chat" as const, channelWireId: "channel-1", access: "read-write" as const },
-      { kind: "workspace" as const, access: "view" as const, role: "member" as const },
-      { kind: "workspace" as const, access: "comment" as const, role: "member" as const },
+      memberAt("view"),
+      memberAt("comment"),
     ]) {
       expect(isLiveEditShareSelector(selector), JSON.stringify(selector)).toBe(false);
     }
@@ -449,6 +468,43 @@ describe("share op filter", () => {
         .allowed,
     ).toBe(false);
   });
+
+  it.each([false, true])(
+    "serves a rename's old path and payload at Edit only when visible before the rename: %s",
+    (visibleBefore) => {
+      const selector = memberAt("edit");
+      selector.reach.pathVisibleBeforeMoment = () => visibleBefore;
+      const beforeSha = "b".repeat(64);
+      const afterSha = "a".repeat(64);
+      const decision = filterOpForShare(
+        selector,
+        "moment.append",
+        momentPayload({
+          operation: "rename",
+          payloadBeforePath: "HR/layoff-plan.md",
+          beforePath: "HR/layoff-plan.md",
+          payloadBeforeBlobSha256: beforeSha,
+        }),
+      );
+      expect(decision).toMatchObject({ allowed: true, blobSha256s: [afterSha] });
+      if (!decision.allowed) return;
+      expect(decision.payload).toMatchObject({
+        operation: visibleBefore ? "rename" : "write",
+        path: "docs/a.md",
+        payloadAfterPath: "docs/a.md",
+        payloadAfterBlobSha256: afterSha,
+        payloadBeforeBlobSha256: visibleBefore ? beforeSha : null,
+      });
+      if (visibleBefore) {
+        expect(decision.payload).toHaveProperty("payloadBeforePath", "HR/layoff-plan.md");
+        expect(decision).not.toHaveProperty("reachMove");
+      } else {
+        expect(JSON.stringify(decision)).not.toContain("HR/");
+        expect(JSON.stringify(decision)).not.toContain(beforeSha);
+        expect(decision.reachMove).toBe("arrival");
+      }
+    },
+  );
 
   it("denies a moment when any referenced path is outside the selector (boundary-crossing rename)", () => {
     const rename = momentPayload({
@@ -1994,7 +2050,7 @@ describe("a new page under Edit", () => {
     recordedAtMs: 1,
     ...overrides,
   });
-  const member: WorkspaceShareSelector = { kind: "workspace", access: "edit", role: "member" };
+  const member = memberAt("edit");
   // The owner's main holds `docs/plan.md`, a Collection at `trip/packing`,
   // and a dataset at `trip/people`.
   const files = ["docs/plan.md", "trip/packing/collection.yaml", "trip/people/dataset.json"];
@@ -2026,10 +2082,7 @@ describe("a new page under Edit", () => {
 
   it("refuses View and Comment", () => {
     for (const access of ["view", "comment"] as const) {
-      expect(
-        decide({ kind: "workspace", access, role: "member" }, [page("docs/idea.md")]),
-        access,
-      ).toEqual(REFUSED);
+      expect(decide(memberAt(access), [page("docs/idea.md")]), access).toEqual(REFUSED);
     }
   });
 
@@ -2064,13 +2117,7 @@ describe("a new page under Edit", () => {
       const decision = decide(member, [page(path)], true);
       expect(decision.allowed && decision.write.kind, path).toBe("new-page");
     }
-    expect(
-      decide(
-        { kind: "workspace", access: "comment", role: "member" },
-        [page("drafts/idea.md")],
-        true,
-      ),
-    ).toEqual(REFUSED);
+    expect(decide(memberAt("comment"), [page("drafts/idea.md")], true)).toEqual(REFUSED);
   });
 
   it("refuses a folder marker, however it is spelled, from a member or an admin by any lane", () => {

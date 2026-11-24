@@ -1,4 +1,4 @@
-import { shareAccessRank } from "@dohc/security-contract/share-selector";
+import { isShareAccessValue, shareAccessRank } from "@dohc/security-contract/share-selector";
 import {
   effectiveShareSelector,
   chatSideOf,
@@ -11,6 +11,7 @@ import {
   type AnyShareSelector,
   type GroupShareSelector,
   type ShareSelector,
+  type PathShareSelector,
   type StoredAnyShareSelector,
   type WorkspaceShareSelector,
 } from "./shareFilter";
@@ -24,6 +25,19 @@ import {
   readCurrentShareGrant,
   type CurrentShareGrantPrincipal,
 } from "./storage/currentShareGrant";
+
+/**
+ * Authorizes and reads in one read transaction, so the read sees the grant
+ * and access rules it was authorized under. Inside a transaction already, it
+ * joins that one.
+ */
+export function readAuthorized<A, T>(
+  storage: Pick<SyncRelayStorage, "readShareTx">,
+  authorize: () => A,
+  read: (authorized: A) => T,
+): T {
+  return storage.readShareTx(() => read(authorize()));
+}
 
 export type ShareAction =
   | "read"
@@ -44,7 +58,7 @@ type ShareAuthorizationStorage = Pick<
   | "listActiveShareGrantsForRecipient"
   | "workspaceIsOwnedBy"
 > &
-  Partial<Pick<SyncRelayStorage, "workspaceMemberGrantRole">>;
+  Partial<Pick<SyncRelayStorage, "workspaceMemberGrantRole" | "memberReach">>;
 
 export interface AuthorizedShareAction<Selector extends AnyShareSelector = AnyShareSelector> {
   ok: true;
@@ -205,14 +219,14 @@ export function authorizeLinkShareAction(
   input: Omit<ShareGrantAuthorizationInput, "principal" | "action"> & {
     action: "read" | "live-edit" | "direct-write";
   },
-): ShareAuthorizationResult<ShareSelector> {
+): ShareAuthorizationResult<PathShareSelector> {
   const result = authorizeShareGrantAction({ ...input, principal: { kind: "link" } });
   // A link never holds a workspace share.
   const files =
     result.ok && !isWorkspaceSelector(result.effectiveSelector)
       ? fileSideOf(result.effectiveSelector)
       : null;
-  if (!result.ok || !files) return { ok: false, reason: "gauntlet" };
+  if (!result.ok || !files || !("access" in files)) return { ok: false, reason: "gauntlet" };
   return { ...result, effectiveSelector: files };
 }
 
@@ -270,13 +284,45 @@ function validateCurrentShareGrant(
   if (selectorTargetsBlockedChannel(storage, share.workspaceId, storedSelector, use)) {
     return { ok: false, reason: "gauntlet" };
   }
-  const effectiveSelector = effectiveShareSelector(storedSelector, grant.access, workspaceRole);
+  if (workspaceRole !== undefined) {
+    if (!isShareAccessValue(grant.access)) return { ok: false, reason: "gauntlet" };
+    const reach = storage.memberReach?.(
+      share.workspaceId,
+      grant.principalUserId!,
+      workspaceRole,
+      grant.access,
+    );
+    if (!reach) return { ok: false, reason: "gauntlet" };
+    return {
+      ok: true,
+      share,
+      grant,
+      effectiveSelector: { kind: "workspace", role: workspaceRole, reach },
+    };
+  }
+  const effectiveSelector = effectiveShareSelector(storedSelector, grant.access);
   if (!effectiveSelector) return { ok: false, reason: "gauntlet" };
 
   return { ok: true, share, grant, effectiveSelector };
 }
 
+// A workspace member has no one level. Their pushes and proposals pass here
+// when they hold the level on some folder or Group; the filter then judges
+// each op's path or Group. Every other member check names its path or Group,
+// because a workspace selector carries levels only per path (`pathLevel`) and
+// per Group (`workspaceChatAccess`).
 function actionAllowed(authorized: AuthorizedShareAction, action: ShareAction): boolean {
+  const selector = authorized.effectiveSelector;
+  const files = fileSideOf(selector);
+  const level = files && "access" in files ? files.access : null;
+  const member = isWorkspaceSelector(selector) ? selector.reach : null;
+  const memberEdit = !!member && member.hasLevel("edit");
+  const memberComment =
+    memberEdit ||
+    (!!member &&
+      (member.hasLevel("comment") ||
+        member.hasGroupLevel("comment") ||
+        member.hasGroupLevel("edit")));
   switch (action) {
     case "read":
     case "presence":
@@ -289,41 +335,39 @@ function actionAllowed(authorized: AuthorizedShareAction, action: ShareAction): 
       if (chat) return chat.access === "read-write";
       // A workspace share posts in its Groups and comments on its files at
       // Comment or Edit; the filter decides which Groups and files.
-      const files = fileSideOf(authorized.effectiveSelector);
       return (
         files !== null &&
         namesFiles(files) &&
-        (files.access === "comment" || files.access === "edit")
+        (member ? memberComment : level === "comment" || level === "edit")
       );
     }
     case "propose": {
-      const files = fileSideOf(authorized.effectiveSelector);
-      return files !== null && namesFiles(files) && files.access === "edit";
+      return files !== null && namesFiles(files) && (member ? memberEdit : level === "edit");
     }
     // Writing a Collection's own files straight into the owner's workspace
     // (ADR 0013), for an Edit share link. A named recipient keeps the
     // proposal rule and its own route; neither widens the other.
     case "direct-write": {
-      const files = fileSideOf(authorized.effectiveSelector);
       return (
         authorized.grant.principalKind === "link" &&
         files !== null &&
         files.paths.length > 0 &&
-        files.access === "edit"
+        level === "edit"
       );
     }
     case "live-edit":
       return (
         (authorized.grant.principalKind === "user" || authorized.grant.principalKind === "link") &&
-        isLiveEditShareSelector(authorized.effectiveSelector)
+        isLiveEditShareSelector(authorized.effectiveSelector) &&
+        (member ? memberEdit : level === "edit")
       );
   }
 }
 
 function effectiveAccessRank(selector: AnyShareSelector): number {
-  if (isWorkspaceSelector(selector)) return shareAccessRank(selector.access);
+  if (isWorkspaceSelector(selector)) return shareAccessRank(selector.reach.evaluated.level);
   if ("kind" in selector) {
     return selector.access === "read-write" ? 1 : 0;
   }
-  return shareAccessRank(selector.access);
+  return "access" in selector ? shareAccessRank(selector.access) : -1;
 }

@@ -9,7 +9,8 @@ import WorkspaceApp from "./WorkspaceApp";
 import { memberDocument, memberPageReady, openMemberPage } from "./memberLive";
 import "./MemberLivePage";
 import { jsonResponse, setControlValue, settle } from "./testing";
-import { writeDraft } from "./drafts";
+import { readDraft, writeDraft } from "./drafts";
+import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
 
 // A workspace member's page in a browser: the workspace's files, a page, and
 // its Groups, at the member's level, and what it says when that ends.
@@ -26,19 +27,19 @@ const GRANT = "grant-1",
 const FILES = [
   {
     path: "trip/plan.md",
-    objectId: "object-plan",
+    objectId: `share-object:v1:${"1".repeat(64)}`,
     blobSha256: "a".repeat(64),
     contentKind: "text",
   },
   {
     path: "trip/to-pack.md",
-    objectId: "object-pack",
+    objectId: `share-object:v1:${"2".repeat(64)}`,
     blobSha256: "b".repeat(64),
     contentKind: "text",
   },
   {
     path: "welcome/readme.md",
-    objectId: "object-readme",
+    objectId: `share-object:v1:${"3".repeat(64)}`,
     blobSha256: "c".repeat(64),
     contentKind: "text",
   },
@@ -146,8 +147,12 @@ afterEach(async () => {
 function server(
   options: {
     level?: Level;
+    // A folder rule's level on a file, where it differs from the member level.
+    fileLevels?: Record<string, Level>;
     levelChangedBy?: string;
     signedIn?: boolean;
+    // The account's session ended while the page was open.
+    expired?: boolean;
     groups?: Array<{ wire: string; name: string; type?: "posts" | "chat" | "both" }>;
     files?: typeof FILES;
     member?: boolean;
@@ -160,13 +165,33 @@ function server(
     holdLogs?: boolean;
     user?: string;
     signOutFails?: boolean;
+    // The only account the grant belongs to. Another account's reads are refused.
+    memberOf?: string;
+    // The read that catches an Edit member's files up to the log fails, as if the log moved on.
+    catchUpFails?: boolean;
+    // The workspace holds more files than a browser lists.
+    tooLarge?: boolean;
+    // The relay refuses the file list, as it does past its scan cap, while the grant still opens.
+    currentRefused?: boolean;
+    // The file list fails to arrive, as on a lost connection.
+    currentUnreachable?: boolean;
+    // The grant answers this many more reads, then loses its connection.
+    metaAnswers?: number;
+    // The account's session cannot be checked.
+    sessionFails?: boolean;
   } = {},
 ) {
   let signedIn = options.signedIn ?? true,
     groupsFail = options.groupsFail ?? 0;
-  const files = options.files ?? FILES;
-  // A test can change the level while the page is open; the next read of the workspace's meta carries it.
+  // A test can change the level, the rules or the files while the page is open; the next read carries them.
+  const files = () =>
+    (options.files ?? FILES).map((file) => ({
+      ...file,
+      access: options.fileLevels?.[file.path] ?? levelNow(),
+    }));
   const levelNow = () => options.level ?? "comment";
+  // The relay's keyed signature of the member's reach: it changes with the level or a rule.
+  const reach = () => JSON.stringify([levelNow(), options.fileLevels ?? {}]);
   const access = () => (levelNow() === "view" ? "read-only" : "read-write");
   // A test can add a Group, or sign in as another account, while the page is open.
   const groups = () =>
@@ -177,8 +202,9 @@ function server(
   const user = () => options.user ?? "sam";
   const meta = () => ({
     ok: true,
-    effectiveSelector: { paths: [], versionId: null, access: levelNow(), wholeWorkspace: true },
+    effectiveSelector: { paths: [], versionId: null, wholeWorkspace: true },
     access: levelNow(),
+    reach: reach(),
     subjectName: "Trip",
     lastSettledAtMs: Date.now(),
     lastSettledKnown: true,
@@ -204,9 +230,14 @@ function server(
     const url = new URL(String(input), "https://share.test"),
       signal = init?.signal ?? new AbortController().signal;
     const headers = new Headers(init?.headers);
+    if (url.pathname === "/api/account/session" && options.sessionFails)
+      throw new TypeError("Failed to fetch");
     if (url.pathname === "/api/account/session")
       return jsonResponse({
-        user: signedIn ? { id: user(), name: user() === "sam" ? "Sam Rivera" : "Lee Park" } : null,
+        user:
+          signedIn && !options.expired
+            ? { id: user(), name: user() === "sam" ? "Sam Rivera" : "Lee Park" }
+            : null,
       });
     if (url.pathname === "/api/account/sign-in") {
       signedIn = true;
@@ -219,7 +250,9 @@ function server(
     }
     // share-web gives an account that holds no membership the answer it gives an unknown grant.
     if (
-      options.member === false &&
+      (options.member === false ||
+        options.expired ||
+        (options.memberOf !== undefined && options.memberOf !== user())) &&
       (url.pathname.startsWith("/api/view/") || url.pathname.startsWith("/api/named-chat/"))
     )
       return jsonResponse({ ok: false, error: "not found" }, 404);
@@ -227,13 +260,25 @@ function server(
       expect(headers.get("x-dohc-link-session") ?? url.searchParams.get("session")).toBe(SESSION);
       if (url.pathname === "/api/view/current" && options.openHeld)
         return hold("current", url, signal);
+      if (url.pathname === "/api/view/current" && options.tooLarge)
+        return jsonResponse(linkRefusalBody("link_too_many_files"), 413);
+      if (url.pathname === "/api/view/current" && options.currentRefused)
+        return jsonResponse({ ok: false, error: "not found" }, 404);
+      if (url.pathname === "/api/view/current" && options.currentUnreachable)
+        throw new TypeError("Failed to fetch");
       if (url.pathname === "/api/view/current")
-        return jsonResponse({ ...meta(), files, nextCursor: 7, epochLogFloor: 0 });
-      if (url.pathname === "/api/view/meta") return jsonResponse(meta());
+        return jsonResponse({ ...meta(), files: files(), nextCursor: 7, epochLogFloor: 0 });
+      if (url.pathname === "/api/view/meta") {
+        if (options.metaAnswers !== undefined && options.metaAnswers-- <= 0)
+          throw new TypeError("Failed to fetch");
+        return jsonResponse(meta());
+      }
       if (url.pathname === "/api/view/log")
         return url.searchParams.has("hold") || options.holdLogs
           ? hold("log", url, signal)
-          : jsonResponse({ ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0 });
+          : options.catchUpFails
+            ? jsonResponse({ ok: false, error: "not found" }, 404)
+            : jsonResponse({ ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0 });
       const sha = url.pathname.slice("/api/view/blob/".length);
       return new Response(TEXT[sha] ?? "", { headers: { "content-type": "text/plain" } });
     }
@@ -255,9 +300,16 @@ function server(
           access: access(),
         })),
       });
+    // The relay answers 404 for a file or Group the member no longer reaches.
+    const gone = (place: { path?: unknown; channelWireId?: unknown }) =>
+      typeof place.path === "string"
+        ? !files().some((file) => file.path === place.path)
+        : typeof place.channelWireId === "string" &&
+          !groups().some((group) => group.wire === place.channelWireId);
     if (url.pathname === "/api/named-chat/messages" && init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
       posts.push(body);
+      if (gone(body)) return jsonResponse({ ok: false, error: "not found" }, 404);
       if (options.postFails)
         return jsonResponse(
           { ok: false, error: "refused", code: options.postFails.code },
@@ -280,6 +332,11 @@ function server(
     }
     // A file's Comments, by the file's path.
     const path = url.searchParams.get("path");
+    if (
+      url.pathname === "/api/named-chat/messages" &&
+      gone({ path: path ?? undefined, channelWireId: url.searchParams.get("channelWireId") })
+    )
+      return jsonResponse({ ok: false, error: "not found" }, 404);
     if (url.pathname === "/api/named-chat/messages" && path !== null) {
       if (url.searchParams.has("since")) return hold("comments", url, signal);
       return jsonResponse({
@@ -287,7 +344,10 @@ function server(
         path,
         nextCursor: 30,
         olderCursor: null,
-        messages: path === "trip/plan.md" ? [chat(9, "Nine is early")] : [],
+        // The relay keeps Comments on the file's object, so a new file at the same path has none.
+        messages: files().some((file) => file.path === path && file.objectId === FILES[0]!.objectId)
+          ? [chat(9, "Nine is early")]
+          : [],
       });
     }
     if (url.pathname === "/api/named-chat/messages" && url.searchParams.has("since"))
@@ -730,6 +790,36 @@ it("shows a reply count at View only where a post has replies, and still opens t
   await click("1 reply");
   await settle(() => listed().includes("Agreed"));
   expect(groupPanel().querySelector('textarea[name="body"]')).toBeNull();
+});
+
+it("reopens a post's thread at View while it holds an unsent first reply, so the person can copy it", async () => {
+  const options: Parameters<typeof server>[0] = {
+    level: "comment",
+    groups: [{ wire: "wire-plans", name: "plans", type: "posts" }],
+    history: { "wire-plans": [chat(6, "Train or car?", "ana", { threadId: "t-ride" })] },
+  };
+  server(options);
+  await render();
+  await settle(() => listed().includes("Train or car?"));
+  await click("Reply");
+  setControlValue(composer(), "Car, I think");
+  // The member is lowered to View, and the page opens again, as Try again opens it after a failed read.
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  held = [];
+  options.level = "view";
+  await render();
+  await settle(() => listed().includes("Train or car?"));
+  await click("Unsent reply");
+  await settle(
+    () =>
+      groupPanel().querySelector<HTMLTextAreaElement>('textarea[aria-label="Your unsent message"]')
+        ?.value === "Car, I think",
+  );
+  expect(groupPanel().querySelector('textarea[name="body"]')).toBeNull();
+  await click("Discard");
+  await click("Back to posts");
+  expect(button("Unsent reply")).toBeUndefined();
 });
 
 // History arrives a page at a time, newest first, so a post's replies can arrive a page before the message that starts it.
@@ -1227,7 +1317,7 @@ it.each([
   },
 );
 
-async function editing(options: { level?: Level; member?: boolean }) {
+async function editing(options: { level?: Level; member?: boolean; catchUpFails?: boolean }) {
   server(options);
   const session = liveSession();
   vi.mocked(openMemberPage).mockResolvedValue(ADMITTED);
@@ -1424,7 +1514,7 @@ it("keeps each account's drafts and unsent edits from another account signed in 
   expect(composer().value).toBe("Half a thought");
 });
 
-it("shows no account's kept edits on a fresh load before sign-in, then only the signed-in account's, still after its session ends", async () => {
+it("shows kept edits only while their account is signed in: none before sign-in or after sign-out, and only that account's", async () => {
   writeDraft(
     "unsent-edits",
     JSON.stringify([
@@ -1450,14 +1540,12 @@ it("shows no account's kept edits on a fresh load before sign-in, then only the 
       (node) => node.textContent,
     ),
   ).toEqual(["Unsent edits to to-pack.md"]);
-  // Signed out on the same page, the person still sees their own kept text, and only theirs.
+  // Signed out, the sign-in form may be filled by someone else, so it shows no kept text. The tab still keeps it.
   await click("Sign out");
   await settle(() => Boolean(container.querySelector('input[name="email"]')));
-  expect(
-    [...container.querySelectorAll('[aria-label="Unsent edits"] summary')].map(
-      (node) => node.textContent,
-    ),
-  ).toEqual(["Unsent edits to to-pack.md"]);
+  expect(recovery()).toBeNull();
+  expect(container.innerHTML).not.toContain("Socks.");
+  expect(JSON.parse(readDraft("unsent-edits"))).toHaveLength(2);
 });
 
 it("stops editing when the person loses Edit, and keeps the unsent text to copy, download or discard with Undo", async () => {
@@ -1613,9 +1701,12 @@ it("keeps the unsent text after the membership ends, with none of the workspace"
 });
 
 it("says the membership ended and shows none of the workspace once the member is removed", async () => {
-  server({ level: "comment" });
+  const options: { level: Level; member?: boolean } = { level: "comment" };
+  server(options);
   await render();
   await opened();
+  // The owner removed the member: every workspace read now refuses, so a fresh read confirms it.
+  options.member = false;
   await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
   await settle(() => text().includes("Your membership in Trip ended."));
   // A browser keeps no copy of the workspace. The next step is one a browser can take.
@@ -1639,7 +1730,7 @@ it("refuses an account that is not a member, names it, and offers Switch account
   await render();
   await settle(() => text().includes("dohc could not open this workspace with this account."));
   expect(container.querySelector(".state-message p")?.textContent).toBe(
-    "This browser is signed in as Sam Rivera, not the account the owner invited.",
+    "This browser is signed in as Sam Rivera. Ask the owner to invite this account, or switch to another.",
   );
   await click("Switch account");
   await settle(() => text().includes("Sign in to open this workspace"));
@@ -1818,4 +1909,425 @@ it("copies a toast's text with the Copy button beside it", async () => {
   expect(writeText).toHaveBeenCalledWith(
     'dohc could not open "plan.md" for editing\nThe owner paused live editing for this page. You can still read it.',
   );
+});
+
+// A folder rule gives a member a level on its files that can differ from the member level.
+const badge = () => container.querySelector(".workspace-page .badge")?.textContent;
+const commentBox = () => commentsPanel().querySelector('textarea[name="body"]');
+
+it("opens the editor and the comment box where a rule gives a View member Edit, and says Can edit", async () => {
+  server({ level: "view", fileLevels: { "trip/plan.md": "edit", "trip/to-pack.md": "edit" } });
+  vi.mocked(openMemberPage).mockResolvedValue(ADMITTED);
+  vi.mocked(memberDocument).mockReturnValue({ session: liveSession() as never, close: vi.fn() });
+  await render();
+  await settle(() => container.querySelector('[role="textbox"]') !== null);
+  expect(vi.mocked(openMemberPage)).toHaveBeenCalledWith(
+    GRANT,
+    "trip/plan.md",
+    expect.any(AbortSignal),
+  );
+  expect(badge()).toBe("Can edit");
+  await showComments();
+  expect(commentBox()).not.toBeNull();
+  // The member level still holds outside the folder.
+  const tree = container.querySelector('nav[aria-label="Workspace files"]')!;
+  await act(async () =>
+    [...tree.querySelectorAll<HTMLButtonElement>(".file")]
+      .find((node) => node.textContent === "readme.md")!
+      .click(),
+  );
+  await settle(() => text().includes("Welcome.") && badge() === "View only");
+  expect(commentBox()).toBeNull();
+});
+
+it("shows View only, no editor and no comment box where a rule lowers an Edit member to View", async () => {
+  server({ level: "edit", fileLevels: { "trip/plan.md": "view" } });
+  await render();
+  await opened();
+  expect(badge()).toBe("View only");
+  expect(vi.mocked(openMemberPage)).not.toHaveBeenCalled();
+  await click("Comments");
+  await settle(() => commentsPanel().textContent?.includes("Nine is early") === true);
+  expect(commentBox()).toBeNull();
+});
+
+it("reads the files again when a rule changes between reads, so a folder that opened shows its files at their level", async () => {
+  const options: { level: Level; files?: typeof FILES; fileLevels?: Record<string, Level> } = {
+    level: "comment",
+    files: FILES.filter((file) => !file.path.startsWith("welcome/")),
+  };
+  server(options);
+  await render();
+  await opened();
+  expect(text()).not.toContain("readme.md");
+  // The owner opened a folder and lowered another between two reads. Its files are older than the log's cursor.
+  options.files = FILES;
+  options.fileLevels = { "trip/plan.md": "view" };
+  await act(async () =>
+    following("log")[0]!.answer({ ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0 }),
+  );
+  await settle(() => text().includes("readme.md") && badge() === "View only");
+  await settle(() => following("log").length === 1);
+});
+
+it("keeps the workspace open when a rule change refuses the held read, and shows what the fresh read brings", async () => {
+  const options: { level: Level; files?: typeof FILES } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  // The owner hid a folder. The relay refuses the read it held, as it would for a lost membership.
+  options.files = FILES.filter((file) => !file.path.startsWith("welcome/"));
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => !text().includes("readme.md") && following("log").length === 1);
+  expect(text()).not.toContain("membership");
+  expect(text()).toContain("Leave at nine.");
+});
+
+it("treats an open file's Comments going away as the file gone, not the membership, and reads the files again", async () => {
+  const options: { level: Level; files?: typeof FILES } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  await showComments();
+  // The owner moved the file into a hidden folder while its Comments were open.
+  options.files = FILES.filter((file) => file.path !== "trip/plan.md");
+  await act(async () => following("comments")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(
+    () =>
+      !text().includes("plan.md") &&
+      commentsPanel().textContent?.includes("No comments yet.") === true,
+  );
+  expect(text()).not.toContain("membership");
+  expect(commentsPanel().textContent).toContain("to-pack.md");
+});
+
+it("treats an open Group going away as the Group gone, not the membership, and lists the rest", async () => {
+  const options: {
+    level: Level;
+    groups?: Array<{ wire: string; name: string }>;
+  } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  const composer = () => groupPanel().querySelector<HTMLTextAreaElement>('textarea[name="body"]');
+  await act(async () => setControlValue(composer()!, "Bring a map"));
+  // The owner deleted the open Group. The post comes back 404.
+  options.groups = [{ wire: "wire-food", name: "food" }];
+  await act(async () =>
+    groupPanel().querySelector<HTMLButtonElement>('button[type="submit"]')!.click(),
+  );
+  await settle(
+    () =>
+      groupPanel().querySelector(".group-list") !== null &&
+      !groupPanel().textContent?.includes("plans"),
+  );
+  expect(text()).not.toContain("membership");
+  expect(text()).toContain("Leave at nine.");
+});
+
+it("says the session ended, not the membership, when it ends while the page is open", async () => {
+  const options: { level: Level; expired?: boolean } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  options.expired = true;
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => text().includes("Your session ended. Sign in again to keep reading."));
+  expect(text()).not.toContain("membership");
+});
+
+it("keeps an Edit workspace open when the read that catches its files up fails while its grant still opens", async () => {
+  const options: { level: Level; catchUpFails?: boolean } = { level: "edit" };
+  await editing(options);
+  const dated = () => container.querySelector<HTMLElement>("header .workspace-dated");
+  // A rule change refuses the held read. The fresh list arrives, but the log read after it fails.
+  options.catchUpFails = true;
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => dated() !== null);
+  expect(text()).not.toContain("membership");
+  expect(container.querySelector('[role="textbox"]')).not.toBeNull();
+  options.catchUpFails = false;
+  await settle(() => dated() === null && following("log").length === 1);
+});
+
+it("says another account signed in, not that the membership ended, when another tab switches accounts", async () => {
+  writeDraft(
+    "unsent-edits",
+    JSON.stringify([{ id: 1, accountId: "sam", path: "trip/plan.md", text: "Bring the tickets." }]),
+  );
+  const options: { level: Level; memberOf: string; user?: string } = {
+    level: "comment",
+    memberOf: "sam",
+  };
+  server(options);
+  await render();
+  await opened();
+  expect(recovery()!.querySelector("textarea")?.value).toBe("Bring the tickets.");
+  // Another tab signed this browser in as Lee. Sam's grant now refuses every read.
+  options.user = "lee";
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => text().includes("This browser is now signed in as Lee Park."));
+  expect(container.querySelector(".state-message p")?.textContent).toBe(
+    "Sign in as Sam Rivera to keep working in Trip.",
+  );
+  expect(text()).not.toContain("membership");
+  expect(text()).not.toContain("Leave at nine.");
+  // Lee sees none of Sam's kept edits, here or on the sign-in form.
+  expect(recovery()).toBeNull();
+  expect(container.innerHTML).not.toContain("Bring the tickets.");
+  await click("Switch account");
+  await settle(() => text().includes("Sign in to open this workspace"));
+  expect(recovery()).toBeNull();
+  expect(container.innerHTML).not.toContain("Bring the tickets.");
+  // Sam's edits are still kept, and come back once Sam signs in again.
+  options.user = "sam";
+  held = [];
+  await act(async () => {
+    setControlValue(container.querySelector('input[name="email"]')!, "sam@dohc.test");
+    setControlValue(container.querySelector('input[name="password"]')!, "secret");
+  });
+  await click("Sign in");
+  await opened();
+  expect(recovery()!.querySelector("textarea")?.value).toBe("Bring the tickets.");
+});
+
+it("offers Try again, not an ended membership, when it cannot check the account after a refusal", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const options: { level: Level; member?: boolean; sessionFails?: boolean } = {
+    level: "comment",
+  };
+  server(options);
+  await render();
+  await opened();
+  const dated = () => container.querySelector<HTMLElement>("header .workspace-dated");
+  const toast = () =>
+    [...container.querySelectorAll<HTMLElement>(".workspace-toast")].find((node) =>
+      node.textContent?.includes("dohc could not update this workspace's files"),
+    );
+  options.member = false;
+  options.sessionFails = true;
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => dated() !== null);
+  for (const wait of [1000, 2000]) await act(async () => vi.advanceTimersByTime(wait));
+  await settle(() => toast() !== undefined);
+  expect(text()).not.toContain("membership");
+  expect(text()).toContain("Leave at nine.");
+  options.member = true;
+  options.sessionFails = false;
+  await act(async () =>
+    [...toast()!.querySelectorAll("button")]
+      .find((node) => node.textContent === "Try again")!
+      .click(),
+  );
+  await settle(() => dated() === null && toast() === undefined && following("log").length === 1);
+});
+
+it("says a workspace too large for a browser is too large, and names the desktop app", async () => {
+  server({ level: "comment", tooLarge: true });
+  await render();
+  await settle(() => text().includes("This workspace is too large to open in a browser."));
+  expect(container.querySelector(".state-message p")?.textContent).toBe(
+    "Open it in the dohc desktop app.",
+  );
+  expect(text()).not.toContain("invite");
+});
+
+it("says the workspace grew too large for a browser, not that the membership ended", async () => {
+  const options: { level: Level; tooLarge?: boolean } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  options.tooLarge = true;
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => text().includes("This workspace is too large to open in a browser."));
+  expect(text()).not.toContain("membership");
+});
+
+it("stops offering the old level's controls when the level changes and the files cannot read again", async () => {
+  const options: { level: Level; currentRefused?: boolean } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  await click("Comments");
+  await settle(() => commentBox() !== null);
+  // The owner lowered the members to View, and the relay refuses the fresh file list while the grant still opens.
+  options.level = "view";
+  options.currentRefused = true;
+  await act(async () =>
+    following("log")[0]!.answer({ ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0 }),
+  );
+  await settle(() => text().includes("dohc could not open this workspace."));
+  expect(container.querySelector('textarea[name="body"]')).toBeNull();
+  expect(text()).not.toContain("Can comment");
+  expect(text()).not.toContain("membership");
+  // Try again opens the workspace at its new level once the files read.
+  options.currentRefused = false;
+  await click("Try again");
+  await settle(() => text().includes("Leave at nine.") && badge() === "View only");
+});
+
+it("opens a replaced file's own Comments, not its predecessor's", async () => {
+  const options: { level: Level; files?: typeof FILES } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  await showComments();
+  expect(commentsPanel().textContent).toContain("Nine is early");
+  const box = () => commentsPanel().querySelector<HTMLTextAreaElement>('textarea[name="body"]')!;
+  await settle(() => commentBox() !== null);
+  setControlValue(box(), "Meant for the old plan");
+  // The owner put a different file at the same path. The old file's follow ends.
+  const before = options.files;
+  options.files = FILES.map((file) =>
+    file.path === "trip/plan.md"
+      ? { ...file, objectId: `share-object:v1:${"4".repeat(64)}`, blobSha256: "c".repeat(64) }
+      : file,
+  );
+  await act(async () => following("comments")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(
+    () =>
+      text().includes("Welcome.") &&
+      commentsPanel().textContent?.includes("No comments yet.") === true &&
+      following("comments").length === 1,
+  );
+  expect(commentsPanel().textContent).not.toContain("Nine is early");
+  expect(text()).not.toContain("membership");
+  // The draft typed on the old file stays with it, so Send cannot post it to the new one.
+  expect(box().value).toBe("");
+  // The old file coming back brings its draft back.
+  options.files = before;
+  await act(async () => following("comments")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => commentsPanel().textContent?.includes("Nine is early") === true);
+  await settle(() => box().value === "Meant for the old plan");
+});
+
+it.each(["currentRefused", "currentUnreachable"] as const)(
+  "stops offering the old level's controls when a level change refuses the held read and the files then fail (%s)",
+  async (failure) => {
+    const options: {
+      level: Level;
+      currentRefused?: boolean;
+      currentUnreachable?: boolean;
+    } = { level: "comment" };
+    server(options);
+    await render();
+    await opened();
+    await click("Comments");
+    await settle(() => commentBox() !== null);
+    // The owner lowered the members to View. The relay refuses the read it held, and the fresh file list fails.
+    options.level = "view";
+    options[failure] = true;
+    await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+    await settle(() => text().includes("dohc could not open this workspace."));
+    expect(container.querySelector('textarea[name="body"]')).toBeNull();
+    expect(text()).not.toContain("Can comment");
+    options[failure] = false;
+    await click("Try again");
+    await settle(() => text().includes("Leave at nine.") && badge() === "View only");
+  },
+);
+
+it("goes by the grant's first answer when a later read of it fails after a level change", async () => {
+  const options: { level: Level; currentRefused?: boolean; metaAnswers?: number } = {
+    level: "comment",
+  };
+  server(options);
+  await render();
+  await opened();
+  await click("Comments");
+  await settle(() => commentBox() !== null);
+  // The grant answers once, at View, and its next read fails.
+  options.level = "view";
+  options.currentRefused = true;
+  options.metaAnswers = 1;
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => text().includes("dohc could not open this workspace."));
+  expect(container.querySelector('textarea[name="body"]')).toBeNull();
+  options.currentRefused = false;
+  options.metaAnswers = undefined;
+  await click("Try again");
+  await settle(() => text().includes("Leave at nine.") && badge() === "View only");
+});
+
+it("asks the grant when the file poll fails, and opens the new level it reports", async () => {
+  const options: { level: Level } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  await click("Comments");
+  await settle(() => commentBox() !== null);
+  // The owner lowered the members to View, and the poll that would have said so failed.
+  options.level = "view";
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "unavailable" }, 503));
+  await settle(() => text().includes("Leave at nine.") && badge() === "View only");
+  expect(container.querySelector('textarea[name="body"]')).toBeNull();
+});
+
+it("stops editing when the files read again at a lower level but their catch-up fails", async () => {
+  const options: { level: Level; catchUpFails?: boolean } = { level: "edit" };
+  await editing(options);
+  options.level = "view";
+  options.catchUpFails = true;
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => container.querySelector('[role="textbox"]') === null && recovery() !== null);
+  expect(text()).not.toContain("membership");
+});
+
+it("keeps each file's comment draft apart when the relay lists files without their identity", async () => {
+  // A development relay without a link key lists files with no object identity.
+  server({
+    level: "comment",
+    files: FILES.map(({ objectId: _, ...file }) => file) as typeof FILES,
+  });
+  await render();
+  await settle(() => text().includes("Leave at nine."));
+  await click("Comments");
+  const box = () => commentsPanel().querySelector<HTMLTextAreaElement>('textarea[name="body"]');
+  await settle(() => box() !== null);
+  setControlValue(box()!, "About the plan");
+  await act(async () =>
+    [...container.querySelectorAll<HTMLElement>(".file")]
+      .find((node) => node.textContent === "to-pack.md")!
+      .click(),
+  );
+  await settle(() => text().includes("Fuel and food.") && box() !== null);
+  expect(box()!.value).toBe("");
+});
+
+it("follows a file's Comments again once the files read again still list it", async () => {
+  server({ level: "comment" });
+  await render();
+  await opened();
+  await showComments();
+  // The follow came back 404, but the file is still there.
+  await act(async () => following("comments")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => following("comments").length === 1);
+  expect(commentsPanel().textContent).toContain("Nine is early");
+  expect(text()).not.toContain("membership");
+});
+
+it("opens a replaced file's own Comments when the files read again, before its old follow ends", async () => {
+  const options: { level: Level; files?: typeof FILES; fileLevels?: Record<string, Level> } = {
+    level: "comment",
+  };
+  server(options);
+  await render();
+  await opened();
+  await showComments();
+  // The owner put a different file at the same path and changed a rule, so the files read again.
+  options.files = FILES.map((file) =>
+    file.path === "trip/plan.md"
+      ? { ...file, objectId: `share-object:v1:${"4".repeat(64)}`, blobSha256: "c".repeat(64) }
+      : file,
+  );
+  options.fileLevels = { "welcome/readme.md": "view" };
+  await act(async () =>
+    following("log")[0]!.answer({ ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0 }),
+  );
+  await settle(
+    () =>
+      text().includes("Welcome.") &&
+      commentsPanel().textContent?.includes("No comments yet.") === true,
+  );
+  expect(commentsPanel().textContent).not.toContain("Nine is early");
 });

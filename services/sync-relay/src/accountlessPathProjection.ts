@@ -14,8 +14,13 @@ interface ProjectionRoot {
   visiblePath: string;
 }
 
-interface AccountlessPathProjection {
-  selector: ShareSelector;
+/** A selector as a response shows it: a member's reach names hidden folders, so it stays on the relay. */
+export type ShownSelector<Selector extends ShareSelector> = Selector extends unknown
+  ? Omit<Selector, "reach" | "levelAt">
+  : never;
+
+interface AccountlessPathProjection<Selector extends ShareSelector> {
+  selector: ShownSelector<Selector>;
   projectPath(path: string): string | null;
   resolvePath(path: string): string | null;
   projectPayload(payload: unknown): unknown | null;
@@ -75,9 +80,9 @@ function projectNestedPaths(
   return projected;
 }
 
-export function createAccountlessPathProjection(
-  selector: ShareSelector,
-): AccountlessPathProjection {
+export function createAccountlessPathProjection<Selector extends ShareSelector>(
+  selector: Selector,
+): AccountlessPathProjection<Selector> {
   const roots = projectionRoots(selector.paths);
   const projectPath = (path: string): string | null => {
     if (roots.length === 0) return path;
@@ -92,11 +97,16 @@ export function createAccountlessPathProjection(
     return `${matched.visiblePath}${path.slice(matched.realPath.length)}`;
   };
 
+  const {
+    reach: _reach,
+    levelAt: _levelAt,
+    ...shown
+  } = selector as ShareSelector & { reach?: unknown };
   return {
     selector: {
-      ...selector,
+      ...shown,
       paths: roots.map((root) => root.visiblePath),
-    },
+    } as ShownSelector<Selector>,
     projectPath,
     resolvePath: (path) => {
       let realPath = path;

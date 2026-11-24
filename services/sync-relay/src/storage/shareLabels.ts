@@ -1,12 +1,13 @@
 import { normalizeShareLabel, type ShareLabels } from "@dohc/security-contract/share-labels";
 import type { StorageContext } from "./context";
-import { shareLabelFor, type ShareLabelReader } from "../shareFilter";
+import { shareLabelFor, type ShareLabelReader, type ShareSelector } from "../shareFilter";
 // The label is stored as the owner wrote it and withheld as it is read, so
 // a label stored before a link was withheld reads the same way.
 export function getShareLabels(
   storage: StorageContext,
   shareId: string,
   reader: ShareLabelReader,
+  readerFiles?: ShareSelector | null,
 ): ShareLabels {
   const row = storage.db
     .prepare(`SELECT l.subject_name, s.selector_json FROM sync_relay_share_labels l
@@ -14,7 +15,9 @@ export function getShareLabels(
     .get(shareId);
   const stored = normalizeShareLabel(row?.subject_name);
   return {
-    subjectName: normalizeShareLabel(shareLabelFor(String(row?.selector_json), stored, reader)),
+    subjectName: normalizeShareLabel(
+      shareLabelFor(String(row?.selector_json), stored, reader, readerFiles),
+    ),
   };
 }
 export function setShareLabels(

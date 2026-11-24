@@ -36,7 +36,12 @@ import { badRequest, relayError, RelayError } from "../errors";
 import { notifyNoticeChange } from "../relayWriteChanges";
 import { authorizeShareGrantAction } from "../shareAuthorization";
 import { showsGranterEmail } from "../shareSummaries";
-import { fileSideOf, parseStoredAnyShareSelectorJson, type ShareSelector } from "../shareFilter";
+import {
+  fileSideOf,
+  parseStoredAnyShareSelectorJson,
+  type ShareSelector,
+  pathLevel,
+} from "../shareFilter";
 import { threadShownOnPhone } from "./accountFeed";
 import type { ChatMessageAccess, PushMessage } from "../chatMessageInterest";
 import { accountName } from "./accountNames";
@@ -569,9 +574,9 @@ export function noticeChatMessage(storage: StorageContext, input: NoticeChatMess
   );
   const lead = `${senderLabel} ${input.reason === "mention" ? "mentioned you in" : "replied in"} `;
   const place = access.channel ? `#${access.place}` : access.place;
-  const body = message.body.isWellFormed()
-    ? message.body.replace(CHAT_NOTICE_BODY_REMOVALS, " ").trim()
-    : "";
+  // A recipient reading through a share sees the body that share serves.
+  const text = access.body ?? message.body;
+  const body = text.isWellFormed() ? text.replace(CHAT_NOTICE_BODY_REMOVALS, " ").trim() : "";
   storage.db.exec("SAVEPOINT chat_message_notice");
   try {
     sweepExpiredNotices(storage, recipientUserId, nowMs);
@@ -1387,7 +1392,18 @@ function fileSidesOn(
     if (!authorized.ok) continue;
     held = true;
     const files = fileSideOf(authorized.effectiveSelector);
-    if (files?.versionId === null && (!editable || files.access === "edit")) sides.push(files);
+    if (files?.versionId === null)
+      sides.push(
+        !editable
+          ? files
+          : {
+              ...files,
+              levelAt: (path) => {
+                const level = pathLevel(files, path);
+                return level === "edit" ? level : null;
+              },
+            },
+      );
   }
   return held ? sides : null;
 }
@@ -1563,6 +1579,10 @@ function settleLostReach(storage: StorageContext, recipientUserId: string, nowMs
       `UPDATE sync_relay_notices
        SET recipient_share_id = COALESCE(?, recipient_share_id),
            target_json = CASE WHEN ? IS NULL THEN NULL ELSE target_json END,
+           title = CASE WHEN ? IS NULL AND EXISTS (SELECT 1 FROM sync_relay_shares s
+             WHERE s.share_id = recipient_share_id AND json_extract(s.selector_json, '$.kind') = 'workspace') THEN 'No longer available' ELSE title END,
+           body = CASE WHEN ? IS NULL AND EXISTS (SELECT 1 FROM sync_relay_shares s
+             WHERE s.share_id = recipient_share_id AND json_extract(s.selector_json, '$.kind') = 'workspace') THEN '' ELSE body END,
            change_seq = ?
        WHERE recipient_user_id = ? AND notice_id = ?`,
     );
@@ -1579,6 +1599,8 @@ function settleLostReach(storage: StorageContext, recipientUserId: string, nowMs
       const movedTo =
         path === undefined || workspaceId === undefined ? null : reach.admitting(workspaceId, path);
       move.run(
+        movedTo,
+        movedTo,
         movedTo,
         movedTo,
         nextChangeSeq(storage, recipientUserId),

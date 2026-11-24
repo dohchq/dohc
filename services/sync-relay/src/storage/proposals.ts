@@ -1,6 +1,10 @@
 import { type StorageContext } from "./context";
 import { type ShareProposalOpRow, type ShareProposalRow, type ShareProposalState } from "./types";
 import { rowToProposalRow, rowToProposalOpRow } from "./rows";
+import { authorizeShareAction } from "../shareAuthorization";
+import { filterProposedChangeForShare, isWorkspaceSelector } from "../shareFilter";
+import { assertMemberChanges } from "../memberActions";
+import { relayError } from "../errors";
 
 export function insertShareProposal(
   storage: StorageContext,
@@ -21,11 +25,46 @@ export function insertShareProposal(
     // re-run under the write lock, so a revoke or a level narrowed
     // mid-flight loses the race rather than slipping a submit through.
     input.guard?.();
+    const authorized = authorizeShareAction({
+      storage,
+      shareId: input.shareId,
+      actorUserId: input.proposedByUserId,
+      action: "propose",
+    });
+    if (!authorized.ok || authorized.share.workspaceId !== input.workspaceId)
+      throw relayError("share_op_rejected");
+    assertMemberChanges(
+      storage,
+      authorized.effectiveSelector,
+      input.proposedByUserId,
+      input.ops,
+      input.createdAtMs,
+    );
+    for (const op of input.ops) {
+      if (
+        !filterProposedChangeForShare(authorized.effectiveSelector, op, {
+          channelKind: (wire) => storage.findChannelCreateKind(input.workspaceId, wire),
+        }).allowed
+      )
+        throw relayError("share_op_rejected");
+      if (
+        isWorkspaceSelector(authorized.effectiveSelector) &&
+        op.basedOnObjectId !== null &&
+        !authorized.effectiveSelector.reach.objectVisible(op.basedOnObjectId)
+      )
+        throw relayError("share_op_rejected");
+    }
     const existing = storage.db
       .prepare(
-        "SELECT proposal_id FROM sync_relay_share_proposals WHERE share_id = ? AND submit_id = ?",
+        `SELECT proposal_id, proposed_by_user_id FROM sync_relay_share_proposals
+          WHERE share_id = ? AND submit_id = ?`,
       )
       .get(input.shareId, input.submitId);
+    // Every member holds the workspace's one share, so a submit id is only a
+    // resend when the same person sent it.
+    if (existing && existing.proposed_by_user_id !== input.proposedByUserId) {
+      throw relayError("conflict", "this submit id is already in use; send with a new one");
+    }
     if (existing) {
       return { proposalId: String(existing.proposal_id), created: false };
     }
@@ -86,9 +125,11 @@ export function getShareProposal(
   return { ...rowToProposalRow(row), ops: proposalOps(storage, proposalId) };
 }
 
+/** The proposals one person sent through a share. Every member holds a workspace's one share. */
 export function listShareProposalsForShare(
   storage: StorageContext,
   shareId: string,
+  proposedByUserId: string,
 ): Array<ShareProposalRow & { opCount: number }> {
   return storage.db
     .prepare(
@@ -97,10 +138,10 @@ export function listShareProposalsForShare(
                 (SELECT COUNT(*) FROM sync_relay_share_proposal_ops o
                   WHERE o.proposal_id = p.proposal_id) AS op_count
          FROM sync_relay_share_proposals p
-         WHERE p.share_id = ?
+         WHERE p.share_id = ? AND p.proposed_by_user_id = ?
          ORDER BY p.created_at_ms DESC, p.proposal_id`,
     )
-    .all(shareId)
+    .all(shareId, proposedByUserId)
     .map((row) => ({ ...rowToProposalRow(row), opCount: Number(row.op_count ?? 0) }));
 }
 

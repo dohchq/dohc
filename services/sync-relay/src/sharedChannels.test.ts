@@ -188,6 +188,23 @@ describe("a group share is one grant for the channel and its folder", () => {
     await createGroupShare(h, MEMBER_A);
   });
 
+  // The desktop's shared-view check accepts file levels only.
+  it("answers a Group's access check with its file level", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await seedOwnerWorkspace(h);
+    const access = async (as: string, shareId: string) =>
+      json(await h(request(as, `/sync/shares/${shareId}/access`)));
+    expect(await access(MEMBER_A, await createGroupShare(h, MEMBER_A, "read-write"))).toEqual({
+      status: "current",
+      access: "edit",
+    });
+    expect(await access(MEMBER_B, await createGroupShare(h, MEMBER_B, "read-only"))).toEqual({
+      status: "current",
+      access: "view",
+    });
+  });
+
   it("serves the channel's chat and the folder's files, and nothing else", async () => {
     const storage = await testStorage();
     const h = handler(storage);

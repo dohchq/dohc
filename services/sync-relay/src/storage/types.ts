@@ -1,6 +1,6 @@
 import type { MemberFolders } from "../shareFilter";
 import type { ShareLabels } from "@dohc/security-contract/share-labels";
-import type { ShareLabelReader } from "../shareFilter";
+import type { ShareLabelReader, ShareSelector } from "../shareFilter";
 import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 import type { ServiceActivationAccess } from "./serviceActivationAccess";
 import type { ServiceActivationStore } from "./serviceActivation";
@@ -1713,6 +1713,18 @@ export interface SyncRelayStorage {
     path: string;
     relaySeq: number;
   }): boolean;
+  readShareTx<T>(read: () => T): T;
+  memberReach(
+    workspaceId: string,
+    userId: string,
+    role: "admin" | "member",
+    level: import("@dohc/security-contract/share-selector").ShareAccess,
+  ): import("./memberReach").MemberReach;
+  refreshAccountEmail(
+    userId: string,
+    email: import("./accountEmails").AccountEmail | null,
+    nowMs: number,
+  ): void;
   currentObjectFile(input: {
     workspaceId: string;
     versionId: string;
@@ -1920,7 +1932,11 @@ export interface SyncRelayStorage {
   setDirectBlock: DirectMessagesMethod<"setDirectBlock">;
   directRevision: DirectMessagesMethod<"directRevision">;
   shareHasActiveGrants(shareId: string): boolean;
-  getShareLabels(shareId: string, reader: ShareLabelReader): ShareLabels;
+  getShareLabels(
+    shareId: string,
+    reader: ShareLabelReader,
+    readerFiles?: ShareSelector | null,
+  ): ShareLabels;
   setShareLabels(shareId: string, labels: ShareLabels, updatedAtMs: number): void;
   getShare(shareId: string): SyncRelayShareRow | null;
   listActiveShareGrantsForRecipient(
@@ -2082,7 +2098,10 @@ export interface SyncRelayStorage {
     guard?: () => void;
   }): { proposalId: string; created: boolean };
   getShareProposal(proposalId: string): (ShareProposalRow & { ops: ShareProposalOpRow[] }) | null;
-  listShareProposalsForShare(shareId: string): Array<ShareProposalRow & { opCount: number }>;
+  listShareProposalsForShare(
+    shareId: string,
+    proposedByUserId: string,
+  ): Array<ShareProposalRow & { opCount: number }>;
   // The granter's open proposals, as counts rather than op rows. The review
   // surface polls this on a timer and renders a sender and a count from it, so
   // serving every op of every open proposal would resolve a base per op on
@@ -2242,6 +2261,7 @@ export interface SqliteStatement {
 }
 
 export interface SqliteDb {
+  readonly isTransaction?: boolean;
   exec(sql: string): void;
   prepare(sql: string): SqliteStatement;
   close(): void;

@@ -53,8 +53,9 @@ export function useMemberListing(
       (error: unknown) => {
         if (controller.signal.aborted) return;
         const reason = ended(error);
+        // The page checks whether the membership ended. If it didn't, the Groups keep their Try again.
         if (reason) onEndedRef.current(reason);
-        else setFound("failed");
+        setFound("failed");
       },
     );
     return () => {
@@ -293,17 +294,20 @@ function LoadFailed({ onRetry }: { onRetry(): void }) {
 /**
  * A file's Comments beside it: the threads on the file that the owner's dohc and every member read.
  * At View there is nothing to write in, only the note.
+ * The relay keeps Comments on the file's object, so a new object at the same path opens its own, with its own draft.
  */
 export function MemberComments({
   found,
   onRetry,
   path,
+  objectId,
   access,
   onEnded,
 }: {
   found: MemberListing;
   onRetry(): void;
   path: string;
+  objectId: string;
   access: NamedChatAccess;
   onEnded(reason: Ended): void;
 }) {
@@ -332,7 +336,7 @@ export function MemberComments({
       </div>
       {client && opened ? (
         <ChannelView
-          key={`${opened.shareId}\n${path}\n${access}`}
+          key={`${opened.shareId}\n${path}\n${objectId}\n${access}`}
           client={client}
           name={`Comments on ${name}`}
           onEnded={onEnded}
@@ -340,7 +344,8 @@ export function MemberComments({
           empty={NO_COMMENTS}
           messageLabel="Comment"
           placeholder="Comment on this file…"
-          draftKey={`${opened.userId}\n${opened.shareId}\nfile\n${path}`}
+          // A relay without a link key lists no identity, so the path tells files apart.
+          draftKey={`${opened.userId}\n${opened.shareId}\nfile\n${objectId || `path\n${path}`}`}
         />
       ) : found === "failed" ? (
         <LoadFailed onRetry={onRetry} />

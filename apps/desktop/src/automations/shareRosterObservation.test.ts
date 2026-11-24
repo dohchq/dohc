@@ -263,6 +263,7 @@ it("lets a paced Access request wait for the scheduled retry, which lists a memb
     status: "active" as const,
     selector: { kind: "workspace" as const },
     access: "comment" as const,
+    memberReach: { role: "member" as const, level: "comment" as const, rules: [] },
   };
   const joined = { ...listing, grants: [member] } as unknown as typeof listing;
   h.list.mockResolvedValue({ kind: "answered", listing: joined });

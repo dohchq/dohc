@@ -54,7 +54,10 @@ import type {
   ResolveAccountSession,
   ResolveActor,
 } from "@dohc/workspace-auth/session";
-import { createNamedShareTransportRoutes } from "./namedShareTransportRoutes";
+import {
+  MEMBER_IDENTITY_MAX_AGE_MS,
+  createNamedShareTransportRoutes,
+} from "./namedShareTransportRoutes";
 import { createKeyEnvelopeRoutes } from "./keyEnvelopeRoutes";
 import {
   createWorkspaceSecretRateLimiter,
@@ -616,12 +619,57 @@ export function createSyncRelayHandler({
   };
 
   // Claim email invites only after the authenticated account verifies its address.
-  const claimPendingShares = async (userId: string, signal?: AbortSignal): Promise<void> => {
-    signal?.throwIfAborted();
-    if (!lookupVerifiedUserEmail) return;
+  // One lookup per account at a time, so a slower lookup can't store an older
+  // email over a newer one. `refreshedAt` lets the member feed skip a repeat
+  // lookup within `maxAgeMs`.
+  const accountRefreshes = new Map<
+    string,
+    { done: Promise<void>; callers: (AbortSignal | undefined)[] }
+  >();
+  const refreshedAt = new Map<string, number>();
+  const refreshAccount = async (
+    userId: string,
+    callers: (AbortSignal | undefined)[],
+  ): Promise<void> => {
+    const startedAt = nowMs();
+    if (!lookupVerifiedUserEmail) {
+      storage.refreshAccountEmail(userId, null, startedAt);
+      return;
+    }
+    // A failed lookup throws and keeps the stored email: design §1 makes it an error.
     const email = await lookupVerifiedUserEmail(userId);
-    signal?.throwIfAborted();
+    // Once every caller has cancelled, the result is dropped: nothing is stored or claimed.
+    if (callers.every((signal) => signal?.aborted)) return;
+    storage.refreshAccountEmail(userId, { verifiedEmail: email }, startedAt);
+    // Kept in refresh order and capped: forgetting the oldest only costs a lookup.
+    refreshedAt.delete(userId);
+    refreshedAt.set(userId, startedAt);
+    if (refreshedAt.size > 10_000) refreshedAt.delete(refreshedAt.keys().next().value!);
     if (email) storage.claimPendingSharesForEmail(email, userId);
+  };
+  // Returns the shared refresh itself, adding no awaits of its own.
+  const claimPendingShares = (
+    userId: string,
+    signal?: AbortSignal,
+    maxAgeMs?: number,
+  ): Promise<void> => {
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    const last = refreshedAt.get(userId);
+    if (maxAgeMs !== undefined && last !== undefined && nowMs() - last < maxAgeMs)
+      return Promise.resolve();
+    let running = accountRefreshes.get(userId);
+    if (!running) {
+      const callers: (AbortSignal | undefined)[] = [];
+      const started = { done: refreshAccount(userId, callers), callers };
+      running = started;
+      accountRefreshes.set(userId, started);
+      const clear = () => {
+        if (accountRefreshes.get(userId) === started) accountRefreshes.delete(userId);
+      };
+      started.done.then(clear, clear);
+    }
+    running.callers.push(signal);
+    return signal ? running.done.then(() => signal.throwIfAborted()) : running.done;
   };
 
   function requireShareAction(
@@ -1107,7 +1155,14 @@ export function createSyncRelayHandler({
     nowMs,
     requireLinkCapability,
     requireFreshLinkRead,
-    resolveActor,
+    // A member's browser reads refresh their account email as the feed does,
+    // so a rule that named their old address stops reaching them.
+    resolveActor: async (request, workspaceId) => {
+      const actor = await resolveActor(request, workspaceId);
+      if (actor.workspaceId === workspaceId)
+        await claimPendingShares(actor.userId, request.signal, MEMBER_IDENTITY_MAX_AGE_MS);
+      return actor;
+    },
     publicOrigin: shareWebOrigin,
   });
   const respondToLinkCollectionWrites = linkKey
