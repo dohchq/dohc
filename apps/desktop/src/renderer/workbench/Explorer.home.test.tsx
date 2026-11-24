@@ -1214,4 +1214,22 @@ describe("selecting several rows in Home", () => {
       "budget.csv",
     ]);
   });
+
+  it("hides internal collection-views JSON files from Other files while keeping lookalikes", () => {
+    render(
+      <Explorer
+        {...explorerProps({
+          files: [
+            file("notes.md"),
+            file("budget.csv"),
+            file(
+              "collection-views/11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222.json",
+            ),
+            file("collection-views/notes.json"),
+          ],
+        })}
+      />,
+    );
+    expect(rowLabels("Other files")).toEqual(["budget.csv", "notes.json"]);
+  });
 });

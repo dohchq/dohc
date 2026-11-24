@@ -71,7 +71,6 @@ export const documentWords = {
   historyUnconfirmed: "dohc could not confirm that History can restore the original.",
   /** Phone: the server refuses a file over the editor's limit before reading any of it, so nothing shows. */
   tooLargeToOpen: "This file is too large to open on a phone. Open it on a computer.",
-  restoring: "This page is being restored.",
   /** Phone: a page in a note format only a newer dohc opens. The desktop's sentence, said of the page. */
   needsNewerDohc: "This page needs a newer version of dohc. Update dohc to open it.",
   /** Phone: the desktop's button opens the full file in another app; the phone points to a computer. */

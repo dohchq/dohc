@@ -232,7 +232,7 @@ function admit(
 // The `MomentAppendPayload` fields native deserialization requires. A source
 // moment's before-image is the host's own prior file, which the relay holds
 // nothing to check against.
-export const NATIVE_MOMENT_FIELDS: readonly string[] = [
+const NATIVE_MOMENT_FIELDS: readonly string[] = [
   "momentId",
   "versionId",
   "objectId",

@@ -19,6 +19,21 @@ export { createDeviceControlRequestParser, refuseDeviceControl } from "./deviceC
 export { BoundedSendQueue } from "./boundedSendQueue";
 export { DeviceCreditSender } from "./deviceCreditSender";
 export { DeviceControlWriter, DeviceCreditWindow } from "./deviceControlWriter";
+export {
+  isAllowedPublicHostname,
+  isPublicInternetAddress,
+  parseSafeOutboundHttpsUrl,
+  resolveSafeAddresses,
+  resolveSafeOutboundDestination,
+  SafeOutboundError,
+  sendSafeOutboundHttps,
+  type SafeAddressLookup,
+  type SafeAddressRecord,
+  type SafeOutboundDestination,
+  type SafeOutboundErrorCode,
+  type SafeOutboundRequest,
+  type SafeOutboundUrlOptions,
+} from "./safeOutboundHttps";
 
 export function jsonResponse(
   body: unknown,

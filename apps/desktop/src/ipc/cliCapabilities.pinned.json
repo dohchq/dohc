@@ -332,6 +332,18 @@
       "chat.message.delete",
       "members.folder.rule",
       "members.folder.marker.remove"
+    ],
+    "inboxList": [
+      "inbox.list"
+    ],
+    "inboxAdd": [
+      "inbox.add"
+    ],
+    "inboxArchive": [
+      "inbox.archive"
+    ],
+    "inboxMove": [
+      "inbox.move"
     ]
   },
   "public": {
@@ -469,6 +481,10 @@
     "members folder": "members.folder.rule",
     "members remove-folder-marker": "members.folder.marker.remove",
     "members end": "members.end",
-    "members group": "members.group.rule"
+    "members group": "members.group.rule",
+    "inbox list": "inbox.list",
+    "inbox add": "inbox.add",
+    "inbox archive": "inbox.archive",
+    "inbox move": "inbox.move"
   }
 }

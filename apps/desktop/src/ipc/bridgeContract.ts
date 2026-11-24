@@ -5,6 +5,8 @@ import type { captureOperations } from "./captureOperations";
 import type { linksOperations } from "./linksOperations";
 import type { retrievalOperations } from "./retrievalOperations";
 import { heldChangeOperations } from "./heldChangeOperations";
+import type { workspaceSecretsOperations } from "./workspaceSecretsOperations";
+import type { incomingWebhooksOperations } from "./incomingWebhooksOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { OutsideChange } from "@dohc/workspace-contracts/outside-changes";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
@@ -28,11 +30,6 @@ import { nameByteLength } from "@dohc/workspace-contracts/names";
 import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
-import type {
-  OwnerRestoreRequest,
-  OwnerRestoreAction,
-  OwnerRestoreResult,
-} from "./ownerRestoreContract";
 import { PublicationAgent } from "@dohc/cli/app-publication";
 import {
   ServerAccountDeletionPreview,
@@ -184,6 +181,11 @@ import type {
   protectedCopyOperations,
   stoppedRunOperations,
 } from "./writeOperations";
+import type {
+  inboxDesktopOperations,
+  inboxReadOperations,
+  inboxWriteOperations,
+} from "./inboxOperations";
 import { isLoopbackHostname } from "../security/loopback";
 import {
   AgentId,
@@ -6619,7 +6621,15 @@ export const AutomationShareImpactPayload = z.object({
   access: SHARE_ACCESS,
 });
 export type AutomationShareImpactPayload = z.infer<typeof AutomationShareImpactPayload>;
-export type AutomationShareImpactResult = { stops: CollectionAutomationShareStop[] };
+export interface IncomingWebhookSharePause {
+  webhookId: string;
+  name: string;
+  collectionPath: string;
+}
+export type AutomationShareImpactResult = {
+  stops: CollectionAutomationShareStop[];
+  pausedWebhooks?: IncomingWebhookSharePause[];
+};
 
 // The fields in one Collection that switched-on automations set, for the
 // ⚡ marks on the table and the record's properties. A document Collection
@@ -8261,7 +8271,11 @@ export const RetryAutomationNoticePayload = z.object({
 });
 export const RetryAutomationNoticeResult = z.union([
   z.object({ status: z.literal("queued"), press: z.boolean() }),
-  z.object({ status: z.literal("definition-changed"), repeatsMessages: z.boolean() }),
+  z.object({
+    status: z.literal("definition-changed"),
+    repeatsMessages: z.boolean(),
+    repeatsWebhooks: z.boolean().optional(),
+  }),
   z.object({ status: z.literal("switched-off"), target: AutomationControlsTargetShape }),
   z.object({ status: z.literal("refused"), reason: z.string().min(1).max(2_000) }),
 ]);
@@ -9455,11 +9469,16 @@ export interface DohcDesktopBridge
     OperationBridge<typeof usageRecordOperations>,
     OperationBridge<typeof noticeOperations>,
     OperationBridge<typeof scheduleHostOperations>,
+    OperationBridge<typeof workspaceSecretsOperations>,
+    OperationBridge<typeof incomingWebhooksOperations>,
     OperationBridge<typeof chatDispatchNoticeOperations>,
     OperationBridge<typeof agentRunStateOperations>,
     OperationBridge<typeof stoppedRunOperations>,
     OperationBridge<typeof protectedCopyOperations>,
     OperationBridge<typeof agentRunUndoOperations>,
+    OperationBridge<typeof inboxReadOperations>,
+    OperationBridge<typeof inboxWriteOperations>,
+    OperationBridge<typeof inboxDesktopOperations>,
     OperationBridge<typeof chatDispatchPauseOperations>,
     OperationBridge<typeof agentThreadOperations>,
     OperationBridge<typeof agentsListeningOperations>,
@@ -9475,9 +9494,6 @@ export interface DohcDesktopBridge
   publishOwnerApp(payload: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   onAppViewEvent(listener: (event: AppViewEvent) => void): () => void;
   ownerAppResponses(payload: OwnerAppResponsesRequest): Promise<OwnerAppResponsesResult>;
-  ownerRestore<Action extends OwnerRestoreAction>(
-    payload: z.input<typeof OwnerRestoreRequest> & { action: Action },
-  ): Promise<OwnerRestoreResult<Action>>;
   // Constant, not a call: the titlebar lays out around macOS traffic lights
   // on darwin vs the window-controls overlay everywhere else.
   platform: NodeJS.Platform;

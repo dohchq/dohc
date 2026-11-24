@@ -220,14 +220,6 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
         instanceId: "instance",
         workspaces: [{ root: workspace, workspaceId: "workspace", maxRegistrations: 8 }],
         settlement: { maxApplicationsPerSettlement: 8 },
-        restore: {
-          maxBytes: 1000000,
-          maxEvents: 100,
-          aggregateBytes: 20000000,
-          workingReserveBytes: 1000000,
-          maxOperations: 1,
-          validation: validationPolicy,
-        },
         sync: {
           policy: {
             maxClientVectorBytes: 100000,

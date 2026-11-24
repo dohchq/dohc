@@ -246,8 +246,6 @@ function PageScreen({ path }: { path: string }) {
     <ScreenFailure text={documentWords.noLongerAvailable} />
   ) : state.value?.kind === "too-large" && !holding ? (
     <ScreenFailure text={documentWords.tooLargeToOpen} />
-  ) : markdown === null && state.problem === "restoring" ? (
-    <ScreenFailure text={documentWords.restoring} onRetry={retry} />
   ) : markdown === null && state.problem ? (
     <ScreenFailure
       text={documentWords.couldntRead}

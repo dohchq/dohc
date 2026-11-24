@@ -2618,6 +2618,15 @@ const automationRunChangeSchema = z.discriminatedUnion("kind", [
     .strict(),
   z.object({ kind: z.literal("message"), messageId: z.string(), name: z.string() }).strict(),
   z.object({ kind: z.literal("notice"), noticeId: z.string(), name: z.string() }).strict(),
+  z
+    .object({
+      kind: z.literal("http-sent"),
+      target: z.string(),
+      status: z.number().int().min(100).max(599),
+      deliveryId: z.string(),
+      unconfirmed: z.literal(true).optional(),
+    })
+    .strict(),
 ]);
 // The change a run is for. `kind` is null for a dataset run that failed
 // before it could carry its change; `by` is null when the change did not say.
@@ -2751,6 +2760,7 @@ const automationRetryResultSchema = z.union([
       ok: z.literal(false),
       status: z.literal("definition-changed"),
       repeatsMessages: z.boolean(),
+      repeatsWebhooks: z.boolean().optional(),
       reason: z.string().min(1),
     })
     .strict(),

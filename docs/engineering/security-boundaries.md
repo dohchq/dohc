@@ -289,6 +289,136 @@ Every read rechecks current authority and uses bounded history scans.
 See [share reads](../../services/sync-relay/src/shareReadQueries.ts) and the
 [named recipient tests](../../services/sync-relay/src/namedShareHistory.test.ts).
 
+## Workspace secrets and outbound HTTPS
+
+Workspace automation secrets are separate from `.env` secret files. They stay write-only
+and outside the workspace directory, so copying a workspace or running a file-based agent
+inside it never exposes secret values.
+
+Each secret belongs to one workspace and has one fixed purpose:
+
+- `http-header`: an opaque credential (printable ASCII without tabs or line breaks, up to
+  4 KiB) pinned to 1–10 exact lowercase public hostnames. It can be attached only to
+  requests whose canonical host matches that list.
+- `http-url`: a complete public HTTPS URL (port 443, no credentials, no fragment, no IP
+  literals or local hosts, up to 2 KiB), reserved for outbound destination URLs and never
+  returned by any list or metadata API.
+
+Creating, rotating, and deleting workspace secrets happen only through the desktop
+Settings UI. Add uses create-only semantics and Replace updates an existing name, so a
+stale list cannot silently overwrite a secret. CLI and MCP doors expose no secret
+mutation operations, preventing local or connected agents from overwriting a secret URL
+or credential. Saved secret values never return to the renderer; while the owner types a
+new value in the desktop Settings dialog, the unsaved input lives transiently in the
+trusted desktop renderer until saved, cancelled, or unmounted, isolated from sandboxed
+apps and previews.
+
+Storage follows the workspace's sync mode:
+
+- **Local-only workspaces** seal secrets in the desktop profile's `workspace-secrets/`
+  folder (`0700` directory, `0600` file) with Electron `safeStorage`. On Linux, dohc
+  checks that `safeStorage.getSelectedStorageBackend()` is neither `basic_text` nor
+  `unknown` and refuses to store secrets when no OS keyring is active. An unreadable or
+  schema-invalid local vault fails closed instead of appearing empty, so existing
+  ciphertext cannot be overwritten. OS keychain storage keeps values out of workspace
+  files and API responses; it does not defend against arbitrary code running as the same
+  OS user. Turning on sync later does not copy local secrets to the server; the owner
+  enters them on the server directly. Pausing sync on a synced workspace keeps its server
+  binding and refuses secret reads or changes until sync resumes instead of switching to
+  local keychain storage.
+- **Synced workspaces** seal secrets on `sync-relay` in `sync_relay_workspace_secrets`
+  using AES-256-GCM (12-byte random nonce, key derived via HKDF-SHA256 from
+  `DOHC_RELAY_LINK_KEY` with info `dohc-workspace-secret-seal-v1`, recorded `key_id`, and
+  AAD binding workspace, owner, secret name, usage, allowed hosts, generation, and key ID). The relay
+  accepts only cookie-less desktop owner Bearer sessions (`resolveAccountSession` with
+  `clientKind === "desktop"`), refusing browser sessions (cookie or Bearer), phone
+  sessions, personal agents, share links, and non-owners, and rechecks session authority,
+  account fencing, and workspace ownership at commit time. Because the server holds the
+  sealing key in its environment, the server operator (dohc Drive or a self-hoster) has
+  technical capability to unseal stored secrets at runtime; rotating `DOHC_RELAY_LINK_KEY`
+  invalidates previously sealed secrets until re-entered. Account deletion purges all
+  workspace secret rows automatically.
+
+Shared outbound HTTPS transport (`packages/service-http/src/safeOutboundHttps.ts`)
+enforces HTTPS on port 443 only, rejects credentials, fragments (including empty `#`),
+raw IPv4/IPv6 literals, trailing dots, single-label hosts, and reserved local suffixes
+(`.local`, `.internal`, `.localhost`, `.home.arpa`), resolves cancellable DNS A and AAAA
+records via `node:dns/promises` `Resolver` with a 2-second timeout, refuses any answer
+containing a private, loopback, link-local, carrier-grade NAT, multicast, mapped,
+translated, or non-global IP, brands the resolved destination internally so forged or
+mutated destinations are rejected, pins the validated address through `node:https`
+connect with TLS certificate verification (`servername` set to the canonical host,
+`rejectUnauthorized: true`, `autoSelectFamily: false`, `agent: false`, no proxy env
+variables), enforces a finite request timeout (default 10 s, capped at 30 s), disables
+response compression (`Accept-Encoding: identity`), refuses redirects by default, bounds
+header and response sizes, and scrubs transport errors.
+Hosted relays still require host or network egress isolation: IP classification alone
+cannot tell whether a public-looking IP routes to an internal network service.
+See the [outbound HTTPS tests](../../packages/service-http/src/safeOutboundHttps.test.ts),
+[relay secret route tests](../../services/sync-relay/src/workspaceSecretRoutes.test.ts),
+and [local secret store tests](../../apps/desktop/src/workspaces/localWorkspaceSecretStore.test.ts).
+
+## Incoming webhooks
+
+Incoming webhooks accept unauthenticated HTTPS `POST` deliveries at `/sync/hooks/:token`
+and turn each delivery into a quarantined Markdown record inside a private Collection
+(defaulting to `Inbox`) owned by the workspace owner.
+
+- **Routing and log redaction.** `/sync/hooks/:token` is matched before `/sync/:workspaceId`
+  and `hooks` is a reserved workspace ID. Request logs collapse the route to
+  `/sync/hooks/:token` so raw webhook tokens never enter relay logs. Self-hosters enabling
+  reverse-proxy access logs must redact `/sync/hooks/*` paths as documented in
+  `tools/self-host/Caddyfile`.
+- **Owner management authority.** Creating, listing, renaming, pausing, resuming, rotating,
+  and deleting incoming webhooks under `/sync/:workspaceId/webhooks*` accept only cookie-less
+  desktop owner Bearer sessions (`clientKind === "desktop"`), rechecking session authority,
+  account fencing, and workspace ownership before every mutation. Each workspace is capped at
+  20 incoming webhooks. Raw tokens are shown once at creation or rotation and stored only as
+  keyed `HMAC-SHA256(DOHC_RELAY_LINK_KEY, ...)` digests compared in constant time.
+- **Public ingress defenses.** `POST /sync/hooks/:token` rejects non-`POST` methods with
+  `405` and self-loop headers (`X-Dohc-Chain-Depth >= 4`) with `422`. Token lookup runs
+  before rate limiting: unknown, malformed, paused, deleted, or fenced endpoints return an
+  opaque `404 { ok: false, error: "not found" }`, and unknown-token probing uses a separate
+  global probe bucket so scanners cannot starve valid endpoints. Active endpoints enforce a
+  per-endpoint token bucket (30 burst, 0.5/s refill), a 500 deliveries/day cap (recording at
+  most one daily Notice naming the limit), a 100 pending deliveries / 4 MiB pending bytes
+  budget, an allowlist of `Content-Type` (`application/json`, `text/plain`,
+  `application/x-www-form-urlencoded`), a streaming 256 KiB body cap with a 10 s read timeout,
+  header allowlisting (`Content-Type`, `Idempotency-Key`, `X-Webhook-Delivery`,
+  `X-Event-Type`, `X-GitHub-Event`, `User-Agent`), and 7-day idempotency (`202` deduplicated
+  on matching SHA-256 body hash, `409` on mismatch).
+- **Queue-only ingress, server-host requirement, and fenced drain.** Incoming webhooks require
+  server-hosted automations and the sync server as the workspace's active automation host;
+  creating or resuming a webhook on a computer-hosted workspace fails with `409`, and servers
+  without server-hosted automations refuse management/delivery with `503` instead of accepting
+  undrained `202` deliveries. Ingress only enqueues deliveries (`202 Accepted`), re-verifying the
+  keyed token digest and active server host inside the SQLite enqueue transaction after streaming
+  the body so a token rotated mid-upload cannot enqueue; it never opens `ServerCopy` or runs user
+  code. The fenced automation host drains pending deliveries under its host generation and per-open
+  lease fences (recovering `accepted` rows across same-generation restarts), preserves the validated
+  `X-Dohc-Chain-Depth` (`0..3`) on the record's author
+  `{ kind: "automation", automationId: "webhook:" + webhookId, onBehalfOf: owner, depth }`,
+  writes each record deterministically (`derivedRecordId("webhook:" + deliveryId)`), quarantines
+  the full accepted payload inside an escaped fenced code block without truncating payload bytes,
+  applies exponential retry backoff with a 5-attempt cap settling persistently failing deliveries
+  as `failed`, and immediately nulls `payload_blob` and zeroes `storage_bytes` upon settlement or
+  terminal failure (updating `sync_relay_workspace_usage` via SQLite triggers). Hourly relay
+  maintenance prunes expired settled/failed/paused delivery metadata after the 7-day idempotency
+  window.
+- **Private-Collection boundary.** Incoming webhooks deliver only to private solo Collections
+  in v1. Creating, retuning, or undoing the removal of any share grant (View, Comment, or Edit,
+  including whole-version `paths: []` shares) covering a webhook's Collection or any ancestor
+  folder atomically pauses the webhook and clears queued payload bytes; resuming is refused with
+  `409` while the share remains active. Both the drain and `appendLogBatchInTransaction` (under
+  SQLite `BEGIN IMMEDIATE`) enforce Collection privacy: any in-flight replica write from a webhook
+  whose Collection was shared before replication commits is atomically marked
+  `relay_admission = 'departed'` so zero rows enter `sync_relay_current_files` or
+  `sync_relay_object_moments` and zero log ops or blob bytes ever reach a share recipient, while
+  keeping the coordinate's `op_kind` intact so the pushing replica's pull advances without
+  `OriginDiverged` and the drain confirms publication before settling. Account deletion
+  purges all webhook definitions and deliveries via `ON DELETE CASCADE`.
+  See the [incoming webhook route and drain tests](../../services/sync-relay/src/incomingWebhookRoutes.test.ts).
+
 ## Decision numbers in existing code
 
 Existing comments cite the former ADR numbers. Their current boundaries are here:

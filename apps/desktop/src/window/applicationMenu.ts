@@ -160,6 +160,7 @@ export function buildMenuTemplate(options: {
         ...command("new-file", { enabled: offers.write }),
         ...command("new-folder", { enabled: offers.folder }),
         ...command("new-collection", { enabled: offers.collection }),
+        ...command("quick-capture", { enabled: offers.write }),
         { type: "separator" },
         ...command("open-workspace"),
         {

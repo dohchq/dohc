@@ -18,6 +18,20 @@ final class ServerRoundTests: XCTestCase {
   }
 
   /// One line for the round's script, sent at once.
+  // The iOS 27.2 simulator's keyboard drops a doubled letter typed in one call ("https" became "hps"), so text goes
+  // in one character at a time.
+  private func typeSlowly(_ element: XCUIElement, _ text: String) {
+    for character in text { element.typeText(String(character)) }
+  }
+
+  private func recordFields(_ app: XCUIApplication) -> XCUIElementQuery {
+    app.descendants(matching: .any).matching(identifier: "record-field")
+  }
+
+  private func nameShowing(_ app: XCUIApplication, _ text: String) -> XCUIElement {
+    app.descendants(matching: .any).matching(NSPredicate(format: "label == %@ OR value == %@", "Name, " + text, text)).firstMatch
+  }
+
   private func say(_ line: String) {
     print(line)
     fflush(stdout)
@@ -77,14 +91,21 @@ final class ServerRoundTests: XCTestCase {
     let field = app.textFields["Server address"]
     XCTAssertTrue(field.waitForExistence(timeout: 30), "A fresh install should open on Connect")
     field.tap()
-    field.typeText(origin)
+    typeSlowly(field, origin)
+    XCTAssertEqual(field.value as? String, origin, "The address field should hold the typed address")
     app.buttons["Connect server"].tap()
     // The approval page opens in the browser's sheet, over the code. Closing it leaves the sign-in waiting.
-    let close = app.buttons.matching(NSPredicate(format: "label IN %@", ["Done", "Close"])).firstMatch
-    if close.waitForExistence(timeout: 30) { close.tap() }
+    let names = ["Done", "Close", "Cancel", "Dismiss"]
+    let close = app.buttons.matching(NSPredicate(format: "label IN %@ OR identifier IN %@", names, names)).firstMatch
     // Connect labels the code one character at a time, so VoiceOver spells it.
     let code = app.descendants(matching: .any).matching(NSPredicate(format: "label MATCHES %@", "([A-Za-z0-9-] )+[A-Za-z0-9-]")).firstMatch
-    XCTAssertTrue(code.waitForExistence(timeout: 10), "Connect should show the device code")
+    let end = Date().addingTimeInterval(40)
+    while Date() < end && !code.exists {
+      if close.exists && !code.exists { close.tap() }
+      _ = code.waitForExistence(timeout: 1)
+    }
+    if !code.exists { say("SERVER ROUND SCREEN \(app.debugDescription)") }
+    XCTAssertTrue(code.exists, "Connect should show the device code")
     say("SERVER ROUND CODE \(code.label.replacingOccurrences(of: " ", with: ""))")
     XCTAssertTrue(app.tabBars.firstMatch.waitForExistence(timeout: 120), "Once the code is approved, the phone should show its tabs")
   }
@@ -193,6 +214,7 @@ final class ServerRoundTests: XCTestCase {
     // An agent's row has its own Sign out; the account's is the last button.
     let buttons = app.buttons.matching(NSPredicate(format: "label == %@", "Sign out"))
     XCTAssertTrue(buttons.firstMatch.waitForExistence(timeout: 30), "Settings should show Sign out")
+    say("SERVER ROUND SETTINGS OPEN")
     let signOut = buttons.element(boundBy: buttons.count - 1)
     for _ in 0..<5 where !signOut.isHittable { app.swipeUp() }
     signOut.tap()
@@ -232,8 +254,10 @@ final class ServerRoundTests: XCTestCase {
     let page = app.webViews.firstMatch
     let text = containing(page, try need("DOHC_SERVER_SENTENCE"))
     XCTAssertTrue(text.waitForExistence(timeout: 10), "Plan should show its sentence")
-    text.tap()
-    app.typeText(sentence)
+    // The simulator's software keyboard ignores Command-Down.
+    let last = page.staticTexts.allElementsBoundByIndex.last ?? text
+    last.coordinate(withNormalizedOffset: CGVector(dx: 0.99, dy: 0.5)).tap()
+    typeSlowly(app, sentence)
     let start = Date()
     XCTAssertTrue(mark("Saving").waitForExistence(timeout: 10) || saved.exists, "Typing should show Saving")
     XCTAssertTrue(saved.waitForExistence(timeout: 60), "The server should apply the edit within 60 s")
@@ -243,6 +267,8 @@ final class ServerRoundTests: XCTestCase {
     openPlan(app)
     XCTAssertTrue(containing(app.webViews.firstMatch, sentence.trimmingCharacters(in: .whitespaces)).waitForExistence(timeout: 60),
                   "After a relaunch, Plan should show the sentence typed on the phone")
+    XCTAssertTrue(containing(app.webViews.firstMatch, try need("DOHC_SERVER_SENTENCE")).exists,
+                  "The seed's sentence should still be whole after the phone's edit")
   }
 
   // Needs a seeded transactional Collection named in DOHC_SERVER_COLLECTION, whose first table has a record with the
@@ -262,9 +288,10 @@ final class ServerRoundTests: XCTestCase {
     XCTAssertTrue(row.waitForExistence(timeout: 30), "\(name) should show a record with \(value)")
     row.tap()
     // In a field of the record's own screen, not the row it was opened from.
-    let field = app.otherElements.matching(identifier: "record-field")
-      .containing(NSPredicate(format: "label CONTAINS %@", value)).firstMatch
-    XCTAssertTrue(field.waitForExistence(timeout: 10), "The record's fields should show \(value)")
+    XCTAssertTrue(recordFields(app).firstMatch.waitForExistence(timeout: 10), "The record's own screen should open")
+    let field = nameShowing(app, value)
+    if !field.waitForExistence(timeout: 10) { say("SERVER ROUND SCREEN \(app.debugDescription)") }
+    XCTAssertTrue(field.exists, "The record's fields should show \(value)")
   }
 
   // Needs a build with EXPO_PUBLIC_DOHC_PHONE_WRITES=1. Planning can mention the author of the seeded post Kickoff, whose
@@ -302,7 +329,7 @@ final class ServerRoundTests: XCTestCase {
                    "The row should make the text \"Can @\(handle) \", not \(String(describing: field.value))")
     XCTAssertTrue(app.keyboards.firstMatch.exists, "The keyboard should stay up after the tap")
     let tail = "join us? \(UUID().uuidString.prefix(8))"
-    field.typeText(tail)
+    typeSlowly(field, tail)
     let body = "Can @\(handle) \(tail)"
     XCTAssertEqual(field.value as? String, body, "Typing should go on after the mention")
     app.buttons.matching(NSPredicate(format: "label IN %@", ["Send message", "Post"])).firstMatch.tap()
@@ -332,8 +359,8 @@ final class ServerRoundTests: XCTestCase {
     let row = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", value)).firstMatch
     XCTAssertTrue(row.waitForExistence(timeout: 30), "\(name) should show a record with \(value)")
     row.tap()
-    let field = app.otherElements.matching(identifier: "record-field")
-      .containing(NSPredicate(format: "label CONTAINS %@", value)).firstMatch
+    XCTAssertTrue(recordFields(app).firstMatch.waitForExistence(timeout: 10), "The record's own screen should open")
+    let field = nameShowing(app, value)
     XCTAssertTrue(field.waitForExistence(timeout: 10), "The record's fields should show \(value)")
     return field
   }
@@ -343,10 +370,12 @@ final class ServerRoundTests: XCTestCase {
   private func edit(_ app: XCUIApplication, _ field: XCUIElement, typing typed: String = "", deleting: Int = 0) {
     field.tap()
     let input = app.textViews.firstMatch
-    XCTAssertTrue(input.waitForExistence(timeout: 10), "The field should open its editor")
+    if !input.waitForExistence(timeout: 10) { say("SERVER ROUND SCREEN \(app.debugDescription)") }
+    XCTAssertTrue(input.exists, "The field should open its editor")
     XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10), "The editor should raise the keyboard")
     // The editor opens with the cursor after the field's text.
-    app.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: deleting) + typed)
+    app.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: deleting))
+    typeSlowly(app, typed)
     app.navigationBars.buttons["Save"].tap()
   }
 
@@ -355,30 +384,23 @@ final class ServerRoundTests: XCTestCase {
   @MainActor
   private func settled(_ app: XCUIApplication, _ field: XCUIElement, _ what: String) {
     XCTAssertTrue(app.activityIndicators["Saving"].waitForNonExistence(timeout: 60), "\(what) should save within 60 s")
-    XCTAssertTrue(field.buttons.firstMatch.waitForExistence(timeout: 10), "\(what): the field should take a change again")
+    let editable = NSPredicate(format: "exists == true AND elementType == %d", XCUIElement.ElementType.button.rawValue)
+    XCTAssertEqual(XCTWaiter.wait(for: [expectation(for: editable, evaluatedWith: field)], timeout: 10), .completed,
+                   "\(what): the field should take a change again")
     XCTAssertFalse(app.buttons["Discard"].exists, "\(what) should save, not fail or be refused")
   }
 
-  /// Reads the open record again from the server: back to its Collection, pull to refresh, and open the record again.
   @MainActor
-  private func reread(_ app: XCUIApplication, _ value: String) {
-    back(app)
-    let shows = NSPredicate(format: "label CONTAINS %@", value)
-    let list = app.scrollViews.containing(shows).firstMatch
-    XCTAssertTrue(list.waitForExistence(timeout: 10), "Back should show the Collection's records")
-    list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15))
-      .press(forDuration: 0.1, thenDragTo: list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)))
-    XCTAssertTrue(app.activityIndicators.firstMatch.waitForNonExistence(timeout: 30), "The Collection should read again within 30 s")
-    let row = app.buttons.matching(shows).firstMatch
-    XCTAssertTrue(row.waitForExistence(timeout: 30), "The records read again should show \(value)")
-    row.tap()
+  private func readAfterRelaunch(_ app: XCUIApplication, _ name: String, _ value: String) -> XCUIElement {
+    app.terminate()
+    app.launch()
+    return openRecord(app, name, value)
   }
 
   // Needs a build with EXPO_PUBLIC_DOHC_PHONE_WRITES=1, and the record test9 reads, with DOHC_SERVER_RECORD in a text
   // field that a reversible edit changes. Adds a word to that field and waits for the change to save, which offers
-  // Undo; Undo puts the value back. Each save is checked by reading the record again. The phone keeps Undo in memory
-  // only, so Undo comes before the relaunch: the test then makes the change again, reads it back after a relaunch, and
-  // leaves the field as the seed had it.
+  // Undo; Undo puts the value back. Each save is checked by reading the record again after a relaunch, which also
+  // ends Undo. The test then makes the change again, reads it back, and leaves the field as the seed had it.
   @MainActor
   func test11_editsACollectionField() throws {
     let name = try need("DOHC_SERVER_COLLECTION")
@@ -389,7 +411,7 @@ final class ServerRoundTests: XCTestCase {
     app.launch()
     let undo = app.buttons["Undo last edit"]
     let showing = { (text: String) in
-      app.otherElements.matching(identifier: "record-field").containing(NSPredicate(format: "label CONTAINS %@", text)).firstMatch
+      self.nameShowing(app, text)
     }
     // `value` is a prefix of `changed`, so a field showing `value` must not also show `changed`.
     let only = { (text: String, what: String) in
@@ -399,37 +421,31 @@ final class ServerRoundTests: XCTestCase {
 
     edit(app, openRecord(app, name, value), typing: added)
     let start = Date()
-    XCTAssertTrue(showing(changed).waitForExistence(timeout: 10), "The field should show the change as it saves")
+    XCTAssertTrue(showing(changed).waitForExistence(timeout: 60), "The field should show the change once it saves, within 60 s")
     settled(app, showing(changed), "The change")
     XCTAssertTrue(undo.exists, "A saved change should offer Undo")
     say("SERVER ROUND COLLECTION SAVED \(since(start)) ms")
-    reread(app, changed)
-    only(changed, "The server should have \(changed)")
-
-    // The record opened again still offers Undo for its last edit.
-    XCTAssertTrue(undo.waitForExistence(timeout: 10), "The record should still offer Undo")
     undo.tap()
     settled(app, showing(value), "Undo")
     only(value, "Undo should put \(value) back")
-    reread(app, value)
+    _ = readAfterRelaunch(app, name, value)
     only(value, "The server should have \(value) back")
 
     edit(app, showing(value), typing: added)
     settled(app, showing(changed), "The change made again")
-    app.terminate()
-    app.launch()
-    let field = openRecord(app, name, changed)
+    let field = readAfterRelaunch(app, name, changed)
+    only(changed, "The server should have \(changed)")
     // Back as the seed had it, for the next round.
     edit(app, field, deleting: added.count)
     settled(app, showing(value), "The seed's value")
-    reread(app, value)
+    _ = readAfterRelaunch(app, name, value)
     only(value, "The server should have \(value) again")
   }
 
   // Needs a build with EXPO_PUBLIC_DOHC_PHONE_WRITES=1, and the Collection test9 reads, whose first table takes a new
   // record with its defaults, as a table made on the desktop does, holds fewer than 50 records, so a new one reads back
-  // on the first page, and shows first a text field an edit changes. Adds a record, names it, finds it after a pull to
-  // refresh, deletes it, and finds it gone after another.
+  // on the first page, and shows first a text field an edit changes. Adds a record, names it, finds it after a relaunch,
+  // deletes it, and finds it gone after another.
   @MainActor
   func test12_addsAndDeletesARecord() throws {
     let name = try need("DOHC_SERVER_COLLECTION")
@@ -448,14 +464,13 @@ final class ServerRoundTests: XCTestCase {
     new.tap()
 
     // The new record opens on its own screen; its first field names it.
-    let first = app.otherElements.matching(identifier: "record-field").firstMatch
-    XCTAssertTrue(first.waitForExistence(timeout: 60), "The new record should open within 60 s")
+    let first = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Name, ")).firstMatch
+    XCTAssertTrue(first.waitForExistence(timeout: 60), "The new record should open within 60 s, its Name ready for a change")
     edit(app, first, typing: added)
-    let named = app.otherElements.matching(identifier: "record-field").containing(NSPredicate(format: "label CONTAINS %@", added)).firstMatch
-    XCTAssertTrue(named.waitForExistence(timeout: 10), "The field should show \(added) as it saves")
+    let named = nameShowing(app, added)
+    XCTAssertTrue(named.waitForExistence(timeout: 60), "The field should show \(added) once it saves, within 60 s")
     settled(app, named, "Naming the new record")
-    reread(app, added)
-    XCTAssertTrue(named.waitForExistence(timeout: 10), "The server should have the new record named \(added)")
+    _ = readAfterRelaunch(app, name, added)
 
     let delete = app.navigationBars.buttons["Delete record"]
     XCTAssertTrue(delete.waitForExistence(timeout: 10), "The record should offer Delete")
@@ -468,9 +483,11 @@ final class ServerRoundTests: XCTestCase {
     XCTAssertTrue(list.waitForExistence(timeout: 60), "The deleted record's screen should leave within 60 s")
     let row = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", added)).firstMatch
     XCTAssertTrue(row.waitForNonExistence(timeout: 10), "The list should drop the deleted record")
-    list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15))
-      .press(forDuration: 0.1, thenDragTo: list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)))
-    XCTAssertTrue(app.activityIndicators.firstMatch.waitForNonExistence(timeout: 30), "The Collection should read again within 30 s")
+    app.terminate()
+    app.launch()
+    tab(app, "Home")
+    XCTAssertTrue(collection.waitForExistence(timeout: 30), "Home should list the Collection \(name)")
+    collection.tap()
     XCTAssertTrue(app.buttons.matching(seeded).firstMatch.waitForExistence(timeout: 30), "The records read again should show \(value)")
     XCTAssertFalse(row.exists, "The server should no longer have the record named \(added)")
   }

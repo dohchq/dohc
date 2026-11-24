@@ -83,6 +83,11 @@ export interface WriteDeclaration {
         readonly command: readonly [group: string, name: string];
         readonly summary: string;
         readonly operands: string;
+        readonly flags?: readonly {
+          readonly name: string;
+          readonly value?: string;
+          readonly text: string;
+        }[];
         readonly notes?: readonly string[];
         // Arguments after the command that reach the socket; the CLI inventory parses them.
         readonly example: readonly string[];

@@ -1,7 +1,12 @@
 import { createCipheriv, createECDH, createHash, hkdfSync, randomBytes, sign } from "node:crypto";
-import { Resolver } from "node:dns/promises";
-import { request as httpsRequest } from "node:https";
-import { BlockList, isIP } from "node:net";
+import {
+  isPublicInternetAddress,
+  resolveSafeAddresses,
+  resolveSafeOutboundDestination,
+  SafeOutboundError,
+  sendSafeOutboundHttps,
+  type SafeOutboundDestination,
+} from "@dohc/service-http";
 import { withholdChatFileLinks } from "@dohc/workspace-contracts/chat-mentions";
 import type { ApnsClient } from "./apnsClient";
 import { apnsPayload, apnsText } from "./apnsPayload";
@@ -38,76 +43,23 @@ const SEND_TIMEOUT_MS = 10_000;
 export const PUSH_DELIVERY_TTL_SECONDS = 60;
 export const PUSH_STREAMS = 4;
 export const APNS_PAUSE_MS = 20 * 60_000;
-const blocked = new BlockList();
-for (const [address, prefix] of [
-  ["0.0.0.0", 8],
-  ["10.0.0.0", 8],
-  ["100.64.0.0", 10],
-  ["127.0.0.0", 8],
-  ["169.254.0.0", 16],
-  ["172.16.0.0", 12],
-  ["192.0.0.0", 24],
-  ["192.0.2.0", 24],
-  ["192.88.99.0", 24],
-  ["192.168.0.0", 16],
-  ["198.18.0.0", 15],
-  ["198.51.100.0", 24],
-  ["203.0.113.0", 24],
-  ["224.0.0.0", 3],
-] as const) {
-  blocked.addSubnet(address, prefix, "ipv4");
-}
-const globalV6 = new BlockList();
-globalV6.addSubnet("2000::", 3, "ipv6");
-for (const [address, prefix] of [
-  ["2001::", 23],
-  ["2001:db8::", 32],
-  ["2002::", 16],
-  ["3fff::", 20],
-] as const) {
-  blocked.addSubnet(address, prefix, "ipv6");
-}
 
 export function isPublicPushAddress(address: string): boolean {
-  const family = isIP(address);
-  if (family === 4) return !blocked.check(address, "ipv4");
-  return family === 6 && globalV6.check(address, "ipv6") && !blocked.check(address, "ipv6");
+  return isPublicInternetAddress(address);
 }
 
 export type PushLookup = (hostname: string) => Promise<Array<{ address: string; family: number }>>;
-export interface PushDestination {
-  url: URL;
-  address: string;
-  family: 4 | 6;
-}
+export type PushDestination = SafeOutboundDestination;
 const unsafeEndpoint = () => new TypeError("Unsafe push endpoint");
 
 async function resolvePushAddresses(hostname: string, signal: AbortSignal): ReturnType<PushLookup> {
-  signal.throwIfAborted();
-  const resolver = new Resolver({ timeout: 2000, tries: 1 });
-  const cancel = () => resolver.cancel();
-  signal.addEventListener("abort", cancel, { once: true });
   try {
-    const results = await Promise.allSettled([
-      resolver.resolve4(hostname),
-      resolver.resolve6(hostname),
-    ]);
-    signal.throwIfAborted();
-    const addresses: Array<{ address: string; family: number }> = [];
-    for (const [index, result] of results.entries()) {
-      if (result.status === "fulfilled") {
-        addresses.push(
-          ...result.value.map((address) => ({ address, family: index === 0 ? 4 : 6 })),
-        );
-      } else if (
-        !["ENODATA", "ENOTFOUND"].includes(String((result.reason as NodeJS.ErrnoException)?.code))
-      ) {
-        throw Error("Push DNS lookup failed");
-      }
+    return await resolveSafeAddresses(hostname, signal);
+  } catch (error) {
+    if (error instanceof SafeOutboundError && error.code === "dns_failed") {
+      throw Error("Push DNS lookup failed");
     }
-    return addresses;
-  } finally {
-    signal.removeEventListener("abort", cancel);
+    throw error;
   }
 }
 
@@ -118,14 +70,21 @@ export async function validatePushEndpoint(
 ): Promise<PushDestination> {
   const url = pushEndpointUrl(endpoint, hosts);
   if (!url) throw unsafeEndpoint();
-  const addresses = await lookup(url.hostname);
-  if (
-    !addresses.length ||
-    addresses.some((row) => !isPublicPushAddress(row.address) || isIP(row.address) !== row.family)
-  )
-    throw unsafeEndpoint();
-  const address = addresses[0]!;
-  return { url, address: address.address, family: address.family as 4 | 6 };
+  try {
+    return await resolveSafeOutboundDestination(endpoint, {
+      allowedHosts: hosts,
+      allowSubdomainPatterns: true,
+      lookup: async (hostname) => await lookup(hostname),
+    });
+  } catch (error) {
+    if (
+      error instanceof SafeOutboundError &&
+      (error.code === "unsafe_url" || error.code === "unsafe_address")
+    ) {
+      throw unsafeEndpoint();
+    }
+    throw error;
+  }
 }
 
 export interface PreparedPushRequest {
@@ -136,53 +95,29 @@ export interface PreparedPushRequest {
 export type PushTransport = (request: PreparedPushRequest, signal: AbortSignal) => Promise<number>;
 
 /** HTTPS uses the validated address for the connection and the provider hostname for TLS. It never follows redirects. */
-export const sendPushRequest: PushTransport = (prepared, signal) =>
-  new Promise((resolve, reject) => {
-    const { destination, body, headers } = prepared;
-    let completedStatus: number | undefined;
-    let failure: Error | undefined;
-    const request = httpsRequest(
-      destination.url,
+export const sendPushRequest: PushTransport = async (prepared, signal) => {
+  try {
+    return await sendSafeOutboundHttps(
       {
+        destination: prepared.destination,
         method: "POST",
-        headers,
-        signal,
-        agent: false,
-        lookup: (_hostname, options, callback) => {
-          // The address cannot be looked up again between the policy check and connect.
-          if (options.all)
-            callback(null, [{ address: destination.address, family: destination.family }]);
-          else callback(null, destination.address, destination.family);
-        },
+        headers: prepared.headers,
+        body: prepared.body,
+        timeoutMs: SEND_TIMEOUT_MS,
         maxHeaderSize: 8192,
+        maxResponseBytes: 8192,
+        rejectRedirects: false,
       },
-      (response) => {
-        const status = response.statusCode ?? 0;
-        response.on("error", (error) => {
-          failure ??= error;
-          request.destroy(error);
-        });
-        response.on("aborted", () => request.destroy(Error("Push response interrupted")));
-        let received = 0;
-        response.on("data", (chunk: Buffer) => {
-          received += chunk.length;
-          if (received > 8192) request.destroy(Error("Push response too large"));
-        });
-        response.on("end", () => {
-          completedStatus = status;
-        });
-      },
+      signal,
     );
-    request.on("error", (error) => {
-      failure ??= error;
-    });
-    request.on("close", () => {
-      if (failure) reject(failure);
-      else if (completedStatus === undefined) reject(Error("Push response interrupted"));
-      else resolve(completedStatus);
-    });
-    request.end(body);
-  });
+  } catch (error) {
+    if (error instanceof SafeOutboundError) {
+      if (error.code === "response_too_large") throw Error("Push response too large");
+      if (error.code === "response_interrupted") throw Error("Push response interrupted");
+    }
+    throw error;
+  }
+};
 
 /** RFC 8291 aes128gcm, one record, with RFC 8292 VAPID authentication. */
 export function preparePushRequest(

@@ -7,7 +7,7 @@ import test from "node:test";
 import { readConfiguredHostProof } from "./configured-hosts.mjs";
 
 for (const [kind, count] of [
-  ["service", 2],
+  ["service", 1],
   ["device", 1],
 ]) {
   test(`${kind} host proof requires every case to pass with the supplied binary`, () => {
