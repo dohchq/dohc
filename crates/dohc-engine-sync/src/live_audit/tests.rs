@@ -924,6 +924,38 @@ fn enrollment_exports_durable_history_across_crash_new_edits_and_reopen() {
     );
 }
 
+#[test]
+fn enrollment_holds_the_history_of_a_note_an_old_restore_stopped() {
+    let mut f = fixture(false);
+    bootstrap(&mut f, false).unwrap();
+    accept_enrollment_event(&mut f, 1);
+    contact(&mut f.store);
+    assert_eq!(count(&f.store, "live_audit_pending_exports"), 1);
+    let binding = serde_json::to_string(&f.binding).unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('ws','main','object','old-relay','old-restore',json_object('oldBinding',json(?1),'newFence',2),'{}')",
+                [binding],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    enrollment::prepare_exports(
+        &mut f.store,
+        "ws",
+        &NoFaults,
+        &crate::NoLiveLeases,
+        201,
+        &mut false,
+    )
+    .unwrap();
+    assert_eq!(count(&f.store, "live_audit_event_publications"), 0);
+    assert_eq!(count(&f.store, "live_audit_pending_exports"), 1);
+    assert_eq!(count(&f.store, "live_audit_held_exports"), 1);
+}
+
 fn import_source(f: &Fixture) -> (ScratchDir, std::path::PathBuf, EngineStore) {
     let (scratch, path, mut store) = open_store();
     store
