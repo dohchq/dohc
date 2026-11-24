@@ -8,7 +8,9 @@ import { useWorkspaces, WorkspacesProvider } from "../../src/chats/Workspaces";
 import { demoMode } from "../../src/demo";
 import { NoticesProvider, useNotices } from "../../src/notices/NoticesState";
 import { sampleBuild } from "../../src/sampleBuild";
+import { views } from "../../src/server/workspaceData";
 import { FeedNotice } from "../../src/workspace/FeedNotice";
+import { useView } from "../../src/workspace/useView";
 import { HideToast, ShowToast, Toast, type ToastMessage } from "../../src/notices/Toast";
 import {
   closeToast,
@@ -71,9 +73,12 @@ function Tabs({ toast, onCloseToast }: { toast: ToastMessage | null; onCloseToas
   const theme = useTheme();
   const { unread } = useNotices();
   const { current } = useWorkspaces();
-  const unreadCount = (current?.sections ?? [])
-    .flatMap((section) => section.rows)
-    .reduce((sum, row) => sum + (row.count ?? 0), 0);
+  const chats = useView(views.chats).state.value;
+  const unreadCount =
+    (current?.sections ?? [])
+      .flatMap((section) => section.rows)
+      .reduce((sum, row) => sum + (row.count ?? 0), 0) +
+    (chats ?? []).reduce((sum, group) => sum + group.unreadCount, 0);
   const pathname = usePathname();
   return (
     <View style={{ flex: 1 }}>
@@ -104,10 +109,6 @@ function Tabs({ toast, onCloseToast }: { toast: ToastMessage | null; onCloseToas
           {unread > 0 ? (
             <NativeTabs.Trigger.Badge>{String(unread)}</NativeTabs.Trigger.Badge>
           ) : null}
-        </NativeTabs.Trigger>
-        <NativeTabs.Trigger name="search" role="search">
-          <NativeTabs.Trigger.Icon sf="magnifyingglass" md="search" />
-          <NativeTabs.Trigger.Label>Search</NativeTabs.Trigger.Label>
         </NativeTabs.Trigger>
       </NativeTabs>
       {toast && (pathname !== "/notices" || toast.holdsUndo) ? (

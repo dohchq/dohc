@@ -181,6 +181,8 @@ function followCaretAboveKeyboard() {
   };
   (window as Window & { __dohcKeyboard?: (height: number) => void }).__dohcKeyboard = (height) => {
     covered = height;
+    const editor = document.getElementById("editor");
+    if (editor) editor.style.paddingBottom = height > 0 ? `max(40vh, ${height + 48}px)` : "";
     reveal();
   };
   document.addEventListener("selectionchange", () => requestAnimationFrame(reveal));

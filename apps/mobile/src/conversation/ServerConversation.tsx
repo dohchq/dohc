@@ -977,6 +977,7 @@ function Conversation({
   const header = (
     <Stack.Screen
       options={{
+        title,
         headerTitle: () => (
           <Text
             style={[styles.name, { color: theme.ink }]}

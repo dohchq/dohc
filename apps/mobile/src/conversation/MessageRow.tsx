@@ -394,7 +394,15 @@ function MessageActions({
             }
           />
         </Pressable>
-        {onReply ? <ReplyButton onPress={() => onReply(message)} theme={theme} /> : null}
+        {onReply ? (
+          <ReplyButton
+            onPress={() => {
+              setPicking(false);
+              onReply(message);
+            }}
+            theme={theme}
+          />
+        ) : null}
       </View>
       {picking ? (
         <View style={styles.picker}>
@@ -632,9 +640,10 @@ const styles = StyleSheet.create({
   pending: { borderStyle: "dashed" },
   /** Add reaction and Reply: as wide as the touch needs, with no count. */
   tool: { minWidth: 36, justifyContent: "center" },
-  picker: { flexDirection: "row", flexWrap: "wrap", gap: 2, marginTop: 4 },
+  picker: { flexDirection: "row", gap: 2, marginTop: 4 },
   choice: {
-    width: 44,
+    flex: 1,
+    maxWidth: 44,
     height: 44,
     borderRadius: 22,
     alignItems: "center",
