@@ -76,7 +76,7 @@ createRoot(document.getElementById("root")!).render(
 
 ## Minimal `app.publish.json`
 
-`inputs` and `packageMap` are optional. When `inputs` is omitted, dohc includes the supported source files in the app folder and leaves out `app.publish.json`, `dataset.json`, co-located Collection schemas and operations, strict Collection subfolders, top-level `changes/` and `revisions/`, `collection.yaml`, `automations.yaml`, `package.json`, `dohc.json`, `tsconfig*.json`, dotfiles, and `node_modules`. Relative script imports without extensions (for example `./Summary` or `./date.utils`) resolve unambiguously across `.tsx`, `.ts`, `.jsx`, `.js`, and `index.*`.
+`inputs` and `packageMap` are optional. When `inputs` is omitted, dohc includes the supported source files in the app folder and leaves out `app.publish.json`, `dataset.json`, co-located Collection schemas and operations, strict Collection subfolders, top-level `changes/` and `revisions/`, `collection.yaml`, `automations.yaml`, `package.json`, `dohc.json`, `tsconfig*.json`, `*.test.*`, `*.spec.*`, dotfiles, and `node_modules`. Relative script imports without extensions (for example `./Summary` or `./date.utils`) resolve unambiguously across `.tsx`, `.ts`, `.jsx`, `.js`, and `index.*`.
 
 A Collection binding can name operations directly and omit `revision` and `revisionSha256`; dohc pins them to the Collection's currently approved revision when preparing the app:
 

@@ -263,6 +263,7 @@ export const AppFrontendDiagnostic = z
     code: z.enum([
       "manifest_error",
       "missing_input",
+      "input_outside_app_root",
       "compile_error",
       "dataset_binding_error",
       "collection_schema_error",

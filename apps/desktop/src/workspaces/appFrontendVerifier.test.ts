@@ -783,6 +783,13 @@ describe("verifyLocalAppFrontend", () => {
       },
     );
     expect(collectionResult.ok).toBe(true);
+    expect(collectionResult.diagnostics).toEqual([
+      expect.objectContaining({
+        code: "input_outside_app_root",
+        severity: "warning",
+        path: "signups/collection.yaml",
+      }),
+    ]);
 
     const unconnectedResult = await verifyLocalAppFrontend(
       { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/static" },
@@ -1255,6 +1262,178 @@ describe("verifyLocalAppFrontend", () => {
       },
     );
     expect(result.ok).toBe(true);
+  });
+
+  it("warns when entryPath or inputs escape appRoot without failing local verification", async () => {
+    const controller = new AbortController();
+    const files: Record<string, string> = {
+      "tournament/spectator/app.publish.json": JSON.stringify({
+        version: 1,
+        entryPath: "../spectator.tsx",
+        inputs: ["../spectator.tsx", "../shared/theme.css", "local.ts"],
+        packageMap: {},
+      }),
+      "tournament/spectator.tsx":
+        "import './shared/theme.css'; import { label } from './spectator/local.ts'; document.body.textContent = label;",
+      "tournament/shared/theme.css": "body { margin: 0; }",
+      "tournament/spectator/local.ts": "export const label = 'spectator';",
+    };
+    const okBrowser = async () => ({
+      ok: true,
+      stage: "complete" as const,
+      startupOk: true,
+      stepsOk: true,
+      handshake: { delivered: true, messageCount: 0 },
+      brokerCalls: [],
+      steps: [],
+      diagnostics: [],
+      externalRequestsBlocked: 0,
+    });
+
+    const candidateResult = await verifyLocalAppFrontend(
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "tournament/spectator" },
+      {
+        workspaceId: "ws-1",
+        workspaceRoot: "C:\\workspace",
+        signal: controller.signal,
+        assertCurrent: () => {},
+        flushCapture: async () => ({ deferredWrites: [] }),
+        withAdapter: async (work) => work(makeMemoryAdapter(files)),
+        compile: (req) => compileClosedApp(req),
+        compileDataset: (src, path) => compileDatasetOperations(src, path),
+        datasetRuntime: {},
+        approvedArtifacts: vi.fn(),
+        verificationPublication: vi.fn(),
+        runBrowser: okBrowser,
+      },
+    );
+
+    expect(candidateResult.ok).toBe(true);
+    expect(candidateResult.stage).toBe("complete");
+    expect(candidateResult.diagnostics).toEqual([
+      expect.objectContaining({
+        code: "input_outside_app_root",
+        severity: "warning",
+        path: "tournament/spectator.tsx",
+      }),
+      expect.objectContaining({
+        code: "input_outside_app_root",
+        severity: "warning",
+        path: "tournament/shared/theme.css",
+      }),
+    ]);
+    for (const diagnostic of candidateResult.diagnostics) {
+      expect(diagnostic.detail).toMatch(/default share link/i);
+      expect(diagnostic.remedy).toMatch(/app folder|share link/i);
+    }
+
+    const siblingFiles: Record<string, string> = {
+      "apps/demo/app.publish.json": JSON.stringify({
+        version: 1,
+        entryPath: "main.ts",
+        inputs: ["main.ts", "../demo-shared/lib.ts"],
+        packageMap: {},
+      }),
+      "apps/demo/main.ts": "import { x } from '../demo-shared/lib.ts'; console.log(x);",
+      "apps/demo-shared/lib.ts": "export const x = 1;",
+    };
+    const siblingResult = await verifyLocalAppFrontend(
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/demo" },
+      {
+        workspaceId: "ws-1",
+        workspaceRoot: "C:\\workspace",
+        signal: controller.signal,
+        assertCurrent: () => {},
+        flushCapture: async () => ({ deferredWrites: [] }),
+        withAdapter: async (work) => work(makeMemoryAdapter(siblingFiles)),
+        compile: (req) => compileClosedApp(req),
+        compileDataset: (src, path) => compileDatasetOperations(src, path),
+        datasetRuntime: {},
+        approvedArtifacts: vi.fn(),
+        verificationPublication: vi.fn(),
+        runBrowser: okBrowser,
+      },
+    );
+    expect(siblingResult.ok).toBe(true);
+    expect(siblingResult.diagnostics).toEqual([
+      expect.objectContaining({
+        code: "input_outside_app_root",
+        severity: "warning",
+        path: "apps/demo-shared/lib.ts",
+      }),
+    ]);
+
+    const pubId = sha("pub-outside");
+    const pubResult = await verifyLocalAppFrontend(
+      { action: "verifyFrontend", workspaceId: "ws-1", publicationId: pubId },
+      {
+        workspaceId: "ws-1",
+        workspaceRoot: "C:\\workspace",
+        signal: controller.signal,
+        assertCurrent: () => {},
+        flushCapture: async () => ({ deferredWrites: [] }),
+        withAdapter: vi.fn(),
+        compile: vi.fn(),
+        compileDataset: vi.fn(),
+        datasetRuntime: {},
+        approvedArtifacts: vi.fn(),
+        verificationPublication: async () => ({
+          publicationId: pubId,
+          authorityRevision: 1,
+          appRoot: "tournament/spectator",
+          kind: "unconnected",
+          resourceId: "res-1",
+          candidate: {
+            versionId: "main",
+            appRoot: "tournament/spectator",
+            entryPath: "tournament/spectator.tsx",
+            packageMap: {},
+            sourceRevision: sha("src"),
+            sourceDigest: sha("src-d"),
+            dependencyLockDigest: sha("dep-d"),
+            bundleDigest: sha("bun-d"),
+            buildDigest: sha("bld-d"),
+            compilerIdentity: {
+              recipe: "dohc-closed-app-v4",
+              version: "0.28.1",
+              binarySha256: sha("bin"),
+            },
+            inputs: [
+              { path: "tournament/spectator/app.publish.json", sha256: sha("m"), byteLength: 10 },
+              { path: "tournament/spectator.tsx", sha256: sha("e"), byteLength: 10 },
+            ],
+            dependencies: ["tournament/spectator.tsx"],
+            files: [
+              {
+                path: "bundle.js",
+                sha256: sha("b"),
+                byteLength: 10,
+                contentType: "application/javascript; charset=utf-8",
+              },
+            ],
+            capabilities: [],
+          },
+          files: [
+            {
+              path: "bundle.js",
+              sha256: sha("b"),
+              byteLength: 10,
+              contentType: "application/javascript; charset=utf-8",
+              bytes: new TextEncoder().encode("console.log(1);"),
+            },
+          ],
+        }),
+        runBrowser: okBrowser,
+      },
+    );
+    expect(pubResult.ok).toBe(true);
+    expect(pubResult.diagnostics).toEqual([
+      expect.objectContaining({
+        code: "input_outside_app_root",
+        severity: "warning",
+        path: "tournament/spectator.tsx",
+      }),
+    ]);
   });
 
   it("matches overlapping backend expectations using complete one-to-one bipartite matching", () => {

@@ -192,6 +192,28 @@ function classifyCompileDiagnostic(
       };
 }
 
+const MAX_DIAGNOSTICS = 64;
+
+function outsideAppRootDiagnostics(candidate: AppPublicationCandidate): AppFrontendDiagnostic[] {
+  const prefix = `${candidate.appRoot}/`;
+  const outsidePaths = [
+    ...new Set(
+      [candidate.entryPath, ...candidate.inputs.map((file) => file.path)].filter(
+        (path) => path !== candidate.appRoot && !path.startsWith(prefix),
+      ),
+    ),
+  ];
+  return outsidePaths.map((path) => ({
+    code: "input_outside_app_root" as const,
+    severity: "warning" as const,
+    path,
+    detail:
+      "Path is outside the app folder; a default share link scoped to the app folder will refuse it.",
+    remedy:
+      "Move shared files inside the app folder, or create a share link whose paths include every referenced folder.",
+  }));
+}
+
 export async function verifyLocalAppFrontend(
   input: VerifyFrontendRequest,
   deps: VerifyLocalAppFrontendDeps,
@@ -742,10 +764,13 @@ export async function verifyLocalAppFrontend(
       scrub: createDiagnosticScrubber(deps.workspaceRoot),
     });
     current();
+    const outsideWarnings = outsideAppRootDiagnostics(candidate);
+    const diagnostics = [...report.diagnostics, ...outsideWarnings].slice(0, MAX_DIAGNOSTICS);
     return OwnerAppPublicationResult.parse({
       kind: "frontendVerified",
       target,
       ...report,
+      diagnostics,
     }) as VerifyFrontendResult;
   } finally {
     deps.signal.removeEventListener("abort", abortLifetime);
