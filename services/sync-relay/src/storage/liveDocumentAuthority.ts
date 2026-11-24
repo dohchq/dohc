@@ -2,7 +2,6 @@ import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { ensureLiveLinkPublicPrincipal } from "./liveAuthorSnapshot";
 import type { StoredLiveDocumentAuthority } from "./types";
 import {
-  restoreInProgress,
   SERVICE_HOST_ENROLLMENTS,
   serviceHostDocumentEnabled,
   serviceHostDocumentEnrolled,
@@ -1589,7 +1588,6 @@ function registerValidatedBaseline(
 function lastLineageEnding(storage: StorageContext, document: LiveDocumentKey): boolean {
   const { workspaceId, mainVersionId, objectId } = document;
   return (
-    restoreInProgress(storage, workspaceId, objectId) ||
     storage.db
       .prepare(`SELECT 1 FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND retired_at_ms IS NULL
         UNION ALL SELECT 1 FROM ${LIVE_ROOM_EDITS} WHERE workspace_id=? AND main_version_id=? AND object_id=?
