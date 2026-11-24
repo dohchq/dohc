@@ -728,6 +728,7 @@ export async function openProductionSync(
   f: Awaited<ReturnType<typeof fixture>>,
   socket: ReturnType<Awaited<ReturnType<typeof fixture>>["connect"]>,
   credit = true,
+  receivePolicy = f.frames.receive,
 ) {
   await vi.waitFor(
     () => {
@@ -738,7 +739,7 @@ export async function openProductionSync(
   );
   const send = (frame: LiveFrame) =>
     socket.ws.send(encodeLiveFrame(frame, f.frames.receive.maxFrameBytes));
-  send({ kind: "hello", receivePolicy: f.frames.receive });
+  send({ kind: "hello", receivePolicy });
   if (credit)
     send({
       kind: "credit",
