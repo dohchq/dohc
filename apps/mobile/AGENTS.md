@@ -47,7 +47,7 @@ band hasn't run on Android.
 
 The app shows its sample data only in a sample build: a development build, or one made with `EXPO_PUBLIC_DOHC_SAMPLE=1`, as the simulator tests are (`src/sampleBuild.ts`).
 Any other build signs in to a server first (`src/account/Connect.tsx`), then reads the open workspace from it: Home, Chats, a chat and a page (`src/server/workspaceData.ts`). It reads and marks the account's Notices.
-Search shows "Not built yet".
+The tab bar has no Search tab until search is built.
 
 Phone writes are off by default, so a signed-in build stays read-only (`src/server/phoneWrites.ts`). Off, the outbox sends nothing, not even records an earlier build kept.
 Keep every write control behind `phoneWrites`: the composer, New post, Reply, reactions, a question's or poll's answers, Send and Discard on outbox messages and reactions, an app's Approve and Open, editing a page, a Collection record's field editors and Undo (`collectionEdit`, `src/collections/FieldEditor.tsx`), and a Collection's New record and Delete (`collectionCreate`, `collectionDelete`).

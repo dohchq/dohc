@@ -337,6 +337,7 @@ export function SampleConversation() {
     <View style={[styles.screen, { backgroundColor: theme.bg }]}>
       <Stack.Screen
         options={{
+          title: shown,
           headerTitle: () => (
             <View style={styles.title}>
               <Text style={[styles.name, { color: theme.ink }]} numberOfLines={1}>
