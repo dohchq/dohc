@@ -20,6 +20,7 @@ import {
   shareListing,
   workspaceActivityCallbacks,
   emitWorkspaceActivity,
+  emitCloudSessionChanged,
   renderView,
   navigatorView,
 } from "./ChatsView.testHarness";
@@ -789,11 +790,21 @@ describe("ChatsView read cursors", () => {
     }
     expect(bridgeMock.markChatThreadRead).toHaveBeenCalledTimes(1);
 
+    // A read marked while signed out is published only when the owner marks it again.
+    act(() => emitCloudSessionChanged("session-b", "ready"));
+    act(() => emitWorkspaceActivity());
+    await waitFor(() => expect(bridgeMock.markChatThreadRead).toHaveBeenCalledTimes(2));
+    expect(bridgeMock.markChatThreadRead).toHaveBeenLastCalledWith({
+      workspaceId: "workspace-a",
+      threadId: "thread-1",
+      upToSequence: 2,
+    });
+
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [message(), message({ id: "m2" }), message({ id: "m3" })],
     });
     act(() => emitWorkspaceActivity());
-    await waitFor(() => expect(bridgeMock.markChatThreadRead).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridgeMock.markChatThreadRead).toHaveBeenCalledTimes(3));
     expect(bridgeMock.markChatThreadRead).toHaveBeenLastCalledWith({
       workspaceId: "workspace-a",
       threadId: "thread-1",

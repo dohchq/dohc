@@ -3633,6 +3633,9 @@ export function ChatsView(props: {
   // answer clears the previous account's rows without any manual refresh.
   useEffect(() => {
     return bridge().onCloudSessionChanged(({ sessionKey, phase }) => {
+      // A read marked before this session may not be published yet; let the
+      // next refresh send it again.
+      markedRead.current.clear();
       // A rotation within the same session — same server, relay, and user;
       // the key deliberately excludes the token — invalidates nothing: the
       // rows stay (an outage during rotation must not hide them), in-flight
