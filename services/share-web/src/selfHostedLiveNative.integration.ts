@@ -2433,6 +2433,8 @@ async function openSelfHostProof(name: string) {
           path,
           objectId: activation(path)!.source.objectId,
           status: "ready",
+          record: expect.objectContaining({ state: "live" }),
+          actions: ["stop"],
           document: { binding, relayDatabaseNamespace: history.namespace },
           // The owner's list also gives the last journal position the relay accepted for the note.
           head: Number(
@@ -3108,6 +3110,8 @@ it(
         status: "retired",
         acceptedCursor: accepted.journalCursor,
         changed: true,
+        record: expect.objectContaining({ state: "off", reason: "stopped" }),
+        actions: expect.any(Array),
       });
       const retiring = {
         activation_id: P,
@@ -3887,7 +3891,14 @@ it(
       // Pause: the activation retires at its seed, and the relay keeps its owner delivery in history.
       expect(await proof.route("DELETE", { path: "docs/a.md" })).toEqual({
         status: 200,
-        body: { ok: true, path: "docs/a.md", objectId: proof.objectId, status: "paused" },
+        body: {
+          ok: true,
+          path: "docs/a.md",
+          objectId: proof.objectId,
+          status: "paused",
+          record: expect.objectContaining({ state: "off", reason: "paused" }),
+          actions: expect.any(Array),
+        },
       });
       await vi.waitFor(
         () => {
@@ -3943,6 +3954,8 @@ it(
           objectId: proof.objectId,
           status: "preparing",
           changed: true,
+          record: expect.objectContaining({ state: "starting" }),
+          actions: ["stop"],
         },
       });
       await vi.waitFor(
@@ -4100,6 +4113,8 @@ it(
         objectId: plain.objectId,
         status: "unavailable",
         reason: "live-document-without-lineage",
+        record: expect.objectContaining({ state: "starting" }),
+        actions: ["stop", "resume"],
       };
       await vi.waitFor(async () => expect(await proof.documents()).toContainEqual(refused), {
         timeout: 30000,
