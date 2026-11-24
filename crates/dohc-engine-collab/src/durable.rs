@@ -3331,13 +3331,11 @@ pub fn read_marker_in(conn: &Connection, key: &DocKey) -> Result<Option<Marker>,
     .transpose()
 }
 
-/// The `replication_log` rows that install a resolution's successor for
-/// `key` (`?1` workspace, `?2` version, `?3` object).
-pub const LOGGED_SUCCESSORS: &str = "workspace_id=?1 AND op_kind='conflict.resolve'     AND apply_disposition='applied' AND json_extract(payload_json,'$.targetVersionId')=?2     AND json_extract(payload_json,'$.transition.result.objectId')=?3";
+pub const LOGGED_SUCCESSORS: &str = "workspace_id=?1 AND op_kind='conflict.resolve' AND apply_disposition='applied' AND json_extract(payload_json,'$.targetVersionId')=?2 AND json_extract(payload_json,'$.transition.result.objectId')=?3";
+const SUCCESSOR_IS: &str = "json_extract(payload_json,'$.lineageTransition.successor.lineageClaimId')=?4 AND json_extract(payload_json,'$.lineageTransition.successor.updateBlobSha256')=?4 AND json_extract(payload_json,'$.lineageTransition.successor.contentKind')=?5";
 
-/// The logged row that introduced an exact lineage: its base-state update, or
-/// the resolution that installed it as a successor. Only a base update's
-/// relay position is the marker's to know.
+/// The logged row that began an exact lineage: its base-state update, or the
+/// resolution that installed it. Only a base update's relay position is known.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineageOrigin {
     pub origin_id: String,
@@ -3345,8 +3343,8 @@ pub struct LineageOrigin {
     pub relay_seq: Option<i64>,
 }
 
-/// Whether the row at `origin_id`/`origin_seq` introduced `lineage_claim_id`
-/// for `key`, and with `imported` came back from the relay.
+/// Whether the row at `origin_id`/`origin_seq` began `lineage_claim_id` for
+/// `key`, and with `imported` came back from the relay.
 pub fn is_lineage_origin_in(
     conn: &Connection,
     key: &DocKey,
@@ -3358,16 +3356,16 @@ pub fn is_lineage_origin_in(
 ) -> Result<bool, CollabError> {
     conn.query_row(
         &format!(
-            "SELECT EXISTS(SELECT 1 FROM replication_log WHERE workspace_id=?1 AND origin_id=?4 AND origin_seq=?5 AND (?8=0 OR imported=1)              AND ((op_kind='ydoc.update' AND apply_disposition='applied'                AND json_extract(payload_json,'$.versionId')=?2 AND json_extract(payload_json,'$.objectId')=?3                AND json_extract(payload_json,'$.lineageClaimId')=?6 AND json_extract(payload_json,'$.updateBlobSha256')=?6                AND json_extract(payload_json,'$.contentKind')=?7 AND json_extract(payload_json,'$.isBaseState')=1)              OR ({LOGGED_SUCCESSORS}                AND json_extract(payload_json,'$.lineageTransition.successor.lineageClaimId')=?6                AND json_extract(payload_json,'$.lineageTransition.successor.updateBlobSha256')=?6                AND json_extract(payload_json,'$.lineageTransition.successor.contentKind')=?7)))"
+            "SELECT EXISTS(SELECT 1 FROM replication_log WHERE workspace_id=?1 AND origin_id=?6 AND origin_seq=?7 AND (?8=0 OR imported=1) AND ((op_kind='ydoc.update' AND apply_disposition='applied' AND json_extract(payload_json,'$.versionId')=?2 AND json_extract(payload_json,'$.objectId')=?3 AND json_extract(payload_json,'$.lineageClaimId')=?4 AND json_extract(payload_json,'$.updateBlobSha256')=?4 AND json_extract(payload_json,'$.contentKind')=?5 AND json_extract(payload_json,'$.isBaseState')=1) OR ({LOGGED_SUCCESSORS} AND {SUCCESSOR_IS})))"
         ),
         rusqlite::params![
             key.workspace_id,
             key.version_id,
             key.object_id,
-            origin_id,
-            origin_seq,
             lineage_claim_id,
             content_kind.as_str(),
+            origin_id,
+            origin_seq,
             imported
         ],
         |row| row.get(0),
@@ -3375,8 +3373,8 @@ pub fn is_lineage_origin_in(
     .map_err(map_sql)
 }
 
-/// The row that introduced `marker`'s exact lineage, or `None` until it has
-/// come back from the relay.
+/// The row that began `marker`'s exact lineage, or `None` until it has come
+/// back from the relay.
 pub fn lineage_origin_in(
     conn: &Connection,
     key: &DocKey,
@@ -3392,15 +3390,15 @@ pub fn lineage_origin_in(
         return conn
             .query_row(
                 &format!(
-                    "SELECT origin_id,origin_seq FROM replication_log WHERE {LOGGED_SUCCESSORS} AND imported=1                      AND json_extract(payload_json,'$.lineageTransition.predecessorClaimId')=?4                      AND json_extract(payload_json,'$.lineageTransition.successor.lineageClaimId')=?5                      AND json_extract(payload_json,'$.lineageTransition.successor.updateBlobSha256')=?5                      AND json_extract(payload_json,'$.lineageTransition.successor.contentKind')=?6                      ORDER BY origin_id,origin_seq LIMIT 1"
+                    "SELECT origin_id,origin_seq FROM replication_log WHERE {LOGGED_SUCCESSORS} AND {SUCCESSOR_IS} AND imported=1 AND json_extract(payload_json,'$.lineageTransition.predecessorClaimId')=?6 ORDER BY origin_id,origin_seq LIMIT 1"
                 ),
                 rusqlite::params![
                     key.workspace_id,
                     key.version_id,
                     key.object_id,
-                    parent,
                     lineage,
-                    marker.content_kind.as_str()
+                    marker.content_kind.as_str(),
+                    parent
                 ],
                 |row| {
                     Ok(LineageOrigin {
@@ -3418,7 +3416,7 @@ pub fn lineage_origin_in(
     else {
         return Ok(None);
     };
-    Ok(is_lineage_origin_in(
+    let found = is_lineage_origin_in(
         conn,
         key,
         true,
@@ -3426,8 +3424,8 @@ pub fn lineage_origin_in(
         lineage,
         origin_id,
         origin_seq,
-    )?
-    .then(|| LineageOrigin {
+    )?;
+    Ok(found.then(|| LineageOrigin {
         origin_id: origin_id.to_owned(),
         origin_seq,
         relay_seq: marker.base_relay_seq,
