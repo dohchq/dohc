@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Modal, Pressable, StyleSheet, Text, View } from "react-native";
+import { Modal, Pressable, StyleSheet, Text } from "react-native";
 import Animated, { FadeIn, SlideInDown } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { showSheetWith, type Choices } from "./confirm";
@@ -59,7 +59,6 @@ export function ChoiceSheetHost() {
         style={[styles.sheet, { backgroundColor: theme.raised, paddingBottom: insets.bottom + 8 }]}
         accessibilityViewIsModal
       >
-        <View style={[styles.handle, { backgroundColor: theme.outline }]} />
         {title ? (
           <Text style={[styles.title, { color: theme.muted }]} accessibilityRole="header">
             {title}
@@ -93,10 +92,9 @@ const styles = StyleSheet.create({
     bottom: 0,
     borderTopLeftRadius: 28,
     borderTopRightRadius: 28,
-    paddingTop: 8,
+    paddingTop: 20,
     elevation: 8,
   },
-  handle: { alignSelf: "center", width: 32, height: 4, borderRadius: 2, marginBottom: 12 },
   title: { fontSize: 14, fontWeight: "600", paddingHorizontal: 24, paddingBottom: 4 },
   message: { fontSize: 15, lineHeight: 20, paddingHorizontal: 24, paddingBottom: 8 },
   row: { minHeight: TOUCH + 8, justifyContent: "center", paddingHorizontal: 24 },

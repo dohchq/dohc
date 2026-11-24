@@ -17,9 +17,12 @@ export function SampleAgentCard() {
   const agent = sampleAgent(id);
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  // A link to an agent the sample doesn't have opens nothing: the sheet closes rather than stand empty.
+  // A link to an agent the sample doesn't have opens nothing: the sheet closes rather than stand empty, or opens Chats
+  // when the link started the app.
   useEffect(() => {
-    if (!agent && router.canGoBack()) router.back();
+    if (agent) return;
+    if (router.canGoBack()) router.back();
+    else router.replace("/");
   }, [agent, router]);
   if (!agent) return null;
   const card = agentCard({

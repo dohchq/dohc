@@ -87,7 +87,8 @@ export function TitleControls({
 const pressedBox = ({ pressed }: { pressed: boolean }) => [styles.box, pressed && styles.pressed];
 
 const styles = StyleSheet.create({
-  controls: { flexDirection: "row", gap: 22, marginTop: -0.5 },
+  // The gap keeps the two controls' touch squares from overlapping.
+  controls: { flexDirection: "row", gap: TOUCH - 22, marginTop: -0.5 },
   // Each control is a real TOUCH square; the negative margin keeps it laid out as 22pt, so the columns don't move.
   box: {
     width: TOUCH,
