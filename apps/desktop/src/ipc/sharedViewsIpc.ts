@@ -50,6 +50,7 @@ import {
   sharePinAtStatedLevel,
   shareViewIdentitySelector,
   shareViewSendsFiles,
+  membershipWaitsToSend,
   recordedShareSelector,
 } from "../workspaces/shareViewRecords";
 import { type ShareAccess, shareAccessRank } from "@dohc/security-contract/share-selector";
@@ -254,6 +255,27 @@ export function registerSharedViewsIpcHandlers<
     return recorded.identity !== "not-required";
   }
 
+  // A membership that can send says editing is not ready until its identity
+  // is recorded, and every write gate reads the mark. A path share's mark
+  // follows its pinned level instead.
+  async function markSendingReady(workspaceId: string, recorded: boolean): Promise<void> {
+    const view = requireWorkspace(workspaceId).shareView;
+    if (
+      !view ||
+      view.ended ||
+      recordedShareSelector(view.grantedSelector)?.wholeWorkspace !== true ||
+      !shareViewSendsFiles(view) ||
+      (view.editingNotReady === true) !== recorded
+    )
+      return;
+    const next = { ...view };
+    if (recorded) delete next.editingNotReady;
+    else next.editingNotReady = true;
+    await setWorkspaceShareView(workspaceId, next);
+    refreshNativeWorkspaceSurfaces();
+    notifyRenderer({ workspaceId, summaryChanged: true });
+  }
+
   async function narrowShareViewLevel(input: {
     workspaceId: string;
     rootPath: string;
@@ -292,7 +314,8 @@ export function registerSharedViewsIpcHandlers<
             unsavedPaths,
             unconfirmedChanges,
           };
-          if (input.editingNotReady) narrowed.editingNotReady = true;
+          if (input.editingNotReady || membershipWaitsToSend(latest, narrowed))
+            narrowed.editingNotReady = true;
           else delete narrowed.editingNotReady;
           await setWorkspaceShareView(input.workspaceId, narrowed);
         },
@@ -332,12 +355,10 @@ export function registerSharedViewsIpcHandlers<
         async (unsavedPaths, unconfirmedChanges) => {
           const latest = requireWorkspace(workspaceId).shareView;
           if (!latest || latest.shareId !== view.shareId || latest.ended) return;
-          await setWorkspaceShareView(workspaceId, {
-            ...latest,
-            reach: listed,
-            unsavedPaths,
-            unconfirmedChanges,
-          });
+          const next = { ...latest, reach: listed, unsavedPaths, unconfirmedChanges };
+          // The caller records the identity next and clears the mark.
+          if (membershipWaitsToSend(latest, next)) next.editingNotReady = true;
+          await setWorkspaceShareView(workspaceId, next);
         },
       ),
     );
@@ -555,6 +576,9 @@ export function registerSharedViewsIpcHandlers<
       populate: async (created, authorityBinding) => {
         assertOpenIdentity();
         const statedEdit = grantedSelector.access === "edit";
+        const waitsToSend =
+          statedEdit ||
+          membershipWaitsToSend(null, { grantedSelector, ...(reach ? { reach } : {}) });
         const shareView: ShareViewIdentity = {
           shareId: parsed.shareId,
           ...(info.granterUserId ? { granterUserId: info.granterUserId } : {}),
@@ -566,7 +590,7 @@ export function registerSharedViewsIpcHandlers<
           // instead of trusting the relay's selection each time. A share
           // stated at Edit is pinned at View until its identity is recorded.
           grantedSelector: statedEdit ? { ...grantedSelector, access: "view" } : grantedSelector,
-          ...(statedEdit ? { editingNotReady: true as const } : {}),
+          ...(waitsToSend ? { editingNotReady: true as const } : {}),
           ...(reach ? { reach } : {}),
           receivedIdentity: info.receivedIdentity,
           ...membershipPlace(info),
@@ -608,7 +632,7 @@ export function registerSharedViewsIpcHandlers<
             delete pinnedAtEdit.editingNotReady;
             await setWorkspaceShareView(created.workspaceId, pinnedAtEdit);
           }
-        }
+        } else if (waitsToSend) await markSendingReady(created.workspaceId, recorded);
         refreshNativeWorkspaceSurfaces();
         try {
           await firstPull(created.rootPath, created.workspaceId, relay);
@@ -1113,10 +1137,13 @@ export function registerSharedViewsIpcHandlers<
                     ? membershipPlace(info)
                     : {}),
                 };
+                // A membership that can send keeps its mark until the identity
+                // below is recorded.
                 if (
                   identityRecorded ||
-                  (widenedPin?.access ?? pinnedLevel(current.shareView)) === "edit" ||
-                  (statedLevel !== undefined && statedLevel !== "edit" && !overtaken)
+                  (!membershipWaitsToSend(current.shareView, nextShareView) &&
+                    ((widenedPin?.access ?? pinnedLevel(current.shareView)) === "edit" ||
+                      (statedLevel !== undefined && statedLevel !== "edit" && !overtaken)))
                 )
                   delete nextShareView.editingNotReady;
                 await setWorkspaceShareView(workspace.workspaceId, nextShareView);
@@ -1144,7 +1171,8 @@ export function registerSharedViewsIpcHandlers<
             }
             if (!identityRecorded && identityFailure === undefined) {
               try {
-                await recordShareViewIdentity(refreshedWorkspace);
+                const recorded = await recordShareViewIdentity(refreshedWorkspace);
+                await markSendingReady(workspace.workspaceId, recorded);
               } catch (error) {
                 console.error("[desktop] share view enrolment:", error);
                 identityFailure = error;
@@ -1159,6 +1187,7 @@ export function registerSharedViewsIpcHandlers<
                   currentShareView: () => operation.workspace.shareView,
                   assertCurrent: () => operation.assertCurrent(),
                 });
+                await markSendingReady(workspace.workspaceId, false);
                 refreshNativeWorkspaceSurfaces();
               }
             }
@@ -1193,10 +1222,15 @@ export function registerSharedViewsIpcHandlers<
             const reachRelay = membershipRelay(workspace.shareView);
             // Installed levels can list Edit where the member had none, so the
             // copy enrolls for sending before anything is written under them.
-            const enrollInstalled = () =>
-              recordShareViewIdentity(currentShareViewWorkspace()).catch((error) => {
-                console.error("[desktop] share view enrolment:", error);
-              });
+            const enrollInstalled = async () => {
+              const recorded = await recordShareViewIdentity(currentShareViewWorkspace()).catch(
+                (error: unknown) => {
+                  console.error("[desktop] share view enrolment:", error);
+                  return false;
+                },
+              );
+              await markSendingReady(workspace.workspaceId, recorded);
+            };
             if (
               reachRelay &&
               lacksReach(workspace.workspaceId) &&
@@ -1559,7 +1593,11 @@ export function registerSharedViewsIpcHandlers<
                   recordedShareSelector(latest.grantedSelector)?.access === currentPin.access
                 ) {
                   const next = { ...latest, grantedSelector: raised, ...latestReach };
-                  delete next.editingNotReady;
+                  // A raise to Edit recorded the identity. One below Edit
+                  // recorded none, so a copy that can send waits for a refresh.
+                  if (statedAccess !== "edit" && membershipWaitsToSend(latest, next))
+                    next.editingNotReady = true;
+                  else delete next.editingNotReady;
                   await setWorkspaceShareView(workspace.workspaceId, next);
                   refreshNativeWorkspaceSurfaces();
                   notifyRenderer({ workspaceId: workspace.workspaceId, summaryChanged: true });
@@ -1580,11 +1618,14 @@ export function registerSharedViewsIpcHandlers<
                 notifyRenderer({ workspaceId: workspace.workspaceId, summaryChanged: true });
               }
               const marked = operation.workspace.shareView;
+              // A membership that can send keeps its mark until a refresh
+              // records its identity.
               if (
                 statedAccess !== "edit" &&
                 marked?.shareId === view.shareId &&
                 marked.editingNotReady &&
-                !marked.ended
+                !marked.ended &&
+                !membershipWaitsToSend(marked, marked)
               ) {
                 const unmarked = { ...marked };
                 delete unmarked.editingNotReady;

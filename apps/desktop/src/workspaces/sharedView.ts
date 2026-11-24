@@ -2384,6 +2384,7 @@ async function captureStandaloneShareViewDivergence(
     // The reach stored with a joined workspace's share view, which gives each
     // path its level.
     reach?: unknown;
+    editingNotReady?: true;
     shareId: string;
     ended: boolean;
     paths?: readonly string[];
@@ -2398,7 +2399,10 @@ async function captureStandaloneShareViewDivergence(
   if (grantedSelector === null) throw new SharePinInvalidError(input.shareId);
   // An edit outside the app is journaled only where the level takes it. One
   // at a view-only path is put back, as the app would have refused it.
-  const writes = writeScopeOfLevels(grantLevels(grantedSelector, input.reach), input.ended);
+  const writes = writeScopeOfLevels(
+    grantLevels(grantedSelector, input.reach, input.editingNotReady === true),
+    input.ended,
+  );
   return captureSharedViewLocalDivergence(
     {
       rootDir: input.rootDir,

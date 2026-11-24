@@ -51,15 +51,26 @@ export function storedShareViewReach(shareView: unknown): ListedReach | null {
 export function shareViewLevels(shareView: unknown): ShareViewLevels {
   if (!isRecord(shareView) || !shareViewIdentityIsIntact(shareView)) return NO_LEVELS;
   const selector = recordedShareSelector(shareView.grantedSelector);
-  return selector === null ? NO_LEVELS : grantLevels(selector, shareView.reach);
+  return selector === null
+    ? NO_LEVELS
+    : grantLevels(selector, shareView.reach, shareView.editingNotReady === true);
 }
 
-/** The levels a readable pinned grant gives with the reach stored beside it, if any. */
+/**
+ * The levels a readable pinned grant gives with the reach stored beside it, if
+ * any. A membership whose editing is not ready has no identity to send with,
+ * so it takes View wherever it would take Edit: a change made then would never
+ * be sent. A path share is pinned at View instead.
+ */
 export function grantLevels(
   selector: NonNullable<ReturnType<typeof recordedShareSelector>>,
   storedReach: unknown,
+  editingNotReady = false,
 ): ShareViewLevels {
-  const member = selector.access;
+  const waits = editingNotReady && selector.wholeWorkspace === true;
+  const cap = (level: ShareAccess | null): ShareAccess | null =>
+    waits && level === "edit" ? "view" : level;
+  const member = cap(selector.access);
   const reach =
     selector.wholeWorkspace === true && storedReach !== undefined
       ? parseListedReach(storedReach)
@@ -70,8 +81,8 @@ export function grantLevels(
   if (reach === undefined) return { member, highest: member, at: () => member, in: () => member };
   return {
     member,
-    highest: highestListedLevel(reach),
-    at: (path) => levelAtPath(reach, path),
-    in: (folder) => listedFolderLevel(reach, folder),
+    highest: cap(highestListedLevel(reach)),
+    at: (path) => cap(levelAtPath(reach, path)),
+    in: (folder) => cap(listedFolderLevel(reach, folder)),
   };
 }
