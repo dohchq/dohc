@@ -42,6 +42,22 @@ function setup(overrides: Partial<CollectionActionDialogProps> = {}) {
 }
 afterEach(cleanup);
 describe("CollectionActionDialog", () => {
+  it("accepts approved bulk input and confirms a large result", async () => {
+    const input = "i".repeat(400_000);
+    const result = "r".repeat(2_000_000);
+    const invoke = vi.fn<CollectionActionDialogProps["invoke"]>().mockResolvedValue({ result });
+    setup({
+      dataset: { ...dataset, operations: [{ ...dataset.operations[0]!, profile: "bulk" }] },
+      invoke,
+    });
+    fireEvent.change(screen.getByLabelText("Advanced JSON input"), {
+      target: { value: JSON.stringify(input) },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Run action" }));
+    expect(invoke).toHaveBeenCalledWith(expect.objectContaining({ input }), expect.anything());
+    await screen.findByText("Action completed");
+    expect(screen.getByLabelText("Action result").textContent?.length).toBe(result.length + 2);
+  });
   it("cancels a running action and retries an unknown outcome with the same key", async () => {
     const first = deferred<{ result: AppBackendJson }>();
     const invoke = vi

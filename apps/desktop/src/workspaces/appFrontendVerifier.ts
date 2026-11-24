@@ -90,7 +90,9 @@ const actionToBrokerOp = (action: LocalAppAction | "file") =>
     ? "collection.list"
     : action === "create"
       ? "collection.create"
-      : `backend.${action}`;
+      : action === "query"
+        ? "backend.invoke"
+        : `backend.${action}`;
 
 export function createDiagnosticScrubber(workspaceRoot: string, origin?: string) {
   const roots = [workspaceRoot, homedir()].filter(Boolean).flatMap((root) => {
@@ -474,7 +476,7 @@ export async function verifyLocalAppFrontend(
             "Unsupported in dry-run verification.",
           );
         }
-        if (action !== "invoke") {
+        if (action !== "invoke" && action !== "query") {
           failBackend(
             op,
             rawOpName,
@@ -506,13 +508,17 @@ export async function verifyLocalAppFrontend(
         const operation = selectedCapability.operations.find(
           (item) => item.name === parsed.operation,
         );
-        if (!operation) {
+        if (!operation || (action === "query" && !operation.readOnly)) {
           failBackend(
             "backend.invoke",
             parsed.operation,
             "operation_not_approved",
-            `Operation "${parsed.operation}" is not in app.publish.json dataset.operationIds.`,
-            "Add the operation's operationId to dataset.operationIds in app.publish.json, or remove the call.",
+            operation
+              ? `Read-only query attempted write operation "${parsed.operation}".`
+              : `Operation "${parsed.operation}" is not in app.publish.json dataset.operationIds.`,
+            operation
+              ? "Call write operations through useDatasetMutation or client.invoke instead of useDatasetQuery."
+              : "Add the operation's operationId to dataset.operationIds in app.publish.json, or remove the call.",
             "This action is not approved for the app.",
           );
         }

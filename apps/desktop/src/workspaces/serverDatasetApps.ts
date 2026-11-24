@@ -137,6 +137,9 @@ export function createServerDatasetApps(options: {
   server: Pick<ServerCollectionsTransport, "approve" | "withdraw" | "request">;
   /** Aborts when the workspace closes. */
   lifetime: AbortSignal;
+  datasetRevision?(datasetId: string): number;
+  subscribeDatasets?(datasetIds: readonly string[], onWake: () => void): () => void;
+  onDatasetRevision?(datasetId: string, revision: number): void;
 }): ReturnType<typeof createLocalDatasetApps> & { close(): Promise<void> } {
   // The server's approval revision for each app this computer approved, once the server has it.
   const approvals = new Map<string, Promise<number>>();
@@ -422,17 +425,24 @@ export function createServerDatasetApps(options: {
         return send(publicationId, authorityRevision, "upload", upload, signal);
       }
       const { authorityRevision, ...input } = parseAppBackendInvokeRequest(raw);
-      if (!operation(publicationId, authorityRevision, input.operation, input.dataset))
-        throw new Error("This action is not approved for the app.");
+      const cap = selectDatasetCapability(
+        current(publicationId, authorityRevision).capabilities,
+        input.dataset,
+      );
+      const found = cap.operations.find(
+        (c) => c.name === input.operation && (action !== "query" || c.readOnly),
+      );
+      if (!found) throw new Error("This action is not approved for the app.");
       // While an agent run is active, a change is the run's, unless a person's
       // click or key press in the app started it, as dohc's bootstrap reports.
       const run = activated ? null : options.agentRun();
-      return send(
+      const pending = send(
         publicationId,
         authorityRevision,
         "invoke",
         {
           ...input,
+          ...(action === "query" ? { readOnly: true } : {}),
           ...(run
             ? {
                 agent:
@@ -444,7 +454,30 @@ export function createServerDatasetApps(options: {
         },
         signal,
       );
+      return found.readOnly
+        ? pending
+        : pending.then((result) => {
+            const rev =
+              result && typeof result === "object"
+                ? (result as Record<string, unknown>).revision
+                : undefined;
+            if (typeof rev === "number" && Number.isSafeInteger(rev))
+              options.onDatasetRevision?.(cap.datasetId, rev);
+            return result;
+          });
     },
+    datasetRevisions: (publicationId: string, expected: number) =>
+      Object.fromEntries(
+        current(publicationId, expected).capabilities.map((cap) => [
+          cap.alias ?? "",
+          options.datasetRevision?.(cap.datasetId) ?? 0,
+        ]),
+      ),
+    subscribeDatasetChanges: (publicationId: string, expected: number, onWake: () => void) =>
+      options.subscribeDatasets?.(
+        current(publicationId, expected).capabilities.map((cap) => cap.datasetId),
+        onWake,
+      ) ?? (() => {}),
     readBrowserFile(
       publicationId: string,
       raw: {

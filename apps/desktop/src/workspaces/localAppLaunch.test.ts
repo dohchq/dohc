@@ -675,3 +675,180 @@ it("returns only validated app refusals after rechecking current authority", asy
   expect(stale.status).toBe(404);
   expect(await stale.text()).toBe("");
 });
+
+it("routes readOnly: true backend.invoke to query and rejects invalid readOnly values", async () => {
+  const f = await fixture(),
+    opened = await f.open(),
+    headers = { "x-dohc-app-proof": opened.proof };
+  expect((await f.post("/backend", { ...invoke, readOnly: false }, headers)).status).toBe(400);
+  expect(f.backend.request).not.toHaveBeenCalled();
+  expect((await f.post("/backend", { ...invoke, readOnly: true }, headers)).status).toBe(200);
+  expect(f.backend.request).toHaveBeenCalledWith(
+    publicationId,
+    "query",
+    {
+      authorityRevision: 1,
+      operation: "register",
+      idempotencyKey: "attempt-1",
+      input: { count: 1 },
+    },
+    expect.any(AbortSignal),
+    false,
+  );
+});
+
+it("serves authenticated POST /events long-poll with alias revisions and aborts cleanly on withdrawal", async () => {
+  const lifetime = new AbortController(),
+    session = new AbortController();
+  let authority = 1;
+  const revisions: Record<string, number> = { expenses: 2, workouts: 1 };
+  const listeners = new Set<() => void>();
+  const wakeAll = () => {
+    for (const listener of [...listeners]) listener();
+  };
+  const bytes = Buffer.from("document.getElementById('root').textContent='Live app';");
+  const backend = {
+    browserPublication: () => ({
+      authorityRevision: authority,
+      files: [
+        {
+          path: "bundle.js",
+          contentType: "text/javascript; charset=utf-8",
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          byteLength: bytes.length,
+          bytes,
+        },
+      ],
+    }),
+    assertBrowserPublication: (id: string, expected: number) => {
+      if (id !== publicationId || expected !== authority) throw Error("Withdrawn");
+    },
+    request: vi.fn(async () => ({ result: null, revision: 1, replayed: false })),
+    readBrowserFile: vi.fn(async () => ({})),
+    datasetRevisions: (id: string, expected: number) => {
+      if (id !== publicationId || expected !== authority) throw Error("Withdrawn");
+      return { ...revisions };
+    },
+    subscribeDatasetChanges: (_id: string, _expected: number, onWake: () => void) => {
+      listeners.add(onWake);
+      return () => listeners.delete(onWake);
+    },
+  };
+  const host = await createLocalAppLaunchHost({ backend, lifetime: lifetime.signal });
+  hosts.push(host);
+  const managed = await host.launchSession(publicationId, session.signal, { keepAlive: true });
+  const origin = new URL(managed.url).origin,
+    handoff = new URL(managed.url).hash.slice(1);
+  const post = (path: string, body?: unknown, headers: Record<string, string> = {}) =>
+    fetch(origin + path, {
+      method: "POST",
+      headers: { origin, "content-type": "application/json", ...headers },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  const opened = (await (await post("/session", { handoff })).json()) as { proof: string };
+  const headers = { "x-dohc-app-proof": opened.proof };
+
+  expect((await post("/events", { since: {} })).status).toBe(404);
+  expect((await post("/events", { since: {}, holdMs: -1 }, headers)).status).toBe(400);
+  expect((await post("/events", { since: { BadAlias: 1 } }, headers)).status).toBe(400);
+
+  const initial = await post("/events", { since: {}, holdMs: 0 }, headers);
+  expect(initial.status).toBe(200);
+  expect(await initial.json()).toEqual({
+    changed: [
+      { dataset: "expenses", revision: 2 },
+      { dataset: "workouts", revision: 1 },
+    ],
+  });
+
+  const parked = post("/events", { since: { expenses: 2, workouts: 1 }, holdMs: 10_000 }, headers);
+  await expect.poll(() => listeners.size).toBe(1);
+  revisions.expenses = 3;
+  wakeAll();
+  const woken = await parked;
+  expect(woken.status).toBe(200);
+  expect(await woken.json()).toEqual({
+    changed: [{ dataset: "expenses", revision: 3 }],
+  });
+  expect(listeners.size).toBe(0);
+
+  const hold1 = post("/events", { since: { expenses: 3, workouts: 1 }, holdMs: 10_000 }, headers);
+  const hold2 = post("/events", { since: { expenses: 3, workouts: 1 }, holdMs: 10_000 }, headers);
+  await expect.poll(() => listeners.size).toBe(2);
+  expect(
+    (await post("/events", { since: { expenses: 3, workouts: 1 }, holdMs: 1000 }, headers)).status,
+  ).toBe(429);
+
+  const burst = await Promise.all(
+    Array.from({ length: 8 }, (_, index) =>
+      post("/backend", { ...invoke, id: `burst-${index}`, readOnly: true }, headers),
+    ),
+  );
+  expect(burst.every((res) => res.status === 200)).toBe(true);
+
+  authority++;
+  wakeAll();
+  const [r1, r2] = await Promise.all([hold1, hold2]);
+  expect(r1.status).toBe(404);
+  expect(r2.status).toBe(404);
+  expect(managed.ended.aborted).toBe(true);
+  expect(managed.ended.reason).toBe("needs-approval");
+  expect(listeners.size).toBe(0);
+});
+
+it("keeps conservative concurrency and broker limits on server-backed launches", async () => {
+  const lifetime = new AbortController(),
+    session = new AbortController();
+  const bytes = Buffer.from("document.getElementById('root').textContent='Server app';");
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let started = 0;
+  const backend = {
+    browserPublication: () => ({
+      authorityRevision: 1,
+      files: [
+        {
+          path: "bundle.js",
+          contentType: "text/javascript; charset=utf-8",
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          byteLength: bytes.length,
+          bytes,
+        },
+      ],
+    }),
+    assertBrowserPublication: () => {},
+    request: vi.fn(async () => {
+      started++;
+      await gate;
+      return { result: null, revision: 1, replayed: false };
+    }),
+    readBrowserFile: vi.fn(async () => ({})),
+    localBudget: () => false,
+  };
+  const host = await createLocalAppLaunchHost({ backend, lifetime: lifetime.signal });
+  hosts.push(host);
+  const url = await host.launch(publicationId, session.signal);
+  const origin = new URL(url).origin,
+    handoff = new URL(url).hash.slice(1);
+  const html = await (await fetch(origin + "/bootstrap")).text();
+  expect(html).not.toContain('"maxPending":12');
+  const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
+    fetch(origin + path, {
+      method: "POST",
+      headers: { origin, "content-type": "application/json", ...headers },
+      body: JSON.stringify(body),
+    });
+  const opened = (await (await post("/session", { handoff })).json()) as { proof: string };
+  const headers = { "x-dohc-app-proof": opened.proof };
+  const held = Array.from({ length: 4 }, (_, index) =>
+    post("/backend", { ...invoke, id: `s-${index}`, readOnly: true }, headers),
+  );
+  await expect.poll(() => started).toBe(4);
+  expect(
+    (await post("/backend", { ...invoke, id: "s-overflow", readOnly: true }, headers)).status,
+  ).toBe(429);
+  release();
+  expect((await Promise.all(held)).every((res) => res.status === 200)).toBe(true);
+});

@@ -4,6 +4,11 @@ import {
 } from "@dohc/security-contract/approval-provenance";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  APP_BACKEND_BULK_LIMITS,
+  APP_BACKEND_INPUT_BYTES,
+  APP_BACKEND_REQUEST_BYTES,
+  AppBackendLimitError,
+  appBackendLimit,
   parseAppBackendCaller,
   parseAppBackendJson,
   type AppBackendCaller,
@@ -275,10 +280,11 @@ export interface ActivateDatasetInput {
   signal?: AbortSignal;
 }
 export interface InvokeDatasetInput extends DatasetScope {
+  requestBytes?: number;
   revision: number;
   revisionSha256: string;
   operationId: string;
-  input: JsonValue;
+  input: unknown;
   idempotencyKey: string;
   access?: DatasetAccess;
   signal?: AbortSignal;
@@ -2169,13 +2175,35 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         through = access(raw.access),
         operationId = text(raw.operationId),
         idempotencyKey = text(raw.idempotencyKey, 128);
-      const input = parseAppBackendJson(raw.input, 64 * 1024),
-        permitted = permissions(context, key, through);
+      const permitted = permissions(context, key, through);
       resolveCompatibleDatasetRevision(db, key, raw, permitted.revision);
       const operation = permitted.operations.find(
         (operation) => operation.operationId === operationId,
       );
       if (!operation) denied();
+      const profile = operation.profile;
+      if (
+        profile === "bulk" &&
+        (operation.access !== "owner" || permitted.authority.caller.kind !== "owner")
+      )
+        denied();
+      const requestLimit =
+        profile === "bulk" ? APP_BACKEND_BULK_LIMITS.requestBytes : APP_BACKEND_REQUEST_BYTES;
+      if (raw.requestBytes !== undefined && raw.requestBytes > requestLimit)
+        throw new AppBackendLimitError(
+          appBackendLimit("Collection action request", requestLimit, raw.requestBytes, "bytes"),
+        );
+      let input: JsonValue;
+      try {
+        input = parseAppBackendJson(
+          raw.input,
+          profile === "bulk" ? APP_BACKEND_BULK_LIMITS.inputBytes : APP_BACKEND_INPUT_BYTES,
+          profile,
+        );
+      } catch (error) {
+        if (error instanceof AppBackendLimitError) throw error;
+        throw new DatasetHostError("invalid", "Invalid operation input.");
+      }
       const restricted = permitted.createFields?.find((entry) => entry.operationId === operationId);
       if (restricted) {
         if (
@@ -2245,6 +2273,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           : permitted.revision.definition.tables.map((table) => table.sqlName),
         restrictTables: approvedLinkRead || undefined,
         operation: operation.name,
+        profile,
         caller: approvedLinkRead
           ? { ...permitted.authority.caller, approvedRead: operationId }
           : permitted.authority.caller,

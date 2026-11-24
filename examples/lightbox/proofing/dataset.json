@@ -1,0 +1,289 @@
+{
+  "formatVersion": 2,
+  "datasetId": "7a1c0b9e-3f42-4d8a-9b6e-2c5d8f1a4e70",
+  "name": "Lightbox proofing",
+  "schemaPath": "schema.sql",
+  "operationsPath": "operations.js",
+  "tables": [
+    {
+      "name": "Shoots",
+      "sqlName": "shoots",
+      "primaryKey": "id",
+      "fields": [
+        { "name": "ID", "sqlColumn": "id", "type": "text" },
+        { "name": "Title", "sqlColumn": "title", "type": "text", "required": true },
+        { "name": "Client", "sqlColumn": "client_name", "type": "text", "required": true },
+        { "name": "Shot on", "sqlColumn": "shot_on", "type": "date", "required": true },
+        {
+          "name": "Selection limit",
+          "sqlColumn": "selection_limit",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Status",
+          "sqlColumn": "status",
+          "type": "select",
+          "required": true,
+          "options": ["draft", "proofing", "delivered"]
+        },
+        {
+          "name": "Internal rate cents",
+          "sqlColumn": "internal_rate_cents",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Access code",
+          "sqlColumn": "access_code",
+          "type": "text",
+          "required": true,
+          "unique": true
+        },
+        { "name": "Created at", "sqlColumn": "created_at_ms", "type": "number", "required": true }
+      ]
+    },
+    {
+      "name": "Assets",
+      "sqlName": "assets",
+      "primaryKey": "id",
+      "fields": [
+        { "name": "ID", "sqlColumn": "id", "type": "text" },
+        {
+          "name": "Shoot",
+          "sqlColumn": "shoot_id",
+          "type": "relation",
+          "required": true,
+          "relation": { "table": "shoots", "field": "id" }
+        },
+        { "name": "Title", "sqlColumn": "title", "type": "text", "required": true },
+        { "name": "File", "sqlColumn": "file_id", "type": "attachment" },
+        { "name": "Demo scene", "sqlColumn": "demo_scene", "type": "text" },
+        {
+          "name": "Type",
+          "sqlColumn": "mime_type",
+          "type": "select",
+          "required": true,
+          "options": ["image/jpeg", "image/png", "image/webp"]
+        },
+        { "name": "Width", "sqlColumn": "width", "type": "number", "required": true },
+        { "name": "Height", "sqlColumn": "height", "type": "number", "required": true },
+        { "name": "Bytes", "sqlColumn": "byte_length", "type": "number", "required": true },
+        { "name": "Order", "sqlColumn": "sort_order", "type": "number", "required": true },
+        { "name": "Rating", "sqlColumn": "owner_rating", "type": "number", "required": true },
+        {
+          "name": "Color label",
+          "sqlColumn": "color_label",
+          "type": "select",
+          "required": true,
+          "options": ["none", "red", "yellow", "green", "blue", "purple"]
+        },
+        { "name": "Published", "sqlColumn": "is_published", "type": "checkbox", "required": true },
+        { "name": "Created at", "sqlColumn": "created_at_ms", "type": "number", "required": true }
+      ]
+    },
+    {
+      "name": "Selections",
+      "sqlName": "selections",
+      "primaryKey": "id",
+      "fields": [
+        { "name": "ID", "sqlColumn": "id", "type": "text" },
+        {
+          "name": "Asset",
+          "sqlColumn": "asset_id",
+          "type": "relation",
+          "required": true,
+          "relation": { "table": "assets", "field": "id" }
+        },
+        { "name": "Reviewer", "sqlColumn": "reviewer_key", "type": "text", "required": true },
+        { "name": "Selected", "sqlColumn": "selected", "type": "checkbox", "required": true },
+        { "name": "Updated at", "sqlColumn": "updated_at_ms", "type": "number", "required": true }
+      ]
+    },
+    {
+      "name": "Annotations",
+      "sqlName": "annotations",
+      "primaryKey": "id",
+      "fields": [
+        { "name": "ID", "sqlColumn": "id", "type": "text" },
+        {
+          "name": "Asset",
+          "sqlColumn": "asset_id",
+          "type": "relation",
+          "required": true,
+          "relation": { "table": "assets", "field": "id" }
+        },
+        { "name": "X %", "sqlColumn": "x_pct", "type": "number", "required": true },
+        { "name": "Y %", "sqlColumn": "y_pct", "type": "number", "required": true },
+        { "name": "Author", "sqlColumn": "author_name", "type": "text", "required": true },
+        { "name": "Comment", "sqlColumn": "body", "type": "text", "required": true },
+        { "name": "Resolved", "sqlColumn": "resolved", "type": "checkbox", "required": true },
+        { "name": "Created at", "sqlColumn": "created_at_ms", "type": "number", "required": true }
+      ]
+    }
+  ],
+  "operations": [
+    {
+      "name": "listPublishedAssets",
+      "label": "Open a proofing gallery",
+      "table": "assets",
+      "kind": "action",
+      "access": "link",
+      "readOnly": true,
+      "fields": []
+    },
+    {
+      "name": "assetFileAccess",
+      "label": "Read a published photo",
+      "table": "assets",
+      "kind": "action",
+      "access": "link",
+      "readOnly": true,
+      "fields": []
+    },
+    {
+      "name": "listAnnotations",
+      "label": "Read notes on a published photo",
+      "table": "annotations",
+      "kind": "action",
+      "access": "link",
+      "readOnly": true,
+      "fields": []
+    },
+    {
+      "name": "toggleClientPick",
+      "label": "Pick or unpick a photo",
+      "table": "selections",
+      "kind": "action",
+      "access": "link",
+      "readOnly": false,
+      "fields": []
+    },
+    {
+      "name": "addPinnedAnnotation",
+      "label": "Pin a note on a photo",
+      "table": "annotations",
+      "kind": "action",
+      "access": "link",
+      "readOnly": false,
+      "fields": []
+    },
+    {
+      "name": "listShoots",
+      "label": "List shoots",
+      "table": "shoots",
+      "kind": "action",
+      "access": "owner",
+      "readOnly": true,
+      "fields": []
+    },
+    {
+      "name": "studioAssets",
+      "label": "List a shoot's photos",
+      "table": "assets",
+      "kind": "action",
+      "access": "owner",
+      "readOnly": true,
+      "fields": []
+    },
+    {
+      "name": "studioAnnotations",
+      "label": "Read notes on any photo",
+      "table": "annotations",
+      "kind": "action",
+      "access": "owner",
+      "readOnly": true,
+      "fields": []
+    },
+    {
+      "name": "studioFileAccess",
+      "label": "Read any photo",
+      "table": "assets",
+      "kind": "action",
+      "access": "owner",
+      "readOnly": true,
+      "fields": []
+    },
+    {
+      "name": "exportFinalPicksList",
+      "label": "Export final picks",
+      "table": "selections",
+      "kind": "action",
+      "access": "owner",
+      "readOnly": true,
+      "fields": []
+    },
+    {
+      "name": "createShoot",
+      "label": "Create a shoot",
+      "table": "shoots",
+      "kind": "action",
+      "access": "owner",
+      "readOnly": false,
+      "fields": []
+    },
+    {
+      "name": "updateShoot",
+      "label": "Update a shoot",
+      "table": "shoots",
+      "kind": "action",
+      "access": "owner",
+      "readOnly": false,
+      "fields": []
+    },
+    {
+      "name": "uploadAsset",
+      "label": "Add an uploaded photo",
+      "table": "assets",
+      "kind": "action",
+      "access": "owner",
+      "readOnly": false,
+      "fields": []
+    },
+    {
+      "name": "setOwnerRating",
+      "label": "Rate a photo",
+      "table": "assets",
+      "kind": "action",
+      "access": "owner",
+      "readOnly": false,
+      "fields": []
+    },
+    {
+      "name": "setColorLabel",
+      "label": "Label a photo",
+      "table": "assets",
+      "kind": "action",
+      "access": "owner",
+      "readOnly": false,
+      "fields": []
+    },
+    {
+      "name": "publishAsset",
+      "label": "Publish or hide photos",
+      "table": "assets",
+      "kind": "action",
+      "access": "owner",
+      "readOnly": false,
+      "fields": []
+    },
+    {
+      "name": "deleteAsset",
+      "label": "Delete a photo",
+      "table": "assets",
+      "kind": "action",
+      "access": "owner",
+      "readOnly": false,
+      "fields": []
+    },
+    {
+      "name": "resolveAnnotation",
+      "label": "Resolve a note",
+      "table": "annotations",
+      "kind": "action",
+      "access": "owner",
+      "readOnly": false,
+      "fields": []
+    }
+  ]
+}

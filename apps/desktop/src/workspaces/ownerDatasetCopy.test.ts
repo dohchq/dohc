@@ -106,13 +106,17 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
     operationSource =
       "globalThis.operations={add(ctx,input){ctx.db.execute('INSERT INTO entries(name) VALUES(?)',[input.name]);return null;},read(ctx){return ctx.db.query('SELECT * FROM entries ORDER BY id');}};";
   const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource });
+  const heardChanges: Array<{ revision?: number }> = [];
   const options = {
     directory: join(directory, "copy"),
     scope,
     ownerKey: "owner",
     origin: "https://relay",
     assertOwner() {},
-    onChanged: () => heard?.(),
+    onChanged: (change?: { revision?: number }) => {
+      if (change) heardChanges.push(change);
+      heard?.();
+    },
   };
   // Settles when the copy next says what it shows changed.
   let heard: (() => void) | undefined;
@@ -270,6 +274,9 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
       copy: { offline: true },
     });
     await found;
+    expect(
+      heardChanges.some((change) => typeof change.revision === "number" && change.revision >= 2),
+    ).toBe(true);
     expect(await copy.data(remote, source, signal).invoke(read)).toMatchObject({
       result: [
         { id: 1, name: "Mom" },

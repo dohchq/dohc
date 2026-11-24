@@ -367,6 +367,32 @@ test("@app-backend-local personal control tower stages via CLI, approves from on
     await app.getByRole("button", { name: "Save workout", exact: true }).click();
     await expect(app.getByText("28 min").first()).toBeVisible({ timeout: 15_000 });
 
+    await expect
+      .poll(
+        async () => {
+          const text = (await embeddedDesktop.app.evaluate(async ({ webContents }) => {
+            const guest = webContents
+              .getAllWebContents()
+              .find(
+                (contents) =>
+                  contents.getType() === "webview" &&
+                  /^http:\/\/127\.0\.0\.1:\d+\/bootstrap(?:#|$)/.test(contents.getURL()),
+              );
+            const frame = guest?.mainFrame.framesInSubtree.find(
+              (entry) => entry.url === "about:srcdoc",
+            );
+            if (!frame) return "";
+            return (await frame.executeJavaScript(
+              "document.body?.innerText ?? ''",
+              true,
+            )) as string;
+          })) as string;
+          return text.includes("Blue Bottle") && text.includes("$6.50") && text.includes("28 min");
+        },
+        { timeout: 15_000 },
+      )
+      .toBe(true);
+
     if (shotDir) {
       for (const theme of ["light", "dark"] as const) {
         await browserPage.emulateMedia({ colorScheme: theme });

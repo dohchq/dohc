@@ -17,6 +17,27 @@ export const APP_BACKEND_UPLOAD_REQUEST_BYTES = 8 * 1024 * 1024;
 export const APP_BACKEND_REFUSAL_BYTES = 8 * 1024;
 export const APP_BACKEND_JSON_MAX_DEPTH = 32;
 export const APP_BACKEND_JSON_MAX_NODES = 16_384;
+export const APP_BACKEND_BULK_LIMITS = Object.freeze({
+  inputBytes: 1024 * 1024,
+  requestBytes: 2 * 1024 * 1024,
+  resultBytes: 4 * 1024 * 1024,
+  jsonNodes: 131_072,
+});
+export const APP_BACKEND_PROFILE_HEADER = "x-dohc-dataset-profile";
+
+export function appBackendLimit(
+  label: string,
+  limit: number,
+  used: number,
+  unit: string,
+  partial = false,
+): string {
+  return `${label} exceeded its limit of ${limit} ${unit}. It used ${partial ? "at least " : ""}${used} ${unit}.`;
+}
+
+export class AppBackendLimitError extends Error {
+  override name = "AppBackendLimitError";
+}
 
 export type AppBackendJson =
   | null
@@ -174,18 +195,29 @@ function contentType(value: unknown): string {
 export function parseAppBackendJson(
   value: unknown,
   maxBytes = APP_BACKEND_RESULT_BYTES,
+  profile?: "bulk",
 ): AppBackendJson {
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > APP_BACKEND_RESULT_BYTES)
+  const maxNodes =
+    profile === "bulk" ? APP_BACKEND_BULK_LIMITS.jsonNodes : APP_BACKEND_JSON_MAX_NODES;
+  const ceiling =
+    profile === "bulk" ? APP_BACKEND_BULK_LIMITS.resultBytes : APP_BACKEND_RESULT_BYTES;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > ceiling)
     throw new Error("Invalid app backend JSON bound.");
   let remaining = maxBytes;
   let nodes = 0;
+  const limit = (max: number, used: number, unit: string): never => {
+    throw new AppBackendLimitError(
+      appBackendLimit("Collection action JSON", max, used, unit, true),
+    );
+  };
   function charge(value: string): void {
     remaining -= bytes(value);
-    if (remaining < 0) throw new Error("App backend JSON exceeds its byte bound.");
+    if (remaining < 0) limit(maxBytes, maxBytes - remaining, "bytes");
   }
   function visit(value: unknown, depth: number): AppBackendJson {
-    if (++nodes > APP_BACKEND_JSON_MAX_NODES || depth > APP_BACKEND_JSON_MAX_DEPTH)
-      throw new Error("App backend JSON exceeds its structural bound.");
+    if (++nodes > maxNodes) limit(maxNodes, nodes, "JSON nodes");
+    if (depth > APP_BACKEND_JSON_MAX_DEPTH)
+      limit(APP_BACKEND_JSON_MAX_DEPTH, depth, "levels of nesting");
     if (
       value === null ||
       typeof value === "boolean" ||
@@ -195,13 +227,13 @@ export function parseAppBackendJson(
       if (typeof value === "number" && !Number.isFinite(value))
         throw new Error("Invalid app backend JSON number.");
       if (typeof value === "string" && value.length > remaining)
-        throw new Error("App backend JSON exceeds its byte bound.");
+        limit(maxBytes, maxBytes - remaining + value.length + 2, "bytes");
       charge(JSON.stringify(value));
       return value;
     }
     if (Array.isArray(value)) {
+      if (value.length > maxNodes - nodes) limit(maxNodes, nodes + value.length, "JSON nodes");
       if (
-        value.length > APP_BACKEND_JSON_MAX_NODES ||
         Object.getPrototypeOf(value) !== Array.prototype ||
         Reflect.ownKeys(value).length !== value.length + 1
       ) {
@@ -219,12 +251,11 @@ export function parseAppBackendJson(
     }
     const row = record(value);
     const keys = Object.keys(row);
-    if (keys.length > APP_BACKEND_JSON_MAX_NODES)
-      throw new Error("App backend JSON exceeds its structural bound.");
+    if (keys.length > maxNodes - nodes) limit(maxNodes, nodes + keys.length, "JSON nodes");
     charge("{}" + ",".repeat(Math.max(0, keys.length - 1)));
     const result: { [key: string]: AppBackendJson } = {};
     for (const key of keys) {
-      if (key.length > remaining) throw new Error("App backend JSON exceeds its byte bound.");
+      if (key.length > remaining) limit(maxBytes, maxBytes - remaining + key.length + 3, "bytes");
       charge(JSON.stringify(key) + ":");
       result[key] = visit(row[key], depth + 1);
     }
@@ -269,7 +300,14 @@ export function parseAppBackendCaller(value: unknown): AppBackendCaller {
   throw new Error("Invalid app backend caller.");
 }
 
-export function parseAppBackendInvokeRequest(value: unknown): AppBackendInvokeRequest {
+export function parseAppBackendInvokeRequest(
+  value: unknown,
+  profile?: "bulk",
+): AppBackendInvokeRequest {
+  const inputBytes =
+    profile === "bulk" ? APP_BACKEND_BULK_LIMITS.inputBytes : APP_BACKEND_INPUT_BYTES;
+  const requestBytes =
+    profile === "bulk" ? APP_BACKEND_BULK_LIMITS.requestBytes : APP_BACKEND_REQUEST_BYTES;
   const row = exact(
     value,
     ["authorityRevision", "operation", "idempotencyKey", "input"],
@@ -279,11 +317,14 @@ export function parseAppBackendInvokeRequest(value: unknown): AppBackendInvokeRe
     authorityRevision: revision(row.authorityRevision),
     operation: name(row.operation),
     idempotencyKey: idempotencyKey(row.idempotencyKey),
-    input: parseAppBackendJson(row.input, APP_BACKEND_INPUT_BYTES),
+    input: parseAppBackendJson(row.input, inputBytes, profile),
     ...(Object.hasOwn(row, "dataset") ? { dataset: datasetAlias(row.dataset) } : {}),
   };
-  if (bytes(JSON.stringify(request)) > APP_BACKEND_REQUEST_BYTES)
-    throw new Error("App backend request exceeds its byte bound.");
+  const used = bytes(JSON.stringify(request));
+  if (used > requestBytes)
+    throw new AppBackendLimitError(
+      appBackendLimit("Collection action request", requestBytes, used, "bytes"),
+    );
   return request;
 }
 

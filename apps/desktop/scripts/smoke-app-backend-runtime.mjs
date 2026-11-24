@@ -7,6 +7,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { stageAppBackendRuntime } from "./stage-app-backend-runtime.mjs";
+import {
+  bulkFixture,
+  importInput,
+  schemaSql as bulkSchema,
+} from "../../../packages/app-backend-runtime/scripts/bulk-fixture.mjs";
 
 if (!["win32", "linux"].includes(process.platform))
   throw new Error("This directory smoke supports Windows and Linux.");
@@ -67,6 +72,18 @@ try {
           recoveredResult=(await recovered.prepare({expected:checkpoint.cursor,caller:{kind:'owner'},operation:'read',readOnly:true,
             source:"globalThis.operations={read(ctx){return ctx.db.query('SELECT * FROM items');}}",input:{},requestId:'recovered',nowMs:2})).result;
         } finally {await recovered.close();}
+        const bulkDirectory=join(app.getPath('userData'),'bulk');mkdirSync(bulkDirectory,{recursive:true});
+        const bulk=await openPersistentAppBackend({...config,directory:bulkDirectory,tables:['journal_lines'],schemaSql:${JSON.stringify(bulkSchema)}},options);
+        let bulkResult;
+        try {
+          const submission={expected:cursor,profile:'bulk',caller:{kind:'owner'},operation:'importStatement',
+            source:${JSON.stringify(bulkFixture)},input:${JSON.stringify(importInput)},requestId:'bulk-import',nowMs:3};
+          const prepared=await bulk.prepare(submission);
+          const next=await bulk.finalize({proposalId:prepared.proposalId,previousDigest:cursor.digest,revision:1,digest:hash('bulk-event'),changesetSha256:prepared.changesetSha256});
+          const report={...submission,expected:next,operation:'trialBalance',input:null,readOnly:true};
+          const standard=await bulk.prepare({...report,profile:undefined}).then(()=>null,error=>error.message);
+          bulkResult={imported:prepared.result.length,reported:(await bulk.prepare(report)).result.length,standard};
+        } finally {await bulk.close();}
         // The CPU budget watch runs on a worker thread and ends the utility process from there.
         const budgetDirectory=join(app.getPath('userData'),'budget');mkdirSync(budgetDirectory);
         const budgeted=await openPersistentAppBackend({...config,directory:budgetDirectory,limits:{cpuBudgetMs:1000}},options);
@@ -81,7 +98,7 @@ try {
         let formulaResult;
         try {formulaResult=await evaluator.evaluate({trigger:{kind:'record-added'},person:null,now:'2026-09-25T09:30:00.000+08:00'},[{kind:'expression',source:'dateAdd(today(), 3, "days")'}]);}
         finally {await evaluator.close();}
-        writeFileSync(${JSON.stringify(resultPath)},JSON.stringify({result:accepted.result,changesetBytes:accepted.changeset.byteLength,persistentResult,recoveredResult,budgetResult,formulaResult,electron:process.versions.electron}));
+        writeFileSync(${JSON.stringify(resultPath)},JSON.stringify({result:accepted.result,changesetBytes:accepted.changeset.byteLength,persistentResult,recoveredResult,bulkResult,budgetResult,formulaResult,electron:process.versions.electron}));
         app.exit(0);
       } catch(error) {writeFileSync(${JSON.stringify(resultPath)},JSON.stringify({error:String(error)}));app.exit(1);}
     });`;
@@ -149,6 +166,9 @@ try {
   assert.ok(result.changesetBytes > 0);
   assert.deepEqual(result.persistentResult, [{ id: "persistent-fuse-proof", value: 43 }]);
   assert.deepEqual(result.recoveredResult, result.persistentResult);
+  assert.equal(result.bulkResult.imported, 2500);
+  assert.equal(result.bulkResult.reported, 10_000);
+  assert.match(result.bulkResult.standard, /1000 rows.*1001 rows/);
   assert.equal(result.budgetResult, "worker_budget");
   assert.deepEqual(result.formulaResult, [{ ok: true, value: "2026-09-28" }]);
   console.log(

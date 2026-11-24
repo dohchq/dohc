@@ -81,8 +81,10 @@ describe("dohc/app", () => {
       "input",
       "op",
       "operation",
+      "readOnly",
     ]);
     expect(fake.sent[0]!.op).toBe("backend.invoke");
+    expect(fake.sent[0]!.readOnly).toBe(true);
     fake.reply({
       id: fake.sent[0]!.id,
       ok: true,
@@ -1281,5 +1283,251 @@ describe("dohc/ui and dohc/charts", () => {
       { alias: "expenses", key: "exp-key-1" },
       { alias: "expenses", key: "exp-key-1" },
     ]);
+  });
+
+  it("auto-refreshes live useDatasetQuery without flashing loading, skips stale revisions, coalesces bursts, and respects live: false", async () => {
+    const fake = makeFakePort();
+    const client = createAppClient({ port: fake.port });
+    const loadingHistory: boolean[] = [];
+
+    function Dashboard() {
+      const expenses = useDatasetQuery<{ count: number }>(
+        "listExpenses",
+        {},
+        { dataset: "expenses" },
+      );
+      const workouts = useDatasetQuery<{ count: number }>(
+        "listWorkouts",
+        {},
+        { dataset: "workouts" },
+      );
+      const snapshot = useDatasetQuery<{ count: number }>(
+        "listExpenses",
+        { snap: true },
+        { dataset: "expenses", live: false },
+      );
+      loadingHistory.push(expenses.loading);
+      return (
+        <div>
+          <span data-testid="exp">
+            {expenses.data ? `${expenses.data.count}@${expenses.revision}` : "none"}
+          </span>
+          <span data-testid="wrk">
+            {workouts.data ? `${workouts.data.count}@${workouts.revision}` : "none"}
+          </span>
+          <span data-testid="snap">
+            {snapshot.data ? `${snapshot.data.count}@${snapshot.revision}` : "none"}
+          </span>
+        </div>
+      );
+    }
+
+    render(
+      <AppProvider client={client}>
+        <Dashboard />
+      </AppProvider>,
+    );
+
+    expect(fake.sent).toHaveLength(3);
+    expect(fake.sent.every((msg) => msg.readOnly === true)).toBe(true);
+    for (const msg of fake.sent) {
+      fake.reply({
+        id: msg.id,
+        ok: true,
+        value: { result: { count: 1 }, revision: 2, replayed: false },
+      });
+    }
+    await waitFor(() => {
+      expect(screen.getByTestId("exp").textContent).toBe("1@2");
+      expect(screen.getByTestId("wrk").textContent).toBe("1@2");
+      expect(screen.getByTestId("snap").textContent).toBe("1@2");
+    });
+
+    loadingHistory.length = 0;
+
+    fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: 2 });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fake.sent).toHaveLength(3);
+
+    fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: 3 });
+    fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: 4 });
+    fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: 5 });
+    await waitFor(() => expect(fake.sent).toHaveLength(4));
+    expect(fake.sent[3]!.dataset).toBe("expenses");
+    expect(fake.sent[3]!.operation).toBe("listExpenses");
+    expect(fake.sent[3]!.readOnly).toBe(true);
+    expect(loadingHistory.every((value) => value === false)).toBe(true);
+
+    fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: 6 });
+    fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: 7 });
+    fake.reply({
+      id: fake.sent[3]!.id,
+      ok: true,
+      value: { result: { count: 5 }, revision: 5, replayed: false },
+    });
+    await waitFor(() => expect(fake.sent).toHaveLength(5));
+    fake.reply({
+      id: fake.sent[4]!.id,
+      ok: true,
+      value: { result: { count: 7 }, revision: 7, replayed: false },
+    });
+    await waitFor(() => expect(screen.getByTestId("exp").textContent).toBe("7@7"));
+
+    expect(loadingHistory.every((value) => value === false)).toBe(true);
+    expect(screen.getByTestId("wrk").textContent).toBe("1@2");
+    expect(screen.getByTestId("snap").textContent).toBe("1@2");
+    client.close();
+  });
+
+  it("handles an 8-widget live dashboard with 20 rapid edits cleanly without loading flashes", async () => {
+    const fake = makeFakePort();
+    const client = createAppClient({ port: fake.port, maxInFlight: 8 });
+    let backgroundLoadingFlashes = 0;
+    let initialLoaded = false;
+
+    function Widget({ index, dataset }: { index: number; dataset: string }) {
+      const query = useDatasetQuery<{ rev: number }>(`widget${index}`, {}, { dataset });
+      if (initialLoaded && query.loading) backgroundLoadingFlashes += 1;
+      return <span data-testid={`w-${index}`}>{query.data?.rev ?? -1}</span>;
+    }
+
+    function EightWidgetDashboard() {
+      return (
+        <div>
+          {Array.from({ length: 8 }, (_, index) => (
+            <Widget key={index} index={index} dataset={index < 4 ? "expenses" : "workouts"} />
+          ))}
+        </div>
+      );
+    }
+
+    render(
+      <AppProvider client={client}>
+        <EightWidgetDashboard />
+      </AppProvider>,
+    );
+
+    expect(fake.sent).toHaveLength(8);
+    for (const msg of fake.sent) {
+      fake.reply({
+        id: msg.id,
+        ok: true,
+        value: { result: { rev: 1 }, revision: 1, replayed: false },
+      });
+    }
+    await waitFor(() => expect(screen.getByTestId("w-7").textContent).toBe("1"));
+    initialLoaded = true;
+
+    let currentExpRev = 1;
+    let currentWrkRev = 1;
+    let nextReplyIndex = 8;
+    const drain = () => {
+      while (nextReplyIndex < fake.sent.length) {
+        const msg = fake.sent[nextReplyIndex++]!;
+        const rev = msg.dataset === "expenses" ? currentExpRev : currentWrkRev;
+        fake.reply({
+          id: msg.id,
+          ok: true,
+          value: { result: { rev }, revision: rev, replayed: false },
+        });
+      }
+    };
+
+    for (let edit = 2; edit <= 21; edit++) {
+      if (edit % 2 === 0) {
+        currentExpRev = edit;
+        fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: edit });
+      } else {
+        currentWrkRev = edit;
+        fake.reply({ kind: "dataset.changed", dataset: "workouts", revision: edit });
+      }
+      if (edit % 5 === 0) {
+        await Promise.resolve();
+        await Promise.resolve();
+        drain();
+      }
+    }
+    await waitFor(() => {
+      drain();
+      expect(screen.getByTestId("w-0").textContent).toBe(String(currentExpRev));
+      expect(screen.getByTestId("w-7").textContent).toBe(String(currentWrkRev));
+    });
+
+    expect(fake.sent.length).toBeLessThan(8 + 80);
+    expect(backgroundLoadingFlashes).toBe(0);
+    client.close();
+  });
+
+  it("catches up missed revisions when live mode resumes and retries rate-limited background refreshes", async () => {
+    const fake = makeFakePort();
+    const client = createAppClient({ port: fake.port });
+    const loadingStates: boolean[] = [];
+
+    function LiveToggle({ live }: { live: boolean }) {
+      const query = useDatasetQuery<{ rev: number }>("list", {}, { dataset: "expenses", live });
+      loadingStates.push(query.loading);
+      return (
+        <div>
+          <span data-testid="val">
+            {query.data ? `${query.data.rev}@${query.revision}` : "none"}
+          </span>
+          <span data-testid="err">{query.error?.status ?? "none"}</span>
+        </div>
+      );
+    }
+
+    const { rerender, unmount } = render(
+      <AppProvider client={client}>
+        <LiveToggle live={false} />
+      </AppProvider>,
+    );
+    expect(fake.sent).toHaveLength(1);
+    fake.reply({
+      id: fake.sent[0]!.id,
+      ok: true,
+      value: { result: { rev: 1 }, revision: 1, replayed: false },
+    });
+    await waitFor(() => expect(screen.getByTestId("val").textContent).toBe("1@1"));
+    loadingStates.length = 0;
+
+    fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: 2 });
+    expect(fake.sent).toHaveLength(1);
+
+    rerender(
+      <AppProvider client={client}>
+        <LiveToggle live={true} />
+      </AppProvider>,
+    );
+    await waitFor(() => expect(fake.sent).toHaveLength(2));
+    expect(loadingStates.every((v) => v === false)).toBe(true);
+    fake.reply({
+      id: fake.sent[1]!.id,
+      ok: true,
+      value: { result: { rev: 2 }, revision: 2, replayed: false },
+    });
+    await waitFor(() => expect(screen.getByTestId("val").textContent).toBe("2@2"));
+
+    fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: 3 });
+    await waitFor(() => expect(fake.sent).toHaveLength(3));
+    fake.reply({ id: fake.sent[2]!.id, ok: false, status: 429 });
+    await waitFor(() => expect(screen.getByTestId("err").textContent).toBe("429"));
+    expect(screen.getByTestId("val").textContent).toBe("2@2");
+
+    fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: 4 });
+    expect(fake.sent).toHaveLength(3);
+    await waitFor(() => expect(fake.sent).toHaveLength(4), { timeout: 2000 });
+    fake.reply({
+      id: fake.sent[3]!.id,
+      ok: true,
+      value: { result: { rev: 4 }, revision: 4, replayed: false },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("val").textContent).toBe("4@4");
+      expect(screen.getByTestId("err").textContent).toBe("none");
+    });
+    expect(loadingStates.every((v) => v === false)).toBe(true);
+    unmount();
+    client.close();
   });
 });

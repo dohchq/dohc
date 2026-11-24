@@ -10,6 +10,7 @@ import {
   approvedTables,
   boundedText,
   DEFAULT_LIMITS,
+  operationLimits,
   type AppOperationRefusal,
 } from "./protocol.js";
 import type { AppOperationFile, JsonValue } from "./protocol.js";
@@ -49,6 +50,7 @@ interface DatasetAccess {
   authorize(): void;
 }
 export interface DatasetInvocation extends DatasetAccess {
+  profile?: "bulk";
   /** Recover the full host-approved schema, but grant the operation only tables. */
   restrictTables?: true;
   operation: string;
@@ -93,6 +95,7 @@ export interface DatasetMigration extends DatasetAccess {
   accountStage?: (allocation: Readonly<CheckpointStageAllocation>) => unknown;
 }
 export interface DatasetInvocationResult {
+  profile?: "bulk";
   result: JsonValue;
   revision: number;
   replayed: boolean;
@@ -1079,6 +1082,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         if (receipt) {
           currentAuthority();
           return {
+            ...(input.profile === "bulk" ? { profile: input.profile } : {}),
             result: JSON.parse(receipt.resultJson),
             revision: receipt.revision,
             replayed: true,
@@ -1089,6 +1093,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         expected: worker.cursor,
         source: captured.source,
         operation: input.operation,
+        profile: input.profile,
         caller: input.caller,
         input: input.input,
         nowMs: now(),
@@ -1103,7 +1108,12 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         const after = head(input);
         if (!sameCursor(after.cursor, worker.cursor))
           throw new Error("The Collection changed while dohc read it. Try again.");
-        return { result: prepared.result, revision: worker.cursor.revision, replayed: false };
+        return {
+          ...(input.profile === "bulk" ? { profile: input.profile } : {}),
+          result: prepared.result,
+          revision: worker.cursor.revision,
+          replayed: false,
+        };
       }
       const refusal = input.refuseResult?.(prepared.result) ?? null;
       if (refusal !== null) {
@@ -1113,7 +1123,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       }
       const resultJson = boundedText(
         JSON.stringify(prepared.result),
-        DEFAULT_LIMITS.resultBytes,
+        operationLimits(DEFAULT_LIMITS, input.profile).resultBytes,
         "Operation result",
       );
       if (input.beforeCommit) {
@@ -1122,6 +1132,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         currentAuthority();
       }
       const committed = options.journal.commitOperation({
+        profile: input.profile,
         expected: worker.cursor,
         proposalId: prepared.proposalId,
         operation: input.operation,
@@ -1152,6 +1163,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       }
       currentAuthority();
       return {
+        ...(input.profile === "bulk" ? { profile: input.profile } : {}),
         result: JSON.parse(committed.receipt.resultJson),
         revision: committed.receipt.revision,
         replayed: committed.kind === "replayed",
@@ -1758,7 +1770,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         );
         const inputJson = boundedText(
           JSON.stringify(raw.input),
-          DEFAULT_LIMITS.inputBytes,
+          operationLimits(DEFAULT_LIMITS, raw.profile).inputBytes,
           "Operation input",
         );
         const bytes =

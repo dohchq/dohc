@@ -76,6 +76,7 @@ const ALLOWED_PATHS = new Set([
   "/session",
   "/resume",
   "/backend",
+  "/events",
   "/status",
   "/close",
 ]);
@@ -87,7 +88,7 @@ const LOCAL_REMEDY: Record<AppBrokerLocalRejectionReason, string> = {
   unserializable: "Send plain JSON-serializable objects over the dohc-app-channel port.",
   payload_too_large: "Reduce the payload size sent over the dohc-app-channel port.",
   invalid_keys:
-    "Match the exact broker message keys (for backend.invoke: id, op, operation, idempotencyKey, input).",
+    "Match the exact broker message keys (for backend.invoke: id, op, operation, idempotencyKey, input, optional dataset/readOnly).",
   rate_limited:
     "Reduce concurrent or rapid broker calls so requests stay within the broker rate limit.",
 };
@@ -103,7 +104,12 @@ const STEP_REMEDY = {
 
 let queue: Promise<void> = Promise.resolve();
 let sessionConfigured = false;
-let activeRun: { origin: string; webContentsId: number; onExternalBlocked(): void } | null = null;
+let activeRun: {
+  origin: string;
+  webContentsId: number;
+  view: WebContentsView;
+  onExternalBlocked(): void;
+} | null = null;
 
 function allowRequestUrl(raw: string, resourceType: string, origin: string): boolean {
   if (resourceType === "subFrame") return raw === "about:srcdoc" || raw === "about:blank";
@@ -365,6 +371,7 @@ async function executeVerification(
   activeRun = {
     origin,
     webContentsId: wc.id,
+    view,
     onExternalBlocked() {
       if (++externalRequestsBlocked === 1) {
         pushDiag({
@@ -964,7 +971,6 @@ async function executeVerification(
     }
     throw error;
   } finally {
-    void view;
     activeRun = null;
     if (!wc.isDestroyed()) {
       const closed = new Promise<void>((resolve) => {

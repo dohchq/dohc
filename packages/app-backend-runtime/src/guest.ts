@@ -9,6 +9,7 @@ import {
 } from "quickjs-emscripten";
 import type { JSValue, JSValuePointer, QuickJSHandle, QuickJSWASMModule } from "quickjs-emscripten";
 import { AppBackendRuntimeError, boundedText } from "./protocol.js";
+import { AppBackendLimitError, appBackendLimit } from "@dohc/security-contract/app-backend";
 import type { AppOperationRefusal, ChildRequest } from "./protocol.js";
 
 export type GuestRequest = Omit<
@@ -307,6 +308,7 @@ function run(
   runtime.removeModuleLoader();
   const vm = runtime.newContext();
   let statements = 0;
+  let resourceLimit: AppBackendLimitError | undefined;
   let refusal: AppOperationRefusal | undefined;
   const attachedFileIds = new Set<string>();
   // Made before the guest runs, so a callback can refuse a copy that does not fit without allocating.
@@ -341,7 +343,14 @@ function run(
         if (options.persistentConnection && !db.isTransaction)
           throw new Error("The app operation transaction ended.");
         if (++statements > request.limits.statements)
-          throw new Error("App database operation limit exceeded.");
+          throw new AppBackendLimitError(
+            appBackendLimit(
+              "Collection action",
+              request.limits.statements,
+              statements,
+              "SQL statements",
+            ),
+          );
         if (performance.now() >= deadline) {
           interrupted = true;
           throw guestFailure("App database operation limit exceeded.");
@@ -397,9 +406,20 @@ function run(
                 )
               )
                 throw new Error("Query results must contain JSON scalars.");
-              bytes += Buffer.byteLength(JSON.stringify(row)) + 1;
-              if (rows.length >= request.limits.queryRows || bytes > request.limits.queryBytes)
-                throw new Error("App query result limit exceeded.");
+              bytes += Buffer.byteLength(JSON.stringify(row)) + (rows.length === 0 ? 0 : 1);
+              if (rows.length >= request.limits.queryRows)
+                throw new AppBackendLimitError(
+                  appBackendLimit(
+                    "Query result",
+                    request.limits.queryRows,
+                    rows.length + 1,
+                    "rows",
+                  ),
+                );
+              if (bytes > request.limits.queryBytes)
+                throw new AppBackendLimitError(
+                  appBackendLimit("Query result", request.limits.queryBytes, bytes, "bytes"),
+                );
               rows.push(row);
             }
             output = JSON.stringify(rows);
@@ -409,6 +429,7 @@ function run(
         }
         return reply(output);
       } catch (error) {
+        if (error instanceof AppBackendLimitError) resourceLimit = error;
         return fail(
           error instanceof Error ? error.message.slice(0, 1024) : "App database operation failed.",
         );
@@ -490,7 +511,9 @@ function run(
       if (result.error) {
         // No guest getters or coercion run while formatting an exception.
         result.error.dispose();
-        throw guestFailure("App operation failed.");
+        throw !interrupted && !exhausted() && resourceLimit
+          ? resourceLimit
+          : guestFailure("App operation failed.");
       }
       try {
         if (vm.typeof(result.value) !== "string")

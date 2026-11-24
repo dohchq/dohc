@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { datasetResponseAction, readDatasetResponse } from "./readDatasetResponse";
+import { APP_BACKEND_PROFILE_HEADER } from "@dohc/security-contract/app-backend";
 
 it("preserves an operation correction but never confuses an authorization error with one", async () => {
   const signal = new AbortController().signal;
@@ -48,4 +49,20 @@ it("recognizes workspace local-apps routes so error codes and response bounds ap
   await expect(
     readDatasetResponse(new Response(oversized, { status: 200 }), "local-app", signal),
   ).rejects.toThrow(/limit/);
+});
+
+it("reads an owner bulk result with the relay's profile header", async () => {
+  const signal = new AbortController().signal;
+  const value = {
+    result: Array.from({ length: 20_000 }, () => "x".repeat(120)),
+    revision: 1,
+    replayed: false,
+  };
+  await expect(readDatasetResponse(Response.json(value), "invoke", signal)).rejects.toThrow(
+    /limit.*bytes/,
+  );
+  const headers = { [APP_BACKEND_PROFILE_HEADER]: "bulk" };
+  await expect(
+    readDatasetResponse(Response.json(value, { headers }), "invoke", signal),
+  ).resolves.toEqual({ ...value, profile: "bulk" });
 });

@@ -35,7 +35,7 @@ export interface ServeFetchHandlerOptions {
    */
   waits?: (url: URL, method: string) => boolean;
   /** The answer to an upload that crosses the cap; the socket closes after it flushes. */
-  oversized: (url: URL) => Response;
+  oversized: (url: URL, size: { limit: number; bytes: number; declared: boolean }) => Response;
   /** The answer when the handler throws. */
   failure: (url: URL) => Response;
   /** The answer to an upload that does not arrive in time; a bare 408 without it. */
@@ -193,7 +193,10 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
         readFirst = maxBodyBytes <= READ_FIRST_BYTES;
         const declared = Number(incoming.headers["content-length"]);
         if (Number.isFinite(declared) && declared > maxBodyBytes) {
-          void answer(options.oversized(url), incoming);
+          void answer(
+            options.oversized(url, { limit: maxBodyBytes, bytes: declared, declared: true }),
+            incoming,
+          );
           return;
         }
         const refuse = (response: Response, reason: RefusedRequest): RefusedRequest => {
@@ -220,7 +223,7 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
         let received = 0;
         const tooLarge = () =>
           refuse(
-            options.oversized(url),
+            options.oversized(url, { limit: maxBodyBytes, bytes: received, declared: false }),
             new RefusedRequest("Request body too large", "AbortError"),
           );
         // A caller refused for the budget has passed its handler's check. Its client may read
