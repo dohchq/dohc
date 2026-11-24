@@ -252,6 +252,83 @@ it("refuses another account, a signed-out browser, another site, and a removed m
   expect(await removed.text()).toBe(refusal);
 });
 
+it("reads the owner's own workspace with the owner's session, sending the workspace and the account cookie", async () => {
+  const f = await fixture();
+  const before = f.forwarded.length;
+  const token = `owner.${WORKSPACE}`;
+  const meta = await f.view("/api/view/meta", OWNER, token);
+  expect(meta.status, await meta.clone().text()).toBe(200);
+  expect(await meta.json()).toMatchObject({ access: "edit" });
+  const current = (await (await f.view("/api/view/current", OWNER, token)).json()) as {
+    files: Array<{ path: string; blobSha256: string }>;
+  };
+  expect(current.files).toEqual([
+    expect.objectContaining({ path: "trip/plan.md", blobSha256: f.planSha }),
+  ]);
+  const blob = await f.web.handle(
+    new Request(`${SHARE_WEB_ORIGIN}/api/view/blob/${f.planSha}?session=${token}`, {
+      headers: { host: HOST, cookie: `${cookieName}=${OWNER}` },
+    }),
+  );
+  expect(await blob.text()).toBe("# Plan\n\nLeave at nine.");
+  for (const sent of f.forwarded.slice(before)) {
+    expect(sent.headers.get("authorization")).toBe(`DohcOwner ${WORKSPACE}`);
+    expect(sent.headers.get("cookie")).toBe(`${cookieName}=${OWNER}`);
+    expect(sent.headers.get("origin")).toBe(SHARE_WEB_ORIGIN);
+    expect(sent.headers.get("x-dohc-relay-exchange-key")).toBe(RELAY_EXCHANGE_KEY);
+  }
+  // A member, another site, or a malformed workspace reads as an unknown grant.
+  const refusal = await (await f.view("/api/view/meta", "sam", "member.no-such-grant")).text();
+  for (const response of [
+    await f.view("/api/view/meta", "sam", token),
+    await f.view("/api/view/meta", OWNER, token, { "sec-fetch-site": "cross-site" }),
+    await f.view("/api/view/meta", OWNER, "owner./"),
+    await f.view("/api/view/meta", OWNER, `admin.${WORKSPACE}`),
+  ]) {
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe(refusal);
+  }
+});
+
+it("lists the workspaces an account owns and joined, only for its own cookie on this site", async () => {
+  const f = await fixture();
+  const list = (user: string | null, headers: Record<string, string> = {}) =>
+    f.web.handle(
+      new Request(`${SHARE_WEB_ORIGIN}/api/workspaces`, {
+        headers: {
+          host: HOST,
+          ...(user === null ? {} : { cookie: `${cookieName}=${user}` }),
+          ...headers,
+        },
+      }),
+    );
+  const owner = await list(OWNER);
+  expect(owner.status, await owner.clone().text()).toBe(200);
+  expect(owner.headers.get("cache-control")).toBe("private, no-store");
+  expect(await owner.json()).toEqual({
+    ok: true,
+    owned: [{ workspaceId: WORKSPACE, name: null }],
+    joined: [],
+  });
+  expect(await (await list("sam")).json()).toEqual({
+    ok: true,
+    owned: [],
+    joined: [{ workspaceId: WORKSPACE, name: "Trip", grantId: f.grantId }],
+  });
+  expect((await list(null)).status).toBe(401);
+  expect((await list(OWNER, { "sec-fetch-site": "cross-site" })).status).toBe(404);
+  expect((await list(OWNER, { host: "elsewhere.test" })).status).toBe(404);
+  expect(
+    (
+      await f.web.handle(
+        new Request(`${SHARE_WEB_ORIGIN}/api/workspaces?user=sam`, {
+          headers: { host: HOST, cookie: `${cookieName}=${OWNER}` },
+        }),
+      )
+    ).status,
+  ).toBe(404);
+});
+
 it("lists every Group and follows them all in one request, each message naming its Group", async () => {
   const f = await fixture();
   const channels = await f.chat(`channels?grantId=${f.grantId}`);

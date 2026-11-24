@@ -5,6 +5,7 @@
 .workspace-title { display: flex; height: 48px; flex: none; align-items: center; gap: 4px; padding: 0 8px 0 0; }
 .workspace-title .bar-mark { width: 32px; }
 .workspace-name { min-width: 0; margin: 0; overflow: hidden; font-family: inherit; font-size: 14px; font-weight: 600; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-title .workspace-all { flex: none; margin-left: auto; }
 .workspace-page > nav .tree { flex: 1 0 auto; padding-bottom: 8px; }
 .workspace-empty { margin: 0; padding: 4px 8px; color: var(--viewer-muted); }
 .workspace-account { position: sticky; bottom: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 -4px; border-top: 1px solid var(--viewer-line); padding: 8px 12px; background: var(--viewer-panel); }
@@ -30,6 +31,8 @@
 .workspace-corner { position: fixed; right: 16px; bottom: 16px; z-index: 30; display: flex; width: 380px; max-width: calc(100% - 32px); flex-direction: column; align-items: flex-end; gap: 8px; pointer-events: none; }
 /* Beside the workspace, the corner sits left of the side panel, so it never covers a Group's or a file's composer. */
 .workspace-page ~ .workspace-corner { right: calc(344px + 16px); max-width: calc(100% - 344px - 32px); }
+/* The owner's page has no side panel yet. */
+@media (min-width: 721px) { .workspace-page.owner-page ~ .workspace-corner { right: 16px; max-width: calc(100% - 32px); } }
 .workspace-corner .handoff-button { display: inline-flex; height: 28px; align-items: center; justify-content: center; border-radius: 6px; padding: 0 8px; font-size: 12px; font-weight: 500; text-decoration: none; white-space: nowrap; }
 .toast-slot { display: flex; width: 360px; max-width: 100%; flex-direction: column; gap: 8px; }
 .toast-slot:empty { display: none; }
@@ -149,3 +152,25 @@
 .load-failed p { min-width: 0; flex: 1; margin: 0; }
 .load-failed button { flex: none; border: 0; padding: 0; background: none; color: var(--viewer-ink); cursor: pointer; font: inherit; font-weight: 600; }
 .load-failed button:hover { text-decoration: underline; }
+
+/* The account's workspaces: one column of links under the page's mark. */
+.workspaces-page .workspaces { width: 100%; max-width: 480px; box-sizing: border-box; margin: 0 auto; padding: 64px 16px 32px; }
+.workspaces h1 { margin: 0 0 8px; padding: 0 8px; font-family: inherit; font-size: 20px; font-weight: 600; line-height: 28px; }
+.workspaces h2 { margin: 16px 0 4px; padding: 0 8px; color: var(--viewer-muted); font-family: inherit; font-size: 12px; font-weight: 600; line-height: 18px; }
+.workspaces ul { margin: 0; padding: 0; list-style: none; }
+.workspace-row { display: flex; height: 36px; align-items: center; gap: 8px; border-radius: 6px; padding: 0 8px; color: var(--viewer-ink); text-decoration: none; }
+a.workspace-row:hover { background: var(--viewer-hover); }
+.workspace-row .icon { color: var(--viewer-subtle); }
+.workspace-row-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspaces-empty { margin: 8px 0; padding: 0 8px; color: var(--viewer-muted); }
+.workspaces .load-failed { margin: 8px; }
+.workspaces .load-failed .toast-copy { margin-top: 0; }
+.workspaces-account { margin: 32px 0 0; padding: 0 8px; color: var(--viewer-subtle); font-size: 12px; }
+.workspaces .launch-failure { margin: 8px 0 0; padding: 0 8px; color: var(--viewer-danger); }
+.workspaces-skeleton { display: flex; flex-direction: column; gap: 16px; padding: 12px 8px; animation: viewer-appear 1ms 150ms both; }
+.workspaces-skeleton i { display: block; height: 12px; border-radius: 4px; background: var(--viewer-skeleton); }
+.workspaces-skeleton i:nth-child(1) { width: 40%; height: 20px; }
+.workspaces-skeleton i:nth-child(2) { width: 72%; }
+.workspaces-skeleton i:nth-child(3) { width: 56%; }
+@media (prefers-reduced-motion: reduce) { .workspaces-skeleton { animation: none; } }
+@media (max-width: 720px) { .workspace-row { height: 44px; } }

@@ -87,8 +87,8 @@ export function Toast({
   );
 }
 
-/** Copies exactly what the toast says, and shows that it did for 2 s. */
-function CopyMessage({ text }: { text: string }) {
+/** Copies exactly what the toast or a failed list says, and shows that it did for 2 s. */
+export function CopyMessage({ text }: { text: string }) {
   const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(timer.current), []);

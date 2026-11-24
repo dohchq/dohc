@@ -18,9 +18,13 @@ import { ensureLocalhostTls } from "../src/testing/device-control/localhostTls.j
 
 // Real viewer, share-web, relay handler and SQLite relay storage. Only account identity is a fixture, as in shared-channel.spec.ts.
 // A workspace member who has no dohc app reads a page, comments on it and posts in a Group, while the owner's desktop reads the same log.
+// The owner then opens the same workspace from their list of workspaces in another browser.
 const workspaceId = "workspace-trip",
   exchangeKey = "member-workspace-browser-exchange-key-32b";
-const accounts = { "sam@example.test": { id: "sam", name: "Sam" } } as const;
+const accounts = {
+  "sam@example.test": { id: "sam", name: "Sam" },
+  "ana@example.test": { id: "owner", name: "Ana" },
+} as const;
 type Email = keyof typeof accounts;
 
 test("a member reads a page, comments on it and posts in a Group in the browser while the owner's desktop reads them", async ({
@@ -176,6 +180,10 @@ test("a member reads a page, comments on it and posts in a Group in the browser 
   });
 
   await owner("/sync/workspaces", { method: "POST", body: JSON.stringify({ workspaceId }) });
+  await owner(`/sync/workspaces/${workspaceId}/name`, {
+    method: "PUT",
+    body: JSON.stringify({ name: "Lisbon trip" }),
+  });
   await append([
     ...group("wire-planning", "planning"),
     message("wire-planning", "seed-1", "Hotel is booked."),
@@ -277,18 +285,24 @@ test("a member reads a page, comments on it and posts in a Group in the browser 
     }
   };
 
-  const context = await browser.newContext({
-    ignoreHTTPSErrors: true,
-    viewport: { width: 1280, height: 800 },
-    reducedMotion: "reduce",
-  });
+  const newContext = () =>
+    browser.newContext({
+      ignoreHTTPSErrors: true,
+      viewport: { width: 1280, height: 800 },
+      reducedMotion: "reduce",
+    });
+  const context = await newContext();
+  const ownerContext = await newContext();
+  const signIn = async (page: Page, email: Email) => {
+    await page.getByLabel("Email", { exact: true }).fill(email);
+    await page.getByLabel("Password", { exact: true }).fill("fixture-password");
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  };
   try {
     const page: Page = await context.newPage();
     page.on("pageerror", (error) => failures.push(String(error)));
     await page.goto(`${viewer}/s/workspace/${encodeURIComponent(grantId!.grantId)}`);
-    await page.getByLabel("Email", { exact: true }).fill("sam@example.test");
-    await page.getByLabel("Password", { exact: true }).fill("fixture-password");
-    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await signIn(page, "sam@example.test");
 
     const files = page.getByRole("navigation", { name: "Workspace files" });
     await expect(files.getByRole("heading", { level: 1 })).toHaveText("Lisbon trip");
@@ -364,8 +378,36 @@ test("a member reads a page, comments on it and posts in a Group in the browser 
       ops.find((op) => op.opKind === "chat.thread.create" && op.threadId === comment!.threadId),
     ).toMatchObject({ linkedObjectId: "object-trip/itinerary.md" });
     await page.screenshot({ path: testInfo.outputPath("member-workspace.png") });
+
+    // Sam's list of workspaces links the one Sam joined.
+    await page.goto(`${viewer}/workspaces`);
+    await expect(page.getByRole("link", { name: "Lisbon trip" })).toHaveAttribute(
+      "href",
+      `/s/workspace/${encodeURIComponent(grantId!.grantId)}`,
+    );
+
+    // The owner signs in on the list, opens the workspace, and reads it with no Groups or Comments.
+    const ownerPage = await ownerContext.newPage();
+    ownerPage.on("pageerror", (error) => failures.push(String(error)));
+    await ownerPage.goto(`${viewer}/workspaces`);
+    await signIn(ownerPage, "ana@example.test");
+    await expect(ownerPage.getByRole("link", { name: "Lisbon trip" })).toBeVisible();
+    await ownerPage.screenshot({ path: testInfo.outputPath("owner-workspaces.png") });
+    await ownerPage.getByRole("link", { name: "Lisbon trip" }).click();
+    await expect(ownerPage).toHaveURL(`${viewer}/s/workspace/owner/${workspaceId}`);
+    const ownerFiles = ownerPage.getByRole("navigation", { name: "Workspace files" });
+    await expect(ownerFiles.getByRole("heading", { level: 1 })).toHaveText("Lisbon trip");
+    await ownerFiles.getByRole("treeitem", { name: "budget.md" }).click();
+    await expect(ownerPage.getByText("Hotel 780, flights 640.")).toBeVisible();
+    await expect(ownerPage.getByText("Owner", { exact: true })).toBeVisible();
+    await expect(ownerPage.getByRole("region", { name: "Chats" })).toHaveCount(0);
+    // A write from the owner's computer reaches the open page without a reload.
+    await write("trip/budget.md", "# Budget\n\nHotel 780, flights 640, train 30.");
+    await expect(ownerPage.getByText("Hotel 780, flights 640, train 30.")).toBeVisible();
+    await ownerPage.screenshot({ path: testInfo.outputPath("owner-workspace.png") });
     expect(failures).toEqual([]);
   } finally {
+    await ownerContext.close();
     await context.close();
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));

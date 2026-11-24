@@ -71,8 +71,11 @@ it("loads only each route's own code before it renders", async () => {
   expect(loads(pages["join.html"]!, EDITOR)).toEqual([]);
 });
 
-it("serves a member's workspace page at /s/workspace/<grant>", () => {
+it("serves the workspace page for a member, an owner and the list of workspaces", () => {
   expect(viewerPage("/s/workspace/grant-1")).toBe("workspace.html");
+  expect(viewerPage("/s/workspace/owner/x")).toBe("workspace.html");
+  expect(viewerPage("/workspaces")).toBe("workspace.html");
+  expect(viewerPage("/workspaces/x")).toBe("index.html");
   expect(viewerPage("/s/workspace")).toBe("index.html");
 });
 

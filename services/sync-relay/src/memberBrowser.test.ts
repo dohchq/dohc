@@ -605,6 +605,174 @@ describe("a member reads the workspace through the link read routes", () => {
   });
 });
 
+function ownerRead(
+  h: SyncRelayHandler,
+  path: string,
+  workspaceId: string,
+  userId: string,
+  init: RequestInit = {},
+) {
+  return memberRead(h, path, "", userId, {
+    ...init,
+    headers: {
+      authorization: `DohcOwner ${workspaceId}`,
+      ...Object.fromEntries(new Headers(init.headers)),
+    },
+  });
+}
+
+const nameWorkspace = (storage: SyncRelayStorage, name: string) =>
+  (storage as unknown as StorageContext).db
+    .prepare("UPDATE sync_relay_workspaces SET display_name = ? WHERE workspace_id = ?")
+    .run(name, WORKSPACE);
+
+describe("the owner reads their own workspace through the link read routes", () => {
+  it("reads a solo workspace's name, files, history and blobs at Edit, with no share or grant", async () => {
+    const { h, storage, planSha } = await seed();
+    nameWorkspace(storage, "Studio");
+    await ownerWrite(h, "docs/plan.md", "the new plan", "the plan");
+    await ownerWrite(h, ".env", "SECRET=SENTINEL");
+    const share = await ownerRead(h, "/sync/link/share", WORKSPACE, OWNER);
+    expect(share.status, await share.clone().text()).toBe(200);
+    expect(await json(share)).toMatchObject({ ok: true, access: "edit", subjectName: "Studio" });
+    const current = await ownerRead(h, "/sync/link/current", WORKSPACE, OWNER);
+    const body = await current.text();
+    expect(current.status, body).toBe(200);
+    expect(JSON.parse(body)).toMatchObject({
+      access: "edit",
+      files: [
+        expect.objectContaining({ path: "docs/plan.md", blobSha256: sha256("the new plan") }),
+      ],
+    });
+    expect(body).not.toContain("SENTINEL");
+    expect(body).not.toContain(".env");
+    // The earlier version reads, as at Edit.
+    const old = await ownerRead(h, `/sync/link/blobs/${planSha}`, WORKSPACE, OWNER);
+    expect(old.status).toBe(200);
+    expect(await old.text()).toBe("the plan");
+    const log = await ownerRead(h, "/sync/link/log?since=0&limit=500", WORKSPACE, OWNER);
+    expect(log.status).toBe(200);
+    const logText = await log.text();
+    expect(logText).toContain("docs/plan.md");
+    expect(logText).not.toContain("SENTINEL");
+    expect(logText).not.toContain(".env");
+  });
+
+  it("reads a folder a rule hides from members, as an admin does", async () => {
+    const { h, storage } = await seed();
+    await member(h, storage, "ana");
+    await ownerRule(h, "hidden", "people:\n  ben@dohc.test: edit\n");
+    await ownerWrite(h, "hidden/x.md", "hidden work");
+    const files = (await json(await ownerRead(h, "/sync/link/current", WORKSPACE, OWNER)))
+      .files as Array<{ path: string }>;
+    expect(files.map((file) => file.path).sort()).toEqual(["docs/plan.md", "hidden/x.md"]);
+  });
+
+  it("refuses another account, a member, a missing credential, another site and a fenced owner like an unknown grant", async () => {
+    const { h, storage } = await seed();
+    const ana = await member(h, storage, "ana");
+    const unknown = await refusalBytes(
+      await memberRead(h, "/sync/link/current", "grant-never", "ana"),
+    );
+    expect(unknown.startsWith("404:")).toBe(true);
+    expect((await ownerRead(h, "/sync/link/current", WORKSPACE, OWNER)).status).toBe(200);
+    // A member, another account, or a workspace that does not exist.
+    for (const [workspaceId, userId] of [
+      [WORKSPACE, "ana"],
+      [WORKSPACE, "mallory"],
+      ["workspace-never", OWNER],
+      // A member's grant never names a workspace under the owner's scheme.
+      [ana.grantId, OWNER],
+    ] as const) {
+      expect(
+        await refusalBytes(await ownerRead(h, "/sync/link/current", workspaceId, userId)),
+        `${workspaceId} ${userId}`,
+      ).toBe(unknown);
+    }
+    for (const headers of [
+      { "x-dohc-relay-exchange-key": "wrong-key-wrong-key-wrong-key-wrong" },
+      { cookie: "" },
+      { origin: "https://elsewhere.test" },
+      { "x-dohc-link-profile-secret": "x" },
+      { "x-dohc-user-id": OWNER, cookie: "session=mallory" },
+    ] as Record<string, string>[]) {
+      expect(
+        await refusalBytes(await ownerRead(h, "/sync/link/current", WORKSPACE, OWNER, { headers })),
+        JSON.stringify(headers),
+      ).toBe(unknown);
+    }
+    const key = "account-deletion-key-at-least-32-bytes";
+    const context = storage as unknown as StorageContext;
+    initializeAccountDeletion(context, key);
+    fenceAccount(context, key, OWNER, `${OWNER}@dohc.test`);
+    for (const route of [
+      "/sync/link/share",
+      "/sync/link/current",
+      "/sync/link/log?since=0&limit=500",
+    ]) {
+      expect(await refusalBytes(await ownerRead(h, route, WORKSPACE, OWNER)), route).toBe(unknown);
+    }
+  });
+});
+
+describe("a browser's list of the account's workspaces", () => {
+  const list = (h: SyncRelayHandler, userId: string, headers: Record<string, string> = {}) =>
+    h(
+      new Request("http://relay.test/sync/members/workspaces", {
+        headers: {
+          cookie: `session=${userId}`,
+          origin: SHARE_WEB_ORIGIN,
+          "x-dohc-relay-exchange-key": RELAY_EXCHANGE_KEY,
+          ...headers,
+        },
+      }),
+    );
+
+  it("lists the workspaces the account owns and the ones it joined, with the grant that opens each", async () => {
+    const { h, storage } = await seed();
+    nameWorkspace(storage, "Studio");
+    expect(await json(await list(h, OWNER))).toEqual({
+      ok: true,
+      owned: [{ workspaceId: WORKSPACE, name: "Studio" }],
+      joined: [],
+    });
+    expect(await json(await list(h, "ana"))).toEqual({ ok: true, owned: [], joined: [] });
+    const ana = await member(h, storage, "ana");
+    expect(await json(await list(h, "ana"))).toEqual({
+      ok: true,
+      owned: [],
+      joined: [{ workspaceId: WORKSPACE, name: "Community", grantId: ana.grantId }],
+    });
+    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana.memberId}/remove`)).status).toBe(
+      200,
+    );
+    expect(await json(await list(h, "ana"))).toEqual({ ok: true, owned: [], joined: [] });
+  });
+
+  it("answers only share-web, with the account's cookie and the exchange key", async () => {
+    const { h } = await seed();
+    expect((await list(h, OWNER)).status).toBe(200);
+    for (const headers of [
+      { "x-dohc-relay-exchange-key": "wrong-key-wrong-key-wrong-key-wrong" },
+      { origin: "https://elsewhere.test" },
+    ] as Record<string, string>[])
+      expect((await list(h, OWNER, headers)).status, JSON.stringify(headers)).toBe(404);
+    // A computer lists its account's workspaces through the account routes instead.
+    expect((await h(request(OWNER, "/sync/members/workspaces"))).status).toBe(404);
+    const posted = await h(
+      new Request("http://relay.test/sync/members/workspaces", {
+        method: "POST",
+        headers: {
+          cookie: `session=${OWNER}`,
+          origin: SHARE_WEB_ORIGIN,
+          "x-dohc-relay-exchange-key": RELAY_EXCHANGE_KEY,
+        },
+      }),
+    );
+    expect(posted.status).toBe(405);
+  });
+});
+
 function chat(h: SyncRelayHandler, path: string, userId: string, init: RequestInit = {}) {
   return h(
     new Request(`http://relay.test/sync/named-chat/${path}`, {

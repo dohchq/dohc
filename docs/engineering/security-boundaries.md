@@ -18,6 +18,26 @@ Every link route, the live routes included, takes that capability as
 another kind of credential.
 The [operations reference](../../services/share-web/README.md) defines deployment controls.
 
+## An owner reads their workspace in a browser with their own sign-in
+
+The owner signs in on share-web with their email and password. That makes a
+`browser` session, which share-web keeps in its host-only cookie. For the owner,
+share-web forwards that cookie to the relay with its own origin and the relay
+exchange key, as it does for a workspace member. The page names the workspace
+with `Authorization: DohcOwner <workspace>`. The relay finds the person from the
+cookie, checks that they own the workspace and that the account isn't fenced,
+and gives them an admin's reach. Secret files, ignored files, and folder markers
+stay hidden. The owner holds no share or grant, so the relay checks ownership
+again on every read.
+
+This is the one place a browser session carries authority: the owner's browser
+reads what the owner's computer reads. It reaches only the link read routes
+(`/sync/link/share`, `current`, `log`, and `blobs`) and the list of the
+account's workspaces at `/sync/members/workspaces`. The account routes, member
+management, settings, and sharing still refuse a cookie. A browser can't post
+in the owner's chats or edit a page live. Each new read checks the session
+again, so signing the browser out ends its access.
+
 ## Agents act with their link's access
 
 An agent connection holds no authority beyond its link grant. The relay keeps

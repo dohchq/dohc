@@ -1,5 +1,6 @@
 import { readBoundedJson } from "@dohc/service-http";
 import {
+  parseBrowserWorkspaceList,
   parseWorkspaceJoinPreview,
   parseWorkspaceJoinResult,
   WORKSPACE_MEMBER_ROUTES,
@@ -9,6 +10,7 @@ import {
   JOIN_API,
   JOIN_REFUSAL_STATUS,
   type JoinRefusal,
+  WORKSPACES_API,
 } from "../viewer/src/joinWire";
 import { namedAccountCookie } from "./namedAccountCookie";
 import {
@@ -38,7 +40,8 @@ const contentType = (response: Response | Request) =>
   response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
 
 /**
- * Forwards a signed-in browser's invite-link preview and join to the relay.
+ * Forwards a signed-in browser's invite-link preview and join, and its list of
+ * workspaces, to the relay.
  * The token stays in the request body; the relay derives the account from the
  * forwarded session cookie, never from anything the browser names.
  */
@@ -67,8 +70,42 @@ export function createWorkspaceJoinClient(options: {
     unavailable: () => refusal("unavailable"),
     fetchRelay: (input) => options.fetchRelay(input),
   });
+  const sameSite = (request: Request) =>
+    !request.signal.aborted &&
+    request.headers.get("host") === origin.host &&
+    request.headers.get("sec-fetch-site") !== "cross-site";
+  const relayHeaders = (cookie: string) => ({
+    cookie,
+    origin: options.publicOrigin,
+    "x-dohc-relay-exchange-key": options.exchangeKey,
+  });
+  const listWorkspaces = (request: Request): Promise<Response> | Response => {
+    if (request.method !== "GET" || new URL(request.url).search || !sameSite(request))
+      return refuse();
+    if (calls.full) return refusal("unavailable");
+    const cookie = namedAccountCookie(request.headers.get("cookie"), options.publicOrigin);
+    if (!cookie) return refusal("signed_out");
+    return calls.run(request, async (signal, relay) => {
+      const response = await relay(
+        new Request(new URL(WORKSPACE_MEMBER_ROUTES.browserWorkspaces, options.relayUrl), {
+          redirect: "manual",
+          signal,
+          headers: relayHeaders(cookie),
+        }),
+      );
+      if (response.redirected || response.headers.has("location")) return refusal("unavailable");
+      if (response.status === 401) return refusal("signed_out");
+      if (response.status !== 200 || contentType(response) !== "application/json")
+        return refusal("unavailable");
+      const result = parseBrowserWorkspaceList(
+        await readBoundedJson(response, limits.maxResponseBytes, signal),
+      );
+      return result ? Response.json(result, { headers }) : refusal("unavailable");
+    });
+  };
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
+    if (url.pathname === WORKSPACES_API) return await listWorkspaces(request);
     const route = (ROUTES as Record<string, (typeof ROUTES)[keyof typeof ROUTES] | undefined>)[
       url.pathname
     ];
@@ -76,10 +113,8 @@ export function createWorkspaceJoinClient(options: {
       !route ||
       url.search ||
       request.method !== "POST" ||
-      request.signal.aborted ||
-      request.headers.get("host") !== origin.host ||
+      !sameSite(request) ||
       request.headers.get("origin") !== options.publicOrigin ||
-      request.headers.get("sec-fetch-site") === "cross-site" ||
       contentType(request) !== "application/json"
     )
       return refuse();
@@ -103,12 +138,7 @@ export function createWorkspaceJoinClient(options: {
           redirect: "manual",
           signal,
           body: JSON.stringify({ token }),
-          headers: {
-            "content-type": "application/json",
-            cookie,
-            origin: options.publicOrigin,
-            "x-dohc-relay-exchange-key": options.exchangeKey,
-          },
+          headers: { "content-type": "application/json", ...relayHeaders(cookie) },
         }),
       );
       if (response.redirected || response.headers.has("location")) return refusal("unavailable");

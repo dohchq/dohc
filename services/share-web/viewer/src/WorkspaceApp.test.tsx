@@ -6,6 +6,7 @@ import * as Y from "yjs";
 import { getDohcYDocBodyFragment, markdownToYDoc } from "@dohc/ydoc-projection";
 import type { NamedLiveBrowserState } from "@dohc/ydoc-projection/named-live-browser-transport";
 import WorkspaceApp from "./WorkspaceApp";
+import type { WorkspaceTarget } from "./workspaceTarget";
 import { memberDocument, memberPageReady, openMemberPage } from "./memberLive";
 import "./MemberLivePage";
 import { jsonResponse, setControlValue, settle } from "./testing";
@@ -189,12 +190,18 @@ function server(
     holdGroups?: number;
     // The relay refuses the Groups while the workspace still opens.
     groupsGone?: boolean;
+    // The view session the page must send, where it is not the member's.
+    session?: string;
+    // The account's workspaces, and how many reads of them fail first.
+    workspaces?: unknown;
+    workspacesFail?: number;
   } = {},
 ) {
   let signedIn = options.signedIn ?? true,
     groupsFail = options.groupsFail ?? 0,
     deleteFails = options.deleteFails ?? 0,
-    holdGroups = options.holdGroups ?? 0;
+    holdGroups = options.holdGroups ?? 0,
+    workspacesFail = options.workspacesFail ?? 0;
   // A test can change the level, the rules or the files while the page is open; the next read carries them.
   const files = () =>
     (options.files ?? FILES).map((file) => ({
@@ -269,6 +276,14 @@ function server(
       signedIn = false;
       return jsonResponse({ ok: true });
     }
+    if (url.pathname === "/api/workspaces") {
+      if (!signedIn) return jsonResponse({ ok: false, error: "unauthorized" }, 401);
+      if (workspacesFail > 0) {
+        workspacesFail -= 1;
+        return jsonResponse({ ok: false, error: "unavailable" }, 503);
+      }
+      return jsonResponse(options.workspaces ?? { ok: true, owned: [], joined: [] });
+    }
     // share-web gives an account that holds no membership the answer it gives an unknown grant.
     if (
       (options.member === false ||
@@ -278,7 +293,9 @@ function server(
     )
       return jsonResponse({ ok: false, error: "not found" }, 404);
     if (url.pathname.startsWith("/api/view/")) {
-      expect(headers.get("x-dohc-link-session") ?? url.searchParams.get("session")).toBe(SESSION);
+      expect(headers.get("x-dohc-link-session") ?? url.searchParams.get("session")).toBe(
+        options.session ?? SESSION,
+      );
       if (url.pathname === "/api/view/current" && options.openHeld)
         return hold("current", url, signal);
       if (url.pathname === "/api/view/current" && options.tooLarge)
@@ -429,8 +446,8 @@ async function click(label: string) {
   expect(control, label).toBeDefined();
   await act(async () => control!.click());
 }
-async function render(grantId: string | null = GRANT) {
-  await act(async () => root.render(<WorkspaceApp grantId={grantId} />));
+async function render(target: WorkspaceTarget | null = { kind: "member", grantId: GRANT }) {
+  await act(async () => root.render(<WorkspaceApp target={target} />));
 }
 const following = (path: "log" | "chat" | "comments") =>
   held.filter((item) => item.path === path && !item.signal.aborted);
@@ -2711,4 +2728,140 @@ it("reads the Groups once when the relay refuses them while the workspace still 
   );
   expect(channelReads(fetch)).toBe(1);
   expect(text()).not.toContain("membership");
+});
+
+describe("the owner's page", () => {
+  const OWNER = { kind: "owner", workspaceId: "ws-1" } as const,
+    OWNER_SESSION = "owner.ws-1";
+  const paths = (fetch: ReturnType<typeof server>) =>
+    fetch.mock.calls.map(([input]) => new URL(String(input), "https://share.test").pathname);
+
+  it("reads the files with the owner's session, shows Markdown read-only, and reads no Groups or live page", async () => {
+    const fetch = server({ level: "edit", session: OWNER_SESSION });
+    await render(OWNER);
+    await settle(() => text().includes("Leave at nine."));
+    expect(container.querySelector(".workspace-name")?.textContent).toBe("Trip");
+    expect(container.querySelector(".badge")?.textContent).toBe("Owner");
+    expect(container.querySelector('[role="textbox"]')).toBeNull();
+    expect(container.querySelector(".workspace-side")).toBeNull();
+    expect(container.querySelector('[role="tab"]')).toBeNull();
+    const all = container.querySelector<HTMLAnchorElement>('a[aria-label="All workspaces"]');
+    expect(all?.getAttribute("href")).toBe("/workspaces");
+    const views = fetch.mock.calls.filter(([input]) =>
+      new URL(String(input), "https://share.test").pathname.startsWith("/api/view/"),
+    );
+    expect(views.length).toBeGreaterThan(0);
+    for (const [input, init] of views)
+      expect(
+        new Headers(init?.headers).get("x-dohc-link-session") ??
+          new URL(String(input), "https://share.test").searchParams.get("session"),
+      ).toBe(OWNER_SESSION);
+    expect(
+      paths(fetch).filter(
+        (path) => path.startsWith("/api/named-chat") || path.startsWith("/api/live"),
+      ),
+    ).toEqual([]);
+    expect(vi.mocked(openMemberPage)).not.toHaveBeenCalled();
+  });
+
+  it("shows only Files and Page on a phone", async () => {
+    narrow = true;
+    server({ level: "edit", session: OWNER_SESSION });
+    await render(OWNER);
+    await settle(() => text().includes("Leave at nine."));
+    expect([...container.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent)).toEqual([
+      "Files",
+      "Page",
+    ]);
+  });
+
+  it("asks a signed-out browser to sign in with the account that owns the workspace", async () => {
+    server({ signedIn: false, level: "edit", session: OWNER_SESSION });
+    await render(OWNER);
+    await settle(() => Boolean(container.querySelector('input[name="email"]')));
+    expect(container.querySelector(".state-message h1")?.textContent).toBe(
+      "Sign in to open this workspace",
+    );
+    expect(text()).toContain("Use the account that owns this workspace.");
+    expect(text()).not.toContain("invited");
+  });
+
+  it("refuses an account that does not own the workspace and offers Switch account", async () => {
+    server({ member: false, session: OWNER_SESSION });
+    await render(OWNER);
+    await settle(() => text().includes("dohc could not open this workspace with this account."));
+    expect(container.querySelector(".state-message p")?.textContent).toBe(
+      "This browser is signed in as Sam Rivera. Switch to the account that owns this workspace.",
+    );
+    expect(button("Switch account")).toBeDefined();
+  });
+});
+
+describe("the list of workspaces", () => {
+  const LIST = { kind: "list" } as const;
+  const WORKSPACES = {
+    ok: true,
+    owned: [
+      { workspaceId: "ws:1", name: "Trip" },
+      { workspaceId: "ws-3", name: null },
+    ],
+    joined: [{ workspaceId: "ws-9", name: "Fundraiser", grantId: "grant-9" }],
+  };
+  const rows = (heading: string) =>
+    [...container.querySelectorAll("section")]
+      .find((section) => section.querySelector("h2")?.textContent === heading)!
+      .querySelectorAll("li");
+
+  it("links each owned and joined workspace to its page", async () => {
+    server({ workspaces: WORKSPACES });
+    await render(LIST);
+    await settle(() => text().includes("Joined"));
+    const owned = [...rows("Your workspaces")];
+    expect(owned.map((row) => row.querySelector("a")?.getAttribute("href") ?? null)).toEqual([
+      "/s/workspace/owner/ws%3A1",
+      "/s/workspace/owner/ws-3",
+    ]);
+    expect(owned[1]!.textContent).toBe("Unnamed workspace");
+    const joined = [...rows("Joined")];
+    expect(joined.map((row) => row.querySelector("a")?.getAttribute("href"))).toEqual([
+      "/s/workspace/grant-9",
+    ]);
+    expect(joined[0]!.textContent).toBe("Fundraiser");
+    expect(text()).toContain("Signed in as Sam Rivera");
+    await click("Sign out");
+    await settle(() => text().includes("Sign in to see your workspaces"));
+  });
+
+  it("says when the account has no workspaces", async () => {
+    server();
+    await render(LIST);
+    await settle(() => text().includes("No workspaces on this account yet."));
+    expect(container.querySelector("section")).toBeNull();
+  });
+
+  it("asks a signed-out browser to sign in, then lists its workspaces", async () => {
+    server({ signedIn: false, workspaces: WORKSPACES });
+    await render(LIST);
+    await settle(() => Boolean(container.querySelector('input[name="email"]')));
+    expect(container.querySelector(".state-message h1")?.textContent).toBe(
+      "Sign in to see your workspaces",
+    );
+    expect(container.querySelector(".state-message p")).toBeNull();
+    await act(async () => {
+      setControlValue(container.querySelector('input[name="email"]')!, "sam@dohc.test");
+      setControlValue(container.querySelector('input[name="password"]')!, "secret");
+    });
+    await click("Sign in");
+    await settle(() => text().includes("Fundraiser"));
+  });
+
+  it("says when the list could not load, with copy and Try again", async () => {
+    server({ workspaces: WORKSPACES, workspacesFail: 1 });
+    await render(LIST);
+    await settle(() => container.querySelector('.load-failed[role="alert"]') !== null);
+    expect(text()).toContain("dohc could not load your workspaces. Check your connection.");
+    expect(button("Copy message")).toBeDefined();
+    await click("Try again");
+    await settle(() => text().includes("Fundraiser"));
+  });
 });

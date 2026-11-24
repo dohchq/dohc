@@ -1,11 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import {
-  createGroupFollow,
-  followMemberGroups,
-  memberSession,
-  openMemberGroups,
-} from "./memberWorkspace";
+import { createGroupFollow, followMemberGroups, openMemberGroups } from "./memberWorkspace";
 import { NamedChatError, type NamedChatChannel } from "./namedChat";
 import { jsonResponse } from "./testing";
 
@@ -32,10 +27,6 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
-});
-
-it("names the grant as the session the view routes read", () => {
-  expect(memberSession("grant-1")).toBe("member.grant-1");
 });
 
 it("opens every Group the member reaches, each with its own access", async () => {
