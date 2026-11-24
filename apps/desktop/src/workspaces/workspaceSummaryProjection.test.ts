@@ -157,6 +157,12 @@ describe("workspace summary projection", () => {
     expect(marked({ ...goodSelector, access: "edit" })).not.toHaveProperty("editingNotReady");
     expect(marked(staleSelector)).not.toHaveProperty("editingNotReady");
     expect(marked(goodSelector, { editingNotReady: "yes" })).not.toHaveProperty("editingNotReady");
+    // A membership at Edit that waits to send shows the level its gates give.
+    const member = { paths: [], versionId: null, access: "edit", wholeWorkspace: true };
+    expect(marked(member)).toMatchObject({ access: "view", editingNotReady: true });
+    expect(workspaceSummaryFor(entry({ shareView: shareView(member) })).shareView).toMatchObject({
+      access: "edit",
+    });
     expect(
       workspaceSummaryFor(entry({ shareView: shareView(goodSelector) })).shareView,
     ).not.toHaveProperty("editingNotReady");

@@ -1426,6 +1426,61 @@ describe("registered received-view handlers", () => {
       });
       expect(h.workspace.shareView).toMatchObject({ editingNotReady: true });
       expect(levelIn(h.workspace.shareView, "Notes/a.md")).toBe("view");
+      // The pull is not cached while the copy waits, so the next background
+      // refresh enrolls again.
+      h.recordIdentity.mockResolvedValue({ identity: "recorded" });
+      await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
+        workspaceId: "existing",
+        trigger: "background",
+      });
+      expect(h.workspace.shareView).not.toHaveProperty("editingNotReady");
+      expect(levelIn(h.workspace.shareView, "Notes/a.md")).toBe("edit");
+    });
+
+    const enrolled = {
+      ...stored,
+      rootLevel: "view" as const,
+      folders: [{ path: "Notes", level: "edit" as const }],
+    };
+
+    it("keeps editing on when a refresh signed out can't enrol again", async () => {
+      const h = await harness();
+      const viewer = { ...member.selector!, access: "view" as const };
+      h.fetchInfo.mockResolvedValue({ ...member, selector: viewer });
+      Object.assign(h.workspace.shareView!, { grantedSelector: viewer, reach: enrolled });
+      h.cache.clear();
+      await h
+        .invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" })
+        .catch(() => undefined);
+      expect(h.workspace.shareView).not.toHaveProperty("editingNotReady");
+      expect(levelIn(h.workspace.shareView, "Notes/a.md")).toBe("edit");
+    });
+
+    it("keeps the mark a newer install set when an older read needed no identity", async () => {
+      const h = await harness();
+      const viewer = { ...member.selector!, access: "view" as const };
+      h.fetchInfo.mockResolvedValue({ ...member, selector: viewer });
+      const viewOnly = { ...stored, rootLevel: "view" as const };
+      Object.assign(h.workspace.shareView!, { grantedSelector: viewer, reach: viewOnly });
+      // While this refresh's own record runs, another pull installs Edit in a
+      // folder and waits to enrol.
+      let warmed = 0;
+      h.warm.mockImplementation(async () => {
+        if (!new Error().stack?.includes("recordShareViewIdentity")) return;
+        warmed++;
+        h.workspace.shareView = {
+          ...h.workspace.shareView!,
+          reach: { ...enrolled, signature: "r2" },
+          editingNotReady: true,
+        };
+      });
+      await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
+        workspaceId: "existing",
+      });
+      expect(warmed).toBe(1);
+      expect(h.recordIdentity).not.toHaveBeenCalled();
+      expect(h.workspace.shareView).toMatchObject({ editingNotReady: true });
+      expect(levelIn(h.workspace.shareView, "Notes/a.md")).toBe("view");
     });
 
     // The levels moved, and the visibility moved before the pull that follows
