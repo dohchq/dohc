@@ -14,7 +14,8 @@ export interface NativeOwnerActivationSource {
   committedCursor: number;
   baseOriginId: string;
   baseOriginSeq: number;
-  baseRelaySeq: number;
+  /** Null when the lineage began at a conflict resolve; the relay finds its position by origin. */
+  baseRelaySeq: number | null;
   sourceMomentId: string;
   sourceDigest: string;
   sourceByteLength: number;
@@ -100,7 +101,7 @@ export function parseNativeOwnerActivationSource(
     !isDigest(source.fullStateDigest) ||
     !isInteger(source.committedCursor, 0) ||
     !isInteger(source.baseOriginSeq, 0) ||
-    !isInteger(source.baseRelaySeq, 0, source.committedCursor) ||
+    (source.baseRelaySeq !== null && !isInteger(source.baseRelaySeq, 0, source.committedCursor)) ||
     !isInteger(source.nativeHeadSequence, 0) ||
     !isInteger(source.sourceByteLength, 0, 2_097_152) ||
     !isInteger(source.fullStateByteLength, 2, maxBytes)

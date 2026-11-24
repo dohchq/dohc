@@ -21,7 +21,7 @@ pub struct ImportedOwnerSource {
     pub committed_cursor: i64,
     pub base_origin_id: String,
     pub base_origin_seq: i64,
-    pub base_relay_seq: i64,
+    pub base_relay_seq: Option<i64>,
     pub source_moment_id: String,
     pub source_digest: String,
     pub source_byte_length: i64,
@@ -369,24 +369,16 @@ pub fn capture_imported_owner_activation(
             || marker.path.as_deref() != Some(path)
         { return Err(ApplicationError::Conflict); }
         let lineage = marker.lineage_claim_id.clone().ok_or(ApplicationError::Conflict)?;
-        let base_origin_id = marker.base_origin_id.clone().ok_or(ApplicationError::Conflict)?;
-        let base_origin_seq = marker.base_origin_seq.ok_or(ApplicationError::Conflict)?;
-        let base_relay_seq = marker.base_relay_seq.ok_or(ApplicationError::Conflict)?;
+        let origin = durable::lineage_origin_in(tx, key, &marker)?.ok_or(ApplicationError::Conflict)?;
+        if marker.lineage_parent_claim_id.is_none() && origin.relay_seq.is_none() { return Err(ApplicationError::Conflict); }
         let (cursor, epoch, stream) = committed_position(tx, key)?;
         integer(cursor, 0, SAFE)?;
-        if base_relay_seq > cursor { return Err(ApplicationError::Conflict); }
+        if origin.relay_seq.is_some_and(|seq| seq > cursor) { return Err(ApplicationError::Conflict); }
         // What the owner holds for its service host is never applied, so it
         // is no document input; the end of its binding decides it.
         let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND deferred_while_bound=0)",
             params![key.workspace_id,key.version_id,key.object_id], |row| row.get(0)).map_err(read_sql)?;
         if pending { return Err(invalid("ordinary activation has deferred document input")); }
-        let payload: String = tx.query_row("SELECT payload_json FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 AND imported=1 AND apply_disposition='applied' AND op_kind='ydoc.update'",
-            params![key.workspace_id,base_origin_id,base_origin_seq], |row| row.get(0)).map_err(read_sql)?;
-        let base: Value = serde_json::from_str(&payload).map_err(|_| ApplicationError::Corrupt)?;
-        if base["versionId"] != key.version_id || base["objectId"] != key.object_id
-            || base["lineageClaimId"] != lineage || base["updateBlobSha256"] != lineage
-            || base["contentKind"] != "richdoc" || base["isBaseState"] != true
-        { return Err(ApplicationError::Conflict); }
         let (moment, source_digest, source_length): (String,String,i64) = tx.query_row(
             "SELECT s.latest_moment_id,s.blob_sha256,b.byte_length FROM snapshots s
              JOIN path_aliases p USING(workspace_id,version_id,object_id,path)
@@ -409,7 +401,8 @@ pub fn capture_imported_owner_activation(
         let reader_source = local.has_reader_source();
         let baseline_bytes = get_binary_blob(tx, &lineage)?.ok_or(ApplicationError::Corrupt)?;
         let original_doc = Ydoc::wire(); original_doc.apply(&baseline_bytes)?;
-        if reader_source { original_doc.validate_reader_baseline(&baseline_bytes)?; }
+        let lineage_epoch = marker.lineage_epoch_tag.as_deref();
+        if reader_source { original_doc.validate_lineage_baseline(&baseline_bytes, true, lineage_epoch)?; }
         let projection = local.project(ContentKind::Richdoc)?.content;
         // The same rule as the version's settled file, so a document whose
         // file keeps a body the engine reads differently still activates.
@@ -445,7 +438,7 @@ pub fn capture_imported_owner_activation(
         let full_state = local.encode_full_state_bounded(max_bytes.saturating_sub(baseline_length as usize).min(crate::limits::MAX_YDOC_UPDATE_BYTES))
             .ok_or(ApplicationError::ConfiguredByteBudgetExceeded)?;
         if !reader_source {
-            original_doc.validate_public_baseline(&baseline_bytes)?;
+            original_doc.validate_lineage_baseline(&baseline_bytes, false, lineage_epoch)?;
         }
         // A retirement still settling this document leaves no tail to follow yet.
         if super::retirement::retiring(tx, key)? { return Err(ApplicationError::Conflict); }
@@ -453,7 +446,7 @@ pub fn capture_imported_owner_activation(
         let source = ImportedOwnerSource {version: 1, reader_source, relay_database_namespace: namespace.to_owned(),
             workspace_id: key.workspace_id.clone(), main_version_id: key.version_id.clone(), object_id: key.object_id.clone(),
             lineage_claim_id: lineage, current_path: path.to_owned(), replication_epoch: epoch, stream_identity: stream,
-            committed_cursor: cursor, base_origin_id, base_origin_seq, base_relay_seq, source_moment_id: moment,
+            committed_cursor: cursor, base_origin_id: origin.origin_id, base_origin_seq: origin.origin_seq, base_relay_seq: origin.relay_seq, source_moment_id: moment,
             source_digest, source_byte_length: source_length, native_head_sequence: marker.head_update_seq,
             full_state_digest: hex_sha256(&full_state), full_state_byte_length: full_state.len(), predecessor_activation_id};
         let descriptor = serde_json::to_string(&source).map_err(|_| ApplicationError::Corrupt)?;
@@ -527,8 +520,10 @@ pub fn resume_imported_owner_activation(
             || marker.lineage_claim_status!=durable::LineageClaimStatus::Exact
             || marker.lineage_claim_id.as_deref()!=Some(source.lineage_claim_id.as_str())
             || marker.path.as_deref()!=Some(path) || source.current_path!=path
-            || marker.base_origin_id.as_deref()!=Some(source.base_origin_id.as_str())
-            || marker.base_origin_seq!=Some(source.base_origin_seq) || marker.base_relay_seq!=Some(source.base_relay_seq)
+        { return Err(ApplicationError::Conflict); }
+        let origin=durable::lineage_origin_in(conn,key,&marker)?;
+        if origin.as_ref().map(|o|(o.origin_id.as_str(),o.origin_seq,o.relay_seq))
+            !=Some((source.base_origin_id.as_str(),source.base_origin_seq,source.base_relay_seq))
         { return Err(ApplicationError::Conflict); }
         let binding=LiveObjectBinding {workspace_id:key.workspace_id.clone(),main_version_id:key.version_id.clone(),
             object_id:key.object_id.clone(),lineage_claim_id:source.lineage_claim_id.clone(),current_path:path.to_owned(),

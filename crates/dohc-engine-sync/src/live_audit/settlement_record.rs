@@ -542,7 +542,7 @@ fn imported_event_zero_before_in_tx(
     }
     require_base_coordinate(tx, &base)?;
     let (imported, disposition, path): (bool, String, String) = tx.query_row(
-        "SELECT imported,apply_disposition,json_extract(payload_json,'$.path') FROM replication_log
+        "SELECT imported,apply_disposition,CASE op_kind WHEN 'conflict.resolve' THEN json_extract(payload_json,'$.paths['||json_extract(payload_json,'$.transition.result.pathRef')||']') ELSE json_extract(payload_json,'$.path') END FROM replication_log
          WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
         params![b.workspace_id,base.base_coordinate.origin_id,base.base_coordinate.origin_seq],
         |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),

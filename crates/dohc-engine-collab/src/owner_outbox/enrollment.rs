@@ -266,19 +266,20 @@ pub fn enroll_in_tx(
     }
     let host = Ydoc::wire();
     host.apply(&input.checkpoint).map_err(collab)?;
-    host.validate_public_baseline(&input.checkpoint)
+    let original = Ydoc::wire();
+    original
+        .apply(&bounded_blob(tx, &input.binding.lineage_claim_id)?)
+        .map_err(collab)?;
+    let epoch = original.lineage_epoch_tag();
+    if host.lineage_epoch_tag() != epoch {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
+    host.validate_lineage_baseline(&input.checkpoint, false, epoch.as_deref())
         .map_err(collab)?;
     crate::replay_parity::prevalidate_state_vector_bytes(&input.host_vector).map_err(collab)?;
     let host_vector = yrs::StateVector::decode_v1(&input.host_vector)
         .map_err(|_| OwnerOutboxError::ParentMismatch)?;
     if host.has_pending_dependencies() || host.state_vector() != host_vector {
-        return Err(OwnerOutboxError::ParentMismatch);
-    }
-    let original = Ydoc::wire();
-    original
-        .apply(&bounded_blob(tx, &input.binding.lineage_claim_id)?)
-        .map_err(collab)?;
-    if host.lineage_epoch_tag() != original.lineage_epoch_tag() {
         return Err(OwnerOutboxError::ParentMismatch);
     }
     let checkpoint = bounded(&host)?;
