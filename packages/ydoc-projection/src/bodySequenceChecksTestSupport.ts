@@ -926,6 +926,18 @@ export const COSTLY_CHANGES: readonly (readonly [name: string, change: (page: Pa
   ],
 ];
 
+interface Written {
+  readonly insert: string | Y.XmlElement;
+  readonly attributes: Record<string, unknown>;
+}
+
+/**
+ * Writes these at the end of the sequence in one pass. Yjs walks a text from its start for each
+ * insert that names its marks, so ten thousand lines written one insert at a time take it seconds.
+ */
+const writeAtTheEnd = (sequence: Y.Text, written: readonly Written[]) =>
+  sequence.applyDelta([{ retain: sequence.length }, ...written]);
+
 const todosWithLinks =
   (count: number) =>
   ({ sequence, records }: Page) => {
@@ -935,6 +947,7 @@ const todosWithLinks =
       attrs: {},
     }))
       records.set(key, value);
+    const lines: Written[] = [];
     for (let line = 0; line < count; line++) {
       const item = `si${String(line)}`;
       for (const [key, value] of recordsOfContainer(schema, {
@@ -943,23 +956,28 @@ const todosWithLinks =
         attrs: {},
       }))
         records.set(key, value);
-      sequence.insertEmbed(
-        sequence.length,
-        element(BLOCK_ELEMENT, { type: "paragraph", path: ["sl", item] }),
-        {},
-      );
-      sequence.insert(sequence.length, "see ", {});
-      sequence.insert(sequence.length, `page ${String(line)}`, {
-        link: {
-          href: `https://example.com/pages/${String(line)}`,
-          target: "_blank",
-          rel: "noopener noreferrer nofollow",
-          class: null,
-          title: null,
+      lines.push(
+        {
+          insert: element(BLOCK_ELEMENT, { type: "paragraph", path: ["sl", item] }),
+          attributes: {},
         },
-      });
-      sequence.insert(sequence.length, " today", { link: null });
+        { insert: "see ", attributes: {} },
+        {
+          insert: `page ${String(line)}`,
+          attributes: {
+            link: {
+              href: `https://example.com/pages/${String(line)}`,
+              target: "_blank",
+              rel: "noopener noreferrer nofollow",
+              class: null,
+              title: null,
+            },
+          },
+        },
+        { insert: " today", attributes: { link: null } },
+      );
     }
+    writeAtTheEnd(sequence, lines);
   };
 
 /**
@@ -997,22 +1015,20 @@ export const LARGE_HONEST_CHANGES: readonly (readonly [
   ],
   [
     "10,000 plain lines seeded at once",
-    ({ sequence }) => {
-      for (let line = 0; line < 10_000; line++) {
-        sequence.insertEmbed(
-          sequence.length,
-          element(BLOCK_ELEMENT, { type: "paragraph", path: [] }),
-          {},
-        );
-        sequence.insert(sequence.length, `line ${String(line)}`, {});
-      }
-    },
+    ({ sequence }) =>
+      writeAtTheEnd(
+        sequence,
+        Array.from({ length: 10_000 }, (_, line): Written[] => [
+          { insert: element(BLOCK_ELEMENT, { type: "paragraph", path: [] }), attributes: {} },
+          { insert: `line ${String(line)}`, attributes: {} },
+        ]).flat(),
+      ),
     { bytes: 633_009, values: 20_000, structs: 40_000 },
   ],
   [
     "6,800 to-dos seeded at once, each with a link",
     todosWithLinks(6_800),
-    { bytes: 2_076_833, values: 88_404, structs: 68_004 },
+    { bytes: 2_081_149, values: 88_404, structs: 68_004 },
   ],
   [
     "one line 64 containers deep",
@@ -1046,6 +1062,6 @@ export const LARGE_HONEST_CHANGES: readonly (readonly [
   [
     "10,000 to-dos seeded at once, each with a link",
     todosWithLinks(10_000),
-    { bytes: 3_059_233, values: 130_004, structs: 100_004 },
+    { bytes: 3_064_554, values: 130_004, structs: 100_004 },
   ],
 ];
