@@ -656,16 +656,18 @@ describe("App", () => {
     expect(container.querySelector("article.markdown")?.textContent).toContain("Shared content");
   });
 
+  const GONE = "This file moved or was removed. Ask its owner for a new link.";
   it.each([
     [
       "renamed",
-      { path: "docs/renamed.md" },
+      ["rename"],
       "Editing is no longer available. Copy any unsynced changes before closing this file.",
     ],
-    ["removed", null, "This file moved or was removed. Ask its owner for a new link."],
+    ["removed", ["delete"], GONE],
+    ["replaced by another file at its path", ["delete", "replace"], GONE],
   ] as const)(
     "says a file open for editing moved or was removed only when the shared files lose it: %s",
-    async (_, change, words) => {
+    async (_, changes, words) => {
       const objectId = "share-object:v1:" + "a".repeat(64);
       const meta: ViewMeta = {
         ...DEFAULT_META,
@@ -711,31 +713,38 @@ describe("App", () => {
       await act(async () =>
         deliver?.(
           logOpsPage(
-            [
-              {
-                relaySeq: 8,
-                recordedAtMs: 1,
-                opKind: "moment.append",
-                payload: {
-                  objectId,
-                  operation: change ? "rename" : "delete",
-                  payloadBeforePath: file.path,
-                  payloadBeforeBlobSha256: file.blobSha256,
-                  ...(change && {
-                    payloadAfterPath: change.path,
-                    payloadAfterBlobSha256: file.blobSha256,
-                    payloadAfterContentKind: "text",
-                  }),
-                },
-              },
-            ],
-            8,
+            changes.map((change, index) => ({
+              relaySeq: 8 + index,
+              recordedAtMs: 1,
+              opKind: "moment.append",
+              payload:
+                change === "replace"
+                  ? {
+                      objectId: "share-object:v1:" + "b".repeat(64),
+                      operation: "write",
+                      payloadAfterPath: file.path,
+                      payloadAfterBlobSha256: "b".repeat(64),
+                      payloadAfterContentKind: "text",
+                    }
+                  : {
+                      objectId,
+                      operation: change,
+                      payloadBeforePath: file.path,
+                      payloadBeforeBlobSha256: file.blobSha256,
+                      ...(change === "rename" && {
+                        payloadAfterPath: "docs/renamed.md",
+                        payloadAfterBlobSha256: file.blobSha256,
+                        payloadAfterContentKind: "text",
+                      }),
+                    },
+            })),
+            7 + changes.length,
           ),
         ),
       );
       await settle(() => container.querySelector(".edit-alert") !== null);
       expect(container.querySelector(".edit-alert")?.textContent).toBe(words);
-      expect(container.querySelector(".edit-notice") === null).toBe(change === null);
+      expect(container.querySelector(".edit-notice") === null).toBe(words === GONE);
     },
   );
 

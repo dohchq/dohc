@@ -906,7 +906,10 @@ export function App() {
     ready.session === editing.discriminator &&
     ready.meta.access === "edit" &&
     ready.meta.effectiveSelector.versionId === null;
-  const available = editable && selected !== undefined;
+  const available =
+    editable &&
+    selected !== undefined &&
+    (editing.objectId === undefined || selected.objectId === editing.objectId);
   // The editor mounts once the bar has its place, so Done never shows anywhere else first.
   const editor =
     !editing || !barSlot ? null : editingCollectionFile ? (
