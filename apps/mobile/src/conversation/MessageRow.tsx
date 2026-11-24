@@ -5,6 +5,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import {
   AccessibilityInfo,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -405,7 +406,12 @@ function MessageActions({
         ) : null}
       </View>
       {picking ? (
-        <View style={styles.picker}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.pickerScroll}
+          contentContainerStyle={styles.picker}
+        >
           {REACTION_CHOICES.map((emoji) => (
             <Pressable
               key={emoji}
@@ -442,7 +448,7 @@ function MessageActions({
               fallback={<X size={16} color={theme.muted} strokeWidth={2.5} />}
             />
           </Pressable>
-        </View>
+        </ScrollView>
       ) : null}
       {problem ? (
         <Text style={[styles.localText, { color: theme.danger }]} accessibilityRole="alert">
@@ -640,10 +646,10 @@ const styles = StyleSheet.create({
   pending: { borderStyle: "dashed" },
   /** Add reaction and Reply: as wide as the touch needs, with no count. */
   tool: { minWidth: 36, justifyContent: "center" },
-  picker: { flexDirection: "row", gap: 2, marginTop: 4 },
+  pickerScroll: { marginTop: 4 },
+  picker: { flexDirection: "row", gap: 2 },
   choice: {
-    flex: 1,
-    maxWidth: 44,
+    width: 44,
     height: 44,
     borderRadius: 22,
     alignItems: "center",

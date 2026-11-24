@@ -125,7 +125,6 @@ export function SampleSharing() {
         tone: "success",
         title: sharingWords.endedShare(subject),
         body: sharingWords.undoWindow,
-        holdsUndo: true,
         action: {
           label: sharingWords.undo,
           onPress: () => {
