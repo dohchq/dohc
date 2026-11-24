@@ -388,7 +388,7 @@ function SettingsScreen() {
       </Section>
       {pageTimings ? (
         <Section title="Page opens">
-          {pageTimings.opens().map((open, index) => (
+          {pageTimings.opens(signIn).map((open, index) => (
             <Row
               key={index}
               title={open.name}

@@ -40,13 +40,17 @@ import {
   type MarkKey,
 } from "./pageParts";
 
+type PageParams = { path?: string; workspace?: string; t0?: string };
+
 // A page opened from a Notice names its workspace. It shows only while that workspace is the one open, so it never
 // reads the page from another.
 export function ServerPage() {
   const { data } = useAccount();
-  const { path = "", workspace } = useLocalSearchParams<{ path?: string; workspace?: string }>();
+  const { path = "", workspace, t0 } = useLocalSearchParams<PageParams>();
   if (workspace !== undefined && data?.workspaceId !== workspace) return <ElsewherePage />;
-  return <PageScreen key={`${data?.instance ?? 0}:${path}`} path={path} />;
+  return (
+    <PageScreen key={`${data?.instance ?? 0}:${path}`} path={path} tap={Number(t0) || undefined} />
+  );
 }
 
 /** A page whose workspace is no longer the one open, as when another device hid it. */
@@ -78,7 +82,7 @@ const openProblem = (reason: string): ServerProblemKind | null =>
       ? reason
       : null;
 
-function PageScreen({ path }: { path: string }) {
+function PageScreen({ path, tap }: { path: string; tap?: number }) {
   const theme = useTheme();
   const name = path.split("/").pop() ?? path;
   const view = useMemo(() => views.page(path), [path]);
@@ -109,7 +113,7 @@ function PageScreen({ path }: { path: string }) {
     createPageHost({ inject: (script) => web.current?.injectJavaScript(script) }),
   );
   const { mount, painted, live, stopped } = useSyncExternalStore(host.subscribe, host.state);
-  const [timing] = useState(() => pageTimings?.open(name));
+  const [timing] = useState(() => pageTimings?.open(name, signIn, tap));
   // The mount whose script has started, and the text given to it.
   const [started, setStarted] = useState<number | null>(null);
   const given = useRef<{ mount: number; markdown: string } | null>(null);
@@ -205,10 +209,10 @@ function PageScreen({ path }: { path: string }) {
     given.current = { mount, markdown };
     web.current?.injectJavaScript(
       sent === null
-        ? `window.__dohcPage = ${JSON.stringify({ ...page, live: editsLive, textScale: PixelRatio.getFontScale() })}; true;`
+        ? `window.__dohcPage = ${JSON.stringify({ ...page, live: phoneWrites, textScale: PixelRatio.getFontScale() })}; true;`
         : `window.__dohcReplaceRead?.(${JSON.stringify(markdown)}); true;`,
     );
-  }, [started, mount, markdown, painted, live, editsLive, path, host]);
+  }, [started, mount, markdown, painted, live, path, host]);
 
   // Copy as Markdown copies the live document once the page shows it, edits included; otherwise the text as it was read.
   const copying = useRef<((text: string) => void) | null>(null);

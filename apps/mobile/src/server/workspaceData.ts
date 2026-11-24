@@ -420,7 +420,7 @@ interface Entry {
   state: ViewState<unknown>;
   readonly listeners: Set<() => void>;
   stale: boolean;
-  /** Its value was read only by `prefetch`, so a later read never keeps it as a gone page's last text. */
+  /** Its value was read only by `prefetch`: no screen has shown it, and a change drops it. */
   prefetched?: boolean;
   readonly reads: ReturnType<typeof requestGenerations>;
 }
@@ -457,6 +457,7 @@ export function createWorkspaceData(options: {
   }
   function seed(found: readonly Cached[]) {
     for (const cached of found) {
+      if (cached.stale && cached.prefetched) continue;
       const target = entries.get(cached.view.id);
       if (target) {
         target.state = { ...target.state, value: cached.value };
@@ -552,9 +553,10 @@ export function createWorkspaceData(options: {
       (answer) => {
         if (!live() || !target.reads.isLatest(request)) return;
         target.stale = false;
-        const previous = target.prefetched ? null : target.state.value;
         target.prefetched = prefetch;
-        const value = target.view.carry ? target.view.carry(previous, answer.value) : answer.value;
+        const value = target.view.carry
+          ? target.view.carry(target.state.value, answer.value)
+          : answer.value;
         const saved = { view: target.view, value, cursor: answer.cursor, stale: false };
         cache.set(scope, { ...saved, prefetched: prefetch || undefined });
         set(target, { value, loading: false, problem: null, failures: target.state.failures });
@@ -578,19 +580,22 @@ export function createWorkspaceData(options: {
   }
 
   const queued: View<unknown>[] = [];
-  let prefetching = 0;
+  const prefetching = new Set<string>();
   function drain() {
-    while (running && live() && !restoring && prefetching < PREFETCH_AT_ONCE) {
+    while (running && live() && !restoring && prefetching.size < PREFETCH_AT_ONCE) {
       const view = queued.shift();
       const count = prefetches.get(scope) ?? 0;
       if (!view || count >= PREFETCH_MAX) return;
       const found = entries.get(view.id);
-      if (found && (found.listeners.size > 0 || found.state.value !== null || found.state.loading))
+      if (
+        prefetching.has(view.id) ||
+        (found && (found.listeners.size > 0 || found.state.value !== null || found.state.loading))
+      )
         continue;
       prefetches.set(scope, count + 1);
-      prefetching += 1;
+      prefetching.add(view.id);
       void read(found ?? entry(view), true).finally(() => {
-        prefetching -= 1;
+        prefetching.delete(view.id);
         drain();
       });
     }
@@ -701,6 +706,7 @@ export function createWorkspaceData(options: {
       }
       forget(target);
       target.stale = true;
+      if (target.prefetched) target.state = { ...target.state, value: null };
       const cached = cache.get(scope, target.view.id);
       if (cached) cache.set(scope, { ...cached, stale: true });
     }
@@ -713,6 +719,12 @@ export function createWorkspaceData(options: {
     subscribe(view, listener) {
       const target = entry(view);
       target.listeners.add(listener);
+      // A screen shows a prefetched value from now on, so it stays as a gone page's last text.
+      if (target.prefetched && target.state.value !== null) {
+        target.prefetched = false;
+        const cached = cache.get(scope, view.id);
+        if (cached) cache.set(scope, { ...cached, prefetched: undefined });
+      }
       if (target.listeners.size === 1 && due(target)) void read(target);
       return () => void target.listeners.delete(listener);
     },

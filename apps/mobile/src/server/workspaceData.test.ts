@@ -990,37 +990,60 @@ describe("prefetching pages", () => {
     );
   });
 
-  it("drops a prefetched page's text when the open's reread finds it gone", async () => {
+  it("keeps a prefetched page's text as its last once a screen opens it, in memory and in the cache", async () => {
     const gone = ops({ ok: false, reason: "dohc: No document.", refusal: "missing" }, "0.1.1");
-    const server = serve("ws-prefetch-gone", page("Hidden text"), gone);
+    const server = serve("ws-prefetch-opened", page("Seen text"), gone);
     const cache = createReadCache();
-    const { data } = open(server, "ws-prefetch-gone", cache);
+    const { data } = open(server, "ws-prefetch-opened", cache);
     data.prefetchPages(["a.md"]);
     await vi.waitFor(() => expect(data.state(views.page("a.md")).value).not.toBeNull());
+    const scope = cacheScope(signInTo(server), "ws-prefetch-opened");
+    expect(cache.get(scope, "page:a.md")?.prefetched).toBe(true);
     data.subscribe(views.page("a.md"), () => {});
-    data.retry(views.page("a.md"));
-    await vi.waitFor(() =>
-      expect(data.state(views.page("a.md")).value).toEqual({ kind: "missing" }),
-    );
-
-    const saved = cache.entries(cacheScope(signInTo(server), "ws-prefetch-gone"));
-    expect(JSON.stringify(saved)).not.toContain("Hidden text");
-  });
-
-  it("keeps a page's last text once a screen's own read has shown it", async () => {
-    const gone = ops({ ok: false, reason: "dohc: No document.", refusal: "missing" }, "0.1.1");
-    const server = serve("ws-prefetch-opened", page("Seen text"), page("Seen text"), gone);
-    const { data } = open(server, "ws-prefetch-opened");
-    data.prefetchPages(["a.md"]);
-    await vi.waitFor(() => expect(data.state(views.page("a.md")).value).not.toBeNull());
-    data.subscribe(views.page("a.md"), () => {});
-    data.retry(views.page("a.md"));
-    await vi.waitFor(() => expect(reads(server)).toBe(2));
-    await settled();
+    expect(cache.get(scope, "page:a.md")?.prefetched).toBeUndefined();
     data.retry(views.page("a.md"));
     await vi.waitFor(() =>
       expect(data.state(views.page("a.md")).value).toEqual({ kind: "missing", last: "Seen text" }),
     );
+  });
+
+  it("drops a prefetched page's text when a change touches it before a screen opens it", async () => {
+    const reread = deferred<Answer>();
+    const server = serve("ws-prefetch-changed", page("Old text"), () => reread.promise);
+    const change = deferred<Answer>();
+    server.on("GET", feedPath("ws-prefetch-changed", "0.1.1"), () => change.promise);
+    server.on("GET", feedPath("ws-prefetch-changed", "0.2.1"), held);
+    const { data } = open(server, "ws-prefetch-changed");
+    data.prefetchPages(["a.md"]);
+    await vi.waitFor(() => expect(data.state(views.page("a.md")).value).not.toBeNull());
+    change.resolve(feed({ cursor: "0.2.1", changed: { files: ["object-a"] } }));
+    await vi.waitFor(() => expect(data.state(views.page("a.md")).value).toBeNull());
+
+    data.subscribe(views.page("a.md"), () => {});
+    expect(data.state(views.page("a.md"))).toMatchObject({ value: null, loading: true });
+    reread.resolve(page("New text"));
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "New text" }),
+    );
+  });
+
+  it("reads a page once when Home lists it again while it's queued or reading", async () => {
+    const waiting: ReturnType<typeof deferred<Answer>>[] = [];
+    const server = serve("ws-prefetch-twice", () => {
+      const answer = deferred<Answer>();
+      waiting.push(answer);
+      return answer.promise;
+    });
+    const { data } = open(server, "ws-prefetch-twice");
+    data.prefetchPages(["a.md"]);
+    await settled();
+    data.prefetchPages(["a.md", "b.md", "c.md"]);
+    while (waiting.length > 0) {
+      waiting.shift()!.resolve(page("Read ahead"));
+      await settled();
+    }
+    const paths = server.calls.map((call) => (call.body as { path?: string } | undefined)?.path);
+    expect(paths.filter(Boolean)).toEqual(["a.md", "b.md", "c.md"]);
   });
 
   it("reads nothing while the store is in the background or after it stops", async () => {

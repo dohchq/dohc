@@ -399,31 +399,38 @@ describe("a relaunch", () => {
     expect(server.calls.filter((call) => call.method === "POST")).toHaveLength(reads);
   });
 
-  it("drops a page only prefetched before the relaunch when the open's reread finds it gone", async () => {
+  it("shows no text after a relaunch for a page only prefetched that a change touched", async () => {
     const server = serverWithA();
+    const reread = deferred<Answer>();
     server.on(
       "POST",
       "/sync/ws-a/ops/documentRead",
-      ops({ ok: true, path: "a.md", markdown: "# A" }, "0.6.2"),
-      ops({ ok: false, reason: "dohc: No document at a.md.", refusal: "missing" }, "0.6.2"),
+      ops({ ok: true, path: "a.md", markdown: "# Old" }, "0.6.2"),
+      () => reread.promise,
     );
-    server.on("GET", feedPath("ws-a", "0.6.2"), held);
+    const change = deferred<Answer>();
+    server.on("GET", feedPath("ws-a", "0.6.2"), () => change.promise);
+    server.on("GET", feedPath("ws-a", "0.7.1"), held);
     const disk = keptDisk();
     const first = launch(disk);
     const before = open(server, first.cache);
     before.prefetchPages(["a.md"]);
     await vi.waitFor(() => expect(before.state(views.page("a.md")).value).not.toBeNull());
+    change.resolve({
+      status: 200,
+      body: { ok: true, cursor: "0.7.1", changed: { files: ["object-a"] } },
+    });
+    await vi.waitFor(() => expect(before.state(views.page("a.md")).value).toBeNull());
     await first.files.flush();
     before.stop();
 
     const data = open(server, launch(disk).cache);
     data.subscribe(views.page("a.md"), () => {});
+    await vi.waitFor(() => expect(count(server, "/sync/ws-a/ops/documentRead")).toBe(2));
+    expect(data.state(views.page("a.md")).value).toBeNull();
+    reread.resolve(ops({ ok: true, path: "a.md", markdown: "# New" }, "0.7.1"));
     await vi.waitFor(() =>
-      expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "# A" }),
-    );
-    data.retry(views.page("a.md"));
-    await vi.waitFor(() =>
-      expect(data.state(views.page("a.md")).value).toEqual({ kind: "missing" }),
+      expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "# New" }),
     );
   });
 
