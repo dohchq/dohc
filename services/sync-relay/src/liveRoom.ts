@@ -11,7 +11,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import * as Y from "yjs";
-import { liveEditFitsCopy } from "@dohc/ydoc-projection/live-journal-validation";
+import { liveEditRefusal } from "@dohc/ydoc-projection/live-journal-validation";
 import type { LiveFrameLease } from "@dohc/live-session-contract/live-frame";
 import { LIVE_MARKDOWN_MAX_BYTES } from "@dohc/live-session-contract/limits";
 import {
@@ -617,7 +617,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
    * Applies an edit to the room's copy of the note and says whether it fits there. The copy is
    * built again whenever it may differ from the note, as after an edit the room did not take.
    */
-  function fitsCopy(room: Room, bytes: Uint8Array) {
+  function refusalOf(room: Room, bytes: Uint8Array) {
     if (
       room.copy &&
       Buffer.compare(Y.encodeStateVector(room.copy), Y.encodeStateVector(room.doc)) !== 0
@@ -627,9 +627,9 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
       room.copy = new Y.Doc({ gc: false });
       Y.applyUpdate(room.copy, Y.encodeStateAsUpdate(room.doc));
     }
-    if (liveEditFitsCopy(room.copy, bytes)) return true;
-    dropCopy(room);
-    return false;
+    const refusal = liveEditRefusal(room.copy, bytes);
+    if (refusal) dropCopy(room);
+    return refusal?.reason;
   }
   function dropCopy(room: Room) {
     room.copy?.destroy();
@@ -1025,7 +1025,8 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
           const seed = liveJournalSeedClientId(storage, held.document);
           if (plan.clients.some((clientId) => clientId === seed))
             return refused("provenance-refused");
-          if (!fitsCopy(held, taken)) return refused("invalid-update");
+          const refusal = refusalOf(held, taken);
+          if (refusal) return refused(refusal);
           let written: ReturnType<typeof appendLiveRoomEdit>;
           try {
             written = appendLiveRoomEdit(storage, {
