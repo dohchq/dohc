@@ -66,6 +66,9 @@ import {
 } from "./workspaceMembers";
 import { initializeAccountNames } from "./accountNames";
 import { initializeDirectMessageSchema } from "./directMessages";
+import { initializeWorkspaceSecretSchema } from "./workspaceSecrets";
+import { initializeOutboundWebhookSchema } from "./outboundWebhooks";
+import { initializeIncomingWebhookSchema } from "./incomingWebhooks";
 import type { SqliteDb } from "./types";
 
 const NORMALIZED_SHARE_SCHEMA_SQL = `
@@ -1694,6 +1697,9 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   initializeAccountNames(db);
   initializeWorkspaceLevelChanges(db);
   initializeDirectMessageSchema(db);
+  initializeWorkspaceSecretSchema(db);
+  initializeOutboundWebhookSchema(db);
+  initializeIncomingWebhookSchema(db);
   db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
         ON sync_relay_link_handoff_codes(result_grant_id)

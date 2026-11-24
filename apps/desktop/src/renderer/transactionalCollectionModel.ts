@@ -68,11 +68,15 @@ function key(value: AppBackendJson | undefined): string | number {
     return value;
   throw new Error("The Collection returned an invalid record ID.");
 }
-export function parsePage(value: unknown, allowedFields: readonly string[]): TransactionalPage {
+export function parsePage(
+  value: unknown,
+  allowedFields: readonly string[],
+  maxRows = 50,
+): TransactionalPage {
   const result = object(parseAppBackendJson(value));
   if (
     !Array.isArray(result.rows) ||
-    result.rows.length > 50 ||
+    result.rows.length > maxRows ||
     !Object.hasOwn(result, "nextCursor")
   )
     throw new Error("The Collection returned an invalid page.");

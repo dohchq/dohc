@@ -12,9 +12,7 @@ import { LIVE_ROOM_SAVES } from "./liveRoomEdits";
 // document held for an unadmitted edit fences live admission. It names the
 // activation as the engine retires it. Once recorded it stays, and admission
 // stays fenced, until the activation retires: Resume, a new share or a
-// restored grant leaves it in place. A restore that fences the document
-// carries it to the fenced generation, and its admission to the restore's
-// accepted cursor. An authority-reducing change must
+// restored grant leaves it in place. An authority-reducing change must
 // always commit, so it charges no quota; its three integers are fixed-size
 // row columns.
 export interface ServiceActivationRetirement {
@@ -107,12 +105,6 @@ export function readServiceActivationRetirementDecision(
   return value ? retirement(value) : null;
 }
 
-/** The activation a restore continues: the adoption of the owner origin it saved. */
-export const restoredActivation = (basisJson: string): unknown => {
-  const origin: unknown = JSON.parse(basisJson)?.ownerOrigin;
-  return typeof origin === "string" ? JSON.parse(origin)?.adoptionId : undefined;
-};
-
 /** Whether the document's activation has an open retirement obligation. */
 export function serviceActivationRetirementOpen(
   storage: StorageContext,
@@ -137,7 +129,7 @@ export function retirementJournalEvidence(
   deliveryIds: readonly string[],
 ) {
   const read = storage.db
-    .prepare(`SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch FROM ${LIVE_JOURNAL_TABLE}
+    .prepare(`SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch,restore_operation_id FROM ${LIVE_JOURNAL_TABLE}
     WHERE delivery_id=? AND relay_database_namespace=? AND workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=? AND journal_cursor<=?`);
   const receipts: LiveUpdateReceipt[] = [],
     absent: string[] = [];
@@ -151,6 +143,7 @@ export function retirementJournalEvidence(
       retirement.acceptedThrough,
     );
     if (!row) absent.push(deliveryId);
+    else if (row.restore_operation_id !== null) throw new Error("live update journal is damaged");
     else
       receipts.push(
         parseLiveUpdateReceipt({
@@ -250,59 +243,6 @@ export function openServiceActivationRetirement(
   return retirement(recorded);
 }
 
-type LineageDocument = { workspaceId: string; objectId: string; lineageClaimId: string };
-
-/**
- * Inside the transaction that moves the lineage's restore generation from
- * `from` to `to`, a restore fence or a native cancellation proving that fence
- * absent, moves its open obligation with it. Only the generation changes: an
- * open obligation fences admission, so its accepted-through is still
- * `acceptedThrough`, the journal cursor the fence closed at.
- */
-export function moveServiceActivationRetirement(
-  storage: StorageContext,
-  document: LineageDocument,
-  from: number,
-  to: number,
-  acceptedThrough: number,
-): void {
-  const where = `workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=? AND retire_restore_generation=? AND ${OPEN_RETIREMENT}`;
-  const params = [document.workspaceId, document.objectId, document.lineageClaimId, integer(from)];
-  const open = storage.db
-    .prepare(`SELECT retire_accepted_cursor FROM ${SERVICE_ACTIVATIONS} WHERE ${where}`)
-    .all(...params);
-  if (open.some((row) => row.retire_accepted_cursor !== integer(acceptedThrough)))
-    throw new Error("Service activation retirement is damaged.");
-  storage.db
-    .prepare(`UPDATE ${SERVICE_ACTIVATIONS} SET retire_restore_generation=? WHERE ${where}`)
-    .run(integer(to), ...params);
-}
-
-/**
- * Inside the transaction that admits a restore at `generation`, names the
- * restore's own accepted journal cursor as the open obligation's
- * accepted-through. An admitted restore always finishes, and its output up to
- * that cursor is then publishable under the retirement before it resumes. The
- * obligation keeps its activation, generation and request time.
- */
-export function carryServiceActivationRetirement(
-  storage: StorageContext,
-  document: LineageDocument,
-  generation: number,
-  acceptedThrough: number,
-): void {
-  storage.db
-    .prepare(`UPDATE ${SERVICE_ACTIVATIONS} SET retire_accepted_cursor=?
-    WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=? AND retire_restore_generation=? AND ${OPEN_RETIREMENT}`)
-    .run(
-      integer(acceptedThrough),
-      document.workspaceId,
-      document.objectId,
-      document.lineageClaimId,
-      integer(generation),
-    );
-}
-
 // A retired activation that no other activation continues. Its accepted cursor no longer moves.
 const RETIRED_TAIL = `a.retired_at_ms IS NOT NULL AND NOT EXISTS(SELECT 1 FROM ${SERVICE_ACTIVATIONS} s
   WHERE s.relay_database_namespace=a.relay_database_namespace AND s.predecessor_activation_id=a.activation_id)`;
@@ -373,7 +313,7 @@ export function readRetiredJournalPage(
       full = false;
     // Rows are read as the page takes them, so it holds no more than its budget and one row.
     for (const row of storage.db
-      .prepare(`SELECT j.journal_cursor,j.update_bytes,s.rows_through
+      .prepare(`SELECT j.journal_cursor,j.update_bytes,j.restore_operation_id,s.rows_through
       FROM ${LIVE_JOURNAL_TABLE} j LEFT JOIN ${LIVE_ROOM_SAVES} s USING(journal_cursor)
       WHERE j.workspace_id=? AND j.main_version_id='main' AND j.object_id=? AND j.lineage_claim_id=?
         AND j.journal_cursor>? AND j.journal_cursor<=? ORDER BY j.journal_cursor LIMIT ?`)
@@ -391,6 +331,7 @@ export function readRetiredJournalPage(
         full = true;
         break;
       }
+      if (row.restore_operation_id !== null) throw new Error("live update journal is damaged");
       bytes += cost;
       rows.push({
         journalCursor: integer(row.journal_cursor),

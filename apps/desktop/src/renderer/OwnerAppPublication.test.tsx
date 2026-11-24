@@ -23,7 +23,7 @@ import type {
   OwnerAppPublicationResult,
 } from "../ipc/ownerAppPublicationContract";
 import { deferred } from "../testing/deferred";
-import { OwnerAppPublication as Control } from "./OwnerAppPublication";
+import { OwnerAppPublication as Control, appLinkUrl } from "./OwnerAppPublication";
 import { WorkspaceSessionProvider } from "./workspace/workspaceSession";
 
 function Session({ children }: { children: ReactNode }) {
@@ -1869,4 +1869,114 @@ it("shows the failed review state instead of falling back when loading staged pr
     vi.unstubAllGlobals();
     api.publishOwnerApp.mockImplementation(answer);
   }
+});
+
+describe("appLinkUrl and Copy app link", () => {
+  const pubId = "c".repeat(64);
+  const otherPubId = "d".repeat(64);
+
+  it("appends ?app=<publicationId> before fragments and preserves existing query parameters", () => {
+    expect(appLinkUrl("https://share.example/s/secret#section", pubId)).toBe(
+      `https://share.example/s/secret?app=${pubId}#section`,
+    );
+    expect(appLinkUrl("https://share.example/s/secret?foo=bar#frag", pubId)).toBe(
+      `https://share.example/s/secret?foo=bar&app=${pubId}#frag`,
+    );
+    expect(appLinkUrl("javascript:alert(1)", pubId)).toBeNull();
+    expect(appLinkUrl("https://share.example/s/secret", "not-a-hash")).toBeNull();
+    expect(appLinkUrl(null, pubId)).toBeNull();
+  });
+
+  it("offers Copy app link only for verified active publications whose link URL is known", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    api.listRelayShareLinks.mockResolvedValue({
+      supportedLinkAccess: ["view", "comment"],
+      independentGrants: [],
+      links: [
+        {
+          url: "https://share.example/s/secret#frag",
+          shareId: "share-1",
+          grantId: "grant-11111111",
+          generation: 1,
+          status: "active",
+          createdAtMs: 1,
+          revokedAtMs: null,
+          lastUsedAtMs: null,
+          urlIssuedAtMs: 1,
+          dependents: [],
+          selector: { paths: ["trip"], versionId: null },
+          access: "view",
+        },
+        {
+          url: null,
+          shareId: "share-2",
+          grantId: "grant-22222222",
+          generation: 1,
+          status: "active",
+          createdAtMs: 1,
+          revokedAtMs: null,
+          lastUsedAtMs: null,
+          urlIssuedAtMs: null,
+          dependents: [],
+          selector: { paths: ["trip"], versionId: null },
+          access: "view",
+        },
+      ],
+    });
+    api.publishOwnerApp.mockImplementation(async (request) => {
+      if (request.action === "list")
+        return {
+          kind: "listed",
+          publications: [
+            {
+              publicationId: pubId,
+              authorityRevision: 1,
+              shareId: "share-1",
+              grantId: "grant-11111111",
+              active: true,
+              linkCurrent: true,
+              manifestUnavailable: false,
+              appRoot: "trip",
+              sourceRevision: "b".repeat(64),
+              collectionCapability: null,
+              datasetCapability: null,
+            },
+            {
+              publicationId: otherPubId,
+              authorityRevision: 1,
+              shareId: "share-1",
+              grantId: "grant-11111111",
+              active: true,
+              linkCurrent: true,
+              manifestUnavailable: true,
+              collectionCapability: null,
+              datasetCapability: null,
+            },
+          ],
+          nextCursor: null,
+        };
+      if (request.action === "listLocal") return { kind: "localListed", publications: [] };
+      if (request.action === "listStaged") return { kind: "stagedListed", stages: [] };
+      return answer(request);
+    });
+    vi.stubGlobal("dohcDesktop", api);
+    try {
+      render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+      await user.click(screen.getByRole("button", { name: "Review app" }));
+      const copyButtons = await screen.findAllByRole("button", { name: "Copy app link" });
+      expect(copyButtons).toHaveLength(1);
+      await user.click(copyButtons[0]!);
+      expect(writeText).toHaveBeenCalledWith(`https://share.example/s/secret?app=${pubId}#frag`);
+    } finally {
+      cleanup();
+      vi.unstubAllGlobals();
+      api.publishOwnerApp.mockImplementation(answer);
+      api.listRelayShareLinks.mockReset();
+    }
+  });
 });

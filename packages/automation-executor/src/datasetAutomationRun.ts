@@ -525,7 +525,8 @@ export function datasetStepEffects(
   function datasetEffect(
     effect: PlannedEffect,
   ): StoredStep["effects"][number] | { problem: string } {
-    if (effect.kind === "message" || effect.kind === "wake") return effect;
+    if (effect.kind === "message" || effect.kind === "wake" || effect.kind === "http")
+      return effect;
     if (effect.kind === "notice") return datasetNotice(effect, collectionPath);
     if (effect.kind === "invoke") {
       const { operation, table } = steps.steps.get(ordinal)!;

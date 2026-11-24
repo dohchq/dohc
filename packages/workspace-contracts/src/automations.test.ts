@@ -1072,6 +1072,48 @@ const AUTOMATION_CASES: AutomationCase[] = [
     item: withStep("post: Hi\ngroup: Team", "{schedule: day, timezone: Mars/Olympus}"),
     expected: [{ code: "invalid-timezone", path: at("/when/timezone") }],
   },
+  {
+    name: "a non-https webhook URL",
+    item: withStep("http: http://hooks.example.com/events"),
+    expected: [{ code: "invalid-http-url", path: at("/do/0/http") }],
+  },
+  {
+    name: "a non-POST webhook method",
+    item: withStep("http: https://hooks.example.com/events\nmethod: GET"),
+    expected: [{ code: "invalid-http-method", path: at("/do/0/method") }],
+  },
+  {
+    name: "an invalid webhook secret name",
+    item: withStep("http:\n  secret: bad-name"),
+    expected: [{ code: "invalid-secret-name", path: at("/do/0/http/secret") }],
+  },
+  {
+    name: "an invalid webhook header name",
+    item: withStep("http: https://hooks.example.com/events\nheaders:\n  'Bad Header': ok"),
+    expected: [{ code: "invalid-http-header-name", path: at("/do/0/headers/Bad Header") }],
+  },
+  {
+    name: "a forbidden webhook header",
+    item: withStep("http: https://hooks.example.com/events\nheaders:\n  Host: evil.example.com"),
+    expected: [{ code: "forbidden-http-header", path: at("/do/0/headers/Host") }],
+  },
+  {
+    name: "more than 16 webhook headers",
+    item: withStep(
+      `http: https://hooks.example.com/events\nheaders:\n${Array.from({ length: 17 }, (_, index) => `  X-H-${index}: v`).join("\n")}`,
+    ),
+    expected: [{ code: "too-many-http-headers", path: at("/do/0") }],
+  },
+  {
+    name: "more than 3 webhook steps",
+    item: stepsItem([
+      "{http: 'https://hooks.example.com/1'}",
+      "{http: 'https://hooks.example.com/2'}",
+      "{http: 'https://hooks.example.com/3'}",
+      "{http: 'https://hooks.example.com/4'}",
+    ]),
+    expected: [{ code: "too-many-http-steps", path: at("/do/3") }],
+  },
 ];
 
 function stepsItem(steps: string[]): string {

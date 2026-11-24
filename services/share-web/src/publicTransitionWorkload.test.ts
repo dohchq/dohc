@@ -6,8 +6,6 @@ import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
 import {
-  deriveRestoreContinuation,
-  parseRestoreContinuationRecipe,
   readPublicTransitionWorkload,
   transitionNames,
   validateInterruptedPublicUpdate,
@@ -22,7 +20,6 @@ type Case = {
   updates: Update[];
   interrupted?: { deliveryId: string; bytes: WorkloadPin };
   resumed?: Update;
-  continuation?: { deliveryId: string; recipe: WorkloadPin; expected: Projection };
 };
 function withFixture(run: (fixture: ReturnType<typeof prepare>) => void) {
   const prefix = join(tmpdir(), "dohc-transition-loader-"),
@@ -59,8 +56,7 @@ function prepare(root: string) {
   const cases: Record<string, Case> = {};
   for (const name of [...transitionNames, "view"]) {
     const doc = markdownToYDoc("Hello"),
-      interrupted = new Y.Doc({ gc: false }),
-      restored = new Y.Doc({ gc: false });
+      interrupted = new Y.Doc({ gc: false });
     try {
       const checkpoint = Y.encodeStateAsUpdate(doc);
       const baseline = {
@@ -79,29 +75,10 @@ function prepare(root: string) {
       }
       if (name === "restart" || name === "staleFrame")
         selected.resumed = append(doc, `${name}-resumed`, " resumed");
-      if (name === "restore") {
-        Y.applyUpdate(restored, checkpoint);
-        const paragraph = new Y.XmlElement("paragraph"),
-          text = new Y.XmlText();
-        text.insert(0, "recovered");
-        paragraph.insert(0, [text]);
-        restored.getXmlFragment("body").push([paragraph]);
-        selected.continuation = {
-          deliveryId: "restore-resumed",
-          recipe: pin(
-            "restore-recipe.json",
-            Buffer.from(
-              JSON.stringify({ version: 1, kind: "append-paragraph", text: "recovered" }),
-            ),
-          ),
-          expected: projection("restore-resumed", yDocToMarkdown(restored)),
-        };
-      }
       cases[name] = selected;
     } finally {
       doc.destroy();
       interrupted.destroy();
-      restored.destroy();
     }
   }
   const manifest = { version: 1, concurrency: 2, cases };
@@ -114,20 +91,14 @@ function prepare(root: string) {
   return { root, manifest, pin, projection, seal };
 }
 
-it("loads pinned restart bytes and a distinct pinned restore continuation recipe", () =>
+it("loads pinned restart bytes", () =>
   withFixture(({ seal }) => {
     const loaded = readPublicTransitionWorkload(seal(), 2);
     expect(Object.keys(loaded.cases)).toEqual([...transitionNames, "view"]);
     expect(loaded.cases.restart.resumed!.expected.markdown.toString()).toBe(
       "Hello first second resumed\n",
     );
-    expect(loaded.cases.restore.updates.at(-1)!.expected.markdown.toString()).toBe(
-      "Hello first second\n",
-    );
-    expect(loaded.cases.restore.resumed).toBeUndefined();
-    expect(loaded.cases.restore.continuation!.expected.markdown.toString()).toBe(
-      "Hello\n\nrecovered\n",
-    );
+    expect(loaded.cases.accessChange.resumed).toBeUndefined();
   }));
 it("refuses missing required transition coverage", () =>
   withFixture(({ manifest, seal }) => {
@@ -158,140 +129,6 @@ it("refuses an unchanged View witness independently of the editor witness", () =
   withFixture(({ manifest, seal }) => {
     manifest.cases.view!.updates[0]!.expected.viewText = manifest.cases.view!.baseline.viewText;
     expect(() => readPublicTransitionWorkload(seal(), 2)).toThrow("changed expected projection");
-  }));
-it("applies the same visible-witness rule after restore", () =>
-  withFixture(({ manifest, seal }) => {
-    manifest.cases.restore!.continuation!.expected.editorText =
-      manifest.cases.restore!.baseline.editorText;
-    expect(() => readPublicTransitionWorkload(seal(), 2)).toThrow("changed expected projection");
-  }));
-it("refuses baseline-relative preselected bytes as a restore continuation", () =>
-  withFixture(({ manifest, seal }) => {
-    manifest.cases.restore!.resumed = manifest.cases.restart!.resumed;
-    expect(() => readPublicTransitionWorkload(seal(), 2)).toThrow("Incomplete transition: restore");
-  }));
-it("refuses a changed recipe asset", () =>
-  withFixture(({ manifest, root, seal }) => {
-    const admission = seal();
-    writeFileSync(join(root, manifest.cases.restore!.continuation!.recipe.path), "changed");
-    expect(() => readPublicTransitionWorkload(admission, 2)).toThrow("Transition asset changed");
-  }));
-it("refuses an unchanged restore View witness", () =>
-  withFixture(({ manifest, seal }) => {
-    manifest.cases.restore!.continuation!.expected.viewText =
-      manifest.cases.restore!.baseline.viewText;
-    expect(() => readPublicTransitionWorkload(seal(), 2)).toThrow("changed expected projection");
-  }));
-it("refuses a recipe whose projection does not match its pinned expectation", () =>
-  withFixture(({ manifest, pin, seal }) => {
-    manifest.cases.restore!.continuation!.recipe = pin(
-      "wrong-recipe.json",
-      Buffer.from(JSON.stringify({ version: 1, kind: "append-paragraph", text: "different" })),
-    );
-    expect(() => readPublicTransitionWorkload(seal(), 2)).toThrow(
-      "differs from selected expectation",
-    );
-  }));
-it.each([
-  { version: 1, kind: "append-paragraph", text: "" },
-  { version: 1, kind: "replace-body", text: "resurrect" },
-  { version: 1, kind: "append-paragraph", text: "valid", clientId: 1 },
-])("refuses malformed continuation recipe %j", (recipe) => {
-  expect(() => parseRestoreContinuationRecipe(Buffer.from(JSON.stringify(recipe)))).toThrow(
-    "Invalid restore continuation recipe",
-  );
-});
-
-it("continues on fresh copied body IDs without resurrecting the discarded branch", () =>
-  withFixture(({ seal }) => {
-    const selected = readPublicTransitionWorkload(seal(), 2).cases.restore,
-      continuation = selected.continuation!;
-    const point = new Y.Doc({ gc: false }),
-      restored = new Y.Doc({ gc: false });
-    try {
-      Y.applyUpdate(point, selected.baseline.checkpoint);
-      Y.applyUpdate(restored, selected.baseline.checkpoint);
-      for (const update of selected.updates) Y.applyUpdate(restored, update.bytes);
-      const used = Y.decodeStateVector(Y.encodeStateVector(restored));
-      let restoreClient = 1;
-      while (used.has(restoreClient)) restoreClient++;
-      restored.clientID = restoreClient;
-      const body = restored.getXmlFragment("body");
-      const copied = point
-        .getXmlFragment("body")
-        .toArray()
-        .map((node) => {
-          if (!(node instanceof Y.XmlElement || node instanceof Y.XmlText))
-            throw new Error("Restore fixture contains an unsupported XML node.");
-          return node.clone();
-        });
-      body.delete(0, body.length);
-      body.push(copied);
-      const checkpoint = Y.encodeStateAsUpdate(restored),
-        before = Y.decodeStateVector(Y.encodeStateVector(restored));
-      const retired = [
-        ...selected.updates.map((update) => update.bytes),
-        selected.interrupted!.bytes,
-      ];
-      const result = deriveRestoreContinuation(
-        checkpoint,
-        continuation.recipe,
-        selected.baseline.markdown,
-        continuation.expected.markdown,
-        retired,
-      );
-      expect(before.has(result.clientId)).toBe(false);
-      expect(
-        Y.decodeUpdate(result.bytes).structs.every((item) => item.id.client === result.clientId),
-      ).toBe(true);
-      for (const bytes of retired)
-        expect(
-          Y.decodeUpdate(bytes).structs.some((item) => item.id.client === result.clientId),
-        ).toBe(false);
-      const input = {
-        document: {
-          workspaceId: "workspace",
-          mainVersionId: "main",
-          objectId: "object",
-          lineageClaimId: hash(selected.baseline.checkpoint),
-        },
-        currentPath: "docs/a.md",
-        checkpoint,
-        suffix: [],
-        candidate: result.bytes,
-        bounds: {
-          maxSubmissionBytes: result.bytes.length,
-          maxUpdateBytes: result.bytes.length,
-          maxAdmissionBytes: checkpoint.length + result.bytes.length,
-        },
-        validate: createLiveMarkdownJournalValidator(policy),
-      };
-      expect(validateInterruptedPublicUpdate(input).projectedMarkdownSha256).toBe(
-        hash(continuation.expected.markdown),
-      );
-      expect(() =>
-        validateInterruptedPublicUpdate({
-          ...input,
-          bounds: { ...input.bounds, maxSubmissionBytes: result.bytes.length - 1 },
-        }),
-      ).toThrow("exceeds admitted capacity");
-      Y.applyUpdate(restored, result.bytes);
-      expect(yDocToMarkdown(restored)).toBe("Hello\n\nrecovered\n");
-      for (const update of selected.updates) Y.applyUpdate(restored, update.bytes);
-      expect(yDocToMarkdown(restored)).toBe("Hello\n\nrecovered\n");
-      expect(() =>
-        deriveRestoreContinuation(
-          Y.encodeStateAsUpdate(restored),
-          continuation.recipe,
-          selected.baseline.markdown,
-          continuation.expected.markdown,
-          retired,
-        ),
-      ).toThrow("Actual restore projection differs");
-    } finally {
-      point.destroy();
-      restored.destroy();
-    }
   }));
 it("refuses malformed interrupted bytes before a runtime refusal can count", () =>
   withFixture(({ manifest, pin, seal }) => {

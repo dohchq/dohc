@@ -531,9 +531,13 @@ function workflowContext({
 // The Windows package job uses GitHub's Windows runner in every mode.
 const githubRunner = (name) => (name === "windows" ? "windows-2025" : "ubuntu-24.04");
 
-test("ready same-repository PRs and manual runs use GitHub Ubuntu unless Blacksmith is on", () => {
+test("ready same-repository PRs, merge groups, and manual runs use GitHub Ubuntu unless Blacksmith is on", () => {
   const document = load(workflow);
-  assert.deepEqual(Object.keys(document.on).sort(), ["pull_request", "workflow_dispatch"]);
+  assert.deepEqual(Object.keys(document.on).sort(), [
+    "merge_group",
+    "pull_request",
+    "workflow_dispatch",
+  ]);
   assert.deepEqual(document.on.pull_request.types, [
     "opened",
     "synchronize",
@@ -541,6 +545,7 @@ test("ready same-repository PRs and manual runs use GitHub Ubuntu unless Blacksm
     "ready_for_review",
     "converted_to_draft",
   ]);
+  assert.deepEqual(document.on.merge_group.types, ["checks_requested"]);
   for (const job of Object.values(document.jobs).filter((job) => job !== document.jobs.changes))
     assert.ok([job.needs].flat().includes("changes"), "every job depends on selection");
   for (const enabled of ["", "false", "0", "disabled"]) {
@@ -559,6 +564,19 @@ test("ready same-repository PRs and manual runs use GitHub Ubuntu unless Blacksm
       }),
       false,
     );
+    const mergeGroup = {
+      github: {
+        event_name: "merge_group",
+        repository: "dohchq/dohc",
+        event: { merge_group: { base_sha: "base", head_sha: "head" } },
+      },
+      vars: { BLACKSMITH_ENABLED: enabled },
+      inputs: {},
+    };
+    assert.equal(workflowExpression(document.jobs.changes.if, mergeGroup), true);
+    for (const [name, job] of Object.entries(document.jobs)) {
+      assert.deepEqual(workflowExpression(job["runs-on"], mergeGroup), [githubRunner(name)], name);
+    }
     const manual = workflowContext({ enabled, event: "workflow_dispatch", size: "8" });
     assert.equal(workflowExpression(document.jobs.changes.if, manual), true);
     for (const [name, job] of Object.entries(document.jobs)) {
@@ -612,7 +630,7 @@ test("manual Blacksmith selection leaves automatic and default runs unchanged", 
 test("runner selection keeps shared preparation and the Windows package on GitHub in every mode", () => {
   const { jobs } = load(workflow);
   for (const enabled of ["", "false", "true"]) {
-    for (const event of ["pull_request", "workflow_dispatch"])
+    for (const event of ["pull_request", "merge_group", "workflow_dispatch"])
       for (const provider of ["github", "blacksmith", "unknown"]) {
         for (const size of ["4", "8", "32", ""]) {
           const context = workflowContext({ enabled, event, provider, size });
@@ -643,13 +661,18 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
         !draft && !fork,
       );
     }
-  for (const event of ["pull_request", "workflow_dispatch"]) {
+  for (const event of ["pull_request", "merge_group", "workflow_dispatch"]) {
     assert.equal(
       workflowExpression(concurrency["cancel-in-progress"], workflowContext({ event })),
       event === "pull_request",
     );
   }
   assert.match(concurrency.group, /github\.event_name/, "manual runs must not replace PR checks");
+  assert.match(
+    concurrency.group,
+    /github\.event\.merge_group\.head_sha/,
+    "each merge group commit gets its own concurrency group",
+  );
   for (const size of ["4", "8", "32", ""]) {
     const context = workflowContext({ enabled: "true", event: "workflow_dispatch", size });
     for (const name of ["javascript", "rust"]) {
@@ -1147,11 +1170,32 @@ test("cloud selection uses the tested Git checkout and evidence has bounded rete
   const { jobs } = load(workflow);
   const checkout = jobs.changes.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
   const filter = jobs.changes.steps.find((step) => step.id === "filter");
+  assert.equal(
+    checkout.if,
+    "github.event_name == 'pull_request' || github.event_name == 'merge_group'",
+  );
   assert.equal(checkout.with.ref, "${{ github.sha }}");
-  assert.equal(checkout.with["fetch-depth"], 2);
+  assert.equal(
+    workflowExpression(checkout.with["fetch-depth"], workflowContext({ event: "pull_request" })),
+    2,
+  );
+  assert.equal(
+    workflowExpression(checkout.with["fetch-depth"], workflowContext({ event: "merge_group" })),
+    0,
+  );
+  assert.equal(
+    filter.if,
+    "github.event_name == 'pull_request' || github.event_name == 'merge_group'",
+  );
   assert.equal(filter.with.token, "", "do not truncate selection at the PR API file limit");
   const base = jobs.changes.steps.find((step) => step.id === "merge-base");
-  assert.equal(base.if, "github.event_name == 'pull_request'");
+  assert.equal(
+    base.if,
+    "github.event_name == 'pull_request' || github.event_name == 'merge_group'",
+  );
+  assert.equal(base.env.EVENT_NAME, "${{ github.event_name }}");
+  assert.equal(base.env.MERGE_GROUP_BASE_SHA, "${{ github.event.merge_group.base_sha }}");
+  assert.ok(base.run.includes("git merge-base --is-ancestor"));
   assert.ok(base.run.includes("git rev-parse --verify HEAD^2"));
   assert.ok(base.run.includes('echo "sha=$(git rev-parse HEAD^1)" >> "$GITHUB_OUTPUT"'));
   assert.equal(filter.with.base, "${{ steps.merge-base.outputs.sha }}");
@@ -1228,6 +1272,11 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
     "windows",
   ]);
   assert.equal(workflowExpression(job.name, workflowContext()), "PR verification");
+  assert.equal(
+    workflowExpression(job.name, workflowContext({ event: "merge_group" })),
+    "PR verification",
+    "merge queue runs must report the required PR verification check name",
+  );
   assert.equal(
     workflowExpression(job.name, workflowContext({ event: "workflow_dispatch", gate: "js" })),
     "Manual verification",
@@ -1528,6 +1577,18 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
       .status,
     0,
     "PR job metadata identifies the branch head while checkout and proof identify the merge commit",
+  );
+  assert.equal(
+    run(jobs("true", "false", "success", "skipped"), "merge_group", "all", completed, "head")
+      .status,
+    0,
+    "merge_group runs verify selected gates and report against the merge group head",
+  );
+  assert.equal(
+    run(jobs(undefined, "false", "skipped", "skipped"), "merge_group", "all", completed, "head")
+      .status,
+    1,
+    "merge_group rejects missing gate selection just like pull_request",
   );
   for (const gate of ["js", "rust"]) {
     const manual = jobs(

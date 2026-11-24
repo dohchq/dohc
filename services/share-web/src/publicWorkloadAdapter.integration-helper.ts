@@ -11,15 +11,13 @@ import type { OrderedLiveUpdateCutPolicy } from "@dohc/ydoc-projection/live-jour
 import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import { readPublicWorkload, type WorkloadPin } from "./publicLinkWorkload.integration-helper.js";
 import {
-  parseRestoreContinuationRecipe,
   readPublicTransitionWorkload,
   transitionNames,
   validateInterruptedPublicUpdate,
   workloadHash as hash,
-  type RestoreContinuationRecipe,
 } from "./publicTransitionWorkload.integration-helper.js";
 
-type Recipe = RestoreContinuationRecipe;
+type Recipe = { version: 1; kind: "append-paragraph"; text: string };
 type Source = { caseId: string; part: "candidate" | "suffix"; index?: number };
 type Step = { deliveryId: string } & ({ source: Source } | { recipe: Recipe });
 type Transition = {
@@ -27,7 +25,6 @@ type Transition = {
   updates: Step[];
   interrupted?: Step;
   resumed?: Step;
-  continuation?: { deliveryId: string; recipe: Recipe };
 };
 export interface PublicFixtureSelection {
   version: 1;
@@ -79,7 +76,6 @@ type OutputTransition = {
   updates: OutputStep[];
   interrupted?: { deliveryId: string; bytes: WorkloadPin };
   resumed?: OutputStep;
-  continuation?: { deliveryId: string; recipe: WorkloadPin; expected: Projection };
 };
 
 export const adapterImplementationPaths = [
@@ -125,7 +121,15 @@ function clone(bytes: Uint8Array) {
   return doc;
 }
 function append(doc: Y.Doc, recipe: Recipe) {
-  parseRestoreContinuationRecipe(Buffer.from(JSON.stringify(recipe)));
+  requireValue(
+    recipe &&
+      Object.keys(recipe).sort().join() === "kind,text,version" &&
+      recipe.version === 1 &&
+      recipe.kind === "append-paragraph" &&
+      typeof recipe.text === "string" &&
+      recipe.text.length,
+    "Invalid recipe.",
+  );
   const paragraph = new Y.XmlElement("paragraph"),
     text = new Y.XmlText();
   text.insert(0, recipe.text);
@@ -442,8 +446,7 @@ export function preparePublicWorkload(
         "Explicit interrupted coverage required.",
       );
       requireValue(
-        ["restart", "staleFrame"].includes(name) === Boolean(input.resumed) &&
-          (name === "restore") === Boolean(input.continuation),
+        ["restart", "staleFrame"].includes(name) === Boolean(input.resumed),
         "Invalid continuation mapping.",
       );
       const item: OutputTransition = {
@@ -464,26 +467,6 @@ export function preparePublicWorkload(
         item.interrupted = { deliveryId: input.interrupted.deliveryId, bytes: save(update) };
       }
       if (input.resumed) item.resumed = apply(input.resumed);
-      if (input.continuation) {
-        const restored = clone(checkpoint);
-        try {
-          restored.clientID = writer();
-          append(restored, input.continuation.recipe);
-          item.continuation = {
-            deliveryId: input.continuation.deliveryId,
-            recipe: json(input.continuation.recipe),
-            expected: projection(restored),
-          };
-          derivations.push({
-            deliveryId: input.continuation.deliveryId,
-            kind: "recipe-only-awaiting-native-restore",
-            recipe: item.continuation.recipe,
-            submittedCandidate: null,
-          });
-        } finally {
-          restored.destroy();
-        }
-      }
       transitions[name] = item;
     } finally {
       doc.destroy();

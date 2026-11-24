@@ -5,6 +5,7 @@ import { posix } from "node:path";
 import { durableBatch } from "./durableBatch";
 import { isDeepStrictEqual } from "node:util";
 import {
+  hasPersonalStep,
   parseAutomationsFile,
   writeAutomationsFile,
   type Automation,
@@ -13,6 +14,7 @@ import {
   type AutomationScheduleTrigger,
   type AutomationsFileParseResult,
 } from "@dohc/workspace-contracts/automations";
+import { computeHttpStepApprovalDigest } from "@dohc/workspace-contracts/http-step-approvals";
 import {
   COLLECTION_SCHEMA_FILENAME,
   collectionVersionError,
@@ -115,6 +117,7 @@ import {
   RECORD_NOT_FOUND,
   UNREADABLE_RUN_ERROR,
   type AutomationChatDependencies,
+  type AutomationHttpWebhookExecutor,
   type ClaimRuns,
   type CollectionAutomationReads,
   type CollectionAutomationRunDependencies,
@@ -415,7 +418,24 @@ export interface ServerDataset {
   runs: "all" | "no-schedules" | "off" | null;
 }
 
+export interface CollectionHttpApprovalGate {
+  isApproved(digest: string): Promise<"approved" | "unapproved" | "unavailable">;
+  /** Reads the workspace's full approved digest set once per batch check, or null when unavailable. */
+  readApprovedDigests?(): Promise<ReadonlySet<string> | null>;
+  approve?(input: {
+    approvalDigest: string;
+    collectionId: string;
+    collectionPath: string;
+    automationId: string;
+    stepOrdinal: number;
+  }): Promise<void>;
+}
+
 export interface CollectionAutomationsOptions {
+  /** External owner confirmation store for outbound HTTP steps, kept outside the workspace. */
+  httpApprovals?: CollectionHttpApprovalGate;
+  /** Outbound HTTP webhook dispatcher (local OS-keychain path or relay E1 verified path). */
+  httpWebhook?: AutomationHttpWebhookExecutor;
   /**
    * The dataset Collection with this id on the workspace's server, read now,
    * or null when it is not there. `unfinished` says why its automations run
@@ -752,9 +772,9 @@ export interface CollectionAutomationHold {
   /** The name of the Collection the automation belongs to, and the one the step reaches. */
   collection: string;
   collectionPath: string;
-  /** A Collection, a Group, or a direct message. */
+  /** A Collection, a Group, a direct message, or a webhook destination. */
   target: string;
-  action: "change" | "find" | "post" | "notify" | "wake" | "read";
+  action: "change" | "find" | "post" | "notify" | "wake" | "read" | "send-http";
   /** A person a formula named, or a Collection a code step named: the hold is theirs, not the step's. */
   recipient?: string;
   /** The editor whose reach stopped the step. */
@@ -941,7 +961,7 @@ export type CollectionAutomationRetry =
   // from the beginning and can repeat what it already did, so the person
   // must choose that. `repeatsMessages` says the confirmation must also say
   // that messages it sent may be sent again.
-  | { status: "definition-changed"; repeatsMessages: boolean }
+  | { status: "definition-changed"; repeatsMessages: boolean; repeatsWebhooks?: boolean }
   | { status: "switched-off"; target: AutomationControlsTarget }
   | { status: "refused"; reason: string };
 
@@ -1127,16 +1147,6 @@ function errorText(error: unknown): string {
 function startDeadline(abort: () => void): () => void {
   const timer = setTimeout(abort, AUTOMATION_RUN_DEADLINE_MS);
   return () => clearTimeout(timer);
-}
-
-function wakesAgent(automation: Automation): boolean {
-  const walk = (steps: Automation["do"]): boolean =>
-    steps.some(
-      (step) =>
-        step.kind === "wake-agent" ||
-        (step.kind === "if" && (walk(step.do) || walk(step.otherwise))),
-    );
-  return walk(automation.do);
 }
 
 // A relayed press's engine id: the relay's id and the definition hash the
@@ -2360,7 +2370,7 @@ export class CollectionAutomations {
           collectionPath: this.locate(failure.automationId)?.collectionPath ?? null,
           startedBy: context.startedBy,
           replaces: last?.open ? last : null,
-          ownerSwitchesOnly: definition !== null && wakesAgent(definition),
+          ownerSwitchesOnly: definition !== null && hasPersonalStep(definition),
         });
       } catch (error) {
         // Unsaved, so the next pass sends it again.
@@ -3166,28 +3176,122 @@ export class CollectionAutomations {
     return null;
   }
 
+  private isHttpReachStep(input: {
+    automationId: string;
+    definitionHash: string;
+    step: string;
+  }): boolean {
+    const located = this.locate(input.automationId);
+    const automation = this.definitionFor(input.automationId);
+    if (!located || !automation || definitionHash(automation) !== input.definitionHash)
+      return false;
+    return this.reachSteps(located.collectionPath, automation).some(
+      (reach, index) => reachStepId(reach, index) === input.step && reach.kind === "http",
+    );
+  }
+
+  private async computeHttpApprovalInput(input: {
+    automationId: string;
+    definitionHash: string;
+    step: string;
+  }): Promise<{
+    approvalDigest: string;
+    collectionId: string;
+    collectionPath: string;
+    automationId: string;
+    stepOrdinal: number;
+  } | null> {
+    const located = this.locate(input.automationId);
+    const automation = this.definitionFor(input.automationId);
+    if (!located || !automation || definitionHash(automation) !== input.definitionHash) return null;
+    const collectionId = this.collectionIdOf(located.collectionPath);
+    if (collectionId === null) return null;
+    const steps = this.reachSteps(located.collectionPath, automation);
+    const matched = steps.find(
+      (reach, index) => reachStepId(reach, index) === input.step && reach.kind === "http",
+    );
+    if (!matched || matched.kind !== "http") return null;
+    const stepEntry = stepsInOrder(automation).find(
+      ({ ordinal }) => ordinal === matched.stepOrdinal,
+    );
+    if (!stepEntry || stepEntry.step.kind !== "http") return null;
+    const codeFileHashes = await this.codeFileHashesFor(located.collectionPath, automation);
+    if (codeFileHashes === null) return null;
+    return {
+      approvalDigest: computeHttpStepApprovalDigest({
+        collectionId,
+        collectionPath: located.collectionPath,
+        automationId: automation.id,
+        stepOrdinal: matched.stepOrdinal,
+        step: stepEntry.step,
+        definitionDigest: definitionDigest(automation),
+        codeFileHashes,
+      }),
+      collectionId,
+      collectionPath: located.collectionPath,
+      automationId: automation.id,
+      stepOrdinal: matched.stepOrdinal,
+    };
+  }
+
+  async httpApprovalInputFor(input: {
+    automationId: string;
+    definitionHash: string;
+    step: string;
+  }): Promise<{
+    approvalDigest: string;
+    collectionId: string;
+    collectionPath: string;
+    automationId: string;
+    stepOrdinal: number;
+  } | null> {
+    await this.ready();
+    return this.computeHttpApprovalInput(input);
+  }
+
   /**
    * A current editor allows a held step. `seq` names the hold they saw, so
    * a verdict that changed since does not take their answer.
    */
-  async confirmReach(input: {
-    automationId: string;
-    definitionHash: string;
-    step: string;
-    seq: number;
-    recipient?: string;
-  }): Promise<"confirmed" | "changed"> {
+  async confirmReach(
+    input: {
+      automationId: string;
+      definitionHash: string;
+      step: string;
+      seq: number;
+      recipient?: string;
+    },
+    options?: {
+      approveHttpStep?: NonNullable<CollectionHttpApprovalGate["approve"]>;
+    },
+  ): Promise<"confirmed" | "changed"> {
     await this.ready();
-    const confirmed = await this.updateVerdicts(() => {
+    const key = reachVerdictKey(
+      input.automationId,
+      input.definitionHash,
+      input.step,
+      input.recipient,
+    );
+    const confirmed = await this.updateVerdicts(async () => {
       if (this.verdictsUnreadable) return false;
-      const key = reachVerdictKey(
-        input.automationId,
-        input.definitionHash,
-        input.step,
-        input.recipient,
-      );
       const stored = this.verdicts.get(key);
       if (stored?.verdict !== "held" || stored.seq !== input.seq) return false;
+      const isHttpHold =
+        stored.httpApprovalDigest !== undefined ||
+        (input.recipient === undefined && this.isHttpReachStep(input));
+      if (isHttpHold) {
+        const httpApproval = await this.computeHttpApprovalInput(input);
+        if (
+          httpApproval === null ||
+          stored.httpApprovalDigest === undefined ||
+          stored.httpApprovalDigest !== httpApproval.approvalDigest
+        ) {
+          return false;
+        }
+        const approve = options?.approveHttpStep ?? this.options.httpApprovals?.approve;
+        if (!approve) return false;
+        await approve(httpApproval);
+      }
       this.verdicts.set(key, {
         ...stored,
         verdict: "allowed",
@@ -3573,7 +3677,17 @@ export class CollectionAutomations {
             effect.writes.some((write) => write.kind === "message" || write.kind === "notice"),
           ) ??
             false);
-        return { status: "definition-changed", repeatsMessages };
+        const repeatsWebhooks =
+          stepsInOrder(automation).some(({ step }) => step.kind === "http") ||
+          (earlier?.applied.some((effect) =>
+            effect.writes.some((write) => write.kind === "http-sent"),
+          ) ??
+            false);
+        return {
+          status: "definition-changed",
+          repeatsMessages,
+          ...(repeatsWebhooks ? { repeatsWebhooks: true } : {}),
+        };
       }
       this.waitingFor.delete(input.claimId);
       const retried =
@@ -6270,10 +6384,10 @@ export class CollectionAutomations {
    * A step that starts or stops waiting for a current editor raises
    * the hold notices once.
    */
-  private updateVerdicts<T>(update: () => T, save = false): Promise<T> {
+  private updateVerdicts<T>(update: () => T | Promise<T>, save = false): Promise<T> {
     const next = this.verdictChain.then(async () => {
       const before = this.verdictSeq;
-      const result = update();
+      const result = await update();
       this.verdictsDirty ||= save || this.verdictSeq !== before;
       // Nothing overwrites a file dohc could not read until someone resets it.
       if (!this.verdictsUnreadable && this.verdictsDirty) {
@@ -6566,6 +6680,93 @@ export class CollectionAutomations {
    * of these automations is held. A step that starts to wait raises its
    * notice once.
    */
+  private async codeFileHashesFor(
+    collectionPath: string,
+    automation: Automation,
+  ): Promise<Array<{ file: string; sha256: string }> | null> {
+    const uniqueFiles = [
+      ...new Set(
+        stepsInOrder(automation).flatMap(({ step }) =>
+          step.kind === "run-file" ? [step.file] : [],
+        ),
+      ),
+    ].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+    const hashes: Array<{ file: string; sha256: string }> = [];
+    for (const file of uniqueFiles) {
+      const read = await this.options.readText(`${collectionPath}/${file}`);
+      if (read === null || read.truncated) return null;
+      hashes.push({
+        file,
+        sha256: createHash("sha256").update(read.text).digest("hex"),
+      });
+    }
+    return hashes;
+  }
+
+  private async httpApprovalStatesFor(
+    owned: readonly OwnedAutomation[],
+    inventories: ReadonlyMap<string, readonly ReachStep[]>,
+  ): Promise<
+    Map<string, { state: "approved" | "unapproved" | "unavailable"; approvalDigest: string | null }>
+  > {
+    const states = new Map<
+      string,
+      { state: "approved" | "unapproved" | "unavailable"; approvalDigest: string | null }
+    >();
+    const hasAnyHttp = owned.some(({ automationId }) =>
+      inventories.get(automationId)?.some((step) => step.kind === "http"),
+    );
+    if (!hasAnyHttp) return states;
+    let prefetched: ReadonlySet<string> | null | undefined;
+    if (this.options.httpApprovals?.readApprovedDigests) {
+      prefetched = await this.options.httpApprovals.readApprovedDigests();
+    }
+    for (const { automationId, collectionPath, automation } of owned) {
+      const steps = inventories.get(automationId);
+      if (!steps || !steps.some((step) => step.kind === "http")) continue;
+      const collectionId = this.collectionIdOf(collectionPath);
+      const hash = definitionHash(automation);
+      const digest = definitionDigest(automation);
+      const codeFileHashes =
+        collectionId === null ? null : await this.codeFileHashesFor(collectionPath, automation);
+      const ordered = stepsInOrder(automation);
+      for (const [index, reachStep] of steps.entries()) {
+        if (reachStep.kind !== "http") continue;
+        const key = reachVerdictKey(automationId, hash, reachStepId(reachStep, index));
+        if (collectionId === null || codeFileHashes === null) {
+          states.set(key, { state: "unavailable", approvalDigest: null });
+          continue;
+        }
+        const entry = ordered.find(({ ordinal }) => ordinal === reachStep.stepOrdinal);
+        if (!entry || entry.step.kind !== "http") {
+          states.set(key, { state: "unavailable", approvalDigest: null });
+          continue;
+        }
+        const approvalDigest = computeHttpStepApprovalDigest({
+          collectionId,
+          collectionPath,
+          automationId: automation.id,
+          stepOrdinal: reachStep.stepOrdinal,
+          step: entry.step,
+          definitionDigest: digest,
+          codeFileHashes,
+        });
+        const state: "approved" | "unapproved" | "unavailable" =
+          prefetched !== undefined
+            ? prefetched === null
+              ? "unavailable"
+              : prefetched.has(approvalDigest)
+                ? "approved"
+                : "unapproved"
+            : this.options.httpApprovals
+              ? await this.options.httpApprovals.isApproved(approvalDigest)
+              : "unapproved";
+        states.set(key, { state, approvalDigest });
+      }
+    }
+    return states;
+  }
+
   private async recordVerdicts(
     roster: Exclude<ReachRoster, { kind: "unknown" }>,
     automations?: readonly OwnedAutomation[],
@@ -6585,6 +6786,7 @@ export class CollectionAutomations {
           ]);
       }
     }
+    const httpApprovalStates = await this.httpApprovalStatesFor(owned, inventories);
     return await this.updateVerdicts(() => {
       // Without the saved verdicts every step waits.
       if (this.verdictsUnreadable) return owned.length > 0;
@@ -6600,15 +6802,30 @@ export class CollectionAutomations {
           codeFiles: codeFilesOf(automation, collectionPath),
           steps,
         }).forEach((reach, index) => {
-          const step = reachStepId(steps[index]!, index);
+          const reachStep = steps[index]!;
+          const step = reachStepId(reachStep, index);
           const key = reachVerdictKey(automationId, hash, step);
           const previous = this.verdicts.get(key);
-          const next = this.unprovenHold(
+          let next = this.unprovenHold(
             automationId,
             hash,
             previous,
             nextReachVerdict(previous, reach, automation.enabled),
           );
+          if (reachStep.kind === "http") {
+            const info = httpApprovalStates.get(key);
+            if (next.verdict === "allowed" && info?.state === "unavailable") {
+              held = true;
+              return;
+            }
+            next = {
+              ...next,
+              ...(info?.approvalDigest ? { httpApprovalDigest: info.approvalDigest } : {}),
+              ...(next.verdict === "allowed" && info?.state !== "approved"
+                ? { verdict: "held" as const, stoppedFor: null }
+                : {}),
+            };
+          }
           if (next.verdict === "held") held = true;
           if (sameReachVerdict(previous, next)) return;
           this.verdicts.set(key, {
@@ -7179,7 +7396,7 @@ export class CollectionAutomations {
       if (moved !== null) return moved;
       // A step that acts as you needs to know who you are now; waiting could
       // mean waiting for a sign-in, so it fails with the reason instead.
-      if (wakesAgent(automation)) {
+      if (hasPersonalStep(automation)) {
         const collection = collectionNamed(id.collectionPath);
         const steps = this.reachSteps(id.collectionPath, automation);
         const stopped = checkAutomationReach(roster, {
@@ -7670,6 +7887,10 @@ export class CollectionAutomations {
       readMessageBody: this.options.readMessageBody,
       recipientVerdicts: (input) => this.recipientVerdicts(input),
       postNotice: this.options.postNotice,
+      ...(this.options.httpWebhook ? { httpWebhook: this.options.httpWebhook } : {}),
+      ...(this.options.httpApprovals
+        ? { isHttpStepApproved: (digest: string) => this.options.httpApprovals!.isApproved(digest) }
+        : {}),
     };
   }
 
@@ -7819,13 +8040,15 @@ function reachDestination(
         ? { target: reach.person.name, action: "notify" }
         : reach.kind === "personal"
           ? { target: "your agent", action: "wake" }
-          : "collection" in reach
-            ? {
-                target: reach.collection.name,
-                action:
-                  reach.kind === "find-records" || reach.kind === "dataset-field"
-                    ? ("find" as const)
-                    : ("change" as const),
-              }
-            : null;
+          : reach.kind === "http"
+            ? { target: reach.target, action: "send-http" as const }
+            : "collection" in reach
+              ? {
+                  target: reach.collection.name,
+                  action:
+                    reach.kind === "find-records" || reach.kind === "dataset-field"
+                      ? ("find" as const)
+                      : ("change" as const),
+                }
+              : null;
 }

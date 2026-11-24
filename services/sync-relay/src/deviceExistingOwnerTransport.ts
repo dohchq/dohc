@@ -7,8 +7,6 @@ import {
   FrameDecoder,
   FrameType,
   encodeFrame,
-  DEFAULT_MAX_BLOB_BYTES,
-  NATIVE_RESTORE_STATUS,
   type Frame,
 } from "@dohc/workspace-engine-client/daemon";
 import { DeviceCreditWindow } from "@dohc/service-http";
@@ -27,11 +25,6 @@ import {
 } from "@dohc/live-session-contract/live-object-binding";
 import { DeviceEngineConnection } from "./deviceEngineConnection.js";
 import { configRecord } from "./deviceLiveHostConfig.js";
-import {
-  parseNativeRestoreCancellationAnswer,
-  parseNativeRestoreFence,
-  parseNativeRestoreFenceReceipt,
-} from "./liveRestoreFence.js";
 import { parseOwnerLiveSyncConfig } from "./liveSyncConfig.js";
 
 export interface ExistingOwnerSession {
@@ -58,8 +51,6 @@ export interface ExistingOwnerDeviceConfig {
   aggregateBytes: number;
   maxAdoptionBytes: number;
   maxAdoptionEvents: number;
-  /** Explicit private input and output bound. Omission disables restore forwarding. */
-  maxRestoreBytes?: number;
   /** Explicit bridge input/output bounds. Native sync provisioning is separate. */
   sync?: { maxClientVectorBytes: number; maxOutputBytes: number };
   requestDeadlineMs: number;
@@ -112,19 +103,6 @@ function string(value: unknown): string {
     throw new Error("Invalid device owner identifier.");
   return value;
 }
-function restoreOperation(method: string): "prepare" | "apply" | "settle" | "resume" | undefined {
-  switch (method) {
-    case "liveApplication.prepareRestore":
-      return "prepare";
-    case "liveApplication.applyRestore":
-      return "apply";
-    case "liveApplication.settleRestore":
-      return "settle";
-    case "liveApplication.resumeRestore":
-      return "resume";
-  }
-}
-
 /** Curated remote host facade. It never forwards an arbitrary daemon method. */
 export function startExistingOwnerDeviceTransport(options: {
   config: ExistingOwnerDeviceConfig;
@@ -145,17 +123,11 @@ export function startExistingOwnerDeviceTransport(options: {
     integer(value, 1);
   integer(config.requestDeadlineMs, 1, 2_147_483_647);
   integer(config.maxFrameBytes, 1_048_576, 16_777_216);
-  const maxRestoreBytes =
-    config.maxRestoreBytes === undefined
-      ? undefined
-      : integer(config.maxRestoreBytes, 5, DEFAULT_MAX_BLOB_BYTES);
   const noticeCharge = config.maxFrameBytes * 3;
   const operationBudget = config.aggregateBytes - noticeCharge;
   if (operationBudget < config.maxFrameBytes)
     throw new Error("Owner notification cannot fit its transport budget.");
   const sync = parseOwnerLiveSyncConfig(config.sync, operationBudget, config.maxFrameBytes);
-  if (maxRestoreBytes !== undefined && maxRestoreBytes * 5 + config.maxFrameBytes > operationBudget)
-    throw new Error("Invalid owner restore transport budget.");
   if (
     config.maxAdoptionBytes * 3 + config.maxFrameBytes > operationBudget ||
     config.maxQueuedBytes < Math.max(limits.maxPayloadBytes + 16, config.maxFrameBytes + 36)
@@ -378,7 +350,6 @@ export function startExistingOwnerDeviceTransport(options: {
         workspace: operation.workspace,
         deadlineMs: config.requestDeadlineMs,
       };
-      const restoring = restoreOperation(operation.method);
       if (operation.method === "liveApplication.hosts") {
         if (operation.workspace || Object.keys(operation.params).length)
           throw new Error("Invalid owner discovery.");
@@ -388,160 +359,6 @@ export function startExistingOwnerDeviceTransport(options: {
           workspaces: config.workspaces,
           ownerSessions: { maxBytes: config.maxAdoptionBytes, maxEvents: config.maxAdoptionEvents },
         };
-      } else if (restoring) {
-        if (maxRestoreBytes === undefined)
-          throw new Error("Owner restore forwarding is not configured.");
-        const bytes = operation.streams[0]!.bytes;
-        if (bytes.length < 5 || bytes.readUInt32LE(0) !== bytes.length - 4)
-          throw new Error("Invalid owner restore header framing.");
-        const header = configRecord(
-          JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(4))),
-          [
-            "fence",
-            "point",
-            ...(restoring === "prepare"
-              ? []
-              : ["candidateDigest", "nativeSourceManifestDigest", "admitted"]),
-            ...(restoring === "resume" ? ["settlementId"] : []),
-          ],
-        );
-        const fence = parseNativeRestoreFenceReceipt(header.fence).operation;
-        if (
-          workspaces.get(operation.workspace) !== fence.oldBinding.workspaceId ||
-          fence.relayDatabaseNamespace !== start.relayNamespace ||
-          fence.hostId !== start.host.hostId
-        )
-          throw new Error("Restore host identity mismatch.");
-        const outputBound = Math.min(
-          maxRestoreBytes,
-          integer(operation.params.maxOutputBytes, 5, DEFAULT_MAX_BLOB_BYTES),
-        );
-        const output = await config.client.sendLiveRestore(
-          request,
-          restoring,
-          bytes,
-          outputBound,
-          signal,
-        );
-        check();
-        signal.throwIfAborted();
-        if (output.bytes.length > outputBound)
-          throw new Error("Owner restore response exceeds its bound.");
-        const digest = createHash("sha256").update(output.bytes).digest("hex"),
-          streamId = operation.id;
-        await send(
-          {
-            type: "blobStart",
-            requestId: operation.id,
-            streamId,
-            totalBytes: output.bytes.length,
-            sha256: digest,
-          },
-          signal,
-        );
-        const chunkBytes = 256 * 1024;
-        for (let offset = 0; offset < output.bytes.length || offset === 0; offset += chunkBytes) {
-          const end = Math.min(offset + chunkBytes, output.bytes.length);
-          await write(
-            encodeFrame(
-              FrameType.BlobChunk,
-              end === output.bytes.length ? 1 : 0,
-              { streamId, bytes: output.bytes.subarray(offset, end) },
-              chunkBytes,
-            ),
-            signal,
-          );
-        }
-        result = {
-          status: NATIVE_RESTORE_STATUS[restoring],
-          streamId,
-          byteLength: output.bytes.length,
-          digest,
-        };
-      } else if (operation.method === "liveApplication.fenceRestore") {
-        const params = configRecord(operation.params, ["operation"]),
-          fence = parseNativeRestoreFence(params.operation);
-        if (
-          workspaces.get(operation.workspace) !== fence.oldBinding.workspaceId ||
-          fence.relayDatabaseNamespace !== start.relayNamespace ||
-          fence.hostId !== start.host.hostId
-        )
-          throw new Error("Restore host identity mismatch.");
-        const response = await config.client.sendRequest(
-          { ...request, method: operation.method, params: { operation: fence as never } },
-          signal,
-        );
-        const refused = configRecord(response.result, ["status"], ["receipt", "reason"]);
-        // The desktop publishes its own journal; a refused fence changed nothing here.
-        if (refused.status === "pending" && typeof refused.reason === "string") {
-          await send(
-            {
-              type: "response",
-              id: operation.id,
-              result: { status: "pending", reason: refused.reason },
-            },
-            signal,
-          );
-          return;
-        }
-        const value = configRecord(response.result, ["status", "receipt"]);
-        if (value.status !== "fenced") throw new Error("Native restore fence did not commit.");
-        const receipt = parseNativeRestoreFenceReceipt(value.receipt);
-        if (!isDeepStrictEqual(receipt.operation, fence))
-          throw new Error("Native restore fence acknowledgement mismatch.");
-        for (const [id, entry] of registrations)
-          if (
-            entry.binding.workspaceId === fence.oldBinding.workspaceId &&
-            entry.binding.mainVersionId === fence.oldBinding.mainVersionId &&
-            entry.binding.objectId === fence.oldBinding.objectId
-          ) {
-            const handoffActive = entry.handoffTimer !== undefined;
-            clearTimeout(entry.handoffTimer);
-            entry.handoffTimer = undefined;
-            entry.adopting = false;
-            entry.stopChanges?.();
-            entry.stopChanges = undefined;
-            registrations.delete(id);
-            if (handoffActive) await entry.owner.finishHandoff(false).catch(() => undefined);
-          }
-        result = { status: "fenced", receipt };
-      } else if (operation.method === "liveApplication.cancelRestoreFence") {
-        const params = configRecord(operation.params, [
-          "operationId",
-          "objectId",
-          "lineageClaimId",
-          "hostId",
-          "newFence",
-        ]);
-        if (params.hostId !== start.host.hostId) throw new Error("Restore host identity mismatch.");
-        const cancellation = {
-          operationId: string(params.operationId),
-          objectId: string(params.objectId),
-          lineageClaimId: string(params.lineageClaimId),
-          hostId: start.host.hostId,
-          newFence: integer(params.newFence, 1),
-        };
-        const response = await config.client.sendRequest(
-          { ...request, method: operation.method, params: cancellation },
-          signal,
-        );
-        const answer = parseNativeRestoreCancellationAnswer(response.result);
-        const binding = answer.binding,
-          workspaceId = workspaces.get(operation.workspace);
-        if (
-          answer.hostId !== start.host.hostId ||
-          (binding &&
-            (binding.workspaceId !== workspaceId ||
-              binding.objectId !== cancellation.objectId ||
-              binding.lineageClaimId !== cancellation.lineageClaimId)) ||
-          (answer.status === "fenceCancelled" &&
-            (answer.receipt.fence.operation.relayDatabaseNamespace !== start.relayNamespace ||
-              answer.receipt.fence.operation.operationId !== cancellation.operationId ||
-              answer.generation !== cancellation.newFence))
-        ) {
-          throw new Error("Native restore cancellation acknowledgement mismatch.");
-        }
-        result = answer;
       } else if (operation.method === "liveApplication.register") {
         const params = configRecord(operation.params, ["binding"], ["resumeAdoptionId"]),
           binding = parseLiveObjectBinding(params.binding);
@@ -1131,27 +948,22 @@ export function startExistingOwnerDeviceTransport(options: {
     const id = integer(value.id, lastId + 1),
       method = string(value.method),
       workspace = value.workspace == null ? "" : string(value.workspace);
-    const restoring = restoreOperation(method);
     if (
-      (!restoring &&
-        ![
-          "liveApplication.hosts",
-          "liveApplication.register",
-          "liveApplication.fenceRestore",
-          "liveApplication.cancelRestoreFence",
-          "liveApplication.ownerState",
-          "liveApplication.ownerOutbox",
-          "liveApplication.readOwnerOutbox",
-          "liveApplication.acknowledgeOwnerOutbox",
-          "liveApplication.quarantineOwnerOutbox",
-          "liveApplication.adoptOwner",
-          "liveApplication.apply",
-          "liveApplication.settle",
-          "liveApplication.syncOpen",
-          "liveApplication.appliedRead",
-          "liveApplication.ack",
-        ].includes(method)) ||
-      (restoring && maxRestoreBytes === undefined) ||
+      ![
+        "liveApplication.hosts",
+        "liveApplication.register",
+        "liveApplication.ownerState",
+        "liveApplication.ownerOutbox",
+        "liveApplication.readOwnerOutbox",
+        "liveApplication.acknowledgeOwnerOutbox",
+        "liveApplication.quarantineOwnerOutbox",
+        "liveApplication.adoptOwner",
+        "liveApplication.apply",
+        "liveApplication.settle",
+        "liveApplication.syncOpen",
+        "liveApplication.appliedRead",
+        "liveApplication.ack",
+      ].includes(method) ||
       (method !== "liveApplication.hosts" && !workspaces.has(workspace)) ||
       value.idempotencyKey != null
     )
@@ -1169,10 +981,6 @@ export function startExistingOwnerDeviceTransport(options: {
       method === "liveApplication.apply"
         ? integer(params.rangeCount, 0, Math.floor((updateBytes - 2) / 5)) * 16 + metadataBytes
         : 0;
-    if (restoring) {
-      configRecord(params, ["streamId", "byteLength", "digest", "maxOutputBytes"]);
-      integer(params.maxOutputBytes, 5, DEFAULT_MAX_BLOB_BYTES);
-    }
     const syncing = method === "liveApplication.syncOpen",
       appliedRead = method === "liveApplication.appliedRead";
     if ((syncing || appliedRead) && !sync)
@@ -1180,15 +988,13 @@ export function startExistingOwnerDeviceTransport(options: {
     if (syncing) configRecord(params, ["registrationId", "streamId", "byteLength", "digest"]);
     const bytes = syncing
       ? integer(params.byteLength, 1, sync!.maxClientVectorBytes)
-      : restoring
-        ? integer(params.byteLength, 5, maxRestoreBytes!)
-        : method === "liveApplication.adoptOwner"
-          ? integer(params.byteLength, 1, config.maxAdoptionBytes)
-          : updateBytes + rangeBytes;
+      : method === "liveApplication.adoptOwner"
+        ? integer(params.byteLength, 1, config.maxAdoptionBytes)
+        : updateBytes + rangeBytes;
     const charge =
       bytes * 3 +
       metadataBytes * 2 +
-      (syncing || appliedRead ? 3 * sync!.maxOutputBytes : restoring ? 2 * maxRestoreBytes! : 0) +
+      (syncing || appliedRead ? 3 * sync!.maxOutputBytes : 0) +
       config.maxFrameBytes;
     if (
       !Number.isSafeInteger(charge) ||
@@ -1220,10 +1026,6 @@ export function startExistingOwnerDeviceTransport(options: {
     if (syncing)
       operation.streams = [
         attachment(params.streamId, params.byteLength, params.digest, sync!.maxClientVectorBytes),
-      ];
-    else if (restoring)
-      operation.streams = [
-        attachment(params.streamId, params.byteLength, params.digest, maxRestoreBytes!),
       ];
     else if (method === "liveApplication.adoptOwner")
       operation.streams = [

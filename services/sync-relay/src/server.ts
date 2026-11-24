@@ -1,4 +1,4 @@
-import { accountIsFenced } from "./storage/accountDeletion";
+import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
 import { parseRoute } from "./relayRoute";
 import { RELAY_ROUTE_PATTERNS, SYNC_RELAY_REQUEST_LOG } from "./requestLog";
 export { SYNC_RELAY_REQUEST_LOG } from "./requestLog";
@@ -41,7 +41,6 @@ import {
   type LinkCollectionWriteAdmission,
   readOwnerCollectionWrites,
 } from "./collectionWriteRoutes";
-import { createOwnerRestoreRoutes, type OwnerRestoreHost } from "./ownerRestoreRoutes";
 import { createHeldDocumentRoutes, type HeldDocumentHost } from "./heldDocumentRoutes";
 import type { LiveRooms } from "./liveRoom";
 import { createLiveRoomPauseRoutes } from "./liveRoomPauseRoutes";
@@ -57,6 +56,29 @@ import type {
 } from "@dohc/workspace-auth/session";
 import { createNamedShareTransportRoutes } from "./namedShareTransportRoutes";
 import { createKeyEnvelopeRoutes } from "./keyEnvelopeRoutes";
+import {
+  createWorkspaceSecretRateLimiter,
+  createWorkspaceSecretRoutes,
+  WORKSPACE_SECRET_MAX_BODY_BYTES,
+} from "./workspaceSecretRoutes";
+import {
+  createOutboundWebhookLimiters,
+  createOutboundWebhookRoutes,
+  executeRelayOutboundWebhook,
+  MAX_HTTP_APPROVAL_BODY_BYTES,
+  MAX_OUTBOUND_DISPATCH_BODY_BYTES,
+  type OutboundWebhookExecutionDependencies,
+  type OutboundWebhookLimiters,
+} from "./outboundWebhookRoutes";
+import {
+  createIncomingWebhookLimiters,
+  createIncomingWebhookRoutes,
+  MAX_INCOMING_WEBHOOK_ADMIN_BODY_BYTES,
+} from "./incomingWebhookRoutes";
+import type {
+  OutboundWebhookDispatchRequest,
+  OutboundWebhookDispatchResponse,
+} from "@dohc/workspace-contracts/http-step-approvals";
 import {
   createNoticeRoutes,
   createNoticeWaits,
@@ -170,8 +192,6 @@ export interface CreateSyncRelayHandlerOptions {
   appCollectionPolicy?: AppCollectionPolicy;
   appBackendAdmissionLimits?: Partial<AppBackendAdmissionLimits>;
   datasetHost?: RelayDatasetHost;
-  ownerRestoreHost?: () => OwnerRestoreHost | undefined;
-  // The live rooms, which save a note's taken edits before a restore closes it.
   liveRooms?: () => Pick<LiveRooms, "saveFirst"> | undefined;
   // The session host's read of what its hosted replicas hold for released retained work.
   heldDocumentHost?: () => HeldDocumentHost | undefined;
@@ -250,6 +270,10 @@ export interface CreateSyncRelayHandlerOptions {
   noticePostRateLimiter?: TokenBucketLimiter;
   // Changes to a workspace's automation host, and to the server's runs, keyed by owner.
   automationHostRateLimiter?: TokenBucketLimiter;
+  workspaceSecretRateLimiter?: TokenBucketLimiter;
+  outboundWebhookLimiters?: OutboundWebhookLimiters;
+  resolveOutboundDestination?: OutboundWebhookExecutionDependencies["resolveDestination"];
+  sendOutboundRequest?: OutboundWebhookExecutionDependencies["sendRequest"];
   // This server while it runs workspaces' automations; absent when it does not.
   automationServer?: AutomationServer;
   pressDataset?: Parameters<typeof createDatasetRoutes>[2]["pressDataset"];
@@ -290,7 +314,6 @@ export function createSyncRelayHandler({
   appCollectionPolicy,
   appBackendAdmissionLimits,
   datasetHost,
-  ownerRestoreHost = () => undefined,
   liveRooms = () => undefined,
   heldDocumentHost = () => undefined,
   storage,
@@ -377,6 +400,10 @@ export function createSyncRelayHandler({
     AUTOMATION_HOST_REFILL_PER_SECOND,
     AUTOMATION_HOST_MAX_OWNERS,
   ),
+  workspaceSecretRateLimiter = createWorkspaceSecretRateLimiter(),
+  outboundWebhookLimiters = createOutboundWebhookLimiters(),
+  resolveOutboundDestination,
+  sendOutboundRequest,
   linkFreshnessPageSize = MAX_LOG_PAGE_SIZE,
   linkCurrentFileLimit = MAX_LINK_CURRENT_FILES,
   newLinkBearer = () => mintLinkBearer(),
@@ -404,6 +431,12 @@ export function createSyncRelayHandler({
   endPhoneAppLaunches(scope: PhoneAppLaunchScope): void;
   deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]): void;
   readOwnerShares(ownerUserId: string, path: string): Promise<{ status: number; body: unknown }>;
+  executeOutboundWebhook(input: {
+    readonly workspaceId: string;
+    readonly ownerUserId: string;
+    readonly request: OutboundWebhookDispatchRequest;
+    readonly signal?: AbortSignal;
+  }): Promise<{ httpStatus: number; body: OutboundWebhookDispatchResponse }>;
 } {
   const accountActor = resolveActor;
   const requireUnfencedActor = (actor: Awaited<ReturnType<ResolveActor>>) => {
@@ -660,6 +693,73 @@ export function createSyncRelayHandler({
   const respondToWorkspaceBlobs = createWorkspaceBlobRoutes(storage, nowMs);
 
   const respondToKeyEnvelopes = createKeyEnvelopeRoutes(storage, nowMs);
+  const respondToWorkspaceSecrets = createWorkspaceSecretRoutes({
+    storage,
+    linkKey,
+    nowMs,
+    rateLimiter: workspaceSecretRateLimiter,
+  });
+  const outboundWebhookInFlight = new Map<string, number>();
+  const readOwnerShares = async (
+    ownerUserId: string,
+    path: string,
+  ): Promise<{ status: number; body: unknown }> => {
+    const request = new Request(new URL(path, "http://relay.invalid"));
+    const url = new URL(request.url);
+    let response: Response;
+    try {
+      const parts = url.pathname
+        .split("/")
+        .filter(Boolean)
+        .map((part) => decodeURIComponent(part));
+      const actor = { userId: ownerUserId };
+      if (url.pathname === "/sync/shares") {
+        response = await ownerShareReads.respondToShareInventory(
+          request,
+          { route: "shares-list" },
+          actor,
+        );
+      } else if (
+        parts.length === 4 &&
+        parts[0] === "sync" &&
+        parts[2] === "shares" &&
+        parts[3] === "links"
+      ) {
+        response = await ownerShareReads.respondToWorkspaceLinkInventory(
+          request,
+          parseWorkspaceId(parts[1]),
+          actor,
+        );
+      } else {
+        throw notFound();
+      }
+    } catch (error) {
+      response = errorResponse(error);
+    }
+    return { status: response.status, body: await response.json().catch(() => undefined) };
+  };
+  const outboundWebhookDeps: OutboundWebhookExecutionDependencies = {
+    storage,
+    linkKey: linkKey ?? null,
+    readOwnerShares,
+    approvalRateLimiter: outboundWebhookLimiters.approval,
+    accountRateLimiter: outboundWebhookLimiters.account,
+    workspaceRateLimiter: outboundWebhookLimiters.workspace,
+    accountInFlight: outboundWebhookInFlight,
+    nowMs,
+    ...(resolveOutboundDestination ? { resolveDestination: resolveOutboundDestination } : {}),
+    ...(sendOutboundRequest ? { sendRequest: sendOutboundRequest } : {}),
+  };
+  const respondToOutboundWebhooks = createOutboundWebhookRoutes(outboundWebhookDeps);
+  const incomingWebhookLimiters = createIncomingWebhookLimiters();
+  const incomingWebhooks = createIncomingWebhookRoutes({
+    storage,
+    linkKey,
+    ...(relayPublicOrigin ? { publicOrigin: relayPublicOrigin } : {}),
+    nowMs,
+    limiters: incomingWebhookLimiters,
+    automationServer: automationServer ?? null,
+  });
 
   const noticeWaits = createNoticeWaits(storage, discussionActivity);
   const respondToNotices = createNoticeRoutes(
@@ -1182,14 +1282,6 @@ export function createSyncRelayHandler({
     lookupUserDisplayName,
   );
 
-  const respondToOwnerRestore = createOwnerRestoreRoutes({
-    storage,
-    host: ownerRestoreHost,
-    rooms: liveRooms,
-    nowMs,
-    newId,
-    lookupUserEmail,
-  });
   const respondToHeldDocuments = createHeldDocumentRoutes({ storage, host: heldDocumentHost });
   const respondToLivePauses = createLiveRoomPauseRoutes(storage);
   const respondToOwnerAppPublication = createOwnerAppPublicationRoutes({
@@ -1248,6 +1340,9 @@ export function createSyncRelayHandler({
       }
       const route = parseRoute(request);
       SYNC_RELAY_REQUEST_LOG.mark(request, RELAY_ROUTE_PATTERNS[route.route]);
+      if (route.route === "incoming-webhook") {
+        return await incomingWebhooks.respondToPublicIngress(request, route.token);
+      }
       if (
         route.route === "work-reference" ||
         route.route === "work-references" ||
@@ -1618,7 +1713,38 @@ export function createSyncRelayHandler({
           route.workspaceId,
         );
         if (actor.workspaceId !== route.workspaceId) throw notFound();
-        return await respondToAutomationServer(request, route, actor.userId);
+        let recheckDesktopHttpApproval: (() => Promise<void>) | undefined;
+        if (route.action === "allow") {
+          const sessionResolver = resolvePhoneCapableAccountSession ?? resolveAccountSession;
+          if (sessionResolver) {
+            const verifyDesktopOwnerSession = async () => {
+              const session = await bearerAccountSession(storage, sessionResolver, request);
+              if (
+                session.clientKind !== "desktop" ||
+                session.userId !== actor.userId ||
+                workspaceIsDeleted(storage, route.workspaceId) ||
+                !storage.workspaceIsOwnedBy(route.workspaceId, session.userId)
+              ) {
+                throw notFound();
+              }
+              return session;
+            };
+            try {
+              const initialDesktopSession = await verifyDesktopOwnerSession();
+              recheckDesktopHttpApproval = async () => {
+                const current = await verifyDesktopOwnerSession();
+                if (current.sessionId !== initialDesktopSession.sessionId) {
+                  throw notFound();
+                }
+              };
+            } catch {
+              recheckDesktopHttpApproval = undefined;
+            }
+          }
+        }
+        return await respondToAutomationServer(request, route, actor.userId, {
+          ...(recheckDesktopHttpApproval ? { recheckDesktopHttpApproval } : {}),
+        });
       }
       if (route.route === "account-workspaces" || route.route === "account-workspace") {
         if (!respondToAccountWorkspaces) throw notFound();
@@ -1701,6 +1827,52 @@ export function createSyncRelayHandler({
           route.workspaceId,
         );
         return await respondToWorkspaceName(storage, request, route.workspaceId, actor.userId);
+      }
+      if (
+        route.route === "workspace-secrets" ||
+        route.route === "workspace-secret" ||
+        route.route === "workspace-http-approvals" ||
+        route.route === "workspace-outbound-dispatch" ||
+        route.route === "workspace-webhooks" ||
+        route.route === "workspace-webhook" ||
+        route.route === "workspace-webhook-rotate"
+      ) {
+        const sessionResolver = resolvePhoneCapableAccountSession ?? resolveAccountSession;
+        if (!sessionResolver) throw notFound();
+        const authorizeDesktopOwner = async () => {
+          const session = await bearerAccountSession(storage, sessionResolver, request);
+          if (session.clientKind !== "desktop") throw notFound();
+          if (
+            workspaceIsDeleted(storage, route.workspaceId) ||
+            !storage.workspaceIsOwnedBy(route.workspaceId, session.userId)
+          ) {
+            throw notFound();
+          }
+          return session;
+        };
+        const session = await authorizeDesktopOwner();
+        const recheckSession = async () => {
+          const current = await authorizeDesktopOwner();
+          if (current.userId !== session.userId || current.sessionId !== session.sessionId) {
+            throw notFound();
+          }
+        };
+        if (route.route === "workspace-secrets" || route.route === "workspace-secret") {
+          return await respondToWorkspaceSecrets(request, route, session.userId, recheckSession);
+        }
+        if (
+          route.route === "workspace-webhooks" ||
+          route.route === "workspace-webhook" ||
+          route.route === "workspace-webhook-rotate"
+        ) {
+          return await incomingWebhooks.respondToOwnerManagement(
+            request,
+            route,
+            session.userId,
+            recheckSession,
+          );
+        }
+        return await respondToOutboundWebhooks(request, route, session.userId, recheckSession);
       }
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");
       if (
@@ -1786,8 +1958,6 @@ export function createSyncRelayHandler({
 
       if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
 
-      if (route.route === "owner-restore")
-        return await respondToOwnerRestore(request, route, actor.userId);
       if (route.route === "owner-collection-writes")
         return readOwnerCollectionWrites(request, route, actor.userId, storage);
 
@@ -1883,41 +2053,13 @@ export function createSyncRelayHandler({
      * workspace's editors the way the owner's computers do. Only
      * `/sync/shares` and `/sync/:workspaceId/shares/links` are served.
      */
-    async readOwnerShares(ownerUserId: string, path: string) {
-      const request = new Request(new URL(path, "http://relay.invalid"));
-      const url = new URL(request.url);
-      let response: Response;
-      try {
-        const parts = url.pathname
-          .split("/")
-          .filter(Boolean)
-          .map((part) => decodeURIComponent(part));
-        const actor = { userId: ownerUserId };
-        if (url.pathname === "/sync/shares") {
-          response = await ownerShareReads.respondToShareInventory(
-            request,
-            { route: "shares-list" },
-            actor,
-          );
-        } else if (
-          parts.length === 4 &&
-          parts[0] === "sync" &&
-          parts[2] === "shares" &&
-          parts[3] === "links"
-        ) {
-          response = await ownerShareReads.respondToWorkspaceLinkInventory(
-            request,
-            parseWorkspaceId(parts[1]),
-            actor,
-          );
-        } else {
-          throw notFound();
-        }
-      } catch (error) {
-        response = errorResponse(error);
-      }
-      return { status: response.status, body: await response.json().catch(() => undefined) };
-    },
+    readOwnerShares,
+    executeOutboundWebhook: (input: {
+      readonly workspaceId: string;
+      readonly ownerUserId: string;
+      readonly request: OutboundWebhookDispatchRequest;
+      readonly signal?: AbortSignal;
+    }) => executeRelayOutboundWebhook(outboundWebhookDeps, input),
   });
 }
 
@@ -1959,6 +2101,16 @@ export function maxRequestBodyBytes(url: URL): number {
     case "shares-create":
     case "share-link-create-atomic":
       return 1024 * 1024;
+    case "workspace-secret":
+      return WORKSPACE_SECRET_MAX_BODY_BYTES;
+    case "workspace-http-approvals":
+      return MAX_HTTP_APPROVAL_BODY_BYTES;
+    case "workspace-outbound-dispatch":
+      return MAX_OUTBOUND_DISPATCH_BODY_BYTES;
+    case "workspace-webhooks":
+    case "workspace-webhook":
+    case "workspace-webhook-rotate":
+      return MAX_INCOMING_WEBHOOK_ADMIN_BODY_BYTES;
     default:
       return DEFAULT_BODY_BYTES;
   }
@@ -2011,6 +2163,7 @@ export function streamsRequestBody(url: URL, method: string): boolean {
     const route = parseRoute({ url: url.href });
     return (
       (route.route === "dataset" && route.action === "import" && method === "POST") ||
+      (route.route === "incoming-webhook" && method === "POST") ||
       route.route === "share-collection-writes" ||
       route.route === "link-collection-writes" ||
       route.route === "account-operation" ||

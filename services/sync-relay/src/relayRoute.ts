@@ -12,7 +12,6 @@ import type { LinkAppPublicationRoute } from "./linkAppPublicationRoutes";
 import type { LinkAppCollectionRoute } from "./appCollectionRoutes";
 import type { OwnerAppPublicationRoute } from "./ownerAppPublicationRoutes";
 import type { OwnerAppResponseRoute } from "./ownerAppResponseRoutes";
-import type { OwnerRestoreRoute } from "./ownerRestoreRoutes";
 import type { PersonalAgentToolRoute } from "./personalAgentRoutes";
 import { MAX_HELD_OBJECT_ID_CHARS, type HeldDocumentRoute } from "./heldDocumentRoutes";
 import { LIVE_PAUSE_ID, type LiveRoomPauseRoute } from "./liveRoomPauseRoutes";
@@ -38,6 +37,9 @@ import type { NamedShareTransportRoute } from "./namedShareTransportRoutes";
 import type { ShareProposalRoute, WorkspaceProposalRoute } from "./proposalRoutes";
 import type { CollectionWriteRoute, OwnerCollectionWriteRoute } from "./collectionWriteRoutes";
 import { parsePersonalAgentRoute, type PersonalAgentRoute } from "./personalAgents";
+import type { WorkspaceSecretRoute } from "./workspaceSecretRoutes";
+import type { OutboundWebhookRoute } from "./outboundWebhookRoutes";
+import type { IncomingWebhookRoute } from "./incomingWebhookRoutes";
 import { parseShareId, parseString, parseWorkspaceId, relayPathSegments } from "./requestInputs";
 import { notFound } from "./errors";
 import { parseDirectMessageRoute, type DirectMessageRoute } from "./directMessageRoutes";
@@ -67,7 +69,6 @@ export type SyncRelayRoute =
   | LinkAppCollectionRoute
   | OwnerAppPublicationRoute
   | OwnerAppResponseRoute
-  | OwnerRestoreRoute
   | HeldDocumentRoute
   | LiveRoomPauseRoute
   | { route: "link-exchange" }
@@ -89,6 +90,9 @@ export type SyncRelayRoute =
   | WorkspaceBlobRoute
   | WorkspaceReplicationRoute
   | { route: "keys"; workspaceId: string }
+  | WorkspaceSecretRoute
+  | OutboundWebhookRoute
+  | IncomingWebhookRoute
   | WorkspaceShareCreationRoute
   | ShareInventoryRoute
   | ShareGrantTransitionRoute
@@ -246,6 +250,12 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     throw notFound();
   }
   if (parts[1] === "wakes") return parseChatWakeRoute(parts);
+  if (parts[1] === "hooks") {
+    if (parts.length === 3 && parts[2]) {
+      return { route: "incoming-webhook", token: parts[2] };
+    }
+    throw notFound();
+  }
   if (parts[1] === "personal-agents") return parsePersonalAgentRoute(parts);
   if (parts[1] === "account")
     return parts[2] === "sessions" ? parseAccountSessionRoute(parts) : parseAccountRoute(parts);
@@ -521,25 +531,6 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     }
     throw notFound();
   }
-  if (parts[2] === "live-restores") {
-    if (parts.length === 3) return { route: "owner-restore", workspaceId, action: "begin" };
-    if (
-      parts.length === 4 &&
-      (parts[3] === "plan" || parts[3] === "options" || parts[3] === "unfinished")
-    )
-      return { route: "owner-restore", workspaceId, action: parts[3] };
-    const operationId = parseString(parts[3], "operationId", 512);
-    if (parts.length === 4)
-      return { route: "owner-restore", workspaceId, operationId, action: "status" };
-    const action = parts[4];
-    if (
-      parts.length === 5 &&
-      (action === "prepare" || action === "review" || action === "confirm" || action === "decline")
-    ) {
-      return { route: "owner-restore", workspaceId, operationId, action };
-    }
-    throw notFound();
-  }
   if (parts.length === 4 && parts[2] === "blobs" && parts[3] === "have") {
     return { route: "blob-have", workspaceId };
   }
@@ -569,6 +560,43 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
   }
   if (parts.length === 3 && parts[2] === "keys") {
     return { route: "keys", workspaceId };
+  }
+  if (parts[2] === "secrets") {
+    if (parts.length === 3) return { route: "workspace-secrets", workspaceId };
+    if (parts.length === 4 && parts[3]) {
+      return {
+        route: "workspace-secret",
+        workspaceId,
+        name: parseString(parts[3], "name", 64),
+      };
+    }
+    throw notFound();
+  }
+  if (parts[2] === "webhooks") {
+    if (parts.length === 3) {
+      return { route: "workspace-webhooks", workspaceId };
+    }
+    if (parts.length === 4 && parts[3] === "http-approvals") {
+      return { route: "workspace-http-approvals", workspaceId };
+    }
+    if (parts.length === 4 && parts[3] === "outbound-dispatch") {
+      return { route: "workspace-outbound-dispatch", workspaceId };
+    }
+    if (parts.length === 4 && parts[3]) {
+      return {
+        route: "workspace-webhook",
+        workspaceId,
+        webhookId: parseString(parts[3], "webhookId", 64),
+      };
+    }
+    if (parts.length === 5 && parts[3] && parts[4] === "rotate") {
+      return {
+        route: "workspace-webhook-rotate",
+        workspaceId,
+        webhookId: parseString(parts[3], "webhookId", 64),
+      };
+    }
+    throw notFound();
   }
   if (
     parts.length === 7 &&
