@@ -1464,4 +1464,80 @@ describe("dohc/ui and dohc/charts", () => {
     expect(backgroundLoadingFlashes).toBe(0);
     client.close();
   });
+
+  it("catches up missed revisions when live mode resumes and retries rate-limited background refreshes", async () => {
+    const fake = makeFakePort();
+    const client = createAppClient({ port: fake.port });
+    const loadingStates: boolean[] = [];
+
+    function LiveToggle({ live }: { live: boolean }) {
+      const query = useDatasetQuery<{ rev: number }>("list", {}, { dataset: "expenses", live });
+      loadingStates.push(query.loading);
+      return (
+        <div>
+          <span data-testid="val">
+            {query.data ? `${query.data.rev}@${query.revision}` : "none"}
+          </span>
+          <span data-testid="err">{query.error?.status ?? "none"}</span>
+        </div>
+      );
+    }
+
+    const { rerender, unmount } = render(
+      <AppProvider client={client}>
+        <LiveToggle live={false} />
+      </AppProvider>,
+    );
+    expect(fake.sent).toHaveLength(1);
+    fake.reply({
+      id: fake.sent[0]!.id,
+      ok: true,
+      value: { result: { rev: 1 }, revision: 1, replayed: false },
+    });
+    await waitFor(() => expect(screen.getByTestId("val").textContent).toBe("1@1"));
+    loadingStates.length = 0;
+
+    // Revision 2 arrives while live is false: no fetch while paused.
+    fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: 2 });
+    expect(fake.sent).toHaveLength(1);
+
+    // Resuming live catches up in the background without flashing loading.
+    rerender(
+      <AppProvider client={client}>
+        <LiveToggle live={true} />
+      </AppProvider>,
+    );
+    await waitFor(() => expect(fake.sent).toHaveLength(2));
+    expect(loadingStates.every((v) => v === false)).toBe(true);
+    fake.reply({
+      id: fake.sent[1]!.id,
+      ok: true,
+      value: { result: { rev: 2 }, revision: 2, replayed: false },
+    });
+    await waitFor(() => expect(screen.getByTestId("val").textContent).toBe("2@2"));
+
+    // A 429 on background refresh retains the pending revision and retries cleanly.
+    fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: 3 });
+    await waitFor(() => expect(fake.sent).toHaveLength(3));
+    fake.reply({ id: fake.sent[2]!.id, ok: false, status: 429 });
+    await waitFor(() => expect(screen.getByTestId("err").textContent).toBe("429"));
+    expect(screen.getByTestId("val").textContent).toBe("2@2");
+
+    // Newer revision 4 arrives during backoff and coalesces into the scheduled retry.
+    fake.reply({ kind: "dataset.changed", dataset: "expenses", revision: 4 });
+    expect(fake.sent).toHaveLength(3);
+    await waitFor(() => expect(fake.sent).toHaveLength(4), { timeout: 2000 });
+    fake.reply({
+      id: fake.sent[3]!.id,
+      ok: true,
+      value: { result: { rev: 4 }, revision: 4, replayed: false },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("val").textContent).toBe("4@4");
+      expect(screen.getByTestId("err").textContent).toBe("none");
+    });
+    expect(loadingStates.every((v) => v === false)).toBe(true);
+    unmount();
+    client.close();
+  });
 });

@@ -553,15 +553,14 @@ it("forwards one-way dataset.changed push events, accepts readOnly: true, and su
   );
   try {
     broker.notifyDatasetChanged("expenses", 2);
-    broker.notifyDatasetChanged("expenses", 5);
     broker.notifyDatasetChanged("BadAlias", 9);
     broker.notifyDatasetChanged("expenses", -1);
     frame.dispatchEvent(new Event("load"));
     expect(handshake).toEqual({ kind: "dohc-app-channel", version: 1, maxInFlight: 8 });
-    const [preloaded] = await once(port, "message");
-    expect(preloaded).toEqual({ kind: "dataset.changed", dataset: "expenses", revision: 5 });
 
     const liveEvent = once(port, "message");
+    broker.notifyDatasetChanged("BadAlias", 9);
+    broker.notifyDatasetChanged("expenses", -1);
     broker.notifyDatasetChanged("workouts", 3);
     expect((await liveEvent)[0]).toEqual({
       kind: "dataset.changed",

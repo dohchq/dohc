@@ -76,6 +76,7 @@ const ALLOWED_PATHS = new Set([
   "/session",
   "/resume",
   "/backend",
+  "/events",
   "/status",
   "/close",
 ]);
@@ -87,7 +88,7 @@ const LOCAL_REMEDY: Record<AppBrokerLocalRejectionReason, string> = {
   unserializable: "Send plain JSON-serializable objects over the dohc-app-channel port.",
   payload_too_large: "Reduce the payload size sent over the dohc-app-channel port.",
   invalid_keys:
-    "Match the exact broker message keys (for backend.invoke: id, op, operation, idempotencyKey, input).",
+    "Match the exact broker message keys (for backend.invoke: id, op, operation, idempotencyKey, input, optional dataset/readOnly).",
   rate_limited:
     "Reduce concurrent or rapid broker calls so requests stay within the broker rate limit.",
 };

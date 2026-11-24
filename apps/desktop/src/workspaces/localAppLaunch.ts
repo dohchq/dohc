@@ -292,6 +292,14 @@ export async function createLocalAppLaunchHost(options: {
         const brokerLimits = highBudget
           ? JSON.stringify({ maxPending, backendBurst, backendRefillMs })
           : "undefined";
+        const hasEvents = Boolean(
+          options.backend.datasetRevisions &&
+          options.backend.subscribeDatasetChanges &&
+          options.backend.datasetRevisions(publicationId, authorityRevision) !== null,
+        );
+        const eventLoop = hasEvents
+          ? `let since={},backoff=500;const watch=async()=>{while(!stopped&&!lifetime.signal.aborted){try{const er=await fetch('/events',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof},body:JSON.stringify({since,holdMs:${MAX_EVENTS_HOLD_MS}}),signal:lifetime.signal});if(er.status===204)return;if(er.status===404){stop();return;}if(!er.ok)throw Error();const payload=await er.json();if(stopped)return;backoff=500;if(Array.isArray(payload?.changed)){for(const item of payload.changed){if(item&&typeof item.dataset==='string'&&typeof item.revision==='number'){since[item.dataset]=Math.max(since[item.dataset]||0,item.revision);broker.notifyDatasetChanged(item.dataset,item.revision);}}}}catch{if(stopped||lifetime.signal.aborted)return;await new Promise(ok=>{const t=setTimeout(ok,backoff);lifetime.signal.addEventListener('abort',()=>{clearTimeout(t);ok();},{once:true});});backoff=Math.min(5000,backoff*2);}}};void watch();`
+          : "";
         const script = `(()=>{
           const handoff=location.hash.slice(1),key='dohc-local-app-proof';history.replaceState(null,'','/bootstrap');
           const lifetime=new AbortController();let frame,proof,stopped=false;
@@ -307,9 +315,7 @@ export async function createLocalAppLaunchHost(options: {
             const broker=(${attachAppCollectionBroker.toString()})(frame,(body,signal,request)=>fetch('/backend',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof,'x-dohc-app-activated':request.activated?'1':'0'},body:JSON.stringify(body),signal}),lifetime.signal,${observe},${brokerLimits});
             addEventListener('message',event=>{const scheme=event.data?.kind==='dohc-color-scheme'?event.data.scheme:null;if(event.source===frame.contentWindow&&(scheme==='light'||scheme==='dark'))frame.style.colorScheme=scheme;},{signal:lifetime.signal});
             frame.srcdoc=value.html;document.body.append(frame);const status=document.getElementById('status');status.textContent='';status.style.margin='0';
-            let since={},first=true,backoff=500;
-            const watch=async()=>{while(!stopped&&!lifetime.signal.aborted){try{const er=await fetch('/events',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof},body:JSON.stringify({since,holdMs:first?0:${MAX_EVENTS_HOLD_MS}}),signal:lifetime.signal});if(er.status===204)return;if(er.status===404){stop();return;}if(!er.ok)throw Error();const payload=await er.json();if(stopped)return;backoff=500;first=false;if(Array.isArray(payload?.changed)){for(const item of payload.changed){if(item&&typeof item.dataset==='string'&&typeof item.revision==='number'){since[item.dataset]=Math.max(since[item.dataset]||0,item.revision);broker.notifyDatasetChanged(item.dataset,item.revision);}}}}catch{if(stopped||lifetime.signal.aborted)return;await new Promise(ok=>{const t=setTimeout(ok,backoff);lifetime.signal.addEventListener('abort',()=>{clearTimeout(t);ok();},{once:true});});backoff=Math.min(5000,backoff*2);}}};
-            void watch();
+            ${eventLoop}
             ${browserLifetime}
           }).catch(()=>{if(!stopped)stop();});
         })();`;
@@ -680,7 +686,7 @@ export async function createLocalAppLaunchHost(options: {
         });
         server.requestTimeout = 15_000;
         server.headersTimeout = 10_000;
-        server.maxConnections = 32;
+        server.maxConnections = 16;
         let stopped: Promise<void> | undefined;
         const stop = () =>
           (stopped ??= Promise.resolve().then(async () => {

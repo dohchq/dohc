@@ -72,8 +72,7 @@ export function attachAppCollectionBroker(
     updated = Date.now();
   const channel = new MessageChannel(),
     controller = new AbortController(),
-    ids = new Set<string>(),
-    queuedEvents = new Map<string, number>();
+    ids = new Set<string>();
   const emit = (event: AppBrokerObservation) => {
     try {
       observe?.(event);
@@ -99,7 +98,6 @@ export function attachAppCollectionBroker(
     channel.port1.close();
     channel.port2.close();
     ids.clear();
-    queuedEvents.clear();
   };
   const active = () => navigator.userActivation?.isActive === true;
   let armed = !active();
@@ -135,10 +133,6 @@ export function attachAppCollectionBroker(
         ? { kind: "dohc-app-channel", version: 1, maxInFlight: Math.min(maxPending, 8) }
         : { kind: "dohc-app-channel", version: 1 };
     frame.contentWindow?.postMessage(handshake, "*", [channel.port2]);
-    for (const [dataset, revision] of queuedEvents) {
-      channel.port1.postMessage({ kind: "dataset.changed", dataset, revision });
-    }
-    queuedEvents.clear();
     emit({ kind: "handshake-delivered" });
   });
   const record = (value: unknown): value is Record<string, unknown> =>
@@ -178,11 +172,7 @@ export function attachAppCollectionBroker(
       return rejectLocal("payload_too_large", 413);
     const keys = Object.keys(body).sort().join();
     const validAlias =
-      !Object.hasOwn(body, "dataset") ||
-      (typeof body.dataset === "string" &&
-        /^[a-z][a-z0-9_-]{0,63}$/.test(body.dataset) &&
-        body.dataset !== "prototype" &&
-        body.dataset !== "constructor");
+      !Object.hasOwn(body, "dataset") || (validDatasetKey(body.dataset) && body.dataset !== "");
     const validReadOnly = !Object.hasOwn(body, "readOnly") || body.readOnly === true;
     const valid =
       validAlias &&
@@ -321,17 +311,13 @@ export function attachAppCollectionBroker(
     notifyDatasetChanged(dataset: string, revision: number) {
       if (
         closed ||
+        !loaded ||
         !validDatasetKey(dataset) ||
         typeof revision !== "number" ||
         !Number.isSafeInteger(revision) ||
         revision < 0
       )
         return;
-      if (!loaded) {
-        const previous = queuedEvents.get(dataset) ?? -1;
-        if (revision > previous) queuedEvents.set(dataset, revision);
-        return;
-      }
       channel.port1.postMessage({ kind: "dataset.changed", dataset, revision });
     },
   };

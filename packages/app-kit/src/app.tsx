@@ -262,32 +262,19 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
   let port: MessagePort | undefined;
   let closed = false;
   let inFlight = 0;
-  let flushScheduled = false;
   const waiting: Pending[] = [];
   const sent = new Map<string, Pending>();
   const latestRevisions = new Map<string, number>();
-  const queuedChanges = new Map<string, number>();
   const listeners = new Set<(event: DatasetChangeEvent) => void>();
 
   const recordDatasetChange = (dataset: string, revision: number) => {
     if (revision <= (latestRevisions.get(dataset) ?? -1)) return;
     latestRevisions.set(dataset, revision);
-    queuedChanges.set(dataset, revision);
-    if (flushScheduled) return;
-    flushScheduled = true;
-    queueMicrotask(() => {
-      flushScheduled = false;
-      if (closed) return queuedChanges.clear();
-      const batch = [...queuedChanges.entries()];
-      queuedChanges.clear();
-      for (const [ds, rev] of batch) {
-        for (const listener of [...listeners]) {
-          try {
-            listener({ dataset: ds, revision: rev });
-          } catch {}
-        }
-      }
-    });
+    for (const listener of [...listeners]) {
+      try {
+        listener({ dataset, revision });
+      } catch {}
+    }
   };
 
   const fail = (item: Pending, status: BackendStatus) => {
@@ -405,7 +392,6 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
     }
     sent.clear();
     waiting.length = 0;
-    queuedChanges.clear();
     listeners.clear();
   };
   const viewFor = (datasetAlias?: string): AppClient => {
@@ -634,10 +620,15 @@ export function useDatasetQuery<T = unknown>(
   const generation = useRef(0);
   const liveRef = useRef(live);
   liveRef.current = live;
+  const syncLiveRef = useRef<(() => void) | null>(null);
 
   const reload = useCallback(() => {
     setVersion((current) => current + 1);
   }, []);
+
+  useEffect(() => {
+    syncLiveRef.current?.();
+  }, [live]);
 
   useEffect(() => {
     if (!enabled) {
@@ -661,13 +652,25 @@ export function useDatasetQuery<T = unknown>(
     let alive = true,
       inFlight = false,
       currentRev: number | null = null,
-      pendingRev: number | null = null;
+      wantedRev: number | null = null,
+      retryDelay = 250,
+      retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearRetry = () => {
+      if (retryTimer !== undefined) {
+        clearTimeout(retryTimer);
+        retryTimer = undefined;
+      }
+    };
+    const latestWanted = () =>
+      Math.max(wantedRev ?? -1, latestRevisionLookup.get(target)?.() ?? -1);
     const parsedInput: unknown = JSON.parse(serializedInput);
     const runFetch = (background: boolean) => {
       if (!alive) return;
+      clearRetry();
       const token = ++generation.current;
       inFlight = true;
       if (!background) {
+        retryDelay = 250;
         setState((current) =>
           current.scope === scope
             ? { ...current, loading: true, error: null }
@@ -678,6 +681,7 @@ export function useDatasetQuery<T = unknown>(
         (reply) => {
           if (!alive || token !== generation.current) return;
           inFlight = false;
+          retryDelay = 250;
           currentRev = reply.revision;
           setState({
             scope,
@@ -686,38 +690,65 @@ export function useDatasetQuery<T = unknown>(
             loading: false,
             error: null,
           });
-          const wanted = Math.max(
-            pendingRev ?? -1,
-            liveRef.current ? (latestRevisionLookup.get(target)?.() ?? -1) : -1,
-          );
-          pendingRev = null;
-          if (liveRef.current && wanted > reply.revision) runFetch(true);
+          const wanted = latestWanted();
+          if (wanted <= reply.revision) wantedRev = null;
+          else if (liveRef.current) {
+            wantedRev = wanted;
+            runFetch(true);
+          }
         },
         (caught: unknown) => {
           if (!alive || token !== generation.current) return;
           inFlight = false;
-          pendingRev = null;
           const error = caught instanceof AppBackendError ? caught : new AppBackendError(503);
           setState((current) =>
             background && current.scope === scope
               ? { ...current, loading: false, error }
               : { scope, data: undefined, revision: null, loading: false, error },
           );
+          if (
+            background &&
+            error.uncertain &&
+            liveRef.current &&
+            wantedRev !== null &&
+            (currentRev === null || wantedRev > currentRev)
+          ) {
+            const delay = retryDelay;
+            retryDelay = Math.min(4_000, retryDelay * 2);
+            retryTimer = setTimeout(() => {
+              retryTimer = undefined;
+              if (alive && liveRef.current && !inFlight) runFetch(true);
+            }, delay);
+          } else if (!background || !error.uncertain) {
+            wantedRev = null;
+          }
         },
       );
     };
-    const unsubscribe = target.subscribe?.((event) => {
-      if (!alive || !liveRef.current) return;
-      if (currentRev !== null && event.revision <= currentRev) return;
-      if (inFlight) {
-        pendingRev = Math.max(pendingRev ?? -1, event.revision);
+    syncLiveRef.current = () => {
+      if (!alive) return;
+      if (!liveRef.current) {
+        clearRetry();
         return;
       }
+      const wanted = latestWanted();
+      if (wanted >= 0 && (currentRev === null || wanted > currentRev) && !inFlight) {
+        wantedRev = wanted;
+        runFetch(true);
+      }
+    };
+    const unsubscribe = target.subscribe?.((event) => {
+      if (!alive) return;
+      if (currentRev !== null && event.revision <= currentRev) return;
+      wantedRev = Math.max(wantedRev ?? -1, event.revision);
+      if (!liveRef.current || inFlight || retryTimer !== undefined) return;
       runFetch(true);
     });
     runFetch(false);
     return () => {
       alive = false;
+      syncLiveRef.current = null;
+      clearRetry();
       unsubscribe?.();
     };
   }, [enabled, operation, scope, serializedInput, target, version]);
