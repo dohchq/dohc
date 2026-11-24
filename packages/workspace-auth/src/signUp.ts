@@ -9,8 +9,17 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 export const SIGN_UP_INVITE_PATH = "/internal/sign-up-invite";
 export const SIGN_UP_INVITE_KEY_HEADER = "x-dohc-sign-up-key";
 
+// A workspace invite link also admits a new account, only to join that
+// workspace. The sign-up request carries the link's token in this header, and
+// the relay checks it. An email is never admitted because some workspace has
+// a link.
+export const SIGN_UP_INVITE_LINK_HEADER = "x-dohc-invite-link";
+
 /** What the server decided about creating an account for one address. */
 export type SignUpAdmission = "admitted" | "refused" | "unavailable";
+
+/** Decides one sign-up: the typed address, and the invite-link token it presented, if any. */
+export type AdmitAccount = (email: string, inviteToken: string | null) => Promise<SignUpAdmission>;
 
 /** The one form every approved-list and invite comparison uses. */
 export function normalizeEmail(email: string): string {

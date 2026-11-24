@@ -37,6 +37,7 @@ import type {
 import { CreationPartial } from "./creation";
 import { DATASET_CAPABILITIES, DatasetRequest, DatasetResult } from "./dataset";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
+import { MEMBERS_CAPABILITIES, MembersResult, OwnerMembersRequest } from "./members";
 import { OwnerAppResponsesRequest, OwnerAppResponsesResult } from "./appResponses";
 import {
   ServerAccountDeletionPreview,
@@ -978,6 +979,13 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z
     .object({
       ...requestBase,
+      verb: z.literal("members"),
+      args: z.object({ ...argsBase, request: OwnerMembersRequest }).strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
       verb: z.literal("accountDeletePreview"),
       args: accountDeletePreviewArgsSchema,
     })
@@ -1279,6 +1287,7 @@ export const CLI_CAPABILITIES = distinct(
     shareCopy: ["share.copy.read"],
     shareAgents: ["share.link.agents.list"],
     shareDisconnect: ["share.link.agent.disconnect"],
+    members: Object.values(MEMBERS_CAPABILITIES).filter((id) => id !== MEMBERS_CAPABILITIES.leave),
     accountDeletePreview: ["account.delete.preview"],
     accountDelete: ["account.delete"],
     accessRefresh: ["access.refresh"],
@@ -2898,6 +2907,7 @@ export const cliResultSchemas = distinct(
     shareCopy: ShareCopyResult,
     shareAgents: ListRelayShareLinkAgentsResult,
     shareDisconnect: DisconnectRelayShareLinkAgentResult,
+    members: MembersResult,
     accountDeletePreview: ServerAccountDeletionPreview,
     accountDelete: ServerAccountDeleteResult,
     accessRefresh: AccessRefreshResult,

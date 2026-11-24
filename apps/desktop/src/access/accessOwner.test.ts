@@ -7,7 +7,7 @@ import {
   type ResolvedAccessObject,
 } from "./accessOwner";
 import { unknownAccess } from "./accessQuery";
-import { hasAccessChat, resolveAccessObject } from "./accessObjectResolution";
+import { accessChatKind, resolveAccessObject } from "./accessObjectResolution";
 import { deferred } from "../testing/deferred";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { AccessObjectRef } from "@dohc/workspace-contracts/access";
@@ -158,7 +158,7 @@ it("resolves current aliases after rename and reports missing objects", async ()
   const ports = {
     filePathForObjectId: file,
     locatePath: async (path: string) => ({ path, exists: true }),
-    hasChat: async () => false,
+    chatKind: async () => null,
   };
   expect(
     await resolveAccessObject(workspace, { kind: "file", objectId: "stable" }, ports),
@@ -187,7 +187,7 @@ it("resolves mount coordinates to the source share and version, never the host's
   const ports = {
     filePathForObjectId: async () => null,
     locatePath: async (path: string) => ({ path, exists: true }),
-    hasChat: async () => false,
+    chatKind: async () => null,
   };
   expect(await resolveAccessObject(workspace, ref, ports)).toMatchObject({
     ref: { path: "Notes/a.md", versionId: "snapshot" },
@@ -244,7 +244,7 @@ it("withholds received projection paths outside the pinned selector", async () =
   const ports = {
     filePathForObjectId: async () => null,
     locatePath: async (path: string) => ({ path, exists: true }),
-    hasChat: async () => false,
+    chatKind: async () => null,
   };
   expect(
     await resolveAccessObject(workspace, { ...path, path: "Private/a.md" }, ports),
@@ -253,16 +253,17 @@ it("withholds received projection paths outside the pinned selector", async () =
 it("resolves channel wire identities independently of the store's local ids", async () => {
   const store = {
     listChannelsPage: vi.fn(
-      async () => ({ channels: [{ id: "local-uuid" }], nextCursor: null }) as never,
+      async () =>
+        ({ channels: [{ id: "local-uuid", kind: "channel" }], nextCursor: null }) as never,
     ),
     getChannelWireId: vi.fn(async () => "origin-wire-id"),
   };
-  expect(await hasAccessChat("w", "origin-wire-id", store)).toBe(true);
+  expect(await accessChatKind("w", "origin-wire-id", store)).toBe("channel");
   expect(store.getChannelWireId).toHaveBeenCalledWith({
     workspaceId: "w",
     channelId: "local-uuid",
   });
-  expect(await hasAccessChat("w", "local-uuid", store)).toBe(false);
+  expect(await accessChatKind("w", "local-uuid", store)).toBeNull();
 });
 it.each([undefined, null, "other@test.dev"])(
   "returns unknown for a mount account pin %s",
@@ -285,7 +286,7 @@ it.each([undefined, null, "other@test.dev"])(
     const ports = {
       filePathForObjectId: async () => null,
       locatePath: async (path: string) => ({ path, exists: true }),
-      hasChat: async () => false,
+      chatKind: async () => null,
     };
     h.resolve.mockImplementation((_w, ref) => resolveAccessObject(workspace, ref, ports));
     for (const path of ["shared-with-me/friend", "shared-with-me/friend/Notes/a.md"]) {

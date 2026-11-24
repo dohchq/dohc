@@ -1,6 +1,7 @@
 import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
 import { reusePreparedStatements } from "./storage/preparedStatements";
 import * as workReferenceStorage from "./storage/workReferences";
+import * as workspaceMembersStorage from "./storage/workspaceMembers";
 import { prepareLiveApplications } from "./storage/liveApplicationAuthorship";
 import { prepareHostedSettlements, prepareSettlementAudits } from "./storage/hostedSettlement";
 import * as serviceActivationPublication from "./storage/serviceActivationPublication";
@@ -1783,6 +1784,55 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   hasPendingInvite(email: string): boolean {
     return sharesStorage.hasPendingInvite(this, email);
+  }
+  workspaceMemberGrantIsCurrent(
+    ...args: Parameters<SyncRelayStorage["workspaceMemberGrantIsCurrent"]>
+  ) {
+    return workspaceMembersStorage.workspaceMemberGrantIsCurrent(this, ...args);
+  }
+  workspaceRoleOf(...args: Parameters<SyncRelayStorage["workspaceRoleOf"]>) {
+    return workspaceMembersStorage.workspaceRoleOf(this, ...args);
+  }
+  readWorkspaceMembers(...args: Parameters<SyncRelayStorage["readWorkspaceMembers"]>) {
+    return workspaceMembersStorage.readWorkspaceMembers(this, ...args);
+  }
+  getWorkspaceMembershipByShare(
+    ...args: Parameters<SyncRelayStorage["getWorkspaceMembershipByShare"]>
+  ) {
+    return workspaceMembersStorage.getWorkspaceMembershipByShare(this, ...args);
+  }
+  inviteWorkspaceMember(...args: Parameters<SyncRelayStorage["inviteWorkspaceMember"]>) {
+    return workspaceMembersStorage.inviteWorkspaceMember(this, ...args);
+  }
+  setWorkspaceMemberLevel(...args: Parameters<SyncRelayStorage["setWorkspaceMemberLevel"]>) {
+    return workspaceMembersStorage.setWorkspaceMemberLevel(this, ...args);
+  }
+  setWorkspaceMemberRole(...args: Parameters<SyncRelayStorage["setWorkspaceMemberRole"]>) {
+    return workspaceMembersStorage.setWorkspaceMemberRole(this, ...args);
+  }
+  removeWorkspaceMember(...args: Parameters<SyncRelayStorage["removeWorkspaceMember"]>) {
+    return workspaceMembersStorage.removeWorkspaceMember(this, ...args);
+  }
+  letWorkspaceMemberBackIn(...args: Parameters<SyncRelayStorage["letWorkspaceMemberBackIn"]>) {
+    return workspaceMembersStorage.letWorkspaceMemberBackIn(this, ...args);
+  }
+  leaveWorkspace(...args: Parameters<SyncRelayStorage["leaveWorkspace"]>) {
+    return workspaceMembersStorage.leaveWorkspace(this, ...args);
+  }
+  endWorkspaceMembership(...args: Parameters<SyncRelayStorage["endWorkspaceMembership"]>) {
+    return workspaceMembersStorage.endWorkspaceMembership(this, ...args);
+  }
+  changeWorkspaceInviteLink(...args: Parameters<SyncRelayStorage["changeWorkspaceInviteLink"]>) {
+    return workspaceMembersStorage.changeWorkspaceInviteLink(this, ...args);
+  }
+  inviteLinkAdmitsSignUp(...args: Parameters<SyncRelayStorage["inviteLinkAdmitsSignUp"]>) {
+    return workspaceMembersStorage.inviteLinkAdmitsSignUp(this, ...args);
+  }
+  previewWorkspaceJoin(...args: Parameters<SyncRelayStorage["previewWorkspaceJoin"]>) {
+    return workspaceMembersStorage.previewWorkspaceJoin(this, ...args);
+  }
+  joinWorkspace(...args: Parameters<SyncRelayStorage["joinWorkspace"]>) {
+    return workspaceMembersStorage.joinWorkspace(this, ...args);
   }
 
   shareHasActiveGrants(shareId: string): boolean {

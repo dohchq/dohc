@@ -147,6 +147,17 @@ const SHARE_RESULTS: Record<string, CliSocketVerb> = {
   agents: "shareAgents",
   disconnect: "shareDisconnect",
 };
+const MEMBERS_RESULTS: Record<string, CliSocketVerb> = {
+  list: "members",
+  invite: "members",
+  remove: "members",
+  level: "members",
+  admin: "members",
+  member: "members",
+  "let-back-in": "members",
+  link: "members",
+  end: "members",
+};
 
 export const ACCESS_RESULTS: Record<string, CliSocketVerb> = {
   refresh: "accessRefresh",
@@ -354,6 +365,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = dist
   {
     dohc_link: { cli: "link" },
     dohc_read_share_copy: { cli: "shareCopy" },
+    dohc_members: { cli: "members" },
     dohc_list_link_agents: { cli: "shareAgents" },
     dohc_disconnect_link_agent: { cli: "shareDisconnect" },
     dohc_dataset: "what that verb returns, listed under [`dohc dataset`](#dohc-dataset).",
@@ -638,6 +650,8 @@ const NOT_SHARED_READS: Record<string, string> = {
     "The code and invite link belong to the owner's sharing. Shared profiles do not offer this read.",
   dohc_list_link_agents:
     "A link's agents belong to the owner's sharing. Shared profiles do not offer this read.",
+  dohc_members:
+    "Members belong to the original workspace and its owner. Shared profiles do not offer this tool.",
   dohc_list_live_documents:
     "Live editing belongs to the owner's sharing. Shared profiles do not offer this read.",
   dohc_list_automation_runs:
@@ -774,8 +788,14 @@ export const MCP_TOOL_GROUPS: readonly {
   {
     id: "sharing-and-agents",
     title: "Sharing and connected agents",
-    summary: "Inspect owned share codes and manage agents connected through a share link.",
-    tools: ["dohc_read_share_copy", "dohc_list_link_agents", "dohc_disconnect_link_agent"],
+    summary:
+      "Inspect owned share codes, manage agents connected through a share link, and manage the workspace's members.",
+    tools: [
+      "dohc_read_share_copy",
+      "dohc_list_link_agents",
+      "dohc_disconnect_link_agent",
+      "dohc_members",
+    ],
   },
   {
     id: "sync-and-recovery",
@@ -964,11 +984,13 @@ function verbReturns(command: string, name: string): string {
                           ? NOTICES_RESULTS[name]
                           : command === "share"
                             ? SHARE_RESULTS[name]
-                            : command === "version"
-                              ? VERSION_RESULTS[name]
-                              : command === "account"
-                                ? ACCOUNT_RESULTS[name]
-                                : undefined;
+                            : command === "members"
+                              ? MEMBERS_RESULTS[name]
+                              : command === "version"
+                                ? VERSION_RESULTS[name]
+                                : command === "account"
+                                  ? ACCOUNT_RESULTS[name]
+                                  : undefined;
   if (socketVerb !== undefined) {
     if (!Object.hasOwn(cliResultSchemas, socketVerb))
       throw new Error(`dohc ${command} ${name} has no result schema.`);
@@ -1054,6 +1076,8 @@ function commandSection(name: string, command: CliCommandSpec): string {
     checkCovered(name, Object.keys(command.verbs), Object.keys(VERSION_RESULTS));
   if (name === "sync") checkCovered(name, Object.keys(command.verbs), Object.keys(SYNC_RESULTS));
   if (name === "share") checkCovered(name, Object.keys(command.verbs), Object.keys(SHARE_RESULTS));
+  if (name === "members")
+    checkCovered(name, Object.keys(command.verbs), Object.keys(MEMBERS_RESULTS));
   if (name === "access")
     checkCovered(name, Object.keys(command.verbs), Object.keys(ACCESS_RESULTS));
   if (name === "account")

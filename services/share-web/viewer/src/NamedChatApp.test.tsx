@@ -178,7 +178,7 @@ it.each([401, 403])("explains sign-in refusal %s with the shared form", async (s
   expect(container.querySelector('[role="alert"]')?.textContent).toBe(
     status === 403
       ? "Choose a password from an emailed link before you sign in. Use Forgot your password? to get a link."
-      : "dohc could not sign you in. Check your email and password, then retry.",
+      : "dohc could not sign you in. Check your email and password, then try again.",
   );
   expect(
     Boolean(container.querySelector('[role="alert"] a[href="/account/forgot-password"]')),

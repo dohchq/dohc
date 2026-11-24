@@ -287,7 +287,35 @@ fn resume_imported(
 /// A text resolve installs its successor lineage with no base update, and the
 /// marker keeps its predecessor's base coordinate.
 fn resolved_fixture() -> Fixture {
-    let mut f = imported_fixture();
+    resolved_fixture_recording(&"e".repeat(64))
+}
+
+fn resolved_fixture_recording(record_tag: &str) -> Fixture {
+    use yrs::updates::decoder::Decode;
+    use yrs::{Map, ReadTxn, Transact};
+    let seed: Value =
+        serde_json::from_str(include_str!("../../tests/owner-source/owner-source-seed.json")).unwrap();
+    let bytes: Vec<u8> = serde_json::from_value(seed["bytes"].clone()).unwrap();
+    let doc = yrs::Doc::new();
+    doc.transact_mut()
+        .apply_update(yrs::Update::decode_v1(&bytes).unwrap())
+        .unwrap();
+    doc.get_or_insert_map(crate::ydoc::ROOT_META).insert(
+        &mut doc.transact_mut(),
+        crate::LINEAGE_EPOCH_META_KEY,
+        "e".repeat(64),
+    );
+    let tagged = doc
+        .transact()
+        .encode_state_as_update_v1(&yrs::StateVector::default());
+    let f = imported_source_fixture(Fixture::with_source(
+        seed["markdown"].as_str().unwrap().to_owned(),
+        tagged,
+    ));
+    resolved_from(f, record_tag)
+}
+
+fn resolved_from(mut f: Fixture, tag: &str) -> Fixture {
     let lineage = f.binding.lineage_claim_id.clone();
     let TxnOutcome::Committed(predecessor) = f
         .store
@@ -308,8 +336,8 @@ fn resolved_fixture() -> Fixture {
         .write_with(&NoFaults, |tx| {
             tx.execute("UPDATE replication_log SET payload_json=json_set(payload_json,'$.lineageClaimId',?1,'$.updateBlobSha256',?1)
                 WHERE origin_id='remote' AND origin_seq=7", [&predecessor]).map_err(write_sql)?;
-            tx.execute("UPDATE ydoc_docs SET lineage_parent_claim_id=?1,lineage_epoch_tag=?1", [&predecessor])
-                .map_err(write_sql)?;
+            tx.execute("UPDATE ydoc_docs SET lineage_parent_claim_id=?1,lineage_epoch_tag=?2",
+                params![predecessor, tag]).map_err(write_sql)?;
             tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported)
                 VALUES('workspace','resolver',3,'conflict.resolve',?1,1,1)", [resolve.to_string()]).map_err(write_sql)?;
             Ok::<_, ApplicationError>(())
@@ -346,6 +374,15 @@ fn a_resolved_lineage_activates_from_the_resolution_that_installed_it() {
     )
     .unwrap();
     assert!(!ack.adoption_replayed);
+}
+
+#[test]
+fn a_resolved_lineage_whose_tag_is_not_its_record_does_not_activate() {
+    let mut f = resolved_fixture_recording(&"d".repeat(64));
+    assert!(matches!(
+        capture_imported(&mut f, 1_000_000),
+        Err(ApplicationError::Collab(CollabError::LineageEpochChanged { .. }))
+    ));
 }
 
 #[test]

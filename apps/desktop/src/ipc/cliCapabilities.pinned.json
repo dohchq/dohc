@@ -316,6 +316,16 @@
     "undoAgentRun": [
       "history.agent.run.undo"
     ],
+    "members": [
+      "members.list",
+      "members.invite",
+      "members.level.set",
+      "members.role.set",
+      "members.remove",
+      "members.readmit",
+      "members.link.change",
+      "members.end"
+    ],
     "inboxList": [
       "inbox.list"
     ],
@@ -452,6 +462,15 @@
     "history agent-run-plan": "history.agent.run.plan",
     "history undo-agent-run": "history.agent.run.undo",
     "app verifyFrontend": "app.frontend.verify",
+    "members list": "members.list",
+    "members invite": "members.invite",
+    "members remove": "members.remove",
+    "members level": "members.level.set",
+    "members admin": "members.role.set",
+    "members member": "members.role.set",
+    "members let-back-in": "members.readmit",
+    "members link": "members.link.change",
+    "members end": "members.end",
     "inbox list": "inbox.list",
     "inbox add": "inbox.add",
     "inbox archive": "inbox.archive",

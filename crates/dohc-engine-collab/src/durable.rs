@@ -3268,6 +3268,22 @@ struct MarkerRow {
     base_relay_confirmed_absent: bool,
 }
 
+pub(crate) fn lineage_epoch_in(
+    conn: &Connection,
+    key: &DocKey,
+    lineage: &str,
+) -> Result<Option<String>, CollabError> {
+    conn.query_row(
+        "SELECT lineage_epoch_tag FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 \
+         UNION ALL SELECT epoch_tag FROM ydoc_inactive_lineages WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 LIMIT 1",
+        rusqlite::params![key.workspace_id, key.version_id, key.object_id, lineage],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
+    .map_err(map_sql)
+}
+
 /// Read a doc's marker from the caller's connection. Supply the existing
 /// transaction when the marker must agree with another read or mutation.
 pub fn read_marker_in(conn: &Connection, key: &DocKey) -> Result<Option<Marker>, CollabError> {

@@ -24,9 +24,12 @@ import {
 } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
 import {
+  chatSideFor,
   chatSideOf,
   filterOpForShareAppend,
   isGroupSelector,
+  isWorkspaceSelector,
+  type AnyShareSelector,
   type ChatShareThreadResolver,
   type ThreadFileBinding,
 } from "./shareFilter";
@@ -102,10 +105,18 @@ export function createNamedShareTransportRoutes(
               actor.userId,
               parseString(clientOrigin, "originId", MAX_ORIGIN_ID_CHARS),
             );
-      const chatSide = chatSideOf(share.selector);
-      if (channelWireId !== null && (!chatSide || chatSide.channelWireId !== channelWireId)) {
-        throw notFound();
-      }
+      const channelKinds = {
+        channelKind: (id: string) => storage.findChannelCreateKind(share.workspaceId, id),
+      };
+      // What this pull reads: the whole grant, or, when it names a channel,
+      // that channel. A workspace share's Group pull reads that Group alone.
+      const pullSelector = (selector: AnyShareSelector): AnyShareSelector => {
+        if (channelWireId === null) return selector;
+        const side = chatSideFor(selector, channelWireId, channelKinds);
+        if (!side) throw notFound();
+        return isWorkspaceSelector(selector) ? side : selector;
+      };
+      const readSelector = pullSelector(share.selector);
       const since = parseCursor(url.searchParams.get("since"));
       const limit = parseLimit(url.searchParams.get("limit"));
       const scan = url.searchParams.get("scan");
@@ -114,7 +125,7 @@ export function createNamedShareTransportRoutes(
       // channel and gets its chat; the folder mount names nothing and gets
       // its files. Each client refuses the other half's ops, so one page
       // carrying both would only produce refusals.
-      const half = isGroupSelector(share.selector)
+      const half = isGroupSelector(readSelector)
         ? channelWireId !== null
           ? ("chat" as const)
           : ("files" as const)
@@ -124,7 +135,7 @@ export function createNamedShareTransportRoutes(
       let page = filteredLogPage(
         share.workspaceId,
         share.shareId,
-        share.selector,
+        readSelector,
         since,
         limit,
         "authenticated",
@@ -134,32 +145,31 @@ export function createNamedShareTransportRoutes(
         0,
         scan === "page" ? limit : undefined,
       );
-      // The selector that filtered the page being returned. A held read
-      // refilters with the grant's level at each wake.
-      let pageSelector = share.selector;
+      // The selector that filtered the page being returned.
+      let pageSelector = readSelector;
       const hold = parseLinkLogHold(url.searchParams.get("hold"));
       if (hold > 0 && page.ops.length === 0 && !page.hasMore && page.nextCursor === since) {
         const deadline = Date.now() + hold;
         let scanSince = since;
         const readPage = (): typeof page => {
           const fresh = requireShareAction(route.shareId, actor.userId, "read");
+          // A changed level or role ends the hold now; the final check below would refuse its page anyway.
           if (
             fresh.share.workspaceId !== share.workspaceId ||
-            (channelWireId !== null &&
-              chatSideOf(fresh.effectiveSelector)?.channelWireId !== channelWireId)
+            JSON.stringify(fresh.effectiveSelector) !== JSON.stringify(authorized.effectiveSelector)
           )
             throw notFound();
           const next = filteredLogPage(
             share.workspaceId,
             share.shareId,
-            fresh.effectiveSelector,
+            pullSelector(fresh.effectiveSelector),
             scanSince,
             limit,
             "authenticated",
             half,
             ["user", actor.userId],
           );
-          pageSelector = fresh.effectiveSelector;
+          pageSelector = pullSelector(fresh.effectiveSelector);
           return next;
         };
         while (!request.signal.aborted && Date.now() < deadline) {
@@ -209,7 +219,7 @@ export function createNamedShareTransportRoutes(
       const latestSelector = JSON.stringify(latest.effectiveSelector);
       if (
         latestSelector !== JSON.stringify(authorized.effectiveSelector) ||
-        latestSelector !== JSON.stringify(pageSelector)
+        JSON.stringify(pullSelector(latest.effectiveSelector)) !== JSON.stringify(pageSelector)
       )
         throw notFound();
       return jsonResponse({
@@ -316,13 +326,20 @@ export function createNamedShareTransportRoutes(
           // path this relay proved — never the pusher's own string.
           const created = JSON.parse(op.payloadJson) as {
             threadId?: unknown;
+            channelWireId?: unknown;
             linkedPath?: unknown;
           };
           const threadId = created.threadId;
-          const chatSideForBinding = chatSideOf(share.selector);
+          // A workspace share's thread sits in the Group the filter just
+          // admitted, or on a file when it names none.
+          const boundChannel = isWorkspaceSelector(share.selector)
+            ? typeof created.channelWireId === "string"
+              ? created.channelWireId
+              : null
+            : (chatSideOf(share.selector)?.channelWireId ?? null);
           if (typeof threadId === "string" && threadId.length > 0) {
-            if (chatSideForBinding) {
-              pendingThreadBindings.set(threadId, chatSideForBinding.channelWireId);
+            if (boundChannel !== null) {
+              pendingThreadBindings.set(threadId, boundChannel);
             } else if (typeof created.linkedPath === "string" && created.linkedPath.length > 0) {
               // The accept door converts the binding.
               //

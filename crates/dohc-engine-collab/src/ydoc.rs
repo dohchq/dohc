@@ -818,15 +818,29 @@ impl Ydoc {
     }
 
     pub(crate) fn validate_public_baseline(&self, bytes: &[u8]) -> Result<(), CollabError> {
-        self.validate_public_baseline_as(bytes, false)
+        self.validate_lineage_baseline(bytes, false, None)
     }
 
     /// Schema/budget checks only. Exact output also requires the strict reader proof.
     pub(crate) fn validate_reader_baseline(&self, bytes: &[u8]) -> Result<(), CollabError> {
-        self.validate_public_baseline_as(bytes, true)
+        self.validate_lineage_baseline(bytes, true, None)
     }
 
-    fn validate_public_baseline_as(&self, bytes: &[u8], reader: bool) -> Result<(), CollabError> {
+    pub(crate) fn validate_lineage_baseline(
+        &self,
+        bytes: &[u8],
+        reader: bool,
+        epoch: Option<&str>,
+    ) -> Result<(), CollabError> {
+        if let Some(expected) = epoch {
+            let observed = self.lineage_epoch_tag().unwrap_or_default();
+            if observed != expected {
+                return Err(CollabError::LineageEpochChanged {
+                    expected: expected.to_owned(),
+                    observed,
+                });
+            }
+        }
         let meta = self.doc.get_or_insert_map(ROOT_META);
         self.doc.get_or_insert_map(ROOT_FRONTMATTER);
         let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
@@ -876,7 +890,9 @@ impl Ydoc {
                     (MARKDOWN_SOURCE_READER_META_KEY, Out::Any(Any::Number(1.0)))
                 );
             let sequence_version = sequence_note && key == "schemaVersion";
-            if !valid && !item_record && !reader_meta && !sequence_version {
+            let lineage_epoch = key == LINEAGE_EPOCH_META_KEY
+                && matches!(&value, Out::Any(Any::String(tag)) if epoch == Some(tag.as_ref()));
+            if !valid && !item_record && !reader_meta && !sequence_version && !lineage_epoch {
                 return Err(invalid());
             }
         }
@@ -1581,15 +1597,12 @@ impl Ydoc {
             return Err(CollabError::MarkdownNotRepresentable);
         }
         drop(txn);
-        // Public schema validation excludes the engine's private lineage tag.
-        let public = Ydoc::wire();
-        public.apply(&candidate.encode_full_state())?;
-        public
-            .doc
-            .get_or_insert_map(ROOT_META)
-            .remove(&mut public.doc.transact_mut(), LINEAGE_EPOCH_META_KEY);
-        public.validate_public_baseline(&public.encode_full_state())?;
-        public.project(ContentKind::Richdoc)?;
+        candidate.validate_lineage_baseline(
+            &candidate.encode_full_state(),
+            false,
+            epoch.as_deref(),
+        )?;
+        candidate.project(ContentKind::Richdoc)?;
         Ok(candidate)
     }
 

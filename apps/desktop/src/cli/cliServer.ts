@@ -496,6 +496,9 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
       import("@dohc/workspace-contracts/share-link-agents").DisconnectRelayShareLinkAgentResult
     >;
   };
+  members?(
+    request: import("@dohc/cli/members").OwnerMembersRequest,
+  ): Promise<import("@dohc/cli/members").MembersResult>;
   access?: {
     refresh(): Promise<import("@dohc/workspace-contracts/access").AccessRefreshResult>;
     object(
@@ -2538,6 +2541,7 @@ const HAND_WRITTEN_SHARE_RULES: {
   shareCopy: "owner",
   shareAgents: "owner",
   shareDisconnect: "owner",
+  members: "owner",
   keptCopies: "owner",
   saveKeptCopy: "owner",
   keepOutsideChange: "owner",
@@ -3287,6 +3291,12 @@ async function dispatchWorkspace(
         grantId: request.args.grantId,
         connectionId: request.args.connectionId,
       });
+    case "members":
+      if (context.readOnly || !context.members)
+        throw new CliCommandError(
+          "Members requires the original workspace and its signed-in owner account.",
+        );
+      return context.members(request.args.request);
     case "accessRefresh":
       if (!context.access) throw new CliCommandError("Access observations are unavailable.");
       return context.access.refresh();

@@ -1000,7 +1000,9 @@ export interface SyncRelayStorage {
     repeated: string[];
   };
   noticeShareReceived(input: import("./notices").NoticeShareReceivedInput): void;
-  pendingShareNotices(recipientUserId: string): { grantId: string; granterUserId: string }[];
+  pendingShareNotices(
+    recipientUserId: string,
+  ): { grantId: string; granterUserId: string; showsGranterEmail: boolean }[];
   readAutomationHost(
     input: import("./automationHosts").AutomationHostReadInput,
   ): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
@@ -1867,6 +1869,22 @@ export interface SyncRelayStorage {
   // Whether a current pending invite is addressed to `email`, matched on the
   // same normalized address a claim uses.
   hasPendingInvite(email: string): boolean;
+  // Workspace members (storage/workspaceMembers.ts).
+  workspaceMemberGrantIsCurrent: WorkspaceMembersMethod<"workspaceMemberGrantIsCurrent">;
+  workspaceRoleOf: WorkspaceMembersMethod<"workspaceRoleOf">;
+  readWorkspaceMembers: WorkspaceMembersMethod<"readWorkspaceMembers">;
+  getWorkspaceMembershipByShare: WorkspaceMembersMethod<"getWorkspaceMembershipByShare">;
+  inviteWorkspaceMember: WorkspaceMembersMethod<"inviteWorkspaceMember">;
+  setWorkspaceMemberLevel: WorkspaceMembersMethod<"setWorkspaceMemberLevel">;
+  setWorkspaceMemberRole: WorkspaceMembersMethod<"setWorkspaceMemberRole">;
+  removeWorkspaceMember: WorkspaceMembersMethod<"removeWorkspaceMember">;
+  letWorkspaceMemberBackIn: WorkspaceMembersMethod<"letWorkspaceMemberBackIn">;
+  leaveWorkspace: WorkspaceMembersMethod<"leaveWorkspace">;
+  endWorkspaceMembership: WorkspaceMembersMethod<"endWorkspaceMembership">;
+  changeWorkspaceInviteLink: WorkspaceMembersMethod<"changeWorkspaceInviteLink">;
+  inviteLinkAdmitsSignUp: WorkspaceMembersMethod<"inviteLinkAdmitsSignUp">;
+  previewWorkspaceJoin: WorkspaceMembersMethod<"previewWorkspaceJoin">;
+  joinWorkspace: WorkspaceMembersMethod<"joinWorkspace">;
   shareHasActiveGrants(shareId: string): boolean;
   getShareLabels(shareId: string, reader: ShareLabelReader): ShareLabels;
   setShareLabels(shareId: string, labels: ShareLabels, updatedAtMs: number): void;
@@ -2236,3 +2254,9 @@ export interface LiveTicketStoragePolicy {
   readonly expiredTicketCleanupBatchSize: number;
   readonly now: () => number;
 }
+
+type WorkspaceMembersModule = typeof import("./workspaceMembers");
+type WorkspaceMembersMethod<K extends keyof WorkspaceMembersModule> =
+  WorkspaceMembersModule[K] extends (storage: never, ...args: infer A) => infer R
+    ? (...args: A) => R
+    : never;

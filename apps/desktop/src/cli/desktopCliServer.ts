@@ -170,6 +170,11 @@ interface DesktopCliServerDependencies<State> {
       input: ShareLinkAgentDisconnectInput,
     ): Promise<DisconnectRelayShareLinkAgentResult>;
   };
+  /** The Members page's actions (workspaceMembersActions.ts). */
+  workspaceMembers?(
+    operation: WorkspaceAuthorityOperation<RegistryEntry, State>,
+    request: import("@dohc/cli/members").MembersRequest,
+  ): Promise<import("@dohc/cli/members").MembersResult>;
   /** Catches a live page, or a folder holding one, up with the server before an agent moves it. */
   beforeMove?(workspaceId: string, storedSpelling: () => Promise<string>): Promise<void>;
   /** The desktop engine's refused live edits, and its Save recovery copy, Try again and Stop again for them. */
@@ -564,6 +569,16 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
                   return dependencies.shareLinkAgents!.disconnect(operation, input);
                 }),
             },
+          }
+        : {}),
+      ...(dependencies.workspaceMembers
+        ? {
+            members: (request: import("@dohc/cli/members").OwnerMembersRequest) =>
+              withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) => {
+                if (operation.signal !== publicationAttachment || publicationAttachment.aborted)
+                  throw new Error("This workspace changed while this ran. Try again.");
+                return dependencies.workspaceMembers!(operation, request);
+              }),
           }
         : {}),
       ...(dependencies.access ? { access: dependencies.access(workspace.workspaceId) } : {}),
