@@ -15,16 +15,19 @@ export function WarmEditor() {
   const [gone, setGone] = useState(false);
   useEffect(() => {
     if (!gone) return;
-    // The editor's files may have been cleared meanwhile; asking for them again puts them back.
-    const again = () => {
-      setGone(false);
-      setLoaded(false);
-      void editorHtmlUri().then((next) => {
-        setUri(next);
-        setLives((count) => count + 1);
-      });
-    };
-    if (AppState.currentState === "active") return again();
+    // The editor's files may have been cleared meanwhile; asking for them again puts them back. If that fails, as on a
+    // full disk, the next return to the front tries again.
+    const again = () =>
+      void editorHtmlUri().then(
+        (next) => {
+          setUri(next);
+          setLoaded(false);
+          setLives((count) => count + 1);
+          setGone(false);
+        },
+        () => undefined,
+      );
+    if (AppState.currentState === "active") again();
     const subscription = AppState.addEventListener("change", (next) => {
       if (next === "active") again();
     });
