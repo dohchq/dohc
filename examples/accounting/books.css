@@ -1,0 +1,153 @@
+.books-panel {
+  margin-top: 16px;
+}
+.books-h2 {
+  margin: 0;
+  font-size: 1.125rem;
+}
+.books-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+}
+.books-controls > * {
+  min-width: 140px;
+}
+.books-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+.books-table th,
+.books-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--kit-line);
+  text-align: left;
+  vertical-align: middle;
+}
+.books-table thead th {
+  color: var(--kit-muted);
+  font-weight: 500;
+}
+.books-form-table td {
+  padding: 4px;
+}
+.books-num {
+  text-align: right !important;
+  white-space: nowrap;
+}
+.books-amount {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.books-out {
+  color: var(--kit-danger);
+}
+.books-strong {
+  font-weight: 600;
+}
+.books-muted {
+  color: var(--kit-muted);
+}
+.books-code {
+  color: var(--kit-muted);
+  font-family: var(--kit-font-mono);
+  font-size: 0.8125rem;
+  margin-right: 4px;
+}
+.books-date {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.books-hash {
+  font-family: var(--kit-font-mono);
+  font-size: 0.75rem;
+  color: var(--kit-muted);
+}
+.books-section th,
+.books-section td {
+  padding-top: 14px;
+  font-weight: 600;
+  color: var(--kit-ink);
+}
+.books-total td {
+  font-weight: 600;
+  border-bottom-width: 1px;
+}
+.books-grand td {
+  font-weight: 700;
+  border-top: 2px solid var(--kit-ink);
+  border-bottom: 3px double var(--kit-ink);
+}
+.books-balanced {
+  margin: 12px 0 0;
+}
+.books-statement-head {
+  text-align: center;
+  margin-bottom: 12px;
+}
+.books-statement-head h2 {
+  margin: 2px 0;
+  font-size: 1.25rem;
+}
+.books-statement-head p {
+  margin: 0;
+}
+.books-invoice {
+  display: grid;
+  gap: 20px;
+  max-width: 820px;
+  margin: 0 auto;
+}
+.books-invoice header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+.books-invoice h2 {
+  margin: 0;
+}
+.books-invoice p {
+  margin: 2px 0;
+}
+.books-receipt {
+  max-width: 100%;
+  max-height: 420px;
+  border: 1px solid var(--kit-line);
+  border-radius: var(--kit-radius-sm);
+}
+
+@media print {
+  .books-no-print,
+  .kit-tabs,
+  button {
+    display: none !important;
+  }
+  .books-panel {
+    margin: 0;
+  }
+  html,
+  body,
+  .kit-card {
+    background: #fff !important;
+    color: #000 !important;
+    box-shadow: none !important;
+    border: 0 !important;
+  }
+  .books-table th,
+  .books-table td {
+    border-color: #999;
+  }
+  .books-muted,
+  .books-code {
+    color: #444 !important;
+  }
+  .books-table tr {
+    break-inside: avoid;
+  }
+}
+.books-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}

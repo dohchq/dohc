@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "entryPath": "../portal.tsx",
+  "inputs": [
+    "../portal.tsx",
+    "../shared.tsx",
+    "../books.css"
+  ],
+  "dataset": {
+    "kind": "dataset",
+    "datasetPath": "accounting/dataset.json",
+    "operations": [
+      "booksInfo",
+      "trialBalance",
+      "incomeStatement",
+      "balanceSheet",
+      "accountLedger"
+    ]
+  }
+}
