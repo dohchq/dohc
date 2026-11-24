@@ -3331,6 +3331,109 @@ pub fn read_marker_in(conn: &Connection, key: &DocKey) -> Result<Option<Marker>,
     .transpose()
 }
 
+/// The `replication_log` rows that install a resolution's successor for
+/// `key` (`?1` workspace, `?2` version, `?3` object).
+pub const LOGGED_SUCCESSORS: &str = "workspace_id=?1 AND op_kind='conflict.resolve'     AND apply_disposition='applied' AND json_extract(payload_json,'$.targetVersionId')=?2     AND json_extract(payload_json,'$.transition.result.objectId')=?3";
+
+/// The logged row that introduced an exact lineage: its base-state update, or
+/// the resolution that installed it as a successor. Only a base update's
+/// relay position is the marker's to know.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineageOrigin {
+    pub origin_id: String,
+    pub origin_seq: i64,
+    pub relay_seq: Option<i64>,
+}
+
+/// Whether the row at `origin_id`/`origin_seq` introduced `lineage_claim_id`
+/// for `key`, and with `imported` came back from the relay.
+pub fn is_lineage_origin_in(
+    conn: &Connection,
+    key: &DocKey,
+    imported: bool,
+    content_kind: ContentKind,
+    lineage_claim_id: &str,
+    origin_id: &str,
+    origin_seq: i64,
+) -> Result<bool, CollabError> {
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM replication_log WHERE workspace_id=?1 AND origin_id=?4 AND origin_seq=?5 AND (?8=0 OR imported=1)              AND ((op_kind='ydoc.update' AND apply_disposition='applied'                AND json_extract(payload_json,'$.versionId')=?2 AND json_extract(payload_json,'$.objectId')=?3                AND json_extract(payload_json,'$.lineageClaimId')=?6 AND json_extract(payload_json,'$.updateBlobSha256')=?6                AND json_extract(payload_json,'$.contentKind')=?7 AND json_extract(payload_json,'$.isBaseState')=1)              OR ({LOGGED_SUCCESSORS}                AND json_extract(payload_json,'$.lineageTransition.successor.lineageClaimId')=?6                AND json_extract(payload_json,'$.lineageTransition.successor.updateBlobSha256')=?6                AND json_extract(payload_json,'$.lineageTransition.successor.contentKind')=?7)))"
+        ),
+        rusqlite::params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            origin_id,
+            origin_seq,
+            lineage_claim_id,
+            content_kind.as_str(),
+            imported
+        ],
+        |row| row.get(0),
+    )
+    .map_err(map_sql)
+}
+
+/// The row that introduced `marker`'s exact lineage, or `None` until it has
+/// come back from the relay.
+pub fn lineage_origin_in(
+    conn: &Connection,
+    key: &DocKey,
+    marker: &Marker,
+) -> Result<Option<LineageOrigin>, CollabError> {
+    let Some(lineage) = marker.lineage_claim_id.as_deref() else {
+        return Ok(None);
+    };
+    if marker.lineage_claim_status != LineageClaimStatus::Exact {
+        return Ok(None);
+    }
+    if let Some(parent) = marker.lineage_parent_claim_id.as_deref() {
+        return conn
+            .query_row(
+                &format!(
+                    "SELECT origin_id,origin_seq FROM replication_log WHERE {LOGGED_SUCCESSORS} AND imported=1                      AND json_extract(payload_json,'$.lineageTransition.predecessorClaimId')=?4                      AND json_extract(payload_json,'$.lineageTransition.successor.lineageClaimId')=?5                      AND json_extract(payload_json,'$.lineageTransition.successor.updateBlobSha256')=?5                      AND json_extract(payload_json,'$.lineageTransition.successor.contentKind')=?6                      ORDER BY origin_id,origin_seq LIMIT 1"
+                ),
+                rusqlite::params![
+                    key.workspace_id,
+                    key.version_id,
+                    key.object_id,
+                    parent,
+                    lineage,
+                    marker.content_kind.as_str()
+                ],
+                |row| {
+                    Ok(LineageOrigin {
+                        origin_id: row.get(0)?,
+                        origin_seq: row.get(1)?,
+                        relay_seq: None,
+                    })
+                },
+            )
+            .optional()
+            .map_err(map_sql);
+    }
+    let (Some(origin_id), Some(origin_seq)) =
+        (marker.base_origin_id.as_deref(), marker.base_origin_seq)
+    else {
+        return Ok(None);
+    };
+    Ok(is_lineage_origin_in(
+        conn,
+        key,
+        true,
+        marker.content_kind,
+        lineage,
+        origin_id,
+        origin_seq,
+    )?
+    .then(|| LineageOrigin {
+        origin_id: origin_id.to_owned(),
+        origin_seq,
+        relay_seq: marker.base_relay_seq,
+    }))
+}
+
 /// The sha of the content the last settle materialized (or `None` if never
 /// settled) — the durable settle-handoff marker the local-only close guard reads.
 /// Full durable admission check for a remote update without applying it:

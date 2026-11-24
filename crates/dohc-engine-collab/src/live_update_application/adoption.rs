@@ -1570,7 +1570,6 @@ fn read_adoption_source_metadata(
             || source.object_id != b.object_id
             || source.lineage_claim_id != b.lineage_claim_id
             || source.current_path != b.current_path
-            || source.base_relay_seq > source.committed_cursor
         {
             return Err(ApplicationError::Conflict);
         }
@@ -1582,21 +1581,24 @@ fn read_adoption_source_metadata(
         integer(source.native_head_sequence, 0, SAFE)?;
         integer(source.committed_cursor, 0, SAFE)?;
         integer(source.base_origin_seq, 0, SAFE)?;
-        integer(source.base_relay_seq, 0, source.committed_cursor)?;
+        if let Some(relay_seq) = source.base_relay_seq {
+            integer(relay_seq, 0, source.committed_cursor)?;
+        }
         if source.full_state_byte_length < 2
             || source.full_state_byte_length > crate::limits::MAX_YDOC_UPDATE_BYTES
         {
             return Err(ApplicationError::Corrupt);
         }
-        let valid_base: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3
-             AND imported=1 AND apply_disposition='applied' AND op_kind='ydoc.update'
-             AND json_extract(payload_json,'$.versionId')=?4 AND json_extract(payload_json,'$.objectId')=?5
-             AND json_extract(payload_json,'$.lineageClaimId')=?6 AND json_extract(payload_json,'$.updateBlobSha256')=?6
-             AND json_extract(payload_json,'$.contentKind')='richdoc' AND json_extract(payload_json,'$.isBaseState')=1)",
-            params![b.workspace_id,source.base_origin_id,source.base_origin_seq,b.main_version_id,b.object_id,b.lineage_claim_id],
-            |row|row.get(0)).map_err(read_sql)?;
-        if !valid_base {
+        let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
+        if !durable::is_lineage_origin_in(
+            conn,
+            &key,
+            true,
+            ContentKind::Richdoc,
+            &b.lineage_claim_id,
+            &source.base_origin_id,
+            source.base_origin_seq,
+        )? {
             return Err(ApplicationError::Conflict);
         }
         let retained_length: i64 = conn

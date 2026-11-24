@@ -2671,7 +2671,7 @@ mod tests {
                 committed_cursor: 0,
                 base_origin_id: "origin".into(),
                 base_origin_seq: 0,
-                base_relay_seq: 0,
+                base_relay_seq: Some(0),
                 source_moment_id: "moment".into(),
                 source_digest: lineage.clone(),
                 source_byte_length: 0,
