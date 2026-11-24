@@ -501,8 +501,7 @@ async function proveSettlementRecord(
   }
   require(record.restoreOperationId === null, "native-record");
   for (const event of events)
-    require(event.restoreOperationId === null &&
-      isDeepStrictEqual(event.metadata.accepted.binding, binding), "accepted-event-binding");
+    require(isDeepStrictEqual(event.metadata.accepted.binding, binding), "accepted-event-binding");
   const cut = storage.db
     .prepare(`SELECT * FROM ${SETTLEMENT_CUTS} WHERE journal_cursor=?`)
     .get(terminal);

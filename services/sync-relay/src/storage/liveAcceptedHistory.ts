@@ -208,8 +208,7 @@ export function readAcceptedHistoryInterval(
   require(from === 0 || preceding);
   let canonicalVersion = preceding?.canonical_version ?? 1;
   require(canonicalVersion === 1 || canonicalVersion === 2);
-  const events: { metadata: AdmittedLiveUpdate["metadata"]; restoreOperationId: string | null }[] =
-    [];
+  const events: { metadata: AdmittedLiveUpdate["metadata"] }[] = [];
   for (let index = 0; index < count; index++) {
     const header = storage.db
       .prepare(`SELECT journal_cursor FROM ${LIVE_JOURNAL_TABLE}
@@ -221,28 +220,20 @@ export function readAcceptedHistoryInterval(
     require(canonicalVersion !== 2 || metadata.canonicalVersion === 2);
     canonicalVersion = metadata.canonicalVersion ?? 1;
     require(raw.relay_database_namespace === namespace);
-    const restoreOperationId =
-      raw.restore_operation_id === null
-        ? null
-        : parseLiveUpdateIdentifier(raw.restore_operation_id);
-    if (raw.validation_checkpoint_sha256 !== null || restoreOperationId !== null) {
+    require(raw.restore_operation_id === null);
+    if (raw.validation_checkpoint_sha256 !== null)
       assertJournalCheckpointPosition(storage.db, {
         admitted: { metadata },
-        restoreOperationId,
         history: { namespace },
-        checkpoint:
-          raw.validation_checkpoint_sha256 === null
-            ? null
-            : { digest: parseLiveUpdateDigest(raw.validation_checkpoint_sha256) },
+        checkpoint: { digest: parseLiveUpdateDigest(raw.validation_checkpoint_sha256) },
       });
-    }
     evidenceDigest = nextVersionedAcceptedHistoryDigest(evidenceDigest, ++eventCount, metadata);
     require(
       raw.accepted_event_count === eventCount && raw.accepted_evidence_digest === evidenceDigest,
     );
     terminal = metadata.accepted.receipt;
     cursor = terminal.journalCursor;
-    events.push({ metadata, restoreOperationId });
+    events.push({ metadata });
   }
   require(
     eventCount === accepted.eventCount &&

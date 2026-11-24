@@ -1351,8 +1351,7 @@ export class LiveCommittedDeliveryStore {
       integrity(
         count <= 4095 &&
           hasCheckpoint ===
-            (row.restoreOperationId !== null ||
-              row.admitted.metadata.checkpointCoverage !== undefined ||
+            (row.admitted.metadata.checkpointCoverage !== undefined ||
               liveJournalCheckpointDue(count, bytes)),
       );
       position = { count, bytes };

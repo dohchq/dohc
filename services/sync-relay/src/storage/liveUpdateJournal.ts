@@ -266,7 +266,6 @@ export function liveJournalSeedClientId(
 interface DecodedJournalRow {
   admitted: AdmittedLiveUpdate;
   checkpoint: { digest: string; bytes: Uint8Array } | null;
-  restoreOperationId: string | null;
   history: { namespace: string; eventCount: number; evidenceDigest: string; metadataBytes: number };
 }
 export function decodeJournalMetadata(
@@ -433,14 +432,11 @@ function journalRowWithBinding(
     evidenceDigest: parseLiveUpdateDigest(raw.accepted_evidence_digest),
     metadataBytes: authorityInteger(raw.accepted_metadata_bytes, 1),
   };
-  const restoreOperationId =
-    raw.restore_operation_id === null ? null : parseLiveUpdateIdentifier(raw.restore_operation_id);
-  journalIntegrity(restoreOperationId === null || checkpoint !== null);
+  journalIntegrity(raw.restore_operation_id === null);
   return {
     admitted: { metadata, updateBytes: journalBytes(raw.update_bytes) },
     checkpoint,
     history,
-    restoreOperationId,
   };
 }
 export function verifyJournalHistoryRow(db: SqliteDb, row: DecodedJournalRow): void {
@@ -489,11 +485,9 @@ export function assertJournalCheckpointPosition(
   row: {
     admitted: { metadata: AdmittedLiveUpdate["metadata"] };
     checkpoint: { digest: string } | null;
-    restoreOperationId: string | null;
     history: { namespace: string };
   },
 ): { count: number; bytes: number } {
-  const restored = row.restoreOperationId !== null;
   const { binding, receipt } = row.admitted.metadata.accepted;
   const predecessor = db
     .prepare(
@@ -503,7 +497,7 @@ export function assertJournalCheckpointPosition(
   if (predecessor)
     journalIntegrity(
       predecessor.current_path === binding.currentPath &&
-        (restored || predecessor.restore_fence_generation === binding.restoreFenceGeneration),
+        predecessor.restore_fence_generation === binding.restoreFenceGeneration,
     );
   const previous = db
     .prepare(`SELECT journal_cursor FROM ${LIVE_JOURNAL_TABLE} WHERE ${JOURNAL_DOCUMENT_WHERE}
@@ -530,7 +524,7 @@ export function assertJournalCheckpointPosition(
     const due = liveJournalCheckpointDue(index + 1, bytes) || authorDue;
     const hasCheckpoint = raw.has_checkpoint_bytes === 1;
     journalIntegrity(hasCheckpoint === (raw.has_checkpoint_digest === 1));
-    journalIntegrity((due || (restored && index === segment.length - 1)) === hasCheckpoint);
+    journalIntegrity(due === hasCheckpoint);
     if (index < segment.length - 1) journalIntegrity(!due);
   }
   return { count: segment.length, bytes };
