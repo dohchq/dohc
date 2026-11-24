@@ -242,6 +242,9 @@ export const cacheScope = (signIn: Pick<SignIn, "origin" | "userId">, workspaceI
 const listScope = (signIn: Pick<SignIn, "origin" | "userId">) =>
   JSON.stringify([signIn.origin, signIn.userId]);
 
+const choiceScope = (signIn: Pick<SignIn, "origin" | "userId">) =>
+  JSON.stringify([signIn.origin, signIn.userId, "chosen"]);
+
 export function createReadCache(files?: CacheRows): ReadCache {
   const scopes = new Map<string, Map<string, Cached>>();
   // A drop moves its scope's generation on, and a clear every scope's, so a restore that a delete overtakes adds nothing.
@@ -337,6 +340,13 @@ export function createReadCache(files?: CacheRows): ReadCache {
             if (!kept.has(known)) forget(known);
           void files.keep([...kept]);
         },
+        loadChosen() {
+          const expected = epoch;
+          return files
+            .readList(choiceScope(signIn))
+            .then((found) => (epoch === expected && typeof found === "string" ? found : null));
+        },
+        chose: (workspaceId) => void files.writeList(choiceScope(signIn), workspaceId),
       };
     },
     flush: () => void files?.flush(),
@@ -368,6 +378,8 @@ export interface WorkspaceData {
   state<T>(view: View<T>): ViewState<T>;
   /** Opens the view while any listener stays: it reads unless it already shows a fresh value. */
   subscribe(view: View<unknown>, listener: () => void): () => void;
+  /** Reads the view now, as a screen about to open it would, unless it shows a fresh value or a read is on its way. */
+  prefetch(view: View<unknown>): void;
   retry(view: View<unknown>): void;
   feed(): FeedState;
   subscribeFeed(listener: () => void): () => void;
@@ -509,6 +521,9 @@ export function createWorkspaceData(options: {
     }
     return found;
   }
+
+  const due = (target: Entry) =>
+    live() && !target.state.loading && (target.state.value === null || target.stale);
 
   function set(target: Entry, state: ViewState<unknown>) {
     target.state = state;
@@ -664,14 +679,12 @@ export function createWorkspaceData(options: {
     subscribe(view, listener) {
       const target = entry(view);
       target.listeners.add(listener);
-      if (
-        target.listeners.size === 1 &&
-        live() &&
-        !target.state.loading &&
-        (target.state.value === null || target.stale)
-      )
-        read(target);
+      if (target.listeners.size === 1 && due(target)) read(target);
       return () => void target.listeners.delete(listener);
+    },
+    prefetch(view) {
+      const target = entry(view);
+      if (due(target)) read(target);
     },
     retry(view) {
       if (hasGone) return options.reopen?.();

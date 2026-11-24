@@ -2,7 +2,7 @@ import { appWords } from "@dohc/interface-words/apps";
 import type { ServerProblemKind } from "@dohc/interface-words/account";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { ChevronRight, FileCode, ShieldCheck, ShieldQuestion } from "lucide-react-native";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useAccount } from "../account/AccountProvider";
 import { Button } from "../account/Button";
@@ -64,8 +64,11 @@ function Review({ apps, publicationId }: { apps: WorkspaceApps; publicationId: s
   useEffect(() => () => leaving.abort(), [leaving]);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<{ text: string; retry(): void } | null>(null);
+  const listed = useSyncExternalStore(apps.subscribe, apps.state).apps?.find(
+    (app) => app.publicationId === publicationId,
+  );
   const review = state.value;
-  const name = review ? appName(review) : "";
+  const name = review ? appName(review) : listed ? appName(listed) : "";
 
   // One action at a time. Its failure's Try again repeats it; a changed app's reads the review again.
   const act = async (failed: string, run: (app: AppReview) => Promise<unknown>) => {
@@ -121,7 +124,10 @@ function Review({ apps, publicationId }: { apps: WorkspaceApps; publicationId: s
         onRetry={load}
       />
     ) : (
-      <HoldRow />
+      <>
+        {name ? <Stack.Screen options={{ title: name }} /> : null}
+        <HoldRow />
+      </>
     );
   const Mark = review.approved ? ShieldCheck : ShieldQuestion;
   return (
