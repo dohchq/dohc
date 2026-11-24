@@ -52,7 +52,6 @@ export function WarmEditor() {
           originWhitelist={["file://*"]}
           allowingReadAccessToURL={editorFolderUri}
           allowFileAccess
-          injectedJavaScriptBeforeContentLoaded="window.__dohcWarm = true; true;"
           onLoad={() => setLoaded(true)}
           onRenderProcessGone={restart}
           onContentProcessDidTerminate={restart}
