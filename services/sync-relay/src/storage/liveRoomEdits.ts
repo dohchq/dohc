@@ -162,8 +162,9 @@ export function appendLiveRoomEdit(
         )
         .get(...params, clientId);
       // An untied id the note has content under is the sender's only when every journal row with
-      // its content came in under the sender's access. Otherwise it is the seed's or the engine's.
-      if (!prior && inNote && !journaledUnder(storage, params, clientId, access))
+      // its content came in under the sender's access, or, with no such row, when the note's base
+      // holds it and the sender owns the note. Otherwise it is the seed's or the engine's.
+      if (!prior && inNote && !sendersContent(storage, params, clientId, access))
         return { kind: "refused" as const };
       if (!prior) bindings.push(clientId);
       else if (
@@ -201,7 +202,7 @@ export function appendLiveRoomEdit(
   });
 }
 
-function journaledUnder(
+function sendersContent(
   storage: StorageContext,
   params: readonly string[],
   clientId: number,
@@ -209,12 +210,24 @@ function journaledUnder(
 ): boolean {
   const row = storage.db
     .prepare(
-      `SELECT MIN(j.principal_kind=? AND j.principal_id=? AND j.grant_id IS ?) AS own FROM ${LIVE_JOURNAL_PROVENANCE} p
-        JOIN ${LIVE_JOURNAL_TABLE} j ON j.journal_cursor=p.journal_cursor
-        WHERE p.workspace_id=? AND p.main_version_id=? AND p.object_id=? AND p.lineage_claim_id=? AND p.client_id=?`,
+      `SELECT (SELECT MIN(j.principal_kind=? AND j.principal_id=? AND j.grant_id IS ?) FROM ${LIVE_JOURNAL_PROVENANCE} p
+          JOIN ${LIVE_JOURNAL_TABLE} j ON j.journal_cursor=p.journal_cursor
+          WHERE p.workspace_id=? AND p.main_version_id=? AND p.object_id=? AND p.lineage_claim_id=? AND p.client_id=?) AS own,
+        EXISTS(SELECT 1 FROM sync_relay_live_document_baseline_ranges b
+          WHERE b.workspace_id=? AND b.main_version_id=? AND b.object_id=? AND b.lineage_claim_id=? AND b.client_id=?) AS base`,
     )
-    .get(access.principalKind, access.principalId, access.grantId, ...params, clientId);
-  return row?.own === 1;
+    .get(
+      access.principalKind,
+      access.principalId,
+      access.grantId,
+      ...params,
+      clientId,
+      ...params,
+      clientId,
+    );
+  return (
+    row?.own === 1 || (row?.own === null && row.base === 1 && access.principalKind === "owner")
+  );
 }
 
 /** A note's edits that were taken and not saved, oldest first. */
