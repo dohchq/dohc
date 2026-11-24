@@ -779,6 +779,14 @@ export function DesktopWorkspaceShell(props: Parameters<typeof WorkspaceShell>[0
   );
 }
 
+// Each split shows its active tab, so its view loads with the file.
+function preloadActiveFileViews(state: WorkbenchState): void {
+  for (const group of state.editorGroups) {
+    if (group.activeTab !== null && !TAB_KINDS[parseTab(group.activeTab).kind].virtual)
+      preloadViewForPath(group.activeTab);
+  }
+}
+
 function WorkspaceShell(props: {
   workspace: Workspace;
   workspaces: Workspace[];
@@ -2294,11 +2302,7 @@ function WorkspaceShell(props: {
         if (stored) {
           const parsed = parseUiState(stored);
           const restoredGroup = activeGroup(parsed);
-          // Each split shows its active tab, so its view loads with the file.
-          for (const group of parsed.editorGroups) {
-            if (group.activeTab !== null && !TAB_KINDS[parseTab(group.activeTab).kind].virtual)
-              preloadViewForPath(group.activeTab);
-          }
+          preloadActiveFileViews(parsed);
           if (
             restoredGroup.activeTab !== null &&
             !TAB_KINDS[parseTab(restoredGroup.activeTab).kind].virtual
@@ -2351,6 +2355,7 @@ function WorkspaceShell(props: {
       if (stored) {
         const saved = parseUiState(stored);
         const merged = mergeSavedTabs(saved, shown);
+        preloadActiveFileViews(merged);
         writeWb(fitWorkbenchSidebars(merged, merged, workbenchWidthRef.current));
         setRestoredTabPaths(new Set(allTabs(saved).map((tab) => tab.path)));
       } else {
@@ -6422,11 +6427,6 @@ function WorkspaceShell(props: {
     if (!syncStatus) return;
     rendererMarks.markOnce("workspace-shell-interactive");
   }, [syncStatus]);
-  // Code for views nobody opened yet loads only once the workbench takes
-  // input, so it does not compete with opening the workspace.
-  useEffect(() => {
-    if (syncStatus && workbenchRestored) scheduleIdleViewPreloads();
-  }, [syncStatus, workbenchRestored]);
 
   // Open the workspace for this renderer selection. Main admits the exact
   // session before watcher readiness, then returns the capture decision and
@@ -8018,6 +8018,11 @@ function WorkspaceShell(props: {
   const oldWindow = props.oldWindow ?? null;
   // The workspace also stops in a window Forget left showing it.
   const workspaceStopped = storeUpdateRefusal !== null || oldWindow !== null;
+  // Code for views nobody opened yet loads only once the workbench takes
+  // input, so it does not compete with opening the workspace.
+  useEffect(() => {
+    if (syncStatus && workbenchRestored && !workspaceStopped) scheduleIdleViewPreloads();
+  }, [syncStatus, workbenchRestored, workspaceStopped]);
   // The rows filed before the stop began. Their Try again would ask the
   // stopped workspace again, which cannot succeed. Main marks a call that
   // fails on it later, so a row filed during the stop keeps its own.
