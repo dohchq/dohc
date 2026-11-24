@@ -305,6 +305,62 @@ it("activates at a hosted cursor that passed rows of documents outside the hoste
   }
 });
 
+function resolvedLineage(
+  f: ReturnType<typeof fixture>,
+  lineageClaimId = f.document.lineageClaimId,
+) {
+  f.raw
+    .prepare(
+      "UPDATE sync_relay_log SET op_kind='conflict.resolve',payload_json=? WHERE origin_id='origin' AND origin_seq=1",
+    )
+    .run(
+      JSON.stringify({
+        targetVersionId: "main",
+        paths: ["docs/a.md"],
+        transition: { result: { present: true, objectId: "object", pathRef: 0 } },
+        lineageTransition: {
+          successor: { contentKind: "richdoc", lineageClaimId, updateBlobSha256: lineageClaimId },
+        },
+      }),
+    );
+  f.capture.source.baseRelaySeq = null;
+}
+it("activates a lineage a conflict resolve installed, finding the resolve's position by its origin", async () => {
+  const f = fixture();
+  try {
+    resolvedLineage(f);
+    expect(await f.prepare()).toEqual({ document: f.document, replayed: false, completed: false });
+    expect(
+      f.raw
+        .prepare(
+          "SELECT d.baseline_moment_relay_seq AS live,b.base_relay_seq AS basis FROM sync_relay_live_documents d JOIN sync_relay_live_document_ordinary_bases b USING (workspace_id,main_version_id,object_id,lineage_claim_id)",
+        )
+        .all(),
+    ).toEqual([{ live: 2, basis: 2 }]);
+    const access = f.store.pending(f.document, host);
+    expect(
+      f.storage.resolveCurrentLiveDocumentBinding({ document: f.document, actor }, access).kind,
+    ).toBe("current");
+    expect(f.store.read("workspace", "docs/a.md", 1_000_000)!.source).toEqual(f.capture.source);
+    expect(await f.prepare()).toMatchObject({ replayed: true, completed: false });
+  } finally {
+    f.close();
+  }
+});
+
+it("refuses a capture whose resolve installed another lineage", async () => {
+  const f = fixture();
+  try {
+    resolvedLineage(f, "c".repeat(64));
+    await expect(f.prepare()).rejects.toThrow(
+      "Native activation base coordinate differs from ordinary history.",
+    );
+    expect(f.raw.prepare("SELECT * FROM sync_relay_live_documents").all()).toEqual([]);
+  } finally {
+    f.close();
+  }
+});
+
 it("refuses a full state that does not contain its baseline even when its rendered Markdown matches", async () => {
   const f = fixture(),
     other = markdownToYDoc("Original", { clientID: 9 });

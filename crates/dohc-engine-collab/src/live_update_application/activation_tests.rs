@@ -98,7 +98,7 @@ fn imported_activation_retains_original_source_without_minting_native_seed() {
         .is_none());
     assert_eq!(first.source.base_origin_id, "remote");
     assert_eq!(first.source.base_origin_seq, 7);
-    assert_eq!(first.source.base_relay_seq, 9);
+    assert_eq!(first.source.base_relay_seq, Some(9));
     assert_eq!(first.source.committed_cursor, 9);
     let seed_count: i64 = f
         .store
@@ -282,6 +282,85 @@ fn resume_imported(
         max_bytes,
         None,
     )
+}
+
+/// A text resolve installs its successor lineage with no base update, and the
+/// marker keeps its predecessor's base coordinate.
+fn resolved_fixture() -> Fixture {
+    let mut f = imported_fixture();
+    let lineage = f.binding.lineage_claim_id.clone();
+    let TxnOutcome::Committed(predecessor) = f
+        .store
+        .write_with(&NoFaults, |tx| dohc_engine_storage::put_binary_blob(tx, &[1, 0]))
+        .unwrap()
+    else {
+        panic!("the predecessor blob is stored");
+    };
+    let resolve = serde_json::json!({
+        "workspaceId": "workspace", "targetVersionId": "main",
+        "transition": { "result": { "present": true, "objectId": "object" } },
+        "lineageTransition": {
+            "predecessorClaimId": predecessor,
+            "successor": { "lineageClaimId": lineage, "updateBlobSha256": lineage, "contentKind": "richdoc" },
+        },
+    });
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE replication_log SET payload_json=json_set(payload_json,'$.lineageClaimId',?1,'$.updateBlobSha256',?1)
+                WHERE origin_id='remote' AND origin_seq=7", [&predecessor]).map_err(write_sql)?;
+            tx.execute("UPDATE ydoc_docs SET lineage_parent_claim_id=?1,lineage_epoch_tag=?1", [&predecessor])
+                .map_err(write_sql)?;
+            tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported)
+                VALUES('workspace','resolver',3,'conflict.resolve',?1,1,1)", [resolve.to_string()]).map_err(write_sql)?;
+            Ok::<_, ApplicationError>(())
+        })
+        .unwrap();
+    f
+}
+
+#[test]
+fn a_resolved_lineage_activates_from_the_resolution_that_installed_it() {
+    let mut f = resolved_fixture();
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    assert_eq!(
+        (
+            captured.source.base_origin_id.as_str(),
+            captured.source.base_origin_seq
+        ),
+        ("resolver", 3)
+    );
+    assert!(serde_json::to_value(&captured.source).unwrap()["baseRelaySeq"].is_null());
+    let resumed = resume_imported(&mut f, &captured.activation_id, 1_000_000).unwrap();
+    assert_eq!(resumed.source, captured.source);
+    f.cut.adoption_id = captured.activation_id;
+    let ack = adopt_owner_committed(
+        &mut f.store,
+        &f.handle,
+        f.cut.clone(),
+        1_000_000,
+        10,
+        4,
+        &NoFaults,
+        None,
+        |_, _, _, _| Ok(()),
+    )
+    .unwrap();
+    assert!(!ack.adoption_replayed);
+}
+
+#[test]
+fn a_resolved_lineage_without_its_resolution_does_not_activate() {
+    let mut f = resolved_fixture();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM replication_log WHERE op_kind='conflict.resolve'", [])
+                .map_err(write_sql)
+        })
+        .unwrap();
+    assert!(matches!(
+        capture_imported(&mut f, 1_000_000),
+        Err(ApplicationError::Conflict)
+    ));
 }
 
 #[test]

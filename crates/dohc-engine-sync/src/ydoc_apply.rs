@@ -4,9 +4,10 @@ use dohc_engine_collab::live_update_application::{
     IncomingCoordinate, ProtectedTails, ReleasedLineageBinding, ReleasedTails,
 };
 use dohc_engine_collab::{
-    CollabError, CompactOutcome, ContentKind, DocKey, RemoteAppendProbe, RemoteUpdate,
-    ReplicationApplyOutcome, WriterDocCache, apply_remote_update_in_transaction_with_projection,
-    apply_remote_update_with_guard, maybe_compact,
+    CollabError, CompactOutcome, ContentKind, DocKey, LOGGED_SUCCESSORS, RemoteAppendProbe,
+    RemoteUpdate, ReplicationApplyOutcome, WriterDocCache,
+    apply_remote_update_in_transaction_with_projection, apply_remote_update_with_guard,
+    maybe_compact,
 };
 use dohc_engine_domain::{
     ConflictFileState, DomainError, WriteText, enqueue_write, select_snapshot_by_path_in_tx,
@@ -4351,11 +4352,6 @@ pub(crate) fn retired_lineage_in_tx(
         doc: replay.doc,
     })
 }
-
-/// The logged resolutions of `key` that installed a successor.
-const LOGGED_SUCCESSORS: &str = "workspace_id=?1 AND op_kind='conflict.resolve' \
-    AND apply_disposition='applied' AND json_extract(payload_json,'$.targetVersionId')=?2 \
-    AND json_extract(payload_json,'$.transition.result.objectId')=?3";
 
 /// The newest lineage this machine logged for `key`, from an editor change or
 /// a resolution's successor, that it has not archived.
