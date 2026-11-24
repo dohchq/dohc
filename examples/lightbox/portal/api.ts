@@ -332,22 +332,48 @@ function evictUnusedFileUrls() {
   }
 }
 
-export function photoFileUrl(
+function releaseEntry(key: string, entry: FileCacheEntry) {
+  entry.refs = Math.max(0, entry.refs - 1);
+  if (entry.refs === 0 && entry.revokeOnRelease) {
+    if (fileUrls.get(key) === entry) fileUrls.delete(key);
+    if (entry.url) URL.revokeObjectURL(entry.url);
+    return;
+  }
+  evictUnusedFileUrls();
+}
+
+export interface PhotoFileLease {
+  readonly promise: Promise<string>;
+  release(): void;
+}
+
+export function acquirePhotoFileUrl(
   client: AppClient,
   fileId: string,
   operation: string,
   input: Record<string, unknown>,
   mimeType: string,
   priority: "high" | "low" = "low",
-): Promise<string> {
+): PhotoFileLease {
   const key = `${operation}:${fileId}`;
+  const bindRelease = (entry: FileCacheEntry): PhotoFileLease => {
+    let released = false;
+    return {
+      promise: entry.promise,
+      release() {
+        if (released) return;
+        released = true;
+        releaseEntry(key, entry);
+      },
+    };
+  };
   const cached = fileUrls.get(key);
   if (cached) {
     cached.refs++;
     fileUrls.delete(key);
     fileUrls.set(key, cached);
     if (priority === "high") cached.promote();
-    return cached.promise;
+    return bindRelease(cached);
   }
   const entry: FileCacheEntry = {
     promise: Promise.resolve(""),
@@ -377,20 +403,24 @@ export function photoFileUrl(
   });
   fileUrls.set(key, fullEntry);
   evictUnusedFileUrls();
-  return fullEntry.promise;
+  return bindRelease(fullEntry);
+}
+
+export function photoFileUrl(
+  client: AppClient,
+  fileId: string,
+  operation: string,
+  input: Record<string, unknown>,
+  mimeType: string,
+  priority: "high" | "low" = "low",
+): Promise<string> {
+  return acquirePhotoFileUrl(client, fileId, operation, input, mimeType, priority).promise;
 }
 
 export function releasePhotoFileUrl(operation: string, fileId: string) {
   const key = `${operation}:${fileId}`;
   const entry = fileUrls.get(key);
-  if (!entry) return;
-  entry.refs = Math.max(0, entry.refs - 1);
-  if (entry.refs === 0 && entry.revokeOnRelease) {
-    fileUrls.delete(key);
-    if (entry.url) URL.revokeObjectURL(entry.url);
-    return;
-  }
-  evictUnusedFileUrls();
+  if (entry) releaseEntry(key, entry);
 }
 
 export function revokePhotoFileUrl(operation: string, fileId: string) {

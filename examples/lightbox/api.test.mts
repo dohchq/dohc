@@ -5,6 +5,14 @@ import type { AppClient, InvokeReply } from "../../packages/app-kit/src/app.tsx"
 
 interface LightboxApiModule {
   invoke<T>(client: AppClient, operation: string, input: unknown): Promise<T>;
+  acquirePhotoFileUrl(
+    client: AppClient,
+    fileId: string,
+    operation: string,
+    input: Record<string, unknown>,
+    mimeType: string,
+    priority?: "high" | "low",
+  ): { promise: Promise<string>; release(): void };
   photoFileUrl(
     client: AppClient,
     fileId: string,
@@ -228,4 +236,46 @@ it("evicts and revokes unused photo blob URLs past the cache cap and on explicit
   expect(revokedUrls).toEqual(expect.arrayContaining([urls[0], urls[1], urls[2]]));
   api.revokePhotoFileUrl("studioFileAccess", "evict_34");
   expect(revokedUrls).toContain(urls[34]);
+});
+
+it("binds each release to the specific cache entry so a failed view's cleanup never revokes a retried entry", async () => {
+  const { api, AppBackendError } = await loadLightboxApi();
+  let failOnce = true;
+  const base = makeThrottledBroker(AppBackendError).client;
+  const client: AppClient = {
+    ...base,
+    async file(fileId, operation, input) {
+      if (failOnce && fileId === "flaky") {
+        failOnce = false;
+        throw new AppBackendError(503);
+      }
+      return base.file(fileId, operation, input);
+    },
+  };
+
+  const first = api.acquirePhotoFileUrl(client, "flaky", "studioFileAccess", { assetId: "flaky" }, "image/jpeg", "high");
+  const second = api.acquirePhotoFileUrl(client, "flaky", "studioFileAccess", { assetId: "flaky" }, "image/jpeg", "high");
+  await expect(first.promise).rejects.toThrow();
+  await expect(second.promise).rejects.toThrow();
+
+  const retried = api.acquirePhotoFileUrl(client, "flaky", "studioFileAccess", { assetId: "flaky" }, "image/jpeg", "high");
+  const url = await retried.promise;
+  first.release();
+  second.release();
+
+  for (let index = 0; index < 35; index++) {
+    const lease = api.acquirePhotoFileUrl(
+      client,
+      `fill_${index}`,
+      "studioFileAccess",
+      { assetId: `fill_${index}` },
+      "image/jpeg",
+      "high",
+    );
+    await vi.advanceTimersByTimeAsync(2500);
+    await lease.promise;
+    lease.release();
+  }
+  expect(revokedUrls).not.toContain(url);
+  retried.release();
 });

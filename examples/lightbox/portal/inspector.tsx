@@ -151,6 +151,7 @@ export function Inspector<T extends PhotoSource & { readonly mimeType?: string }
   const [showResolved, setShowResolved] = useState(true);
   const [reload, setReload] = useState(0);
   const draftGen = useRef(0);
+  const savingRef = useRef(false);
   const root = useRef<HTMLDivElement | null>(null);
   const bodyRef = useRef<HTMLTextAreaElement | null>(null);
   const rulesRef = useRef(rules);
@@ -158,8 +159,12 @@ export function Inspector<T extends PhotoSource & { readonly mimeType?: string }
 
   const updateDraft = (next: Draft | null) => {
     draftGen.current++;
+    if (savingRef.current) {
+      savingRef.current = false;
+      setSaving(false);
+      setBody("");
+    }
     setDraft(next);
-    setSaving(false);
   };
 
   useEffect(() => {
@@ -169,6 +174,7 @@ export function Inspector<T extends PhotoSource & { readonly mimeType?: string }
       (error: unknown) => current && setNotes({ id: active.id, error: errorMessage(error) }),
     );
     draftGen.current++;
+    savingRef.current = false;
     setDraft(null);
     setBody("");
     setSaving(false);
@@ -248,6 +254,7 @@ export function Inspector<T extends PhotoSource & { readonly mimeType?: string }
     const pendingDraft = draft;
     const trimmedBody = body.trim();
     const expectedCount = list.length + 1;
+    savingRef.current = true;
     setSaving(true);
     try {
       const note = await rules.add(active, { ...pendingDraft, authorName, body: trimmedBody });
@@ -255,6 +262,7 @@ export function Inspector<T extends PhotoSource & { readonly mimeType?: string }
       setNotes((current) => (current.id === targetId ? { id: targetId, list: [...(current.list ?? []), note] } : current));
       toast(`Note ${expectedCount} pinned.`);
       if (draftGen.current === gen) {
+        savingRef.current = false;
         updateDraft(null);
         setBody("");
         root.current?.focus();
@@ -262,7 +270,10 @@ export function Inspector<T extends PhotoSource & { readonly mimeType?: string }
     } catch (error) {
       toast(errorMessage(error), { tone: "danger" });
     } finally {
-      if (draftGen.current === gen) setSaving(false);
+      if (draftGen.current === gen) {
+        savingRef.current = false;
+        setSaving(false);
+      }
     }
   };
 

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useApp } from "dohc/app";
-import { errorMessage, photoFileUrl, releasePhotoFileUrl, type PhotoSource } from "./api";
+import { acquirePhotoFileUrl, errorMessage, type PhotoSource } from "./api";
 import { sceneUrl } from "./scenes";
 
 export interface FileAccess {
@@ -50,8 +50,8 @@ export function Photo({
   useEffect(() => {
     if (!visible) return;
     let current = true;
-    const pending = photo.fileId
-      ? photoFileUrl(
+    const lease = photo.fileId
+      ? acquirePhotoFileUrl(
           client,
           photo.fileId,
           access.operation,
@@ -59,6 +59,9 @@ export function Photo({
           photo.mimeType ?? "image/jpeg",
           size === "full" ? "high" : "low",
         )
+      : null;
+    const pending = lease
+      ? lease.promise
       : sceneUrl(photo.demoScene ?? "coast:1", photo.width, photo.height, size === "thumb" ? 720 : 2200);
     pending.then(
       (url) => current && setState({ key, url }),
@@ -66,7 +69,7 @@ export function Photo({
     );
     return () => {
       current = false;
-      if (photo.fileId) releasePhotoFileUrl(access.operation, photo.fileId);
+      lease?.release();
     };
   }, [visible, retry, client, key, access.operation, fileInput, photo.fileId, photo.demoScene, photo.width, photo.height, photo.mimeType, size]);
 

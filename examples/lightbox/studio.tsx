@@ -609,6 +609,11 @@ function ShootView({ shoot, onShoot }: { shoot: Shoot; onShoot(shoot?: Shoot): v
         </div>
       ) : (
         <>
+          {assets.error ? (
+            <Callout tone="danger" title="Couldn't refresh photos" action={<Button size="sm" onClick={assets.reload}>Try again</Button>}>
+              {errorMessage(assets.error)}
+            </Callout>
+          ) : null}
           <ShootStats shoot={shoot} assets={all} />
           <div className="lb-toolbar">
             <FilterBar options={filters} value={filter} onChange={setFilter} label="Show photos" />
