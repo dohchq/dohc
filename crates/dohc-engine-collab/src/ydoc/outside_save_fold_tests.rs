@@ -716,12 +716,12 @@ fn an_outside_edit_inside_a_line_keeps_the_marks_around_it() {
         ("~~gone~~ kept\n", "~~gone~~ kept, more\n"),
         ("Line one  \nline two\n", "Line one  \nline two and three\n"),
         ("# Title\n", "# Title two\n"),
-        ("- one\n- two\n", "- one\n- two more\n"),
-        ("> Quoted.\n", "> Quoted, still.\n"),
     ] {
         edited_in_place(before, after);
     }
     for (before, after) in [
+        ("- one\n- two\n", "- one\n- two more\n"),
+        ("> Quoted.\n", "> Quoted, still.\n"),
         ("**Bold** text\n", "Bold text\n"),
         ("Bold text\n", "**Bold** text\n"),
         ("- one\n", "- one\n- two\n"),
@@ -775,6 +775,37 @@ fn a_save_that_shifts_paragraphs_does_not_move_a_collaborators_typing() {
         text.insert(&mut txn, 6, " from the orchard");
     }
     let markdown = "Cherries.\n\nApples in the basket.\n";
+    doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, markdown)
+        .expect(markdown);
+    doc.apply(&peer.encode_full_state()).unwrap();
+    let merged = doc.project_richdoc().unwrap();
+    assert!(!merged.contains("Cherries from the orchard"), "{merged}");
+}
+
+#[test]
+fn a_save_that_shifts_paragraphs_in_a_quote_does_not_move_a_collaborators_typing() {
+    let doc = folded("> Apples.\n>\n> Bananas.\n");
+    let peer = Ydoc::wire();
+    peer.apply(&doc.encode_full_state()).unwrap();
+    let text = {
+        let body = peer.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        let txn = peer.doc.transact();
+        let Some(XmlOut::Element(quote)) = body.get(&txn, 0) else {
+            panic!("no quote");
+        };
+        let Some(XmlOut::Element(apples)) = quote.get(&txn, 0) else {
+            panic!("no paragraph");
+        };
+        let Some(XmlOut::Text(text)) = apples.get(&txn, 0) else {
+            panic!("no text");
+        };
+        text
+    };
+    {
+        let mut txn = peer.doc.transact_mut();
+        text.insert(&mut txn, 6, " from the orchard");
+    }
+    let markdown = "> Cherries.\n>\n> Apples in the basket.\n";
     doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, markdown)
         .expect(markdown);
     doc.apply(&peer.encode_full_state()).unwrap();

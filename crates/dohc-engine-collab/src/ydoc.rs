@@ -5439,9 +5439,8 @@ fn same_shape<A: ReadTxn, B: ReadTxn>(
                 && olds
                     .iter()
                     .zip(&news)
-                    .all(|(old, new)| same_shape(old_txn, old, new_txn, new))
+                    .all(|pair| matches!(pair, (XmlOut::Text(_), XmlOut::Text(_))))
         }
-        (XmlOut::Text(_), XmlOut::Text(_)) => true,
         _ => false,
     }
 }
