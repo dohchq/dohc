@@ -17,6 +17,7 @@ import { relayError } from "../errors";
 import { initialAcceptedHistoryDigest } from "../liveAcceptedHistory";
 import { LIVE_JOURNAL_TABLE } from "./schema";
 import { LIVE_DELIVERY_OWNERS } from "./liveCommittedDeliverySchema";
+import { beginsLineage } from "./ordinaryActivationBasis";
 import { LIVE_DELIVERY_OWNER_HISTORY, SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
 import type { ServiceActivationRetirement } from "./serviceActivationRetirement";
 import { liveApplicationConfirmed, preparedLiveApplication } from "./liveApplicationAuthorship";
@@ -485,7 +486,7 @@ function requireBaseRecord(
       source.terminalCursor === (terminal?.journalCursor ?? 0) &&
       isDeepStrictEqual(binding, original),
   );
-  // A real base coordinate: the lineage's base Y.Doc row, earlier in this push or already admitted.
+  // A real base coordinate: the row that began the lineage, earlier in this push or already admitted.
   require(
     identifier(coordinate.originId) &&
       typeof coordinate.originSeq === "number" &&
@@ -501,14 +502,9 @@ function requireBaseRecord(
       .prepare(`SELECT op_kind AS opKind,payload_json AS payloadJson FROM sync_relay_log
     WHERE workspace_id=? AND origin_id=? AND origin_seq=?`)
       .get(document.workspaceId, coordinate.originId, coordinate.originSeq);
-  require(row?.opKind === "ydoc.update" && (!pending || pending.relayAdmission !== "refused"));
-  const base = asRecord(JSON.parse(String(row.payloadJson)));
   require(
-    base?.versionId === "main" &&
-      base.objectId === document.objectId &&
-      base.lineageClaimId === document.lineageClaimId &&
-      base.updateBlobSha256 === document.lineageClaimId &&
-      base.contentKind === "richdoc" &&
-      base.isBaseState === true,
+    row &&
+      (!pending || pending.relayAdmission !== "refused") &&
+      beginsLineage(row.opKind, String(row.payloadJson), document),
   );
 }

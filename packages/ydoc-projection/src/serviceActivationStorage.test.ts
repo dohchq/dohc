@@ -100,15 +100,16 @@ const host = {
 const actor = { kind: "owner" as const, userId: "owner" };
 const bounds = { maxCaptureBytes: 1_000_000, maxBytesPerDrain: 1_000_000 };
 // A `large` note is not validated here; its projections are placeholders that only a finished validation would refuse.
-function fixture(note = "Original", large = false, clientID?: number) {
+function fixture(note = "Original", large = false, clientID?: number, lineageEpoch?: string) {
   const root = mkdtempSync(join(tmpdir(), "dohc-service-activation-")),
     path = join(root, "relay.sqlite");
   const storage = openEmptyRelayTestStorage(path),
     raw = new DatabaseSync(path);
   const history = createLiveJournalHistoryAuthority({ namespace: "history", reconciled: true }),
     store = storage.createServiceActivationStore(history);
-  const doc = markdownToYDoc(note, { clientID }),
-    baselineBytes = Buffer.from(Y.encodeStateAsUpdate(doc));
+  const doc = markdownToYDoc(note, { clientID });
+  if (lineageEpoch) doc.getMap("meta").set("dohcLineageEpoch", lineageEpoch);
+  const baselineBytes = Buffer.from(Y.encodeStateAsUpdate(doc));
   doc.getMap("frontmatter").set("title", "Edited");
   const fullState = Buffer.from(Y.encodeStateAsUpdate(doc));
   doc.destroy();
@@ -301,6 +302,108 @@ it("activates at a hosted cursor that passed rows of documents outside the hoste
     f.capture.source.committedCursor = 4;
     expect(await f.prepare()).toEqual({ document: f.document, replayed: false, completed: false });
   } finally {
+    f.close();
+  }
+});
+
+const TAG = "e".repeat(64);
+const resolvedFixture = () => fixture("Original", false, undefined, TAG);
+function resolvedLineage(
+  f: ReturnType<typeof fixture>,
+  lineageClaimId = f.document.lineageClaimId,
+  epochTag = TAG,
+) {
+  f.raw
+    .prepare(
+      "UPDATE sync_relay_log SET op_kind='conflict.resolve',payload_json=? WHERE origin_id='origin' AND origin_seq=1",
+    )
+    .run(
+      JSON.stringify({
+        targetVersionId: "main",
+        paths: ["docs/a.md"],
+        transition: { result: { present: true, objectId: "object", pathRef: 0 } },
+        lineageTransition: {
+          successor: {
+            contentKind: "richdoc",
+            lineageClaimId,
+            updateBlobSha256: lineageClaimId,
+            epochTag,
+          },
+        },
+      }),
+    );
+  f.capture.source.baseRelaySeq = null;
+}
+it("activates a lineage a conflict resolve installed, finding the resolve's position by its origin", async () => {
+  const f = resolvedFixture();
+  try {
+    resolvedLineage(f);
+    expect(await f.prepare()).toEqual({ document: f.document, replayed: false, completed: false });
+    expect(
+      f.raw
+        .prepare(
+          "SELECT d.baseline_moment_relay_seq AS live,b.base_relay_seq AS basis FROM sync_relay_live_documents d JOIN sync_relay_live_document_ordinary_bases b USING (workspace_id,main_version_id,object_id,lineage_claim_id)",
+        )
+        .all(),
+    ).toEqual([{ live: 2, basis: 2 }]);
+    const access = f.store.pending(f.document, host);
+    expect(
+      f.storage.resolveCurrentLiveDocumentBinding({ document: f.document, actor }, access).kind,
+    ).toBe("current");
+    expect(f.store.read("workspace", "docs/a.md", 1_000_000)!.source).toEqual(f.capture.source);
+    expect(await f.prepare()).toMatchObject({ replayed: true, completed: false });
+  } finally {
+    f.close();
+  }
+});
+
+it("refuses a capture whose resolve installed another lineage", async () => {
+  const f = resolvedFixture();
+  try {
+    resolvedLineage(f, "c".repeat(64));
+    await expect(f.prepare()).rejects.toThrow(
+      "Native activation base coordinate differs from ordinary history.",
+    );
+    expect(f.raw.prepare("SELECT * FROM sync_relay_live_documents").all()).toEqual([]);
+  } finally {
+    f.close();
+  }
+});
+
+it.each([
+  ["a baseline whose tag is not the one its resolve gave", TAG, "d".repeat(64)],
+  ["a resolved lineage's baseline with no tag", undefined, TAG],
+  ["a plain note's baseline with a tag", TAG, undefined],
+])("refuses %s", async (_, baselineTag, resolveTag) => {
+  const f = fixture("Original", false, undefined, baselineTag);
+  try {
+    if (resolveTag) resolvedLineage(f, f.document.lineageClaimId, resolveTag);
+    await expect(f.prepare()).rejects.toThrow(
+      "Native activation base coordinate differs from ordinary history.",
+    );
+    expect(f.raw.prepare("SELECT * FROM sync_relay_live_documents").all()).toEqual([]);
+  } finally {
+    f.close();
+  }
+});
+
+it("refuses a full state that changes its lineage's tag", async () => {
+  const f = resolvedFixture(),
+    doc = new Y.Doc();
+  try {
+    resolvedLineage(f);
+    Y.applyUpdate(doc, f.capture.fullState);
+    doc.getMap("meta").set("dohcLineageEpoch", "d".repeat(64));
+    const bytes = Buffer.from(Y.encodeStateAsUpdate(doc));
+    Object.assign(f.capture, { fullState: bytes });
+    Object.assign(f.capture.source, {
+      fullStateDigest: hash(bytes),
+      fullStateByteLength: bytes.length,
+    });
+    await expect(f.prepare()).rejects.toThrow("Native activation does not contain its baseline.");
+    expect(f.raw.prepare("SELECT * FROM sync_relay_live_documents").all()).toEqual([]);
+  } finally {
+    doc.destroy();
     f.close();
   }
 });

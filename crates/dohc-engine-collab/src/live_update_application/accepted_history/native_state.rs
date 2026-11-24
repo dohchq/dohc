@@ -693,7 +693,7 @@ pub(super) fn restore_association(
         let bytes = budget.blob(conn, state)?;
         let doc = Ydoc::wire();
         doc.apply(&bytes)?;
-        doc.validate_public_baseline(&bytes)?;
+        validate_baseline(conn, held, &doc, &bytes, false)?;
         if doc.canonical_content_sha256() != content {
             return Err(ApplicationError::Corrupt);
         }
@@ -817,7 +817,7 @@ pub(super) fn read(
     {
         let baseline = budget.blob(conn, &c.state_digest)?;
         doc.apply(&baseline)?;
-        validate_baseline(&doc, &baseline)?;
+        validate_baseline(conn, held, &doc, &baseline, doc.has_reader_source())?;
     }
     let p = parameters(held);
     let mut query=conn.prepare(&format!("SELECT event_count,journal_cursor,update_sha256,suffix_count,suffix_bytes FROM live_accepted_updates WHERE {DOCUMENT} AND event_count>?6 AND journal_cursor<=?7 AND length(CAST(update_sha256 AS BLOB))=64 ORDER BY event_count LIMIT 4096")).map_err(read_sql)?;

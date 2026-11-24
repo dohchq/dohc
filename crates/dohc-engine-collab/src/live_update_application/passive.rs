@@ -309,7 +309,7 @@ fn apply_row(
         return Err(ApplicationError::Conflict);
     }
     if let Some(restore) = &row.restore {
-        validate_restore(row, restore, generation)?;
+        validate_restore(tx, key, row, restore, generation)?;
     }
     let count = count
         .checked_add(1)
@@ -616,6 +616,8 @@ fn save_position(
 }
 
 fn validate_restore(
+    conn: &Connection,
+    key: &DocKey,
     row: &ReplicaJournalRow,
     restore: &ReplicaRestore,
     generation: i64,
@@ -656,6 +658,7 @@ fn validate_restore(
     }
     let checkpoint = crate::Ydoc::wire();
     checkpoint.apply(&restore.checkpoint_bytes)?;
-    checkpoint.validate_public_baseline(&restore.checkpoint_bytes)?;
+    let epoch = durable::lineage_epoch_in(conn, key, &b.lineage_claim_id)?;
+    checkpoint.validate_lineage_baseline(&restore.checkpoint_bytes, false, epoch.as_deref())?;
     Ok(())
 }

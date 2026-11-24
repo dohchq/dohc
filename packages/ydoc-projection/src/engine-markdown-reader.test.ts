@@ -250,7 +250,7 @@ it("strictly proves canonical continuation while fresh unanchored source still h
   }
 });
 
-it("preserves engine epoch metadata without widening the ordinary journal", () => {
+it("preserves engine epoch metadata, which the ordinary journal keeps", () => {
   const source = "- **parent**\n  - child & text\n",
     doc = markdownToYDoc(source);
   try {
@@ -265,7 +265,7 @@ it("preserves engine epoch metadata without widening the ordinary journal", () =
         suffix: [],
         candidate: new Uint8Array([0, 0]),
       }).kind,
-    ).toBe("refused");
+    ).toBe("accepted");
     const result = reader.construct({ ...context, source, checkpoint });
     expect(result.kind).toBe("accepted");
     if (result.kind === "accepted") Y.applyUpdate(doc, result.delta);
