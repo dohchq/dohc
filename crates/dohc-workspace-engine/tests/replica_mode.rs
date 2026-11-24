@@ -61,8 +61,7 @@ async fn replica_refuses_every_other_rpc_before_dispatch() {
     ];
     let source = concat!(
         include_str!("../src/rpc/dispatch.rs"),
-        include_str!("../src/live_application_ingress.rs"),
-        include_str!("../src/live_application_ingress/restore.rs")
+        include_str!("../src/live_application_ingress.rs")
     );
     let methods: std::collections::BTreeSet<_> = source
         .split('"')
@@ -192,10 +191,6 @@ fn replica_upload_ingress_refuses_non_replica_methods_before_parsing() {
     let connection = ConnectionOwner::authenticated();
     for method in [
         "liveApplication.apply",
-        "liveApplication.prepareRestore",
-        "liveApplication.applyRestore",
-        "liveApplication.settleRestore",
-        "liveApplication.resumeRestore",
         "ydoc.ownerDelivery.applyAcceptedFrame",
         "ydoc.ownerDelivery.applyInitialSync",
         "ydoc.ownerDelivery.enroll",

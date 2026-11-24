@@ -19,7 +19,6 @@ mod chunks;
 pub(crate) mod enrollment;
 mod held;
 mod origin_record;
-mod restore_record;
 mod settlement_record;
 pub use application_record::journal_live_event_in_tx;
 pub(crate) use application_record::{
@@ -29,7 +28,7 @@ pub(crate) use application_record::{
 pub use enrollment::journal_live_event_or_defer_in_tx;
 pub(crate) use held::{WAITS_ON_HELD, hold_in_tx, holds, is_audit, refused_before, waits_on_held};
 pub use settlement_record::journal_live_settlement_in_tx;
-pub(crate) use settlement_record::{owner_settlement_cursor_in, restore_successor_settlement_in};
+pub(crate) use settlement_record::owner_settlement_cursor_in;
 
 pub(crate) fn apply_audit_envelope(
     store: &mut EngineStore,
@@ -50,6 +49,11 @@ pub(crate) fn apply_audit_envelope(
 
 pub(crate) const BASE_OP: &str = "live.audit.base";
 const SCOPE: &str = "relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5";
+
+/// A restore a record once carried. No value parses, so a record that
+/// carries one refuses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum Retired {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -116,7 +120,6 @@ impl BaseRecord {
                 .any(|byte| byte.is_ascii_control())
             || checkpoint.event_count != 0
             || checkpoint.terminal.is_some()
-            || checkpoint.restore_operation_id.is_some()
             || checkpoint.state_digest != binding.lineage_claim_id
             || !digest(&checkpoint.state_digest)
             || !digest(&self.origin_stamp)
@@ -293,7 +296,6 @@ pub fn journal_live_base_in_tx(
         relay_database_namespace: namespace.to_owned(),
         checkpoint: NativeAcceptedCheckpoint {
             canonical_version: None,
-            restore_operation_id: None,
             event_count: 0,
             terminal: None,
             binding: source_binding.clone(),

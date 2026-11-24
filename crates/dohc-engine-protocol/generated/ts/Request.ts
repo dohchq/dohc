@@ -20,8 +20,8 @@ workspace?: WorkspaceHandle | null,
  * elapses, a request whose work did not happen fails with
  * `DEADLINE_EXCEEDED`; one whose work landed answers with its result.
  * A live acknowledgement stopped after its work landed gets no answer,
- * so `liveApplication.settle` and `liveApplication.fenceRestore` require
- * a deadline, and the caller treats its expiry as an unknown outcome.
+ * so `liveApplication.settle` requires a deadline, and the caller
+ * treats its expiry as an unknown outcome.
  */
 deadlineMs?: number | null, 
 /**

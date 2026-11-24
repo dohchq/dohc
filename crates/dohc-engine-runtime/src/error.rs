@@ -212,7 +212,6 @@ impl RuntimeError {
                     ApplicationError::AcceptedStateIncomplete => {
                         "live-application-accepted-state-incomplete"
                     }
-                    ApplicationError::RestoreRefused(_) => "native-restore-refused",
                     ApplicationError::MaterializationPending => {
                         "settlement-materialization-pending"
                     }

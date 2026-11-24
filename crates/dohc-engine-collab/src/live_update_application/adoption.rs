@@ -34,7 +34,7 @@ mod tests {
     use crate::owner_outbox;
     use dohc_engine_domain::{VersionedTextStore, WriteText};
     use dohc_test_scratch::ScratchDir;
-    include!("adoption_restore_tail_tests.rs");
+    include!("adoption_tail_tests.rs");
     include!("activation_tests.rs");
     include!("owner_activations_tests.rs");
     include!("retirement_tests.rs");
@@ -45,7 +45,6 @@ mod tests {
     include!("released_protection_tests.rs");
     include!("rename_tests.rs");
     include!("retired_outbox_tests.rs");
-    include!("restore_cancel_tests.rs");
 
     /// What a held proof's memory peaks at, beside what it reserved.
     #[cfg(feature = "held-proof-memory")]
@@ -351,19 +350,8 @@ mod tests {
         f.store
             .read_with(|conn| {
                 let mut remaining = usize::MAX;
-                let (binding, namespace, _) =
-                    read_native_accepted_in(conn, &f.key, &mut remaining)?.unwrap();
-                assert_eq!(
-                    read_restore_predecessor_in(
-                        conn,
-                        &f.key,
-                        &namespace,
-                        &binding,
-                        &mut remaining
-                    )?,
-                    None
-                );
-                // The existing base proof needs these two reads and its original blob.
+                read_native_accepted_in(conn, &f.key, &mut remaining)?.unwrap();
+                // The existing base proof needs this read and its original blob.
                 let base_budget = usize::MAX - remaining + f.cut.baseline_bytes.len();
                 let mut remaining = base_budget;
                 assert_eq!(
@@ -385,307 +373,6 @@ mod tests {
             .unwrap();
     }
 
-    #[test]
-    fn restore_preparation_authenticates_original_owner_prefix_before_adoption_terminal() {
-        let mut f = Fixture::new();
-        f.edit(true);
-        f.adopt().unwrap();
-        let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
-        let operation = NativeRestoreFence {
-            point: crate::live_update_application::NativeRestoreSelection {
-                journal_cursor: 0,
-                receipt_digest: f.binding.lineage_claim_id.clone(),
-            },
-            operation_id: "restore-owner".into(),
-            relay_database_namespace: "namespace".into(),
-            old_binding: f.binding.clone(),
-            host_id: "host".into(),
-            new_fence: 1,
-            origin: RestoreDeliveryOrigin::Owner {
-                id: f.cut.adoption_id.clone(),
-            },
-            terminal: f.cut.terminal_receipt.clone(),
-            applied_sequence: f.cut.expected_local_sequence,
-        };
-        let fence = f
-            ._owner
-            .fence_restore(
-                &mut f.store,
-                None,
-                operation,
-                coordinate.clone(),
-                20,
-                &NoFaults,
-                |_, _| Ok(()),
-            )
-            .unwrap();
-        let point = Ydoc::wire();
-        point.apply(&f.cut.baseline_bytes).unwrap();
-        let projection = point.project(ContentKind::Richdoc).unwrap().content;
-        let source = point
-            .preserved_markdown_source(&projection)
-            .unwrap_or_else(|| projection.clone());
-        let input = NativeRestorePreparation {
-            fence,
-            point: NativeRestorePoint {
-                journal_cursor: 0,
-                receipt_digest: f.binding.lineage_claim_id.clone(),
-                markdown_digest: hex_sha256(source.as_bytes()),
-                projection_digest: hex_sha256(projection.as_bytes()),
-            },
-        };
-        for damage in ["id", "namespace", "origin", "sequence"] {
-            let mut changed = input.clone();
-            match damage {
-                "id" => changed.fence.operation.operation_id = "other".into(),
-                "namespace" => changed.fence.operation.relay_database_namespace = "other".into(),
-                "origin" => {
-                    changed.fence.operation.origin =
-                        RestoreDeliveryOrigin::Owner { id: "other".into() }
-                }
-                "sequence" => changed.fence.local_head_sequence += 1,
-                _ => unreachable!(),
-            }
-            assert!(
-                f._owner
-                    .prepare_restore(
-                        &mut f.store,
-                        None,
-                        changed,
-                        coordinate.clone(),
-                        1_000_000,
-                        100,
-                        &NoFaults
-                    )
-                    .is_err(),
-                "{damage}"
-            );
-        }
-        let prepared = f
-            ._owner
-            .prepare_restore(
-                &mut f.store,
-                None,
-                input.clone(),
-                coordinate.clone(),
-                1_000_000,
-                100,
-                &NoFaults,
-            )
-            .unwrap();
-        assert_eq!(prepared.receipt().accepted_history.suffix.len(), 1);
-        assert_eq!(prepared.receipt().point.journal_cursor, 0);
-        assert_eq!(
-            f.store
-                .table_row_count("live_device_update_applications")
-                .unwrap(),
-            0
-        );
-        let replay = f
-            ._owner
-            .prepare_restore(
-                &mut f.store,
-                None,
-                input.clone(),
-                coordinate.clone(),
-                1_000_000,
-                100,
-                &NoFaults,
-            )
-            .unwrap();
-        assert_eq!(
-            serde_json::to_vec(&prepared).unwrap(),
-            serde_json::to_vec(&replay).unwrap()
-        );
-        let mut changed = input;
-        changed.point.receipt_digest = "f".repeat(64);
-        assert!(f
-            ._owner
-            .prepare_restore(
-                &mut f.store,
-                None,
-                changed,
-                coordinate,
-                1_000_000,
-                100,
-                &NoFaults
-            )
-            .is_err());
-    }
-
-    #[test]
-    fn restore_fence_refuses_late_creation_of_an_empty_owner_outbox() {
-        for reopen in [false, true] {
-            let mut f = Fixture::new();
-            let ack = f.adopt().unwrap();
-            assert_eq!(f.store.table_row_count("owner_ydoc_outboxes").unwrap(), 0);
-            let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
-            let input = NativeRestoreFence {
-                point: crate::live_update_application::NativeRestoreSelection {
-                    journal_cursor: 0,
-                    receipt_digest: f.binding.lineage_claim_id.clone(),
-                },
-                operation_id: "empty-owner-restore".into(),
-                relay_database_namespace: "namespace".into(),
-                old_binding: f.binding.clone(),
-                host_id: coordinate.host_id.clone(),
-                new_fence: 1,
-                origin: RestoreDeliveryOrigin::Owner {
-                    id: ack.adoption_id,
-                },
-                terminal: f.cut.terminal_receipt.clone(),
-                applied_sequence: ack.local_ydoc_sequence,
-            };
-            let receipt = f
-                ._owner
-                .fence_restore(
-                    &mut f.store,
-                    None,
-                    input.clone(),
-                    coordinate.clone(),
-                    20,
-                    &NoFaults,
-                    |_, _| Ok(()),
-                )
-                .unwrap();
-            let pending = owner_outbox::OwnerOutboxAppendInput {
-                binding: f.binding.clone(),
-                base_update: f.cut.baseline_bytes.clone(),
-                append_key: "late-owner-edit".into(),
-                update: f.doc.encode_full_state(),
-                limits: f.cut.outbox_limits.clone(),
-                created_at_ms: 21,
-            };
-            let path = f._scratch.join("engine.db");
-            let mut store = if reopen {
-                drop(f.handle);
-                drop(f._owner);
-                drop(f.store);
-                EngineStore::open(&path, 21).unwrap()
-            } else {
-                f.store
-            };
-            let before = store.table_row_count("binary_blobs").unwrap();
-            assert!(matches!(
-                owner_outbox::append(&mut store, "workspace", pending),
-                Err(owner_outbox::OwnerOutboxError::Frozen)
-            ));
-            assert_eq!(store.table_row_count("owner_ydoc_outboxes").unwrap(), 0);
-            assert_eq!(
-                store.table_row_count("owner_ydoc_outbox_entries").unwrap(),
-                0
-            );
-            assert_eq!(store.table_row_count("binary_blobs").unwrap(), before);
-            let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
-            assert_eq!(
-                owner
-                    .fence_restore(
-                        &mut store,
-                        None,
-                        input,
-                        coordinate,
-                        22,
-                        &NoFaults,
-                        |_, _| Ok(())
-                    )
-                    .unwrap(),
-                receipt
-            );
-        }
-    }
-
-    #[test]
-    fn restore_fence_keeps_owner_pending_bytes_and_separates_head_from_ack() {
-        let mut f = Fixture::new();
-        f.local_edit_before_adoption();
-        let ack = f.adopt().unwrap();
-        let terminal = f.cut.terminal_receipt.clone();
-        f.edit(false);
-        let pending_before:Vec<(String,String,i64)>=f.store.read_with(|c| {
-            let mut q=c.prepare("SELECT update_digest,update_blob_digest,byte_length FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence").unwrap();
-            q.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap().collect::<Result<_,_>>()
-        }).unwrap();
-        assert!(!pending_before.is_empty());
-        let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
-        let input = NativeRestoreFence {
-            point: crate::live_update_application::NativeRestoreSelection {
-                journal_cursor: 0,
-                receipt_digest: f.binding.lineage_claim_id.clone(),
-            },
-            operation_id: "owner-restore".into(),
-            relay_database_namespace: "namespace".into(),
-            old_binding: f.binding.clone(),
-            host_id: coordinate.host_id.clone(),
-            new_fence: 1,
-            origin: RestoreDeliveryOrigin::Owner {
-                id: ack.adoption_id,
-            },
-            terminal,
-            applied_sequence: ack.local_ydoc_sequence,
-        };
-        let receipt = f
-            ._owner
-            .fence_restore(
-                &mut f.store,
-                None,
-                input.clone(),
-                coordinate.clone(),
-                20,
-                &NoFaults,
-                |_, _| Ok(()),
-            )
-            .unwrap();
-        assert!(receipt.local_head_sequence > receipt.operation.applied_sequence);
-        let pending_after:Vec<(String,String,i64)>=f.store.read_with(|c| {
-            let mut q=c.prepare("SELECT update_digest,update_blob_digest,byte_length FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence").unwrap();
-            q.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap().collect::<Result<_,_>>()
-        }).unwrap();
-        assert_eq!(pending_after, pending_before);
-        let outboxes: Vec<String> = f
-            .store
-            .read_with(|c| {
-                let mut q = c
-                    .prepare("SELECT outbox_id FROM owner_ydoc_outboxes")
-                    .unwrap();
-                q.query_map([], |r| r.get(0))
-                    .unwrap()
-                    .collect::<Result<_, _>>()
-            })
-            .unwrap();
-        let mut retained = Vec::new();
-        for id in outboxes {
-            let p = owner_outbox::read_pending(&f.store, "workspace", &id).unwrap();
-            assert_eq!(p.state, owner_outbox::OwnerOutboxState::Quarantined);
-            retained.push(p);
-        }
-        assert!(f.adopt().is_err());
-        let path = f._scratch.join("engine.db");
-        drop(f.handle);
-        drop(f._owner);
-        drop(f.store);
-        let mut store = EngineStore::open(&path, 21).unwrap();
-        for original in retained {
-            assert_eq!(
-                owner_outbox::read_pending(&store, "workspace", &original.outbox_id).unwrap(),
-                original
-            );
-        }
-        let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
-        assert_eq!(
-            owner
-                .fence_restore(
-                    &mut store,
-                    None,
-                    input,
-                    coordinate,
-                    22,
-                    &NoFaults,
-                    |_, _| Ok(())
-                )
-                .unwrap(),
-            receipt
-        );
-    }
     #[test]
     fn native_outbox_headers_keep_only_recorded_human_edits() {
         use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
@@ -2452,9 +2139,8 @@ fn chain_bindings(
 
 /// Each binding the released chain held must be one this document held
 /// before the registration's: at its path, or one lineage-preserving renames
-/// moved it from, and at its restore generation, or one that resumed restores
-/// led from to it. Rename and restore history are each walked once, for
-/// every binding.
+/// moved it from, and at its restore generation. Rename history is walked
+/// once, for every binding.
 fn require_historical(
     conn: &Connection,
     held: &Registration,
@@ -2472,14 +2158,6 @@ fn require_historical(
         .filter(|path| *path != b.current_path)
         .collect();
     let renamed = renamed_from(conn, key, &b.current_path, &moved_from, max_events)?;
-    let resumed = if chain
-        .iter()
-        .any(|historical| historical.restore_fence_generation != b.restore_fence_generation)
-    {
-        resumed_generations(conn, held, max_events)?
-    } else {
-        std::collections::HashSet::new()
-    };
     for historical in chain {
         let mut moved = (*historical).clone();
         if historical.current_path != b.current_path {
@@ -2489,76 +2167,9 @@ fn require_historical(
             moved.current_path = b.current_path.clone();
             moved.selector_paths = b.selector_paths.clone();
         }
-        restore_resume::validate_origin_binding(conn, held, &moved)?;
-        if !resumed.contains(&historical.restore_fence_generation)
-            && historical.restore_fence_generation != b.restore_fence_generation
-        {
-            return Err(ApplicationError::Conflict);
-        }
+        settlement::validate_historical_binding(&moved, b)?;
     }
     Ok(())
-}
-
-/// The generations resumed restores, or restores cancelled after their
-/// fences, of this document's lineage led from to the registration's, its
-/// own included. The walk counts every generation it visits and refuses past
-/// `max_events`.
-fn resumed_generations(
-    conn: &Connection,
-    held: &Registration,
-    max_events: usize,
-) -> Result<std::collections::HashSet<i64>, ApplicationError> {
-    let b = &held.binding;
-    let mut query = conn
-        .prepare(
-            "WITH RECURSIVE resumed(generation,cancelled) AS (SELECT ?6,0 UNION ALL
-               SELECT f.old_generation,f.cancelled_json IS NOT NULL FROM live_restore_fences f JOIN resumed r ON f.new_generation=r.generation
-               WHERE f.relay_database_namespace=?1 AND f.workspace_id=?2 AND f.main_version_id=?3 AND f.object_id=?4
-                 AND f.lineage_claim_id=?5 AND (f.resume_receipt_json IS NOT NULL OR f.cancelled_json IS NOT NULL) LIMIT ?7)
-             SELECT generation,cancelled FROM resumed",
-        )
-        .map_err(read_sql)?;
-    let doc = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
-    let limit = i64::try_from(max_events)
-        .map_err(|_| ApplicationError::Corrupt)?
-        .saturating_add(1);
-    let rows = query
-        .query_map(
-            params![
-                held.namespace,
-                b.workspace_id,
-                b.main_version_id,
-                b.object_id,
-                b.lineage_claim_id,
-                b.restore_fence_generation,
-                limit
-            ],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
-        )
-        .map_err(read_sql)?;
-    let mut generations = std::collections::HashSet::new();
-    for (visited, row) in rows.enumerate() {
-        let (generation, cancelled) = row.map_err(read_sql)?;
-        if visited >= max_events {
-            return Err(over_budget());
-        }
-        // A cancellation carried the lineage from this generation to the next.
-        if cancelled
-            && restore_fence::cancelled_at(
-                conn,
-                &held.namespace,
-                &doc,
-                Some(&b.lineage_claim_id),
-                generation + 1,
-                None,
-            )?
-            .is_none()
-        {
-            return Err(ApplicationError::Corrupt);
-        }
-        generations.insert(generation);
-    }
-    Ok(generations)
 }
 
 /// The paths renames of this document moved it from to `to`, keeping its
@@ -2683,15 +2294,14 @@ pub(super) fn read_origin(
 }
 
 /// The current activation's adopted origin. With a budget, its row, source
-/// metadata, the original snapshot, and any resumed generation are charged
-/// before they are read.
+/// metadata, and the original snapshot are charged before they are read.
 pub(super) fn read_origin_with(
     conn: &Connection,
     held: &Registration,
-    mut budget: Option<&mut restore_content::Budget>,
+    budget: Option<&mut budget::Budget>,
 ) -> Result<Option<AdoptedOrigin>, ApplicationError> {
     let b = &held.binding;
-    if let Some(budget) = budget.as_deref_mut() {
+    if let Some(budget) = budget {
         let length: i64 = conn.query_row(
             &format!("SELECT coalesce((SELECT length(CAST(a.binding_json AS BLOB))+length(CAST(a.source_moment_id AS BLOB))+length(CAST(a.source_digest AS BLOB))+length(CAST(a.terminal_receipt_json AS BLOB))+length(CAST(a.activation_id AS BLOB))
                +coalesce((SELECT sum(length(CAST(s.descriptor_json AS BLOB))) FROM ydoc_owner_activation_sources s WHERE s.activation_id=a.activation_id),0)
@@ -2747,7 +2357,7 @@ pub(super) fn read_origin_with(
     if original.as_deref() != Some(b.lineage_claim_id.as_str()) {
         return Err(ApplicationError::Corrupt);
     }
-    restore_resume::validate_origin_binding_with(conn, held, &binding, budget)?;
+    settlement::validate_historical_binding(&binding, b)?;
     let terminal: Option<LiveUpdateReceipt> =
         serde_json::from_str(&terminal).map_err(|_| ApplicationError::Corrupt)?;
     if let Some(receipt) = &terminal {
