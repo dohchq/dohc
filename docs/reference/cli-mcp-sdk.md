@@ -1936,7 +1936,7 @@ Owner only. Keeps the last 200 invocations in memory per Collection.
 - `expectedDatasetId`: `UUID`
 - `limit`: `integer`
 
-Returns `{ kind: "trace", entries: { atMs, operation, durationMs, statementCount, rowsRead, wasmMemoryBytes, changesetBytes, callerKind, revision, status, refusalCode }[], limit }`.
+Returns `{ kind: "trace", entries: { atMs, operation, durationMs, statementCount, rowsRead, changesetBytes, callerKind, revision, status, refusalCode }[], limit }`.
 
 #### `dohc dataset history`
 

@@ -112,7 +112,7 @@ async function setupHost() {
   const journal = createDatasetJournal({ db, transaction });
   const supervisor = await createDatasetSupervisor({
     journal,
-    directory: privateFolder(dir, "workers"),
+    directory: privateFolder(join(dir, "workers")),
     reopenWaitCapMs: 0,
   });
   const host = createDatasetHost<"owner" | "guest">({
@@ -298,7 +298,6 @@ describe("dataset inspector SQL and trace", () => {
       status: "ok",
       refusalCode: null,
     });
-    expect(full.entries[0]!.wasmMemoryBytes).toBeGreaterThan(0);
 
     await expect(
       host.invoke("owner", {

@@ -55,7 +55,6 @@ export interface PersistentPrepareInput {
 export interface OperationMetrics {
   statementCount: number;
   rowsRead: number;
-  wasmMemoryBytes: number;
   durationMs: number;
 }
 export type PersistentSqlParam = string | number | null;

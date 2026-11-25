@@ -37,7 +37,6 @@ beforeEach(() => {
             durationMs: 4,
             statementCount: 1,
             rowsRead: 12,
-            wasmMemoryBytes: 8 * 1024 * 1024,
             changesetBytes: 0,
             callerKind: "owner",
             revision: 3,
@@ -102,7 +101,6 @@ describe("AppInspectorDrawer", () => {
     });
     expect(screen.getByText("listEntries")).toBeTruthy();
     expect(screen.getByText("4 ms")).toBeTruthy();
-    expect(screen.getByText("8.0 MiB")).toBeTruthy();
     expect(screen.getByText("r3")).toBeTruthy();
 
     const traceTab = screen.getByTestId("app-inspector-tab-trace");

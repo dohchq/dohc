@@ -615,7 +615,6 @@ function run(
           metrics: {
             statementCount: statements,
             rowsRead,
-            wasmMemoryBytes: request.limits.memoryBytes,
             durationMs: Math.max(0, Math.round(performance.now() - started)),
           },
         };

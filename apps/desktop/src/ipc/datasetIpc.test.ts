@@ -1861,7 +1861,6 @@ it("allows owner sql and trace while refusing both on shared views", async () =>
         durationMs: 3,
         statementCount: 1,
         rowsRead: 1,
-        wasmMemoryBytes: 1024,
         changesetBytes: 64,
         callerKind: "owner",
         revision: 1,

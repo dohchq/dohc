@@ -11,7 +11,6 @@ export interface DatasetTraceEntry {
   durationMs: number;
   statementCount: number;
   rowsRead: number;
-  wasmMemoryBytes: number;
   changesetBytes: number;
   callerKind: string;
   revision: number | null;
@@ -33,7 +32,6 @@ export function traceSuccess(
     durationMs: Math.max(0, Math.round(performance.now() - startedMs)),
     statementCount: metrics?.statementCount ?? 0,
     rowsRead: metrics?.rowsRead ?? 0,
-    wasmMemoryBytes: metrics?.wasmMemoryBytes ?? 0,
     changesetBytes,
     callerKind,
     revision,
@@ -61,7 +59,6 @@ export function traceFailure(
     durationMs: Math.max(0, Math.round(performance.now() - startedMs)),
     statementCount: 0,
     rowsRead: 0,
-    wasmMemoryBytes: 0,
     changesetBytes: 0,
     callerKind,
     revision: null,

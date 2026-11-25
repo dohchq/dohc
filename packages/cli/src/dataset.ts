@@ -934,7 +934,6 @@ export const DatasetResult = z.discriminatedUnion("kind", [
               durationMs: z.number().int().nonnegative(),
               statementCount: z.number().int().nonnegative(),
               rowsRead: z.number().int().nonnegative(),
-              wasmMemoryBytes: z.number().int().nonnegative(),
               changesetBytes: z.number().int().nonnegative(),
               callerKind: z.string().min(1).max(64),
               revision: z.number().int().nonnegative().nullable(),

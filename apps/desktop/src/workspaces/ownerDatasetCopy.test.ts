@@ -764,19 +764,25 @@ it("runs read-only SQL, EXPLAIN, and records traces on the synced owner copy", a
   };
   const schemaSql = "CREATE TABLE entries(id INTEGER PRIMARY KEY, name TEXT NOT NULL);",
     operationSource =
-      "globalThis.operations={add(ctx){ctx.db.execute('INSERT INTO entries(name) VALUES(?)',[ctx.input.name]);return null;},list(ctx){return ctx.db.query('SELECT id, name FROM entries ORDER BY id');}};";
+      "globalThis.operations={add(ctx,input){ctx.db.execute('INSERT INTO entries(name) VALUES(?)',[input.name]);return null;},list(ctx){return ctx.db.query('SELECT id, name FROM entries ORDER BY id');}};";
   const revision = describeDatasetRevision({
     definition,
     revision: 1,
     schemaSql,
     operationSource,
   });
+  let heard: (() => void) | undefined;
+  const changed = () =>
+    new Promise<void>((resolve) => {
+      heard = resolve;
+    });
   const options = {
     directory: join(directory, "copy"),
     scope,
     ownerKey: "owner",
     origin: "https://relay",
     assertOwner() {},
+    onChanged: () => heard?.(),
   };
   await mkdir(options.directory);
   const copy = await createOwnerDatasetCopy(options);
@@ -804,12 +810,14 @@ it("runs read-only SQL, EXPLAIN, and records traces on the synced owner copy", a
   try {
     await host.activate(actor, { workspaceId: "w", revision, schemaSql, operationSource });
     const data = copy.data(remote, source, signal);
+    const updated = changed();
     await data.invoke({
       ...pinned,
       operationId: id(5),
       input: { name: "Ledger" },
       idempotencyKey: "add-1",
     });
+    await updated;
     expect(
       await data.invoke({ ...pinned, operationId: id(6), input: {}, idempotencyKey: "list-1" }),
     ).toMatchObject({ result: [{ id: 1, name: "Ledger" }] });
@@ -850,7 +858,6 @@ it("runs read-only SQL, EXPLAIN, and records traces on the synced owner copy", a
       rowsRead: 1,
       callerKind: "owner",
     });
-    expect(trace.entries[0]!.wasmMemoryBytes).toBeGreaterThan(0);
     expect(trace.entries[1]).toMatchObject({
       operation: "add",
       status: "ok",

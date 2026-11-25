@@ -209,7 +209,6 @@ export function AppInspectorDrawer({
                   <th className="px-2 py-1.5 text-right font-medium">Time</th>
                   <th className="px-2 py-1.5 text-right font-medium">SQL</th>
                   <th className="px-2 py-1.5 text-right font-medium">Rows</th>
-                  <th className="px-2 py-1.5 text-right font-medium">Memory</th>
                   <th className="px-2 py-1.5 text-right font-medium">Changeset</th>
                   <th className="px-2 py-1.5 font-medium">Caller</th>
                   <th className="px-3 py-1.5 text-right font-medium">Rev</th>
@@ -236,9 +235,6 @@ export function AppInspectorDrawer({
                     </td>
                     <td className="px-2 py-1 text-right tabular-nums text-muted">
                       {entry.rowsRead}
-                    </td>
-                    <td className="px-2 py-1 text-right tabular-nums text-muted">
-                      {formatBytes(entry.wasmMemoryBytes)}
                     </td>
                     <td className="px-2 py-1 text-right tabular-nums text-muted">
                       {formatBytes(entry.changesetBytes)}
