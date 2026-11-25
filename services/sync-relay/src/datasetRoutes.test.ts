@@ -2115,6 +2115,41 @@ it("supports multi-Collection local apps on the relay and enforces isolation and
   );
 });
 
+it("publishes a two-Collection app to the workspace's members, and refuses one that creates Collection files", async () => {
+  const { f, multiCandidate } = await multiCollectionFixture();
+  const publish = (candidate: unknown) =>
+    f.http("w/app-publications", { audience: "workspace", candidate });
+  expect((await publish(multiCandidate)).status).toBe(409);
+  f.storage.inviteWorkspaceMember({
+    workspaceId: "w",
+    actorUserId: "owner",
+    workspaceName: "Team",
+    email: "ana@dohc.test",
+    recipientUserId: "ana",
+    newMemberId: () => "ana-entry",
+    newGrantId: () => "ana-grant",
+    newShareId: () => "members",
+    nowMs: 5,
+  });
+  expect((await publish(multiCandidate)).status).toBe(200);
+  const creates = {
+    ...multiCandidate,
+    capabilities: [
+      {
+        kind: "collection-create",
+        collectionPath: "responses",
+        schemaSha256: "a".repeat(64),
+        allowedFields: ["name"],
+        requiredFields: ["name"],
+        readFields: ["name"],
+      },
+    ],
+  };
+  const refused = await publish(creates);
+  expect(refused.status).toBe(400);
+  expect(await refused.text()).toMatch(/only on a link/);
+});
+
 it("publishes, activates, invokes, withdraws, and deletes a two-Collection link app", async () => {
   const { f, multiCandidate, basePub } = await multiCollectionFixture();
   const owner = basePub.owner as { shareId: string; grantId: string; generation: number };

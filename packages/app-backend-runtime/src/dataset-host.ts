@@ -173,11 +173,12 @@ export interface DatasetAuthority {
   /** Host permission/publication generation; changes invalidate in-flight work. */
   authorityToken?: string;
   /**
-   * A host ceiling on the operations this caller runs: only those listed, and
-   * only read-only ones when `readOnlyOnly` is set. Fold its inputs into
+   * A host ceiling on the operations an app caller runs: only those its data
+   * grant or workspace defaults hold when `grantedOnly` is set, and only
+   * read-only ones when `readOnlyOnly` is set. Fold its inputs into
    * `authorityToken`, so a narrower ceiling stops in-flight work.
    */
-  operationCeiling?: { allowedOperationIds?: readonly string[]; readOnlyOnly?: boolean };
+  operationCeiling?: { grantedOnly?: boolean; readOnlyOnly?: boolean };
   /** Operations a named caller holds by its Collection's workspace defaults, beside its own data grant. */
   defaultOperationIds?: readonly string[];
   /**
@@ -774,7 +775,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       ).filter(
         (operation) =>
           verified.caller.kind === "owner" ||
-          operation.access !== "helper" ||
+          (operation.access !== "helper" && !verified.operationCeiling?.grantedOnly) ||
           allowedHelperIds.has(operation.operationId),
       );
       token = JSON.stringify([row.token, dataToken]);
@@ -805,12 +806,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     }
     const ceiling = verified.operationCeiling;
     if (ceiling)
-      operations = operations.filter(
-        (operation) =>
-          (!ceiling.readOnlyOnly || operation.readOnly) &&
-          (!ceiling.allowedOperationIds ||
-            ceiling.allowedOperationIds.includes(operation.operationId)),
-      );
+      operations = operations.filter((operation) => !ceiling.readOnlyOnly || operation.readOnly);
     return {
       authority: verified,
       revision: approved,

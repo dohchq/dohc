@@ -22,6 +22,7 @@ import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifac
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import { generateDatasetSchema } from "../workspaces/datasetGenerator";
 import type { OwnerDatasetData } from "../workspaces/remoteDataset";
+import type { NamedDatasetData } from "../workspaces/namedDataset";
 import { DatasetResult, type DatasetPlace } from "@dohc/cli/dataset";
 import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
@@ -137,7 +138,7 @@ it("cancels only the caller's running invocation through its worker signal", asy
 
 function fixture(
   remote?: OwnerDatasetData,
-  named?: Pick<OwnerDatasetData, "list" | "describe" | "invoke" | "upload" | "file">,
+  named?: NamedDatasetData,
   automationName?: (
     workspace: { workspaceId: string },
     automationId: string,
@@ -803,7 +804,7 @@ it("allows named Collection data actions without opening a local owner store or 
     upload: vi.fn(),
     file: vi.fn(),
   };
-  const f = fixture(undefined, named);
+  const f = fixture(undefined, named as unknown as NamedDatasetData);
   f.workspace.shareView = { shareId: "shared" };
   expect(await f.handler("window", { action: "list", workspaceId: "workspace" })).toMatchObject({
     kind: "list",
@@ -1715,17 +1716,44 @@ it("reads a received share's Collections through its server, never the local sto
   const localHost = vi.fn(async (): Promise<LocalDatasetHost> => {
     throw new Error("Unexpected local store.");
   });
-  const f = fixture(
-    undefined,
-    named as unknown as Pick<OwnerDatasetData, "list" | "describe" | "invoke" | "upload" | "file">,
-    undefined,
-    localHost,
-  );
+  const f = fixture(undefined, named as unknown as NamedDatasetData, undefined, localHost);
   f.workspace.shareView = { shareId: "s" };
   expect(await f.handler("window", { workspaceId: "workspace", action: "list" })).toEqual({
     kind: "list",
     datasets: [],
     nextCursor: null,
+  });
+  expect(localHost).not.toHaveBeenCalled();
+});
+
+it("sends an Admin's grants and defaults in a received workspace to its server, which checks their role", async () => {
+  const page = { grants: [], nextCursor: null, defaults: null };
+  const named = {
+    permissions: vi.fn(async () => page),
+    setGrant: vi.fn(async () => undefined),
+    setDefaults: vi.fn(async () => undefined),
+  };
+  const localHost = vi.fn(async (): Promise<LocalDatasetHost> => {
+    throw new Error("Unexpected local store.");
+  });
+  const f = fixture(undefined, named as unknown as NamedDatasetData, undefined, localHost);
+  f.workspace.shareView = { shareId: "s" };
+  const selection = { workspaceId: "workspace", datasetPath: "data/dataset.json" };
+  const defaults = {
+    view: [],
+    comment: [],
+    edit: [],
+    revision: 1,
+    revisionSha256: f.revision.revisionSha256,
+  };
+  expect(await f.handler("cli", { ...selection, action: "setDefaults", defaults })).toEqual({
+    kind: "grant-updated",
+  });
+  expect(named.setDefaults).toHaveBeenCalledWith(
+    expect.objectContaining({ datasetId: f.revision.datasetId, defaults }),
+  );
+  expect(await f.handler("cli", { ...selection, action: "permissions" })).toMatchObject({
+    kind: "permissions",
   });
   expect(localHost).not.toHaveBeenCalled();
 });

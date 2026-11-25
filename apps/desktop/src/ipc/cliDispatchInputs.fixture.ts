@@ -29,6 +29,7 @@ const jsonFields: Readonly<Record<string, unknown>> = {
   reference: hash,
   grantId: id,
   grant: { revision: 1, revisionSha256: hash, operationIds: [id], discover: true },
+  defaults: { view: [], comment: [], edit: [id], revision: 1, revisionSha256: hash },
   principalKey: "principal",
   revision: 1,
   revisionSha256: hash,

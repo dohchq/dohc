@@ -1301,7 +1301,7 @@ it("closes a workspace app when a folder rule hides one of its Collections or it
   await expect(read("source-hidden")).rejects.toMatchObject({ code: "not_found" });
 });
 
-it("lets only an Edit member run a write through a workspace app", async () => {
+it("lets only an Edit member run a write through a workspace app, and only one their grant or defaults hold", async () => {
   const f = await memberFixture();
   const shared = f.app();
   const submit = (key: string) => f.invoke(ana, id(5), { name: "Ana" }, shared, key);
@@ -1313,8 +1313,19 @@ it("lets only an Edit member run a write through a workspace app", async () => {
     expect((await f.invoke(ana, id(6), {}, shared, `${level}-read`)).result).toBe(level);
   }
   f.level("edit");
-  expect((await submit("edit-submit")).result).toEqual({ accepted: true });
+  await expect(submit("ungranted-submit")).rejects.toMatchObject(refused);
   expect((await edit("edit-edit")).result).toBe(true);
+  f.host.setWorkspaceDefaults(owner, {
+    ...scope,
+    defaults: {
+      view: [],
+      comment: [],
+      edit: [id(5)],
+      revision: 1,
+      revisionSha256: memberRevision.revisionSha256,
+    },
+  });
+  expect((await submit("edit-submit")).result).toEqual({ accepted: true });
 });
 
 it("refuses a member's running write through a workspace app when a default or folder rule lowers it before it commits", async () => {

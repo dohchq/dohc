@@ -223,6 +223,11 @@ export function createOwnerAppPublicationRoutes(options: {
     } catch {
       throw badRequest("Invalid publication candidate.");
     }
+    if (
+      workspace &&
+      candidate.capabilities.some((capability) => capability.kind === "collection-create")
+    )
+      throw badRequest("Apps that create Collection files share only on a link.");
     let agent;
     try {
       agent = parseApprovalAgent(input.agent);

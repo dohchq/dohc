@@ -162,7 +162,7 @@ export interface OwnerDatasetData {
 
 /** A Collection's data on a server, where its owner also reads its grants and presses its buttons. */
 export type RemoteDatasetData = OwnerDatasetData &
-  Required<Pick<OwnerDatasetData, "permissions" | "press">>;
+  Required<Pick<OwnerDatasetData, "permissions" | "press" | "setGrant" | "setDefaults">>;
 
 /** A press the server runs: who pressed is the server's to know; an agent that pressed for them is provenance. */
 export interface DatasetServerPressInput {

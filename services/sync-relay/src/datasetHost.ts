@@ -475,7 +475,9 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         ]),
       ),
       ...(defaults?.operationIds.length ? { defaultOperationIds: defaults.operationIds } : {}),
-      ...(publication && effective !== "edit" ? { operationCeiling: { readOnlyOnly: true } } : {}),
+      ...(publication
+        ? { operationCeiling: { grantedOnly: true, readOnlyOnly: effective !== "edit" } }
+        : {}),
     };
   }
   function workspacePublication(
@@ -1873,13 +1875,13 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         if (loaded.local || loaded.workspaceId !== input.workspaceId) throw notFound();
         const operations = loaded.candidate.capabilities.map((declared) => {
           if (declared.kind !== "dataset") throw notFound();
-          const verified = app(auth, input.workspaceId, declared.datasetId, input.publicationId);
+          requireCollectionFile(input.workspaceId, declared.datasetId);
           const {
             operations: _operations,
             name: _name,
             alias: _alias,
             ...binding
-          } = verified.capability;
+          } = capability(loaded.candidate, input.workspaceId, declared.datasetId);
           return { datasetId: declared.datasetId, appId: input.publicationId, binding };
         });
         if (

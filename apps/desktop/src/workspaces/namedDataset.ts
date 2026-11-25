@@ -15,6 +15,12 @@ import { JOINED_BY_ANOTHER_ACCOUNT } from "../ipc/joinedAccountWords";
 import { joinedByAccount } from "./shareWriteGate";
 
 /** Source View/Edit and Collection data permissions are separate. The relay resolves the named grant. */
+/** A member's Collection data through their share. An Admin manages grants and defaults on the workspace's own routes, where the server checks their role. */
+export type NamedDatasetData = Pick<
+  OwnerDatasetData,
+  "list" | "describe" | "inspect" | "invoke" | "upload" | "file"
+> &
+  Required<Pick<OwnerDatasetData, "permissions" | "setGrant" | "setDefaults">>;
 export function createNamedDatasetData(input: {
   workspaceId: string;
   shareView: unknown;
@@ -32,7 +38,7 @@ export function createNamedDatasetData(input: {
       init: RequestInit,
     ): Promise<Response>;
   };
-}): Pick<OwnerDatasetData, "list" | "describe" | "inspect" | "invoke" | "upload" | "file"> {
+}): NamedDatasetData {
   const marker = input.shareView as {
     shareId?: unknown;
     recipientUserId?: unknown;
@@ -77,12 +83,15 @@ export function createNamedDatasetData(input: {
     throw new Error(JOINED_BY_ANOTHER_ACCOUNT);
   const shareId = marker.shareId;
   const data = createRemoteDatasetData({ ...input, shareId });
+  const { permissions, setGrant, setDefaults } = createRemoteDatasetData(input);
+  const managed = { permissions, setGrant, setDefaults };
   const exposed = {
     list: data.list,
     describe: data.describe,
     invoke: data.invoke,
     upload: data.upload,
     file: data.file,
+    ...managed,
   };
   if (!input.offline) return exposed;
   const { cache, relayResponse } = input.offline;
@@ -238,5 +247,6 @@ export function createNamedDatasetData(input: {
         )
       ).value;
     },
+    ...managed,
   };
 }
