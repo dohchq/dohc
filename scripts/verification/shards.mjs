@@ -6,11 +6,14 @@ import { desktopProofTags } from "./verify.mjs";
 
 const slash = (path) => path.replaceAll("\\", "/");
 const fileId = (path) => slash(relative(repoRoot, path));
-export const JS_SHARDS = 13;
-// Median worker inventory plus artifact restoration in the recorded cloud run.
+export const JS_SHARDS = 12;
 export const JS_NATIVE_READY_SECONDS = 100;
 const splitNativeFile = "services/share-web/src/selfHostedLiveNative.integration.ts";
 export const BROWSER_TEST_FILES = new Set(["examples/hex-tactics/hex-tactics.test.mts"]);
+export const SELF_HOST_BROWSER_FILES = new Set([
+  "services/share-web/src/namedRecipientAuthenticatedNative.integration.ts",
+  "services/share-web/src/publicLinkAuthenticatedNative.integration.ts",
+]);
 
 const databasePackages = new Set([
   "@dohc/workspace-postgres",
@@ -46,13 +49,15 @@ export function javascriptGroups(tasks) {
         kind: "vitest",
         pkg: files[0].package,
         native: Boolean(files[0].native),
-        // Desktop Vitest, projection, lint, and desktop typecheck slowed each other in measured
-        // runs. The simulator counts each as 2.5 of a worker's four CPUs, and browser proofs as 2.
+        // Vitest runs two workers per group (one for app-backend-runtime), and projection or
+        // desktop suites contend more heavily. The simulator counts those as 2.5 of four CPUs.
         cpu:
           files[0].package === "@dohc/ydoc-projection" ||
           (files[0].package === "@dohc/desktop" && files[0].project === "desktop")
             ? 2.5
-            : 1,
+            : files[0].package === "@dohc/app-backend-runtime"
+              ? 1
+              : 2,
         resource: databasePackages.has(files[0].package)
           ? "postgres"
           : files[0].package === "@dohc/mobile"
@@ -224,6 +229,9 @@ export const preparedArtifactPaths = [
   "services/share-web/viewer/dist",
   "services/sync-relay/dist",
 ];
+export const packedPreparedArtifactPaths = preparedArtifactPaths.filter(
+  (path) => path !== "apps/desktop/target/debug/dohc-workspace-engine",
+);
 
 function referencesPreparedArtifact(file, source) {
   if (/\bDOHC_TEST_(?:ENGINE_BINARY|RELAY_MAIN)\b/u.test(source)) return true;

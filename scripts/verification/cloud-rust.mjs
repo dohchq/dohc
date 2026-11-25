@@ -16,13 +16,11 @@ import {
 import { stageReaderTestNode } from "../../tools/rust-engine-program/reader-test-node.mjs";
 import rustTestTimes from "./rust-test-times.json" with { type: "json" };
 
-export const RUST_SHARDS = 6;
+export const RUST_SHARDS = 5;
 // Default ubuntu-24.04 runners have 4 vCPUs, and nextest runs one test per CPU. An 8-vCPU
 // Blacksmith dispatch reserves too little. Every partition must compute the same plan, so this
 // stays a constant rather than a reading of the runner.
 export const RUST_TEST_THREADS = 4;
-// In run 43610854388, tests began 29 s wall after compile on partition 0, versus about 12 s elsewhere.
-export const RUST_PARTITION_ZERO_DELAY_SECONDS = 17;
 export const RUST_READER_SHARD = 1;
 // The reader tests run after the partition; across six CI runs they took 34 to 68 s wall, median 47 s.
 export const RUST_READER_SECONDS = 47;
@@ -33,7 +31,6 @@ export const RUST_POLICY_STEPS = [
   "fmt --check",
   "clippy -D warnings",
   "doctests",
-  "build daemon",
   "cargo-deny",
   "cargo-audit",
   "scratch leak",
@@ -68,7 +65,6 @@ export function partitionRustTests(
   count = RUST_SHARDS,
   times = rustTestTimes,
   readerSeconds = RUST_READER_SECONDS,
-  partitionZeroDelaySeconds = RUST_PARTITION_ZERO_DELAY_SECONDS,
   threads = RUST_TEST_THREADS,
 ) {
   if (!Number.isSafeInteger(count) || count < 1)
@@ -85,9 +81,7 @@ export function partitionRustTests(
   if (tasks.some((task) => !Number.isFinite(task.seconds) || task.seconds <= 0))
     throw new Error("Rust test estimates must be positive seconds.");
   const partitions = Array.from({ length: count }, (_, index) => ({
-    seconds:
-      (index === 0 ? partitionZeroDelaySeconds : index === RUST_READER_SHARD ? readerSeconds : 0) *
-      threads,
+    seconds: (index === RUST_READER_SHARD ? readerSeconds : 0) * threads,
     tests: [],
   }));
   for (const task of tasks.sort(
@@ -195,7 +189,7 @@ export async function cloudRust(part, index = 0) {
             "--workspace",
             "--archive-file",
             archive,
-            "--zstd-level=-1",
+            "--zstd-level=3",
           ],
           { env },
         );
@@ -255,8 +249,6 @@ export async function cloudRust(part, index = 0) {
         repoRoot,
         "--extract-to",
         repoRoot,
-        // Partition zero extracts over the target directory it just built.
-        ...(index === 0 ? ["--extract-overwrite"] : []),
         "--message-format=json",
       ]);
       const extracted = rustTestInventory(JSON.parse(listed.stdout)).map((task) => task.id);

@@ -223,7 +223,7 @@ function runGate(stubDir, extraEnv = {}, args = []) {
     return {
       code: res.status,
       summary: out.slice(out.indexOf("== summary ==")),
-      evidence: (out.match(/^- .*\| run-rust-checks \|.*$/m) ?? [""])[0],
+      evidence: (out.match(/^- .*\| run-rust-checks(?:\/policy)? \|.*$/m) ?? [""])[0],
     };
   } finally {
     rmSync(slotRoot, { recursive: true, force: true });
@@ -620,6 +620,27 @@ test("a HEAD moved and returned inside one step is refused", () => {
     assert.match(run.evidence, / head UNATTRIBUTABLE\)/);
     assert.match(run.evidence, /\| FAIL \|/);
     assert.notEqual(run.code, 0);
+  } finally {
+    rmSync(stub, { recursive: true, force: true });
+  }
+});
+
+test("policy-only skips build daemon while keeping doctests and policy checks", () => {
+  const stub = stubToolchain();
+  try {
+    const policy = runGate(stub, {}, ["--prepared-runtime", "--policy-only"]);
+    assert.equal(policy.code, 0, policy.summary);
+    assert.match(policy.evidence, /doctests=PASS/);
+    assert.doesNotMatch(policy.evidence, /build daemon=/);
+    const commands = readFileSync(join(stub, "commands.txt"), "utf8").trim().split(/\r?\n/);
+    assert.equal(
+      commands.some((cmd) => cmd.includes("test --locked --workspace --doc")),
+      true,
+    );
+    assert.equal(
+      commands.some((cmd) => cmd.includes("build --locked -p dohc-workspace-engine")),
+      false,
+    );
   } finally {
     rmSync(stub, { recursive: true, force: true });
   }

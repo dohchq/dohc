@@ -1,18 +1,20 @@
 import {
+  copyFileSync,
   createWriteStream,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   rmdirSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { setTimeout as delay } from "node:timers/promises";
-import { assertPrepared, hashFile, prepare, stagedEnginePath } from "./build.mjs";
+import { assertPrepared, enginePath, hashFile, prepare, stagedEnginePath } from "./build.mjs";
 import {
   desktopProofCommand,
   electronBinary,
@@ -25,6 +27,7 @@ import { selectsRepositoryTests } from "./selection.mjs";
 import {
   BROWSER_TEST_FILES,
   JS_SHARDS,
+  SELF_HOST_BROWSER_FILES,
   assertTaskCoverage,
   javascriptGroups,
   javascriptTasks,
@@ -207,43 +210,61 @@ export async function runJavascript(
           : [task.command === "node" ? process.execPath : task.command, task.args];
       await command(task, executable, args, { cwd: resolve(repoRoot, task.cwd) });
     } else if (task.kind === "self-host-native") {
-      const proofDirectory = join(directory, `self-host-${record.steps.length}`);
-      mkdirSync(proofDirectory, { recursive: true });
-      const sha256 = hashFile(stagedEnginePath);
-      const escaped = task.name?.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-      await command(
-        task,
-        ...pnpm([
-          "--filter",
-          "@dohc/share-web",
-          "exec",
-          "vitest",
-          "run",
-          "--config",
-          "vitest.self-host-native.config.ts",
-          // Vitest matches a filter against the path from its root.
-          relative(resolve(repoRoot, "services/share-web"), resolve(repoRoot, task.file)),
-          ...(escaped ? ["--testNamePattern", `^${escaped}$`] : []),
-          "--reporter=default",
-          "--reporter=json",
-          `--outputFile.json=${join(proofDirectory, "vitest.json")}`,
-        ]),
-        {
-          env: {
-            ...process.env,
-            DOHC_SERVICE_HOST_PROOF_BINARY: stagedEnginePath,
-            DOHC_SERVICE_HOST_PROOF_SHA256: sha256,
-            DOHC_SERVICE_HOST_PROOF_OUTPUT: proofDirectory,
+      const evidenceDirectory = join(directory, `self-host-${record.steps.length}`);
+      mkdirSync(evidenceDirectory, { recursive: true });
+      const proofDirectory = mkdtempSync(join(tmpdir(), "dohc-self-host-proof-"));
+      try {
+        const sha256 = hashFile(stagedEnginePath);
+        const escaped = task.name?.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+        const vitestReport = join(evidenceDirectory, "vitest.json");
+        await command(
+          task,
+          ...pnpm([
+            "--filter",
+            "@dohc/share-web",
+            "exec",
+            "vitest",
+            "run",
+            "--config",
+            "vitest.self-host-native.config.ts",
+            // Vitest matches a filter against the path from its root.
+            relative(resolve(repoRoot, "services/share-web"), resolve(repoRoot, task.file)),
+            ...(escaped ? ["--testNamePattern", `^${escaped}$`] : []),
+            "--reporter=default",
+            "--reporter=json",
+            `--outputFile.json=${vitestReport}`,
+          ]),
+          {
+            env: {
+              ...process.env,
+              DOHC_SERVICE_HOST_PROOF_BINARY: stagedEnginePath,
+              DOHC_SERVICE_HOST_PROOF_SHA256: sha256,
+              DOHC_SERVICE_HOST_PROOF_OUTPUT: proofDirectory,
+            },
           },
-        },
-      );
-      assertNativeProof(
-        task,
-        JSON.parse(readFileSync(join(proofDirectory, "vitest.json"), "utf8")),
-      );
-      if (task.name?.startsWith("enrolls a self-hosted document,")) {
-        // The canonical reader also checks the complete saved delivery record.
-        record.selfHostNative = readSelfHostDeliveryProof(proofDirectory, stagedEnginePath, sha256);
+        );
+        assertNativeProof(task, JSON.parse(readFileSync(vitestReport, "utf8")));
+        if (task.name?.startsWith("enrolls a self-hosted document,")) {
+          const deliveryDirectories = readdirSync(proofDirectory, { withFileTypes: true }).filter(
+            (entry) => entry.isDirectory() && entry.name.startsWith("self-host-live-"),
+          );
+          if (deliveryDirectories.length !== 1)
+            throw new Error("The self-host native proof did not produce one evidence record.");
+          const retainedDeliveryDir = join(evidenceDirectory, deliveryDirectories[0].name);
+          mkdirSync(retainedDeliveryDir, { recursive: true });
+          copyFileSync(
+            join(proofDirectory, deliveryDirectories[0].name, "result.json"),
+            join(retainedDeliveryDir, "result.json"),
+          );
+          // The canonical reader also checks the complete saved delivery record.
+          record.selfHostNative = readSelfHostDeliveryProof(
+            evidenceDirectory,
+            stagedEnginePath,
+            sha256,
+          );
+        }
+      } finally {
+        rmSync(proofDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       }
     } else if (task.kind === "desktop" || task.kind === "accounts") {
       const path = join(directory, `${record.steps.length}-playwright.json`);
@@ -313,6 +334,8 @@ async function restoreNativePreparation() {
       cwd: repoRoot,
       log: join(output, "artifact-restore.log"),
     });
+    mkdirSync(dirname(stagedEnginePath), { recursive: true });
+    copyFileSync(enginePath, stagedEnginePath);
     return assertPrepared();
   } finally {
     rmSync(zip, { force: true });
@@ -389,12 +412,14 @@ export async function cloudJavascript(part, index = 0) {
                 record.build = build;
               }),
             ];
-            // namedRecipientAuthenticatedNative drives Chromium too.
             if (
               shard.some(
                 (group) =>
-                  ["desktop", "accounts", "self-host-native"].includes(group.kind) ||
-                  group.tasks.some((task) => BROWSER_TEST_FILES.has(task.file)),
+                  ["desktop", "accounts"].includes(group.kind) ||
+                  group.tasks.some(
+                    (task) =>
+                      BROWSER_TEST_FILES.has(task.file) || SELF_HOST_BROWSER_FILES.has(task.file),
+                  ),
               )
             )
               actions.push(

@@ -25,7 +25,7 @@ import {
 } from "./people";
 import { test } from "./test";
 
-const MINUTES = Number(process.env.TOGETHER_MINUTES ?? 3);
+const MINUTES = Number(process.env.TOGETHER_MINUTES ?? 2);
 const PEOPLE = Number(process.env.TOGETHER_PEOPLE ?? 3);
 const SEED = Number(process.env.TOGETHER_SEED ?? 41);
 

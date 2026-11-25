@@ -1,14 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
@@ -19,6 +11,7 @@ import {
   javascriptGroups,
   javascriptTasks,
   nativeTestFiles,
+  packedPreparedArtifactPaths,
   partitionJavascript,
   preparedArtifactPaths,
   simulateJavascript,
@@ -27,19 +20,14 @@ import { MIN_TASK_SECONDS, refreshShardTimes } from "./refresh-shard-times.mjs";
 import { readWorkspacePackages } from "./selection.mjs";
 import {
   CLOUD_JOB_GRAPH,
-  RUST_ARCHIVE_BUILD_STEP,
-  RUST_ARCHIVE_WAIT_STEP,
-  aggregateCloud,
   aggregateJavascript,
   aggregateRust,
   completedGateTiming,
   verifyCompletedCloud,
-  waitForGate,
 } from "./cloud-aggregate.mjs";
 import { JS_SHARDS } from "./cloud.mjs";
 import {
   RUST_ARCHIVE_PROOFS,
-  RUST_PARTITION_ZERO_DELAY_SECONDS,
   RUST_POLICY_STEPS,
   RUST_READER_SHARD,
   RUST_SHARDS,
@@ -55,10 +43,6 @@ import { recordedRustTimes, rustTimingSamples } from "./refresh-rust-times.mjs";
 import { waitForPreparation } from "./wait-preparation.mjs";
 import { cloudApi } from "./cloud-api.mjs";
 import { runVitestGroup } from "./vitest-group.mjs";
-
-// A successful group wait records when it ended. These tests keep that record out of the checkout.
-const waitOutput = mkdtempSync(join(tmpdir(), "gate-wait-"));
-process.on("exit", () => rmSync(waitOutput, { recursive: true, force: true }));
 
 test("JS workers retry the Electron installer once and propagate other errors", async (t) => {
   const directory = mkdtempSync(join(tmpdir(), "cloud-electron-retry-"));
@@ -300,9 +284,9 @@ test("prepared artifact references keep tests and their helpers behind restorati
     .trim()
     .split(/\s+/u)
     .slice(pack.trim().split(/\s+/u).indexOf("/tmp/javascript-prepared.tar.zst") + 1);
-  assert.deepEqual(new Set(paths), new Set(preparedArtifactPaths));
+  assert.deepEqual(new Set(paths), new Set(packedPreparedArtifactPaths));
   const expected = [];
-  for (const [index, path] of paths.entries()) {
+  for (const [index, path] of preparedArtifactPaths.entries()) {
     for (const [style, expression] of Object.entries({
       literal: `join(repoRoot, ${JSON.stringify(path)})`,
       joined: `join(repoRoot, ${path
@@ -744,7 +728,6 @@ test("Rust partitions use binary defaults for new tests and the global default f
       2,
       times,
       0,
-      0,
     ),
     [
       ["known slow", "constructor new", "new_crate new"],
@@ -765,24 +748,12 @@ test("The reader reserve holds back wall seconds times the test thread count", (
     [2, [14, 10]],
     [undefined, [16, 8]],
   ]) {
-    const partitions = partitionRustTests(inventory, 2, times, 20, 0, threads);
+    const partitions = partitionRustTests(inventory, 2, times, 20, threads);
     assert.deepEqual(
       partitions.map((tests) => tests.length),
       sizes,
     );
   }
-});
-
-test("Rust partition zero converts its wall delay to test-seconds at four threads", () => {
-  const times = { defaultSeconds: 1, binaries: {}, tests: {} };
-  // With 204 one-second tests and 4 threads, the 17 s wall reserve balances both at 34 s wall.
-  const inventory = Array.from({ length: 204 }, (_, i) => `crate t${i}`);
-  const partitions = partitionRustTests(inventory, 2, times, 0);
-  assert.equal(RUST_PARTITION_ZERO_DELAY_SECONDS, 17);
-  assert.deepEqual(
-    partitions.map((tests) => tests.length),
-    [68, 136],
-  );
 });
 
 test("Rust filters select exact tests in exact binaries and escape filterset syntax", () => {
@@ -868,24 +839,8 @@ function passingCloudJobs() {
   const { jobs } = JSON.parse(
     readFileSync(new URL("./fixtures/passing-cloud-jobs.json", import.meta.url), "utf8"),
   );
-  for (const [prefix, count] of [
-    ["JS worker", JS_SHARDS],
-    ["Rust tests", RUST_SHARDS],
-  ]) {
-    const workers = jobs.filter((job) => job.name.startsWith(`${prefix} `));
-    for (let part = workers.length + 1; part < count; part++) {
-      jobs.push({ ...workers[0], name: `${prefix} ${part}` });
-    }
-  }
   const active = new Set(Object.values(CLOUD_JOB_GRAPH).flatMap((node) => node.names));
   return jobs.filter((job) => active.has(job.name));
-}
-
-function publishAggregate(outputDirectory, aggregate) {
-  const published = join(outputDirectory, "published");
-  mkdirSync(published, { recursive: true });
-  if (aggregate) writeFileSync(join(published, "js-result.json"), JSON.stringify(aggregate));
-  else copyFileSync(join(outputDirectory, "js-result.json"), join(published, "js-result.json"));
 }
 
 const apiEnv = {
@@ -953,8 +908,7 @@ test("the adapted saved run includes shared preparation in the gate span", () =>
     assert.equal(result.spanSeconds, seconds);
     assert.equal("confinementSeconds" in result, false);
     assert.equal(result.seconds, seconds);
-    // The saved Rust workers started late; their wait from selection now counts.
-    assert.equal(result.contended, scope === "rust");
+    assert.equal(result.contended, false);
     assert.equal(result.timing, "within budget");
     assert.ok(result.jobs.every((job) => Number.isFinite(job.runnerWaitSeconds)));
   }
@@ -967,17 +921,19 @@ test("the adapted saved run includes shared preparation in the gate span", () =>
   );
 });
 
-test("run 43478162335 adapted to the current graph retains its span and delayed Rust starts", () => {
+test("run 43478162335 adapted to the current graph retains its span", () => {
   const { jobs } = JSON.parse(
     readFileSync(new URL("./fixtures/folded-passing-run.json", import.meta.url), "utf8"),
   );
+  const active = new Set(Object.values(CLOUD_JOB_GRAPH).flatMap((node) => node.names));
+  const filtered = jobs.filter((job) => active.has(job.name));
   for (const [scope, seconds] of [
     ["js", 280],
     ["rust", 432],
   ]) {
-    const result = completedGateTiming(scope, jobs, jobs[0].head_sha);
+    const result = completedGateTiming(scope, filtered, filtered[0].head_sha);
     assert.equal(result.seconds, seconds);
-    assert.equal(result.contended, scope === "rust");
+    assert.equal(result.contended, false);
     assert.equal(result.timing, "within budget");
   }
 });
@@ -985,8 +941,8 @@ test("run 43478162335 adapted to the current graph retains its span and delayed 
 test("uncontended ceiling overruns fail; contended overruns retain their measured span", (t) => {
   const warn = t.mock.method(console, "warn", () => {});
   for (const [scope, finalJob, budget] of [
-    ["js", "typecheck + tests", 400],
-    ["rust", "engine gate", 700],
+    ["js", "JS worker 0", 400],
+    ["rust", "Rust tests 0", 700],
   ]) {
     const jobs = withoutWaits(),
       start = Date.parse(jobs[0].started_at);
@@ -1012,7 +968,7 @@ test("uncontended ceiling overruns fail; contended overruns retain their measure
     assert.equal(result.timing, "unmeasured");
     assert.match(
       result.warning,
-      new RegExp(`${budget + 50}s.*${budget - 100}s.*${finalJob.replaceAll("+", "\\+")}.*31s`, "u"),
+      new RegExp(`${budget + 50}s.*${budget - 100}s.*${finalJob}.*31s`, "u"),
     );
     last.completed_at = new Date(start + (budget - 100) * 1000).toISOString();
     const within = completedGateTiming(scope, jobs, jobs[0].head_sha);
@@ -1053,38 +1009,12 @@ test("shared preparation uses the wall span and its runner wait counts as conten
   }
 });
 
-test("Rust archive polling does not count as a runner wait", () => {
-  const jobs = withoutWaits(),
-    partition = jobs.find((job) => job.name === "Rust tests 1"),
-    start = Date.parse(jobs[0].started_at);
-  partition.steps = [
-    {
-      name: "Wait for the shared Rust archive",
-      started_at: partition.started_at,
-      completed_at: new Date(start + 250_000).toISOString(),
-    },
-  ];
-  jobs.find((job) => job.name === "engine gate").completed_at = new Date(
-    start + 750_000,
-  ).toISOString();
-  assert.throws(
-    () => completedGateTiming("rust", jobs, jobs[0].head_sha),
-    (error) => {
-      assert.equal(
-        error.timing.jobs.find((job) => job.name === partition.name).runnerWaitSeconds,
-        0,
-      );
-      return error.timing.timing === "over budget";
-    },
-  );
-});
-
 test("a failed JavaScript worker leaves Rust's independent verdict visible", () => {
   const jobs = withoutWaits();
   jobs.find((job) => job.name === "JS worker 1").conclusion = "failure";
   assert.throws(() => completedGateTiming("js", jobs, jobs[0].head_sha), /unsuccessful/u);
   assert.equal(completedGateTiming("rust", jobs, jobs[0].head_sha).timing, "within budget");
-  const last = jobs.find((job) => job.name === "engine gate");
+  const last = jobs.find((job) => job.name === "Rust tests 0");
   last.completed_at = new Date(Date.parse(jobs[0].started_at) + 750_000).toISOString();
   assert.throws(() => completedGateTiming("rust", jobs, jobs[0].head_sha), /exceeding/u);
 });
@@ -1094,21 +1024,14 @@ test("contention counts only waits that can occur inside the gate span", (t) => 
   const jobs = withoutWaits(),
     start = Date.parse(jobs[0].started_at);
   jobs[0].created_at = new Date(start - 31_000).toISOString();
-  jobs.find((job) => job.name === "typecheck + tests").completed_at = new Date(
+  jobs.find((job) => job.name === "JS worker 0").completed_at = new Date(
     start + 450_000,
   ).toISOString();
   assert.throws(() => completedGateTiming("js", jobs, jobs[0].head_sha), /exceeding/u);
-  jobs.find((job) => job.name === "engine gate").completed_at = new Date(
+  jobs.find((job) => job.name === "Rust tests 0").completed_at = new Date(
     start + 750_000,
   ).toISOString();
   assert.throws(() => completedGateTiming("rust", jobs, jobs[0].head_sha), /exceeding/u);
-  const reporting = jobs.find((job) => job.name === "typecheck + tests");
-  reporting.created_at = new Date(Date.parse(reporting.started_at) - 300_000).toISOString();
-  assert.throws(
-    () => completedGateTiming("rust", jobs, jobs[0].head_sha),
-    /exceeding/u,
-    "Rust does not wait for JS reporting",
-  );
   const js = jobs.find((job) => job.name === "JS worker 1");
   withRunnerWait(jobs, js.name, 300);
   js.completed_at = new Date(Date.parse(js.started_at) + 1000).toISOString();
@@ -1124,10 +1047,8 @@ test("contention counts only waits that can occur inside the gate span", (t) => 
     "a JavaScript worker's wait does not excuse Rust's overrun",
   );
   for (const absent of [false, true]) {
-    const onlyRust = withoutWaits().filter(
-      (job) => !absent || !/^JS worker|^typecheck \+ tests$/u.test(job.name),
-    );
-    for (const job of onlyRust.filter((job) => /^JS worker|^typecheck \+ tests$/u.test(job.name))) {
+    const onlyRust = withoutWaits().filter((job) => !absent || !job.name.startsWith("JS worker"));
+    for (const job of onlyRust.filter((job) => job.name.startsWith("JS worker"))) {
       Object.assign(job, { conclusion: "skipped", started_at: null, completed_at: null });
     }
     assert.equal(completedGateTiming("rust", onlyRust, jobs[0].head_sha).timing, "within budget");
@@ -1400,24 +1321,6 @@ test("workflow reads retry transient responses and request errors within their c
     assert.equal(clock, deadline);
     assert.equal(attempts, Math.ceil(deadline / 1_000));
   }
-  for (const scope of ["js", "rust"]) {
-    let clock = 0,
-      reads = 0;
-    const jobs = passingCloudJobs(),
-      waitOutput = mkdtempSync(join(tmpdir(), "read-retry-"));
-    t.after(() => rmSync(waitOutput, { recursive: true, force: true }));
-    await waitForGate(scope, {
-      env: apiEnv,
-      outputDirectory: waitOutput,
-      now: () => clock,
-      pause: async (ms) => {
-        clock += ms;
-      },
-      request: async () => (++reads === 1 ? apiResponse(null, 500) : apiResponse({ jobs })),
-    });
-    assert.equal(reads, 2);
-    assert.equal(clock, 1_000);
-  }
   for (const failedRead of ["jobs", "artifacts"]) {
     let clock = 0,
       failures = 0;
@@ -1562,10 +1465,7 @@ test("prepared artifact body timing excludes readiness retries", async (t) => {
   assert.equal(downloads, 4);
 });
 
-for (const [scope, jobName, artifact] of [
-  ["js", "shared preparation", "javascript-prepared"],
-  ["rust", "engine gate", "rust-tests"],
-]) {
+for (const [scope, jobName, artifact] of [["js", "shared preparation", "javascript-prepared"]]) {
   test(`${scope} preparation polls artifacts conditionally before reading jobs`, async (t) => {
     let clock = 0,
       jobReads = 0,
@@ -1865,153 +1765,7 @@ for (const [scope, jobName, artifact] of [
   });
 }
 
-test("reporting joins its own successful group and caps queued or running siblings at 20 minutes", async () => {
-  for (const scope of ["js", "rust"]) {
-    const jobs = passingCloudJobs();
-    const sibling = jobs.find(
-      (job) => job.name === (scope === "js" ? "JS worker 1" : "Rust tests 1"),
-    );
-    for (const state of ["queued", "in_progress"]) {
-      let clock = 0;
-      Object.assign(sibling, { status: state, conclusion: null });
-      await assert.rejects(
-        waitForGate(scope, {
-          readJobs: async () => jobs,
-          now: () => clock,
-          pause: async (ms) => {
-            clock += ms;
-          },
-        }),
-        new RegExp(
-          `20-minute wait cap.*${state === "queued" ? "queued for a runner" : "running"}`,
-          "u",
-        ),
-      );
-      assert.equal(clock, 1_200_000);
-    }
-    for (const conclusion of ["failure", "cancelled", "skipped"]) {
-      Object.assign(sibling, { status: "completed", conclusion });
-      await assert.rejects(
-        waitForGate(scope, { readJobs: async () => jobs }),
-        /did not finish successfully/u,
-      );
-    }
-    Object.assign(sibling, { conclusion: "success" });
-    const proof = jobs.find((job) => job.name === "shared preparation");
-    Object.assign(proof, { status: "queued", conclusion: null });
-    let polls = 0;
-    await waitForGate(scope, {
-      outputDirectory: waitOutput,
-      readJobs: async () => {
-        if (++polls === 2) Object.assign(proof, { status: "completed", conclusion: "success" });
-        return jobs;
-      },
-      pause: async () => {},
-    });
-    assert.equal(polls, 2, "reporting waits for confinement before deciding timing and contention");
-    await assert.rejects(
-      waitForGate(scope, { readJobs: async () => [...jobs, sibling] }),
-      /Duplicate/u,
-    );
-  }
-});
-
-test("API-backed group waits retain the cap message and last observed jobs", async (t) => {
-  t.mock.method(console, "log", () => {});
-  for (const scope of ["js", "rust"])
-    for (const state of ["queued", "in_progress", "missing"]) {
-      let clock = 0,
-        lastRead = -1;
-      const jobs = passingCloudJobs(),
-        sibling = jobs.find(
-          (job) => job.name === (scope === "js" ? "JS worker 1" : "Rust tests 1"),
-        );
-      Object.assign(sibling, { status: state, conclusion: null });
-      await assert.rejects(
-        waitForGate(scope, {
-          env: apiEnv,
-          now: () => clock,
-          pause: async (ms) => {
-            clock += ms;
-          },
-          request: async () => {
-            assert.ok(clock < 1_200_000, "requests must start before the group deadline");
-            lastRead = clock;
-            return apiResponse({
-              jobs: state === "missing" ? jobs.filter((job) => job !== sibling) : jobs,
-            });
-          },
-        }),
-        {
-          message: `The ${scope} group exceeded its 20-minute wait cap; awaited jobs ${state === "queued" ? "still queued for a runner" : state === "in_progress" ? "still running" : "missing"}.`,
-        },
-      );
-      assert.equal(clock, 1_200_000);
-      assert.ok(lastRead >= 1_190_000 && lastRead < 1_200_000);
-    }
-  let clock = 0;
-  await assert.rejects(
-    waitForGate("js", {
-      env: apiEnv,
-      now: () => clock,
-      request: async () => {
-        clock = 1_200_000;
-        return apiResponse({
-          jobs: [{ name: "JS worker 1", status: "completed", conclusion: "failure" }],
-        });
-      },
-    }),
-    /did not finish successfully/u,
-    "a failure returned by the last permitted read still takes precedence",
-  );
-});
-
-test("aggregate polling keeps its interval and revalidates unchanged jobs", async (t) => {
-  const log = t.mock.method(console, "log", () => {});
-  for (const [scope, interval, name] of [
-    ["js", 3_000, "JS worker 1"],
-    ["rust", 10_000, "Rust tests 1"],
-  ]) {
-    const jobs = passingCloudJobs(),
-      sibling = jobs.find((job) => job.name === name);
-    Object.assign(sibling, { status: "in_progress", conclusion: null });
-    let clock = 0,
-      reads = 0;
-    await waitForGate(scope, {
-      env: apiEnv,
-      outputDirectory: waitOutput,
-      now: () => clock,
-      pause: async (ms) => {
-        assert.equal(ms, interval);
-        clock += ms;
-      },
-      request: async (url, { headers }) => {
-        assert.equal(headers["If-None-Match"], reads === 0 ? undefined : '"fixture"');
-        if (++reads === 2) return apiResponse(null, 304);
-        if (reads === 3) Object.assign(sibling, { status: "completed", conclusion: "success" });
-        return apiResponse({ jobs });
-      },
-    });
-    assert.equal(clock, interval * 2);
-    assert.match(log.mock.calls.at(-1).arguments[0], /counted=2 304=1/u);
-  }
-});
-
 test("polling waits for initially missing jobs and rejects invalid HTTP responses", async () => {
-  for (const scope of ["js", "rust"]) {
-    const jobs = passingCloudJobs(),
-      name = scope === "js" ? "JS worker 1" : "Rust tests 1";
-    let reads = 0,
-      pauses = 0;
-    await waitForGate(scope, {
-      outputDirectory: waitOutput,
-      readJobs: async () => (++reads === 1 ? jobs.filter((job) => job.name !== name) : jobs),
-      pause: async () => {
-        pauses++;
-      },
-    });
-    assert.equal(pauses, 1);
-  }
   let clock = 0,
     reads = 0;
   await waitForPreparation("js", {
@@ -2038,14 +1792,6 @@ test("polling waits for initially missing jobs and rejects invalid HTTP response
       }),
       status === 304 ? /no cached data/u : /HTTP 503/u,
     );
-    await assert.rejects(
-      waitForGate("js", {
-        env: apiEnv,
-        pause: async () => {},
-        request: async () => apiResponse(null, status),
-      }),
-      status === 304 ? /no cached data/u : /HTTP 503/u,
-    );
   }
   await assert.rejects(
     waitForPreparation("js", {
@@ -2057,6 +1803,7 @@ test("polling waits for initially missing jobs and rejects invalid HTTP response
     }),
     /no cached data/u,
   );
+  await assert.rejects(waitForPreparation("rust", { env: apiEnv }), /Only JavaScript workers/u);
 });
 
 function writeTimingReceipts(root, scope, commit) {
@@ -2112,16 +1859,14 @@ function writeTimingReceipts(root, scope, commit) {
   }
 }
 
-test("delayed job creation in run 43235841741 is unmeasured in both timing checks", async (t) => {
+test("delayed job creation in run 43235841741 is unmeasured", async (t) => {
   const fixture = JSON.parse(
     readFileSync(new URL("./fixtures/delayed-job-creation.json", import.meta.url), "utf8"),
   );
   const origin = Date.parse(fixture.origin),
     commit = fixture.headSha;
-  // The run had more partitions than the gate has now; keep the jobs the gate still has.
   const active = new Set(Object.values(CLOUD_JOB_GRAPH).flatMap((node) => node.names));
   const recorded = fixture.jobs.filter(([name]) => active.has(name));
-  const lastRust = `Rust tests ${RUST_SHARDS - 1}`;
   const jobs = recorded.map(([name, created, started, completed]) => ({
     name,
     head_sha: commit,
@@ -2135,18 +1880,12 @@ test("delayed job creation in run 43235841741 is unmeasured in both timing check
       ]),
     ),
   }));
-  for (const report of fixture.reportingJobs)
-    Object.assign(
-      jobs.find((job) => job.name === report.name),
-      report,
-    );
   assert.ok(jobs.every((job) => Date.parse(job.started_at) - Date.parse(job.created_at) <= 30_000));
   t.mock.method(console, "log", () => {});
   const warn = t.mock.method(console, "warn", () => {});
-  // Rust workers are ready at selection (32s), so their retained 660s start gives a 628s wait.
-  for (const [scope, name, seconds, completedSeconds, longest, wait] of [
-    ["js", "typecheck + tests", 401, 405, "JS worker 8", 126],
-    ["rust", "engine gate", 853, 857, lastRust, 628],
+  for (const [scope, completedSeconds, longest, wait] of [
+    ["js", 405, "JS worker 8", 126],
+    ["rust", 857, "Rust build", 123],
   ])
     await t.test(scope, async () => {
       const root = mkdtempSync(join(tmpdir(), "creation-gap-")),
@@ -2158,46 +1897,204 @@ test("delayed job creation in run 43235841741 is unmeasured in both timing check
         DOHC_WORKFLOW_HEAD_SHA: commit,
         GITHUB_STEP_SUMMARY: join(root, "summary.md"),
       };
-      const final = jobs.find((job) => job.name === name),
-        verify = final.steps.find((step) => step.name.startsWith("Require complete proof"));
-      const warningCount = warn.mock.calls.length;
-      const aggregate = await aggregateCloud(scope, root.replaceAll("\\", "/"), {
+      await verifyCompletedCloud(scope, {
+        directory: root,
         env,
         outputDirectory,
-        now: () => Date.parse(verify.completed_at),
         readJobs: async () => jobs,
       });
-      assert.equal(
-        warn.mock.calls.length,
-        warningCount,
-        "only final verification emits timing warnings",
-      );
-      if (scope === "js") publishAggregate(outputDirectory);
-      await verifyCompletedCloud(scope, { env, outputDirectory, readJobs: async () => jobs });
       const completed = JSON.parse(
         readFileSync(join(outputDirectory, `${scope}-completed-result.json`), "utf8"),
       );
-      for (const [result, measured] of [
-        [aggregate, seconds],
-        [completed, completedSeconds],
-      ]) {
-        assert.equal(result.verdict, "PASS");
-        assert.equal(result.timing, "unmeasured");
-        assert.equal(result.contended, true);
-        assert.equal(result.seconds, measured);
-        assert.equal(result.jobs.find((job) => job.name === longest).runnerWaitSeconds, wait);
-        assert.equal(
-          result.warning,
-          `${scope} timing unmeasured: ${measured}s exceeds the ${scope === "js" ? 300 : 600}s target; longest wait for GitHub to start ${longest}: ${wait}s.`,
-        );
-      }
+      assert.equal(completed.verdict, "PASS");
+      assert.equal(completed.timing, "unmeasured");
+      assert.equal(completed.contended, true);
+      assert.equal(completed.seconds, completedSeconds);
+      assert.equal(completed.jobs.find((job) => job.name === longest).runnerWaitSeconds, wait);
+      assert.equal(
+        completed.warning,
+        `${scope} timing unmeasured: ${completedSeconds}s exceeds the ${scope === "js" ? 300 : 600}s target; longest wait for GitHub to start ${longest}: ${wait}s.`,
+      );
       assert.equal(readFileSync(env.GITHUB_STEP_SUMMARY, "utf8"), completed.warning + "\n");
       assert.equal(warn.mock.calls.at(-1).arguments[0], "::warning::" + completed.warning);
     });
 });
 
+for (const fixture of [
+  {
+    run: "45431027391",
+    start: "2026-11-24T15:55:12Z",
+    selectionEnd: 23,
+    workerStart: 26,
+    lateJob: ["JS worker 9", 300, 402],
+    lastWork: ["JS worker 7", 329, 332],
+    completedSeconds: 402,
+    delay: 73,
+  },
+  {
+    run: "45434028943",
+    start: "2026-11-24T16:10:36Z",
+    selectionEnd: 28,
+    workerStart: 31,
+    lateJob: ["JS worker 3", 291, 393],
+    lastWork: ["JS worker 6", 303, 305],
+    completedSeconds: 393,
+    delay: 90,
+  },
+]) {
+  test(`job completion delay in run ${fixture.run}`, async (t) => {
+    const root = mkdtempSync(join(tmpdir(), "completion-delay-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const outputDirectory = join(root, "aggregate");
+    const at = (seconds) => new Date(Date.parse(fixture.start) + seconds * 1000).toISOString();
+    const jobs = withoutWaits();
+    const selection = jobs.find((job) => job.name === "what changed");
+    const commit = selection.head_sha;
+    Object.assign(selection, {
+      created_at: at(0),
+      started_at: at(0),
+      completed_at: at(fixture.selectionEnd),
+    });
+    for (const job of jobs.filter(
+      (job) => job.name.startsWith("JS worker ") || job.name === "shared preparation",
+    )) {
+      const [, stepEnd, jobEnd] = [fixture.lateJob, fixture.lastWork].find(
+        ([name]) => name === job.name,
+      ) ?? [job.name, 230, 233];
+      Object.assign(job, {
+        created_at: at(fixture.selectionEnd),
+        started_at: at(fixture.workerStart),
+        completed_at: at(jobEnd),
+        steps: [{ name: "Complete job", conclusion: "success", completed_at: at(stepEnd) }],
+      });
+    }
+    writeTimingReceipts(root, "js", commit);
+    t.mock.method(console, "log", () => {});
+    t.mock.method(console, "warn", () => {});
+
+    const timing = await verifyCompletedCloud("js", {
+      directory: root,
+      env: { GITHUB_SHA: commit, DOHC_WORKFLOW_HEAD_SHA: commit },
+      outputDirectory,
+      readJobs: async () => structuredClone(jobs),
+    });
+    assert.equal(timing.timing, "unmeasured");
+    assert.equal(timing.contended, true);
+    assert.equal(timing.spanSeconds, fixture.completedSeconds);
+    assert.equal(timing.completionDelaySeconds, fixture.delay);
+    assert.equal(
+      timing.warning,
+      `js timing unmeasured: ${fixture.completedSeconds}s exceeds the 300s target; GitHub took ${fixture.delay}s to mark finished jobs complete.`,
+    );
+
+    const overBudget = structuredClone(jobs);
+    const slowWork = overBudget.find((job) => job.name === fixture.lastWork[0]);
+    const delayed = overBudget.find((job) => job.name === fixture.lateJob[0]);
+    slowWork.steps[0].completed_at = at(401);
+    slowWork.completed_at = at(403);
+    delayed.completed_at = at(401 + fixture.delay);
+    assert.throws(
+      () => completedGateTiming("js", overBudget, commit),
+      (error) => {
+        assert.equal(error.timing.timing, "over budget");
+        assert.equal(error.timing.completionDelaySeconds, fixture.delay);
+        return /exceeding its 400s budget/u.test(error.message);
+      },
+    );
+  });
+}
+
+test("self-host native proof retains JSON receipts in worker output and removes scratch DBs", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "self-host-retain-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const fakeEngine = join(root, "dohc-workspace-engine");
+  const workerOutput = join(root, "worker-output");
+  mkdirSync(workerOutput, { recursive: true });
+  writeFileSync(fakeEngine, "engine-bytes");
+  const buildStub = `data:text/javascript,${encodeURIComponent(`
+    export * from ${JSON.stringify(new URL("./build.mjs", import.meta.url).href)};
+    export const stagedEnginePath = ${JSON.stringify(fakeEngine)};
+  `)}`;
+  const workerUrl = new URL("./cloud.mjs?self-host-retain", import.meta.url);
+  const hook = registerHooks({
+    resolve(specifier, context, next) {
+      return context.parentURL === workerUrl.href && specifier === "./build.mjs"
+        ? { url: buildStub, shortCircuit: true }
+        : next(specifier, context);
+    },
+  });
+  t.after(() => hook.deregister());
+  const { runJavascript } = await import(workerUrl.href);
+  const taskName = "enrolls a self-hosted document, delivers edits across restart";
+  const group = {
+    id: `self-host-native:${taskName}`,
+    kind: "self-host-native",
+    native: true,
+    weight: 15,
+    tasks: [
+      {
+        id: `self-host-native:${taskName}`,
+        kind: "self-host-native",
+        name: taskName,
+        file: "services/share-web/src/selfHostedLiveNative.integration.ts",
+      },
+    ],
+  };
+  let seenScratchDir;
+  const record = { steps: [], tests: [], completed: [], flaky: [] };
+  await runJavascript([group], record, () => {}, null, {
+    directory: workerOutput,
+    executeCommand: async (_command, args, options) => {
+      const vitestOut = args
+        .find((arg) => arg.startsWith("--outputFile.json="))
+        .slice("--outputFile.json=".length);
+      seenScratchDir = options.env.DOHC_SERVICE_HOST_PROOF_OUTPUT;
+      writeFileSync(
+        vitestOut,
+        JSON.stringify({
+          success: true,
+          numFailedTests: 0,
+          numPassedTests: 1,
+          testResults: [{ assertionResults: [{ fullName: taskName, status: "passed" }] }],
+        }),
+      );
+      const deliveryDir = join(seenScratchDir, "self-host-live-123");
+      mkdirSync(deliveryDir, { recursive: true });
+      writeFileSync(join(deliveryDir, "workspace.db-wal"), "large-wal-bytes");
+      writeFileSync(
+        join(deliveryDir, "result.json"),
+        JSON.stringify({
+          verdict: "PASS",
+          executable: options.env.DOHC_SERVICE_HOST_PROOF_BINARY,
+          sha256: options.env.DOHC_SERVICE_HOST_PROOF_SHA256,
+          results: {
+            ownerDelivery: {
+              restartPreservedDraft: true,
+              concurrentOwnerAndNamedEditsMerged: true,
+              idleOwnerPulledRecipientEdit: true,
+            },
+            settledAndPublished: { ordinaryOwnerReadMatched: true },
+          },
+        }),
+      );
+    },
+  });
+  assert.ok(seenScratchDir && !existsSync(seenScratchDir), "scratch proof dir was removed");
+  assert.ok(
+    record.selfHostNative.path.startsWith(workerOutput),
+    "delivery receipt stays inside worker output",
+  );
+  assert.ok(existsSync(record.selfHostNative.path), "delivery receipt exists on disk");
+  assert.ok(existsSync(join(workerOutput, "self-host-0/vitest.json")), "vitest JSON retained");
+  assert.ok(
+    !existsSync(join(workerOutput, "self-host-0/self-host-live-123/workspace.db-wal")),
+    "WAL scratch files stay out of worker output",
+  );
+});
+
 test("a re-run of failed jobs aggregates each part's receipt from the newest attempt that ran it", async (t) => {
   t.mock.method(console, "log", () => {});
+  t.mock.method(console, "warn", () => {});
   for (const scope of ["js", "rust"]) {
     const root = mkdtempSync(join(tmpdir(), "partial-rerun-")),
       outputDirectory = join(root, "aggregate"),
@@ -2205,8 +2102,8 @@ test("a re-run of failed jobs aggregates each part's receipt from the newest att
       commit = jobs[0].head_sha,
       [part, rerun, final] =
         scope === "js"
-          ? ["worker-3", "JS worker 3", "typecheck + tests"]
-          : ["tests-3", "Rust tests 3", "engine gate"];
+          ? ["worker-3", "JS worker 3", "JS worker 0"]
+          : ["tests-3", "Rust tests 3", "Rust tests 0"];
     t.after(() => rmSync(root, { recursive: true, force: true }));
     writeTimingReceipts(root, scope, commit);
     const first = join(root, `${part}-1`, "result.json"),
@@ -2217,14 +2114,16 @@ test("a re-run of failed jobs aggregates each part's receipt from the newest att
     const rerunAt = Date.parse(jobs.find((job) => job.name === final).completed_at) + 3_600_000;
     for (const job of jobs) {
       job.created_at = new Date(rerunAt).toISOString();
-      if (job.name === rerun || job.name === final) job.started_at = job.created_at;
-      if (job.name === rerun) job.completed_at = new Date(rerunAt + 200_000).toISOString();
+      if (job.name === rerun) {
+        job.started_at = job.created_at;
+        job.completed_at = new Date(rerunAt + 200_000).toISOString();
+      }
     }
     const run = () =>
-      aggregateCloud(scope, root.replaceAll("\\", "/"), {
-        env: { GITHUB_SHA: commit },
+      verifyCompletedCloud(scope, {
+        directory: root,
+        env: { GITHUB_SHA: commit, DOHC_WORKFLOW_HEAD_SHA: commit },
         outputDirectory,
-        now: () => rerunAt + 300_000,
         readJobs: async () => jobs,
       });
     const report = await run();
@@ -2251,40 +2150,23 @@ test("job creation waits follow each gate's dependencies", async (t) => {
     for (const wait of [30, 31]) {
       const jobs = withoutWaits(),
         start = Date.parse(jobs[0].started_at);
-      if (scope === "rust") {
-        const workers = jobs.filter((job) => job.name.startsWith("JS worker "));
-        workers.at(-1).completed_at = new Date(
-          Math.max(...workers.map((job) => Date.parse(job.completed_at))) + 10_000,
-        ).toISOString();
-      }
       const job = jobs.find((job) => job.name === name),
         ready = dependencyFinishedAt(jobs, name);
       if (scope === "rust")
         assert.equal(
           ready,
-          Date.parse(jobs.find((job) => job.name === "what changed").completed_at),
-          "Rust setup becomes ready at selection even when JavaScript workers finish later",
+          Date.parse(jobs.find((job) => job.name === "Rust build").completed_at),
+          "Rust tests become ready only after Rust build completes",
         );
       job.started_at = new Date(ready + wait * 1000).toISOString();
       job.created_at = new Date(ready + (wait - 1) * 1000).toISOString();
       const final = jobs.find(
-        (job) => job.name === (scope === "js" ? "typecheck + tests" : "engine gate"),
+        (job) => job.name === (scope === "js" ? "JS worker 0" : "Rust tests 0"),
       );
       const end = start + (ceiling + 1) * 1000;
       final.completed_at = new Date(end).toISOString();
-      const run = aggregateCloud(scope, root.replaceAll("\\", "/"), {
-        env,
-        outputDirectory,
-        now: () => end,
-        readJobs: async () => jobs,
-      });
-      if (wait === 30) await assert.rejects(run, /exceeding/u);
-      else await run;
-      const aggregate = JSON.parse(
-        readFileSync(join(outputDirectory, `${scope}-result.json`), "utf8"),
-      );
-      if (scope === "js") publishAggregate(outputDirectory, { verdict: "PASS", commit });
       const completedRun = verifyCompletedCloud(scope, {
+        directory: root,
         env,
         outputDirectory,
         readJobs: async () => jobs,
@@ -2294,11 +2176,9 @@ test("job creation waits follow each gate's dependencies", async (t) => {
       const completed = JSON.parse(
         readFileSync(join(outputDirectory, `${scope}-completed-result.json`), "utf8"),
       );
-      for (const result of [aggregate, completed]) {
-        assert.equal(result.jobs.find((row) => row.name === name).runnerWaitSeconds, wait);
-        assert.equal(result.timing, wait === 31 ? "unmeasured" : "over budget");
-        assert.equal(result.contended, wait === 31);
-      }
+      assert.equal(completed.jobs.find((row) => row.name === name).runnerWaitSeconds, wait);
+      assert.equal(completed.timing, wait === 31 ? "unmeasured" : "over budget");
+      assert.equal(completed.contended, wait === 31);
     }
   }
 });
@@ -2311,10 +2191,10 @@ test("job readiness falls back for later prerequisites and partial re-runs", () 
     job.started_at = new Date(Date.parse(job.started_at) + 200_000).toISOString();
     job.created_at = new Date(Date.parse(job.started_at) - 5000).toISOString();
     job.completed_at = new Date(Date.parse(job.started_at) + 1000).toISOString();
-    jobs.find((job) => job.name === "what changed").completed_at = new Date(
+    jobs.find((job) => job.name === "Rust build").completed_at = new Date(
       Date.parse(job.started_at) + 1000,
     ).toISOString();
-    jobs.find((job) => job.name === "engine gate").completed_at = new Date(
+    jobs.find((job) => job.name === "Rust tests 0").completed_at = new Date(
       start + 750_000,
     ).toISOString();
     assert.throws(
@@ -2330,25 +2210,22 @@ test("job readiness falls back for later prerequisites and partial re-runs", () 
       /longest runner wait Rust tests 1: 31s/u,
     );
   }
-  // Run 44053570685, attempt 2: GitHub lists each job that passed before under the new attempt,
-  // created with the attempt and keeping its first run's start and finish.
   for (const wait of [0, 31]) {
     const jobs = withoutWaits(),
-      rerunAt =
-        Date.parse(jobs.find((job) => job.name === "typecheck + tests").completed_at) + 3_600_000;
-    const fresh = ["JS worker 12", "typecheck + tests"];
+      rerunAt = Date.parse(jobs.find((job) => job.name === "JS worker 0").completed_at) + 3_600_000;
+    const fresh = [`JS worker ${JS_SHARDS - 1}`];
     for (const job of jobs) {
       job.created_at = new Date(rerunAt).toISOString();
       if (!fresh.includes(job.name)) continue;
-      job.started_at = new Date(rerunAt + (job.name === fresh[0] ? wait * 1000 : 0)).toISOString();
+      job.started_at = new Date(rerunAt + wait * 1000).toISOString();
       job.completed_at = new Date(rerunAt + 300_000).toISOString();
     }
     const timing = completedGateTiming("js", jobs, jobs[0].head_sha);
     assert.equal(timing.timing, "unmeasured");
-    assert.equal(timing.jobs.find((row) => row.name === "JS worker 12").runnerWaitSeconds, wait);
+    assert.equal(timing.jobs.find((row) => row.name === fresh[0]).runnerWaitSeconds, wait);
     assert.equal(
       timing.warning,
-      `js timing unmeasured: ${timing.seconds}s exceeds the 300s target; part of the gate passed in an earlier attempt and did not run again${wait ? `; longest runner wait JS worker 12: ${wait}s` : ""}.`,
+      `js timing unmeasured: ${timing.seconds}s exceeds the 300s target; part of the gate passed in an earlier attempt and did not run again${wait ? `; longest runner wait ${fresh[0]}: ${wait}s` : ""}.`,
     );
   }
 });
@@ -2368,7 +2245,7 @@ test("timing warnings name the larger part of a job's scheduling wait", () => {
       worker.started_at = new Date(ready + (creation + runner) * 1000).toISOString();
       worker.completed_at = new Date(Date.parse(worker.started_at) + 1000).toISOString();
       jobs.find(
-        (job) => job.name === (scope === "js" ? "typecheck + tests" : "engine gate"),
+        (job) => job.name === (scope === "js" ? "JS worker 0" : "Rust tests 0"),
       ).completed_at = new Date(Date.parse(jobs[0].started_at) + 750_000).toISOString();
       const timing = completedGateTiming(scope, jobs, jobs[0].head_sha);
       assert.equal(
@@ -2378,58 +2255,7 @@ test("timing warnings name the larger part of a job's scheduling wait", () => {
     }
 });
 
-test("a Rust test job's runner wait counts only by how late it reached the published archive", () => {
-  // Each worker sets up for `setup` seconds after its runner starts, then waits for the archive.
-  for (const [startBeforePublish, setup, expected] of [
-    [100, 60, null],
-    [10, 50, 40],
-    [100, undefined, 105],
-  ]) {
-    const jobs = withoutWaits(),
-      worker = jobs.find((job) => job.name === "Rust tests 1"),
-      gate = jobs.find((job) => job.name === "engine gate"),
-      ready = dependencyFinishedAt(jobs, worker.name),
-      builtAt = ready + 200_000,
-      publishedAt = builtAt + 5_000,
-      at = (time) => new Date(time).toISOString();
-    gate.steps = [
-      { name: RUST_ARCHIVE_BUILD_STEP, started_at: at(ready), completed_at: at(builtAt) },
-      {
-        name: "Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
-        started_at: at(builtAt),
-        completed_at: at(publishedAt),
-      },
-    ];
-    const startedAt = publishedAt - startBeforePublish * 1000;
-    worker.created_at = at(ready);
-    worker.started_at = at(startedAt);
-    worker.completed_at = at(startedAt + 120_000);
-    // Without the wait step the whole runner wait still counts.
-    worker.steps =
-      setup === undefined
-        ? []
-        : [
-            {
-              name: RUST_ARCHIVE_WAIT_STEP,
-              started_at: at(startedAt + setup * 1000),
-              completed_at: at(startedAt + setup * 1000 + 1000),
-            },
-          ];
-    gate.completed_at = at(Date.parse(jobs[0].started_at) + 750_000);
-    if (expected === null)
-      assert.throws(
-        () => completedGateTiming("rust", jobs, jobs[0].head_sha),
-        (error) => error.timing.timing === "over budget",
-      );
-    else
-      assert.match(
-        completedGateTiming("rust", jobs, jobs[0].head_sha).warning,
-        new RegExp(`longest runner wait Rust tests 1: ${expected}s`, "u"),
-      );
-  }
-});
-
-test("Rust scheduling ignores JavaScript matrix metadata in both timing checks", async (t) => {
+test("Rust scheduling ignores JavaScript matrix metadata", async (t) => {
   t.mock.method(console, "log", () => {});
   t.mock.method(console, "warn", () => {});
   const root = mkdtempSync(join(tmpdir(), "skipped-needs-")),
@@ -2440,7 +2266,6 @@ test("Rust scheduling ignores JavaScript matrix metadata in both timing checks",
   writeTimingReceipts(root, "rust", commit);
   const names = CLOUD_JOB_GRAPH["javascript-workers"].names;
   const placeholderName = names[0].replace(/\d+$/u, "${{ matrix.shard }}");
-  // A Rust-only run lists the skipped matrix as one placeholder row.
   const modes = ["placeholder", "worker wait", "running workers"];
   for (const [mode, wait] of modes.flatMap((mode) => [5, 122].map((wait) => [mode, wait]))) {
     const original = withoutWaits(),
@@ -2463,25 +2288,20 @@ test("Rust scheduling ignores JavaScript matrix metadata in both timing checks",
       }
       jobs.push(...workers);
     }
-    for (const job of jobs.filter(
-      (job) => job.name.startsWith("Rust tests ") || job.name === "engine gate",
-    )) {
-      job.created_at = new Date(ready + (wait - 5) * 1000).toISOString();
-      job.started_at = new Date(ready + wait * 1000).toISOString();
-      job.completed_at = new Date(ready + (wait + 1) * 1000).toISOString();
+    const build = jobs.find((job) => job.name === "Rust build");
+    build.created_at = new Date(ready + (wait - 5) * 1000).toISOString();
+    build.started_at = new Date(ready + wait * 1000).toISOString();
+    build.completed_at = new Date(ready + (wait + 1) * 1000).toISOString();
+    for (const job of jobs.filter((job) => job.name.startsWith("Rust tests "))) {
+      job.created_at = build.completed_at;
+      job.started_at = build.completed_at;
+      job.completed_at = new Date(Date.parse(build.completed_at) + 1000).toISOString();
     }
     const end = Date.parse(jobs[0].started_at) + 750_000;
-    jobs.find((job) => job.name === "engine gate").completed_at = new Date(end).toISOString();
+    jobs.find((job) => job.name === "Rust tests 0").completed_at = new Date(end).toISOString();
     const contended = wait > 30;
-    const aggregateRun = aggregateCloud("rust", root.replaceAll("\\", "/"), {
-      env,
-      outputDirectory,
-      now: () => end,
-      readJobs: async () => jobs,
-    });
-    if (contended) await aggregateRun;
-    else await assert.rejects(aggregateRun, /exceeding/u);
     const finalRun = verifyCompletedCloud("rust", {
+      directory: root,
       env,
       outputDirectory,
       readJobs: async () => jobs,
@@ -2494,7 +2314,7 @@ test("Rust scheduling ignores JavaScript matrix metadata in both timing checks",
       assert.equal(report.verdict, contended ? "PASS" : "FAIL", mode);
       assert.equal(report.contended, contended, mode);
       assert.equal(
-        report.jobs.find((job) => job.name === "engine gate").runnerWaitSeconds,
+        report.jobs.find((job) => job.name === "Rust build").runnerWaitSeconds,
         wait,
         mode,
       );
@@ -2503,10 +2323,10 @@ test("Rust scheduling ignores JavaScript matrix metadata in both timing checks",
 });
 
 for (const [scope, finalJob, target, ceiling] of [
-  ["js", "typecheck + tests", 300, 400],
-  ["rust", "engine gate", 600, 700],
+  ["js", "JS worker 0", 300, 400],
+  ["rust", "Rust tests 0", 600, 700],
 ]) {
-  test(`${scope} timing boundaries agree in aggregate and completed receipts; only final verification warns`, async (t) => {
+  test(`${scope} timing boundaries agree in full and completed receipts`, async (t) => {
     const parent = resolve(".agent-artifacts/verification");
     mkdirSync(parent, { recursive: true });
     const root = mkdtempSync(join(parent, "timing-boundaries-"));
@@ -2545,35 +2365,23 @@ for (const [scope, finalJob, target, ceiling] of [
               : timing === "unmeasured"
                 ? `${scope} timing unmeasured: ${seconds}s exceeds the ${target}s target; longest runner wait ${finalJob}: ${wait}s.`
                 : undefined;
-          const run = aggregateCloud(scope, root.replaceAll("\\", "/"), {
-            env,
-            outputDirectory,
-            now: () => Date.parse(final.completed_at),
-            readJobs: async () => jobs,
-          });
           const before = warn.mock.calls.length;
-          if (fails) await assert.rejects(run, /exceeding.*budget/u);
-          else await run;
-          const aggregate = JSON.parse(
-            readFileSync(join(outputDirectory, `${scope}-result.json`), "utf8"),
-          );
-          assert.equal(aggregate.complete, false);
-          assert.equal(warn.mock.calls.length, before, "the aggregate must not emit an annotation");
-          assert.equal(existsSync(summary), false, "the aggregate must not write the step summary");
-          // The completed check must independently catch reporting crossing the ceiling.
-          if (scope === "js") publishAggregate(outputDirectory, { verdict: "PASS", commit });
           const completedRun = verifyCompletedCloud(scope, {
+            directory: root,
             env,
             outputDirectory,
             readJobs: async () => jobs,
           });
           if (fails) await assert.rejects(completedRun, /exceeding.*budget/u);
           else await completedRun;
+          const full = JSON.parse(
+            readFileSync(join(outputDirectory, `${scope}-result.json`), "utf8"),
+          );
           const completed = JSON.parse(
             readFileSync(join(outputDirectory, `${scope}-completed-result.json`), "utf8"),
           );
-          assert.equal(completed.complete, true);
-          for (const report of [aggregate, completed]) {
+          for (const report of [full, completed]) {
+            assert.equal(report.complete, true);
             assert.equal(report.verdict, fails ? "FAIL" : "PASS");
             assert.equal(report.seconds, seconds);
             assert.equal(report.spanSeconds, seconds);
@@ -2596,460 +2404,7 @@ for (const [scope, finalJob, target, ceiling] of [
   });
 }
 
-for (const [scope, finalJob, target, ceiling] of [
-  ["js", "typecheck + tests", 300, 400],
-  ["rust", "engine gate", 600, 700],
-]) {
-  test(`${scope} receipt transfer contention requires known evidence above 30 seconds`, async (t) => {
-    const parent = resolve(".agent-artifacts/verification");
-    mkdirSync(parent, { recursive: true });
-    const root = mkdtempSync(join(parent, "transfer-boundaries-"));
-    t.after(() => rmSync(root, { recursive: true, force: true }));
-    const outputDirectory = join(root, "aggregate");
-    mkdirSync(outputDirectory);
-    const jobs = withoutWaits(),
-      commit = jobs[0].head_sha,
-      start = Date.parse(jobs[0].started_at);
-    const env = { GITHUB_SHA: commit, DOHC_WORKFLOW_HEAD_SHA: commit };
-    writeTimingReceipts(root, scope, commit);
-    t.mock.method(console, "log", () => {});
-    t.mock.method(console, "warn", () => {});
-    // ceiling + 32 stays over the ceiling after a 31 s transfer is taken out.
-    for (const seconds of [target, target + 1, ceiling + 1, ceiling + 31, ceiling + 32]) {
-      for (const [label, transfer, marker, step, runnerWait = 0] of [
-        ["30", 30, true, true],
-        ["31", 31, true, true],
-        ["missing wait file", 31, false, true],
-        ["missing download step", 31, true, false],
-        ["missing both", 31, false, false],
-        ["invalid marker", 31, "invalid", true],
-        ["stale marker", 31, "stale", true],
-        ["future marker", 31, "future", true],
-        ["runner and transfer", 31, true, true, 35],
-      ]) {
-        await t.test(`${seconds}s: ${label}`, async () => {
-          const rows = structuredClone(jobs),
-            final = rows.find((job) => job.name === finalJob);
-          const end = start + seconds * 1000,
-            waitedAt = new Date(end - transfer * 1000).toISOString();
-          final.completed_at = new Date(end).toISOString();
-          withRunnerWait(rows, finalJob, runnerWait);
-          final.steps = [
-            {
-              name: "Run actions/download-artifact@unrelated-archive",
-              started_at: new Date(start).toISOString(),
-              completed_at: new Date(start + 80_000).toISOString(),
-            },
-            ...(scope === "rust"
-              ? [
-                  {
-                    name: "Download the shared Rust archive again after a stalled transfer",
-                    started_at: new Date(start + 80_000).toISOString(),
-                    completed_at: new Date(start + 260_000).toISOString(),
-                  },
-                ]
-              : []),
-            {
-              name: `Wait for the complete ${scope === "js" ? "JavaScript" : "Rust"} group`,
-              completed_at: waitedAt,
-            },
-            ...(step
-              ? [
-                  {
-                    name: "Run actions/download-artifact@different-pin",
-                    started_at: waitedAt,
-                    completed_at: final.completed_at,
-                  },
-                ]
-              : []),
-            {
-              name: `Require complete proof and the ${scope} timing ceiling`,
-              started_at: final.completed_at,
-            },
-          ];
-          const path = join(outputDirectory, `${scope}-wait-finished.json`);
-          if (existsSync(path)) rmSync(path);
-          if (marker)
-            writeFileSync(
-              path,
-              marker === "invalid"
-                ? "{"
-                : JSON.stringify({
-                    finishedAt:
-                      marker === "stale"
-                        ? new Date(Date.parse(final.started_at) - 1).toISOString()
-                        : marker === "future"
-                          ? new Date(end + 1).toISOString()
-                          : waitedAt,
-                  }),
-            );
-          const expected = (known) => ({
-            transferSeconds: known ? transfer : null,
-            contended: runnerWait > 30 || (known && transfer > 30),
-            timing:
-              seconds <= target
-                ? "within budget"
-                : runnerWait > 30 || (known && transfer > 30 && seconds - transfer <= ceiling)
-                  ? "unmeasured"
-                  : seconds <= ceiling
-                    ? "over target"
-                    : "over budget",
-          });
-          const aggregateExpected = expected(marker === true),
-            completedExpected = expected(step);
-          const run = aggregateCloud(scope, root.replaceAll("\\", "/"), {
-            env,
-            outputDirectory,
-            now: () => end,
-            readJobs: async () => rows,
-          });
-          if (aggregateExpected.timing === "over budget") await assert.rejects(run, /exceeding/u);
-          else await run;
-          const aggregate = JSON.parse(
-            readFileSync(join(outputDirectory, `${scope}-result.json`), "utf8"),
-          );
-          if (scope === "js") publishAggregate(outputDirectory, { verdict: "PASS", commit });
-          const finalRun = verifyCompletedCloud(scope, {
-            env,
-            outputDirectory,
-            readJobs: async () => rows,
-          });
-          if (completedExpected.timing === "over budget")
-            await assert.rejects(finalRun, /exceeding/u);
-          else await finalRun;
-          const completed = JSON.parse(
-            readFileSync(join(outputDirectory, `${scope}-completed-result.json`), "utf8"),
-          );
-          for (const [report, expected] of [
-            [aggregate, aggregateExpected],
-            [completed, completedExpected],
-          ]) {
-            assert.equal(report.transferSeconds, expected.transferSeconds);
-            assert.equal(report.contended, expected.contended);
-            assert.equal(report.timing, expected.timing);
-            assert.equal(report.verdict, expected.timing === "over budget" ? "FAIL" : "PASS");
-            if (expected.timing === "unmeasured")
-              assert.equal(
-                report.warning,
-                `${scope} timing unmeasured: ${seconds}s exceeds the ${target}s target; ${runnerWait > 30 ? `longest runner wait ${finalJob}: ${runnerWait}s; ` : ""}receipt transfer took ${transfer}s.`,
-              );
-          }
-        });
-      }
-    }
-  });
-}
-
-test("a saved 181-second receipt download is unmeasured in both timing checks", async (t) => {
-  const fixture = JSON.parse(
-    readFileSync(new URL("./fixtures/stalled-receipt-transfer.json", import.meta.url), "utf8"),
-  );
-  const parent = resolve(".agent-artifacts/verification");
-  mkdirSync(parent, { recursive: true });
-  const root = mkdtempSync(join(parent, "transfer-run-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const outputDirectory = join(root, "aggregate"),
-    jobs = withoutWaits();
-  const shift = Date.parse(fixture.selectionStartedAt) - Date.parse(jobs[0].started_at);
-  for (const job of jobs) {
-    for (const field of ["created_at", "started_at", "completed_at"])
-      job[field] = new Date(Date.parse(job[field]) + shift).toISOString();
-    job.head_sha = fixture.reportingJob.head_sha;
-  }
-  const final = jobs.find((job) => job.name === "typecheck + tests");
-  Object.assign(final, fixture.reportingJob);
-  assert.throws(
-    () => completedGateTiming("js", jobs, final.head_sha),
-    /unsuccessful/u,
-    "a failed job must still fail",
-  );
-  // The recorded failure was timing-only; model the successful task verdict under the new rule.
-  final.conclusion = "success";
-  assert.equal(completedGateTiming("js", jobs, final.head_sha).timing, "unmeasured");
-  const env = { ...apiEnv, GITHUB_SHA: final.head_sha, DOHC_WORKFLOW_HEAD_SHA: final.head_sha };
-  writeTimingReceipts(root, "js", final.head_sha);
-  t.mock.method(console, "log", () => {});
-  t.mock.method(console, "warn", () => {});
-  const [wait, download, verify] = final.steps;
-  await waitForGate("js", {
-    env,
-    outputDirectory,
-    readJobs: async () => jobs,
-    now: () => Date.parse(wait.completed_at),
-  });
-  assert.equal(
-    JSON.parse(readFileSync(join(outputDirectory, "js-wait-finished.json"), "utf8")).finishedAt,
-    new Date(wait.completed_at).toISOString(),
-  );
-  assert.equal((Date.parse(download.completed_at) - Date.parse(download.started_at)) / 1000, 181);
-  let calls = 0;
-  const aggregate = await aggregateCloud("js", root.replaceAll("\\", "/"), {
-    env,
-    outputDirectory,
-    readJobs: async () => jobs,
-    now: () => Date.parse(calls++ === 0 ? verify.started_at : verify.completed_at),
-  });
-  publishAggregate(outputDirectory);
-  await verifyCompletedCloud("js", { env, outputDirectory, readJobs: async () => jobs });
-  const completed = JSON.parse(
-    readFileSync(join(outputDirectory, "js-completed-result.json"), "utf8"),
-  );
-  for (const report of [aggregate, completed]) {
-    assert.equal(report.verdict, "PASS");
-    assert.equal(report.contended, true);
-    assert.equal(report.transferSeconds, 181);
-    assert.equal(report.timing, "unmeasured");
-    assert.ok(
-      report.jobs
-        .filter((job) => !job.name.endsWith("confinement"))
-        .every((job) => job.runnerWaitSeconds <= 30),
-    );
-    assert.equal(
-      report.warning,
-      `js timing unmeasured: ${report.seconds}s exceeds the 300s target; receipt transfer took 181s.`,
-    );
-  }
-  assert.equal(aggregate.seconds, 446);
-  assert.equal(completed.seconds, 450, "completed timing also includes upload and post steps");
-});
-
-for (const fixture of [
-  {
-    run: "45431027391",
-    start: "2026-11-24T15:55:12Z",
-    selectionEnd: 23,
-    reportingStart: 26,
-    waitStart: 275,
-    waitEnd: 409,
-    downloadSeconds: 5,
-    initialSeconds: 415.316,
-    completedSeconds: 421,
-    lateJob: ["JS worker 9", 300, 402],
-    lastWork: ["JS worker 7", 329, 332],
-    delay: 73,
-  },
-  {
-    run: "45434028943",
-    start: "2026-11-24T16:10:36Z",
-    selectionEnd: 28,
-    reportingStart: 31,
-    waitStart: 283,
-    waitEnd: 397,
-    downloadSeconds: 4,
-    initialSeconds: 403.091,
-    completedSeconds: 407,
-    lateJob: ["JS worker 3", 291, 393],
-    lastWork: ["JS worker 6", 303, 305],
-    delay: 90,
-  },
-]) {
-  test(`job completion delay in run ${fixture.run}`, async (t) => {
-    const parent = resolve(".agent-artifacts/verification");
-    mkdirSync(parent, { recursive: true });
-    const root = mkdtempSync(join(parent, "completion-delay-"));
-    t.after(() => rmSync(root, { recursive: true, force: true }));
-    const outputDirectory = join(root, "aggregate");
-    const at = (seconds) => new Date(Date.parse(fixture.start) + seconds * 1000).toISOString();
-    const jobs = withoutWaits();
-    const selection = jobs.find((job) => job.name === "what changed");
-    const final = jobs.find((job) => job.name === "typecheck + tests");
-    const commit = selection.head_sha;
-    Object.assign(selection, {
-      created_at: at(0),
-      started_at: at(0),
-      completed_at: at(fixture.selectionEnd),
-    });
-    for (const job of jobs.filter(
-      (job) => job.name.startsWith("JS worker ") || job.name === "shared preparation",
-    )) {
-      const [, stepEnd, jobEnd] = [fixture.lateJob, fixture.lastWork].find(
-        ([name]) => name === job.name,
-      ) ?? [job.name, 230, 233];
-      Object.assign(job, {
-        created_at: at(fixture.selectionEnd),
-        started_at: at(fixture.reportingStart),
-        completed_at: at(jobEnd),
-        steps: [{ name: "Complete job", conclusion: "success", completed_at: at(stepEnd) }],
-      });
-    }
-    Object.assign(final, {
-      created_at: at(fixture.selectionEnd),
-      started_at: at(fixture.reportingStart),
-      completed_at: at(fixture.completedSeconds),
-      steps: [
-        {
-          name: "Wait for the complete JavaScript group",
-          conclusion: "success",
-          started_at: at(fixture.waitStart),
-          completed_at: at(fixture.waitEnd),
-        },
-        {
-          name: "Run actions/download-artifact@fixture",
-          started_at: at(fixture.waitEnd),
-          completed_at: at(fixture.waitEnd + fixture.downloadSeconds),
-        },
-        { name: "Require complete proof and the JavaScript timing ceiling" },
-      ],
-    });
-    writeTimingReceipts(root, "js", commit);
-    mkdirSync(outputDirectory);
-    writeFileSync(
-      join(outputDirectory, "js-wait-finished.json"),
-      JSON.stringify({ finishedAt: at(fixture.waitEnd) }),
-    );
-
-    for (const [check, seconds] of [
-      ["initial", fixture.initialSeconds],
-      ["completed", fixture.completedSeconds],
-    ]) {
-      const run = async (rows, extraSeconds = 0) => {
-        const reporting = rows.find((job) => job.name === final.name);
-        if (check === "completed") {
-          reporting.completed_at = at(seconds + extraSeconds);
-          return completedGateTiming("js", rows, commit);
-        }
-        Object.assign(reporting, { status: "in_progress", conclusion: null, completed_at: null });
-        let clockReads = 0;
-        return aggregateCloud("js", root.replaceAll("\\", "/"), {
-          env: { GITHUB_SHA: commit },
-          outputDirectory,
-          readJobs: async () => rows,
-          now: () =>
-            Date.parse(
-              at(
-                clockReads++ === 0
-                  ? fixture.waitEnd + fixture.downloadSeconds
-                  : seconds + extraSeconds,
-              ),
-            ),
-        });
-      };
-      await t.test(`${check} check records the delay and keeps the raw span`, async () => {
-        const timing = await run(structuredClone(jobs));
-        assert.equal(timing.timing, "unmeasured");
-        assert.equal(timing.spanSeconds, seconds);
-        assert.equal(timing.seconds, seconds);
-        assert.equal(timing.completionDelaySeconds, fixture.delay);
-        assert.equal(timing.contended, true);
-        assert.match(
-          timing.warning,
-          new RegExp(`GitHub took ${fixture.delay}s to mark finished jobs complete`, "u"),
-        );
-      });
-      await t.test(`${check} check still enforces the ceiling`, async () => {
-        const rows = structuredClone(jobs);
-        const late = rows.find((job) => job.name === fixture.lateJob[0]);
-        await assert.rejects(
-          run(structuredClone(rows), 401 + fixture.delay - seconds),
-          /exceeding/u,
-        );
-        const overlap = structuredClone(rows);
-        overlap.find((job) => job.name === final.name).steps[0].started_at = at(
-          fixture.lateJob[2] - 30,
-        );
-        await assert.rejects(run(overlap), /exceeding/u);
-        late.steps[0].completed_at = late.completed_at;
-        await assert.rejects(run(structuredClone(rows)), /exceeding/u);
-        delete late.steps[0].completed_at;
-        await assert.rejects(run(structuredClone(rows)), /exceeding/u);
-        late.conclusion = "failure";
-        await assert.rejects(run(rows), /unsuccessful|did not finish successfully/u);
-      });
-    }
-  });
-}
-
-test("aggregate receipts use the same timing rule and remain incomplete", async (t) => {
-  const parent = resolve(".agent-artifacts/verification");
-  mkdirSync(parent, { recursive: true });
-  const root = mkdtempSync(join(parent, "cloud-timing-test-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const outputDirectory = join(root, "aggregate"),
-    jobs = passingCloudJobs(),
-    commit = jobs[0].head_sha;
-  const records = [{ scope: "js", part: "prepare-0", commit, verdict: "PASS" }];
-  for (let index = 0; index < JS_SHARDS; index++)
-    records.push({
-      scope: "js",
-      part: `worker-${index}`,
-      commit,
-      verdict: "PASS",
-      planned: Array.from({ length: JS_SHARDS }, (_, id) => `task-${id}`),
-      assigned: [`task-${index}`],
-      completed: [`task-${index}`],
-      tests: [],
-      ...(!index ? { selfHostNative: {} } : {}),
-    });
-  for (const record of records) {
-    const directory = join(root, `${record.part}-1`);
-    mkdirSync(directory);
-    writeFileSync(join(directory, "result.json"), JSON.stringify(record));
-  }
-  const final = jobs.find((job) => job.name === "typecheck + tests");
-  const now = Date.parse(final.completed_at);
-  Object.assign(final, { status: "in_progress", conclusion: null, completed_at: null });
-  const run = (rows, finish, env = { GITHUB_SHA: commit }) =>
-    aggregateCloud("js", root.replaceAll("\\", "/"), {
-      readJobs: async () => rows,
-      now: () => finish,
-      env,
-      outputDirectory,
-    });
-  const passed = await run(jobs, now);
-  assert.equal(passed.complete, false);
-  assert.equal(passed.seconds, 241);
-  assert.equal(passed.spanSeconds, 241);
-  assert.equal("confinementSeconds" in passed, false);
-  assert.equal(passed.timing, "within budget");
-  const contended = structuredClone(jobs);
-  for (const job of contended)
-    if (job.name !== "what changed") {
-      job.started_at = new Date(Date.parse(job.started_at) + 900_000).toISOString();
-      if (job.completed_at)
-        job.completed_at = new Date(Date.parse(job.completed_at) + 900_000).toISOString();
-    }
-  const adjusted = await run(contended, now + 900_000);
-  assert.equal(adjusted.seconds, 1141);
-  assert.equal(adjusted.timing, "unmeasured");
-  assert.equal(adjusted.contended, true);
-  const queuedProof = structuredClone(jobs);
-  Object.assign(
-    queuedProof.find((job) => job.name === "shared preparation"),
-    { status: "queued", started_at: null, completed_at: null },
-  );
-  await assert.rejects(run(queuedProof, now), /missing or did not finish successfully/u);
-  const proofWait = structuredClone(jobs);
-  const proof = proofWait.find((job) => job.name === "shared preparation");
-  withRunnerWait(proofWait, proof.name, 31);
-  const unmeasured = await run(proofWait, Date.parse(jobs[0].started_at) + 401_000);
-  assert.equal(
-    unmeasured.timing,
-    "unmeasured",
-    "a shared preparation runner wait also governs aggregate timing",
-  );
-  const zeroWait = structuredClone(jobs);
-  zeroWait.forEach((job) => {
-    job.created_at = job.started_at;
-  });
-  await assert.rejects(
-    run(zeroWait, Date.parse(jobs[0].started_at) + 401_000),
-    /exceeding.*budget/u,
-  );
-  const failed = JSON.parse(readFileSync(join(outputDirectory, "js-result.json"), "utf8"));
-  assert.equal(failed.verdict, "FAIL");
-  assert.equal(failed.seconds, 401);
-  assert.equal(failed.contended, false);
-  for (const rows of [
-    jobs.slice(1),
-    [...jobs, jobs[0]],
-    jobs.map((job) => (job.name === "JS worker 1" ? { ...job, conclusion: "cancelled" } : job)),
-  ]) {
-    await assert.rejects(run(rows, now), /missing or did not finish/u);
-  }
-  await assert.rejects(run(jobs, now, { GITHUB_SHA: "other-head" }), /requested commit/u);
-});
-
-test("JavaScript flaky evidence survives aggregation and the completed receipt without relaxing coverage", async (t) => {
+test("JavaScript flaky evidence survives final verification without relaxing coverage", async (t) => {
   const parent = resolve(".agent-artifacts/verification");
   mkdirSync(parent, { recursive: true });
   const root = mkdtempSync(join(parent, "cloud-flaky-"));
@@ -3094,21 +2449,12 @@ test("JavaScript flaky evidence survives aggregation and the completed receipt w
     writeFileSync(join(directory, "result.json"), JSON.stringify(record));
   }
   const log = t.mock.method(console, "log", () => {});
-  const gate = await aggregateCloud("js", root.replaceAll("\\", "/"), {
-    readJobs: async () => jobs,
-    now: () => Date.parse(jobs.find((job) => job.name === "typecheck + tests").completed_at),
+  await verifyCompletedCloud("js", {
+    directory: root,
     env,
+    readJobs: async () => jobs,
     outputDirectory,
   });
-  assert.equal(gate.verdict, "PASS");
-  assert.deepEqual(gate.flaky, flaky);
-  assert.equal(existsSync(summary), false);
-  assert.equal(
-    log.mock.calls.some((call) => call.arguments[0].startsWith("::warning")),
-    false,
-  );
-  publishAggregate(outputDirectory);
-  await verifyCompletedCloud("js", { env, readJobs: async () => jobs, outputDirectory });
   const completed = JSON.parse(
     readFileSync(join(outputDirectory, "js-completed-result.json"), "utf8"),
   );
@@ -3119,7 +2465,7 @@ test("JavaScript flaky evidence survives aggregation and the completed receipt w
     log.mock.calls
       .map((call) => call.arguments[0])
       .filter((line) => line.startsWith("Passed on retry:")),
-    ["Passed on retry: task-1 › recovered test", "Passed on retry: task-1 › recovered test"],
+    ["Passed on retry: task-1 › recovered test"],
   );
   assert.equal(readFileSync(summary, "utf8"), "Passed on retry: task-1 › recovered test\n");
   assert.deepEqual(
@@ -3128,41 +2474,22 @@ test("JavaScript flaky evidence survives aggregation and the completed receipt w
   );
   await assert.rejects(
     verifyCompletedCloud("js", {
+      directory: root,
       env: { ...env, GITHUB_SHA: "another-checkout" },
       readJobs: async () => jobs,
       outputDirectory,
     }),
-    /aggregate.*commit/u,
+    /requested commit/u,
   );
-  rmSync(join(outputDirectory, "published"), { recursive: true });
-  await assert.rejects(
-    verifyCompletedCloud("js", { env, readJobs: async () => jobs, outputDirectory }),
-    /Expected one JavaScript aggregate, found 0/u,
-  );
-  for (const [attempt, verdict] of [
-    [1, "FAIL"],
-    [2, "PASS"],
-  ]) {
-    const published = join(outputDirectory, "published", `verification-js-${attempt}`);
-    mkdirSync(published, { recursive: true });
-    writeFileSync(join(published, "js-result.json"), JSON.stringify({ verdict, commit }));
-  }
-  await verifyCompletedCloud("js", { env, readJobs: async () => jobs, outputDirectory });
 });
 test("preparation spends only artifact requests before two minutes", async (t) => {
   const log = t.mock.method(console, "log", () => {});
   for (const [scope, readyAt, expectedJobs, expectedCounted, jobsAt] of [
-    ["rust", 0, 0, 2],
-    ["rust", 5_000, 0, 3],
-    ["rust", 130_000, 1, 4, 120_000],
     ["js", 0, 0, 2],
     ["js", 90_000, 0, 3],
     ["js", 130_000, 1, 4, 120_000],
   ]) {
-    const [job, artifact] =
-      scope === "rust"
-        ? ["engine gate", "rust-tests-1"]
-        : ["shared preparation", "javascript-prepared-1"];
+    const [job, artifact] = ["shared preparation", "javascript-prepared-1"];
     let clock = 0,
       jobs = 0,
       lists = 0,
@@ -3206,10 +2533,7 @@ test("preparation spends only artifact requests before two minutes", async (t) =
 test("a re-run of failed jobs reads a passed build from the attempt that ran it", async (t) => {
   t.mock.method(console, "log", () => {});
   const env = { ...apiEnv, GITHUB_RUN_ATTEMPT: "3" };
-  for (const [scope, job, artifact] of [
-    ["js", "shared preparation", "javascript-prepared"],
-    ["rust", "engine gate", "rust-tests"],
-  ])
+  for (const [scope, job, artifact] of [["js", "shared preparation", "javascript-prepared"]])
     for (const [carried, published, expected] of [
       [true, ["1"], `${artifact}-1`],
       [true, ["1", "2"], `${artifact}-2`],

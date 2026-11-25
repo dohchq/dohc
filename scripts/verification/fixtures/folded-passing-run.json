@@ -22,7 +22,7 @@
       "run_attempt": 1
     },
     {
-      "name": "typecheck + tests",
+      "name": "JS worker 0",
       "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
       "status": "completed",
       "conclusion": "success",
@@ -162,12 +162,22 @@
       "run_attempt": 1
     },
     {
-      "name": "engine gate",
+      "name": "Rust build",
       "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
       "status": "completed",
       "conclusion": "success",
       "created_at": "2026-11-13T17:59:24Z",
       "started_at": "2026-11-13T17:59:26Z",
+      "completed_at": "2026-11-13T18:03:13Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "Rust tests 0",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T18:03:13Z",
+      "started_at": "2026-11-13T18:03:15Z",
       "completed_at": "2026-11-13T18:06:34Z",
       "run_attempt": 1
     },
