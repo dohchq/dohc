@@ -115,6 +115,30 @@ fn a_successor_format_two_cannot_hold_is_written_in_format_one() {
 }
 
 #[test]
+fn a_successor_keeps_room_for_a_kept_source_under_the_struct_limit() {
+    let note = |paragraphs: usize, headings: usize| {
+        format!(
+            "{}{}\n",
+            "a\n\n".repeat(paragraphs),
+            vec!["# a"; headings].join("\n\n")
+        )
+    };
+    reading_body_sequence_here(|| {
+        for (paragraphs, headings, structs, schema_version) in [
+            (24_996, 2, 99_999, 2),
+            (24_995, 3, 100_000, 2),
+            (24_994, 4, 100_001, 1),
+            (24_997, 2, 100_003, 1),
+        ] {
+            let artifact = note(paragraphs, headings);
+            let note = loaded(&successor(&artifact));
+            assert_eq!(note.schema_version, schema_version, "{structs} structs");
+            assert_eq!(note.file, artifact, "{structs} structs");
+        }
+    });
+}
+
+#[test]
 fn a_successor_of_an_empty_artifact_or_kept_source_stays_in_format_two() {
     reading_body_sequence_here(|| {
         let empty = loaded(&successor(""));

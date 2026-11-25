@@ -378,7 +378,11 @@ pub fn fresh_successor_base(
     let in_format_two = format_two
         .then(|| successor_doc(identity, artifact, 2.0).ok())
         .flatten()
-        .filter(|doc| body_sequence_writer::Weight::of(&doc.doc).fits_a_live_note());
+        .filter(|doc| {
+            body_sequence_writer::Weight::of(&doc.doc)
+                .with_room_for_a_kept_source(artifact)
+                .fits_a_live_note()
+        });
     let doc = match in_format_two {
         Some(doc) => doc,
         None => successor_doc(identity, artifact, 1.0)?,

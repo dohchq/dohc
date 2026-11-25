@@ -16,6 +16,7 @@ const SAVE_VISITS_PER_STRUCT: usize = 4;
 const SAVE_VISITS_PER_VALUE: usize = 7;
 const LIVE_NOTE_CAPACITY: usize = 280_000;
 const LIVE_NOTE_ELEMENT_WEIGHT: usize = 6;
+const SHA256_HEX_BYTES: usize = 64;
 
 const KINDS_A_CONTAINER_CAN_BECOME: [&[&str]; 4] = [
     &["blockquote", "callout"],
@@ -306,6 +307,22 @@ impl Weight {
         }
     }
 
+    pub(super) fn with_room_for_a_kept_source(mut self, markdown: &str) -> Self {
+        let keys = [
+            MARKDOWN_SOURCE_META_KEY,
+            MARKDOWN_SOURCE_SHA_META_KEY,
+            MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+        ];
+        self.structs += keys.len();
+        self.values += keys.len();
+        self.bytes += markdown.len() + 2 * SHA256_HEX_BYTES;
+        self.bytes += keys
+            .iter()
+            .map(|key| ROOT_META.len() + key.len())
+            .sum::<usize>();
+        self
+    }
+
     pub(super) fn fits_a_live_note(&self) -> bool {
         SAVE_VISITS_PER_STRUCT * self.structs <= MAX_STRUCT_VISITS
             && self.structs + LIVE_NOTE_ELEMENT_WEIGHT * self.elements <= LIVE_NOTE_CAPACITY
@@ -457,14 +474,39 @@ mod tests {
         assert!(!at_most(bytes));
     }
 
+    fn reading_of(markdown: &str) -> Vec<MarkdownNode> {
+        let (blocks, refused) = parse_markdown_blocks_checked(markdown, MarkdownReading::Successor);
+        assert!(!refused, "{markdown}");
+        let (mut nodes, mut bytes) = (MAX_PROJECTION_NODES, 0);
+        read_blocks::<true>(&blocks, &mut nodes, &mut bytes).expect("the note reads")
+    }
+
+    #[test]
+    fn writes_to_a_sequence_that_came_through_an_update() {
+        let first = written(&reading_of("- a\n- b\n"));
+        let second = Ydoc::with_client_id(10).reading_body_sequence();
+        second
+            .apply(&first.encode_full_state())
+            .expect("the note applies");
+        let sequence = second.doc.get_or_insert_text(ROOT_SEQUENCE);
+        let containers = second.doc.get_or_insert_map(ROOT_CONTAINERS);
+        let heading = new_body(&reading_of("# Title\n")).expect("the heading can be written");
+        let edit = second.with_delta(|txn| write(txn, &sequence, &containers, heading));
+        let third = Ydoc::wire().reading_body_sequence();
+        third
+            .apply(&first.encode_full_state())
+            .expect("the note applies");
+        third.apply(&edit).expect("the edit applies");
+        let expected = markdown_document(&reading_of("# Title\n\n- a\n- b\n")).expect("projects");
+        for doc in [&second, &third] {
+            assert_eq!(markdown_document(&read(doc)).expect("projects"), expected);
+        }
+    }
+
     #[test]
     fn reads_a_written_list_alike_though_it_left_out_attributes_that_default_to_null() {
         for note in ["- a\n- b\n", "1. one\n2. two\n"] {
-            let (blocks, refused) = parse_markdown_blocks_checked(note, MarkdownReading::Successor);
-            assert!(!refused, "{note}");
-            let (mut nodes, mut bytes) = (MAX_PROJECTION_NODES, 0);
-            let body =
-                read_blocks::<true>(&blocks, &mut nodes, &mut bytes).expect("the note reads");
+            let body = reading_of(note);
             assert!(same_reading(&read(&written(&body)), &body), "{note}");
         }
         let ordered = |start: i64| MarkdownNode::Element {
