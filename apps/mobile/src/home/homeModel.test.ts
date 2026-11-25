@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WorkspaceFile } from "../server/workspaceReads";
-import { FILES_SHOWN, homeRows } from "./homeModel";
+import { FILES_SHOWN, homeRows, revealedPages } from "./homeModel";
 
 const file = (path: string): WorkspaceFile => ({
   path,
@@ -24,6 +24,20 @@ describe("Home's rows", () => {
     "people/dataset.json",
     "people/maya.md",
   ].map(file);
+
+  it("pass on only the pages a change of rows reveals", () => {
+    const passed = new Set<string>();
+    expect(revealedPages(homeRows(files, new Set()).pages, passed)).toEqual([
+      "Agenda 9.md",
+      "Agenda 10.md",
+      "notes.md",
+    ]);
+    expect(revealedPages(homeRows(files, new Set(["trip"])).pages, passed)).toEqual([
+      "trip/budget.md",
+      "trip/days.md",
+    ]);
+    expect(revealedPages(homeRows(files, new Set(["trip"])).pages, passed)).toEqual([]);
+  });
 
   it("nest pages in the folders that hold them, folders first, by the name each row shows", () => {
     expect(names(homeRows(files, new Set()).pages)).toEqual([

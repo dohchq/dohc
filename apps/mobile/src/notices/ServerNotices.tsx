@@ -35,7 +35,10 @@ export function ServerNotices() {
   const { data, notices: records, workspaces } = useAccount();
   useEffect(() => {
     if (focused && data && records)
-      data.prefetchPages(noticePages(records.state().notices, workspaces, data.workspaceId));
+      data.prefetchPages(
+        noticePages(records.state().notices, workspaces, data.workspaceId),
+        "notices",
+      );
   }, [focused, data, records, workspaces, notices]);
   const onViewableItemsChanged = useCallback(
     ({ viewableItems }: OnViewableItemsChangedInfo<PhoneNotice>) => {
