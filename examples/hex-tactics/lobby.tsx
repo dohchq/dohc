@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "rea
 import { Button, Callout, Input } from "dohc/ui";
 import { ArrowRight, ChevronDown, CircleX, Eye, Lock, Plus, RotateCcw, Users } from "dohc/icons";
 import { FactionCrest, HexLogo, LobbyHero } from "./board-art";
+import { playerName } from "./rules";
 import type { GameSummary } from "./types";
 
 export type LobbyPanel = "create" | "join" | "resume" | null;
@@ -66,7 +67,7 @@ function MenuRow({
 function statusText(game: GameSummary): string {
   if (game.status === "finished")
     return game.winnerSeat
-      ? `${game.players?.find((p) => p.seat === game.winnerSeat)?.name ?? (game.winnerSeat === 1 ? "Crimson" : "Cobalt")} won on turn ${game.turnNumber}`
+      ? `${playerName(game.players, game.winnerSeat)} won on turn ${game.turnNumber}`
       : "Finished";
   if (game.status === "waiting") return "Waiting for player 2";
   return `Turn ${game.turnNumber}`;

@@ -833,10 +833,25 @@
     };
   }
 
+  function gameById(ctx, gameId) {
+    return ctx.db.query("SELECT * FROM games WHERE id = ?", [gameId])[0];
+  }
+
+  function playerByToken(ctx, gameId, token) {
+    return ctx.db.query("SELECT id,seat,name,color,gold FROM players WHERE game_id = ? AND player_token = ?", [gameId, token])[0];
+  }
+
+  function tileAt(ctx, gameId, q, r) {
+    return ctx.db.query(
+      "SELECT id,q,r,terrain,owner_player_id,units,fortified FROM hex_tiles WHERE game_id = ? AND q = ? AND r = ?",
+      [gameId, q, r],
+    )[0];
+  }
+
   function getVisibleState(ctx, input) {
     const payload = expectObject(ctx, input);
     const gameId = cleanGameId(ctx, payload.gameId);
-    const game = ctx.db.query("SELECT * FROM games WHERE id = ?", [gameId])[0];
+    const game = gameById(ctx, gameId);
     if (!game) {
       ctx.refuse("game_not_found", "Match not found.");
     }
@@ -849,10 +864,7 @@
     }
 
     const token = cleanToken(ctx, payload.playerToken);
-    const player = ctx.db.query(
-      "SELECT id,seat,name,color,gold FROM players WHERE game_id = ? AND player_token = ?",
-      [game.id, token],
-    )[0];
+    const player = playerByToken(ctx, game.id, token);
     if (!player) {
       ctx.refuse("unauthorized_player", "That player token does not belong to this match.");
     }
@@ -867,14 +879,10 @@
     let goldAdded = BASE_GOLD_INCOME;
     const supplyUpdates = [];
     for (const tile of ownedTiles) {
-      if (tile.terrain === "capital") {
-        ctx.db.execute("UPDATE hex_tiles SET units = units + 1 WHERE id = ?", [tile.id]);
-        supplyUpdates.push({ q: tile.q, r: tile.r, addedUnits: 1 });
-      } else if (tile.terrain === "gold") {
-        goldAdded += GOLD_MINE_INCOME;
-        ctx.db.execute("UPDATE hex_tiles SET units = units + 1 WHERE id = ?", [tile.id]);
-        supplyUpdates.push({ q: tile.q, r: tile.r, addedUnits: 1 });
-      }
+      if (tile.terrain !== "capital" && tile.terrain !== "gold") continue;
+      if (tile.terrain === "gold") goldAdded += GOLD_MINE_INCOME;
+      ctx.db.execute("UPDATE hex_tiles SET units = units + 1 WHERE id = ?", [tile.id]);
+      supplyUpdates.push({ q: tile.q, r: tile.r, addedUnits: 1 });
     }
     ctx.db.execute("UPDATE players SET gold = gold + ? WHERE id = ?", [goldAdded, nextPlayer.id]);
     return { nextSeat: nextPlayer.seat, goldAdded, supplyUpdates };
@@ -890,7 +898,7 @@
       ctx.refuse("invalid_action", "Choose march, fortify, reinforce, pass, or resign.");
     }
 
-    const game = ctx.db.query("SELECT * FROM games WHERE id = ?", [gameId])[0];
+    const game = gameById(ctx, gameId);
     if (!game) {
       ctx.refuse("game_not_found", "Match not found.");
     }
@@ -903,10 +911,7 @@
       );
     }
 
-    const player = ctx.db.query(
-      "SELECT id,seat,name,color,gold FROM players WHERE game_id = ? AND player_token = ?",
-      [game.id, token],
-    )[0];
+    const player = playerByToken(ctx, game.id, token);
     if (!player) {
       ctx.refuse("unauthorized_player", "That player token does not belong to this match.");
     }
@@ -963,10 +968,7 @@
     } else if (actionType === "fortify") {
       const fq = expectSafeInt(ctx, payload.fromQ, "invalid_hex", "Choose a valid hex to fortify.");
       const fr = expectSafeInt(ctx, payload.fromR, "invalid_hex", "Choose a valid hex to fortify.");
-      const tile = ctx.db.query(
-        "SELECT id,q,r,terrain,owner_player_id,units,fortified FROM hex_tiles WHERE game_id = ? AND q = ? AND r = ?",
-        [game.id, fq, fr],
-      )[0];
+      const tile = tileAt(ctx, game.id, fq, fr);
       if (!tile) ctx.refuse("invalid_hex", "That hex is outside the board.");
       if (tile.owner_player_id !== player.id) {
         ctx.refuse("not_tile_owner", "You can only fortify a hex you control.");
@@ -1003,10 +1005,7 @@
           "Deploy between 1 and " + MAX_REINFORCE_PER_TURN + " units per turn.",
         );
       }
-      const tile = ctx.db.query(
-        "SELECT id,q,r,terrain,owner_player_id,units,fortified FROM hex_tiles WHERE game_id = ? AND q = ? AND r = ?",
-        [game.id, fq, fr],
-      )[0];
+      const tile = tileAt(ctx, game.id, fq, fr);
       if (!tile) ctx.refuse("invalid_hex", "That hex is outside the board.");
       if (tile.owner_player_id !== player.id) {
         ctx.refuse("not_tile_owner", "You can only reinforce a hex you control.");
@@ -1046,14 +1045,8 @@
         ctx.refuse("not_adjacent", "Units can only march to an adjacent hex (distance 1).");
       }
 
-      const fromTile = ctx.db.query(
-        "SELECT id,q,r,terrain,owner_player_id,units,fortified FROM hex_tiles WHERE game_id = ? AND q = ? AND r = ?",
-        [game.id, fq, fr],
-      )[0];
-      const toTile = ctx.db.query(
-        "SELECT id,q,r,terrain,owner_player_id,units,fortified FROM hex_tiles WHERE game_id = ? AND q = ? AND r = ?",
-        [game.id, tq, tr],
-      )[0];
+      const fromTile = tileAt(ctx, game.id, fq, fr);
+      const toTile = tileAt(ctx, game.id, tq, tr);
       if (!fromTile || !toTile) {
         ctx.refuse("invalid_hex", "One of the chosen hexes is outside the board.");
       }
@@ -1231,7 +1224,7 @@
       ],
     );
 
-    const updatedGame = ctx.db.query("SELECT * FROM games WHERE id = ?", [game.id])[0];
+    const updatedGame = gameById(ctx, game.id);
     const updatedPlayer = ctx.db.query(
       "SELECT id,seat,name,color,gold FROM players WHERE id = ?",
       [player.id],
@@ -1261,7 +1254,7 @@
     if (limit < 1 || limit > 200) {
       ctx.refuse("invalid_input", "limit must be between 1 and 200.");
     }
-    const game = ctx.db.query("SELECT * FROM games WHERE id = ?", [gameId])[0];
+    const game = gameById(ctx, gameId);
     if (!game) {
       ctx.refuse("game_not_found", "Match not found.");
     }

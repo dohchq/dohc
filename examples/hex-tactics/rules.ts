@@ -1,5 +1,19 @@
 import type { MoveRecord, TerrainType, VisibleTile } from "./types";
 
+type Seat = 1 | 2;
+
+export function factionName(seat: Seat | null): string {
+  return seat === 1 ? "Crimson" : seat === 2 ? "Cobalt" : "Neutral";
+}
+
+export function otherSeat(seat: Seat): Seat {
+  return seat === 1 ? 2 : 1;
+}
+
+export function playerName(players: ReadonlyArray<{ readonly seat: Seat; readonly name: string }> | undefined, seat: Seat | null): string {
+  return players?.find((player) => player.seat === seat)?.name ?? factionName(seat);
+}
+
 export const VISION_RANGE = 2;
 export const FORTIFY_COST = 3;
 export const REINFORCE_UNIT_COST = 2;
@@ -100,6 +114,13 @@ export function forecastMarch(
     heldYield: null,
     capitalCaptured: false,
   };
+}
+
+export function forecastLabel(forecast: MarchForecast, claim: boolean): string {
+  if (forecast.kind === "transfer") return `+${forecast.attackerUnits}`;
+  if (claim) return "CLAIM";
+  if (forecast.kind === "capture") return forecast.capitalCaptured ? "WIN" : "CAPTURE";
+  return "REPELLED";
 }
 
 export function maxReinforce(gold: number): number {

@@ -1,13 +1,5 @@
 import type { MoveRecord, ReplayPayload, VisibleTile } from "./types";
 
-export function hexKeyOf(q: number, r: number): string {
-  return `${q},${r}`;
-}
-
-export function axialDistance(aq: number, ar: number, bq: number, br: number): number {
-  return (Math.abs(aq - bq) + Math.abs(ar - br) + Math.abs(aq + ar - (bq + br))) / 2;
-}
-
 export interface ReplayFrame {
   readonly stepIndex: number;
   readonly label: string;

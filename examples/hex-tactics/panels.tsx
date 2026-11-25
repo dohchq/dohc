@@ -8,15 +8,12 @@ import {
   REINFORCE_UNIT_COST,
   TERRAIN_INFO,
   VISION_RANGE,
+  factionName,
   isClaim,
   type MarchForecast,
 } from "./rules";
 import type { ReplayFrame } from "./replay";
 import type { MoveRecord, VisibleTile } from "./types";
-
-export function factionName(seat: 1 | 2 | null): string {
-  return seat === 1 ? "Crimson" : seat === 2 ? "Cobalt" : "Neutral";
-}
 
 export function Kbd({ children }: { readonly children: ReactNode }) {
   return <kbd className="hc-kbd">{children}</kbd>;
@@ -737,7 +734,7 @@ export function RulesSheet() {
             <b>March</b> units from a hex you hold to a neighbor, leaving at least 1 behind. Moving onto your own hex merges them.
           </li>
           <li>
-            <b>Fortify</b> a hex for {FORTIFY_COST} gold: +2 defense until the hex is captured.
+            <b>Fortify</b> a hex for {FORTIFY_COST} gold: +2 defense until its defenders take losses.
           </li>
           <li>
             <b>Recruit</b> up to 5 units on a hex for {REINFORCE_UNIT_COST} gold each.

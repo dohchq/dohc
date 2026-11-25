@@ -21,9 +21,9 @@ import { unguardedCollections } from "../../apps/desktop/src/testing/collections
 import { createDatasetFixtureCompiler } from "../../apps/desktop/src/testing/datasetFixtureCompiler.ts";
 import { openedLocalState } from "../../apps/desktop/src/testing/preparedLocalState.ts";
 import { sourceCaptureAdapter } from "../../apps/desktop/src/testing/sourceCaptureAdapter.ts";
-import { arrowPath, countBadgeWidth, hexCenter } from "./geometry.ts";
+import { arrowPath, axialDistance, countBadgeWidth, hexCenter } from "./geometry.ts";
 import { withJoinedSeat } from "./sessions.ts";
-import { axialDistance, reconstructReplayFrames } from "./replay.ts";
+import { reconstructReplayFrames } from "./replay.ts";
 import { flashKindForMove, forecastMarch, isClaim, keptPips, type MarchForecast } from "./rules.ts";
 import type {
   CreateGameReply,

@@ -1,6 +1,14 @@
 export const HEX_SIZE = 40;
 const SQRT3 = Math.sqrt(3);
 
+export function hexKeyOf(q: number, r: number): string {
+  return `${q},${r}`;
+}
+
+export function axialDistance(aq: number, ar: number, bq: number, br: number): number {
+  return (Math.abs(aq - bq) + Math.abs(ar - br) + Math.abs(aq + ar - (bq + br))) / 2;
+}
+
 export function hexCenter(q: number, r: number): { x: number; y: number } {
   return { x: HEX_SIZE * SQRT3 * (q + r / 2), y: HEX_SIZE * 1.5 * r };
 }

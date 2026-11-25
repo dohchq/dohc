@@ -1,10 +1,7 @@
 import { useId, useMemo, useRef, type CSSProperties, type KeyboardEvent } from "react";
 import { TerrainArt, UnitStack } from "./board-art";
-import { HEX_SIZE, arrowPath, hexCenter, hexPoints } from "./geometry";
-import { axialDistance, hexKeyOf } from "./replay";
+import { HEX_SIZE, arrowPath, hexCenter, hexKeyOf, hexPoints } from "./geometry";
 import type { VisibleTile } from "./types";
-
-export { axialDistance, hexKeyOf };
 
 export type TargetKind = "move" | "claim" | "attack";
 
