@@ -22,8 +22,11 @@ export const WORKER_LIVE_VALIDATION_POLICY: OrderedLiveUpdateCutPolicy = Object.
 export const LIVE_NOTE_CAPACITY = 280_000;
 export const LIVE_NOTE_ELEMENT_WEIGHT = 6;
 
-/** Whether `doc` fits the capacity above. The journal visits each struct three times, so `policy` also caps its structs. */
-export function withinLiveNoteCapacity(doc: Y.Doc, policy: OrderedLiveUpdateCutPolicy): boolean {
+/** A note's Yjs structs, and how many of them are block elements. */
+export type LiveNoteWeight = { structs: number; elements: number };
+
+/** The weight of what `doc` stores. */
+export function liveNoteWeight(doc: Y.Doc): LiveNoteWeight {
   let structs = 0,
     elements = 0;
   for (const list of doc.store.clients.values()) {
@@ -37,8 +40,21 @@ export function withinLiveNoteCapacity(doc: Y.Doc, policy: OrderedLiveUpdateCutP
         elements++;
     }
   }
+  return { structs, elements };
+}
+
+/** Whether a note of this weight fits the capacity above. The journal visits each struct three times, so `policy` also caps its structs. */
+export function fitsLiveNoteCapacity(
+  { structs, elements }: LiveNoteWeight,
+  policy: OrderedLiveUpdateCutPolicy,
+): boolean {
   return (
     structs <= policy.maxStructVisits / 3 &&
     structs + LIVE_NOTE_ELEMENT_WEIGHT * elements <= LIVE_NOTE_CAPACITY
   );
+}
+
+/** Whether `doc` fits the capacity above. */
+export function withinLiveNoteCapacity(doc: Y.Doc, policy: OrderedLiveUpdateCutPolicy): boolean {
+  return fitsLiveNoteCapacity(liveNoteWeight(doc), policy);
 }

@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import * as ydocProjection from "@dohc/ydoc-projection";
+import {
+  admitBodySequenceNotes,
+  createLiveMarkdownRegistrationValidator,
+  WORKER_LIVE_VALIDATION_POLICY,
+} from "@dohc/ydoc-projection/live-journal-validation";
 import commonmark from "../../../ydoc-projection/src/fixtures/commonmark-edit-meaning.json";
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
@@ -2307,8 +2312,7 @@ describe("seeding an absent lineage", () => {
     expect(recordedUpdates(engine, true)).toHaveLength(1);
   });
 
-  /** The note a device seeds when the engine's open answer names a format for the seed. */
-  async function seededUnder(content: string, seedSchemaVersion?: number): Promise<Y.Doc> {
+  async function openUnder(content: string, seedSchemaVersion?: number) {
     const engine = new YdocLoopbackEngine();
     engine.seedFile({
       workspace: WORKSPACE,
@@ -2328,18 +2332,26 @@ describe("seeding an absent lineage", () => {
       },
     };
     const adapter = new YdocLiveAdapter(transport);
+    let refusal: unknown;
     try {
       const session = await adapter.openSession({
         workspace: WORKSPACE,
         versionId: VERSION,
         path: PATH,
         contentKind: "richdoc",
+        largeSeed: { workspaceId: "workspace-1", maxBytes: 1024 * 1024 },
       });
       await session.close({ settle: false });
+    } catch (error) {
+      refusal = error;
     } finally {
       adapter.dispose();
     }
-    const seeds = recordedUpdates(engine, true);
+    return { refusal, seeds: recordedUpdates(engine, true) };
+  }
+  async function seededUnder(content: string, seedSchemaVersion?: number): Promise<Y.Doc> {
+    const { refusal, seeds } = await openUnder(content, seedSchemaVersion);
+    expect(refusal).toBeUndefined();
     expect(seeds).toHaveLength(1);
     const note = new Y.Doc();
     Y.applyUpdate(note, seeds[0]!);
@@ -2375,8 +2387,33 @@ describe("seeding an absent lineage", () => {
     });
   });
 
+  it("seeds format 1 when the engine names 2 and a format-2 note of the text would be past the relay's capacity", async () => {
+    const content = "a\n\n".repeat(29_000);
+    const note = await seededUnder(content, 2);
+    expect(note.getMap("meta").get("schemaVersion")).toBe(1);
+    const checkpoint = Y.encodeStateAsUpdate(note);
+    admitBodySequenceNotes(true);
+    try {
+      const result = createLiveMarkdownRegistrationValidator(WORKER_LIVE_VALIDATION_POLICY)({
+        document: {
+          workspaceId: WORKSPACE,
+          mainVersionId: "main",
+          objectId: "object",
+          lineageClaimId: createHash("sha256").update(checkpoint).digest("hex"),
+        },
+        currentPath: "notes/live.md",
+        checkpoint,
+      });
+      expect(result.kind).toBe("accepted");
+    } finally {
+      admitBodySequenceNotes(false);
+    }
+  });
+
   it("refuses an open answer that names a format it does not know, and seeds nothing", async () => {
-    await expect(seededUnder("# Shared\n", 3)).rejects.toThrow(/seedSchemaVersion/);
+    const { refusal, seeds } = await openUnder("# Shared\n", 3);
+    expect(String(refusal)).toMatch(/seedSchemaVersion/);
+    expect(seeds).toHaveLength(0);
   });
 
   it("refuses seed content that comes without a seed client", async () => {

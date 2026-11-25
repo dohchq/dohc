@@ -10,10 +10,9 @@ import {
   flattenBody,
   recordsOfContainer,
 } from "./bodySequenceGrammar.js";
-import { writeNewBody } from "./bodySequenceWriter.js";
+import { newBodyWeight, writeNewBody } from "./bodySequenceWriter.js";
 import { boundaryOf, holdsBodySequence, readBodySequence, storedValue } from "./bodySequenceYjs.js";
 import {
-  BodySequenceCannotHoldError,
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
   markdownToYDoc,
@@ -23,7 +22,11 @@ import {
   admitBodySequenceNotes,
   createLiveMarkdownRegistrationValidator,
 } from "./liveDocumentValidation.js";
-import { WORKER_LIVE_VALIDATION_POLICY } from "./liveValidationPolicy.js";
+import {
+  fitsLiveNoteCapacity,
+  liveNoteWeight,
+  WORKER_LIVE_VALIDATION_POLICY,
+} from "./liveValidationPolicy.js";
 
 const schema = getDohcProseMirrorSchema();
 const register = createLiveMarkdownRegistrationValidator(WORKER_LIVE_VALIDATION_POLICY);
@@ -44,14 +47,15 @@ const kept = (doc: Y.Doc) => {
 const inFormat1 = (markdown: string, reading: Reading = "source") =>
   kept(markdownToYDoc(markdown, { clientID: CLIENT, reading }));
 const inFormat2 = (markdown: string, reading: Reading = "source") =>
-  kept(markdownToYDoc(markdown, { clientID: CLIENT, reading, schemaVersion: 2 }));
+  kept(markdownToYDoc(markdown, { clientID: CLIENT, reading, bodySequence: true }));
+const byNumber = (_container: unknown, index: number) => index.toString(36);
+const marker = (doc: Y.Doc) => storedValue(doc.share.get("meta"), "schemaVersion");
 
 const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 const underBody = (doc: Y.Doc) =>
   yXmlFragmentToProseMirrorRootNode(getDohcYDocBodyFragment(doc), schema).toJSON() as unknown;
 const inSequence = (doc: Y.Doc) => readBodySequence(schema, doc).toJSON() as unknown;
 
-/** What the relay's registration check says of a note: the cut, intake and the full check. */
 function registered(doc: Y.Doc) {
   const checkpoint = Y.encodeStateAsUpdate(doc);
   const result = register({
@@ -71,16 +75,15 @@ function registered(doc: Y.Doc) {
 
 const ONE_EMPTY_LINE = { type: "doc", content: [{ type: "paragraph" }] };
 
-/**
- * A format-2 note made from Markdown is the document format 1 holds, and the relay registers it.
- * A file with no body gives a format-1 note with no block, and a format-2 note that reads as one
- * empty line.
- */
 function expectTheSameNote(markdown: string, reading: Reading = "source"): string {
   const first = inFormat1(markdown, reading);
   const second = inFormat2(markdown, reading);
   expect(holdsBodySequence(second)).toBe(true);
-  expect(second.share.get("body")?._start ?? null).toBeNull();
+  expect(second.share.has("body")).toBe(false);
+  const parsed = yXmlFragmentToProseMirrorRootNode(getDohcYDocBodyFragment(first), schema);
+  const alone = kept(new Y.Doc());
+  writeNewBody(schema, alone, parsed, byNumber);
+  expect(newBodyWeight(schema, parsed)).toEqual(liveNoteWeight(alone));
   const held = underBody(first);
   expect(inSequence(second)).toEqual(
     getDohcYDocBodyFragment(first).length === 0 ? ONE_EMPTY_LINE : held,
@@ -98,11 +101,6 @@ const fixtures = (
   ) as Fixture[]
 ).flatMap((fixture) => ("markdown" in fixture ? [[fixture.name, fixture.markdown] as const] : []));
 
-/**
- * Fixture Markdown that a format-1 note does not write back letter for letter, and why. Each is
- * written from a stored note that no Markdown reads as, and a format-2 note writes what the
- * format-1 note does.
- */
 const NOT_GIVEN_BACK: Record<string, string> = {
   "every mark, alone, together and where it means nothing":
     "the text __proto__ is written with no escape, and reads back as bold",
@@ -146,7 +144,6 @@ const corpus = JSON.parse(
   }[];
 };
 
-/** Corpus cases whose document format 2 cannot hold, and why. */
 const NOT_HELD: Record<string, string> = {
   "quote-after-lists": "its last line sits in 66 containers, and a note holds lines in at most 64",
 };
@@ -166,7 +163,9 @@ describe("the shared Markdown corpus, read into format-2 notes", () => {
         return;
       }
       if (Object.hasOwn(NOT_HELD, name)) {
-        expect(() => inFormat2(source, reading)).toThrow(BodySequenceCannotHoldError);
+        const doc = inFormat2(source, reading);
+        expect(marker(doc)).toBe(1);
+        expect(yDocToMarkdown(doc)).toBe(sourceCanonical ?? canonical);
         return;
       }
       expect(expectTheSameNote(source, reading)).toBe(sourceCanonical ?? canonical);
@@ -215,11 +214,9 @@ describe("a format-2 note made from Markdown", () => {
 
   it("holds the marker 2, nothing under body, a boundary with its kind and path for every line, and every record of each container", () => {
     const doc = inFormat2(SEVERAL_KINDS);
-    expect(storedValue(doc.share.get("meta"), "schemaVersion")).toBe(2);
-    expect(doc.share.get("body")?._start ?? null).toBeNull();
-    const leaves = flattenBody(readBodySequence(schema, doc), (_container, index) =>
-      index.toString(36),
-    );
+    expect(marker(doc)).toBe(2);
+    expect(doc.share.has("body")).toBe(false);
+    const leaves = flattenBody(readBodySequence(schema, doc), byNumber);
     expect(leaves.length).toBeGreaterThan(12);
     const boundaries: unknown[] = [];
     for (let item = doc.getText(BODY_SEQUENCE_FIELD)._start; item !== null; item = item.right) {
@@ -313,23 +310,53 @@ describe("a format-2 note made from Markdown", () => {
   });
 });
 
-describe("what format 2 cannot hold as the Markdown says it", () => {
-  it.each([
-    ["a link", "Run [`npm install`](https://docs.example/install) first.\n"],
-    ["bold", "A **`flag`** here.\n"],
-  ])(
-    "inline code under %s: format 1 keeps both marks, and a format-2 note is refused, since it would read code alone",
-    (_mark, markdown) => {
-      expect(yDocToMarkdown(inFormat1(markdown))).toBe(markdown);
-      expect(() => inFormat2(markdown)).toThrow(BodySequenceCannotHoldError);
-    },
-  );
+const TABLE = "| a   |\n| --- |\n| 1   |\n";
 
-  it("a line inside 65 quotes is refused, where one inside 64 is held", () => {
+function expectFormat1(markdown: string): void {
+  const asked = inFormat2(markdown);
+  expect(marker(asked)).toBe(1);
+  expect(sha(Y.encodeStateAsUpdate(asked))).toBe(sha(Y.encodeStateAsUpdate(inFormat1(markdown))));
+}
+
+describe("what format 2 cannot hold as the Markdown says it, made in format 1", () => {
+  it.each([
+    ["inline code under a link", "Run [`npm install`](https://docs.example/install) first.\n"],
+    ["inline code under bold", "A **`flag`** here.\n"],
+    ["a row height over the limit", `<!-- dohc:table row-heights=1:1000001 -->\n${TABLE}`],
+    ["a callout type that holds a line separator", "> [!no te] Title\n> body\n"],
+  ])("%s: format 1 keeps it, and format 2 would read it otherwise", (_what, markdown) => {
+    const first = inFormat1(markdown);
+    expect(yDocToMarkdown(first)).toBe(markdown);
+    const parsed = yXmlFragmentToProseMirrorRootNode(getDohcYDocBodyFragment(first), schema);
+    expect(newBodyWeight(schema, parsed)).toBeNull();
+    expectFormat1(markdown);
+  });
+
+  it("a row height at the limit is held", () => {
+    const markdown = `<!-- dohc:table row-heights=1:1000000 -->\n${TABLE}`;
+    expect(expectTheSameNote(markdown)).toBe(markdown);
+  });
+
+  it("a line inside 65 quotes, where one inside 64 is held", () => {
     const quoted = (depth: number) => `${"> ".repeat(depth)}deep\n`;
     expect(expectTheSameNote(quoted(64))).toBe(quoted(64));
     expect(yDocToMarkdown(inFormat1(quoted(65)))).toBe(quoted(65));
-    expect(() => inFormat2(quoted(65))).toThrow(BodySequenceCannotHoldError);
+    expectFormat1(quoted(65));
+  });
+
+  it("a note past the relay's capacity in format 2 that fits it in format 1, and the relay registers that note", () => {
+    const markdown = "a\n\n".repeat(29_000);
+    const first = inFormat1(markdown);
+    const parsed = yXmlFragmentToProseMirrorRootNode(getDohcYDocBodyFragment(first), schema);
+    const weight = newBodyWeight(schema, parsed)!;
+    expect(fitsLiveNoteCapacity(weight, WORKER_LIVE_VALIDATION_POLICY)).toBe(false);
+    expectFormat1(markdown);
+    const projection = yDocToMarkdown(first);
+    const meta = first.getMap("meta");
+    meta.set("dohcMarkdownSource", markdown);
+    meta.set("dohcMarkdownSourceSha256", sha(markdown));
+    meta.set("dohcMarkdownSourceProjectionSha256", sha(projection));
+    expect(registered(first)).toEqual({ kind: "accepted", markdown });
   });
 });
 
@@ -337,10 +364,10 @@ describe("the format a note is made in", () => {
   it("is format 1 unless format 2 is asked for", () => {
     const markdown = "# Title\n\nBody\n";
     const byDefault = inFormat1(markdown);
-    expect(storedValue(byDefault.share.get("meta"), "schemaVersion")).toBe(1);
+    expect(marker(byDefault)).toBe(1);
     expect(byDefault.share.get("body")?._start ?? null).not.toBeNull();
-    expect(byDefault.share.get(BODY_SEQUENCE_FIELD)?._start ?? null).toBeNull();
-    const asked = kept(markdownToYDoc(markdown, { clientID: CLIENT, schemaVersion: 1 }));
+    expect(byDefault.share.has(BODY_SEQUENCE_FIELD)).toBe(false);
+    const asked = kept(markdownToYDoc(markdown, { clientID: CLIENT, bodySequence: false }));
     expect(sha(Y.encodeStateAsUpdate(asked))).toBe(sha(Y.encodeStateAsUpdate(byDefault)));
   });
 });
@@ -349,13 +376,12 @@ describe("the reference writer's whole body", () => {
   it("is refused for a note that already holds a body, in its sequence or in its records", () => {
     const written = inFormat2("one\n");
     const body = readBodySequence(schema, written);
-    const idFor = (_container: unknown, index: number) => index.toString(36);
-    expect(() => writeNewBody(schema, written, body, idFor)).toThrow(/already holds/);
+    expect(() => writeNewBody(schema, written, body, byNumber)).toThrow(/already holds/);
     const recorded = kept(new Y.Doc());
     recorded.getMap(BODY_CONTAINERS_FIELD).set("q", "blockquote");
-    expect(() => writeNewBody(schema, recorded, body, idFor)).toThrow(/already holds/);
+    expect(() => writeNewBody(schema, recorded, body, byNumber)).toThrow(/already holds/);
     const fresh = kept(new Y.Doc());
-    writeNewBody(schema, fresh, body, idFor);
+    writeNewBody(schema, fresh, body, byNumber);
     expect(readBodySequence(schema, fresh).toJSON()).toEqual(body.toJSON());
   });
 });

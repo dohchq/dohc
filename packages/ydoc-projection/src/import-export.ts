@@ -13,7 +13,7 @@ import {
 } from "marked";
 import { StarterKit } from "@tiptap/starter-kit";
 import { TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
-import { prosemirrorJSONToYXmlFragment, yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
+import { prosemirrorToYXmlFragment, yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
 import * as Y from "yjs";
 import {
   DohcMarkdownTable,
@@ -37,12 +37,17 @@ import { sanitizeImageSrc } from "./image-src.js";
 import { backtickFence, codeBlockFence } from "./markdown-fence.js";
 import { getDohcYDocBodyFragment } from "./body-fragment.js";
 import { BODY_SEQUENCE_FIELD } from "./bodySequenceGrammar.js";
-import { writeNewBody } from "./bodySequenceWriter.js";
+import { newBodyWeight, writeNewBody } from "./bodySequenceWriter.js";
 import {
   BODY_SEQUENCE_SCHEMA_VERSION,
   holdsBodySequence,
   readBodySequence,
 } from "./bodySequenceYjs.js";
+import {
+  fitsLiveNoteCapacity,
+  liveNoteWeight,
+  WORKER_LIVE_VALIDATION_POLICY,
+} from "./liveValidationPolicy.js";
 import {
   FRONTMATTER_SOURCE_META_KEY,
   frontmatterBlockFor,
@@ -574,37 +579,16 @@ function withinElements(root: JSONContent, limit: number): boolean {
   return true;
 }
 
-/**
- * Markdown that a note whose body is one sequence cannot hold as it reads: inline code that also
- * carries a link or another mark, or a line inside more containers than a note holds. Such a note
- * would be written back as other Markdown, so `markdownToYDoc` makes none.
- */
-export class BodySequenceCannotHoldError extends Error {
-  constructor() {
-    super("body-sequence-cannot-hold");
-  }
-}
-
-/** Writes the body of a new format-2 note, and refuses a document the note would not read as. */
-function writeBodySequence(doc: Y.Doc, tiptapJson: JSONContent): void {
-  const parsed = schema.nodeFromJSON(tiptapJson);
-  try {
-    writeNewBody(schema, doc, parsed, (_container, index) => index.toString(36));
-  } catch (error) {
-    if (error instanceof RangeError) throw new BodySequenceCannotHoldError();
-    throw error;
-  }
-  const asked = parsed.childCount === 0 ? schema.topNodeType.createAndFill()! : parsed;
-  if (!readBodySequence(schema, doc).eq(asked)) throw new BodySequenceCannotHoldError();
-}
+const KEPT_SOURCE_META_ENTRIES = 3;
 
 /**
- * A new note made from Markdown. `schemaVersion` is the format it is made in: 1, the default, or
- * 2 for a note whose body is one sequence (`docs/engineering/note-body-sequence.md`). A format-2
- * note reads as the document the same Markdown gives a format-1 note, so both are written as the
- * same Markdown; where it could not, this throws `BodySequenceCannotHoldError`. Its container ids
- * are each container's number in the document, so every device that makes a note from one text
- * under one `clientID` makes the same bytes.
+ * A new note made from Markdown. With `bodySequence` it is made in format 2, a note whose body is
+ * one sequence (`docs/engineering/note-body-sequence.md`), where that format holds it: the note
+ * reads as the document the same Markdown gives a format-1 note (`newBodyWeight` lists where it
+ * would not), and it fits the relay's capacity for a note with room for the three entries of a
+ * kept source text. Otherwise, and by default, it is made in format 1. A format-2 note's container
+ * ids are each container's number in the document, so every device that makes a note from one
+ * text under one `clientID` makes the same bytes.
  */
 export function markdownToYDoc(
   markdown: string,
@@ -612,47 +596,52 @@ export function markdownToYDoc(
     clientID?: number;
     reading?: "source" | "projection";
     maxElements?: number;
-    schemaVersion?: typeof DOHC_SCHEMA_VERSION | typeof BODY_SEQUENCE_SCHEMA_VERSION;
+    bodySequence?: boolean;
   } = {},
 ): Y.Doc {
   const usesCrlf = markdown.includes("\r\n");
   const { meta, body, frontmatterSource } = parseFrontmatter(markdown, usesCrlf);
-  const doc = new Y.Doc();
-  if (options.clientID !== undefined) doc.clientID = options.clientID;
-  const schemaVersion = options.schemaVersion ?? DOHC_SCHEMA_VERSION;
-
-  writeFrontmatterMap(doc.getMap(FRONTMATTER_FIELD), meta);
-  writeFrontmatterMap(doc.getMap(META_FIELD), {
-    schemaVersion,
-    ...(usesCrlf ? { [MARKDOWN_CRLF_META_KEY]: true } : {}),
-    ...(frontmatterSource === undefined
-      ? {}
-      : { [FRONTMATTER_SOURCE_META_KEY]: frontmatterSource }),
-  });
-  if (frontmatterSource !== undefined) {
-    recordFrontmatterSourceItems(doc.getMap(FRONTMATTER_FIELD), doc.getMap(META_FIELD));
-  }
-
-  const bodyFragment = getDohcYDocBodyFragment(doc);
   const tiptapJson = parseRichdocMarkdown(
     usesCrlf ? body.replaceAll("\r\n", "\n") : body,
     options.reading,
   );
   // Checked before the Y.Doc is built, which costs far more memory than parsing.
-  if (options.maxElements !== undefined && !withinElements(tiptapJson, options.maxElements)) {
-    doc.destroy();
+  if (options.maxElements !== undefined && !withinElements(tiptapJson, options.maxElements))
     throw new MarkdownCapacityError();
-  }
-  if (schemaVersion === DOHC_SCHEMA_VERSION)
-    prosemirrorJSONToYXmlFragment(schema, tiptapJson, bodyFragment);
-  else
-    try {
-      writeBodySequence(doc, tiptapJson);
-    } catch (error) {
-      doc.destroy();
-      throw error;
+  const parsed = schema.nodeFromJSON(tiptapJson);
+  const note = (schemaVersion: number) => {
+    const doc = new Y.Doc();
+    if (options.clientID !== undefined) doc.clientID = options.clientID;
+    writeFrontmatterMap(doc.getMap(FRONTMATTER_FIELD), meta);
+    writeFrontmatterMap(doc.getMap(META_FIELD), {
+      schemaVersion,
+      ...(usesCrlf ? { [MARKDOWN_CRLF_META_KEY]: true } : {}),
+      ...(frontmatterSource === undefined
+        ? {}
+        : { [FRONTMATTER_SOURCE_META_KEY]: frontmatterSource }),
+    });
+    if (frontmatterSource !== undefined) {
+      recordFrontmatterSourceItems(doc.getMap(FRONTMATTER_FIELD), doc.getMap(META_FIELD));
     }
+    return doc;
+  };
 
+  const sequence = options.bodySequence ? newBodyWeight(schema, parsed) : null;
+  if (sequence) {
+    const doc = note(BODY_SEQUENCE_SCHEMA_VERSION);
+    const properties = liveNoteWeight(doc);
+    const whole = {
+      structs: properties.structs + sequence.structs + KEPT_SOURCE_META_ENTRIES,
+      elements: properties.elements + sequence.elements,
+    };
+    if (fitsLiveNoteCapacity(whole, WORKER_LIVE_VALIDATION_POLICY)) {
+      writeNewBody(schema, doc, parsed, (_container, index) => index.toString(36));
+      return doc;
+    }
+    doc.destroy();
+  }
+  const doc = note(DOHC_SCHEMA_VERSION);
+  prosemirrorToYXmlFragment(parsed, getDohcYDocBodyFragment(doc));
   return doc;
 }
 

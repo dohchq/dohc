@@ -1,4 +1,4 @@
-import type { Node as ProseMirrorNode, Schema } from "@tiptap/pm/model";
+import type { NodeType, Node as ProseMirrorNode, Schema } from "@tiptap/pm/model";
 import * as Y from "yjs";
 import {
   BLOCK_ELEMENT,
@@ -7,6 +7,7 @@ import {
   MAX_SEQUENCE_DEPTH,
   allowedChildren,
   flattenBody,
+  keepsMarkup,
   leavesOfSequence,
   readBodyLeaves,
   recordsOfContainer,
@@ -14,6 +15,7 @@ import {
   type SequenceAttrs,
   type SequenceLeaf,
 } from "./bodySequenceGrammar.js";
+import type { LiveNoteWeight } from "./liveValidationPolicy.js";
 
 /**
  * A container as a writer holds it. Neighbouring lines in one container hold the same object, so
@@ -1285,15 +1287,75 @@ export function writeBody(
 }
 
 /**
+ * What a note stores more once `writeNewBody` writes `body` into it, weighed as the relay weighs
+ * a note, or null when the note would not read as `body`:
+ * - a line sits in more containers than a note holds;
+ * - a container holds no line, or a node holds what its kind does not allow;
+ * - a block or an inline item carries a mark;
+ * - an attribute holds a value its rule does not keep (2.3), such as a row height over the
+ *   limit or a callout type with a line break;
+ * - a letter of inline code carries another mark, such as a link.
+ */
+export function newBodyWeight(schema: Schema, body: ProseMirrorNode): LiveNoteWeight | null {
+  if (body.childCount > 0 && !body.type.validContent(body.content)) return null;
+  const counted = new Map<NodeType, number>();
+  const per = (type: NodeType, count: () => number) => {
+    let known = counted.get(type);
+    if (known === undefined) counted.set(type, (known = count()));
+    return known;
+  };
+  let structs = 0;
+  let elements = 0;
+  const holds = (node: ProseMirrorNode, depth: number): boolean => {
+    for (let at = 0; at < node.childCount; at++) {
+      const child = node.child(at);
+      if (!keepsMarkup(child)) return false;
+      if (child.isTextblock || child.isLeaf) {
+        if (!child.type.validContent(child.content)) return false;
+        structs +=
+          1 + per(child.type, () => new Set([...Object.keys(child.attrs), "type", "path"]).size);
+        elements++;
+        for (let piece = 0; piece < child.childCount; piece++) {
+          const inline = child.child(piece);
+          if (!keepsMarkup(inline)) return false;
+          if (inline.isText) structs += 1 + 2 * inline.marks.length;
+          else {
+            structs += 1 + Object.keys(inline.attrs).length;
+            elements++;
+          }
+        }
+        continue;
+      }
+      if (
+        depth === MAX_SEQUENCE_DEPTH ||
+        child.childCount === 0 ||
+        !child.type.validContent(child.content)
+      )
+        return false;
+      structs += per(
+        child.type,
+        () =>
+          recordsOfContainer(schema, { type: child.type.name, id: "", attrs: { ...child.attrs } })
+            .size,
+      );
+      if (!holds(child, depth + 1)) return false;
+    }
+    return true;
+  };
+  return holds(body, 0) ? { structs, elements } : null;
+}
+
+/**
  * Write a whole document as the body of a new note, in one change. Every line gets a boundary
  * with its kind, every attribute of its kind and its path, and every container gets its type
  * record and a record for every attribute of every kind it can become. `idFor` names each
- * container, and no two may share a name. A note made this way has no line that is read with no
- * boundary of its own, so nothing is written in a change of its own first.
+ * container, and no two may share a name. A document with no block writes no item: the note reads
+ * as one empty line with no boundary, so the first change to it gives that line its boundary in a
+ * change of its own first (section 4). No other line is read with no boundary of its own.
  *
  * It throws for a note whose body already holds an item or a record, and a `RangeError` for a
- * line that sits in more containers than a note holds. It writes what a note stores: a mark on an
- * inline item is not written, and of the marks on a letter of inline code only `code` is read.
+ * line that sits in more containers than a note holds. It writes what a note stores, so the note
+ * reads as `body` only where `newBodyWeight` says so.
  */
 export function writeNewBody(
   schema: Schema,

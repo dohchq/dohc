@@ -2,6 +2,7 @@ import {
   Fragment,
   Mark,
   type MarkType,
+  type Attrs,
   type Node as ProseMirrorNode,
   type NodeType,
   type Schema,
@@ -147,6 +148,44 @@ function attrsFor(type: NodeType | MarkType, raw: unknown): SequenceAttrs {
   return attrs;
 }
 
+const sameValue = (left: unknown, right: unknown): boolean =>
+  Array.isArray(left) && Array.isArray(right)
+    ? left.length === right.length && left.every((value, at) => value === right[at])
+    : left === right;
+
+const attrSpecs = new WeakMap<NodeType | MarkType, [string, unknown][]>();
+
+function keepsAttrs(type: NodeType | MarkType, attrs: Attrs): boolean {
+  let specs = attrSpecs.get(type);
+  if (!specs) {
+    specs = Object.entries(type.spec.attrs ?? {}).map(([key, spec]) => [
+      key,
+      (spec as { default?: unknown }).default,
+    ]);
+    attrSpecs.set(type, specs);
+  }
+  if (specs.length === 0) return true;
+  const kept = attrsFor(type, attrs);
+  return specs.every(([key, fallback]) =>
+    sameValue(key in kept ? kept[key] : fallback, attrs[key]),
+  );
+}
+
+/**
+ * Whether a reader gives back `node`'s attributes and marks as `flattenBody` writes them, in a
+ * node that allows them. A mark on anything but a letter is not written, an attribute whose value
+ * breaks its rule (2.3) reads as its default, and of two marks where one excludes the other only
+ * one is read: a letter of inline code reads with `code` alone.
+ */
+export function keepsMarkup(node: ProseMirrorNode): boolean {
+  if (!node.isText) return node.marks.length === 0 && keepsAttrs(node.type, node.attrs);
+  return node.marks.every(
+    (mark) =>
+      keepsAttrs(mark.type, mark.attrs) &&
+      node.marks.every((other) => other === mark || !mark.type.excludes(other.type)),
+  );
+}
+
 type Shape = {
   children: Map<NodeType, Set<NodeType>>;
   leafBlock(type: NodeType | undefined): type is NodeType;
@@ -275,14 +314,25 @@ const KINDS_A_CONTAINER_CAN_BECOME = [
  */
 export function recordsOfContainer(schema: Schema, frame: SequenceFrame): Map<string, unknown> {
   const records = new Map<string, unknown>([[frame.id, frame.type]]);
-  const kinds = KINDS_A_CONTAINER_CAN_BECOME.find((family) => family.includes(frame.type)) ?? [
-    frame.type,
-  ];
+  for (const [key, value] of startingRecords(schema, frame.type))
+    records.set(`${frame.id}.${key}`, value);
+  for (const [key, value] of Object.entries(frame.attrs)) records.set(`${frame.id}.${key}`, value);
+  return records;
+}
+
+const startingRecordsOf = new WeakMap<Schema, Map<string, Map<string, unknown>>>();
+
+function startingRecords(schema: Schema, type: string): Map<string, unknown> {
+  let known = startingRecordsOf.get(schema);
+  if (!known) startingRecordsOf.set(schema, (known = new Map()));
+  let records = known.get(type);
+  if (records) return records;
+  records = new Map();
+  const kinds = KINDS_A_CONTAINER_CAN_BECOME.find((family) => family.includes(type)) ?? [type];
   for (const kind of kinds)
     for (const [key, spec] of Object.entries(schema.nodes[kind]?.spec.attrs ?? {}))
-      if (!records.has(`${frame.id}.${key}`))
-        records.set(`${frame.id}.${key}`, (spec as { default?: unknown }).default ?? null);
-  for (const [key, value] of Object.entries(frame.attrs)) records.set(`${frame.id}.${key}`, value);
+      if (!records.has(key)) records.set(key, (spec as { default?: unknown }).default ?? null);
+  known.set(type, records);
   return records;
 }
 
