@@ -656,7 +656,7 @@ export function createAppLaunchHandler(options: {
                 0,
                 0,
               ).then(
-                (response) => response.ok,
+                (response) => response.ok || [429, 503].includes(response.status),
                 () => false,
               );
           let doc: ReturnType<typeof createAppDocument>;

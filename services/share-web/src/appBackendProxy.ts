@@ -336,7 +336,7 @@ export async function relayAppEvents(
       !Number.isSafeInteger(value.revision) ||
       (value.revision as number) < 0
     )
-      return unavailableLinkRefusal();
+      return opaqueLinkRefusal();
     return Response.json(
       { dataset: value.dataset, revision: value.revision },
       { headers: responseHeaders },

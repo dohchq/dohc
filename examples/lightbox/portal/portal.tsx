@@ -879,7 +879,6 @@ function ClientGallery({
 }
 
 function Portal() {
-  const client = useApp();
   const [code, setCode] = useState(readCode);
   const loaded = useLoader<GalleryData>(code || null, (client) =>
     loadPages(
@@ -903,23 +902,13 @@ function Portal() {
       reload();
       setTick((value) => value + 1);
     };
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const stop = client.subscribe?.(() => {
-      clearTimeout(timer);
-      timer = setTimeout(() => {
-        last = 0;
-        refresh();
-      }, 300);
-    });
     addEventListener("focus", refresh);
     document.addEventListener("visibilitychange", refresh);
     return () => {
-      clearTimeout(timer);
-      stop?.();
       removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", refresh);
     };
-  }, [client, code, reload]);
+  }, [code, reload]);
   const leave = () => {
     saveCode("");
     setCode("");

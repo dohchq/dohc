@@ -235,8 +235,12 @@ it("starts a launch's change loop only when the relay answers its Collection's r
   });
   expect((await f.open("profile-collection")).html).toContain("void watch();");
   expect(probes).toEqual(["?authorityRevision=1&since=0&hold=0"]);
+  f.relayEvents(async () => new Response(null, { status: 503 }));
+  expect((await f.open("profile-busy")).html).toContain("void watch();");
   f.relayEvents(async () => new Response(null, { status: 404 }));
   expect((await f.open("profile-static")).html).not.toContain("void watch();");
+  f.relayEvents(async () => Response.json({ publicationId, authorityRevision: 1, files: [] }));
+  expect((await f.open("profile-malformed")).html).not.toContain("void watch();");
 });
 
 it("holds one change wait per launch, outside the document lane and the session's request budget", async () => {
@@ -274,7 +278,7 @@ it("holds one change wait per launch, outside the document lane and the session'
   expect((await call("/events", { since: -1 })).status).toBe(404);
   expect((await call("/events", { since: 4, dataset: "votes" })).status).toBe(404);
   f.relayEvents(async () => Response.json({ dataset: "votes", revision: -1 }));
-  expect((await call("/events", { since: 4 })).status).toBe(503);
+  expect((await call("/events", { since: 4 })).status).toBe(404);
   f.relayEvents(async () => Response.json(null, { status: 404 }));
   expect((await call("/events", { since: 4 })).status).toBe(404);
   f.relayEvents(() => Promise.reject(new Error("offline")));
