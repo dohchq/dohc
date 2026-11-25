@@ -545,6 +545,22 @@ export function createWorkspaceEngineIpc<
     // timeline from engine moments through the admitted workspace. Owner
     // history rejects when the engine capture is not attached.
 
+    class HistoryServerChanged extends Error {
+      constructor() {
+        super("History stopped loading because the workspace changed.");
+      }
+    }
+
+    async function readForCurrentServer<Result>(read: () => Promise<Result>): Promise<Result> {
+      for (;;) {
+        try {
+          return await read();
+        } catch (error) {
+          if (!(error instanceof HistoryServerChanged)) throw error;
+        }
+      }
+    }
+
     // How one History read draws its authors, and the check it makes after each await.
     // The read stops when its window, server, or shared view changes; the operation itself
     // retires when the folder does. Other registry writes replace the entry too, such as the
@@ -560,7 +576,7 @@ export function createWorkspaceEngineIpc<
           current.remote?.serverUrl !== entry.remote?.serverUrl ||
           shareViewIsPresent(current.shareView) !== shared
         ) {
-          throw new Error("History stopped loading because the workspace changed.");
+          throw new HistoryServerChanged();
         }
       };
       const presentations = async (): Promise<EngineMomentAuthorNames["presentations"]> => {
@@ -612,23 +628,25 @@ export function createWorkspaceEngineIpc<
         assertCurrent: () => void,
       ) => Promise<Result>,
     ): Promise<Result> {
-      const { entry, shared, assertCurrent, presentations } = historyIdentity(operation);
-      if (!shared) {
-        const { capture } = await requireEngineCapture(entry.workspaceId, "History");
-        assertCurrent();
-        return read(capture, entry.rootPath, await presentations(), assertCurrent);
-      }
-      const store = receivedShareEngine.storeFor({
-        engineWorkspaceId: entry.workspaceId,
-        rootPath: entry.rootPath,
-        attachmentId: entry.attachmentId,
+      return readForCurrentServer(async () => {
+        const { entry, shared, assertCurrent, presentations } = historyIdentity(operation);
+        if (!shared) {
+          const { capture } = await requireEngineCapture(entry.workspaceId, "History");
+          assertCurrent();
+          return read(capture, entry.rootPath, await presentations(), assertCurrent);
+        }
+        const store = receivedShareEngine.storeFor({
+          engineWorkspaceId: entry.workspaceId,
+          rootPath: entry.rootPath,
+          attachmentId: entry.attachmentId,
+        });
+        return read(
+          sharedViewHistory(store, entry.workspaceId),
+          null,
+          await presentations(),
+          assertCurrent,
+        );
       });
-      return read(
-        sharedViewHistory(store, entry.workspaceId),
-        null,
-        await presentations(),
-        assertCurrent,
-      );
     }
 
     const policyUnreadable = (policy: WorkspaceEnginePolicySnapshot) =>
@@ -647,133 +665,136 @@ export function createWorkspaceEngineIpc<
       },
       historyOperations,
       {
-        listHistory: async (input, { event, operation }) => {
-          // The timeline draws file authors as the moment list does, with the same checks.
-          const identity = historyIdentity(operation);
-          const { entry: workspace, shared, assertCurrent } = identity;
-          assertCurrent();
-          const policy = shared ? null : await readWorkspaceEnginePolicy(workspace.rootPath);
-          assertCurrent();
-          if (policy?.errors.length) return policyUnreadable(policy);
-          const engine = shared
-            ? sharedViewHistory(
-                receivedShareEngine.storeFor({
-                  engineWorkspaceId: workspace.workspaceId,
-                  rootPath: workspace.rootPath,
-                  attachmentId: workspace.attachmentId,
-                }),
-                workspace.workspaceId,
-              )
-            : (await requireEngineCapture(workspace.workspaceId, "History")).capture;
-          assertCurrent();
-          const presentations = await identity.presentations();
-          let resolved: Awaited<ReturnType<typeof dependencies.historyCollections>> | undefined;
-          let pending: Promise<NonNullable<typeof resolved>> | undefined;
-          const without = (why: Error): Pick<TimelineReads, "scope" | "local" | "remote"> => ({
-            scope: operation.scope ?? workspace.workspaceId,
-            local: () => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }),
-            remote: async () => {
-              throw why;
-            },
-          });
-          // Another computer keeps the Collections: History shows files and documents without them.
-          const getCollections = () =>
-            (pending ??= dependencies
-              .historyCollections(operation)
-              .catch((error: unknown) => {
-                if (error instanceof CollectionsRefusalError) return without(error);
-                throw error;
-              })
-              .then((value) => {
-                assertCurrent();
-                resolved = value;
-                return value;
-              }));
-          const collections: Pick<TimelineReads, "scope" | "local" | "remote"> = shared
-            ? without(new Error("Collection History is unavailable in a received share."))
-            : {
-                get scope() {
-                  return resolved?.scope ?? operation.scope ?? workspace.workspaceId;
-                },
-                local: async (positions, limit, sourceIds) =>
-                  (await getCollections()).local(positions, limit, sourceIds),
-                remote: async (datasetId, beforeRevision, signal) =>
-                  (await getCollections()).remote(datasetId, beforeRevision, signal),
-              };
-          return timeline(input, {
-            ...collections,
-            get scope() {
-              return collections.scope;
-            },
-            engine,
-            signal: operation.signal,
-            assertCurrent,
-            names: authorNames(workspace.workspaceId, event.sender, presentations),
-            ...(policy ? { admitted: historyPathAdmission(policy) } : {}),
-          });
-        },
+        listHistory: (input, { event, operation }) =>
+          readForCurrentServer(async () => {
+            // The timeline draws file authors as the moment list does, with the same checks.
+            const identity = historyIdentity(operation);
+            const { entry: workspace, shared, assertCurrent } = identity;
+            assertCurrent();
+            const policy = shared ? null : await readWorkspaceEnginePolicy(workspace.rootPath);
+            assertCurrent();
+            if (policy?.errors.length) return policyUnreadable(policy);
+            const engine = shared
+              ? sharedViewHistory(
+                  receivedShareEngine.storeFor({
+                    engineWorkspaceId: workspace.workspaceId,
+                    rootPath: workspace.rootPath,
+                    attachmentId: workspace.attachmentId,
+                  }),
+                  workspace.workspaceId,
+                )
+              : (await requireEngineCapture(workspace.workspaceId, "History")).capture;
+            assertCurrent();
+            const presentations = await identity.presentations();
+            let resolved: Awaited<ReturnType<typeof dependencies.historyCollections>> | undefined;
+            let pending: Promise<NonNullable<typeof resolved>> | undefined;
+            const without = (why: Error): Pick<TimelineReads, "scope" | "local" | "remote"> => ({
+              scope: operation.scope ?? workspace.workspaceId,
+              local: () => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }),
+              remote: async () => {
+                throw why;
+              },
+            });
+            // Another computer keeps the Collections: History shows files and documents without them.
+            const getCollections = () =>
+              (pending ??= dependencies
+                .historyCollections(operation)
+                .catch((error: unknown) => {
+                  if (error instanceof CollectionsRefusalError) return without(error);
+                  throw error;
+                })
+                .then((value) => {
+                  assertCurrent();
+                  resolved = value;
+                  return value;
+                }));
+            const collections: Pick<TimelineReads, "scope" | "local" | "remote"> = shared
+              ? without(new Error("Collection History is unavailable in a received share."))
+              : {
+                  get scope() {
+                    return resolved?.scope ?? operation.scope ?? workspace.workspaceId;
+                  },
+                  local: async (positions, limit, sourceIds) =>
+                    (await getCollections()).local(positions, limit, sourceIds),
+                  remote: async (datasetId, beforeRevision, signal) =>
+                    (await getCollections()).remote(datasetId, beforeRevision, signal),
+                };
+            return timeline(input, {
+              ...collections,
+              get scope() {
+                return collections.scope;
+              },
+              engine,
+              signal: operation.signal,
+              assertCurrent,
+              names: authorNames(workspace.workspaceId, event.sender, presentations),
+              ...(policy ? { admitted: historyPathAdmission(policy) } : {}),
+            });
+          }),
         // Each version's newest change of its own, for the Versions page. A version's history
         // also holds what it was made from, so its own changes are the moments it recorded.
         // A received share keeps no versions.
-        listVersionLastChanges: async (input, { event, operation }) => {
-          const { entry: workspace, shared, assertCurrent } = historyIdentity(operation);
-          if (shared) return { versions: [] };
-          const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
-          assertCurrent();
-          if (policy.errors.length) throw new Error("History can't read this folder's settings.");
-          const admitted = historyPathAdmission(policy);
-          const { capture } = await requireEngineCapture(input.workspaceId, "History");
-          assertCurrent();
-          const { versions } = await capture.listVersions();
-          assertCurrent();
-          // A page also holds version markers and hidden paths, so reading goes on
-          // until an own shown moment, the end, or a page older than the version:
-          // a version records nothing before it was made. Past the last page read,
-          // the version shows no change of its own.
-          const latest = await Promise.all(
-            versions.map(async (version) => {
-              let cursor: HistoryCursor | undefined;
-              for (let read = 0; read < LAST_CHANGE_PAGES_MAX; read += 1) {
-                const page = await capture.listMoments({
+        listVersionLastChanges: (input, { event, operation }) =>
+          readForCurrentServer(async () => {
+            const { entry: workspace, shared, assertCurrent } = historyIdentity(operation);
+            if (shared) return { versions: [] };
+            const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
+            assertCurrent();
+            if (policy.errors.length) throw new Error("History can't read this folder's settings.");
+            const admitted = historyPathAdmission(policy);
+            const { capture } = await requireEngineCapture(input.workspaceId, "History");
+            assertCurrent();
+            const { versions } = await capture.listVersions();
+            assertCurrent();
+            // A page also holds version markers and hidden paths, so reading goes on
+            // until an own shown moment, the end, or a page older than the version:
+            // a version records nothing before it was made. Past the last page read,
+            // the version shows no change of its own.
+            const latest = await Promise.all(
+              versions.map(async (version) => {
+                let cursor: HistoryCursor | undefined;
+                for (let read = 0; read < LAST_CHANGE_PAGES_MAX; read += 1) {
+                  const page = await capture.listMoments({
+                    versionId: version.id,
+                    limit: LAST_CHANGE_PAGE_ROWS,
+                    ...(cursor ? { cursor } : {}),
+                  });
+                  assertCurrent();
+                  const own = page.moments.find(
+                    (moment) =>
+                      moment.versionId === version.id &&
+                      (moment.protected || admitted(moment.path)),
+                  );
+                  if (own !== undefined) return own;
+                  const oldest = Math.min(
+                    ...page.moments.map((moment) => moment.recordedAtMs),
+                    ...page.versionMarkers.map((marker) => marker.createdAtMs),
+                  );
+                  if (page.nextCursor === null || oldest < version.createdAtMs) return undefined;
+                  cursor = page.nextCursor;
+                }
+                return undefined;
+              }),
+            );
+            assertCurrent();
+            // Only person names are read here, so no presentations are drawn.
+            const names = authorNames(input.workspaceId, event.sender, () => []);
+            names.prepare?.(latest.flatMap((moment) => moment?.authors ?? []));
+            return {
+              versions: versions.map((version, index) => {
+                const moment = latest[index];
+                if (moment === undefined) return { versionId: version.id, lastChange: null };
+                const personName = momentPersonName(moment, names);
+                return {
                   versionId: version.id,
-                  limit: LAST_CHANGE_PAGE_ROWS,
-                  ...(cursor ? { cursor } : {}),
-                });
-                assertCurrent();
-                const own = page.moments.find(
-                  (moment) =>
-                    moment.versionId === version.id && (moment.protected || admitted(moment.path)),
-                );
-                if (own !== undefined) return own;
-                const oldest = Math.min(
-                  ...page.moments.map((moment) => moment.recordedAtMs),
-                  ...page.versionMarkers.map((marker) => marker.createdAtMs),
-                );
-                if (page.nextCursor === null || oldest < version.createdAtMs) return undefined;
-                cursor = page.nextCursor;
-              }
-              return undefined;
-            }),
-          );
-          assertCurrent();
-          // Only person names are read here, so no presentations are drawn.
-          const names = authorNames(input.workspaceId, event.sender, () => []);
-          names.prepare?.(latest.flatMap((moment) => moment?.authors ?? []));
-          return {
-            versions: versions.map((version, index) => {
-              const moment = latest[index];
-              if (moment === undefined) return { versionId: version.id, lastChange: null };
-              const personName = momentPersonName(moment, names);
-              return {
-                versionId: version.id,
-                lastChange: {
-                  atMs: moment.recordedAtMs,
-                  ...(personName !== undefined ? { personName } : {}),
-                },
-              };
-            }),
-          };
-        },
+                  lastChange: {
+                    atMs: moment.recordedAtMs,
+                    ...(personName !== undefined ? { personName } : {}),
+                  },
+                };
+              }),
+            };
+          }),
       },
     );
 

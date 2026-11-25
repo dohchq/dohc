@@ -2373,27 +2373,27 @@ describe("workspace engine IPC registrations", () => {
         remote: { serverUrl: "https://other.test", ownerUserId: "owner-other" },
       });
 
-    it("stops a read whose registry entry was replaced, after each wait", async () => {
-      const replace = toOtherServer;
+    it("stops a read whose server changed after each wait, and reads again for the new server", async () => {
       const during = await harness();
-      during.capture.listMoments.mockImplementation(async () => {
-        replace(during);
+      during.capture.listMoments.mockResolvedValue(page([sam]));
+      during.capture.listMoments.mockImplementationOnce(async () => {
+        toOtherServer(during);
         return page([sam]);
       });
-      await expect(during.invoke(CHANNELS.listEngineMoments)).rejects.toThrow(
-        "the workspace changed",
-      );
-      const warming = await harness();
-      warming.warmCredentialCache.mockImplementation(async () => {
-        replace(warming);
+      await expect(during.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({
+        moments: [expect.anything()],
       });
-      await expect(warming.invoke(CHANNELS.listEngineMoments)).rejects.toThrow(
-        "the workspace changed",
-      );
-      expect(warming.capture.listMoments).not.toHaveBeenCalled();
+      expect(during.capture.listMoments).toHaveBeenCalledTimes(2);
+      const warming = await harness();
+      warming.warmCredentialCache.mockImplementationOnce(async () => {
+        toOtherServer(warming);
+      });
+      await expect(warming.invoke(CHANNELS.listEngineMoments)).resolves.toBeDefined();
+      expect(warming.warmCredentialCache).toHaveBeenCalledTimes(2);
+      expect(warming.capture.listMoments).toHaveBeenCalledTimes(1);
       const capturing = await harness();
-      capturing.requireEngineCapture.mockImplementation(async () => {
-        replace(capturing);
+      capturing.requireEngineCapture.mockImplementationOnce(async () => {
+        toOtherServer(capturing);
         return { capture: capturing.capture };
       });
       await expect(
@@ -2401,8 +2401,9 @@ describe("workspace engine IPC registrations", () => {
           workspaceId: "workspace",
           momentId: "moment",
         }),
-      ).rejects.toThrow("the workspace changed");
-      expect(capturing.warmCredentialCache).not.toHaveBeenCalled();
+      ).resolves.toBeDefined();
+      expect(capturing.requireEngineCapture).toHaveBeenCalledTimes(2);
+      expect(capturing.warmCredentialCache).toHaveBeenCalledTimes(1);
     });
 
     // None of these reaches a token, so only the read's own checks can stop it.
@@ -2470,36 +2471,35 @@ describe("workspace engine IPC registrations", () => {
           });
         },
       ],
-    ] as const)("stops a read whose server changed during %s", async (_await, channel, arrange) => {
-      const h = await harness();
-      arrange(h, () => toOtherServer(h));
-      const payload =
-        channel === CHANNELS.listEngineMoments
-          ? { objectId: "object-1", limit: 5 }
-          : { momentId: "moment" };
-      await expect(h.invoke(channel, { workspaceId: "workspace", ...payload })).rejects.toThrow(
-        "the workspace changed",
-      );
-    });
+    ] as const)(
+      "reads again when the server changed during %s",
+      async (_await, channel, arrange) => {
+        const h = await harness();
+        let reached = 0;
+        arrange(h, () => {
+          reached += 1;
+          toOtherServer(h);
+        });
+        const payload =
+          channel === CHANNELS.listEngineMoments
+            ? { objectId: "object-1", limit: 5 }
+            : { momentId: "moment" };
+        await expect(
+          h.invoke(channel, { workspaceId: "workspace", ...payload }),
+        ).resolves.toBeDefined();
+        expect(reached).toBe(2);
+      },
+    );
 
-    it.each([
-      [
-        "its folder moves",
-        { rootPath: "C:/moved" },
-        "This workspace changed while this ran. Try again.",
-      ],
-      [
-        "it becomes a shared view",
-        { shareView: {} as NonNullable<RegistryEntry["shareView"]> },
-        "the workspace changed",
-      ],
-    ])("stops a read when %s", async (_change, fields, message) => {
+    it("stops a read when its folder moves", async () => {
       const h = await harness();
       h.capture.listMoments.mockImplementation(async () => {
-        h.replaceEntry({ ...h.workspace, ...fields });
+        h.replaceEntry({ ...h.workspace, rootPath: "C:/moved" });
         return page([sam]);
       });
-      await expect(h.invoke(CHANNELS.listEngineMoments)).rejects.toThrow(message);
+      await expect(h.invoke(CHANNELS.listEngineMoments)).rejects.toThrow(
+        "This workspace changed while this ran. Try again.",
+      );
     });
 
     it("keeps reading through a registry write that leaves its folder, server, and shared view alone", async () => {
@@ -2513,7 +2513,7 @@ describe("workspace engine IPC registrations", () => {
       ]);
     });
 
-    it("draws the timeline's file authors as the moment list does, and stops it on a server change", async () => {
+    it("draws the timeline's file authors as the moment list does, and reads it again on a server change", async () => {
       const h = await harness();
       h.workspace.remote = { serverUrl: "https://account.test/", ownerUserId: "person-local" };
       h.identity.credentials = account;
@@ -2531,16 +2531,15 @@ describe("workspace engine IPC registrations", () => {
       })) as { entries: Array<{ moment: EngineMomentRecord }> };
       expect(byId(timeline.entries.map((entry) => entry.moment))).toEqual(listed);
       expect(listed["m-0"]![0]!.self).toBe(true);
-      h.capture.listMoments.mockImplementation(async () => {
+      h.capture.listMoments.mockImplementationOnce(async () => {
         toOtherServer(h);
-        return page([sam]);
+        return page([{ kind: "human", humanId: "person-local" }]);
       });
-      await expect(
-        h.invoke(historyOperations.listHistory.channel, {
-          workspaceId: "workspace",
-          object: { kind: "file", objectId: "object" },
-        }),
-      ).rejects.toThrow("the workspace changed");
+      const reread = (await h.invoke(historyOperations.listHistory.channel, {
+        workspaceId: "workspace",
+        object: { kind: "file", objectId: "object" },
+      })) as { entries: Array<{ moment: EngineMomentRecord }> };
+      expect(byId(reread.entries.map((entry) => entry.moment))["m-0"]![0]!.self).toBe(false);
     });
 
     it("keeps an account from being you in a folder that synced and has no remote now", async () => {
