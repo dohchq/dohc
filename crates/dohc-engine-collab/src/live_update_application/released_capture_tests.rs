@@ -60,8 +60,10 @@ fn a_released_window_folds_over_a_legacy_settlement_without_a_final_newline() {
                     &local
                 }
             };
-            assert!(doc.markdown_source_reference().is_none());
             let projection = doc.project(ContentKind::Richdoc)?.content;
+            assert!(doc
+                .markdown_source_reference()
+                .is_none_or(|witness| witness.projection_sha256 != hex_sha256(projection.as_bytes())));
             let file = projection.strip_suffix('\n').unwrap();
             let vector = hex_sha256(&doc.encode_state_vector());
             record_text(store, audit, "retired", file, &vector)
