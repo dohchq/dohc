@@ -1131,6 +1131,7 @@
   "desktop:@two-computer-conflict": 63.3,
   "desktop:@two-computer-drag": 38.2,
   "desktop:@verification-smoke": 39.702,
+  "examples/hex-tactics/hex-tactics.test.mts": 18.5,
   "node:apps/desktop/scripts/agent-probe-owner.test.mjs": 0.091,
   "node:apps/desktop/scripts/agent-probe-process.test.mjs": 0.139,
   "node:apps/desktop/scripts/appimage-apprun.test.mjs": 0.611,

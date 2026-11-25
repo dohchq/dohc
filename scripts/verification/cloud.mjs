@@ -23,6 +23,7 @@ import {
 } from "./verify.mjs";
 import { selectsRepositoryTests } from "./selection.mjs";
 import {
+  BROWSER_TEST_FILES,
   JS_SHARDS,
   assertTaskCoverage,
   javascriptGroups,
@@ -390,8 +391,10 @@ export async function cloudJavascript(part, index = 0) {
             ];
             // namedRecipientAuthenticatedNative drives Chromium too.
             if (
-              shard.some((group) =>
-                ["desktop", "accounts", "self-host-native"].includes(group.kind),
+              shard.some(
+                (group) =>
+                  ["desktop", "accounts", "self-host-native"].includes(group.kind) ||
+                  group.tasks.some((task) => BROWSER_TEST_FILES.has(task.file)),
               )
             )
               actions.push(

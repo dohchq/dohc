@@ -50,8 +50,8 @@ Outliers are readings far from their series' trailing 30-day average, the mean o
 
 ## Share a snapshot
 
-1. In a workspace connected to a relay, use `dohc_publish_app` with `action: "createLink"`, `appRoot: "quant-workbench/report"`, `access: "view"`, and a fresh UUID in `operationId`. dohc does not show a link's full grant ID on screen yet, so this step needs an agent or the CLI.
-2. Choose **Share**, then pick the saved snapshot. Enter the returned `grantId` under **Report link grant ID** and choose **Link report**.
+1. In a workspace connected to a relay, share the `quant-workbench/report` folder with a **Can view** link. Open the link's **Link options** and choose **Copy link ID**. An agent can instead use `dohc_publish_app` with `action: "createLink"`, `appRoot: "quant-workbench/report"`, `access: "view"`, and a fresh UUID in `operationId`, and use the returned `grantId`.
+2. Choose **Share**, then pick the saved snapshot. Paste the ID under **Report link ID** and choose **Link report**.
 3. Publish the report app on that link. In dohc, open the report app, choose **Publish on a share link**, pick the link, approve it, and choose **Copy app link**. An agent can instead use `action: "prepare"` with the returned `shareId` and `grantId`, approve, and insert the returned `appQuery` before the link URL's fragment.
 4. Open the app link in a browser and choose **Open app**.
 

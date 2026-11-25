@@ -437,6 +437,7 @@ function accessWords(access: string): string {
 }
 
 const AGENT_COPY_WORDS = { copied: "Copied for an agent" };
+const LINK_ID_COPY_WORDS = { copied: "Copied link ID" };
 
 function LinkRowActions(props: {
   grantId: string;
@@ -453,34 +454,51 @@ function LinkRowActions(props: {
     words: AGENT_COPY_WORDS,
     sensitive: AGENT_ADDRESS_SECRET,
   });
-  const forAgent: MenuEntry[] =
-    address === null
+  const idCopy = useCopy({ getText: () => props.grantId, words: LINK_ID_COPY_WORDS });
+  const [lastCopy, setLastCopy] = useState<"agent" | "id">("agent");
+  const shown = lastCopy === "id" ? idCopy : agentCopy;
+  const copyForAgent = (setupId: string | null) => {
+    setLastCopy("agent");
+    agentCopy.copy(setupId);
+  };
+  const copies: MenuEntry[] = [
+    ...(address === null
       ? []
       : [
           {
             id: "agent",
             label: "Copy for an agent",
             testId: "share-link-agent-copy",
-            onSelect: () => agentCopy.copy(null),
+            onSelect: () => copyForAgent(null),
           },
           ...setups.map((setup) => ({
             id: `agent-${setup.id}`,
             label: `Copy ${setup.label.charAt(0).toLowerCase()}${setup.label.slice(1)}`,
             testId: `share-link-agent-apps-${setup.id}`,
-            onSelect: () => agentCopy.copy(setup.id),
+            onSelect: () => copyForAgent(setup.id),
           })),
-        ];
-  const items: MenuEntry[] = [props.everyday, forAgent, props.lifecycle]
+        ]),
+    {
+      id: "link-id",
+      label: "Copy link ID",
+      testId: "share-link-id-copy",
+      onSelect: () => {
+        setLastCopy("id");
+        idCopy.copy();
+      },
+    },
+  ];
+  const items: MenuEntry[] = [props.everyday, copies, props.lifecycle]
     .filter((group) => group.length > 0)
     .flatMap((group, index) => (index === 0 ? group : [MENU_SEPARATOR, ...group]));
   return (
     <>
       <span
-        className={`min-w-0 flex-1 truncate text-right text-[12px] ${agentCopy.feedback === "failed" ? "text-danger" : "text-muted"}`}
+        className={`min-w-0 flex-1 truncate text-right text-[12px] ${shown.feedback === "failed" ? "text-danger" : "text-muted"}`}
       >
-        {agentCopy.feedback ? agentCopy.words[agentCopy.feedback] : null}
+        {shown.feedback ? shown.words[shown.feedback] : null}
         <span role="status" aria-live="polite" className="sr-only">
-          {agentCopy.announcement}
+          {shown.announcement}
         </span>
       </span>
       {url !== null ? (
@@ -492,14 +510,12 @@ function LinkRowActions(props: {
           testId="share-link-copy"
         />
       ) : null}
-      {items.length > 0 ? (
-        <ShareOptionsMenu
-          label="Link options"
-          testId={`share-link-options-${props.grantId}`}
-          width={240}
-          items={items}
-        />
-      ) : null}
+      <ShareOptionsMenu
+        label="Link options"
+        testId={`share-link-options-${props.grantId}`}
+        width={240}
+        items={items}
+      />
     </>
   );
 }

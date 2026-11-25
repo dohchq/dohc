@@ -100,6 +100,8 @@ Every app runs in a sandboxed `srcdoc` iframe with an opaque origin (`window.ori
 - Do not read or write `sessionStorage`, `localStorage`, `indexedDB`, or `document.cookie`. They throw `SecurityError` in an opaque origin. Keep UI state in memory and persist data in Collections.
 - Do not call `navigator.clipboard.writeText(...)` directly inside the app frame. Chromium logs a Permissions Policy `console.error` even inside `try/catch`, which fails `verifyFrontend`. Import `copyText(text)` from `dohc/app` (or send `host.copy` over `dohc-app-channel`) from a click or key handler.
 - Do not call `window.print()` directly inside the app frame. Chromium ignores it without `allow-modals`. Import `print()` from `dohc/app` (or send `host.print` over `dohc-app-channel`) from a click or key handler. When the printable area scrolls inside a fixed-height container, expand it in `@media print` (`height: auto; overflow: visible`) and pass `{ height }` with the container's full scroll height so rows below the viewport are not clipped. For standalone offline exports, generate a Blob download via `allow-downloads`.
+- Do not call `requestFullscreen()`. The frame does not allow fullscreen, so it rejects and logs a Permissions Policy `console.error` that fails `verifyFrontend`. Fill the frame with CSS (`height: 100vh`) instead.
+- Give an `IntersectionObserver` an explicit `root` (`document` or the scrolling element) when it uses `rootMargin`. Without one, the opaque-origin frame ignores `rootMargin`, and content loads only once it is already visible.
 
 ## Verifying an app frontend (`dohc_publish_app` `verifyFrontend`)
 

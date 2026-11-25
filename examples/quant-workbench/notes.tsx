@@ -217,11 +217,11 @@ export function Notes({
             </h3>
             <ol>
               <li>
-                Create a view link for <code>quant-workbench/report</code> with your agent or the
-                dohc CLI. dohc does not show a link&apos;s full grant ID on screen yet.
+                In dohc, share <code>quant-workbench/report</code> with a Can view link. Open its
+                Link options and choose Copy link ID.
               </li>
               <li>
-                Pick a saved snapshot below, paste the grant ID under Report link, and choose Link
+                Pick a saved snapshot below, paste the ID under Report link ID, and choose Link
                 report.
               </li>
               <li>
@@ -504,7 +504,7 @@ export function Notes({
                       void updateLink(grant.trim());
                     }}
                   >
-                    <Field label="Report link grant ID" htmlFor="report-grant">
+                    <Field label="Report link ID" htmlFor="report-grant">
                       <Input
                         id="report-grant"
                         value={grant}

@@ -643,7 +643,7 @@ function setReportLink(ctx, input) {
     !Number.isSafeInteger(version) ||
     version < 0
   )
-    ctx.refuse("invalid_report", "Choose a note and enter a valid link grant ID.");
+    ctx.refuse("invalid_report", "Choose a note and enter a valid link ID.");
   if (
     grant &&
     ctx.db.query("SELECT id FROM research_notes WHERE grant_id = ? AND id <> ?", [grant, id]).length

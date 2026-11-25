@@ -35,6 +35,10 @@ const tests = desktopTestFiles(dirname(fileURLToPath(import.meta.url)), {
 // file a worker of its own, so a test that passes only after another file in
 // its shared worker fails there.
 const ISOLATE_ALL = process.env.DOHC_DESKTOP_TEST_ISOLATION === "all";
+const EXAMPLE_TESTS = [
+  "../../examples/lightbox/api.test.mts",
+  "../../examples/hex-tactics/hex-tactics.test.mts",
+];
 
 const common = {
   // Source-backed examples outside this package use the same React instance as their desktop tests.
@@ -85,13 +89,8 @@ export default defineConfig({
           ...desktop,
           name: "desktop",
           include: ISOLATE_ALL
-            ? [
-                ...tests.isolated,
-                ...tests.sharedDom,
-                ...tests.sharedNode,
-                "../../examples/lightbox/api.test.mts",
-              ]
-            : [...tests.isolated, "../../examples/lightbox/api.test.mts"],
+            ? [...tests.isolated, ...tests.sharedDom, ...tests.sharedNode, ...EXAMPLE_TESTS]
+            : [...tests.isolated, ...EXAMPLE_TESTS],
         },
       },
       // Files in a shared project run one after another in the same worker.

@@ -1382,6 +1382,7 @@ describe("RelayShareDialog", () => {
       "Copy message for Grok Bot",
       "Copy commands for Claude Code",
       "Copy commands for Codex",
+      "Copy link ID",
       "Reset link",
       "End link",
     ]);
@@ -1444,9 +1445,46 @@ codex mcp login dohc-share`);
       "Comments",
       "Add another link",
       "New separate link",
+      "Copy link ID",
       "Reset link",
       "End link",
     ]);
+  });
+
+  it("copies a link's ID from its menu, and the latest copy is the one the row reports", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [
+        readableLink("grant-link-1", { url: `https://share.dohc.test/s/#${"A".repeat(43)}` }),
+      ],
+    });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    const row = await screen.findByTestId("share-link-row-grant-link-1");
+    const said = () =>
+      within(row)
+        .getAllByRole("status", { hidden: true })
+        .map((s) => s.textContent);
+
+    await chooseLinkOption(user, row, "Copy link ID");
+    expect(writeText).toHaveBeenCalledExactlyOnceWith("grant-link-1");
+    await waitFor(() => expect(said()).toContain("Copied link ID"));
+    expect(document.activeElement).toBe(within(row).getByRole("button", { name: "Link options" }));
+
+    await chooseLinkOption(user, row, "Copy for an agent");
+    await waitFor(() => expect(said()).toContain("Copied for an agent"));
+    expect(row.textContent).not.toContain("Copied link ID");
+
+    await chooseLinkOption(user, row, "Copy link ID");
+    await waitFor(() => expect(said()).toContain("Copied link ID"));
+    expect(row.textContent).not.toContain("Copied for an agent");
+    expect(writeText).toHaveBeenCalledTimes(3);
+    expect(writeText).toHaveBeenLastCalledWith("grant-link-1");
   });
 
   it("lists a link's agents under Link details, and Disconnect takes one off", async () => {
@@ -7953,6 +7991,7 @@ describe("people and links on one surface", () => {
       "Comments",
       "Add another link",
       "New separate link",
+      "Copy link ID",
       "Reset link",
       "End link",
     ]);
@@ -8561,6 +8600,7 @@ describe("people and links on one surface", () => {
       "Copy message for Grok Bot",
       "Copy commands for Claude Code",
       "Copy commands for Codex",
+      "Copy link ID",
     ]);
 
     await user.click(within(made).getByRole("button", { name: "Copy link" }));
