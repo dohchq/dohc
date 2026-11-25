@@ -1666,6 +1666,7 @@ test("gate selection follows workflow inputs, including shared and gate implemen
     "examples/tournament/index.tsx",
     "examples/hex-tactics/index.tsx",
     "examples/quant-workbench/workbench.tsx",
+    "examples/team-roadmap/roadmap/operations.js",
   ]) {
     assert.deepEqual(localGates([file], workflow), { rust: false, js: true }, file);
   }
