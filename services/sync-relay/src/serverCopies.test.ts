@@ -262,9 +262,32 @@ describe("the hold a read keeps on its copy", () => {
     const run = await copies(storage);
     await run.copies.withServerCopy(OWNER, "trip", read(), async () => undefined);
     storage.setShowOnPhone({ ownerUserId: OWNER, workspaceId: "trip", showOnPhone: false });
-    run.copies.reconcile("trip");
-    await vi.waitFor(() => expect(run.copies.replica("trip")).toBeUndefined());
+    run.copies.endHold("trip");
+    // Turned on again before the pass the hidden hook asked for.
     storage.setShowOnPhone({ ownerUserId: OWNER, workspaceId: "trip", showOnPhone: true });
+    await vi.waitFor(() => expect(run.copies.replica("trip")).toBeUndefined());
+    expect(run.wanted()).toEqual(new Map());
+  });
+
+  it("starts only once a read completes, not for one that failed or never opened its copy", async () => {
+    const storage = await relay();
+    const run = await copies(storage);
+    await expect(
+      run.copies.withServerCopy(OWNER, "trip", read(), async () => {
+        throw new Error("The read failed.");
+      }),
+    ).rejects.toThrow("The read failed.");
+    await vi.waitFor(() => expect(run.copies.replica("trip")).toBeUndefined());
+    run.holdOpens();
+    const request = new AbortController();
+    const opening = run.copies.withServerCopy(
+      OWNER,
+      "trip",
+      { ...read(), signal: request.signal } as CopyVisitor,
+      async () => undefined,
+    );
+    request.abort(new Error("The read ran out of time."));
+    await expect(opening).rejects.toThrow("The read ran out of time.");
     expect(run.wanted()).toEqual(new Map());
   });
 

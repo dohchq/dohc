@@ -330,7 +330,9 @@ export async function startServerCopies(options: ServerCopiesOptions) {
         !storage.workspaceIsOwnedBy(workspaceId, ownerUserId)
       )
         throw notFound();
-      return await work(replica);
+      const done = await work(replica);
+      if (visitor.reason === "account" && visitor.hold) hold(ownerUserId, workspaceId);
+      return done;
     } finally {
       if (visitor.reason === "account") {
         count(callerVisits, visitor.caller, -1);
@@ -349,7 +351,6 @@ export async function startServerCopies(options: ServerCopiesOptions) {
         ) {
           storage.endCopyReason(workspaceId, "account");
         }
-        if (visitor.reason === "account" && visitor.hold) hold(ownerUserId, workspaceId);
         if (current.actions > 1) {
           visits.set(workspaceId, { ...current, actions: current.actions - 1, accountActions });
         } else {
@@ -383,6 +384,11 @@ export async function startServerCopies(options: ServerCopiesOptions) {
     replica: (workspaceId: string) => replicas.replica(workspaceId),
     /** Ask for a pass; a visit can retry its workspace immediately. */
     reconcile: (workspaceId?: string) => replicas.reconcile(workspaceId),
+    /** Ends a read's hold on the copy, as when its workspace stops showing on the phone. */
+    endHold(workspaceId: string) {
+      release(workspaceId);
+      replicas.reconcile(workspaceId);
+    },
     /** A copy became ready for automation visits. */
     notifyReady: recheck,
     async deleteWorkspaces(workspaceIds: readonly string[]) {

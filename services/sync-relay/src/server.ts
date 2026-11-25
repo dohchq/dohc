@@ -878,7 +878,7 @@ export function createSyncRelayHandler({
         sockets: ownerSockets,
         hidden: (userId, workspaceId) => {
           phoneApps.end({ userId, workspaceId });
-          serverCopies()?.reconcile(workspaceId);
+          serverCopies()?.endHold(workspaceId);
         },
       })
     : undefined;
