@@ -5490,6 +5490,9 @@ fn edit_text_in_place<T: ReadTxn>(
         .take_while(|&pair| same(pair))
         .count();
     let units = |run: &[(char, usize)]| run.iter().map(|(c, _)| c.len_utf16() as u32).sum::<u32>();
+    if units(&before) != old.len(&*txn) {
+        return false;
+    }
     let mut at = units(&before[..prefix]);
     let removed = units(&before[prefix..before.len() - suffix]);
     if removed > 0 {

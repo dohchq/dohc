@@ -812,3 +812,19 @@ fn a_save_that_shifts_paragraphs_in_a_quote_does_not_move_a_collaborators_typing
     let merged = doc.project_richdoc().unwrap();
     assert!(!merged.contains("Cherries from the orchard"), "{merged}");
 }
+
+#[test]
+fn a_line_holding_a_string_embed_is_replaced_rather_than_edited() {
+    let doc = folded("Placeholder.\n\nKept.\n");
+    let text = doc.richdoc_block_text(0).unwrap();
+    {
+        let mut txn = doc.doc.transact_mut();
+        let len = text.len(&txn);
+        text.remove_range(&mut txn, 0, len);
+        text.insert_embed(&mut txn, 0, Any::from("hello"));
+    }
+    let markdown = "X\n\nKept.\n";
+    doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, markdown)
+        .expect(markdown);
+    assert_eq!(body_json(&doc), body_json(&folded(markdown)));
+}
