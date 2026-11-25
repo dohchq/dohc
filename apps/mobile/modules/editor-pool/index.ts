@@ -25,8 +25,10 @@ type EditorSlotProps = {
 };
 
 interface EditorPoolModule {
-  /** Names the editor files. A spare loads from them, two seconds after the app is active with every open settled. */
+  /** Names the editor files. A rewrite drops a spare loaded from the old ones. */
   prepare(page: string, folder: string, rewritten: boolean): Promise<void>;
+  /** While on, a spare loads two seconds after the app is active with every open settled. Off drops the spare. */
+  keepSpare(on: boolean): Promise<void>;
   addListener(
     event: "spareReady",
     listener: (event: { ready: boolean }) => void,

@@ -125,15 +125,21 @@ export default function RootLayout() {
   );
 }
 
-/** On iPhone, names the editor files to the pool, which loads a spare editor from them. */
+/** On iPhone, keeps a spare editor loaded while the signed-in app shows. */
 function SpareEditor() {
   const [ready, setReady] = useState(false);
   useEffect(() => {
     void editorHtmlUri().catch(() => undefined);
+    void editorPool?.keepSpare(true);
     // Design review only: "page-pool" shows that a spare has loaded, for the speed test.
-    if (demoMode !== "page-pool") return;
-    const spare = editorPool?.addListener("spareReady", (event) => setReady(event.ready));
-    return () => spare?.remove();
+    const spare =
+      demoMode === "page-pool"
+        ? editorPool?.addListener("spareReady", (event) => setReady(event.ready))
+        : undefined;
+    return () => {
+      spare?.remove();
+      void editorPool?.keepSpare(false);
+    };
   }, []);
   return ready ? <Text style={styles.probe}>Editor ready</Text> : null;
 }

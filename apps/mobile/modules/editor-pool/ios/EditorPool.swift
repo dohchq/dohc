@@ -9,8 +9,8 @@ final class EditorPool {
   private var folder: URL?
   private var spare: Editor?
   private var failedPage: URL?
-  private var nextId = 1
-  private var unsettled = Set<Int>()
+  private var keeping = false
+  private var unsettled = 0
   private var timer: Timer?
   private var shelf: UIView?
 
@@ -42,6 +42,16 @@ final class EditorPool {
     schedule()
   }
 
+  func keepSpare(_ on: Bool) {
+    keeping = on
+    if on {
+      schedule()
+    } else {
+      stopTimer()
+      drop()
+    }
+  }
+
   func claim(page: URL, folder: URL) -> (Editor, Claim)? {
     let page = normalized(page)
     let folder = normalized(folder)
@@ -55,14 +65,13 @@ final class EditorPool {
       editor = spare
       claim = spare.ready ? .ready : .loading
     } else {
-      editor = make(page: page, folder: folder)
+      editor = Editor(page: page, folder: folder)
       claim = .cold
     }
     stopTimer()
-    let id = editor.id
-    unsettled.insert(id)
+    unsettled += 1
     editor.onSettle = { [weak self] in
-      self?.unsettled.remove(id)
+      self?.unsettled -= 1
       self?.schedule()
     }
     return (editor, claim)
@@ -82,13 +91,13 @@ final class EditorPool {
   }
 
   private var canRefill: Bool {
-    spare == nil && unsettled.isEmpty && page != nil && page != failedPage
+    keeping && spare == nil && unsettled == 0 && page != nil && page != failedPage
       && UIApplication.shared.applicationState == .active
   }
 
   private func refill() {
     guard canRefill, let page, let folder, exists(page), let window = keyWindow() else { return }
-    let editor = make(page: page, folder: folder)
+    let editor = Editor(page: page, folder: folder)
     editor.onReady = { [weak self, weak editor] in
       guard let self, let editor, self.spare === editor else { return }
       quiet(editor.webView)
@@ -111,11 +120,6 @@ final class EditorPool {
     self.spare = nil
     spare.release()
     spareChanged?(false)
-  }
-
-  private func make(page: URL, folder: URL) -> Editor {
-    defer { nextId += 1 }
-    return Editor(id: nextId, page: page, folder: folder)
   }
 
   private func exists(_ page: URL) -> Bool {

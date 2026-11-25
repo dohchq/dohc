@@ -11,7 +11,6 @@ enum Claim: String {
 
 @MainActor
 final class Editor: NSObject, WKNavigationDelegate, UIScrollViewDelegate {
-  let id: Int
   let page: URL
   let folder: URL
   let webView: WKWebView
@@ -26,8 +25,7 @@ final class Editor: NSObject, WKNavigationDelegate, UIScrollViewDelegate {
 
   var ready: Bool { started && fontsLoaded }
 
-  init(id: Int, page: URL, folder: URL) {
-    self.id = id
+  init(page: URL, folder: URL) {
     self.page = page
     self.folder = folder
     let controller = WKUserContentController()

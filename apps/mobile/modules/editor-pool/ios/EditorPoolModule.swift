@@ -15,6 +15,9 @@ public final class EditorPoolModule: Module {
         EditorPool.shared.prepare(page: page, folder: folder, rewritten: rewritten)
       }
     }.runOnQueue(.main)
+    AsyncFunction("keepSpare") { (on: Bool) in
+      MainActor.assumeIsolated { EditorPool.shared.keepSpare(on) }
+    }.runOnQueue(.main)
     View(EditorSlot.self) {
       Events("onMessage", "onLost", "onClaim")
       Prop("source") { (view: EditorSlot, value: String) in view.source = URL(string: value) }
