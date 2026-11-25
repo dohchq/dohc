@@ -727,8 +727,9 @@ describe("guest memory", () => {
   it("answers a failed database call with a readable error however full the shape table and memory are", async () => {
     await withDatabase(async (db) => {
       const limit = "App operation needed more than its 24 MiB memory limit, so it stopped.";
+      const expected = { limited: true, named: true, other: 0, shapes: 20000, rows: [{ n: 0 }] };
       // Many shapes make QuickJS's shape table large. Each step frees a little memory and fails a query with a 1 KiB message.
-      const body = `const sql = 'SELECT ' + 'c'.repeat(1000) + ' FROM items';
+      const body = (fill: number) => `const sql = 'SELECT ' + 'c'.repeat(1000) + ' FROM items';
         const shapes = []; for (let i = 0; i < 20000; i++) shapes.push({ ['p' + i]: i });
         let limited = 0, named = 0, other = 0, steps = 0;
         let held = [];
@@ -736,7 +737,7 @@ describe("guest memory", () => {
         try { for (;;) held.push(new Uint8Array(4096)); } catch {}
         // Fill the last bytes too, so early steps leave less than the 1 KiB message free.
         // Smaller objects can leave the operation's own code no room to finish.
-        try { for (;;) held.push(new Uint8Array(64)); } catch {}
+        try { for (;;) held.push(new Uint8Array(${fill})); } catch {}
         for (; steps < 100 && held.length; steps++) {
           held.length -= 1;
           // The operation's own code can run out of memory too, so only a query's error is counted.
@@ -752,9 +753,18 @@ describe("guest memory", () => {
         }
         held = null;
         return { limited: limited > 0, named: named > 0, other, shapes: shapes.length, rows: ctx.db.query('SELECT count(*) AS n FROM items') };`;
-      expect(
-        JSON.parse((await evaluate(db, request(body), { persistentConnection: true })).resultJson),
-      ).toEqual({ limited: true, named: true, other: 0, shapes: 20000, rows: [{ n: 0 }] });
+      // QuickJS's own out-of-memory paths can stop an operation before its query, at points that depend on the heap
+      // layout, so several fills each end in the expected answers or the memory limit, and one reaches the queries.
+      const outcomes = [];
+      for (const fill of [32, 48, 64, 80, 96, 128])
+        outcomes.push(
+          await evaluate(db, request(body(fill)), { persistentConnection: true }).then(
+            (result) => JSON.parse(result.resultJson) as unknown,
+            (error: Error) => error.message,
+          ),
+        );
+      expect(outcomes).toContainEqual(expected);
+      for (const outcome of outcomes) expect([expected, limit]).toContainEqual(outcome);
     });
   });
 });
