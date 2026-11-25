@@ -66,6 +66,7 @@ export type AutoUpdateController = {
     onDownloading?: (version: string) => void,
   ) => Promise<string | null>;
   installUpdate: () => Promise<UpdateActionResult>;
+  noteQuitInstallStarted: () => void;
   stop: () => void;
 };
 
@@ -254,6 +255,7 @@ export async function startAutoUpdates(options: {
   startupDelayMs?: number;
   pollIntervalMs?: number;
   onState?: (state: UpdateState, publicState: PublicUpdateState) => void;
+  onInstallStarted?: () => void;
   // Quits dohc through its ordinary close path, where every window can still
   // stop the quit. Restart to update quits this way on Windows. Elsewhere it
   // completes a restart already staged: quitAndInstall starts its own quit on
@@ -287,6 +289,7 @@ export async function startAutoUpdates(options: {
   let checkInFlight = false;
   let checkRequested = false;
   let restartStaged = false;
+  let installStartedNotified = false;
   let failure: (InstallFailure & { step: UpdateStep; id: number }) | null = null;
   let failures = 0;
   // The downloaded .deb or .rpm on Linux, which a failed install names in its command.
@@ -295,6 +298,11 @@ export async function startAutoUpdates(options: {
   // error, then as the download's rejection.
   let stagingError: unknown = null;
   let stopped = false;
+  const notifyInstallStarted = (): void => {
+    if (installStartedNotified) return;
+    installStartedNotified = true;
+    options.onInstallStarted?.();
+  };
   const publicState = (): PublicUpdateState => {
     const base = publicUpdateState(state, {
       currentVersion,
@@ -518,6 +526,7 @@ export async function startAutoUpdates(options: {
     failure = null;
     keepChosen(state.version);
     emit();
+    notifyInstallStarted();
     if (platform === "win32") {
       options.quit();
       return { accepted: true, state: publicState() };
@@ -605,6 +614,12 @@ export async function startAutoUpdates(options: {
   }, pollIntervalMs);
   interval.unref?.();
 
+  const noteQuitInstallStarted = (): void => {
+    if (!stopped && state.status === "ready" && installsOnQuit(platform)) {
+      notifyInstallStarted();
+    }
+  };
+
   const stop = (): void => {
     stopped = true;
     clearTimeout(startupTimeout);
@@ -618,6 +633,7 @@ export async function startAutoUpdates(options: {
     downloadUpdate,
     awaitUpdate,
     installUpdate,
+    noteQuitInstallStarted,
     stop,
   };
 }

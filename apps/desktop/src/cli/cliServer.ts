@@ -21,7 +21,12 @@ import { creationPartialMessage } from "@dohc/cli/creation";
 import type { AgentNotice } from "../notices/agentNotices";
 import type { SentNoticeTarget } from "../notices/noticeTarget";
 import { atomicReplaceFileSync } from "../atomicReplaceFile";
-import { cliUsageInvocation, type CliUsageInvocation } from "../usage/cliUsage";
+import {
+  cliCapabilityId,
+  cliUsageInvocation,
+  isCliWriteRequest,
+  type CliUsageInvocation,
+} from "../usage/cliUsage";
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import { formatChatWorkReferenceToken } from "@dohc/workspace-contracts/chat-mentions";
 import type { WorkTargetInput } from "@dohc/workspace-engine-client/daemon";
@@ -655,8 +660,16 @@ export type DeclaredReaders<Workspace> = {
   ) => Promise<z.output<(typeof DECLARED_VERBS)[Verb]["result"]>>;
 };
 
+export interface CliToolInvocationEvent {
+  door: "cli" | "mcp";
+  capabilityId: string;
+  outcome: "ok" | "error" | "refused";
+  durationMs: number;
+}
+
 export interface CliServerOptions {
   recordSuccess?(invocation: CliUsageInvocation): unknown;
+  onToolInvoked?(event: CliToolInvocationEvent): unknown;
   // The server account this computer is connected to. Its verbs need no
   // workspace.
   serverAccount?: Pick<
@@ -5549,6 +5562,23 @@ export async function handleCliRequestLine(
     )}\n`;
   }
 
+  const startedAtMs = Date.now();
+  const capabilityId = cliCapabilityId(parsed.data);
+  const isWrite = isCliWriteRequest(parsed.data);
+  const door = parsed.data.door ?? "cli";
+  const reportTool = (outcome: "ok" | "error" | "refused") => {
+    try {
+      options.onToolInvoked?.({
+        door,
+        capabilityId,
+        outcome,
+        durationMs: Math.max(0, Date.now() - startedAtMs),
+      });
+    } catch {
+      /* Measurement cannot fail the command. */
+    }
+  };
+
   try {
     // The caller's door labels counting only; authority never receives it. The
     // run secret only proves the request is a run's; no verb receives it.
@@ -5602,8 +5632,21 @@ export async function handleCliRequestLine(
         /* Measurement cannot fail the command. */
       }
     }
+    const replayed =
+      completion.replayed ||
+      (result !== null &&
+        typeof result === "object" &&
+        "replayed" in result &&
+        result.replayed === true);
+    if (!replayed) {
+      const outcome = cliToolOutcome(parsed.data, result, refusal !== undefined);
+      if (isWrite || outcome !== "ok") reportTool(outcome);
+    }
     return `${JSON.stringify(response)}\n`;
   } catch (error) {
+    if (!signal?.aborted) {
+      reportTool(error instanceof CliCommandError ? "refused" : "error");
+    }
     const response = cliTransportResponseSchema.parse({
       protocolVersion: CLI_PROTOCOL_VERSION,
       ok: false,
@@ -5611,6 +5654,38 @@ export async function handleCliRequestLine(
     });
     return `${JSON.stringify(response)}\n`;
   }
+}
+
+function cliToolOutcome(
+  request: CliRequest,
+  result: CliResultByVerb[CliRequest["verb"]],
+  refusal: boolean,
+): "ok" | "error" | "refused" {
+  if (refusal) return "refused";
+  if (result && typeof result === "object") {
+    if ("kind" in result && (result.kind === "refused" || result.kind === "collections-refused")) {
+      return "refused";
+    }
+    if ("status" in result && result.status === "refused") return "refused";
+    if ("kind" in result && result.kind === "partial") return "error";
+    if (request.verb === "automationPress" && "ok" in result && !result.ok && "confirm" in result) {
+      return "refused";
+    }
+    if (
+      request.verb === "automationSwitch" &&
+      "result" in result &&
+      result.result &&
+      typeof result.result === "object" &&
+      "status" in result.result
+    ) {
+      const status = result.result.status;
+      if (status === "written") return "ok";
+      if (status === "unavailable" || status === "unknown") return "error";
+      return "refused";
+    }
+    if ("ok" in result && !result.ok) return "error";
+  }
+  return "ok";
 }
 
 function attachSocketHandler(

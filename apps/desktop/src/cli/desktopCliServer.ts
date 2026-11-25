@@ -241,6 +241,7 @@ interface DesktopCliServerDependencies<State> {
   };
   access?(workspaceId: string): NonNullable<CliWorkspaceContext["access"]>;
   recordSuccess?: CliServerOptions["recordSuccess"];
+  onToolInvoked?: CliServerOptions["onToolInvoked"];
   serverAccount?: CliServerOptions["serverAccount"];
   dataset?(
     request: import("@dohc/cli/dataset").DatasetRequest,
@@ -1494,6 +1495,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
   async function startDesktopCliServer(): Promise<CliServerHandle> {
     return startCliServer({
       recordSuccess: dependencies.recordSuccess,
+      onToolInvoked: dependencies.onToolInvoked,
       serverAccount: dependencies.serverAccount,
       stateDir: stateDir(),
       listWorkspaces: () =>

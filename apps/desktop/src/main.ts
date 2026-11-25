@@ -981,7 +981,18 @@ import { workspaceTrustHandlers } from "./ipc/workspaceTrustIpc";
 import { createCrashReportPreview } from "./crashReports/crashReportPreview";
 import { createCrashReportStore, crashReportEndpoint } from "./crashReports/crashReportStore";
 import { REPORTING_BUILD, resolveReporting } from "./telemetry/reportingConfig";
-import { createTelemetry, privacyInEffect, usageEventFor } from "./telemetry/telemetry";
+import {
+  classifyServerKind,
+  countBucket,
+  crashSignalFromEvent,
+  createTelemetry,
+  createWorkspaceOpenTriggers,
+  privacyInEffect,
+  updateEventFromTransition,
+  usageEventFor,
+  type WorkspaceKind,
+  type WorkspaceOpenTrigger,
+} from "./telemetry/telemetry";
 import { diagnosticsText, saveDiagnostics } from "./telemetry/diagnostics";
 import {
   createShareHandoffIntentSlot,
@@ -1022,8 +1033,20 @@ function usageRecordStopped(): void {
     sendIfOpen(window, CHANNELS.usageRecordStopped);
   }
 }
+function recordDesktopUsageSuccess(invocation: {
+  capabilityId: string;
+  door: "renderer" | "automation";
+}): void {
+  usageStore?.recordSuccess(invocation);
+  telemetry.track({
+    name: "feature_used",
+    capability_id: invocation.capabilityId,
+    door: invocation.door,
+  });
+  if (invocation.door === "renderer") telemetry.markActive();
+}
 const rendererUsage = createRendererUsage<IpcMainInvokeEvent>((invocation) =>
-  usageStore?.recordSuccess(invocation),
+  recordDesktopUsageSuccess(invocation),
 );
 
 const crashFacts = () => ({
@@ -1120,11 +1143,14 @@ const telemetry = createTelemetry({
     arch: process.arch,
     electron: process.versions.electron ?? "unknown",
   }),
+  serverKind: () =>
+    classifyServerKind(
+      credentialSessionCache.snapshot().credentials?.serverUrl ??
+        listWorkspaces().find((workspace) => workspace.remote)?.remote?.serverUrl,
+    ),
   locate: createCodeLocations(codeRoots, process.platform),
   readCode: (path) => readFile(join(codeRoots[0]!, path), "utf8"),
 });
-// The report switches as the settings file sets them. A file main cannot
-// read turns both off.
 const readPrivacy = () =>
   readCachedUserSettingsFile(stateDir()).then(privacyInEffect, () => ({
     usageReports: false,
@@ -1133,10 +1159,47 @@ const readPrivacy = () =>
 if (telemetry.available.usage || telemetry.available.errors) {
   void readPrivacy().then((privacy) => telemetry.setPrivacy(privacy));
 }
-telemetry.track({ name: "app_launched" });
+let launchAnalyticsRecorded = false;
+let previousUpdateState: PublicUpdateState | null = null;
+const workspaceOpenTriggers = createWorkspaceOpenTriggers<WebContents>();
+
+function noteWorkspaceActivationTrigger(
+  window: BrowserWindow,
+  workspaceId: string,
+  trigger: WorkspaceOpenTrigger,
+): void {
+  if (rendererWorkspaceSessions.current(window.webContents)?.workspaceId === workspaceId) return;
+  workspaceOpenTriggers.noteActivation(window.webContents, workspaceId, trigger);
+}
+
+function workspaceKindOf(workspace: RegistryEntry | null | undefined): WorkspaceKind | undefined {
+  if (!workspace) return undefined;
+  if (workspace.shareView !== undefined) return "received_share";
+  if (workspace.remote !== undefined) return "synced";
+  return "local";
+}
+
+function recordLaunchAnalytics(): void {
+  if (launchAnalyticsRecorded) return;
+  launchAnalyticsRecorded = true;
+  const workspaces = listWorkspaces();
+  const syncedCount = workspaces.filter(
+    (workspace) => workspace.remote !== undefined || workspace.shareView !== undefined,
+  ).length;
+  telemetry.track({
+    name: "app_launched",
+    workspace_count_bucket: countBucket(workspaces.length),
+    synced_workspace_count_bucket: countBucket(syncedCount),
+    has_agents_configured: cachedAgents.length > 0,
+  });
+  telemetry.observePreviousCrash(crashReports.read().report);
+}
+
 function recordCrash(event: CrashEvent): void {
   crashReports.record(event);
   telemetry.reportError({ kind: "crash", event });
+  const signal = crashSignalFromEvent(event);
+  if (signal) telemetry.track(signal);
 }
 installCrashCapture<WebContents>({
   process,
@@ -7127,7 +7190,7 @@ function createCollectionAutomationsFor(
     }),
     onRunsChanged: () => notifyAutomationRunsChanged(workspaceId),
     onUsageSuccess: (invocation) => {
-      usageStore?.recordSuccess(invocation);
+      recordDesktopUsageSuccess(invocation);
     },
     reportFailure: (report) =>
       sendFailureNotices(
@@ -8138,6 +8201,16 @@ const { startDesktopCliServer } = createDesktopCliServer({
   access: (workspaceId) =>
     accessCliQueries(accessOwner, (work) => withPhysicalWorkspaceOperation(workspaceId, work)),
   recordSuccess: (invocation) => usageStore?.recordSuccess(invocation),
+  onToolInvoked: (event) => {
+    telemetry.track({
+      name: "tool_invoked",
+      door: event.door,
+      capability_id: event.capabilityId,
+      outcome: event.outcome,
+      duration_ms: event.durationMs,
+    });
+    telemetry.markActive();
+  },
   serverAccount: serverAccountDeletion,
   dataset: (input, agent) => {
     if (!datasetForCli) throw new Error("Collections are not ready. Try again.");
@@ -8607,7 +8680,13 @@ function startUpdates(): Promise<AutoUpdateController | null> {
     restartApproved: () => exitRounds.approvedExit() === "update",
     stateDir: stateDir(),
     onState: (_state, state) => {
+      const updateEvent = updateEventFromTransition(previousUpdateState, state);
+      previousUpdateState = state;
+      if (updateEvent) telemetry.track(updateEvent);
       broadcastUpdateState(state);
+    },
+    onInstallStarted: () => {
+      telemetry.track({ name: "app_update_event", stage: "install_started" });
     },
   })
     .then((controller) => {
@@ -9423,8 +9502,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
         }),
     },
     windows: {
-      create: () =>
-        trackWorkspaceWindow(
+      create: () => {
+        const window = trackWorkspaceWindow(
           createMainWindow({
             beforeRendererReload: prepareAfterRendererCrash,
             currentRendererDocumentId: (sender) =>
@@ -9433,7 +9512,11 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
             afterRendererCrashLoop,
             preloadArguments,
           }),
-        ),
+        );
+        if (listWorkspaces().length > 0)
+          workspaceOpenTriggers.markStartupRestore(window.webContents);
+        return window;
+      },
       whenLoaded: (window) =>
         new Promise<boolean>((resolve) => {
           const contents = window.webContents;
@@ -9468,9 +9551,9 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       hasAny: () => BrowserWindow.getAllWindows().length !== 0,
       showOrCreate: showOrCreateMainWindow,
       activate: (window, workspace) => {
-        void sendWorkspaceActivated(window, workspace).catch((error: unknown) =>
-          desktopWindows.reportActivationFailure(workspace, error),
-        );
+        void sendWorkspaceActivated(window, workspace, (target) =>
+          noteWorkspaceActivationTrigger(target, workspace.workspaceId, "deep_link"),
+        ).catch((error: unknown) => desktopWindows.reportActivationFailure(workspace, error));
       },
     },
     workspaces: {
@@ -9507,6 +9590,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       applySettings: ({ settings }) => {
         cachedPreferredName = settings.profile.preferredName;
         cachedAgents = listAgents(settings);
+        recordLaunchAnalytics();
         desktopWindows.seedZoomLevel(settings.appearance.zoomLevel);
         applyThemeMode(settings.appearance.themeMode);
         session.defaultSession.setSpellCheckerEnabled(settings.editor.spellcheck);
@@ -9536,6 +9620,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
           console.error("[desktop] chat wake sign-in:", error),
         );
         app.on("browser-window-focus", () => {
+          telemetry.markActive();
           resumeRunNow();
           void automationWakeConsumer.resume();
           chatWakes.resume();
@@ -9645,7 +9730,10 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
         );
       },
       stopAgentIntegration: () => agentIntegration.stopAll(),
-      flushReports: () => telemetry.flush(),
+      flushReports: () => {
+        autoUpdateController?.noteQuitInstallStarted();
+        return telemetry.flush();
+      },
       closeWorkspaces: async () => {
         await workspaceAuthorities.close();
         await Promise.allSettled(
@@ -9729,7 +9817,10 @@ const workLinkActivations = createWorkLinkActivations<{
     const entry = findWorkspace(place.workspaceId);
     if (!entry) return null;
     const workspace = workspaceSummaryFor(entry);
-    return { window: await sendWorkspaceActivated(liveWorkspaceWindow(), workspace), workspace };
+    const window = await sendWorkspaceActivated(liveWorkspaceWindow(), workspace, (target) =>
+      noteWorkspaceActivationTrigger(target, workspace.workspaceId, "deep_link"),
+    );
+    return { window, workspace };
   },
   deliver: ({ window, workspace }, place) => {
     workLinkOpens.request(window.webContents, workspace, {
@@ -9803,7 +9894,9 @@ const openPathOpener = createOpenPathOpener<WorkspaceSummary, BrowserWindow>({
     );
   },
   activate: async (workspace, file, window) => {
-    const shown = await sendWorkspaceActivated(window, workspace);
+    const shown = await sendWorkspaceActivated(window, workspace, (target) =>
+      noteWorkspaceActivationTrigger(target, workspace.workspaceId, "deep_link"),
+    );
     if (file !== null) workspaceFileOpens.request(shown.webContents, workspace, file);
     refreshNativeWorkspaceSurfaces();
   },
@@ -9855,8 +9948,20 @@ function handleIpc(channel: string, listener: Parameters<typeof ipcMain.handle>[
   ipcMain.handle(channel, async (event, ...args) => {
     try {
       const result: unknown = await listener(event, ...args);
-      const counted = usageEventFor(channel, result);
-      if (counted) telemetry.track(counted);
+      const counted = usageEventFor(channel, result, args[0], {
+        workspaceKind: (workspaceId) => workspaceKindOf(findWorkspace(workspaceId)),
+        workspaceOpenTrigger: (workspaceId) =>
+          workspaceOpenTriggers.consume(event.sender, workspaceId),
+      });
+      if (counted) {
+        if (counted.name === "workspace_added" && counted.method !== "mount_share") {
+          workspaceOpenTriggers.clearStartupRestore(event.sender);
+        }
+        telemetry.track(counted);
+        if (!(counted.name === "workspace_opened" && counted.trigger === "auto_restore")) {
+          telemetry.markActive();
+        }
+      }
       return result;
     } catch (error) {
       throw ipcWireError(

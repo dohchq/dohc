@@ -11,7 +11,12 @@ import {
   UsageVersionCoverage,
   queryUsage,
 } from "@dohc/workspace-contracts/usage";
-import { cliUsageInvocation, CLI_USAGE_ACTION_IDS, DESKTOP_USAGE_COVERAGE } from "./cliUsage";
+import {
+  cliUsageInvocation,
+  CLI_USAGE_ACTION_IDS,
+  DESKTOP_USAGE_COVERAGE,
+  isCliWriteRequest,
+} from "./cliUsage";
 
 const request = (verb: string, args: object = {}, door?: "cli" | "mcp"): CliRequest =>
   cliRequestSchema.parse({
@@ -216,5 +221,74 @@ describe("socket usage coverage", () => {
         waiting: null,
       }),
     ).toBeNull();
+  });
+
+  it("classifies CLI and MCP reads vs writes accurately across declared and legacy verbs", () => {
+    expect(isCliWriteRequest(request("versionCompare", { version: "draft" }))).toBe(false);
+    expect(isCliWriteRequest(request("heldNoteChange", { action: "review", path: "a.md" }))).toBe(
+      false,
+    );
+    expect(
+      isCliWriteRequest(
+        request("heldNoteChange", { action: "drop", path: "a.md", token: "a".repeat(64) }),
+      ),
+    ).toBe(true);
+    expect(
+      isCliWriteRequest(
+        request("fileDuplicate", {
+          path: "a.md",
+          requestId: "00000000-0000-4000-8000-000000000001",
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isCliWriteRequest(
+        request("historyUndo", {
+          operationId: "dohc-operation:abcdef01-2345-6789-abcd-0123456789ab",
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isCliWriteRequest(
+        request("inboxAdd", {
+          title: "Item",
+          body: "Hello",
+        }),
+      ),
+    ).toBe(true);
+    expect(isCliWriteRequest(request("members", { request: { action: "list" } }))).toBe(false);
+    expect(
+      isCliWriteRequest(request("members", { request: { action: "group", group: "General" } })),
+    ).toBe(false);
+    expect(
+      isCliWriteRequest(
+        request("members", { request: { action: "group", group: "General", level: "comment" } }),
+      ),
+    ).toBe(true);
+    expect(
+      isCliWriteRequest(
+        request("members", {
+          request: { action: "invite", email: "a@b.test" },
+        }),
+      ),
+    ).toBe(true);
+    expect(isCliWriteRequest(request("show", { target: "t1", peek: true }))).toBe(false);
+    expect(isCliWriteRequest(request("show", { target: "t1", peek: false }))).toBe(true);
+    expect(
+      isCliWriteRequest(
+        request("dataset", {
+          request: {
+            action: "invoke",
+            workspaceId: "ws-1",
+            datasetPath: "tasks/dataset.json",
+            operationId: "00000000-0000-4000-8000-000000000002",
+            revision: 1,
+            revisionSha256: "a".repeat(64),
+            input: {},
+            idempotencyKey: "k1",
+          },
+        }),
+      ),
+    ).toBe(true);
   });
 });

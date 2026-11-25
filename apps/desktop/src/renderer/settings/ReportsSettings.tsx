@@ -56,7 +56,7 @@ export function ReportsSettings(props: {
     <>
       <SettingRow
         title="Send usage reports"
-        description="Counts when you open dohc, create or open a workspace, share, publish an app, or send a chat message. Includes a random ID for this installation. No names, content, or links."
+        description="Counts launches, active days, updates, workspaces, actions, CLI and MCP tool calls, sharing, app publishing, chat, and crash signals. Includes a random ID for this installation. No names, content, prompts, account details, or links."
         aside={
           usageUnavailable ? (
             <p id={usageUnavailableId} className="m-0 text-[12px] text-muted">

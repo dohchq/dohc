@@ -500,23 +500,30 @@ the values.
 
 | Variable | Value |
 | --- | --- |
-| `DOHC_POSTHOG_KEY` | The PostHog project API key, which starts with `phc_`. |
-| `DOHC_POSTHOG_HOST` | `https://us.i.posthog.com`, `https://eu.i.posthog.com`, or your own HTTPS host. |
+| `DOHC_POSTHOG_KEY` | The desktop and Drive PostHog project API key, which starts with `phc_`. Keep this separate from the marketing site's `VITE_SITE_POSTHOG_KEY` project. |
+| `DOHC_POSTHOG_HOST` | `https://dohc.computer/telemetry` (first-party proxy that strips client IPs and enforces `ALLOWED_TELEMETRY_KEYS`), `https://us.i.posthog.com`, `https://eu.i.posthog.com`, or your own HTTPS host. |
 
 The workflow sets `DOHC_DESKTOP_DIST` to `<platform>-<arch>` for each package.
-Error reports carry it as `dist`. A missing or invalid key or host turns off
+Usage and error reports carry it as `dist`. A missing or invalid key or host turns off
 both kinds of report. `scripts/verification/build.mjs` includes these
 variables in the desktop build fingerprint.
 
-Before the first release that reports:
+Before the first release that reports (or when cutting over to a dedicated
+desktop and Drive PostHog project):
 
 1. In PostHog, turn on **Discard client IP data** for the project.
 2. In PostHog, set a billing limit for product analytics and for error
    tracking. Check the current free allowance for each on PostHog's pricing
    page.
+3. Update `POSTHOG_CLI_PROJECT_ID` alongside `DOHC_POSTHOG_KEY` so uploaded
+   source maps land in the same PostHog project that receives `$exception`
+   events. If using `https://dohc.computer/telemetry`, include the key in
+   `ALLOWED_TELEMETRY_KEYS` on the site Worker.
 
-The app caps the reports it sends in each launch and drops the ones it cannot
-send. The limits are `REPORT_LIMITS` in
+The app caps the reports it sends in each launch. Usage reports retry transient
+failures (network errors, HTTP 408, 429, and 5xx) with backoff for up to 30
+minutes and drop permanent 4xx errors immediately; error reports drop on failure.
+The limits are `REPORT_LIMITS` in
 [`apps/desktop/src/telemetry/telemetry.ts`](../../apps/desktop/src/telemetry/telemetry.ts).
 The other files in [`apps/desktop/src/telemetry/`](../../apps/desktop/src/telemetry/)
 build and send each report.

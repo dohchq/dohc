@@ -1,3 +1,7 @@
+import { posthogProject } from "@dohc/service-http/telemetry";
+
+export { posthogProject };
+
 // The PostHog project a release build reports to. electron.vite.config.ts
 // compiles it in from DOHC_POSTHOG_KEY, DOHC_POSTHOG_HOST and
 // DOHC_DESKTOP_DIST; an empty value names no project.
@@ -62,18 +66,4 @@ export function resolveReporting(input: {
     errors: { host: base, key: project.key },
     dist: /^[\w.-]{1,64}$/.test(build.dist) ? build.dist : `${process.platform}-${process.arch}`,
   };
-}
-
-/** A project key and an https host, or null when either is unusable. */
-export function posthogProject(key: string, host: string): { key: string; base: URL } | null {
-  if (!/^phc_\w{10,100}$/.test(key.trim())) return null;
-  let base: URL;
-  try {
-    base = new URL(host.trim());
-  } catch {
-    return null;
-  }
-  if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash)
-    return null;
-  return { key: key.trim(), base };
 }

@@ -336,6 +336,33 @@ describe("desktop workspace windows", () => {
     expect(registry(windowA.webContents.native)).toEqual({ workspaces: rows });
   });
 
+  it("notifies onTarget before activation reaches either a live or newly created window", async () => {
+    const f = fixture();
+    const targetWorkspace = workspace("b");
+    const order: string[] = [];
+
+    const opening = f.windows.sendWorkspaceActivated(undefined, targetWorkspace, (win) => {
+      order.push(`created:${win === f.all[0]?.native}`);
+      expect(f.all[0]?.webContents.send).not.toHaveBeenCalled();
+    });
+    expect(order).toEqual(["created:true"]);
+    f.all[0]!.finishLoad();
+    const created = await opening;
+
+    const live = new Window();
+    live.webContents.send.mockImplementation(() => {
+      order.push("send");
+    });
+    f.windows.trackWorkspaceWindow(live.native);
+    await f.windows.sendWorkspaceActivated(live.native, targetWorkspace, () => {
+      order.push("live");
+    });
+    expect(order).toEqual(["created:true", "live", "send"]);
+
+    created.destroy();
+    live.destroy();
+  });
+
   it("opens the workspace that was open when dohc quit, and the first one when that is gone", async () => {
     const home = await createTestScratch("registry-last-opened-");
     const stateDir = await createTestScratch("registry-last-opened-state-");
