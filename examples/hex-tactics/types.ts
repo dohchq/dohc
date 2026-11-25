@@ -95,7 +95,6 @@ export interface VisibleBoardState {
 
 export interface SeatCredential {
   readonly seat: 1 | 2;
-  readonly playerId: string;
   readonly name: string;
   readonly color: "crimson" | "cobalt";
   readonly playerToken: string;

@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { TerrainType } from "./types";
 import { MAX_PIPS, keptPips } from "./rules";
 import { HEX_SIZE, countBadgeWidth, hexCenter, hexPoints } from "./geometry";
@@ -354,10 +355,10 @@ const HERO_TILES: ReadonlyArray<{
   { q: 2, r: 0, terrain: "gold", owner: null, units: 2 },
 ];
 
-export function LobbyHero() {
-  const placed = HERO_TILES.map((tile) => ({ ...tile, ...hexCenter(tile.q, tile.r) })).sort(
-    (a, b) => a.y - b.y || a.x - b.x,
-  );
+const HERO_PLACED = HERO_TILES.map((tile) => ({ ...tile, ...hexCenter(tile.q, tile.r) })).sort((a, b) => a.y - b.y || a.x - b.x);
+
+export const LobbyHero = memo(function LobbyHero() {
+  const placed = HERO_PLACED;
   return (
     <svg className="hc-hero" viewBox="-200 -118 400 232" aria-hidden="true" preserveAspectRatio="xMidYMid meet">
       {placed.map(({ q, r, x, y, terrain, owner }) => (
@@ -398,7 +399,7 @@ export function LobbyHero() {
       )}
     </svg>
   );
-}
+});
 
 export function HexLogo({ size = 28 }: { readonly size?: number }) {
   return (

@@ -7,14 +7,15 @@ import { Copy } from "dohc/icons";
 import { HexLogo } from "./board-art";
 import { InviteDialog, Notices, ResignDialog, type Notice } from "./dialogs";
 import { EndTurnButton, VictoryCard } from "./dock";
-import { axialDistance, hexKeyOf } from "./geometry";
-import { HexBoard, type BoardFlash, type BoardForecast, type TargetKind } from "./hex-board";
+import { hexKeyOf } from "./geometry";
+import { HexBoard, type BoardFlash } from "./hex-board";
 import { Hud } from "./hud";
 import { Lobby, type LobbyPanel } from "./lobby";
 import { CombatPreview, HandoffCover, LogDrawer, ReplayDock, RulesSheet, TacticalCard, TurnBanner } from "./panels";
-import { flashKindForMove, forecastLabel, forecastMarch, isClaim, maxReinforce as maxReinforceFor, otherSeat, playerName } from "./rules";
+import { deriveOrders } from "./orders";
+import { flashKindForMove, maxReinforce as maxReinforceFor, otherSeat, playerName } from "./rules";
 import { NO_SELECTION, selectionReducer } from "./selection";
-import { type StoredMatchSession, withJoinedSeat } from "./sessions";
+import { type StoredMatchSession, withJoinedSeat, withSeat } from "./sessions";
 import type {
   ActionType,
   CreateGameReply,
@@ -139,7 +140,7 @@ export function HexClashApp() {
   const [settledPhase, setSettledPhase] = useState("loading");
 
   const [selection, dispatchSelection] = useReducer(selectionReducer, NO_SELECTION);
-  const { selectedHex, targetHex, hoverHex, cursorHex, marchUnits, reinforceUnits } = selection;
+  const { selectedHex, hoverHex, cursorHex, marchUnits, reinforceUnits } = selection;
   const lockedAt = useRef(0);
   const [toast, setToast] = useState<{ readonly id: number; readonly text: string } | null>(null);
   const toastSeq = useRef(0);
@@ -164,7 +165,7 @@ export function HexClashApp() {
 
   const [liveEvents, setLiveEvents] = useState(false);
   const [banner, setBanner] = useState<{ seat: 1 | 2 | null; turn: number; label: string; token: number } | null>(null);
-  const [handoff, setHandoff] = useState<{ gameId: string; seat: 1 | 2; turn: number } | null>(null);
+  const [handoffs, setHandoffs] = useState<Record<string, { readonly seat: 1 | 2; readonly turn: number }>>({});
   const [logPreviewTurn, setLogPreviewTurn] = useState<number | null>(null);
   const [logPinnedTurn, setLogPinnedTurn] = useState<number | null>(null);
   const [flash, setFlash] = useState<BoardFlash | null>(null);
@@ -208,7 +209,7 @@ export function HexClashApp() {
     (spectatorMode ? boardData.viewer.spectator : boardData.viewer.seat === (activeSeatCredential?.seat ?? null))
       ? boardData
       : null;
-  const canSwitchSeat = isPassAndPlay && !replayOpen && board?.game.status !== "finished";
+  const canSwitchSeat = isPassAndPlay && !replayOpen && board?.game.status !== "finished" && !submitMove.pending && !submitMove.uncertain;
   const reloadSeatOne = seatOneQuery.reload;
   const reloadSeatTwo = seatTwoQuery.reload;
   const reloadSpectator = spectatorQuery.reload;
@@ -250,8 +251,13 @@ export function HexClashApp() {
     [cancelPendingResume, discardPendingOrder, resetBoardView, resetReplay],
   );
 
+  const clearRefusal = () => {
+    if (submitMove.error && !submitMove.pending && !submitMove.uncertain) discardPendingOrder();
+  };
+
   const switchSeat = (seat: 1 | 2) => {
     if (!activeSession || !canSwitchSeat) return;
+    clearRefusal();
     closeReplay();
     updateSession({ ...activeSession, activeSeat: seat });
     resetBoardView();
@@ -284,47 +290,15 @@ export function HexClashApp() {
   const isMyTurn = Boolean(
     !replayOpen && board && board.game.status === "active" && viewerSeat !== null && board.game.activeSeat === viewerSeat && activeSeatCredential,
   );
-  const selectedTile = selectedHex ? (tileByKey.get(selectedHex) ?? null) : null;
   const gold = board?.players.find((p) => p.seat === viewerSeat)?.gold ?? 0;
 
-  const targets = useMemo(() => {
-    const map = new Map<string, TargetKind>();
-    if (!isMyTurn || !selectedTile || selectedTile.ownerSeat !== viewerSeat || (selectedTile.units ?? 0) <= 1) return map;
-    for (const tile of displayedTiles) {
-      if (!tile.visible || tile.terrain === "mountain") continue;
-      if (axialDistance(selectedTile.q, selectedTile.r, tile.q, tile.r) !== 1) continue;
-      map.set(hexKeyOf(tile.q, tile.r), tile.ownerSeat === viewerSeat ? "move" : isClaim(tile) ? "claim" : "attack");
-    }
-    return map;
-  }, [displayedTiles, isMyTurn, selectedTile, viewerSeat]);
-
-  const activeTargetHex = targetHex && targets.has(targetHex) ? targetHex : null;
-  const targetTile = activeTargetHex ? (tileByKey.get(activeTargetHex) ?? null) : null;
-  const maxMovable = selectedTile ? Math.max(0, (selectedTile.units ?? 0) - 1) : 0;
-  const lockedUnits = Math.min(marchUnits, maxMovable);
+  const turnScope = board && viewerSeat !== null ? `${board.game.id}:${viewerSeat}:${board.game.turnNumber}` : null;
+  const orders = useMemo(
+    () => deriveOrders({ tiles: displayedTiles, tileByKey, selection, viewerSeat, canAct: isMyTurn, turnScope, compact }),
+    [compact, displayedTiles, isMyTurn, selection, tileByKey, turnScope, viewerSeat],
+  );
+  const { selectedTile, targets, targetHex: activeTargetHex, targetTile, maxMovable, lockedUnits, targetForecast, preview } = orders;
   const maxReinforce = maxReinforceFor(gold);
-
-  const previewHex = activeTargetHex ?? [hoverHex, cursorHex].find((hex) => hex !== null && targets.has(hex)) ?? null;
-  const previewShown = previewHex !== null && (!compact || previewHex === activeTargetHex);
-  const previewTile = previewHex ? (tileByKey.get(previewHex) ?? null) : null;
-  const previewUnits = previewHex === activeTargetHex ? lockedUnits : maxMovable;
-  const previewForecast = previewTile && viewerSeat !== null && previewUnits > 0 ? forecastMarch(previewUnits, previewTile, viewerSeat) : null;
-  const targetForecast = targetTile && viewerSeat !== null && maxMovable > 0 ? forecastMarch(lockedUnits, targetTile, viewerSeat) : null;
-
-  const boardForecast: BoardForecast | null = (() => {
-    if (!previewShown || !previewForecast || !previewHex || !selectedHex) return null;
-    const claim = targets.get(previewHex) === "claim";
-    const transfer = previewForecast.kind === "transfer";
-    return {
-      fromHex: selectedHex,
-      toHex: previewHex,
-      tone: transfer ? "move" : claim ? "claim" : previewForecast.kind,
-      label: forecastLabel(previewForecast, claim),
-      leaving: previewForecast.attackerUnits,
-      defenderLoss: transfer ? 0 : previewForecast.defenderLosses,
-      gain: transfer ? previewForecast.attackerUnits : 0,
-    };
-  })();
 
   const boardInteractive = !replayOpen && !(compact && board?.game.status === "finished");
   const hoverInspectable =
@@ -338,12 +312,14 @@ export function HexClashApp() {
     return move ? { fromHex: move.fromHex, toHex: move.toHex, seat: move.actorSeat, token: move.turnNumber } : null;
   }, [activeReplayFrame, latestMove]);
 
+  const onTurnChanged = useEffectEvent(clearRefusal);
   useEffect(() => {
     if (!board) return;
     const key = `${board.game.id}:${board.game.status}:${board.game.turnNumber}`;
     if (lastTurnKeyRef.current === key) return;
     const previous = lastTurnKeyRef.current;
     lastTurnKeyRef.current = key;
+    onTurnChanged();
     if (board.game.status !== "active") return;
     const seat = board.game.activeSeat;
     if (isPassAndPlay && previous?.startsWith(`${board.game.id}:`)) return;
@@ -357,11 +333,12 @@ export function HexClashApp() {
     return () => window.clearTimeout(timer);
   }, [banner]);
 
-  const handoffActive = handoff !== null && handoff.gameId === activeGameId && board?.game.status !== "finished" && !replayOpen;
+  const handoff = activeGameId ? (handoffs[activeGameId] ?? null) : null;
+  const handoffActive = handoff !== null && board?.game.status !== "finished" && !replayOpen;
   const handoffReady = handoffActive && board !== null && board.viewer.seat === handoff.seat && board.game.turnNumber >= handoff.turn;
   const dismissHandoff = () => {
     dispatchSelection({ type: "hover", hex: null });
-    setHandoff(null);
+    setHandoffs(({ [activeGameId ?? ""]: _dismissed, ...rest }) => rest);
   };
 
   const shownLogTurn = logPreviewTurn ?? logPinnedTurn;
@@ -411,7 +388,7 @@ export function HexClashApp() {
     updateSession({
       gameId: data.gameId,
       joinCode: data.joinCode,
-      seats: [{ seat: 1, playerId: data.playerId, name: data.playerName, color: "crimson", playerToken: data.playerToken }],
+      seats: [{ seat: 1, name: data.playerName, color: "crimson", playerToken: data.playerToken }],
       activeSeat: 1,
     });
     reloadGames();
@@ -438,19 +415,20 @@ export function HexClashApp() {
 
   const applyMoveResult = (result: SubmitMoveReply) => {
     const { game } = result.state;
-    if (game.status === "active") {
+    const passAndPlay = sessionsRef.current[game.id]?.seats.length === 2;
+    const handsOver = passAndPlay && game.status === "active";
+    if (handsOver) {
       setSessions((prev) => {
         const current = prev[game.id];
-        if (!current || current.seats.length !== 2) return prev;
-        return { ...prev, [game.id]: { ...current, activeSeat: game.activeSeat } };
+        return current ? { ...prev, [game.id]: { ...current, activeSeat: game.activeSeat } } : prev;
       });
+      setHandoffs((prev) => ({ ...prev, [game.id]: { seat: game.activeSeat, turn: game.turnNumber } }));
     }
     if (activeGameIdRef.current === game.id) {
-      const passAndPlay = sessionsRef.current[game.id]?.seats.length === 2;
       resetBoardView();
-      if (passAndPlay && game.status === "active") {
+      if (handsOver) {
         setBanner(null);
-        setHandoff({ gameId: game.id, seat: game.activeSeat, turn: game.turnNumber });
+        setInviteOpen(false);
       }
       if (game.status !== "finished" && !passAndPlay) showToast(result.outcome.summary);
       reloadBoard();
@@ -475,19 +453,16 @@ export function HexClashApp() {
         setResumeError("That seat key does not match a seat in this match.");
         return;
       }
-      const playerInfo = state.players.find((p) => p.seat === seat);
       const restored: SeatCredential = {
         seat,
-        playerId: playerInfo?.id ?? `p${seat}_${parsed.gameId}`,
         name: playerName(state.players, seat),
         color: seat === 1 ? "crimson" : "cobalt",
         playerToken: parsed.playerToken,
       };
-      setSessions((prev) => {
-        const existing = prev[parsed.gameId];
-        const seats = existing ? [...existing.seats.filter((s) => s.seat !== seat), restored] : [restored];
-        return { ...prev, [parsed.gameId]: { gameId: parsed.gameId, joinCode: state.game.joinCode ?? null, seats, activeSeat: seat } };
-      });
+      setSessions((prev) => ({
+        ...prev,
+        [parsed.gameId]: withSeat(prev[parsed.gameId], parsed.gameId, state.game.joinCode ?? null, restored, true),
+      }));
       enterGame(parsed.gameId, false);
       showToast(`Back in ${state.game.title} as ${restored.name}`);
       reloadGames();
@@ -524,7 +499,15 @@ export function HexClashApp() {
       reloadGames();
     }
   };
-  const retryOrder = () => void settle(submitMove.retry, applyMoveResult);
+  const retryOrder = async () => {
+    try {
+      const reply = await submitMove.retry();
+      if (reply) applyMoveResult(reply.result);
+    } catch {
+      reloadBoard();
+      reloadGames();
+    }
+  };
 
   const openReplay = async (gameId: string) => {
     if (!(await replay.load(gameId))) return;
@@ -547,7 +530,7 @@ export function HexClashApp() {
     if (selectedTile && targets.has(key)) {
       if (activeTargetHex !== key) {
         lockedAt.current = performance.now();
-        dispatchSelection({ type: "target", hex: key, movable: maxMovable });
+        if (turnScope) dispatchSelection({ type: "target", hex: key, movable: maxMovable, scope: turnScope });
       } else if (!forecastHidden && (via === "enter" || (via === "pointer" && performance.now() - lockedAt.current >= SECOND_TAP_GUARD_MS))) {
         void executeOrder("march");
       }
@@ -632,19 +615,19 @@ export function HexClashApp() {
     };
   }, [replayNames[0], replayNames[1], replayFrames]);
 
-  const mutationNotice = <T,>(
-    mutation: { readonly retry: () => Promise<Settled<T>>; readonly discardPending: () => void; readonly pending: boolean },
+  const mutationNotice = (
+    mutation: { readonly discardPending: () => void; readonly pending: boolean },
     title: string,
     retryId: string,
-    apply: (result: T, navigation: number) => void,
-  ): Notice => ({ title, retryId, retry: () => void settle(mutation.retry, apply), discard: mutation.discardPending, pending: mutation.pending });
+    retry: () => void,
+  ): Notice => ({ title, retryId, retry, discard: mutation.discardPending, pending: mutation.pending });
 
   const notice: Notice | null = (() => {
-    if (startDemo.uncertain && !lobbyVisible) return mutationNotice(startDemo, "dohc could not confirm the demo match", "retry-demo-btn", applyDemoResult);
-    if (createGame.uncertain && !lobbyVisible) return mutationNotice(createGame, "dohc could not confirm the new match", "retry-create-banner-btn", applyCreateResult);
-    if (joinGame.uncertain && !lobbyVisible) return mutationNotice(joinGame, "dohc could not confirm your seat", "retry-join-banner-btn", applyJoinResult);
-    if (submitMove.uncertain) return mutationNotice(submitMove, "dohc could not confirm your order", "retry-move-btn", applyMoveResult);
-    if (submitMove.error) return { title: "Order refused", detail: submitMove.error.message };
+    if (startDemo.uncertain && !lobbyVisible) return mutationNotice(startDemo, "dohc could not confirm the demo match", "retry-demo-btn", () => void settle(startDemo.retry, applyDemoResult));
+    if (createGame.uncertain && !lobbyVisible) return mutationNotice(createGame, "dohc could not confirm the new match", "retry-create-banner-btn", () => void settle(createGame.retry, applyCreateResult));
+    if (joinGame.uncertain && !lobbyVisible) return mutationNotice(joinGame, "dohc could not confirm your seat", "retry-join-banner-btn", () => void settle(joinGame.retry, applyJoinResult));
+    if (submitMove.uncertain) return mutationNotice(submitMove, "dohc could not confirm your order", "retry-move-btn", () => void retryOrder());
+    if (submitMove.error) return { title: "Order refused", detail: submitMove.error.message, discard: discardPendingOrder };
     if (boardQuery.error && activeGameId) return { title: "dohc could not load the board", detail: boardQuery.error.message, retryId: "reload-board-btn", retry: reloadBoard };
     if (replay.error) return { title: "dohc could not load the replay", detail: replay.error };
     return null;
@@ -691,7 +674,10 @@ export function HexClashApp() {
             }}
             onToggleLog={() => setDrawerOpen((open) => !open)}
             onRules={() => setRulesOpen(true)}
-            onResign={() => setResignOpen(true)}
+            onResign={() => {
+              clearRefusal();
+              setResignOpen(true);
+            }}
           />
 
           <main className="hc-stage" data-drawer={drawerOpen ? "open" : "closed"}>
@@ -711,7 +697,7 @@ export function HexClashApp() {
                     : lastMoveForBoard
                 }
                 highlightHexes={shownLogPreview ? [shownLogPreview.fromHex, shownLogPreview.toHex].filter((hex) => hex !== null) : []}
-                forecast={boardForecast}
+                forecast={orders.boardForecast}
                 flash={flash && flash.scope === (replayOpen ? `replay:${activeGameId}` : liveFlashScope(board)) ? flash : null}
                 onActivate={handleActivate}
                 onHover={(hex) => dispatchSelection({ type: "hover", hex })}
@@ -760,11 +746,11 @@ export function HexClashApp() {
                 <ReplayDock frames={replayFrames} step={replayStep} playing={replay.playing} onStep={replay.goTo} onTogglePlay={replay.togglePlay} onExit={closeReplay} />
               ) : dockCardVisible ? (
                 <div className="hc-dock-stack">
-                  {previewShown && previewForecast && previewTile && viewerSeat !== null ? (
+                  {preview && viewerSeat !== null ? (
                     <CombatPreview
-                      forecast={previewForecast}
+                      forecast={preview.forecast}
                       attackerSeat={viewerSeat}
-                      target={previewTile}
+                      target={preview.tile}
                       onClose={compact ? () => dispatchSelection({ type: "deselect" }) : undefined}
                     />
                   ) : null}
@@ -896,7 +882,7 @@ export function HexClashApp() {
       <Notices notice={notice} toast={notice ? null : toast} measure={observeNotices} />
 
       <InviteDialog
-        open={inviteOpen}
+        open={inviteOpen && !handoffActive}
         joinCode={board?.game.status === "waiting" ? visibleJoinCode : null}
         codeCopied={codeCopied}
         seatName={activeSeatCredential?.name ?? null}
@@ -918,7 +904,7 @@ export function HexClashApp() {
         pending={submitMove.pending}
         uncertain={submitMove.uncertain}
         error={submitMove.error?.message ?? null}
-        onResign={() => (submitMove.uncertain ? retryOrder() : void executeOrder("resign"))}
+        onResign={() => void (submitMove.uncertain ? retryOrder() : executeOrder("resign"))}
         onClose={() => setResignOpen(false)}
       />
     </div>

@@ -193,28 +193,24 @@
     return input;
   }
 
-  function cleanName(ctx, value, fallback) {
+  function cleanText(ctx, value, fallback, code, noun, max) {
     if (value === undefined || value === null || value === "") return fallback;
     if (typeof value !== "string" || /[\r\n\u0000-\u001f]/.test(value)) {
-      ctx.refuse("invalid_name", "Enter a plain player name up to 40 characters.");
+      ctx.refuse(code, "Enter a plain " + noun + " up to " + max + " characters.");
     }
     const trimmed = value.trim().replace(/\s+/g, " ");
-    if (!trimmed || trimmed.length > 40) {
-      ctx.refuse("invalid_name", "Enter a player name between 1 and 40 characters.");
+    if (!trimmed || trimmed.length > max) {
+      ctx.refuse(code, "Enter a " + noun + " between 1 and " + max + " characters.");
     }
     return trimmed;
   }
 
+  function cleanName(ctx, value, fallback) {
+    return cleanText(ctx, value, fallback, "invalid_name", "player name", 40);
+  }
+
   function cleanTitle(ctx, value, fallback) {
-    if (value === undefined || value === null || value === "") return fallback;
-    if (typeof value !== "string" || /[\r\n\u0000-\u001f]/.test(value)) {
-      ctx.refuse("invalid_title", "Enter a match title up to 64 characters.");
-    }
-    const trimmed = value.trim().replace(/\s+/g, " ");
-    if (!trimmed || trimmed.length > 64) {
-      ctx.refuse("invalid_title", "Enter a match title between 1 and 64 characters.");
-    }
-    return trimmed;
+    return cleanText(ctx, value, fallback, "invalid_title", "match title", 64);
   }
 
   function expectSafeInt(ctx, value, code, message) {
@@ -248,13 +244,12 @@
     return value;
   }
 
-  function isPathConnected(tileMap, startKey, endKey) {
+  function isFullyConnected(tileMap, startKey) {
     const visited = new Set([startKey]);
     const queue = [startKey];
     let head = 0;
     while (head < queue.length) {
       const key = queue[head++];
-      if (key === endKey) return true;
       const tile = tileMap.get(key);
       for (const dir of HEX_DIRECTIONS) {
         const nk = hexKey(tile.q + dir[0], tile.r + dir[1]);
@@ -265,7 +260,9 @@
         queue.push(nk);
       }
     }
-    return false;
+    let passable = 0;
+    for (const tile of tileMap.values()) if (tile.terrain !== "mountain") passable += 1;
+    return visited.size === passable;
   }
 
   function generateBalancedMap(seed, radius, p1Id, p2Id) {
@@ -365,10 +362,7 @@
       } else if (mountainPairs < 3) {
         a.terrain = "mountain";
         b.terrain = "mountain";
-        if (
-          isPathConnected(tileMap, hexKey(-radius, 0), hexKey(radius, 0)) &&
-          isPathConnected(tileMap, hexKey(-radius, 0), "0,0")
-        ) {
+        if (isFullyConnected(tileMap, hexKey(-radius, 0))) {
           mountainPairs += 1;
         } else {
           a.terrain = "plains";
@@ -433,15 +427,15 @@
     );
   }
 
-  function formatPlayerPublic(row, seatMap, gameTiles, viewerSeat, fullVisibility) {
-    let visibleTiles = 0;
-    let visibleUnits = 0;
-    for (const tile of gameTiles) {
-      if (tile.owner_player_id === row.id) {
-        if (fullVisibility || seatMap.get(row.id) === viewerSeat) {
-          visibleTiles += 1;
-          visibleUnits += tile.units;
-        }
+  function formatPlayerPublic(row, gameTiles, viewerSeat, fullVisibility) {
+    const shown = fullVisibility || row.seat === viewerSeat;
+    let tileCount = 0;
+    let unitCount = 0;
+    if (shown) {
+      for (const tile of gameTiles) {
+        if (tile.owner_player_id !== row.id) continue;
+        tileCount += 1;
+        unitCount += tile.units;
       }
     }
     return {
@@ -449,9 +443,9 @@
       seat: row.seat,
       name: row.name,
       color: row.color,
-      gold: fullVisibility || row.seat === viewerSeat ? row.gold : null,
-      tileCount: fullVisibility || row.seat === viewerSeat ? visibleTiles : null,
-      unitCount: fullVisibility || row.seat === viewerSeat ? visibleUnits : null,
+      gold: shown ? row.gold : null,
+      tileCount: shown ? tileCount : null,
+      unitCount: shown ? unitCount : null,
     };
   }
 
@@ -638,7 +632,7 @@
         foggedTiles: foggedCount,
       },
       players: players.map((row) =>
-        formatPlayerPublic(row, seatByPlayerId, tiles, viewerSeat, fullVisibility),
+        formatPlayerPublic(row, tiles, viewerSeat, fullVisibility),
       ),
       tiles: projectedTiles,
       recentMoves,
@@ -873,17 +867,19 @@
 
   function applyTurnSupply(ctx, gameId, nextPlayer) {
     const ownedTiles = ctx.db.query(
-      "SELECT id,q,r,terrain,units FROM hex_tiles WHERE game_id = ? AND owner_player_id = ? ORDER BY r ASC, q ASC",
+      "SELECT q,r,terrain FROM hex_tiles WHERE game_id = ? AND owner_player_id = ? AND terrain IN ('capital', 'gold') ORDER BY r ASC, q ASC",
       [gameId, nextPlayer.id],
     );
     let goldAdded = BASE_GOLD_INCOME;
     const supplyUpdates = [];
     for (const tile of ownedTiles) {
-      if (tile.terrain !== "capital" && tile.terrain !== "gold") continue;
       if (tile.terrain === "gold") goldAdded += GOLD_MINE_INCOME;
-      ctx.db.execute("UPDATE hex_tiles SET units = units + 1 WHERE id = ?", [tile.id]);
       supplyUpdates.push({ q: tile.q, r: tile.r, addedUnits: 1 });
     }
+    ctx.db.execute(
+      "UPDATE hex_tiles SET units = units + 1 WHERE game_id = ? AND owner_player_id = ? AND terrain IN ('capital', 'gold')",
+      [gameId, nextPlayer.id],
+    );
     ctx.db.execute("UPDATE players SET gold = gold + ? WHERE id = ?", [goldAdded, nextPlayer.id]);
     return { nextSeat: nextPlayer.seat, goldAdded, supplyUpdates };
   }
@@ -945,7 +941,7 @@
       }
     }
 
-    const opponentVisionBefore = opponentVision(ctx, game.id, opponent.id);
+    const opponentSees = actionType === "pass" || actionType === "resign" ? new Set() : opponentVision(ctx, game.id, opponent.id);
     let fromHex = null;
     let toHex = null;
     let unitsMoved = 0;
@@ -1189,8 +1185,7 @@
       supply = applyTurnSupply(ctx, game.id, opponent);
     }
 
-    const opponentVisionAfter = opponentVision(ctx, game.id, opponent.id);
-    const sawHex = (key) => Boolean(key && (opponentVisionBefore.has(key) || opponentVisionAfter.has(key)));
+    const sawHex = (key) => Boolean(key && opponentSees.has(key));
     const storedOutcome = Object.assign({}, outcome, winnerPlayerId ? {} : { supply }, {
       opponentSaw: { from: sawHex(fromHex), to: sawHex(toHex) },
     });
@@ -1225,11 +1220,7 @@
     );
 
     const updatedGame = gameById(ctx, game.id);
-    const updatedPlayer = ctx.db.query(
-      "SELECT id,seat,name,color,gold FROM players WHERE id = ?",
-      [player.id],
-    )[0];
-    const state = buildVisibleState(ctx, updatedGame, updatedPlayer, updatedGame.status === "finished");
+    const state = buildVisibleState(ctx, updatedGame, player, updatedGame.status === "finished");
     return {
       turnExecuted: game.turn_number,
       outcome: stripLiveOutcome(outcome, updatedGame.status === "finished"),

@@ -1,6 +1,7 @@
 import { useId, useMemo, useRef, type CSSProperties, type KeyboardEvent } from "react";
 import { TerrainArt, UnitStack } from "./board-art";
 import { HEX_SIZE, arrowPath, hexCenter, hexKeyOf, hexPoints } from "./geometry";
+import { factionName } from "./rules";
 import type { VisibleTile } from "./types";
 
 export type TargetKind = "move" | "claim" | "attack";
@@ -55,10 +56,6 @@ function terrainKey(tile: VisibleTile): string {
   return tile.visible ? (tile.terrain ?? "plains") : "fog";
 }
 
-function ownerName(seat: 1 | 2 | null): string {
-  return seat === 1 ? "Crimson" : seat === 2 ? "Cobalt" : "Neutral";
-}
-
 const MARK_GLYPH: Record<TargetKind, string> = {
   move: "M -3 1.6 L 0 -1.6 L 3 1.6",
   claim: "M -1.8 3 V -3 L 2.8 -1.5 L -1.8 0",
@@ -69,7 +66,7 @@ function tileLabel(tile: VisibleTile, target: TargetKind | undefined): string {
   const coord = `Hex ${tile.q}, ${tile.r}`;
   if (!tile.visible) return `${coord}, hidden by fog of war`;
   const units = tile.units ?? 0;
-  const parts = [coord, tile.terrain ?? "plains", ownerName(tile.ownerSeat)];
+  const parts = [coord, tile.terrain ?? "plains", factionName(tile.ownerSeat)];
   if (tile.terrain !== "mountain") parts.push(`${units} unit${units === 1 ? "" : "s"}`);
   if (tile.fortified) parts.push("fortified");
   if (target === "attack") parts.push("attack target");
@@ -103,11 +100,13 @@ export function HexBoard({
     blur: `hc-blur-${uid}`,
     clip: `hc-clip-${uid}`,
   };
-  const hitRefs = useRef(new Map<string, SVGPolygonElement>());
   const anchorX = useRef<number | null>(null);
 
   const layout = useMemo(() => {
-    const positioned = tiles.map((tile) => ({ tile, key: hexKeyOf(tile.q, tile.r), ...hexCenter(tile.q, tile.r) }));
+    const positioned = tiles.map((tile) => {
+      const { x, y } = hexCenter(tile.q, tile.r);
+      return { tile, key: hexKeyOf(tile.q, tile.r), x, y, face: hexPoints(x, y, HEX_SIZE - 1) };
+    });
     let minX = -200;
     let maxX = 200;
     let minY = -180;
@@ -132,8 +131,6 @@ export function HexBoard({
     return arrowPath(from, to);
   }, [lastMove, layout.byKey]);
 
-  const fogTiles = layout.positioned.filter((p) => !p.tile.visible);
-
   const moveCursor = (event: KeyboardEvent<SVGPolygonElement>, from: { x: number; y: number; tile: VisibleTile }) => {
     let next: string | null = null;
     const horizontal = NEIGHBORS[event.key];
@@ -151,27 +148,19 @@ export function HexBoard({
       next = candidates[0]?.key ?? null;
       if (anchorX.current === null) anchorX.current = from.x;
     } else {
-      return false;
+      return;
     }
     event.preventDefault();
     if (next) {
       onCursor(next);
-      hitRefs.current.get(next)?.focus();
+      event.currentTarget.ownerSVGElement?.querySelector<SVGPolygonElement>(`.hc-hit[data-hex="${next}"]`)?.focus();
     }
-    return true;
   };
 
-  const style = { "--hc-ratio": (layout.width / layout.height).toFixed(4) } as CSSProperties;
-
-  return (
-    <div className="hc-board" style={style} data-can-act={canAct ? "true" : "false"}>
-      <svg
-        className="hc-board-svg"
-        viewBox={`${layout.minX.toFixed(1)} ${layout.minY.toFixed(1)} ${layout.width.toFixed(1)} ${layout.height.toFixed(1)}`}
-        role="group"
-        aria-label="HexClash battlefield"
-        onPointerLeave={() => onHover(null)}
-      >
+  const terrain = useMemo(() => {
+    const fogTiles = layout.positioned.filter((p) => !p.tile.visible);
+    return (
+      <>
         <defs>
           <linearGradient id={ids.bevel} x1="0" y1="0" x2="0" y2="1">
             <stop offset="0" stopColor="var(--hc-bevel-hi)" />
@@ -198,24 +187,24 @@ export function HexBoard({
         </defs>
 
         <g className="hc-layer-tiles">
-          {layout.positioned.map(({ tile, key, x, y }) => {
+          {layout.positioned.map(({ tile, key, x, y, face }) => {
             const t = terrainKey(tile);
             const owned = tile.visible && tile.ownerSeat !== null;
             return (
               <g key={key} className="hc-tile" data-t={t}>
                 <polygon points={hexPoints(x, y + SKIRT, HEX_SIZE - 1)} fill={`var(--t-${t}-side)`} />
-                <polygon points={hexPoints(x, y, HEX_SIZE - 1)} fill={`var(--t-${t}-top)`} />
+                <polygon points={face} fill={`var(--t-${t}-top)`} />
                 {t === "plains" || t === "capital" ? (
-                  <polygon points={hexPoints(x, y, HEX_SIZE - 1)} fill={`url(#${ids.grass})`} opacity={0.5} />
+                  <polygon points={face} fill={`url(#${ids.grass})`} opacity={0.5} />
                 ) : null}
-                {t === "fog" ? <polygon points={hexPoints(x, y, HEX_SIZE - 1)} fill={`url(#${ids.mist})`} /> : null}
+                {t === "fog" ? <polygon points={face} fill={`url(#${ids.mist})`} /> : null}
                 {owned ? (
                   <polygon
-                    points={hexPoints(x, y, HEX_SIZE - 1)}
+                    points={face}
                     fill={tile.ownerSeat === 1 ? "var(--hc-p1-tint)" : "var(--hc-p2-tint)"}
                   />
                 ) : null}
-                <polygon points={hexPoints(x, y, HEX_SIZE - 1)} fill={`url(#${ids.bevel})`} />
+                <polygon points={face} fill={`url(#${ids.bevel})`} />
                 {owned ? (
                   <polygon
                     points={hexPoints(x, y, HEX_SIZE - 4)}
@@ -247,15 +236,31 @@ export function HexBoard({
             </g>
           </g>
         ) : null}
+      </>
+    );
+  }, [layout, ids.bevel, ids.blur, ids.clip, ids.grass, ids.mist]);
+
+  const style = { "--hc-ratio": (layout.width / layout.height).toFixed(4) } as CSSProperties;
+
+  return (
+    <div className="hc-board" style={style} data-can-act={canAct ? "true" : "false"}>
+      <svg
+        className="hc-board-svg"
+        viewBox={`${layout.minX.toFixed(1)} ${layout.minY.toFixed(1)} ${layout.width.toFixed(1)} ${layout.height.toFixed(1)}`}
+        role="group"
+        aria-label="HexClash battlefield"
+        onPointerLeave={() => onHover(null)}
+      >
+        {terrain}
 
         <g className="hc-layer-marks" pointerEvents="none" aria-hidden="true">
-          {layout.positioned.map(({ key, x, y, tile }) => {
+          {layout.positioned.map(({ key, x, y, face }) => {
             const kind = targets.get(key);
             if (!kind) return null;
             const chosen = targetHex === key;
             return (
               <g key={key} className={`hc-mark hc-mark-${kind}${chosen ? " hc-mark-chosen" : ""}`}>
-                <polygon points={hexPoints(x, y, HEX_SIZE - 1)} className="hc-mark-fill" />
+                <polygon points={face} className="hc-mark-fill" />
                 <polygon points={hexPoints(x, y, HEX_SIZE - 5)} className="hc-mark-edge" />
                 {kind === "attack" ? (
                   <g className="hc-reticle">
@@ -286,7 +291,7 @@ export function HexBoard({
             <polygon
               key={`flash-${flash.token}`}
               className={`hc-flash hc-flash-${flash.kind}`}
-              points={hexPoints(layout.byKey.get(flash.hex)!.x, layout.byKey.get(flash.hex)!.y, HEX_SIZE - 1)}
+              points={layout.byKey.get(flash.hex)!.face}
             />
           ) : null}
         </g>
@@ -353,10 +358,6 @@ export function HexBoard({
             return (
               <polygon
                 key={key}
-                ref={(node) => {
-                  if (node) hitRefs.current.set(key, node);
-                  else hitRefs.current.delete(key);
-                }}
                 className="hc-hit"
                 points={hexPoints(x, y, HEX_SIZE - 0.5)}
                 data-hex={key}

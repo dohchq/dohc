@@ -3,6 +3,7 @@ import { Button, Callout, Input } from "dohc/ui";
 import { ArrowRight, ChevronDown, CircleX, Eye, Lock, Plus, RotateCcw, Users } from "dohc/icons";
 import { FactionCrest, HexLogo, LobbyHero } from "./board-art";
 import { playerName } from "./rules";
+import { lobbyMatches } from "./sessions";
 import type { GameSummary } from "./types";
 
 export type LobbyPanel = "create" | "join" | "resume" | null;
@@ -109,7 +110,7 @@ function matchMeta(game: GameSummary): string {
 export function Lobby(props: LobbyProps) {
   const { panel, onPanel, demo, create, join, resume } = props;
   const toggle = (next: Exclude<LobbyPanel, null>) => onPanel(panel === next ? null : next);
-  const recent = props.games.slice(0, 8);
+  const recent = lobbyMatches(props.games, props.seatedGameIds, 8);
   const cardRef = useRef<HTMLDivElement>(null);
   const overlay = props.overlay;
   const [createName, setCreateName] = useState("Crimson");

@@ -41,7 +41,7 @@ export function Hud({
   const status = board?.game.status;
   const viewer = viewerSeat === null ? null : (board?.players.find((p) => p.seat === viewerSeat) ?? null);
   return (
-    <header className="hc-hud" data-testid="turn-banner">
+    <header className="hc-hud">
       <div className="hc-hud-group hc-hud-left">
         <button type="button" id="open-lobby-btn" className="hc-icon-btn" aria-label="Game menu" title="Game menu" onClick={onMenu}>
           <Menu size={17} aria-hidden="true" />

@@ -1,8 +1,8 @@
+import { FORTIFY_COST, REINFORCE_UNIT_COST } from "./rules";
 import type { MoveRecord, ReplayPayload, VisibleTile } from "./types";
 
 export interface ReplayFrame {
   readonly stepIndex: number;
-  readonly label: string;
   readonly move: MoveRecord | null;
   readonly tiles: readonly VisibleTile[];
   readonly seat1Units: number;
@@ -83,7 +83,6 @@ export function reconstructReplayFrames(replay: ReplayPayload): ReplayFrame[] {
   const frames: ReplayFrame[] = [
     {
       stepIndex: 0,
-      label: "Start",
       move: null,
       ...initial,
       seat1Gold,
@@ -98,14 +97,14 @@ export function reconstructReplayFrames(replay: ReplayPayload): ReplayFrame[] {
     if (move.actionType === "fortify" && move.fromHex) {
       const tile = tileMap.get(move.fromHex);
       if (tile) tile.fortified = true;
-      const spent = outcome.goldSpent ?? 3;
+      const spent = outcome.goldSpent ?? FORTIFY_COST;
       if (actor === 1) seat1Gold = Math.max(0, seat1Gold - spent);
       else if (actor === 2) seat2Gold = Math.max(0, seat2Gold - spent);
     } else if (move.actionType === "reinforce" && move.fromHex) {
       const tile = tileMap.get(move.fromHex);
       const added = outcome.unitsAdded ?? move.unitsMoved ?? 0;
       if (tile) tile.units += added;
-      const spent = outcome.goldSpent ?? added * 2;
+      const spent = outcome.goldSpent ?? added * REINFORCE_UNIT_COST;
       if (actor === 1) seat1Gold = Math.max(0, seat1Gold - spent);
       else if (actor === 2) seat2Gold = Math.max(0, seat2Gold - spent);
     } else if (move.actionType === "march" && move.fromHex && move.toHex) {
@@ -142,7 +141,6 @@ export function reconstructReplayFrames(replay: ReplayPayload): ReplayFrame[] {
     const snap = snapshotTiles(tileMap);
     frames.push({
       stepIndex: frames.length,
-      label: `Turn ${move.turnNumber}`,
       move,
       ...snap,
       seat1Gold,

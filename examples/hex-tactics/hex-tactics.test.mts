@@ -22,7 +22,9 @@ import { createDatasetFixtureCompiler } from "../../apps/desktop/src/testing/dat
 import { openedLocalState } from "../../apps/desktop/src/testing/preparedLocalState.ts";
 import { sourceCaptureAdapter } from "../../apps/desktop/src/testing/sourceCaptureAdapter.ts";
 import { arrowPath, axialDistance, countBadgeWidth, hexCenter } from "./geometry.ts";
-import { withJoinedSeat } from "./sessions.ts";
+import { lobbyMatches, withJoinedSeat } from "./sessions.ts";
+import { deriveOrders } from "./orders.ts";
+import { NO_SELECTION, lockedTarget, selectionReducer } from "./selection.ts";
 import { reconstructReplayFrames } from "./replay.ts";
 import { flashKindForMove, forecastMarch, isClaim, keptPips, type MarchForecast } from "./rules.ts";
 import type {
@@ -317,7 +319,7 @@ function expectForecastMatches(forecast: MarchForecast, outcome: MoveOutcome) {
 
 describe("HexClash authoritative strategy game", () => {
   it("keeps the seat you were playing when a join reply lands after you left the Game menu", () => {
-    const seat1 = { seat: 1, playerId: "p1", name: "Ada", color: "crimson", playerToken: "t1" } as const;
+    const seat1 = { seat: 1, name: "Ada", color: "crimson", playerToken: "t1" } as const;
     const existing = { gameId: "g", joinCode: "ABCD", seats: [seat1], activeSeat: 1 } as const;
     const reply = { gameId: "g", joinCode: "ABCD", seat: 2, playerId: "p2", playerName: "Bo", playerToken: "t2" } as const;
     const late = withJoinedSeat(existing, reply, false);
@@ -325,6 +327,57 @@ describe("HexClash authoritative strategy game", () => {
     expect(late.seats.map((s) => s.seat)).toEqual([1, 2]);
     expect(withJoinedSeat(existing, reply, true).activeSeat).toBe(2);
     expect(withJoinedSeat(undefined, reply, false).activeSeat).toBe(2);
+  });
+
+  it("keeps a match you hold a seat in on the Game menu after eight newer matches", () => {
+    const games = Array.from({ length: 12 }, (_, index) => ({ id: `g${index}` }));
+    const shown = lobbyMatches(games, new Set(["g10"]), 8).map((game) => game.id);
+    expect(shown).toEqual(["g0", "g1", "g2", "g3", "g4", "g5", "g6", "g7", "g10"]);
+    expect(lobbyMatches(games, new Set(["g2"]), 8)).toHaveLength(9);
+  });
+
+  it("drops a locked march target once the turn it was locked in is over", () => {
+    const targets = new Map([["1,0", "attack"]]);
+    const locked = selectionReducer(selectionReducer(NO_SELECTION, { type: "select", hex: "0,0", units: 4 }), {
+      type: "target",
+      hex: "1,0",
+      movable: 3,
+      scope: "g:1:5",
+    });
+    expect(lockedTarget(locked, "g:1:5", targets)).toBe("1,0");
+    expect(lockedTarget(locked, "g:1:7", targets)).toBeNull();
+    expect(lockedTarget(locked, "g:2:5", targets)).toBeNull();
+    expect(lockedTarget(locked, "g:1:5", new Map())).toBeNull();
+  });
+
+  it("derives march targets and the board forecast only for the selected stack on the viewer's own turn", () => {
+    const tile = (q: number, r: number, terrain: "plains" | "mountain", ownerSeat: 1 | 2 | null, units: number) =>
+      ({ q, r, visible: true, terrain, ownerSeat, units, fortified: false }) as const;
+    const tiles = [
+      tile(0, 0, "plains", 1, 4),
+      tile(-1, 0, "plains", 1, 1),
+      tile(1, 0, "plains", 2, 1),
+      tile(0, 1, "plains", null, 0),
+      tile(1, -1, "mountain", null, 0),
+      tile(2, 0, "plains", 2, 9),
+    ];
+    const tileByKey = new Map(tiles.map((t) => [`${t.q},${t.r}`, t]));
+    const selected = selectionReducer(NO_SELECTION, { type: "select", hex: "0,0", units: 4 });
+    const base = { tiles, tileByKey, viewerSeat: 1, canAct: true, turnScope: "g:1:3", compact: false } as const;
+
+    const idle = deriveOrders({ ...base, selection: selected });
+    expect(Object.fromEntries(idle.targets)).toEqual({ "-1,0": "move", "1,0": "attack", "0,1": "claim" });
+    expect(idle.boardForecast).toBeNull();
+
+    const hovering = deriveOrders({ ...base, selection: selectionReducer(selected, { type: "hover", hex: "1,0" }) });
+    expect(hovering.boardForecast).toMatchObject({ fromHex: "0,0", toHex: "1,0", tone: "capture", leaving: 3 });
+    expect(deriveOrders({ ...base, compact: true, selection: selectionReducer(selected, { type: "hover", hex: "1,0" }) }).preview).toBeNull();
+
+    const locked = selectionReducer(selected, { type: "target", hex: "0,1", movable: 3, scope: "g:1:3" });
+    const claim = deriveOrders({ ...base, compact: true, selection: locked });
+    expect(claim.targetHex).toBe("0,1");
+    expect(claim.boardForecast).toMatchObject({ tone: "claim", label: "CLAIM" });
+    expect(deriveOrders({ ...base, canAct: false, selection: locked }).targets.size).toBe(0);
   });
 
   it("keeps the last-move arrowhead clear of every count badge size at every phone scale, in every direction", () => {
@@ -674,6 +727,26 @@ describe("HexClash authoritative strategy game", () => {
     expect(reply.outcome.summary).toMatch(/ claimed /);
     expect(flashKindForMove(reply.state.recentMoves[0]!)).toBe("move");
   }, 20_000);
+
+  it("generates maps where every hex that is not a mountain can be reached on foot", async () => {
+    const { call } = await openLinkHost();
+    for (const seed of [125, 589, 1814, 2101]) {
+      const demo = await call<StartDemoReply>("startDemoMatch", { seed }, "owner");
+      const whole = await call<VisibleBoardState>(
+        "getVisibleState",
+        { gameId: demo.gameId, spectator: true, playerTokens: demo.seats.map((s) => s.playerToken) },
+        "owner",
+      );
+      const sealed = whole.tiles
+        .filter((t) => t.terrain !== "mountain")
+        .filter((t) => {
+          const [first] = findShortestPassablePath(whole.tiles, "-3,0", `${t.q},${t.r}`);
+          return first?.q !== -3 || first.r !== 0;
+        })
+        .map((t) => `${t.q},${t.r}`);
+      expect({ seed, sealed }).toEqual({ seed, sealed: [] });
+    }
+  }, 30_000);
 
   it("forecasts the gold and unit a captured mine pays on the captor's next turn, and the server pays exactly that", async () => {
     const { call } = await openLinkHost();

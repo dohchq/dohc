@@ -510,14 +510,16 @@ export function LogDrawer({
   const [movesOpen, setMovesOpen] = useState(false);
   if (movesOpen && (!open || !replay)) setMovesOpen(false);
   const replayStep = replay?.step ?? null;
+  const replaying = replayStep !== null;
   useEffect(() => {
     const list = listRef.current;
-    if (!open || replayStep === null || !list) return;
-    const reveal = () => activeStepRef.current?.scrollIntoView({ block: "nearest" });
-    reveal();
-    const observer = new ResizeObserver(reveal);
+    if (!open || !replaying || !list) return;
+    const observer = new ResizeObserver(() => activeStepRef.current?.scrollIntoView({ block: "nearest" }));
     observer.observe(list);
     return () => observer.disconnect();
+  }, [open, replaying]);
+  useEffect(() => {
+    if (open && replayStep !== null) activeStepRef.current?.scrollIntoView({ block: "nearest" });
   }, [open, replayStep, movesOpen]);
   return (
     <aside
