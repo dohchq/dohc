@@ -1309,6 +1309,79 @@ describe("Collection automations", () => {
     expect(read).toHaveBeenCalledTimes(reads);
   });
 
+  it("reports each run whose shared update was not accepted once, after History read it too", async () => {
+    const w = await world({
+      automations: {
+        Tasks:
+          "  - id: finish\n    name: Finish\n    when: {field-changed: Status, to: Done}\n    do: [{set: {Note: saved}}]\n",
+      },
+    });
+    const record = w.addRecord("Tasks", "pending", { Status: "Done" });
+    const claim = w.claim("collection:Tasks#finish", record);
+    const draft = {
+      outboxId: "outbox-one",
+      appendKey: "write/Note",
+      nativeHeadSequence: 2,
+      binding: {
+        workspaceId: "workspace",
+        mainVersionId: "main",
+        objectId: "object",
+        lineageClaimId: "a".repeat(64),
+        currentPath: "Tasks/pending.md",
+        selectorPaths: ["Tasks"],
+        restoreFenceGeneration: 0,
+      },
+    };
+    const executor = w.makeExecutor({
+      withRecordWrites: async (_signal, work) =>
+        work({
+          setFields: async () => ({
+            replaced: { Note: null },
+            kept: {},
+            sharedFileUpdates: { Note: draft },
+          }),
+          create: async () => {
+            throw new Error("No added record");
+          },
+        }),
+    });
+    onTestFinished(() => executor.dispose());
+    let state: "pending" | "not-accepted" = "pending";
+    w.engine.sharedFileUpdateStates = async (writes) => writes.map(() => state);
+    await executor.open();
+    expect((await w.settledClaim(claim)).state).toBe("done");
+    const reported: unknown[] = [];
+    const report = async (run: { claimId: string }, refused: readonly unknown[]) => {
+      reported.push({ claimId: run.claimId, refused });
+    };
+    await executor.reportRefusedSharedUpdates(report);
+    expect(reported).toEqual([]);
+    state = "not-accepted";
+    expect(await executor.run(claim.automationId, claim.claimId)).toMatchObject({
+      sharedSettlementNotAccepted: true,
+    });
+    await expect(
+      executor.reportRefusedSharedUpdates(async () => {
+        throw new Error("The relay is away.");
+      }),
+    ).rejects.toThrow("The relay is away.");
+    await executor.reportRefusedSharedUpdates(report);
+    await executor.reportRefusedSharedUpdates(report);
+    expect(reported).toEqual([
+      {
+        claimId: claim.claimId,
+        refused: [
+          expect.objectContaining({
+            field: "Note",
+            before: null,
+            after: "saved",
+            sharedFileUpdate: draft,
+          }),
+        ],
+      },
+    ]);
+  });
+
   it("counts pending reversals once and keeps refused reversals retryable", async () => {
     const definition =
       "  - id: finish\n    name: Finish\n    when: {field-changed: Status, to: Done}\n    do: [{set: {Note: saved}}]\n";

@@ -387,12 +387,10 @@ describe("notice list", () => {
 
   it("refuses client notices that impersonate a server run", async () => {
     const { h } = await relay();
-    const response = await post(
-      h,
-      "owner",
-      notice({ noticeId: "server-automation-failed:forged" }),
-    );
-    expect(response.status).toBe(400);
+    for (const noticeId of ["server-automation-failed:forged", "server-update-refused:forged"]) {
+      const response = await post(h, "owner", notice({ noticeId }));
+      expect(response.status, noticeId).toBe(400);
+    }
     expect((await pull(h, "owner")).notices).toEqual([]);
   });
 

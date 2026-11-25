@@ -784,6 +784,18 @@ const UnfinishedUndosSchema = z.object({
   ),
 });
 
+const SharedWaitingSchema = z.object({
+  version: z.literal(1),
+  runs: z.array(
+    z.object({
+      automationId: z.string().min(1),
+      claimId: z.string().min(1),
+      keySeed: z.string().min(1),
+    }),
+  ),
+});
+export type SharedWaitingRun = z.infer<typeof SharedWaitingSchema>["runs"][number];
+
 const EnabledAutomationsSchema = z.object({
   version: z.literal(1),
   collections: z.array(z.object({ path: z.string().min(1), enabled: z.array(z.string().min(1)) })),
@@ -1092,6 +1104,9 @@ export interface AutomationRunStore {
    * run was last saved, or null when their list cannot be read.
    */
   unfinishedUndos(): Promise<ReadonlySet<string> | null>;
+  /** The runs that saved a field update to a shared file whose outcome their owner has not heard yet. */
+  sharedWaiting(): Promise<SharedWaitingRun[]>;
+  forgetSharedWaiting(run: SharedWaitingRun): Promise<void>;
   readSubscriptions(): Promise<StoredSubscription[]>;
   saveSubscriptions(subscriptions: readonly StoredSubscription[]): Promise<void>;
   /**
@@ -1395,6 +1410,18 @@ export function createAutomationRunStore(
     );
     undos = next;
   };
+  const sharedWaitingFile = async () => join(await base(), "shared-waiting.json");
+  // A list that cannot be read starts again empty.
+  const readSharedWaiting = async () => {
+    const parsed = SharedWaitingSchema.safeParse(await readStoredJson("shared-waiting.json"));
+    return parsed.success ? parsed.data.runs : [];
+  };
+  const sameRun = (left: SharedWaitingRun, right: SharedWaitingRun) =>
+    left.automationId === right.automationId &&
+    left.claimId === right.claimId &&
+    left.keySeed === right.keySeed;
+  const writeSharedWaiting = async (runs: SharedWaitingRun[]) =>
+    writeCurrent(await sharedWaitingFile(), `${JSON.stringify({ version: 1, runs })}\n`);
   const parseRun = (
     text: string | null | undefined,
     name: string,
@@ -1893,7 +1920,30 @@ export function createAutomationRunStore(
       });
     },
     appendEffect(run, applied) {
-      return serial(() => appendLine(run, { kind: "effect", ...applied }));
+      return serial(async () => {
+        // Listed first, so a saved shared update always has its run listed.
+        if (applied.writes.some((write) => write.kind === "field" && write.sharedFileUpdate)) {
+          const listed = {
+            automationId: run.automationId,
+            claimId: run.claimId,
+            keySeed: run.keySeed,
+          };
+          const waiting = await readSharedWaiting();
+          if (!waiting.some((entry) => sameRun(entry, listed)))
+            await writeSharedWaiting([...waiting, listed]);
+        }
+        await appendLine(run, { kind: "effect", ...applied });
+      });
+    },
+    sharedWaiting() {
+      return serial(readSharedWaiting);
+    },
+    forgetSharedWaiting(run) {
+      return serial(async () => {
+        const waiting = await readSharedWaiting();
+        if (waiting.some((entry) => sameRun(entry, run)))
+          await writeSharedWaiting(waiting.filter((entry) => !sameRun(entry, run)));
+      });
     },
     recordCreated(run, created) {
       return serial(() => appendLine(run, { kind: "created", ...created }));
