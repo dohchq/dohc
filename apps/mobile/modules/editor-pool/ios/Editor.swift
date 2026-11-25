@@ -105,7 +105,9 @@ final class Editor: NSObject, WKNavigationDelegate, UIScrollViewDelegate {
     _ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
     decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void
   ) {
-    let own = action.targetFrame?.isMainFrame == true && action.request.url.map { normalized($0).path } == page.path
+    let own =
+      action.targetFrame?.isMainFrame == true
+      && action.request.url.map { $0.isFileURL && normalized($0).path == page.path } == true
     decisionHandler(own ? .allow : .cancel)
   }
 
