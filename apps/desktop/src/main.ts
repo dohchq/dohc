@@ -11643,15 +11643,14 @@ function registerIpcHandlers(): void {
             data: (dataSignal) => datasetDependencies.namedDataForWorkspace(current(), dataSignal),
             edits: async (datasetId, editSignal) => {
               const signal = AbortSignal.any([editSignal ?? operation.signal, operation.signal]);
-              const workspace = current();
-              const data = await datasetDependencies.namedDataForWorkspace(workspace, signal);
+              const data = await datasetDependencies.namedDataForWorkspace(current(), signal);
               const description = await data.describe(datasetId);
               const [address] =
                 (await withEngineAdapter(bound, (adapter) =>
                   addressDatasets(adapter, bound.workspaceId, [description], signal),
                 )) ?? [];
               return (
-                !!address?.datasetPath && personalAppEdits(workspace.shareView, address.datasetPath)
+                !!address?.datasetPath && personalAppEdits(current().shareView, address.datasetPath)
               );
             },
           });
