@@ -5,6 +5,10 @@ export interface EmailMessage {
   to: string;
   subject: string;
   text: string;
+  /** The same message laid out for mail apps that show HTML. */
+  html?: string;
+  /** The person the message comes from. The sender shows as "<name> via dohc" at the configured address. */
+  fromName?: string;
 }
 
 export type SendEmail = (message: EmailMessage) => Promise<void>;
@@ -133,14 +137,33 @@ export function createSmtpSender(
     if (!ADDRESS.test(mailbox(message.to)) || /[\r\n]/.test(message.to)) {
       throw new SmtpDeliveryError("The recipient is not an email address.");
     }
+    const { to, subject, text, html, fromName } = message;
     try {
-      await transport.sendMail({ from: settings.from, ...message });
+      await transport.sendMail({
+        from: sender(settings.from, fromName),
+        to,
+        subject,
+        text,
+        ...(html !== undefined ? { html } : {}),
+      });
     } catch {
       throw new SmtpDeliveryError(
         "Account email could not be delivered. Check the SMTP connection, TLS, and credentials.",
       );
     }
   };
+}
+
+// A bare configured address shows as "dohc". A configured name stays unless the
+// message names its sender. The address never changes, so SPF and DKIM still align.
+function sender(
+  from: string,
+  fromName: string | undefined,
+): string | { name: string; address: string } {
+  const name = fromName?.trim();
+  if (name && !/[\p{C}\p{Zl}\p{Zp}]/u.test(name))
+    return { name: `${name} via dohc`, address: mailbox(from) };
+  return /<[^>]*>\s*$/.test(from) ? from : { name: "dohc", address: mailbox(from) };
 }
 
 export function isLoopback(host: string): boolean {

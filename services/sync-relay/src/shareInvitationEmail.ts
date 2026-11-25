@@ -1,4 +1,5 @@
 import type { SendEmail } from "@dohc/workspace-auth/smtp";
+import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
 import { shareCodeForRelay, shareInvitationMessage } from "./shareInvitationMessage";
 import type { SyncRelayStorage } from "./storage";
 import {
@@ -41,6 +42,7 @@ export function createShareInvitationEmailer(options: {
   nowMs: () => number;
   sendEmail: SendEmail | undefined;
   lookupVerifiedUserEmail: ((userId: string) => Promise<string | null> | string | null) | undefined;
+  lookupUserDisplayName?: LookupUserDisplayName;
   relayPublicOrigin: string | undefined;
   timeoutMs?: number;
 }): (invitation: ShareInvitation) => Promise<ShareInvitationEmailAnswer> {
@@ -55,7 +57,11 @@ export function createShareInvitationEmailer(options: {
       if (answered || performance.now() - startedAt >= timeoutMs) throw new Error("timed out");
     };
     const email = async (): Promise<ShareInvitationEmailAnswer> => {
-      const inviterEmail = await options.lookupVerifiedUserEmail?.(invitation.inviterUserId);
+      // The name lookup has its own short deadline and answers null on failure.
+      const [inviterEmail, inviterName] = await Promise.all([
+        options.lookupVerifiedUserEmail?.(invitation.inviterUserId),
+        accountDisplayName(options.lookupUserDisplayName, invitation.inviterUserId),
+      ]);
       if (!inviterEmail) return { invitationEmail: "unavailable" };
       const recipientEmail =
         "recipientEmail" in invitation
@@ -99,6 +105,7 @@ export function createShareInvitationEmailer(options: {
         const message = shareInvitationMessage({
           recipientEmail,
           inviterEmail,
+          inviterName,
           subjectName: invitation.subjectName,
           access: granted.access,
           browserInvitationUrl: granted.browserInvitationUrl,

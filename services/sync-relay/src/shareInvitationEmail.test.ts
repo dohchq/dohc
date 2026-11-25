@@ -82,7 +82,9 @@ async function fixture(overrides: HandlerOverrides = {}) {
 }
 
 it("emails the typed address the same way whether or not it has an account", async () => {
-  const { storage, sent, invite } = await fixture();
+  const { storage, sent, invite } = await fixture({
+    lookupUserDisplayName: (userId) => (userId === "owner" ? "Sam Rivera" : null),
+  });
 
   const account = await invite({ recipientEmail: "friend@dohc.test" });
   const pending = await invite({ recipientEmail: "pending@example.test" });
@@ -104,30 +106,31 @@ it("emails the typed address the same way whether or not it has an account", asy
   expect(account).not.toHaveProperty("recipientUserId");
 
   expect(sent).toHaveLength(2);
-  expect(sent[0]).toEqual({
+  const { html, ...first } = sent[0]!;
+  expect(first).toEqual({
     to: "friend@dohc.test",
-    subject: 'owner@dohc.test shared "Trip plan" with you',
+    subject: 'Sam Rivera shared "Trip plan" with you',
+    fromName: "Sam Rivera",
     text: [
-      'owner@dohc.test shared "Trip plan" with you on dohc. You can edit it.',
+      'Sam Rivera (owner@dohc.test) shared "Trip plan" with you. You can edit it.',
       "",
-      "Open it in your browser:",
+      "Open in browser:",
       `${SHARE_WEB_ORIGIN}/s/edit/grant-0`,
+      "Sign in or create an account with friend@dohc.test.",
       "",
-      "Open it in dohc:",
-      "1. Sign in to dohc as friend@dohc.test.",
-      "2. Choose Sharing, then Shared with me.",
-      "",
-      "Or choose Open a share and paste this code:",
+      "Using the dohc app? Sign in with friend@dohc.test. Choose Sharing, then Shared with me. Or choose Open a share and paste this code:",
       `dohc-share:share-0:${RELAY_ORIGIN}`,
       "",
-      "You got this email because owner@dohc.test invited friend@dohc.test. If you do not know them, you can ignore it.",
+      "You got this because Sam Rivera (owner@dohc.test) invited friend@dohc.test. If you do not know them, ignore this email. Nothing happens if you do.",
       "",
     ].join("\n"),
   });
-  expect(sent[1]).toEqual({
+  expect(html).toContain(`href="${SHARE_WEB_ORIGIN}/s/edit/grant-0"`);
+  expect(sent[1]).toMatchObject({
     to: "pending@example.test",
-    subject: sent[0]!.subject,
-    text: sent[0]!.text
+    subject: first.subject,
+    fromName: "Sam Rivera",
+    text: first.text
       .replaceAll("friend@dohc.test", "pending@example.test")
       .replace("grant-0", "grant-1")
       .replace("share-0", "share-1"),
@@ -146,16 +149,15 @@ it("leaves the browser link and the code out when the relay can give neither", a
   expect(reply).toMatchObject({ invitationEmail: "sent" });
   expect(sent[0]!.text).toBe(
     [
-      'owner@dohc.test shared "Trip plan" with you on dohc. You can view it.',
+      'owner@dohc.test shared "Trip plan" with you. You can view it.',
       "",
-      "Open it in dohc:",
-      "1. Sign in to dohc as friend@dohc.test.",
-      "2. Choose Sharing, then Shared with me.",
+      "Open in the dohc app: Sign in with friend@dohc.test. Choose Sharing, then Shared with me.",
       "",
-      "You got this email because owner@dohc.test invited friend@dohc.test. If you do not know them, you can ignore it.",
+      "You got this because owner@dohc.test invited friend@dohc.test. If you do not know them, ignore this email. Nothing happens if you do.",
       "",
     ].join("\n"),
   );
+  expect(sent[0]).not.toHaveProperty("fromName");
 });
 
 it("sends nothing and counts nothing for an inviter whose own address is not verified", async () => {

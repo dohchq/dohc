@@ -222,7 +222,7 @@ describeWithPostgres("closed sign-up", () => {
     newPassword: string,
   ): Promise<void> {
     const message = lastEmailTo(email);
-    expect(message.subject).toBe("Choose your dohc password");
+    expect(message.subject).toBe("Set your dohc password");
     const link = linkIn(message);
     expect(link.pathname).toBe("/account/reset-password");
     await closed.api.resetPassword({

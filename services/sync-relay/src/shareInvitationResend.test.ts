@@ -143,7 +143,7 @@ it("names the access the person has now", async () => {
   expect(await f.resend("grant-1", "share-1")).toEqual({ ok: true, invitationEmail: "sent" });
 
   expect(f.sent.at(-1)!.text).toContain("You can view it.");
-  expect(f.sent.at(-1)!.text).not.toContain("Open it in your browser:");
+  expect(f.sent.at(-1)!.text).not.toContain("Open in browser:");
 });
 
 it("sends one email a minute to one person, counting from their invite", async () => {
@@ -449,7 +449,44 @@ it("names the access the person has when the email goes, after a change made whi
 
   expect(await json(await resending)).toEqual({ ok: true, invitationEmail: "sent" });
   expect(f.sent.at(-1)!.text).toContain("You can view it.");
-  expect(f.sent.at(-1)!.text).not.toContain("Open it in your browser:");
+  expect(f.sent.at(-1)!.text).not.toContain("Open in browser:");
+});
+
+it("sends nothing and counts nothing when the person is removed while the inviter's name is read", async () => {
+  let held = false;
+  let waiting: () => void = () => undefined;
+  const reading = new Promise<void>((resolve) => {
+    waiting = resolve;
+  });
+  let answerName: (name: string) => void = () => undefined;
+  const f = await invited({
+    lookupUserDisplayName: (userId) => {
+      if (!held || userId !== "owner") return null;
+      waiting();
+      return new Promise<string>((resolve) => {
+        answerName = resolve;
+      });
+    },
+  });
+  const counted = attempts(f.storage);
+
+  held = true;
+  const resending = f.resendTo("owner", "grant-0", "share-0");
+  await reading;
+  held = false;
+  const removed = await f.handler(
+    request(
+      "owner",
+      "/sync/shares/share-0/grants/grant-0/revoke",
+      jsonBody({ workspaceId: "workspace" }),
+    ),
+  );
+  expect(removed.status).toBe(200);
+  answerName("Sam Rivera");
+
+  expect((await resending).status).toBe(404);
+  expect(f.sent).toHaveLength(2);
+  expect(attempts(f.storage)).toBe(counted);
 });
 
 it("keeps the minute once a send began, whether the deadline passed or the mail server refused", async () => {
@@ -591,5 +628,5 @@ it("emails a person who joined through a link once the owner has made them indep
     to: "holder@dohc.test",
     subject: 'owner@dohc.test shared "Trip plan" with you',
   });
-  expect(f.sent[2]!.text).toContain("1. Sign in to dohc as holder@dohc.test.");
+  expect(f.sent[2]!.text).toContain("Sign in with holder@dohc.test.");
 });

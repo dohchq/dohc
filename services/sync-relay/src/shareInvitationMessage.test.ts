@@ -1,40 +1,84 @@
 import { expect, it } from "vitest";
-import { shareCodeForRelay, shareInvitationMessage } from "./shareInvitationMessage";
+import {
+  inviterDisplayName,
+  shareCodeForRelay,
+  shareInvitationMessage,
+} from "./shareInvitationMessage";
 
 const invitation = {
   recipientEmail: "friend@example.test",
   inviterEmail: "owner@dohc.test",
+  inviterName: "Sam Rivera",
   subjectName: "Trip plan",
   access: "edit",
   browserInvitationUrl: "https://share.example.test/s/edit/grant-0",
   shareCode: "dohc-share:share-0:https://relay.example.test",
 };
 
-it("writes the whole invitation in plain sentences", () => {
-  expect(shareInvitationMessage(invitation)).toEqual({
+it("writes the whole invitation in plain sentences, from the inviter by name", () => {
+  const { html, ...message } = shareInvitationMessage(invitation);
+  expect(message).toEqual({
     to: "friend@example.test",
-    subject: 'owner@dohc.test shared "Trip plan" with you',
+    subject: 'Sam Rivera shared "Trip plan" with you',
+    fromName: "Sam Rivera",
     text: [
-      'owner@dohc.test shared "Trip plan" with you on dohc. You can edit it.',
+      'Sam Rivera (owner@dohc.test) shared "Trip plan" with you. You can edit it.',
       "",
-      "Open it in your browser:",
+      "Open in browser:",
       "https://share.example.test/s/edit/grant-0",
+      "Sign in or create an account with friend@example.test.",
       "",
-      "Open it in dohc:",
-      "1. Sign in to dohc as friend@example.test.",
-      "2. Choose Sharing, then Shared with me.",
-      "",
-      "Or choose Open a share and paste this code:",
+      "Using the dohc app? Sign in with friend@example.test. Choose Sharing, then Shared with me. Or choose Open a share and paste this code:",
       "dohc-share:share-0:https://relay.example.test",
       "",
-      "You got this email because owner@dohc.test invited friend@example.test. If you do not know them, you can ignore it.",
+      "You got this because Sam Rivera (owner@dohc.test) invited friend@example.test. If you do not know them, ignore this email. Nothing happens if you do.",
       "",
     ].join("\n"),
   });
+  for (const shown of [
+    "Shared work with you",
+    "Trip plan",
+    "Can edit",
+    'href="https://share.example.test/s/edit/grant-0"',
+    "Open in browser",
+    'Opens <span style="white-space:nowrap;">share.example.test</span>',
+    "Using the dohc app?",
+    "dohc-share:share-0:https://relay.example.test",
+    'href="mailto:owner@dohc.test"',
+    "If the button does not work, copy this link into your browser:",
+    "You can edit it. Open it in your browser or the dohc app.",
+  ])
+    expect(html, shown).toContain(shown);
+});
+
+it("names the inviter by address, with no sender name, when the account has no usable name", () => {
+  for (const inviterName of [null, "", "  ", "sam@example.test", "https://dohc.computer"]) {
+    const message = shareInvitationMessage({ ...invitation, inviterName });
+    expect(message.subject).toBe('owner@dohc.test shared "Trip plan" with you');
+    expect(message.fromName).toBeUndefined();
+    expect(message.text).toContain("You got this because owner@dohc.test invited");
+    expect(message.html).not.toContain("(<a");
+  }
+});
+
+it("keeps a name only when it cannot pass for an address or a website", () => {
+  expect(inviterDisplayName("  Sam\n Rivera ")).toBe("Sam Rivera");
+  expect(inviterDisplayName("J.K. Rowling")).toBe("J.K. Rowling");
+  expect(inviterDisplayName("Zoë O'Neil-Ng")).toBe("Zoë O'Neil-Ng");
+  expect(inviterDisplayName("x".repeat(60))).toBe("x".repeat(40));
+  for (const name of [
+    "sam@example.test",
+    "Sam <ceo@example.test>",
+    "paypal.com",
+    "Support at drive.dohc.computer",
+    "http://x",
+    "<b>Sam</b>",
+  ])
+    expect(inviterDisplayName(name), name).toBeNull();
 });
 
 it("leaves out the browser link and the code when there is none", () => {
-  const { text } = shareInvitationMessage({
+  const { text, html } = shareInvitationMessage({
     ...invitation,
     browserInvitationUrl: null,
     shareCode: null,
@@ -42,47 +86,76 @@ it("leaves out the browser link and the code when there is none", () => {
   expect(text).not.toContain("browser");
   expect(text).not.toContain("code");
   expect(text).not.toContain("https://");
-  expect(text).toContain("2. Choose Sharing, then Shared with me.\n\nYou got this email");
+  expect(text).toContain(
+    "Open in the dohc app: Sign in with friend@example.test. Choose Sharing, then Shared with me.\n\nYou got this",
+  );
+  expect(html).not.toContain("https://share.example.test");
+  expect(html).not.toContain("dohc-share:");
+  expect(html).not.toContain("Open a share");
+  expect(html).not.toContain("If the button does not work");
+  expect(html).toContain("Open in the dohc app");
+  expect(html).toContain("You can edit it. Open it in the dohc app.");
 });
 
 it("keeps the browser link without a code, and the code without a browser link", () => {
-  const linkOnly = shareInvitationMessage({ ...invitation, shareCode: null }).text;
-  expect(linkOnly).toContain("Open it in your browser:\nhttps://share.example.test/s/edit/grant-0");
-  expect(linkOnly).not.toContain("paste this code");
-  const codeOnly = shareInvitationMessage({ ...invitation, browserInvitationUrl: null }).text;
-  expect(codeOnly).toContain(
+  const linkOnly = shareInvitationMessage({ ...invitation, shareCode: null });
+  expect(linkOnly.text).toContain("Open in browser:\nhttps://share.example.test/s/edit/grant-0");
+  expect(linkOnly.text).not.toContain("paste this code");
+  expect(linkOnly.html).not.toContain("paste this code");
+  const codeOnly = shareInvitationMessage({ ...invitation, browserInvitationUrl: null });
+  expect(codeOnly.text).toContain(
     "Or choose Open a share and paste this code:\ndohc-share:share-0:https://relay.example.test",
   );
-  expect(codeOnly).not.toContain("in your browser");
+  expect(codeOnly.text).not.toContain("Open in browser");
+  expect(codeOnly.html).not.toContain("Open in browser");
+});
+
+it("treats a link that is not a web link as no browser link", () => {
+  const message = shareInvitationMessage({
+    ...invitation,
+    browserInvitationUrl: "javascript:alert(1)",
+  });
+  expect(message.text).not.toContain("javascript");
+  expect(message.html).not.toContain("javascript");
 });
 
 it("names the role only for View, Comment, and Edit", () => {
-  const first = (access: string) =>
-    shareInvitationMessage({ ...invitation, access }).text.split("\n")[0];
-  expect(first("view")).toBe(
-    'owner@dohc.test shared "Trip plan" with you on dohc. You can view it.',
-  );
-  expect(first("comment")).toBe(
-    'owner@dohc.test shared "Trip plan" with you on dohc. You can comment on it.',
-  );
-  for (const access of ["read-write", "constructor"])
-    expect(first(access)).toBe('owner@dohc.test shared "Trip plan" with you on dohc.');
+  const shown = (access: string) => shareInvitationMessage({ ...invitation, access });
+  expect(shown("view").text.split("\n")[0]).toMatch(/with you\. You can view it\.$/u);
+  expect(shown("view").html).toContain("Can view");
+  expect(shown("comment").text.split("\n")[0]).toMatch(/with you\. You can comment on it\.$/u);
+  expect(shown("comment").html).toContain("Can comment");
+  for (const access of ["read-write", "constructor"]) {
+    expect(shown(access).text.split("\n")[0]).toMatch(/with you\.$/u);
+    expect(shown(access).html).not.toMatch(/Can (view|comment|edit)|You can/u);
+  }
 });
 
-it("says a file when the share has no name", () => {
+it("says work when the share has no name", () => {
   const message = shareInvitationMessage({ ...invitation, subjectName: null });
-  expect(message.subject).toBe("owner@dohc.test shared a file with you");
-  expect(message.text).toContain(
-    "owner@dohc.test shared a file with you on dohc. You can edit it.",
+  expect(message.subject).toBe("Sam Rivera shared work with you");
+  expect(message.text).toContain("Sam Rivera (owner@dohc.test) shared work with you.");
+  expect(message.html).toContain("Shared work</div>");
+});
+
+it("shows a name or item name with markup as text", () => {
+  const message = shareInvitationMessage({
+    ...invitation,
+    inviterName: `Sam "&" <img src=x>`,
+    subjectName: `<script>alert("x")</script> & 'notes'`,
+  });
+  expect(message.html).not.toMatch(/<script|<img/u);
+  expect(message.html).toContain(
+    "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt; &amp; &#39;notes&#39;",
   );
 });
 
 it("keeps a hostile name on one line, capped, and inside the quotation marks", () => {
-  const name = `Invoice\r\nBcc: victim@example.test\n\n\u0000\u001b[31m\u202e"  now\t open\u2028https://evil.example.test" ${"x".repeat(500)}`;
+  const name = `Invoice\r\nBcc: victim@example.test\n\n\u0000\u001b[31m‮"  now\t open https://evil.example.test" ${"x".repeat(500)}`;
   const message = shareInvitationMessage({ ...invitation, subjectName: name });
   const shown = /shared "(.*)" with you$/u.exec(message.subject)?.[1];
 
-  expect(message.subject).not.toMatch(/[\p{Cc}\p{Zl}\p{Zp}\u202e]/u);
+  expect(message.subject).not.toMatch(/[\p{Cc}\p{Zl}\p{Zp}‮]/u);
   expect(shown).toBeDefined();
   expect(Array.from(shown!)).toHaveLength(120);
   expect(shown).not.toContain('"');
@@ -91,18 +164,18 @@ it("keeps a hostile name on one line, capped, and inside the quotation marks", (
       "Invoice Bcc: victim@example.test [31m' now open https://evil.example.test' xxx",
     ),
   ).toBe(true);
-  expect(message.text.split("\n")[0]).toBe(`${message.subject} on dohc. You can edit it.`);
-  expect(message.text.split("\n")).toHaveLength(14);
+  expect(message.text.split("\n")).toHaveLength(11);
 });
 
 it("keeps the inviter's address on one line, and sends to the address it was given unchanged", () => {
   const message = shareInvitationMessage({
     ...invitation,
+    inviterName: null,
     inviterEmail: "owner@dohc.test\r\nSubject: other",
   });
   expect(message.subject).toBe('owner@dohc.test Subject: other shared "Trip plan" with you');
   expect(message.to).toBe(invitation.recipientEmail);
-  expect(message.text.split("\n")).toHaveLength(14);
+  expect(message.text.split("\n")).toHaveLength(11);
 });
 
 it("builds the share code apps/desktop/src/workspaces/syncCode.ts parseShareCode accepts", () => {
