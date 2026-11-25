@@ -469,13 +469,21 @@
     execute(ctx, "UPDATE fiscal_periods SET status='locked',locked_at_ms=? WHERE id=?", [ctx.nowMs, all[index].id]);
     return { id: all[index].id, status: "locked" };
   }
+  function firstQueue(ctx, where, params) {
+    const queues = ctx.db.query(`${NETS} SELECT coalesce(sum(s='new' AND NOT m),0) AS review,coalesce(sum(m),0) AS matched
+      FROM (SELECT b.status AS s,b.status='new' AND ${MATCHED} AS m FROM bank_imports b WHERE ${UNDECIDED} AND ${where})`, params)[0];
+    return queues.review ? "new" : queues.matched ? "matched" : "duplicate";
+  }
   function listPeriods(ctx) {
     owner(ctx);
-    return ctx.db.query(`SELECT p.id,p.start_date AS startDate,p.end_date AS endDate,p.status,
+    const periods = ctx.db.query(`SELECT p.id,p.start_date AS startDate,p.end_date AS endDate,p.status,
       (SELECT count(*) FROM journal_entries e WHERE e.entry_date BETWEEN p.start_date AND p.end_date) AS entries,
       (SELECT count(*) FROM bank_imports b WHERE b.status='new' AND b.posted_on<=p.end_date) AS waiting,
       (SELECT count(*) FROM bank_imports b WHERE b.status='duplicate' AND b.confirmed=0 AND b.posted_on<=p.end_date) AS duplicates
       FROM fiscal_periods p ORDER BY p.start_date`);
+    const next = periods.find((period) => period.status === "open");
+    return periods.map((period) => ({ ...period,
+      reviewQueue: period === next && (period.waiting || period.duplicates) ? firstQueue(ctx, "b.posted_on<=?", [period.endDate]) : null }));
   }
   const ENTRY_VIEWS = ["all", "receipt", "missing", "reversed"];
   const CLIENT = "coalesce(i.buyer_name,c.name)";
@@ -803,11 +811,11 @@
     const first = ctx.db.query(`SELECT ${firstRow("?1", "?2")} AS day`, [bankAccountId, code])[0].day;
     const clearedCents = ctx.db.query(`SELECT coalesce(sum(l.debit_cents-l.credit_cents),0) AS n ${CLEARED_LINES}
       WHERE l.account_id=?1 AND e.currency=?2 AND ${clearedBy("?3", "?4")}`, [bankAccountId, code, asOf, first])[0].n;
-    const rows = ctx.db.query(`WITH o AS (SELECT e.id,e.number,e.entry_date AS date,e.memo,e.reverses_entry_id AS rev,
+    const rows = ctx.db.query(`WITH o AS (SELECT e.id,e.number,e.entry_date AS date,substr(e.memo,1,${PREVIEW}) AS memo,e.reverses_entry_id AS rev,
         sum(l.debit_cents-l.credit_cents) AS amountCents,c.posted_on AS clearedOn ${CLEARED_LINES}
         WHERE l.account_id=?1 AND e.currency=?2 AND (e.entry_date<=?3)<>(${clearedBy("?3", "?4")}) GROUP BY e.id HAVING amountCents<>0)
       SELECT x.id,x.number,x.date,x.memo,x.amountCents,x.clearedOn,count(*) OVER () AS total FROM o x
-      WHERE NOT EXISTS (SELECT 1 FROM o p WHERE p.rev=x.id OR p.id=x.rev) ORDER BY x.date,x.number LIMIT ${MAX_OUTSTANDING}`,
+      WHERE NOT EXISTS (SELECT 1 FROM o p WHERE (p.rev=x.id OR p.id=x.rev) AND (p.date<=?3)=(x.date<=?3)) ORDER BY x.date,x.number LIMIT ${MAX_OUTSTANDING}`,
     [bankAccountId, code, asOf, first]);
     const firstWaiting = ctx.db.query(`SELECT min(b.posted_on) AS day FROM bank_imports b WHERE b.bank_account_id=? AND b.currency=? AND ${UNDECIDED}`,
       [bankAccountId, code])[0].day;
@@ -831,10 +839,7 @@
     const code = input.currency === undefined ? currencies[0] || reportCurrency(ctx, {}) : currency(ctx, input.currency);
     if (currencies.length && !currencies.includes(code)) invalid(ctx, `${bank.name} holds ${currencies.join(", ")}. Reconcile one of those.`);
     const waiting = waitingRows(ctx, bank.id, code, statementDate);
-    const queues = waiting ? ctx.db.query(`${NETS} SELECT coalesce(sum(s='new' AND NOT m),0) AS review,coalesce(sum(m),0) AS matched
-      FROM (SELECT b.status AS s,b.status='new' AND ${MATCHED} AS m FROM bank_imports b
-        WHERE b.bank_account_id=? AND b.currency=? AND ${UNDECIDED} AND b.posted_on<=?)`, [bank.id, code, statementDate])[0] : null;
-    const reviewQueue = !queues ? null : queues.review ? "new" : queues.matched ? "matched" : "duplicate";
+    const reviewQueue = waiting ? firstQueue(ctx, "b.bank_account_id=? AND b.currency=? AND b.posted_on<=?", [bank.id, code, statementDate]) : null;
     const existing = ctx.db.query("SELECT id,balance_cents AS balanceCents FROM reconciliations WHERE bank_account_id=? AND currency=? AND statement_date=?",
       [bank.id, code, statementDate])[0] || null;
     return { bank, statementDate, code, currencies, waiting, reviewQueue, existing, booksCents: bookBalance(ctx, bank.id, code, statementDate),

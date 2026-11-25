@@ -225,6 +225,7 @@ WHEN (SELECT status FROM invoices WHERE id = NEW.invoice_id) IS NOT 'issued'
   OR (SELECT e.source || ':' || e.source_id || ':' || e.currency || ':' || e.entry_date || ':' || (SELECT sum(l.credit_cents - l.debit_cents)
       FROM journal_lines l JOIN accounts a ON a.id = l.account_id WHERE l.entry_id = e.id AND a.role = 'receivable') FROM journal_entries e WHERE e.id = NEW.entry_id)
     IS NOT 'payment:' || NEW.invoice_id || ':' || (SELECT currency FROM invoices WHERE id = NEW.invoice_id) || ':' || NEW.paid_on || ':' || NEW.amount_cents
+  OR EXISTS (SELECT 1 FROM journal_entries r WHERE r.reverses_entry_id = NEW.entry_id)
 BEGIN SELECT RAISE(ABORT, 'overpaid: A payment is a payment entry that credits receivables by its amount, to an issued invoice, and no more than what is still due.'); END;
 CREATE TRIGGER invoice_payments_paid AFTER INSERT ON invoice_payments
 BEGIN

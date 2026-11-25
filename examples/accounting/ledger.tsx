@@ -347,10 +347,10 @@ export function Register() {
               <span className="b-muted">
                 {(page * PAGE + 1).toLocaleString()}–{(page * PAGE + rows.length).toLocaleString()} of {current.total.toLocaleString()}
               </span>
-              <button type="button" className="b-icon-btn" aria-label="Previous page" disabled={page === 0} onClick={() => setPage(page - 1)}>
+              <button type="button" className="b-icon-btn" aria-label="Previous page" disabled={page === 0} onClick={() => (setPage(page - 1), setCursor(0), setKeyed(false))}>
                 <ChevronLeft size={16} aria-hidden />
               </button>
-              <button type="button" className="b-icon-btn" aria-label="Next page" disabled={current.nextOffset === null} onClick={() => setPage(page + 1)}>
+              <button type="button" className="b-icon-btn" aria-label="Next page" disabled={current.nextOffset === null} onClick={() => (setPage(page + 1), setCursor(0), setKeyed(false))}>
                 <ChevronRight size={16} aria-hidden />
               </button>
             </div>

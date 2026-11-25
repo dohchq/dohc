@@ -12,6 +12,7 @@ interface Period {
   entries: number;
   waiting: number;
   duplicates: number;
+  reviewQueue: "new" | "matched" | "duplicate" | null;
 }
 
 const TYPES = Object.keys(TYPE_LABEL) as AccountType[];
@@ -338,9 +339,9 @@ export function Periods() {
                       ) : null}
                     </p>
                     {firstOpen.waiting || firstOpen.duplicates ? (
-                      <button type="button" className="b-btn" onClick={() => go(firstOpen.waiting ? { view: "bank" } : { view: "bank", show: "duplicate" })}>
+                      <button type="button" className="b-btn" onClick={() => go({ view: "bank", show: firstOpen.reviewQueue ?? "new" })}>
                         <Landmark size={14} aria-hidden />
-                        {firstOpen.waiting ? "Review bank rows" : "Check duplicates"}
+                        {firstOpen.reviewQueue === "duplicate" ? "Check duplicates" : firstOpen.reviewQueue === "matched" ? "Review suggestions" : "Review bank rows"}
                       </button>
                     ) : (
                       <button type="button" className="b-btn" disabled={firstOpen.endDate >= now} onClick={() => setConfirming(firstOpen.id)}>

@@ -138,7 +138,11 @@ describe("bank row decisions", () => {
 
   it("pays the invoice the operator chose over the suggested one", () => {
     const other = { ...invoice, id: "inv-2", number: "INV-0003", balanceCents: 180_000 };
-    const suggested = row({ match: invoice, payables: [invoice, other] });
+    const suggested = row({
+      match: invoice,
+      payables: [invoice, other],
+      suggestedAccountId: "4000",
+    });
     expect(decide(suggested).invoice?.id).toBe("inv-1");
     const chosen = after(suggested, {
       invoiceId: "inv-2",
@@ -158,9 +162,9 @@ describe("bank row decisions", () => {
       override: false,
       none: true,
     });
-    expect(decide(paidElsewhere, stored)).toMatchObject({
-      invoice: undefined,
-      matchesOnEnter: false,
-    });
+    const gone = decide(paidElsewhere, stored);
+    expect(gone).toMatchObject({ invoice: undefined, matchesOnEnter: false });
+    expect(typeof gone.pick).toBe("string");
+    expect(enterLabel(paidElsewhere, gone)).toBe("choose");
   });
 });

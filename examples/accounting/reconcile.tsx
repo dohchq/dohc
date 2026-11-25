@@ -91,12 +91,15 @@ export function ReconcileSheet({
     const id = check.data?.reconciliationId;
     const balanceCents = check.data?.reconciledCents;
     if (!id || balanceCents === null || balanceCents === undefined) return;
+    const holds = balanceCents === check.data?.clearedCents && !check.data.waiting;
     void run("removeReconciliation", { id }, {
       failed: "Could not remove the reconciliation",
       after: () =>
         toast({
           message: `Removed the reconciliation on ${shortDate(asOf, true)}`,
-          undo: () => void run("reconcileBank", { bankAccountId, date: asOf, currency, balanceCents }, { done: "Reconciled again", failed: "Could not reconcile again" }),
+          ...(holds
+            ? { undo: () => void run("reconcileBank", { bankAccountId, date: asOf, currency, balanceCents }, { done: "Reconciled again", failed: "Could not reconcile again" }) }
+            : {}),
         }),
     });
   };

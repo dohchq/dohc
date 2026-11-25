@@ -1176,7 +1176,7 @@ describe("accounting example on the real dataset host", () => {
     });
     expect(
       (await f.result("listPeriods", {})).find((row: any) => row.id === "2026-01"),
-    ).toMatchObject({ waiting: 0, duplicates: 1 });
+    ).toMatchObject({ waiting: 0, duplicates: 1, reviewQueue: "duplicate" });
     const duplicatesBefore = (await f.result("overview", { today: "2026-04-30" }))
       .duplicateBankRows;
     expect(
@@ -1492,8 +1492,8 @@ describe("accounting example on the real dataset host", () => {
       refusal("unreviewed"),
     );
     expect(
-      (await f.result("listPeriods", {})).find((period: any) => period.id === "2026-05").waiting,
-    ).toBe(2);
+      (await f.result("listPeriods", {})).find((period: any) => period.id === "2026-05"),
+    ).toMatchObject({ waiting: 2, reviewQueue: "new" });
     await f.result("stageBankRows", {
       importId: "import-euro",
       bankAccountId: "1010",
@@ -2214,6 +2214,91 @@ describe("accounting example on the real dataset host", () => {
     expect(page.nextOffset).toBe(page.rows.length);
   });
 
+  it("bounds outstanding memo previews within the query limit", async () => {
+    const f = await books();
+    await f.result("stageBankRows", {
+      importId: "import-first",
+      bankAccountId: "1000",
+      currency: "USD",
+      firstLine: 1,
+      rows: [["2026-01-02", "Opening", "1.00"]],
+    });
+    await f.result("postJournalEntries", {
+      entries: Array.from({ length: 200 }, (_, index) => ({
+        ...entry("2026-01-10", [
+          ["1000", index + 200, 0],
+          ["4000", 0, index + 200],
+        ]),
+        memo: "記".repeat(500),
+      })),
+    });
+    const status = await f.result("reconcileStatus", { bankAccountId: "1000", date: "2026-01-31" });
+    expect(status.outstandingCount).toBe(200);
+    expect(status.outstanding[0].memo).toHaveLength(120);
+  });
+
+  it("lists an entry and its reversal that fall on opposite sides of the statement date", async () => {
+    const f = await books();
+    const deposit = await f.result(
+      "postJournalEntry",
+      entry("2026-01-10", [
+        ["1000", 10_000, 0],
+        ["4000", 0, 10_000],
+      ]),
+    );
+    await f.result("stageBankRows", {
+      importId: "import-deposit",
+      bankAccountId: "1000",
+      currency: "USD",
+      firstLine: 1,
+      rows: [["2026-02-05", "Client deposit", "100.00"]],
+    });
+    const [cleared] = (await unreviewed(f)) as any[];
+    await f.result("linkBankRow", { id: cleared.id, entryId: deposit.id });
+    const reversal = await f.result("reverseJournalEntry", {
+      entryId: deposit.id,
+      date: "2026-02-06",
+    });
+    await f.result("stageBankRows", {
+      importId: "import-return",
+      bankAccountId: "1000",
+      currency: "USD",
+      firstLine: 1,
+      rows: [["2026-01-30", "Returned deposit", "-100.00"]],
+    });
+    const returned = ((await unreviewed(f)) as any[]).find(
+      (row) => row.description === "Returned deposit",
+    );
+    await f.result("linkBankRow", { id: returned.id, entryId: reversal.id });
+    const status = await f.result("reconcileStatus", { bankAccountId: "1000", date: "2026-01-31" });
+    expect(status.booksCents - status.clearedCents).toBe(20_000);
+    expect(status.outstanding.map((row: any) => row.id)).toEqual([deposit.id, reversal.id]);
+    expect(status.outstandingCount).toBe(2);
+    await f.result(
+      "postJournalEntry",
+      entry(
+        "2026-01-20",
+        [
+          ["1000", 5_000, 0],
+          ["4000", 0, 5_000],
+        ],
+        { memo: "Northwind retainer" },
+      ),
+    );
+    await f.result("stageBankRows", {
+      importId: "import-suggested",
+      bankAccountId: "1000",
+      currency: "USD",
+      firstLine: 1,
+      rows: [["2026-01-20", "NORTHWIND RETAINER", "50.00"]],
+    });
+    expect((await f.result("listBankRows", { status: "matched" })).rows).toHaveLength(1);
+    expect((await f.result("listPeriods"))[0]).toMatchObject({
+      id: "2026-01",
+      reviewQueue: "matched",
+    });
+  });
+
   it("undoes a full page of posted bank rows in one reversal", async () => {
     const f = await books();
     await f.result("stageBankRows", {
@@ -2594,7 +2679,9 @@ describe("accounting example on the real dataset host", () => {
       "overview",
       "receiptAccess",
     ])
-      await expect(f.call(name, {}, "accountant")).rejects.toThrow();
+      await expect(f.call(name, {}, "accountant")).rejects.toMatchObject({
+        code: "not_authorized",
+      });
     await expect(
       f.call("trialBalance", { asOf: "2026-12-31" }, "stranger", null),
     ).rejects.toThrow();
@@ -2766,6 +2853,16 @@ describe("accounting schema without the operations", () => {
       paid_on: "2026-01-12",
     });
     expect(() => db.exec("DELETE FROM invoice_payments WHERE entry_id='e2'")).toThrow(/posted/);
+    db.exec("BEGIN");
+    db.exec(
+      "INSERT INTO journal_lines(id,entry_id,line_no,account_id,debit_cents,credit_cents) VALUES('e6-1','e6',1,'1100',40,0),('e6-2','e6',2,'6000',0,40)",
+    );
+    db.exec(
+      "INSERT INTO journal_entries(id,number,entry_date,currency,memo,source,source_id,total_cents,created_at_ms,reverses_entry_id) VALUES('e6',6,'2026-01-13','USD','','reversal','e4',40,0,'e4')",
+    );
+    db.exec("COMMIT");
+    db.exec("DELETE FROM invoice_payments WHERE entry_id='e4'");
+    expect(() => pay("e4", 40, "2026-01-12")).toThrow(/overpaid/);
     expect(() => db.exec("UPDATE invoice_payments SET amount_cents=1")).toThrow(/posted/);
     expect(() => db.exec("UPDATE invoices SET seller_name='Other' WHERE id='i'")).toThrow(
       /invoice_issued/,

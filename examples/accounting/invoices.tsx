@@ -596,12 +596,16 @@ function InvoiceEditor({ invoice, onClose }: { invoice?: Invoice; onClose: (id?:
   const income = accounts.find((account) => account.type === "income" && !account.archived)?.id ?? "";
   const [pickedClient, setClientId] = useState(invoice?.clientId ?? "");
   const [newClient, setNewClient] = useState({ name: "", email: "", address: "" });
+  const typeClient = (patch: Partial<typeof newClient>) => {
+    setNewClient((typed) => ({ ...typed, ...patch }));
+    setClientId((picked) => picked || "new");
+  };
   const [issueDate, setIssueDate] = useState(invoice?.issueDate ?? now);
   const [dueDate, setDueDate] = useState(invoice?.dueDate ?? plus30);
   const [currency, setCurrency] = useState(invoice?.currency ?? overview?.currency ?? "USD");
   const [taxRate, setTaxRate] = useState(invoice ? String(invoice.taxRateBp / 100) : "0");
   const [notes, setNotes] = useState(invoice?.notes ?? "");
-  const nextKey = useRef(100);
+  const nextKey = useRef((invoice?.lines.length ?? 1) + 1);
   const [lines, setLines] = useState<LineDraft[]>(
     invoice?.lines.map((line, index) => ({
       key: index + 1,
@@ -787,15 +791,15 @@ function InvoiceEditor({ invoice, onClose }: { invoice?: Invoice; onClose: (id?:
             <div className="b-form-grid">
               <label className="b-field">
                 <span className="b-field-label">Client name</span>
-                <input className="b-input" value={newClient.name} maxLength={150} onChange={(event) => setNewClient({ ...newClient, name: event.target.value })} />
+                <input className="b-input" value={newClient.name} maxLength={150} onChange={(event) => typeClient({ name: event.target.value })} />
               </label>
               <label className="b-field">
                 <span className="b-field-label">Email</span>
-                <input className="b-input" type="email" value={newClient.email} maxLength={200} onChange={(event) => setNewClient({ ...newClient, email: event.target.value })} />
+                <input className="b-input" type="email" value={newClient.email} maxLength={200} onChange={(event) => typeClient({ email: event.target.value })} />
               </label>
               <label className="b-field b-span-2">
                 <span className="b-field-label">Address</span>
-                <textarea className="b-input" rows={2} value={newClient.address} maxLength={500} onChange={(event) => setNewClient({ ...newClient, address: event.target.value })} />
+                <textarea className="b-input" rows={2} value={newClient.address} maxLength={500} onChange={(event) => typeClient({ address: event.target.value })} />
               </label>
             </div>
           ) : null}
