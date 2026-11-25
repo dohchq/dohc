@@ -1,5 +1,4 @@
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -1521,12 +1520,11 @@ describe("HexClash authoritative strategy game", () => {
   }, 30_000);
 
   it("boots inside dohc's sandboxed iframe over the real MessagePort broker, plays turns, and resumes a seat key across reload", async () => {
-    if (!existsSync(chromium.executablePath()))
-      execFileSync(
-        process.execPath,
-        [createRequire(import.meta.url).resolve("@playwright/test/cli"), "install", "chromium"],
-        { stdio: "inherit" },
-      );
+    execFileSync(
+      process.execPath,
+      [createRequire(import.meta.url).resolve("@playwright/test/cli"), "install", "chromium"],
+      { stdio: "inherit" },
+    );
     const files = await loadExampleFiles();
     const rawDef = JSON.parse(files.get("hex-tactics/dataset.json")!);
     const definition = parseDatasetDefinition(rawDef, {

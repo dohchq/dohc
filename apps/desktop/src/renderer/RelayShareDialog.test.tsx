@@ -1490,6 +1490,19 @@ codex mcp login dohc-share`);
     await waitFor(() => expect(said()).toContain("Copied link ID"));
     expect(row.textContent).not.toContain("Copied for an agent");
     expect(writeText).toHaveBeenLastCalledWith("grant-link-1");
+
+    const agentPending = Promise.withResolvers<void>();
+    const idPending = Promise.withResolvers<void>();
+    writeText.mockReturnValueOnce(agentPending.promise).mockReturnValueOnce(idPending.promise);
+    await chooseLinkOption(user, row, "Copy for an agent");
+    await chooseLinkOption(user, row, "Copy link ID");
+    expect(writeText).toHaveBeenCalledTimes(5);
+    await act(async () => agentPending.resolve());
+    await waitFor(() => expect(said()).toContain("Copied for an agent"));
+    expect(row.textContent).not.toContain("Copied link ID");
+    await act(async () => idPending.resolve());
+    await waitFor(() => expect(said()).toContain("Copied link ID"));
+    expect(row.textContent).not.toContain("Copied for an agent");
   });
 
   it("lists a link's agents under Link details, and Disconnect takes one off", async () => {
