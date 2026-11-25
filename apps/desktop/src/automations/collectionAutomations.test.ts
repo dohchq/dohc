@@ -3602,8 +3602,50 @@ describe("Collection automations that a Group message starts", () => {
       );
       await promptly(Promise.all([executor.resyncFileObservation(), executor.open()]));
       expect(hostReads).toBeGreaterThanOrEqual(answerAgainAt);
-      expect(reachReads).toBe(3);
+      expect(reachReads).toBe(2);
       expect(w.errors).toHaveLength(1);
+    });
+
+    it("reports a failed read ahead once when the next sync answer reads again", async () => {
+      const handover = unanswered(false);
+      const third = Promise.withResolvers<void>();
+      let reachReads = 0;
+      const { w, executor, opening } = await openingAt3({
+        reachRelayRecord: async (generation) => {
+          reachReads++;
+          if (reachReads <= 2) throw new TypeError("fetch failed");
+          await third.promise;
+          return { generation, reach: null, everShared: false };
+        },
+        ...relayFor("Group handover", handover.read),
+      });
+      await opening;
+
+      executor.relayAnswered();
+      await vi.waitFor(() => expect(w.errors).toHaveLength(2));
+      executor.relayAnswered();
+      await vi.waitFor(() => expect(reachReads).toBe(3));
+      handover.answer();
+      third.resolve();
+      await promptly(w.until(() => subscribed(w)));
+      expect(handover.asked).toEqual([3]);
+      expect(w.errors).toHaveLength(2);
+    });
+
+    it("lists a pulled automations file without reading the relay again", async () => {
+      const reach = unanswered();
+      const { w, executor, opening } = await openingAt3(relayFor("reach verdicts", reach.read));
+      await opening;
+
+      executor.relayAnswered();
+      await promptly(reach.reading);
+      executor.handlePulledPaths(["Tasks/automations.yaml"]);
+      reach.answer();
+      await promptly(executor.automationsIn("Tasks"));
+      await vi.waitFor(async () =>
+        expect(await w.baseStore.readReachVerdicts()).toMatchObject({ pending: null, taken: 3 }),
+      );
+      expect(reach.asked).toEqual([3, 3]);
     });
 
     it("reads the relay again after a close ends a read ahead", async () => {

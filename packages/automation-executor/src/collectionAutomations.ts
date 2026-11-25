@@ -1920,30 +1920,34 @@ export class CollectionAutomations {
     this.readingRelay = { reach: true, handover: true };
     const reads = this.relayReads.signal;
     const generation = (await this.options.groupHost().catch(() => null)) ?? 0;
-    const answers: RelayAnswers = { generation };
-    const reconcile = () => {
+    const reconcile = async (answers: RelayAnswers) => {
       if (reads.aborted || this.opened === null) return;
-      void this.enqueue(() => this.reconcile(false, answers)).catch((error: unknown) =>
+      await this.enqueue(() => this.reconcile(false, answers)).catch((error: unknown) =>
         this.options.onError("update Group subscriptions for the automation host", error),
       );
     };
     const reach = !busy.reach && generation !== 0 && generation !== this.reachTakenAt;
-    const handover = !busy.handover && generation !== 0 && generation !== this.watchedGeneration;
+    const handover =
+      !busy.handover &&
+      generation !== 0 &&
+      generation !== this.watchedGeneration &&
+      (reach || generation === this.reachTakenAt);
     if (!busy.reach && !reach) this.readingRelay.reach = false;
     if (!busy.handover && !handover) this.readingRelay.handover = false;
+    const readHandover = () =>
+      settled(this.options.groupRelayRecord(generation, reads))
+        .then((answer) => reconcile({ generation, handover: answer }))
+        .finally(() => (this.readingRelay.handover = false));
     if (reach)
-      void settled(this.options.reachRelayRecord(generation, reads)).then((answer) => {
-        answers.reach = answer;
-        this.readingRelay.reach = false;
-        reconcile();
-      });
-    if (handover)
-      void settled(this.options.groupRelayRecord(generation, reads)).then((answer) => {
-        answers.handover = answer;
-        this.readingRelay.handover = false;
-        reconcile();
-      });
-    if (!reach && !handover) reconcile();
+      void settled(this.options.reachRelayRecord(generation, reads))
+        .then(async (answer) => {
+          if (handover && answer.status === "fulfilled") void readHandover();
+          else if (handover) this.readingRelay.handover = false;
+          await reconcile({ generation, reach: answer });
+        })
+        .finally(() => (this.readingRelay.reach = false));
+    else if (handover) void readHandover();
+    if (!reach && !handover) void reconcile({ generation });
   }
 
   /**
