@@ -335,6 +335,31 @@ describe("a member's raw pull answered across a change", () => {
       levelChanged: true,
     });
 
+    await putBlob(h, OWNER, WORKSPACE, "Plan updated");
+    await appendLog(
+      h,
+      OWNER,
+      WORKSPACE,
+      [
+        moment("notes/plan.md", "Plan updated", {
+          originSeq: 1,
+          objectId: "plan",
+          beforePath: "notes/plan.md",
+          beforeContent: "Plan",
+          recordedAtMs: 2,
+        }),
+      ],
+      { originId: "device" },
+    );
+    const loweredWithOps = await json(
+      await h(
+        request("ana", `/sync/shares/${pathShareId}/log?since=${pathCursor}&scan=page&level=edit`),
+      ),
+    );
+    expect(loweredWithOps).toMatchObject({ ok: true, levelChanged: true });
+    expect((loweredWithOps.ops as unknown[]).length).toBeGreaterThan(0);
+    const updatedPathCursor = Number(loweredWithOps.nextCursor);
+
     expect(
       (
         await h(
@@ -348,13 +373,24 @@ describe("a member's raw pull answered across a change", () => {
     ).toBe(200);
     const raised = await json(
       await h(
-        request("ana", `/sync/shares/${pathShareId}/log?since=${pathCursor}&scan=page&level=view`),
+        request(
+          "ana",
+          `/sync/shares/${pathShareId}/log?since=${updatedPathCursor}&scan=page&level=view`,
+        ),
       ),
     );
-    expect(raised).toMatchObject({ ok: true, ops: [], nextCursor: pathCursor, levelChanged: true });
+    expect(raised).toMatchObject({
+      ok: true,
+      ops: [],
+      nextCursor: updatedPathCursor,
+      levelChanged: true,
+    });
     const matched = await json(
       await h(
-        request("ana", `/sync/shares/${pathShareId}/log?since=${pathCursor}&scan=page&level=edit`),
+        request(
+          "ana",
+          `/sync/shares/${pathShareId}/log?since=${updatedPathCursor}&scan=page&level=edit`,
+        ),
       ),
     );
     expect(matched).not.toHaveProperty("levelChanged");

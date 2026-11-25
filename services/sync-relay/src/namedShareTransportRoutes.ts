@@ -281,13 +281,17 @@ export function createNamedShareTransportRoutes(
       );
       const hold = parseLinkLogHold(url.searchParams.get("hold"));
       const knew = url.searchParams.get("level");
-      const effectiveAccess = isWorkspaceSelector(authorized.effectiveSelector)
-        ? authorized.effectiveSelector.reach.evaluated.level
-        : (() => {
-            const files = fileSideOf(authorized.effectiveSelector);
-            return files && "access" in files ? files.access : "view";
-          })();
-      if (isShareAccessValue(knew) && knew !== effectiveAccess) {
+      const accessOf = (selector: AnyShareSelector) => {
+        if (isWorkspaceSelector(selector)) return selector.reach.evaluated.level;
+        const files = fileSideOf(selector);
+        return files && "access" in files ? files.access : "view";
+      };
+      if (
+        isShareAccessValue(knew) &&
+        knew !== accessOf(authorized.effectiveSelector) &&
+        page.ops.length === 0 &&
+        !page.hasMore
+      ) {
         return jsonResponse({
           ok: true,
           ops: [],
@@ -402,7 +406,10 @@ export function createNamedShareTransportRoutes(
         const ops = isWorkspaceSelector(share.selector)
           ? await nameAuthorsByAccount(held.ops, lookupUserDisplayName)
           : held.ops;
-        if (markOf(stillHeld().effectiveSelector) !== mark) return null;
+        const latest = stillHeld();
+        if (markOf(latest.effectiveSelector) !== mark) return null;
+        const levelChanged =
+          isShareAccessValue(knew) && knew !== accessOf(latest.effectiveSelector);
         return jsonResponse({
           ok: true,
           ...(mappings.references.length || mappings.nextAfter
@@ -415,6 +422,7 @@ export function createNamedShareTransportRoutes(
           ...held,
           ops,
           ownOriginId,
+          ...(levelChanged ? { levelChanged: true } : {}),
           ...signed(),
         });
       };

@@ -414,6 +414,12 @@ export function MarkdownView(props: {
   );
   const [draft, setDraft] = useState(props.body);
   const [savedBody, setSavedBody] = useState(props.body);
+  const [awaitingReadOnlySync, setAwaitingReadOnlySync] = useState(false);
+  if (props.readOnlyRefreshPending && !awaitingReadOnlySync) {
+    setAwaitingReadOnlySync(true);
+  } else if (!props.forceReadOnly && awaitingReadOnlySync) {
+    setAwaitingReadOnlySync(false);
+  }
   const [wysiwygResyncEpoch, setWysiwygResyncEpoch] = useState(0);
   const knownFiles = props.knownFiles ?? EMPTY_WIKILINK_FILES;
   const [saveState, setSaveStateValue] = useState<SaveState>(SAVED_HERE);
@@ -1476,11 +1482,16 @@ export function MarkdownView(props: {
     ) {
       acceptSnapshot(latestSnapshot.current, SAVED_HERE);
     }
+    if (awaitingReadOnlySync && !props.readOnlyRefreshPending && !editing) {
+      setAwaitingReadOnlySync(false);
+    }
     // The helpers read mutable writer state and the atomic snapshot above.
   }, [
     props.body,
     props.contentHash,
     props.contentRequestId,
+    props.readOnlyRefreshPending,
+    awaitingReadOnlySync,
     editing,
     sharedSnapshot,
     writerSettledEpoch,
@@ -2706,7 +2717,26 @@ export function MarkdownView(props: {
         />
       ) : null}
       {documentNotices}
-      {surfaceMode === "source" ? (
+      {props.readOnlyRefreshPending || awaitingReadOnlySync ? (
+        <div
+          ref={localDocPaneRef}
+          data-testid="view-markdown"
+          className="flex min-h-0 flex-1 flex-col overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
+        >
+          <TopMatter hidden={props.recordBody}>
+            <PageIdentity
+              body={draft}
+              onChange={onPropertiesDraft}
+              filenameStem={filenameStem(props.path)}
+              readOnly
+              opening={opening}
+              file={noteFile}
+            />
+            {recordButtons}
+          </TopMatter>
+          <SkeletonRows layout="document" label="Loading…" className="pt-12" />
+        </div>
+      ) : surfaceMode === "source" ? (
         <Suspense fallback={<SkeletonRows layout="panel" label="Loading editor…" />}>
           <LazySourceCodeEditor
             testId="markdown-editor"
@@ -2806,13 +2836,6 @@ export function MarkdownView(props: {
             />
             <MarkdownRenderCommitted onRendered={onMarkdownRendered} />
           </Suspense>
-        </div>
-      ) : props.readOnlyRefreshPending ? (
-        <div
-          data-testid="view-markdown"
-          className="min-h-0 flex-1 overflow-auto [scrollbar-gutter:stable]"
-        >
-          <SkeletonRows layout="document" label="Loading…" className="pt-12" />
         </div>
       ) : (
         <div

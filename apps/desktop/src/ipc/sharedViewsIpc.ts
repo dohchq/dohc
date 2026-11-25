@@ -739,6 +739,7 @@ export function registerSharedViewsIpcHandlers<
       relayUrl: string;
       nextCursor?: number;
       credentialGeneration: number;
+      wholeWorkspace?: true;
       level?: ShareViewSelector["access"];
       pendingLevel?: ShareViewSelector["access"];
       reach?: ShareReachSignatures;
@@ -808,6 +809,7 @@ export function registerSharedViewsIpcHandlers<
       entry?.workspaceId === input.workspaceId && entry.attachmentId === session!.attachmentId
         ? entry
         : undefined;
+    let probeLevelChanged = false;
     if (input.trigger === "background") {
       if (
         cached &&
@@ -888,13 +890,13 @@ export function registerSharedViewsIpcHandlers<
             ...(cached.level ? { level: cached.level } : {}),
             ...(cached.reach ? { reach: cached.reach } : {}),
           });
-          if (probe.levelChanged) {
-            cached.pendingLevel = cached.level;
-            delete cached.level;
-          }
           controller.signal.throwIfAborted();
           scoped.assertCurrent();
-          if (probe.unchanged || probe.levelChanged) {
+          if (probe.unchanged || (probe.levelChanged && !probe.hasOps)) {
+            if (probe.levelChanged) {
+              if (!cached.wholeWorkspace && !cached.reach) cached.pendingLevel = cached.level;
+              delete cached.level;
+            }
             if (pressBurst)
               syncSharedViewNotices(session!, retirement!, credentialGeneration, cached);
             return {
@@ -910,6 +912,7 @@ export function registerSharedViewsIpcHandlers<
               refusedDetail: null,
             };
           }
+          probeLevelChanged = probe.levelChanged === true;
         } catch (error) {
           if (closed) controller.signal.throwIfAborted();
           scoped.assertCurrent();
@@ -1043,7 +1046,10 @@ export function registerSharedViewsIpcHandlers<
           // is newer than what the refresh reads. Such a refresh changes no pin
           // and no marker, and its pull is not cached.
           let levelReadOvertaken = () => false;
-          if (!workspace.shareView.ended && (input.trigger !== "background" || !cached)) {
+          if (
+            !workspace.shareView.ended &&
+            (input.trigger !== "background" || !cached || probeLevelChanged)
+          ) {
             let refreshedWorkspace = workspace;
             await warmCredentialCache().catch(() => undefined);
             const credentials = currentCredentials();
@@ -1326,7 +1332,8 @@ export function registerSharedViewsIpcHandlers<
             workspace.shareView.recipientUserId &&
             workspace.shareView.relayUrl
           ) {
-            const markedLevel = sharePinLevel(marked?.grantedSelector);
+            const markedPin = recordedShareSelector(marked?.grantedSelector);
+            const markedLevel = sharePinLevel(markedPin);
             const cacheLevel =
               statedLevel !== undefined &&
               markedLevel.level !== undefined &&
@@ -1341,6 +1348,7 @@ export function registerSharedViewsIpcHandlers<
               relayUrl: workspace.shareView.relayUrl,
               nextCursor,
               credentialGeneration,
+              ...(markedPin?.wholeWorkspace === true ? { wholeWorkspace: true as const } : {}),
               ...cacheLevel,
               ...(settledReach ? { reach: settledReach } : {}),
             });

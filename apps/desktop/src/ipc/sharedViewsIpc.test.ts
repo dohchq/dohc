@@ -3186,12 +3186,36 @@ describe("background share pulls", () => {
       "https://relay.example.test/sync/shares/share/log?since=42&scan=page&hold=25000&level=comment",
       expect.anything(),
     );
-    // Answered once: the next hold names no level, so a stale one cannot loop.
+    // Answered once: the next hold names no level, so a stale one cannot loop,
+    // even when checkSharedViewAccess answers unverified while waiting for a rebuild.
+    h.fetchAccess.mockResolvedValueOnce({ access: "edit" });
+    h.fetchReach.mockResolvedValueOnce({
+      signature: "r2",
+      visibilitySignature: "v2",
+      rootLevel: "edit",
+      groupDefault: "edit",
+      groups: [],
+      folders: [],
+    });
+    h.workspace.shareView!.reach = {
+      signature: "r1",
+      visibilitySignature: "v1",
+      rootLevel: "comment",
+      groupDefault: "comment",
+      groups: [],
+      folders: [],
+    };
+    await expect(
+      h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
+        workspaceId: "existing",
+      }),
+    ).resolves.toEqual({ status: "unverified" });
     await h.invoke(channel, held);
     expect(fetch).toHaveBeenLastCalledWith(
       "https://relay.example.test/sync/shares/share/log?since=42&scan=page&hold=25000",
       expect.anything(),
     );
+    delete h.workspace.shareView!.reach;
     h.fetchAccess.mockResolvedValue({ access: "edit" });
     await expect(
       h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
@@ -3292,6 +3316,32 @@ describe("background share pulls", () => {
       "https://relay.example.test/sync/shares/share/log?since=42&scan=page",
       expect.anything(),
     );
+
+    // When a background probe carries both new ops and levelChanged, run the full refresh (info + reconcile).
+    h.workspace.shareView!.grantedSelector = { paths: ["docs"], versionId: null, access: "edit" };
+    h.fetchInfo.mockResolvedValueOnce({
+      ...info,
+      selector: { paths: ["docs"], versionId: null, access: "edit" },
+    });
+    await h.invoke(channel, { workspaceId: "existing", trigger: "manual" });
+    vi.clearAllMocks();
+    bodies.push({
+      ops: [{ seq: 43 }],
+      hasMore: false,
+      nextCursor: 43,
+      levelChanged: true,
+    } as never);
+    h.fetchInfo.mockResolvedValueOnce({
+      ...info,
+      selector: { paths: ["docs"], versionId: null, access: "view" },
+    });
+    await expect(h.invoke(channel, payload)).resolves.toMatchObject({
+      ok: true,
+      status: "updated",
+    });
+    expect(h.fetchInfo).toHaveBeenCalledOnce();
+    expect(h.reconcile).toHaveBeenCalledOnce();
+    expect(h.workspace.shareView!.grantedSelector.access).toBe("view");
   });
   it("asks for the next held pull after a held pull brought changes", async () => {
     const h = await primed();

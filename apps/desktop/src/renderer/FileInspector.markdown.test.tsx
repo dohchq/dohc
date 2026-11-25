@@ -482,6 +482,8 @@ describe("FileInspector renders markdown through the shared component map", () =
       engineDocState.doc = null;
       view.rerender(<FileInspector workspaceId="ws-1" path="a.md" readOnly={true} />);
 
+      expect(screen.queryByText("WALKA1O1")).toBeNull();
+      expect(screen.queryByTestId("markdown-editor")).toBeNull();
       await waitFor(() => expect(reads).toBe(2));
       expect(screen.queryByText("WALKA1O1")).toBeNull();
 

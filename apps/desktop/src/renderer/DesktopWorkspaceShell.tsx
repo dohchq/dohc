@@ -7285,17 +7285,17 @@ function WorkspaceShell(props: {
   refreshShareViewRef.current = refreshShareView;
   const refreshAfterLiveReadOnly = useCallback(() => {
     const targetWorkspaceId = workspaceIdRef.current;
+    pendingLiveReadOnlyCheckRef.current = targetWorkspaceId;
     void refreshShareViewRef.current().then(async (pulled) => {
-      if (pulled !== "current" && pulled !== "changed") return;
       if (workspaceIdRef.current !== targetWorkspaceId) return;
-      pendingLiveReadOnlyCheckRef.current = targetWorkspaceId;
+      if (pulled === "ended") {
+        if (pendingLiveReadOnlyCheckRef.current === targetWorkspaceId)
+          pendingLiveReadOnlyCheckRef.current = null;
+        return;
+      }
+      if (pulled !== "current" && pulled !== "changed") return;
       const checked = await checkShareAccessRef.current();
       if (workspaceIdRef.current !== targetWorkspaceId) return;
-      if (
-        checked.status !== "unverified" &&
-        pendingLiveReadOnlyCheckRef.current === targetWorkspaceId
-      )
-        pendingLiveReadOnlyCheckRef.current = null;
       if (checked.relayStatesMore) void refreshShareViewRef.current("manual");
     });
   }, []);
