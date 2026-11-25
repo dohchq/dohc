@@ -62,8 +62,6 @@ final class Editor: NSObject, WKNavigationDelegate, UIScrollViewDelegate {
 
   func attach(_ slot: EditorSlot) {
     self.slot = slot
-    onReady = nil
-    onLost = nil
     if started { slot.editorStarted() }
     queue.forEach(slot.forward)
     queue = []

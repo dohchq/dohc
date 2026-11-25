@@ -15,20 +15,17 @@ final class EditorPool {
   private var shelf: UIView?
 
   private init() {
-    let center = NotificationCenter.default
-    center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) {
-      [weak self] _ in MainActor.assumeIsolated { self?.schedule() }
+    observe(UIApplication.didBecomeActiveNotification) { $0.schedule() }
+    observe(UIApplication.willResignActiveNotification) { $0.stopTimer() }
+    observe(UIApplication.didReceiveMemoryWarningNotification) {
+      $0.drop()
+      $0.schedule()
     }
-    center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) {
-      [weak self] _ in MainActor.assumeIsolated { self?.stopTimer() }
-    }
-    center.addObserver(
-      forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main
-    ) { [weak self] _ in
-      MainActor.assumeIsolated {
-        self?.drop()
-        self?.schedule()
-      }
+  }
+
+  private func observe(_ name: Notification.Name, _ act: @escaping (EditorPool) -> Void) {
+    NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+      MainActor.assumeIsolated { if let self { act(self) } }
     }
   }
 
@@ -44,12 +41,8 @@ final class EditorPool {
 
   func keepSpare(_ on: Bool) {
     keeping = on
-    if on {
-      schedule()
-    } else {
-      stopTimer()
-      drop()
-    }
+    if !on { drop() }
+    schedule()
   }
 
   func claim(page: URL, folder: URL) -> (Editor, Claim)? {
