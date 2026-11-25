@@ -1054,22 +1054,20 @@ const LISTED = 200;
 
 globalThis.operations = {
   liveSnapshot(ctx, input) {
-    const shared =
-      ctx.caller.kind === "owner" || ctx.caller.kind === "named"
-        ? ""
-        : " WHERE visibility = 'shared'";
-    const fans = Boolean(shared) || input?.view === "public";
-    const tournaments = ctx.db.query(
-      `SELECT id, name, sport, status, visibility, created_at AS createdAt FROM tournaments${shared} ORDER BY created_at DESC, id DESC LIMIT ${LISTED}`,
-    );
+    const scorekeeper =
+      ctx.caller.kind === "owner" || (ctx.caller.kind === "named" && ctx.caller.helper);
+    const fans = !scorekeeper || input?.view === "public";
+    const summary = (where, params = [], limit = 1) =>
+      ctx.db.query(
+        `SELECT id, name, sport, status, visibility, created_at AS createdAt FROM tournaments WHERE ${where}${fans ? " AND visibility = 'shared'" : ""} ORDER BY created_at DESC, id DESC LIMIT ${limit}`,
+        params,
+      );
+    const tournaments = summary("1 = 1", [], LISTED);
     const requested = typeof input?.tournamentId === "string" ? input.tournamentId : null;
-    const explicit = requested
-      ? ctx.db.query(
-          `SELECT id, name, sport, status, visibility, created_at AS createdAt FROM tournaments WHERE id = ?${shared ? " AND visibility = 'shared'" : ""}`,
-          [requested],
-        )[0]
-      : null;
-    const chosen = explicit ?? tournaments.find((row) => row.status === "live") ?? tournaments[0];
+    const chosen =
+      (requested ? summary("id = ?", [requested])[0] : undefined) ??
+      summary("status = 'live'")[0] ??
+      tournaments[0];
     if (!chosen) return { tournaments: [], tournament: null, now: ctx.nowMs };
     const listed = tournaments.some((row) => row.id === chosen.id)
       ? tournaments

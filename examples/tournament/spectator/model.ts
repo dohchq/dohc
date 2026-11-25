@@ -2,12 +2,12 @@ import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "re
 import { AppBackendError, type AppClient } from "dohc/app";
 
 export type Side = "a" | "b";
-export type MatchStatus = "waiting" | "ready" | "live" | "done" | "bye" | "skipped";
+type MatchStatus = "waiting" | "ready" | "live" | "done" | "bye" | "skipped";
 export type BracketSide = "winners" | "losers" | "final";
 export type Format = "single" | "double";
 export type Visibility = "shared" | "private";
 
-export interface TournamentSummary {
+interface TournamentSummary {
   id: string;
   name: string;
   sport: string;
@@ -80,7 +80,7 @@ export interface Court {
   matchId: string | null;
 }
 
-export type EventKind =
+type EventKind =
   | "bye"
   | "start"
   | "point"
@@ -92,7 +92,7 @@ export type EventKind =
   | "reopen"
   | "cancel";
 
-export interface MatchEvent {
+interface MatchEvent {
   id: string;
   matchId: string;
   seq: number;
@@ -167,12 +167,13 @@ export function useLiveSnapshot(
     let eventsArrive = false;
     let token = 0;
     let timer: number | undefined;
+    let backoff = 0;
     let waiters: Array<(ok: boolean) => void> = [];
-    const settle = (ok: boolean) => {
-      const done = waiters;
-      waiters = [];
+    let covered: Array<(ok: boolean) => void> = [];
+    const settle = (done: Array<(ok: boolean) => void>, ok: boolean) => {
       for (const resolve of done) resolve(ok);
     };
+    const lifetime = new AbortController();
     const clearTimer = () => {
       if (timer !== undefined) window.clearTimeout(timer);
       timer = undefined;
@@ -180,7 +181,10 @@ export function useLiveSnapshot(
     const schedule = () => {
       clearTimer();
       if (disposed || document.hidden) return;
-      timer = window.setTimeout(() => void load(), eventsArrive ? HEARTBEAT_MS : pollMs);
+      timer = window.setTimeout(
+        () => void load(),
+        Math.max(backoff, eventsArrive ? HEARTBEAT_MS : pollMs),
+      );
     };
     const load = async () => {
       clearTimer();
@@ -190,6 +194,8 @@ export function useLiveSnapshot(
       }
       inFlight = true;
       again = false;
+      covered = waiters;
+      waiters = [];
       const started = Date.now();
       const mine = ++token;
       const target = tournamentId ?? pinnedId.current;
@@ -202,7 +208,7 @@ export function useLiveSnapshot(
             ...(view === "public" ? { view } : {}),
           },
           undefined,
-          { readOnly: true },
+          { readOnly: true, signal: lifetime.signal },
         );
         if (disposed || mine !== token) return;
         seen = Math.max(seen, reply.revision);
@@ -214,18 +220,21 @@ export function useLiveSnapshot(
         setClockSkew((current) => (Math.abs(current - skew) > 1000 ? skew : current));
         setSyncedAt((previous) => Math.max((previous ?? 0) + 1, started));
         setError(null);
+        backoff = 0;
         ok = true;
       } catch (caught: unknown) {
         if (disposed || mine !== token) return;
-        setError(caught instanceof AppBackendError ? caught : new AppBackendError(503));
+        const failure = caught instanceof AppBackendError ? caught : new AppBackendError(503);
+        backoff = failure.retryAfterMs ?? 0;
+        setError(failure);
       } finally {
         if (!disposed && mine === token) {
           inFlight = false;
+          const done = covered;
+          covered = [];
+          settle(done, ok);
           if (again) void load();
-          else {
-            schedule();
-            settle(ok);
-          }
+          else schedule();
         }
       }
     };
@@ -252,7 +261,10 @@ export function useLiveSnapshot(
     return () => {
       disposed = true;
       token += 1;
-      settle(false);
+      lifetime.abort();
+      settle([...covered, ...waiters], false);
+      covered = [];
+      waiters = [];
       clearTimer();
       unsubscribe?.();
       document.removeEventListener("visibilitychange", onVisible);
@@ -345,7 +357,7 @@ export function useNow(skew: number, everyMs = 1000): number {
   return now;
 }
 
-export type LabelLength = "full" | "short" | "tiny";
+type LabelLength = "full" | "short" | "tiny";
 
 export function winnersRounds(tournament: Tournament): number {
   return Math.log2(tournament.bracketSize);
@@ -402,7 +414,7 @@ export function matchRound(
   return roundLabel(tournament, match.bracket, match.round, length);
 }
 
-export function isTitleMatch(tournament: Tournament, match: Match): boolean {
+function isTitleMatch(tournament: Tournament, match: Match): boolean {
   return tournament.format === "double"
     ? match.bracket === "final"
     : match.round === winnersRounds(tournament);

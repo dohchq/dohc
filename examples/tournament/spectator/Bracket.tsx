@@ -434,9 +434,12 @@ export function Bracket({
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerEnd}
-        onPointerCancel={onPointerEnd}
+        onPointerCancel={(event) => {
+          onPointerEnd(event);
+          suppressClick.current = false;
+        }}
         onClickCapture={(event) => {
-          if (suppressClick.current) {
+          if (suppressClick.current && event.detail > 0) {
             suppressClick.current = false;
             event.stopPropagation();
             event.preventDefault();

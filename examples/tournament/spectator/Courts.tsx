@@ -16,6 +16,7 @@ import {
   nextLabel,
   pressureLabel,
   timeOfDay,
+  useNow,
   type Court,
   type Match,
   type Side,
@@ -41,13 +42,13 @@ export interface ScoreActions {
 interface DeskProps {
   snapshot: Snapshot;
   people: Map<string, Standing>;
-  now: number;
+  clockSkew: number;
   actions?: ScoreActions;
   focusRequest?: { matchId: string; seq: number } | null;
   onOpenMatch(match: Match): void;
 }
 
-export function shownScore(match: Match, actions: ScoreActions | undefined) {
+function shownScore(match: Match, actions: ScoreActions | undefined) {
   const queued = actions?.taps.get(match.id) ?? [];
   const sentFrom = actions?.sending.get(match.id);
   const taps = sentFrom !== undefined && match.version > sentFrom ? queued.slice(1) : queued;
@@ -71,11 +72,12 @@ export function shownScore(match: Match, actions: ScoreActions | undefined) {
 export function CourtDesk({
   snapshot,
   people,
-  now,
+  clockSkew,
   actions,
   focusRequest,
   onOpenMatch,
 }: DeskProps) {
+  const now = useNow(clockSkew);
   const tournament = snapshot.tournament!;
   const playing = liveCourts(snapshot);
   const busyCourts = new Set(playing.map(({ court }) => court.id));

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { copyText } from "dohc/app";
 import { Copy, RefreshCw, Undo2, X } from "./spectator/Icons";
 
-export interface Toast {
+interface Toast {
   id: number;
   tone: "done" | "warning" | "danger";
   matchId?: string;
@@ -13,7 +13,7 @@ export interface Toast {
   action?: { label: string; undo?: boolean; run(): void };
 }
 
-export type ToastInput = Omit<Toast, "id">;
+type ToastInput = Omit<Toast, "id">;
 
 export function useToasts(shownId: string | undefined) {
   const [toasts, setToasts] = useState<Toast[]>([]);

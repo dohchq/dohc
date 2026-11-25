@@ -14,7 +14,7 @@ import { createDatasetSupervisor } from "./supervisor.ts";
 import { createDatasetHost } from "./dataset-host.ts";
 import { privateFolder } from "./private-folder.test-helper";
 
-type Context = "owner" | "scorer" | "fan";
+type Context = "owner" | "scorer" | "viewer" | "fan";
 type Json = Record<string, any>;
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -70,10 +70,10 @@ async function fixture() {
         caller:
           context === "owner"
             ? { kind: "owner", userId: "owner" }
-            : context === "scorer"
+            : context === "scorer" || context === "viewer"
               ? {
                   kind: "named",
-                  userId: "scorer",
+                  userId: context,
                   grantId: "court-crew",
                   access: "view",
                   helper: false,
@@ -127,7 +127,9 @@ async function fixture() {
       operationId: operation(name).operationId,
       input,
       idempotencyKey: `call-${++sequence}`,
-      ...(context === "fan" ? { access: { kind: "app", appId: "spectator" } as const } : {}),
+      ...(context === "fan" || context === "viewer"
+        ? { access: { kind: "app", appId: "spectator" } as const }
+        : {}),
     });
     return reply.result as Json;
   }
@@ -851,7 +853,7 @@ describe("tournament example on the real Collection host", () => {
       true,
     ]);
     for (const player of view.standings)
-      expect(player.losses).toBe(player.id === view.tournament.championId ? player.losses : 2);
+      expect(player.losses).toBe(player.id === view.tournament.championId ? 0 : 2);
     expect(view.courts.every((court: Json) => court.matchId === null)).toBe(true);
     expect(view.standings.reduce((sum: number, p: Json) => sum + p.rating, 0)).toBe(startSum);
   }, 180_000);
@@ -1300,6 +1302,14 @@ describe("tournament example on the real Collection host", () => {
     const pinned = await f.snapshot(hidden.tournamentId, "fan");
     expect(pinned.tournament.id).toBe(shared.view.tournament.id);
     expect(JSON.stringify(pinned)).not.toContain("Staff scrimmage");
+    const viewer = await f.snapshot(hidden.tournamentId, "viewer");
+    expect(viewer.tournament.id).toBe(shared.view.tournament.id);
+    expect(JSON.stringify(viewer)).not.toContain("Staff scrimmage");
+    const preview = await f.call("liveSnapshot", {
+      tournamentId: hidden.tournamentId,
+      view: "public",
+    });
+    expect(JSON.stringify(preview)).not.toContain("Staff scrimmage");
     const owner = await f.snapshot(hidden.tournamentId);
     expect(owner.tournament).toMatchObject({ id: hidden.tournamentId, visibility: "private" });
     for (const context of ["fan", "scorer"] as const)

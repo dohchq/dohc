@@ -13,7 +13,6 @@ import {
   modalOpen,
   playersById,
   useMedia,
-  useNow,
   PHONE,
   type LiveState,
   type Match,
@@ -69,8 +68,10 @@ export function Dashboard({
   const [tv, setTv] = useState(false);
   const [deskFocus, setDeskFocus] = useState<{ matchId: string; seq: number } | null>(null);
   const recording = useRef(false);
+  const [isRecording, setIsRecording] = useState(false);
   const onRecording = useCallback((on: boolean) => {
     recording.current = on;
+    setIsRecording(on);
   }, []);
   const close = () => {
     if (!recording.current) setOpenId(null);
@@ -82,7 +83,6 @@ export function Dashboard({
   const [ask, setAsk] = useState<{ matchId: string; seq: number } | null>(null);
   const phone = useMedia(PHONE);
   const snapshot = live.data;
-  const now = useNow(live.clockSkew);
   const people = useMemo(
     () => (snapshot?.tournament ? playersById(snapshot) : new Map()),
     [snapshot],
@@ -108,11 +108,13 @@ export function Dashboard({
     return () => window.cancelAnimationFrame(frame);
   }, [openId, view]);
 
+  const handledReopen = useRef<number | null>(null);
   useEffect(() => {
-    if (!reopenRequest || recording.current) return;
+    if (!reopenRequest || isRecording || handledReopen.current === reopenRequest.seq) return;
+    handledReopen.current = reopenRequest.seq;
     setAsk(reopenRequest);
     setOpenId(reopenRequest.matchId);
-  }, [reopenRequest]);
+  }, [reopenRequest, isRecording]);
 
   useEffect(() => {
     if (ask && openId !== ask.matchId) setAsk(null);
@@ -187,6 +189,10 @@ export function Dashboard({
     if (!id) return;
     setView("bracket");
     if (phone) setOpenId(null);
+    window.requestAnimationFrame(() => {
+      if (document.activeElement === document.body)
+        document.querySelector<HTMLElement>(".co-canvas-viewport")?.focus({ preventScroll: true });
+    });
   };
 
   return (
@@ -207,6 +213,7 @@ export function Dashboard({
                       <select
                         aria-label="Tournament"
                         value={tournament.id}
+                        disabled={isRecording}
                         onChange={(event) => onPickTournament(event.target.value)}
                       >
                         {snapshot.tournaments.map((entry) => (
@@ -304,7 +311,7 @@ export function Dashboard({
             </div>
           ) : null}
         </div>
-        <div className={`co-stage${opened ? " has-inspector" : ""}`}>
+        <div className="co-stage">
           <main
             className={`co-view-body is-${view}`}
             aria-busy={live.switching || undefined}
@@ -323,7 +330,7 @@ export function Dashboard({
                 key={tournament.id}
                 snapshot={snapshot}
                 people={people}
-                now={now}
+                clockSkew={live.clockSkew}
                 actions={actions}
                 focusRequest={deskFocus}
                 onOpenMatch={openMatch}
@@ -341,7 +348,7 @@ export function Dashboard({
               match={opened}
               snapshot={snapshot}
               people={people}
-              now={now}
+              clockSkew={live.clockSkew}
               loadTimeline={loadTimeline}
               describeActor={describeActor}
               actions={actions}
@@ -368,7 +375,7 @@ export function Dashboard({
         <TvBoard
           snapshot={snapshot}
           people={people}
-          now={now}
+          clockSkew={live.clockSkew}
           freshness={live.freshness}
           syncedAt={live.syncedAt}
           onClose={() => setTv(false)}

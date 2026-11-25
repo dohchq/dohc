@@ -15,7 +15,7 @@ It is ordinary workspace source. Copy the folder, then change the rules, the scr
   - `completeMatch` records a won game. When a player has won enough games, it records the winner, updates both Elo ratings, frees the court, moves the winner on, and drops the loser to the losers bracket. The last match crowns the champion.
   - `awardWalkover` sends a player through when the other cannot play. Walkovers do not change Elo.
   - `reportResult` takes the game scores of a match played off the board, such as a score sheet a referee hands in. It checks each game against the rules, then completes the match like `completeMatch`. The log records who entered it, with no made-up points. Reopening a reported result puts the match back in the queue with no score, so a corrected sheet can be entered.
-  - `reopenMatch` corrects a wrong result until the next match for either player has a point. It reverses both Elo changes and takes both players back out of their next matches. A next match that started at 0–0 goes back to waiting and frees its court.
+  - `reopenMatch` corrects a wrong result until the next match for either player has a point. It reverses both Elo changes and takes both players back out of their next matches. A next match that started at 0–0 goes back to waiting and frees its court. A next match with any result, a walkover included, blocks the reopen until that result is reopened first. A reopened match that was played on a court needs a free court again.
   - A unique index allows one live match per court. `startMatch` refuses a busy court. `returnToQueue` sends a started match with no points back to the queue and frees its court.
   - Every start, point, undo, game, result, walkover, reopen, and cancelled start goes into `match_events`, with who did it and who was playing.
 - **Standings without SQL views.** `liveSnapshot` computes the leaderboard, bracket, courts, and recent events in one read. Players knocked out at the same stage share a place. Pass a `matchId` from the shown tournament and it adds that match's point-by-point timeline, without who entered each point.
@@ -31,7 +31,7 @@ It is ordinary workspace source. Copy the folder, then change the rules, the scr
 
 | Operation | Who |
 | --- | --- |
-| `liveSnapshot` | Anyone with a link. Link viewers see only tournaments shown on the share link. Named members, such as scorekeepers, also see hidden ones. The spectator app always gets public history, without undone points or reopened results. |
+| `liveSnapshot` | Anyone with a link. Link viewers and signed-in viewers see only tournaments shown on the share link. The owner and scorekeepers also see hidden ones. The spectator app always gets only shown tournaments and public history, without undone points or reopened results. |
 | `matchLog`, `startMatch`, `returnToQueue`, `scorePoint`, `undoPoint`, `completeMatch`, `awardWalkover`, `reportResult`, `reopenMatch` | The owner and helpers. Scorekeepers correct results on purpose: whoever is at the court sees a wrong result first, and every reopen and walkover is logged with who did it. |
 | `createTournament`, `setVisibility`, `seedDemo` | The owner |
 

@@ -8,7 +8,7 @@ const COLUMNS: Array<{ key: SortKey; label: string; numeric: boolean; title?: st
   { key: "place", label: "#", numeric: true, title: "Place" },
   { key: "name", label: "Player", numeric: false },
   { key: "record", label: "W–L", numeric: true, title: "Wins and losses" },
-  { key: "diff", label: "Diff", numeric: true, title: "Points for minus points against" },
+  { key: "diff", label: "Diff", numeric: true, title: "Diff: points for minus points against" },
   { key: "rating", label: "Elo", numeric: true },
   { key: "delta", label: "±", numeric: true, title: "Elo change this event" },
 ];

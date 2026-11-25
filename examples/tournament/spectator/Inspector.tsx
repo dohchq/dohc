@@ -10,6 +10,7 @@ import {
   matchRound,
   timeOfDay,
   trapFocus,
+  useNow,
   type Court,
   type Match,
   type Side,
@@ -24,7 +25,7 @@ interface InspectorProps {
   match: Match;
   snapshot: Snapshot;
   people: Map<string, Standing>;
-  now: number;
+  clockSkew: number;
   loadTimeline(match: Match): Promise<Timeline>;
   describeActor?: (actor: string) => string;
   actions?: ScoreActions;
@@ -61,7 +62,7 @@ export function Inspector({
   match,
   snapshot,
   people,
-  now,
+  clockSkew,
   loadTimeline,
   describeActor,
   actions,
@@ -72,6 +73,7 @@ export function Inspector({
   onRecording,
   askReopen = false,
 }: InspectorProps) {
+  const now = useNow(clockSkew);
   const tournament = snapshot.tournament!;
   const series = tournament.bestOf > 1;
   const court = snapshot.courts.find((entry) => entry.id === match.courtId);
@@ -589,7 +591,7 @@ export function Inspector({
         </p>
       ) : null}
 
-      {match.status === "live" || match.status === "done" || (queued && history) ? (
+      {match.status === "live" || match.status === "done" || (queued && (history || failed)) ? (
         <section className="co-timeline" aria-label={played ? "Point by point" : "History"}>
           <h3 className="co-rail-title">{played ? "Point by point" : "History"}</h3>
           {failed ? (
@@ -800,7 +802,7 @@ function ResultForm({
   const filled = rows.findLastIndex(([a, b]) => a !== "" || b !== "") + 1;
   return (
     <form
-      className="co-reopen co-result"
+      className="co-reopen"
       aria-label="Enter the final score"
       noValidate
       onSubmit={(event) => {

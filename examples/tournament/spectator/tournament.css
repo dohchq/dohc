@@ -463,6 +463,10 @@ kbd {
   overflow: hidden;
 }
 
+.co-view-body.is-courts {
+  container-type: inline-size;
+}
+
 .co-ticker {
   flex: none;
   height: 34px;
@@ -1183,6 +1187,21 @@ button.co-canvas-round:focus-visible {
   height: 100%;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 316px;
+}
+
+@media (min-width: 761px) {
+  @container (max-width: 767px) {
+    .co-desk {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: minmax(0, 1fr) auto;
+    }
+
+    .co-desk > .co-rail {
+      max-height: 40dvh;
+      border-left: 0;
+      border-top: 1px solid var(--co-line);
+    }
+  }
 }
 
 .co-desk-main {
@@ -4095,7 +4114,9 @@ body:has(.co-drawer) .co-toasts {
     width: 100%;
   }
 
-  .co-tv-courts {
+  .co-tv-courts,
+  .co-tv-courts.is-many {
+    flex: 1 0 auto;
     grid-template-columns: 1fr;
     grid-auto-rows: auto;
   }

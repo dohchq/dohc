@@ -10,6 +10,7 @@ import {
   timeOfDay,
   trapFocus,
   useMedia,
+  useNow,
   PHONE,
   type Freshness,
   type Snapshot,
@@ -19,7 +20,7 @@ import {
 interface TvBoardProps {
   snapshot: Snapshot;
   people: Map<string, Standing>;
-  now: number;
+  clockSkew: number;
   freshness: Freshness;
   syncedAt: number | null;
   onClose(): void;
@@ -31,7 +32,15 @@ const PAGE_MS = 12_000;
 
 const MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 
-export function TvBoard({ snapshot, people, now, freshness, syncedAt, onClose }: TvBoardProps) {
+export function TvBoard({
+  snapshot,
+  people,
+  clockSkew,
+  freshness,
+  syncedAt,
+  onClose,
+}: TvBoardProps) {
+  const now = useNow(clockSkew);
   const frame = useRef<HTMLDivElement | null>(null);
   const [full, setFull] = useState(false);
   const closeRef = useRef(onClose);
@@ -69,6 +78,10 @@ export function TvBoard({ snapshot, people, now, freshness, syncedAt, onClose }:
     const timer = window.setInterval(() => setTurn((current) => current + 1), PAGE_MS);
     return () => window.clearInterval(timer);
   }, [pages, held]);
+  const exit = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (pages < 2 && document.activeElement === document.body) exit.current?.focus();
+  }, [pages]);
   const at = anchor === null ? -1 : playing.findIndex((entry) => entry.court.id === anchor);
   const start =
     pages < 2 ? 0 : Math.min(at >= 0 ? at : (turn % pages) * perPage, playing.length - perPage);
@@ -177,7 +190,7 @@ export function TvBoard({ snapshot, people, now, freshness, syncedAt, onClose }:
             <button
               type="button"
               className="co-tv-close"
-              aria-label={held ? "Rotate pages" : "Hold this page"}
+              aria-label="Hold this page"
               aria-pressed={held}
               onClick={hold}
             >
@@ -201,9 +214,15 @@ export function TvBoard({ snapshot, people, now, freshness, syncedAt, onClose }:
             Full screen <kbd>{MAC ? "⌃⌘F" : "F11"}</kbd>
           </span>
         )}
-        <button type="button" className="co-tv-close" onClick={onClose} aria-label="Exit TV mode">
+        <button
+          ref={exit}
+          type="button"
+          className="co-tv-close"
+          onClick={onClose}
+          aria-label="Exit TV mode"
+        >
           <X size={16} />
-          <kbd className="co-tv-esc">Esc</kbd>
+          <kbd>Esc</kbd>
         </button>
       </header>
       {champion ? (
