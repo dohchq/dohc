@@ -269,6 +269,11 @@ test("the owner keeps books: entries with receipts, bank import, invoices, and b
     await editor.getByLabel("Quantity on line 1").fill("10");
     await editor.getByLabel("Price on line 1").fill("150");
     await expect(editor.getByLabel("Preview")).toContainText("$1,623.75");
+    const issued = await editor.getByLabel("Issued").inputValue();
+    await editor.getByLabel("Issued").fill("");
+    await expect(editor.getByRole("button", { name: "Save draft" })).toBeDisabled();
+    await expect(editor.getByText("Enter the issue and due dates")).toBeVisible();
+    await editor.getByLabel("Issued").fill(issued);
     await editor.getByRole("button", { name: "Save draft" }).click();
     await expect(editor).toHaveCount(0);
     const pane = app.getByRole("complementary", { name: /^Invoice / });
