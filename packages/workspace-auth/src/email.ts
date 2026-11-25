@@ -67,9 +67,9 @@ const DARK = `@media (prefers-color-scheme:dark){
 export const strong = (text: string): Markup =>
   markup(`<b class="ink" style="color:${INK};font-weight:600;">${escapeHtml(text)}</b>`);
 
-/** An address or host that must not wrap; clients that auto-link it keep the text color. */
+/** An address or host as plain text. It breaks only when it cannot fit a phone's width. */
 export const literal = (text: string): Markup =>
-  markup(`<span style="white-space:nowrap;">${escapeHtml(text)}</span>`);
+  markup(`<span style="word-break:break-word;overflow-wrap:anywhere;">${escapeHtml(text)}</span>`);
 
 export const mailto = (address: string, color = MUTED): Markup =>
   markup(
@@ -139,7 +139,7 @@ export const rule = (): Markup =>
 </tr></table>`);
 
 // Up to two letters from the name, or the address when there is no name.
-export function initials(name: string | null, address: string): string {
+function initials(name: string | null, address: string): string {
   const first = (word: string) => /[\p{L}\p{N}]/u.exec(word)?.[0] ?? "";
   const words = (name ?? "").split(/\s+/u).filter((word) => first(word));
   const letters =

@@ -41,7 +41,7 @@ it("writes the whole invitation in plain sentences, from the inviter by name", (
     "Can edit",
     'href="https://share.example.test/s/edit/grant-0"',
     "Open in browser",
-    'Opens <span style="white-space:nowrap;">share.example.test</span>',
+    "share.example.test</span>. Sign in or create an account with",
     "Using the dohc app?",
     "dohc-share:share-0:https://relay.example.test",
     'href="mailto:owner@dohc.test"',
@@ -64,14 +64,16 @@ it("names the inviter by address, with no sender name, when the account has no u
 it("keeps a name only when it cannot pass for an address or a website", () => {
   expect(inviterDisplayName("  Sam\n Rivera ")).toBe("Sam Rivera");
   expect(inviterDisplayName("J.K. Rowling")).toBe("J.K. Rowling");
+  expect(inviterDisplayName("محمد\u200cرضا")).toBe("محمد\u200cرضا");
   expect(inviterDisplayName("Zoë O'Neil-Ng")).toBe("Zoë O'Neil-Ng");
-  expect(inviterDisplayName("x".repeat(60))).toBe("x".repeat(40));
   for (const name of [
     "sam@example.test",
     "Sam <ceo@example.test>",
     "paypal.com",
     "Support at drive.dohc.computer",
     "http://x",
+    "例え.テスト",
+    "例え。テスト",
     "<b>Sam</b>",
   ])
     expect(inviterDisplayName(name), name).toBeNull();

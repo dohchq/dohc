@@ -63,8 +63,9 @@ export async function startSmtpCapture() {
   };
 }
 
-// The links in a message's text, each checked against the HTML part's links
-// when the message has one, so a button cannot point somewhere else.
+// The links in an account email's text. Its HTML part must link each one
+// twice, from the button and from the fallback line, so neither can point
+// somewhere else.
 export function mailLinks(message: string): string[] {
   const { headers, body } = splitPart(message);
   const boundary = /boundary="?([^";\r\n]+)"?/i.exec(headers)?.[1];
@@ -78,11 +79,11 @@ export function mailLinks(message: string): string[] {
   if (!text) throw new Error("Captured message has no text part.");
   const links = [...decodePart(text).matchAll(/https?:\/\/[^\s<>"']+/g)].map((match) => match[0]!);
   const html = parts.find((part) => /content-type:\s*text\/html/i.test(part.headers));
-  if (html) {
-    const page = decodePart(html).replaceAll("&amp;", "&");
-    for (const link of links)
-      if (!page.includes(`href="${link}"`)) throw new Error(`The HTML part does not link ${link}.`);
-  }
+  if (!html) throw new Error("Captured message has no HTML part.");
+  const page = decodePart(html).replaceAll("&amp;", "&");
+  for (const link of links)
+    if (page.split(`href="${link}"`).length !== 3)
+      throw new Error(`The HTML button and fallback do not both link ${link}.`);
   return links;
 }
 
@@ -93,11 +94,12 @@ function splitPart(part: string): { headers: string; body: string } {
 }
 
 function decodePart({ headers, body }: { headers: string; body: string }): string {
-  return /content-transfer-encoding:\s*base64/i.test(headers)
-    ? Buffer.from(body.replace(/\s/g, ""), "base64").toString("utf8")
-    : body
-        .replace(/=\r\n/g, "")
-        .replace(/=([0-9A-F]{2})/gi, (_, value: string) =>
-          String.fromCharCode(Number.parseInt(value, 16)),
-        );
+  if (/content-transfer-encoding:\s*base64/i.test(headers))
+    return Buffer.from(body.replace(/\s/g, ""), "base64").toString("utf8");
+  if (!/content-transfer-encoding:\s*quoted-printable/i.test(headers)) return body;
+  return body
+    .replace(/=\r\n/g, "")
+    .replace(/=([0-9A-F]{2})/gi, (_, value: string) =>
+      String.fromCharCode(Number.parseInt(value, 16)),
+    );
 }

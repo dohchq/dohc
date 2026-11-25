@@ -18,22 +18,17 @@ import {
   webUrl,
 } from "@dohc/workspace-auth/email";
 import type { EmailMessage } from "@dohc/workspace-auth/smtp";
+import { SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT } from "@dohc/security-contract/share-discussion";
 import { canonicalRelayUrl } from "@dohc/workspace-contracts/relay-values";
 
 const NAME_MAX_CHARS = 120;
 const ADDRESS_MAX_CHARS = 320;
 const SHARE_CODE_ID_MAX_CHARS = 128;
-const INVITER_NAME_MAX_CHARS = 40;
 
-const ROLE_SENTENCES = new Map([
-  ["view", "You can view it."],
-  ["comment", "You can comment on it."],
-  ["edit", "You can edit it."],
-]);
-const ROLE_LABELS = new Map([
-  ["view", "Can view"],
-  ["comment", "Can comment"],
-  ["edit", "Can edit"],
+const ROLES = new Map([
+  ["view", { sentence: "You can view it.", label: "Can view" }],
+  ["comment", { sentence: "You can comment on it.", label: "Can comment" }],
+  ["edit", { sentence: "You can edit it.", label: "Can edit" }],
 ]);
 
 function oneLine(value: string, maxChars: number): string {
@@ -66,8 +61,10 @@ export function shareCodeForRelay(
 // A name shown as the sender must not pass for an address or a website. When
 // it could, the email names the inviter by address only.
 export function inviterDisplayName(name: string | null): string | null {
-  const shown = oneLine(name ?? "", INVITER_NAME_MAX_CHARS);
-  return shown && !/[@<>]|:\/\/|[\p{L}\p{N}-]\.[A-Za-z]{2,}/u.test(shown) ? shown : null;
+  const shown = oneLine(name ?? "", SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT);
+  return shown && !/[@<>]|:\/\/|[\p{L}\p{N}-][.\u3002\uff0e\uff61]\p{L}{2,}/u.test(shown)
+    ? shown
+    : null;
 }
 
 export function shareInvitationMessage(input: {
@@ -84,15 +81,18 @@ export function shareInvitationMessage(input: {
   const inviterName = inviterDisplayName(input.inviterName);
   const inviter = inviterName ?? inviterEmail;
   const inviterWithAddress = inviterName ? `${inviterName} (${inviterEmail})` : inviterEmail;
-  const name = oneLine(input.subjectName ?? "", NAME_MAX_CHARS).replace(/["“”„‟«»]/gu, "'");
+  const name = oneLine(input.subjectName ?? "", NAME_MAX_CHARS).replace(
+    /["\u201c\u201d\u201e\u201f\u00ab\u00bb]/gu,
+    "'",
+  );
   const what = name ? `"${name}"` : "work";
   const subject = `${inviter} shared ${what} with you`;
-  const role = ROLE_SENTENCES.get(input.access);
+  const role = ROLES.get(input.access);
   const browserUrl = input.browserInvitationUrl && webUrl(input.browserInvitationUrl);
   const code = input.shareCode;
 
   const text = [
-    `${inviterWithAddress} shared ${what} with you.${role ? ` ${role}` : ""}`,
+    `${inviterWithAddress} shared ${what} with you.${role ? ` ${role.sentence}` : ""}`,
     ...(browserUrl
       ? [`Open in browser:\n${browserUrl}\nSign in or create an account with ${recipient}.`]
       : []),
@@ -124,7 +124,7 @@ export function shareInvitationMessage(input: {
   const html = emailHtml({
     title: subject,
     preheader: [
-      role,
+      role?.sentence,
       browserUrl ? "Open it in your browser or the dohc app." : "Open it in the dohc app.",
     ]
       .filter(Boolean)
@@ -132,7 +132,7 @@ export function shareInvitationMessage(input: {
     card: [
       sender(inviterName, inviterEmail),
       heading("Shared work with you"),
-      item(name || "Shared work", ROLE_LABELS.get(input.access) ?? null),
+      item(name || "Shared work", role?.label ?? null),
       gap(24),
       ...browser,
       subheading(browserUrl ? "Using the dohc app?" : "Open in the dohc app"),

@@ -161,7 +161,7 @@ function sender(
   fromName: string | undefined,
 ): string | { name: string; address: string } {
   const name = fromName?.trim();
-  if (name && !/[\p{C}\p{Zl}\p{Zp}]/u.test(name))
+  if (name && !/(?![\u200c\u200d])[\p{C}\p{Zl}\p{Zp}]/u.test(name))
     return { name: `${name} via dohc`, address: mailbox(from) };
   return /<[^>]*>\s*$/.test(from) ? from : { name: "dohc", address: mailbox(from) };
 }

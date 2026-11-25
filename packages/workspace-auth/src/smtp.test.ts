@@ -236,6 +236,12 @@ describe("createSmtpSender", () => {
       html: "<p>Designed body</p>",
       fromName: 'Sam "Q" Rivera, Jr',
     });
+    await send({
+      to: "person@example.com",
+      subject: "Joined",
+      text: "Body",
+      fromName: "Mohammad\u200cReza",
+    });
     await send({ to: "person@example.com", subject: "Bare", text: "Body" });
     await send({
       to: "person@example.com",
@@ -244,10 +250,11 @@ describe("createSmtpSender", () => {
       fromName: "Sam\r\nBcc: x",
     });
 
-    const [named, bare, odd] = server.messages();
+    const [named, joined, bare, odd] = server.messages();
+    expect(joined).toMatch(/^From: =\?UTF-8\?.+\?= <accounts@dohc\.test>/mu);
     expect(
       server.transcript.filter((line) => line === "MAIL FROM:<accounts@dohc.test>"),
-    ).toHaveLength(3);
+    ).toHaveLength(4);
     expect(named).toContain('From: "Sam \\"Q\\" Rivera, Jr via dohc" <accounts@dohc.test>');
     expect(named).toMatch(/Content-Type: multipart\/alternative/u);
     expect(named).toContain("Plain body");

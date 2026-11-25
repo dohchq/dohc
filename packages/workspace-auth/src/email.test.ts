@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { accountEmail, button, emailHtml, initials, item, sender, strong } from "./email";
+import { accountEmail, button, emailHtml, item, sender, strong } from "./email";
 
 const reset = {
   to: "person@example.com",
@@ -42,8 +42,13 @@ describe("emailHtml", () => {
   });
 });
 
-describe("initials", () => {
-  it("takes the first letter of the first and last names, or of the address", () => {
+describe("sender", () => {
+  const initials = (name: string | null, address: string) =>
+    /class="avatar"[^>]*>([^<]*)</u.exec(
+      emailHtml({ title: "", preheader: "", card: [sender(name, address)], footer: [] }),
+    )?.[1];
+
+  it("shows the first letter of the first and last names, or of the address", () => {
     expect(initials("Sam Rivera", "s@example.test")).toBe("SR");
     expect(initials("sam", "s@example.test")).toBe("S");
     expect(initials("Ana María de la Cruz", "a@example.test")).toBe("AC");
