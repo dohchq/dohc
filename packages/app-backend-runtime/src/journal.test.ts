@@ -769,7 +769,8 @@ it("exports pinned immutable history while later writes and schema transitions c
 
 function schemaHistory(f: ReturnType<typeof fixture>) {
   f.db.exec(
-    "CREATE TABLE IF NOT EXISTS dohc_dataset_automation_revisions(workspace_id,dataset_id,revision,automation_id,depth)",
+    `CREATE TABLE IF NOT EXISTS dohc_dataset_automation_revisions(workspace_id,dataset_id,revision,automation_id,depth);
+    CREATE TABLE IF NOT EXISTS dohc_dataset_revision_actors(workspace_id,dataset_id,revision,actor)`,
   );
   return readDatasetHistory(
     f.db,

@@ -1,5 +1,12 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ChevronRight, History as HistoryIcon, Paperclip, Undo2, Zap } from "lucide-react";
+import {
+  AppWindow,
+  ChevronRight,
+  History as HistoryIcon,
+  Paperclip,
+  Undo2,
+  Zap,
+} from "lucide-react";
 import { DatasetHistoryPage } from "@dohc/cli/dataset";
 import {
   CollectionHistoryRevisionDetails,
@@ -32,7 +39,8 @@ function History(props: CollectionHistoryDialogProps) {
   const [page, setPage] = useState<DatasetHistoryPage | null>(null),
     [busy, setBusy] = useState(false);
   const alive = useRef(true),
-    request = useRef<AbortController | null>(null);
+    request = useRef<AbortController | null>(null),
+    shown = useRef<number | undefined>(undefined);
   useLayoutEffect(() => {
     alive.current = true;
     return () => {
@@ -66,7 +74,10 @@ function History(props: CollectionHistoryDialogProps) {
           result.nextBeforeRevision !== result.entries.at(-1)?.revision)
       )
         throw Error("The Collection returned an invalid history page.");
-      if (alive.current && !controller.signal.aborted) setPage(result);
+      if (alive.current && !controller.signal.aborted) {
+        shown.current = beforeRevision;
+        setPage(result);
+      }
     } catch (error) {
       if (alive.current && !controller.signal.aborted) {
         setPage(null);
@@ -81,6 +92,13 @@ function History(props: CollectionHistoryDialogProps) {
   useEffect(() => {
     void load();
   }, [props.refreshVersion]);
+  useEffect(
+    () =>
+      window.dohcDesktop?.onHistoryNamesChanged?.((event) => {
+        if (event.workspaceId === props.workspaceId) void load(shown.current);
+      }),
+    [props.workspaceId],
+  );
   return (
     <Overlay
       onClose={props.onClose}
@@ -145,6 +163,7 @@ function History(props: CollectionHistoryDialogProps) {
                 {entry.revision}
               </span>
               <span className="font-medium">{entry.operation}</span>
+              {entry.by && <Author by={entry.by} />}
               {entry.automation && (
                 <span
                   className="flex min-w-0 items-center gap-1 text-[12px] text-muted"
@@ -266,5 +285,21 @@ function History(props: CollectionHistoryDialogProps) {
         </SecondaryButton>
       </div>
     </Overlay>
+  );
+}
+
+function Author({ by }: { by: NonNullable<DatasetHistoryPage["entries"][number]["by"]> }) {
+  return (
+    <span className="flex min-w-0 items-center gap-1 text-[12px] text-muted">
+      <span className={by.kind === "agent" ? "truncate text-agent" : "truncate"}>{by.name}</span>
+      {by.person && <span className="truncate">for {by.person}</span>}
+      {by.app && (
+        <span className="flex min-w-0 items-center gap-1" title="App">
+          <AppWindow size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
+          <span className="sr-only">through app </span>
+          <span className="truncate">{by.app}</span>
+        </span>
+      )}
+    </span>
   );
 }

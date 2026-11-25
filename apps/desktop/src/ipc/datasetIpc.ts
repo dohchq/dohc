@@ -56,6 +56,10 @@ import {
   invalidateDatasetAddresses,
   type ResolvedDatasetRequest,
 } from "../workspaces/datasetAddress";
+import { parseAppPublicationCandidate } from "@dohc/security-contract/app-publication";
+import type { LocalAppRow } from "../workspaces/localAppStore";
+import { APP_PUBLICATION_LIMITS } from "../workspaces/ownerAppPublication";
+import { collectionHistoryAuthors, type CollectionHistoryNames } from "./collectionHistoryAuthors";
 import {
   assertSourcePathsNotHeld,
   assertSourcePathsNotDeferred,
@@ -142,6 +146,8 @@ export function createDatasetHandler<
     signal: AbortSignal,
   ): Promise<ShareLinkPublication | null>;
   collectionRulesChanged?(workspaceId: string, datasetId: string): void;
+  /** Names Collection History's people and agents for the desktop. The owner CLI keeps raw actors. */
+  historyPeople?(caller: Caller, workspace: W): Omit<CollectionHistoryNames, "app">;
 }) {
   const migrations = new Map<
     string,
@@ -559,6 +565,27 @@ export function createDatasetHandler<
           }
           const data = await openData();
           current();
+          const lookupLocalApps = async (
+            ids: readonly string[],
+          ): Promise<Map<string, LocalAppRow> | null> => {
+            if (
+              operation.workspace.rootPath &&
+              !(await localDatasetStoreExists(operation.workspace.rootPath))
+            )
+              return new Map();
+            try {
+              const apps = (await localHost()).apps;
+              const map = new Map<string, LocalAppRow>();
+              for (const id of ids) {
+                const row = apps?.heldDatasetApp?.(id);
+                if (row) map.set(id, row);
+              }
+              return map;
+            } catch (error) {
+              if (operation.signal.aborted) throw error;
+              return null;
+            }
+          };
           const discoverBoundApps = async (
             datasetId: string,
             targetRevision: DatasetRevision | (() => Promise<DatasetRevision>),
@@ -585,25 +612,7 @@ export function createDatasetHandler<
                 "historyRevision" in data && data.historyRevision
                   ? async (revisionSha256) => data.historyRevision!({ datasetId, revisionSha256 })
                   : undefined,
-              lookupLocalApps: async (ids) => {
-                if (
-                  operation.workspace.rootPath &&
-                  !(await localDatasetStoreExists(operation.workspace.rootPath))
-                )
-                  return new Map();
-                try {
-                  const apps = (await localHost()).apps;
-                  const map = new Map();
-                  for (const id of ids) {
-                    const row = apps?.heldDatasetApp?.(id);
-                    if (row) map.set(id, row);
-                  }
-                  return map;
-                } catch (error) {
-                  if (operation.signal.aborted) throw error;
-                  return null;
-                }
-              },
+              lookupLocalApps,
               readShareLinkPublication: dependencies.readShareLinkPublication
                 ? (pubId, sig) =>
                     dependencies.readShareLinkPublication!(operation.workspace, pubId, sig)
@@ -917,16 +926,35 @@ export function createDatasetHandler<
                 );
             }
             current();
-            return {
-              kind: "history" as const,
-              ...result,
-              entries: result.entries.map((entry) => {
-                const name = entry.automation && names.get(entry.automation.automationId);
-                return name && entry.automation
-                  ? { ...entry, automation: { ...entry.automation, name } }
-                  : entry;
-              }),
+            const entries = result.entries.map((entry) => {
+              const name = entry.automation && names.get(entry.automation.automationId);
+              return name && entry.automation
+                ? { ...entry, automation: { ...entry.automation, name } }
+                : entry;
+            });
+            const people = dependencies.historyPeople?.(caller, operation.workspace);
+            if (!people) return { kind: "history" as const, ...result, entries };
+            const appRoot = async (publicationId: string) => {
+              const held = (await lookupLocalApps([publicationId]))?.get(publicationId);
+              if (held) return held.appRoot;
+              const shared = await dependencies.readShareLinkPublication?.(
+                operation.workspace,
+                publicationId,
+                AbortSignal.any([operation.signal, AbortSignal.timeout(5_000)]),
+              );
+              return shared?.active && !shared.operatorTakedown && shared.linkCurrent !== false
+                ? parseAppPublicationCandidate(shared.candidate, APP_PUBLICATION_LIMITS).appRoot
+                : null;
             };
+            const named = await collectionHistoryAuthors(entries, {
+              ...people,
+              app: async (publicationId) => {
+                const root = await appRoot(publicationId);
+                return root === null ? null : root.slice(root.lastIndexOf("/") + 1);
+              },
+            });
+            current();
+            return { kind: "history" as const, ...result, entries: named };
           }
           if (input.action === "permissions") {
             if (!("permissions" in data) || !data.permissions)

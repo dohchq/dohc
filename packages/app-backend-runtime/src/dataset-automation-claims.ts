@@ -514,6 +514,10 @@ export function createDatasetAutomationClaims(options: {
       workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,revision INTEGER NOT NULL,automation_id TEXT NOT NULL,depth INTEGER NOT NULL,
       storage_bytes INTEGER NOT NULL CHECK(storage_bytes>0),
       PRIMARY KEY(workspace_id,dataset_id,revision)) STRICT;
+    CREATE TABLE IF NOT EXISTS dohc_dataset_revision_actors(
+      workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,revision INTEGER NOT NULL,actor TEXT NOT NULL,
+      storage_bytes INTEGER NOT NULL CHECK(storage_bytes>0),
+      PRIMARY KEY(workspace_id,dataset_id,revision)) STRICT;
     CREATE TABLE IF NOT EXISTS dohc_dataset_automation_presses(
       workspace_id TEXT NOT NULL,press_id TEXT NOT NULL,dataset_id TEXT NOT NULL,claim_id TEXT NOT NULL,request TEXT NOT NULL,
       pressed_at_ms INTEGER NOT NULL,storage_bytes INTEGER NOT NULL CHECK(storage_bytes>0),
@@ -535,9 +539,8 @@ export function createDatasetAutomationClaims(options: {
     /**
      * Claim one commit for its subscribed automations. Runs inside the commit
      * transaction, so the claims and their charge commit or roll back with it.
-     * Returns how many claims it made. With no subscription it returns after
-     * one indexed read, unless an automation made the commit, which it also
-     * records for History.
+     * Returns how many claims it made. It also records who made the commit
+     * for History, in the last DATASET_AUTOMATION_ATTRIBUTED_REVISIONS.
      */
     recordCommit(
       input: DatasetCommit & { approved: DatasetRevision; actor: DatasetActor },
@@ -561,10 +564,10 @@ export function createDatasetAutomationClaims(options: {
       let delta = 0,
         made = 0;
       let failed = false;
-      if (self !== undefined) {
-        const row = [cursor.workspaceId, cursor.datasetId, cursor.revision, self, depth],
+      const attribute = (table: string, ...values: Array<string | number>) => {
+        const row = [cursor.workspaceId, cursor.datasetId, cursor.revision, ...values],
           storageBytes = bytes(row) + ROW_BYTES;
-        db.prepare("INSERT INTO dohc_dataset_automation_revisions VALUES(?,?,?,?,?,?)").run(
+        db.prepare(`INSERT INTO ${table} VALUES(${"?,".repeat(row.length)}?)`).run(
           ...row,
           storageBytes,
         );
@@ -573,7 +576,7 @@ export function createDatasetAutomationClaims(options: {
           refunded(
             db
               .prepare(
-                "DELETE FROM dohc_dataset_automation_revisions WHERE workspace_id=? AND dataset_id=? AND revision<=? RETURNING storage_bytes",
+                `DELETE FROM ${table} WHERE workspace_id=? AND dataset_id=? AND revision<=? RETURNING storage_bytes`,
               )
               .all(
                 cursor.workspaceId,
@@ -581,7 +584,21 @@ export function createDatasetAutomationClaims(options: {
                 cursor.revision - DATASET_AUTOMATION_ATTRIBUTED_REVISIONS,
               ),
           );
-      }
+      };
+      if (actor.kind === "automation")
+        attribute("dohc_dataset_automation_revisions", actor.automationId, depth);
+      else
+        attribute(
+          "dohc_dataset_revision_actors",
+          JSON.stringify({
+            kind: actor.kind,
+            ...("userId" in actor && actor.userId !== undefined ? { userId: actor.userId } : {}),
+            ...(actor.appId === undefined ? {} : { appId: actor.appId }),
+            ...(actor.kind === "agent" && actor.agentId !== undefined
+              ? { agentId: actor.agentId }
+              : {}),
+          }),
+        );
       if (subscriptions.length) {
         if (
           input.approved.datasetId !== cursor.datasetId ||
@@ -1110,6 +1127,7 @@ export function createDatasetAutomationClaims(options: {
         "dohc_dataset_automation_subscriptions",
         "dohc_dataset_automation_claims",
         "dohc_dataset_automation_revisions",
+        "dohc_dataset_revision_actors",
         "dohc_dataset_automation_failure_generations",
         "dohc_dataset_automation_presses",
       ])
