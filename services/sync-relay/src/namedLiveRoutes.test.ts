@@ -1062,6 +1062,28 @@ describe("an owner's phone", () => {
     }
   };
 
+  it("keeps an idle phone open past idleTimeoutMs while it answers pings, and closes one whose pongs stop", async () => {
+    const routeLimits = { ...limits, idleTimeoutMs: 600 };
+    const f = await fixture(routeLimits, false, undefined, true);
+    const phone = f.connect((await mintPhone(f)).token, "", phoneHeaders);
+    expect(await phone.status).toBe(101);
+    expect(await waitForPings(phone.ws, 5)).toBe(5);
+    expect(phone.ws.readyState).toBe(WebSocket.OPEN);
+    const silent = f.connect((await mintPhone(f)).token, "", phoneHeaders, "", undefined, false);
+    expect(await silent.status).toBe(101);
+    const opened = performance.now();
+    const spoof = setInterval(() => {
+      if (silent.ws.readyState === WebSocket.OPEN) silent.ws.pong(Buffer.alloc(8, 7));
+    }, 100);
+    try {
+      await silent.closed;
+    } finally {
+      clearInterval(spoof);
+    }
+    expect(performance.now() - opened).toBeLessThan(2 * routeLimits.idleTimeoutMs);
+    expect(phone.ws.readyState).toBe(WebSocket.OPEN);
+  });
+
   it("opens once per ticket, selects only the live protocol, and keeps its own capture with owner rooms on", async () => {
     const join = vi.fn((captured: NamedFrameRoomHost) => captured);
     const f = await phoneFixture({ join } as unknown as LiveRooms);
