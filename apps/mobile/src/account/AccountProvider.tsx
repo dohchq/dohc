@@ -48,6 +48,7 @@ import {
   type WorkspaceList,
   type WorkspaceListStore,
 } from "../server/workspaceList";
+import { launchTimings } from "../startup";
 import { useTheme } from "../theme";
 import { Connect } from "./Connect";
 import { ProblemLine } from "./ProblemLine";
@@ -139,7 +140,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   );
   const state = useSyncExternalStore(account.subscribe, account.state);
   useEffect(() => {
-    void openNow([kept, cacheFile]);
+    void openNow([kept, cacheFile]).then(() => launchTimings?.mark("databases"));
     void account.restore();
   }, [account, kept, cacheFile]);
   // Subscribed before the cache and the outbox follow the account, so it runs before either clears anything.
@@ -185,6 +186,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     (open ?? noOpen).subscribe,
     (open ?? noOpen).state,
   );
+  if (currentWorkspaceId && !choosing) launchTimings?.mark("chosen");
   const apps = useMemo(
     () =>
       signIn && currentWorkspaceId

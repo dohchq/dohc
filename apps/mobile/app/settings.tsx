@@ -22,6 +22,7 @@ import { recoveryRows } from "../src/conversation/outboxMessages";
 import { useOutboxState } from "../src/conversation/useOutbox";
 import { OutboxError } from "../src/server/outbox";
 import { pageTimings, timingOwner } from "../src/pages/pageTimings";
+import { launchTimings, type LaunchStep } from "../src/startup";
 import { phoneWrites } from "../src/server/phoneWrites";
 import type { SignIn } from "../src/server/account";
 import {
@@ -108,6 +109,13 @@ function useServerList<T>(signIn: SignIn, read: (client: ServerClient) => Promis
   );
   return { load, reload, update, fail };
 }
+
+const LAUNCH_STEPS: readonly (readonly [LaunchStep, string])[] = [
+  ["keychain", "Keychain read"],
+  ["databases", "Databases open"],
+  ["chosen", "Workspace chosen"],
+  ["chats", "Chats shown"],
+];
 
 // A signed-in build's Settings, from your mark in the Chats header: the account and its server, which workspaces show
 // on this phone, the account's sessions and agents, and Sign out.
@@ -383,6 +391,17 @@ function SettingsScreen() {
           <Text style={[styles.signOutLabel, { color: theme.danger }]}>{accountWords.signOut}</Text>
         </Pressable>
       </Section>
+      {launchTimings ? (
+        <Section title="Launch">
+          {LAUNCH_STEPS.map(([step, title]) => (
+            <Row
+              key={step}
+              title={title}
+              detail={`${launchTimings?.marks().get(step) ?? "-"} ms`}
+            />
+          ))}
+        </Section>
+      ) : null}
       {pageTimings ? (
         <Section title="Page opens">
           {pageTimings.opens(timingOwner(signIn)).map((open, index) => (

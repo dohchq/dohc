@@ -14,6 +14,7 @@ import {
 import { View } from "react-native";
 import { useAccount } from "../account/AccountProvider";
 import { phoneWrites } from "../server/phoneWrites";
+import { launchTimings } from "../startup";
 import { views } from "../server/workspaceData";
 import type { ChatGroup } from "../server/workspaceReads";
 import { useTheme, workspaceMarkFills } from "../theme";
@@ -110,6 +111,7 @@ function ServerChatList({ workspace }: { workspace: PhoneWorkspace }) {
     void data.refresh(views.chats).finally(() => setPulling(false));
   }, [data]);
   useEffect(() => {
+    if (sections) launchTimings?.mark("chats");
     if (sections && data) warmUnread(data, sections);
   }, [sections, data, warmUnread]);
   return (
