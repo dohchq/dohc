@@ -267,4 +267,211 @@ describe("a member's raw pull answered across a change", () => {
     release();
     expect((await revoked).status).toBe(404);
   });
+
+  it("signals levelChanged on non-held path probes and normalizes group share levels", async () => {
+    const storage = (await testStorage()) as StorageContext;
+    const h = testHandler(storage);
+    expect(
+      (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
+    ).toBe(200);
+    await putBlob(h, OWNER, WORKSPACE, "Plan");
+    await appendLog(
+      h,
+      OWNER,
+      WORKSPACE,
+      [moment("notes/plan.md", "Plan", { originSeq: 0, objectId: "plan", recordedAtMs: 1 })],
+      { originId: "device" },
+    );
+    await appendLog(
+      h,
+      OWNER,
+      WORKSPACE,
+      sequenced([
+        chatChannelCreate(TEAM, {
+          name: "Team",
+          kind: "channel",
+          type: "both",
+          folderPath: "notes",
+        }),
+      ]),
+      { originId: "chat-device" },
+    );
+    const createdPath = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({ recipientUserId: "ana", paths: ["notes/plan.md"], access: "edit" }),
+      ),
+    );
+    expect(createdPath.status, await createdPath.clone().text()).toBe(200);
+    const pathShare = await json(createdPath);
+    const pathShareId = String(pathShare.shareId);
+    const pathGrantId = String(pathShare.grantId);
+    const initialPath = await json(
+      await h(request("ana", `/sync/shares/${pathShareId}/log?since=0&scan=page`)),
+    );
+    const pathCursor = Number(initialPath.nextCursor);
+
+    expect(
+      (
+        await h(
+          request(
+            OWNER,
+            `/sync/shares/${pathShareId}/grants/${pathGrantId}/retune`,
+            jsonBody({ workspaceId: WORKSPACE, access: "view" }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    const lowered = await json(
+      await h(
+        request("ana", `/sync/shares/${pathShareId}/log?since=${pathCursor}&scan=page&level=edit`),
+      ),
+    );
+    expect(lowered).toMatchObject({
+      ok: true,
+      ops: [],
+      nextCursor: pathCursor,
+      levelChanged: true,
+    });
+
+    await putBlob(h, OWNER, WORKSPACE, "Plan updated");
+    await appendLog(
+      h,
+      OWNER,
+      WORKSPACE,
+      [
+        moment("notes/plan.md", "Plan updated", {
+          originSeq: 1,
+          objectId: "plan",
+          beforePath: "notes/plan.md",
+          beforeContent: "Plan",
+          recordedAtMs: 2,
+        }),
+      ],
+      { originId: "device" },
+    );
+    const loweredWithOps = await json(
+      await h(
+        request("ana", `/sync/shares/${pathShareId}/log?since=${pathCursor}&scan=page&level=edit`),
+      ),
+    );
+    expect(loweredWithOps).toMatchObject({ ok: true, levelChanged: true });
+    expect((loweredWithOps.ops as unknown[]).length).toBeGreaterThan(0);
+    const updatedPathCursor = Number(loweredWithOps.nextCursor);
+
+    expect(
+      (
+        await h(
+          request(
+            OWNER,
+            `/sync/shares/${pathShareId}/grants/${pathGrantId}/retune`,
+            jsonBody({ workspaceId: WORKSPACE, access: "edit" }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    const raised = await json(
+      await h(
+        request(
+          "ana",
+          `/sync/shares/${pathShareId}/log?since=${updatedPathCursor}&scan=page&level=view`,
+        ),
+      ),
+    );
+    expect(raised).toMatchObject({
+      ok: true,
+      ops: [],
+      nextCursor: updatedPathCursor,
+      levelChanged: true,
+    });
+    const matched = await json(
+      await h(
+        request(
+          "ana",
+          `/sync/shares/${pathShareId}/log?since=${updatedPathCursor}&scan=page&level=edit`,
+        ),
+      ),
+    );
+    expect(matched).not.toHaveProperty("levelChanged");
+
+    const createdGroup = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({
+          recipientUserId: "ana",
+          channelWireId: TEAM,
+          paths: ["notes"],
+          access: "read-write",
+          subjectName: "Team",
+        }),
+      ),
+    );
+    expect(createdGroup.status, await createdGroup.clone().text()).toBe(200);
+    const groupShareId = String((await json(createdGroup)).shareId);
+    const initialGroup = await json(
+      await h(request("ana", `/sync/shares/${groupShareId}/log?since=0&scan=page`)),
+    );
+    const groupCursor = Number(initialGroup.nextCursor);
+    const groupMatched = await json(
+      await h(
+        request(
+          "ana",
+          `/sync/shares/${groupShareId}/log?since=${groupCursor}&scan=page&level=edit`,
+        ),
+      ),
+    );
+    expect(groupMatched).not.toHaveProperty("levelChanged");
+    const groupMismatched = await json(
+      await h(
+        request(
+          "ana",
+          `/sync/shares/${groupShareId}/log?since=${groupCursor}&scan=page&level=view`,
+        ),
+      ),
+    );
+    expect(groupMismatched).toMatchObject({
+      ok: true,
+      ops: [],
+      nextCursor: groupCursor,
+      levelChanged: true,
+    });
+
+    const member = await seed();
+    const firstMember = await json(await member.pull());
+    const memberCursor = Number(firstMember.nextCursor);
+    await putBlob(member.h, OWNER, WORKSPACE, "Updated plan");
+    await appendLog(
+      member.h,
+      OWNER,
+      WORKSPACE,
+      [
+        moment("notes/plan.md", "Updated plan", {
+          originSeq: 1,
+          objectId: "plan",
+          beforePath: "notes/plan.md",
+          beforeContent: "Plan",
+          recordedAtMs: 2,
+        }),
+      ],
+      { originId: "device" },
+    );
+    expect(
+      (
+        await member.h(
+          request(OWNER, `/sync/${WORKSPACE}/members/level`, jsonBody({ level: "view" })),
+        )
+      ).status,
+    ).toBe(200);
+    const memberLowered = await json(
+      await member.pull(`since=${memberCursor}&scan=page&level=edit`),
+    );
+    expect(memberLowered).toMatchObject({
+      ok: true,
+      ops: [],
+      nextCursor: memberCursor,
+      levelChanged: true,
+    });
+  });
 });

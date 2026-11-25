@@ -3110,7 +3110,7 @@ describe("background share pulls", () => {
     expect(result).not.toHaveProperty("nextCursor");
     expect(fetch).toHaveBeenCalledOnce();
     expect(fetch).toHaveBeenCalledWith(
-      "https://relay.example.test/sync/shares/share/log?since=42&scan=page",
+      "https://relay.example.test/sync/shares/share/log?since=42&scan=page&level=edit",
       expect.objectContaining({ headers: expect.any(Headers), signal: expect.any(AbortSignal) }),
     );
     expect(new Headers(fetch.mock.calls[0]![1]!.headers).get("authorization")).toBe("Bearer token");
@@ -3134,7 +3134,7 @@ describe("background share pulls", () => {
       held: true,
     });
     expect(fetch).toHaveBeenLastCalledWith(
-      "https://relay.example.test/sync/shares/share/log?since=42&scan=page&hold=25000",
+      "https://relay.example.test/sync/shares/share/log?since=42&scan=page&hold=25000&level=edit",
       expect.anything(),
     );
     const changed = await h.invoke(channel, { ...payload, trigger: "held" });
@@ -3165,6 +3165,10 @@ describe("background share pulls", () => {
       access: "comment",
       wholeWorkspace: true,
     };
+    h.fetchInfo.mockResolvedValue({
+      ...info,
+      selector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
+    });
     await h.invoke(channel, { workspaceId: "existing" });
     vi.clearAllMocks();
     const bodies = [
@@ -3182,12 +3186,34 @@ describe("background share pulls", () => {
       "https://relay.example.test/sync/shares/share/log?since=42&scan=page&hold=25000&level=comment",
       expect.anything(),
     );
-    // Answered once: the next hold names no level, so a stale one cannot loop.
+    h.fetchAccess.mockResolvedValueOnce({ access: "edit" });
+    h.fetchReach.mockResolvedValueOnce({
+      signature: "r2",
+      visibilitySignature: "v2",
+      rootLevel: "edit",
+      groupDefault: "edit",
+      groups: [],
+      folders: [],
+    });
+    h.workspace.shareView!.reach = {
+      signature: "r1",
+      visibilitySignature: "v1",
+      rootLevel: "comment",
+      groupDefault: "comment",
+      groups: [],
+      folders: [],
+    };
+    await expect(
+      h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
+        workspaceId: "existing",
+      }),
+    ).resolves.toEqual({ status: "unverified" });
     await h.invoke(channel, held);
     expect(fetch).toHaveBeenLastCalledWith(
       "https://relay.example.test/sync/shares/share/log?since=42&scan=page&hold=25000",
       expect.anything(),
     );
+    delete h.workspace.shareView!.reach;
     h.fetchAccess.mockResolvedValue({ access: "edit" });
     await expect(
       h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
@@ -3199,6 +3225,135 @@ describe("background share pulls", () => {
       "https://relay.example.test/sync/shares/share/log?since=42&scan=page&hold=25000&level=edit",
       expect.anything(),
     );
+
+    bodies.push({
+      ops: [{ seq: 43 }],
+      hasMore: false,
+      nextCursor: 43,
+      levelChanged: true,
+    } as never);
+    h.fetchInfo.mockClear();
+    h.reconcile.mockClear();
+    await expect(h.invoke(channel, payload)).resolves.toMatchObject({
+      probed: true,
+      levelChanged: true,
+    });
+    expect(h.fetchInfo).not.toHaveBeenCalled();
+    expect(h.reconcile).not.toHaveBeenCalled();
+  });
+  async function primedPathShare(access: "view" | "edit") {
+    const h = await harness();
+    h.workspace.shareView!.grantedSelector = { paths: ["docs"], versionId: null, access };
+    h.fetchInfo.mockResolvedValue({
+      ...info,
+      selector: { paths: ["docs"], versionId: null, access },
+    });
+    await h.invoke(channel, { workspaceId: "existing" });
+    vi.clearAllMocks();
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json(bodies.shift()));
+    h.probeLog.mockImplementation((input) =>
+      probeShareViewLog({ ...input, relay: { ...input.relay, fetch } }),
+    );
+    return { h, bodies, fetch };
+  }
+  it("restores a path share's pending level after an unverified check and clears it once access confirms a higher level", async () => {
+    const { h, bodies, fetch } = await primedPathShare("view");
+    bodies.push(
+      { ops: [], hasMore: false, nextCursor: 42, levelChanged: true },
+      { ops: [], hasMore: false, nextCursor: 42, levelChanged: true },
+      { ops: [], hasMore: false, nextCursor: 42 },
+    );
+
+    await expect(h.invoke(channel, payload)).resolves.toMatchObject({
+      probed: true,
+      levelChanged: true,
+    });
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://relay.example.test/sync/shares/share/log?since=42&scan=page&level=view",
+      expect.anything(),
+    );
+
+    h.fetchAccess.mockRejectedValueOnce(new Error("timeout"));
+    await expect(
+      h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
+        workspaceId: "existing",
+      }),
+    ).resolves.toEqual({ status: "unverified" });
+
+    await expect(h.invoke(channel, payload)).resolves.toMatchObject({
+      probed: true,
+      levelChanged: true,
+    });
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://relay.example.test/sync/shares/share/log?since=42&scan=page&level=view",
+      expect.anything(),
+    );
+
+    h.fetchAccess.mockResolvedValueOnce({ access: "edit" });
+    await expect(
+      h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
+        workspaceId: "existing",
+      }),
+    ).resolves.toEqual({ status: "current", access: "view", relayStatesMore: true });
+
+    await h.invoke(channel, payload);
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://relay.example.test/sync/shares/share/log?since=42&scan=page",
+      expect.anything(),
+    );
+  });
+  it("caches a path share's widened level after manual refresh and omits level when scope mismatch refuses widening", async () => {
+    const { h, bodies, fetch } = await primedPathShare("view");
+    bodies.push(
+      { ops: [], hasMore: false, nextCursor: 42 },
+      { ops: [], hasMore: false, nextCursor: 42 },
+    );
+
+    h.fetchInfo.mockResolvedValueOnce({
+      ...info,
+      selector: { paths: ["docs"], versionId: null, access: "edit" },
+    });
+    await h.invoke(channel, { workspaceId: "existing", trigger: "manual" });
+    expect(h.workspace.shareView!.grantedSelector.access).toBe("edit");
+    await h.invoke(channel, payload);
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://relay.example.test/sync/shares/share/log?since=42&scan=page&level=edit",
+      expect.anything(),
+    );
+
+    h.workspace.shareView!.grantedSelector = { paths: ["docs"], versionId: null, access: "view" };
+    h.fetchInfo.mockResolvedValueOnce({
+      ...info,
+      selector: { paths: ["docs", "other"], versionId: null, access: "edit" },
+    });
+    await h.invoke(channel, { workspaceId: "existing", trigger: "manual" });
+    expect(h.workspace.shareView!.grantedSelector.access).toBe("view");
+    await h.invoke(channel, payload);
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://relay.example.test/sync/shares/share/log?since=42&scan=page",
+      expect.anything(),
+    );
+  });
+  it("runs a full refresh when a path share probe returns both new ops and levelChanged", async () => {
+    const { h, bodies } = await primedPathShare("edit");
+    bodies.push({
+      ops: [{ seq: 43 }],
+      hasMore: false,
+      nextCursor: 43,
+      levelChanged: true,
+    });
+    h.fetchInfo.mockResolvedValueOnce({
+      ...info,
+      selector: { paths: ["docs"], versionId: null, access: "view" },
+    });
+    await expect(h.invoke(channel, payload)).resolves.toMatchObject({
+      ok: true,
+      status: "updated",
+    });
+    expect(h.fetchInfo).toHaveBeenCalledOnce();
+    expect(h.reconcile).toHaveBeenCalledOnce();
+    expect(h.workspace.shareView!.grantedSelector.access).toBe("view");
   });
   it("asks for the next held pull after a held pull brought changes", async () => {
     const h = await primed();

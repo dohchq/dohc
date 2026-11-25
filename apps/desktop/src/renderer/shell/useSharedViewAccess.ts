@@ -6,7 +6,7 @@ import { onAutomationButtonResult } from "../collections/useAutomationButtons";
 const unverified = (): CheckSharedViewAccessResult => ({ status: "unverified" });
 // What a pull says about the next one. "held" waited at the relay for news,
 // so the next pull can start at once instead of in 30 s. "level-changed"
-// ended a hold because the account's level changed: access is checked again.
+// saw the grant's level differ from the cached one: access is checked again.
 export type SharedViewPulled = "held" | "level-changed" | "other";
 export type SharedViewAccessScheduler = (() => Promise<CheckSharedViewAccessResult>) & {
   pull(): Promise<CheckSharedViewAccessResult>;
@@ -102,14 +102,17 @@ export function useSharedViewAccess(input: {
           const completed = await Promise.allSettled([accessCheck(), pullShare()]);
           if (!isCurrent() || startedEpoch !== epoch) return unverified();
           // An access check that ran beside the pull may have read the level before it changed.
-          if (levelChanged) completed.push(...(await Promise.allSettled([accessCheck(true)])));
+          if (levelChanged) {
+            completed.push(...(await Promise.allSettled([accessCheck(true)])));
+            if (result.status === "unverified") nextPullAt = Date.now() + 30_000;
+          }
           if (!isCurrent() || startedEpoch !== epoch) return unverified();
           if (result.status === "needs-reopen") {
             paused = true;
             buttonPulls = [];
             return result;
           }
-          if (returned && result.relayStatesMore)
+          if ((returned || levelChanged) && result.relayStatesMore)
             void Promise.resolve()
               .then(() => latest.current.followStatedLevel())
               .catch(() => undefined);

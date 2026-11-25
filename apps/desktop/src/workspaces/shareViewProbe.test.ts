@@ -3,10 +3,24 @@ import { RelayUnauthorizedError, ShareUnavailableError } from "@dohc/workspace-c
 import { fetchShareViewReach, probeShareViewLog } from "./shareViewInfo";
 
 it.each([
-  [{ ops: [], nextCursor: 42, hasMore: false }, true],
-  [{ ops: [{ relaySeq: 43 }], nextCursor: 43, hasMore: false }, false],
-  [{ ops: [], nextCursor: 43, hasMore: true }, false],
-])("only skips a complete empty log page (%j)", async (body, unchanged) => {
+  [{ ops: [], nextCursor: 42, hasMore: false }, { unchanged: true }],
+  [
+    { ops: [{ relaySeq: 43 }], nextCursor: 43, hasMore: false },
+    { unchanged: false, hasOps: true },
+  ],
+  [
+    { ops: [], nextCursor: 43, hasMore: true },
+    { unchanged: false, hasOps: true },
+  ],
+  [
+    { ops: [], nextCursor: 42, hasMore: false, levelChanged: true },
+    { unchanged: true, levelChanged: true },
+  ],
+  [
+    { ops: [{ relaySeq: 43 }], nextCursor: 43, hasMore: false, levelChanged: true },
+    { unchanged: false, hasOps: true, levelChanged: true },
+  ],
+])("only skips a complete empty log page (%j)", async (body, expected) => {
   const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json(body));
   await expect(
     probeShareViewLog({
@@ -14,7 +28,7 @@ it.each([
       shareId: "share/id",
       since: 42,
     }),
-  ).resolves.toEqual({ unchanged });
+  ).resolves.toEqual(expected);
   expect(fetch).toHaveBeenCalledOnce();
   expect(fetch.mock.calls[0]![0]).toBe(
     "https://relay.test/sync/shares/share%2Fid/log?since=42&scan=page",

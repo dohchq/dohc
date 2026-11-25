@@ -34,6 +34,7 @@ import type { AuthorizedShareAction } from "./shareAuthorization";
 import {
   chatSideFor,
   chatSideOf,
+  fileSideOf,
   filterOpForShareAppend,
   isGroupSelector,
   isWorkspaceSelector,
@@ -279,19 +280,17 @@ export function createNamedShareTransportRoutes(
         scan === "page" ? limit : undefined,
       );
       const hold = parseLinkLogHold(url.searchParams.get("hold"));
-      // A held read names the level its reader knew, so a change that landed
-      // while no read waited still ends the next hold. The stored grant
-      // decides; a value that names no level is ignored.
       const knew = url.searchParams.get("level");
+      const accessOf = (selector: AnyShareSelector) => {
+        if (isWorkspaceSelector(selector)) return selector.reach.evaluated.level;
+        const files = fileSideOf(selector);
+        return files && "access" in files ? files.access : "view";
+      };
       if (
-        hold > 0 &&
         isShareAccessValue(knew) &&
-        knew !==
-          (isWorkspaceSelector(authorized.effectiveSelector)
-            ? authorized.effectiveSelector.reach.evaluated.level
-            : "access" in authorized.effectiveSelector
-              ? authorized.effectiveSelector.access
-              : "view")
+        knew !== accessOf(authorized.effectiveSelector) &&
+        (isWorkspaceSelector(authorized.effectiveSelector) ||
+          (page.ops.length === 0 && !page.hasMore))
       ) {
         return jsonResponse({
           ok: true,
@@ -407,7 +406,10 @@ export function createNamedShareTransportRoutes(
         const ops = isWorkspaceSelector(share.selector)
           ? await nameAuthorsByAccount(held.ops, lookupUserDisplayName)
           : held.ops;
-        if (markOf(stillHeld().effectiveSelector) !== mark) return null;
+        const latest = stillHeld();
+        if (markOf(latest.effectiveSelector) !== mark) return null;
+        const levelChanged =
+          isShareAccessValue(knew) && knew !== accessOf(latest.effectiveSelector);
         return jsonResponse({
           ok: true,
           ...(mappings.references.length || mappings.nextAfter
@@ -420,6 +422,7 @@ export function createNamedShareTransportRoutes(
           ...held,
           ops,
           ownOriginId,
+          ...(levelChanged ? { levelChanged: true } : {}),
           ...signed(),
         });
       };

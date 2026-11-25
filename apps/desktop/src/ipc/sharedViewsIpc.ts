@@ -739,9 +739,9 @@ export function registerSharedViewsIpcHandlers<
       relayUrl: string;
       nextCursor?: number;
       credentialGeneration: number;
-      // A membership's level as this computer knows it, which its held pull
-      // names. Cleared once the relay says it differs, until a check moves it.
+      wholeWorkspace?: true;
       level?: ShareViewSelector["access"];
+      pendingLevel?: ShareViewSelector["access"];
       reach?: ShareReachSignatures;
     }
   >();
@@ -809,6 +809,7 @@ export function registerSharedViewsIpcHandlers<
       entry?.workspaceId === input.workspaceId && entry.attachmentId === session!.attachmentId
         ? entry
         : undefined;
+    let probeLevelChanged = false;
     if (input.trigger === "background") {
       if (
         cached &&
@@ -885,15 +886,17 @@ export function registerSharedViewsIpcHandlers<
             shareId: cached.shareId,
             since: cached.nextCursor,
             signal: AbortSignal.any([controller.signal, retirement!]),
-            ...(held
-              ? { hold: SHARE_VIEW_HOLD_MS, ...(cached.level ? { level: cached.level } : {}) }
-              : {}),
+            ...(held ? { hold: SHARE_VIEW_HOLD_MS } : {}),
+            ...(cached.level ? { level: cached.level } : {}),
             ...(cached.reach ? { reach: cached.reach } : {}),
           });
-          if (probe.levelChanged) delete cached.level;
           controller.signal.throwIfAborted();
           scoped.assertCurrent();
-          if (probe.unchanged || probe.levelChanged) {
+          if (probe.unchanged || (probe.levelChanged && (!probe.hasOps || cached.wholeWorkspace))) {
+            if (probe.levelChanged) {
+              if (!cached.wholeWorkspace && !cached.reach) cached.pendingLevel = cached.level;
+              delete cached.level;
+            }
             if (pressBurst)
               syncSharedViewNotices(session!, retirement!, credentialGeneration, cached);
             return {
@@ -909,6 +912,7 @@ export function registerSharedViewsIpcHandlers<
               refusedDetail: null,
             };
           }
+          probeLevelChanged = probe.levelChanged === true;
         } catch (error) {
           if (closed) controller.signal.throwIfAborted();
           scoped.assertCurrent();
@@ -1037,11 +1041,15 @@ export function registerSharedViewsIpcHandlers<
           let identityFailure: unknown;
           let editStatedForCopyBelowEdit = false;
           let saysEditingNotReady = false;
+          let statedLevel: ShareAccess | undefined;
           // An access answer that arrives after this refresh asked for the level
           // is newer than what the refresh reads. Such a refresh changes no pin
           // and no marker, and its pull is not cached.
           let levelReadOvertaken = () => false;
-          if (!workspace.shareView.ended && (input.trigger !== "background" || !cached)) {
+          if (
+            !workspace.shareView.ended &&
+            (input.trigger !== "background" || !cached || probeLevelChanged)
+          ) {
             let refreshedWorkspace = workspace;
             await warmCredentialCache().catch(() => undefined);
             const credentials = currentCredentials();
@@ -1114,7 +1122,7 @@ export function registerSharedViewsIpcHandlers<
                 }
                 const overtaken = levelReadOvertaken();
                 if (overtaken) widenedPin = null;
-                const statedLevel =
+                statedLevel =
                   info.statedShareId === current.shareView.shareId
                     ? recordedShareSelector(info.selector)?.access
                     : undefined;
@@ -1324,6 +1332,14 @@ export function registerSharedViewsIpcHandlers<
             workspace.shareView.recipientUserId &&
             workspace.shareView.relayUrl
           ) {
+            const markedPin = recordedShareSelector(marked?.grantedSelector);
+            const markedLevel = sharePinLevel(markedPin);
+            const cacheLevel =
+              statedLevel !== undefined &&
+              markedLevel.level !== undefined &&
+              statedLevel !== markedLevel.level
+                ? {}
+                : markedLevel;
             pullCache.set(event.sender, {
               workspaceId: input.workspaceId,
               attachmentId: session!.attachmentId,
@@ -1332,7 +1348,8 @@ export function registerSharedViewsIpcHandlers<
               relayUrl: workspace.shareView.relayUrl,
               nextCursor,
               credentialGeneration,
-              ...membershipLevel(workspace.shareView.grantedSelector),
+              ...(markedPin?.wholeWorkspace === true ? { wholeWorkspace: true as const } : {}),
+              ...cacheLevel,
               ...(settledReach ? { reach: settledReach } : {}),
             });
             const clear = () => clearCache(event.sender);
@@ -1460,8 +1477,9 @@ export function registerSharedViewsIpcHandlers<
         checks.add(event.sender);
         const timeout = setTimeout(() => controller.abort(), 4_000);
         const unsubscribe = dependencies.onSenderClosed(event.sender, () => controller.abort());
+        let outcome: CheckSharedViewAccessResult = { status: "unverified" };
         try {
-          return await withRendererWorkspaceOperation(
+          outcome = await withRendererWorkspaceOperation(
             event.sender,
             input.workspaceId,
             "Share access check stopped because this window changed workspaces.",
@@ -1664,13 +1682,6 @@ export function registerSharedViewsIpcHandlers<
                 });
                 notifyRenderer({ workspaceId: workspace.workspaceId, summaryChanged: true });
               }
-              const pulling = pullCache.get(event.sender);
-              if (
-                pulling?.workspaceId === workspace.workspaceId &&
-                pulling.shareId === view.shareId
-              ) {
-                Object.assign(pulling, membershipLevel(committedPin));
-              }
               // A membership that waits to send answers View where it is pinned
               // at Edit, as its write gates and summary do.
               const answered =
@@ -1683,6 +1694,15 @@ export function registerSharedViewsIpcHandlers<
                 shareAccessRank(statedAccess) > shareAccessRank(answered)
                   ? { relayStatesMore: true as const }
                   : {};
+              const pulling = pullCache.get(event.sender);
+              if (
+                pulling?.workspaceId === workspace.workspaceId &&
+                pulling.shareId === view.shareId
+              ) {
+                delete pulling.pendingLevel;
+                if (!statesMore.relayStatesMore)
+                  Object.assign(pulling, sharePinLevel(committedPin));
+              }
               return committedPin.wholeWorkspace === true
                 ? {
                     status: "current",
@@ -1701,9 +1721,21 @@ export function registerSharedViewsIpcHandlers<
                 : { status: "current", access: committedPin.access, ...statesMore };
             },
           );
+          return outcome;
         } catch {
-          return { status: "unverified" };
+          return outcome;
         } finally {
+          if (outcome.status === "unverified") {
+            const pulling = pullCache.get(event.sender);
+            if (
+              pulling?.workspaceId === input.workspaceId &&
+              pulling.level === undefined &&
+              pulling.pendingLevel !== undefined
+            ) {
+              pulling.level = pulling.pendingLevel;
+              delete pulling.pendingLevel;
+            }
+          }
           clearTimeout(timeout);
           unsubscribe();
           checks.delete(event.sender);
@@ -1740,11 +1772,9 @@ function membershipPlace(info: {
   };
 }
 
-// A membership's level follows the relay both ways, so its held pull names
-// it. A path share's pin never rises, so naming its level could only repeat.
-function membershipLevel(selector: unknown): { level?: ShareViewSelector["access"] } {
+function sharePinLevel(selector: unknown): { level?: ShareViewSelector["access"] } {
   const pin = recordedShareSelector(selector);
-  return pin?.wholeWorkspace === true ? { level: pin.access } : {};
+  return pin ? { level: pin.access } : {};
 }
 
 // The engine closed a membership's copy for a rebuild.

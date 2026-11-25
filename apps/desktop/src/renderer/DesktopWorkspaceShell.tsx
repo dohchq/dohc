@@ -3352,6 +3352,8 @@ function WorkspaceShell(props: {
     trigger: ShareViewRefreshTrigger;
     followUp?: Promise<ShareViewRefresh>;
   } | null>(null);
+  const [shareEditVerifiedEpoch, setShareEditVerifiedEpoch] = useState(0);
+  const pendingLiveReadOnlyCheckRef = useRef<string | null>(null);
   const checkShareAccess = useSharedViewAccess({
     workspaceId,
     enabled: workspaceIsReady && !!shareView && !shareViewDamaged && !shareViewEnded,
@@ -3365,6 +3367,12 @@ function WorkspaceShell(props: {
       const pulled = await refreshShareViewRef.current(
         pressBurst ? "press-burst" : shareView?.membership ? "held" : "background",
       );
+      if (pulled !== "level-changed" && pendingLiveReadOnlyCheckRef.current === workspaceId) {
+        void checkShareAccessRef.current().then((checked) => {
+          if (checked.relayStatesMore && !workspaceAdmission.superseded)
+            void refreshShareViewRef.current("manual");
+        });
+      }
       return pulled === "held" || pulled === "level-changed" ? pulled : "other";
     },
     followStatedLevel: () => refreshShareViewRef.current("manual"),
@@ -3378,7 +3386,12 @@ function WorkspaceShell(props: {
     },
     onVerified: (result) => {
       if (!shareView) return;
-      if (result.status === "current") shareAccessCurrent.dispatchEvent(new Event("current"));
+      if (pendingLiveReadOnlyCheckRef.current === workspaceId)
+        pendingLiveReadOnlyCheckRef.current = null;
+      if (result.status === "current") {
+        shareAccessCurrent.dispatchEvent(new Event("current"));
+        if (result.access === "edit") setShareEditVerifiedEpoch((epoch) => epoch + 1);
+      }
       if (
         result.status === "ended" ||
         result.status === "needs-reopen" ||
@@ -3414,6 +3427,8 @@ function WorkspaceShell(props: {
       }
     },
   });
+  const checkShareAccessRef = useRef(checkShareAccess);
+  checkShareAccessRef.current = checkShareAccess;
   useEffect(() => {
     if (shareView)
       reportShareCapture(
@@ -7268,7 +7283,22 @@ function WorkspaceShell(props: {
     ],
   );
   refreshShareViewRef.current = refreshShareView;
-  const refreshAfterLiveReadOnly = useCallback(() => void refreshShareViewRef.current(), []);
+  const refreshAfterLiveReadOnly = useCallback(() => {
+    const targetWorkspaceId = workspaceIdRef.current;
+    pendingLiveReadOnlyCheckRef.current = targetWorkspaceId;
+    void refreshShareViewRef.current().then(async (pulled) => {
+      if (workspaceIdRef.current !== targetWorkspaceId) return;
+      if (pulled === "ended") {
+        if (pendingLiveReadOnlyCheckRef.current === targetWorkspaceId)
+          pendingLiveReadOnlyCheckRef.current = null;
+        return;
+      }
+      if (pulled !== "current" && pulled !== "changed") return;
+      const checked = await checkShareAccessRef.current();
+      if (workspaceIdRef.current !== targetWorkspaceId) return;
+      if (checked.relayStatesMore) void refreshShareViewRef.current("manual");
+    });
+  }, []);
 
   // ---- The recipient's own submitted changes ----
   // A submission exists only from Send changes: there is no draft at the
@@ -9081,7 +9111,7 @@ function WorkspaceShell(props: {
                                       // only on an active-version change: versionEpoch alone, not
                                       // history growth (which must not churn the live session).
                                       engineVersionKey={versionEpoch}
-                                      sharePullKey={shareContentEpoch}
+                                      sharePullKey={shareContentEpoch + shareEditVerifiedEpoch}
                                       onOpenPath={openPathWithHeading}
                                       drawingCollaboration={chatCollaboration}
                                       // A search or heading jump opens the file's tab, never a record's body.

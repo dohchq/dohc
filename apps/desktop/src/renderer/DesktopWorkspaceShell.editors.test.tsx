@@ -1104,3 +1104,190 @@ it.each([
     expect(openEngineYDocSession).toHaveBeenCalledTimes(opens);
   },
 );
+
+type LiveSaveListener = (event: {
+  sessionId: string;
+  workspaceId: string;
+  path: string;
+  seq: number;
+  state: { kind: string };
+  access?: "read-only" | "deleted" | "object-changed";
+  readOnlyCause?: string;
+}) => void;
+
+function makeLiveSharedEditorBridge(
+  refreshSharedView: ReturnType<typeof vi.fn>,
+  checkSharedViewAccess: ReturnType<typeof vi.fn>,
+) {
+  const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["a.md"], "a.md")));
+  bridge.listWorkspaceFiles = vi.fn(async () => ({
+    visibility: { status: "ready" as const, rules: [] },
+    files: [{ path: "a.md", kind: "file" as const }],
+    folders: [] as string[],
+  }));
+  const doc = markdownToYDoc("# Shared\n");
+  const saveListeners = new Set<LiveSaveListener>();
+  let openedSessionId = "";
+  const openEngineYDocSession = vi.fn(async (payload: { sessionId: string }) => {
+    openedSessionId = payload.sessionId;
+    return {
+      available: true,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      lineageGeneration: 1,
+    };
+  });
+  Object.assign(bridge, {
+    openEngineYDocSession,
+    applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
+    closeEngineYDocSession: vi.fn(async () => undefined),
+    onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+    onEngineYDocSaveState: vi.fn((listener: LiveSaveListener) => {
+      saveListeners.add(listener);
+      return () => {
+        saveListeners.delete(listener);
+      };
+    }),
+    onEngineYDocOwnerHandoff: () => () => undefined,
+    prepareEngineYDocOwnerHandoff: async () => undefined,
+    onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+    acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
+      accepted: true as const,
+      updates: [],
+    })),
+    refreshSharedView,
+    checkSharedViewAccess,
+  });
+  const emitReadOnly = () => {
+    act(() => {
+      for (const listener of [...saveListeners]) {
+        listener({
+          sessionId: openedSessionId,
+          workspaceId: WORKSPACE.workspaceId,
+          path: "a.md",
+          seq: 0,
+          state: { kind: "unknown" },
+          access: "read-only",
+          readOnlyCause: "access-ended",
+        });
+      }
+    });
+  };
+  return { bridge, openEngineYDocSession, emitReadOnly };
+}
+
+it("reopens a live shared document that went read-only when a fast View-to-Edit roundtrip verifies Edit", async () => {
+  const unchanged: RefreshSharedViewResult = {
+    ok: true,
+    status: "unchanged",
+    changedPaths: 0,
+    excludedPaths: [],
+    unjournalablePaths: [],
+    refusedOps: 0,
+    refusedDetail: null,
+  };
+  const { bridge, openEngineYDocSession, emitReadOnly } = makeLiveSharedEditorBridge(
+    vi.fn(async () => unchanged),
+    vi.fn(async () => ({ status: "current" as const, access: "edit" as const })),
+  );
+  renderShell(bridge, {
+    ...WORKSPACE,
+    shareView: { shareId: "share-1", granterEmail: "granter@dohc.test", access: "edit" },
+  });
+  await screen.findByTestId("markdown-source-toggle");
+  await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
+
+  emitReadOnly();
+
+  await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
+});
+
+it("follows relayStatesMore on live read-only recovery and retries after transient refresh failure", async () => {
+  const unchanged: RefreshSharedViewResult = {
+    ok: true,
+    status: "unchanged",
+    changedPaths: 0,
+    excludedPaths: [],
+    unjournalablePaths: [],
+    refusedOps: 0,
+    refusedDetail: null,
+  };
+  const refreshSharedView = vi.fn(async () => unchanged);
+  const checkSharedViewAccess = vi
+    .fn()
+    .mockResolvedValueOnce({ status: "current" as const, access: "edit" as const })
+    .mockResolvedValueOnce({
+      status: "current" as const,
+      access: "view" as const,
+      relayStatesMore: true as const,
+    });
+  const { bridge, openEngineYDocSession, emitReadOnly } = makeLiveSharedEditorBridge(
+    refreshSharedView,
+    checkSharedViewAccess,
+  );
+  const view = renderShell(bridge, {
+    ...WORKSPACE,
+    shareView: { shareId: "share-1", granterEmail: "granter@dohc.test", access: "edit" },
+  });
+  await screen.findByTestId("markdown-source-toggle");
+  await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(checkSharedViewAccess).toHaveBeenCalledTimes(1));
+
+  const manualRefreshes = () =>
+    (refreshSharedView.mock.calls as unknown as Array<[{ trigger?: string }]>).filter(
+      ([payload]) => payload.trigger === "manual",
+    ).length;
+
+  emitReadOnly();
+  await waitFor(() => expect(manualRefreshes()).toBe(2));
+  view.unmount();
+});
+
+it("retries live read-only access verification on a later pull after a transient failure", async () => {
+  const unchanged = {
+    ok: true as const,
+    status: "unchanged" as const,
+    changedPaths: 0,
+    excludedPaths: [],
+    unjournalablePaths: [],
+    refusedOps: 0,
+    refusedDetail: null,
+  };
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    const flakyRefresh = vi
+      .fn()
+      .mockResolvedValueOnce(unchanged)
+      .mockResolvedValueOnce({
+        ok: false as const,
+        errorKind: "transient" as const,
+        changedPaths: 0,
+        errorMessage: "temporary timeout",
+      })
+      .mockResolvedValue(unchanged);
+    const flakyCheck = vi
+      .fn()
+      .mockResolvedValueOnce({ status: "current" as const, access: "edit" as const })
+      .mockResolvedValueOnce({ status: "unverified" as const })
+      .mockResolvedValue({ status: "current" as const, access: "edit" as const });
+    const flaky = makeLiveSharedEditorBridge(flakyRefresh, flakyCheck);
+    const view = renderShell(flaky.bridge, {
+      ...WORKSPACE,
+      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test", access: "edit" },
+    });
+    await screen.findByTestId("markdown-source-toggle");
+    await waitFor(() => expect(flaky.openEngineYDocSession).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(flakyCheck).toHaveBeenCalledTimes(1));
+
+    flaky.emitReadOnly();
+    await waitFor(() => expect(flakyCheck).toHaveBeenCalledTimes(2));
+    expect(flaky.openEngineYDocSession).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    await waitFor(() => expect(flaky.openEngineYDocSession).toHaveBeenCalledTimes(2));
+    view.unmount();
+  } finally {
+    vi.useRealTimers();
+  }
+});

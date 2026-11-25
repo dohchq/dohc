@@ -326,6 +326,7 @@ export function MarkdownView(props: {
   // Read-only shared views: editing is disabled regardless of size,
   // and live collab never activates.
   forceReadOnly?: boolean;
+  readOnlyRefreshPending?: boolean;
   // The level allows no editing here, so the page shows this mark in place of its Edit toggle.
   levelMark?: LevelMark | null;
   // Main takes no live edits to this note from this computer until Try again
@@ -413,6 +414,12 @@ export function MarkdownView(props: {
   );
   const [draft, setDraft] = useState(props.body);
   const [savedBody, setSavedBody] = useState(props.body);
+  const [awaitingReadOnlySync, setAwaitingReadOnlySync] = useState(false);
+  if (props.readOnlyRefreshPending && !awaitingReadOnlySync) {
+    setAwaitingReadOnlySync(true);
+  } else if (!props.forceReadOnly && awaitingReadOnlySync) {
+    setAwaitingReadOnlySync(false);
+  }
   const [wysiwygResyncEpoch, setWysiwygResyncEpoch] = useState(0);
   const knownFiles = props.knownFiles ?? EMPTY_WIKILINK_FILES;
   const [saveState, setSaveStateValue] = useState<SaveState>(SAVED_HERE);
@@ -1468,19 +1475,25 @@ export function MarkdownView(props: {
       }
     }
     if (
-      !editing &&
+      (!editing || readOnly) &&
       !unsavedDraft.current &&
       writersLive.current === 0 &&
       props.contentRequestId > acceptedRequestFloor.current
     ) {
       acceptSnapshot(latestSnapshot.current, SAVED_HERE);
     }
+    if (awaitingReadOnlySync && !props.readOnlyRefreshPending && (!editing || readOnly)) {
+      setAwaitingReadOnlySync(false);
+    }
     // The helpers read mutable writer state and the atomic snapshot above.
   }, [
     props.body,
     props.contentHash,
     props.contentRequestId,
+    props.readOnlyRefreshPending,
+    awaitingReadOnlySync,
     editing,
+    readOnly,
     sharedSnapshot,
     writerSettledEpoch,
   ]);
@@ -2705,7 +2718,26 @@ export function MarkdownView(props: {
         />
       ) : null}
       {documentNotices}
-      {surfaceMode === "source" ? (
+      {props.readOnlyRefreshPending || awaitingReadOnlySync ? (
+        <div
+          ref={localDocPaneRef}
+          data-testid="view-markdown"
+          className="flex min-h-0 flex-1 flex-col overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
+        >
+          <TopMatter hidden={props.recordBody}>
+            <PageIdentity
+              body={draft}
+              onChange={onPropertiesDraft}
+              filenameStem={filenameStem(props.path)}
+              readOnly
+              opening={opening}
+              file={noteFile}
+            />
+            {recordButtons}
+          </TopMatter>
+          <SkeletonRows layout="document" label="Loading…" className="pt-12" />
+        </div>
+      ) : surfaceMode === "source" ? (
         <Suspense fallback={<SkeletonRows layout="panel" label="Loading editor…" />}>
           <LazySourceCodeEditor
             testId="markdown-editor"

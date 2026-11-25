@@ -710,3 +710,29 @@ it("checks on a return within five seconds of a background pull", async () => {
   await returnToWindow(2_000);
   expect(check).toHaveBeenCalledTimes(2);
 });
+
+it("follows the stated level when a background pull reports level-changed", async () => {
+  setup();
+  await flush();
+  expect(follow).not.toHaveBeenCalled();
+  pull.mockResolvedValueOnce("level-changed");
+  check.mockResolvedValueOnce(more);
+  await act(() => vi.advanceTimersByTimeAsync(30_000));
+  expect(check).toHaveBeenCalledTimes(2);
+  expect(follow).toHaveBeenCalledOnce();
+});
+
+it("waits 30 seconds before retrying when a level-changed access check returns unverified", async () => {
+  setup();
+  await flush();
+  pull.mockResolvedValueOnce("level-changed");
+  check.mockResolvedValueOnce({ status: "unverified" });
+  await act(() => vi.advanceTimersByTimeAsync(30_000));
+  expect(check).toHaveBeenCalledTimes(2);
+  expect(follow).not.toHaveBeenCalled();
+  const pullsAfterUnverified = pull.mock.calls.length;
+  await act(() => vi.advanceTimersByTimeAsync(29_999));
+  expect(pull.mock.calls.length).toBe(pullsAfterUnverified);
+  await act(() => vi.advanceTimersByTimeAsync(1));
+  expect(pull.mock.calls.length).toBe(pullsAfterUnverified + 1);
+});
