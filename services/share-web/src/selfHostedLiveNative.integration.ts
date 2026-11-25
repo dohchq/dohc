@@ -4818,6 +4818,29 @@ it(
         { timeout: 30000 },
       );
 
+      const acceptedSettlements = () =>
+        proof.relayRead
+          .prepare(
+            "SELECT payload_json,settlement_admission_json FROM sync_relay_log WHERE workspace_id='workspace' AND op_kind='moment.append'",
+          )
+          .all()
+          .flatMap((row) => {
+            const payload = JSON.parse(String(row.payload_json)) as Record<string, any>;
+            if (payload.objectId !== note.objectId || !payload.settlementReference) return [];
+            const admission =
+              row.settlement_admission_json === null
+                ? null
+                : (JSON.parse(String(row.settlement_admission_json)) as { status?: string });
+            return [
+              {
+                path: payload.payloadAfterPath as string,
+                previousCursor: payload.settlementReference.record.previousCursor as number,
+                terminalCursor: payload.settlementReference.record.terminalCursor as number,
+                status: admission?.status ?? null,
+              },
+            ];
+          });
+
       const firstLive = await proof.liveEdit("firstLiveEdit", "live", note.document);
       await vi.waitFor(
         () => {
@@ -4826,6 +4849,12 @@ it(
             settled: firstLive.journalCursor,
           });
           expect(proof.unpushed()).toEqual([]);
+          expect(acceptedSettlements()).toContainEqual({
+            path: "notes/third.md",
+            previousCursor: 0,
+            terminalCursor: firstLive.journalCursor,
+            status: "accepted",
+          });
         },
         { timeout: 30000 },
       );
@@ -4848,7 +4877,7 @@ it(
           expect(proof.hosted(note.objectId)?.state).toBe("parked");
           expect(
             proof.storage.readServiceHostEnrollment("workspace", "notes/third.md")?.hostDrainedAtMs,
-          ).not.toBeNull();
+          ).toEqual(expect.any(Number));
         },
         { timeout: 30000 },
       );
@@ -4891,6 +4920,12 @@ it(
             settled: afterRenameBack.journalCursor,
           });
           expect(proof.unpushed()).toEqual([]);
+          expect(acceptedSettlements()).toContainEqual({
+            path: "notes/second.md",
+            previousCursor: firstLive.journalCursor,
+            terminalCursor: afterRenameBack.journalCursor,
+            status: "accepted",
+          });
         },
         { timeout: 30000 },
       );
