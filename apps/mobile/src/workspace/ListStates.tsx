@@ -3,7 +3,7 @@ import { documentWords } from "@dohc/interface-words/documents";
 import { noticesWords } from "@dohc/interface-words/notices";
 import { AlertTriangle } from "lucide-react-native";
 import { useEffect, useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 import { useAccount, useSignIn } from "../account/AccountProvider";
 import { ProblemLine } from "../account/ProblemLine";
 import { DohcMark } from "../DohcMark";
@@ -39,11 +39,7 @@ export function RetryRow({ label, onRetry }: { label: string; onRetry(): void })
  * VoiceOver, as the desktop's skeleton does.
  */
 export function HoldRow() {
-  const [shown, setShown] = useState(false);
-  useEffect(() => {
-    const timer = setTimeout(() => setShown(true), 150);
-    return () => clearTimeout(timer);
-  }, []);
+  const shown = useHeld();
   return (
     <View
       style={styles.hold}
@@ -51,6 +47,24 @@ export function HoldRow() {
       accessibilityLabel={shown ? documentWords.loading : undefined}
     />
   );
+}
+
+export function HoldScreen() {
+  const shown = useHeld();
+  return (
+    <View style={styles.screen}>
+      {shown ? <ActivityIndicator size="large" accessibilityLabel={documentWords.loading} /> : null}
+    </View>
+  );
+}
+
+function useHeld() {
+  const [shown, setShown] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => setShown(true), 150);
+    return () => clearTimeout(timer);
+  }, []);
+  return shown;
 }
 
 /** One muted line where a list has nothing: `No pages yet.` */
@@ -146,6 +160,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
   },
   hold: { height: 44 },
+  screen: { flex: 1, alignItems: "center", justifyContent: "center" },
   empty: { fontSize: 15, lineHeight: 20, paddingHorizontal: 16, paddingVertical: 12 },
   message: { paddingHorizontal: 16, paddingTop: 24 },
   text: { fontSize: 17, lineHeight: 22 },

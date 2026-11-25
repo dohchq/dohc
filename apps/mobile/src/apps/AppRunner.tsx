@@ -7,7 +7,7 @@ import { WebView } from "react-native-webview";
 import { AppWebView } from "../../modules/app-web-view";
 import { useAccount, useSignIn } from "../account/AccountProvider";
 import { useTheme } from "../theme";
-import { HoldRow } from "../workspace/ListStates";
+import { HoldScreen } from "../workspace/ListStates";
 import { createNavigationRule, externalLink } from "./appNavigation";
 import type { RunningApp } from "./appStore";
 import { offerLink } from "./offerLink";
@@ -76,7 +76,7 @@ export function AppRunScreen() {
           onStopped={() => runner.stop()}
         />
       ) : launching ? (
-        <HoldRow />
+        <HoldScreen />
       ) : null}
     </View>
   );
