@@ -228,6 +228,7 @@ export function WikilinkPicker({ state, files, view, insertMode = "text", onDism
           ? { bottom: position.bottom }
           : { top: position.y }),
         maxHeight: position.maxHeight,
+        maxWidth: position.maxWidth,
         zIndex: 60,
         ...menuEnterFrom(position.placement),
       }}

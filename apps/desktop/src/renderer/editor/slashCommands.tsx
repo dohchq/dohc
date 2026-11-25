@@ -113,6 +113,7 @@ export type SlashCommandState =
       // FloatingMenuPosition.bottom. Null when the menu is top-anchored.
       bottom: number | null;
       maxHeight: number;
+      maxWidth?: number;
       placement: FloatingMenuPlacement;
       gutterTarget?: GutterSlashTarget;
     };
@@ -132,6 +133,7 @@ export function slashCommandStatesEqual(
     left.x === right.x &&
     left.y === right.y &&
     left.maxHeight === right.maxHeight &&
+    left.maxWidth === right.maxWidth &&
     left.placement === right.placement &&
     left.gutterTarget?.blockPos === right.gutterTarget?.blockPos &&
     left.gutterTarget?.reuseEmpty === right.gutterTarget?.reuseEmpty
@@ -383,6 +385,7 @@ function readSlashCommandState(view: EditorView, previous: SlashCommandState): S
     let y = 40;
     let bottom: number | null = null;
     let maxHeight = FLOATING_MENU_MAX_HEIGHT;
+    let maxWidth: number | undefined;
     let placement: FloatingMenuPlacement = "below";
     try {
       const dom = view.nodeDOM(gutter.blockPos);
@@ -399,6 +402,7 @@ function readSlashCommandState(view: EditorView, previous: SlashCommandState): S
       y = position.y;
       bottom = position.bottom ?? null;
       maxHeight = position.maxHeight;
+      maxWidth = position.maxWidth;
       placement = position.placement;
     } catch {
       // Offscreen/jsdom editors cannot always resolve coordinates.
@@ -415,6 +419,7 @@ function readSlashCommandState(view: EditorView, previous: SlashCommandState): S
       y,
       bottom,
       maxHeight,
+      maxWidth,
       placement,
       gutterTarget: { blockPos: gutter.blockPos, reuseEmpty: gutter.reuseEmpty },
     };
@@ -431,6 +436,7 @@ function readSlashCommandState(view: EditorView, previous: SlashCommandState): S
   let y = 40;
   let bottom: number | null = null;
   let maxHeight = FLOATING_MENU_MAX_HEIGHT;
+  let maxWidth: number | undefined;
   let placement: FloatingMenuPlacement = "below";
   try {
     const coords = view.coordsAtPos(from);
@@ -442,6 +448,7 @@ function readSlashCommandState(view: EditorView, previous: SlashCommandState): S
     y = position.y;
     bottom = position.bottom ?? null;
     maxHeight = position.maxHeight;
+    maxWidth = position.maxWidth;
     placement = position.placement;
   } catch {
     // Offscreen/jsdom editors cannot always resolve coordinates.
@@ -460,6 +467,7 @@ function readSlashCommandState(view: EditorView, previous: SlashCommandState): S
     y,
     bottom,
     maxHeight,
+    maxWidth,
     placement,
   };
 }
@@ -809,6 +817,7 @@ export function SlashCommandMenu({
         ...(state.placement === "above" && state.bottom !== null
           ? { left: state.x, bottom: state.bottom, maxHeight: state.maxHeight }
           : { left: state.x, top: state.y, maxHeight: state.maxHeight }),
+        maxWidth: state.maxWidth,
         ...menuEnterFrom(state.placement),
       }}
       role="listbox"

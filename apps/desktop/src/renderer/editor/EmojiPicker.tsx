@@ -180,6 +180,7 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
           ? { bottom: position.bottom }
           : { top: position.y }),
         maxHeight: position.maxHeight,
+        maxWidth: position.maxWidth,
         zIndex: 60,
         ...menuEnterFrom(position.placement),
       }}

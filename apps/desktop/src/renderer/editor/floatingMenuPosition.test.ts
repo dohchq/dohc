@@ -11,7 +11,7 @@ describe("resolveFloatingMenuPosition", () => {
         menuWidth: 240,
         menuMaxHeight: 180,
       }),
-    ).toEqual({ x: 100, y: 126, maxHeight: 180, placement: "below" });
+    ).toEqual({ x: 100, y: 126, maxHeight: 180, maxWidth: 240, placement: "below" });
   });
 
   it("flips above and clamps the left edge inside the viewport", () => {
@@ -23,7 +23,7 @@ describe("resolveFloatingMenuPosition", () => {
         menuWidth: 240,
         menuMaxHeight: 180,
       }),
-    ).toEqual({ x: 548, y: 314, maxHeight: 180, placement: "above", bottom: 106 });
+    ).toEqual({ x: 548, y: 314, maxHeight: 180, maxWidth: 240, placement: "above", bottom: 106 });
   });
 
   it("stays inside the given bounds, flipping above when they end below the cursor", () => {
@@ -36,7 +36,7 @@ describe("resolveFloatingMenuPosition", () => {
         menuWidth: 240,
         menuMaxHeight: 180,
       }),
-    ).toEqual({ x: 112, y: 114, maxHeight: 180, placement: "above", bottom: 306 });
+    ).toEqual({ x: 112, y: 114, maxHeight: 180, maxWidth: 240, placement: "above", bottom: 306 });
   });
 
   it("shrinks to the larger side when neither side has full height", () => {
@@ -48,7 +48,7 @@ describe("resolveFloatingMenuPosition", () => {
         menuWidth: 320,
         menuMaxHeight: 300,
       }),
-    ).toEqual({ x: 20, y: 12, maxHeight: 162, placement: "above", bottom: 146 });
+    ).toEqual({ x: 20, y: 12, maxHeight: 162, maxWidth: 320, placement: "above", bottom: 146 });
   });
 
   it("pins the above-placement bottom anchor to the cursor's top edge", () => {
@@ -94,4 +94,34 @@ it("opens above when asked and there is room, and below when there is none", () 
   expect(
     resolveFloatingMenuPosition({ ...input, cursorRect: { left: 50, top: 40, bottom: 60 } }),
   ).toMatchObject({ placement: "below", y: 64 });
+});
+
+it("narrows a menu wider than its bounds to fit inside them", () => {
+  const position = resolveFloatingMenuPosition({
+    cursorRect: { left: 120, top: 300, bottom: 320 },
+    viewportWidth: 375,
+    viewportHeight: 812,
+    bounds: { top: 100, left: 16, right: 354, bottom: 700 },
+    menuWidth: 360,
+    margin: 12,
+  });
+  expect(position.x).toBe(28);
+  expect(position.x + position.maxWidth).toBe(342);
+});
+
+it("keeps a menu inside its bounds when the caret has scrolled out of them", () => {
+  const bounds = { top: 100, left: 0, right: 1440, bottom: 586 };
+  const input = { viewportWidth: 1440, viewportHeight: 700, bounds, menuMaxHeight: 140 };
+  const below = resolveFloatingMenuPosition({
+    ...input,
+    cursorRect: { left: 400, top: 640, bottom: 660 },
+  });
+  expect(below.y).toBeGreaterThanOrEqual(bounds.top);
+  expect(below.y + below.maxHeight).toBeLessThanOrEqual(bounds.bottom);
+  const above = resolveFloatingMenuPosition({
+    ...input,
+    cursorRect: { left: 400, top: 40, bottom: 60 },
+  });
+  expect(above.y).toBeGreaterThanOrEqual(bounds.top);
+  expect(above.y + above.maxHeight).toBeLessThanOrEqual(bounds.bottom);
 });

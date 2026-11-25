@@ -55,6 +55,7 @@ export type LinkMenuState =
       y: number;
       bottom?: number | null;
       maxHeight: number;
+      maxWidth?: number;
       placement: FloatingMenuPlacement;
     };
 
@@ -111,6 +112,7 @@ export function computeLinkMenuState(
   let y = 40;
   let bottom: number | null = null;
   let maxHeight = FLOATING_MENU_MAX_HEIGHT;
+  let maxWidth: number | undefined;
   let placement: FloatingMenuPlacement = "below";
   try {
     const coords = view.coordsAtPos(from);
@@ -124,6 +126,7 @@ export function computeLinkMenuState(
     y = position.y;
     bottom = position.bottom ?? null;
     maxHeight = position.maxHeight;
+    maxWidth = position.maxWidth;
     placement = position.placement;
   } catch {
     // Offscreen/jsdom editors cannot always resolve coordinates.
@@ -139,6 +142,7 @@ export function computeLinkMenuState(
     y,
     bottom,
     maxHeight,
+    maxWidth,
     placement,
   };
 }
@@ -404,11 +408,12 @@ export function LinkMenu({
       ref={containerRef}
       className="dohc-link-menu"
       data-placement={state.placement}
-      style={
-        state.placement === "above" && state.bottom != null
+      style={{
+        ...(state.placement === "above" && state.bottom != null
           ? { left: state.x, bottom: state.bottom }
-          : { left: state.x, top: state.y }
-      }
+          : { left: state.x, top: state.y }),
+        maxWidth: state.maxWidth,
+      }}
       onMouseDown={(event) => {
         // Let the input itself receive focus/caret; only block the editor
         // from stealing selection when clicking the surrounding chrome.

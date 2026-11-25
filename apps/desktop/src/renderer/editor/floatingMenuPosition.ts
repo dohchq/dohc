@@ -11,6 +11,7 @@ export type FloatingMenuPosition = {
   x: number;
   y: number;
   maxHeight: number;
+  maxWidth: number;
   placement: FloatingMenuPlacement;
   // CSS `bottom` offset for "above" placement. `y` assumes the menu fills
   // maxHeight, so a top-anchored menu whose content is shorter than maxHeight
@@ -50,10 +51,13 @@ export function resolveFloatingMenuPosition({
   prefer = "below",
 }: FloatingMenuPositionInput): FloatingMenuPosition {
   const minLeft = bounds.left + margin;
-  const maxLeft = Math.max(minLeft, bounds.right - menuWidth - margin);
+  const maxWidth = Math.max(0, Math.min(menuWidth, bounds.right - margin - minLeft));
+  const maxLeft = Math.max(minLeft, bounds.right - maxWidth - margin);
   const x = Math.min(Math.max(cursorRect.left, minLeft), maxLeft);
-  const availableBelow = Math.max(0, bounds.bottom - cursorRect.bottom - gap - margin);
-  const availableAbove = Math.max(0, cursorRect.top - bounds.top - gap - margin);
+  const anchorTop = Math.min(cursorRect.top, bounds.bottom);
+  const anchorBottom = Math.max(cursorRect.bottom, bounds.top);
+  const availableBelow = Math.max(0, bounds.bottom - anchorBottom - gap - margin);
+  const availableAbove = Math.max(0, anchorTop - bounds.top - gap - margin);
   const belowHeight = Math.min(menuMaxHeight, availableBelow);
   const aboveHeight = Math.min(menuMaxHeight, availableAbove);
   const placement =
@@ -67,15 +71,15 @@ export function resolveFloatingMenuPosition({
   const maxHeight = placement === "above" ? aboveHeight : belowHeight;
   const y =
     placement === "above"
-      ? Math.max(bounds.top + margin, cursorRect.top - gap - maxHeight)
-      : Math.min(cursorRect.bottom + gap, bounds.bottom - margin);
+      ? Math.max(bounds.top + margin, anchorTop - gap - maxHeight)
+      : Math.min(anchorBottom + gap, bounds.bottom - margin);
 
   if (placement === "above") {
     // Same box as `y`+maxHeight describes, expressed from the viewport's
     // bottom edge so the menu's bottom stays pinned when content is shorter.
-    return { x, y, maxHeight, placement, bottom: viewportHeight - (y + maxHeight) };
+    return { x, y, maxHeight, maxWidth, placement, bottom: viewportHeight - (y + maxHeight) };
   }
-  return { x, y, maxHeight, placement };
+  return { x, y, maxHeight, maxWidth, placement };
 }
 
 export function floatingMenuBounds(node: Node): FloatingMenuBounds {
