@@ -78,9 +78,11 @@ This preserves negative zero across Yjs import, snapshot encoding, and reopen.
 Ordinary integer values keep their existing bytes. Regression tests cover
 signed zero, safe integer extrema, and the shared bootstrap projection vectors.
 
-`src/types/text.rs` and `src/any.rs` write keys in sorted order. Upstream
-inserts a text's formatting items, and encodes an `Any::Map`, in `HashMap`
-order, which changes from one run to the next. The engine builds a
+`src/types/text.rs`, `src/any.rs` and `src/encoding/serde/ser.rs` write keys
+in sorted order. Upstream inserts a text's formatting items, and encodes an
+`Any::Map`, in `HashMap` order, which changes from one run to the next. A
+formatting item's value and an embed are written as JSON through `Any`'s
+serde serializer, which now also writes a map's entries in key order. The engine builds a
 successor's base from its identity alone and names it by the SHA-256 of its
 bytes, so the same note must give the same bytes every time. `insert_attributes`
 and the last loop of `insert_negated_attributes` now open and close marks in

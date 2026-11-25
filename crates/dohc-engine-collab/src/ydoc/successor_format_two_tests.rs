@@ -2,6 +2,9 @@ use super::*;
 
 const WRITTEN_NOTES: &str =
     include_str!("../../../../packages/ydoc-projection/src/fixtures/body-sequence.json");
+const LINKS: &str =
+    "# Title\n\nSee [a link](https://example.com).\n\nAnd [another](https://example.org \"Its title\").\n";
+const KEPT_FRONTMATTER: &str = "---\n# kept\ntitle: A\ntags: b\nstatus: c\nowner: d\n---\n\nBody\n";
 
 fn identity(artifact: &str, schema_version: u8) -> SuccessorIdentity {
     let key = crate::DocKey::new("workspace", "main", "object").unwrap();
@@ -116,25 +119,65 @@ fn a_successor_format_two_cannot_hold_is_written_in_format_one() {
 
 #[test]
 fn a_successor_keeps_room_for_a_kept_source_under_the_struct_limit() {
-    let note = |paragraphs: usize, headings: usize| {
+    let note = |paragraphs: usize, headings: usize, end: &str| {
         format!(
-            "{}{}\n",
+            "{}{}{end}",
             "a\n\n".repeat(paragraphs),
             vec!["# a"; headings].join("\n\n")
         )
     };
     reading_body_sequence_here(|| {
-        for (paragraphs, headings, structs, schema_version) in [
-            (24_996, 2, 99_999, 2),
-            (24_995, 3, 100_000, 2),
-            (24_994, 4, 100_001, 1),
-            (24_997, 2, 100_003, 1),
+        for (paragraphs, headings, end, structs, schema_version) in [
+            (24_996, 2, "\n", 99_999, 2),
+            (24_995, 3, "\n", 100_000, 2),
+            (24_994, 4, "\n", 100_001, 1),
+            (24_997, 2, "\n", 100_003, 1),
+            (24_995, 3, "\n\n", 100_000, 2),
         ] {
-            let artifact = note(paragraphs, headings);
+            let artifact = note(paragraphs, headings, end);
             let note = loaded(&successor(&artifact));
             assert_eq!(note.schema_version, schema_version, "{structs} structs");
             assert_eq!(note.file, artifact, "{structs} structs");
         }
+    });
+}
+
+#[test]
+fn a_successor_of_a_note_with_links_gives_the_same_bytes_each_time() {
+    reading_body_sequence_here(|| {
+        let first = successor(LINKS);
+        assert_eq!(loaded(&first).schema_version, 2);
+        for _ in 1..20 {
+            assert_eq!(successor(LINKS).update, first.update);
+        }
+    });
+}
+
+#[test]
+fn a_successor_of_a_note_with_kept_frontmatter_gives_the_same_bytes_each_time() {
+    reading_body_sequence_here(|| {
+        let first = successor(KEPT_FRONTMATTER);
+        for _ in 1..20 {
+            assert_eq!(successor(KEPT_FRONTMATTER).update, first.update);
+        }
+    });
+}
+
+#[test]
+fn only_a_successor_writes_a_note_in_format_two() {
+    reading_body_sequence_here(|| {
+        let doc = Ydoc::wire();
+        let meta = doc.doc.get_or_insert_map(ROOT_META);
+        meta.insert(
+            &mut doc.doc.transact_mut(),
+            "schemaVersion",
+            Any::Number(2.0),
+        );
+        assert!(doc
+            .rewrite_content_to_markdown(ContentKind::Richdoc, "# a\n")
+            .is_err());
+        let sequence = doc.doc.get_or_insert_text(ROOT_SEQUENCE);
+        assert_eq!(sequence.len(&doc.doc.transact()), 0);
     });
 }
 
@@ -171,6 +214,10 @@ fn each_shared_note_a_successor_takes_gives_the_pinned_bytes() {
     let markdown: Vec<(&str, &str)> = notes
         .iter()
         .filter_map(|note| Some((note.name.as_str(), note.markdown.as_deref()?)))
+        .chain([
+            ("a plain link and a titled link", LINKS),
+            ("frontmatter with a comment", KEPT_FRONTMATTER),
+        ])
         .collect();
     let (mut updates, mut not_format_two) = (Vec::new(), Vec::new());
     reading_body_sequence_here(|| {
@@ -189,11 +236,11 @@ fn each_shared_note_a_successor_takes_gives_the_pinned_bytes() {
             updates.extend(first.update);
         }
     });
-    assert_eq!(markdown.len(), 22);
+    assert_eq!(markdown.len(), 24);
     assert_eq!(
         (crate::hex_sha256(&updates), not_format_two),
         (
-            "3a60793a8a2263fac16d77f96da47d78d7e68a0ab8a2a36b0f5d04c7f6d00970".to_owned(),
+            "faf7965808e85b95f8cf1868ffc372e5c6f72c5679cb9c4b64568fff9d91d2af".to_owned(),
             [
                 "lists, a to-do, a callout and an uneven table",
                 "values and paths a reader must repair",

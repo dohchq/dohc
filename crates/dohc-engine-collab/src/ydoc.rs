@@ -9,10 +9,12 @@
 //!    divergence and a struct-store panic on non-ASCII). Only the cross-engine
 //!    `offsetProbe` test reaches it, through [`Ydoc::with_mode`] with
 //!    [`OffsetMode::Bytes`], to pin the divergence.
-//! 2. **Nested `Any::Map` key order is nondeterministic through a yrs re-encode.**
-//!    [`Ydoc::canonical_content`] sorts every map through `BTreeMap`, and
-//!    [`project_frontmatter`] sorts nested keys, so neither the convergence
-//!    surface nor the content projection depends on HashMap iteration order.
+//! 2. **Nested `Any::Map` entries are written in key order.** The vendored yrs
+//!    encodes a map's entries sorted by key (`vendor/yrs-0.27.3/DOHC-PATCH.md`),
+//!    so the same document gives the same bytes. [`Ydoc::canonical_content`]
+//!    still sorts every map through `BTreeMap`, and [`project_frontmatter`]
+//!    sorts nested keys, so neither the convergence surface nor the content
+//!    projection depends on how a map holds its entries.
 //! 3. **Well-formed UTF-16 at the boundary.** Rust `String` cannot hold a lone
 //!    surrogate, so every string this module produces is well-formed. Raw
 //!    [`Ydoc::apply`] stays permissive; durable callers also use
@@ -379,9 +381,12 @@ pub fn fresh_successor_base(
         .then(|| successor_doc(identity, artifact, 2.0).ok())
         .flatten()
         .filter(|doc| {
-            body_sequence_writer::Weight::of(&doc.doc)
-                .with_room_for_a_kept_source(artifact)
-                .fits_a_live_note()
+            let weight = body_sequence_writer::Weight::of(&doc.doc);
+            match doc.markdown_source_reference() {
+                Some(_) => weight,
+                None => weight.with_room_for_a_kept_source(artifact),
+            }
+            .fits_a_live_note()
         });
     let doc = match in_format_two {
         Some(doc) => doc,
@@ -1809,6 +1814,7 @@ impl Ydoc {
                 let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
                 let sequence_roots = self.body_sequence_roots().filter(|(sequence, containers)| {
                     fold == FileFold::No
+                        && reading == MarkdownReading::Successor
                         && body_sequence::holds_no_item([
                             frag.as_ref(),
                             sequence.as_ref(),
@@ -2502,13 +2508,14 @@ fn keep_frontmatter_source(
         meta.remove(txn, FRONTMATTER_SOURCE_META_KEY);
         return;
     };
-    let items: Vec<(String, String)> = map
+    let mut items: Vec<(String, String)> = map
         .keys(txn)
         .filter_map(|key| {
             map.entry_id(txn, key)
                 .map(|id| (item_meta_key(key), item_text(id)))
         })
         .collect();
+    items.sort_unstable();
     meta.insert(txn, FRONTMATTER_SOURCE_META_KEY, source);
     for (key, item) in items {
         meta.insert(txn, key.as_str(), item);

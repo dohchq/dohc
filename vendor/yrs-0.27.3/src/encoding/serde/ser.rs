@@ -42,8 +42,10 @@ impl Serialize for Any {
                 seq.end()
             }
             Any::Map(entries) => {
-                let mut map = serializer.serialize_map(Some(entries.len()))?;
-                for (key, value) in entries.iter() {
+                let mut sorted: Vec<_> = entries.iter().collect();
+                sorted.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+                let mut map = serializer.serialize_map(Some(sorted.len()))?;
+                for (key, value) in sorted {
                     map.serialize_entry(key, value)?;
                 }
                 map.end()

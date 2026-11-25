@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use yrs::types::text::TextItem;
 use yrs::types::Attrs;
-use yrs::{Any, Doc, Text, Transact};
+use yrs::{Any, Doc, ReadTxn, StateVector, Text, Transact};
 
 const KEYS: [&str; 8] = ["h", "c", "f", "a", "g", "b", "e", "d"];
 
@@ -49,5 +49,25 @@ fn letters_with_marks_open_and_close_each_mark_in_the_order_of_its_name() {
         let closed = ["-a", "-b", "-c", "-d", "-e", "-f", "-g", "-h"];
         let expected: Vec<&str> = opened.into_iter().chain(["x"]).chain(closed).collect();
         assert_eq!(stored, expected);
+    }
+}
+
+#[test]
+fn a_mark_holding_a_map_is_written_the_same_in_every_doc() {
+    let update = || {
+        let doc = Doc::with_client_id(1);
+        let text = doc.get_or_insert_text("sequence");
+        let link: HashMap<String, Any> = KEYS
+            .iter()
+            .map(|key| (key.to_string(), Any::from(*key)))
+            .collect();
+        let marks: Attrs = [(Arc::from("link"), Any::from(link))].into_iter().collect();
+        text.insert_with_attributes(&mut doc.transact_mut(), 0, "x", marks);
+        let txn = doc.transact();
+        txn.encode_state_as_update_v1(&StateVector::default())
+    };
+    let first = update();
+    for _ in 1..20 {
+        assert_eq!(update(), first);
     }
 }
