@@ -667,14 +667,18 @@ it.each([
   }
 });
 
+// The bold italic words around a bold space are written as these bytes, which
+// read back as one bold italic run with literal asterisks.
 it("refuses literal markup even when the old string-only proof accepts it", () => {
-  const source = "- **bold**\n  - child\n",
+  const source = "- ***x* *y***\n  - child\n",
     doc = markdownToYDoc("- bold\n  - child\n");
   try {
     const item = (doc.getXmlFragment("body").get(0) as Y.XmlElement).get(0) as Y.XmlElement;
     const text = (item.get(0) as Y.XmlElement).get(0) as Y.XmlText;
     text.delete(0, text.length);
-    text.insert(0, "**bold**");
+    text.insert(0, "x", { bold: {}, italic: {} });
+    text.insert(1, " ", { bold: {} });
+    text.insert(2, "y", { bold: {}, italic: {} });
     bind(doc, source);
     expect(resolveMarkdownSource(doc, yDocToMarkdown(doc)).kind).toBe("verified");
     expect(

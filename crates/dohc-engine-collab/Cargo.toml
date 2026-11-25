@@ -64,6 +64,9 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 ryu-js = "1.0.3"
 # Native Excalidraw imports carry embedded binary files as base64 data URLs.
 base64 = "0.23"
+# The Unicode punctuation, symbol, letter, and number classes the Markdown
+# reader uses to decide where emphasis opens and closes.
+regex-syntax = "0.8"
 
 [dev-dependencies]
 dohc-engine-reader = { path = "../dohc-engine-reader", features = ["test-support"] }

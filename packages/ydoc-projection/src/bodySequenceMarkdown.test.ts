@@ -199,8 +199,6 @@ const fixtures = (
 ).flatMap((fixture) => ("markdown" in fixture ? [[fixture.name, fixture.markdown] as const] : []));
 
 const NOT_GIVEN_BACK: Record<string, string> = {
-  "every mark, alone, together and where it means nothing":
-    "the text __proto__ is written with no escape, and reads back as bold",
   "every block that holds no blocks":
     "an empty heading above an empty paragraph is written as blank lines, which read as one empty paragraph",
   "what a tableCell holds": "a quote in a table cell is written on one row, where > reads as text",

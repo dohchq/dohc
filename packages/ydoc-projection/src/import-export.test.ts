@@ -37,6 +37,11 @@ const boldItalic = (text: string): JSONContent => ({
   text,
   marks: [{ type: "bold" }, { type: "italic" }],
 });
+const marked = (text: string, ...marks: string[]): JSONContent => ({
+  type: "text",
+  text,
+  marks: marks.map((type) => ({ type })),
+});
 
 function textWork(run: () => void): { split: number; replace: number } {
   const { split, replace } = String.prototype;
@@ -587,6 +592,83 @@ it.each([
     const reopened = parseRichdocMarkdown(saved);
     expect(serializeRichdocBody(reopened)).toBe(saved);
     expect(textContentOf(reopened)).toBe(content.map((node) => node.text).join(""));
+  },
+);
+
+// Each character of a paragraph with the marks it holds. A typed backslash
+// written as an escape reads back as one. Whitespace is compared without its
+// marks, since a run of only whitespace is written without them.
+function markedCharactersOf(document: JSONContent): string[] {
+  return (document.content ?? []).flatMap((block) =>
+    (block.content ?? []).flatMap((node) => {
+      const text = node.type === "escapedPunctuation" ? String(node.attrs?.value) : node.text;
+      const marks = (node.marks ?? []).map((mark) => mark.type).sort();
+      return Array.from(text ?? "", (character) =>
+        /\s/u.test(character) ? character : `${character}${marks.join(",")}`,
+      );
+    }),
+  );
+}
+
+// #4139: marks nest in an order whose delimiters the reader reads back,
+// a typed `*`, `_`, or backtick the reader would pair is written as a
+// reference, and a typed backslash before punctuation is doubled. Typed
+// characters that pair with nothing keep their bytes. The engine writer's
+// test has the same cases.
+it.each([
+  [
+    "bold and underline inside a word",
+    [plain("un"), marked("do", "bold", "underline"), plain("ne")],
+    "un++**do**++ne",
+  ],
+  ["italic and underline at the end", [plain("a"), marked("b", "italic", "underline")], "a++*b*++"],
+  [
+    "bold ending on a space after italic",
+    [italic("a"), boldItalic("b"), bold(" "), plain("c")],
+    "*a**b*** c",
+  ],
+  [
+    "highlight ending on a space after italic",
+    [italic("a"), marked("b", "italic", "highlight"), marked(" ", "highlight"), plain("c")],
+    "*a==b==* c",
+  ],
+  ["strike inside bold", [plain("a"), marked("x", "bold", "strike"), plain("b")], "a**~~x~~**b"],
+  [
+    "italic inside highlight",
+    [plain("a"), marked("x", "italic", "highlight"), plain("b")],
+    "a==*x*==b",
+  ],
+  ["bold closing inside italic", [boldItalic("x"), italic("y")], "***x**y*"],
+  ["typed asterisks around words", [plain("*a b*")], "&#42;a b&#42;"],
+  ["typed underscores around words", [plain("_a b_")], "&#95;a b&#95;"],
+  ["typed asterisks inside a word", [plain("a*b*")], "a&#42;b&#42;"],
+  [
+    "typed asterisks around bold",
+    [plain("**"), bold("_x"), plain("**")],
+    "&#42;&#42;**&#95;x**&#42;&#42;",
+  ],
+  ["a struck asterisk after a backtick", [plain("`"), marked("*", "strike")], "&#96;~~&#42;~~"],
+  ["an italic underscore after a space", [plain(" "), italic("_")], "&#32;*&#95;*"],
+  ["a typed backtick before code", [plain("a ` b "), marked("x", "code")], "a &#96; b `x`"],
+  ["a typed backslash before code", [plain("a \\"), marked("x", "code")], "a \\\\`x`"],
+  ["a typed backslash before bold", [plain("a\\"), bold("b")], "a\\\\**b**"],
+  ["a typed backslash before an asterisk", [plain("a\\*b*")], "a\\\\&#42;b&#42;"],
+  ["a multiplication", [plain("2 * 3")], "2 * 3"],
+  ["a name in snake case", [plain("snake_case_name")], "snake_case_name"],
+  ["two asterisks between spaces", [plain("a ** b")], "a ** b"],
+  [
+    "an asterisk that pairs with nothing",
+    [plain("*Terms apply. Also "), italic("em")],
+    "*Terms apply. Also *em*",
+  ],
+] satisfies Array<[string, JSONContent[], string]>)(
+  "writes %s so it reads back",
+  (_name, content, saved) => {
+    const document = { type: "doc", content: [{ type: "paragraph", content }] };
+    expect(serializeRichdocBody(document)).toBe(saved);
+    const reopened = parseRichdocMarkdown(saved);
+    expect(markedCharactersOf(reopened)).toEqual(markedCharactersOf(document));
+    expect(serializeRichdocBody(reopened)).toBe(saved);
   },
 );
 

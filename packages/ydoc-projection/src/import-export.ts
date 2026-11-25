@@ -1,7 +1,6 @@
 import { utf8ByteLength } from "@dohc/live-session-contract/limits";
 import type { AnyExtension, JSONContent } from "@tiptap/core";
 import { Extension, getSchema } from "@tiptap/core";
-import { MarkdownManager } from "@tiptap/markdown";
 import {
   getDefaults,
   Lexer,
@@ -37,6 +36,7 @@ import {
 import { assertSupportedListMarkdown } from "./list-markdown.js";
 import { sanitizeImageSrc } from "./image-src.js";
 import { backtickFence, codeBlockFence } from "./markdown-fence.js";
+import { DohcMarkdownManager, type InlineTokens } from "./inline-marks.js";
 import { getDohcYDocBodyFragment } from "./body-fragment.js";
 import { BODY_SEQUENCE_FIELD } from "./bodySequenceGrammar.js";
 import { newBodyWeight, writeNewBody } from "./bodySequenceWriter.js";
@@ -548,14 +548,14 @@ class ContentTabLexer<ParserOutput = string, RendererOutput = string> extends Le
 }
 markdownParser.Lexer = ContentTabLexer;
 
-const markdownManager = new MarkdownManager({
+const markdownManager = new DohcMarkdownManager({
   marked: markdownParser as unknown as typeof marked,
   extensions,
   indentation: { style: "space", size: 2 },
 });
-let projectedManager: MarkdownManager | undefined;
-function projectedMarkdownManager(): MarkdownManager {
-  return (projectedManager ??= new MarkdownManager({
+let projectedManager: DohcMarkdownManager | undefined;
+function projectedMarkdownManager(): DohcMarkdownManager {
+  return (projectedManager ??= new DohcMarkdownManager({
     marked: markdownParser as unknown as typeof marked,
     extensions: extensions.map((extension) =>
       extension.name === "dohcMarkdownLists" ? DohcProjectedMarkdownLists : extension,
@@ -1107,17 +1107,14 @@ export function serializeRichdocBody(root: JSONContent): string {
   const leadingWhitespaceSentinels = new Map<string, string>();
   const blockEscapeSentinels = new Map<string, string>();
   const codeBlocks = new Map<string, string>();
-  const reservedTokens = new Set(
-    source.match(/\uE000DOHC(?:[A-Z_]+_\d+|CHARACTER\d+)\uE001/gu) ?? [],
-  );
+  const reservedTokens = new Set(source.match(/\uE000DOHC(?:[A-Z_]+_\d+|[A-Z]+\d+)\uE001/gu) ?? []);
   let tokenIndex = 0;
   const reserveToken = (kind: string): string => {
     let token: string;
     do {
-      token =
-        kind === "CHARACTER"
-          ? `\uE000DOHCCHARACTER${tokenIndex}\uE001`
-          : `\uE000DOHC_${kind}_${tokenIndex}\uE001`;
+      token = kind.includes("_")
+        ? `\uE000DOHC_${kind}_${tokenIndex}\uE001`
+        : `\uE000DOHC${kind}${tokenIndex}\uE001`;
       tokenIndex += 1;
     } while (reservedTokens.has(token));
     reservedTokens.add(token);
@@ -1141,6 +1138,44 @@ export function serializeRichdocBody(root: JSONContent): string {
     blockEscapeSentinels.set(value, token);
     return token;
   };
+  const encodeRaw = (text: string): string =>
+    replaceCharacters(text, characterSentinels, () => reserveToken("CHARACTER"), /[\s\S]+/g);
+  const linkAmpersands = new Map<string, string>();
+  const heldCharacters = new Map<string, string>();
+  const heldTokens = new Map<string, string>();
+  const holdCharacter = (character: string): string => {
+    const existing = heldTokens.get(character);
+    if (existing) return existing;
+    const token = reserveToken("HELD");
+    heldTokens.set(character, token);
+    heldCharacters.set(token, character);
+    return token;
+  };
+  const opaque = [reserveToken("MARK"), reserveToken("MARK")] as const;
+  const scope = [reserveToken("MARK"), reserveToken("MARK")] as const;
+  // A typed `*`, `_`, backtick, or backslash is held until the inline writer
+  // sees what the reader would pair it with. A highlight's own `\=` is
+  // written as it is.
+  const holdTypedSyntax = (content: JSONContent[]): JSONContent[] =>
+    content.map((node) => {
+      if (typeof node.text !== "string" || node.marks?.some((mark) => mark.type === "code")) {
+        return node;
+      }
+      const syntax = node.marks?.some((mark) => mark.type === "highlight")
+        ? /\\=|[*_`\\]/g
+        : /[*_`\\]/g;
+      const text = node.text
+        .split(/(DOHC(?:[A-Z_]+_\d+|[A-Z]+\d+))/u)
+        .map((part, index) =>
+          index % 2
+            ? part
+            : part.replace(syntax, (found) =>
+                found.length > 1 ? encodeRaw(found) : holdCharacter(found),
+              ),
+        )
+        .join("");
+      return text === node.text ? node : { ...node, text };
+    });
   // An empty link the parser keeps as the file holds it reads back only from
   // the same bytes, so its `&`, `<`, `>`, and NBSP are written as they are,
   // and so is each line it starts, which no block opener or indent escape
@@ -1151,22 +1186,29 @@ export function serializeRichdocBody(root: JSONContent): string {
   // written whole, so no later escape reads it.
   const asWritten = (text: string, highlighted: boolean): string => {
     if (!opensBlock(text)) {
-      return replaceCharacters(
-        text,
-        characterSentinels,
-        () => reserveToken("CHARACTER"),
-        /[&<>\u00a0]|(?<=\n)[^\n\r]/g,
+      const kept = replaceCharacters(
+        replaceCharacters(
+          text,
+          characterSentinels,
+          () => reserveToken("CHARACTER"),
+          /[<>\u00a0*_`\\]|(?<=\n)[^\n\r]/g,
+        ),
+        linkAmpersands,
+        () => reserveToken("LINK"),
+        /&/g,
       );
+      return opaque[0] + kept + opaque[1];
     }
     const written = highlighted
       ? text.split("\\=").map(writtenDefinition).join("\\=")
       : writtenDefinition(text);
-    return replaceCharacters(
+    const kept = replaceCharacters(
       written,
       characterSentinels,
       () => reserveToken("CHARACTER"),
       /[^\n]+/g,
     );
+    return opaque[0] + kept + opaque[1];
   };
 
   function visit(node: JSONContent, insideTableCell = false, parentType = ""): JSONContent {
@@ -1226,7 +1268,13 @@ export function serializeRichdocBody(root: JSONContent): string {
           ];
         }
       }
-      content = renderInlineCodeRuns(content, characterSentinels, () => reserveToken("CHARACTER"));
+      content = holdTypedSyntax(content);
+      content = renderInlineCodeRuns(
+        content,
+        characterSentinels,
+        () => reserveToken("CHARACTER"),
+        opaque,
+      );
       content = protectMarkdownSyntax(content, characterSentinels, () => reserveToken("CHARACTER"));
       content = openNoDelimitersAroundWhitespace(content);
     }
@@ -1257,32 +1305,57 @@ export function serializeRichdocBody(root: JSONContent): string {
   }
 
   const prepared = visit(root);
+  if (heldCharacters.size > 0) {
+    for (const text of ["*", "_", "`", "\\", "\\\\"]) encodeRaw(text);
+    for (const character of ["*", "_", "`"]) encodeBlockEscape(character);
+  }
   // A character token's text can hold the other tokens, so it is written
-  // first. Every token is reserved by now.
-  const written = [
-    new Map(
-      Array.from(characterSentinels, ([character, sentinel]) => [sentinel, character] as const),
+  // first. Every token is reserved by now. The others write text that holds
+  // no token, so they are written together.
+  const characters = new Map(
+    Array.from(characterSentinels, ([character, sentinel]) => [sentinel, character] as const),
+  );
+  const others = new Map<string, string>([
+    ...Array.from(
+      blockEscapeSentinels,
+      ([character, sentinel]) => [sentinel, `&#${character.codePointAt(0)};`] as const,
     ),
-    new Map(
-      Array.from(
-        blockEscapeSentinels,
-        ([character, sentinel]) => [sentinel, `&#${character.codePointAt(0)};`] as const,
-      ),
+    ...Array.from(
+      leadingWhitespaceSentinels,
+      ([whitespace, sentinel]) => [sentinel, whitespace === " " ? "&#32;" : "&#9;"] as const,
     ),
-    new Map(
-      Array.from(
-        leadingWhitespaceSentinels,
-        ([whitespace, sentinel]) => [sentinel, whitespace === " " ? "&#32;" : "&#9;"] as const,
-      ),
-    ),
-  ];
-  const writeTokens = (text: string) => written.reduce(restoreCharacterSentinels, text);
+    ...heldCharacters,
+    ...[...opaque, ...scope].map((marker) => [marker, ""] as const),
+  ]);
+  const ampersands = new Map(
+    Array.from(linkAmpersands, ([character, token]) => [token, character] as const),
+  );
+  const othersAndAmpersands = new Map([...others, ...ampersands]);
+  const writeTokens = (text: string) =>
+    restoreCharacterSentinels(restoreCharacterSentinels(text, characters), othersAndAmpersands);
+  // An empty link reads back only from its own bytes, so a break it spells is
+  // not written as a cell's `<br>`.
+  const writeTableCellTokens = (text: string, writeBreaks: (markdown: string) => string) =>
+    restoreCharacterSentinels(
+      writeBreaks(restoreCharacterSentinels(restoreCharacterSentinels(text, characters), others)),
+      ampersands,
+    );
+  const inlineTokens: InlineTokens = {
+    write: writeTokens,
+    held: heldCharacters,
+    opaque,
+    scope,
+    raw: (text) => characterSentinels.get(text) ?? text,
+    reference: (character) => blockEscapeSentinels.get(character) ?? character,
+  };
   // The library writes a note of only `&nbsp;` as empty, for its blank lines.
   // A sealed piece holding that text is the file's own, so it is written.
-  let markdown = writingTableCellTokens(writeTokens, () =>
-    holdsSealedPiece(prepared)
-      ? markdownManager.renderNodes(prepared, prepared)
-      : markdownManager.serialize(prepared),
+  let markdown = writingTableCellTokens(writeTableCellTokens, () =>
+    markdownManager.writingTokens(inlineTokens, () =>
+      holdsSealedPiece(prepared)
+        ? markdownManager.renderNodes(prepared, prepared)
+        : markdownManager.serialize(prepared),
+    ),
   );
   if (prepared.content?.[0]?.type === "horizontalRule") {
     markdown = "***" + markdown.slice(3);
@@ -2113,20 +2186,14 @@ const sameMark = (left: Mark, right: Mark): boolean =>
   left.type === right.type &&
   JSON.stringify(left.attrs ?? {}) === JSON.stringify(right.attrs ?? {});
 
-// Markdown reads no delimiter beside only whitespace as a mark, so a mark that
-// opens or closes inside whitespace reads back as literal asterisks. A run of
-// only whitespace keeps a mark that continues through it to text on both
-// sides, or that opens right before a character, where the whitespace is
-// written before the delimiter. It keeps one that closes right after a
-// character, where the whitespace is written after it, unless the run also
-// opens a mark: closing and opening in one run writes them inside the
-// whitespace. It drops the others. Each kept mark is written where the old
-// writer wrote it, whose nesting the reader depends on. The engine writer does
+// Markdown reads no delimiter beside only whitespace as a mark, and the reader
+// gives whitespace at a mark's edge no mark. A run of only whitespace keeps
+// only a mark that continues through it to text on both sides, so the writer
+// writes the same delimiters for what it reads back. The engine writer does
 // the same.
 function openNoDelimitersAroundWhitespace(content: JSONContent[]): JSONContent[] {
   const blank = content.map((node) => node.type === "text" && /^\s*$/u.test(node.text ?? ""));
   if (!blank.includes(true)) return content;
-  const textAt = (index: number) => (content[index]?.type === "text" && content[index].text) || "";
   // For each blank run, the marks it shares with the text the order visits
   // before it, through blank runs that carry them too.
   const reachingText = (order: number[]): Mark[][] => {
@@ -2152,20 +2219,10 @@ function openNoDelimitersAroundWhitespace(content: JSONContent[]): JSONContent[]
   const fromAfter = reachingText([...indexes].reverse());
   return content.map((node, index) => {
     if (!blank[index] || !node.marks?.length) return node;
-    const beforeText = /^\S/u.test(textAt(index + 1));
-    const afterText = /\S$/u.test(textAt(index - 1));
     const back = (mark: Mark) => fromBefore[index]!.some((other) => sameMark(other, mark));
     const ahead = (mark: Mark) => fromAfter[index]!.some((other) => sameMark(other, mark));
-    const delimits = (mark: Mark) => DELIMITER_MARKS.has(mark.type);
-    const opens = node.marks.some(
-      (mark) => delimits(mark) && beforeText && ahead(mark) && !back(mark),
-    );
     const marks = node.marks.filter(
-      (mark) =>
-        !delimits(mark) ||
-        (back(mark) && ahead(mark)) ||
-        (ahead(mark) && beforeText) ||
-        (back(mark) && afterText && !opens),
+      (mark) => !DELIMITER_MARKS.has(mark.type) || (back(mark) && ahead(mark)),
     );
     if (marks.length === node.marks.length) return node;
     return marks.length ? { ...node, marks } : { type: node.type, text: node.text };
@@ -2196,6 +2253,7 @@ function renderInlineCodeRuns(
   content: JSONContent[],
   entitySentinels: Map<string, string>,
   reserveSentinel: () => string,
+  opaque: readonly [string, string],
 ): JSONContent[] {
   const output: JSONContent[] = [];
   for (let index = 0; index < content.length;) {
@@ -2215,7 +2273,10 @@ function renderInlineCodeRuns(
     const marks = node.marks?.filter((mark) => mark.type !== "code");
     output.push({
       ...node,
-      text: renderInlineCode(replaceCharacters(value, entitySentinels, reserveSentinel)),
+      text:
+        opaque[0] +
+        renderInlineCode(replaceCharacters(value, entitySentinels, reserveSentinel)) +
+        opaque[1],
       marks: marks?.length ? marks : undefined,
     });
     index = end;
@@ -2323,12 +2384,15 @@ function continuationPrefixForListMarker(prefix: string): string | null {
   return `${listItem[1]}${" ".repeat(listItem[2].length + 1)}`;
 }
 
-function restoreCharacterSentinels(markdown: string, replacements: Map<string, string>): string {
-  if (replacements.size === 0) return markdown;
+function restoreCharacterSentinels(
+  markdown: string,
+  replacements: ReadonlyMap<string, string>,
+): string {
+  if (replacements.size === 0 || !markdown.includes("\uE000")) return markdown;
   // Every sentinel the serializer reserves has this shape, so one pass finds
   // them all, however many there are.
   return markdown.replace(
-    /\uE000DOHC(?:[A-Z_]+_\d+|CHARACTER\d+)\uE001/gu,
+    /\uE000DOHC(?:[A-Z_]+_\d+|[A-Z]+\d+)\uE001/gu,
     (sentinel) => replacements.get(sentinel) ?? sentinel,
   );
 }

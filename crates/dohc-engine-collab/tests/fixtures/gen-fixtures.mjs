@@ -976,10 +976,9 @@ const RICHDOC_PROJECTION_CASES = [
           tableRow([tableCell("tableCell", "[](a&lt;br&gt;b)")]),
           tableRow([tableCell("tableCell", [xmlText("&lt;br&gt;", { code: {} })])]),
           tableRow([tableCell("tableCell", [xmlText("&amp;lt;br&amp;gt;", { code: {} })])]),
-          // A backtick or backslash in the text moves where both writers
-          // find the code spans that keep a spelled break. Their written
-          // form is a known gap, not the wanted output: a cell writes its
-          // text's backticks and backslashes unescaped.
+          // A backtick or backslash in the text is escaped, so it can't
+          // move where the reader finds the code spans that keep a spelled
+          // break.
           tableRow([
             tableCell("tableCell", [xmlText("a ` <br> b "), xmlText("x", { code: {} })]),
           ]),
@@ -1162,6 +1161,34 @@ const RICHDOC_PROJECTION_CASES = [
             ]),
           ]),
         ]),
+      ]),
+  },
+  {
+    // #4139: marks nest in an order whose delimiters the reader reads back,
+    // and a typed `*`, `_`, backtick, or backslash the reader would read as
+    // syntax is escaped.
+    name: "mixed-formatting",
+    makeDoc: () =>
+      directRichdoc([
+        paragraph([xmlRuns([["un"], ["do", { bold: {}, underline: {} }], ["ne"]])]),
+        paragraph([xmlRuns([["a"], ["b", { italic: {}, underline: {} }]])]),
+        paragraph([
+          xmlRuns([["a", { italic: {} }], ["b", { italic: {}, bold: {} }], [" ", { bold: {} }], ["c"]]),
+        ]),
+        paragraph([
+          xmlRuns([
+            ["a", { italic: {} }],
+            ["b", { italic: {}, highlight: {} }],
+            [" ", { highlight: {} }],
+            ["c"],
+          ]),
+        ]),
+        paragraph([xmlRuns([["a"], ["x", { bold: {}, strike: {} }], ["b"]])]),
+        paragraph("*a b* _a b_ a*b* 2 * 3 snake_case_name a ** b"),
+        paragraph([xmlRuns([["a ` b "], ["x", { code: {} }]])]),
+        paragraph([xmlRuns([["a \\"], ["x", { code: {} }]])]),
+        paragraph([xmlRuns([["a\\"], ["b", { bold: {} }]])]),
+        paragraph("a\\*b*"),
       ]),
   },
 ];
