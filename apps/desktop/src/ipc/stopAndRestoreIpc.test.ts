@@ -27,8 +27,9 @@ import {
   sharedLiveRestoreDetail,
   sharedLiveRestoreTitle,
 } from "./errorWords";
-import { registerStopAndRestoreIpc } from "./stopAndRestoreIpc";
-import { liveStopWaitingError } from "./liveEditingStop";
+import { registerStopAndRestoreIpc, watchReleaseOutsideFile } from "./stopAndRestoreIpc";
+import { isLiveStopWaiting, liveStopWaitingError } from "./liveEditingStop";
+import { OwnerJournalPending } from "../workspaces/ownerJournal";
 import { stopAndRestoreRecoveryOperations } from "./bridgeContract";
 import { newRun } from "@dohc/automation-executor/collection-automation-run";
 import {
@@ -1604,5 +1605,49 @@ describe("renderer-held restore guards", () => {
       unfinished: null,
     });
     expect(f.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
+  });
+});
+
+describe("a Stop's release before Stop and restore removes the page", () => {
+  const released = (release: () => Promise<unknown>) => {
+    const watch = watchReleaseOutsideFile<string>(release as never);
+    return {
+      watch,
+      run: () =>
+        watch.ownerLiveStop("workspace", "release", "note.md", undefined, 3).catch(() => undefined),
+    };
+  };
+
+  it("waits for live editing to stop when the server is still retiring the note", async () => {
+    const { watch, run } = released(async () => {
+      throw new OwnerJournalPending();
+    });
+    await run();
+    let answered: unknown;
+    try {
+      watch.answer({ keptEdits: "none" });
+    } catch (error) {
+      answered = error;
+    }
+    expect(isLiveStopWaiting(answered)).toBe(true);
+  });
+
+  it("keeps the page when the release failed or left edits outside the file", async () => {
+    for (const release of [
+      async () => {
+        throw new Error("The file could not be written.");
+      },
+      async () => ({ deferred: { reason: "behind" } }),
+    ]) {
+      const { watch, run } = released(release);
+      await run();
+      expect(watch.answer({ keptEdits: "none" })).toEqual({ keptEdits: "kept" });
+    }
+  });
+
+  it("removes the page after a release that wrote the file", async () => {
+    const { watch, run } = released(async () => ({ state: "released" }));
+    await run();
+    expect(watch.answer({ keptEdits: "none" })).toEqual({ keptEdits: "none" });
   });
 });

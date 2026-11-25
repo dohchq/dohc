@@ -202,12 +202,8 @@ async function withSharedCollection(
     ownerText(path: string): Promise<string>;
     recipientText(path: string): Promise<string>;
     ownerLiveState(path: string): Record<string, unknown>;
-    ownerEngineRows(paths: string[]): Promise<Record<string, unknown>>;
   }) => Promise<void>,
-  {
-    ownerEnv = {},
-    refuse,
-  }: { ownerEnv?: Record<string, string>; refuse?(method: string, path: string): boolean } = {},
+  { refuse }: { refuse?(method: string, path: string): boolean } = {},
 ) {
   const ownerTemp = await createTempWorkspace(),
     recipientTemp = await createTempWorkspace();
@@ -256,7 +252,7 @@ async function withSharedCollection(
       userId: "e2e-granter",
       token: OWNER_TOKEN,
     });
-    owner = await launchDesktopApp({ workspace: ownerTemp, env: { ...env, ...ownerEnv } });
+    owner = await launchDesktopApp({ workspace: ownerTemp, env });
     launches.push(owner);
     await openWorkspaceFromFirstRun(owner.page, ownerTemp);
     await owner.page.evaluate(async (workspaceId) => {
@@ -311,7 +307,7 @@ async function withSharedCollection(
         owner = undefined;
       },
       restartOwner: async () => {
-        owner = await launchDesktopApp({ workspace: ownerTemp, env: { ...env, ...ownerEnv } });
+        owner = await launchDesktopApp({ workspace: ownerTemp, env });
         launches.push(owner);
         return owner;
       },
@@ -353,54 +349,6 @@ async function withSharedCollection(
                 "SELECT moment_id,operation,sync_record_only,payload_after_blob_sha256 FROM moments WHERE path=? ORDER BY moment_order DESC",
               )
               .all(path),
-          };
-        } finally {
-          db.close();
-        }
-      },
-      // Read only when a test fails: every engine row that shows where an owner edit went.
-      ownerEngineRows: async (paths) => {
-        const db = new DatabaseSync(join(ownerTemp.rootPath, ".dohc/engine/engine.db"), {
-          readOnly: true,
-        });
-        try {
-          const marks = (values: unknown[]) => values.map(() => "?").join(",");
-          const objects = db
-            .prepare(`SELECT object_id FROM snapshots WHERE path IN (${marks(paths)})
-            UNION SELECT object_id FROM ydoc_docs WHERE path IN (${marks(paths)})`)
-            .all(...paths, ...paths)
-            .map((row) => String(row.object_id));
-          const byObject = (table: string) =>
-            db
-              .prepare(`SELECT * FROM ${table} WHERE object_id IN (${marks(objects)})`)
-              .all(...objects);
-          const byOutbox = (table: string) =>
-            db
-              .prepare(`SELECT t.* FROM ${table} t JOIN owner_ydoc_outboxes o USING (outbox_id)
-            WHERE o.object_id IN (${marks(objects)})`)
-              .all(...objects);
-          return {
-            disk: Object.fromEntries(
-              await Promise.all(
-                paths.map(async (path) => [
-                  path,
-                  await readFile(join(ownerTemp.rootPath, path), "utf8").catch(() => "missing"),
-                ]),
-              ),
-            ),
-            snapshots: byObject("snapshots"),
-            documents: byObject("ydoc_docs"),
-            bindings: byObject("ydoc_owner_bindings"),
-            appliedFrames: byObject("ydoc_owner_applied_frames"),
-            outboxes: byObject("owner_ydoc_outboxes"),
-            outboxEntries: byOutbox("owner_ydoc_outbox_entries"),
-            outboxRefusals: byOutbox("owner_ydoc_outbox_refusals"),
-            pendingSettlements: byObject("owner_pending_settlements"),
-            liveStops: byObject("owner_live_stops"),
-            moments: db
-              .prepare(`SELECT moment_id,path,operation,sync_record_only,payload_after_blob_sha256 FROM moments
-              WHERE path IN (${marks(paths)}) ORDER BY moment_order DESC`)
-              .all(...paths),
           };
         } finally {
           db.close();
@@ -638,38 +586,12 @@ for (const restartBeforeRestore of [false, true]) {
         ).toBeEditable();
         await status.fill("Owner text KEEP");
         await expect(status).toHaveValue("Owner text KEEP");
-        try {
-          await expect
-            .poll(
-              () => {
-                const documents = fixture.ownerLiveState(created[0]!.path).documents as {
-                  head_update_seq: number;
-                  settled_update_seq: number | null;
-                }[];
-                return documents.some((doc) => doc.head_update_seq !== doc.settled_update_seq);
-              },
-              {
-                message: "the owner's typing never showed as an unsettled live edit",
-                timeout: 120_000,
-              },
-            )
-            .toBe(true);
-        } catch (error) {
-          await test.info().attach("owner engine rows after the wait for unsettled typing failed", {
-            contentType: "application/json",
-            body: await fixture.ownerEngineRows(created.map((record) => record.path)).then(
-              (rows) => JSON.stringify(rows, null, 2),
-              (dumpError: unknown) => `The engine rows couldn't be read: ${String(dumpError)}`,
-            ),
-          });
-          throw error;
-        }
         await expect(async () => {
           expect(
             (await ownerRecordHistory(fixture.owner.page, created[0]!.path)).some((moment) =>
               moment.afterText?.includes("Owner text KEEP"),
             ),
-          ).toBe(false);
+          ).toBe(true);
         }).toPass({ timeout: 120_000 });
         if (restartBeforeRestore) {
           await fixture.stopOwner();
@@ -698,8 +620,6 @@ for (const restartBeforeRestore of [false, true]) {
             2,
           ),
         });
-        // Owner settlement is held by the existing debounce seam. History still
-        // attributes the file to the recipient when this destructive action runs.
         // One run stops live editing for the recipient-only page and removes it.
         // The owner's typing keeps the other page.
         const result = await stopAndRestoreRecipient(fixture.owner.page);
@@ -709,9 +629,7 @@ for (const restartBeforeRestore of [false, true]) {
           review: [{ path: created[0]!.path }],
           unfinished: null,
         });
-        expect(result.status === "restored" && result.review[0]?.reason).toMatch(
-          /^(changed-since|restore-refused)$/,
-        );
+        expect(result.status === "restored" && result.review[0]?.reason).toBe("changed-since");
         if (!restartBeforeRestore) await expect(status).toHaveValue("Owner text KEEP");
         expect(await fixture.ownerText(created[0]!.path)).not.toBe("missing");
         expect(await fixture.ownerText(created[1]!.path)).toBe("missing");
@@ -746,7 +664,6 @@ for (const restartBeforeRestore of [false, true]) {
           .poll(() => fixture.ownerText(created[1]!.path), { timeout: 120_000 })
           .toContain("Recipient only");
       },
-      { ownerEnv: { DOHC_TEST_YDOC_SETTLE_DEBOUNCE_MS: "600000" } },
     );
   });
 }

@@ -581,6 +581,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
           target: { binding, relayDatabaseNamespace: stop.relayDatabaseNamespace },
           read: journal,
           signal: signal ?? AbortSignal.any([]),
+          through: acceptedCursor,
         })) === null
       )
         throw new OwnerJournalPending();

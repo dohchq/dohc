@@ -11959,9 +11959,9 @@ function registerIpcHandlers(): void {
       // Only the page Stop and restore found at this path.
       if (document?.objectId !== objectId)
         throw new Error(`"${path}" changed. Open Live documents to check it.`);
-      const result = await actions.stop({ workspaceId, path, objectId }, operation);
+      const result = release.answer(await actions.stop({ workspaceId, path, objectId }, operation));
       sendRendererActivity({ workspaceId, liveDocumentStopped: objectId });
-      return release.outsideFile() ? { keptEdits: "kept" } : result;
+      return result;
     },
     queuePull: (workspaceId) => activity.queueCloudPull(workspaceId),
     syncNow: (workspaceId) => activity.syncNow(workspaceId),
