@@ -3687,6 +3687,7 @@
                             "collection.create",
                             "host.copy",
                             "host.print",
+                            "host.notice",
                             "unknown"
                           ]
                         },
@@ -3786,6 +3787,7 @@
                                     "collection.create",
                                     "host.copy",
                                     "host.print",
+                                    "host.notice",
                                     "unknown"
                                   ]
                                 },

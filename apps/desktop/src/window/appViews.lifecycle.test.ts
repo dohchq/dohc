@@ -64,14 +64,16 @@ function fixture() {
     stop: ReturnType<typeof vi.fn>;
     isAlive(): boolean;
     end(reason: string): void;
+    notice(notice: { message: string; detail?: string }): void;
   }> = [];
   const activePublication = vi.fn(async () => "approved" as string | null);
   let handler!: (event: IpcMainInvokeEvent, payload: unknown) => Promise<unknown>;
   const manager = registerAppViews({
     activePublication,
-    launch: vi.fn(async () => {
+    launch: vi.fn(async (_operation, _publicationId, notice) => {
       const ended = new AbortController();
       const launch = {
+        notice,
         url: `http://127.0.0.1:${43000 + launches.length}/bootstrap#${"a".repeat(43)}`,
         ended: ended.signal,
         stop: vi.fn(async () => {
@@ -162,6 +164,24 @@ it("clears an admission that Electron didn't use in the same task", async () => 
   });
   app.emit("web-contents-created", {}, late);
   expect(late.close).toHaveBeenCalledOnce();
+});
+it("sends an app's notice to the window that owns its tab, and none after the tab closes", async () => {
+  const f = fixture();
+  await f.open();
+  f.launches[0]!.notice({
+    message: "Bank import stopped at row 40",
+    detail: "Row 40 has no date.",
+  });
+  expect(f.owner.send).toHaveBeenCalledWith(CHANNELS.appViewEvent, {
+    kind: "app-notice",
+    viewId: "one",
+    message: "Bank import stopped at row 40",
+    detail: "Row 40 has no date.",
+  });
+  await f.invoke({ action: "close", workspaceId: "w", viewId: "one" });
+  const sent = f.owner.send.mock.calls.length;
+  f.launches[0]!.notice({ message: "Too late" });
+  expect(f.owner.send).toHaveBeenCalledTimes(sent);
 });
 it("creates no launch or guest authorization without an active approval", async () => {
   const f = fixture();

@@ -11599,11 +11599,11 @@ function registerIpcHandlers(): void {
         ? (listed.publications.find((publication) => publication.active)?.publicationId ?? null)
         : null;
     },
-    launch: async (operation, publicationId) =>
+    launch: async (operation, publicationId, onNotice) =>
       (await localAppLauncher(operation.workspace, operation.signal)).launchSession(
         publicationId,
         operation.signal,
-        { keepAlive: true },
+        { keepAlive: true, onNotice },
       ),
   });
   registerOperations(operationBoundary, appViewOperations, { appView: appViews.appView });

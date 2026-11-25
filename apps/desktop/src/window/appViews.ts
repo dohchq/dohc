@@ -13,7 +13,7 @@ import { isSharedWithMePath } from "@dohc/workspace-core";
 import type { AppViewEvent, AppViewRequest, AppViewResult } from "../ipc/bridgeContract";
 import { CHANNELS } from "../ipc/channels";
 import { matchesShortcut } from "../shortcuts/shortcutRegistry";
-import type { LocalAppLaunchSession } from "../workspaces/localAppLaunch";
+import type { AppNotice, LocalAppLaunchSession } from "../workspaces/localAppLaunch";
 
 type ColorScheme = "light" | "dark";
 // One partition per app: every launch is on 127.0.0.1, so apps sharing one would share its cache and cookies.
@@ -242,6 +242,7 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
   launch(
     operation: AppViewOperation<Workspace>,
     publicationId: string,
+    onNotice: (notice: AppNotice) => void,
   ): Promise<LocalAppLaunchSession>;
 }) {
   const partitions = new Map<string, Map<number, Entry>>();
@@ -528,7 +529,9 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
           return { kind: "unapproved", viewId: input.viewId };
         }
         partitionEntries(entry.partition);
-        const launch = await dependencies.launch(operation, publicationId);
+        const launch = await dependencies.launch(operation, publicationId, (notice) =>
+          emit(entry, { kind: "app-notice", viewId: entry.viewId, ...notice }),
+        );
         entry.launch = launch;
         if (entry.closed) {
           await launch.stop();

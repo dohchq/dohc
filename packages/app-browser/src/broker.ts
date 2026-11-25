@@ -7,6 +7,7 @@ export type AppBrokerOp =
   | "backend.file"
   | "host.copy"
   | "host.print"
+  | "host.notice"
   | "unknown";
 
 export type AppBrokerLocalRejectionReason =
@@ -52,6 +53,7 @@ export interface AppBrokerLimits {
 export interface AppBrokerHostActions {
   copyText?(text: string): Promise<void>;
   print?(options: { height?: number }): Promise<void>;
+  notice?(notice: { message: string; detail?: string }): Promise<boolean>;
 }
 
 export interface AppBrokerHandle {
@@ -98,7 +100,8 @@ export function attachAppCollectionBroker(
     copying = false,
     nextCopyAt = 0,
     printing = false,
-    nextPrintAt = 0;
+    nextPrintAt = 0,
+    noticing = false;
   const channel = new MessageChannel(),
     controller = new AbortController(),
     ids = new Set<string>();
@@ -124,7 +127,8 @@ export function attachAppCollectionBroker(
     v === "backend.upload" ||
     v === "backend.file" ||
     v === "host.copy" ||
-    v === "host.print"
+    v === "host.print" ||
+    v === "host.notice"
       ? v
       : "unknown";
   const knownOperation = (v: unknown): string | undefined =>
@@ -381,6 +385,44 @@ export function attachAppCollectionBroker(
         }
       } else {
         defaultPrint(printHeight === undefined ? {} : { height: printHeight });
+      }
+      return;
+    }
+    if (body.op === "host.notice") {
+      const line = (v: unknown, max: number) =>
+        typeof v === "string" &&
+        v.trim() !== "" &&
+        v.length <= max &&
+        !/[\p{Cc}\p{Zl}\p{Zp}]/u.test(v);
+      if (
+        !["id,message,op", "detail,id,message,op"].includes(keys) ||
+        !line(body.message, 200) ||
+        (Object.hasOwn(body, "detail") && !line(body.detail, 500))
+      )
+        return rejectLocal("invalid_keys", 400);
+      if (noticing)
+        return rejectLocal("rate_limited", 429, {
+          code: "rate_limited",
+          message:
+            "Rate limit reached: at most 1 notice at a time (1 already in flight). Wait for it to finish, then try again.",
+        });
+      noticing = true;
+      ids.add(id);
+      emit({ kind: "started", id, op });
+      try {
+        const notice =
+          typeof body.detail === "string"
+            ? { message: body.message as string, detail: body.detail }
+            : { message: body.message as string };
+        const recorded = hostActions?.notice
+          ? await hostActions.notice(notice).catch(() => false)
+          : false;
+        if (closed) return;
+        channel.port1.postMessage({ id, ok: true, value: { recorded: recorded === true } });
+        emit({ kind: "completed", id, op, status: 200, ok: true });
+      } finally {
+        noticing = false;
+        ids.delete(id);
       }
       return;
     }

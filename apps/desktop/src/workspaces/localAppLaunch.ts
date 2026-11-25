@@ -79,10 +79,19 @@ export interface LocalAppLaunchHost {
   launchSession(
     publicationId: string,
     signal: AbortSignal,
-    options?: { keepAlive?: boolean; observeBroker?: boolean },
+    options?: { keepAlive?: boolean; observeBroker?: boolean; onNotice?(notice: AppNotice): void },
   ): Promise<LocalAppLaunchSession>;
   close(): Promise<void>;
 }
+export interface AppNotice {
+  message: string;
+  detail?: string;
+}
+export const isAppNoticeLine = (value: unknown, max: number): value is string =>
+  typeof value === "string" &&
+  value.trim() !== "" &&
+  value.length <= max &&
+  !/[\p{Cc}\p{Zl}\p{Zp}]/u.test(value);
 export interface LocalAppLaunchSession {
   url: string;
   ended: AbortSignal;
@@ -105,6 +114,7 @@ const MAX_SESSIONS = 16,
   LOCAL_BACKEND_REFILL_MS = 50,
   FILE_BURST = 120,
   FILE_REFILL_MS = 250,
+  NOTICE_COOLDOWN_MS = 5_000,
   MAX_EVENTS_PENDING = 2,
   MAX_EVENTS_HOLD_MS = 25_000;
 const validEventAlias = (key: string) =>
@@ -289,11 +299,13 @@ export async function createLocalAppLaunchHost(options: {
           fileRefillMs = highBudget ? LOCAL_BACKEND_REFILL_MS : FILE_REFILL_MS;
         const callBudget = { burst: backendBurst, refillMs: backendRefillMs, tokens: backendBurst },
           fileBudget = { burst: FILE_BURST, refillMs: fileRefillMs, tokens: FILE_BURST };
+        const onNotice = launchOptions?.keepAlive ? launchOptions.onNotice : undefined;
         let handoffDigest: string | null = digest(handoff),
           origin = "",
           pending = 0,
           eventsPending = 0,
-          updated = Date.now();
+          updated = Date.now(),
+          nextNoticeAt = 0;
         let expires = Date.now() + HANDOFF_MS,
           hardExpires = expires;
         const common = {
@@ -338,6 +350,9 @@ export async function createLocalAppLaunchHost(options: {
           invokeResultBytes: BULK_INVOKE_REPLY_BYTES,
           trustRateLimitDetails: true,
         });
+        const hostActions = onNotice
+          ? "{notice:n=>fetch('/notice',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof},body:JSON.stringify(n),signal:lifetime.signal}).then(async r=>r.ok&&(await r.json()).recorded===true)}"
+          : "undefined";
         const hasEvents = Boolean(
           options.backend.datasetRevisions &&
           options.backend.subscribeDatasetChanges &&
@@ -358,7 +373,7 @@ export async function createLocalAppLaunchHost(options: {
           const request=proof?fetch('/resume',{method:'POST',headers:{'x-dohc-app-proof':proof},signal:lifetime.signal}):fetch('/session',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({handoff}),signal:lifetime.signal});
           request.then(async r=>{if(!r.ok)throw Error();const value=await r.json();if(stopped)return;proof=value.proof;saveProof(proof);
             frame=document.createElement('iframe');frame.title='Local app';frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox';frame.style='display:block;border:0;width:100%;height:100vh';
-            const broker=(${attachAppCollectionBroker.toString()})(frame,(body,signal,request)=>{if(body.op==='backend.upload'){const{bytes,...meta}=body;return fetch('/backend',{method:'POST',headers:{'content-type':'application/octet-stream','x-dohc-app-proof':proof,'x-dohc-app-activated':request.activated?'1':'0','x-dohc-app-meta':encodeURIComponent(JSON.stringify(meta))},body:bytes,signal});}return fetch(body.op==='backend.file'?'/file':'/backend',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof,'x-dohc-app-activated':request.activated?'1':'0'},body:JSON.stringify(body),signal});},lifetime.signal,${observe},${brokerLimits});
+            const broker=(${attachAppCollectionBroker.toString()})(frame,(body,signal,request)=>{if(body.op==='backend.upload'){const{bytes,...meta}=body;return fetch('/backend',{method:'POST',headers:{'content-type':'application/octet-stream','x-dohc-app-proof':proof,'x-dohc-app-activated':request.activated?'1':'0','x-dohc-app-meta':encodeURIComponent(JSON.stringify(meta))},body:bytes,signal});}return fetch(body.op==='backend.file'?'/file':'/backend',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof,'x-dohc-app-activated':request.activated?'1':'0'},body:JSON.stringify(body),signal});},lifetime.signal,${observe},${brokerLimits},${hostActions});
             addEventListener('message',event=>{const scheme=event.data?.kind==='dohc-color-scheme'?event.data.scheme:null;if(event.source===frame.contentWindow&&(scheme==='light'||scheme==='dark'))frame.style.colorScheme=scheme;},{signal:lifetime.signal});
             frame.srcdoc=value.html;document.body.append(frame);const status=document.getElementById('status');status.textContent='';status.style.margin='0';
             ${eventLoop}
@@ -407,6 +422,7 @@ export async function createLocalAppLaunchHost(options: {
                 "/file",
                 "/events",
                 "/status",
+                "/notice",
                 "/close",
               ].includes(url.pathname)
             )
@@ -461,6 +477,25 @@ export async function createLocalAppLaunchHost(options: {
               ? Infinity
               : Math.min(hardExpires, Date.now() + IDLE_MS);
             if (url.pathname === "/status") return reply(response, 204);
+            if (url.pathname === "/notice") {
+              if (!onNotice) return reply(response, 404);
+              const body = await readJson(request, 4096, activeSignal);
+              if (
+                !exact(body, ["message"], ["detail"]) ||
+                !isAppNoticeLine(body.message, 200) ||
+                (Object.hasOwn(body, "detail") && !isAppNoticeLine(body.detail, 500))
+              )
+                return reply(response, 400);
+              const now = Date.now();
+              if (now < nextNoticeAt) return reply(response, 200, { recorded: false });
+              nextNoticeAt = now + NOTICE_COOLDOWN_MS;
+              onNotice(
+                typeof body.detail === "string"
+                  ? { message: body.message, detail: body.detail }
+                  : { message: body.message },
+              );
+              return reply(response, 200, { recorded: true });
+            }
             if (url.pathname === "/events") {
               if (eventsPending >= MAX_EVENTS_PENDING) return reply(response, 429);
               eventsPending++;

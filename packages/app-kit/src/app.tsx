@@ -35,6 +35,11 @@ export interface UploadReply {
   readonly replayed: boolean;
 }
 
+export interface AppNotice {
+  readonly message: string;
+  readonly detail?: string;
+}
+
 export interface FileReply {
   readonly file: UploadedFileMeta;
   readonly bytes: ArrayBuffer;
@@ -121,6 +126,7 @@ export interface AppClient {
   attempt(operation: string, request: AttemptRequest): Promise<AttemptResult>;
   copyText?(text: string): Promise<void>;
   print?(options?: PrintOptions): Promise<void>;
+  notice?(notice: AppNotice): Promise<boolean>;
   dataset(alias: string): AppClient;
   subscribe?(listener: (event: DatasetChangeEvent) => void): () => void;
   close(): void;
@@ -678,6 +684,19 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
           { immediate: true },
         );
       },
+      async notice(notice: AppNotice): Promise<boolean> {
+        const reply = await send(
+          {
+            op: "host.notice",
+            message: notice.message,
+            ...(notice.detail !== undefined ? { detail: notice.detail } : {}),
+          },
+          invokeTimeoutMs,
+          (value) => isRecord(value) && typeof value.recorded === "boolean",
+          { immediate: true },
+        );
+        return (reply as { recorded: boolean }).recorded;
+      },
       dataset(alias: string): AppClient {
         const checked = assertDatasetAlias(alias);
         let scoped = scopedViews.get(checked);
@@ -747,6 +766,10 @@ export function copyText(text: string): Promise<void> {
 
 export function print(options?: PrintOptions): Promise<void> {
   return getSharedAppClient().print!(options);
+}
+
+export function notice(notice: AppNotice): Promise<boolean> {
+  return getSharedAppClient().notice!(notice);
 }
 
 const AppClientContext = createContext<AppClient | null>(null);

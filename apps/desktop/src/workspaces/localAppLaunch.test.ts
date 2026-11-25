@@ -5,6 +5,7 @@ import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import {
   createLocalAppLaunchHost,
   LocalAppUnavailableError,
+  type AppNotice,
   type LocalAppLaunchHost,
 } from "./localAppLaunch";
 
@@ -15,7 +16,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
   await Promise.all(hosts.splice(0).map((host) => host.close()));
 });
-async function fixture(keepAlive = false) {
+async function fixture(keepAlive = false, onNotice?: (notice: AppNotice) => void) {
   const lifetime = new AbortController(),
     session = new AbortController();
   let revision = 1,
@@ -69,7 +70,10 @@ async function fixture(keepAlive = false) {
   const host = await createLocalAppLaunchHost({ backend, lifetime: lifetime.signal });
   hosts.push(host);
   const managed = keepAlive
-    ? await host.launchSession(publicationId, session.signal, { keepAlive: true })
+    ? await host.launchSession(publicationId, session.signal, {
+        keepAlive: true,
+        ...(onNotice ? { onNotice } : {}),
+      })
     : undefined;
   const url = managed?.url ?? (await host.launch(publicationId, session.signal)),
     origin = new URL(url).origin,
@@ -320,6 +324,58 @@ it("takes a click from the bootstrap's header and never from the app's request",
   expect(html).toContain("navigator.userActivation?.isActive");
 });
 
+it("records an app's notice for dohc's own tab, one per cooldown, and only single lines within limits", async () => {
+  const onNotice = vi.fn();
+  const f = await fixture(true, onNotice),
+    opened = await f.open(),
+    headers = { "x-dohc-app-proof": opened.proof };
+  expect(await (await fetch(f.origin + "/bootstrap")).text()).toContain("fetch('/notice'");
+  for (const body of [
+    { message: "Import failed\nat row 3" },
+    { message: "x".repeat(201) },
+    { message: " " },
+    { message: "Import failed", detail: "y".repeat(501) },
+    { message: "Import failed", retry: true },
+  ])
+    expect((await f.post("/notice", body, headers)).status).toBe(400);
+  expect((await f.post("/notice", { message: "Import failed" })).status).toBe(404);
+  expect(onNotice).not.toHaveBeenCalled();
+
+  let now = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  const notice = { message: "Bank import stopped at row 40", detail: "Row 40 has no date." };
+  const first = await f.post("/notice", notice, headers);
+  expect(first.status).toBe(200);
+  expect(await first.json()).toEqual({ recorded: true });
+  expect(onNotice).toHaveBeenCalledWith(notice);
+  const soon = await f.post("/notice", { message: "Again" }, headers);
+  expect(await soon.json()).toEqual({ recorded: false });
+  expect(onNotice).toHaveBeenCalledTimes(1);
+  now += 5_000;
+  expect(await (await f.post("/notice", { message: "Again" }, headers)).json()).toEqual({
+    recorded: true,
+  });
+  expect(onNotice).toHaveBeenLastCalledWith({ message: "Again" });
+
+  const browser = await f.host.launchSession(publicationId, f.session.signal, { onNotice });
+  const origin = new URL(browser.url).origin;
+  const send = (path: string, body: unknown, extra: Record<string, string> = {}) =>
+    fetch(origin + path, {
+      method: "POST",
+      headers: { origin, "content-type": "application/json", ...extra },
+      body: JSON.stringify(body),
+    });
+  const session = (await (
+    await send("/session", { handoff: new URL(browser.url).hash.slice(1) })
+  ).json()) as { proof: string };
+  expect(await (await fetch(origin + "/bootstrap")).text()).not.toContain("/notice");
+  expect(
+    (await send("/notice", { message: "Import failed" }, { "x-dohc-app-proof": session.proof }))
+      .status,
+  ).toBe(404);
+  expect(onNotice).toHaveBeenCalledTimes(2);
+  await browser.stop();
+});
 it("carries exact Collection list and create requests and answers an unavailable engine with 503", async () => {
   const f = await fixture(),
     opened = await f.open(),

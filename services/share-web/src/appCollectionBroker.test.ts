@@ -1067,3 +1067,92 @@ it("raises request and reply caps only for invokes and only when the host grants
     bulk.close();
   }
 });
+
+it("hands the host one notice at a time and only single lines within their limits", async () => {
+  vi.stubGlobal("MessageChannel", NodeMessageChannel);
+  const frame = new EventTarget();
+  let port!: NodeMessagePort;
+  Object.assign(frame, {
+    contentWindow: {
+      postMessage(_message: unknown, _target: string, ports: NodeMessagePort[]) {
+        port = ports[0]!;
+      },
+    },
+  });
+  const notices: unknown[] = [];
+  let release!: (recorded: boolean) => void;
+  const lifetime = new AbortController();
+  attachAppCollectionBroker(
+    frame as HTMLIFrameElement,
+    async () => Response.json({}),
+    lifetime.signal,
+    undefined,
+    undefined,
+    {
+      notice: (notice) => {
+        notices.push(notice);
+        return new Promise<boolean>((resolve) => {
+          release = resolve;
+        });
+      },
+    },
+  );
+  try {
+    frame.dispatchEvent(new Event("load"));
+    const send = (body: unknown) => {
+      const reply = once(port, "message");
+      port.postMessage(body);
+      return reply.then(([value]) => value);
+    };
+    const invalid: Array<[string, Record<string, unknown>]> = [
+      ["n-newline", { message: "Import failed\nat row 3" }],
+      ["n-separator", { message: `Import failed${String.fromCharCode(0x2028)}at row 3` }],
+      ["n-long", { message: "x".repeat(201) }],
+      ["n-blank", { message: "   " }],
+      ["n-detail", { message: "Import failed", detail: "y".repeat(501) }],
+      ["n-extra", { message: "Import failed", retry: true }],
+      ["n-type", { message: 7 }],
+    ];
+    for (const [id, body] of invalid)
+      expect(await send({ id, op: "host.notice", ...body })).toEqual({
+        id,
+        ok: false,
+        status: 400,
+      });
+    expect(notices).toEqual([]);
+
+    port.postMessage({
+      id: "n-1",
+      op: "host.notice",
+      message: "Bank import stopped at row 40",
+      detail: "Row 40 has no date.",
+    });
+    await vi.waitFor(() => expect(notices).toHaveLength(1));
+    expect(await send({ id: "n-2", op: "host.notice", message: "Again" })).toMatchObject({
+      id: "n-2",
+      ok: false,
+      status: 429,
+      error: { code: "rate_limited" },
+    });
+    const first = once(port, "message");
+    release(true);
+    expect((await first)[0]).toEqual({ id: "n-1", ok: true, value: { recorded: true } });
+    expect(notices).toEqual([
+      { message: "Bank import stopped at row 40", detail: "Row 40 has no date." },
+    ]);
+  } finally {
+    lifetime.abort();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("answers a notice as not recorded where the host keeps no Notices", async () => {
+  const shared = harness();
+  try {
+    expect(await shared.request({ id: "n", op: "host.notice", message: "Payment failed" })).toEqual(
+      { id: "n", ok: true, value: { recorded: false } },
+    );
+  } finally {
+    shared.close();
+  }
+});

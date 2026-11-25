@@ -2023,4 +2023,37 @@ describe("dohc/ui and dohc/charts", () => {
     await expect(queuedRead).resolves.toBe("q");
     client.close();
   });
+
+  it("sends a notice ahead of queued calls and says whether dohc recorded it", async () => {
+    const fake = makeFakePort();
+    const client = createAppClient({ port: fake.port, maxInFlight: 1 });
+    const slowRead = client.read("slow");
+
+    const recorded = client.notice!({
+      message: "Bank import stopped at row 40",
+      detail: "Row 40 has no date.",
+    });
+    expect(fake.sent).toHaveLength(2);
+    expect(fake.sent[1]).toEqual({
+      id: expect.any(String),
+      op: "host.notice",
+      message: "Bank import stopped at row 40",
+      detail: "Row 40 has no date.",
+    });
+    fake.reply({ id: fake.sent[1]!.id, ok: true, value: { recorded: true } });
+    await expect(recorded).resolves.toBe(true);
+
+    const shared = client.notice!({ message: "Payment failed" });
+    expect(Object.keys(fake.sent[2]!).sort()).toEqual(["id", "message", "op"]);
+    fake.reply({ id: fake.sent[2]!.id, ok: true, value: { recorded: false } });
+    await expect(shared).resolves.toBe(false);
+
+    fake.reply({
+      id: fake.sent[0]!.id,
+      ok: true,
+      value: { result: "ok", revision: 1, replayed: false },
+    });
+    await expect(slowRead).resolves.toBe("ok");
+    client.close();
+  });
 });
