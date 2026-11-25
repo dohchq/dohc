@@ -12,6 +12,10 @@
   const GOLD_MINE_INCOME = 2;
   const JOIN_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
+  function countOf(count, singular, plural) {
+    return count + " " + (count === 1 ? singular : plural);
+  }
+
   const HEX_DIRECTIONS = [
     [1, 0],
     [1, -1],
@@ -164,6 +168,18 @@
 
   function hexKey(q, r) {
     return q + "," + r;
+  }
+
+  const PLACE_NAMES = {
+    plains: "the plains",
+    forest: "the forest",
+    mountain: "the mountain",
+    gold: "the gold mine",
+    capital: "the capital",
+  };
+
+  function placeName(terrain) {
+    return PLACE_NAMES[terrain] ?? "a hidden hex";
   }
 
   function hexDistance(aq, ar, bq, br) {
@@ -453,9 +469,16 @@
     return visibleKeys;
   }
 
+  function opponentVision(ctx, gameId, opponentId) {
+    const tiles = ctx.db.query("SELECT q,r,owner_player_id FROM hex_tiles WHERE game_id = ?", [gameId]);
+    return computeVisibleSet(tiles, opponentId);
+  }
+
   function stripLiveOutcome(outcome, fullVisibility) {
-    if (fullVisibility || !outcome || typeof outcome !== "object") return outcome;
-    const { supply: _supply, ...publicOutcome } = outcome;
+    if (!outcome || typeof outcome !== "object") return outcome;
+    const { opponentSaw: _opponentSaw, ...shared } = outcome;
+    if (fullVisibility) return shared;
+    const { supply: _supply, ...publicOutcome } = shared;
     return publicOutcome;
   }
 
@@ -465,7 +488,11 @@
       [game.id],
     );
     const seatByPlayerId = new Map();
-    for (const p of players) seatByPlayerId.set(p.id, p.seat);
+    const nameByPlayerId = new Map();
+    for (const p of players) {
+      seatByPlayerId.set(p.id, p.seat);
+      nameByPlayerId.set(p.id, p.name);
+    }
 
     const tiles = ctx.db.query(
       "SELECT q,r,terrain,owner_player_id,units,fortified FROM hex_tiles WHERE game_id = ? ORDER BY r ASC, q ASC",
@@ -511,14 +538,17 @@
       [game.id],
     );
 
+    const terrainByKey = new Map(tiles.map((tile) => [hexKey(tile.q, tile.r), tile.terrain]));
     const viewerSeat = viewerPlayer ? viewerPlayer.seat : null;
     const recentMoves = moveRows.map((row) => {
       const actorSeat = seatByPlayerId.get(row.actor_player_id) ?? null;
-      const fromVisible = Boolean(row.from_hex && (fullVisibility || visibleKeys.has(row.from_hex)));
-      const toVisible = Boolean(row.to_hex && (fullVisibility || visibleKeys.has(row.to_hex)));
+      const actorName = nameByPlayerId.get(row.actor_player_id) ?? "The enemy";
+      const parsed = JSON.parse(row.combat_outcome_json);
+      const saw = viewerSeat !== null ? parsed.opponentSaw : null;
+      const fromVisible = Boolean(saw && saw.from);
+      const toVisible = Boolean(saw && saw.to);
       const isOwnMove = viewerSeat !== null && actorSeat === viewerSeat;
-      if (fullVisibility || isOwnMove || row.action_type === "resign" || row.action_type === "pass") {
-        const parsed = JSON.parse(row.combat_outcome_json);
+      if (fullVisibility || isOwnMove || row.action_type === "resign") {
         return {
           turnNumber: row.turn_number,
           actorSeat,
@@ -532,7 +562,6 @@
         };
       }
       if (fromVisible || toVisible) {
-        const parsed = JSON.parse(row.combat_outcome_json);
         let safeSummary;
         if (row.action_type === "fortify" && fromVisible) {
           safeSummary = parsed.summary;
@@ -541,15 +570,20 @@
         } else if (fromVisible && toVisible) {
           safeSummary = parsed.summary;
         } else if (toVisible) {
-          safeSummary = parsed.captured
-            ? "Enemy captured (" + row.to_hex + ")."
-            : "Enemy engaged (" + row.to_hex + ").";
+          const place = placeName(terrainByKey.get(row.to_hex));
+          safeSummary =
+            actorName +
+            (parsed.kind === "transfer" ? " moved into " : parsed.claimed ? " claimed " : parsed.captured ? " captured " : " attacked ") +
+            place +
+            ".";
         } else {
-          safeSummary = "Enemy forces moved out of (" + row.from_hex + ").";
+          safeSummary = actorName + " left " + placeName(terrainByKey.get(row.from_hex)) + ".";
         }
         const safeOutcome = toVisible
           ? {
+              kind: parsed.kind,
               captured: parsed.captured ?? false,
+              claimed: parsed.claimed ?? false,
               capitalCaptured: parsed.capitalCaptured ?? false,
               summary: safeSummary,
             }
@@ -611,12 +645,22 @@
     };
   }
 
+  function canSeeWholeBoard(ctx, game, playerTokens) {
+    if (game.status === "finished") return true;
+    if (!Array.isArray(playerTokens) || playerTokens.length !== 2) return false;
+    const held = ctx.db.query("SELECT seat FROM players WHERE game_id = ? AND player_token IN (?, ?)", [
+      game.id,
+      cleanToken(ctx, playerTokens[0]),
+      cleanToken(ctx, playerTokens[1]),
+    ]);
+    return held.length === 2;
+  }
+
   function listGames(ctx) {
-    const canSpectateActive = ctx.caller.kind === "owner";
     const games = ctx.db.query(
       "SELECT id,title,seed,radius,status,turn_number,active_seat,winner_player_id,win_reason,created_at_ms,updated_at_ms FROM games ORDER BY updated_at_ms DESC, id DESC LIMIT 30",
     );
-    if (games.length === 0) return { games: [], canSpectateActive };
+    if (games.length === 0) return { games: [] };
     const gameIds = games.map((g) => g.id);
     const placeholders = gameIds.map(() => "?").join(",");
     const players = ctx.db.query(
@@ -634,7 +678,6 @@
       byGame.set(p.game_id, list);
     }
     return {
-      canSpectateActive,
       games: games.map((g) => {
         const list = byGame.get(g.id) ?? [];
         return {
@@ -799,11 +842,8 @@
     }
 
     if (payload.spectator === true) {
-      if (game.status !== "finished" && ctx.caller.kind !== "owner") {
-        ctx.refuse(
-          "spectator_forbidden",
-          "Spectator view unlocks after the match finishes or for the workspace owner.",
-        );
+      if (!canSeeWholeBoard(ctx, game, payload.playerTokens)) {
+        ctx.refuse("spectator_forbidden", "The whole board opens when the match ends, or to someone holding both seat keys.");
       }
       return buildVisibleState(ctx, game, null, true);
     }
@@ -900,6 +940,7 @@
       }
     }
 
+    const opponentVisionBefore = opponentVision(ctx, game.id, opponent.id);
     let fromHex = null;
     let toHex = null;
     let unitsMoved = 0;
@@ -945,7 +986,7 @@
       outcome = {
         action: "fortify",
         goldSpent: FORTIFY_COST,
-        summary: player.name + " fortified (" + fq + "," + fr + ").",
+        summary: player.name + " fortified " + placeName(tile.terrain) + ".",
       };
     } else if (actionType === "reinforce") {
       const fq = expectSafeInt(ctx, payload.fromQ, "invalid_hex", "Choose a valid hex to reinforce.");
@@ -974,7 +1015,13 @@
       if (player.gold < totalCost) {
         ctx.refuse(
           "insufficient_gold",
-          "Deploying " + count + " unit(s) costs " + totalCost + " gold. You have " + player.gold + ".",
+          "Recruiting " +
+            countOf(count, "unit", "units") +
+            " costs " +
+            totalCost +
+            " gold. You have " +
+            player.gold +
+            ".",
         );
       }
       ctx.db.execute("UPDATE players SET gold = gold - ? WHERE id = ?", [totalCost, player.id]);
@@ -985,7 +1032,8 @@
         action: "reinforce",
         goldSpent: totalCost,
         unitsAdded: count,
-        summary: player.name + " deployed " + count + " unit(s) to (" + fq + "," + fr + ").",
+        summary:
+          player.name + " recruited " + countOf(count, "unit", "units") + " for " + placeName(tile.terrain) + ".",
       };
     } else if (actionType === "march") {
       const fq = expectSafeInt(ctx, payload.fromQ, "invalid_hex", "Select valid origin and destination hexes.");
@@ -1021,7 +1069,7 @@
       if (fromTile.units <= 1 || units > fromTile.units - 1) {
         ctx.refuse(
           "insufficient_units",
-          "Leave at least 1 garrison unit on (" + fq + "," + fr + ").",
+          "Leave at least 1 unit behind to hold the hex you are leaving.",
         );
       }
 
@@ -1045,18 +1093,7 @@
           newToUnits: toTile.units + units,
           newToFortified: toTile.fortified === 1,
           summary:
-            player.name +
-            " shifted " +
-            units +
-            " unit(s) from (" +
-            fq +
-            "," +
-            fr +
-            ") to (" +
-            tq +
-            "," +
-            tr +
-            ").",
+            player.name + " moved " + countOf(units, "unit", "units") + " to " + placeName(toTile.terrain) + ".",
         };
       } else {
         const defenderUnits = toTile.units;
@@ -1072,6 +1109,7 @@
         const defensePower = defenderUnits + terrainBonus + fortifyBonus;
         const wasEnemyCapital =
           toTile.terrain === "capital" && toTile.owner_player_id === opponent.id;
+        const claimed = defenderUnits === 0 && toTile.owner_player_id === null;
 
         if (units > defensePower) {
           const attackerLosses =
@@ -1096,19 +1134,18 @@
             attackerLosses,
             defenderLosses: defenderUnits,
             captured: true,
+            claimed,
             capitalCaptured: wasEnemyCapital,
             newToUnits: survivors,
             newToFortified: false,
             summary: wasEnemyCapital
-              ? player.name + " captured the enemy capital at (" + tq + "," + tr + ")."
+              ? player.name + " captured the enemy capital."
               : player.name +
-                " captured (" +
-                tq +
-                "," +
-                tr +
-                ") with " +
-                survivors +
-                " survivor(s).",
+                (claimed ? " claimed " : " captured ") +
+                placeName(toTile.terrain) +
+                " and holds it with " +
+                countOf(survivors, "unit", "units") +
+                ".",
           };
         } else {
           const effectiveDamage = Math.max(
@@ -1139,13 +1176,12 @@
             newToFortified: nextFortified === 1,
             summary:
               player.name +
-              "'s assault on (" +
-              tq +
-              "," +
-              tr +
-              ") was repelled (" +
-              remainingDefender +
-              " defender(s) left).",
+              "'s attack on " +
+              placeName(toTile.terrain) +
+              " was repelled. " +
+              (remainingDefender === 0
+                ? "No defenders are left, but the hex holds."
+                : countOf(remainingDefender, "defender holds.", "defenders hold.")),
           };
         }
       }
@@ -1160,7 +1196,11 @@
       supply = applyTurnSupply(ctx, game.id, opponent);
     }
 
-    const storedOutcome = winnerPlayerId ? outcome : Object.assign({}, outcome, { supply });
+    const opponentVisionAfter = opponentVision(ctx, game.id, opponent.id);
+    const sawHex = (key) => Boolean(key && (opponentVisionBefore.has(key) || opponentVisionAfter.has(key)));
+    const storedOutcome = Object.assign({}, outcome, winnerPlayerId ? {} : { supply }, {
+      opponentSaw: { from: sawHex(fromHex), to: sawHex(toHex) },
+    });
 
     ctx.db.execute(
       "INSERT INTO moves(id,game_id,turn_number,actor_player_id,action_type,from_hex,to_hex,units_moved,combat_outcome_json,created_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -1225,11 +1265,8 @@
     if (!game) {
       ctx.refuse("game_not_found", "Match not found.");
     }
-    if (game.status !== "finished" && ctx.caller.kind !== "owner") {
-      ctx.refuse(
-        "replay_unavailable",
-        "Full match replay unlocks once the match finishes or for the workspace owner.",
-      );
+    if (!canSeeWholeBoard(ctx, game, payload.playerTokens)) {
+      ctx.refuse("replay_unavailable", "Full replay opens when the match ends, or to someone holding both seat keys.");
     }
 
     const players = ctx.db.query(
@@ -1276,7 +1313,7 @@
         fromHex: row.from_hex,
         toHex: row.to_hex,
         unitsMoved: row.units_moved,
-        outcome: JSON.parse(row.combat_outcome_json),
+        outcome: stripLiveOutcome(JSON.parse(row.combat_outcome_json), true),
         createdAtMs: row.created_at_ms,
       })),
       nextAfterTurn,

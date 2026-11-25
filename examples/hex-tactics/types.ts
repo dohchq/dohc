@@ -57,6 +57,7 @@ export interface MoveOutcome {
   readonly attackerLosses?: number;
   readonly defenderLosses?: number;
   readonly captured?: boolean;
+  readonly claimed?: boolean;
   readonly capitalCaptured?: boolean;
   readonly newToUnits?: number;
   readonly newToFortified?: boolean;

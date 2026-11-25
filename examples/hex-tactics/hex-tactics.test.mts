@@ -21,11 +21,15 @@ import { unguardedCollections } from "../../apps/desktop/src/testing/collections
 import { createDatasetFixtureCompiler } from "../../apps/desktop/src/testing/datasetFixtureCompiler.ts";
 import { openedLocalState } from "../../apps/desktop/src/testing/preparedLocalState.ts";
 import { sourceCaptureAdapter } from "../../apps/desktop/src/testing/sourceCaptureAdapter.ts";
+import { arrowPath, countBadgeWidth, hexCenter } from "./geometry.ts";
+import { withJoinedSeat } from "./sessions.ts";
 import { axialDistance, reconstructReplayFrames } from "./replay.ts";
+import { flashKindForMove, forecastMarch, isClaim, keptPips, type MarchForecast } from "./rules.ts";
 import type {
   CreateGameReply,
   GameSummary,
   JoinGameReply,
+  MoveOutcome,
   ReplayPayload,
   StartDemoReply,
   SubmitMoveReply,
@@ -283,7 +287,79 @@ function findShortestPassablePath(
   return path.reverse();
 }
 
+function expectForecastMatches(forecast: MarchForecast, outcome: MoveOutcome) {
+  expect({
+    captured: forecast.kind === "capture",
+    attackerUnits: forecast.attackerUnits,
+    defenderUnits: forecast.defenderUnits,
+    terrainBonus: forecast.terrainBonus,
+    fortifyBonus: forecast.fortifyBonus,
+    defensePower: forecast.defensePower,
+    attackerLosses: forecast.attackerLosses,
+    defenderLosses: forecast.defenderLosses,
+    capitalCaptured: forecast.capitalCaptured,
+    newToUnits: forecast.resultUnits,
+    newToFortified: forecast.resultFortified,
+  }).toEqual({
+    captured: outcome.captured,
+    attackerUnits: outcome.attackerUnits,
+    defenderUnits: outcome.defenderUnits,
+    terrainBonus: outcome.terrainBonus,
+    fortifyBonus: outcome.fortifyBonus,
+    defensePower: outcome.defensePower,
+    attackerLosses: outcome.attackerLosses,
+    defenderLosses: outcome.defenderLosses,
+    capitalCaptured: outcome.capitalCaptured,
+    newToUnits: outcome.newToUnits,
+    newToFortified: outcome.newToFortified,
+  });
+}
+
 describe("HexClash authoritative strategy game", () => {
+  it("keeps the seat you were playing when a join reply lands after you left the Game menu", () => {
+    const seat1 = { seat: 1, playerId: "p1", name: "Ada", color: "crimson", playerToken: "t1" } as const;
+    const existing = { gameId: "g", joinCode: "ABCD", seats: [seat1], activeSeat: 1 } as const;
+    const reply = { gameId: "g", joinCode: "ABCD", seat: 2, playerId: "p2", playerName: "Bo", playerToken: "t2" } as const;
+    const late = withJoinedSeat(existing, reply, false);
+    expect(late.activeSeat).toBe(1);
+    expect(late.seats.map((s) => s.seat)).toEqual([1, 2]);
+    expect(withJoinedSeat(existing, reply, true).activeSeat).toBe(2);
+    expect(withJoinedSeat(undefined, reply, false).activeSeat).toBe(2);
+  });
+
+  it("keeps the last-move arrowhead clear of every count badge size at every phone scale, in every direction", () => {
+    const badges = ([1, 2, null] as const)
+      .flatMap((seat) => [7, 42, 999].map((units) => countBadgeWidth(seat, units)))
+      .flatMap((width) => [1, 1.35, 1.6].map((scale) => ({ left: 24.8 - width * scale, right: 24.8, top: -12.8, bottom: -12.8 + 16.6 * scale })));
+    const directions = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+      [1, -1],
+      [-1, 1],
+    ] as const;
+    for (const [q, r] of directions) {
+      const to = hexCenter(q, r);
+      const arrow = arrowPath(hexCenter(0, 0), to);
+      expect(arrow).not.toBeNull();
+      const points = arrow!.head.split(" ").map((pair) => pair.split(",").map(Number) as [number, number]);
+      const xs = points.map(([x]) => x - to.x);
+      const ys = points.map(([, y]) => y - to.y);
+      const overlaps = badges.some(
+        (badge) => Math.min(...xs) < badge.right && Math.max(...xs) > badge.left && Math.min(...ys) < badge.bottom && Math.max(...ys) > badge.top,
+      );
+      expect({ q, r, overlaps }).toEqual({ q, r, overlaps: false });
+    }
+  });
+
+  it("keeps the staying units filled when a forecast stack is larger than the pip tray", () => {
+    expect(keptPips(6, 5)).toBe(1);
+    expect(keptPips(12, 10)).toBe(2);
+    expect(keptPips(14, 2)).toBe(10);
+    expect(keptPips(3, 5)).toBe(0);
+  });
+
   it("stages and approves one formatVersion:2 multi-table Collection and compiles cleanly with omitted inputs", async () => {
     const { summary, approved, invoke } = await openStagedHexClash();
     expect(summary.appRoot).toBe("hex-tactics");
@@ -291,15 +367,9 @@ describe("HexClash authoritative strategy game", () => {
     expect(summary.collections[0]!.name).toBe("HexClash");
     expect(approved.collectionsApplied).toHaveLength(1);
 
-    const listed = await invoke<{ games: GameSummary[]; canSpectateActive?: boolean }>(
-      "listGames",
-      {},
-    );
+    const listed = await invoke<{ games: GameSummary[] }>("listGames", {});
     expect(listed.ok).toBe(true);
-    if (listed.ok) {
-      expect(listed.result.games).toEqual([]);
-      expect(listed.result.canSpectateActive).toBe(true);
-    }
+    if (listed.ok) expect(listed.result).toEqual({ games: [] });
   });
 
   it("enforces server-side Fog of War and hides seeds, join codes, opponent supply, tokens, and out-of-vision moves", async () => {
@@ -315,24 +385,13 @@ describe("HexClash authoritative strategy game", () => {
     expect(p1.joinCode).toMatch(/^[A-Z0-9]{6}$/);
     expect("seed" in p1).toBe(false);
 
-    const waitingLobby = await call<{ games: GameSummary[]; canSpectateActive?: boolean }>(
-      "listGames",
-      {},
-      "linkB",
-    );
+    const waitingLobby = await call<{ games: GameSummary[] }>("listGames", {}, "linkB");
     const waitingJson = JSON.stringify(waitingLobby);
     expect(waitingJson).not.toContain(p1.playerToken);
     expect(waitingJson).not.toContain(p1.joinCode);
-    expect(waitingLobby.canSpectateActive).toBe(false);
     expect(waitingLobby.games[0]!.seed).toBeNull();
     expect("joinCode" in waitingLobby.games[0]!).toBe(false);
 
-    const ownerLobby = await call<{ games: GameSummary[]; canSpectateActive?: boolean }>(
-      "listGames",
-      {},
-      "owner",
-    );
-    expect(ownerLobby.canSpectateActive).toBe(true);
 
     const joinKey = "join-seat-2-retry-key";
     const p2 = await call<JoinGameReply>(
@@ -414,6 +473,41 @@ describe("HexClash authoritative strategy game", () => {
       call("replayGame", { gameId: p1.gameId }, "linkA"),
     ).rejects.toMatchObject({ refusal: { code: "replay_unavailable" } });
 
+    const hosted = await call<CreateGameReply>(
+      "createGame",
+      { title: "Hosted", playerName: "Crimson", seed: 5150 },
+      "owner",
+    );
+    await call<JoinGameReply>("joinGame", { joinCode: hosted.joinCode, playerName: "Cobalt" }, "linkB");
+    await expect(
+      call("getVisibleState", { gameId: hosted.gameId, spectator: true }, "owner"),
+    ).rejects.toMatchObject({ refusal: { code: "spectator_forbidden" } });
+    await expect(
+      call("replayGame", { gameId: hosted.gameId }, "owner"),
+    ).rejects.toMatchObject({ refusal: { code: "replay_unavailable" } });
+
+    const guestDemo = await call<StartDemoReply>("startDemoMatch", { seed: 31 }, "linkB");
+    await expect(
+      call("getVisibleState", { gameId: guestDemo.gameId, spectator: true }, "owner"),
+    ).rejects.toMatchObject({ refusal: { code: "spectator_forbidden" } });
+    await expect(
+      call("replayGame", { gameId: guestDemo.gameId }, "owner"),
+    ).rejects.toMatchObject({ refusal: { code: "replay_unavailable" } });
+    await expect(
+      call(
+        "getVisibleState",
+        { gameId: guestDemo.gameId, spectator: true, playerTokens: [guestDemo.seats[0]!.playerToken, hosted.playerToken] },
+        "owner",
+      ),
+    ).rejects.toMatchObject({ refusal: { code: "spectator_forbidden" } });
+    await expect(
+      call(
+        "replayGame",
+        { gameId: guestDemo.gameId, playerTokens: [guestDemo.seats[0]!.playerToken, guestDemo.seats[0]!.playerToken] },
+        "owner",
+      ),
+    ).rejects.toMatchObject({ refusal: { code: "replay_unavailable" } });
+
     const p1Pass = await call<SubmitMoveReply>(
       "submitMove",
       { gameId: p1.gameId, playerToken: p1.playerToken, actionType: "pass" },
@@ -448,12 +542,23 @@ describe("HexClash authoritative strategy game", () => {
     expect(latestForP1.toHex).toBeNull();
     expect(latestForP1.unitsMoved).toBeNull();
     expect("supply" in view1AfterP2.recentMoves[1]!.outcome).toBe(false);
+    expect(view1AfterP2.recentMoves[1]!.actionType).toBe("pass");
+
+    const view2AfterP2 = await call<VisibleBoardState>(
+      "getVisibleState",
+      { gameId: p1.gameId, playerToken: p2.playerToken },
+      "linkB",
+    );
+    const enemyPass = view2AfterP2.recentMoves[1]!;
+    expect(enemyPass.hidden).toBe(true);
+    expect(enemyPass.actionType).toBe("hidden");
+    expect(enemyPass.outcome.summary).toBe("Activity in fog of war");
 
     const demoBoundary = await call<StartDemoReply>("startDemoMatch", { seed: 2026 }, "owner");
     const [b1, b2] = demoBoundary.seats;
     const bView = await call<VisibleBoardState>(
       "getVisibleState",
-      { gameId: demoBoundary.gameId, spectator: true },
+      { gameId: demoBoundary.gameId, spectator: true, playerTokens: [b1!.playerToken, b2!.playerToken] },
       "owner",
     );
     const toCenter = findShortestPassablePath(bView.tiles, "-3,0", "0,0");
@@ -463,7 +568,7 @@ describe("HexClash authoritative strategy game", () => {
       while (true) {
         const cur = await call<VisibleBoardState>(
           "getVisibleState",
-          { gameId: demoBoundary.gameId, spectator: true },
+          { gameId: demoBoundary.gameId, spectator: true, playerTokens: [b1!.playerToken, b2!.playerToken] },
           "owner",
         );
         const fromTile = cur.tiles.find((t) => t.q === from.q && t.r === from.r)!;
@@ -550,6 +655,215 @@ describe("HexClash authoritative strategy game", () => {
     expect("captured" in boundaryMove.outcome).toBe(false);
     expect("capitalCaptured" in boundaryMove.outcome).toBe(false);
   }, 20_000);
+
+  it("logs a march into an empty neutral hex as a claim, not a capture", async () => {
+    const { call } = await openLinkHost();
+    const demo = await call<StartDemoReply>("startDemoMatch", { seed: 2026 }, "owner");
+    const s1 = demo.seats[0]!;
+    const view = await call<VisibleBoardState>("getVisibleState", { gameId: demo.gameId, playerToken: s1.playerToken }, "owner");
+    const home = view.tiles.find((t) => t.ownerSeat === 1 && (t.units ?? 0) > 1)!;
+    const empty = view.tiles.find(
+      (t) => t.visible && t.terrain !== "mountain" && isClaim(t) && axialDistance(t.q, t.r, home.q, home.r) === 1,
+    )!;
+    const reply = await call<SubmitMoveReply>(
+      "submitMove",
+      { gameId: demo.gameId, playerToken: s1.playerToken, actionType: "march", fromQ: home.q, fromR: home.r, toQ: empty.q, toR: empty.r, units: 1 },
+      "owner",
+    );
+    expect(reply.outcome.claimed).toBe(true);
+    expect(reply.outcome.summary).toMatch(/ claimed /);
+    expect(flashKindForMove(reply.state.recentMoves[0]!)).toBe("move");
+  }, 20_000);
+
+  it("forecasts the gold and unit a captured mine pays on the captor's next turn, and the server pays exactly that", async () => {
+    const { call } = await openLinkHost();
+    for (let seed = 2026; seed < 2066; seed += 1) {
+      const demo = await call<StartDemoReply>("startDemoMatch", { seed }, "owner");
+      const [s1, s2] = demo.seats;
+      const view = () => call<VisibleBoardState>("getVisibleState", { gameId: demo.gameId, playerToken: s1!.playerToken }, "owner");
+      const before = await view();
+      const pick = before.tiles
+        .filter((t) => t.ownerSeat === 1)
+        .flatMap((from) =>
+          before.tiles
+            .filter((to) => to.visible && to.terrain === "gold" && to.ownerSeat === null && axialDistance(from.q, from.r, to.q, to.r) === 1)
+            .map((to) => ({ from, to, forecast: forecastMarch((from.units ?? 0) - 1, to, 1) })),
+        )
+        .find((option) => option.forecast.kind === "capture" && !isClaim(option.to));
+      if (!pick) continue;
+      expect(pick.forecast.heldYield).toEqual({ gold: 2, units: 1 });
+      const goldBefore = before.players.find((p) => p.seat === 1)!.gold!;
+      const reply = await call<SubmitMoveReply>(
+        "submitMove",
+        {
+          gameId: demo.gameId,
+          playerToken: s1!.playerToken,
+          actionType: "march",
+          fromQ: pick.from.q,
+          fromR: pick.from.r,
+          toQ: pick.to.q,
+          toR: pick.to.r,
+          units: pick.forecast.attackerUnits,
+        },
+        "owner",
+      );
+      expectForecastMatches(pick.forecast, reply.outcome);
+      await call<SubmitMoveReply>("submitMove", { gameId: demo.gameId, playerToken: s2!.playerToken, actionType: "pass" }, "owner");
+      const after = await view();
+      const mine = after.tiles.find((t) => t.q === pick.to.q && t.r === pick.to.r)!;
+      expect(mine.ownerSeat).toBe(1);
+      expect(mine.units).toBe(pick.forecast.resultUnits + pick.forecast.heldYield!.units);
+      const minesHeld = after.tiles.filter((t) => t.ownerSeat === 1 && t.terrain === "gold").length;
+      expect(after.players.find((p) => p.seat === 1)!.gold! - goldBefore).toBe(2 + minesHeld * pick.forecast.heldYield!.gold);
+      expect(forecastMarch(3, { ...mine, ownerSeat: 2 }, 1).heldYield).toBeNull();
+      return;
+    }
+    throw new Error("no seed opened with a capturable neutral gold mine next to seat 1");
+  }, 60_000);
+
+  it("keeps a move hidden after the viewer's territory later grows to see both of its hexes", async () => {
+    const { call } = await openLinkHost();
+    const demo = await call<StartDemoReply>("startDemoMatch", { seed: 2026 }, "owner");
+    const [s1, s2] = demo.seats;
+    const spectate = () =>
+      call<VisibleBoardState>("getVisibleState", { gameId: demo.gameId, spectator: true, playerTokens: [s1!.playerToken, s2!.playerToken] }, "owner");
+    const pass1 = () =>
+      call("submitMove", { gameId: demo.gameId, playerToken: s1!.playerToken, actionType: "pass" }, "linkA");
+
+    await call(
+      "submitMove",
+      {
+        gameId: demo.gameId,
+        playerToken: s1!.playerToken,
+        actionType: "march",
+        fromQ: -3,
+        fromR: 0,
+        toQ: -2,
+        toR: 0,
+        units: 1,
+      },
+      "linkA",
+    );
+    const seat2Before = await call<VisibleBoardState>(
+      "getVisibleState",
+      { gameId: demo.gameId, playerToken: s2!.playerToken },
+      "linkB",
+    );
+    expect(seat2Before.recentMoves.find((m) => m.turnNumber === 1)!.hidden).toBe(true);
+
+    const start = await spectate();
+    const goal = start.tiles
+      .filter(
+        (t) =>
+          t.terrain !== "mountain" &&
+          t.ownerSeat !== 1 &&
+          axialDistance(t.q, t.r, -3, 0) <= 2 &&
+          axialDistance(t.q, t.r, -2, 0) <= 2,
+      )
+      .sort((a, b) => axialDistance(a.q, a.r, 2, 0) - axialDistance(b.q, b.r, 2, 0))[0]!;
+    const path = findShortestPassablePath(start.tiles, "2,0", `${goal.q},${goal.r}`);
+    for (let i = 0; i < path.length - 1; i += 1) {
+      const from = path[i]!;
+      const to = path[i + 1]!;
+      while (true) {
+        const cur = await spectate();
+        const fromTile = cur.tiles.find((t) => t.q === from.q && t.r === from.r)!;
+        const toTile = cur.tiles.find((t) => t.q === to.q && t.r === to.r)!;
+        const held = toTile.units ?? 0;
+        const need = toTile.ownerSeat === 2 ? 1 : held + (toTile.terrain === "forest" && held > 0 ? 1 : 0) + 1;
+        const movable = (fromTile.units ?? 0) - 1;
+        await call(
+          "submitMove",
+          movable >= need
+            ? {
+                gameId: demo.gameId,
+                playerToken: s2!.playerToken,
+                actionType: "march",
+                fromQ: from.q,
+                fromR: from.r,
+                toQ: to.q,
+                toR: to.r,
+                units: movable,
+              }
+            : {
+                gameId: demo.gameId,
+                playerToken: s2!.playerToken,
+                actionType: "reinforce",
+                fromQ: from.q,
+                fromR: from.r,
+                units: 1,
+              },
+          "linkB",
+        );
+        await pass1();
+        if (movable >= need) break;
+      }
+    }
+
+    const seat2After = await call<VisibleBoardState>(
+      "getVisibleState",
+      { gameId: demo.gameId, playerToken: s2!.playerToken },
+      "linkB",
+    );
+    const seen = (q: number, r: number) => seat2After.tiles.find((t) => t.q === q && t.r === r)!.visible;
+    expect(seen(-3, 0)).toBe(true);
+    expect(seen(-2, 0)).toBe(true);
+    const oldMove = seat2After.recentMoves.find((m) => m.turnNumber === 1)!;
+    expect(oldMove.hidden).toBe(true);
+    expect(oldMove.fromHex).toBeNull();
+    expect(oldMove.toHex).toBeNull();
+    expect(oldMove.unitsMoved).toBeNull();
+
+    const seat1View = await call<VisibleBoardState>(
+      "getVisibleState",
+      { gameId: demo.gameId, playerToken: s1!.playerToken },
+      "linkA",
+    );
+    const seenBy1 = (q: number, r: number) => seat1View.tiles.find((t) => t.q === q && t.r === r)!.visible;
+    const [origin, exit] = path
+      .filter((p) => seenBy1(p.q, p.r))
+      .flatMap((p) =>
+        start.tiles
+          .filter((t) => t.terrain !== "mountain" && axialDistance(t.q, t.r, p.q, p.r) === 1 && !seenBy1(t.q, t.r))
+          .map((t) => [p, t] as const),
+      )[0]!;
+    const atOrigin = (await spectate()).tiles.find((t) => t.q === origin.q && t.r === origin.r)!;
+    expect(atOrigin.ownerSeat).toBe(2);
+    if ((atOrigin.units ?? 0) < 2) {
+      await call(
+        "submitMove",
+        { gameId: demo.gameId, playerToken: s2!.playerToken, actionType: "reinforce", fromQ: origin.q, fromR: origin.r, units: 1 },
+        "linkB",
+      );
+      await pass1();
+    }
+    const retreat = await call<{ state: VisibleBoardState }>(
+      "submitMove",
+      {
+        gameId: demo.gameId,
+        playerToken: s2!.playerToken,
+        actionType: "march",
+        fromQ: origin.q,
+        fromR: origin.r,
+        toQ: exit.q,
+        toR: exit.r,
+        units: 1,
+      },
+      "linkB",
+    );
+    const seat1Late = await call<VisibleBoardState>(
+      "getVisibleState",
+      { gameId: demo.gameId, playerToken: s1!.playerToken },
+      "linkA",
+    );
+    const partial = seat1Late.recentMoves.find((m) => m.turnNumber === retreat.state.game.turnNumber - 1)!;
+    expect(partial.hidden).toBe(false);
+    expect(partial.fromHex).toBe(`${origin.q},${origin.r}`);
+    expect(partial.toHex).toBeNull();
+    expect(partial.outcome.summary).toMatch(/^Cobalt left /);
+    expect(partial.outcome.kind).toBeUndefined();
+    expect(flashKindForMove(partial)).toBe("move");
+  }, 45_000);
 
   it("refuses forged tokens, out-of-turn moves, stale turns, illegal distance, coerced types, and invalid orders without mutating state", async () => {
     const { invoke } = await openStagedHexClash();
@@ -679,6 +993,7 @@ describe("HexClash authoritative strategy game", () => {
     const spectator = await invoke<VisibleBoardState>("getVisibleState", {
       gameId,
       spectator: true,
+      playerTokens: [s1.playerToken, s2.playerToken],
     });
     expect(spectator.ok).toBe(true);
     if (!spectator.ok) throw new Error("Expected spectator read to succeed");
@@ -700,8 +1015,17 @@ describe("HexClash authoritative strategy game", () => {
 
     const matchA = await call<StartDemoReply>("startDemoMatch", { seed: 2026 }, "owner");
     const matchB = await call<StartDemoReply>("startDemoMatch", { seed: 2026 }, "owner");
-    const replayInitA = await call<ReplayPayload>("replayGame", { gameId: matchA.gameId }, "owner");
-    const replayInitB = await call<ReplayPayload>("replayGame", { gameId: matchB.gameId }, "owner");
+    const bothSeats = (match: StartDemoReply) => match.seats.map((seat) => seat.playerToken);
+    const replayInitA = await call<ReplayPayload>(
+      "replayGame",
+      { gameId: matchA.gameId, playerTokens: bothSeats(matchA) },
+      "owner",
+    );
+    const replayInitB = await call<ReplayPayload>(
+      "replayGame",
+      { gameId: matchB.gameId, playerTokens: bothSeats(matchB) },
+      "owner",
+    );
     expect(replayInitA.initialTiles).toEqual(replayInitB.initialTiles);
 
     const { gameId, seats } = matchA;
@@ -753,6 +1077,7 @@ describe("HexClash authoritative strategy game", () => {
 
     let mountainTested = false;
     let repelledCombatTested = false;
+    const forecastsChecked: MarchForecast[] = [];
 
     for (let idx = 0; idx < path.length - 1; idx += 1) {
       const from = path[idx]!;
@@ -760,7 +1085,7 @@ describe("HexClash authoritative strategy game", () => {
 
       let currentBoard = await call<VisibleBoardState>(
         "getVisibleState",
-        { gameId, spectator: true },
+        { gameId, spectator: true, playerTokens: [p1.playerToken, p2.playerToken] },
         "owner",
       );
       if (currentBoard.game.status === "finished") break;
@@ -791,7 +1116,7 @@ describe("HexClash authoritative strategy game", () => {
       while (true) {
         currentBoard = await call<VisibleBoardState>(
           "getVisibleState",
-          { gameId, spectator: true },
+          { gameId, spectator: true, playerTokens: [p1.playerToken, p2.playerToken] },
           "owner",
         );
         const fromTile = currentBoard.tiles.find((t) => t.q === from.q && t.r === from.r)!;
@@ -829,6 +1154,13 @@ describe("HexClash authoritative strategy game", () => {
           );
           expect(probe.outcome.captured).toBe(false);
           expect(probe.outcome.attackerLosses).toBe(2);
+          const probeForecast = forecastMarch(2, toTile, 1);
+          expectForecastMatches(probeForecast, probe.outcome);
+          expect(probeForecast.supplyNext).toBe(1);
+          expect(probe.state.tiles.find((t) => t.q === to.q && t.r === to.r)!.units).toBe(
+            probeForecast.resultUnits + probeForecast.supplyNext,
+          );
+          forecastsChecked.push(probeForecast);
           repelledCombatTested = true;
           await call<SubmitMoveReply>(
             "submitMove",
@@ -854,6 +1186,14 @@ describe("HexClash authoritative strategy game", () => {
             },
             "linkA",
           );
+          if (toTile.ownerSeat !== 1) {
+            const marchForecast = forecastMarch(marchCount, toTile, 1);
+            expectForecastMatches(marchForecast, moveRes.outcome);
+            expect(moveRes.state.tiles.find((t) => t.q === to.q && t.r === to.r)!.units).toBe(
+              marchForecast.resultUnits + marchForecast.supplyNext,
+            );
+            forecastsChecked.push(marchForecast);
+          }
           if (moveRes.state.game.status === "finished") {
             expect(moveRes.state.game.winnerSeat).toBe(1);
             expect(moveRes.state.game.winReason).toBe("capital_captured");
@@ -908,6 +1248,12 @@ describe("HexClash authoritative strategy game", () => {
     expect(finalBoard.game.seed).toBe(2026);
     expect(finalBoard.viewer.foggedTiles).toBe(0);
     expect(repelledCombatTested).toBe(true);
+    expect(forecastsChecked.length).toBeGreaterThanOrEqual(3);
+    expect(forecastsChecked.map((f) => f.kind)).toEqual(expect.arrayContaining(["capture", "repelled"]));
+    expect(
+      forecastsChecked.some((f) => f.terrainBonus === 2 && f.fortifyBonus === 2 && f.kind === "repelled"),
+    ).toBe(true);
+    expect(forecastsChecked.some((f) => f.capitalCaptured && f.terrainBonus === 2)).toBe(true);
 
     const replay = await call<ReplayPayload>("replayGame", { gameId }, "linkB");
     expect(replay.moves.length).toBeGreaterThan(5);
@@ -1062,6 +1408,10 @@ describe("HexClash authoritative strategy game", () => {
               state: "visible",
               timeout: 15_000,
             });
+
+            await frame.locator("#handoff-ready-btn").waitFor({ state: "visible", timeout: 5_000 });
+            await frame.locator("#handoff-ready-btn").click();
+            await frame.locator("#handoff-ready-btn").waitFor({ state: "hidden", timeout: 5_000 });
 
             await frame.locator("#open-seat-key-btn").click();
             await frame.locator("#copy-seat-key-btn").click();
