@@ -2,6 +2,7 @@ import type { OutboxRecord } from "../conversation/conversationWrites";
 import { decisionOf } from "../conversation/decisionAnswers";
 import type { SignIn } from "../server/account";
 import type { NoticeRecord } from "../server/notices";
+import { readLane } from "../server/readLane";
 import type { WorkspaceList } from "../server/workspaceList";
 import type {
   ChatGroup,
@@ -216,6 +217,7 @@ export function createNoticeTargets(options: {
   onThread?(workspaceId: string, thread: ChatThread): void;
 }): NoticeTargets {
   const { signIn, read, readPost, onThread } = options;
+  const lane = readLane(signIn);
   let entries: ReadonlyMap<string, TargetRead> = new Map();
   const targets = new Map<string, MessageTarget>();
   const running = new Map<string, AbortController>();
@@ -238,9 +240,9 @@ export function createNoticeTargets(options: {
     const { workspaceId, threadId } = target;
     const post =
       target.answer === true && readPost
-        ? readPost(workspaceId, threadId, controller.signal)
+        ? lane.screen(() => readPost(workspaceId, threadId, controller.signal))
         : undefined;
-    Promise.all([read(workspaceId, threadId, controller.signal), post]).then(
+    Promise.all([lane.screen(() => read(workspaceId, threadId, controller.signal)), post]).then(
       ([answer, isPostThread]) => {
         if (!current()) return;
         running.delete(key);
