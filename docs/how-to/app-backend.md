@@ -202,6 +202,7 @@ It is not the owner: an operation that allows only the owner refuses it.
 An action can name its reverse with `"reversedBy": "<action name>"` in the dataset descriptor.
 It then returns `{ undo }`, at most 16 KB: the input its reverse takes.
 The host refuses to commit a result without it, and an automation run's Undo runs the reverse with that input.
+An action can also declare a `contract`, the input it takes and the result it returns, so apps get exact types. See [typed actions](../reference/app-kit.md#typed-actions).
 `ctx.requestId` identifies the request. It and the operation context stay stable during host retries.
 A generated Collection names each new record by `ctx.requestId`, so with no sort, records list in the order they were added.
 If the clock steps back while the host restarts, a newer record can list before an older one.

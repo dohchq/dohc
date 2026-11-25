@@ -182,8 +182,9 @@ The file exports:
 - `Tables`: each table's row, keyed by SQL column, with values as dohc's generated operations read and write them. A checkbox is `boolean`, a select is a union of its options, a multi-select or a many relation is an array, and a field that isn't required can be `null`.
 - `Row<"table">`: one table's row.
 - `FieldIds`: each column's `fieldId`, the key generated operations use in `values`.
-- `Operations`: each operation's `kind`, `table`, `access`, `readOnly`, and `fields`, the row columns it declares.
+- `Operations`: each operation's `kind`, `table`, `access`, `readOnly`, and `fields`, the row columns it declares. An `action` also has `input` and `output`, from its contract or `unknown`.
 - `OperationName`: the operation names.
+- `Input<"name">` and `Output<"name">`: an action's declared input and result. Other operations give `never`.
 
 Import them with `import type`, so the app bundle and its approval never include the file. Generated row-list reads (without `groupBy`) return `{ rows, nextCursor }` with each row's `values` keyed by `FieldIds`:
 
@@ -206,7 +207,34 @@ type ExpensePage = {
 const { data } = useDatasetQuery<ExpensePage>("listExpenses");
 ```
 
-Types describe the approved revision, not a draft. Run the command again after you approve a change. Operations you write yourself return whatever their code returns, so type their results with `Row`, `fields`, or your own types.
+Types describe the approved revision, not a draft. Run the command again after you approve a change.
+
+### Typed actions
+
+An `action` can declare a `contract` in `dataset.json`: the input it takes and the result it returns.
+
+```json
+{
+  "name": "setStatus",
+  "table": "tasks",
+  "kind": "action",
+  "readOnly": false,
+  "contract": {
+    "input": { "object": { "id": "string", "status": { "enum": ["open", "done"] }, "note": { "nullable": "string" } }, "optional": ["note"] },
+    "output": { "object": { "status": { "enum": ["open", "done"] } } }
+  }
+}
+```
+
+A type is `"string"`, `"number"`, `"boolean"`, `"unknown"`, `{ "enum": [...] }` with up to 64 strings, numbers, or booleans, `{ "array": type }`, `{ "nullable": type }`, or `{ "object": { "key": type }, "optional": ["key"] }` with 1 to 64 keys. A contract nests at most 8 levels and holds at most 256 types. `Output` types the action's `result`, inside the reply's `{ result, revision, replayed }`:
+
+```tsx
+import type { Input, Output } from "../.dohc/types/tasks-11111111-1111-4111-8111-111111111101";
+
+const setStatus = useDatasetMutation<Input<"setStatus">, Output<"setStatus">>("setStatus");
+```
+
+dohc does not check values against a contract. Check input in `operations.js` and refuse what it can't take. When an owner reviews a change, an app built on an action is marked **Needs update** if the action stops accepting input it took before or can return output the app doesn't expect. A change to a contract alone keeps the app's approval. Type the results of actions without a contract with `Row`, `fields`, or your own types.
 
 ## Staging an app and its Collections together
 

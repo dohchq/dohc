@@ -4,6 +4,7 @@ import {
   datasetBaseFolder,
   parseDatasetDefinition,
   type DatasetField,
+  type DatasetOperation,
 } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetHistoryRevision } from "@dohc/cli/dataset";
@@ -13,6 +14,7 @@ import {
 } from "./datasetHistoryReversibility";
 
 const fieldShape = ({ name: _name, ...field }: DatasetField) => JSON.stringify(field);
+const contractShape = (operation: DatasetOperation) => JSON.stringify(operation.contract ?? null);
 
 /** A compensating change starts from today's schema. It never copies yesterday's records or permissions. */
 export function generateDatasetHistoryRestore(
@@ -106,13 +108,23 @@ export function generateDatasetHistoryRestore(
     );
   for (const previous of old.operations) {
     const selected = after.operations.find((item) => item.operationId === previous.operationId)!;
-    if (previous.label === selected.label) continue;
+    const contract = contractShape(previous);
+    const contractChanged = contract !== contractShape(selected);
+    if (previous.label === selected.label && !contractChanged) continue;
     const operation = definition.operations.find(
       (item) => item.operationId === previous.operationId,
     );
     if (!operation)
       throw new Error(`The action ${previous.label} was removed. Review a source migration.`);
     operation.label = restoreLabel(previous.label, selected.label, operation.label, previous.label);
+    if (!contractChanged) continue;
+    if (contractShape(operation) === contractShape(selected)) {
+      delete operation.contract;
+      if (previous.contract) operation.contract = previous.contract;
+    } else if (contractShape(operation) !== contract)
+      throw new Error(
+        `The contract of ${previous.label} changed again. Review it before reversing this change.`,
+      );
   }
   const restoresSource = saved.revision.operationsSha256 !== changed.revision.operationsSha256;
   if (

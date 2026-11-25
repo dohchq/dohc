@@ -17,7 +17,7 @@ export function datasetColumnShape(tables: DatasetDefinition["tables"]): string 
 }
 
 export function datasetOperationShape(operation: DatasetDefinition["operations"][number]): string {
-  const { label: _label, access: _access, ...rest } = operation;
+  const { label: _label, access: _access, contract: _contract, ...rest } = operation;
   return JSON.stringify(rest);
 }
 
