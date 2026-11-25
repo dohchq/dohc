@@ -402,9 +402,11 @@ export function createWorkspaceCollections(
         reading: null,
         problem: null,
         opened:
-          opened && fresh && ready && newest(fresh, opened.record) === fresh
-            ? { ...opened, record: fresh, files: ready.files }
-            : opened,
+          page?.status === "refused" && opened?.tableId === table?.tableId
+            ? null
+            : opened && fresh && ready && newest(fresh, opened.record) === fresh
+              ? { ...opened, record: fresh, files: ready.files }
+              : opened,
       });
     } catch (error) {
       const cause = shownProblem(error);
@@ -412,7 +414,7 @@ export function createWorkspaceCollections(
       const refused = cause === "refused";
       if (refused) held.delete(datasetId);
       update(datasetId, {
-        ...(refused ? { description: null, rows: [], files: {}, next: null } : {}),
+        ...(refused ? { description: null, rows: [], files: {}, next: null, opened: null } : {}),
         reading: null,
         problem: cause ? { cause, more } : (view?.problem ?? null),
       });

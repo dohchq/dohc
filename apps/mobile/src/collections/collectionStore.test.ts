@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { appTeardown } from "../apps/appStore";
 import { createScopedEnds } from "../pages/pageLive";
 import { createAccount } from "../server/account";
@@ -371,6 +371,24 @@ describe("a Collection's records", () => {
     server.on("POST", `${OPS}/collection`, () => new Promise<Answer>(() => {}));
     void collections.open(D);
     expect(collections.view()).toMatchObject({ description: null, rows: [] });
+  });
+
+  it("closes a record opened from a reopened Collection whose table or Collection is then refused", async () => {
+    for (const refusal of [ok({ status: "refused", reason: "no-read" }), { status: 404 }]) {
+      const { server, collections } = setup();
+      pages(server);
+      await collections.open(D);
+      collections.close(D);
+      const held = deferred<Answer>();
+      server.on("POST", `${OPS}/collectionRecords`, () => held.promise);
+      void collections.open(D);
+      await sent(server, 4);
+      collections.openRecord(collections.view()!.rows[0]!);
+      expect(collections.view()?.opened).not.toBeNull();
+      held.resolve(refusal);
+      await vi.waitFor(() => expect(collections.view()?.reading).toBeNull());
+      expect(collections.view()?.opened).toBeNull();
+    }
   });
 
   it("clears what a Collection showed when the server refuses its records", async () => {
