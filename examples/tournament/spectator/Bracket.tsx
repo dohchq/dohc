@@ -134,6 +134,20 @@ function PhoneBracket(props: BracketProps) {
   }, [selectedMatchId]);
 
   useEffect(() => {
+    const column = tracedPlayer
+      ? rounds.find((entry) =>
+          snapshot.matches.some(
+            (match) =>
+              match.bracket === entry.bracket &&
+              match.round === entry.round &&
+              (match.playerA === tracedPlayer || match.playerB === tracedPlayer),
+          ),
+        )
+      : undefined;
+    if (column) setPicked(column.key);
+  }, [tracedPlayer]);
+
+  useEffect(() => {
     tabs.current
       ?.querySelector<HTMLElement>('[aria-selected="true"]')
       ?.scrollIntoView({ block: "nearest", inline: "nearest" });
