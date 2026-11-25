@@ -80,21 +80,24 @@ export interface Court {
   matchId: string | null;
 }
 
+export type EventKind =
+  | "bye"
+  | "start"
+  | "point"
+  | "undo"
+  | "game"
+  | "complete"
+  | "report"
+  | "walkover"
+  | "reopen"
+  | "cancel";
+
 export interface MatchEvent {
   id: string;
   matchId: string;
   seq: number;
   game: number;
-  kind:
-    | "start"
-    | "point"
-    | "undo"
-    | "game"
-    | "complete"
-    | "report"
-    | "walkover"
-    | "reopen"
-    | "cancel";
+  kind: EventKind;
   side: Side | null;
   playerA: string | null;
   playerB: string | null;
@@ -102,6 +105,16 @@ export interface MatchEvent {
   scoreB: number;
   courtId: string | null;
   at: number;
+}
+
+export type TimelineEntry = Pick<
+  MatchEvent,
+  "seq" | "game" | "kind" | "side" | "playerA" | "playerB" | "scoreA" | "scoreB" | "at"
+> & { actor?: string };
+
+export interface Timeline {
+  entries: TimelineEntry[];
+  cut: boolean;
 }
 
 export interface Snapshot {
@@ -308,6 +321,20 @@ function keepNewerMatches(current: Snapshot | undefined, next: Snapshot): Snapsh
   };
 }
 
+export const PHONE = "(max-width: 760px)";
+
+export function useMedia(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const list = window.matchMedia(query);
+    const sync = () => setMatches(list.matches);
+    sync();
+    list.addEventListener("change", sync);
+    return () => list.removeEventListener("change", sync);
+  }, [query]);
+  return matches;
+}
+
 export function useNow(skew: number, everyMs = 1000): number {
   const [now, setNow] = useState(() => Date.now() + skew);
   useEffect(() => {
@@ -404,13 +431,17 @@ export function gameScores(match: Match): Array<[number, number]> {
     .map((game) => game.split("-").map(Number) as [number, number]);
 }
 
-export function gamesToWin(tournament: Tournament): number {
-  return Math.floor(tournament.bestOf / 2) + 1;
+export function gamesToWin(bestOf: number): number {
+  return Math.floor(bestOf / 2) + 1;
+}
+
+export function hasPoints(match: Match): boolean {
+  return match.scoreA + match.scoreB + match.gamesA + match.gamesB > 0;
 }
 
 export function pressureLabel(tournament: Tournament, match: Match, side: Side): string {
   const games = side === "a" ? match.gamesA : match.gamesB;
-  if (games + 1 < gamesToWin(tournament)) return "Game point";
+  if (games + 1 < gamesToWin(tournament.bestOf)) return "Game point";
   if (
     isTitleMatch(tournament, match) &&
     !(match.bracket === "final" && match.round === 1 && side === "b")
@@ -511,7 +542,7 @@ export const HISTORY_LIMIT = 500;
 
 export function eventScore(
   tournament: Tournament,
-  event: { kind: string; side: Side | null; game: number; scoreA: number; scoreB: number },
+  event: Pick<MatchEvent, "kind" | "side" | "game" | "scoreA" | "scoreB">,
 ): string {
   if (event.kind === "start" || event.kind === "cancel" || event.kind === "bye") return "";
   if (event.kind === "walkover" || (event.kind === "reopen" && !event.side)) return "W/O";
@@ -520,7 +551,7 @@ export function eventScore(
     (event.kind === "complete" || event.kind === "report" || event.kind === "reopen") &&
     event.side
   ) {
-    const won = gamesToWin(tournament);
+    const won = gamesToWin(tournament.bestOf);
     const lost = Math.max(0, event.game - won);
     return event.side === "a" ? `${won}–${lost}` : `${lost}–${won}`;
   }

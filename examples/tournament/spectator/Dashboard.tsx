@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Bracket } from "./Bracket";
 import { CourtDesk, type ScoreActions } from "./Courts";
 import { ChevronDown, Eye, EyeOff, Maximize, RefreshCw, Trophy } from "./Icons";
-import { Inspector, type Timeline } from "./Inspector";
+import { Inspector } from "./Inspector";
 import { Standings } from "./Standings";
 import { TvBoard } from "./TvBoard";
 import {
@@ -12,10 +12,13 @@ import {
   matchRound,
   modalOpen,
   playersById,
+  useMedia,
   useNow,
+  PHONE,
   type LiveState,
   type Match,
   type Snapshot,
+  type Timeline,
   type Tournament,
   type Visibility,
 } from "./model";
@@ -42,8 +45,6 @@ const VIEWS: Array<{ id: ViewId; key: string; organizer: string; spectator: stri
   { id: "courts", key: "C", organizer: "Courts", spectator: "Live courts" },
   { id: "standings", key: "S", organizer: "Standings", spectator: "Standings" },
 ];
-
-const PHONE = "(max-width: 760px)";
 
 export function Dashboard({
   live,
@@ -79,13 +80,7 @@ export function Dashboard({
   };
   const [changingVisibility, setChangingVisibility] = useState(false);
   const [ask, setAsk] = useState<{ matchId: string; seq: number } | null>(null);
-  const [phone, setPhone] = useState(() => window.matchMedia(PHONE).matches);
-  useEffect(() => {
-    const query = window.matchMedia(PHONE);
-    const change = () => setPhone(query.matches);
-    query.addEventListener("change", change);
-    return () => query.removeEventListener("change", change);
-  }, []);
+  const phone = useMedia(PHONE);
   const snapshot = live.data;
   const now = useNow(live.clockSkew);
   const people = useMemo(

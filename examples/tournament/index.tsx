@@ -3,8 +3,7 @@ import { createRoot } from "react-dom/client";
 import { AppProvider, isAppBackendError, mutationKey, useApp } from "dohc/app";
 import { Dashboard } from "./spectator/Dashboard";
 import type { ScoreActions } from "./spectator/Courts";
-import { ChevronDown, ChevronUp, Copy, Plus, RefreshCw, Trophy, Undo2, X } from "./spectator/Icons";
-import type { TimelineEntry } from "./spectator/Inspector";
+import { ChevronDown, ChevronUp, Plus, Trophy, X } from "./spectator/Icons";
 import {
   HISTORY_LIMIT,
   gameScores,
@@ -15,10 +14,12 @@ import {
   type Court,
   type Match,
   type Side,
+  type TimelineEntry,
   type Tournament,
   type Visibility,
 } from "./spectator/model";
 import "./spectator/tournament.css";
+import { Toasts, useToasts } from "./toasts";
 
 interface Completed {
   match: Match;
@@ -31,17 +32,6 @@ interface Completed {
   droppedTo?: string | null;
   championId?: string | null;
   loserOut?: boolean;
-}
-
-interface Toast {
-  id: number;
-  tone: "done" | "warning" | "danger";
-  matchId?: string;
-  tournamentId?: string;
-  sticky?: boolean;
-  title: string;
-  message: string;
-  action?: { label: string; undo?: boolean; run(): void };
 }
 
 const LABELS: Record<string, string> = {
@@ -75,70 +65,20 @@ function Organizer() {
   const tapsRef = useRef(new Map<string, readonly Side[]>());
   const draining = useRef(new Set<string>());
   const drained = useRef(new Map<string, Match>());
-  const [toasts, setToasts] = useState<Toast[]>([]);
   const [setupOpen, setSetupOpen] = useState(false);
   const [reopenRequest, setReopenRequest] = useState<{ matchId: string; seq: number } | null>(null);
   const [seeding, setSeeding] = useState(false);
-  const toastId = useRef(0);
-  const timers = useRef(new Map<number, number>());
   const shownId = live.data?.tournament?.id;
-  const shownRef = useRef(shownId);
-  shownRef.current = shownId;
+  const toaster = useToasts(shownId);
+  const { push, drop } = toaster;
 
-  useEffect(() => {
-    const active = timers.current;
-    return () => {
-      for (const timer of active.values()) window.clearTimeout(timer);
-      active.clear();
-    };
-  }, []);
-
-  const dismiss = useCallback((id: number) => {
-    window.clearTimeout(timers.current.get(id));
-    timers.current.delete(id);
-    setToasts((current) => current.filter((toast) => toast.id !== id));
-  }, []);
-  const arm = useCallback(
-    (toast: Pick<Toast, "id" | "action">) => {
-      window.clearTimeout(timers.current.get(toast.id));
-      timers.current.set(
-        toast.id,
-        window.setTimeout(() => dismiss(toast.id), toast.action ? 10000 : 6000),
-      );
+  const pickTournament = useCallback(
+    (id: string) => {
+      setTournamentId(id);
+      drop((toast) => !toast.sticky);
     },
-    [dismiss],
+    [drop],
   );
-  const hold = (id: number) => {
-    if (!timers.current.has(id)) return;
-    window.clearTimeout(timers.current.get(id));
-    timers.current.set(id, 0);
-  };
-  const resume = (toast: Toast, box: HTMLElement) => {
-    if (!timers.current.has(toast.id)) return;
-    if (box.matches(":hover") || box.contains(document.activeElement)) return;
-    arm(toast);
-  };
-  const push = useCallback(
-    (toast: Omit<Toast, "id">) => {
-      const id = ++toastId.current;
-      setToasts((current) => [
-        ...current.filter((shown) => toast.tone !== "done" || shown.tone !== "done").slice(-4),
-        { ...toast, id, tournamentId: toast.tournamentId ?? shownRef.current },
-      ]);
-      if (toast.tone !== "danger" && !toast.sticky) arm({ id, action: toast.action });
-    },
-    [arm],
-  );
-
-  const dropDone = useCallback(
-    () => setToasts((current) => current.filter((toast) => toast.tone !== "done")),
-    [],
-  );
-
-  const pickTournament = useCallback((id: string) => {
-    setTournamentId(id);
-    setToasts((current) => current.filter((toast) => toast.sticky));
-  }, []);
 
   const setTapList = useCallback((matchId: string, list: readonly Side[]) => {
     const next = new Map(tapsRef.current);
@@ -180,7 +120,7 @@ function Organizer() {
           next.delete(match.id);
           return next;
         });
-        setToasts((current) => current.filter((toast) => toast.matchId !== match.id));
+        drop((toast) => toast.matchId === match.id);
         if (
           operation === "completeMatch" ||
           operation === "awardWalkover" ||
@@ -215,10 +155,7 @@ function Organizer() {
             tone: "danger",
             ...where,
             title: `Could not ${LABELS[operation]}`,
-            message:
-              isAppBackendError(caught) && caught.status === 429
-                ? `dohc is pacing taps from this app. Wait a moment.${dropped}`
-                : `${caught instanceof Error ? caught.message : String(caught)}${dropped}`,
+            message: `${caught instanceof Error ? caught.message : String(caught)}${dropped}`,
             action:
               away || point || operation === "reportResult"
                 ? undefined
@@ -461,7 +398,7 @@ function Organizer() {
         covered={setupOpen}
         onSetVisibility={setVisibility}
         reopenRequest={reopenRequest}
-        onViewChange={dropDone}
+        onViewChange={() => drop((toast) => toast.tone === "done")}
         barEnd={
           <button
             type="button"
@@ -515,71 +452,7 @@ function Organizer() {
           }}
         />
       ) : null}
-      <div className="co-toasts" aria-live="polite">
-        {toasts
-          .filter((toast) => !toast.tournamentId || toast.tournamentId === shownId)
-          .map((toast) => (
-            <div
-              key={toast.id}
-              className={`co-toast is-${toast.tone}`}
-              role={toast.tone === "danger" ? "alert" : undefined}
-              onPointerEnter={() => hold(toast.id)}
-              onPointerLeave={(event) => resume(toast, event.currentTarget)}
-              onFocus={() => hold(toast.id)}
-              onBlur={(event) => {
-                const box = event.currentTarget;
-                window.requestAnimationFrame(() => resume(toast, box));
-              }}
-            >
-              <div className="co-toast-text">
-                <strong>{toast.title}</strong>
-                {toast.message.split("\n").map((line, index) => (
-                  <span key={index} className="co-toast-line">
-                    {line}
-                  </span>
-                ))}
-              </div>
-              <div className="co-toast-actions">
-                {toast.action ? (
-                  <button
-                    type="button"
-                    className="co-btn is-quiet"
-                    onClick={() => {
-                      dismiss(toast.id);
-                      toast.action?.run();
-                    }}
-                  >
-                    {toast.action.undo ? <Undo2 size={13} /> : <RefreshCw size={13} />}
-                    {toast.action.label}
-                  </button>
-                ) : null}
-                {toast.tone !== "done" ? (
-                  <button
-                    type="button"
-                    className="co-icon-btn"
-                    aria-label="Copy the error"
-                    title="Copy the error"
-                    onClick={() =>
-                      void navigator.clipboard
-                        ?.writeText(`${toast.title}. ${toast.message}`)
-                        .catch(() => undefined)
-                    }
-                  >
-                    <Copy size={14} />
-                  </button>
-                ) : null}
-                <button
-                  type="button"
-                  className="co-icon-btn"
-                  aria-label="Dismiss"
-                  onClick={() => dismiss(toast.id)}
-                >
-                  <X size={14} />
-                </button>
-              </div>
-            </div>
-          ))}
-      </div>
+      <Toasts toaster={toaster} shownId={shownId} />
     </>
   );
 }

@@ -9,6 +9,8 @@ import {
   pressureLabel,
   timeOfDay,
   trapFocus,
+  useMedia,
+  PHONE,
   type Freshness,
   type Snapshot,
   type Standing,
@@ -26,8 +28,6 @@ interface TvBoardProps {
 const RESULT_MS = 90_000;
 const PER_PAGE = 6;
 const PAGE_MS = 12_000;
-
-const NARROW = "(max-width: 760px)";
 
 const MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 
@@ -57,13 +57,7 @@ export function TvBoard({ snapshot, people, now, freshness, syncedAt, onClose }:
   const upNext = snapshot.matches.filter((match) => match.status === "ready").slice(0, 4);
   const champion = tournament.championId ? people.get(tournament.championId) : undefined;
   const person = (id: string | null) => (id ? people.get(id) : undefined);
-  const [narrow, setNarrow] = useState(() => window.matchMedia(NARROW).matches);
-  useEffect(() => {
-    const query = window.matchMedia(NARROW);
-    const sync = () => setNarrow(query.matches);
-    query.addEventListener("change", sync);
-    return () => query.removeEventListener("change", sync);
-  }, []);
+  const narrow = useMedia(PHONE);
   const perPage = narrow ? 2 : PER_PAGE;
   const pages = Math.max(1, Math.ceil(playing.length / perPage));
   const playingNow = playing.some((entry) => !entry.final);
@@ -302,6 +296,9 @@ export function TvBoard({ snapshot, people, now, freshness, syncedAt, onClose }:
                       ? match.scoreB
                       : match.scoreA;
                   const won = side === "a" ? match.gamesA : match.gamesB;
+                  const sideGames = games
+                    .map((game) => (side === "a" ? game[0] : game[1]))
+                    .join(", ");
                   const ahead = final
                     ? match.winnerId === (side === "a" ? match.playerA : match.playerB)
                     : score > other;
@@ -338,11 +335,9 @@ export function TvBoard({ snapshot, people, now, freshness, syncedAt, onClose }:
                           role="img"
                           aria-label={
                             tally
-                              ? `Game scores ${games.map((game) => (side === "a" ? game[0] : game[1])).join(", ")}`
+                              ? `Game scores ${sideGames}`
                               : `${won} ${won === 1 ? "game" : "games"} won${
-                                  games.length > 0
-                                    ? `, game scores ${games.map((game) => (side === "a" ? game[0] : game[1])).join(", ")}`
-                                    : ""
+                                  games.length > 0 ? `, game scores ${sideGames}` : ""
                                 }`
                           }
                         >

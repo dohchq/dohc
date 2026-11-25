@@ -211,13 +211,14 @@ function finishingPlaces(format, bracketSize, matches) {
   };
 }
 
-function newState(tournament) {
+function newState(tournament, lastSeq = () => 0) {
   return {
     tournament,
     players: new Map(),
     courts: new Map(),
     matches: new Map(),
     seq: new Map(),
+    lastSeq,
     events: [],
     changedPlayers: new Set(),
     changedMatches: new Set(),
@@ -239,6 +240,14 @@ function gameNumber(match) {
   return match.games_a + match.games_b + 1;
 }
 
+function hasPoints(match) {
+  return match.score_a + match.score_b + match.games_a + match.games_b > 0;
+}
+
+function gamesToWin(tournament) {
+  return Math.floor(tournament.best_of / 2) + 1;
+}
+
 function addEvent(
   state,
   match,
@@ -249,7 +258,7 @@ function addEvent(
   game = gameNumber(match),
   score = [match.score_a, match.score_b],
 ) {
-  const seq = (state.seq.get(match.id) ?? 0) + 1;
+  const seq = (state.seq.get(match.id) ?? state.lastSeq(match.id)) + 1;
   state.seq.set(match.id, seq);
   state.events.push({
     id: `${match.id}-e${seq}`,
@@ -312,11 +321,7 @@ function send(state, match, winnerId, loserId, at, actor) {
 }
 
 function retract(ctx, state, target, column, at, actor) {
-  if (
-    target.status === "done" ||
-    (target.status === "live" &&
-      target.score_a + target.score_b + target.games_a + target.games_b > 0)
-  )
+  if (target.status === "done" || (target.status === "live" && hasPoints(target)))
     ctx.refuse(
       "next_started",
       `${matchLabel(state, target)} already has points, so this result can no longer change.`,
@@ -662,7 +667,7 @@ function completeGameIn(ctx, state, match, at, actor) {
     .join(" ");
   if (aWon) match.games_a += 1;
   else match.games_b += 1;
-  if (Math.max(match.games_a, match.games_b) > tournament.best_of / 2)
+  if (Math.max(match.games_a, match.games_b) >= gamesToWin(tournament))
     return { ...finishMatch(state, match, aWon, at, actor, "played"), matchOver: true };
   touchMatch(state, match);
   touchTournament(state, at);
@@ -818,18 +823,18 @@ function loadState(ctx, matchId) {
   ])[0];
   if (!found) ctx.refuse("not_found", "That match no longer exists.");
   const id = found.tournament_id;
-  const state = newState(ctx.db.query("SELECT * FROM tournaments WHERE id = ?", [id])[0]);
+  const state = newState(ctx.db.query("SELECT * FROM tournaments WHERE id = ?", [id])[0], (match) =>
+    Number(
+      ctx.db.query("SELECT MAX(seq) AS seq FROM match_events WHERE match_id = ?", [match])[0]
+        ?.seq ?? 0,
+    ),
+  );
   for (const row of ctx.db.query("SELECT * FROM players WHERE tournament_id = ?", [id]))
     state.players.set(row.id, row);
   for (const row of ctx.db.query("SELECT * FROM courts WHERE tournament_id = ?", [id]))
     state.courts.set(row.id, row);
   for (const row of ctx.db.query("SELECT * FROM matches WHERE tournament_id = ?", [id]))
     state.matches.set(row.id, row);
-  for (const row of ctx.db.query(
-    "SELECT match_id, MAX(seq) AS seq FROM match_events WHERE tournament_id = ? GROUP BY match_id",
-    [id],
-  ))
-    state.seq.set(row.match_id, Number(row.seq));
   return { state, match: state.matches.get(matchId) };
 }
 
@@ -854,7 +859,7 @@ function checkVersion(ctx, state, match, expectedVersion) {
 }
 
 function reportedGames(ctx, tournament, value) {
-  const need = Math.floor(tournament.best_of / 2) + 1;
+  const need = gamesToWin(tournament);
   if (!Array.isArray(value) || value.length < need || value.length > tournament.best_of)
     ctx.refuse(
       "invalid_input",
@@ -1125,6 +1130,12 @@ globalThis.operations = {
       typeof input?.matchId === "string" && matches.some((match) => match.id === input.matchId)
         ? input.matchId
         : null;
+    const timeline = timelineFor
+      ? ctx.db.query(
+          `SELECT seq, game, kind, side, player_a AS playerA, player_b AS playerB, score_a AS scoreA, score_b AS scoreB, at FROM match_events WHERE match_id = ? ORDER BY seq DESC LIMIT ${HISTORY_LIMIT}`,
+          [timelineFor],
+        )
+      : null;
     return {
       tournaments: listed,
       tournament,
@@ -1133,18 +1144,10 @@ globalThis.operations = {
       courts,
       recent,
       now: ctx.nowMs,
-      ...(timelineFor
+      ...(timeline
         ? {
-            ...(() => {
-              const rows = ctx.db.query(
-                `SELECT seq, game, kind, side, player_a AS playerA, player_b AS playerB, score_a AS scoreA, score_b AS scoreB, at FROM match_events WHERE match_id = ? ORDER BY seq DESC LIMIT ${HISTORY_LIMIT}`,
-                [timelineFor],
-              );
-              return {
-                timeline: fans ? publicHistory(rows) : rows,
-                timelineCut: rows.length >= HISTORY_LIMIT,
-              };
-            })(),
+            timeline: fans ? publicHistory(timeline) : timeline,
+            timelineCut: timeline.length >= HISTORY_LIMIT,
           }
         : {}),
     };
@@ -1232,7 +1235,7 @@ globalThis.operations = {
   returnToQueue(ctx, input) {
     return liveMatchAction(ctx, input, (state, match) => {
       requireLive(ctx, state, match);
-      if (match.score_a + match.score_b + match.games_a + match.games_b > 0)
+      if (hasPoints(match))
         ctx.refuse(
           "match_scored",
           `${matchLabel(state, match)} already has points. Undo them before returning it to the queue.`,
@@ -1337,7 +1340,7 @@ globalThis.operations = {
           "match_not_open",
           `${matchLabel(state, match)} needs both players and no result to enter one.`,
         );
-      if (match.score_a + match.score_b + match.games_a + match.games_b > 0)
+      if (hasPoints(match))
         ctx.refuse(
           "match_scored",
           `${matchLabel(state, match)} already has points. Finish it on the board, or undo them first.`,

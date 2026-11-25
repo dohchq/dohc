@@ -8,6 +8,7 @@ import {
   gamePoints,
   gameScores,
   gamesToWin,
+  hasPoints,
   isDecided,
   liveCourts,
   matchRound,
@@ -139,11 +140,7 @@ export function CourtDesk({
       if ((event.key === "1" || event.key === "2") && !busy && !decided) {
         event.preventDefault();
         actions.point(match, event.key === "1" ? "a" : "b");
-      } else if (
-        (event.key === "z" || event.key === "Z") &&
-        settled &&
-        match.scoreA + match.scoreB + match.gamesA + match.gamesB > 0
-      ) {
+      } else if ((event.key === "z" || event.key === "Z") && settled && hasPoints(match)) {
         event.preventDefault();
         actions.undo(match);
       } else if (
@@ -410,7 +407,8 @@ function CourtBoard({
   const named = actions ? winnerSide : null;
   const takesMatch =
     winnerSide !== null &&
-    (winnerSide === "a" ? match.gamesA : match.gamesB) + 1 >= gamesToWin(tournament);
+    (winnerSide === "a" ? match.gamesA : match.gamesB) + 1 >= gamesToWin(tournament.bestOf);
+  const ends = takesMatch || !series;
   const player = (side: Side) => {
     const id = side === "a" ? match.playerA : match.playerB;
     return id ? people.get(id) : undefined;
@@ -495,7 +493,7 @@ function CourtBoard({
         {`${player("a")?.name ?? "TBD"} ${shown.scoreA}, ${player("b")?.name ?? "TBD"} ${shown.scoreB}${
           decided
             ? actions
-              ? takesMatch || !series
+              ? ends
                 ? ", match over"
                 : `, game ${game} over`
               : ", result pending"
@@ -535,7 +533,7 @@ function CourtBoard({
                     className="co-games"
                     aria-label={`${games} ${games === 1 ? "game" : "games"} won`}
                   >
-                    {Array.from({ length: gamesToWin(tournament) }, (_, index) => (
+                    {Array.from({ length: gamesToWin(tournament.bestOf) }, (_, index) => (
                       <i
                         key={index}
                         className={
@@ -637,14 +635,14 @@ function CourtBoard({
           <button
             type="button"
             className="co-btn"
-            disabled={!settled || match.scoreA + match.scoreB + match.gamesA + match.gamesB === 0}
+            disabled={!settled || !hasPoints(match)}
             onClick={() => actions.undo(match)}
           >
             <Undo2 size={14} />
             Undo {keys ? <kbd>Z</kbd> : null}
           </button>
           <span className="co-board-rule">
-            {decided ? (takesMatch || !series ? "Match over" : `Game ${game} over`) : rule}
+            {decided ? (ends ? "Match over" : `Game ${game} over`) : rule}
           </span>
           <button
             type="button"
@@ -653,14 +651,13 @@ function CourtBoard({
             onClick={() => onConfirm(true)}
           >
             <Check size={14} />
-            {takesMatch || !series ? "Complete" : `Record game ${game}`}{" "}
-            {keys ? <kbd>C</kbd> : null}
+            {ends ? "Complete" : `Record game ${game}`} {keys ? <kbd>C</kbd> : null}
           </button>
         </footer>
       ) : (
         <footer className="co-board-foot is-quiet">
           <span className={`co-board-rule${decided ? " is-pending" : ""}`}>
-            {decided ? (takesMatch || !series ? "Result pending" : `Game ${game} pending`) : rule}
+            {decided ? (ends ? "Result pending" : `Game ${game} pending`) : rule}
           </span>
         </footer>
       )}

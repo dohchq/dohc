@@ -3,8 +3,13 @@ import { createRoot } from "react-dom/client";
 import { AppProvider, useApp } from "dohc/app";
 import { Dashboard } from "./Dashboard";
 import { Trophy } from "./Icons";
-import type { Timeline, TimelineEntry } from "./Inspector";
-import { useLiveSnapshot, type Match, type Snapshot } from "./model";
+import {
+  useLiveSnapshot,
+  type Match,
+  type Snapshot,
+  type Timeline,
+  type TimelineEntry,
+} from "./model";
 import "./tournament.css";
 
 function Spectator() {

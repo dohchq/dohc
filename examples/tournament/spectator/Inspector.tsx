@@ -4,45 +4,21 @@ import {
   HISTORY_LIMIT,
   eventScore,
   gameScores,
+  gamesToWin,
+  hasPoints,
   isDecided,
   matchRound,
   timeOfDay,
+  trapFocus,
   type Court,
   type Match,
   type Side,
   type Snapshot,
   type Standing,
-  trapFocus,
+  type Timeline,
+  type TimelineEntry,
 } from "./model";
 import type { ScoreActions } from "./Courts";
-
-export interface TimelineEntry {
-  seq: number;
-  game: number;
-  kind:
-    | "bye"
-    | "start"
-    | "point"
-    | "undo"
-    | "game"
-    | "complete"
-    | "report"
-    | "walkover"
-    | "reopen"
-    | "cancel";
-  side: Side | null;
-  playerA: string | null;
-  playerB: string | null;
-  scoreA: number;
-  scoreB: number;
-  at: number;
-  actor?: string;
-}
-
-export interface Timeline {
-  entries: TimelineEntry[];
-  cut: boolean;
-}
 
 interface InspectorProps {
   match: Match;
@@ -115,8 +91,7 @@ export function Inspector({
   const seenVersion = useRef(match.version);
   const scored = (entry: Match | undefined) =>
     entry !== undefined &&
-    (entry.status === "done" ||
-      (entry.status === "live" && entry.scoreA + entry.scoreB + entry.gamesA + entry.gamesB > 0));
+    (entry.status === "done" || (entry.status === "live" && hasPoints(entry)));
   const reach = (entry: Match | undefined): Match[] =>
     entry?.status === "bye"
       ? [find(entry.nextMatchId), find(entry.loserNextMatchId)].flatMap(reach)
@@ -167,7 +142,7 @@ export function Inspector({
     setConfirm((current) =>
       current === "result" &&
       (match.status === "ready" || match.status === "live") &&
-      match.scoreA + match.scoreB + match.gamesA + match.gamesB === 0
+      !hasPoints(match)
         ? current
         : null,
     );
@@ -462,7 +437,7 @@ export function Inspector({
           >
             Score on {court?.name ?? "court"}
           </button>
-          {actions && match.scoreA + match.scoreB + match.gamesA + match.gamesB === 0 ? (
+          {actions && !hasPoints(match) ? (
             <button
               type="button"
               className="co-btn is-quiet is-wide"
@@ -530,7 +505,7 @@ export function Inspector({
             </div>
           ) : (
             <>
-              {match.scoreA + match.scoreB + match.gamesA + match.gamesB === 0 ? (
+              {!hasPoints(match) ? (
                 <button
                   type="button"
                   className="co-btn is-wide"
@@ -689,9 +664,10 @@ function Momentum({
   top: string;
   bottom: string;
 }) {
+  const ordered = [...timeline].sort((left, right) => left.seq - right.seq);
   const points: Array<{ game: number; lead: number }> = [];
   const breaks: number[] = [];
-  for (const entry of [...timeline].sort((left, right) => left.seq - right.seq)) {
+  for (const entry of ordered) {
     if (entry.kind === "point")
       points.push({ game: entry.game, lead: entry.scoreA - entry.scoreB });
     else if (entry.kind === "undo" && entry.side) points.pop();
@@ -699,9 +675,7 @@ function Momentum({
     else if (entry.kind === "undo") breaks.pop();
   }
   if (points.length < 2) return null;
-  const first = [...timeline]
-    .sort((left, right) => left.seq - right.seq)
-    .find((entry) => entry.kind === "point");
+  const first = ordered.find((entry) => entry.kind === "point");
   const opening = first ? first.scoreA - first.scoreB - (first.side === "a" ? 1 : -1) : 0;
   const peak = Math.max(3, Math.abs(opening), ...points.map((point) => Math.abs(point.lead)));
   const width = 300;
@@ -767,7 +741,7 @@ function sheetProblem(
   pointsToWin: number,
   winBy: number,
 ): { row: number; cell: number | null; message: string } | null {
-  const need = Math.floor(bestOf / 2) + 1;
+  const need = gamesToWin(bestOf);
   const entered = rows.slice(0, rows.findLastIndex(([a, b]) => a !== "" || b !== "") + 1);
   const wins = [0, 0];
   for (const [index, [a, b]] of entered.entries()) {
@@ -822,7 +796,7 @@ function ResultForm({
   } | null>(null);
   const inputs = useRef<Array<HTMLInputElement | null>>([]);
   useEffect(() => inputs.current[0]?.focus(), []);
-  const need = Math.floor(bestOf / 2) + 1;
+  const need = gamesToWin(bestOf);
   const filled = rows.findLastIndex(([a, b]) => a !== "" || b !== "") + 1;
   return (
     <form

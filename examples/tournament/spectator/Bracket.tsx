@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -11,72 +12,39 @@ import {
 } from "react";
 import { Minus, Plus, Scan, Search, Trophy, X } from "./Icons";
 import {
+  CHAMP_W,
+  GAP_X,
+  GRID,
+  MAX_ZOOM,
+  MIN_ZOOM,
+  NODE_H,
+  NODE_W,
+  ROW_H,
+  clamp,
+  colX,
+  columnView,
+  fitView,
+  inView,
+  initialView,
+  layoutOf,
+  readableZoom,
+  type Column,
+  type Layout,
+  type Spot,
+  type View,
+} from "./bracketLayout";
+import {
   feederText,
   isDecided,
-  losersRounds,
   matchRound,
   playersById,
   roundLabel,
-  winnersRounds,
   type BracketSide,
   type Match,
   type Snapshot,
   type Standing,
   type Tournament,
 } from "./model";
-
-const NODE_W = 220;
-const ROW_H = 28;
-const NODE_H = ROW_H * 2;
-const UNIT = 84;
-const GAP_X = 72;
-const PAD_X = 40;
-const PAD_Y = 28;
-const LANE_GAP = 76;
-const CHAMP_W = 184;
-const GRID = 24;
-const GUTTER = 40;
-
-const inView = (
-  view: { x: number; y: number; k: number },
-  spot: { x: number; y: number },
-  box: { w: number; h: number },
-) => {
-  const left = view.x + spot.x * view.k;
-  const top = view.y + (spot.y - NODE_H / 2) * view.k;
-  return (
-    left >= 8 &&
-    left + NODE_W * view.k <= box.w - 8 &&
-    top >= 8 &&
-    top + NODE_H * view.k <= box.h - 8
-  );
-};
-const MIN_ZOOM = 0.08;
-const MAX_ZOOM = 1.6;
-
-interface View {
-  x: number;
-  y: number;
-  k: number;
-}
-
-interface Column {
-  key: string;
-  index: number;
-  bracket: BracketSide;
-  round: number;
-  top: number;
-}
-
-interface Layout {
-  at: Map<string, { x: number; y: number }>;
-  columns: Column[];
-  lanes: Array<{ round: number; index: number }>;
-  losersTop: number | null;
-  champion: { x: number; y: number };
-  width: number;
-  height: number;
-}
 
 interface BracketProps {
   snapshot: Snapshot;
@@ -86,90 +54,7 @@ interface BracketProps {
   onOpenMatch(match: Match): void;
 }
 
-const colX = (index: number) => PAD_X + index * (NODE_W + GAP_X);
 const count = (value: number, unit: string) => `${value} ${unit}${value === 1 ? "" : "s"}`;
-
-const spansOf = (layout: Layout) => [
-  ...[...new Set([...layout.at.values()].map((spot) => spot.x))].map((left) => [
-    left,
-    left + NODE_W,
-  ]),
-  [layout.champion.x, layout.champion.x + CHAMP_W],
-];
-
-function snapRight(layout: Layout, k: number, x: number, w: number) {
-  if (w < 600) return { k, x, cut: null };
-  const cut = spansOf(layout).find(
-    ([left, right]) => x + left! * k < w - 8 && x + right! * k > w - 8,
-  );
-  if (!cut) return { k, x, cut: null };
-  const start = (GUTTER - x) / k;
-  const snug = (w - 16 - GUTTER) / (cut[1]! - start);
-  if (snug < 0.6) return { k, x, cut: cut[0]! };
-  const fitted = Math.min(k, snug);
-  return { k: fitted, x: GUTTER - start * fitted, cut: null };
-}
-const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
-const readableZoom = (width: number) =>
-  width < 600 ? 1 : clamp(width / (3 * NODE_W + 2 * GAP_X + 48), 0.6, 1);
-
-function layoutOf(tournament: Tournament | null, matches: Match[]): Layout {
-  const size = tournament?.bracketSize ?? 2;
-  const winners = tournament ? winnersRounds(tournament) : 1;
-  const losers = tournament ? losersRounds(tournament) : 0;
-  const at = new Map<string, { x: number; y: number }>();
-  const winnersY = (round: number, slot: number) => PAD_Y + (slot - 0.5) * 2 ** (round - 1) * UNIT;
-  const losersTop = losers > 0 ? PAD_Y + (size / 2) * UNIT + LANE_GAP : null;
-  const losersY = (round: number, slot: number) =>
-    (losersTop ?? 0) + (slot - 0.5) * 2 ** (Math.ceil(round / 2) - 1) * UNIT;
-  const winnersCol = (round: number) => (losers > 0 && round > 1 ? 2 * round - 3 : round - 1);
-  const finalIndex = Math.max(winners, losers);
-  const crownY = winnersY(winners, 1);
-  for (const match of matches) {
-    if (match.bracket === "winners")
-      at.set(match.id, { x: colX(winnersCol(match.round)), y: winnersY(match.round, match.slot) });
-    else if (match.bracket === "losers")
-      at.set(match.id, { x: colX(match.round - 1), y: losersY(match.round, match.slot) });
-    else at.set(match.id, { x: colX(finalIndex + match.round - 1), y: crownY });
-  }
-  const columns: Column[] = [];
-  for (let index = 0; index < winners; index += 1)
-    columns.push({
-      key: `w${index}`,
-      index: winnersCol(index + 1),
-      bracket: "winners",
-      round: index + 1,
-      top: winnersY(index + 1, 1),
-    });
-  for (let index = 0; index < losers; index += 1)
-    columns.push({
-      key: `l${index}`,
-      index,
-      bracket: "losers",
-      round: index + 1,
-      top: losersY(index + 1, 1),
-    });
-  if (losers > 0)
-    for (const round of [1, 2])
-      columns.push({
-        key: `f${round}`,
-        index: finalIndex + round - 1,
-        bracket: "final",
-        round,
-        top: crownY,
-      });
-  const championIndex = losers > 0 ? finalIndex + 2 : winners;
-  return {
-    at,
-    columns,
-    lanes: Array.from({ length: losers }, (_, index) => ({ round: index + 1, index })),
-    losersTop,
-    champion: { x: colX(championIndex), y: crownY },
-    width: colX(championIndex) + CHAMP_W + PAD_X,
-    height:
-      (losersTop === null ? PAD_Y + (size / 2) * UNIT : losersTop + (size / 4) * UNIT) + PAD_Y,
-  };
-}
 
 export function Bracket({
   snapshot,
@@ -192,7 +77,25 @@ export function Bracket({
     () => layoutOf(tournament, snapshot.matches),
     [tournament, snapshot.matches],
   );
+  const liveCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const match of snapshot.matches)
+      if (match.status === "live")
+        counts.set(
+          `${match.bracket}:${match.round}`,
+          (counts.get(`${match.bracket}:${match.round}`) ?? 0) + 1,
+        );
+    return counts;
+  }, [snapshot.matches]);
+  const liveIn = (bracket: BracketSide, round: number) =>
+    liveCounts.get(`${bracket}:${round}`) ?? 0;
   const [hovered, setHovered] = useState<string | null>(null);
+  const openRef = useRef(onOpenMatch);
+  openRef.current = onOpenMatch;
+  const openNode = useCallback((picked: Match) => {
+    setHovered(null);
+    openRef.current(picked);
+  }, []);
   const focus = hovered ?? (tracedPlayer && people.has(tracedPlayer) ? tracedPlayer : null);
   const contentW = layout.width;
   const contentH = layout.height;
@@ -203,12 +106,8 @@ export function Bracket({
 
   const fit = useCallback(() => {
     const el = viewport.current;
-    if (!el) return;
-    const w = el.clientWidth;
-    const h = el.clientHeight;
-    const k = clamp(Math.min(w / contentW, h / contentH), MIN_ZOOM, 1);
-    setView({ k, x: Math.max(0, (w - contentW * k) / 2), y: Math.max(0, (h - contentH * k) / 2) });
-  }, [contentW, contentH]);
+    if (el) setView(fitView(layout, el.clientWidth, el.clientHeight));
+  }, [layout]);
 
   useLayoutEffect(() => {
     const el = viewport.current;
@@ -221,175 +120,27 @@ export function Bracket({
 
   const frame = useCallback(() => {
     const el = viewport.current;
-    if (!el) return;
-    const w = el.clientWidth;
-    const h = el.clientHeight;
-    if (Math.min(w / contentW, h / contentH) >= 0.8) return fit();
-    const open = snapshot.matches.filter(
-      (match) => match.status === "live" || match.status === "ready",
-    );
-    const active = open.flatMap((match) => layout.at.get(match.id) ?? []);
-    if (w >= 600 && active.length > 1) {
-      const nearest = (values: number[], ok: (value: number) => boolean, origin: number) =>
-        values.filter(ok).sort((one, two) => Math.abs(one - origin) - Math.abs(two - origin))[0];
-      const spans = spansOf(layout);
-      const left = Math.min(...active.map((spot) => spot.x));
-      const edge = Math.max(...active.map((spot) => spot.x)) + NODE_W;
-      const right = Math.min(contentW, edge + NODE_W + GAP_X);
-      let top = Math.min(...active.map((spot) => spot.y - NODE_H / 2)) - 18;
-      let bottom = Math.max(...active.map((spot) => spot.y + NODE_H / 2));
-      for (let attempt = 0; attempt < 4; attempt += 1) {
-        const fitted = Math.min(1, (w - 2 * GUTTER) / (right - left), (h - 16) / (bottom - top));
-        if (fitted < 0.75) break;
-        const most = Math.min(1, (w - GUTTER - 8) / (edge - left), (h - 4) / (bottom - top));
-        const tornRight = (zoom: number) => {
-          const at = GUTTER - left * zoom;
-          return spans.some(([a, b]) => at + (a! - 28) * zoom < w && at + b! * zoom > w);
-        };
-        const k =
-          [
-            fitted,
-            ...spans.flatMap(([a, b]) => [
-              (w + 2 - GUTTER) / (a! - 28 - left),
-              (w - 2 - GUTTER) / (b! - left),
-            ]),
-          ]
-            .filter(
-              (zoom) => Number.isFinite(zoom) && zoom >= 0.75 && zoom <= Math.max(most, fitted),
-            )
-            .sort((one, two) => Math.abs(one - fitted) - Math.abs(two - fitted))
-            .find((zoom) => !tornRight(zoom)) ?? fitted;
-        const x = GUTTER - left * k;
-        const cards = [...layout.at.values()]
-          .filter((spot) => x + (spot.x + NODE_W) * k > 0 && x + spot.x * k < w)
-          .map((spot) => [spot.y - NODE_H / 2 - 18, spot.y + NODE_H / 2] as const);
-        const tornTop = (y: number) => cards.some(([a, b]) => y + a * k < 0 && y + b * k > 0);
-        const tornY = (y: number) =>
-          cards.filter(
-            ([a, b]) => (y + a * k < 0 && y + b * k > 0) || (y + a * k < h && y + b * k > h),
-          );
-        const base = (h - (bottom - top) * k) / 2 - top * k;
-        const placesY = [
-          base,
-          ...cards.flatMap(([a, b]) => [2 - a * k, -2 - b * k, h - 2 - b * k, h + 2 - a * k]),
-        ];
-        const showsY = (value: number) =>
-          value + top * k >= 0 && value + bottom * k <= h && !tornTop(value);
-        const y = nearest(placesY, (value) => showsY(value) && tornY(value).length === 0, base);
-        if (y !== undefined) return setView({ k, x, y });
-        const torn = tornY(base);
-        const wider = [
-          Math.min(top, ...torn.map(([a]) => a)),
-          Math.max(bottom, ...torn.map(([, b]) => b)),
-        ] as const;
-        if (Math.min(1, (h - 16) / (wider[1] - wider[0])) < 0.75)
-          return setView({ k, x, y: nearest(placesY, showsY, base) ?? base });
-        [top, bottom] = wider;
-      }
-    }
-    const onCourt = snapshot.courts.find((court) => court.matchId)?.matchId;
-    const target = open.find((match) => match.id === onCourt) ?? open[0] ?? snapshot.matches.at(-1);
-    const near = open.filter((match) => match.bracket === target?.bracket);
-    const first = near.length
-      ? Math.min(...near.map((match) => layout.at.get(match.id)?.x ?? PAD_X))
-      : PAD_X;
-    const y = target ? (layout.at.get(target.id)?.y ?? PAD_Y) : PAD_Y;
-    const losers = target?.bracket === "losers" && layout.losersTop !== null;
-    const targetX = target ? (layout.at.get(target.id)?.x ?? PAD_X) : PAD_X;
-    const lane = layout.losersTop === null ? null : layout.losersTop - LANE_GAP + 18;
-    const zoom = readableZoom(w);
-    const snapped = snapRight(
-      layout,
-      zoom,
-      w < 600
-        ? GUTTER - targetX * zoom
-        : Math.min(GUTTER - first * zoom, w - 16 - (targetX + NODE_W) * zoom),
-      w,
-    );
-    const k = snapped.k;
-    const x = snapped.cut === null ? snapped.x : w - snapped.cut * k;
-    const above = lane === null ? -1 : h - lane * k;
-    const base = losers
-      ? 8 - lane! * k
-      : above >= 0
-        ? Math.min(above, 32)
-        : Math.min(32, h / 2 - y * k);
-    const floor = h - 4;
-    const flag = 18 * k;
-    const spots = [...layout.at.values()];
-    const topmost = Math.min(...spots.map((spot) => (spot.y - NODE_H / 2) * k)) - flag;
-    const bottom = Math.max(...spots.map((spot) => (spot.y + NODE_H / 2) * k));
-    const placed =
-      losers || lane === null || base + bottom <= floor
-        ? base
-        : Math.max(4 - topmost, Math.min(base, floor - 40 - lane * k));
-    const tops = spots.map((spot) => placed + (spot.y - NODE_H / 2) * k);
-    const straddles = (shift: number) =>
-      tops.some((top) => top + shift - flag < floor && top + shift + NODE_H * k > floor);
-    const nudge = [
-      0,
-      ...tops.flatMap((top) => [floor - top + flag + 2, floor - top - NODE_H * k - 2]),
-    ]
-      .filter((shift) => Math.abs(shift) <= 96 && placed + topmost + shift >= 4)
-      .sort((left, right) => Math.abs(left) - Math.abs(right))
-      .find((shift) => !straddles(shift));
-    setView({ k, x, y: placed + (nudge ?? 0) });
-  }, [contentW, contentH, fit, layout, snapshot.matches, snapshot.courts]);
+    if (el)
+      setView(
+        initialView(layout, snapshot.matches, snapshot.courts, el.clientWidth, el.clientHeight),
+      );
+  }, [layout, snapshot.matches, snapshot.courts]);
 
   const showColumn = (column: Column, from: Column = column, to: Column | null = null) => {
     const el = viewport.current;
     if (!el) return;
-    const ys = snapshot.matches
-      .filter((match) => match.bracket === column.bracket && match.round === column.round)
-      .map((match) => layout.at.get(match.id)?.y ?? column.top);
-    const top = Math.min(column.top, ...ys) - NODE_H / 2;
-    const bottom = Math.max(column.top, ...ys) + NODE_H / 2;
-    const lane =
-      column.bracket === "losers" && layout.losersTop !== null
-        ? layout.losersTop - LANE_GAP + 18
-        : null;
-    const end = contentH - PAD_Y;
-    setView((current) => {
-      const w = el.clientWidth;
-      const readable = Math.max(current.k, readableZoom(w));
-      if (to && lane !== null) {
-        const span = colX(to.index) - colX(from.index) + NODE_W;
-        const whole = Math.min(
-          1.15,
-          (w - 2 * GUTTER) / span,
-          (el.clientHeight - 16) / (end - lane),
-        );
-        if (whole >= 0.7)
-          return {
-            k: whole,
-            x: (w - span * whole) / 2 - colX(from.index) * whole,
-            y: 8 - lane * whole,
-          };
-      }
-      const zoom =
-        lane === null
-          ? readable
-          : Math.max(readable, Math.min(1.15, (el.clientHeight - 16) / (end - lane)));
-      const anchor =
-        (colX(column.index) - colX(from.index) + NODE_W) * zoom + 2 * GUTTER <= w ? from : column;
-      const { k, x } = snapRight(
+    setView((current) =>
+      columnView(
         layout,
-        zoom,
-        Math.max(GUTTER - colX(anchor.index) * zoom, Math.min(w - contentW * zoom, GUTTER)),
-        w,
-      );
-      const tall = (bottom - top) * k + 80 > el.clientHeight;
-      return {
-        k,
-        x,
-        y:
-          lane !== null && (bottom - lane) * k + 8 <= el.clientHeight
-            ? 8 - lane * k
-            : tall
-              ? 40 - top * k
-              : el.clientHeight / 2 - ((top + bottom) / 2) * k,
-      };
-    });
+        snapshot.matches,
+        column,
+        from,
+        to,
+        current,
+        el.clientWidth,
+        el.clientHeight,
+      ),
+    );
   };
 
   const showSide = (side: "winners" | "losers") => {
@@ -600,10 +351,6 @@ export function Bracket({
       (match) =>
         match.nextMatchId === null && (tournament.format === "single" || match.bracket === "final"),
     );
-  const liveIn = (bracket: BracketSide, round: number) =>
-    snapshot.matches.filter(
-      (match) => match.status === "live" && match.bracket === bracket && match.round === round,
-    ).length;
   const championSpot = layout.champion;
   const titleSpot = titleMatch ? layout.at.get(titleMatch.id) : undefined;
 
@@ -627,12 +374,10 @@ export function Bracket({
     ) ?? "tiny";
   const labelLength = lengthFor(false);
   const laneLength = lengthFor(true);
-  const inLosers =
-    layout.losersTop !== null && view.y + (layout.losersTop - LANE_GAP + 18) * view.k <= 16;
-  const losersSide =
-    layout.losersTop !== null && view.y + (layout.losersTop - LANE_GAP + 18) * view.k < box.h / 2;
-  const losersInView =
-    layout.losersTop !== null && view.y + (layout.losersTop - LANE_GAP + 18) * view.k < box.h - 24;
+  const laneY = layout.laneTop === null ? null : view.y + layout.laneTop * view.k;
+  const inLosers = laneY !== null && laneY <= 16;
+  const losersSide = laneY !== null && laneY < box.h / 2;
+  const losersInView = laneY !== null && laneY < box.h - 24;
 
   return (
     <div className="co-canvas">
@@ -731,11 +476,11 @@ export function Bracket({
             } as CSSProperties
           }
         >
-          {layout.losersTop !== null && losersInView ? (
+          {layout.laneTop !== null && losersInView ? (
             <div
               className={inLosers ? "co-lane is-headed" : "co-lane"}
               style={{
-                top: layout.losersTop - LANE_GAP + 18,
+                top: layout.laneTop,
                 width: contentW,
                 fontSize: `${11 / view.k}px`,
               }}
@@ -764,69 +509,14 @@ export function Bracket({
               })}
             </div>
           ) : null}
-          <svg className="co-wires" width={contentW} height={contentH} aria-hidden="true">
-            {snapshot.matches.map((match) => {
-              const next = match.nextMatchId ? byId.get(match.nextMatchId) : undefined;
-              const from = layout.at.get(match.id);
-              const to = next ? layout.at.get(next.id) : undefined;
-              if (!next || !from || !to) return null;
-              const x1 = from.x + NODE_W;
-              const y1 = from.y;
-              const x2 = to.x;
-              const y2 =
-                match.nextSlot === null
-                  ? to.y
-                  : to.y - NODE_H / 2 + (match.nextSlot === "b" ? ROW_H * 1.5 : ROW_H / 2);
-              const mid = x2 - GAP_X / 2;
-              const advanced =
-                match.nextSlot === null
-                  ? next.status !== "skipped" && next.status !== "waiting"
-                  : match.winnerId !== null;
-              const lit =
-                focus !== null &&
-                match.winnerId === focus &&
-                (next.playerA === focus || next.playerB === focus);
-              return (
-                <path
-                  key={match.id}
-                  d={`M${x1} ${y1} H${mid} V${y2} H${x2}`}
-                  className={`co-wire${advanced ? " is-advanced" : ""}${lit ? " is-lit" : ""}${
-                    next.status === "skipped" ? " is-unused" : ""
-                  }`}
-                />
-              );
-            })}
-            {focus
-              ? snapshot.matches.map((match) => {
-                  if (!match.loserNextMatchId || !match.winnerId || match.winnerId === focus)
-                    return null;
-                  if (match.playerA !== focus && match.playerB !== focus) return null;
-                  const from = layout.at.get(match.id);
-                  const to = layout.at.get(match.loserNextMatchId);
-                  if (!from || !to) return null;
-                  const x1 = from.x + NODE_W;
-                  const x2 = to.x;
-                  const y2 =
-                    to.y - NODE_H / 2 + (match.loserNextSlot === "b" ? ROW_H * 1.5 : ROW_H / 2);
-                  const gap = (layout.losersTop ?? 0) - LANE_GAP + 8;
-                  return (
-                    <path
-                      key={`drop-${match.id}`}
-                      d={`M${x1} ${from.y} H${x1 + 18} V${gap} H${Math.max(8, x2 - 54)} V${y2} H${x2}`}
-                      className="co-wire is-drop is-lit"
-                    />
-                  );
-                })
-              : null}
-            {titleSpot ? (
-              <path
-                d={`M${titleSpot.x + NODE_W} ${titleSpot.y} H${championSpot.x}`}
-                className={`co-wire${champion ? " is-advanced" : ""}${
-                  champion && champion.id === focus ? " is-lit" : ""
-                }`}
-              />
-            ) : null}
-          </svg>
+          <Wires
+            matches={snapshot.matches}
+            byId={byId}
+            layout={layout}
+            focus={focus}
+            titleSpot={titleSpot}
+            champion={champion}
+          />
           {snapshot.matches.map((match) => {
             const spot = layout.at.get(match.id);
             if (!spot) return null;
@@ -842,10 +532,7 @@ export function Bracket({
                 traced={onPath(match)}
                 selected={selectedMatchId === match.id}
                 onHover={setHovered}
-                onOpen={(picked) => {
-                  setHovered(null);
-                  onOpenMatch(picked);
-                }}
+                onOpen={openNode}
                 left={spot.x}
                 top={spot.y - NODE_H / 2}
               />
@@ -875,20 +562,12 @@ export function Bracket({
         onZoomIn={() => zoomCenter(1.2)}
         onZoomOut={() => zoomCenter(1 / 1.2)}
         onFit={fit}
-        side={layout.losersTop === null ? null : losersSide ? "losers" : "winners"}
+        side={layout.laneTop === null ? null : losersSide ? "losers" : "winners"}
         losersInView={losersInView}
         onSide={showSide}
-        losersLive={
-          snapshot.matches.filter((match) => match.status === "live" && match.bracket === "losers")
-            .length
-        }
+        losersLive={layout.lanes.reduce((sum, lane) => sum + liveIn("losers", lane.round), 0)}
         rounds={layout.columns.map((column) => {
-          const playing = snapshot.matches.filter(
-            (match) =>
-              match.status === "live" &&
-              match.bracket === column.bracket &&
-              match.round === column.round,
-          ).length;
+          const playing = liveIn(column.bracket, column.round);
           return {
             key: column.key,
             label: `${roundLabel(tournament, column.bracket, column.round)}${playing ? ` · ${playing} live` : ""}`,
@@ -908,6 +587,89 @@ export function Bracket({
   );
 }
 
+interface WiresProps {
+  matches: Match[];
+  byId: Map<string, Match>;
+  layout: Layout;
+  focus: string | null;
+  titleSpot: Spot | undefined;
+  champion: Standing | undefined;
+}
+
+const Wires = memo(function Wires({
+  matches,
+  byId,
+  layout,
+  focus,
+  titleSpot,
+  champion,
+}: WiresProps) {
+  const championSpot = layout.champion;
+  return (
+    <svg className="co-wires" width={layout.width} height={layout.height} aria-hidden="true">
+      {matches.map((match) => {
+        const next = match.nextMatchId ? byId.get(match.nextMatchId) : undefined;
+        const from = layout.at.get(match.id);
+        const to = next ? layout.at.get(next.id) : undefined;
+        if (!next || !from || !to) return null;
+        const x1 = from.x + NODE_W;
+        const y1 = from.y;
+        const x2 = to.x;
+        const y2 =
+          match.nextSlot === null
+            ? to.y
+            : to.y - NODE_H / 2 + (match.nextSlot === "b" ? ROW_H * 1.5 : ROW_H / 2);
+        const mid = x2 - GAP_X / 2;
+        const advanced =
+          match.nextSlot === null
+            ? next.status !== "skipped" && next.status !== "waiting"
+            : match.winnerId !== null;
+        const lit =
+          focus !== null &&
+          match.winnerId === focus &&
+          (next.playerA === focus || next.playerB === focus);
+        return (
+          <path
+            key={match.id}
+            d={`M${x1} ${y1} H${mid} V${y2} H${x2}`}
+            className={`co-wire${advanced ? " is-advanced" : ""}${lit ? " is-lit" : ""}${
+              next.status === "skipped" ? " is-unused" : ""
+            }`}
+          />
+        );
+      })}
+      {focus
+        ? matches.map((match) => {
+            if (!match.loserNextMatchId || !match.winnerId || match.winnerId === focus) return null;
+            if (match.playerA !== focus && match.playerB !== focus) return null;
+            const from = layout.at.get(match.id);
+            const to = layout.at.get(match.loserNextMatchId);
+            if (!from || !to) return null;
+            const x1 = from.x + NODE_W;
+            const x2 = to.x;
+            const y2 = to.y - NODE_H / 2 + (match.loserNextSlot === "b" ? ROW_H * 1.5 : ROW_H / 2);
+            const gap = (layout.laneTop ?? 0) - 10;
+            return (
+              <path
+                key={`drop-${match.id}`}
+                d={`M${x1} ${from.y} H${x1 + 18} V${gap} H${Math.max(8, x2 - 54)} V${y2} H${x2}`}
+                className="co-wire is-drop is-lit"
+              />
+            );
+          })
+        : null}
+      {titleSpot ? (
+        <path
+          d={`M${titleSpot.x + NODE_W} ${titleSpot.y} H${championSpot.x}`}
+          className={`co-wire${champion ? " is-advanced" : ""}${
+            champion && champion.id === focus ? " is-lit" : ""
+          }`}
+        />
+      ) : null}
+    </svg>
+  );
+});
+
 interface MatchNodeProps {
   tournament: Tournament;
   snapshot: Snapshot;
@@ -923,7 +685,7 @@ interface MatchNodeProps {
   top: number;
 }
 
-function MatchNode({
+const MatchNode = memo(function MatchNode({
   tournament,
   snapshot,
   match,
@@ -1061,7 +823,7 @@ function MatchNode({
       </button>
     </div>
   );
-}
+});
 
 interface CanvasToolsProps {
   zoom: number;
