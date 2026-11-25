@@ -130,6 +130,7 @@ export interface LineChartProps {
   readonly goal?: { readonly value: number; readonly label?: string };
   readonly formatValue?: (value: number) => string;
   readonly ariaLabel?: string;
+  readonly markerIndex?: number;
 }
 
 export function LineChart({
@@ -141,6 +142,7 @@ export function LineChart({
   goal,
   formatValue = (value) => value.toLocaleString(),
   ariaLabel = "Trend chart",
+  markerIndex,
 }: LineChartProps) {
   const { ref, width } = useContainerWidth(560);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
@@ -151,6 +153,13 @@ export function LineChart({
     rawSeries ?? (data ? [{ name: "Value", values: data.map((item) => item.value) }] : []);
   const selected =
     activeIndex !== null && activeIndex >= 0 && activeIndex < labels.length ? activeIndex : null;
+  const marker =
+    markerIndex !== undefined &&
+    Number.isInteger(markerIndex) &&
+    markerIndex >= 0 &&
+    markerIndex < labels.length
+      ? markerIndex
+      : null;
 
   const validGoal = goal && Number.isFinite(goal.value) ? goal : undefined;
   const finiteValues = [
@@ -198,7 +207,7 @@ export function LineChart({
       ref={ref}
       className="kit-chart"
       role="group"
-      aria-label={ariaLabel}
+      aria-label={marker === null ? ariaLabel : `${ariaLabel}, marked ${labels[marker]}`}
       tabIndex={0}
       onFocus={() => {
         setKeyboardFocused(true);
@@ -267,6 +276,18 @@ export function LineChart({
           </g>
         ) : null}
 
+        {marker !== null ? (
+          <line
+            className="kit-chart-marker"
+            x1={xOf(marker)}
+            y1={pad.top}
+            x2={xOf(marker)}
+            y2={pad.top + plotH}
+            stroke="var(--kit-ink)"
+            strokeWidth={1.5}
+          />
+        ) : null}
+
         {series.map((entry, seriesIndex) => {
           const stroke = colorAt(seriesIndex, entry.color);
           const segments: Array<Array<{ index: number; value: number }>> = [];
@@ -318,7 +339,7 @@ export function LineChart({
                     key={`${seriesIndex}-pt-${index}`}
                     cx={xOf(index)}
                     cy={yOf(value)}
-                    r={selected === index ? 4.5 : 2.5}
+                    r={selected === index || marker === index ? 4.5 : 2.5}
                     fill={stroke}
                   />
                 );

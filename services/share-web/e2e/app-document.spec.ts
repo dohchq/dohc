@@ -49,7 +49,10 @@ test("approved React bundle runs under inherited CSP in an opaque child", async 
         createRoot(document.getElementById('root')!).render(<Poll/>);
         fetch('${origin}/external',{method:'POST',body:'allowed'}).then(r=>r.text()).then(value=>{document.body.dataset.network=value});`,
         ),
-        input("style.css", "button { color: rgb(4, 5, 6) }"),
+        input(
+          "style.css",
+          "button { color: rgb(4, 5, 6) } @layer app { button { box-sizing: content-box } }",
+        ),
       ],
     });
     const doc = createAppDocument(build.files, {
@@ -67,6 +70,12 @@ test("approved React bundle runs under inherited CSP in an opaque child", async 
     await expect(app.getByRole("button")).toHaveText("Votes: 1");
     await expect(app.getByRole("button")).toHaveCSS("color", "rgb(4, 5, 6)");
     await expect(app.getByRole("button")).toHaveCSS("background-color", "rgb(1, 2, 3)");
+    await expect(app.locator("body")).toHaveCSS(
+      "font-family",
+      'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
+    );
+    await expect(app.getByRole("img")).toHaveCSS("box-sizing", "border-box");
+    await expect(app.getByRole("button")).toHaveCSS("box-sizing", "content-box");
     await expect(app.locator("body")).toHaveAttribute("data-network", "received");
     await expect
       .poll(() =>

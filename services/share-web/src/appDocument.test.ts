@@ -71,7 +71,9 @@ describe("compiled app document", () => {
     const dom = new JSDOM(output.html, { runScripts: "dangerously" });
     expect(dom.window.value).toBe(attack);
     expect(dom.window.document.querySelectorAll("script[src],img")).toHaveLength(0);
-    expect(dom.window.document.querySelector("style")!.textContent).toBe(`/*${attack}*/`);
+    expect([...dom.window.document.querySelectorAll("style")].at(-1)!.textContent).toBe(
+      `/*${attack}*/`,
+    );
     dom.window.close();
   });
 
@@ -196,7 +198,7 @@ describe("compiled app document", () => {
     it("lets the browser parse the page after the policy and bundle.js, pinning every script by hash", () => {
       const output = build(page());
       expect(output.html).toMatch(
-        /^<!doctype html><html lang="fr" data-note="a &quot;quoted&quot; &amp; value"><head><meta charset="utf-8">.*<meta http-equiv="Content-Security-Policy" content="[^"]*"><script>addEventListener\("click"[^<]*<\/script><script>window\.registry = true;<\/script><title>Trip<\/title>/,
+        /^<!doctype html><html lang="fr" data-note="a &quot;quoted&quot; &amp; value"><head><meta charset="utf-8">.*<meta http-equiv="Content-Security-Policy" content="[^"]*"><style>@layer dohc-frame\{[^<]*<\/style><script>addEventListener\("click"[^<]*<\/script><script>window\.registry = true;<\/script><title>Trip<\/title>/,
       );
       const dom = new JSDOM(output.html, { runScripts: "dangerously" });
       expect(dom.window.document.documentElement.getAttribute("data-note")).toBe(

@@ -6,17 +6,18 @@ import {
   isValidElement,
   useEffect,
   useId,
+  useImperativeHandle,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type ButtonHTMLAttributes,
+  type ComponentProps,
   type CSSProperties,
   type InputHTMLAttributes,
   type KeyboardEvent,
   type ReactNode,
   type SelectHTMLAttributes,
-  type TextareaHTMLAttributes,
 } from "react";
 
 export type Tone = "neutral" | "success" | "warning" | "danger";
@@ -447,7 +448,7 @@ export function Field({ label, htmlFor, hint, error, children }: FieldProps) {
   );
 }
 
-export function Input({ className, ...props }: InputHTMLAttributes<HTMLInputElement>) {
+export function Input({ className, ...props }: ComponentProps<"input">) {
   return <input {...props} className={cx("kit-input", className)} />;
 }
 
@@ -455,8 +456,95 @@ export function Select({ className, ...props }: SelectHTMLAttributes<HTMLSelectE
   return <select {...props} className={cx("kit-select", className)} />;
 }
 
-export function Textarea({ className, ...props }: TextareaHTMLAttributes<HTMLTextAreaElement>) {
+export function Textarea({ className, ...props }: ComponentProps<"textarea">) {
   return <textarea {...props} className={cx("kit-textarea", className)} />;
+}
+
+export interface DateFieldProps extends Omit<
+  ComponentProps<"input">,
+  "type" | "value" | "defaultValue" | "onChange" | "min" | "max"
+> {
+  readonly value: string;
+  readonly onChange: (value: string) => void;
+  readonly min?: string;
+  readonly max?: string;
+}
+
+function dateProblem(text: string, min?: string, max?: string): string | null {
+  if (text === "") return null;
+  if (!parseIsoDate(text)) return "Enter a date as YYYY-MM-DD";
+  if ((!min || text >= min) && (!max || text <= max)) return null;
+  if (min && max) return `Enter a date from ${min} to ${max}`;
+  return min ? `Enter a date on or after ${min}` : `Enter a date on or before ${max}`;
+}
+
+function stepDate(text: string, days: number, min?: string, max?: string): string {
+  const now = new Date();
+  const date =
+    parseIsoDate(text) ?? utcDate(now.getFullYear(), now.getMonth() + 1, now.getDate() - days);
+  date.setUTCDate(date.getUTCDate() + days);
+  const next = toIsoDate(date);
+  return max && next > max ? max : min && next < min ? min : next;
+}
+
+export function DateField({
+  value,
+  onChange,
+  min,
+  max,
+  ref,
+  className,
+  onBlur,
+  onKeyDown,
+  ...props
+}: DateFieldProps) {
+  const field = useRef<HTMLInputElement>(null);
+  useImperativeHandle(ref, () => field.current!, []);
+  const [text, setText] = useState(value);
+  const [shown, setShown] = useState(value);
+  const [checked, setChecked] = useState(false);
+  if (value !== shown) {
+    setShown(value);
+    setText(value);
+  }
+  const problem = dateProblem(text, min, max);
+  useLayoutEffect(() => field.current?.setCustomValidity(problem ?? ""), [problem]);
+
+  const commit = (next: string) => {
+    setText(next);
+    const date = next && !dateProblem(next, min, max) ? next : "";
+    setShown(date);
+    if (date !== value) onChange(date);
+  };
+
+  return (
+    <input
+      placeholder="YYYY-MM-DD"
+      autoComplete="off"
+      spellCheck={false}
+      {...props}
+      ref={field}
+      type="text"
+      value={text}
+      aria-invalid={checked && problem ? true : props["aria-invalid"]}
+      className={cx("kit-input", "kit-date-field", className)}
+      onChange={(event) => {
+        setChecked(false);
+        commit(event.target.value);
+      }}
+      onBlur={(event) => {
+        setChecked(true);
+        onBlur?.(event);
+      }}
+      onKeyDown={(event) => {
+        onKeyDown?.(event);
+        if (event.defaultPrevented || (event.key !== "ArrowUp" && event.key !== "ArrowDown"))
+          return;
+        event.preventDefault();
+        commit(stepDate(text, event.key === "ArrowUp" ? 1 : -1, min, max));
+      }}
+    />
+  );
 }
 
 export interface CheckboxProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "type"> {
@@ -512,6 +600,12 @@ export function Modal({ open, title, onClose, footer, children }: ModalProps) {
   });
   const previousFocus = useRef<HTMLElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
+  const wasOpen = useRef(false);
+  if (open && !wasOpen.current) {
+    previousFocus.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  }
+  wasOpen.current = open;
 
   useEffect(() => {
     if (!open) return;
@@ -519,10 +613,8 @@ export function Modal({ open, title, onClose, footer, children }: ModalProps) {
     openModalStack.push(modalId);
     const isTopModal = () => openModalStack[openModalStack.length - 1] === modalId;
 
-    previousFocus.current =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const dialog = dialogRef.current;
-    dialog?.focus();
+    if (!dialog?.contains(document.activeElement)) dialog?.focus();
 
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (!isTopModal()) return;
@@ -572,7 +664,7 @@ export function Modal({ open, title, onClose, footer, children }: ModalProps) {
       const wasTop = isTopModal();
       const index = openModalStack.lastIndexOf(modalId);
       if (index >= 0) openModalStack.splice(index, 1);
-      if (wasTop && previousFocus.current?.isConnected) {
+      if (wasTop && !dialog?.isConnected && previousFocus.current?.isConnected) {
         previousFocus.current.focus();
       }
     };
@@ -830,30 +922,35 @@ export function formatCompact(value: number): string {
 
 const DATE_ONLY_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 
+function utcDate(year: number, month: number, day: number): Date {
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  return date;
+}
+
+function toIsoDate(date: Date): string {
+  const pad = (part: number, length: number) => String(part).padStart(length, "0");
+  return `${pad(date.getUTCFullYear(), 4)}-${pad(date.getUTCMonth() + 1, 2)}-${pad(date.getUTCDate(), 2)}`;
+}
+
+function parseIsoDate(value: string): Date | null {
+  const match = DATE_ONLY_PATTERN.exec(value);
+  if (!match) return null;
+  const date = utcDate(Number(match[1]), Number(match[2]), Number(match[3]));
+  return toIsoDate(date) === value ? date : null;
+}
+
 export function formatDate(
   value: string | number | Date,
   style: "short" | "medium" | "long" = "medium",
 ): string {
-  let date: Date;
-  if (value instanceof Date) {
-    date = value;
-  } else if (typeof value === "string") {
-    const match = DATE_ONLY_PATTERN.exec(value);
-    if (match) {
-      const year = Number(match[1]);
-      const month = Number(match[2]);
-      const day = Number(match[3]);
-      date = new Date(year, month - 1, day);
-      if (year < 100) date.setFullYear(year);
-      if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) {
-        return value;
-      }
-    } else {
-      date = new Date(value);
-    }
-  } else {
-    date = new Date(value);
+  if (typeof value === "string" && DATE_ONLY_PATTERN.test(value)) {
+    const day = parseIsoDate(value);
+    return day
+      ? new Intl.DateTimeFormat(undefined, { dateStyle: style, timeZone: "UTC" }).format(day)
+      : value;
   }
+  const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
   return new Intl.DateTimeFormat(undefined, { dateStyle: style }).format(date);
 }

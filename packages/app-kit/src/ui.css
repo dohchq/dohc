@@ -342,6 +342,17 @@ body {
   padding: 7px 10px;
 }
 
+.kit-input[aria-invalid="true"],
+.kit-select[aria-invalid="true"],
+.kit-textarea[aria-invalid="true"] {
+  border-color: var(--kit-danger);
+}
+
+.kit-date-field {
+  max-width: 16ch;
+  font-variant-numeric: tabular-nums;
+}
+
 .kit-textarea {
   min-height: 84px;
   resize: vertical;
