@@ -775,7 +775,6 @@ fn watcher_thread(
                     }
                     if !unavailable.load(Ordering::Acquire) && !watched_root.still_bound(&root) {
                         state.disruptions.fetch_add(1, Ordering::AcqRel);
-                        dirty();
                         // Rebind to the new directory object (so we don't
                         // reattach every poll forever), then reattach -- same
                         // bind-before-attach ordering as startup, and it also
