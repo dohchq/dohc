@@ -44,7 +44,11 @@ import {
   type ValidatedLiveUpdateCut,
   type OrderedLiveUpdateCutRefusal,
 } from "./orderedLiveUpdateCut.js";
-import { WORKER_LIVE_VALIDATION_POLICY, withinLiveNoteCapacity } from "./liveValidationPolicy.js";
+import {
+  MAX_PROJECTION_NODES,
+  WORKER_LIVE_VALIDATION_POLICY,
+  withinLiveNoteCapacity,
+} from "./liveValidationPolicy.js";
 
 const INPUT_FIELDS = ["document", "currentPath", "checkpoint"] as const;
 const JOURNAL_INPUT_FIELDS = [...INPUT_FIELDS, "suffix", "candidate"] as const;
@@ -59,7 +63,6 @@ const POLICY_FIELDS = [
   "maxIndexOperations",
 ] as const;
 const MAX_DEPTH = 128;
-const MAX_NODES = 262_144;
 const MIN_INT64 = -(1n << 63n);
 const MAX_INT64 = (1n << 63n) - 1n;
 const SHARED_BIGINT_KEY = "$dohcBigInt";
@@ -772,11 +775,11 @@ class ProjectionBudget {
 
   consumeNode(): void {
     this.nodes += 1;
-    if (this.nodes > MAX_NODES) refuse("capacity-refused");
+    if (this.nodes > MAX_PROJECTION_NODES) refuse("capacity-refused");
   }
 
   get remaining(): number {
-    return MAX_NODES - this.nodes;
+    return MAX_PROJECTION_NODES - this.nodes;
   }
 }
 

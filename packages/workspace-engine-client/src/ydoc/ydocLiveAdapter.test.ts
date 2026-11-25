@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import * as ydocProjection from "@dohc/ydoc-projection";
+import {
+  admitBodySequenceNotes,
+  createLiveMarkdownRegistrationValidator,
+  WORKER_LIVE_VALIDATION_POLICY,
+} from "@dohc/ydoc-projection/live-journal-validation";
 import commonmark from "../../../ydoc-projection/src/fixtures/commonmark-edit-meaning.json";
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
@@ -2305,6 +2310,110 @@ describe("seeding an absent lineage", () => {
     expect(edits.length).toBeGreaterThanOrEqual(3);
     for (const edit of edits) expect(clientsOf(edit)).not.toContain(seedClient);
     expect(recordedUpdates(engine, true)).toHaveLength(1);
+  });
+
+  async function openUnder(content: string, seedSchemaVersion?: number) {
+    const engine = new YdocLoopbackEngine();
+    engine.seedFile({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      content,
+      contentKind: "richdoc",
+    });
+    const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        const response = await engine.sendRequest(request);
+        if (request.method !== YDOC_METHOD.open || seedSchemaVersion === undefined) return response;
+        const result = { ...(response.result as Record<string, JsonValue>), seedSchemaVersion };
+        return { id: response.id, result };
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    let refusal: unknown;
+    try {
+      const session = await adapter.openSession({
+        workspace: WORKSPACE,
+        versionId: VERSION,
+        path: PATH,
+        contentKind: "richdoc",
+        largeSeed: { workspaceId: "workspace-1", maxBytes: 1024 * 1024 },
+      });
+      await session.close({ settle: false });
+    } catch (error) {
+      refusal = error;
+    } finally {
+      adapter.dispose();
+    }
+    return { refusal, seeds: recordedUpdates(engine, true) };
+  }
+  async function seededUnder(content: string, seedSchemaVersion?: number): Promise<Y.Doc> {
+    const { refusal, seeds } = await openUnder(content, seedSchemaVersion);
+    expect(refusal).toBeUndefined();
+    expect(seeds).toHaveLength(1);
+    const note = new Y.Doc();
+    Y.applyUpdate(note, seeds[0]!);
+    return note;
+  }
+  const formatOf = (note: Y.Doc) => ({
+    marker: note.getMap("meta").get("schemaVersion"),
+    underBody: note.getXmlFragment("body").length > 0,
+    inSequence: note.getText("sequence").length > 0,
+    markdown: ydocProjection.yDocToMarkdown(note),
+  });
+
+  it("seeds a note in the format the engine's answer names: format 2 for 2, and format 1 for 1 or for none", async () => {
+    const content = "# Shared\n\n- one\n- two\n";
+    const first = { marker: 1, underBody: true, inSequence: false, markdown: content };
+    expect(formatOf(await seededUnder(content))).toEqual(first);
+    expect(formatOf(await seededUnder(content, 1))).toEqual(first);
+    expect(formatOf(await seededUnder(content, 2))).toEqual({
+      marker: 2,
+      underBody: false,
+      inSequence: true,
+      markdown: content,
+    });
+  });
+
+  it("seeds format 1 when the engine names 2 and the text holds what format 2 cannot: a link on inline code", async () => {
+    const content = "Run [`npm install`](https://docs.example/install) first.\n";
+    expect(formatOf(await seededUnder(content, 2))).toEqual({
+      marker: 1,
+      underBody: true,
+      inSequence: false,
+      markdown: content,
+    });
+  });
+
+  it("seeds format 1 when the engine names 2 and a format-2 note of the text would be past the relay's capacity", async () => {
+    const content = "a\n\n".repeat(29_000);
+    const note = await seededUnder(content, 2);
+    expect(note.getMap("meta").get("schemaVersion")).toBe(1);
+    const checkpoint = Y.encodeStateAsUpdate(note);
+    admitBodySequenceNotes(true);
+    try {
+      const result = createLiveMarkdownRegistrationValidator(WORKER_LIVE_VALIDATION_POLICY)({
+        document: {
+          workspaceId: WORKSPACE,
+          mainVersionId: "main",
+          objectId: "object",
+          lineageClaimId: createHash("sha256").update(checkpoint).digest("hex"),
+        },
+        currentPath: "notes/live.md",
+        checkpoint,
+      });
+      expect(result.kind).toBe("accepted");
+    } finally {
+      admitBodySequenceNotes(false);
+    }
+  });
+
+  it("refuses an open answer that names a format it does not know, and seeds nothing", async () => {
+    const { refusal, seeds } = await openUnder("# Shared\n", 3);
+    expect(String(refusal)).toMatch(/seedSchemaVersion/);
+    expect(seeds).toHaveLength(0);
   });
 
   it("refuses seed content that comes without a seed client", async () => {

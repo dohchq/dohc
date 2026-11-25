@@ -1678,7 +1678,10 @@ export class YdocLiveAdapter {
         const seedDoc =
           result.contentKind === "plaintext"
             ? createPlaintextSeedDoc(seedContent, clientID)
-            : markdownToYDoc(seedContent, { clientID });
+            : markdownToYDoc(seedContent, {
+                clientID,
+                bodySequence: result.seedSchemaVersion === 2,
+              });
         try {
           if (result.contentKind === "richdoc") {
             let projection: string | undefined;

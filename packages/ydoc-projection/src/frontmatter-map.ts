@@ -3,6 +3,7 @@
 // kept text and its items in the meta map. This module imports only yjs and
 // the frontmatter rules, so a surface can read and edit a live document's
 // frontmatter without loading the editor.
+import { utf8ByteLength } from "@dohc/live-session-contract/limits";
 import * as Y from "yjs";
 import {
   assertFrontmatterEdit,
@@ -248,6 +249,34 @@ const FRONTMATTER_SHARED_BIGINT_KEY = "$dohcBigInt";
 // spelled this way gain one `$` when a shared map is built and lose one when
 // it is read, so only a real sentinel ever carries the unescaped key.
 const SHARED_BIGINT_KEY_SPELLING = /^\$+dohcBigInt$/;
+
+/**
+ * What the engine's Markdown writer spends reading a note's frontmatter: a node for each value,
+ * and the bytes of each key and string, and of bytes as base64.
+ */
+export function engineReadOfFrontmatter(map: Y.Map<unknown>): { nodes: number; bytes: number } {
+  const read = { nodes: 0, bytes: 0 };
+  const entries = (pairs: Iterable<[string, unknown]>) => {
+    for (const [key, held] of pairs) {
+      read.bytes += utf8ByteLength(key);
+      value(held);
+    }
+  };
+  const value = (held: unknown): void => {
+    read.nodes++;
+    if (held instanceof Y.Map) {
+      if (held.size !== 1 || typeof held.get(FRONTMATTER_SHARED_BIGINT_KEY) !== "bigint")
+        entries(held.entries());
+    } else if (held instanceof Y.Array || Array.isArray(held))
+      for (const child of held instanceof Y.Array ? held.toArray() : (held as unknown[]))
+        value(child);
+    else if (typeof held === "string") read.bytes += utf8ByteLength(held);
+    else if (held instanceof Uint8Array) read.bytes += Math.ceil(held.length / 3) * 4;
+    else if (typeof held === "object" && held !== null) entries(Object.entries(held));
+  };
+  entries(map.entries());
+  return read;
+}
 
 function escapeSharedBigIntKey(key: string): string {
   return SHARED_BIGINT_KEY_SPELLING.test(key) ? `$${key}` : key;

@@ -7,7 +7,11 @@ import {
 } from "./bodySequenceGrammar.js";
 import { holdsBodySequence } from "./bodySequenceYjs.js";
 import { getDohcProseMirrorSchema } from "./import-export.js";
-import { LIVE_NOTE_CAPACITY, LIVE_NOTE_ELEMENT_WEIGHT } from "./liveValidationPolicy.js";
+import {
+  LIVE_NOTE_CAPACITY,
+  LIVE_NOTE_ELEMENT_WEIGHT,
+  SAVE_VISITS_PER_READ,
+} from "./liveValidationPolicy.js";
 import {
   readLiveUpdateAsTheCutDoes,
   type LiveUpdateAsRead,
@@ -535,23 +539,6 @@ export function bodySequenceStateRefusal(
  * seven times and counts to 5,000,000, so one change's values are at most 700,000 of that count.
  */
 export const BODY_SEQUENCE_CHANGE_MAX_VALUES = 100_000;
-
-/**
- * How many times the save's check is at each thing that one read of a change is at once, at
- * most. Measured on the save's own counters: four reads of each struct, and of each value and
- * byte of text outside a mark, seven of each inside one, and at most four of each delete. The
- * save's index operations are its sorting work, not a count of what a change holds, and are not
- * divided.
- */
-const SAVE_VISITS_PER_READ: OrderedLiveUpdateCutPolicy = {
-  maxStructVisits: 4,
-  maxValueNodeVisits: 7,
-  maxDecodedPayloadByteVisits: 7,
-  maxStructClientGroupVisits: 4,
-  maxDeleteClientGroupVisits: 4,
-  maxDeleteIntervalVisits: 4,
-  maxIndexOperations: 1,
-};
 
 /**
  * The policy a room reads one change under, from the save's: each count the save allows, divided

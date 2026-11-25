@@ -1,4 +1,5 @@
-import type { Schema } from "@tiptap/pm/model";
+import { utf8ByteLength } from "@dohc/live-session-contract/limits";
+import type { MarkType, NodeType, Node as ProseMirrorNode, Schema } from "@tiptap/pm/model";
 import * as Y from "yjs";
 import {
   BLOCK_ELEMENT,
@@ -6,12 +7,17 @@ import {
   BODY_SEQUENCE_FIELD,
   MAX_SEQUENCE_DEPTH,
   allowedChildren,
+  flattenBody,
+  keepsMarkup,
   leavesOfSequence,
   readBodyLeaves,
   recordsOfContainer,
+  startingRecords,
+  writtenLeaves,
   type SequenceAttrs,
   type SequenceLeaf,
 } from "./bodySequenceGrammar.js";
+import type { NewNoteCounts } from "./liveValidationPolicy.js";
 
 /**
  * A container as a writer holds it. Neighbouring lines in one container hold the same object, so
@@ -1279,6 +1285,233 @@ export function writeBody(
     edits.sort((one, other) => other.index - one.index || one.rank - other.rank);
     for (const edit of edits) edit.make();
     bound(change.made());
+  }, origin);
+}
+
+type Read = { values: number; bytes: number };
+
+function stored(read: Read, value: unknown): void {
+  read.values++;
+  if (typeof value === "string") read.bytes += utf8ByteLength(value);
+  else if (Array.isArray(value)) for (const held of value) stored(read, held);
+  else if (typeof value === "object" && value !== null)
+    for (const [key, held] of Object.entries(value)) {
+      read.bytes += utf8ByteLength(key);
+      stored(read, held);
+    }
+}
+
+const SEQUENCE_NAME_BYTES = utf8ByteLength(BODY_SEQUENCE_FIELD);
+const CONTAINERS_NAME_BYTES = utf8ByteLength(BODY_CONTAINERS_FIELD);
+const BOUNDARY_NAME_BYTES = utf8ByteLength(BLOCK_ELEMENT);
+
+type Kind = { structs: number; keyBytes: number; nameBytes: number };
+
+/**
+ * What a note stores more once `writeNewBody` writes `body` into it with `idFor`, counted as the
+ * save's check and the engine's Markdown writer count it, or null when the note would not read
+ * as `body`:
+ * - a line sits in more containers than a note holds;
+ * - a container holds no line, or a node holds what its kind does not allow;
+ * - a block or an inline item carries a mark;
+ * - an attribute holds a value its rule does not keep (2.3), such as a row height over the
+ *   limit or a callout type with a line break;
+ * - a letter of inline code carries another mark, such as a link.
+ *
+ * The engine's Markdown writer spends a node on each path entry of each line, each container,
+ * line, text run, mark of a run, inline item, attribute and column width, and on the one empty
+ * line of a note with none. It counts the bytes of each path entry, kind and string it reads, and
+ * a run's marks each time it reads them: when it reaches the run, when it starts the run, and when
+ * it compares them with the run before of as many marks.
+ */
+export function newBodyWeight(
+  schema: Schema,
+  body: ProseMirrorNode,
+  idFor: (container: ProseMirrorNode, index: number) => string,
+): NewNoteCounts | null {
+  if (body.childCount > 0 && !body.type.validContent(body.content)) return null;
+  const kinds = new Map<NodeType | MarkType, Kind>();
+  const kind = (type: NodeType | MarkType, made: () => Omit<Kind, "nameBytes">) => {
+    let known = kinds.get(type);
+    if (known === undefined)
+      kinds.set(type, (known = { ...made(), nameBytes: utf8ByteLength(type.name) }));
+    return known;
+  };
+  const keyBytes = (keys: Iterable<string>, prefix = "") => {
+    let bytes = 0;
+    for (const key of keys) bytes += utf8ByteLength(prefix + key);
+    return bytes;
+  };
+  let structs = 0;
+  let elements = 0;
+  let engineNodes = 0;
+  let engineBytes = 0;
+  let containers = 0;
+  const read: Read = { values: 0, bytes: 0 };
+  const marked: Read = { values: 0, bytes: 0 };
+  const attributes = (attrs: ProseMirrorNode["attrs"]) => {
+    for (const [key, value] of Object.entries(attrs)) {
+      if (key === "type" || key === "path") continue;
+      stored(read, value);
+      engineNodes++;
+      if (typeof value === "string") engineBytes += utf8ByteLength(value);
+      else if (Array.isArray(value)) engineNodes += value.length;
+    }
+  };
+  const line = (child: ProseMirrorNode, depth: number, pathBytes: number): boolean => {
+    if (!child.type.validContent(child.content)) return false;
+    const leaf = kind(child.type, () => {
+      const keys = new Set([...Object.keys(child.attrs), "type", "path"]);
+      return { structs: 1 + keys.size, keyBytes: keyBytes(keys) };
+    });
+    structs += leaf.structs;
+    elements++;
+    read.bytes += BOUNDARY_NAME_BYTES + leaf.keyBytes + leaf.nameBytes + pathBytes;
+    read.values += 2 + depth;
+    engineNodes += 1 + depth;
+    engineBytes += leaf.nameBytes + pathBytes;
+    attributes(child.attrs);
+    const unmarked = child.type.spec.marks === "";
+    let before = -1;
+    for (let piece = 0; piece < child.childCount; piece++) {
+      const inline = child.child(piece);
+      if (!keepsMarkup(inline)) return false;
+      if (!inline.isText) {
+        const atom = kind(inline.type, () => {
+          const keys = Object.keys(inline.attrs);
+          return { structs: 1 + keys.length, keyBytes: keyBytes(keys) };
+        });
+        structs += atom.structs;
+        elements++;
+        read.bytes += atom.nameBytes + atom.keyBytes;
+        engineNodes++;
+        engineBytes += atom.nameBytes;
+        attributes(inline.attrs);
+        before = -1;
+        continue;
+      }
+      const letters = utf8ByteLength(inline.text ?? "");
+      const marks = inline.marks;
+      structs += 1 + 2 * marks.length;
+      read.bytes += letters;
+      engineBytes += letters;
+      if (unmarked) {
+        if (before === -1) engineNodes++;
+        before = 0;
+        continue;
+      }
+      let markBytes = 0;
+      engineNodes++;
+      for (const mark of marks) {
+        marked.bytes += 2 * kind(mark.type, () => ({ structs: 0, keyBytes: 0 })).nameBytes;
+        marked.values++;
+        stored(marked, mark.attrs);
+        engineNodes++;
+        for (const value of Object.values(mark.attrs)) {
+          engineNodes++;
+          if (typeof value === "string") markBytes += utf8ByteLength(value);
+        }
+      }
+      engineBytes += (before === marks.length ? 3 : 2) * markBytes;
+      before = marks.length;
+    }
+    return true;
+  };
+  const holds = (node: ProseMirrorNode, depth: number, pathBytes: number): boolean => {
+    for (let at = 0; at < node.childCount; at++) {
+      const child = node.child(at);
+      if (!keepsMarkup(child)) return false;
+      if (child.isTextblock || child.isLeaf) {
+        if (!line(child, depth, pathBytes)) return false;
+        continue;
+      }
+      if (
+        depth === MAX_SEQUENCE_DEPTH ||
+        child.childCount === 0 ||
+        !child.type.validContent(child.content)
+      )
+        return false;
+      const starting = startingRecords(schema, child.type.name);
+      const container = kind(child.type, () => ({
+        structs: 1 + starting.size,
+        keyBytes: (1 + starting.size) * CONTAINERS_NAME_BYTES + keyBytes(starting.keys(), "."),
+      }));
+      const idBytes = utf8ByteLength(idFor(child, containers++));
+      structs += container.structs;
+      read.bytes += container.keyBytes + container.structs * idBytes + container.nameBytes;
+      read.values++;
+      for (const [key, fallback] of starting)
+        stored(read, Object.hasOwn(child.attrs, key) ? child.attrs[key] : fallback);
+      engineNodes++;
+      engineBytes += container.nameBytes;
+      for (const value of Object.values(child.attrs)) {
+        engineNodes++;
+        if (typeof value === "string") engineBytes += utf8ByteLength(value);
+        else if (Array.isArray(value)) engineNodes += value.length;
+      }
+      if (!holds(child, depth + 1, pathBytes + idBytes)) return false;
+    }
+    return true;
+  };
+  if (!holds(body, 0, 0)) return null;
+  if (elements === 0) engineNodes++;
+  else read.bytes += SEQUENCE_NAME_BYTES;
+  return {
+    structs,
+    elements,
+    values: read.values,
+    markValues: marked.values,
+    bytes: read.bytes,
+    markBytes: marked.bytes,
+    engineNodes,
+    engineBytes,
+  };
+}
+
+/**
+ * Write a whole document as the body of a new note, in one change. Every line gets a boundary
+ * with its kind, every attribute of its kind and its path, and every container gets its type
+ * record and a record for every attribute of every kind it can become. `idFor` names each
+ * container, and no two may share a name. A document with no block writes no item: the note reads
+ * as one empty line with no boundary, so the first change to it gives that line its boundary in a
+ * change of its own first (section 4). No other line is read with no boundary of its own.
+ *
+ * It throws for a note whose body already holds an item or a record, and a `RangeError` for a
+ * line that sits in more containers than a note holds. It writes what a note stores, so the note
+ * reads as `body` only where `newBodyWeight` says so.
+ */
+export function writeNewBody(
+  schema: Schema,
+  doc: Y.Doc,
+  body: ProseMirrorNode,
+  idFor: (container: ProseMirrorNode, index: number) => string,
+  origin?: unknown,
+): void {
+  const sequence = doc.getText(BODY_SEQUENCE_FIELD);
+  const records = doc.getMap(BODY_CONTAINERS_FIELD);
+  if (sequence._start !== null || records._map.size > 0)
+    throw new Error("writeNewBody writes the body of a new note, and this note already holds one.");
+  const leaves = flattenBody(body, idFor);
+  const written = writtenLeaves(schema, leaves);
+  const element = (name: string, attrs: SequenceAttrs) => {
+    const made = new Y.XmlElement(name);
+    for (const [key, value] of Object.entries(attrs))
+      made.setAttribute(key, plain(value) as string);
+    return made;
+  };
+  const pieces: { insert: string | Y.XmlElement; attributes: unknown }[] = [];
+  for (const [at, leaf] of leaves.entries()) {
+    pieces.push({ insert: element(BLOCK_ELEMENT, written.boundaries[at]!), attributes: {} });
+    for (const piece of leaf.inline)
+      pieces.push(
+        "text" in piece
+          ? { insert: piece.text, attributes: plain(piece.marks) }
+          : { insert: element(piece.atom, piece.attrs), attributes: {} },
+      );
+  }
+  doc.transact(() => {
+    for (const [key, value] of written.containers) records.set(key, plain(value));
+    sequence.applyDelta(pieces);
   }, origin);
 }
 
