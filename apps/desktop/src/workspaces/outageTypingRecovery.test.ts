@@ -191,6 +191,26 @@ it("keeps the run an agent typed in through the checkpoint and its import", asyn
   await importTypingCheckpoints(directory, "workspace", importer, vi.fn(), vi.fn());
   expect(importer).toHaveBeenCalledOnce();
 });
+it("sends the editor's full state only for a drawing", async () => {
+  const directory = await createTestScratch("typing-state-");
+  await writeTypingCheckpoint(directory, { ...checkpoint, updateBase64: "AQID" });
+  await writeTypingCheckpoint(directory, {
+    ...checkpoint,
+    checkpointId: "drawing-checkpoint",
+    objectId: "drawing",
+    path: "plan.excalidraw",
+    updateBase64: "AQID",
+  });
+  const importer = vi.fn(async (_input: { path: string; stateBase64: string }) => ({
+    committed: true as const,
+    outcome: "replayed" as const,
+    momentId: null,
+  }));
+  await importTypingCheckpoints(directory, "workspace", importer, vi.fn(), vi.fn());
+  expect(
+    Object.fromEntries(importer.mock.calls.map(([input]) => [input.path, input.stateBase64])),
+  ).toEqual({ "note.md": "", "plan.excalidraw": "AQID" });
+});
 it("rejects tampered authors and does not send a malformed record to the engine", async () => {
   const directory = await createTestScratch("typing-invalid-");
   await writeTypingCheckpoint(directory, checkpoint);

@@ -9,6 +9,7 @@ import type {
   CaptureRecoveryImportResult,
 } from "@dohc/workspace-engine-client";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
+import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 
 const attribution = z
   .object({
@@ -215,7 +216,10 @@ export async function importTypingCheckpoints(
         updateBase64: stateBase64,
         ...input
       } = row.checkpoint;
-      result = await importer({ ...input, stateBase64 });
+      result = await importer({
+        ...input,
+        stateBase64: liveDocumentKindForPath(input.path) === "scene" ? stateBase64 : "",
+      });
       if (result.committed !== true) throw new Error("Recovery was not committed.");
     } catch (error) {
       failure({
