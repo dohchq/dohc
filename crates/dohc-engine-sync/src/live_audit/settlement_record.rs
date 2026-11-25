@@ -507,8 +507,36 @@ fn imported_event_zero_before_in_tx(
     if !imported {
         return Ok(None);
     }
-    if disposition != "applied" || path != base_binding.current_path {
+    if disposition != "applied" {
         return Err(invalid("settlement event zero was not applied at its path"));
+    }
+    let moved_origin = path != base_binding.current_path;
+    if moved_base || moved_origin {
+        let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)
+            .map_err(SyncError::corrupt)?;
+        let mut needed = std::collections::HashSet::new();
+        if path != b.current_path {
+            needed.insert(path.as_str());
+        }
+        if base_binding.current_path != b.current_path {
+            needed.insert(base_binding.current_path.as_str());
+        }
+        let proved = dohc_engine_collab::live_update_application::paths_renamed_from_in(
+            tx,
+            &key,
+            &b.current_path,
+            &needed,
+            1024,
+        )
+        .map_err(SyncError::corrupt)?;
+        if path != b.current_path && !proved.contains(&path) {
+            return Err(invalid("settlement event zero was not applied at its path"));
+        }
+        if base_binding.current_path != b.current_path
+            && !proved.contains(&base_binding.current_path)
+        {
+            return Err(SyncError::corrupt(rusqlite::Error::QueryReturnedNoRows));
+        }
     }
     require_base_blob(tx, &base)?;
     let bytes: Vec<u8> = tx
@@ -528,7 +556,7 @@ fn imported_event_zero_before_in_tx(
         .preserved_markdown_source(&projected)
         .unwrap_or(projected);
     let digest = hex_sha256(markdown.as_bytes());
-    if !moved_base {
+    if !moved_base && !moved_origin {
         return tx.query_row(
             concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
              FROM moments m JOIN blobs t ON t.sha256=m.after_blob_sha256
@@ -553,28 +581,14 @@ fn imported_event_zero_before_in_tx(
                 b.workspace_id,
                 b.main_version_id,
                 b.object_id,
-                base_binding.current_path,
+                path,
                 digest,
                 markdown.len() as i64
             ],
             |row| row.get(0),
         )
         .map_err(SyncError::corrupt)?;
-    let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)
-        .map_err(SyncError::corrupt)?;
-    let needed = std::collections::HashSet::from([base_binding.current_path.as_str()]);
-    let proved = dohc_engine_collab::live_update_application::paths_renamed_from_in(
-        tx,
-        &key,
-        &b.current_path,
-        &needed,
-        1024,
-    )
-    .map_err(SyncError::corrupt)?;
-    if proved.contains(&base_binding.current_path) {
-        return Ok(None);
-    }
-    Err(SyncError::corrupt(rusqlite::Error::QueryReturnedNoRows))
+    Ok(None)
 }
 
 pub(super) fn apply_settlement_envelope(
@@ -1567,5 +1581,232 @@ mod tests {
         );
         assert_eq!(edited_emitted["beforePath"], "moved.md");
         assert_eq!(edited_emitted["payloadBeforeBlobSha256"], edited_digest);
+    }
+
+    #[test]
+    fn a_cursor_zero_settlement_follows_a_note_renamed_before_its_first_activation() {
+        use dohc_engine_domain::RenameTextFile;
+
+        let (_scratch, mut store, base_binding) = cursor_zero_store(&[2]);
+        let base_text: String = store
+            .read_with(|conn| {
+                let bytes: Vec<u8> = conn
+                    .query_row(
+                        "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+                        [&base_binding.lineage_claim_id],
+                        |r| r.get(0),
+                    )
+                    .map_err(SyncError::corrupt)?;
+                let doc = dohc_engine_collab::Ydoc::wire();
+                doc.apply(&bytes).map_err(SyncError::corrupt)?;
+                let projected = doc
+                    .project(ContentKind::Richdoc)
+                    .map_err(SyncError::corrupt)?
+                    .content;
+                Ok::<_, SyncError>(
+                    doc.preserved_markdown_source(&projected)
+                        .unwrap_or(projected),
+                )
+            })
+            .unwrap();
+        let write = |store: &mut EngineStore, path: &str, text: &str, moment_id: &str, now: i64| {
+            VersionedTextStore::new(store)
+                .write_text(
+                    &WriteText {
+                        workspace_id: "ws".into(),
+                        version_id: "main".into(),
+                        object_id: "object".into(),
+                        path: path.into(),
+                        text: text.into(),
+                        moment_id: moment_id.into(),
+                        request_id: None,
+                        metadata_origin: "sync".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: now,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        };
+        let rename = |store: &mut EngineStore, from: &str, to: &str, moment_id: &str, now: i64| {
+            VersionedTextStore::new(store)
+                .rename_text_file(
+                    &RenameTextFile {
+                        workspace_id: "ws".into(),
+                        version_id: "main".into(),
+                        from_path: from.into(),
+                        to_path: to.into(),
+                        moment_id: moment_id.into(),
+                        request_id: None,
+                        metadata_origin: "user".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: now,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        };
+
+        let first_edit = "Edited at original path.";
+        let final_text = "Edited at middle path.";
+        let final_digest = hex_sha256(final_text.as_bytes());
+        write(&mut store, "note.md", &base_text, "origin-base-moment", 11);
+        write(&mut store, "note.md", first_edit, "edit-at-origin", 12);
+        rename(&mut store, "note.md", "mid.md", "rename-origin-to-mid", 13);
+        write(&mut store, "mid.md", final_text, "edit-at-mid", 14);
+        rename(&mut store, "mid.md", "final.md", "rename-mid-to-final", 15);
+
+        let final_binding = LiveObjectBinding {
+            current_path: "final.md".into(),
+            selector_paths: vec!["final.md".into()],
+            ..base_binding.clone()
+        };
+        let final_binding_json = serde_json::to_string(&final_binding).unwrap();
+        let update_base_publication =
+            |store: &mut EngineStore, published_binding: &LiveObjectBinding| {
+                store
+                .write_with(&NoFaults, |tx| {
+                    let existing_json: String = tx
+                        .query_row(
+                            "SELECT record_json FROM live_audit_base_publications WHERE workspace_id='ws'",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .map_err(SyncError::corrupt)?;
+                    let mut record: BaseRecord =
+                        serde_json::from_str(&existing_json).map_err(SyncError::corrupt)?;
+                    record.checkpoint.binding = published_binding.clone();
+                    record.checkpoint.evidence_digest = hex_sha256(
+                        &serde_json::to_vec(&(
+                            "accepted-history-v1",
+                            scope("relay", published_binding),
+                        ))
+                        .unwrap(),
+                    );
+                    record.origin = origin_record::read(tx, "relay", published_binding)?;
+                    record.origin_stamp = record.origin.stamp(tx, published_binding)?;
+                    record.validate("ws")?;
+                    tx.execute(
+                        "UPDATE live_audit_base_publications SET record_json=?1 WHERE workspace_id='ws'",
+                        [record.canonical_json()?],
+                    )
+                    .map_err(SyncError::persist)?;
+                    Ok::<_, SyncError>(())
+                })
+                .unwrap();
+            };
+
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE replication_log SET imported=1,apply_disposition='applied' \
+                     WHERE workspace_id='ws' AND op_kind='ydoc.update'",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "UPDATE live_owner_adoptions SET binding_json=?1,source_moment_id='rename-mid-to-final',\
+                     source_digest=?2,source_byte_length=?3 WHERE adoption_id='activation-0'",
+                    params![final_binding_json, final_digest, final_text.len() as i64],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "UPDATE live_owner_activations SET binding_json=?1,source_moment_id='rename-mid-to-final',\
+                     source_digest=?2,source_byte_length=?3 WHERE activation_id='activation-0'",
+                    params![final_binding_json, final_digest, final_text.len() as i64],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        update_base_publication(&mut store, &final_binding);
+
+        let emitted = before_payload(&mut store, &final_binding, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(emitted["beforeLatestMomentId"], "rename-mid-to-final");
+        assert_eq!(emitted["beforePath"], "final.md");
+        assert_eq!(emitted["payloadBeforePath"], "final.md");
+        assert_eq!(emitted["payloadBeforeBlobSha256"], final_digest);
+
+        let mid_binding = LiveObjectBinding {
+            current_path: "mid.md".into(),
+            selector_paths: vec!["mid.md".into()],
+            ..base_binding.clone()
+        };
+        let mid_binding_json = serde_json::to_string(&mid_binding).unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE live_owner_adoptions SET binding_json=?1,source_moment_id='edit-at-mid',\
+                     source_digest=?2,source_byte_length=?3 WHERE adoption_id='activation-0'",
+                    params![mid_binding_json, final_digest, final_text.len() as i64],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "UPDATE live_owner_activations SET binding_json=?1,source_moment_id='edit-at-mid',\
+                     source_digest=?2,source_byte_length=?3,released_at_ms=20,released_restore_generation=0,\
+                     released_accepted_cursor=terminal_cursor,carried_manifest_json='[]',\
+                     released_boundary_json=json_object('terminalReceipt',json(terminal_receipt_json),\
+                     'eventCount',0,'historyEvidenceDigest',evidence_digest) WHERE activation_id='activation-0'",
+                    params![mid_binding_json, final_digest, final_text.len() as i64],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "INSERT INTO live_owner_activations (relay_database_namespace,activation_id,\
+                     workspace_id,main_version_id,object_id,lineage_claim_id,origin_adoption_id,\
+                     predecessor_activation_id,binding_json,source_moment_id,source_digest,\
+                     source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,\
+                     host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,\
+                     local_ydoc_sequence,terminal_cursor,terminal_receipt_json,max_pending_bytes,\
+                     max_pending_age_ms) VALUES ('relay','activation-1','ws','main','object',?1,\
+                     'activation-0','activation-0',?2,'rename-mid-to-final',?3,?4,1,1,'{}',\
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',\
+                     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',0,1,0,\
+                     'null',1,1)",
+                    params![
+                        final_binding.lineage_claim_id,
+                        final_binding_json,
+                        final_digest,
+                        final_text.len() as i64
+                    ],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        update_base_publication(&mut store, &mid_binding);
+
+        let moved_twice_emitted = before_payload(&mut store, &final_binding, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            moved_twice_emitted["beforeLatestMomentId"],
+            "rename-mid-to-final"
+        );
+        assert_eq!(moved_twice_emitted["beforePath"], "final.md");
+        assert_eq!(moved_twice_emitted["payloadBeforeBlobSha256"], final_digest);
+
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE replication_log SET payload_json=json_set(payload_json,'$.path','unrelated.md') \
+                     WHERE workspace_id='ws' AND op_kind='ydoc.update'",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        assert!(matches!(
+            before_payload(&mut store, &final_binding, 0),
+            Err(SyncError::InvalidInput {
+                reason: "settlement event zero was not applied at its path",
+            })
+        ));
     }
 }
