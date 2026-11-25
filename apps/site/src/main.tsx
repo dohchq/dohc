@@ -38,6 +38,7 @@ if (host) {
         { createRoot },
         { createElement },
         { initKeyboardNavigation },
+        { style: editorCss },
       ] = await Promise.all([
         import("@fontsource-variable/inter/index.css"),
         import("@fontsource/ibm-plex-mono/400.css"),
@@ -48,6 +49,8 @@ if (host) {
         import("react-dom/client"),
         import("react"),
         import("../../desktop/src/renderer/keyboardNavigation"),
+        // TipTap adds these to the page's head, which the shadow root doesn't see.
+        import("../../desktop/node_modules/@tiptap/core/src/style"),
       ]);
       await hydrateDemoWorkspaceAssets();
       // Browsers ignore @property inside a shadow root, which leaves
@@ -71,7 +74,7 @@ if (host) {
         };
       }
       const style = document.createElement("style");
-      style.textContent = demoCss;
+      style.textContent = demoCss + editorCss;
       const root = document.createElement("div");
       root.id = "root";
       root.style.height = "100%";

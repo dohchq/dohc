@@ -58,7 +58,7 @@ export const GUESTS_DATASET: TransactionalDatasetDescription = {
         },
         {
           fieldId: paid,
-          name: "Paid deposit",
+          name: "Paid",
           type: "checkbox",
           required: false,
           unique: false,

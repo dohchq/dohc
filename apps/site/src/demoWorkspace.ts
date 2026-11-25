@@ -209,6 +209,17 @@ export const APP_SOURCE = `<!doctype html>
 </html>
 `;
 
+const THEME_LISTENER = `<script>
+  addEventListener("message", (event) => {
+    const theme = event.source === parent && event.data && event.data.dohcTheme;
+    if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
+  });
+</script>
+</head>`;
+
 export function appDocument(theme: "light" | "dark"): string {
-  return APP_SOURCE.replace('<html lang="en">', `<html lang="en" data-theme="${theme}">`);
+  return APP_SOURCE.replace('<html lang="en">', `<html lang="en" data-theme="${theme}">`).replace(
+    "</head>",
+    THEME_LISTENER,
+  );
 }

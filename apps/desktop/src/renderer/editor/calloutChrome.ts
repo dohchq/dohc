@@ -263,12 +263,10 @@ function buildCalloutHeader(
       setTypeMenuOpen(false);
     }
   });
-  typePicker.addEventListener("focusout", () => {
-    queueMicrotask(() => {
-      const root = typePicker.getRootNode();
-      const active = root instanceof ShadowRoot ? root.activeElement : document.activeElement;
-      if (!typePicker.contains(active)) setTypeMenuOpen(false);
-    });
+  // The browser moves focus to the pressed option only after focusout.
+  typePicker.addEventListener("focusout", (event) => {
+    const next = event.relatedTarget;
+    if (!(next instanceof globalThis.Node) || !typePicker.contains(next)) setTypeMenuOpen(false);
   });
   typePicker.append(typeTrigger, typeMenu);
 

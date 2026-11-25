@@ -789,6 +789,23 @@ export function BlockMenu({
     return () => handle?.setAttribute("aria-expanded", "false");
   }, [open, pos]);
 
+  // A scroll inside a shadow root doesn't reach the document.
+  useEffect(() => {
+    const menu = menuRef.current;
+    if (!open || !menu) return;
+    const onScroll = (event: Event) => {
+      if (event.target instanceof Node && menu.contains(event.target)) return;
+      onClose();
+    };
+    const roots = new Set<Document | ShadowRoot>([menu.ownerDocument]);
+    const root = menu.getRootNode();
+    if (root instanceof ShadowRoot) roots.add(root);
+    for (const target of roots) target.addEventListener("scroll", onScroll, true);
+    return () => {
+      for (const target of roots) target.removeEventListener("scroll", onScroll, true);
+    };
+  }, [open, onClose]);
+
   const rowId = (index: number) => `${id}-row-${index}`;
   // The list is taller than its cap, so the active row is scrolled into it
   // whenever it changes. The first row of a section brings its label along.

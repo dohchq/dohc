@@ -2951,6 +2951,12 @@ body {
 .dohc-callout-type-menu[hidden] {
   display: none;
 }
+/* content-visibility: auto clips what a block paints outside its box. */
+.dohc-notion-editor > :has(.dohc-callout-type-picker.is-open) {
+  position: relative;
+  z-index: 1;
+  content-visibility: visible;
+}
 .dohc-callout-type-option {
   display: flex;
   width: 100%;

@@ -45,7 +45,7 @@ describe("demo asset persistence fallback", () => {
       createFile: () => undefined,
       createFolder: () => undefined,
       movePath: () => undefined,
-      deletePath: () => undefined,
+      deletePath: () => () => undefined,
     });
     const persistenceUnavailable = vi.fn();
     window.addEventListener(DEMO_ASSET_PERSISTENCE_EVENT, persistenceUnavailable);

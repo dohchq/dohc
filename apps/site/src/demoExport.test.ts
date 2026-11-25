@@ -36,7 +36,7 @@ it.each([
       createFile: () => undefined,
       createFolder: () => undefined,
       movePath: () => undefined,
-      deletePath: () => undefined,
+      deletePath: () => () => undefined,
     });
 
     await expect(
