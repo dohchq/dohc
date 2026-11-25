@@ -211,6 +211,16 @@ describe("local approved dataset apps", () => {
     ).rejects.toThrow("These Collections are on Laptop.");
   });
 
+  it("still holds a standard operation to its own input limit", async () => {
+    const f = await fixture();
+    await expect(
+      f.host.apps.request(f.published.publicationId, "invoke", {
+        ...f.invocation(),
+        input: { values: { [id(4)]: "x".repeat(200 * 1024) } },
+      }),
+    ).rejects.toThrow(/limit of 65536 bytes/);
+  });
+
   it("upgrades the baseline app tables without losing artifacts or charging root rows", async () => {
     const f = await fixture();
     await f.host.close();

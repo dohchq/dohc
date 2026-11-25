@@ -9,6 +9,7 @@ import {
   APP_PUBLICATION_MAX_DOCUMENT_BYTES,
 } from "@dohc/security-contract/app-publication";
 import {
+  APP_BACKEND_BULK_LIMITS,
   APP_BACKEND_REQUEST_BYTES,
   APP_BACKEND_RESULT_BYTES,
   APP_BACKEND_UPLOAD_BYTES,
@@ -27,6 +28,7 @@ import {
 } from "@dohc/security-contract/app-publication";
 import { isAppCollectionPageRequest } from "@dohc/security-contract/app-collection-checks";
 import { palette } from "../renderer/tokens";
+const BULK_INVOKE_REPLY_BYTES = APP_BACKEND_BULK_LIMITS.resultBytes + 4096;
 export type LocalAppAction = "invoke" | "query" | "upload" | "attempt" | "list" | "create";
 /** The workspace engine cannot answer now. The app may retry; this is not a refusal. */
 export class LocalAppUnavailableError extends Error {}
@@ -326,11 +328,12 @@ export async function createLocalAppLaunchHost(options: {
         const observe = launchOptions?.observeBroker
           ? "(event)=>{try{globalThis.__dohcVerifyObserve?.(JSON.stringify(event));}catch{}}"
           : "undefined";
-        const brokerLimits = JSON.stringify(
-          highBudget
-            ? { maxPending, backendBurst, backendRefillMs, trustRateLimitDetails: true }
-            : { trustRateLimitDetails: true },
-        );
+        const brokerLimits = JSON.stringify({
+          ...(highBudget ? { maxPending, backendBurst, backendRefillMs } : {}),
+          invokeRequestBytes: APP_BACKEND_BULK_LIMITS.requestBytes,
+          invokeResultBytes: BULK_INVOKE_REPLY_BYTES,
+          trustRateLimitDetails: true,
+        });
         const hasEvents = Boolean(
           options.backend.datasetRevisions &&
           options.backend.subscribeDatasetChanges &&
@@ -592,7 +595,11 @@ export async function createLocalAppLaunchHost(options: {
                 return reply(response, 503);
               return reply(response, 200, uploaded);
             }
-            const body = await readJson(request, APP_BACKEND_REQUEST_BYTES, activeSignal);
+            const body = await readJson(
+              request,
+              APP_BACKEND_BULK_LIMITS.requestBytes,
+              activeSignal,
+            );
             if (!body || typeof body !== "object" || Array.isArray(body))
               return reply(response, 400);
             const row = body as Record<string, unknown>;
@@ -603,7 +610,11 @@ export async function createLocalAppLaunchHost(options: {
             )
               return reply(response, 400);
             const collection = row.op === "collection.list" || row.op === "collection.create";
-            if (collection && Buffer.byteLength(JSON.stringify(row)) > APP_COLLECTION_REQUEST_BYTES)
+            if (
+              row.op !== "backend.invoke" &&
+              Buffer.byteLength(JSON.stringify(row)) >
+                (collection ? APP_COLLECTION_REQUEST_BYTES : APP_BACKEND_REQUEST_BYTES)
+            )
               return reply(response, 413);
             let result: unknown;
             if (
@@ -672,13 +683,16 @@ export async function createLocalAppLaunchHost(options: {
             ) {
               if (Object.hasOwn(row, "readOnly") && row.readOnly !== true)
                 return reply(response, 400);
-              const input = parseAppBackendInvokeRequest({
-                authorityRevision: authorityRevision,
-                operation: row.operation,
-                idempotencyKey: row.idempotencyKey,
-                input: row.input,
-                ...(Object.hasOwn(row, "dataset") ? { dataset: row.dataset } : {}),
-              });
+              const input = parseAppBackendInvokeRequest(
+                {
+                  authorityRevision: authorityRevision,
+                  operation: row.operation,
+                  idempotencyKey: row.idempotencyKey,
+                  input: row.input,
+                  ...(Object.hasOwn(row, "dataset") ? { dataset: row.dataset } : {}),
+                },
+                "bulk",
+              );
               result = await options.backend.request(
                 publicationId,
                 row.readOnly === true ? "query" : "invoke",
@@ -741,9 +755,17 @@ export async function createLocalAppLaunchHost(options: {
             } else return reply(response, 400);
             activeSignal.throwIfAborted();
             current();
+            const bulk =
+              !!result &&
+              typeof result === "object" &&
+              (result as { profile?: unknown }).profile === "bulk";
             if (
               Buffer.byteLength(JSON.stringify(result)) >
-              (collection ? APP_COLLECTION_RESPONSE_BYTES : APP_BACKEND_RESULT_BYTES)
+              (collection
+                ? APP_COLLECTION_RESPONSE_BYTES
+                : bulk
+                  ? BULK_INVOKE_REPLY_BYTES
+                  : APP_BACKEND_RESULT_BYTES)
             )
               return reply(response, 503);
             return reply(response, 200, result);

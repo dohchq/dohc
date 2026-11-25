@@ -730,6 +730,41 @@ it("routes readOnly: true backend.invoke to query and rejects invalid readOnly v
   );
 });
 
+it("carries an owner's bulk invoke while other requests keep standard limits", async () => {
+  const f = await fixture(),
+    opened = await f.open(),
+    headers = { "x-dohc-app-proof": opened.proof },
+    large = "x".repeat(200 * 1024),
+    huge = "x".repeat(2 * 1024 * 1024);
+  f.backend.request.mockResolvedValue({ result: null, revision: 1, replayed: false });
+  const bulk = await f.post("/backend", { ...invoke, input: { large } }, headers);
+  expect(bulk.status).toBe(200);
+  expect(f.backend.request).toHaveBeenLastCalledWith(
+    publicationId,
+    "invoke",
+    expect.objectContaining({ input: { large } }),
+    expect.any(AbortSignal),
+    false,
+  );
+  const attempt = await f.post(
+    "/backend",
+    { id: "attempt", op: "backend.attempt", operation: "register", request: { large } },
+    headers,
+  );
+  expect(attempt.status).toBe(413);
+  f.backend.request.mockResolvedValue({ result: huge, revision: 1, replayed: false });
+  expect((await f.post("/backend", invoke, headers)).status).toBe(503);
+  f.backend.request.mockResolvedValue({
+    profile: "bulk",
+    result: huge,
+    revision: 1,
+    replayed: false,
+  });
+  const result = await f.post("/backend", invoke, headers);
+  expect(result.status).toBe(200);
+  expect(((await result.json()) as { result: string }).result).toHaveLength(huge.length);
+});
+
 it("serves authenticated POST /events long-poll with alias revisions and aborts cleanly on withdrawal", async () => {
   const lifetime = new AbortController(),
     session = new AbortController();
@@ -867,6 +902,7 @@ it("keeps conservative concurrency and broker limits on server-backed launches",
     handoff = new URL(url).hash.slice(1);
   const html = await (await fetch(origin + "/bootstrap")).text();
   expect(html).not.toContain('"maxPending":12');
+  expect(html).toContain('"invokeRequestBytes":2097152,"invokeResultBytes":4198400');
   const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
     fetch(origin + path, {
       method: "POST",

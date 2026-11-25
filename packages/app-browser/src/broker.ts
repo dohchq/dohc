@@ -42,6 +42,8 @@ export interface AppBrokerLimits {
   readonly maxPending?: number;
   readonly backendBurst?: number;
   readonly backendRefillMs?: number;
+  readonly invokeRequestBytes?: number;
+  readonly invokeResultBytes?: number;
   readonly trustRateLimitDetails?: boolean;
 }
 
@@ -73,6 +75,8 @@ export function attachAppCollectionBroker(
   const maxPending = bounded(limits?.maxPending, 1, 16, 4),
     backendBurst = bounded(limits?.backendBurst, 1, 240, 30),
     backendRefillMs = bounded(limits?.backendRefillMs, 10, 10_000, 2000),
+    invokeRequestBytes = bounded(limits?.invokeRequestBytes, 131_072, 2_097_152, 131_072),
+    invokeResultBytes = bounded(limits?.invokeResultBytes, 1_048_576, 4_198_400, 1_048_576),
     trustRateLimitDetails = limits?.trustRateLimitDetails === true,
     collectionBurst = 12,
     collectionRefillMs = 5000,
@@ -384,7 +388,13 @@ export function attachAppCollectionBroker(
     } catch {
       return rejectLocal("unserializable", 400);
     }
-    const requestBytes = upload ? 4096 : backend ? 128 * 1024 : 16_384;
+    const requestBytes = upload
+      ? 4096
+      : body.op === "backend.invoke"
+        ? invokeRequestBytes
+        : backend
+          ? 128 * 1024
+          : 16_384;
     if (new TextEncoder().encode(encoded).byteLength > requestBytes)
       return rejectLocal("payload_too_large", 413);
     const validAlias =
@@ -557,7 +567,13 @@ export function attachAppCollectionBroker(
         return finish(status, false);
       }
       const binaryFile = !refusal && body.op === "backend.file";
-      const responseBytes = refusal ? 8192 : binaryFile ? maxFileBytes : 1024 * 1024;
+      const responseBytes = refusal
+      ? 8192
+      : binaryFile
+        ? maxFileBytes
+        : body.op === "backend.invoke"
+          ? invokeResultBytes
+          : 1024 * 1024;
       let fileMeta: Record<string, unknown> | undefined;
       if (binaryFile) {
         const mime = response.headers.get("content-type")?.split(";", 1)[0];

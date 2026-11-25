@@ -4,7 +4,7 @@ import {
   type MessagePort as NodeMessagePort,
 } from "node:worker_threads";
 import { once } from "node:events";
-import { attachAppCollectionBroker } from "@dohc/app-browser/broker";
+import { attachAppCollectionBroker, type AppBrokerLimits } from "@dohc/app-browser/broker";
 
 function harness(
   send: (
@@ -12,6 +12,7 @@ function harness(
     signal: AbortSignal,
     request: { activated: boolean },
   ) => Promise<Response> = async (body) => Response.json(body),
+  limits?: AppBrokerLimits,
 ) {
   vi.stubGlobal("MessageChannel", NodeMessageChannel);
   const frame = new EventTarget();
@@ -27,7 +28,7 @@ function harness(
     },
   });
   const lifetime = new AbortController();
-  attachAppCollectionBroker(frame as HTMLIFrameElement, send, lifetime.signal);
+  attachAppCollectionBroker(frame as HTMLIFrameElement, send, lifetime.signal, undefined, limits);
   frame.dispatchEvent(new Event("load"));
   const request = (body: unknown) => {
     const response = once(port, "message");
@@ -985,5 +986,43 @@ it("gates host.copy and host.print on user activation, size bounds, and anti-spa
     nowSpy.mockRestore();
     lifetime.abort();
     vi.unstubAllGlobals();
+  }
+});
+
+it("raises request and reply caps only for invokes and only when the host grants them", async () => {
+  const large = "x".repeat(200 * 1024),
+    huge = "x".repeat(2 * 1024 * 1024);
+  const invoke = { op: "backend.invoke", operation: "importRows", idempotencyKey: "k", input: {} };
+  const reply = async (body: unknown) =>
+    Response.json((body as { input?: { huge?: true } }).input?.huge ? { result: huge } : body);
+  const standard = harness(reply);
+  try {
+    expect(await standard.request({ ...invoke, id: "big", input: { large } })).toEqual({
+      id: "big",
+      ok: false,
+      status: 413,
+    });
+    expect(await standard.request({ ...invoke, id: "reply", input: { huge: true } })).toEqual({
+      id: "reply",
+      ok: false,
+      status: 503,
+    });
+  } finally {
+    standard.close();
+  }
+  const bulk = harness(reply, { invokeRequestBytes: 2_097_152, invokeResultBytes: 4_198_400 });
+  try {
+    expect((await bulk.request({ ...invoke, id: "big", input: { large } })).ok).toBe(true);
+    expect((await bulk.request({ ...invoke, id: "reply", input: { huge: true } })).ok).toBe(true);
+    expect(
+      await bulk.request({
+        id: "attempt",
+        op: "backend.attempt",
+        operation: "importRows",
+        request: { large },
+      }),
+    ).toEqual({ id: "attempt", ok: false, status: 413 });
+  } finally {
+    bulk.close();
   }
 });
