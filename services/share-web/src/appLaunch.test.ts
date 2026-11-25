@@ -196,7 +196,7 @@ it("rechecks relay and keeps credentials out of opaque document", async () => {
     "Secure; HttpOnly; SameSite=Strict; Path=/",
   );
   expect(app.html).toContain(
-    "frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox'",
+    "frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox';frame.allow='fullscreen';frame.allowFullscreen=true;",
   );
   expect(app.html).not.toContain("server-capability");
   expect(app.html).not.toContain("server-profile");

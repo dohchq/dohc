@@ -66,13 +66,34 @@ const definition: DatasetDefinition = {
       readOnly: true,
       fieldIds: [],
     },
+    {
+      operationId: id(96),
+      name: "refuseSeat",
+      label: "Refuse seat",
+      tableId: id(92),
+      kind: "read",
+      access: "owner",
+      readOnly: true,
+      fieldIds: [],
+    },
+    {
+      operationId: id(97),
+      name: "yearReport",
+      label: "Year report",
+      tableId: id(92),
+      kind: "read",
+      access: "owner",
+      readOnly: true,
+      fieldIds: [],
+      profile: "bulk",
+    },
   ],
 };
 
 const appSource = `
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { AppProvider, copyText, print, useDatasetQuery } from "dohc/app";
+import { AppProvider, copyText, print, useApp, useDatasetQuery } from "dohc/app";
 
 const rows = Array.from({ length: 120 }, (_, i) => i + 1);
 
@@ -82,6 +103,8 @@ function App() {
   const [startupCopy, setStartupCopy] = useState("pending");
   const [printStatus, setPrintStatus] = useState("idle");
   const [secondPrint, setSecondPrint] = useState("idle");
+  const [backendStatus, setBackendStatus] = useState("idle");
+  const app = useApp();
   const q1 = useDatasetQuery<{ tag: string }>("summary", { slot: 1, filter });
   const q2 = useDatasetQuery<{ tag: string }>("summary", { slot: 2, filter });
   const q3 = useDatasetQuery<{ tag: string }>("summary", { slot: 3, filter });
@@ -129,6 +152,22 @@ function App() {
             setPrintStatus("err:" + (err?.refusal?.code ?? err?.status));
           }
         }}>Print invoice</button>
+        <button id="refuse-btn" type="button" onClick={async () => {
+          try {
+            await app.read("refuseSeat");
+            setBackendStatus("unexpected-ok");
+          } catch (err: any) {
+            setBackendStatus("refused:" + err?.status + ":" + err?.refusal?.code);
+          }
+        }}>Refuse</button>
+        <button id="bulk-btn" type="button" onClick={async () => {
+          try {
+            const report = await app.read<string>("yearReport");
+            setBackendStatus("bulk:" + report.length);
+          } catch (err: any) {
+            setBackendStatus("bulk-err:" + err?.status);
+          }
+        }}>Year report</button>
         <button id="filter-b" type="button" onClick={() => setFilter("b")}>Filter B</button>
         <button id="filter-c" type="button" onClick={() => setFilter("c")}>Filter C</button>
       </div>
@@ -137,6 +176,7 @@ function App() {
       <p id="print-status">{printStatus}</p>
       <p id="second-print">{secondPrint}</p>
       <p id="queries">{[q1.data?.tag, q2.data?.tag, q3.data?.tag].join(",")}</p>
+      <p id="backend-status">{backendStatus}</p>
       <div id="report-scroll">
         {rows.map((n) => (
           <div key={n}>{n === 120 ? "ROW-120-LOCAL-END" : "LOCAL-ROW-" + n}</div>
@@ -156,13 +196,16 @@ createRoot(document.getElementById("root")!).render(
 const sharedAppSource = `
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
-import { copyText, print } from "dohc/app";
+import { copyText, createAppClient, print } from "dohc/app";
 
+const client = createAppClient();
 const rows = Array.from({ length: 120 }, (_, i) => i + 1);
 
 function SharedApp() {
   const [copyStatus, setCopyStatus] = useState("idle");
   const [printStatus, setPrintStatus] = useState("idle");
+  const [refusal, setRefusal] = useState("idle");
+  const [fullscreen, setFullscreen] = useState("idle");
   return (
     <div>
       <style>{\`
@@ -178,8 +221,26 @@ function SharedApp() {
           await print();
           setPrintStatus("printed");
         }}>Print</button>
+        <button id="refuse-btn" type="button" onClick={async () => {
+          try {
+            await client.invoke("register", {}, "seat-1");
+            setRefusal("unexpected-ok");
+          } catch (err: any) {
+            setRefusal(err?.status + ":" + err?.refusal?.code);
+          }
+        }}>Register</button>
+        <button id="fullscreen-btn" type="button" onClick={async () => {
+          try {
+            await document.documentElement.requestFullscreen();
+            setFullscreen(document.fullscreenElement === document.documentElement ? "on" : "missing");
+          } catch (err: any) {
+            setFullscreen("err:" + err?.name);
+          }
+        }}>Full screen</button>
       </div>
       <p id="copy-status">{copyStatus}</p>
+      <p id="refusal">{refusal}</p>
+      <p id="fullscreen">{fullscreen}</p>
       <p id="print-status">{printStatus}</p>
       <div>
         {rows.map((n) => (
@@ -299,7 +360,7 @@ test("local app copyText, multi-page print, anti-spam, and rapid parallel querie
       [
         "data/operations.js",
         Buffer.from(
-          `globalThis.operations = { summary(_ctx, input) { return { tag: input.filter + "-" + input.slot }; } };`,
+          `globalThis.operations = { summary(_ctx, input) { return { tag: input.filter + "-" + input.slot }; }, refuseSeat(ctx) { ctx.refuse("full", "Every seat is taken."); }, yearReport() { return "R".repeat(1536 * 1024); } };`,
         ),
       ],
       ["app/index.tsx", Buffer.from(appSource)],
@@ -321,7 +382,7 @@ test("local app copyText, multi-page print, anti-spam, and rapid parallel querie
             datasetPath: "data/dataset.json",
             revision: revision.revision,
             revisionSha256: revision.revisionSha256,
-            operationIds: [id(95)],
+            operationIds: [id(95), id(96), id(97)],
           },
         }),
       ),
@@ -414,6 +475,11 @@ test("local app copyText, multi-page print, anti-spam, and rapid parallel querie
     await app.locator("#filter-c").click();
     await expect(app.locator("#queries")).toHaveText("c-1,c-2,c-3");
 
+    await app.locator("#refuse-btn").click();
+    await expect(app.locator("#backend-status")).toHaveText("refused:409:full");
+    await app.locator("#bulk-btn").click();
+    await expect(app.locator("#backend-status")).toHaveText(`bulk:${1536 * 1024}`);
+
     await app.locator("#copy-btn").click();
     await expect(app.locator("#copy-status")).toHaveText("copied");
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("SEAT-KEY-4517");
@@ -492,6 +558,11 @@ test("share-web app copyText and multi-page print work over HTTPS without weaken
         : { ok: false, status: 404 },
     fetchRelay: async (request) => {
       const path = new URL(request.url).pathname;
+      if (path.endsWith("/backend/invoke"))
+        return Response.json(
+          { code: "full", message: "Every seat is taken." },
+          { status: 409 },
+        );
       if (path.includes("/blobs/")) {
         const sha = path.split("/").at(-1)!;
         const blob = blobs.get(sha)!;
@@ -595,6 +666,19 @@ test("share-web app copyText and multi-page print work over HTTPS without weaken
     const sharedPdfText = extractPdfText(await page.pdf());
     expect(sharedPdfText).toContain("SHARED-ROW-1");
     expect(sharedPdfText).toContain("ROW-120-SHARED-END");
+    await page.evaluate(() => document.body.classList.remove("dohc-printing"));
+
+    await app.locator("#refuse-btn").click();
+    await expect(app.locator("#refusal")).toHaveText("409:full");
+
+    expect(await page.locator("iframe").getAttribute("allow")).toBe("fullscreen");
+    await app.locator("#fullscreen-btn").click();
+    await expect(app.locator("#fullscreen")).toHaveText("on");
+    await expect
+      .poll(() => page.evaluate(() => document.fullscreenElement?.tagName ?? null))
+      .toBe("IFRAME");
+    await page.evaluate(() => document.exitFullscreen());
+    await expect.poll(() => page.evaluate(() => document.fullscreenElement === null)).toBe(true);
 
     const sandboxAttr = await page.locator("iframe").getAttribute("sandbox");
     expect(sandboxAttr).not.toContain("allow-modals");
