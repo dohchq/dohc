@@ -420,7 +420,7 @@ describe("reusable guest evaluator", () => {
       "a write in a read-only operation",
       "ctx.db.execute(\"INSERT INTO items VALUES(9, 'x')\")",
       true,
-      "This operation only reads, so it can't change items.",
+      "Only ctx.db.execute in an operation that writes can change items.",
     ],
     [
       "a denied function",

@@ -197,7 +197,7 @@ By default, one call gets 64 KiB of input, a 256 KiB result, 1,000 rows and 256 
 Parameters are strings, finite numbers, or null. Any other value is refused as `invalid_input`, unless the operation catches the error.
 One statement's parameters may use 256 KiB as JSON, so a large document fits in one write.
 To pass a list, bind it as JSON text and read it with `json_each`, such as `WHERE id IN (SELECT value FROM json_each(?))`.
-SQL that the operation can't use, such as a table outside its Collection, is refused as `sql_not_allowed` with the table or function named.
+SQL that the operation can't use, such as a table the operation doesn't list, is refused as `sql_not_allowed` with the table or function named.
 The host verifies `ctx.caller`.
 `ctx.caller.kind` says who asked: `owner`, `named` for a person the owner granted access, `link` for someone with a share link, or `automation` for an automation on the Collection.
 A link caller has `grantId`, the link's ID. The owner copies it from **Share**, the link's **Link options**, then **Copy link ID**.

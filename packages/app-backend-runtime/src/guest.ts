@@ -178,7 +178,7 @@ export function authorize(
       if (writable && (tables.has(table) || (initializing && schemaTables.has(table))))
         return constants.SQLITE_OK;
       return tables.has(table)
-        ? deny(`This operation only reads, so it can't change ${table}.`)
+        ? deny(`Only ctx.db.execute in an operation that writes can change ${table}.`)
         : outside(table, "change");
     }
     if (initializing) {
@@ -586,9 +586,13 @@ function run(
       }
       if (result.error) {
         // No guest getters or coercion run while formatting an exception.
-        const escaped = thrown.find(({ error }) => vm.sameValue(result.error!, error))?.refusal;
+        const failed = !interrupted && !exhausted();
+        const escaped =
+          failed && !resourceLimit
+            ? thrown.find(({ error }) => vm.sameValue(result.error!, error))?.refusal
+            : undefined;
         result.error.dispose();
-        if (!interrupted && !exhausted()) {
+        if (failed) {
           if (resourceLimit) throw resourceLimit;
           if (escaped) throw new AppBackendRuntimeError(escaped);
         }
