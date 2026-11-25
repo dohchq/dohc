@@ -12315,3 +12315,7 @@ mod nested1b_allowlist_tests;
 #[cfg(test)]
 #[path = "ydoc/successor_format_two_tests.rs"]
 mod successor_format_two_tests;
+
+#[cfg(test)]
+#[path = "ydoc/body_sequence_fold_tests.rs"]
+mod body_sequence_fold_tests;

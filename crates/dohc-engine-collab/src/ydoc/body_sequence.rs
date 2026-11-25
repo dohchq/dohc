@@ -793,7 +793,7 @@ pub(super) fn blocks<T: ReadTxn>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use base64::Engine as _;
 
@@ -1043,7 +1043,7 @@ mod tests {
         matches!(read, Err(CollabError::ProjectionTooLarge { .. }))
     }
 
-    fn shown(nodes: &[MarkdownNode]) -> Vec<Value> {
+    pub(in crate::ydoc) fn shown(nodes: &[MarkdownNode]) -> Vec<Value> {
         let mut shown_nodes = Vec::new();
         for node in nodes {
             match node {
@@ -1094,7 +1094,7 @@ mod tests {
         }
     }
 
-    fn same_document(recorded: &Value, here: &Value) -> bool {
+    pub(in crate::ydoc) fn same_document(recorded: &Value, here: &Value) -> bool {
         match (recorded, here) {
             (Value::Number(recorded), Value::Number(here)) => recorded.as_f64() == here.as_f64(),
             (Value::Array(recorded), Value::Array(here)) => {
