@@ -2,7 +2,12 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "re
 import { TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import { EMOJI_DATA, type EmojiEntry } from "./emojiData";
-import { resolveFloatingMenuPosition } from "./floatingMenuPosition";
+import {
+  FLOATING_LIST_MIN_HEIGHT,
+  floatingMenuBounds,
+  resolveFloatingMenuPosition,
+  useCloseOnScrollAway,
+} from "./floatingMenuPosition";
 import { dismissTrigger } from "./triggerPlugin";
 import {
   MENU_ACTIVE_OPTION,
@@ -150,11 +155,18 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
         })()
       : null;
 
-  if (!state.open || !coords) return null;
+  useCloseOnScrollAway(listRef, view, state.open && coords ? state.from : null, () => {
+    if (view && state.open) dismissTrigger(view, state.from);
+    onDismiss();
+  });
+
+  if (!state.open || !view || !coords) return null;
   const position = resolveFloatingMenuPosition({
     cursorRect: coords,
+    bounds: floatingMenuBounds(view.dom),
     menuWidth: 220,
     menuMaxHeight: 240,
+    menuMinHeight: FLOATING_LIST_MIN_HEIGHT,
     gap: 4,
   });
 
@@ -170,6 +182,7 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
           ? { bottom: position.bottom }
           : { top: position.y }),
         maxHeight: position.maxHeight,
+        maxWidth: position.maxWidth,
         zIndex: 60,
         ...menuEnterFrom(position.placement),
       }}

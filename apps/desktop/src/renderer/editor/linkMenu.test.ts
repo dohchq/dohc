@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { createElement } from "react";
+import { cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Editor } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
@@ -8,6 +10,7 @@ import {
   applyLinkMenu,
   CLOSED_LINK_MENU_STATE,
   computeLinkMenuState,
+  LinkMenu,
   makeLinkMenuPlugin,
   removeLinkMenu,
   type LinkMenuState,
@@ -924,5 +927,83 @@ describe("makeLinkMenuPlugin: click", () => {
     expect(handled).toBe(false);
     expect(setState).toHaveBeenCalledWith(CLOSED_LINK_MENU_STATE);
     editor.destroy();
+  });
+});
+
+describe("LinkMenu when something scrolls", () => {
+  afterEach(cleanup);
+
+  it("closes when a scroll moves the link it edits", () => {
+    const editor = makeEditor("<p>hello world</p>");
+    let top = 200;
+    vi.spyOn(editor.view, "coordsAtPos").mockImplementation(() => ({
+      left: 40,
+      right: 40,
+      top,
+      bottom: top + 20,
+    }));
+    const onDismiss = vi.fn();
+    const { container } = render(
+      createElement(LinkMenu, {
+        editor,
+        state: {
+          open: true,
+          from: 1,
+          to: 6,
+          url: "",
+          hasLink: false,
+          x: 0,
+          y: 0,
+          maxHeight: 140,
+          placement: "below",
+        },
+        onDismiss,
+      }),
+    );
+    fireEvent.scroll(document);
+    expect(onDismiss).not.toHaveBeenCalled();
+    top = 150;
+    fireEvent.scroll(container.querySelector(".dohc-link-menu")!);
+    expect(onDismiss).not.toHaveBeenCalled();
+    fireEvent.scroll(document);
+    expect(onDismiss).toHaveBeenCalledOnce();
+    editor.destroy();
+  });
+});
+
+describe("LinkMenu inside a shadow root", () => {
+  afterEach(cleanup);
+
+  it("stays open for a press on its input, and closes for one outside it", () => {
+    const host = document.body.appendChild(document.createElement("div"));
+    const container = host
+      .attachShadow({ mode: "open" })
+      .appendChild(document.createElement("div"));
+    const editor = makeEditor("<p>hello world</p>");
+    const onDismiss = vi.fn();
+    render(
+      createElement(LinkMenu, {
+        editor,
+        state: {
+          open: true,
+          from: 1,
+          to: 6,
+          url: "",
+          hasLink: false,
+          x: 0,
+          y: 0,
+          maxHeight: 140,
+          placement: "below",
+        },
+        onDismiss,
+      }),
+      { container },
+    );
+    fireEvent.mouseDown(container.querySelector(".dohc-link-menu__input")!);
+    expect(onDismiss).not.toHaveBeenCalled();
+    fireEvent.mouseDown(document.body);
+    expect(onDismiss).toHaveBeenCalledOnce();
+    editor.destroy();
+    host.remove();
   });
 });

@@ -84,6 +84,7 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 html { scroll-behavior: smooth; }
+html:has(#desktop-demo:focus-within) { scroll-behavior: auto; }
 
 body {
   font-family: var(--font-sans);
@@ -317,7 +318,7 @@ body {
 
 /* ---------- real desktop demo ---------- */
 
-.section.demo-section { max-width: 1360px; padding-top: clamp(20px, 4vh, 44px); }
+.section.demo-section { max-width: 1360px; padding-top: clamp(20px, 4vh, 44px); scroll-margin-top: 64px; }
 
 .demo-stage {
   height: min(820px, 84vh);

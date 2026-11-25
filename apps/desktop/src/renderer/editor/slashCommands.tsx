@@ -56,7 +56,10 @@ import { compareRelativePositions, type RelativePosition, type XmlFragment } fro
 import { isComposingKey } from "../ui/keys";
 import {
   FLOATING_MENU_MAX_HEIGHT,
+  FLOATING_LIST_MIN_HEIGHT,
+  floatingMenuBounds,
   resolveFloatingMenuPosition,
+  useCloseOnScrollAway,
   type FloatingMenuPlacement,
 } from "./floatingMenuPosition";
 import { MERMAID_STARTER_SNIPPET } from "./mermaidRender";
@@ -111,6 +114,7 @@ export type SlashCommandState =
       // FloatingMenuPosition.bottom. Null when the menu is top-anchored.
       bottom: number | null;
       maxHeight: number;
+      maxWidth?: number;
       placement: FloatingMenuPlacement;
       gutterTarget?: GutterSlashTarget;
     };
@@ -130,6 +134,7 @@ export function slashCommandStatesEqual(
     left.x === right.x &&
     left.y === right.y &&
     left.maxHeight === right.maxHeight &&
+    left.maxWidth === right.maxWidth &&
     left.placement === right.placement &&
     left.gutterTarget?.blockPos === right.gutterTarget?.blockPos &&
     left.gutterTarget?.reuseEmpty === right.gutterTarget?.reuseEmpty
@@ -381,6 +386,7 @@ function readSlashCommandState(view: EditorView, previous: SlashCommandState): S
     let y = 40;
     let bottom: number | null = null;
     let maxHeight = FLOATING_MENU_MAX_HEIGHT;
+    let maxWidth: number | undefined;
     let placement: FloatingMenuPlacement = "below";
     try {
       const dom = view.nodeDOM(gutter.blockPos);
@@ -389,11 +395,16 @@ function readSlashCommandState(view: EditorView, previous: SlashCommandState): S
         rect && (rect.width > 0 || rect.height > 0)
           ? { left: rect.left, top: rect.bottom, bottom: rect.bottom }
           : view.coordsAtPos(anchorPos);
-      const position = resolveFloatingMenuPosition({ cursorRect });
+      const position = resolveFloatingMenuPosition({
+        cursorRect,
+        bounds: floatingMenuBounds(view.dom),
+        menuMinHeight: FLOATING_LIST_MIN_HEIGHT,
+      });
       x = position.x;
       y = position.y;
       bottom = position.bottom ?? null;
       maxHeight = position.maxHeight;
+      maxWidth = position.maxWidth;
       placement = position.placement;
     } catch {
       // Offscreen/jsdom editors cannot always resolve coordinates.
@@ -410,6 +421,7 @@ function readSlashCommandState(view: EditorView, previous: SlashCommandState): S
       y,
       bottom,
       maxHeight,
+      maxWidth,
       placement,
       gutterTarget: { blockPos: gutter.blockPos, reuseEmpty: gutter.reuseEmpty },
     };
@@ -426,14 +438,20 @@ function readSlashCommandState(view: EditorView, previous: SlashCommandState): S
   let y = 40;
   let bottom: number | null = null;
   let maxHeight = FLOATING_MENU_MAX_HEIGHT;
+  let maxWidth: number | undefined;
   let placement: FloatingMenuPlacement = "below";
   try {
     const coords = view.coordsAtPos(from);
-    const position = resolveFloatingMenuPosition({ cursorRect: coords });
+    const position = resolveFloatingMenuPosition({
+      cursorRect: coords,
+      bounds: floatingMenuBounds(view.dom),
+      menuMinHeight: FLOATING_LIST_MIN_HEIGHT,
+    });
     x = position.x;
     y = position.y;
     bottom = position.bottom ?? null;
     maxHeight = position.maxHeight;
+    maxWidth = position.maxWidth;
     placement = position.placement;
   } catch {
     // Offscreen/jsdom editors cannot always resolve coordinates.
@@ -452,6 +470,7 @@ function readSlashCommandState(view: EditorView, previous: SlashCommandState): S
     y,
     bottom,
     maxHeight,
+    maxWidth,
     placement,
   };
 }
@@ -720,11 +739,13 @@ function groupSlashCommands(items: SlashCommandItem[]): Array<{
 // itself to show it.
 export function SlashCommandMenu({
   state,
+  view = null,
   onSelect,
   onHover,
   onDismiss,
 }: {
   state: SlashCommandState;
+  view?: EditorView | null;
   onSelect: (id: SlashCommandId) => void;
   onHover: (index: number) => void;
   onDismiss?: () => void;
@@ -742,12 +763,16 @@ export function SlashCommandMenu({
   useEffect(() => {
     if (!state.open || !onDismiss) return;
     function onPointerDown(event: MouseEvent) {
-      if (listRef.current?.contains(event.target as Node)) return;
+      if (listRef.current && event.composedPath().includes(listRef.current)) return;
       onDismiss?.();
     }
     window.addEventListener("mousedown", onPointerDown, true);
     return () => window.removeEventListener("mousedown", onPointerDown, true);
   }, [state.open, onDismiss]);
+
+  useCloseOnScrollAway(listRef, view, state.open && onDismiss ? state.from : null, () =>
+    onDismiss?.(),
+  );
 
   if (!state.open) return null;
   const items = filterSlashCommands(state.query);
@@ -795,6 +820,7 @@ export function SlashCommandMenu({
         ...(state.placement === "above" && state.bottom !== null
           ? { left: state.x, bottom: state.bottom, maxHeight: state.maxHeight }
           : { left: state.x, top: state.y, maxHeight: state.maxHeight }),
+        maxWidth: state.maxWidth,
         ...menuEnterFrom(state.placement),
       }}
       role="listbox"

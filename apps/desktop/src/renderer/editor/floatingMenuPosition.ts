@@ -1,9 +1,23 @@
+import { useEffect, useLayoutEffect, useRef, type RefObject } from "react";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import type { Selection } from "@tiptap/pm/state";
+import type { EditorView } from "@tiptap/pm/view";
+
 export type FloatingMenuPlacement = "above" | "below";
+
+export type FloatingMenuBounds = {
+  top: number;
+  left: number;
+  right: number;
+  bottom: number;
+  screen?: { top: number; bottom: number };
+};
 
 export type FloatingMenuPosition = {
   x: number;
   y: number;
   maxHeight: number;
+  maxWidth: number;
   placement: FloatingMenuPlacement;
   // CSS `bottom` offset for "above" placement. `y` assumes the menu fills
   // maxHeight, so a top-anchored menu whose content is shorter than maxHeight
@@ -17,8 +31,10 @@ type FloatingMenuPositionInput = {
   cursorRect: { left: number; top: number; bottom: number };
   viewportWidth?: number;
   viewportHeight?: number;
+  bounds?: FloatingMenuBounds;
   menuWidth?: number;
   menuMaxHeight?: number;
+  menuMinHeight?: number;
   margin?: number;
   gap?: number;
   // The side to open on when it has room; the other side otherwise.
@@ -29,24 +45,31 @@ const FLOATING_MENU_VIEWPORT_MARGIN = 12;
 const FLOATING_MENU_CURSOR_GAP = 6;
 const FLOATING_MENU_WIDTH = 320;
 export const FLOATING_MENU_MAX_HEIGHT = 320;
+export const FLOATING_LIST_MIN_HEIGHT = 80;
 
 export function resolveFloatingMenuPosition({
   cursorRect,
   viewportWidth = typeof window === "undefined" ? 1024 : window.innerWidth,
   viewportHeight = typeof window === "undefined" ? 768 : window.innerHeight,
+  bounds = { top: 0, left: 0, right: viewportWidth, bottom: viewportHeight },
   menuWidth = FLOATING_MENU_WIDTH,
   menuMaxHeight = FLOATING_MENU_MAX_HEIGHT,
+  menuMinHeight = 0,
   margin = FLOATING_MENU_VIEWPORT_MARGIN,
   gap = FLOATING_MENU_CURSOR_GAP,
   prefer = "below",
 }: FloatingMenuPositionInput): FloatingMenuPosition {
-  const maxLeft = Math.max(margin, viewportWidth - menuWidth - margin);
-  const x = Math.min(Math.max(cursorRect.left, margin), maxLeft);
-  const availableBelow = Math.max(0, viewportHeight - cursorRect.bottom - gap - margin);
-  const availableAbove = Math.max(0, cursorRect.top - gap - margin);
+  const minLeft = bounds.left + margin;
+  const maxWidth = Math.max(0, Math.min(menuWidth, bounds.right - margin - minLeft));
+  const maxLeft = Math.max(minLeft, bounds.right - maxWidth - margin);
+  const x = Math.min(Math.max(cursorRect.left, minLeft), maxLeft);
+  const anchorTop = Math.min(cursorRect.top, bounds.bottom);
+  const anchorBottom = Math.max(cursorRect.bottom, bounds.top);
+  const availableBelow = Math.max(0, bounds.bottom - anchorBottom - gap - margin);
+  const availableAbove = Math.max(0, anchorTop - bounds.top - gap - margin);
   const belowHeight = Math.min(menuMaxHeight, availableBelow);
   const aboveHeight = Math.min(menuMaxHeight, availableAbove);
-  const placement =
+  let placement: FloatingMenuPlacement =
     prefer === "above"
       ? aboveHeight >= menuMaxHeight || aboveHeight >= belowHeight
         ? "above"
@@ -54,16 +77,111 @@ export function resolveFloatingMenuPosition({
       : belowHeight >= menuMaxHeight || belowHeight >= aboveHeight
         ? "below"
         : "above";
-  const maxHeight = placement === "above" ? aboveHeight : belowHeight;
-  const y =
+  let maxHeight = placement === "above" ? aboveHeight : belowHeight;
+  let y =
     placement === "above"
-      ? Math.max(margin, cursorRect.top - gap - maxHeight)
-      : Math.min(cursorRect.bottom + gap, viewportHeight - margin);
+      ? Math.max(bounds.top + margin, anchorTop - gap - maxHeight)
+      : Math.min(anchorBottom + gap, bounds.bottom - margin);
+  if (maxHeight < menuMinHeight) {
+    const screen = bounds.screen ?? { top: 0, bottom: viewportHeight };
+    const room = bounds.bottom - bounds.top >= menuMinHeight ? bounds : screen;
+    const inset = Math.max(0, Math.min(margin, (room.bottom - room.top - menuMinHeight) / 2));
+    maxHeight = menuMinHeight;
+    const ideal = placement === "above" ? anchorTop - gap - maxHeight : anchorBottom + gap;
+    y = Math.min(Math.max(ideal, room.top + inset), room.bottom - inset - maxHeight);
+    placement = y - screen.top > screen.bottom - (y + maxHeight) ? "above" : "below";
+  }
 
   if (placement === "above") {
     // Same box as `y`+maxHeight describes, expressed from the viewport's
     // bottom edge so the menu's bottom stays pinned when content is shorter.
-    return { x, y, maxHeight, placement, bottom: viewportHeight - (y + maxHeight) };
+    return { x, y, maxHeight, maxWidth, placement, bottom: viewportHeight - (y + maxHeight) };
   }
-  return { x, y, maxHeight, placement };
+  return { x, y, maxHeight, maxWidth, placement };
+}
+
+export function floatingMenuBounds(node: Node): FloatingMenuBounds {
+  const win = node.ownerDocument?.defaultView ?? window;
+  const root = node.getRootNode();
+  if (!(root instanceof ShadowRoot)) {
+    return { top: 0, left: 0, right: win.innerWidth, bottom: win.innerHeight };
+  }
+  const covered = parseFloat(
+    win.getComputedStyle(root.host).getPropertyValue("--dohc-page-covered-top"),
+  );
+  const screen = { top: Number.isFinite(covered) ? covered : 0, bottom: win.innerHeight };
+  const host = root.host.getBoundingClientRect();
+  return {
+    top: Math.max(screen.top, host.top),
+    left: Math.max(0, host.left),
+    right: Math.min(win.innerWidth, host.right),
+    bottom: Math.min(screen.bottom, host.bottom),
+    screen,
+  };
+}
+
+export function onScrollOutside(menu: Element, listener: () => void): () => void {
+  const onScroll = (event: Event) => {
+    if (event.target instanceof Node && menu.contains(event.target)) return;
+    listener();
+  };
+  const roots = new Set<Document | ShadowRoot>([menu.ownerDocument]);
+  const root = menu.getRootNode();
+  // A scroll inside a shadow root doesn't reach the document.
+  if (root instanceof ShadowRoot) roots.add(root);
+  for (const target of roots) target.addEventListener("scroll", onScroll, true);
+  return () => {
+    for (const target of roots) target.removeEventListener("scroll", onScroll, true);
+  };
+}
+
+type AnchorPoint = { left: number; top: number };
+
+type Placement = { at: AnchorPoint | null; doc: ProseMirrorNode; selection: Selection };
+
+function place(view: EditorView, from: number): Placement {
+  let at: AnchorPoint | null = null;
+  try {
+    at = view.coordsAtPos(from);
+  } catch {
+    // coordsAtPos throws when the editor has no layout.
+  }
+  return { at, doc: view.state.doc, selection: view.state.selection };
+}
+
+export function useCloseOnScrollAway(
+  menuRef: RefObject<HTMLElement | null>,
+  view: EditorView | null,
+  from: number | null,
+  onClose: () => void,
+): void {
+  const latest = useRef({ view, from, onClose });
+  const placed = useRef<Placement | null>(null);
+  useLayoutEffect(() => {
+    latest.current = { view, from, onClose };
+    placed.current = view && from !== null ? place(view, from) : null;
+  });
+  const open = view !== null && from !== null;
+  useEffect(() => {
+    const menu = menuRef.current;
+    if (!open || !menu) return;
+    let closed = false;
+    return onScrollOutside(menu, () => {
+      const { view: editor, from: pos, onClose: close } = latest.current;
+      const was = placed.current;
+      if (closed || !editor || pos === null || !was) return;
+      const now = place(editor, pos);
+      // ProseMirror's scroll to the caret can arrive before the menu follows an edit.
+      if (now.at && was.at) {
+        if (Math.abs(now.at.left - was.at.left) < 1 && Math.abs(now.at.top - was.at.top) < 1)
+          return;
+        if (now.doc !== was.doc || !now.selection.eq(was.selection)) {
+          placed.current = now;
+          return;
+        }
+      }
+      closed = true;
+      close();
+    });
+  }, [open, menuRef]);
 }

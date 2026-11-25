@@ -34,7 +34,9 @@ import {
 } from "../linkActivation";
 import {
   FLOATING_MENU_MAX_HEIGHT,
+  floatingMenuBounds,
   resolveFloatingMenuPosition,
+  useCloseOnScrollAway,
   type FloatingMenuPlacement,
 } from "./floatingMenuPosition";
 
@@ -53,8 +55,37 @@ export type LinkMenuState =
       y: number;
       bottom?: number | null;
       maxHeight: number;
+      maxWidth?: number;
       placement: FloatingMenuPlacement;
     };
+
+const LINK_FORM_HEIGHT = 46;
+const LINK_FORM_WITH_ERROR_HEIGHT = 68;
+
+type LinkMenuPlace = {
+  x: number;
+  y: number;
+  bottom: number | null;
+  maxHeight: number;
+  maxWidth?: number;
+  placement: FloatingMenuPlacement;
+};
+
+function placeLinkMenu(view: EditorView, from: number, minHeight: number): LinkMenuPlace {
+  try {
+    const position = resolveFloatingMenuPosition({
+      cursorRect: view.coordsAtPos(from),
+      bounds: floatingMenuBounds(view.dom),
+      menuWidth: 340,
+      menuMaxHeight: 140,
+      menuMinHeight: minHeight,
+    });
+    return { ...position, bottom: position.bottom ?? null };
+  } catch {
+    // Offscreen/jsdom editors cannot always resolve coordinates.
+    return { x: 12, y: 40, bottom: null, maxHeight: FLOATING_MENU_MAX_HEIGHT, placement: "below" };
+  }
+}
 
 export const CLOSED_LINK_MENU_STATE: LinkMenuState = { open: false };
 
@@ -105,38 +136,13 @@ export function computeLinkMenuState(
 
   const href = linkHrefAt(state.doc, from);
 
-  let x = 12;
-  let y = 40;
-  let bottom: number | null = null;
-  let maxHeight = FLOATING_MENU_MAX_HEIGHT;
-  let placement: FloatingMenuPlacement = "below";
-  try {
-    const coords = view.coordsAtPos(from);
-    const position = resolveFloatingMenuPosition({
-      cursorRect: coords,
-      menuWidth: 340,
-      menuMaxHeight: 140,
-    });
-    x = position.x;
-    y = position.y;
-    bottom = position.bottom ?? null;
-    maxHeight = position.maxHeight;
-    placement = position.placement;
-  } catch {
-    // Offscreen/jsdom editors cannot always resolve coordinates.
-  }
-
   return {
     open: true,
     from,
     to,
     url: href ?? "",
     hasLink: href != null,
-    x,
-    y,
-    bottom,
-    maxHeight,
-    placement,
+    ...placeLinkMenu(view, from, LINK_FORM_HEIGHT),
   };
 }
 
@@ -345,7 +351,7 @@ export function LinkMenu({
       editor?.commands.focus();
     }
     function onPointerDown(event: MouseEvent) {
-      if (containerRef.current?.contains(event.target as Node)) return;
+      if (containerRef.current && event.composedPath().includes(containerRef.current)) return;
       onDismiss();
     }
     window.addEventListener("keydown", onKeyDown, true);
@@ -355,6 +361,13 @@ export function LinkMenu({
       window.removeEventListener("mousedown", onPointerDown, true);
     };
   }, [state.open, onDismiss, editor]);
+
+  useCloseOnScrollAway(
+    containerRef,
+    editor?.view ?? null,
+    state.open ? state.from : null,
+    onDismiss,
+  );
 
   if (!state.open || !editor || !isEditableEditor(editor)) return null;
   const openState = state;
@@ -388,17 +401,20 @@ export function LinkMenu({
   }
 
   const normalizedPreview = normalizeLinkUrl(value);
+  const place =
+    invalid && editor ? placeLinkMenu(editor.view, state.from, LINK_FORM_WITH_ERROR_HEIGHT) : state;
 
   return (
     <div
       ref={containerRef}
       className="dohc-link-menu"
-      data-placement={state.placement}
-      style={
-        state.placement === "above" && state.bottom != null
-          ? { left: state.x, bottom: state.bottom }
-          : { left: state.x, top: state.y }
-      }
+      data-placement={place.placement}
+      style={{
+        ...(place.placement === "above" && place.bottom != null
+          ? { left: place.x, bottom: place.bottom }
+          : { left: place.x, top: place.y }),
+        maxWidth: place.maxWidth,
+      }}
       onMouseDown={(event) => {
         // Let the input itself receive focus/caret; only block the editor
         // from stealing selection when clicking the surrounding chrome.

@@ -331,3 +331,30 @@ describe("EmojiPicker on the Menu part's recipe", () => {
     }
   });
 });
+
+describe("EmojiPicker when something scrolls", () => {
+  it("closes when a scroll moves its colon, as Escape does", () => {
+    const editor = makeEditorWithEmojiPlugin(":smi");
+    let top = 200;
+    vi.spyOn(editor.view, "coordsAtPos").mockImplementation(() => ({
+      left: 40,
+      right: 40,
+      top,
+      bottom: top + 20,
+    }));
+    const onDismiss = vi.fn();
+    render(
+      createElement(EmojiPicker, {
+        state: { open: true, from: 1, query: "smi" },
+        view: editor.view,
+        onDismiss,
+      }),
+    );
+    fireEvent.scroll(document);
+    expect(onDismiss).not.toHaveBeenCalled();
+    top = 150;
+    fireEvent.scroll(document);
+    expect(onDismiss).toHaveBeenCalledOnce();
+    editor.destroy();
+  });
+});
