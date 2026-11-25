@@ -132,27 +132,6 @@ export function keepsContainers(
   return leavesWhole(step, before, after, isTablePart);
 }
 
-function joinsContainers(step: Step, after: ProseMirrorNode): boolean {
-  let joins = false;
-  step.getMap().forEach((_oldStart, _oldEnd, newStart, newEnd) => {
-    const { nodeBefore, nodeAfter } = after.resolve(newStart);
-    if (newStart === newEnd && nodeBefore && nodeAfter)
-      joins ||= holdsBlocks(nodeBefore) && holdsBlocks(nodeAfter);
-  });
-  return joins;
-}
-
-const changesAContainer = (transactions: readonly Transform[]) =>
-  transactions.some((transaction) =>
-    transaction.steps.some((step, at) => {
-      const after = transaction.docs[at + 1] ?? transaction.doc;
-      return (
-        !leavesWhole(step, transaction.docs[at]!, after, holdsBlocks) ||
-        joinsContainers(step, after)
-      );
-    }),
-  );
-
 const isHighSurrogate = (unit: number) => unit >= 0xd800 && unit <= 0xdbff;
 const isLowSurrogate = (unit: number) => unit >= 0xdc00 && unit <= 0xdfff;
 
@@ -1115,8 +1094,6 @@ type Touched = {
   gone: Set<number>;
   from: number;
   to: number;
-  isSure: boolean;
-  isNearALineWithNoBoundary: boolean;
 };
 
 function whatStepsTouch(reading: BodyReading, transactions: readonly Transform[]): Touched {
@@ -1131,8 +1108,6 @@ function whatStepsTouch(reading: BodyReading, transactions: readonly Transform[]
     gone,
     from: reading.doc.content.size,
     to: 0,
-    isSure: true,
-    isNearALineWithNoBoundary: false,
   };
   const maps: StepMap[] = [];
   const back = (pos: number, side: -1 | 1) => {
@@ -1144,11 +1119,6 @@ function whatStepsTouch(reading: BodyReading, transactions: readonly Transform[]
   const near = (from: number, to: number) => {
     touched.from = Math.min(touched.from, from);
     touched.to = Math.max(touched.to, to);
-    let block = Math.max(0, countBelow(reading.starts, from + 1) - 2);
-    while (block > 0 && isAddedParagraph(reading, block - 1)) block--;
-    const last = Math.min(reading.blocks.length - 1, countBelow(reading.starts, to + 1));
-    for (; block <= last; block++)
-      if (boundaryAt(reading, block) < 0) touched.isNearALineWithNoBoundary = true;
   };
   const touch = (block: number) => {
     after.add(block);
@@ -1199,20 +1169,7 @@ function whatStepsTouch(reading: BodyReading, transactions: readonly Transform[]
           const first = tokens[0];
           const startsWithBlock = first !== undefined && "block" in first;
           const opened = blockStartingAt(reading, from);
-          const keepsItsKind =
-            opened >= 0 &&
-            to === from + 1 &&
-            tokens.length === 1 &&
-            startsWithBlock &&
-            first.block.type === reading.blocks[opened]!.node.type;
-          const onlyClosesIt =
-            holder >= 0 &&
-            tokens.length === 0 &&
-            to === from + 1 &&
-            from === reading.starts[holder]! + 1 + reading.blocks[holder]!.node.content.size;
           near(from, to);
-          if (!keepsItsKind && !onlyClosesIt && (holder < 0 || endsIn !== holder))
-            touched.isSure = false;
           if (holder >= 0) {
             edits.add(holder);
             const startsALaterBlockAgain = endsIn > holder ? 1 : 0;
@@ -1658,8 +1615,15 @@ function runsOfClocks(first: Y.Item | null, end: Y.Item | null): number {
     const { client, clock } = item.id;
     if (!last || client !== last.id.client || clock !== last.id.clock + last.length) runs++;
     last = item;
+    if (item.content instanceof Y.ContentType) runs += itemsWithin(item.content.type);
   }
   return runs;
+}
+
+function itemsWithin(type: Y.AbstractType<unknown>): number {
+  let items = runsOfClocks(type._start, null);
+  for (const item of type._map.values()) if (!item.deleted) items++;
+  return items;
 }
 
 function copyOfWindow(
@@ -1790,86 +1754,6 @@ function passesTheRoom(change: Uint8Array, apart: number): boolean {
   );
 }
 
-const ITEM_BYTES = 256;
-const BYTES_PER_LETTER = 3;
-const PATH_BYTES_PER_LEVEL = 35;
-
-function largestValue(step: Step): number {
-  if (!(step instanceof ReplaceStep || step instanceof ReplaceAroundStep))
-    return JSON.stringify(step.toJSON()).length;
-  let largest = 0;
-  step.slice.content.descendants((node) => {
-    for (const value of [node.attrs, ...node.marks.map((mark) => mark.attrs)])
-      largest = Math.max(largest, JSON.stringify(value).length);
-  });
-  return largest;
-}
-
-function formattingNear(
-  sequence: Y.Text,
-  reading: BodyReading,
-  { from, to }: Touched,
-): { letters: number; items: number } {
-  const lineItem = (block: number, step: 1 | -1) => {
-    for (let at = block; at >= 0 && at < reading.lines.length; at += step) {
-      const item = reading.lines[at]?.item;
-      if (item) return item;
-    }
-    return null;
-  };
-  const head = lineItem(countBelow(reading.starts, from + 1) - 2, -1);
-  const end = lineItem(countBelow(reading.starts, to + 1) + 1, 1);
-  const inForce = new Map<string, unknown>();
-  const near = { letters: 0, items: 0 };
-  let isNear = head === null;
-  for (let item = sequence._start; item !== null && item !== end; item = item.right) {
-    if (item === head) {
-      isNear = true;
-      for (const [key, value] of inForce) near.letters += key.length + JSON.stringify(value).length;
-    }
-    if (item.deleted || !(item.content instanceof Y.ContentFormat)) continue;
-    const { key, value } = item.content;
-    if (!isNear) inForce.set(key, value);
-    else {
-      near.letters += key.length + JSON.stringify(value).length;
-      near.items += 1;
-    }
-  }
-  return near;
-}
-
-function isUnderAnyLimit(
-  { sequence, reader }: BodyWriting,
-  transactions: readonly Transform[],
-  touched: Touched,
-  given: number,
-): boolean {
-  const steps = transactions.flatMap((transaction) => transaction.steps);
-  const reaches = steps.map((step) => {
-    let reach = 1;
-    if (step instanceof AddMarkStep || step instanceof RemoveMarkStep) reach += step.to - step.from;
-    step.getMap().forEach((oldStart, oldEnd, newStart, newEnd) => {
-      reach += oldEnd - oldStart + newEnd - newStart;
-    });
-    return reach;
-  });
-  let bytes = ITEM_BYTES * (given + reaches.reduce((sum, reach) => sum + reach, 0));
-  if (bytes >= BODY_SEQUENCE_CHANGE_MAX_VALUES) return false;
-  for (const step of steps) bytes += BYTES_PER_LETTER * JSON.stringify(step.toJSON()).length;
-  if (bytes >= BODY_SEQUENCE_CHANGE_MAX_VALUES) return false;
-  const reading = reader.reading();
-  const { doc } = reading;
-  const depthAt = (pos: number) => doc.resolve(Math.max(0, Math.min(pos, doc.content.size))).depth;
-  const path = PATH_BYTES_PER_LEVEL * (Math.max(depthAt(touched.from), depthAt(touched.to)) + 1);
-  const formatting = formattingNear(sequence, reading, touched);
-  const near = path + formatting.letters;
-  bytes += ITEM_BYTES * formatting.items + BYTES_PER_LETTER * near * given;
-  steps.forEach((step, at) => {
-    bytes += BYTES_PER_LETTER * (near + largestValue(step)) * reaches[at]!;
-  });
-  return bytes < BODY_SEQUENCE_CHANGE_MAX_VALUES;
-}
-
 function linesToGiveFirst(
   writing: BodyWriting,
   transactions: readonly Transform[],
@@ -1878,13 +1762,6 @@ function linesToGiveFirst(
   const reading = writing.reader.reading();
   const touched = whatStepsTouch(reading, transactions);
   const guessed = linesTouched(reading, touched);
-  const isPlain = touched.isSure || !touched.isNearALineWithNoBoundary;
-  if (
-    isPlain &&
-    !changesAContainer(transactions) &&
-    isUnderAnyLimit(writing, transactions, touched, guessed.length)
-  )
-    return guessed;
   const inWindow =
     trial === "window"
       ? linesATrialGives((given) => copyOfWindow(writing, transactions, touched, given), guessed)

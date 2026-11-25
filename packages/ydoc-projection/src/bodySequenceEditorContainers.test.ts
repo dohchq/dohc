@@ -2,7 +2,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import { lift, wrapIn } from "@tiptap/pm/commands";
-import { NodeRange, type Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { Fragment, NodeRange, Slice, type Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { liftListItem, sinkListItem, wrapInList } from "@tiptap/pm/schema-list";
 import {
   EditorState,
@@ -11,6 +11,7 @@ import {
   type Command,
   type Transaction,
 } from "@tiptap/pm/state";
+import { ReplaceStep } from "@tiptap/pm/transform";
 import { recordsOfContainer } from "./bodySequenceGrammar.js";
 import { isBodySequenceChange, type BodySequenceUnwritten } from "./bodySequenceEditor.js";
 import { BODY_SEQUENCE_SCHEMA_VERSION } from "./bodySequenceYjs.js";
@@ -18,6 +19,7 @@ import { admitBodySequenceNotes, liveEditRefusal } from "./liveDocumentValidatio
 import { LIVE_UPDATE_MAX_BYTES } from "./liveValidationPolicy.js";
 import {
   boundary,
+  declared,
   editorOn,
   element,
   elementsOf,
@@ -607,6 +609,98 @@ describe("a dispatch the editor writes whole or not at all", () => {
     a.view.dispatch(a.view.state.tr.replaceWith(2, 2, schema.text("X", [link(85_000)])));
     refusedWhole(a, told, ["ab"]);
   });
+
+  it("refuses breaks and letters put in an added paragraph that shares its line with three more, when the sequence takes a long link off and puts it back for each", () => {
+    const ids = ["L1", "I1", "L2", "I2", "L3", "I3"];
+    const { a, told } = toldOf(
+      noteIn(
+        ids.map((id, at) => [id, at % 2 === 0 ? "bulletList" : "listItem"] as Frame),
+        [
+          [[], "ab"],
+          [ids, "H", { type: "heading", level: 1 }],
+        ],
+      ),
+    );
+    a.view.dispatch(a.view.state.tr.addMark(1, a.view.state.doc.content.size, link(100_000)));
+    expect(told).toEqual([]);
+    a.sent.splice(0);
+    const lines = a.lines();
+    const put = Array.from({ length: 30 }, () => [
+      schema.nodes.hardBreak!.create(),
+      schema.text("a"),
+    ]).flat();
+    a.view.dispatch(a.view.state.tr.insert(11, put));
+    refusedWhole(a, told, lines);
+  });
+
+  it("refuses splitting five code blocks at their start, each of whose new boundaries takes the block's long language", () => {
+    const { a, told } = toldOf(
+      noteIn(
+        [],
+        Array.from({ length: 5 }, (): Row => [
+          [],
+          "x",
+          { type: "codeBlock", language: "a".repeat(500_000) },
+        ]),
+      ),
+    );
+    const lines = a.lines();
+    const tr = a.view.state.tr;
+    const split = new Slice(
+      Fragment.from([schema.nodes.codeBlock!.create(), schema.nodes.paragraph!.create()]),
+      1,
+      1,
+    );
+    for (let at = 4; at >= 0; at--) {
+      const pos = posOfChild(tr.doc, at) + 1;
+      tr.step(new ReplaceStep(pos, pos, split));
+    }
+    a.view.dispatch(tr);
+    refusedWhole(a, told, lines);
+  });
+
+  it(
+    "refuses deleting a line of images whose attributes another person wrote apart, which takes the room more delete ranges than it takes",
+    { timeout: 60_000 },
+    () => {
+      const one = declared(1);
+      one.sequence.applyDelta([
+        { insert: boundary() },
+        ...Array.from({ length: 17_000 }, () => ({ insert: element("image", {}) })),
+        { insert: boundary() },
+        { insert: "after" },
+        { insert: boundary() },
+        { insert: "tail" },
+      ]);
+      const two = declared(2);
+      Y.applyUpdate(two.doc, Y.encodeStateAsUpdate(one.doc));
+      one.doc.destroy();
+      const images = two.sequence
+        .toDelta()
+        .map(({ insert }: { insert: unknown }) => insert)
+        .filter(
+          (insert: unknown): insert is Y.XmlElement =>
+            insert instanceof Y.XmlElement && insert.nodeName === "image",
+        );
+      two.doc.transact(() => {
+        for (const image of images)
+          for (const [key, value] of [
+            ["src", "/a.png"],
+            ["alt", "A"],
+            ["title", "T"],
+          ] as const) {
+            image.setAttribute(key, value);
+            two.sequence.insert(two.sequence.length, "z");
+          }
+      });
+      const baseline = Y.encodeStateAsUpdate(two.doc);
+      two.doc.destroy();
+      const { a, told } = toldOf(baseline);
+      const lines = a.lines();
+      a.view.dispatch(a.view.state.tr.delete(0, a.view.state.doc.child(0).nodeSize));
+      refusedWhole(a, told, lines);
+    },
+  );
 });
 
 const inFormat2 = (note: Uint8Array) => {
