@@ -202,7 +202,7 @@ it.skipIf(engine.missing || process.platform !== "win32")(
 // `last_settled_sha` (crates/dohc-engine-collab/src/durable.rs). The outside
 // edit waits for this session, so the close evicts it: the disk version
 // stands and the unsettled text comes back as a recovered copy. The
-// save refusal still reads as an error, never as "changed on disk".
+// save refusal reads as the change made outside dohc, never as an error.
 it.skipIf(engine.missing)(
   "keeps unsettled edits in a recovered copy when their close meets a deferred outside edit",
   async () => {
@@ -259,9 +259,9 @@ it.skipIf(engine.missing)(
       errors.length = 0;
 
       await expect(session.close()).resolves.toBeUndefined();
-      // The refused save reads as the change made outside dohc, which clears
-      // its save-failure notice. No capture poll ran before this close.
-      expect(states).toContain("error");
+      // No capture poll ran before this close, so the note finds the outside
+      // change by comparing the file on disk with the copy it last saved.
+      expect(states).not.toContain("error");
       expect(states.at(-1)).toBe("changed-on-disk");
       expect(errors).toContain("ydoc settle of note.md");
 
