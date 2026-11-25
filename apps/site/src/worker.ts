@@ -68,16 +68,28 @@ async function readBoundedText(request: Request, maxBytes: number): Promise<stri
   return new TextDecoder().decode(merged);
 }
 
-function stripIp(record: Record<string, unknown>): Record<string, unknown> {
-  const { $ip: _ignored, ...rest } = record;
-  return rest;
+function stripIpDeep(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripIpDeep);
+  if (!isPlainRecord(value)) return value;
+  const cleaned: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (key === "$ip") continue;
+    cleaned[key] = stripIpDeep(entry);
+  }
+  return cleaned;
 }
 
 function sanitizeBatchEvent(item: unknown): Record<string, unknown> | null {
   if (!isPlainRecord(item)) return null;
-  const cleaned = stripIp(item);
-  if (isPlainRecord(cleaned.properties)) cleaned.properties = stripIp(cleaned.properties);
+  const cleaned = stripIpDeep(item) as Record<string, unknown>;
+  const properties = isPlainRecord(cleaned.properties) ? cleaned.properties : {};
+  cleaned.properties = { ...properties, $geoip_disable: true };
   return cleaned;
+}
+
+function isJsonContentType(request: Request): boolean {
+  const mediaType = request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
+  return mediaType === "application/json";
 }
 
 async function forwardTelemetryBatch(request: Request, env: Env): Promise<Response> {
@@ -86,6 +98,7 @@ async function forwardTelemetryBatch(request: Request, env: Env): Promise<Respon
   const allowedKeys = parseAllowedTelemetryKeys(env.ALLOWED_TELEMETRY_KEYS);
   if (allowedKeys.size === 0)
     return new Response("Telemetry proxy is not configured", { status: 503 });
+  if (!isJsonContentType(request)) return new Response("Unsupported Media Type", { status: 415 });
   const rawBody = await readBoundedText(request, MAX_TELEMETRY_BODY_BYTES);
   if (rawBody === null) return new Response("Payload Too Large", { status: 413 });
   let parsed: unknown;

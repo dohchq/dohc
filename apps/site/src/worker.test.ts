@@ -89,7 +89,7 @@ it("forwards allowed /telemetry/batch/ JSON payloads while stripping IP headers 
             $ip: "203.0.113.7",
             properties: {
               $ip: "203.0.113.7",
-              $geoip_disable: true,
+              $set: { $ip: "203.0.113.7", keep: true },
               channel: "nightly",
             },
           },
@@ -110,20 +110,35 @@ it("forwards allowed /telemetry/batch/ JSON payloads while stripping IP headers 
       {
         event: "app_launched",
         distinct_id: "install-1",
-        properties: { $geoip_disable: true, channel: "nightly" },
+        properties: { $set: { keep: true }, $geoip_disable: true, channel: "nightly" },
       },
     ],
   });
   expect(assets.fetch).not.toHaveBeenCalled();
 });
 
-it("refuses /telemetry/batch/ when unconfigured, wrong key, wrong method, wrong path, bad JSON, or oversized", async () => {
+it("refuses /telemetry/batch/ when unconfigured, wrong media type, wrong key, wrong method, wrong path, bad JSON, or oversized", async () => {
   const validBody = JSON.stringify({ api_key: ALLOWED_KEY, batch: [{ event: "app_launched" }] });
+  const jsonHeaders = { "content-type": "application/json; charset=utf-8" };
   const unconfigured = await worker.fetch(
-    new Request("https://dohc.computer/telemetry/batch/", { method: "POST", body: validBody }),
+    new Request("https://dohc.computer/telemetry/batch/", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: validBody,
+    }),
     { ASSETS: assets },
   );
   expect(unconfigured.status).toBe(503);
+
+  const wrongMediaType = await worker.fetch(
+    new Request("https://dohc.computer/telemetry/batch/", {
+      method: "POST",
+      headers: { "content-type": "text/plain; charset=utf-8" },
+      body: validBody,
+    }),
+    { ASSETS: assets, ALLOWED_TELEMETRY_KEYS: ALLOWED_KEY },
+  );
+  expect(wrongMediaType.status).toBe(415);
 
   const wrongMethod = await worker.fetch(
     new Request("https://dohc.computer/telemetry/batch/", { method: "GET" }),
@@ -133,7 +148,11 @@ it("refuses /telemetry/batch/ when unconfigured, wrong key, wrong method, wrong 
   expect(wrongMethod.headers.get("allow")).toBe("POST");
 
   const wrongPath = await worker.fetch(
-    new Request("https://dohc.computer/telemetry/e/", { method: "POST", body: validBody }),
+    new Request("https://dohc.computer/telemetry/e/", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: validBody,
+    }),
     { ASSETS: assets, ALLOWED_TELEMETRY_KEYS: ALLOWED_KEY },
   );
   expect(wrongPath.status).toBe(404);
@@ -141,6 +160,7 @@ it("refuses /telemetry/batch/ when unconfigured, wrong key, wrong method, wrong 
   const forbidden = await worker.fetch(
     new Request("https://dohc.computer/telemetry/batch/", {
       method: "POST",
+      headers: jsonHeaders,
       body: JSON.stringify({ api_key: OTHER_KEY, batch: [{ event: "app_launched" }] }),
     }),
     { ASSETS: assets, ALLOWED_TELEMETRY_KEYS: ALLOWED_KEY },
@@ -148,7 +168,11 @@ it("refuses /telemetry/batch/ when unconfigured, wrong key, wrong method, wrong 
   expect(forbidden.status).toBe(403);
 
   const badJson = await worker.fetch(
-    new Request("https://dohc.computer/telemetry/batch/", { method: "POST", body: "not-json" }),
+    new Request("https://dohc.computer/telemetry/batch/", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: "not-json",
+    }),
     { ASSETS: assets, ALLOWED_TELEMETRY_KEYS: ALLOWED_KEY },
   );
   expect(badJson.status).toBe(400);
@@ -156,6 +180,7 @@ it("refuses /telemetry/batch/ when unconfigured, wrong key, wrong method, wrong 
   const emptyBatch = await worker.fetch(
     new Request("https://dohc.computer/telemetry/batch/", {
       method: "POST",
+      headers: jsonHeaders,
       body: JSON.stringify({ api_key: ALLOWED_KEY, batch: [] }),
     }),
     { ASSETS: assets, ALLOWED_TELEMETRY_KEYS: ALLOWED_KEY },
@@ -165,6 +190,7 @@ it("refuses /telemetry/batch/ when unconfigured, wrong key, wrong method, wrong 
   const oversized = await worker.fetch(
     new Request("https://dohc.computer/telemetry/batch/", {
       method: "POST",
+      headers: jsonHeaders,
       body: "a".repeat(1_048_577),
     }),
     { ASSETS: assets, ALLOWED_TELEMETRY_KEYS: ALLOWED_KEY },

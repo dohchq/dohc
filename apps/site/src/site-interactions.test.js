@@ -622,23 +622,33 @@ describe("Drive waitlist", () => {
   });
 
   it("announces a pending request, blocks a second submission, and reports the failure", async () => {
-    let fail;
-    vi.mocked(fetch).mockImplementation(
-      () =>
-        new Promise((_, reject) => {
-          fail = reject;
-        }),
-    );
-    const form = await join();
-    const status = document.querySelector("[data-waitlist-status]");
-    expect(status.textContent).toBe("Joining the waitlist…");
-    expect(form.querySelector('button[type="submit"]').getAttribute("aria-disabled")).toBe("true");
-    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    expect(fetch).toHaveBeenCalledOnce();
-    fail(new TypeError("offline"));
-    await vi.waitFor(() => expect(form.dataset.state).toBe("error"));
-    expect(status.textContent).toContain("Check your connection");
-    expect(form.querySelector('button[type="submit"]').hasAttribute("aria-disabled")).toBe(false);
+    const outcomes = [];
+    const onOutcome = (event) => outcomes.push(event.detail.outcome);
+    document.addEventListener("dohc:waitlist-submitted", onOutcome);
+    try {
+      let fail;
+      vi.mocked(fetch).mockImplementation(
+        () =>
+          new Promise((_, reject) => {
+            fail = reject;
+          }),
+      );
+      const form = await join();
+      const status = document.querySelector("[data-waitlist-status]");
+      expect(status.textContent).toBe("Joining the waitlist…");
+      expect(form.querySelector('button[type="submit"]').getAttribute("aria-disabled")).toBe(
+        "true",
+      );
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      expect(fetch).toHaveBeenCalledOnce();
+      fail(new TypeError("offline"));
+      await vi.waitFor(() => expect(form.dataset.state).toBe("error"));
+      expect(status.textContent).toContain("Check your connection");
+      expect(form.querySelector('button[type="submit"]').hasAttribute("aria-disabled")).toBe(false);
+      expect(outcomes).toEqual(["failed"]);
+    } finally {
+      document.removeEventListener("dohc:waitlist-submitted", onOutcome);
+    }
   });
 
   it.each([
