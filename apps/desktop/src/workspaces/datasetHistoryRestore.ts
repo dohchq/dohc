@@ -109,13 +109,15 @@ export function generateDatasetHistoryRestore(
   for (const previous of old.operations) {
     const selected = after.operations.find((item) => item.operationId === previous.operationId)!;
     const contract = contractShape(previous);
-    if (previous.label === selected.label && contract === contractShape(selected)) continue;
+    const contractChanged = contract !== contractShape(selected);
+    if (previous.label === selected.label && !contractChanged) continue;
     const operation = definition.operations.find(
       (item) => item.operationId === previous.operationId,
     );
     if (!operation)
       throw new Error(`The action ${previous.label} was removed. Review a source migration.`);
     operation.label = restoreLabel(previous.label, selected.label, operation.label, previous.label);
+    if (!contractChanged) continue;
     if (contractShape(operation) === contractShape(selected)) {
       delete operation.contract;
       if (previous.contract) operation.contract = previous.contract;

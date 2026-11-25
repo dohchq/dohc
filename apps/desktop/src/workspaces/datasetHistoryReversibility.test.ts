@@ -7,7 +7,7 @@ import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifac
 import { datasetRevisionHistoryReversible } from "./datasetHistoryReversibility";
 import { generateDatasetHistoryRestore } from "./datasetHistoryRestore";
 
-const revision = (number: number, contract?: DatasetOperationContract) =>
+const revision = (number: number, contract?: DatasetOperationContract, label = "Close") =>
   describeDatasetRevision({
     definition: parseDatasetDefinition(
       {
@@ -20,6 +20,7 @@ const revision = (number: number, contract?: DatasetOperationContract) =>
         operations: [
           {
             name: "close",
+            label,
             table: "tasks",
             kind: "action",
             readOnly: false,
@@ -33,8 +34,8 @@ const revision = (number: number, contract?: DatasetOperationContract) =>
     schemaSql: "CREATE TABLE tasks(id TEXT PRIMARY KEY);",
     operationSource: "export default {};",
   });
-const saved = (number: number, contract?: DatasetOperationContract) => ({
-  revision: revision(number, contract),
+const saved = (number: number, contract?: DatasetOperationContract, label?: string) => ({
+  revision: revision(number, contract, label),
   schemaSql: "CREATE TABLE tasks(id TEXT PRIMARY KEY);",
   operationSource: "export default {};",
 });
@@ -55,6 +56,15 @@ describe("dataset history reversibility", () => {
     expect(restored()).not.toHaveProperty("contract");
     expect(() =>
       generateDatasetHistoryRestore(saved(3, { output: "string" }), saved(1), saved(2, later)),
-    ).toThrow("The contract of close changed again.");
+    ).toThrow("The contract of Close changed again.");
+  });
+
+  it("reverses a rename without touching a contract added after it", () => {
+    const restored = generateDatasetHistoryRestore(
+      saved(3, { input: "string" }, "Finish"),
+      saved(1),
+      saved(2, undefined, "Finish"),
+    ).definition.operations[0]!;
+    expect(restored).toMatchObject({ label: "Close", contract: { input: "string" } });
   });
 });
