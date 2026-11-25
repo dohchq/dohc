@@ -29,6 +29,7 @@ import { createScopedEnds, type ScopedEnds } from "../pages/pageLive";
 import { createAccount, type Account, type AccountState, type SignIn } from "../server/account";
 import { createCacheRows } from "../server/cacheRows";
 import { createCacheDatabase, createKeptDatabase } from "../server/keptDatabase";
+import { openNow } from "../server/keptStore";
 import {
   clearNoticeListsOnSignInChange,
   createNoticeStore,
@@ -124,6 +125,8 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   // Sign out deletes the account's kept.db rows: the sign-in ends, and its token goes, once that delete has committed.
   // With phone writes off it sends nothing, not even records an earlier build kept. Both files open once per install.
   const [kept] = useState(createKeptDatabase);
+  const [cacheFile] = useState(createCacheDatabase);
+  const [cache] = useState(() => createReadCache(createCacheRows(cacheFile)));
   const [outbox] = useState(() => createOutbox({ store: kept, sends: phoneWrites }));
   const [account] = useState(() =>
     createAccount({
@@ -131,15 +134,18 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       fetch,
       onSignOut: teardown.signOut((leave, ending) => outbox.signOut(leave, ending)),
       pendingSignOuts: pendingSignOuts(kept),
+      onSaved: (saved) => cache.preload(saved),
     }),
   );
   const state = useSyncExternalStore(account.subscribe, account.state);
-  useEffect(() => void account.restore(), [account]);
+  useEffect(() => {
+    void openNow([kept, cacheFile]);
+    void account.restore();
+  }, [account, kept, cacheFile]);
   // Subscribed before the cache and the outbox follow the account, so it runs before either clears anything.
   useEffect(() => teardown.follow(account), [account, teardown]);
   const signIn = state.status === "signed-in" ? state.signIn : null;
 
-  const [cache] = useState(() => createReadCache(createCacheRows(createCacheDatabase())));
   useEffect(() => cache.follow(account), [account, cache]);
   useEffect(() => pageTimings?.follow(account), [account]);
 

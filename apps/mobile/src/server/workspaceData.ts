@@ -234,6 +234,8 @@ export interface ReadCache {
    * to read: the scope already has views in memory, which are newer, or the cache keeps nothing on disk.
    */
   restore(scope: string): Promise<void> | null;
+  /** Starts reading the sign-in's saved list and choice, for its `savedList` to answer with unless a clear comes first. */
+  preload(signIn: Pick<SignIn, "origin" | "userId">): void;
   /** The sign-in's saved workspace list, or null when the cache keeps nothing on disk. */
   savedList(signIn: Pick<SignIn, "origin" | "userId">): SavedList | null;
   /** Saves now what waits to be saved, as when the app goes to the background. */
@@ -266,6 +268,7 @@ export function createReadCache(files?: CacheRows): ReadCache {
   // One restore per scope at a time: a second store for the scope waits on the first, so the scope stays tracked until
   // the only read of its file settles, and a list that drops it meanwhile moves its generation on.
   const restoring = new Map<string, Promise<void>>();
+  const preloads = new Map<string, { readonly epoch: number; readonly read: Promise<unknown> }>();
   function forget(scope: string) {
     drops.set(scope, (drops.get(scope) ?? 0) + 1);
     scopes.delete(scope);
@@ -331,15 +334,24 @@ export function createReadCache(files?: CacheRows): ReadCache {
       restoring.set(scope, done);
       return done;
     },
+    preload(signIn) {
+      for (const scope of [listScope(signIn), choiceScope(signIn)])
+        if (files) preloads.set(scope, { epoch, read: files.readList(scope) });
+    },
     savedList(signIn) {
       if (!files) return null;
       const scope = listScope(signIn);
+      const readList = (key: string) => {
+        const early = preloads.get(key);
+        preloads.delete(key);
+        return early?.epoch === epoch ? early.read : files.readList(key);
+      };
       return {
         load() {
           const expected = epoch;
-          return files
-            .readList(scope)
-            .then((found) => (epoch === expected ? each(found, accountWorkspace) : null));
+          return readList(scope).then((found) =>
+            epoch === expected ? each(found, accountWorkspace) : null,
+          );
         },
         // The list from the server, or one this phone changed, decides which workspaces the cache keeps: only those the
         // phone can open.
@@ -356,9 +368,9 @@ export function createReadCache(files?: CacheRows): ReadCache {
         },
         loadChosen() {
           const expected = epoch;
-          return files
-            .readList(choiceScope(signIn))
-            .then((found) => (epoch === expected && typeof found === "string" ? found : null));
+          return readList(choiceScope(signIn)).then((found) =>
+            epoch === expected && typeof found === "string" ? found : null,
+          );
         },
         chose: (workspaceId) => void files.writeList(choiceScope(signIn), workspaceId),
       };

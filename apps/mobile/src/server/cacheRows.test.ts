@@ -12,8 +12,9 @@ import {
   type SavedView,
 } from "./cacheRows";
 import { createServerClient } from "./client";
-import { CACHE_FORMAT } from "./keptStore";
+import { CACHE_FORMAT, openNow } from "./keptStore";
 import { createOpenWorkspace } from "./openWorkspace";
+import { pendingSignOuts } from "./pushRegistration";
 import { keptDisk, type KeptDisk } from "./testKeptDisk";
 import { deferred, memoryStore, serveSessionEnd, testServer, type Answer } from "./testServer";
 import {
@@ -1168,5 +1169,86 @@ describe("the saved workspace list", () => {
     await vi.waitFor(() => expect(emptied.workspace.state().currentWorkspaceId).toBe("ws-a"));
     expect(emptied.opened).toEqual(["ws-a"]);
     emptied.workspace.stop();
+  });
+});
+
+describe("a launch", () => {
+  const SAVED: StoredSignIn = {
+    origin: "https://dohc.example.com",
+    token: "tok-1",
+    userId: "u-1",
+    email: "ice@example.com",
+  };
+  const entry = (workspaceId: string) => ({
+    workspaceId,
+    name: workspaceId,
+    canOpen: true,
+    showOnPhone: true,
+  });
+
+  /** A relaunch whose keychain read and Sign out check each wait until the test lets them answer. */
+  async function relaunch(signingOut: boolean) {
+    const disk = keptDisk();
+    const seeded = launch(disk).files;
+    await seeded.writeList(JSON.stringify([SAVED.origin, SAVED.userId]), [
+      entry("ws-a"),
+      entry("ws-b"),
+    ]);
+    await seeded.writeList(JSON.stringify([SAVED.origin, SAVED.userId, "chosen"]), "ws-b");
+    disk.cache.crash();
+
+    const kept = disk.launch();
+    const cacheFile = disk.cache.launch();
+    const files = createCacheRows(cacheFile);
+    made.push(files);
+    const reads: string[] = [];
+    const cache = createReadCache({
+      ...files,
+      readList: (scope) => (reads.push(scope), files.readList(scope)),
+    });
+    const keychain = memoryStore(SAVED);
+    const answerKeychain = keychain.holdLoads();
+    const check = deferred<boolean>();
+    const account = createAccount({
+      store: keychain.store,
+      fetch: testServer().fetch,
+      pendingSignOuts: { ...pendingSignOuts(kept), isPending: () => check.promise },
+      onSaved: (saved) => cache.preload(saved),
+    });
+    cache.follow(account);
+    const opened = openNow([kept, cacheFile]);
+    void account.restore();
+    await opened;
+    expect(existsSync(disk.path)).toBe(true);
+    expect(account.state().status).toBe("loading");
+
+    answerKeychain();
+    await vi.waitFor(() => expect(reads).toHaveLength(2));
+    expect(account.state().status).toBe("loading");
+    check.resolve(signingOut);
+    await vi.waitFor(() => expect(account.state().status).not.toBe("loading"));
+    return { disk, files, cache, account, reads };
+  }
+
+  it("opens both files while the keychain is read, and reads the saved list and choice before the Sign out check answers", async () => {
+    const { cache, account, reads } = await relaunch(false);
+    const state = account.state();
+    if (state.status !== "signed-in") throw new Error("expected signed-in");
+    const signIn = state.signIn;
+    const list = createWorkspaceList(signIn, cache.savedList(signIn));
+    const workspace = createOpenWorkspace({ signIn, list, cache });
+    await vi.waitFor(() =>
+      expect(workspace.state()).toMatchObject({ currentWorkspaceId: "ws-b", choosing: false }),
+    );
+    expect(list.state()).toMatchObject({ workspaces: [entry("ws-a"), entry("ws-b")] });
+    expect(reads).toHaveLength(2);
+    workspace.stop();
+  });
+
+  it("stays signed out, and deletes the cache.db it read early, when a Sign out waits to finish", async () => {
+    const { disk, files, account } = await relaunch(true);
+    expect(account.state().status).toBe("signed-out");
+    await files.flush();
+    expect(existsSync(disk.cache.path)).toBe(false);
   });
 });

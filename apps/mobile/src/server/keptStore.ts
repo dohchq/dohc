@@ -106,6 +106,10 @@ export async function deleteAccountRows(sql: Sql, account: { origin: string; use
     ]);
 }
 
+/** Opens each file now, so its first statement doesn't wait for the open. Resolves once each has opened or failed. */
+export const openNow = (stores: readonly Pick<KeptStore, "read">[]) =>
+  Promise.all(stores.map((store) => store.read("SELECT 1", []).catch(() => undefined)));
+
 type Setting = readonly [name: string, value: string, readBack: string | number];
 
 /** Each setting, the value it's set to, and what reading it back must give. */
