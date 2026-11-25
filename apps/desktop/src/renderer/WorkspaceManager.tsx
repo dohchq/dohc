@@ -22,6 +22,7 @@ import { OpenSharedView } from "./OpenSharedView";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
 import { ReportsPrivacyDialog } from "./settings/ReportsPrivacyDialog";
 import { ConnectionNotices, useConnectionNotices } from "./shell/connectionNotices";
+import { reportInstallationFailure } from "./shell/installationNotices";
 import { useKeptTyping } from "./shell/useKeptTyping";
 import { useCrashReport } from "./shell/useCrashReport";
 import { useStandaloneReportsNotice } from "./shell/useReportsNotice";
@@ -114,6 +115,26 @@ function writeListWidth(width: number): void {
 
 const ROW_MENU_WIDTH = 176;
 const LIST_REFRESH = "workspace-list:refresh";
+
+function reportCutOffPrivacySave(
+  change: {
+    settings: DesktopUserSettingsResult["settings"];
+    base: DesktopUserSettingsResult["settings"];
+  },
+  cause: unknown,
+): void {
+  reportInstallationFailure({
+    message: ipcErrorMessage(cause, "dohc could not save your settings."),
+    cause,
+    serverUrl: null,
+    retry: () => {
+      void bridge()
+        .setUserSettings(change)
+        .catch((next: unknown) => reportCutOffPrivacySave(change, next));
+      return true;
+    },
+  });
+}
 type RemovalDialog = { workspace: Workspace; busy: boolean; error: string | null };
 const ROW_ACTIONS = ["open", "reveal", "remove"] as const;
 type RowAction = (typeof ROW_ACTIONS)[number];
@@ -239,6 +260,7 @@ export function WorkspaceManager(props: {
   const keptTyping = useKeptTyping();
   const crashReportNotice = useCrashReport(connectionNotices);
   const committedSettingsRef = useRef(props.userSettings ?? null);
+  const broadcastSettingsRef = useRef<DesktopUserSettingsResult | null>(null);
   const inFlightPrivacyRef = useRef<Partial<PrivacySettings>>({});
   const queuedPrivacyRef = useRef<Partial<PrivacySettings>>({});
   const savingPrivacyRef = useRef(false);
@@ -248,6 +270,9 @@ export function WorkspaceManager(props: {
   useEffect(() => {
     if (!savingPrivacyRef.current) {
       committedSettingsRef.current = props.userSettings ?? null;
+      broadcastSettingsRef.current = null;
+    } else if (props.userSettings && props.userSettings !== committedSettingsRef.current) {
+      broadcastSettingsRef.current = props.userSettings;
     }
   }, [props.userSettings]);
   useEffect(() => {
@@ -303,12 +328,14 @@ export function WorkspaceManager(props: {
             inFlightPrivacyRef.current = batch;
             const batchKeys = Object.keys(batch) as Array<keyof PrivacySettings>;
             const nextPrivacy: PrivacySettings = { ...current.settings.privacy, ...batch };
+            const change = {
+              settings: { ...current.settings, privacy: nextPrivacy },
+              base: current.settings,
+            };
             try {
-              const saved = await bridge().setUserSettings({
-                settings: { ...current.settings, privacy: nextPrivacy },
-                base: current.settings,
-              });
+              const saved = await bridge().setUserSettings(change);
               committedSettingsRef.current = saved;
+              broadcastSettingsRef.current = null;
               inFlightPrivacyRef.current = {};
               const nextPending = { ...queuedPrivacyRef.current };
               if (mountedRef.current) {
@@ -319,6 +346,10 @@ export function WorkspaceManager(props: {
                 setPendingPrivacy(nextPending);
               }
             } catch (cause) {
+              if (broadcastSettingsRef.current) {
+                committedSettingsRef.current = broadcastSettingsRef.current;
+                broadcastSettingsRef.current = null;
+              }
               inFlightPrivacyRef.current = {};
               const nextPending = { ...queuedPrivacyRef.current };
               if (mountedRef.current) {
@@ -335,10 +366,16 @@ export function WorkspaceManager(props: {
                     `first-run-privacy:${key}`,
                   );
                 }
+              } else {
+                reportCutOffPrivacySave(change, cause);
               }
             }
           }
         } finally {
+          if (broadcastSettingsRef.current) {
+            committedSettingsRef.current = broadcastSettingsRef.current;
+            broadcastSettingsRef.current = null;
+          }
           inFlightPrivacyRef.current = {};
           savingPrivacyRef.current = false;
         }

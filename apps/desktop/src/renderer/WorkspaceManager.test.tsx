@@ -16,6 +16,8 @@ import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { deferred } from "../testing/deferred";
 import { reportsNoticeText } from "./shell/useReportsNotice";
+import { useInstallationNotices } from "./shell/installationNotices";
+import type { ConnectionErrorReport } from "./shell/connectionNotices";
 import { WorkspaceManager } from "./WorkspaceManager";
 
 let menuListener: ((command: MenuCommand) => void) | null = null;
@@ -991,5 +993,119 @@ describe("workspace manager with registered workspaces", () => {
       });
     });
     expect(usageSwitch.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("reports cut-off privacy save failures to installation notices after unmount and reconciles broadcasts on rejection", async () => {
+    const user = userEvent.setup();
+    const initial: DesktopUserSettingsResult = {
+      settings: {
+        ...structuredClone(DEFAULT_USER_SETTINGS),
+        privacy: { usageReports: false, errorReports: true },
+      },
+      source: "stored",
+    };
+    const broadcastOn: DesktopUserSettingsResult = {
+      settings: {
+        ...structuredClone(DEFAULT_USER_SETTINGS),
+        privacy: { usageReports: true, errorReports: true },
+      },
+      source: "stored",
+    };
+
+    const firstSave = deferred<DesktopUserSettingsResult>();
+    const saves: Array<{
+      settings: DesktopUserSettingsResult["settings"];
+      base?: DesktopUserSettingsResult["settings"];
+    }> = [];
+    bridge.readReportsNotice.mockResolvedValueOnce({ usage: false, errors: true });
+    bridge.setUserSettings
+      .mockImplementationOnce(async (payload) => {
+        saves.push(payload);
+        return firstSave.promise;
+      })
+      .mockImplementationOnce(async (payload) => {
+        saves.push(payload);
+        return { settings: payload.settings, source: "stored" };
+      });
+
+    let pushExternalSettings!: (next: DesktopUserSettingsResult) => void;
+    function BroadcastHarness() {
+      const [settings, setSettings] = useState<DesktopUserSettingsResult>(initial);
+      pushExternalSettings = setSettings;
+      return (
+        <WorkspaceManager
+          workspaces={[]}
+          current={null}
+          userSettings={settings}
+          onUserSettingsChange={setSettings}
+          onForgot={async () => []}
+          onOpenWorkspace={() => {}}
+        />
+      );
+    }
+
+    const view = render(<BroadcastHarness />);
+    expect(await screen.findByText(reportsNoticeText({ usage: false, errors: true }))).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Privacy settings" }));
+    const dialog = await screen.findByTestId("first-run-privacy-dialog");
+    const usageSwitch = within(dialog).getByRole("switch", { name: "Send usage reports" });
+
+    await user.click(usageSwitch);
+    await act(async () => {
+      pushExternalSettings(broadcastOn);
+    });
+    await act(async () => {
+      firstSave.reject(new Error("tray failed after write"));
+    });
+    expect(await screen.findByText(/tray failed after write/i)).toBeTruthy();
+    expect(usageSwitch.getAttribute("aria-checked")).toBe("true");
+
+    await user.click(usageSwitch);
+    await waitFor(() => expect(saves).toHaveLength(2));
+    expect(saves[1]!.base?.privacy.usageReports).toBe(true);
+    expect(saves[1]!.settings.privacy.usageReports).toBe(false);
+    view.unmount();
+
+    const cutOffSave = deferred<DesktopUserSettingsResult>();
+    const installationErrors: ConnectionErrorReport[] = [];
+    bridge.readReportsNotice.mockResolvedValueOnce({ usage: true, errors: true });
+    bridge.setUserSettings
+      .mockImplementationOnce(async () => cutOffSave.promise)
+      .mockImplementationOnce(async ({ settings }) => ({ settings, source: "stored" }));
+
+    function CutOffHarness() {
+      const [showManager, setShowManager] = useState(true);
+      useInstallationNotices((error) => installationErrors.push(error));
+      return showManager ? (
+        <>
+          <WorkspaceManager
+            workspaces={[]}
+            current={null}
+            userSettings={broadcastOn}
+            onForgot={async () => []}
+            onOpenWorkspace={() => {}}
+          />
+          <button type="button" onClick={() => setShowManager(false)}>
+            Leave first run
+          </button>
+        </>
+      ) : null;
+    }
+
+    render(<CutOffHarness />);
+    expect(await screen.findByText(reportsNoticeText({ usage: true, errors: true }))).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Privacy settings" }));
+    const cutOffDialog = await screen.findByTestId("first-run-privacy-dialog");
+    await user.click(within(cutOffDialog).getByRole("switch", { name: "Send usage reports" }));
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Leave first run" }));
+
+    await act(async () => {
+      cutOffSave.reject(new Error("disk busy"));
+    });
+    await waitFor(() => expect(installationErrors).toHaveLength(1));
+    expect(installationErrors[0]!.message).toContain("disk busy");
+    installationErrors[0]!.retry?.();
+    await waitFor(() => expect(bridge.setUserSettings).toHaveBeenCalledTimes(4));
   });
 });
