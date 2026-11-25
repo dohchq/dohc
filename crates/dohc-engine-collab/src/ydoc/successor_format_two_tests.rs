@@ -6,21 +6,32 @@ const LINKS: &str =
     "# Title\n\nSee [a link](https://example.com).\n\nAnd [another](https://example.org \"Its title\").\n";
 const KEPT_FRONTMATTER: &str = "---\n# kept\ntitle: A\ntags: b\nstatus: c\nowner: d\n---\n\nBody\n";
 
+const HASHES: [&str; 3] = [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+];
+
+fn identity_input<'a>(
+    key: &'a crate::DocKey,
+    result_sha256: &'a str,
+) -> SuccessorIdentityInput<'a> {
+    SuccessorIdentityInput {
+        key,
+        predecessor_claim_id: HASHES[0],
+        predecessor_state_vector_sha256: HASHES[1],
+        artifact_op_kind: "conflict.resolve",
+        artifact_id: "conflict",
+        artifact_preimage_sha256: HASHES[2],
+        content_kind: ContentKind::Richdoc,
+        result_sha256,
+    }
+}
+
 fn identity(artifact: &str, schema_version: u8) -> SuccessorIdentity {
     let key = crate::DocKey::new("workspace", "main", "object").unwrap();
-    SuccessorIdentity::derive_with_schema_version(
-        SuccessorIdentityInput {
-            key: &key,
-            predecessor_claim_id: &"a".repeat(64),
-            predecessor_state_vector_sha256: &"b".repeat(64),
-            artifact_op_kind: "conflict.resolve",
-            artifact_id: "conflict",
-            artifact_preimage_sha256: &"c".repeat(64),
-            content_kind: ContentKind::Richdoc,
-            result_sha256: &crate::hex_sha256(artifact.as_bytes()),
-        },
-        schema_version,
-    )
+    let result = crate::hex_sha256(artifact.as_bytes());
+    SuccessorIdentity::derive_with_schema_version(identity_input(&key, &result), schema_version)
 }
 
 fn successor(artifact: &str) -> SuccessorBase {
@@ -88,6 +99,28 @@ fn the_format_two_version_is_part_of_the_epoch_and_any_other_version_is_format_o
     assert_eq!(derived, identity(artifact, 7));
     assert_ne!(identity(artifact, 2).epoch_tag, derived.epoch_tag);
     assert_ne!(identity(artifact, 2).client_id, derived.client_id);
+    let result = crate::hex_sha256(artifact.as_bytes());
+    let plain = |schema_version| {
+        SuccessorIdentity::derive_with_schema_version(
+            SuccessorIdentityInput {
+                content_kind: ContentKind::Plaintext,
+                ..identity_input(&key, &result)
+            },
+            schema_version,
+        )
+    };
+    assert_eq!(plain(2), plain(1));
+}
+
+#[test]
+fn a_successor_with_a_container_that_holds_no_line_is_written_in_format_one() {
+    reading_body_sequence_here(|| {
+        for artifact in [">\n", "hello\n\n>\n"] {
+            let note = loaded(&successor(artifact));
+            assert_eq!(note.schema_version, 1, "{artifact:?}");
+            assert_eq!(note.file, artifact);
+        }
+    });
 }
 
 #[test]

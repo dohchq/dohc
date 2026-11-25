@@ -132,7 +132,11 @@ impl NewBody {
                         self.containers += 1;
                         self.records(&id, container, attrs);
                         path.push(id);
+                        let pieces = self.pieces.len();
                         self.blocks(children, path)?;
+                        if self.pieces.len() == pieces {
+                            return None;
+                        }
                         path.pop();
                     }
                     _ => return None,

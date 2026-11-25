@@ -280,12 +280,12 @@ impl SuccessorIdentity {
     /// Bind a successor whose note is written in rich-document
     /// `schema_version`. A successor of a format-2 note is written in format
     /// 2 where that format holds it, and the version is part of its epoch tag.
-    /// Any other version derives what [`Self::derive`] derives.
+    /// Any other version, or any other content kind, derives what
+    /// [`Self::derive`] derives.
     pub fn derive_with_schema_version(
         input: SuccessorIdentityInput<'_>,
         schema_version: u8,
     ) -> Self {
-        let schema_version = if schema_version == 2 { 2 } else { 1 };
         let SuccessorIdentityInput {
             key,
             predecessor_claim_id,
@@ -296,6 +296,10 @@ impl SuccessorIdentity {
             content_kind,
             result_sha256,
         } = input;
+        let schema_version = match (schema_version, content_kind) {
+            (2, ContentKind::Richdoc) => 2,
+            _ => 1,
+        };
         let mut identity = Vec::new();
         identity.extend_from_slice(SUCCESSOR_EPOCH_DOMAIN);
         for field in [
@@ -369,7 +373,7 @@ pub fn fresh_successor_base(
             observed: observed_result,
         });
     }
-    let format_two = identity.schema_version == 2 && identity.content_kind == ContentKind::Richdoc;
+    let format_two = identity.schema_version == 2;
     if format_two && !body_sequence_setting() {
         return Err(CollabError::InvalidSuccessorBase {
             constraint: "format-2 successor",
