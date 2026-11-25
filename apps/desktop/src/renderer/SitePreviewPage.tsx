@@ -1025,6 +1025,7 @@ export function SitePreviewPage(props: {
                   <AppInspectorDrawer
                     workspaceId={props.workspaceId}
                     onClose={() => setInspectorOpen(false)}
+                    reportError={props.reportError}
                   />
                 ) : null}
               </>

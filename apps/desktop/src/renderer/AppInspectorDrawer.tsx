@@ -22,9 +22,11 @@ const formatBytes = (n: number) =>
 export function AppInspectorDrawer({
   workspaceId,
   onClose,
+  reportError,
 }: {
   workspaceId: string;
   onClose: () => void;
+  reportError?: (fallback: string, error: unknown, retry: (() => void) | null) => void;
 }) {
   const session = useWorkspaceSession();
   const [tab, setTab] = useState<"trace" | "sql">("trace");
@@ -81,6 +83,27 @@ export function AppInspectorDrawer({
       return result.kind === "sql" ? result : null;
     },
   });
+
+  const datasetsFailure = datasetsQuery.error;
+  const retryDatasets = datasetsQuery.retry;
+  useEffect(() => {
+    if (datasetsFailure)
+      reportError?.(
+        "dohc could not load Collections.",
+        datasetsFailure,
+        () => void retryDatasets(),
+      );
+  }, [datasetsFailure, retryDatasets, reportError]);
+  const traceFailure = traceQuery.error;
+  const retryTrace = traceQuery.retry;
+  useEffect(() => {
+    if (traceFailure)
+      reportError?.(
+        "dohc could not load recent operations.",
+        traceFailure,
+        () => void retryTrace(),
+      );
+  }, [traceFailure, retryTrace, reportError]);
 
   const runSql = (explain: boolean) => {
     const trimmed = sql.trim();

@@ -143,11 +143,52 @@ describe("AppInspectorDrawer", () => {
         computer: "Studio Mac",
       },
     });
+    const reportError = vi.fn();
     render(
       <WorkspaceSessionProvider workspaceId="ws-1">
-        <AppInspectorDrawer workspaceId="ws-1" onClose={() => {}} />
+        <AppInspectorDrawer workspaceId="ws-1" onClose={() => {}} reportError={reportError} />
       </WorkspaceSessionProvider>,
     );
     expect(await screen.findByText("This workspace's Collections run on Studio Mac.")).toBeTruthy();
+    expect(reportError).toHaveBeenCalledTimes(1);
+    expect(reportError.mock.calls[0]?.[0]).toBe("dohc could not load Collections.");
+    reportError.mock.calls[0]?.[2]?.();
+    await waitFor(() => {
+      expect(screen.getByTestId("app-inspector-trace-row")).toBeTruthy();
+    });
+  });
+
+  it("reports a failed trace load with Try again", async () => {
+    const reportError = vi.fn();
+    datasetMock.mockImplementationOnce(async () => ({
+      kind: "list",
+      datasets: [
+        {
+          datasetId: "11111111-1111-4111-8111-111111111101",
+          datasetPath: "ledger/dataset.json",
+          name: "Ledger",
+          revision: 1,
+          revisionSha256: "a".repeat(64),
+          tables: [],
+          operations: [],
+        },
+      ],
+      nextCursor: null,
+    }));
+    datasetMock.mockImplementationOnce(async () => {
+      throw new Error("The Collection's worker stopped.");
+    });
+    render(
+      <WorkspaceSessionProvider workspaceId="ws-1">
+        <AppInspectorDrawer workspaceId="ws-1" onClose={() => {}} reportError={reportError} />
+      </WorkspaceSessionProvider>,
+    );
+    await waitFor(() => expect(reportError).toHaveBeenCalledTimes(1));
+    expect(reportError.mock.calls[0]?.[0]).toBe("dohc could not load recent operations.");
+    reportError.mock.calls[0]?.[2]?.();
+    await waitFor(() => {
+      expect(screen.getByTestId("app-inspector-trace-row")).toBeTruthy();
+    });
+    expect(reportError).toHaveBeenCalledTimes(1);
   });
 });
