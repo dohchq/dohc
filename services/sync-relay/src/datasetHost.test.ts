@@ -1289,7 +1289,10 @@ it("closes a workspace app when a folder rule hides one of its Collections or it
   const read = (key: string) => f.invoke(ana, id(6), {}, shared, key);
   expect((await read("both")).result).toBe("edit");
   const { ruleId, revision } = f.rule(null, "hidden");
-  await expect(read("one-hidden")).rejects.toMatchObject(refused);
+  await expect(read("one-hidden")).rejects.toMatchObject({ code: "not_found" });
+  expect(() => f.host.servedPublication(ana, shared)).toThrow(
+    expect.objectContaining({ code: "not_found" }),
+  );
   f.storage.changeFolderRule({
     workspaceId: "w",
     actorUserId: "owner",
@@ -1421,6 +1424,14 @@ it("lets an admin set Collection defaults and grant a member existing actions, b
     expect.objectContaining({ code: "bad_request" }),
   );
   expect(defaults(id(1), memberRevision.revisionSha256, [id(6)])).toEqual({ generation: 1 });
+  expect(f.host.permissions(ana, scope).rules).toMatchObject({
+    revision: 1,
+    revisionSha256: memberRevision.revisionSha256,
+    actions: expect.arrayContaining([{ operationId: id(6), name: "read", readOnly: true }]),
+  });
+  expect(
+    f.host.permissions(ana, { workspaceId: "w", datasetId: id(21) }).rules.actions,
+  ).not.toContainEqual(expect.objectContaining({ operationId: id(6) }));
   await expect(
     (async () =>
       f.host.activate(ana, {
@@ -1431,6 +1442,28 @@ it("lets an admin set Collection defaults and grant a member existing actions, b
         capacityBytes: 1024 * 1024,
       }))(),
   ).rejects.toMatchObject(refused);
+});
+
+it("lists a Collection a member reaches only by its defaults, and changes their offline copy's access when the defaults change", async () => {
+  const f = await memberFixture(false);
+  expect(f.listed().datasets).toEqual([]);
+  const defaults = (view: string[]) =>
+    f.host.setWorkspaceDefaults(owner, {
+      ...scope,
+      defaults: {
+        view,
+        comment: [],
+        edit: [],
+        revision: 1,
+        revisionSha256: memberRevision.revisionSha256,
+      },
+    });
+  defaults([id(6)]);
+  expect(f.listed().datasets.map((dataset) => dataset.datasetId)).toEqual([id(1)]);
+  const fingerprint = f.host.offlineAccessFingerprint(ana);
+  defaults([]);
+  expect(f.listed().datasets).toEqual([]);
+  expect(f.host.offlineAccessFingerprint(ana)).not.toBe(fingerprint);
 });
 
 it("pages a member's Collections past ones they can't reach, without naming them", async () => {

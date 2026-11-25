@@ -10,7 +10,7 @@ import {
   type DatasetDefinition,
   type DatasetOperationContract,
 } from "@dohc/security-contract/dataset";
-import { discoverDatasetBoundApps } from "./datasetBoundApps";
+import { discoverDatasetBoundApps, parseShareLinkPublication } from "./datasetBoundApps";
 import type { LocalAppRow } from "./localAppStore";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -203,6 +203,7 @@ describe("discoverDatasetBoundApps", () => {
     const linkPubId = sha("link-active");
     const withdrawnPubId = sha("link-withdrawn");
     const endedLinkPubId = sha("link-ended");
+    const workspacePubId = sha("workspace-active");
 
     const localRow: LocalAppRow = {
       kind: "dataset",
@@ -259,6 +260,18 @@ describe("discoverDatasetBoundApps", () => {
           },
           {
             kind: "app",
+            principal: workspacePubId,
+            current: true,
+            metadata: {
+              kind: "dataset",
+              datasetId: rev1.datasetId,
+              revision: 1,
+              revisionSha256: rev1.revisionSha256,
+              operationIds: [id(11)],
+            },
+          },
+          {
+            kind: "app",
             principal: endedLinkPubId,
             current: true,
             metadata: {
@@ -286,6 +299,14 @@ describe("discoverDatasetBoundApps", () => {
             candidate: makeCandidate("apps/order-form", [linkCap]),
           };
         }
+        if (pubId === workspacePubId)
+          return parseShareLinkPublication("w", "owner", workspacePubId, {
+            publicationId: workspacePubId,
+            active: true,
+            authorityRevision: 6,
+            owner: { workspaceId: "w", shareId: "members", ownerUserId: "owner" },
+            candidate: makeCandidate("apps/team-board", [linkCap]),
+          });
         if (pubId === endedLinkPubId) {
           return {
             publicationId: endedLinkPubId,
@@ -333,6 +354,17 @@ describe("discoverDatasetBoundApps", () => {
         pinnedRevision: 1,
         pinnedRevisionSha256: rev1.revisionSha256,
         operationIds: [id(10)],
+        status: "needs-refresh",
+      },
+      {
+        scope: "workspace",
+        publicationId: workspacePubId,
+        authorityRevision: 6,
+        appRoot: "apps/team-board",
+        shareId: "members",
+        pinnedRevision: 1,
+        pinnedRevisionSha256: rev1.revisionSha256,
+        operationIds: [id(11)],
         status: "needs-refresh",
       },
     ]);

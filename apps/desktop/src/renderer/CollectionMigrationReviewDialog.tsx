@@ -28,6 +28,11 @@ export function boundAppStatusLabel(status: "compatible" | "needs-refresh" | "in
       ? "Needs approval again"
       : "";
 }
+export const BOUND_APP_SCOPE_LABEL = {
+  local: "Local",
+  link: "Share link",
+  workspace: "Workspace",
+} as const;
 export interface CollectionMigrationReviewDialogProps {
   workspaceId: string;
   datasetId: string;
@@ -722,7 +727,7 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
                               <span className="text-[11px] text-muted">({app.alias})</span>
                             ) : null}
                             <span className="rounded bg-panel px-1.5 py-0.5 text-[11px] text-muted">
-                              {app.scope === "link" ? "Share link" : "Local"}
+                              {BOUND_APP_SCOPE_LABEL[app.scope]}
                             </span>
                           </span>
                           <span

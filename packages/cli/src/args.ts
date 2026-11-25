@@ -1779,7 +1779,8 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
   setDefaults: {
     summary: "Set the actions each workspace level gets in a Collection by default.",
     notes: [
-      "defaults names view, comment, and edit operationIds, with revision and revisionSha256.",
+      "defaults names view, comment, and edit operationIds, with revision and revisionSha256. Read them from permissions rules.",
+      "An Admin runs permissions, setGrant, removeGrant, and setDefaults in a workspace they joined.",
       "View and Comment get only reads. No level gets an owner-only action.",
     ],
   },
@@ -2009,7 +2010,7 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
       { field: "candidateDigest", from: "prepare", path: "candidateDigest" },
     ],
     notes: [
-      "Take approvalId and candidateDigest from prepare, prepareLocal, or reviewReactivation. Append the returned appQuery before the fragment of any link URL, including one returned by createLink.",
+      "Take approvalId and candidateDigest from prepare, prepareLocal, or reviewReactivation. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. An app for members returns no appQuery.",
       "For linkReads, select operationId from the prepared dataset capability's operations and fieldIds from each operation's fields[].fieldId. These selections expose reads to link holders.",
       agentLabelNote,
     ],

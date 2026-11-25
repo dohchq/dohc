@@ -158,7 +158,7 @@ Pass `{ request: { action, ... } }` to `dohc_publish_app`:
 
 1. **Prepare**: `{ action: "prepare", workspaceId, appRoot, audience: "workspace" }` -> returns `approvalId`, `candidateDigest`. Omit `shareId` and `grantId`.
 2. **Approve**: `{ action: "approve", workspaceId, approvalId, candidateDigest }` -> returns `publicationId`.
-3. A member opens the app only while they can see the app folder and every bound Collection. Below Edit, they run only read-only actions. Each member gets the actions their own grant gives, plus the defaults for their level, set with `dohc_dataset` `{ action: "setDefaults", workspaceId, datasetPath, defaults: { view, comment, edit, revision, revisionSha256 } }`. Defaults never include owner-only actions, and `view` and `comment` defaults are read-only.
+3. A member opens the app only while they can see the app folder and every bound Collection. Below Edit, they run only read-only actions. Each member gets the actions their own grant gives, plus the defaults for their level, set with `dohc_dataset` `{ action: "setDefaults", workspaceId, datasetPath, defaults: { view, comment, edit, revision, revisionSha256 } }`. Defaults never include owner-only actions, and `view` and `comment` defaults are read-only. Take `revision`, `revisionSha256`, and the actions to choose from out of `permissions` `rules`. An Admin of a workspace they joined does the same with `dohc_collection_access`.
 
 ## Re-approving apps after a standalone Collection migration
 

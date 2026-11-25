@@ -56,7 +56,7 @@ import { sendCliRequest } from "@dohc/cli/client";
 import { DohcCliError } from "@dohc/cli/errors";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { MEMBERS_CAPABILITIES, AgentMembersRequest } from "@dohc/cli/members";
-import { DATASET_CAPABILITIES, DatasetRequest } from "@dohc/cli/dataset";
+import { DATASET_CAPABILITIES, DatasetAdminRequest, DatasetRequest } from "@dohc/cli/dataset";
 import {
   CLI_PROTOCOL_VERSION,
   APP_PUBLICATION_CAPABILITIES,
@@ -134,6 +134,12 @@ export const MCP_TOOL_CAPABILITIES = distinct(
     dohc_list_automations: ["automation.list"],
     dohc_switch_automation: ["automation.switch"],
     dohc_dataset: Object.values(DATASET_CAPABILITIES),
+    dohc_collection_access: [
+      DATASET_CAPABILITIES.permissions,
+      DATASET_CAPABILITIES.setGrant,
+      DATASET_CAPABILITIES.removeGrant,
+      DATASET_CAPABILITIES.setDefaults,
+    ],
     dohc_publish_app: Object.values(APP_PUBLICATION_CAPABILITIES),
     dohc_members: Object.values(MEMBERS_CAPABILITIES).filter(
       (id) => id !== MEMBERS_CAPABILITIES.leave,
@@ -2376,11 +2382,11 @@ export async function members(ctx: ToolContext, input: unknown) {
   return requestCli(ctx, "members", { request: parsed.data });
 }
 
-/** Dataset authority comes from the owning desktop attachment, never a folder share. */
+/** Dataset authority comes from the owning desktop attachment. A joined workspace sends only an Admin's grants and defaults, which the relay checks. */
 export async function dataset(ctx: ToolContext, input: unknown) {
-  if (ctx.shareAccess !== undefined)
-    return { ok: false as const, reason: "Collections require the owning workspace." };
-  const parsed = DatasetRequest.safeParse(input);
+  const parsed = (ctx.shareAccess === undefined ? DatasetRequest : DatasetAdminRequest).safeParse(
+    input,
+  );
   if (!parsed.success) {
     const datasetPathIssue = parsed.error.issues.find(
       (issue) => issue.path[0] === "datasetPath" && issue.code === "custom",

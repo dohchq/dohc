@@ -44,6 +44,12 @@ export const SEPARATE_CAPABILITY_DOORS = {
   },
 } as const;
 
+const ADMIN_COLLECTION_ACCESS = {
+  view: ["dohc_collection_access"],
+  comment: ["dohc_collection_access"],
+  edit: ["dohc_collection_access"],
+} as const;
+
 function capability(
   description: string,
   exposure: {
@@ -1367,30 +1373,30 @@ const LISTED_CAPABILITIES = {
   }),
   "dataset.permissions.read": capability("List app bindings and explicit data grants.", {
     ipc: ["dataset"],
-    mcp: { owner: ["dohc_dataset"] },
+    mcp: { owner: ["dohc_dataset"], ...ADMIN_COLLECTION_ACCESS },
     mcpReason:
-      "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
+      "The Owner's agents use the multiplexed tool. A joined workspace's agents get only this, and the relay accepts it from an Admin alone.",
   }),
   "dataset.grant.set": capability("Add or change an explicit data grant.", {
     ipc: ["dataset"],
-    mcp: { owner: ["dohc_dataset"] },
+    mcp: { owner: ["dohc_dataset"], ...ADMIN_COLLECTION_ACCESS },
     mcpReason:
-      "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
+      "The Owner's agents use the multiplexed tool. A joined workspace's agents get only this, and the relay accepts it from an Admin alone.",
   }),
   "dataset.defaults.set": capability(
     "Set the actions each workspace level gets in a Collection by default.",
     {
       ipc: ["dataset"],
-      mcp: { owner: ["dohc_dataset"] },
+      mcp: { owner: ["dohc_dataset"], ...ADMIN_COLLECTION_ACCESS },
       mcpReason:
-        "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
+        "The Owner's agents use the multiplexed tool. A joined workspace's agents get only this, and the relay accepts it from an Admin alone.",
     },
   ),
   "dataset.grant.remove": capability("Remove an explicit data grant.", {
     ipc: ["dataset"],
-    mcp: { owner: ["dohc_dataset"] },
+    mcp: { owner: ["dohc_dataset"], ...ADMIN_COLLECTION_ACCESS },
     mcpReason:
-      "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
+      "The Owner's agents use the multiplexed tool. A joined workspace's agents get only this, and the relay accepts it from an Admin alone.",
   }),
   "dataset.holder.keep": capability(
     "Keep a workspace's Collections on this computer, after confirming when another computer may have them.",

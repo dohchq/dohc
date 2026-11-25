@@ -620,11 +620,12 @@ export function createOwnerAppPublicationHandler<
         }
         const finishPublication = async (publicationId: unknown, authorityRevision: unknown) => {
           const address = (authorityRevision: number) => {
-            const appQuery = `?app=${String(publicationId)}`;
             return OwnerAppPublicationResult.parse({
               ...published,
               authorityRevision,
-              appQuery,
+              ...(entry.input.audience === "workspace"
+                ? {}
+                : { appQuery: `?app=${String(publicationId)}` }),
               ...(entry.access
                 ? { access: entry.access, bearerWarning: bearerWarning(entry.access) }
                 : {}),

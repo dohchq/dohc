@@ -790,7 +790,13 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         .get(key.workspaceId, key.datasetId, verified.principalKey);
       const defaults = verified.defaultOperationIds ?? [];
       if (!row && !defaults.length) denied();
-      const grant = row && currentGrant(key, JSON.parse(String(row.grant_json)), approved);
+      let grant: StoredGrant | undefined;
+      try {
+        grant = row ? currentGrant(key, JSON.parse(String(row.grant_json)), approved) : undefined;
+      } catch (error) {
+        if (!defaults.length || !(error instanceof DatasetHostError) || error.code !== "conflict")
+          throw error;
+      }
       // A data grant supplies organizer authority without requiring source Edit.
       if (verified.caller.kind === "named") verified.caller = { ...verified.caller, helper: true };
       const binding = {
@@ -2033,25 +2039,16 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         limit = raw.limit ?? 50;
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
         throw new Error("Choose a page size from 1 to 100.");
-      // Apply data grants in SQL so inaccessible datasets do not create page gaps or counts.
+      // A named caller reaches a Collection by its own grant or by its level's defaults; permissions decides each.
       const verified = authority(context, { workspaceId }, { kind: "data" });
       const includeArchived = raw.includeArchived === true;
       if (includeArchived && verified.caller.kind !== "owner") denied();
       const page = (from: string) =>
-        verified.caller.kind === "owner"
-          ? db
-              .prepare(
-                `SELECT c.dataset_id FROM dohc_dataset_catalog c LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id WHERE c.workspace_id=? AND c.dataset_id>? AND (?=1 OR COALESCE(l.archived,0)=0) AND ${CLAIMED} ORDER BY c.dataset_id LIMIT ?`,
-              )
-              .all(workspaceId, from, includeArchived ? 1 : 0, limit + 1)
-          : db
-              .prepare(`SELECT c.dataset_id FROM dohc_dataset_catalog c JOIN dohc_dataset_data_grants g
-            ON c.workspace_id=g.workspace_id AND c.dataset_id=g.dataset_id WHERE c.workspace_id=? AND g.principal_key=? AND c.dataset_id>?
-            AND json_extract(g.grant_json,'$.discover')=1
-            AND json_extract(g.grant_json,'$.revisionSha256')=json_extract(c.revision_json,'$.revisionSha256')
-            AND COALESCE((SELECT archived FROM dohc_dataset_lifecycle l WHERE l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id),0)=0
-            AND ${CLAIMED} ORDER BY c.dataset_id LIMIT ?`)
-              .all(workspaceId, verified.principalKey, from, limit + 1);
+        db
+          .prepare(
+            `SELECT c.dataset_id FROM dohc_dataset_catalog c LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id WHERE c.workspace_id=? AND c.dataset_id>? AND (?=1 OR COALESCE(l.archived,0)=0) AND ${CLAIMED} ORDER BY c.dataset_id LIMIT ?`,
+          )
+          .all(workspaceId, from, includeArchived ? 1 : 0, limit + 1);
       const datasets: Array<DatasetDescription & { archived: boolean }> = [];
       let bytes = 0,
         more = false,
@@ -2064,14 +2061,14 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
             permitted = permissions(context, key, { kind: "data" }, includeArchived);
           } catch (error) {
             if (
-              verified.caller.kind === "named" &&
+              verified.caller.kind !== "owner" &&
               error instanceof DatasetHostError &&
-              error.code === "not_authorized"
+              (error.code === "not_authorized" || error.code === "conflict")
             )
               continue;
             throw error;
           }
-          if (!permitted.discover) denied();
+          if (!permitted.discover) continue;
           const description = {
               ...describePermission(permitted),
               archived: lifecycle(key).archived,

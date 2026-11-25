@@ -455,8 +455,10 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       throw notFound();
     const level =
       reach && datasetId !== undefined ? collectionLevel(reach, workspaceId, datasetId) : access;
-    if (level === null)
+    if (level === null) {
+      if (publication) throw notFound();
       throw new DatasetHostError("not_authorized", "You do not have access to this Collection.");
+    }
     const effective = lowerAccess(access, level);
     const defaults =
       reach && datasetId !== undefined
@@ -805,10 +807,10 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       (value): value is AppDatasetCapability => value.kind === "dataset",
     );
     if (requested.length === 0) return null;
-    const authority = loaded.resolveAuthority(requested[0]!.datasetId);
+    const authorities: DatasetAuthority[] = [];
     const capabilities: AppDatasetCapability[] = [];
     for (const cap of requested) {
-      loaded.resolveAuthority(cap.datasetId);
+      authorities.push(loaded.resolveAuthority(cap.datasetId));
       capabilities.push(capability(loaded.candidate, loaded.workspaceId, cap.datasetId));
       requireCollectionFile(loaded.workspaceId, cap.datasetId);
       if (loaded.local && requested.length > 1)
@@ -820,7 +822,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       authorityRevision: loaded.authorityRevision,
       capability: capabilities.length === 1 ? capabilities[0]! : null,
       capabilities,
-      authority: { ...authority, appId: publicationId },
+      authority: { ...authorities[0]!, appId: publicationId },
       candidate: loaded.candidate,
       /** An app the owner approved on their own computer. */
       local: loaded.local,
@@ -1421,6 +1423,16 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
           const level = reach && collectionLevel(reach, auth.workspaceId, String(row.dataset_id));
           if (reach && level === null) continue;
           digest.update(JSON.stringify(reach ? [row, level] : row));
+        }
+        for (const row of reach
+          ? storage.db
+              .prepare(
+                "SELECT dataset_id,generation FROM dohc_dataset_workspace_defaults WHERE workspace_id=? ORDER BY dataset_id",
+              )
+              .all(auth.workspaceId)
+          : []) {
+          const level = collectionLevel(reach!, auth.workspaceId, String(row.dataset_id));
+          if (level !== null) digest.update(JSON.stringify(["defaults", row, level]));
         }
         return digest.digest("hex");
       },
@@ -2069,9 +2081,19 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         auth: AppBackendAuth,
         input: { workspaceId: string; datasetId: string; after?: string; limit?: number },
       ) {
+        const manager = grantManager(auth, input.workspaceId);
+        const page = host.permissions(manager, input);
+        const approved = host.approvedRevision(manager, input);
         return {
-          ...host.permissions(grantManager(auth, input.workspaceId), input),
+          ...page,
           defaults: readWorkspaceDefaults(input.workspaceId, input.datasetId),
+          rules: {
+            revision: approved.revision,
+            revisionSha256: approved.revisionSha256,
+            actions: approved.definition.operations
+              .filter((operation) => operation.access !== "owner")
+              .map(({ operationId, name, readOnly }) => ({ operationId, name, readOnly })),
+          },
         };
       },
       /** Sets the operations each folder level holds by default. View and Comment hold only reads; no level holds an `owner` operation. */
