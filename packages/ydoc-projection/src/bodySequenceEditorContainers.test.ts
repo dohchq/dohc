@@ -36,6 +36,7 @@ import {
 import {
   containerRulesBroken,
   expectTheWindowToAgree,
+  FULL,
   recordRulesBroken,
   random,
   type Agreement,
@@ -1056,6 +1057,8 @@ function playAtRandom(
   );
 }
 
+const SEEDS = FULL ? 200 : 50;
+
 describe.each([3, 4])(
   "%i people who make container changes at once, with undo and redo",
   (size) => {
@@ -1065,15 +1068,16 @@ describe.each([3, 4])(
       "read the same note and keep every record, and each write breaks no container rule, with changes delivered %s",
       (arrive) => {
         const tally: Tally = { runs: 0, acts: 0, wrote: 0, replayedOntoAShare: 0, refused: {} };
-        for (let seed = 1; seed <= 200; seed++)
+        for (let seed = 1; seed <= SEEDS; seed++)
           try {
             playAtRandom(size, arrive, seed, tally);
           } finally {
             stopEveryone();
           }
         console.log(`${String(size)} people, ${arrive}: ${JSON.stringify(tally)}`);
-        expect(tally.runs).toBe(200);
+        expect(tally.runs).toBe(SEEDS);
       },
+      FULL ? 300_000 : undefined,
     );
   },
 );
