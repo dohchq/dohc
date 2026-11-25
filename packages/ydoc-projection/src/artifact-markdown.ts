@@ -2,7 +2,7 @@ import { exceedsLiveMarkdownLimit, exceedsUtf8Bytes } from "@dohc/live-session-c
 import { digest } from "lib0/hash/sha256";
 import type * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "./import-export.js";
-import { canPreserveMarkdownSource } from "./artifact-markdown-guard.js";
+import { canPreserveMarkdownSource, omitsFinalMarkdownNewline } from "./artifact-markdown-guard.js";
 
 export const SOURCE_META_KEYS = [
   "dohcMarkdownSource",
@@ -71,6 +71,8 @@ export function resolveMarkdownSource(
       );
     if (witness === "absent" || witness === "invalid") result = { kind: witness };
     else if (exceedsLiveMarkdownLimit(witness.source)) result = { kind: "capacity-refused" };
+    else if (omitsFinalMarkdownNewline(witness.source, canonical))
+      result = { kind: "verified", markdown: witness.source };
     else {
       try {
         const imported = markdownToYDoc(witness.source);

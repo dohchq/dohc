@@ -404,36 +404,44 @@ pub fn capture_imported_owner_activation(
         let lineage_epoch = marker.lineage_epoch_tag.as_deref();
         if reader_source { original_doc.validate_lineage_baseline(&baseline_bytes, true, lineage_epoch)?; }
         let projection = local.project(ContentKind::Richdoc)?.content;
+        let matches_file = |text: &str| {
+            text.len() as i64 == source_length && hex_sha256(text.as_bytes()) == source_digest
+        };
         // The same rule as the version's settled file, so a document whose
         // file keeps a body the engine reads differently still activates.
         // A reader-built file the reader cannot prove, as one settled at a
         // released boundary before the Y.Doc's Carried edits, has no text.
-        let text = if reader_source {
+        let file_matches = if reader_source {
             let authority = serde_json::to_string(&(&namespace, &epoch, &stream))
                 .map_err(|_| ApplicationError::Corrupt)?;
             match crate::reader_snapshot::resolve(tx, key, &local, &projection,
                 &crate::reader_snapshot::SnapshotIdentity {
                     moment: &moment, path, digest: &source_digest, lineage: &lineage, restore_fence: None, authority: &authority,
                 }, resolver) {
-                Ok(text) => Some(text),
+                Ok(text) => Some(matches_file(&text)),
                 Err(CollabError::MarkdownReaderUnavailable | CollabError::MarkdownReaderRetryable
                     | CollabError::MarkdownReaderCapacity) => None,
                 Err(error) => return Err(error.into()),
             }
-        } else { Some(local
-            .settled_markdown_source(&projection, || {
+        } else {
+            let settled = local.settled_markdown_source(&projection, || {
                 text::read(tx, &source_digest)
                     .optional()
                     .map_err(read_sql)
-            })?
-            .unwrap_or(projection)) };
+            })?;
+            Some(match settled {
+                Some(text) => matches_file(&text),
+                None => matches_file(&projection)
+                    || crate::ydoc::without_final_markdown_newline(&projection).is_some_and(matches_file),
+            })
+        };
         let file = (moment.as_str(), source_digest.as_str(), source_length);
-        match text {
+        match file_matches {
             None => reader_settled_at_boundary(tx, namespace, key, path, &lineage, None, &local, file, max_bytes, resolver)?,
-            Some(text) if text.len() as i64 != source_length || hex_sha256(text.as_bytes()) != source_digest => {
+            Some(false) => {
                 settled_at_boundary(tx, namespace, key, path, &lineage, None, &local, file, max_bytes, resolver)?;
             }
-            Some(_) => {}
+            Some(true) => {}
         }
         let full_state = local.encode_full_state_bounded(max_bytes.saturating_sub(baseline_length as usize).min(crate::limits::MAX_YDOC_UPDATE_BYTES))
             .ok_or(ApplicationError::ConfiguredByteBudgetExceeded)?;

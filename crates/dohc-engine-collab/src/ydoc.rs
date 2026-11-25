@@ -454,6 +454,13 @@ impl std::fmt::Debug for Ydoc {
     }
 }
 
+pub fn without_final_markdown_newline(projection: &str) -> Option<&str> {
+    projection
+        .strip_suffix("\r\n")
+        .or_else(|| projection.strip_suffix('\n'))
+        .filter(|source| !source.is_empty() && !source.ends_with(['\n', '\r']))
+}
+
 impl Ydoc {
     /// Construct an empty wire-facing doc with `OffsetKind::Utf16` (constraint 1).
     /// This is the constructor durable/replicated code paths use.
@@ -691,9 +698,9 @@ impl Ydoc {
 
     /// Resolve exact Markdown source only when it is equivalent to
     /// `canonical_projection`: the projection witness must be fresh, the
-    /// source digest must match, and differing source bytes must parse and
-    /// reproject to the canonical projection. The digests alone prove freshness
-    /// and self-consistency, never equivalence — the metadata rides the
+    /// source digest must match, and differences beyond an omitted final
+    /// newline require reprojection. The digests alone prove freshness and
+    /// self-consistency, never equivalence — the metadata rides the
     /// replicated doc, so a crafted update can pair the current projection's
     /// digest with foreign source bytes, and settlement would write bytes the
     /// canonical Y.Doc never represented. Reprojection admits only lexical
@@ -711,7 +718,9 @@ impl Ydoc {
             return None;
         }
         let source = self.markdown_source(&reference)?;
-        if source == canonical_projection {
+        if source == canonical_projection
+            || without_final_markdown_newline(canonical_projection) == Some(source.as_str())
+        {
             return Some(source);
         }
         self.source_reproduces(&source, canonical_projection, true)
@@ -11406,6 +11415,24 @@ mod projection_tests {
             crate::hex_sha256(canonical.as_bytes()),
         );
         canonical
+    }
+
+    #[test]
+    fn only_a_single_final_line_ending_can_be_omitted() {
+        for (projection, without_newline) in [
+            ("body\n", Some("body")),
+            ("first\r\nsecond\r\n", Some("first\r\nsecond")),
+            ("first\nsecond\n", Some("first\nsecond")),
+            ("body", None),
+            ("body\r", None),
+            ("body\n\n", None),
+            ("body\r\n\r\n", None),
+            ("body\r\r\n", None),
+            ("\n", None),
+            ("", None),
+        ] {
+            assert_eq!(without_final_markdown_newline(projection), without_newline);
+        }
     }
 
     #[test]

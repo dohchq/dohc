@@ -40,6 +40,9 @@ const document = {
 const context = { document, currentPath: "note.md" };
 
 it.each([
+  "Changed\n\n- parent\n  - child",
+  "Changed\r\n\r\n- parent\r\n  - child",
+  "Changed\r\n\r\n- parent\r\n  - child\r\n",
   "Changed beside the list\n\n- parent\n  - child\n",
   "A **bold** word, an *italic* word, and a [link](https://example.com).\n\n- parent\n  - child\n",
 ])("constructs an exact native outside fold for %j", (source) => {
@@ -56,7 +59,9 @@ it.each([
     if (result.kind !== "accepted") throw Error(JSON.stringify(result));
     Y.applyUpdate(base, result.delta);
     expect(tree(base).eq(tree(imported))).toBe(true);
-    expect(yDocToMarkdown(base)).toBe(source);
+    expect(yDocToMarkdown(base)).toBe(yDocToMarkdown(imported));
+    expect(result.sourceSha256).toBe(sha(source));
+    expect(result.sourceByteLength).toBe(Buffer.byteLength(source));
     expect(
       [...base.getMap("meta").keys()].filter((key) => key.startsWith("dohcMarkdownSource")),
     ).toEqual([]);
@@ -75,8 +80,11 @@ it.each([
   "- parent\n    - child",
   "__bold__",
   "- first\ncontinuation",
-  "- parent\n  - child",
-  "- parent\r\n  - child",
+  "- parent\n  - child\n\n",
+  "- parent\n  - child\r",
+  "Changed\r\n\r\n- parent\r\n  - child\r",
+  "- parent\r\n  - child\n",
+  "- parent\n  - child \n",
 ])("refuses a non-exact native outside fold for %j", (source) => {
   const base = markdownToYDoc("Before");
   try {

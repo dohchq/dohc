@@ -143,18 +143,24 @@ pub(super) fn settled_base(
     };
     let text = match proved {
         Some(text) => text,
-        None => state
-            .settled_markdown_source(&projection, || {
-                conn.query_row(
-                    "SELECT text FROM blobs WHERE sha256=?1",
-                    [source_digest],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map(Option::flatten)
-                .map_err(read_sql)
-            })?
-            .unwrap_or(projection),
+        None => {
+            let text = state
+                .settled_markdown_source(&projection, || {
+                    conn.query_row(
+                        "SELECT text FROM blobs WHERE sha256=?1",
+                        [source_digest],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map(Option::flatten)
+                    .map_err(read_sql)
+                })?
+                .unwrap_or_else(|| projection.clone());
+            match crate::ydoc::without_final_markdown_newline(&text) {
+                Some(file) if hex_sha256(file.as_bytes()) == source_digest => file.to_owned(),
+                _ => text,
+            }
+        }
     };
     if text.len() as i64 != source_length || hex_sha256(text.as_bytes()) != source_digest {
         return Err(unexplained());

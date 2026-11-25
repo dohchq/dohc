@@ -63,6 +63,25 @@ function refused(checkpoint: Uint8Array, reason = "invalid-schema") {
 }
 afterEach(() => vi.restoreAllMocks());
 
+it.each(["\n", "\r\n"])("registers the captured bytes with or without a final %j", (newline) => {
+  const body = ["- &amp;", "  - child"].join(newline);
+  const canonical = body + newline;
+  const utf8 = new TextEncoder();
+  for (const markdown of [body, canonical]) {
+    const checkpoint = encode(markdown, (doc) => {
+      const meta = doc.getMap("meta");
+      meta.set("dohcMarkdownSource", markdown);
+      meta.set("dohcMarkdownSourceSha256", hash(utf8.encode(markdown)));
+      meta.set("dohcMarkdownSourceProjectionSha256", hash(utf8.encode(canonical)));
+    });
+    const { projectedMarkdown, projectedMarkdownSha256, projectedMarkdownByteLength } =
+      accepted(checkpoint);
+    expect(projectedMarkdown).toBe(markdown);
+    expect(projectedMarkdownSha256).toBe(hash(utf8.encode(markdown)));
+    expect(projectedMarkdownByteLength).toBe(utf8.encode(markdown).length);
+  }
+});
+
 it("canonical importer output with an isolated hostile key reaches registration validation", () => {
   const doc = markdownToYDoc("---\nnested:\n  __proto__: preserved\n---\n\nBody");
   try {
