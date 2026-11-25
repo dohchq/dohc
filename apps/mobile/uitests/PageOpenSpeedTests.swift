@@ -57,6 +57,7 @@ final class PageOpenSpeedTests: XCTestCase {
       guard let open = openPage(app, "packing-list.md") else { return }
       XCTAssertEqual(open.claim, "ready", "The page should take the spare editor once it has loaded")
       XCTAssertLessThan(open.afterMount, 150, "The page should draw before the loading lines show")
+      XCTAssertLessThan(open.afterTap, 300, "The page should draw within 300 ms of the tap")
       XCTAssertTrue(app.webViews.firstMatch.staticTexts["Packing list"].exists)
       back(app)
     }
