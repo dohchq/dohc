@@ -15,7 +15,11 @@ import {
   BODY_CONTAINERS_FIELD,
   BODY_SEQUENCE_FIELD,
 } from "./bodySequenceGrammar.js";
-import { bodySequenceChangeLimit } from "./bodySequenceIntake.js";
+import {
+  BODY_SEQUENCE_CHANGE_MAX_VALUES,
+  bodySequenceChangeLimit,
+  bodySequenceChangeSize,
+} from "./bodySequenceIntake.js";
 import {
   isBox,
   isItem,
@@ -27,7 +31,7 @@ import {
   type BodyContainer,
   type Planned,
 } from "./bodySequenceWriter.js";
-import { WORKER_LIVE_VALIDATION_POLICY } from "./liveValidationPolicy.js";
+import { LIVE_UPDATE_MAX_BYTES, WORKER_LIVE_VALIDATION_POLICY } from "./liveValidationPolicy.js";
 import { storedValue, visitPieces } from "./bodySequenceYjs.js";
 import {
   blockHolding,
@@ -122,11 +126,24 @@ export function keepsContainers(
   return leavesWhole(step, before, after, isTablePart);
 }
 
+function joinsContainers(step: Step, after: ProseMirrorNode): boolean {
+  let joins = false;
+  step.getMap().forEach((_oldStart, _oldEnd, newStart, newEnd) => {
+    const { nodeBefore, nodeAfter } = after.resolve(newStart);
+    if (newStart === newEnd && nodeBefore && nodeAfter)
+      joins ||= holdsBlocks(nodeBefore) && holdsBlocks(nodeAfter);
+  });
+  return joins;
+}
+
 const changesAContainer = (transactions: readonly Transform[]) =>
   transactions.some((transaction) =>
     transaction.steps.some((step, at) => {
       const after = transaction.docs[at + 1] ?? transaction.doc;
-      return !leavesWhole(step, transaction.docs[at]!, after, holdsBlocks);
+      return (
+        !leavesWhole(step, transaction.docs[at]!, after, holdsBlocks) ||
+        joinsContainers(step, after)
+      );
     }),
   );
 
@@ -649,10 +666,12 @@ function writeContainersThatDiffer(
   for (const node of nodes) {
     if (owned.has(node)) continue;
     const element = firstElement(node);
-    const kin = (element ? (history.get(element) ?? []) : []).filter(
-      (known) =>
-        known.first === element && familyOf(known.node) === familyOf(node.node) && isFree(known),
-    );
+    const kin = (element ? (history.get(element) ?? []) : [])
+      .toReversed()
+      .filter(
+        (known) =>
+          known.first === element && familyOf(known.node) === familyOf(node.node) && isFree(known),
+      );
     claim(node, kin.find((known) => known.node.type === node.node.type) ?? kin[0]);
   }
   const contains = (one: Around, other: Around) =>
@@ -752,6 +771,7 @@ function writeContainersThatDiffer(
     const known = owned.get(node)!;
     known.id = made.get(node)!.id;
     known.node = node.node;
+    known.first = firstElement(node);
   }
   chains.forEach((chain, leaf) => {
     const element = elementOf(leaf);
@@ -1619,6 +1639,13 @@ function copyOfNote({ sequence, reader }: BodyWriting, transactions: readonly Tr
   return { writing, transactions, first: 0 };
 }
 
+function liveItems(first: Y.Item | null, end: Y.Item | null): number {
+  let count = 0;
+  for (let item = first; item !== null && item !== end; item = item.right)
+    if (!item.deleted) count++;
+  return count;
+}
+
 function copyOfWindow(
   { sequence, reader }: BodyWriting,
   transactions: readonly Transform[],
@@ -1666,6 +1693,10 @@ function copyOfWindow(
   const copy = new Y.Doc();
   const copied = copy.getText(BODY_SEQUENCE_FIELD);
   copied.applyDelta(changes);
+  if (liveItems(head, reading.lines[last + 1]?.item ?? null) > liveItems(copied._start, null)) {
+    copy.destroy();
+    return null;
+  }
   const records = copy.getMap<unknown>(BODY_CONTAINERS_FIELD);
   sequence.doc!.getMap(BODY_CONTAINERS_FIELD).forEach((value, key) => {
     if (named.has(key.split(".")[0]!)) records.set(key, value);
@@ -1707,10 +1738,10 @@ function linesATrialGives(
     const { writing: trial, transactions, first } = copy;
     const note = trial.sequence.doc!;
     const there = given.map((block) => block - first);
+    const changes: Uint8Array[] = [];
+    note.on("update", (update: Uint8Array) => changes.push(update));
     note.transact(() => giveBoundaries(trial, there));
     const gave = there.map((block) => trial.reader.reading().lines[block]!.item!);
-    let change: Uint8Array | null = null;
-    note.on("update", (update: Uint8Array) => (change = update));
     const left = linesAWriteLeavesWanting(trial, transactions);
     for (const block of left.moved) moved.add(block + first);
     const taken = given.filter((_, at) => gave[at]!.deleted);
@@ -1722,28 +1753,36 @@ function linesATrialGives(
       given = [...given.filter((block) => !never.has(block)), ...more];
       continue;
     }
-    const isTooBig =
-      change !== null &&
-      bodySequenceChangeLimit(change, WORKER_LIVE_VALIDATION_POLICY) !== undefined;
-    if (left.isSettled) return isTooBig ? null : given;
+    if (left.isSettled) return changes.every(passesTheRoom) ? given : null;
     return left.isRead ? null : undefined;
   }
   return undefined;
 }
 
+const LONGER_NUMBERS_LIVE = 8;
+
+function passesTheRoom(change: Uint8Array): boolean {
+  if (change.byteLength <= BODY_SEQUENCE_CHANGE_MAX_VALUES) return true;
+  if (bodySequenceChangeLimit(change, WORKER_LIVE_VALIDATION_POLICY) !== undefined) return false;
+  const { structs, deletes } = bodySequenceChangeSize(change);
+  return change.byteLength + LONGER_NUMBERS_LIVE * (structs + deletes) <= LIVE_UPDATE_MAX_BYTES;
+}
+
 const UNDER_ANY_LIMIT = 1_000;
 
-function reachOf(transactions: readonly Transform[]): number {
+function isUnderAnyLimit(transactions: readonly Transform[]): boolean {
+  const steps = transactions.flatMap((transaction) => transaction.steps);
   let reach = 0;
-  for (const transaction of transactions)
-    for (const step of transaction.steps) {
-      if (step instanceof AddMarkStep || step instanceof RemoveMarkStep)
-        reach += step.to - step.from;
-      step.getMap().forEach((oldStart, oldEnd, newStart, newEnd) => {
-        reach += oldEnd - oldStart + newEnd - newStart;
-      });
-    }
-  return reach;
+  for (const step of steps) {
+    if (step instanceof AddMarkStep || step instanceof RemoveMarkStep) reach += step.to - step.from;
+    step.getMap().forEach((oldStart, oldEnd, newStart, newEnd) => {
+      reach += oldEnd - oldStart + newEnd - newStart;
+    });
+  }
+  if (reach >= UNDER_ANY_LIMIT) return false;
+  let written = 0;
+  for (const step of steps) written += JSON.stringify(step.toJSON()).length;
+  return written < BODY_SEQUENCE_CHANGE_MAX_VALUES;
 }
 
 function linesToGiveFirst(
@@ -1755,8 +1794,7 @@ function linesToGiveFirst(
   const touched = whatStepsTouch(reading, transactions);
   const guessed = linesTouched(reading, touched);
   const isPlain = touched.isSure || !touched.isNearALineWithNoBoundary;
-  if (isPlain && !changesAContainer(transactions) && reachOf(transactions) < UNDER_ANY_LIMIT)
-    return guessed;
+  if (isPlain && !changesAContainer(transactions) && isUnderAnyLimit(transactions)) return guessed;
   const inWindow =
     trial === "window"
       ? linesATrialGives((given) => copyOfWindow(writing, transactions, touched, given), guessed)
@@ -1817,8 +1855,9 @@ function asOneRange(transaction: Transform): Transform | null {
  *
  * The guess is the answer when every range stays inside one block or only gives a block's start
  * another attribute, or when the dispatch comes within a block of no line with no boundary, and
- * when no step starts, changes or takes apart a container, and when the steps replace and mark
- * fewer than 1,000 positions in all, too few for a change to pass a limit of the room's. Any
+ * when no step starts, changes, takes apart or joins containers, and when the steps reach fewer
+ * than 1,000 positions in all and their JSON holds fewer letters than the room takes values in
+ * one change, too few for a change to pass a limit of the room's. Any
  * other dispatch is written to a copy with the guessed lines given, and
  * `linesAWriteLeavesWanting` says from what the writer did there which more lines to give. Those
  * are given on a new copy and the dispatch is written again, until it leaves no line wanting. A
@@ -1828,18 +1867,20 @@ function asOneRange(transaction: Transform): Transform | null {
  * side, with whole lines, their live items only, the formatting in force where they start, and
  * the steps moved to start there, with the records of the containers those lines are in. When a
  * container of the window shares its id with a line outside it, when the window does not read as
- * that part of the editor's document, before or after a step, or when it takes more than three
- * copies, the whole note is copied instead, which costs a read of the note; `trial` `"note"`
- * asks for that copy at once.
+ * that part of the editor's document, before or after a step, when the note holds more live items
+ * there than the window, whose deletes the window would then count as fewer ranges, or when it
+ * takes more than three copies, the whole note is copied instead, which costs a read of the
+ * note; `trial` `"note"` asks for that copy at once.
  *
  * A dispatch cannot be written as dispatched when a copy that read as the editor's document
  * after every step is still not settled once no more lines can be given: a boundary the dispatch
  * makes would stand in front of what a line with none held, which undo would take away with
  * whatever someone else made of that line. Nor can it when the whole note takes more than three
  * copies or does not read as the editor's document, when its containers cannot be written, when
- * it deletes the boundary given to a list item's added paragraph that it moves, or when the
- * change written to the copy holds more than the room takes in one change, by
- * `bodySequenceChangeLimit`.
+ * it deletes the boundary given to a list item's added paragraph that it moves, or when a change
+ * written to the copy, the boundaries given first among them, holds more than the room takes in
+ * one change, by `bodySequenceChangeLimit` and `LIVE_UPDATE_MAX_BYTES`, with room for the
+ * longer numbers of the live note.
  *
  * It is then tried once more with each transaction whose steps touch written as one step. Enter
  * over a selection deletes into such a line and splits it off again; as one step the line keeps

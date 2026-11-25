@@ -348,8 +348,7 @@ function holdSelection(
  * around its letters. It shows every change the note's document holds by then, also the ones
  * Yjs has not told of yet. Such a transaction is never written back.
  *
- * A transaction that would start, change or cut a list, quote, callout or table is refused, also
- * one that would remove the last line between two of them that share an id. So is one that would
+ * A transaction that would start, change or cut a table is refused. So is one that would
  * write between the two units of a surrogate pair or put in half of one, and one dispatched while
  * a Yjs transaction is open, while Yjs has not told of every finished one, or before the editor
  * shows a change the note's document holds: its offsets may be of a document the sequence no

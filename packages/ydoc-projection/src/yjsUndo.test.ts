@@ -35,4 +35,32 @@ describe("Yjs undo", () => {
     expect(blocks.length).toBe(0);
     expect(a.getArray("blocks").toJSON()).toEqual(b.getArray("blocks").toJSON());
   });
+
+  it("passes over a key whose map was collected with the map around it", () => {
+    const a = new Y.Doc();
+    const b = new Y.Doc();
+    a.clientID = 1;
+    b.clientID = 2;
+    const blocks = a.getArray<Y.Map<Y.Map<string>>>("blocks");
+    const outer = new Y.Map<Y.Map<string>>();
+    blocks.insert(0, [outer]);
+    const inner = new Y.Map<string>();
+    outer.set("inner", inner);
+    inner.set("path", "first");
+    exchange(a, b);
+    const history = new Y.UndoManager(blocks, { captureTimeout: 0, ignoreRemoteMapChanges: true });
+    inner.set("path", "second");
+    blocks.delete(0);
+    history.undo();
+    blocks.get(0).get("inner")!.set("path", "third");
+    history.undo();
+    blocks.push([new Y.Map<Y.Map<string>>()]);
+    exchange(a, b);
+    b.getArray("blocks").delete(0);
+    exchange(a, b);
+    while (history.undo());
+    exchange(a, b);
+    expect(history.undoStack).toHaveLength(0);
+    expect(a.getArray("blocks").toJSON()).toEqual(b.getArray("blocks").toJSON());
+  });
 });

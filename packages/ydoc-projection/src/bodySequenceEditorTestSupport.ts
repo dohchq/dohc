@@ -548,15 +548,20 @@ const FAMILY_OF: Record<string, string> = {
 
 /**
  * The record rules a change broke, which hold after any merge: no record key goes, and every
- * container a path names has its type recorded.
+ * container a path names has its type recorded, and each record its type is made with.
  */
 export function recordRulesBroken(before: Y.Doc, after: Y.Doc): string[] {
   const broken: string[] = [];
   const records = after.getMap(BODY_CONTAINERS_FIELD);
   for (const key of before.getMap(BODY_CONTAINERS_FIELD).keys())
     if (!records.has(key)) broken.push(`the record ${key} went`);
-  for (const { id } of containerRuns(after))
-    if (typeof records.get(id) !== "string") broken.push(`the container ${id} has no type`);
+  for (const { id } of containerRuns(after)) {
+    const type = records.get(id);
+    if (typeof type !== "string") broken.push(`the container ${id} has no type`);
+    else
+      for (const [key] of recordsOfContainer(schema, { id, type, attrs: {} }))
+        if (!records.has(key)) broken.push(`the container ${id} has no record ${key}`);
+  }
   return broken;
 }
 

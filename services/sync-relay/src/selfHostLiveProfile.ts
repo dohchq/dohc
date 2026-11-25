@@ -1,4 +1,7 @@
-import { WORKER_LIVE_VALIDATION_POLICY } from "@dohc/ydoc-projection/live-journal-validation";
+import {
+  LIVE_UPDATE_MAX_BYTES,
+  WORKER_LIVE_VALIDATION_POLICY,
+} from "@dohc/ydoc-projection/live-journal-validation";
 
 /** Shared live-edit transport bounds. */
 export function selfHostLiveProfile() {
@@ -7,7 +10,7 @@ export function selfHostLiveProfile() {
     receive: {
       maxFrameBytes: 64 * 1024,
       maxStateVectorBytes: 128 * 1024,
-      maxUpdateBytes: 2 * MiB,
+      maxUpdateBytes: LIVE_UPDATE_MAX_BYTES,
       maxSyncBytes: 4 * MiB,
     },
     maxQueuedBytes: 4 * MiB,
@@ -114,7 +117,7 @@ export function selfHostLiveProfile() {
       host: {
         maxClientVectorBytes: 128 * 1024,
         maxSyncOutputBytes: 4 * MiB,
-        maxAppliedUpdateBytes: 2 * MiB,
+        maxAppliedUpdateBytes: LIVE_UPDATE_MAX_BYTES,
         maxSubmissionBytes: 4 * MiB,
         maxAdmissionBytes: 16 * MiB,
       },

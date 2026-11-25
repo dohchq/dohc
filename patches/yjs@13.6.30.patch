@@ -1,9 +1,13 @@
 diff --git a/dist/yjs.cjs b/dist/yjs.cjs
-index d50f7262ce53030e935954a20ee7104fba9c8ea0..aec354ee48f1ef3907772435981f51f79c92246a 100644
+index d50f7262ce53030e935954a20ee7104fba9c8ea0..90f70db52053753904895ddd7b823dba77fde62d 100644
 --- a/dist/yjs.cjs
 +++ b/dist/yjs.cjs
-@@ -9691,6 +9691,7 @@ const redoItem = (transaction, item, redoitems, itemsToDelete, ignoreRemoteMapCh
-     while (parentItem.redone !== null) {
+@@ -9688,9 +9688,10 @@ const redoItem = (transaction, item, redoitems, itemsToDelete, ignoreRemoteMapCh
+     if (parentItem.redone === null && (!redoitems.has(parentItem) || redoItem(transaction, parentItem, redoitems, itemsToDelete, ignoreRemoteMapChanges, um) === null)) {
+       return null
+     }
+-    while (parentItem.redone !== null) {
++    while (parentItem instanceof Item && parentItem.redone !== null) {
        parentItem = getItemCleanStart(transaction, parentItem.redone);
      }
 +    if (parentItem.deleted) return null;
@@ -11,11 +15,15 @@ index d50f7262ce53030e935954a20ee7104fba9c8ea0..aec354ee48f1ef3907772435981f51f7
    const parentType = parentItem === null ? /** @type {AbstractType<any>} */ (item.parent) : /** @type {ContentType} */ (parentItem.content).type;
  
 diff --git a/dist/yjs.mjs b/dist/yjs.mjs
-index 192cbd07886886b31a9ff797d806cddcf01b578a..eac35001f202a171a878a90368f50b0fcd85330d 100644
+index 192cbd07886886b31a9ff797d806cddcf01b578a..2c98231f8d0793b64de79a35321f25dc89c96c2a 100644
 --- a/dist/yjs.mjs
 +++ b/dist/yjs.mjs
-@@ -9654,6 +9654,7 @@ const redoItem = (transaction, item, redoitems, itemsToDelete, ignoreRemoteMapCh
-     while (parentItem.redone !== null) {
+@@ -9651,9 +9651,10 @@ const redoItem = (transaction, item, redoitems, itemsToDelete, ignoreRemoteMapCh
+     if (parentItem.redone === null && (!redoitems.has(parentItem) || redoItem(transaction, parentItem, redoitems, itemsToDelete, ignoreRemoteMapChanges, um) === null)) {
+       return null
+     }
+-    while (parentItem.redone !== null) {
++    while (parentItem instanceof Item && parentItem.redone !== null) {
        parentItem = getItemCleanStart(transaction, parentItem.redone);
      }
 +    if (parentItem.deleted) return null;
@@ -23,11 +31,15 @@ index 192cbd07886886b31a9ff797d806cddcf01b578a..eac35001f202a171a878a90368f50b0f
    const parentType = parentItem === null ? /** @type {AbstractType<any>} */ (item.parent) : /** @type {ContentType} */ (parentItem.content).type;
  
 diff --git a/src/structs/Item.js b/src/structs/Item.js
-index 2d2b1bb927be55e2ed64170ff1b48f97f0bf2ede..81a3436baae72af928b6a4bcda64e5b02e1d974e 100644
+index 2d2b1bb927be55e2ed64170ff1b48f97f0bf2ede..25627f6fff7fbbc43bc9eb555a1a1ea34632e0af 100644
 --- a/src/structs/Item.js
 +++ b/src/structs/Item.js
-@@ -166,6 +166,7 @@ export const redoItem = (transaction, item, redoitems, itemsToDelete, ignoreRemo
-     while (parentItem.redone !== null) {
+@@ -163,9 +163,10 @@ export const redoItem = (transaction, item, redoitems, itemsToDelete, ignoreRemo
+     if (parentItem.redone === null && (!redoitems.has(parentItem) || redoItem(transaction, parentItem, redoitems, itemsToDelete, ignoreRemoteMapChanges, um) === null)) {
+       return null
+     }
+-    while (parentItem.redone !== null) {
++    while (parentItem instanceof Item && parentItem.redone !== null) {
        parentItem = getItemCleanStart(transaction, parentItem.redone)
      }
 +    if (parentItem.deleted) return null

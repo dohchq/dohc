@@ -1,12 +1,20 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import { lift, wrapIn } from "@tiptap/pm/commands";
 import { NodeRange, type Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { liftListItem, sinkListItem, wrapInList } from "@tiptap/pm/schema-list";
-import { TextSelection, type Command } from "@tiptap/pm/state";
+import {
+  EditorState,
+  Plugin,
+  TextSelection,
+  type Command,
+  type Transaction,
+} from "@tiptap/pm/state";
 import { recordsOfContainer } from "./bodySequenceGrammar.js";
-import type { BodySequenceUnwritten } from "./bodySequenceEditor.js";
+import { isBodySequenceChange, type BodySequenceUnwritten } from "./bodySequenceEditor.js";
+import { BODY_SEQUENCE_SCHEMA_VERSION } from "./bodySequenceYjs.js";
+import { admitBodySequenceNotes, liveEditRefusal } from "./liveDocumentValidation.js";
 import {
   boundary,
   editorOn,
@@ -260,6 +268,52 @@ describe("containers the editor writes", () => {
     a.expectMirror();
   });
 
+  it("keeps the inner callout's id when it is lifted out of the outer one and given a new title", () => {
+    const baseline = noteIn(
+      [
+        ["C1", "callout", { title: "One" }],
+        ["C2", "callout", { title: "Two" }],
+      ],
+      [[["C1", "C2"], "x"]],
+    );
+    const a = person(baseline, 10);
+    const { doc } = a.view.state;
+    const inner = doc.child(0).child(0);
+    const tr = a.view.state.tr.lift(
+      new NodeRange(doc.resolve(1), doc.resolve(1 + inner.nodeSize), 1),
+      0,
+    );
+    a.view.dispatch(tr.setNodeMarkup(0, undefined, { ...tr.doc.child(0).attrs, title: "Lifted" }));
+    expect(pathsOf(a)).toEqual([["C2"]]);
+    expect(a.containers.get("C2.title")).toBe("Lifted");
+    expect(a.containers.get("C1.title")).toBe("One");
+    a.expectMirror();
+  });
+
+  it("gives a new id to a quote put back around a line lifted out of it, when the same write types in the line still in the quote", () => {
+    const a = person(
+      noteIn(
+        [["Q", "blockquote"]],
+        [
+          [["Q"], "a"],
+          [["Q"], "b"],
+        ],
+      ),
+      10,
+    );
+    let state = a.view.state;
+    state = state.apply(state.tr.lift(state.doc.resolve(2).blockRange()!, 0));
+    state = state.apply(state.tr.insertText("!", state.doc.child(0).nodeSize + 3));
+    state = state.apply(state.tr.wrap(state.doc.resolve(1).blockRange()!, quotes(1)));
+    a.view.updateState(state);
+    expect(a.lines()).toEqual(["a", "b!"]);
+    const [first, second] = pathsOf(a);
+    expect(second).toEqual(["Q"]);
+    expect(first).toHaveLength(1);
+    expect(first![0]).toMatch(/^[0-9a-f]{32}$/);
+    a.expectMirror();
+  });
+
   it("gives the containers two people make at once ids of their own, made at random", () => {
     const baseline = note("one", "two");
     const a = person(baseline, 10);
@@ -322,30 +376,176 @@ describe("containers the editor writes", () => {
   });
 });
 
+describe("a dispatch the editor writes whole or not at all", () => {
+  const refusedWhole = (a: Person, told: BodySequenceUnwritten[], lines: string[]) => {
+    expect(told).toEqual(["unwritable"]);
+    expect(a.sent).toEqual([]);
+    expect(a.lines()).toEqual(lines);
+    a.expectMirror();
+  };
+
+  it.each(["", "!"])(
+    "deletes the line between two quotes that share an id, with a list item's added paragraph further in the lower one, and types %j after, all in one write",
+    (typed) => {
+      const baseline = noteIn(
+        [
+          ["Q", "blockquote"],
+          ["L", "bulletList"],
+          ["I", "listItem"],
+        ],
+        [
+          [["Q"], "a"],
+          [[], "b"],
+          [["Q"], "c"],
+          [["Q"], "d"],
+          [["Q"], "e"],
+          [["Q", "L", "I"], "T", { type: "heading", level: 2 }],
+        ],
+      );
+      const { a, told } = toldOf(baseline);
+      const b = person(baseline, 20);
+      const was = page(Y.encodeStateAsUpdate(a.doc), 30);
+      const { doc } = a.view.state;
+      const from = doc.child(0).nodeSize;
+      const tr = a.view.state.tr.delete(from, from + doc.child(1).nodeSize);
+      if (typed) tr.insertText(typed, 2);
+      a.view.dispatch(tr);
+      expect(told).toEqual([]);
+      expect(a.sent).toHaveLength(2);
+      expect(a.view.state.doc.childCount).toBe(2);
+      expect(a.lines()).toEqual([`${typed}a`, "c", "d", "e", "", "T"]);
+      const lower = pathsOf(a)[1]![0]!;
+      expect(lower).toMatch(/^[0-9a-f]{32}$/);
+      expect(pathsOf(a)).toEqual([
+        ["Q"],
+        [lower],
+        [lower],
+        [lower],
+        [lower, "L", "I"],
+        [lower, "L", "I"],
+      ]);
+      expect(containerRulesBroken(was.doc, a.doc)).toEqual([]);
+      a.expectMirror();
+      exchange(a, b);
+      expect(b.view.state.doc.eq(a.view.state.doc)).toBe(true);
+      expect(a.undo()).toBe(true);
+      expect(a.lines()).toEqual(["a", "b", "c", "d", "e", "", "T"]);
+      a.expectMirror();
+    },
+  );
+
+  it("refuses a delete that joins two stacks of 60 quotes that share their ids around 1,700 lines", () => {
+    const ids = Array.from({ length: 60 }, (_, at) => `q${String(at)}`);
+    const { a, told } = toldOf(
+      noteIn(
+        ids.map((id) => [id, "blockquote"] as Frame),
+        [[ids, "a"], [[], "b"], ...Array.from({ length: 1_700 }, (): Row => [ids, "x"])],
+      ),
+    );
+    const lines = a.lines();
+    const { doc } = a.view.state;
+    const from = doc.child(0).nodeSize;
+    a.view.dispatch(a.view.state.tr.delete(from, from + doc.child(1).nodeSize));
+    refusedWhole(a, told, lines);
+  });
+
+  it("refuses a formula longer than the room takes in one change", () => {
+    const { a, told } = toldOf(noteIn([], [[[], "", { type: "mathBlock", tex: "x" }]]));
+    a.view.dispatch(a.view.state.tr.setNodeAttribute(0, "tex", "x".repeat(2_200_000)));
+    refusedWhole(a, told, [""]);
+  });
+
+  it("refuses a paste longer than the room takes in one change", () => {
+    const { a, told } = toldOf(note("a"));
+    a.view.dispatch(a.view.state.tr.insertText("x".repeat(2_200_000), 2));
+    refusedWhole(a, told, ["a"]);
+  });
+
+  it(
+    "refuses taking the rules from 1,000 lines 64 deep when the boundaries their text needs first come to more than the room takes",
+    { timeout: 60_000 },
+    () => {
+      const ids = Array.from({ length: 64 }, (_, at) => `${String(at)}`.padEnd(32, "q"));
+      const { a, told } = toldOf(
+        noteIn(
+          ids.map((id) => [id, "blockquote"] as Frame),
+          Array.from({ length: 1_000 }, (): Row => [ids, "x", { type: "horizontalRule" }]),
+        ),
+      );
+      const lines = a.lines();
+      let inner = a.view.state.doc.child(0);
+      for (let depth = 1; depth < ids.length; depth++) inner = inner.child(0);
+      const rules: number[] = [];
+      inner.forEach((node, offset) => {
+        if (node.type.name === "horizontalRule") rules.push(ids.length + offset);
+      });
+      const tr = a.view.state.tr;
+      for (const at of rules.reverse()) tr.delete(at, at + 1);
+      a.view.dispatch(tr);
+      refusedWhole(a, told, lines);
+    },
+  );
+
+  it("refuses deleting a line whose letters were written apart, which takes the room more delete ranges than it takes", () => {
+    const LETTERS = 50_010;
+    const { a, told } = toldOf(
+      noteOf(({ sequence }) => {
+        sequence.insertEmbed(0, boundary(), {});
+        sequence.insert(1, "xy".repeat(LETTERS), {});
+        sequence.insertEmbed(sequence.length, boundary(), {});
+        sequence.insert(sequence.length, "after", {});
+        sequence.applyDelta([
+          { retain: 2 },
+          ...Array.from({ length: LETTERS }, () => [{ delete: 1 }, { retain: 1 }]).flat(),
+        ]);
+      }),
+    );
+    const lines = a.lines();
+    const { doc } = a.view.state;
+    a.view.dispatch(a.view.state.tr.delete(0, doc.child(0).nodeSize));
+    refusedWhole(a, told, lines);
+  });
+});
+
+const inFormat2 = (note: Uint8Array) => {
+  const doc = new Y.Doc();
+  doc.clientID = 1;
+  Y.applyUpdate(doc, note);
+  doc.getMap("meta").set("schemaVersion", BODY_SEQUENCE_SCHEMA_VERSION);
+  const marked = Y.encodeStateAsUpdate(doc);
+  doc.destroy();
+  return marked;
+};
+
 const STARTING = () =>
-  noteIn(
-    [
-      ["L", "bulletList"],
-      ["I", "listItem"],
-      ["J", "listItem"],
-      ["Q", "blockquote"],
-      ["C", "callout", { title: "Note" }],
-      ["T", "taskList"],
-      ["K", "taskItem"],
-      ["O", "orderedList"],
-      ["P", "listItem"],
-    ],
-    [
-      [[], "Top"],
-      [["L", "I"], "first"],
-      [["L", "J"], "second"],
-      [["Q"], "quoted"],
-      [["Q", "C"], "in a callout"],
-      [[], "middle"],
-      [["T", "K"], "a to-do"],
-      [["O", "P"], "numbered"],
-      [[], "Bottom"],
-    ],
+  inFormat2(
+    noteIn(
+      [
+        ["L", "bulletList"],
+        ["I", "listItem"],
+        ["J", "listItem"],
+        ["H", "listItem"],
+        ["Q", "blockquote"],
+        ["C", "callout", { title: "Note" }],
+        ["T", "taskList"],
+        ["K", "taskItem"],
+        ["O", "orderedList"],
+        ["P", "listItem"],
+      ],
+      [
+        [[], "Top"],
+        [["L", "I"], "first"],
+        [["L", "J"], "second"],
+        [["L", "H"], "headed", { type: "heading", level: 2 }],
+        [["Q"], "quoted"],
+        [["Q", "C"], "in a callout"],
+        [[], "ruled", { type: "horizontalRule" }],
+        [[], "middle"],
+        [["T", "K"], "a to-do"],
+        [["O", "P"], "numbered"],
+        [[], "Bottom"],
+      ],
+    ),
   );
 
 type Act = (a: Person, next: () => number) => boolean;
@@ -354,6 +554,34 @@ const run =
   (command: Command): Act =>
   (a) =>
     command(a.view.state, a.view.dispatch);
+const relist: Act = (a, next) => {
+  const { state } = a.view;
+  const lifted: Transaction[] = [];
+  for (const item of [schema.nodes.listItem!, schema.nodes.taskItem!])
+    liftListItem(item)(state, (tr) => lifted.push(tr));
+  const target = [schema.nodes.bulletList!, schema.nodes.orderedList!, schema.nodes.taskList!][
+    Math.floor(next() * 3)
+  ]!;
+  const wrapped: Transaction[] = [];
+  if (lifted[0])
+    wrapInList(target)(
+      EditorState.create({ doc: lifted[0].doc, selection: lifted[0].selection }),
+      (tr) => wrapped.push(tr),
+    );
+  if (!wrapped[0]) return false;
+  const combined = state.tr;
+  for (const step of [...lifted[0]!.steps, ...wrapped[0].steps]) combined.step(step);
+  a.view.dispatch(combined);
+  return true;
+};
+
+const KIND_OF: Record<string, [string, Record<string, unknown> | null]> = {
+  blockquote: ["callout", { title: "Made" }],
+  callout: ["blockquote", null],
+  bulletList: ["orderedList", null],
+  orderedList: ["bulletList", null],
+};
+
 const ACTS: [string, Act][] = [
   ["a letter", (a) => (a.type("x"), true)],
   ["Enter", (a) => a.press("Enter")],
@@ -394,6 +622,25 @@ const ACTS: [string, Act][] = [
       return false;
     },
   ],
+  [
+    "another kind",
+    (a) => {
+      const { $from } = a.view.state.selection;
+      for (let depth = $from.depth; depth > 0; depth--) {
+        const kind = KIND_OF[$from.node(depth).type.name];
+        if (!kind) continue;
+        const tr = a.view.state.tr.setNodeMarkup(
+          $from.before(depth),
+          schema.nodes[kind[0]],
+          kind[1],
+        );
+        a.view.dispatch(tr);
+        return true;
+      }
+      return false;
+    },
+  ],
+  ["a list made another as the share page does", relist],
   ["undo", (a) => a.undo()],
   ["redo", (a) => a.redo()],
 ];
@@ -422,12 +669,17 @@ type Tally = {
   refused: Record<string, number>;
 };
 
-function deliverMerged(people: Person[], next: () => number): void {
+function deliverMerged(
+  people: Person[],
+  next: () => number,
+  toRoom: (updates: Uint8Array[]) => void,
+): void {
   for (let round = 0; round < 6; round++) {
     const senders = people.filter((each) => each.sent.length > 0);
     if (senders.length === 0) return;
     const order = senders.toSorted(() => next() - 0.5);
     for (const from of order) {
+      toRoom(from.sent);
       const merged = Y.mergeUpdates(from.sent.splice(0));
       for (const to of people) if (to !== from) to.receive(merged);
     }
@@ -443,14 +695,38 @@ function playAtRandom(
 ): void {
   const next = random(seed);
   const baseline = STARTING();
+  const room = new Y.Doc({ gc: false });
+  Y.applyUpdate(room, baseline);
+  const checked = new WeakSet<Uint8Array>();
+  const toRoom = (updates: Uint8Array[]) => {
+    for (const update of updates.filter((each) => !checked.has(each))) {
+      checked.add(update);
+      expect(liveEditRefusal(room, update), `seed ${String(seed)}`).toBeUndefined();
+    }
+  };
+  let refusals = 0;
+  let dispatched: ProseMirrorNode | null = null;
+  const watch = new Plugin({
+    state: {
+      init: () => null,
+      apply(tr) {
+        if (tr.docChanged && !isBodySequenceChange(tr)) dispatched = tr.doc;
+        return null;
+      },
+    },
+  });
   const people = Array.from({ length: size }, (_, at) =>
-    editorOn(page(baseline, 10 + at), "bare", [], [], {
-      unwritten: (why) => (tally.refused[why] = (tally.refused[why] ?? 0) + 1),
+    editorOn(page(baseline, 10 + at), "bare", [watch], [], {
+      unwritten: (why) => {
+        refusals += 1;
+        tally.refused[why] = (tally.refused[why] ?? 0) + 1;
+      },
     }),
   );
   const settle = () => {
-    if (arrive === "merged") deliverMerged(people, next);
+    if (arrive === "merged") deliverMerged(people, next, toRoom);
     else reconnect(...people);
+    for (const each of people) toRoom(each.sent);
     for (const each of people) {
       each.expectMirror();
       expect(each.view.state.doc.eq(people[0]!.view.state.doc), `seed ${String(seed)}`).toBe(true);
@@ -465,11 +741,17 @@ function playAtRandom(
         const [name, play] = ACTS[Math.floor(next() * ACTS.length)]!;
         const sent = each.sent.length;
         const was = page(Y.encodeStateAsUpdate(each.doc), 98);
+        const refused = refusals;
+        dispatched = null;
         play(each, next);
         tally.acts += 1;
         if (each.sent.length > sent) tally.wrote += 1;
         const label = `seed ${String(seed)}, round ${String(round)}, person ${String(who)}, ${name}`;
         const replays = name === "undo" || name === "redo";
+        toRoom(each.sent);
+        if (refusals > refused) expect(each.sent.length, label).toBe(sent);
+        else if (dispatched && !replays)
+          expect(each.view.state.doc.eq(dispatched), label).toBe(true);
         const broken = containerRulesBroken(was.doc, each.doc);
         if (replays && broken.length > 0) tally.replayedOntoAShare += 1;
         expect(replays ? recordRulesBroken(was.doc, each.doc) : broken, label).toEqual([]);
@@ -482,11 +764,16 @@ function playAtRandom(
   }
   for (const each of people) while (each.undo());
   settle();
+  expect(recordRulesBroken(page(baseline, 97).doc, people[0]!.doc), `seed ${String(seed)}`).toEqual(
+    [],
+  );
 }
 
 describe.each([3, 4])(
   "%i people who make container changes at once, with undo and redo",
   (size) => {
+    beforeAll(() => admitBodySequenceNotes(true));
+    afterAll(() => admitBodySequenceNotes(false));
     it.each(["merged", "after a reconnect"] as const)(
       "read the same note and keep every record, and each write breaks no container rule, with changes delivered %s",
       (arrive) => {

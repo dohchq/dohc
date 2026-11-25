@@ -7,4 +7,4 @@ export {
 } from "./liveDocumentValidation.js";
 export type { LiveEditRefusal, LiveMarkdownJournalTiming } from "./liveDocumentValidation.js";
 export type { OrderedLiveUpdateCutPolicy } from "./orderedLiveUpdateCut.js";
-export { WORKER_LIVE_VALIDATION_POLICY } from "./liveValidationPolicy.js";
+export { LIVE_UPDATE_MAX_BYTES, WORKER_LIVE_VALIDATION_POLICY } from "./liveValidationPolicy.js";
