@@ -1019,9 +1019,10 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
  * attribute with half a surrogate pair, or a line with no boundary of its own that would move to
  * other containers. `writing.wanting` then collects that line. `afterEachStep` is called with the
  * editor's document once for each step that changes leaves, when it is written, once at the end
- * of each run that keeps them or only inserts, and once more for formatting steps that end the transaction. When
- * it returns false the writer stops there and returns false too: the next step's places are
- * places in the editor's document, and mean nothing in a sequence that does not read as it.
+ * of each run that keeps them or only inserts, and once more for formatting steps that end the
+ * transaction. When it returns false the writer stops there and returns false too: the next
+ * step's places are places in the editor's document, and mean nothing in a sequence that does
+ * not read as it.
  */
 export function writeTransaction(
   writing: BodyWriting,
@@ -1069,7 +1070,7 @@ export function writeTransaction(
         : ranges
           ? null
           : "marks";
-    const base = insert && run?.kind === "inserts" ? baseOf(insert[0]) : -1;
+    const base = kind === "inserts" && run?.kind === "inserts" ? baseOf(insert![0]) : -1;
     if (base >= 0) inserts.push([base, at, insert!]);
     if (base >= 0 || (kind !== null && kind !== "inserts" && run?.kind === kind)) continue;
     if (!flush(at, false)) return false;
