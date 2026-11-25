@@ -1085,7 +1085,7 @@ fn insert_attributes(
 ) -> Attrs {
     let mut negated_attrs = HashMap::with_capacity(attrs.len());
     let mut store = txn.store_mut();
-    for (k, v) in attrs {
+    for (k, v) in sorted_attributes(attrs) {
         let current_value = pos
             .current_attrs
             .as_ref()
@@ -1117,6 +1117,12 @@ fn insert_attributes(
     negated_attrs
 }
 
+fn sorted_attributes(attrs: Attrs) -> Vec<(std::sync::Arc<str>, Any)> {
+    let mut attrs: Vec<_> = attrs.into_iter().collect();
+    attrs.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+    attrs
+}
+
 fn insert_negated_attributes(
     this: BranchPtr,
     txn: &mut TransactionMut,
@@ -1142,7 +1148,7 @@ fn insert_negated_attributes(
     }
 
     let mut store = txn.store_mut();
-    for (k, v) in attrs {
+    for (k, v) in sorted_attributes(attrs) {
         let client_id = store.client_id;
         let parent = this.into();
         let item = Item::new(

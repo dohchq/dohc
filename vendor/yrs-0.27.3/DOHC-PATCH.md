@@ -78,6 +78,19 @@ This preserves negative zero across Yjs import, snapshot encoding, and reopen.
 Ordinary integer values keep their existing bytes. Regression tests cover
 signed zero, safe integer extrema, and the shared bootstrap projection vectors.
 
+`src/types/text.rs` and `src/any.rs` write keys in sorted order. Upstream
+inserts a text's formatting items, and encodes an `Any::Map`, in `HashMap`
+order, which changes from one run to the next. The engine builds a
+successor's base from its identity alone and names it by the SHA-256 of its
+bytes, so the same note must give the same bytes every time. `insert_attributes`
+and the last loop of `insert_negated_attributes` now open and close marks in
+the order of their names, and an `Any::Map` encodes its entries in key order.
+Readers in both libraries gather a run's marks and a map's entries into maps,
+so what they read does not change. Tests: `crates/yrs-interop/tests/sorted_writes.rs`
+for the patch, and `each_shared_note_a_successor_takes_gives_the_pinned_bytes`
+in `crates/dohc-engine-collab/src/ydoc/successor_format_two_tests.rs` for the
+engine.
+
 `src/deleted_content.rs` adds `deleted_runs`. It reads the items a delete set
 names in a document that keeps deleted content: each run's text, embed or
 element with its attributes, the line it sat in and its place in the document.
