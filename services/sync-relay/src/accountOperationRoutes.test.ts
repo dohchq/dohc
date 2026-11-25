@@ -694,6 +694,36 @@ describe("an account read's deadline", () => {
   });
 });
 
+describe("an account read's deadline over its checks", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("answers server_busy for a check of the sign-in that outlasts the deadline, and frees the visit", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let calls = 0;
+    let pausing = true;
+    const { engine, h } = await relay({
+      resolve: async (request) => {
+        // Before the arguments, after them, once the copy opens, once it syncs, then once the result is ready.
+        if (++calls % 5 === 0 && pausing) await new Promise<never>(() => undefined);
+        return await resolveAccountSession(request);
+      },
+    });
+    await seedTrip(engine);
+    for (let read = 1; read <= ACCOUNT_VISITS_PER_CALLER; read++) {
+      const response = h(op("trip", "documentRead", { path: "docs/plan.md" }));
+      await expect.poll(() => calls).toBe(5 * read);
+      await vi.advanceTimersByTimeAsync(ACCOUNT_READ_DEADLINE_MS);
+      const busy = await response;
+      expect(busy.status).toBe(503);
+      expect(await busy.text()).not.toContain("Alfama");
+    }
+    pausing = false;
+    expect((await h(op("trip", "groups"))).status, "every visit was freed").toBe(200);
+  });
+});
+
 describe("an account's share of the server", () => {
   it("answers server_busy past one sign-in's open visits", async () => {
     const { h, holdSyncs, syncs } = await relay();

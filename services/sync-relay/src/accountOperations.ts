@@ -133,27 +133,38 @@ export async function runAccountOperation(
   const deadline = new AbortController();
   const timer = setTimeout(() => deadline.abort(), ACCOUNT_READ_DEADLINE_MS);
   const signal = AbortSignal.any([input.visitor.signal, deadline.signal]);
-  const times = [performance.now()];
+  const authorize = () => untilAborted(input.authorize(), signal);
+  const spent: string[] = [];
+  const lap = (step: string, since: number) =>
+    spent.push(`${step}=${Math.round(performance.now() - since)}ms`);
+  const timed = async <T>(step: string, work: Promise<T>) => {
+    const since = performance.now();
+    try {
+      return await work;
+    } finally {
+      lap(step, since);
+    }
+  };
+  const started = performance.now();
   try {
     return await server.copies.withServerCopy(
       input.owner,
       input.workspaceId,
       { ...input.visitor, signal, hold: true },
       async (replica) => {
-        times.push(performance.now());
-        await input.authorize();
+        lap("open", started);
+        await authorize();
         // The sync brings the copy at least this far.
         const cursor = currentAccountFeedCursor(server.storage, input.workspaceId);
-        if (request.operation !== "documentRead" || !copyIsCurrent(server.storage, replica))
-          await replica.sync(signal);
-        times.push(performance.now());
-        await input.authorize();
-        const result = await untilAborted(
-          answer(server.storage, replica, input.workspaceId, request),
-          signal,
+        const stale =
+          request.operation !== "documentRead" || !copyIsCurrent(server.storage, replica);
+        await timed("sync", stale ? replica.sync(signal) : Promise.resolve());
+        await authorize();
+        const result = await timed(
+          "read",
+          untilAborted(answer(server.storage, replica, input.workspaceId, request), signal),
         );
-        times.push(performance.now());
-        await input.authorize();
+        await authorize();
         return { result, cursor };
       },
     );
@@ -167,9 +178,6 @@ export async function runAccountOperation(
     throw error;
   } finally {
     clearTimeout(timer);
-    const spent = ["open", "sync", "read"]
-      .slice(0, times.length - 1)
-      .map((step, index) => `${step}=${Math.round(times[index + 1]! - times[index]!)}ms`);
     console.info(`[account-reads] ${request.operation} ${spent.join(" ")}`);
   }
 }
