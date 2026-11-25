@@ -211,8 +211,6 @@ export function WorkspaceManager(props: {
   // The workspace open behind the manager, when there is one. Back returns
   // to it; removing it from the list drops to whatever remains.
   current: Workspace | null;
-  // Provided only on first run (no open workspace window), where this surface
-  // owns the reports notice and privacy dialog.
   userSettings?: DesktopUserSettingsResult | null;
   onUserSettingsChange?: (result: DesktopUserSettingsResult) => void;
   // May reject: the manager stays open and a toast says why.
@@ -225,7 +223,7 @@ export function WorkspaceManager(props: {
   const [joining, setJoining] = useState(false);
   const [openingShare, setOpeningShare] = useState(false);
   const [privacyOpen, setPrivacyOpen] = useState(false);
-  const [pendingPrivacy, setPendingPrivacy] = useState<PrivacySettings | null>(null);
+  const [pendingPrivacy, setPendingPrivacy] = useState<Partial<PrivacySettings>>({});
   const [removing, setRemovingState] = useState<RemovalDialog | null>(null);
   // Written only with the state, so two requests in one turn see each other
   // whenever React renders.
@@ -240,52 +238,118 @@ export function WorkspaceManager(props: {
   const connectionNotices = useConnectionNotices();
   const keptTyping = useKeptTyping();
   const crashReportNotice = useCrashReport(connectionNotices);
-  const privacySaveRequest = useRequestSequence();
-  const userSettingsRef = useRef(props.userSettings ?? null);
-  userSettingsRef.current = props.userSettings ?? null;
+  const committedSettingsRef = useRef(props.userSettings ?? null);
+  const queuedPrivacyRef = useRef<Partial<PrivacySettings>>({});
+  const savingPrivacyRef = useRef(false);
+  const mountedRef = useRef(true);
   const onUserSettingsChangeRef = useRef(props.onUserSettingsChange);
   onUserSettingsChangeRef.current = props.onUserSettingsChange;
   useEffect(() => {
-    setPendingPrivacy(null);
+    if (!savingPrivacyRef.current) {
+      committedSettingsRef.current = props.userSettings ?? null;
+    }
   }, [props.userSettings]);
-  useEffect(
-    () => () => {
-      privacySaveRequest.next();
-    },
-    [privacySaveRequest],
-  );
-  const effectivePrivacy = pendingPrivacy ?? props.userSettings?.settings.privacy ?? null;
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const committedPrivacy = props.userSettings?.settings.privacy ?? null;
+  const effectivePrivacy = committedPrivacy ? { ...committedPrivacy, ...pendingPrivacy } : null;
   const { showReportsNotice: pushReportsNotice, reportsNotice } = connectionNotices;
   const reportsNoticeShown = useStandaloneReportsNotice({
     enabled: props.userSettings !== undefined,
-    privacy: effectivePrivacy,
+    privacy: committedPrivacy,
     notice: reportsNotice,
     show: (reports) => pushReportsNotice(reports, () => setPrivacyOpen(true)),
   });
-  const savePrivacy = useCallback(
-    async (privacy: PrivacySettings) => {
-      const current = userSettingsRef.current;
-      if (!current) return;
-      const requestId = privacySaveRequest.next();
-      setPendingPrivacy(privacy);
-      try {
-        const saved = await bridge().setUserSettings({
-          settings: { ...current.settings, privacy },
-          base: current.settings,
-        });
-        if (!privacySaveRequest.isCurrent(requestId)) return;
-        userSettingsRef.current = saved;
-        setPendingPrivacy(null);
-        onUserSettingsChangeRef.current?.(saved);
-      } catch (cause) {
-        if (!privacySaveRequest.isCurrent(requestId)) return;
-        setPendingPrivacy(null);
-        connectionNotices.reportError("dohc could not save your settings.", cause, () => {
-          void savePrivacy(privacy);
-        });
+  const enqueuePrivacyPatch = useCallback(
+    (patch: Partial<PrivacySettings>) => {
+      const keys = Object.keys(patch) as Array<keyof PrivacySettings>;
+      if (keys.length === 0) return;
+      queuedPrivacyRef.current = { ...queuedPrivacyRef.current, ...patch };
+      if (mountedRef.current) {
+        setPendingPrivacy((current) => ({ ...current, ...patch }));
       }
+      if (savingPrivacyRef.current) return;
+      savingPrivacyRef.current = true;
+      void (async () => {
+        try {
+          while (Object.keys(queuedPrivacyRef.current).length > 0) {
+            const current = committedSettingsRef.current;
+            if (!current) {
+              queuedPrivacyRef.current = {};
+              if (mountedRef.current) setPendingPrivacy({});
+              return;
+            }
+            const batch = queuedPrivacyRef.current;
+            queuedPrivacyRef.current = {};
+            const batchKeys = Object.keys(batch) as Array<keyof PrivacySettings>;
+            const nextPrivacy: PrivacySettings = { ...current.settings.privacy, ...batch };
+            try {
+              const saved = await bridge().setUserSettings({
+                settings: { ...current.settings, privacy: nextPrivacy },
+                base: current.settings,
+              });
+              committedSettingsRef.current = saved;
+              if (mountedRef.current) {
+                onUserSettingsChangeRef.current?.(saved);
+                for (const key of batchKeys) {
+                  connectionNotices.clearIdentity(`first-run-privacy:${key}`);
+                }
+                setPendingPrivacy((prev) => {
+                  const remaining: Partial<PrivacySettings> = { ...prev };
+                  for (const key of batchKeys) {
+                    if (!(key in queuedPrivacyRef.current)) delete remaining[key];
+                  }
+                  return remaining;
+                });
+              }
+            } catch (cause) {
+              if (mountedRef.current) {
+                setPendingPrivacy((prev) => {
+                  const remaining: Partial<PrivacySettings> = { ...prev };
+                  for (const key of batchKeys) {
+                    if (!(key in queuedPrivacyRef.current)) delete remaining[key];
+                  }
+                  return remaining;
+                });
+                for (const key of batchKeys) {
+                  const value = batch[key];
+                  if (value === undefined) continue;
+                  const retryPatch: Partial<PrivacySettings> = { [key]: value };
+                  connectionNotices.reportError(
+                    "dohc could not save your settings.",
+                    cause,
+                    () => enqueuePrivacyPatch(retryPatch),
+                    undefined,
+                    `first-run-privacy:${key}`,
+                  );
+                }
+              }
+            }
+          }
+        } finally {
+          savingPrivacyRef.current = false;
+        }
+      })();
     },
-    [connectionNotices.reportError, privacySaveRequest],
+    [connectionNotices.clearIdentity, connectionNotices.reportError],
+  );
+  const savePrivacy = useCallback(
+    (nextPrivacy: PrivacySettings) => {
+      if (!effectivePrivacy) return;
+      const patch: Partial<PrivacySettings> = {};
+      if (nextPrivacy.usageReports !== effectivePrivacy.usageReports) {
+        patch.usageReports = nextPrivacy.usageReports;
+      }
+      if (nextPrivacy.errorReports !== effectivePrivacy.errorReports) {
+        patch.errorReports = nextPrivacy.errorReports;
+      }
+      enqueuePrivacyPatch(patch);
+    },
+    [effectivePrivacy, enqueuePrivacyPatch],
   );
   const openNoticeTarget = useCallback((target: NoticeTarget) => {
     if (target.to === "privacy-settings") setPrivacyOpen(true);
@@ -658,7 +722,7 @@ export function WorkspaceManager(props: {
         <ShellErrorReporter.Provider value={connectionNotices.reportFailure}>
           <ReportsPrivacyDialog
             privacy={effectivePrivacy}
-            onChange={(privacy) => void savePrivacy(privacy)}
+            onChange={savePrivacy}
             onError={(message, cause) => connectionNotices.reportError(message, cause, null)}
             onClose={() => setPrivacyOpen(false)}
           />

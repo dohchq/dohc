@@ -18,15 +18,6 @@ export function reportsNoticeText(reports: ReportKinds): string {
   return "dohc sends error reports to its developers. Reports hold no file names, content, chats, prompts, account details, or links.";
 }
 
-/**
- * Shows the notice about reports when main says one is due. Returns what the
- * notice center calls when a toast comes on screen: the notice's own toast
- * tells main which reports its words name, and until then none of them
- * leaves. A notice waiting behind a newer toast tells main nothing yet. A
- * window that closes or changes workspace while it asks shows nothing and
- * tells main nothing, so the next ask shows the notice again. A switch
- * turned on later asks again.
- */
 function useAcknowledgeReportsNotice(
   current: { id: string; reports: ReportKinds } | null,
 ): (toastId: string) => void {
@@ -41,6 +32,15 @@ function useAcknowledgeReportsNotice(
   }, []);
 }
 
+/**
+ * Shows the notice about reports when main says one is due. Returns what the
+ * notice center calls when a toast comes on screen: the notice's own toast
+ * tells main which reports its words name, and until then none of them
+ * leaves. A notice waiting behind a newer toast tells main nothing yet. A
+ * window that closes or changes workspace while it asks shows nothing and
+ * tells main nothing, so the next ask shows the notice again. A switch
+ * turned on later asks again.
+ */
 export function useReportsNotice(input: {
   workspaceId: string;
   privacy: PrivacySettings | null;

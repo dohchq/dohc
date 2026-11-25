@@ -78,9 +78,14 @@ const bridge = {
   readReportsNotice: vi.fn(async (): Promise<ReportKinds> => ({ usage: false, errors: false })),
   acknowledgeReportsNotice: vi.fn(async () => undefined),
   setUserSettings: vi.fn(
-    async ({ settings }: { settings: DesktopUserSettingsResult["settings"] }) => ({
+    async ({
       settings,
-      source: "stored" as const,
+    }: {
+      settings: DesktopUserSettingsResult["settings"];
+      base?: DesktopUserSettingsResult["settings"];
+    }): Promise<DesktopUserSettingsResult> => ({
+      settings,
+      source: "stored",
     }),
   ),
   readDiagnostics: vi.fn(async (): Promise<ReadDiagnosticsResult> => ({
@@ -791,7 +796,6 @@ describe("workspace manager with registered workspaces", () => {
     await user.keyboard("{Escape}");
     expect(screen.queryByTestId("first-run-privacy-dialog")).toBeNull();
 
-    // Clicking the durable row inside Notices reopens Privacy settings.
     await user.click(screen.getByTestId("notice-center-toggle"));
     await user.click(screen.getByText(noticeWords));
     expect(await screen.findByTestId("first-run-privacy-dialog")).toBeTruthy();
@@ -812,5 +816,102 @@ describe("workspace manager with registered workspaces", () => {
     });
     expect(bridge.readReportsNotice).not.toHaveBeenCalled();
     expect(screen.queryByText(reportsNoticeText({ usage: true, errors: true }))).toBeNull();
+  });
+
+  it("serializes rapid toggle reversals, scopes Try again to the failed switch, and asks for notices only after commit", async () => {
+    const user = userEvent.setup();
+    let committed: DesktopUserSettingsResult = {
+      settings: {
+        ...structuredClone(DEFAULT_USER_SETTINGS),
+        privacy: { usageReports: false, errorReports: true },
+      },
+      source: "stored",
+    };
+    const save1 = deferred<DesktopUserSettingsResult>();
+    const save2 = deferred<DesktopUserSettingsResult>();
+    const saves: Array<{
+      settings: DesktopUserSettingsResult["settings"];
+      base?: DesktopUserSettingsResult["settings"];
+    }> = [];
+    bridge.setUserSettings
+      .mockImplementationOnce(async (payload) => {
+        saves.push(payload);
+        return save1.promise;
+      })
+      .mockImplementationOnce(async (payload) => {
+        saves.push(payload);
+        return save2.promise;
+      });
+    bridge.readReportsNotice.mockResolvedValueOnce({ usage: false, errors: true });
+
+    const renderWith = (settings: DesktopUserSettingsResult) => (
+      <WorkspaceManager
+        workspaces={[]}
+        current={null}
+        userSettings={settings}
+        onUserSettingsChange={(next) => {
+          committed = next;
+          view.rerender(renderWith(committed));
+        }}
+        onForgot={async () => []}
+        onOpenWorkspace={() => {}}
+      />
+    );
+    const view = render(renderWith(committed));
+    expect(await screen.findByText(reportsNoticeText({ usage: false, errors: true }))).toBeTruthy();
+    expect(bridge.readReportsNotice).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "Privacy settings" }));
+    const dialog = await screen.findByTestId("first-run-privacy-dialog");
+    const usageSwitch = within(dialog).getByRole("switch", { name: "Send usage reports" });
+    const errorSwitch = within(dialog).getByRole("switch", { name: "Send error reports" });
+
+    await user.click(usageSwitch);
+    expect(usageSwitch.getAttribute("aria-checked")).toBe("true");
+    expect(bridge.readReportsNotice).toHaveBeenCalledTimes(1);
+
+    await user.click(usageSwitch);
+    expect(usageSwitch.getAttribute("aria-checked")).toBe("false");
+    expect(saves).toHaveLength(1);
+    expect(saves[0]!.base?.privacy.usageReports).toBe(false);
+    expect(saves[0]!.settings.privacy.usageReports).toBe(true);
+
+    const savedOn: DesktopUserSettingsResult = {
+      settings: saves[0]!.settings,
+      source: "stored",
+    };
+    await act(async () => {
+      save1.resolve(savedOn);
+    });
+    await waitFor(() => expect(saves).toHaveLength(2));
+    expect(saves[1]!.base?.privacy.usageReports).toBe(true);
+    expect(saves[1]!.settings.privacy.usageReports).toBe(false);
+    expect(bridge.readReportsNotice).toHaveBeenCalledTimes(2);
+    expect(usageSwitch.getAttribute("aria-checked")).toBe("false");
+
+    await act(async () => {
+      save2.resolve({ settings: saves[1]!.settings, source: "stored" });
+    });
+    await waitFor(() => expect(committed.settings.privacy.usageReports).toBe(false));
+
+    bridge.setUserSettings
+      .mockRejectedValueOnce(new Error("busy"))
+      .mockImplementationOnce(async ({ settings }) => ({ settings, source: "stored" as const }))
+      .mockImplementationOnce(async ({ settings }) => ({ settings, source: "stored" as const }));
+
+    await user.click(usageSwitch);
+    expect(await screen.findByText(/dohc could not save your settings\./i)).toBeTruthy();
+    await waitFor(() => expect(usageSwitch.getAttribute("aria-checked")).toBe("false"));
+
+    await user.click(errorSwitch);
+    await waitFor(() => expect(committed.settings.privacy.errorReports).toBe(false));
+
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() =>
+      expect(committed.settings.privacy).toEqual({
+        usageReports: true,
+        errorReports: false,
+      }),
+    );
   });
 });
