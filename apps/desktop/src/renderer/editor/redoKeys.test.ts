@@ -47,6 +47,7 @@ for (const { history, extensions } of [
         { key: "z", keyCode: 90, shiftKey: true },
         { key: "Z", keyCode: 90, shiftKey: true },
         { key: "y", keyCode: 89 },
+        { key: "я", code: "KeyQ", keyCode: 81, shiftKey: true },
       ]) {
         expect(key(redo).defaultPrevented).toBe(true);
         expect(editor.getText()).toBe("Hello");

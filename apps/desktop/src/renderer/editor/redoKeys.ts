@@ -11,6 +11,6 @@ export const RedoKeys = Extension.create({
       this.editor.commands.redo();
       return true;
     };
-    return { "Shift-Mod-z": redo, "Mod-y": redo };
+    return { "Shift-Mod-z": redo, "Mod-y": redo, "Shift-Mod-я": redo };
   },
 });
