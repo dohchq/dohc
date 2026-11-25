@@ -196,6 +196,29 @@ it("refuses /telemetry/batch/ when unconfigured, wrong media type, wrong key, wr
     { ASSETS: assets, ALLOWED_TELEMETRY_KEYS: ALLOWED_KEY },
   );
   expect(oversized.status).toBe(413);
+
+  const deepNested = await worker.fetch(
+    new Request("https://dohc.computer/telemetry/batch/", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: `{"api_key":"${ALLOWED_KEY}","batch":[{"event":"x","properties":{"a":${"[".repeat(64)}1${"]".repeat(64)}}}]}`,
+    }),
+    { ASSETS: assets, ALLOWED_TELEMETRY_KEYS: ALLOWED_KEY },
+  );
+  expect(deepNested.status).toBe(400);
   expect(upstream).not.toHaveBeenCalled();
   expect(assets.fetch).not.toHaveBeenCalled();
+
+  const protoBody = `{"api_key":"${ALLOWED_KEY}","batch":[{"event":"app_launched","properties":{"__proto__":{"keep":1},"$ip":"1.2.3.4"}}]}`;
+  const protoResponse = await worker.fetch(
+    new Request("https://dohc.computer/telemetry/batch/", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: protoBody,
+    }),
+    { ASSETS: assets, ALLOWED_TELEMETRY_KEYS: ALLOWED_KEY },
+  );
+  expect(protoResponse.status).toBe(200);
+  expect(upstream.mock.calls[0]![1].body).toContain('"__proto__":{"keep":1}');
+  expect(upstream.mock.calls[0]![1].body).not.toContain('"$ip"');
 });

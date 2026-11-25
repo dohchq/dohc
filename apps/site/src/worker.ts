@@ -13,6 +13,7 @@ const API_HOST = "us.i.posthog.com";
 const ASSET_HOST = "us-assets.i.posthog.com";
 const MAX_TELEMETRY_BODY_BYTES = 1_048_576;
 const MAX_TELEMETRY_BATCH_EVENTS = 200;
+const MAX_TELEMETRY_JSON_DEPTH = 32;
 const POSTHOG_KEY_PATTERN = /^phc_\w{10,100}$/;
 // Only what the browser SDK's requests need. Cookies, credentials, and the
 // headers Cloudflare adds, such as the visitor's country, stay here.
@@ -68,23 +69,39 @@ async function readBoundedText(request: Request, maxBytes: number): Promise<stri
   return new TextDecoder().decode(merged);
 }
 
-function stripIpDeep(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stripIpDeep);
+const DEPTH_EXCEEDED = Symbol("depth-exceeded");
+
+function stripIpDeep(value: unknown, depth = 0): unknown {
+  if (depth > MAX_TELEMETRY_JSON_DEPTH) return DEPTH_EXCEEDED;
+  if (Array.isArray(value)) {
+    const out: unknown[] = [];
+    for (const entry of value) {
+      const next = stripIpDeep(entry, depth + 1);
+      if (next === DEPTH_EXCEEDED) return DEPTH_EXCEEDED;
+      out.push(next);
+    }
+    return out;
+  }
   if (!isPlainRecord(value)) return value;
-  const cleaned: Record<string, unknown> = {};
+  const cleaned = Object.create(null) as Record<string, unknown>;
   for (const [key, entry] of Object.entries(value)) {
     if (key === "$ip") continue;
-    cleaned[key] = stripIpDeep(entry);
+    const next = stripIpDeep(entry, depth + 1);
+    if (next === DEPTH_EXCEEDED) return DEPTH_EXCEEDED;
+    cleaned[key] = next;
   }
   return cleaned;
 }
 
 function sanitizeBatchEvent(item: unknown): Record<string, unknown> | null {
   if (!isPlainRecord(item)) return null;
-  const cleaned = stripIpDeep(item) as Record<string, unknown>;
-  const properties = isPlainRecord(cleaned.properties) ? cleaned.properties : {};
-  cleaned.properties = { ...properties, $geoip_disable: true };
-  return cleaned;
+  const stripped = stripIpDeep(item);
+  if (stripped === DEPTH_EXCEEDED || !isPlainRecord(stripped)) return null;
+  const properties = Object.create(null) as Record<string, unknown>;
+  if (isPlainRecord(stripped.properties)) Object.assign(properties, stripped.properties);
+  properties.$geoip_disable = true;
+  stripped.properties = properties;
+  return stripped;
 }
 
 function isJsonContentType(request: Request): boolean {
