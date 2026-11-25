@@ -913,7 +913,7 @@ export const DatasetResult = z.discriminatedUnion("kind", [
       kind: z.literal("sql"),
       columns: z.array(z.string().max(1024)).max(1024),
       rows: z
-        .array(z.record(z.string(), z.union([z.string(), z.number().finite(), z.null()])))
+        .array(z.array(z.union([z.string(), z.number().finite(), z.null()])).max(1024))
         .max(1000),
       truncated: z.boolean(),
       durationMs: z.number().int().nonnegative(),

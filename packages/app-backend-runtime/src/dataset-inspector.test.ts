@@ -172,10 +172,18 @@ describe("dataset inspector SQL and trace", () => {
     expect(queried.revision).toBe(5);
     expect(queried.columns).toEqual(["id", "memo", "cents"]);
     expect(queried.rows).toEqual([
-      { id: "e3", memo: "Item 3", cents: 300 },
-      { id: "e4", memo: "Item 4", cents: 400 },
-      { id: "e5", memo: "Item 5", cents: 500 },
+      ["e3", "Item 3", 300],
+      ["e4", "Item 4", 400],
+      ["e5", "Item 5", 500],
     ]);
+
+    const joined = await host.querySql("owner", {
+      workspaceId: "ws1",
+      datasetId: rev.datasetId,
+      sql: "SELECT a.id, b.id, 9007199254740993 AS big FROM ledger a JOIN ledger b ON b.cents = a.cents + 100 WHERE a.id = 'e1'",
+    });
+    expect(joined.columns).toEqual(["id", "id", "big"]);
+    expect(joined.rows).toEqual([["e1", "e2", "9007199254740993"]]);
 
     const limited = await host.querySql("owner", {
       workspaceId: "ws1",
@@ -183,7 +191,7 @@ describe("dataset inspector SQL and trace", () => {
       sql: "SELECT id FROM ledger ORDER BY id",
       limit: 2,
     });
-    expect(limited.rows).toEqual([{ id: "e1" }, { id: "e2" }]);
+    expect(limited.rows).toEqual([["e1"], ["e2"]]);
     expect(limited.truncated).toBe(true);
 
     const plan = await host.querySql("owner", {
@@ -194,7 +202,8 @@ describe("dataset inspector SQL and trace", () => {
       explain: true,
     });
     expect(plan.explain).toBe(true);
-    expect(plan.rows.some((row) => /SEARCH|SCAN/i.test(String(row.detail ?? "")))).toBe(true);
+    const detail = plan.columns.indexOf("detail");
+    expect(plan.rows.some((row) => /SEARCH|SCAN/i.test(String(row[detail])))).toBe(true);
 
     for (const forbidden of [
       "DELETE FROM ledger",
@@ -245,7 +254,7 @@ describe("dataset inspector SQL and trace", () => {
       datasetId: rev.datasetId,
       sql: "SELECT count(*) AS n FROM ledger",
     });
-    expect(after.rows).toEqual([{ n: 5 }]);
+    expect(after.rows).toEqual([[5]]);
   }, 30_000);
 
   it("bounds the in-memory trace ring buffer to 200 entries with metrics and refusal codes", async () => {
@@ -380,7 +389,7 @@ describe("dataset inspector SQL and trace", () => {
       sql: "SELECT id, memo, cents FROM ledger WHERE cents = ?",
       params: [999],
     });
-    expect(queried.rows).toEqual([{ id: "r1", memo: "Synced", cents: 999 }]);
+    expect(queried.rows).toEqual([["r1", "Synced", 999]]);
     expect(queried.revision).toBe(1);
 
     const plan = await replica.querySql({
@@ -398,6 +407,6 @@ describe("dataset inspector SQL and trace", () => {
       /Only read-only SELECT queries/,
     );
     const stillWarm = await replica.querySql({ sql: "SELECT count(*) AS n FROM ledger" });
-    expect(stillWarm.rows).toEqual([{ n: 1 }]);
+    expect(stillWarm.rows).toEqual([[1]]);
   }, 30_000);
 });

@@ -1846,7 +1846,7 @@ it("allows owner sql and trace while refusing both on shared views", async () =>
   const f = fixture();
   const querySql = vi.fn(async () => ({
     columns: ["id"],
-    rows: [{ id: "r1" }],
+    rows: [["r1"]],
     truncated: false,
     durationMs: 2,
     revision: 1,
@@ -1879,7 +1879,7 @@ it("allows owner sql and trace while refusing both on shared views", async () =>
       sql: "SELECT id FROM responses",
     }),
   );
-  expect(sql).toMatchObject({ kind: "sql", columns: ["id"], rows: [{ id: "r1" }] });
+  expect(sql).toMatchObject({ kind: "sql", columns: ["id"], rows: [["r1"]] });
   const traced = DatasetResult.parse(
     await f.handler("window", {
       action: "trace",

@@ -142,6 +142,11 @@ describe("app view boundaries", () => {
     for (const key of ["p", "k", "w", "b", "r"])
       expect(appViewShortcut({ ...input, key }, "win32")).not.toBeNull();
     expect(appViewShortcut({ ...input, shift: true }, "win32")).not.toBeNull();
+    expect(appViewShortcut({ ...input, key: "I", shift: true }, "win32")).not.toBeNull();
+    expect(
+      appViewShortcut({ ...input, key: "I", shift: true, control: false, meta: true }, "darwin"),
+    ).not.toBeNull();
+    expect(appViewShortcut({ ...input, key: "i" }, "win32")).toBeNull();
     for (const key of ["F5", "F6"])
       expect(appViewShortcut({ ...input, key, control: false }, "win32")).not.toBeNull();
     for (const shift of [true, false])

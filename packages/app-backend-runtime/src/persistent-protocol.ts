@@ -55,7 +55,6 @@ export interface PersistentPrepareInput {
 export interface OperationMetrics {
   statementCount: number;
   rowsRead: number;
-  durationMs: number;
 }
 export type PersistentSqlParam = string | number | null;
 export interface PersistentSqlInput {
@@ -68,7 +67,7 @@ export interface PersistentSqlInput {
 }
 export interface PersistentSqlResult {
   columns: string[];
-  rows: Array<Record<string, PersistentSqlParam>>;
+  rows: PersistentSqlParam[][];
   truncated: boolean;
   durationMs: number;
   revision: number;

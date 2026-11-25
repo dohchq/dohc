@@ -499,8 +499,10 @@ async function handle(command: PersistentCommand): Promise<PersistentResult> {
       return appCode((): PersistentSqlResult => {
         try {
           const statement = activeDb.prepare(sql);
+          statement.setReturnArrays(true);
+          statement.setReadBigInts(true);
           const resultColumns = statement.columns().map((column) => column.name);
-          const rows: Array<Record<string, PersistentSqlParam>> = [];
+          const rows: PersistentSqlParam[][] = [];
           let bytes = 2,
             truncated = false;
           for (const rawRow of statement.iterate(...params)) {
@@ -508,19 +510,17 @@ async function handle(command: PersistentCommand): Promise<PersistentResult> {
               truncated = true;
               break;
             }
-            const row: Record<string, PersistentSqlParam> = {};
-            for (const [key, value] of Object.entries(rawRow)) {
-              row[key] =
-                typeof value === "bigint"
-                  ? Number.isSafeInteger(Number(value))
-                    ? Number(value)
-                    : String(value)
-                  : value instanceof Uint8Array
-                    ? `<${value.byteLength} bytes>`
-                    : value === null || typeof value === "string" || typeof value === "number"
-                      ? value
-                      : String(value);
-            }
+            const row = (rawRow as unknown as unknown[]).map((value): PersistentSqlParam =>
+              typeof value === "bigint"
+                ? Number.isSafeInteger(Number(value))
+                  ? Number(value)
+                  : String(value)
+                : value instanceof Uint8Array
+                  ? `<${value.byteLength} bytes>`
+                  : value === null || typeof value === "string" || typeof value === "number"
+                    ? value
+                    : String(value),
+            );
             const nextBytes =
               bytes + Buffer.byteLength(JSON.stringify(row)) + (rows.length ? 1 : 0);
             if (nextBytes > maxBytes) {

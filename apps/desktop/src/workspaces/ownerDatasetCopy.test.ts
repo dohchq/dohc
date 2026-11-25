@@ -833,7 +833,7 @@ it("runs read-only SQL, EXPLAIN, and records traces on the synced owner copy", a
       signal,
     });
     expect(sql.columns).toEqual(["name"]);
-    expect(sql.rows).toEqual([{ name: "Ledger" }]);
+    expect(sql.rows).toEqual([["Ledger"]]);
     expect(sql.explain).toBe(false);
 
     const plan = await data.querySql!({

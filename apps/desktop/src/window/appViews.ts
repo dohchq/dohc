@@ -121,18 +121,20 @@ export function appViewShortcut(
     ] as const
   ).some((id) => matchesShortcut(key, id, platform));
   const bare = !input.control && !input.meta && !input.alt && !input.shift;
-  const reload =
-    input.key.toLowerCase() === "r" &&
+  const primary =
     !input.alt &&
-    !input.shift &&
     (platform === "darwin" ? input.meta && !input.control : input.control && !input.meta);
+  const reload = input.key.toLowerCase() === "r" && !input.shift && primary;
+  const inspector = input.key.toLowerCase() === "i" && input.shift && primary;
   const history =
     ["ArrowLeft", "ArrowRight"].includes(input.key) &&
     input.alt &&
     !input.control &&
     !input.meta &&
     !input.shift;
-  return shell || (bare && ["F5", "F6"].includes(input.key)) || reload || history ? key : null;
+  return shell || (bare && ["F5", "F6"].includes(input.key)) || reload || inspector || history
+    ? key
+    : null;
 }
 
 interface AppViewOperation<Workspace> {

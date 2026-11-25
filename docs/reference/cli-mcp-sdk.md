@@ -1871,7 +1871,7 @@ dohc dataset <verb> '<JSON>'
 
 Create, change, and use transactional Collections.
 
-Each verb takes one JSON object that names workspaceId (or - to read the JSON from stdin, recommended in PowerShell on Windows). Find workspaceId in .dohc/manifest.json at the workspace root. datasetPath is the caller-relative dataset.json path. List and describe return it alongside the internal datasetId. After moving the file, update commands and app manifests. An old path reports a broken reference. These verbs use the same Collection rules as dohc. They do not accept SQL or caller identity.
+Each verb takes one JSON object that names workspaceId (or - to read the JSON from stdin, recommended in PowerShell on Windows). Find workspaceId in .dohc/manifest.json at the workspace root. datasetPath is the caller-relative dataset.json path. List and describe return it alongside the internal datasetId. After moving the file, update commands and app manifests. An old path reports a broken reference. These verbs use the same Collection rules as dohc. They never accept caller identity. Only sql accepts SQL, read-only and for the owner.
 
 #### `dohc dataset list`
 
@@ -1913,7 +1913,7 @@ Returns `{ kind: "types-written", path, revision }`.
 
 Run a read-only SQL query or EXPLAIN QUERY PLAN against a Collection.
 
-Owner only. Refuses writes, PRAGMAs, and internal tables. Pass explain: true to inspect SQLite's query plan.
+Owner only. Refuses writes, PRAGMAs, and internal tables. Pass explain: true to inspect SQLite's query plan. Each row lists its values in column order.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.

@@ -690,7 +690,6 @@ export function SitePreviewPage(props: {
     holdFocus: reviewOpen,
     notices: props.notices,
     reportError: props.reportError,
-    onToggleInspector: isOwnerLocalApp ? toggleInspector : undefined,
   });
   const onTitle = props.onTitle;
   const title = site?.title;

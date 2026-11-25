@@ -331,10 +331,9 @@ function run(
   request: GuestRequest,
   options: GuestOptions,
 ): { resultJson: string; attachedFileIds: string[]; metrics: OperationMetrics } {
-  const started = performance.now();
   const runtime = module.newRuntime();
   runtime.setMaxStackSize(request.limits.stackBytes);
-  const deadline = started + request.limits.evaluationMs;
+  const deadline = performance.now() + request.limits.evaluationMs;
   let interrupted = false;
   runtime.setInterruptHandler(() => (interrupted ||= performance.now() >= deadline));
   const memoryLimit = `App operation needed more than its ${request.limits.memoryBytes / MiB} MiB memory limit, so it stopped.`;
@@ -615,7 +614,6 @@ function run(
           metrics: {
             statementCount: statements,
             rowsRead,
-            durationMs: Math.max(0, Math.round(performance.now() - started)),
           },
         };
       } finally {

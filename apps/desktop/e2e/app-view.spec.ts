@@ -1,7 +1,7 @@
 import { expect, test, type ElectronApplication, type Locator, type Page } from "@playwright/test";
 import { sendCliRequest } from "@dohc/cli/client";
 import { CLI_PROTOCOL_VERSION } from "@dohc/cli/protocol";
-import { mkdir, readdir } from "node:fs/promises";
+import { mkdir, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { editorTabTestId } from "../src/testPins";
@@ -884,14 +884,19 @@ test("@app-view owner data inspector toggles, shows live trace, runs SQL and EXP
     expect(listed.kind).toBe("list");
     const datasetPath = listed.datasets.find((d) => d.name === "Registrations")!.datasetPath;
 
-    const described = (await cliDataset({ action: "describe", datasetPath })) as {
-      kind: string;
-      revision: number;
-      revisionSha256: string;
-      tables: Array<{ sqlName: string; fields: Array<{ fieldId: string; name: string }> }>;
-      operations: Array<{ operationId: string; kind: string }>;
+    const { dataset: described } = (await cliDataset({ action: "describe", datasetPath })) as {
+      dataset: {
+        revision: number;
+        revisionSha256: string;
+        tables: Array<{ fields: Array<{ fieldId: string; name: string }> }>;
+        operations: Array<{ operationId: string; kind: string }>;
+      };
     };
-    const tableSql = described.tables[0]!.sqlName;
+    const tableSql = (
+      JSON.parse(await readFile(join(workspace.rootPath, datasetPath), "utf8")) as {
+        tables: Array<{ sqlName: string }>;
+      }
+    ).tables[0]!.sqlName;
     const nameFieldId = described.tables[0]!.fields.find((f) => f.name === "Name")!.fieldId;
     const createOp = described.operations.find((o) => o.kind === "create")!.operationId;
     await cliDataset({

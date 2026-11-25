@@ -56,7 +56,7 @@ beforeEach(() => {
         return {
           kind: "sql",
           columns: ["id", "parent", "notused", "detail"],
-          rows: [{ id: 2, parent: 0, notused: 0, detail: "SEARCH ledger USING INDEX idx_cents" }],
+          rows: [[2, 0, 0, "SEARCH ledger USING INDEX idx_cents"]],
           truncated: false,
           durationMs: 1,
           revision: 3,
@@ -66,7 +66,7 @@ beforeEach(() => {
       return {
         kind: "sql",
         columns: ["id", "cents"],
-        rows: [{ id: "e1", cents: 1250 }],
+        rows: [["e1", 1250]],
         truncated: false,
         durationMs: 2,
         revision: 3,

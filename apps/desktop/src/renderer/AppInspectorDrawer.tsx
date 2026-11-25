@@ -334,12 +334,11 @@ export function AppInspectorDrawer({
                         data-testid="app-inspector-sql-row"
                         className="border-b border-line/60 hover:bg-hover"
                       >
-                        {sqlResult.columns.map((c, i) => {
-                          const cell =
-                            row[c] === null || row[c] === undefined ? "NULL" : String(row[c]);
+                        {row.map((value, i) => {
+                          const cell = value === null ? "NULL" : String(value);
                           return (
                             <td
-                              key={`${c}-${i}`}
+                              key={i}
                               className="max-w-72 truncate px-2 py-1 font-mono text-ink"
                               title={cell}
                             >
