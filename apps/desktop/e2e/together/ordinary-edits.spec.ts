@@ -25,7 +25,7 @@ import {
 } from "./people";
 import { test } from "./test";
 
-const MINUTES = Number(process.env.TOGETHER_MINUTES ?? 1);
+const MINUTES = Number(process.env.TOGETHER_MINUTES ?? 2);
 const PEOPLE = Number(process.env.TOGETHER_PEOPLE ?? 3);
 const SEED = Number(process.env.TOGETHER_SEED ?? 41);
 
@@ -292,7 +292,7 @@ test(`${String(PEOPLE)} people make ordinary edits for ${String(MINUTES)} minute
           failed[kind] = (failed[kind] ?? 0) + 1;
         }
         // A person's pause between one edit and the next.
-        await person.page.waitForTimeout(150 + random() * 450);
+        await person.page.waitForTimeout(400 + random() * 1400);
       }
     }),
   );
