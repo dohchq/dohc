@@ -52,8 +52,12 @@ export function HoldRow() {
 export function HoldScreen() {
   const shown = useHeld();
   return (
-    <View style={styles.screen}>
-      {shown ? <ActivityIndicator size="large" accessibilityLabel={documentWords.loading} /> : null}
+    <View
+      style={styles.screen}
+      accessible={shown}
+      accessibilityLabel={shown ? documentWords.loading : undefined}
+    >
+      {shown ? <ActivityIndicator size="large" /> : null}
     </View>
   );
 }
