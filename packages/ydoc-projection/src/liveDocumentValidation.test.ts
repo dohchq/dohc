@@ -14,7 +14,7 @@ import {
   liveEditFitsCopy,
   type LiveMarkdownRegistrationEvidence,
 } from "./liveDocumentValidation.js";
-import { WORKER_LIVE_VALIDATION_POLICY, withinLiveNoteCapacity } from "./liveValidationPolicy.js";
+import { withinLiveNoteCapacity } from "./liveValidationPolicy.js";
 
 const fixturePolicy: OrderedLiveUpdateCutPolicy = {
   maxStructVisits: 1_000_000,
@@ -1052,7 +1052,7 @@ describe("live note capacity (#3575, #2534)", () => {
     Y.applyUpdate(owner, Y.encodeStateAsUpdate(markdownToYDoc(note(0))));
     const body = owner.getXmlFragment("body");
     let saves = 0;
-    while (withinLiveNoteCapacity(owner, WORKER_LIVE_VALIDATION_POLICY)) {
+    while (withinLiveNoteCapacity(owner)) {
       const blocks = markdownToYDoc(note(++saves))
         .getXmlFragment("body")
         .toArray() as Y.XmlElement[];

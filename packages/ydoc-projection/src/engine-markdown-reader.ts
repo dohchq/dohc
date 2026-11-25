@@ -121,8 +121,8 @@ function compareReadings(actual: Y.Doc, imported: Y.Doc): void {
   );
 }
 /** Checked before the heaviest work, so the refusal comes before the reader's heap fills. */
-function checkCapacity(doc: Y.Doc, policy: OrderedLiveUpdateCutPolicy): void {
-  requireReading(withinLiveNoteCapacity(doc, policy), "capacity-refused");
+function checkCapacity(doc: Y.Doc): void {
+  requireReading(withinLiveNoteCapacity(doc), "capacity-refused");
 }
 /** Each element is also a struct, so a source past this many elements is over capacity before it is built. */
 const MAX_SOURCE_ELEMENTS = Math.floor(LIVE_NOTE_CAPACITY / (LIVE_NOTE_ELEMENT_WEIGHT + 1));
@@ -135,7 +135,7 @@ function importSource(source: string, policy: OrderedLiveUpdateCutPolicy): Y.Doc
     throw error;
   }
   try {
-    checkCapacity(doc, policy);
+    checkCapacity(doc);
   } catch (error) {
     doc.destroy();
     throw error;
@@ -198,7 +198,7 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
         input = checked.input;
         doc = new Y.Doc({ gc: false });
         Y.applyUpdate(doc, input.checkpoint);
-        checkCapacity(doc, policy);
+        checkCapacity(doc);
         requireReading(
           doc.getMap("meta").get("schemaVersion") === DOHC_SCHEMA_VERSION,
           "invalid-schema",
@@ -283,7 +283,7 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
           }
         });
         // The changed blocks add to the note; refuse before the journal copies it again.
-        checkCapacity(doc, policy);
+        checkCapacity(doc);
         compareReadings(doc, imported);
         // Full-state encoding repeats historical deletes even for a no-op; keep only this construction's updates.
         const delta = Y.diffUpdate(Y.mergeUpdates(updates), before);
@@ -303,7 +303,7 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
         input = checked.input;
         doc = new Y.Doc({ gc: false });
         Y.applyUpdate(doc, input.checkpoint);
-        checkCapacity(doc, policy);
+        checkCapacity(doc);
         const witness = readMarkdownSourceWitness(Object.fromEntries(doc.getMap("meta").entries()));
         requireReading(witness !== "absent" && witness !== "invalid", "witness-mismatch");
         const canonical = yDocToMarkdown(doc);

@@ -1,3 +1,4 @@
+import { utf8ByteLength } from "@dohc/live-session-contract/limits";
 import type { AnyExtension, JSONContent } from "@tiptap/core";
 import { Extension, getSchema } from "@tiptap/core";
 import { MarkdownManager } from "@tiptap/markdown";
@@ -11,6 +12,7 @@ import {
   type Tokens,
   type TokensList,
 } from "marked";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { StarterKit } from "@tiptap/starter-kit";
 import { TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
 import { prosemirrorToYXmlFragment, yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
@@ -44,10 +46,12 @@ import {
   readBodySequence,
 } from "./bodySequenceYjs.js";
 import {
-  fitsLiveNoteCapacity,
-  liveNoteWeight,
+  fitsNewNote,
   WORKER_LIVE_VALIDATION_POLICY,
+  type NewNoteCounts,
 } from "./liveValidationPolicy.js";
+import { readLiveUpdateAsTheCutDoes } from "./orderedLiveUpdateCut.js";
+import { SOURCE_META_KEYS } from "./artifact-markdown.js";
 import {
   FRONTMATTER_SOURCE_META_KEY,
   frontmatterBlockFor,
@@ -56,6 +60,7 @@ import {
   parseFrontmatter,
 } from "./frontmatter.js";
 import {
+  engineReadOfFrontmatter,
   frontmatterMapValues,
   recordFrontmatterSourceItems,
   writeFrontmatterMap,
@@ -579,16 +584,44 @@ function withinElements(root: JSONContent, limit: number): boolean {
   return true;
 }
 
-const KEPT_SOURCE_META_ENTRIES = 3;
+const SHA256_HEX_BYTES = 64;
+
+/**
+ * What a note holding `body` stores once the engine keeps `markdown` as its source text, or null
+ * when its properties alone are past `WORKER_LIVE_VALIDATION_POLICY`. `doc` holds only the
+ * properties; one read of them counts what they store.
+ */
+function newNoteCounts(doc: Y.Doc, body: NewNoteCounts, markdown: string): NewNoteCounts | null {
+  const read = readLiveUpdateAsTheCutDoes(
+    Y.encodeStateAsUpdate(doc),
+    WORKER_LIVE_VALIDATION_POLICY,
+  );
+  if (read.kind === "refused") return null;
+  const engine = engineReadOfFrontmatter(doc.getMap(FRONTMATTER_FIELD));
+  let keptBytes = utf8ByteLength(markdown) + 2 * SHA256_HEX_BYTES;
+  for (const key of SOURCE_META_KEYS) keptBytes += utf8ByteLength(META_FIELD + key);
+  return {
+    structs: read.usage.structVisits + body.structs + SOURCE_META_KEYS.length,
+    elements: body.elements,
+    values: read.usage.valueNodeVisits + body.values + SOURCE_META_KEYS.length,
+    markValues: body.markValues,
+    bytes: read.usage.decodedPayloadByteVisits + body.bytes + keptBytes,
+    markBytes: body.markBytes,
+    engineNodes: engine.nodes + body.engineNodes,
+    engineBytes: engine.bytes + body.engineBytes,
+  };
+}
+
+const containerId = (_container: ProseMirrorNode, index: number) => index.toString(36);
 
 /**
  * A new note made from Markdown. With `bodySequence` it is made in format 2, a note whose body is
  * one sequence (`docs/engineering/note-body-sequence.md`), where that format holds it: the note
  * reads as the document the same Markdown gives a format-1 note (`newBodyWeight` lists where it
- * would not), and it fits the relay's capacity for a note with room for the three entries of a
- * kept source text. Otherwise, and by default, it is made in format 1. A format-2 note's container
- * ids are each container's number in the document, so every device that makes a note from one
- * text under one `clientID` makes the same bytes.
+ * would not), and the save's check and the engine's Markdown writer take it, with room for the
+ * three entries of a kept source text. Otherwise, and by default, it is made in format 1. A
+ * format-2 note's container ids are each container's number in the document, so every device that
+ * makes a note from one text under one `clientID` makes the same bytes.
  */
 export function markdownToYDoc(
   markdown: string,
@@ -626,16 +659,12 @@ export function markdownToYDoc(
     return doc;
   };
 
-  const sequence = options.bodySequence ? newBodyWeight(schema, parsed) : null;
+  const sequence = options.bodySequence ? newBodyWeight(schema, parsed, containerId) : null;
   if (sequence) {
     const doc = note(BODY_SEQUENCE_SCHEMA_VERSION);
-    const properties = liveNoteWeight(doc);
-    const whole = {
-      structs: properties.structs + sequence.structs + KEPT_SOURCE_META_ENTRIES,
-      elements: properties.elements + sequence.elements,
-    };
-    if (fitsLiveNoteCapacity(whole, WORKER_LIVE_VALIDATION_POLICY)) {
-      writeNewBody(schema, doc, parsed, (_container, index) => index.toString(36));
+    const counts = newNoteCounts(doc, sequence, markdown);
+    if (counts && fitsNewNote(counts, WORKER_LIVE_VALIDATION_POLICY)) {
+      writeNewBody(schema, doc, parsed, containerId);
       return doc;
     }
     doc.destroy();

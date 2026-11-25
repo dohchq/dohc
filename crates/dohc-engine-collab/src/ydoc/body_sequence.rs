@@ -785,6 +785,9 @@ mod tests {
         include_str!("../../../../packages/ydoc-projection/src/fixtures/body-sequence.json");
     const EDITED_NOTE: &str =
         include_str!("../../../../packages/ydoc-projection/src/fixtures/body-sequence-edited.json");
+    const WRITTEN_NOTES: &str = include_str!(
+        "../../../../packages/ydoc-projection/src/fixtures/body-sequence-written.json"
+    );
     const DELETES_FIRST_UNIT: [u8; 6] = [0, 1, 5, 1, 0, 1];
     const TYPES_BETWEEN_UNITS: [u8; 12] = [1, 1, 6, 0, 0xc4, 5, 0, 5, 1, 1, b'y', 0];
     const TWO_TO_THE_53: f64 = 9_007_199_254_740_992.0;
@@ -804,6 +807,16 @@ mod tests {
     struct StoredItems {
         live: usize,
         nodes_at_most: usize,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct WrittenNote {
+        name: String,
+        update: String,
+        engine_nodes: usize,
+        engine_bytes: usize,
+        note_nodes: usize,
     }
 
     #[derive(serde::Deserialize)]
@@ -1290,6 +1303,55 @@ mod tests {
     fn stops_at_the_node_budget() {
         let doc = stored(&notes()[0]);
         stops_one_node_short_of(&doc, nodes_spent(&doc));
+    }
+
+    #[test]
+    fn spends_what_the_markdown_writer_counts_for_each_note_it_writes() {
+        let notes: Vec<WrittenNote> =
+            serde_json::from_str(WRITTEN_NOTES).expect("the written notes parse");
+        assert_eq!(notes.len(), 23);
+        for note in notes {
+            let doc = opened(&note.update);
+            let counted = (note.engine_nodes, note.engine_bytes);
+            assert_eq!(spent(&doc), counted, "{}", note.name);
+            let short = doc.project_richdoc_with_node_budget(note.note_nodes - 1);
+            assert!(
+                matches!(short, Err(CollabError::ProjectionTooComplex { .. })),
+                "{}",
+                note.name
+            );
+            assert!(
+                doc.project_richdoc_with_node_budget(note.note_nodes)
+                    .is_ok(),
+                "{}",
+                note.name
+            );
+        }
+    }
+
+    #[test]
+    fn reads_the_most_quoted_lines_the_markdown_writer_makes_in_format_2() {
+        let ids: Vec<String> = (0..63).map(|depth| format!("{depth:x}")).collect();
+        let path: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let lines = 4_032;
+        let note = note_of(|txn, sequence| {
+            for _ in 0..lines {
+                insert_boundary(txn, sequence, PARAGRAPH, &path);
+                let at = sequence.len(txn);
+                sequence.insert(txn, at, "a");
+            }
+        });
+        let containers = note.doc.get_or_insert_map(ROOT_CONTAINERS);
+        {
+            let mut txn = note.doc.transact_mut();
+            for id in &ids {
+                containers.insert(&mut txn, id.as_str(), Any::from("blockquote"));
+            }
+        }
+        let (entries, paragraph, run, quotes) = (63, 1, 1, 63);
+        let nodes = lines * (entries + paragraph + run) + quotes;
+        assert_eq!(nodes, MAX_PROJECTION_NODES - 1);
+        stops_one_node_short_of(&note, nodes);
     }
 
     fn stops_one_node_short_of(note: &Ydoc, nodes: usize) {

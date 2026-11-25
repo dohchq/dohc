@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { readFileSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
 import * as Y from "yjs";
 import { getDohcYDocBodyFragment } from "./body-fragment.js";
@@ -11,7 +11,14 @@ import {
   recordsOfContainer,
 } from "./bodySequenceGrammar.js";
 import { newBodyWeight, writeNewBody } from "./bodySequenceWriter.js";
-import { boundaryOf, holdsBodySequence, readBodySequence, storedValue } from "./bodySequenceYjs.js";
+import {
+  BODY_SEQUENCE_SCHEMA_VERSION,
+  boundaryOf,
+  holdsBodySequence,
+  readBodySequence,
+  storedValue,
+} from "./bodySequenceYjs.js";
+import { engineReadOfFrontmatter } from "./frontmatter-map.js";
 import {
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
@@ -23,10 +30,22 @@ import {
   createLiveMarkdownRegistrationValidator,
 } from "./liveDocumentValidation.js";
 import {
-  fitsLiveNoteCapacity,
+  fitsNewNote,
+  LIVE_NOTE_CAPACITY,
+  LIVE_NOTE_ELEMENT_WEIGHT,
   liveNoteWeight,
+  MAX_PROJECTION_BYTES,
+  MAX_PROJECTION_NODES,
+  type NewNoteCounts,
+  SAVE_VISITS_OUTSIDE_A_MARK,
+  SAVE_VISITS_PER_READ,
   WORKER_LIVE_VALIDATION_POLICY,
 } from "./liveValidationPolicy.js";
+import * as ordered from "./orderedLiveUpdateCut.js";
+import {
+  type OrderedLiveUpdateCutUsage,
+  readLiveUpdateAsTheCutDoes,
+} from "./orderedLiveUpdateCut.js";
 
 const schema = getDohcProseMirrorSchema();
 const register = createLiveMarkdownRegistrationValidator(WORKER_LIVE_VALIDATION_POLICY);
@@ -73,6 +92,87 @@ function registered(doc: Y.Doc) {
     : { kind: `refused: ${result.reason}` };
 }
 
+function registeredWithVisits(doc: Y.Doc) {
+  const actual = ordered.validateRegistrationCutForProjection;
+  let usage: OrderedLiveUpdateCutUsage | undefined;
+  const registration = vi
+    .spyOn(ordered, "validateRegistrationCutForProjection")
+    .mockImplementation((...args) => {
+      const result = actual(...args);
+      if (result.kind !== "accepted") return result;
+      const finish = result.cut.finishAfterProjection;
+      return {
+        ...result,
+        cut: {
+          ...result.cut,
+          finishAfterProjection: () => {
+            const finished = finish();
+            if (finished.kind === "accepted") usage = finished.usage;
+            return finished;
+          },
+        },
+      };
+    });
+  try {
+    return { registered: registered(doc), usage };
+  } finally {
+    registration.mockRestore();
+  }
+}
+
+function saveVisits(doc: Y.Doc): OrderedLiveUpdateCutUsage {
+  const { registered, usage } = registeredWithVisits(doc);
+  expect(registered.kind).toBe("accepted");
+  return usage!;
+}
+
+function oneRead(doc: Y.Doc): OrderedLiveUpdateCutUsage {
+  const read = readLiveUpdateAsTheCutDoes(
+    Y.encodeStateAsUpdate(doc),
+    WORKER_LIVE_VALIDATION_POLICY,
+  );
+  if (read.kind === "refused") throw new Error(read.reason);
+  return read.usage;
+}
+
+const parsedBody = (markdown: string, reading: Reading = "source") =>
+  yXmlFragmentToProseMirrorRootNode(getDohcYDocBodyFragment(inFormat1(markdown, reading)), schema);
+
+function formatTwoProperties(): Y.Doc {
+  const doc = kept(new Y.Doc());
+  doc.getMap("meta").set("schemaVersion", BODY_SEQUENCE_SCHEMA_VERSION);
+  return doc;
+}
+
+const saveVisitsOf = (outside: number, inside: number, perRead: number) =>
+  SAVE_VISITS_OUTSIDE_A_MARK * outside + perRead * inside;
+
+function expectTheCountsOfWhatIsWritten(markdown: string, reading: Reading): void {
+  const parsed = parsedBody(markdown, reading);
+  const counts = newBodyWeight(schema, parsed, byNumber)!;
+  const bare = formatTwoProperties();
+  const alone = formatTwoProperties();
+  writeNewBody(schema, alone, parsed, byNumber);
+  const added = <T extends object>(of: (doc: Y.Doc) => T) => {
+    const [whole, properties] = [of(alone), of(bare)];
+    return (key: keyof T) => (whole[key] as number) - (properties[key] as number);
+  };
+  const weight = added(liveNoteWeight);
+  expect([counts.structs, counts.elements]).toEqual([weight("structs"), weight("elements")]);
+  const read = added(oneRead);
+  expect([
+    counts.structs,
+    counts.values + counts.markValues,
+    counts.bytes + counts.markBytes,
+  ]).toEqual([read("structVisits"), read("valueNodeVisits"), read("decodedPayloadByteVisits")]);
+  const saved = added(saveVisits);
+  expect([
+    SAVE_VISITS_PER_READ.maxStructVisits * counts.structs,
+    saveVisitsOf(counts.values, counts.markValues, SAVE_VISITS_PER_READ.maxValueNodeVisits),
+    saveVisitsOf(counts.bytes, counts.markBytes, SAVE_VISITS_PER_READ.maxDecodedPayloadByteVisits),
+  ]).toEqual([saved("structVisits"), saved("valueNodeVisits"), saved("decodedPayloadByteVisits")]);
+}
+
 const ONE_EMPTY_LINE = { type: "doc", content: [{ type: "paragraph" }] };
 
 function expectTheSameNote(markdown: string, reading: Reading = "source"): string {
@@ -80,10 +180,7 @@ function expectTheSameNote(markdown: string, reading: Reading = "source"): strin
   const second = inFormat2(markdown, reading);
   expect(holdsBodySequence(second)).toBe(true);
   expect(second.share.has("body")).toBe(false);
-  const parsed = yXmlFragmentToProseMirrorRootNode(getDohcYDocBodyFragment(first), schema);
-  const alone = kept(new Y.Doc());
-  writeNewBody(schema, alone, parsed, byNumber);
-  expect(newBodyWeight(schema, parsed)).toEqual(liveNoteWeight(alone));
+  expectTheCountsOfWhatIsWritten(markdown, reading);
   const held = underBody(first);
   expect(inSequence(second)).toEqual(
     getDohcYDocBodyFragment(first).length === 0 ? ONE_EMPTY_LINE : held,
@@ -112,6 +209,51 @@ const NOT_GIVEN_BACK: Record<string, string> = {
   "every attribute as numbers, as BigInt and as values a reader repairs":
     "a list stored as loose whose items hold one paragraph each reads back as a tight list",
 };
+
+const WRITTEN_FILE = new URL("./fixtures/body-sequence-written.json", import.meta.url);
+const EVERY_PROPERTY = [
+  "---",
+  "title: Trip",
+  "count: 3",
+  "big: 12345678901234567890",
+  "done: true",
+  "nothing: null",
+  "tags:",
+  "  - a",
+  "  - 12345678901234567890",
+  "place:",
+  "  city: Lisbon",
+  "  days: [1, 2]",
+  "---",
+  "",
+  "Body",
+  "",
+].join("\n");
+
+describe("the notes made in format 2 from each fixture's Markdown", () => {
+  it("are kept with the nodes and bytes of text the engine's Markdown writer spends reading each", () => {
+    const notes = [
+      ...fixtures,
+      ["properties of each kind Markdown gives", EVERY_PROPERTY] as const,
+    ];
+    const written = notes.map(([name, markdown]) => {
+      const counts = newBodyWeight(schema, parsedBody(markdown), byNumber)!;
+      const doc = inFormat2(markdown);
+      expect(marker(doc)).toBe(BODY_SEQUENCE_SCHEMA_VERSION);
+      return {
+        name,
+        update: Buffer.from(Y.encodeStateAsUpdate(doc)).toString("base64"),
+        engineNodes: counts.engineNodes,
+        engineBytes: counts.engineBytes,
+        noteNodes: counts.engineNodes + engineReadOfFrontmatter(doc.getMap("frontmatter")).nodes,
+      };
+    });
+    expect(written.at(-1)!.noteNodes).toBeGreaterThan(written.at(-1)!.engineNodes);
+    if (process.env.BODY_SEQUENCE_WRITE_FIXTURES === "1")
+      writeFileSync(WRITTEN_FILE, `${JSON.stringify(written, null, 2)}\n`);
+    expect(JSON.parse(readFileSync(WRITTEN_FILE, "utf8"))).toEqual(written);
+  });
+});
 
 describe("the Markdown each stored fixture note is written as, read into a format-2 note", () => {
   it("covers every fixture that records its Markdown", () => {
@@ -328,7 +470,7 @@ describe("what format 2 cannot hold as the Markdown says it, made in format 1", 
     const first = inFormat1(markdown);
     expect(yDocToMarkdown(first)).toBe(markdown);
     const parsed = yXmlFragmentToProseMirrorRootNode(getDohcYDocBodyFragment(first), schema);
-    expect(newBodyWeight(schema, parsed)).toBeNull();
+    expect(newBodyWeight(schema, parsed, byNumber)).toBeNull();
     expectFormat1(markdown);
   });
 
@@ -343,20 +485,135 @@ describe("what format 2 cannot hold as the Markdown says it, made in format 1", 
     expect(yDocToMarkdown(inFormat1(quoted(65)))).toBe(quoted(65));
     expectFormat1(quoted(65));
   });
+});
 
-  it("a note past the relay's capacity in format 2 that fits it in format 1, and the relay registers that note", () => {
-    const markdown = "a\n\n".repeat(29_000);
-    const first = inFormat1(markdown);
-    const parsed = yXmlFragmentToProseMirrorRootNode(getDohcYDocBodyFragment(first), schema);
-    const weight = newBodyWeight(schema, parsed)!;
-    expect(fitsLiveNoteCapacity(weight, WORKER_LIVE_VALIDATION_POLICY)).toBe(false);
+function withItsSource(doc: Y.Doc, markdown: string): Y.Doc {
+  const meta = doc.getMap("meta");
+  meta.set("dohcMarkdownSource", markdown);
+  meta.set("dohcMarkdownSourceSha256", sha(markdown));
+  meta.set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+  return doc;
+}
+
+function inFormat2ByHand(markdown: string): Y.Doc {
+  const doc = formatTwoProperties();
+  writeNewBody(schema, doc, parsedBody(markdown), byNumber);
+  return withItsSource(doc, markdown);
+}
+
+function expectTheLastThatFits(fits: string, over: string) {
+  const held = inFormat2(fits);
+  expect(marker(held)).toBe(BODY_SEQUENCE_SCHEMA_VERSION);
+  const { registered: result, usage } = registeredWithVisits(withItsSource(held, fits));
+  expect(result).toEqual({ kind: "accepted", markdown: fits });
+  expectFormat1(over);
+  const first = withItsSource(inFormat1(over), over);
+  expect(registered(first)).toEqual({ kind: "accepted", markdown: over });
+  return { fits: held, usage: usage!, over: inFormat2ByHand(over) };
+}
+
+const weightOf = (doc: Y.Doc) => {
+  const { structs, elements } = liveNoteWeight(doc);
+  return structs + LIVE_NOTE_ELEMENT_WEIGHT * elements;
+};
+
+describe("a note made in format 2 only where the save's check and the engine's Markdown writer take it with its source text", () => {
+  it("the most lines whose structs the save's check visits within its limit", () => {
+    const lines = (count: number) => "a\n\n".repeat(count);
+    const { usage, over } = expectTheLastThatFits(lines(24_998), lines(24_999));
+    const limit = WORKER_LIVE_VALIDATION_POLICY.maxStructVisits;
+    expect(usage.structVisits).toBe(limit - 4);
+    expect(liveNoteWeight(over).structs * SAVE_VISITS_PER_READ.maxStructVisits).toBe(limit + 12);
+    expect(registered(over)).toEqual({ kind: "refused: capacity-refused" });
+  });
+
+  it("the most rules whose weight fits the capacity", () => {
+    const rules = (count: number) => "***\n\n".repeat(count);
+    const { fits, over } = expectTheLastThatFits(rules(31_109), rules(31_110));
+    expect(weightOf(fits)).toBe(LIVE_NOTE_CAPACITY - 6);
+    expect(weightOf(over)).toBe(LIVE_NOTE_CAPACITY + 3);
+    expect(registered(over)).toEqual({ kind: "refused: capacity-refused" });
+  });
+
+  it("the most quoted lines the engine's Markdown writer reads within its node budget", () => {
+    const quoted = (count: number) => `${"> ".repeat(63)}a\n${"> ".repeat(62)}>\n`.repeat(count);
+    const { over } = expectTheLastThatFits(quoted(4_032), quoted(4_033));
+    const [path, paragraph, run, quotes] = [63, 1, 1, 63];
+    const nodes = (count: number) => count * (path + paragraph + run) + quotes;
+    const engineNodes = (count: number) =>
+      newBodyWeight(schema, parsedBody(quoted(count)), byNumber)?.engineNodes;
+    expect([engineNodes(4_032), engineNodes(4_033)]).toEqual([nodes(4_032), nodes(4_033)]);
+    expect([nodes(4_032), nodes(4_033)]).toEqual([
+      MAX_PROJECTION_NODES - 1,
+      MAX_PROJECTION_NODES + 64,
+    ]);
+    expect(registered(over).kind).toBe("accepted");
+  });
+
+  it("a table in 61 quotes, over the engine's node budget, made in format 1", () => {
+    const row = `|${" a |".repeat(64)}\n`;
+    const quoted = "> ".repeat(61);
+    const markdown = `${quoted}${row}${quoted}|${" - |".repeat(64)}\n${`${quoted}${row}`.repeat(64)}`;
+    const [quotes, table, rows, cells] = [61, 1, 65, 65 * 64];
+    const [path, leaf, run, rowAndHeight, cellAndAttributes] = [quotes + 3, 1, 1, 2, 5];
+    const nodes =
+      cells * (path + leaf + run) +
+      quotes +
+      table +
+      rows * rowAndHeight +
+      cells * cellAndAttributes;
+    expect(newBodyWeight(schema, parsedBody(markdown), byNumber)?.engineNodes).toBe(nodes);
+    expect(nodes).toBe(295_552);
     expectFormat1(markdown);
-    const projection = yDocToMarkdown(first);
-    const meta = first.getMap("meta");
-    meta.set("dohcMarkdownSource", markdown);
-    meta.set("dohcMarkdownSourceSha256", sha(markdown));
-    meta.set("dohcMarkdownSourceProjectionSha256", sha(projection));
-    expect(registered(first)).toEqual({ kind: "accepted", markdown });
+    expect(registered(withItsSource(inFormat1(markdown), markdown)).kind).toBe("accepted");
+  });
+
+  it("headings in 32 lists, past the save's value visits and the engine's node budget, made in format 1", () => {
+    const lists = Array.from({ length: 32 }, (_, level) => `${"  ".repeat(level)}- a\n`).join("");
+    const markdown = lists + `\n${"  ".repeat(32)}# a\n`.repeat(19_000);
+    const counts = newBodyWeight(schema, parsedBody(markdown), byNumber)!;
+    expect(SAVE_VISITS_OUTSIDE_A_MARK * counts.values).toBeGreaterThan(
+      WORKER_LIVE_VALIDATION_POLICY.maxValueNodeVisits,
+    );
+    expect(counts.engineNodes).toBeGreaterThan(MAX_PROJECTION_NODES);
+    expectFormat1(markdown);
+    expect(registered(withItsSource(inFormat1(markdown), markdown)).kind).toBe("accepted");
+  });
+
+  it("is refused one value, one byte of text or one engine node past each limit", () => {
+    const none: NewNoteCounts = {
+      structs: 0,
+      elements: 0,
+      values: 0,
+      markValues: 0,
+      bytes: 0,
+      markBytes: 0,
+      engineNodes: 0,
+      engineBytes: 0,
+    };
+    const fits = (counts: Partial<NewNoteCounts>) =>
+      fitsNewNote({ ...none, ...counts }, WORKER_LIVE_VALIDATION_POLICY);
+    const { maxValueNodeVisits, maxDecodedPayloadByteVisits } = WORKER_LIVE_VALIDATION_POLICY;
+    expect(4 * 1_250_000).toBe(maxValueNodeVisits);
+    expect([fits({ values: 1_250_000 }), fits({ values: 1_250_001 })]).toEqual([true, false]);
+    expect(4 * 3 + 7 * 714_284).toBe(maxValueNodeVisits);
+    expect([
+      fits({ values: 3, markValues: 714_284 }),
+      fits({ values: 4, markValues: 714_284 }),
+    ]).toEqual([true, false]);
+    expect(4 * 4 + 7 * 14_285_712).toBe(maxDecodedPayloadByteVisits);
+    expect([
+      fits({ bytes: 4, markBytes: 14_285_712 }),
+      fits({ bytes: 5, markBytes: 14_285_712 }),
+    ]).toEqual([true, false]);
+    expect([
+      fits({ engineNodes: MAX_PROJECTION_NODES }),
+      fits({ engineNodes: MAX_PROJECTION_NODES + 1 }),
+    ]).toEqual([true, false]);
+    expect([
+      fits({ engineBytes: MAX_PROJECTION_BYTES }),
+      fits({ engineBytes: MAX_PROJECTION_BYTES + 1 }),
+    ]).toEqual([true, false]);
   });
 });
 

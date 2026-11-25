@@ -310,10 +310,15 @@ const KINDS_A_CONTAINER_CAN_BECOME = [
 
 /**
  * The records a writer gives a new container: its type, and every attribute of every kind it can
- * become where it stands, so that each later change to one is an overwrite.
+ * become where it stands, so that each later change to one is an overwrite. They are set in
+ * `records`, a new map unless one is given.
  */
-export function recordsOfContainer(schema: Schema, frame: SequenceFrame): Map<string, unknown> {
-  const records = new Map<string, unknown>([[frame.id, frame.type]]);
+export function recordsOfContainer(
+  schema: Schema,
+  frame: SequenceFrame,
+  records = new Map<string, unknown>(),
+): Map<string, unknown> {
+  records.set(frame.id, frame.type);
   for (const [key, value] of startingRecords(schema, frame.type))
     records.set(`${frame.id}.${key}`, value);
   for (const [key, value] of Object.entries(frame.attrs)) records.set(`${frame.id}.${key}`, value);
@@ -322,7 +327,11 @@ export function recordsOfContainer(schema: Schema, frame: SequenceFrame): Map<st
 
 const startingRecordsOf = new WeakMap<Schema, Map<string, Map<string, unknown>>>();
 
-function startingRecords(schema: Schema, type: string): Map<string, unknown> {
+/**
+ * The attributes a writer gives a new container of `type` a record for, each with its default:
+ * every attribute of every kind it can become where it stands.
+ */
+export function startingRecords(schema: Schema, type: string): ReadonlyMap<string, unknown> {
   let known = startingRecordsOf.get(schema);
   if (!known) startingRecordsOf.set(schema, (known = new Map()));
   let records = known.get(type);
@@ -351,8 +360,7 @@ export function writtenLeaves(
         `A line sits in ${String(leaf.path.length)} containers; a note holds at most ${String(MAX_SEQUENCE_DEPTH)}.`,
       );
     for (const frame of leaf.path)
-      if (!containers.has(frame.id))
-        for (const [key, value] of recordsOfContainer(schema, frame)) containers.set(key, value);
+      if (!containers.has(frame.id)) recordsOfContainer(schema, frame, containers);
     return { ...leaf.attrs, type: leaf.type, path: leaf.path.map((frame) => frame.id) };
   });
   return { boundaries, containers };
