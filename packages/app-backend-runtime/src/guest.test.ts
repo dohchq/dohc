@@ -359,6 +359,26 @@ describe("reusable guest evaluator", () => {
     });
   });
 
+  it("binds the SQL parameter values it checked", async () => {
+    await withDatabase(async (db) => {
+      const result = await evaluate(
+        db,
+        request(`
+          let reads = 0;
+          const params = [];
+          Object.defineProperty(params, 0, { enumerable: true, get: () => ++reads < 2 ? 'checked' : { toJSON: () => 'swapped' } });
+          let replaced;
+          try { ctx.db.query('SELECT ? AS v', { toJSON: () => ['swapped'] }); } catch (error) { replaced = error.message; }
+          return { bound: ctx.db.query('SELECT ? AS v', params), replaced };
+        `),
+      );
+      expect(JSON.parse(result.resultJson)).toEqual({
+        bound: [{ v: "checked" }],
+        replaced: "SQL parameters must be scalar values.",
+      });
+    });
+  });
+
   it("lets an operation catch a refused SQL parameter and refuse in its own words", async () => {
     await withDatabase(async (db) => {
       await expect(
@@ -453,10 +473,16 @@ describe("reusable guest evaluator", () => {
     await withDatabase(async (db) => {
       db.exec("CREATE TABLE notes(id TEXT PRIMARY KEY)");
       await expect(
-        evaluate(db, request("ctx.db.execute(\"INSERT INTO notes(rowid, id) VALUES(5, 'a')\");"), {
-          persistentConnection: true,
-          schemaTables: ["items", "notes"],
-        }),
+        evaluate(
+          db,
+          request("ctx.db.execute(\"INSERT INTO notes(rowid, id) VALUES(5, 'a')\");", {
+            tables: ["items", "notes"],
+          }),
+          {
+            persistentConnection: true,
+            schemaTables: ["items", "notes"],
+          },
+        ),
       ).rejects.toMatchObject({
         refusal: {
           code: "sql_not_allowed",

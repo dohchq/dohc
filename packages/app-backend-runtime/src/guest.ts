@@ -549,7 +549,7 @@ function run(
       const caller = deepFreeze(parse(${JSON.stringify(request.callerJson)}));
       const input = deepFreeze(parse(${JSON.stringify(request.inputJson)}));
       const scalar = value => value === null || typeof value === 'string' || (typeof value === 'number' && finite(value));
-      const bind = params => { if (!isArray(params)) return stringify(params); const bound = []; for (let i = 0; i < params.length; i++) bound[i] = params[i] === undefined ? null : scalar(params[i]) ? params[i] : {}; return stringify(bound); };
+      const bind = params => { if (!isArray(params)) return 'null'; const bound = []; for (let i = 0; i < params.length; i++) { const value = params[i]; bound[i] = value === undefined ? null : scalar(value) ? value : {}; } return stringify(bound); };
       const db = freeze({ query: (sql, params = []) => parse(q(sql, bind(params))), execute: (sql, params = []) => parse(e(sql, bind(params))) });
       const ctx = freeze({ caller, db, refuse, files:freeze({attach:id=>deepFreeze(parse(attach(id)))}), localDate: zone => localDate(zone), nowMs: ${request.nowMs}, requestId: ${JSON.stringify(request.requestId)}, secret: ${JSON.stringify(request.secret)} });
       const hasOwn = Object.hasOwn;
