@@ -696,16 +696,6 @@ impl Reader<'_> {
         let Some(trace) = self.trace.as_deref_mut() else {
             return Ok(());
         };
-        if self
-            .leaf
-            .as_ref()
-            .is_some_and(Leaf::holds_letters_without_marks)
-        {
-            trace
-                .slots
-                .extend(text.encode_utf16().map(|unit| Slot::Unit(unit, 0)));
-            return Ok(());
-        }
         if trace.generation != Some(self.formatting.generation) {
             let (mut nodes, mut bytes) = (MAX_PROJECTION_NODES, 0);
             let mut budget = Budget {
@@ -950,11 +940,7 @@ pub(super) fn traced<T: ReadTxn>(
     sequence: &yrs::TextRef,
     containers: &MapRef,
 ) -> ProjectionResult<Trace> {
-    let mut trace = Trace {
-        marks: vec![yrs::types::Attrs::new()],
-        ..Trace::default()
-    };
-    let (mut nodes, mut bytes) = (MAX_PROJECTION_NODES, 0);
+    let (mut nodes, mut bytes, mut trace) = (MAX_PROJECTION_NODES, 0, Trace::default());
     read(
         txn,
         sequence,

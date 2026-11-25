@@ -849,7 +849,9 @@ impl Ydoc {
     /// frontmatter-only engine edit rewrote such a body. Every projection
     /// compared with the version's file uses this rule, so a settle, a later
     /// check that the version is settled, and live activation agree. The
-    /// live baseline keeps the strict rule.
+    /// live baseline keeps the strict rule. A format-2 note holds a file it
+    /// cannot hold as the nearest reading, so it keeps any source that still
+    /// rebuilds it, whatever the snapshot holds.
     pub fn settled_markdown_source<E>(
         &self,
         canonical_projection: &str,
@@ -857,6 +859,9 @@ impl Ydoc {
     ) -> Result<Option<String>, E> {
         if let Some(source) = self.preserved_markdown_source(canonical_projection) {
             return Ok(Some(source));
+        }
+        if self.body_sequence_roots().is_some() {
+            return Ok(self.reprojected_markdown_source(canonical_projection));
         }
         let Some(reference) = self.markdown_source_reference() else {
             return Ok(None);

@@ -44,6 +44,7 @@ struct WantedFrame {
 struct Target {
     slots: Vec<Wanted>,
     marks: Vec<Attrs>,
+    hidden: Vec<bool>,
     inline: Vec<(&'static str, Stored)>,
     lines: Vec<WantedLine>,
     frames: Vec<WantedFrame>,
@@ -70,6 +71,7 @@ impl Target {
                 }
             }
         }
+        let mut code = false;
         for piece in body.pieces {
             let Delta::Inserted(piece, marks) = piece else {
                 return None;
@@ -81,6 +83,7 @@ impl Target {
                         marks.retain(|name, _| &**name == "code");
                     }
                     target.marks.push(marks);
+                    target.hidden.push(code);
                     let marks = target.marks.len() - 1;
                     let units = text.encode_utf16().map(|unit| Wanted::Unit(unit, marks));
                     target.slots.extend(units);
@@ -101,6 +104,7 @@ impl Target {
                         return None;
                     };
                     let tag = body_sequence::known(&LEAVES, tag)?;
+                    code = tag == "codeBlock";
                     target.slots.push(Wanted::Line(target.lines.len()));
                     target.lines.push(WantedLine {
                         tag,
@@ -121,9 +125,7 @@ impl Target {
 fn same(before: &Trace, target: &Target, at: usize, wanted: usize) -> bool {
     visit(1);
     match (&before.slots[at], &target.slots[wanted]) {
-        (Slot::Unit(unit, marks), Wanted::Unit(other, wanted)) => {
-            unit == other && before.marks[*marks as usize] == target.marks[*wanted]
-        }
+        (Slot::Unit(unit, _), Wanted::Unit(other, _)) => unit == other,
         (Slot::Inline(item), Wanted::Inline(other)) => {
             before.inline[*item] == target.inline[*other]
         }
@@ -140,10 +142,11 @@ fn unit_in(slot: &Slot, surrogates: std::ops::Range<u16>) -> bool {
 pub(super) struct Fold {
     records: Vec<(String, Any)>,
     attributes: Vec<(yrs::XmlElementRef, &'static str, Any)>,
-    after: Vec<(u32, Piece, Attrs)>,
+    formats: Vec<Delta<Piece>>,
+    after: Vec<(u32, Stored)>,
     middle: Vec<Delta<Piece>>,
     placed: Vec<Delta<Piece>>,
-    before: Vec<(u32, Piece, Attrs)>,
+    before: Vec<(u32, Stored)>,
 }
 
 pub(super) fn plan<T: ReadTxn>(
@@ -170,13 +173,23 @@ pub(super) fn plan<T: ReadTxn>(
         end += 1;
     }
     end -= usize::from(end > 0 && unit_in(&before.slots[have - end], 0xDC00..0xE000));
-    while start > 0
-        && end == have - start
-        && want - end > start
-        && matches!(before.slots[start - 1], Slot::Line(_))
-        && same(&before, &target, start - 1, want - 1 - end)
-    {
-        (start, end) = (start - 1, end + 1);
+    if start + end == have.min(want) && have != want {
+        let pair = |slid: usize| match have > want {
+            true => (have - 1 - end - slid, start - 1 - slid),
+            false => (start - 1 - slid, want - 1 - end - slid),
+        };
+        let mut slid = 0;
+        while slid < start && {
+            let (at, wanted) = pair(slid);
+            same(&before, &target, at, wanted)
+        } {
+            slid += 1;
+        }
+        slid -= usize::from(slid > 0 && unit_in(&before.slots[start - slid], 0xDC00..0xE000));
+        let moved = &before.slots[start - slid..start];
+        if moved.iter().any(|slot| matches!(slot, Slot::Line(_))) {
+            (start, end) = (start - slid, end + slid);
+        }
     }
     visit(have);
     let mut offsets = Vec::with_capacity(have + 1);
@@ -192,6 +205,44 @@ pub(super) fn plan<T: ReadTxn>(
     visit(start + end);
     let kept = (0..start).map(|at| (at, at));
     let kept = kept.chain((have - end..have).map(|at| (at, at + want - have)));
+    let (mut formats, mut cursor, mut last) = (Vec::new(), 0, None);
+    for (at, wanted) in kept.clone() {
+        let (Slot::Unit(_, had), Wanted::Unit(_, given)) =
+            (&before.slots[at], &target.slots[wanted])
+        else {
+            continue;
+        };
+        let (had, shown) = (&before.marks[*had as usize], &target.marks[*given]);
+        if had == shown || target.hidden[*given] {
+            continue;
+        }
+        let mut diff: Attrs = shown
+            .iter()
+            .filter(|(name, value)| had.get(*name) != Some(*value))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        diff.extend(
+            had.keys()
+                .filter(|name| !shown.contains_key(*name))
+                .map(|name| (name.clone(), Any::Null)),
+        );
+        if at + 1 == start {
+            last = Some(diff.clone());
+        }
+        let offset = offsets[at];
+        match formats.last_mut() {
+            Some(Delta::Retain(length, Some(run))) if cursor == offset && **run == diff => {
+                *length += 1
+            }
+            _ => {
+                if offset > cursor {
+                    formats.push(Delta::Retain(offset - cursor, None));
+                }
+                formats.push(Delta::Retain(1, Some(Box::new(diff))));
+            }
+        }
+        cursor = offset + 1;
+    }
     let pairs: Vec<(usize, usize)> = kept
         .filter_map(
             |(at, wanted)| match (&before.slots[at], &target.slots[wanted]) {
@@ -204,6 +255,7 @@ pub(super) fn plan<T: ReadTxn>(
     let mut fold = Fold {
         records: ids.records(txn, containers, &before, &target),
         attributes: Vec::new(),
+        formats,
         after: Vec::new(),
         middle: Vec::new(),
         placed: Vec::new(),
@@ -212,13 +264,9 @@ pub(super) fn plan<T: ReadTxn>(
     let boundary = |wanted: &WantedLine| {
         let mut attributes = wanted.attributes.clone();
         attributes.insert("path", ids.path(&wanted.frames));
-        Piece::Element {
-            tag: BOUNDARY,
-            attributes,
-        }
+        attributes
     };
     let mut written = vec![false; before.lines.len()];
-    let mut promoted = Vec::new();
     for &(line, wanted) in &pairs {
         let (had, given) = (&before.lines[line], &target.lines[wanted]);
         let Some(element) = &had.boundary else {
@@ -249,22 +297,18 @@ pub(super) fn plan<T: ReadTxn>(
             || (edited && low <= to && high >= from)
             || !changes(had, given, &before, &ids).is_empty();
         if given_again {
-            promoted.push((had.slot < start, offsets[had.slot], boundary(given)));
+            let promoted = (offsets[had.slot], boundary(given));
+            match had.slot < start {
+                true => fold.before.push(promoted),
+                false => fold.after.push(promoted),
+            }
         }
     }
+    fold.before.reverse();
+    fold.after.reverse();
     let (from, to) = (offsets[start], offsets[have - end]);
     let middle = &target.slots[start..want - end];
     let places_items = middle.iter().any(|slot| !matches!(slot, Wanted::Unit(..)));
-    let mut asked: Vec<u32> = promoted.iter().map(|(_, offset, _)| *offset).collect();
-    asked.extend(places_items.then_some(from));
-    let formatting = formatting_at(txn, sequence, asked);
-    for (above, offset, piece) in promoted.into_iter().rev() {
-        let promoted = (offset, piece, formatting[&offset].clone());
-        match above {
-            true => fold.before.push(promoted),
-            false => fold.after.push(promoted),
-        }
-    }
     if from > 0 {
         fold.middle.push(Delta::Retain(from, None));
     }
@@ -272,12 +316,22 @@ pub(super) fn plan<T: ReadTxn>(
         fold.middle.push(Delta::Deleted(to - from));
     }
     visit(middle.len());
-    let mut in_force = formatting.get(&from).cloned().unwrap_or_default();
+    let mut in_force = match places_items {
+        true => formatting_at(txn, sequence, from),
+        false => Attrs::new(),
+    };
+    for (name, value) in last.into_iter().flatten() {
+        match value {
+            Any::Null => in_force.remove(&name),
+            value => in_force.insert(name, value),
+        };
+    }
     let placed = places_items
         && (!in_force.is_empty()
             || middle.iter().any(
                 |slot| matches!(slot, Wanted::Unit(_, marks) if !target.marks[*marks].is_empty()),
-            ));
+            )
+            || (to > from && !formatting_at(txn, sequence, to).is_empty()));
     let (mut at, mut position, mut retained) = (0, from, 0);
     while at < middle.len() {
         let piece = match &middle[at] {
@@ -302,7 +356,10 @@ pub(super) fn plan<T: ReadTxn>(
                 let (tag, attributes) = target.inline[*item].clone();
                 Piece::Element { tag, attributes }
             }
-            Wanted::Line(line) => boundary(&target.lines[*line]),
+            Wanted::Line(line) => Piece::Element {
+                tag: BOUNDARY,
+                attributes: boundary(&target.lines[*line]),
+            },
         };
         match placed {
             true => {
@@ -320,42 +377,21 @@ pub(super) fn plan<T: ReadTxn>(
     Ok(fold)
 }
 
-fn formatting_at<T: ReadTxn>(
-    txn: &T,
-    sequence: &yrs::TextRef,
-    mut asked: Vec<u32>,
-) -> HashMap<u32, Attrs> {
-    asked.sort_unstable();
-    asked.dedup();
-    let mut asked = asked.into_iter().peekable();
-    let mut found = HashMap::new();
-    if asked.next_if_eq(&0).is_some() {
-        found.insert(0, Attrs::new());
-    }
+fn formatting_at<T: ReadTxn>(txn: &T, sequence: &yrs::TextRef, offset: u32) -> Attrs {
     let (mut attrs, mut passed) = (Attrs::new(), 0_u32);
     let _ = sequence.try_visit_items(txn, |item| {
-        if asked.peek().is_none() {
+        if passed >= offset {
             return Err(());
         }
-        let width = match item {
-            TextItem::Letters(text) => text.encode_utf16().count() as u32,
-            TextItem::Format(key, Any::Null) => {
-                attrs.remove(key);
-                0
-            }
-            TextItem::Format(key, value) => {
-                attrs.insert(Arc::from(key), value.clone());
-                0
-            }
-            TextItem::Embed(_) | TextItem::Other => 1,
-        };
-        passed += width;
-        while let Some(offset) = asked.next_if(|offset| width > 0 && *offset <= passed) {
-            found.insert(offset, attrs.clone());
+        match item {
+            TextItem::Letters(text) => passed += text.encode_utf16().count() as u32,
+            TextItem::Format(key, Any::Null) => drop(attrs.remove(key)),
+            TextItem::Format(key, value) => drop(attrs.insert(Arc::from(key), value.clone())),
+            TextItem::Embed(_) | TextItem::Other => passed += 1,
         }
         Ok(())
     });
-    found
+    attrs
 }
 
 fn changes(had: &Line, given: &WantedLine, before: &Trace, ids: &Ids) -> Vec<(&'static str, Any)> {
@@ -411,7 +447,7 @@ impl Ids {
                 let family = body_sequence_writer::same_family(kind.0, kind.1);
                 let (added, removed) = (given.len() - to, had.len() - at);
                 match kept[wanted] {
-                    Some(kept) if kept == frame => {}
+                    Some(_) if family => {}
                     None if family => kept[wanted] = Some(frame),
                     _ if !family && added > removed => {
                         to += 1;
@@ -471,6 +507,15 @@ impl Ids {
             if let (Some(&above), Some(&below)) = (above.get(shared), below.get(shared)) {
                 if id(&kept, above).is_some() && id(&kept, above) == id(&kept, below) {
                     kept[below] = None;
+                }
+            }
+        }
+        for line in &target.lines {
+            for (depth, &inner) in line.frames.iter().enumerate() {
+                let outer = &line.frames[..depth];
+                let twice = |held| outer.iter().any(|&outer| id(&kept, outer) == Some(held));
+                if id(&kept, inner).is_some_and(twice) {
+                    kept[inner] = None;
                 }
             }
         }
@@ -556,15 +601,18 @@ impl Fold {
         for (element, name, value) in self.attributes {
             element.insert_attribute(txn, name, value);
         }
-        let one = |offset: u32, piece: Piece, formatting: Attrs| {
-            let inserted = Delta::Inserted(piece, Some(Box::new(formatting)));
-            match offset {
-                0 => vec![inserted],
-                _ => vec![Delta::Retain(offset, None), inserted],
+        if !self.formats.is_empty() {
+            sequence.apply_delta(txn, self.formats);
+        }
+        let promote = |txn: &mut yrs::TransactionMut, (offset, attributes): (u32, Stored)| {
+            let element =
+                sequence.insert_embed(txn, offset, yrs::XmlElementPrelim::empty(BOUNDARY));
+            for (name, value) in attributes {
+                element.insert_attribute(txn, name, value);
             }
         };
-        for (offset, piece, formatting) in self.after {
-            sequence.apply_delta(txn, one(offset, piece, formatting));
+        for promoted in self.after {
+            promote(txn, promoted);
         }
         if self
             .middle
@@ -576,8 +624,8 @@ impl Fold {
         if !self.placed.is_empty() {
             sequence.apply_delta(txn, self.placed);
         }
-        for (offset, piece, formatting) in self.before {
-            sequence.apply_delta(txn, one(offset, piece, formatting));
+        for promoted in self.before {
+            promote(txn, promoted);
         }
     }
 }
