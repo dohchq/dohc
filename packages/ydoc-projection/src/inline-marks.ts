@@ -168,9 +168,15 @@ export class DohcMarkdownManager extends MarkdownManager {
       }
       return text;
     };
+    const ends = new Map<string, { from: number; end: number; mark: Mark }>();
     const endOf = (index: number, mark: Mark): number => {
+      const known = ends.get(mark.type);
+      if (known && known.from <= index && index <= known.end && carries([known.mark], mark)) {
+        return known.end;
+      }
       let end = index;
       while (nodes[end + 1]?.type === "text" && carries(nodes[end + 1]!.marks, mark)) end += 1;
+      ends.set(mark.type, { from: index, end, mark });
       return end;
     };
     const looseAfterRun = (end: number): boolean => {

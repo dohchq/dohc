@@ -6214,14 +6214,18 @@ fn end_with_line_break(out: &mut ProjectionBuffer, line_break: &str) -> Result<(
     out.push_str(line_break)
 }
 
+/// A projection being written. The inline writer's markers are never
+/// written, so they don't count toward the projection limit.
 struct ProjectionBuffer {
     value: String,
+    markers: usize,
 }
 
 impl ProjectionBuffer {
     fn new() -> Self {
         Self {
             value: String::new(),
+            markers: 0,
         }
     }
 
@@ -6231,17 +6235,28 @@ impl ProjectionBuffer {
         }
         Ok(Self {
             value: String::with_capacity(capacity),
+            markers: 0,
         })
     }
 
+    fn written(&self) -> usize {
+        self.value.len() - self.markers
+    }
+
     fn push_str(&mut self, value: &str) -> Result<(), CollabError> {
-        checked_projection_len(self.value.len(), value.len())?;
+        let written = held_characters::written_len(value);
+        checked_projection_len(self.written(), written)?;
         self.value.push_str(value);
+        self.markers += value.len() - written;
         Ok(())
     }
 
     fn push(&mut self, value: char) -> Result<(), CollabError> {
-        checked_projection_len(self.value.len(), value.len_utf8())?;
+        if held_characters::is_marker(value) {
+            self.markers += value.len_utf8();
+        } else {
+            checked_projection_len(self.written(), value.len_utf8())?;
+        }
         self.value.push(value);
         Ok(())
     }
@@ -6251,7 +6266,7 @@ impl ProjectionBuffer {
             .len_utf8()
             .checked_mul(count)
             .ok_or_else(|| projection_too_large(usize::MAX))?;
-        checked_projection_len(self.value.len(), bytes)?;
+        checked_projection_len(self.written(), bytes)?;
         self.value.extend(std::iter::repeat_n(value, count));
         Ok(())
     }
@@ -9498,6 +9513,10 @@ fn render_inline(
                 *literal_markdown = true;
                 if !matches!(&rest, InlinePart::Text { run, .. } if run.text.is_empty()) {
                     parts.insert(1, rest);
+                    rendered_nodes = rendered_nodes
+                        .into_iter()
+                        .map(|(index, rendered)| (index + 1, rendered))
+                        .collect();
                 }
             }
         }
@@ -9602,13 +9621,15 @@ fn render_inline(
                 run,
                 literal_markdown,
             } => {
-                if run.text.len() > MAX_PROJECTION_BYTES {
-                    return Err(projection_too_large(run.text.len()));
+                let run_written = held_characters::written_len(&run.text);
+                if run_written > MAX_PROJECTION_BYTES {
+                    return Err(projection_too_large(run_written));
                 }
                 let mut text =
                     written_run_text(&run, literal_markdown, code_context, escape_block_syntax)?;
                 if holds && text.contains(HELD) {
-                    let mut written = ProjectionBuffer::with_capacity(text.len())?;
+                    let mut written =
+                        ProjectionBuffer::with_capacity(held_characters::written_len(&text))?;
                     for character in text.chars() {
                         if character != HELD {
                             written.push(character)?;
@@ -10878,6 +10899,45 @@ mod projection_tests {
         assert_eq!(
             paragraph_markdown(vec![("b", marks(&["bold"])), (&typed, Attrs::new())]),
             format!("**b**{typed}\n")
+        );
+    }
+
+    // Writing a paragraph's leading space as a reference splits its first
+    // text in two. Each image after it keeps its own Markdown. The TypeScript
+    // writer writes the same bytes.
+    #[test]
+    fn a_paragraph_with_a_leading_space_keeps_each_node_after_it() {
+        let source = Ydoc::wire();
+        let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        {
+            let mut txn = source.doc.transact_mut();
+            let paragraph = body.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
+            paragraph.push_back(&mut txn, XmlTextPrelim::new(" x"));
+            for (alt, src) in [("A", "a.png"), ("B", "b.png")] {
+                let image = paragraph.push_back(&mut txn, XmlElementPrelim::empty("image"));
+                image.insert_attribute(&mut txn, "alt", alt);
+                image.insert_attribute(&mut txn, "src", src);
+            }
+        }
+        assert_eq!(
+            source
+                .project(ContentKind::Richdoc)
+                .expect("projection")
+                .content,
+            "&#32;x![A](a.png)![B](b.png)\n"
+        );
+    }
+
+    // The writer holds each typed backslash with a three-byte marker while it
+    // decides how to write it. Each run here is 7,000,000 bytes as written
+    // and 17,500,000 bytes while held, past the 16 MiB projection limit. The
+    // paragraph is written in 14,000,005 bytes, so it fits.
+    #[test]
+    fn typed_characters_count_toward_the_projection_limit_as_written() {
+        let typed = "\\a".repeat(3_500_000);
+        assert_eq!(
+            paragraph_markdown(vec![(&typed, marks(&["bold"])), (&typed, Attrs::new())]),
+            format!("**{typed}**{typed}\n")
         );
     }
 

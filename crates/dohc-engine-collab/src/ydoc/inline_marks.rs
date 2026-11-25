@@ -2,8 +2,8 @@ use std::cell::{OnceCell, RefCell};
 use std::collections::BTreeMap;
 
 use super::held_characters::{
-    escape_markers, resolved, write_held_characters, OPAQUE_CLOSE, OPAQUE_OPEN, SCOPE_CLOSE,
-    SCOPE_OPEN,
+    escape_markers, resolved, write_held_characters, written_len, OPAQUE_CLOSE, OPAQUE_OPEN,
+    SCOPE_CLOSE, SCOPE_OPEN,
 };
 use super::{
     active_mark, checked_projection_len, contains_same_mark, is_js_whitespace, js_value_string,
@@ -213,7 +213,7 @@ impl Writer<'_> {
     }
 
     fn push(&mut self, text: String) -> ProjectionResult<()> {
-        self.written = checked_projection_len(self.written, text.len())?;
+        self.written = checked_projection_len(self.written, written_len(&text))?;
         self.result.push(text);
         self.tails.push(OnceCell::new());
         Ok(())
@@ -223,7 +223,7 @@ impl Writer<'_> {
         let Some(last) = self.result.last_mut() else {
             return Ok(());
         };
-        self.written = checked_projection_len(self.written, closings.len())?;
+        self.written = checked_projection_len(self.written, written_len(closings))?;
         let written = {
             let (body, spaces) = split_trailing_js_whitespace(last);
             format!("{body}{closings}{spaces}")

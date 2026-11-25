@@ -35,8 +35,20 @@ pub(super) fn writing_link_ampersands_as<T>(written: char, write: impl FnOnce() 
     write()
 }
 
-fn is_marker(character: char) -> bool {
+pub(super) fn is_marker(character: char) -> bool {
     (OPAQUE_OPEN..=LINK_AMPERSAND).contains(&character)
+}
+
+/// The bytes of `text` that are written, leaving out the markers.
+pub(super) fn written_len(text: &str) -> usize {
+    let lead = OPAQUE_OPEN.encode_utf8(&mut [0; 4]).as_bytes()[0];
+    if !text.as_bytes().contains(&lead) {
+        return text.len();
+    }
+    text.chars()
+        .filter(|&character| !is_marker(character))
+        .map(char::len_utf8)
+        .sum()
 }
 
 pub(super) fn escape_markers(text: String) -> String {
@@ -197,7 +209,7 @@ pub(super) fn write_held_characters(markdown: String) -> ProjectionResult<String
         Vec::new()
     };
     let ampersand = link_ampersand();
-    let mut written = ProjectionBuffer::with_capacity(markdown.len())?;
+    let mut written = ProjectionBuffer::with_capacity(written_len(&markdown))?;
     let mut at = 0usize;
     let mut characters = markdown.chars();
     while let Some(character) = characters.next() {
