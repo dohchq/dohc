@@ -1,5 +1,5 @@
 import { readBoundedBytes, readBoundedJson } from "@dohc/service-http";
-import { opaqueLinkRefusal, relayLinkRefusal } from "./linkRefusal";
+import { opaqueLinkRefusal, relayLinkRefusal, unavailableLinkRefusal } from "./linkRefusal";
 import {
   parseDatasetAttemptRequest,
   parseDatasetAttemptResult,
@@ -279,6 +279,75 @@ export async function forwardAppBackend(input: {
     return Response.json(result, { headers: responseHeaders });
   } catch {
     return error(503);
+  } finally {
+    await relay.body?.cancel().catch(() => {});
+  }
+}
+
+interface AppEventsRelay {
+  relayUrl: string;
+  publicationId: string;
+  authorityRevision: number;
+  signal: AbortSignal;
+  fetchRelay(request: Request): Promise<Response>;
+}
+
+/** Waits for the link app's Collection to move past `since`, then answers its alias and revision. */
+export async function forwardAppEvents(
+  input: AppEventsRelay & { request: Request },
+): Promise<Response> {
+  let since: unknown;
+  try {
+    if (input.request.headers.get("content-type") !== "application/json") throw Error();
+    const body = await readBoundedJson(input.request, 256, input.signal);
+    if (!record(body) || !exact(body, ["since"])) throw Error();
+    since = body.since;
+  } catch {
+    return opaqueLinkRefusal();
+  }
+  if (!Number.isSafeInteger(since) || (since as number) < 0) return opaqueLinkRefusal();
+  return relayAppEvents(input, since as number, 25_000);
+}
+
+/** The relay's answer for the link app's Collection after `since`, held up to `hold` ms. */
+export async function relayAppEvents(
+  input: AppEventsRelay,
+  since: number,
+  hold: number,
+): Promise<Response> {
+  const url = new URL(
+    `/sync/link/app-publications/${input.publicationId}/backend/events?authorityRevision=${input.authorityRevision}&since=${since}&hold=${hold}`,
+    input.relayUrl,
+  );
+  let relay: Response;
+  try {
+    relay = await input.fetchRelay(new Request(url, { redirect: "manual", signal: input.signal }));
+  } catch {
+    return unavailableLinkRefusal();
+  }
+  try {
+    if (relay.status !== 200 || relay.redirected || relay.headers.has("location"))
+      return await relayLinkRefusal(relay, input.signal);
+    let value: unknown;
+    try {
+      value = await readBoundedJson(relay, 256, input.signal);
+    } catch (error) {
+      return error instanceof RangeError || error instanceof SyntaxError
+        ? opaqueLinkRefusal()
+        : unavailableLinkRefusal();
+    }
+    if (
+      !record(value) ||
+      !exact(value, ["dataset", "revision"]) ||
+      typeof value.dataset !== "string" ||
+      !Number.isSafeInteger(value.revision) ||
+      (value.revision as number) < 0
+    )
+      return opaqueLinkRefusal();
+    return Response.json(
+      { dataset: value.dataset, revision: value.revision },
+      { headers: responseHeaders },
+    );
   } finally {
     await relay.body?.cancel().catch(() => {});
   }

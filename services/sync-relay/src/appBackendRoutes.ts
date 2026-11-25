@@ -4,6 +4,8 @@ export type AppBackendAction =
   | "upload"
   | "file"
   | "attempt"
+  /** A link app waits here for its Collection to change. */
+  | "events"
   | "descriptor"
   | "summary"
   | "blob"

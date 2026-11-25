@@ -11,6 +11,7 @@ import {
 } from "@dohc/security-contract/app-publication";
 import type { AppBackendAdmissionLimits } from "./appBackendAdmission";
 import { createDatasetAppRoutes, createDatasetRoutes, datasetRequestBytes } from "./datasetRoutes";
+import { createAppEventWaits } from "./appEventWaits";
 import { MAX_BLOB_BYTES } from "./wireLimits";
 import {
   APP_BACKEND_BULK_LIMITS,
@@ -500,12 +501,16 @@ export function createSyncRelayHandler({
         nowMs,
       })
     : undefined;
+  const appEventWaits = datasetHost
+    ? createAppEventWaits(storage, datasetHost.datasetRevision)
+    : undefined;
   const respondToDatasetApp = datasetHost
     ? createDatasetAppRoutes(datasetHost, storage, {
         limits: appBackendAdmissionLimits,
         nowMs,
         shareSenderLabel,
         publications: appPublicationLimits !== undefined,
+        events: appEventWaits,
       })
     : undefined;
   if (
@@ -1663,7 +1668,10 @@ export function createSyncRelayHandler({
         if (!respondToDatasetApp) throw notFound();
         if (!route.workspaceId) {
           if (!appPublicationLimits || !linkKey || request.headers.has("cookie")) throw notFound();
-          const { capability } = requireLinkCapability(request);
+          const { capability } =
+            route.action === "events"
+              ? requireLinkRead(request, linkLogReadRateLimiter, linkGrantLogReadRateLimiter)
+              : requireLinkCapability(request);
           const secret = request.headers.get("x-dohc-link-profile-secret");
           if (!secret || !LINK_SECRET_PATTERN.test(secret)) throw notFound();
           const auth = {
@@ -2123,6 +2131,7 @@ export function createSyncRelayHandler({
     personalLimiter: linkReadRateLimiter,
     dispose() {
       accountFeedWaits.close();
+      appEventWaits?.close();
       chatWakeWaits.close();
       noticeWaits.close();
       return personalAgents.dispose();

@@ -22,6 +22,7 @@ import { encodeRecoveryManifest } from "@dohc/app-backend-runtime/recovery";
 
 import { ClientClosedRequest, serveFetchHandler } from "@dohc/service-http";
 import { guardRelayResponses } from "./relayResponseStanding";
+import { hasRelayWriteObservers } from "./relayWriteChanges";
 import { APP_BACKEND_PROFILE_HEADER } from "@dohc/security-contract/app-backend";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -290,7 +291,14 @@ async function httpFixture(
   maxParticipantsPerGrant?: number,
   publications = true,
   hostLimits: AppPublicationLimits = limits,
+  appDefinition = definition,
 ) {
+  const revision = describeDatasetRevision({
+    definition: appDefinition,
+    revision: 1,
+    schemaSql,
+    operationSource,
+  });
   const f = fixture(),
     directory = await mkdtemp(join(tmpdir(), "relay-dataset-routes-"));
   pushFile(f.storage, "dataset-file", null, {
@@ -1198,8 +1206,8 @@ const upload = {
   contentType: "image/png",
   bytesBase64: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3]).toString("base64"),
 };
-async function attachmentsFixture() {
-  const f = await httpFixture();
+async function attachmentsFixture(appDefinition = definition) {
+  const f = await httpFixture(undefined, true, limits, appDefinition);
   await f.activate();
   const publicationId = f.publish();
   const app = (action: string, body: unknown, headers = f.publicHeaders) =>
@@ -1273,6 +1281,82 @@ it("uploads and atomically attaches a receipt, then discloses bytes only through
   await f.bind(false);
   expect((await f.named("file", read)).status).toBe(404);
   expect((await f.app("upload", upload)).status).toBe(404);
+});
+
+const linkReadable = {
+  ...definition,
+  operations: definition.operations.map((operation) =>
+    operation.name === "read" ? { ...operation, access: "link" as const } : operation,
+  ),
+};
+const submitted = (n: number) => ({
+  authorityRevision: 1,
+  operation: "submit",
+  input: { name: `Friend ${n}` },
+  idempotencyKey: `submit-${n}`,
+});
+
+it("wakes a parked link app poll on a Collection change, and answers only while the link can read", async () => {
+  const f = await attachmentsFixture(linkReadable);
+  await f.bind(true);
+  const events = (query: string, headers = f.publicHeaders) =>
+    f.http(`link/app-publications/${f.publicationId}/backend/events?${query}`, undefined, headers);
+  const first = await events("authorityRevision=1&since=0&hold=0");
+  expect(first.status).toBe(200);
+  const { revision: start } = await first.json();
+  expect(await (await events(`authorityRevision=1&since=${start}&hold=50`)).json()).toEqual({
+    dataset: "",
+    revision: start,
+  });
+  const parked = Array.from({ length: 6 }, () =>
+    events(`authorityRevision=1&since=${start}&hold=20000`),
+  );
+  const startedAtMs = Date.now();
+  expect((await f.app("invoke", submitted(1))).status).toBe(200);
+  for (const answer of await Promise.all(parked)) {
+    expect(answer.status).toBe(200);
+    expect(await answer.json()).toEqual({ dataset: "", revision: start + 1 });
+  }
+  expect(Date.now() - startedAtMs).toBeLessThan(5_000);
+  expect((await events("authorityRevision=2&since=0&hold=0")).status).toBe(404);
+  expect((await events("authorityRevision=1&since=0&hold=0&extra=1")).status).toBe(404);
+  expect((await f.app("events", {})).status).toBe(405);
+  const otherApp = f.publish("a".repeat(64));
+  expect(
+    (
+      await f.http(
+        `link/app-publications/${otherApp}/backend/events?authorityRevision=1&since=0&hold=0`,
+        undefined,
+        f.publicHeaders,
+      )
+    ).status,
+  ).toBe(404);
+  const archived = events(`authorityRevision=1&since=${start + 1}&hold=20000`);
+  await vi.waitFor(() => expect(hasRelayWriteObservers(f.storage)).toBe(true));
+  expect((await f.http(`${f.path}/archive`, {})).status).toBe(200);
+  expect((await archived).status).toBe(404);
+  expect((await f.http(`${f.path}/restore`, {})).status).toBe(200);
+  expect(hasRelayWriteObservers(f.storage)).toBe(false);
+  const revoked = events(`authorityRevision=1&since=${start + 1}&hold=20000`);
+  await vi.waitFor(() => expect(hasRelayWriteObservers(f.storage)).toBe(true));
+  const revokedAtMs = Date.now();
+  expect(f.storage.revokeShareGrant({ shareId: "s", grantId: "g", revokedAtMs: 11 }).ok).toBe(true);
+  expect((await revoked).status).toBe(404);
+  expect(Date.now() - revokedAtMs).toBeLessThan(5_000);
+  expect(hasRelayWriteObservers(f.storage)).toBe(false);
+  expect((await events(`authorityRevision=1&since=${start + 1}&hold=0`)).status).toBe(404);
+});
+
+it("refuses change events to a link that can only write to its app's Collection", async () => {
+  const f = await attachmentsFixture();
+  await f.bind(true);
+  expect((await f.app("invoke", submitted(1))).status).toBe(200);
+  const answer = await f.http(
+    `link/app-publications/${f.publicationId}/backend/events?authorityRevision=1&since=0&hold=0`,
+    undefined,
+    f.publicHeaders,
+  );
+  expect(answer.status).toBe(404);
 });
 
 it("keeps staged files private to their caller and rolls attachment back with a refused operation", async () => {

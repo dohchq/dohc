@@ -1,0 +1,90 @@
+import { WaiterRegistry, type WaiterCaps } from "@dohc/service-http";
+import { relayError } from "./errors";
+import { observeRelayWrites } from "./relayWriteChanges";
+
+const SWEEP_MS = 250;
+const RECHECK_MS = 1_000;
+
+/**
+ * Link app polls parked by Collection. A relay write wakes the Collections whose revision moved within 250 ms,
+ * and every parked poll within a second, so each checks its link again. Writes are heard only while a poll waits.
+ */
+export function createAppEventWaits(
+  storage: object,
+  revision: (workspaceId: string, datasetId: string) => number,
+  caps: WaiterCaps = { maxTotal: 1_024, maxPerGroup: 1_024, maxPerActor: 256 },
+) {
+  const waiters = new WaiterRegistry(caps);
+  const groups = new Map<string, { workspaceId: string; datasetId: string; revision: number }>();
+  let stopObserving: (() => void) | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let dueAtMs = 0;
+  let sweptAtMs = 0;
+  let recheckedAtMs = 0;
+  const schedule = (atMs: number) => {
+    clearTimeout(timer);
+    dueAtMs = atMs;
+    timer = setTimeout(sweep, Math.max(0, atMs - Date.now()));
+    timer.unref();
+  };
+  const read = (workspaceId: string, datasetId: string) => {
+    try {
+      return revision(workspaceId, datasetId);
+    } catch {
+      return Number.NaN;
+    }
+  };
+  const sweep = () => {
+    timer = undefined;
+    sweptAtMs = Date.now();
+    const recheck = sweptAtMs - recheckedAtMs >= RECHECK_MS;
+    if (recheck) recheckedAtMs = sweptAtMs;
+    for (const [key, group] of groups) {
+      const current = read(group.workspaceId, group.datasetId);
+      if (recheck || current !== group.revision) {
+        group.revision = current;
+        waiters.wake(key, undefined);
+      }
+    }
+    if (!recheck && groups.size) schedule(recheckedAtMs + RECHECK_MS);
+  };
+  const written = () => {
+    if (timer === undefined || sweptAtMs + SWEEP_MS < dueAtMs) schedule(sweptAtMs + SWEEP_MS);
+  };
+  const close = () => {
+    stopObserving?.();
+    stopObserving = undefined;
+    clearTimeout(timer);
+    timer = undefined;
+  };
+  return {
+    async wait(input: {
+      workspaceId: string;
+      datasetId: string;
+      grantId: string;
+      since: number;
+      holdMs: number;
+      signal: AbortSignal;
+    }): Promise<void> {
+      const key = JSON.stringify([input.workspaceId, input.datasetId]);
+      if (waiters.atCapacity(key, input.grantId)) throw relayError("link_read_rate_limited");
+      const { workspaceId, datasetId, since } = input;
+      if (!groups.has(key)) groups.set(key, { workspaceId, datasetId, revision: since });
+      stopObserving ??= observeRelayWrites(storage, written);
+      try {
+        await waiters.park(key, input.grantId, {
+          holdMs: input.holdMs,
+          signal: input.signal,
+          settle: () => undefined,
+          shouldPark: () => read(workspaceId, datasetId) === since,
+        });
+      } finally {
+        if (!waiters.waiting(key)) groups.delete(key);
+        if (groups.size === 0) close();
+      }
+    },
+    close,
+  };
+}
+
+export type AppEventWaits = ReturnType<typeof createAppEventWaits>;

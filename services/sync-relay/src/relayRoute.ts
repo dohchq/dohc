@@ -146,7 +146,8 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
       (parts[5] === "invoke" ||
         parts[5] === "upload" ||
         parts[5] === "file" ||
-        parts[5] === "attempt")
+        parts[5] === "attempt" ||
+        parts[5] === "events")
     ) {
       return { route: "app-backend", publicationId, action: parts[5] };
     }

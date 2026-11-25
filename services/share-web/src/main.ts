@@ -96,8 +96,10 @@ const server = serveFetchHandler({
         ? config.namedBrowserSessionLimits.maxRequestBytes
         : MAX_REQUEST_BODY_BYTES),
   streamBody: streamsRequestBody,
-  // A page keeps a read open for up to 30 s to hear of a change: the log, chat, and comment activity.
-  waits: waitsOnQuery("hold"),
+  // A page keeps a read open for up to 30 s to hear of a change: the log, chat, comment activity, and a shared app's
+  // Collection.
+  waits: (url, method) =>
+    waitsOnQuery("hold")(url, method) || (method === "POST" && url.pathname === "/events"),
   oversized: (url) =>
     url.pathname === "/api/named-chat/messages"
       ? Response.json(

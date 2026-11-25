@@ -1,10 +1,15 @@
-import { test, expect, type Browser, type Frame, type TestInfo } from "@playwright/test";
+import { test, expect, type Frame, type TestInfo } from "@playwright/test";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { cpus, freemem, loadavg, platform, totalmem } from "node:os";
 import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
-import { actualFundraiserFixture, syntheticReceipt, viewerOrigin } from "./actualFundraiserFixture";
-import { loadRequest, publicLoadBrowser, type BrokerReply } from "./publicLoadBrowser";
+import { actualFundraiserFixture, syntheticReceipt } from "./actualFundraiserFixture";
+import {
+  loadRequest,
+  openLoadApp as open,
+  publicLoadBrowser,
+  type BrokerReply,
+} from "./publicLoadBrowser";
 
 const enabled = process.env.DOHC_PUBLIC_LINK_LOAD === "1";
 const participants = 100,
@@ -16,34 +21,6 @@ type Sample = {
   status: number;
   code?: string;
 };
-
-async function open(browser: Browser) {
-  const context = await browser.newContext();
-  try {
-    const page = await context.newPage();
-    page.setDefaultTimeout(30_000);
-    await page.goto(`${viewerOrigin}/fixture-open`);
-    const exchangeReply = page.waitForResponse(
-      (response) => new URL(response.url()).pathname === "/api/exchange",
-    );
-    const launchReply = page.waitForResponse(
-      (response) => new URL(response.url()).pathname === "/api/apps/launch",
-    );
-    // Both waits have handlers before either can reject during a failed exchange.
-    void launchReply.catch(() => {});
-    await page.getByRole("button", { name: "Open", exact: true }).click();
-    expect((await exchangeReply).status(), "Link exchange").toBe(200);
-    expect((await launchReply).status(), "App launch").toBe(200);
-    await expect(page).toHaveURL(/^https:\/\/[a-f0-9]{48}\.example\.net\/bootstrap$/);
-    await expect(page.frameLocator("iframe").locator("body")).toHaveAttribute("data-ready", "true");
-    const frame = page.frames().find((frame) => frame !== page.mainFrame());
-    if (!frame) throw Error("App frame unavailable");
-    return { context, frame };
-  } catch (error) {
-    await context.close();
-    throw error;
-  }
-}
 
 async function sampled(
   samples: Sample[],

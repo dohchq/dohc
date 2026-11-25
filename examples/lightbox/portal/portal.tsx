@@ -902,11 +902,9 @@ function Portal() {
       reload();
       setTick((value) => value + 1);
     };
-    const timer = setInterval(refresh, 30000);
     addEventListener("focus", refresh);
     document.addEventListener("visibilitychange", refresh);
     return () => {
-      clearInterval(timer);
       removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", refresh);
     };

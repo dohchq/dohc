@@ -317,6 +317,14 @@ export async function actualFundraiserFixture(
     calls,
     compiler: prepared.candidate.compilerIdentity,
     deleteCollectionFile: () => pushDatasetFile(1, false),
+    endLink: () =>
+      storage.revokeShareGrant({ shareId: "s", grantId: "g", revokedAtMs: Date.now() }),
+    collectionRevision: () =>
+      Number(
+        storage.db
+          .prepare("SELECT revision FROM dohc_dataset_journals WHERE dataset_id=?")
+          .get(definition.datasetId)!.revision,
+      ),
     advance(ms: number) {
       clockOffset += ms;
     },

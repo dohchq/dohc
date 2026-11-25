@@ -61,7 +61,7 @@ It is ordinary workspace source. Copy the folder, then change the rules, the scr
 
 ## Limits
 
-- The organizer app updates the moment a score changes on this computer. Share links do not get change events, so the spectator app reads `liveSnapshot` every 5 seconds while visible. A scoring tap updates its match from the reply without another read.
+- Both apps update the moment a score changes, on this computer and through a share link. The spectator app reads `liveSnapshot` every 5 seconds while visible until its first change event arrives, then on each change and every 15 seconds as a check. A scoring tap updates its match from the reply without another read.
 - An operation may run 128 statements with 128 values each. `operations.js` loads a tournament once and writes it back in bulk, so a 32-player double-elimination bracket fits.
 
 The tests are in [tournament-example.test.ts](../../packages/app-backend-runtime/src/tournament-example.test.ts). To typecheck the screens, run `pnpm exec tsc -p ../../examples/tournament/tsconfig.json` from `apps/desktop`.
