@@ -437,5 +437,41 @@ describe("a member's raw pull answered across a change", () => {
       nextCursor: groupCursor,
       levelChanged: true,
     });
+
+    const member = await seed();
+    const firstMember = await json(await member.pull());
+    const memberCursor = Number(firstMember.nextCursor);
+    await putBlob(member.h, OWNER, WORKSPACE, "Updated plan");
+    await appendLog(
+      member.h,
+      OWNER,
+      WORKSPACE,
+      [
+        moment("notes/plan.md", "Updated plan", {
+          originSeq: 1,
+          objectId: "plan",
+          beforePath: "notes/plan.md",
+          beforeContent: "Plan",
+          recordedAtMs: 2,
+        }),
+      ],
+      { originId: "device" },
+    );
+    expect(
+      (
+        await member.h(
+          request(OWNER, `/sync/${WORKSPACE}/members/level`, jsonBody({ level: "view" })),
+        )
+      ).status,
+    ).toBe(200);
+    const memberLowered = await json(
+      await member.pull(`since=${memberCursor}&scan=page&level=edit`),
+    );
+    expect(memberLowered).toMatchObject({
+      ok: true,
+      ops: [],
+      nextCursor: memberCursor,
+      levelChanged: true,
+    });
   });
 });

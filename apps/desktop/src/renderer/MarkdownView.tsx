@@ -1475,14 +1475,14 @@ export function MarkdownView(props: {
       }
     }
     if (
-      !editing &&
+      (!editing || readOnly) &&
       !unsavedDraft.current &&
       writersLive.current === 0 &&
       props.contentRequestId > acceptedRequestFloor.current
     ) {
       acceptSnapshot(latestSnapshot.current, SAVED_HERE);
     }
-    if (awaitingReadOnlySync && !props.readOnlyRefreshPending && !editing) {
+    if (awaitingReadOnlySync && !props.readOnlyRefreshPending && (!editing || readOnly)) {
       setAwaitingReadOnlySync(false);
     }
     // The helpers read mutable writer state and the atomic snapshot above.
@@ -1493,6 +1493,7 @@ export function MarkdownView(props: {
     props.readOnlyRefreshPending,
     awaitingReadOnlySync,
     editing,
+    readOnly,
     sharedSnapshot,
     writerSettledEpoch,
   ]);

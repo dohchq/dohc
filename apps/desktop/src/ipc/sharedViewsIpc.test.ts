@@ -3227,6 +3227,22 @@ describe("background share pulls", () => {
       "https://relay.example.test/sync/shares/share/log?since=42&scan=page&hold=25000&level=edit",
       expect.anything(),
     );
+
+    // Even if a relay response carries both ops and levelChanged for a membership, keep the level-changed path so access checks run and the notice shows.
+    bodies.push({
+      ops: [{ seq: 43 }],
+      hasMore: false,
+      nextCursor: 43,
+      levelChanged: true,
+    } as never);
+    h.fetchInfo.mockClear();
+    h.reconcile.mockClear();
+    await expect(h.invoke(channel, payload)).resolves.toMatchObject({
+      probed: true,
+      levelChanged: true,
+    });
+    expect(h.fetchInfo).not.toHaveBeenCalled();
+    expect(h.reconcile).not.toHaveBeenCalled();
   });
   it("tracks a path share's level across View to Edit recovery, scope refusal, and transient unverified checks", async () => {
     const h = await harness();

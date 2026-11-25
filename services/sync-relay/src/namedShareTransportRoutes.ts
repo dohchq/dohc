@@ -289,8 +289,8 @@ export function createNamedShareTransportRoutes(
       if (
         isShareAccessValue(knew) &&
         knew !== accessOf(authorized.effectiveSelector) &&
-        page.ops.length === 0 &&
-        !page.hasMore
+        (isWorkspaceSelector(authorized.effectiveSelector) ||
+          (page.ops.length === 0 && !page.hasMore))
       ) {
         return jsonResponse({
           ok: true,

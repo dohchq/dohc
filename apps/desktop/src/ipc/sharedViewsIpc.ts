@@ -892,7 +892,7 @@ export function registerSharedViewsIpcHandlers<
           });
           controller.signal.throwIfAborted();
           scoped.assertCurrent();
-          if (probe.unchanged || (probe.levelChanged && !probe.hasOps)) {
+          if (probe.unchanged || (probe.levelChanged && (!probe.hasOps || cached.wholeWorkspace))) {
             if (probe.levelChanged) {
               if (!cached.wholeWorkspace && !cached.reach) cached.pendingLevel = cached.level;
               delete cached.level;
