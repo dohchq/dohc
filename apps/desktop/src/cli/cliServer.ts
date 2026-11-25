@@ -3020,10 +3020,13 @@ async function dispatch(
       : { ok: false, reason };
   }
   try {
-    return paths.result(
-      parseCliResult(request.verb, await dispatchWorkspace(rebased, context, options, completion)),
-      request.verb === "moment",
+    const result = parseCliResult(
+      request.verb,
+      await dispatchWorkspace(rebased, context, options, completion),
     );
+    return request.verb === "appPublication" && context.readOnly
+      ? result
+      : paths.result(result, request.verb === "moment");
   } catch (error) {
     const workspacePaths = error instanceof DatasetSchemaChangeError ? error.workspacePaths : [];
     const mapped = paths.result({
@@ -3438,7 +3441,11 @@ async function dispatchWorkspace(
       if (
         !context.dataset ||
         (context.readOnly &&
-          !(context.joined && DATASET_ADMIN_ACTIONS.has(request.args.request.action)))
+          !(
+            context.joined &&
+            (DATASET_ADMIN_ACTIONS.has(request.args.request.action) ||
+              request.args.request.action === "types")
+          ))
       )
         throw new CliCommandError("Collections require the owning workspace.");
       if (request.args.request.workspaceId !== context.workspaceId)

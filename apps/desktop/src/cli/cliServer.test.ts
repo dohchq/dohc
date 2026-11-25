@@ -3018,6 +3018,52 @@ describe("CLI socket server", () => {
       expect(dataset).toHaveBeenCalledOnce();
     });
 
+    it("writes Collection types and lists Personal apps from a subfolder of a joined workspace", async () => {
+      const personal = join(tmpdir(), "personal-apps", WORKSPACE_ID);
+      const dataset = vi.fn(async () => ({
+        kind: "types-written" as const,
+        path: join(personal, "trips.d.ts"),
+        revision: 1,
+      }));
+      const appPublication = vi.fn(async () => ({
+        kind: "personalFolder" as const,
+        path: personal,
+        apps: [{ appRoot: "trip" }],
+      }));
+      joinAs("view");
+      context = { ...context, dataset, appPublication };
+      const cwd = join(workspaceRoot, "trips");
+      await mkdir(cwd, { recursive: true });
+      const types = {
+        action: "types" as const,
+        workspaceId: WORKSPACE_ID,
+        datasetPath: "dataset.json",
+      };
+      await expect(invoke("dataset", { cwd, actor: "agent", request: types })).resolves.toEqual({
+        kind: "types-written",
+        path: join(personal, "trips.d.ts"),
+        revision: 1,
+      });
+      expect(dataset).toHaveBeenCalledWith(
+        expect.objectContaining({ action: "types", datasetPath: "trips/dataset.json" }),
+        expect.anything(),
+      );
+      await expect(
+        invoke("appPublication", {
+          cwd,
+          actor: "agent",
+          request: { action: "personalFolder", workspaceId: WORKSPACE_ID },
+        }),
+      ).resolves.toEqual({ kind: "personalFolder", path: personal, apps: [{ appRoot: "trip" }] });
+      await expect(
+        invoke("dataset", {
+          cwd,
+          actor: "agent",
+          request: { action: "describe", workspaceId: WORKSPACE_ID, datasetPath: "dataset.json" },
+        }),
+      ).rejects.toThrow("Collections require the owning workspace.");
+    });
+
     // Its links would name this computer's view, which no one else can open.
     it("refuses a link at every level, without calling it read-only", async () => {
       const makeWorkReference = vi.fn(async () => "ref");

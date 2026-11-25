@@ -103,10 +103,14 @@ test("@two-client a member builds, approves, and opens a Personal app on a Colle
         async (request) => window.dohcDesktop!.dataset(request as never) as Promise<unknown>,
         { workspaceId, ...input },
       );
-    const listed = (await dataset({ action: "list" })) as {
-      datasets: Array<{ datasetPath: string; name: string }>;
-    };
-    const datasetPath = listed.datasets.find((entry) => entry.name === "Trips")!.datasetPath;
+    const tripsPath = async () =>
+      (
+        (await dataset({ action: "list" })) as {
+          datasets: Array<{ datasetPath: string; name: string }>;
+        }
+      ).datasets.find((entry) => entry.name === "Trips")?.datasetPath;
+    await expect.poll(tripsPath).toBeTruthy();
+    const datasetPath = (await tripsPath())!;
     const { dataset: trips } = (await dataset({ action: "describe", datasetPath })) as {
       dataset: {
         revision: number;

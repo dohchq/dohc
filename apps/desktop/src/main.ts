@@ -73,6 +73,7 @@ import {
 } from "./workspaces/ownerShareLabels";
 import { describeAutomationDataset } from "./workspaces/automationDatasetDescription";
 import {
+  addressDatasets,
   invalidateDatasetAddresses,
   isDatasetDescriptor,
   unclaimedDatasetFolders,
@@ -229,6 +230,7 @@ import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "./workspaces/
 import {
   createPersonalAppPublication,
   createPersonalApps,
+  personalAppEdits,
   personalAppFolder,
   writePersonalTypes,
 } from "./workspaces/personalApps";
@@ -11635,6 +11637,21 @@ function registerIpcHandlers(): void {
             databasePath: `${folder}.approvals.sqlite`,
             lifetime: operation.signal,
             data: (dataSignal) => datasetDependencies.namedDataForWorkspace(bound, dataSignal),
+            edits: async (datasetId, editSignal) => {
+              const signal = editSignal
+                ? AbortSignal.any([editSignal, operation.signal])
+                : operation.signal;
+              const data = await datasetDependencies.namedDataForWorkspace(bound, signal);
+              const description = await data.describe(datasetId);
+              const [address] =
+                (await withEngineAdapter(bound, (adapter) =>
+                  addressDatasets(adapter, bound.workspaceId, [description], signal),
+                )) ?? [];
+              return (
+                !!address?.datasetPath &&
+                personalAppEdits(findWorkspace(bound.workspaceId)?.shareView, address.datasetPath)
+              );
+            },
           });
           operation.signal.addEventListener("abort", () => void apps.close(), { once: true });
           const launcher = await createLocalAppLaunchHost({

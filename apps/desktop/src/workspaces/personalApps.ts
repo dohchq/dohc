@@ -26,6 +26,7 @@ import {
 import type { OwnerDatasetData } from "./remoteDataset";
 import { createServerDatasetApps, localDatasetAppId } from "./serverDatasetApps";
 import { recordedShareSelector } from "./shareViewRecords";
+import { shareViewWriteLevel, shareViewWriteScopeOf } from "./shareWriteGate";
 
 type MemberData = Pick<OwnerDatasetData, "describe" | "invoke" | "upload" | "file">;
 type SourceAdapter = Pick<
@@ -148,11 +149,21 @@ export function personalAppSource(
   };
 }
 
+/** Whether the member's level on a Collection's folder lets a Personal app change its records. */
+export function personalAppEdits(shareView: unknown, datasetPath: string) {
+  const scope = shareViewWriteScopeOf(shareView, null);
+  const folder = datasetPath.includes("/")
+    ? datasetPath.slice(0, datasetPath.lastIndexOf("/"))
+    : "";
+  return scope !== null && shareViewWriteLevel(scope, { folder }) === "edit";
+}
+
 /** What a Personal app may do with a Collection: what it declares, within what the member's own grant shows them. */
 export function memberDatasetCapability(
   reference: AppDatasetReference,
   datasetId: string,
   description: DatasetDescription,
+  edits: boolean,
   alias?: string,
 ): AppDatasetCapability {
   if (description.datasetId !== datasetId)
@@ -176,6 +187,10 @@ export function memberDatasetCapability(
     );
     if (!found || found.access === "owner")
       throw new Error(`${key} is not an action you can use in ${description.name}.`);
+    if (!found.readOnly && !edits)
+      throw new Error(
+        `${key} changes records, and you can only view ${description.name}. Remove it from app.publish.json.`,
+      );
     const { operationId, name, access, readOnly } = found;
     return { operationId, name, access, readOnly };
   });
@@ -242,6 +257,7 @@ export function createPersonalApps(options: {
   databasePath: string;
   lifetime: AbortSignal;
   data(signal: AbortSignal): Promise<MemberData>;
+  edits(datasetId: string, signal?: AbortSignal): Promise<boolean>;
 }) {
   const { DatabaseSync } = createRequire(import.meta.url)(
     "node:sqlite",
@@ -293,6 +309,13 @@ export function createPersonalApps(options: {
         };
         const operation = capability.operations.find((found) => found.name === body.operation);
         const member = await data(signal);
+        if (
+          (action === "upload" || (action === "invoke" && !operation!.readOnly)) &&
+          !(await options.edits(capability.datasetId, signal))
+        )
+          throw new Error(
+            `You can only view ${capability.name} now, so this app cannot change it.`,
+          );
         if (action === "invoke") {
           const { catchUp: _, ...result } = await member.invoke({
             ...pinned,
@@ -411,6 +434,7 @@ export function createPersonalAppPublication<
         reference,
         datasetId,
         await (await deps.data(workspace, signal)).describe(datasetId),
+        personalAppEdits(workspace.shareView, reference.datasetPath),
         alias,
       ),
     appSource: (workspace, adapter) =>

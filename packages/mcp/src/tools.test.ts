@@ -27,6 +27,7 @@ import {
   listChanges,
   listWorkspaces,
   moveWorkspacePath,
+  publishApp,
   queryDatabase,
   readChange,
   readChat,
@@ -636,6 +637,33 @@ describe("mcp tools operate on allowed paths", () => {
       });
       expect(shared).not.toHaveProperty("keptEdits");
       expect(asked).toEqual(["collectionsWaiting", "sharedFilesHeld"]);
+    });
+  });
+
+  it("forwards only Personal app actions from a joined workspace's profile", async () => {
+    await withWorkspace(async (ctx) => {
+      const asked: unknown[] = [];
+      const joined: ToolContext = {
+        ...ctx,
+        shareAccess: "view",
+        request: async (request) => {
+          asked.push(request.args);
+          return { kind: "personalFolder", path: "/personal", apps: [] };
+        },
+      };
+      const workspaceId = "00000000-0000-4000-8000-000000000001";
+      await expect(publishApp(joined, { action: "personalFolder", workspaceId })).resolves.toEqual({
+        kind: "personalFolder",
+        path: "/personal",
+        apps: [],
+      });
+      expect(asked).toEqual([
+        expect.objectContaining({ request: { action: "personalFolder", workspaceId } }),
+      ]);
+      await expect(
+        publishApp(joined, { action: "verifyFrontend", workspaceId, appRoot: "app" }),
+      ).resolves.toEqual({ ok: false, reason: "App publication requires the owning workspace." });
+      expect(asked).toHaveLength(1);
     });
   });
 

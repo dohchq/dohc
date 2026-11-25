@@ -13,7 +13,7 @@ import { OwnerAppPublicationResult } from "../ipc/ownerAppPublicationContract";
 import { compileClosedApp } from "./closedAppCompiler";
 import { createLocalAppLaunchHost } from "./localAppLaunch";
 import { createNamedDatasetData } from "./namedDataset";
-import { createPersonalAppPublication, createPersonalApps } from "./personalApps";
+import { createPersonalAppPublication, createPersonalApps, personalAppEdits } from "./personalApps";
 import type { CloudCredentials } from "./cloudCredentialStore";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -59,6 +59,7 @@ function collection(n: number, name: string, folder: string): DatasetDefinition 
       ["read", "helper", true],
       ["edit", "helper", false],
       ["audit", "owner", true],
+      ["remove", "helper", false],
     ].map(([operation, access, readOnly], index) => ({
       operationId: id(n + 4 + index),
       name: operation as string,
@@ -88,7 +89,7 @@ async function memberWorkspace() {
   const actor = { kind: "named" as const, workspaceId: "w", userId: "owner" };
   const schemaSql = `CREATE TABLE trips(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL);
     INSERT INTO trips VALUES('a','Kyoto');`;
-  const operationSource = `globalThis.operations={read(ctx){const rows=ctx.db.query('SELECT id,name FROM trips ORDER BY id');return {rows,count:rows.length,nextCursor:null};},edit(){return null;},audit(){return {rows:[],count:0,nextCursor:null};}};`;
+  const operationSource = `globalThis.operations={read(ctx){const rows=ctx.db.query('SELECT id,name FROM trips ORDER BY id');return {rows,count:rows.length,nextCursor:null};},edit(){return null;},remove(){return null;},audit(){return {rows:[],count:0,nextCursor:null};}};`;
   const trips = collection(1, "Trips", "trips"),
     budget = collection(21, "Budget", "budget");
   const revisions = [trips, budget].map((definition) =>
@@ -109,7 +110,7 @@ async function memberWorkspace() {
     grant: {
       revision: 1,
       revisionSha256: revisions[0]!.revisionSha256,
-      operationIds: [id(5)],
+      operationIds: [id(5), id(6)],
       discover: true,
     },
   });
@@ -156,6 +157,7 @@ async function memberWorkspace() {
       wholeWorkspace: true as boolean | undefined,
     },
     role: "member",
+    reach: undefined as unknown,
   };
   const workspace = { workspaceId: "local", shareView };
   const data = () =>
@@ -200,6 +202,11 @@ async function memberWorkspace() {
     databasePath: join(directory, "local.approvals.sqlite"),
     lifetime: lifetime.signal,
     data: async () => data(),
+    edits: async (datasetId) =>
+      personalAppEdits(
+        shareView,
+        datasetId === id(1) ? "trips/dataset.json" : "budget/dataset.json",
+      ),
   });
   cleanups.push(() => apps.close());
   const launcher = await createLocalAppLaunchHost({
@@ -334,7 +341,7 @@ it("lets a member compile, approve, and launch a Personal app that runs a grante
 it("refuses a Personal app actions the member's grant does not show, owner actions, linkReads, and hidden Collections", async () => {
   const m = await memberWorkspace();
   for (const [appRoot, dataset, refusal] of [
-    ["ungranted", { operations: ["edit"] }, /edit is not an action you can use in Trips/],
+    ["ungranted", { operations: ["remove"] }, /remove is not an action you can use in Trips/],
     ["owner", { operations: ["audit"] }, /audit is not an action you can use in Trips/],
     [
       "links",
@@ -365,6 +372,35 @@ it("refuses a Personal app actions the member's grant does not show, owner actio
       .run(),
   );
   await expect(request("read")).rejects.toThrow("The owner removed your access.");
+}, 60_000);
+
+it("runs only read-only actions in a Personal app while the member can only view the Collection's folder", async () => {
+  const m = await memberWorkspace();
+  const viewOnly = {
+    signature: "s1",
+    visibilitySignature: "v1",
+    rootLevel: "edit",
+    folders: [{ path: "trips", level: "view" }],
+    groupDefault: "edit",
+    groups: [],
+  };
+  m.shareView.reach = viewOnly;
+  await m.writeApp("trip", { operations: ["read", "edit"] });
+  await expect(m.invoke({ action: "prepareLocal", appRoot: "trip" })).rejects.toThrow(
+    /edit changes records, and you can only view Trips/,
+  );
+  m.shareView.reach = undefined;
+  const { publicationId } = await m.approve("trip");
+  m.shareView.reach = viewOnly;
+  const request = async (operation: string) =>
+    m.apps.backend.request(publicationId, "invoke", {
+      authorityRevision: 1,
+      operation,
+      input: {},
+      idempotencyKey: operation,
+    });
+  await expect(request("edit")).rejects.toThrow("You can only view Trips now");
+  await expect(request("read")).resolves.toMatchObject({ result: { count: 1 } });
 }, 60_000);
 
 it("keeps the owner's publishing actions refused in a joined workspace, and Personal apps to members", async () => {
