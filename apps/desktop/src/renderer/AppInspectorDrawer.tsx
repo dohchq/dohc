@@ -1,6 +1,7 @@
 import { Database, Play, RefreshCcw, Terminal, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { DatasetResult } from "@dohc/cli/dataset";
+import { collectionsRefusalError } from "../ipc/errorWords";
 import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { EmptyState, IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
@@ -35,6 +36,7 @@ export function AppInspectorDrawer({
     key: `app-inspector-datasets:${workspaceId}`,
     load: async () => {
       const result = await bridge().dataset({ action: "list", workspaceId, limit: 100 });
+      if (result.kind === "collections-refused") throw collectionsRefusalError(result.refusal);
       return result.kind === "list" ? result.datasets : [];
     },
   });

@@ -133,4 +133,21 @@ describe("AppInspectorDrawer", () => {
     fireEvent.keyDown(input, { key: "Escape" });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it("shows why the Collection list was refused", async () => {
+    datasetMock.mockResolvedValueOnce({
+      kind: "collections-refused",
+      refusal: {
+        kind: "elsewhere",
+        words: "This workspace's Collections run on Studio Mac.",
+        computer: "Studio Mac",
+      },
+    });
+    render(
+      <WorkspaceSessionProvider workspaceId="ws-1">
+        <AppInspectorDrawer workspaceId="ws-1" onClose={() => {}} />
+      </WorkspaceSessionProvider>,
+    );
+    expect(await screen.findByText("This workspace's Collections run on Studio Mac.")).toBeTruthy();
+  });
 });

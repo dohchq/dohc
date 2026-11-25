@@ -185,6 +185,27 @@ describe("dataset inspector SQL and trace", () => {
     expect(joined.columns).toEqual(["id", "id", "big"]);
     expect(joined.rows).toEqual([["e1", "e2", "9007199254740993"]]);
 
+    const overflow = await host.querySql("owner", {
+      workspaceId: "ws1",
+      datasetId: rev.datasetId,
+      sql: "SELECT 1e999 AS n",
+    });
+    expect(overflow.rows).toEqual([["Infinity"]]);
+    await expect(
+      host.querySql("owner", {
+        workspaceId: "ws1",
+        datasetId: rev.datasetId,
+        sql: `SELECT ${Array.from({ length: 1025 }, () => "1").join(", ")}`,
+      }),
+    ).rejects.toThrow("The query returns 1025 columns; the limit is 1024 columns.");
+    await expect(
+      host.querySql("owner", {
+        workspaceId: "ws1",
+        datasetId: rev.datasetId,
+        sql: `SELECT '${"x".repeat(1030)}'`,
+      }),
+    ).rejects.toThrow("the limit is 1024 characters");
+
     const limited = await host.querySql("owner", {
       workspaceId: "ws1",
       datasetId: rev.datasetId,

@@ -913,7 +913,7 @@ test("@app-view owner data inspector toggles, shows live trace, runs SQL and EXP
       action: "sql",
       datasetPath,
       sql: `SELECT * FROM ${tableSql}`,
-    })) as { kind: string; rows: Array<Record<string, unknown>>; explain: boolean };
+    })) as { kind: string; rows: unknown[][]; explain: boolean };
     expect(sqlCli.kind).toBe("sql");
     expect(sqlCli.explain).toBe(false);
     expect(sqlCli.rows).toHaveLength(1);
@@ -923,7 +923,7 @@ test("@app-view owner data inspector toggles, shows live trace, runs SQL and EXP
       datasetPath,
       sql: `SELECT * FROM ${tableSql}`,
       explain: true,
-    })) as { kind: string; rows: Array<Record<string, unknown>>; explain: boolean };
+    })) as { kind: string; rows: unknown[][]; explain: boolean };
     expect(explainCli.kind).toBe("sql");
     expect(explainCli.explain).toBe(true);
     expect(explainCli.rows.length).toBeGreaterThan(0);

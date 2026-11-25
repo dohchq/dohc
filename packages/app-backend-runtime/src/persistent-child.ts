@@ -502,6 +502,17 @@ async function handle(command: PersistentCommand): Promise<PersistentResult> {
           statement.setReturnArrays(true);
           statement.setReadBigInts(true);
           const resultColumns = statement.columns().map((column) => column.name);
+          if (resultColumns.length > 1024)
+            reject(
+              "invalid_input",
+              `The query returns ${resultColumns.length} columns; the limit is 1024 columns.`,
+            );
+          const longName = resultColumns.find((name) => name.length > 1024);
+          if (longName !== undefined)
+            reject(
+              "invalid_input",
+              `A column name is ${longName.length} characters; the limit is 1024 characters. Name it with AS.`,
+            );
           const rows: PersistentSqlParam[][] = [];
           let bytes = 2,
             truncated = false;
@@ -517,7 +528,9 @@ async function handle(command: PersistentCommand): Promise<PersistentResult> {
                   : String(value)
                 : value instanceof Uint8Array
                   ? `<${value.byteLength} bytes>`
-                  : value === null || typeof value === "string" || typeof value === "number"
+                  : value === null ||
+                      typeof value === "string" ||
+                      (typeof value === "number" && Number.isFinite(value))
                     ? value
                     : String(value),
             );

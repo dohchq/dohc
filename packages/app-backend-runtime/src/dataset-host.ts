@@ -51,11 +51,7 @@ import {
   traceSuccess,
   type DatasetTraceEntry,
 } from "./dataset-trace.js";
-export {
-  createDatasetTraceBuffer,
-  DATASET_TRACE_CAPACITY,
-  type DatasetTraceEntry,
-} from "./dataset-trace.js";
+export type { DatasetTraceEntry } from "./dataset-trace.js";
 export type { PersistentSqlParam, PersistentSqlResult } from "./persistent-protocol.js";
 import { prepareDatasetRecoveryExport, type RecoveryAttachment } from "./recovery-export.js";
 import { stageDatasetRecovery, type RecoveryLimits } from "./recovery.js";

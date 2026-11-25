@@ -115,7 +115,6 @@ export interface DatasetSqlQuery extends DatasetAccess {
   params?: PersistentSqlParam[];
   explain?: boolean;
   maxRows?: number;
-  maxBytes?: number;
 }
 export interface DatasetMigrationCandidate {
   candidateId: string;
@@ -1233,7 +1232,6 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         params: input.params,
         explain: input.explain,
         maxRows: input.maxRows,
-        maxBytes: input.maxBytes,
       });
       currentAuthority();
       const after = head(input);

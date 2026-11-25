@@ -669,7 +669,7 @@ export function SitePreviewPage(props: {
     setInspectorOpen(false);
   }, [props.workspaceId, props.siteRoot]);
   useEffect(() => {
-    if (!isOwnerLocalApp || !(props.visible ?? true) || !(props.focused ?? true)) return;
+    if (!isOwnerLocalApp || !(props.visible ?? true) || !(props.focused ?? false)) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "i") {
         event.preventDefault();
