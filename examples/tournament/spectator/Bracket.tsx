@@ -10,7 +10,7 @@ import {
   type KeyboardEvent,
   type PointerEvent,
 } from "react";
-import { Minus, Plus, Scan, Search, Trophy, X } from "./Icons";
+import { List, MapGlyph, Minus, Plus, Scan, Search, Trophy, X } from "./Icons";
 import {
   CHAMP_W,
   GAP_X,
@@ -39,6 +39,7 @@ import {
   matchRound,
   playersById,
   roundLabel,
+  useMedia,
   type BracketSide,
   type Match,
   type Snapshot,
@@ -56,22 +57,15 @@ interface BracketProps {
 
 const count = (value: number, unit: string) => `${value} ${unit}${value === 1 ? "" : "s"}`;
 
-export function Bracket({
-  snapshot,
-  selectedMatchId,
-  tracedPlayer,
-  onTrace,
-  onOpenMatch,
-}: BracketProps) {
+const ROUND_LIST = "(max-width: 560px)";
+const TAB_ORDER: Record<BracketSide, number> = { winners: 0, final: 1, losers: 2 };
+
+function useBracketData(snapshot: Snapshot) {
   const tournament = snapshot.tournament;
   const people = useMemo(() => playersById(snapshot), [snapshot]);
   const courts = useMemo(
     () => new Map(snapshot.courts.map((court) => [court.id, court.name])),
     [snapshot.courts],
-  );
-  const byId = useMemo(
-    () => new Map(snapshot.matches.map((match) => [match.id, match])),
-    [snapshot.matches],
   );
   const layout = useMemo(
     () => layoutOf(tournament, snapshot.matches),
@@ -89,6 +83,202 @@ export function Bracket({
   }, [snapshot.matches]);
   const liveIn = (bracket: BracketSide, round: number) =>
     liveCounts.get(`${bracket}:${round}`) ?? 0;
+  return { tournament, people, courts, layout, liveIn };
+}
+
+export function Bracket(props: BracketProps) {
+  const narrow = useMedia(ROUND_LIST);
+  return narrow ? (
+    <PhoneBracket key={props.snapshot.tournament?.id} {...props} />
+  ) : (
+    <BracketMap {...props} />
+  );
+}
+
+function PhoneBracket(props: BracketProps) {
+  const { snapshot, selectedMatchId, tracedPlayer, onOpenMatch } = props;
+  const { tournament, people, courts, layout, liveIn } = useBracketData(snapshot);
+  const rounds = useMemo(
+    () =>
+      [...layout.columns].sort(
+        (left, right) =>
+          TAB_ORDER[left.bracket] - TAB_ORDER[right.bracket] || left.round - right.round,
+      ),
+    [layout.columns],
+  );
+  const [map, setMap] = useState(false);
+  const [picked, setPicked] = useState(
+    () =>
+      (
+        rounds.find((column) => liveIn(column.bracket, column.round) > 0) ??
+        rounds.find((column) =>
+          snapshot.matches.some(
+            (match) =>
+              match.bracket === column.bracket &&
+              match.round === column.round &&
+              (match.status === "ready" || match.status === "waiting"),
+          ),
+        ) ??
+        rounds[0]
+      )?.key,
+  );
+  const current = rounds.find((column) => column.key === picked) ?? rounds[0];
+  const tabs = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const selected = snapshot.matches.find((match) => match.id === selectedMatchId);
+    const column = selected
+      ? rounds.find((entry) => entry.bracket === selected.bracket && entry.round === selected.round)
+      : undefined;
+    if (column) setPicked(column.key);
+  }, [selectedMatchId]);
+
+  useEffect(() => {
+    tabs.current
+      ?.querySelector<HTMLElement>('[aria-selected="true"]')
+      ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [current?.key, map]);
+
+  if (!tournament || !current) return null;
+  const focus = tracedPlayer && people.has(tracedPlayer) ? tracedPlayer : null;
+  const shown = snapshot.matches
+    .filter((match) => match.bracket === current.bracket && match.round === current.round)
+    .sort((left, right) => left.slot - right.slot);
+  const liveNow = liveIn(current.bracket, current.round);
+
+  const pick = (index: number) => {
+    const column = rounds[(index + rounds.length) % rounds.length];
+    if (!column) return;
+    setPicked(column.key);
+    tabs.current?.querySelector<HTMLElement>(`[data-round="${column.key}"]`)?.focus();
+  };
+
+  return (
+    <div className="co-rounds-view">
+      <div className="co-rounds-bar">
+        {map ? null : (
+          <div
+            ref={tabs}
+            className="co-rounds-tabs"
+            role="tablist"
+            aria-label="Rounds"
+            onKeyDown={(event) => {
+              const at = rounds.indexOf(current);
+              const to =
+                event.key === "ArrowRight"
+                  ? at + 1
+                  : event.key === "ArrowLeft"
+                    ? at - 1
+                    : event.key === "Home"
+                      ? 0
+                      : event.key === "End"
+                        ? rounds.length - 1
+                        : null;
+              if (to === null) return;
+              event.preventDefault();
+              pick(to);
+            }}
+          >
+            {rounds.map((column) => {
+              const live = liveIn(column.bracket, column.round);
+              const selected = column.key === current.key;
+              const full = roundLabel(tournament, column.bracket, column.round);
+              return (
+                <button
+                  key={column.key}
+                  type="button"
+                  role="tab"
+                  id={`co-round-tab-${column.key}`}
+                  data-round={column.key}
+                  className="co-rounds-tab"
+                  aria-selected={selected}
+                  aria-controls="co-round-panel"
+                  aria-label={`${full}${live > 0 ? `, ${live} live` : ""}`}
+                  title={full}
+                  tabIndex={selected ? 0 : -1}
+                  onClick={() => setPicked(column.key)}
+                >
+                  {live > 0 ? <span className="co-dot" aria-hidden="true" /> : null}
+                  {roundLabel(tournament, column.bracket, column.round, "tiny")}
+                </button>
+              );
+            })}
+          </div>
+        )}
+        <div className="co-tools-group co-rounds-mode" role="group" aria-label="Bracket view">
+          <button
+            type="button"
+            className="co-tool"
+            aria-pressed={!map}
+            aria-label="Round list"
+            title="Round list"
+            onClick={() => setMap(false)}
+          >
+            <List size={15} />
+          </button>
+          <button
+            type="button"
+            className="co-tool"
+            aria-pressed={map}
+            aria-label="Map"
+            title="Map"
+            onClick={() => setMap(true)}
+          >
+            <MapGlyph size={15} />
+          </button>
+        </div>
+      </div>
+      {map ? (
+        <BracketMap {...props} />
+      ) : (
+        <section
+          className={`co-rounds-panel${focus ? " is-tracing" : ""}`}
+          id="co-round-panel"
+          role="tabpanel"
+          aria-labelledby={`co-round-tab-${current.key}`}
+        >
+          <h2 className="co-rail-title">
+            {roundLabel(tournament, current.bracket, current.round)}
+            {liveNow > 0 ? <em>{liveNow} live</em> : null}
+          </h2>
+          <ol className="co-rounds-list">
+            {shown.map((match) => (
+              <li key={match.id}>
+                <MatchNode
+                  tournament={tournament}
+                  snapshot={snapshot}
+                  match={match}
+                  people={people}
+                  court={match.courtId ? courts.get(match.courtId) : undefined}
+                  focus={focus}
+                  traced={focus !== null && (match.playerA === focus || match.playerB === focus)}
+                  selected={selectedMatchId === match.id}
+                  onHover={noHover}
+                  onOpen={onOpenMatch}
+                />
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
+    </div>
+  );
+}
+
+const noHover = () => undefined;
+
+function BracketMap({
+  snapshot,
+  selectedMatchId,
+  tracedPlayer,
+  onTrace,
+  onOpenMatch,
+}: BracketProps) {
+  const { tournament, people, courts, layout, liveIn } = useBracketData(snapshot);
+  const byId = useMemo(
+    () => new Map(snapshot.matches.map((match) => [match.id, match])),
+    [snapshot.matches],
+  );
   const [hovered, setHovered] = useState<string | null>(null);
   const openRef = useRef(onOpenMatch);
   openRef.current = onOpenMatch;
@@ -684,8 +874,8 @@ interface MatchNodeProps {
   selected: boolean;
   onHover(id: string | null): void;
   onOpen(match: Match): void;
-  left: number;
-  top: number;
+  left?: number;
+  top?: number;
 }
 
 const MatchNode = memo(function MatchNode({
@@ -740,8 +930,8 @@ const MatchNode = memo(function MatchNode({
     <div
       className={`co-node is-${match.status}${traced ? " is-traced" : ""}${
         selected ? " is-selected" : ""
-      }${series ? " is-series" : ""}`}
-      style={{ left, top, width: NODE_W, height: NODE_H }}
+      }${series ? " is-series" : ""}${left === undefined ? " is-listed" : ""}`}
+      style={left === undefined ? { height: NODE_H } : { left, top, width: NODE_W, height: NODE_H }}
     >
       <span className="co-node-num" aria-hidden="true">
         {match.number}

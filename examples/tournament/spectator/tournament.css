@@ -725,6 +725,100 @@ button.co-canvas-round:focus-visible {
   transition: opacity 140ms;
 }
 
+.co-node.is-listed {
+  position: relative;
+}
+
+.co-rounds-view {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--co-sunken);
+}
+
+.co-rounds-view > .co-canvas {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+}
+
+.co-rounds-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px 6px 12px;
+  background: var(--co-surface);
+  border-bottom: 1px solid var(--co-line);
+}
+
+.co-rounds-tabs {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.co-rounds-mode {
+  flex: none;
+  margin-left: auto;
+}
+
+.co-rounds-tab {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--co-ink-2);
+  font-size: 12px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.co-rounds-tab:hover {
+  background: var(--co-hover);
+  color: var(--co-ink);
+}
+
+.co-rounds-tab[aria-selected="true"] {
+  background: var(--co-accent-soft);
+  color: var(--co-accent-ink);
+}
+
+.co-rounds-panel {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 16px 24px;
+}
+
+.co-rounds-panel > .co-rail-title {
+  justify-content: flex-start;
+}
+
+.co-rounds-panel > .co-rail-title em {
+  font-style: normal;
+  letter-spacing: 0.02em;
+  color: var(--co-live);
+}
+
+.co-rounds-list {
+  display: grid;
+  gap: 28px;
+  margin: 0;
+  padding: 18px 0 0 26px;
+  list-style: none;
+}
+
 .is-tracing .co-wire:not(.is-lit) {
   opacity: 0.4;
 }
