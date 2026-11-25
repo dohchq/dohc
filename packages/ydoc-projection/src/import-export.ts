@@ -1155,7 +1155,13 @@ export function serializeRichdocBody(root: JSONContent): string {
   const scope = [reserveToken("MARK"), reserveToken("MARK")] as const;
   // A typed `*`, `_`, backtick, or backslash is held until the inline writer
   // sees what the reader would pair it with. A highlight's own `\=` is
-  // written as it is.
+  // written as it is. Only a block with a mark other than code holds them:
+  // the engine keeps a block it can't read as the Markdown the file spells,
+  // with no mark but code, and that text must be written as it is.
+  const formattedBeyondCode = (content: JSONContent[]): boolean =>
+    content.some(
+      (node) => node.type === "text" && node.marks?.some((mark) => mark.type !== "code"),
+    );
   const holdTypedSyntax = (content: JSONContent[]): JSONContent[] =>
     content.map((node) => {
       if (typeof node.text !== "string" || node.marks?.some((mark) => mark.type === "code")) {
@@ -1232,6 +1238,7 @@ export function serializeRichdocBody(root: JSONContent): string {
       return { ...node, content: [{ type: "text", text: token }] };
     }
 
+    const formatted = formattedBeyondCode(node.content ?? []);
     let content = insideTableCell
       ? node.content?.flatMap(prepareTableCellBlock)
       : node.content?.map((child) => visit(child, false, node.type));
@@ -1268,7 +1275,7 @@ export function serializeRichdocBody(root: JSONContent): string {
           ];
         }
       }
-      content = holdTypedSyntax(content);
+      if (formatted) content = holdTypedSyntax(content);
       content = renderInlineCodeRuns(
         content,
         characterSentinels,

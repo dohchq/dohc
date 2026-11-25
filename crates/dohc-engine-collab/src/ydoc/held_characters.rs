@@ -14,6 +14,7 @@ pub(super) const LINK_AMPERSAND: char = '\u{e006}';
 
 const PAIRING_WORK_PER_CELL: usize = 256;
 const PAIRING_MINIMUM_CELLS: usize = 256;
+const PAIRING_WORK_LIMIT: usize = 1 << 21;
 
 thread_local! {
     static WRITTEN_LINK_AMPERSAND: Shared<char> = const { Shared::new('&') };
@@ -164,7 +165,7 @@ impl Shown {
 }
 
 enum Cell {
-    Text(Shown),
+    Text { first: Shown, last: Shown },
     Delimiter(char),
     Held { character: char, at: usize },
     Opaque(String),
@@ -183,8 +184,9 @@ enum Side {
 /// from pairing, is written as a reference. A backslash before ASCII
 /// punctuation is doubled. The others are written as they are, so text that
 /// reads back keeps its bytes. Modeling how the reader pairs them takes at
-/// most [`PAIRING_WORK_PER_CELL`] steps per character. Past that, only a
-/// backtick beside code is written as a reference.
+/// most [`PAIRING_WORK_PER_CELL`] steps per cell and [`PAIRING_WORK_LIMIT`]
+/// steps in all. Past that, only a backtick beside code is written as a
+/// reference.
 pub(super) fn write_held_characters(markdown: String) -> ProjectionResult<String> {
     if !markdown.chars().any(is_marker) {
         return Ok(markdown);
@@ -343,16 +345,30 @@ fn flush(cells: &mut Vec<Cell>, plain: &mut String) {
         } else {
             None
         };
-        if let Some(width) = width {
-            cells.push(Cell::Text(Shown::Reference));
-            rest = &rest[width..];
-            continue;
+        rest = &rest[width.unwrap_or(character.len_utf8())..];
+        let shown = if width.is_some() {
+            Shown::Reference
+        } else {
+            Shown::Character(character)
+        };
+        let joins_run = matches!(shown, Shown::Character(next) if !matches!(next, '*' | '_' | '`'))
+            && matches!(
+                cells.last(),
+                Some(Cell::Text { first: Shown::Character(first), .. }) if *first != '`'
+            );
+        if joins_run {
+            if let Some(Cell::Text { last, .. }) = cells.last_mut() {
+                *last = shown;
+            }
+        } else {
+            cells.push(match shown {
+                Shown::Character(delimiter @ ('*' | '_')) => Cell::Delimiter(delimiter),
+                _ => Cell::Text {
+                    first: shown,
+                    last: shown,
+                },
+            });
         }
-        cells.push(match character {
-            '*' | '_' => Cell::Delimiter(character),
-            _ => Cell::Text(Shown::Character(character)),
-        });
-        rest = &rest[character.len_utf8()..];
     }
     plain.clear();
 }
@@ -375,7 +391,10 @@ fn ends_underline(cells: &[Cell], index: usize) -> bool {
 
 fn shown(cell: &Cell, escaped: &[bool], index: usize, side: Side) -> Option<Shown> {
     match cell {
-        Cell::Text(shown) => Some(*shown),
+        Cell::Text { first, last } => Some(match side {
+            Side::First => *first,
+            Side::Last => *last,
+        }),
         Cell::Delimiter(character) => Some(Shown::Character(*character)),
         Cell::Held { character, .. } => Some(if escaped[index] {
             Shown::Reference
@@ -449,8 +468,8 @@ fn backtick_runs(
                     }
                 }
             }
-            Cell::Text(shown) => {
-                if shown.is('`') {
+            Cell::Text { first, .. } => {
+                if first.is('`') {
                     run.push(Backtick { index, held: false });
                 } else if end(&mut found, &mut run) {
                     return found;
@@ -505,7 +524,8 @@ struct Pairing<'a> {
 
 impl<'a> Pairing<'a> {
     fn new(cells: &'a [Cell], escaped: Vec<bool>) -> Self {
-        let work = cells.len().max(PAIRING_MINIMUM_CELLS) * PAIRING_WORK_PER_CELL;
+        let work = (cells.len().max(PAIRING_MINIMUM_CELLS) * PAIRING_WORK_PER_CELL)
+            .min(PAIRING_WORK_LIMIT);
         Self {
             cells,
             escaped,
@@ -893,8 +913,11 @@ impl<'a> Pairing<'a> {
                     }
                 }
             }
-            if !shown.is('_') {
-                before = Some(shown);
+            let last = self
+                .shown(index, Side::Last)
+                .expect("text shows a character");
+            if !last.is('_') {
+                before = Some(last);
             }
             index += 1;
         }

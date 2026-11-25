@@ -1,7 +1,7 @@
 import type { InlineTokens } from "./inline-marks.js";
 
 type Cell =
-  | { kind: "text"; character: string }
+  | { kind: "text"; first: string; last: string }
   | { kind: "delimiter"; character: string }
   | { kind: "held"; character: string; at: number }
   | { kind: "opaque"; written: string }
@@ -13,6 +13,7 @@ const PUNCTUATION = /[\p{P}\p{S}]/u;
 const ASCII_PUNCTUATION = /^[!-/:-@[-`{-~]/u;
 const PAIRING_WORK_PER_CELL = 256;
 const PAIRING_MINIMUM_CELLS = 256;
+const PAIRING_WORK_LIMIT = 2 ** 21;
 const REFERENCE = "";
 const TOKEN = /DOHC[A-Z]+\d+/gu;
 
@@ -22,8 +23,8 @@ const TOKEN = /DOHC[A-Z]+\d+/gu;
  * pairing, is written as a reference. A backslash before ASCII punctuation is
  * doubled. The others are written as they are, so text that reads back keeps
  * its bytes. Modeling how the reader pairs them takes at most
- * `PAIRING_WORK_PER_CELL` steps per character. Past that, only a backtick
- * beside code is written as a reference.
+ * `PAIRING_WORK_PER_CELL` steps per cell and `PAIRING_WORK_LIMIT` steps in
+ * all. Past that, only a backtick beside code is written as a reference.
  */
 export function writeHeldCharacters(markdown: string, tokens: InlineTokens): string {
   if (tokens.held.size === 0 || !markdown.includes("DOHCHELD")) return markdown;
@@ -59,13 +60,23 @@ function cellsOf(markdown: string, tokens: InlineTokens): Cell[] {
   let at = 0;
   let last = 0;
   const flush = () => {
-    for (const piece of tokens.write(plain).match(/&(?:amp;)?#\d+;|\\=|[\s\S]/gu) ?? []) {
-      if (piece.length > 1) {
-        cells.push({ kind: "text", character: REFERENCE });
-      } else if (piece === "*" || piece === "_") {
-        cells.push({ kind: "delimiter", character: piece });
+    for (const [, reference, delimiter, other] of tokens
+      .write(plain)
+      .matchAll(/(&(?:amp;)?#\d+;|\\=)|([*_`])|([^*_`&\\]+|[\s\S])/gu)) {
+      if (reference) {
+        cells.push({ kind: "text", first: REFERENCE, last: REFERENCE });
+      } else if (delimiter === "`") {
+        cells.push({ kind: "text", first: delimiter, last: delimiter });
+      } else if (delimiter) {
+        cells.push({ kind: "delimiter", character: delimiter });
       } else {
-        cells.push({ kind: "text", character: piece });
+        const characters = Array.from(other!);
+        const previous = cells.at(-1);
+        if (previous?.kind === "text" && previous.first !== REFERENCE && previous.first !== "`") {
+          previous.last = characters.at(-1)!;
+        } else {
+          cells.push({ kind: "text", first: characters[0]!, last: characters.at(-1)! });
+        }
       }
     }
     plain = "";
@@ -128,6 +139,7 @@ function endsUnderline(cells: Cell[], index: number): boolean {
 function shown(cell: Cell, escaped: Set<number>, index: number, side: "first" | "last") {
   switch (cell.kind) {
     case "text":
+      return side === "first" ? cell.first : cell.last;
     case "delimiter":
       return cell.character;
     case "held":
@@ -192,9 +204,10 @@ function backtickRuns(
         if (piece === "`") run.push({ index, held: false });
         else if (end()) return found;
       }
-    } else if (cell.kind === "text" || cell.kind === "delimiter") {
-      if (cell.character === "`") run.push({ index, held: false });
-      else if (end()) return found;
+    } else if (cell.kind === "text" && cell.first === "`") {
+      run.push({ index, held: false });
+    } else if ((cell.kind === "text" || cell.kind === "delimiter") && end()) {
+      return found;
     }
   }
   end();
@@ -214,7 +227,10 @@ type Match = { from: number; width: number; end: number };
 class PairingTooLong extends Error {}
 
 function escapePairs(cells: Cell[], escaped: Set<number>): boolean {
-  let work = Math.max(cells.length, PAIRING_MINIMUM_CELLS) * PAIRING_WORK_PER_CELL;
+  let work = Math.min(
+    Math.max(cells.length, PAIRING_MINIMUM_CELLS) * PAIRING_WORK_PER_CELL,
+    PAIRING_WORK_LIMIT,
+  );
   const spend = (steps: number): void => {
     work -= steps;
     if (work < 0) throw new PairingTooLong();
@@ -466,7 +482,8 @@ function escapePairs(cells: Cell[], escaped: Set<number>): boolean {
           continue;
         }
       }
-      if (character !== "_") before = character;
+      const last = shown(cell, escaped, index, "last")!;
+      if (last !== "_") before = last;
       index += 1;
     }
   };

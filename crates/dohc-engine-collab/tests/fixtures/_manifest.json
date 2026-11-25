@@ -88,6 +88,7 @@
   "richdocProjection-empty-lists.json",
   "richdocProjection-empty-list-in-table-cell.json",
   "richdocProjection-mixed-formatting.json",
+  "richdocProjection-pairing-budget.json",
   "offsetProbe.json",
   "surrogateProbe.json",
   "nestedFrontmatter.json",

@@ -6,9 +6,9 @@ use super::held_characters::{
     SCOPE_OPEN,
 };
 use super::{
-    active_mark, contains_same_mark, is_js_whitespace, js_value_string, remove_active, set_active,
-    split_leading_js_whitespace, split_trailing_js_whitespace, MarkKind, MarkdownMark,
-    ProjectionBuffer, ProjectionResult,
+    active_mark, checked_projection_len, contains_same_mark, is_js_whitespace, js_value_string,
+    remove_active, set_active, split_leading_js_whitespace, split_trailing_js_whitespace, MarkKind,
+    MarkdownMark, ProjectionBuffer, ProjectionResult,
 };
 
 pub(super) enum Piece {
@@ -199,6 +199,7 @@ fn marks_to_close_at_end(
 struct Writer<'p> {
     pieces: &'p [Piece],
     result: Vec<String>,
+    written: usize,
     tails: Vec<OnceCell<String>>,
     active: Vec<MarkdownMark>,
     modes: BTreeMap<MarkKind, Mode>,
@@ -211,15 +212,18 @@ impl Writer<'_> {
         self.modes.get(&kind).copied().unwrap_or(Mode::Markdown)
     }
 
-    fn push(&mut self, text: String) {
+    fn push(&mut self, text: String) -> ProjectionResult<()> {
+        self.written = checked_projection_len(self.written, text.len())?;
         self.result.push(text);
         self.tails.push(OnceCell::new());
+        Ok(())
     }
 
-    fn close_before_trailing_whitespace(&mut self, closings: &str) {
+    fn close_before_trailing_whitespace(&mut self, closings: &str) -> ProjectionResult<()> {
         let Some(last) = self.result.last_mut() else {
-            return;
+            return Ok(());
         };
+        self.written = checked_projection_len(self.written, closings.len())?;
         let written = {
             let (body, spaces) = split_trailing_js_whitespace(last);
             format!("{body}{closings}{spaces}")
@@ -228,6 +232,7 @@ impl Writer<'_> {
         if let Some(tail) = self.tails.last_mut() {
             *tail = OnceCell::new();
         }
+        Ok(())
     }
 
     fn written_end(&self) -> String {
@@ -448,6 +453,7 @@ pub(super) fn write_inline(pieces: &[Piece]) -> ProjectionResult<String> {
     let mut writer = Writer {
         pieces,
         result: Vec::with_capacity(pieces.len()),
+        written: 0,
         tails: Vec::with_capacity(pieces.len()),
         active: Vec::new(),
         modes: BTreeMap::new(),
@@ -469,7 +475,7 @@ pub(super) fn write_inline(pieces: &[Piece]) -> ProjectionResult<String> {
                 written.push(OPAQUE_OPEN);
                 written.push_str(rendered);
                 written.push(OPAQUE_CLOSE);
-                writer.push(written);
+                writer.push(written)?;
                 loose_edge = Some(true);
                 continue;
             }
@@ -478,7 +484,7 @@ pub(super) fn write_inline(pieces: &[Piece]) -> ProjectionResult<String> {
         let reopening = std::mem::take(&mut reopened);
         if writer.active.is_empty() && marks.is_empty() {
             loose_edge = ends_with_escape(source).then_some(true);
-            writer.push(source.clone());
+            writer.push(source.clone())?;
             continue;
         }
         let current = by_kind(marks);
@@ -496,7 +502,7 @@ pub(super) fn write_inline(pieces: &[Piece]) -> ProjectionResult<String> {
                 closings.push_str(&writer.close(kind, &current, true));
             }
             if !closings.is_empty() {
-                writer.close_before_trailing_whitespace(&closings);
+                writer.close_before_trailing_whitespace(&closings)?;
                 reopens_here = true;
             }
         }
@@ -596,7 +602,7 @@ pub(super) fn write_inline(pieces: &[Piece]) -> ProjectionResult<String> {
         loose_edge = (closed && trailing.is_empty() && middle_trailing.is_empty()).then_some(true);
         text.push_str(&trailing);
         text.push_str(middle_trailing);
-        writer.push(text);
+        writer.push(text)?;
     }
     let mut joined = ProjectionBuffer::new();
     for text in &writer.result {

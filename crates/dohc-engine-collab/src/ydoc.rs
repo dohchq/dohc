@@ -9132,6 +9132,10 @@ fn render_inline(
 
     let mut source_parts = Vec::new();
     flatten(nodes, &mut source_parts);
+    let formatted_beyond_code = source_parts.iter().any(|part| {
+        matches!(part, SourceInlinePart::Text(run)
+            if run.marks.iter().any(|mark| mark.kind != MarkKind::Code))
+    });
     let definition = escape_block_syntax
         && matches!(
             source_parts.first(),
@@ -9420,7 +9424,11 @@ fn render_inline(
             else {
                 unreachable!();
             };
-            run.text = held_characters::hold_typed(&escaped);
+            run.text = if formatted_beyond_code {
+                held_characters::hold_typed(&escaped)
+            } else {
+                escaped
+            };
             *literal_markdown = true;
             for part in &mut parts[run_start + 1..part_index] {
                 let InlinePart::Text { run, .. } = part else {
@@ -10710,9 +10718,10 @@ mod projection_tests {
         }
     }
 
-    // #4139: marks nest in an order whose delimiters the reader reads back,
-    // and a typed `*`, `_`, backtick, or backslash the reader would read as
-    // syntax is escaped. The TypeScript writer's tests have the same cases.
+    // #4139: marks nest in an order whose delimiters the reader reads back.
+    // In a paragraph with a mark other than code, a typed `*`, `_`, backtick,
+    // or backslash the reader would read as syntax is escaped. The TypeScript
+    // writer's tests have the same cases.
     #[test]
     fn mixed_formatting_and_typed_markers_are_written_so_they_read_back() {
         let plain = Attrs::new;
@@ -10767,9 +10776,18 @@ mod projection_tests {
                 vec![("x", marks(&["bold", "italic"])), ("y", marks(&["italic"]))],
                 "***x**y*\n",
             ),
-            (vec![("*a b*", plain())], "&#42;a b&#42;\n"),
-            (vec![("_a b_", plain())], "&#95;a b&#95;\n"),
-            (vec![("a*b*", plain())], "a&#42;b&#42;\n"),
+            (
+                vec![("b", marks(&["bold"])), (" *a b*", plain())],
+                "**b** &#42;a b&#42;\n",
+            ),
+            (
+                vec![("b", marks(&["bold"])), (" _a b_", plain())],
+                "**b** &#95;a b&#95;\n",
+            ),
+            (
+                vec![("b", marks(&["bold"])), (" a*b*", plain())],
+                "**b** a&#42;b&#42;\n",
+            ),
             (
                 vec![("**", plain()), ("_x", marks(&["bold"])), ("**", plain())],
                 "&#42;&#42;**&#95;x**&#42;&#42;\n",
@@ -10783,21 +10801,45 @@ mod projection_tests {
                 "&#32;*&#95;*\n",
             ),
             (
-                vec![("a ` b ", plain()), ("x", marks(&["code"]))],
-                "a &#96; b `x`\n",
+                vec![
+                    ("b", marks(&["bold"])),
+                    (" a ` b ", plain()),
+                    ("x", marks(&["code"])),
+                ],
+                "**b** a &#96; b `x`\n",
             ),
             (
-                vec![("a \\", plain()), ("x", marks(&["code"]))],
-                "a \\\\`x`\n",
+                vec![
+                    ("b", marks(&["bold"])),
+                    (" a \\", plain()),
+                    ("x", marks(&["code"])),
+                ],
+                "**b** a \\\\`x`\n",
             ),
             (
                 vec![("a\\", plain()), ("b", marks(&["bold"]))],
                 "a\\\\**b**\n",
             ),
-            (vec![("a\\*b*", plain())], "a\\\\&#42;b&#42;\n"),
-            (vec![("2 * 3", plain())], "2 * 3\n"),
-            (vec![("snake_case_name", plain())], "snake_case_name\n"),
-            (vec![("a ** b", plain())], "a ** b\n"),
+            (
+                vec![("b", marks(&["bold"])), (" a\\*b*", plain())],
+                "**b** a\\\\&#42;b&#42;\n",
+            ),
+            (
+                vec![("b", marks(&["bold"])), (" 2 * 3", plain())],
+                "**b** 2 * 3\n",
+            ),
+            (
+                vec![("b", marks(&["bold"])), (" snake_case_name", plain())],
+                "**b** snake_case_name\n",
+            ),
+            (
+                vec![("b", marks(&["bold"])), (" a ** b", plain())],
+                "**b** a ** b\n",
+            ),
+            (
+                vec![("b", marks(&["bold"])), (" 😀_b_😀", plain())],
+                "**b** 😀&#95;b&#95;😀\n",
+            ),
             (
                 vec![("*Terms apply. Also ", plain()), ("em", marks(&["italic"]))],
                 "*Terms apply. Also *em*\n",
@@ -10806,6 +10848,37 @@ mod projection_tests {
         for (runs, expected) in cases {
             assert_eq!(paragraph_markdown(runs), expected);
         }
+    }
+
+    // A file's paragraph this reader can't follow is kept as the Markdown it
+    // spells, with no mark but code, so a paragraph like that keeps the bytes
+    // it had. The TypeScript writer's test has the same cases.
+    #[test]
+    fn a_paragraph_without_other_marks_keeps_its_typed_bytes() {
+        let plain = Attrs::new;
+        let cases: Vec<(Vec<(&str, Attrs)>, &str)> = vec![
+            (vec![("*a b*", plain())], "*a b*\n"),
+            (
+                vec![("a \\", plain()), ("x", marks(&["code"]))],
+                "a \\`x`\n",
+            ),
+            (vec![("\\[x] task", plain())], "\\[x] task\n"),
+        ];
+        for (runs, expected) in cases {
+            assert_eq!(paragraph_markdown(runs), expected);
+        }
+    }
+
+    // Modeling how the reader pairs these backticks takes 2,687,147 steps,
+    // past the writer's limit of 2,097,152, so they are written as typed. The
+    // TypeScript writer's test has the same case.
+    #[test]
+    fn a_paragraph_past_the_pairing_limit_keeps_its_typed_characters() {
+        let typed = " `a".repeat(53_334);
+        assert_eq!(
+            paragraph_markdown(vec![("b", marks(&["bold"])), (&typed, Attrs::new())]),
+            format!("**b**{typed}\n")
+        );
     }
 
     #[test]

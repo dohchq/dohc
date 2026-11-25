@@ -610,11 +610,11 @@ function markedCharactersOf(document: JSONContent): string[] {
   );
 }
 
-// #4139: marks nest in an order whose delimiters the reader reads back,
-// a typed `*`, `_`, or backtick the reader would pair is written as a
-// reference, and a typed backslash before punctuation is doubled. Typed
-// characters that pair with nothing keep their bytes. The engine writer's
-// test has the same cases.
+// #4139: marks nest in an order whose delimiters the reader reads back. In a
+// paragraph with a mark other than code, a typed `*`, `_`, or backtick the
+// reader would pair is written as a reference, and a typed backslash before
+// punctuation is doubled. Typed characters that pair with nothing keep their
+// bytes. The engine writer's test has the same cases.
 it.each([
   [
     "bold and underline inside a word",
@@ -639,9 +639,9 @@ it.each([
     "a==*x*==b",
   ],
   ["bold closing inside italic", [boldItalic("x"), italic("y")], "***x**y*"],
-  ["typed asterisks around words", [plain("*a b*")], "&#42;a b&#42;"],
-  ["typed underscores around words", [plain("_a b_")], "&#95;a b&#95;"],
-  ["typed asterisks inside a word", [plain("a*b*")], "a&#42;b&#42;"],
+  ["typed asterisks around words", [bold("b"), plain(" *a b*")], "**b** &#42;a b&#42;"],
+  ["typed underscores around words", [bold("b"), plain(" _a b_")], "**b** &#95;a b&#95;"],
+  ["typed asterisks inside a word", [bold("b"), plain(" a*b*")], "**b** a&#42;b&#42;"],
   [
     "typed asterisks around bold",
     [plain("**"), bold("_x"), plain("**")],
@@ -649,13 +649,22 @@ it.each([
   ],
   ["a struck asterisk after a backtick", [plain("`"), marked("*", "strike")], "&#96;~~&#42;~~"],
   ["an italic underscore after a space", [plain(" "), italic("_")], "&#32;*&#95;*"],
-  ["a typed backtick before code", [plain("a ` b "), marked("x", "code")], "a &#96; b `x`"],
-  ["a typed backslash before code", [plain("a \\"), marked("x", "code")], "a \\\\`x`"],
+  [
+    "a typed backtick before code",
+    [bold("b"), plain(" a ` b "), marked("x", "code")],
+    "**b** a &#96; b `x`",
+  ],
+  [
+    "a typed backslash before code",
+    [bold("b"), plain(" a \\"), marked("x", "code")],
+    "**b** a \\\\`x`",
+  ],
   ["a typed backslash before bold", [plain("a\\"), bold("b")], "a\\\\**b**"],
-  ["a typed backslash before an asterisk", [plain("a\\*b*")], "a\\\\&#42;b&#42;"],
-  ["a multiplication", [plain("2 * 3")], "2 * 3"],
-  ["a name in snake case", [plain("snake_case_name")], "snake_case_name"],
-  ["two asterisks between spaces", [plain("a ** b")], "a ** b"],
+  ["a typed backslash before an asterisk", [bold("b"), plain(" a\\*b*")], "**b** a\\\\&#42;b&#42;"],
+  ["a multiplication", [bold("b"), plain(" 2 * 3")], "**b** 2 * 3"],
+  ["a name in snake case", [bold("b"), plain(" snake_case_name")], "**b** snake_case_name"],
+  ["two asterisks between spaces", [bold("b"), plain(" a ** b")], "**b** a ** b"],
+  ["typed underscores between emoji", [bold("b"), plain(" 😀_b_😀")], "**b** 😀&#95;b&#95;😀"],
   [
     "an asterisk that pairs with nothing",
     [plain("*Terms apply. Also "), italic("em")],
@@ -671,6 +680,33 @@ it.each([
     expect(serializeRichdocBody(reopened)).toBe(saved);
   },
 );
+
+// The engine keeps a paragraph it can't read as the Markdown the file spells,
+// with no mark but code, so a paragraph like that keeps the bytes it had. The
+// engine writer's test has the same cases.
+it.each([
+  ["typed asterisks", [plain("*a b*")], "*a b*"],
+  ["a typed backslash before code", [plain("a \\"), marked("x", "code")], "a \\`x`"],
+  ["an escaped bracket", [plain("\\[x] task")], "\\[x] task"],
+] satisfies Array<[string, JSONContent[], string]>)(
+  "writes %s in a paragraph without other marks as typed",
+  (_name, content, saved) => {
+    const document = { type: "doc", content: [{ type: "paragraph", content }] };
+    expect(serializeRichdocBody(document)).toBe(saved);
+  },
+);
+
+// Modeling how the reader pairs these backticks takes 2,687,147 steps, past
+// the writer's limit of 2,097,152, so they are written as typed. The engine
+// writer's test has the same case.
+it("writes typed characters as typed in a paragraph past the pairing limit", () => {
+  const typed = " `a".repeat(53_334);
+  const document = {
+    type: "doc",
+    content: [{ type: "paragraph", content: [bold("b"), plain(typed)] }],
+  };
+  expect(serializeRichdocBody(document)).toBe(`**b**${typed}`);
+});
 
 // The underline opens on the space and is written outside the italic. Opened
 // with the italic at the text instead, it would read back as literal asterisks.

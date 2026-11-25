@@ -1164,9 +1164,10 @@ const RICHDOC_PROJECTION_CASES = [
       ]),
   },
   {
-    // #4139: marks nest in an order whose delimiters the reader reads back,
-    // and a typed `*`, `_`, backtick, or backslash the reader would read as
-    // syntax is escaped.
+    // #4139: marks nest in an order whose delimiters the reader reads back.
+    // In a paragraph with a mark other than code, a typed `*`, `_`, backtick,
+    // or backslash the reader would read as syntax is escaped. The last
+    // paragraph has no such mark, so it is written as typed.
     name: "mixed-formatting",
     makeDoc: () =>
       directRichdoc([
@@ -1184,12 +1185,26 @@ const RICHDOC_PROJECTION_CASES = [
           ]),
         ]),
         paragraph([xmlRuns([["a"], ["x", { bold: {}, strike: {} }], ["b"]])]),
-        paragraph("*a b* _a b_ a*b* 2 * 3 snake_case_name a ** b"),
-        paragraph([xmlRuns([["a ` b "], ["x", { code: {} }]])]),
-        paragraph([xmlRuns([["a \\"], ["x", { code: {} }]])]),
+        paragraph([xmlRuns([["b", { bold: {} }], [" *a b* _a b_ a*b* 2 * 3 snake_case_name a ** b"]])]),
+        paragraph([xmlRuns([["b", { bold: {} }], [" a ` b "], ["x", { code: {} }]])]),
+        paragraph([xmlRuns([["b", { bold: {} }], [" a \\"], ["x", { code: {} }]])]),
         paragraph([xmlRuns([["a\\"], ["b", { bold: {} }]])]),
-        paragraph("a\\*b*"),
+        paragraph([xmlRuns([["b", { bold: {} }], [" a\\*b*"]])]),
+        paragraph([xmlRuns([["b", { bold: {} }], [" 😀_b_😀"]])]),
+        paragraph("*a b* _a b_ a*b* 2 * 3 snake_case_name a ** b"),
       ]),
+  },
+  {
+    // Both writers spend the same pairing work: the first paragraph is the
+    // longest of these whose typed characters are still escaped, and the
+    // second is written as typed.
+    name: "pairing-budget",
+    makeDoc: () =>
+      directRichdoc(
+        [104, 105].map((repeats) =>
+          paragraph([xmlRuns([["b", { bold: {} }], [" " + "*_`\\x ".repeat(repeats)]])]),
+        ),
+      ),
   },
 ];
 
