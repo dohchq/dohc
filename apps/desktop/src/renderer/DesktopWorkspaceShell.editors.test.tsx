@@ -1188,3 +1188,99 @@ it("reopens a live shared document that went read-only when a fast View-to-Edit 
 
   await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
 });
+
+it("follows relayStatesMore and retries after transient unverified checks on live read-only recovery", async () => {
+  const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["a.md"], "a.md")));
+  bridge.listWorkspaceFiles = vi.fn(async () => ({
+    visibility: { status: "ready" as const, rules: [] },
+    files: [{ path: "a.md", kind: "file" as const }],
+    folders: [] as string[],
+  }));
+  const doc = markdownToYDoc("# Shared\n");
+  type SaveListener = (event: {
+    sessionId: string;
+    workspaceId: string;
+    path: string;
+    seq: number;
+    state: { kind: string };
+    access?: "read-only" | "deleted" | "object-changed";
+    readOnlyCause?: string;
+  }) => void;
+  const saveListeners = new Set<SaveListener>();
+  let openedSessionId = "";
+  const openEngineYDocSession = vi.fn(async (payload: { sessionId: string }) => {
+    openedSessionId = payload.sessionId;
+    return {
+      available: true,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      lineageGeneration: 1,
+    };
+  });
+  const unchanged: RefreshSharedViewResult = {
+    ok: true,
+    status: "unchanged",
+    changedPaths: 0,
+    excludedPaths: [],
+    unjournalablePaths: [],
+    refusedOps: 0,
+    refusedDetail: null,
+  };
+  const refreshSharedView = vi.fn(async () => unchanged);
+  const checkSharedViewAccess = vi
+    .fn()
+    .mockResolvedValueOnce({ status: "current" as const, access: "edit" as const })
+    .mockResolvedValueOnce({
+      status: "current" as const,
+      access: "view" as const,
+      relayStatesMore: true as const,
+    });
+  Object.assign(bridge, {
+    openEngineYDocSession,
+    applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
+    closeEngineYDocSession: vi.fn(async () => undefined),
+    onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+    onEngineYDocSaveState: vi.fn((listener: SaveListener) => {
+      saveListeners.add(listener);
+      return () => {
+        saveListeners.delete(listener);
+      };
+    }),
+    onEngineYDocOwnerHandoff: () => () => undefined,
+    prepareEngineYDocOwnerHandoff: async () => undefined,
+    onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+    acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
+      accepted: true as const,
+      updates: [],
+    })),
+    refreshSharedView,
+    checkSharedViewAccess,
+  });
+  renderShell(bridge, {
+    ...WORKSPACE,
+    shareView: { shareId: "share-1", granterEmail: "granter@dohc.test", access: "edit" },
+  });
+  await screen.findByTestId("markdown-source-toggle");
+  await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(checkSharedViewAccess).toHaveBeenCalledTimes(1));
+
+  const manualRefreshes = () =>
+    (refreshSharedView.mock.calls as unknown as Array<[{ trigger?: string }]>).filter(
+      ([payload]) => payload.trigger === "manual",
+    ).length;
+
+  act(() => {
+    for (const listener of [...saveListeners]) {
+      listener({
+        sessionId: openedSessionId,
+        workspaceId: WORKSPACE.workspaceId,
+        path: "a.md",
+        seq: 0,
+        state: { kind: "unknown" },
+        access: "read-only",
+        readOnlyCause: "access-ended",
+      });
+    }
+  });
+
+  await waitFor(() => expect(manualRefreshes()).toBe(2));
+});

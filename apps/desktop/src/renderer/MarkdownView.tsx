@@ -326,6 +326,7 @@ export function MarkdownView(props: {
   // Read-only shared views: editing is disabled regardless of size,
   // and live collab never activates.
   forceReadOnly?: boolean;
+  readOnlyRefreshPending?: boolean;
   // The level allows no editing here, so the page shows this mark in place of its Edit toggle.
   levelMark?: LevelMark | null;
   // Main takes no live edits to this note from this computer until Try again
@@ -2805,6 +2806,13 @@ export function MarkdownView(props: {
             />
             <MarkdownRenderCommitted onRendered={onMarkdownRendered} />
           </Suspense>
+        </div>
+      ) : props.readOnlyRefreshPending ? (
+        <div
+          data-testid="view-markdown"
+          className="min-h-0 flex-1 overflow-auto [scrollbar-gutter:stable]"
+        >
+          <SkeletonRows layout="document" label="Loading…" className="pt-12" />
         </div>
       ) : (
         <div

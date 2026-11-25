@@ -404,7 +404,11 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
   let { count: readOnlyRefreshCount, pending: readOnlyRefreshPending } = readOnlyRefresh;
   if (readOnlyRefresh.key !== key || readOnlyRefresh.readOnly !== !!props.readOnly) {
     const becameReadOnly =
-      readOnlyRefresh.key === key && !readOnlyRefresh.readOnly && !!props.readOnly && isText;
+      readOnlyRefresh.key === key &&
+      !readOnlyRefresh.readOnly &&
+      !!props.readOnly &&
+      !props.accessEnded &&
+      isText;
     readOnlyRefreshCount += becameReadOnly ? 1 : 0;
     readOnlyRefreshPending = becameReadOnly;
     setReadOnlyRefresh({
@@ -786,7 +790,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
   const reading =
     isText &&
     !engineDocBound &&
-    (text === null || loadedPath !== props.path || readFailedUnchecked || awaitingReadOnlyRead);
+    (text === null || loadedPath !== props.path || readFailedUnchecked);
   // A new page waiting on this file hears when no document opens here to
   // take what was typed; MarkdownView answers for one that does.
   const { onEditorReady } = props;
@@ -1003,6 +1007,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
             pendingUndo={pendingTextUndo}
             onPendingUndoConsumed={props.onPendingUndoConsumed}
             forceReadOnly={props.readOnly}
+            readOnlyRefreshPending={awaitingReadOnlyRead}
             levelMark={props.levelMark}
             liveEditingPaused={props.liveEditingPaused}
             pendingShare={props.pendingShare}

@@ -1692,8 +1692,8 @@ export function registerSharedViewsIpcHandlers<
                 pulling.shareId === view.shareId
               ) {
                 delete pulling.pendingLevel;
-                if (statesMore.relayStatesMore) delete pulling.level;
-                else Object.assign(pulling, sharePinLevel(committedPin));
+                if (!statesMore.relayStatesMore)
+                  Object.assign(pulling, sharePinLevel(committedPin));
               }
               return committedPin.wholeWorkspace === true
                 ? {

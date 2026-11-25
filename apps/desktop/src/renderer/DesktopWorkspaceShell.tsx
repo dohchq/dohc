@@ -3353,6 +3353,7 @@ function WorkspaceShell(props: {
     followUp?: Promise<ShareViewRefresh>;
   } | null>(null);
   const [shareEditVerifiedEpoch, setShareEditVerifiedEpoch] = useState(0);
+  const pendingLiveReadOnlyCheckRef = useRef<string | null>(null);
   const checkShareAccess = useSharedViewAccess({
     workspaceId,
     enabled: workspaceIsReady && !!shareView && !shareViewDamaged && !shareViewEnded,
@@ -3366,6 +3367,12 @@ function WorkspaceShell(props: {
       const pulled = await refreshShareViewRef.current(
         pressBurst ? "press-burst" : shareView?.membership ? "held" : "background",
       );
+      if (pulled !== "level-changed" && pendingLiveReadOnlyCheckRef.current === workspaceId) {
+        void checkShareAccessRef.current().then((checked) => {
+          if (checked.relayStatesMore && !workspaceAdmission.superseded)
+            void refreshShareViewRef.current("manual");
+        });
+      }
       return pulled === "held" || pulled === "level-changed" ? pulled : "other";
     },
     followStatedLevel: () => refreshShareViewRef.current("manual"),
@@ -3379,6 +3386,8 @@ function WorkspaceShell(props: {
     },
     onVerified: (result) => {
       if (!shareView) return;
+      if (pendingLiveReadOnlyCheckRef.current === workspaceId)
+        pendingLiveReadOnlyCheckRef.current = null;
       if (result.status === "current") {
         shareAccessCurrent.dispatchEvent(new Event("current"));
         if (result.access === "edit") setShareEditVerifiedEpoch((epoch) => epoch + 1);
@@ -7275,8 +7284,19 @@ function WorkspaceShell(props: {
   );
   refreshShareViewRef.current = refreshShareView;
   const refreshAfterLiveReadOnly = useCallback(() => {
-    void refreshShareViewRef.current().then((pulled) => {
-      if (pulled === "current" || pulled === "changed") void checkShareAccessRef.current();
+    const targetWorkspaceId = workspaceIdRef.current;
+    void refreshShareViewRef.current().then(async (pulled) => {
+      if (pulled !== "current" && pulled !== "changed") return;
+      if (workspaceIdRef.current !== targetWorkspaceId) return;
+      pendingLiveReadOnlyCheckRef.current = targetWorkspaceId;
+      const checked = await checkShareAccessRef.current();
+      if (workspaceIdRef.current !== targetWorkspaceId) return;
+      if (
+        checked.status !== "unverified" &&
+        pendingLiveReadOnlyCheckRef.current === targetWorkspaceId
+      )
+        pendingLiveReadOnlyCheckRef.current = null;
+      if (checked.relayStatesMore) void refreshShareViewRef.current("manual");
     });
   }, []);
 
