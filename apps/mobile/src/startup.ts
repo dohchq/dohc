@@ -15,13 +15,13 @@ export type LaunchStep = "keychain" | "databases" | "chosen" | "chats";
 
 /** The first time each step of a launch finished, in ms from React Native's runtime start. */
 export function createLaunchTimings(since: () => number | null = msSinceStartup) {
-  const marks = new Map<LaunchStep, number>();
+  const marks = new Map<LaunchStep, { readonly ms: number; readonly from?: string }>();
   return {
-    mark(step: LaunchStep) {
+    mark(step: LaunchStep, from?: string) {
       const ms = since();
-      if (ms !== null && !marks.has(step)) marks.set(step, Math.round(ms));
+      if (ms !== null && !marks.has(step)) marks.set(step, { ms: Math.round(ms), from });
     },
-    marks: (): ReadonlyMap<LaunchStep, number> => marks,
+    marks: (): ReadonlyMap<LaunchStep, { readonly ms: number; readonly from?: string }> => marks,
   };
 }
 

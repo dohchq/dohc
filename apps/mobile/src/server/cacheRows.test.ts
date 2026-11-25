@@ -442,6 +442,20 @@ describe("a relaunch", () => {
     expect(server.calls.filter((call) => call.method === "POST")).toHaveLength(reads);
   });
 
+  it("says a view shows the cache's value until a read from the server replaces it", async () => {
+    const server = serverWithA();
+    const disk = keptDisk();
+    await readBeforeRelaunch(server, disk);
+    const data = open(server, launch(disk).cache);
+    expect(data.fromCache(views.files)).toBe(false);
+    data.subscribe(views.files, () => {});
+    await vi.waitFor(() => expect(data.state(views.files).value).toEqual(A_FILES));
+    expect(data.fromCache(views.files)).toBe(true);
+    await data.refresh(views.files);
+    expect(data.fromCache(views.files)).toBe(false);
+    data.stop();
+  });
+
   it("shows no text after a relaunch for a page only prefetched that a change touched", async () => {
     const server = serverWithA();
     const reread = deferred<Answer>();

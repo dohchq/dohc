@@ -403,6 +403,8 @@ export interface WorkspaceData {
   /** This store's number, different for each one made, so a screen can start afresh with a new store. */
   readonly instance: number;
   state<T>(view: View<T>): ViewState<T>;
+  /** Whether the view shows a value from the cache that no read from the server has replaced yet. */
+  fromCache(view: View<unknown>): boolean;
   /** Opens the view while any listener stays: it reads unless it already shows a fresh value. */
   subscribe(view: View<unknown>, listener: () => void): () => void;
   /** Reads the view now, as a screen about to open it would, unless it shows a fresh value or a read is on its way. */
@@ -481,9 +483,11 @@ export function createWorkspaceData(options: {
     feedState = next;
     for (const listener of feedListeners) listener();
   }
+  const cachedValues = new Set<string>();
   function seed(found: readonly Cached[]) {
     for (const cached of found) {
       if (cached.stale && cached.prefetched) continue;
+      cachedValues.add(cached.view.id);
       const target = entries.get(cached.view.id);
       if (target) {
         target.state = { ...target.state, value: cached.value };
@@ -588,6 +592,7 @@ export function createWorkspaceData(options: {
       (answer) => {
         if (!live() || !target.reads.isLatest(request)) return;
         target.stale = false;
+        cachedValues.delete(target.view.id);
         const previous = unseen ? null : target.state.value;
         const value = target.view.carry ? target.view.carry(previous, answer.value) : answer.value;
         const shownAs = target.view.shownAs;
@@ -750,6 +755,7 @@ export function createWorkspaceData(options: {
     workspaceId,
     instance: ++instances,
     state: <T>(view: View<T>) => entry(view).state as ViewState<T>,
+    fromCache: (view) => cachedValues.has(view.id),
     subscribe(view, listener) {
       const target = entry(view);
       target.listeners.add(listener);

@@ -111,7 +111,7 @@ function ServerChatList({ workspace }: { workspace: PhoneWorkspace }) {
     void data.refresh(views.chats).finally(() => setPulling(false));
   }, [data]);
   useEffect(() => {
-    if (sections) launchTimings?.mark("chats");
+    if (sections) launchTimings?.mark("chats", data?.fromCache(views.chats) ? "cache" : "server");
     if (sections && data) warmUnread(data, sections);
   }, [sections, data, warmUnread]);
   return (

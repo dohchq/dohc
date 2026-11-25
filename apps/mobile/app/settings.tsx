@@ -393,13 +393,16 @@ function SettingsScreen() {
       </Section>
       {launchTimings ? (
         <Section title="Launch">
-          {LAUNCH_STEPS.map(([step, title]) => (
-            <Row
-              key={step}
-              title={title}
-              detail={`${launchTimings?.marks().get(step) ?? "-"} ms`}
-            />
-          ))}
+          {LAUNCH_STEPS.map(([step, title]) => {
+            const mark = launchTimings?.marks().get(step);
+            return (
+              <Row
+                key={step}
+                title={mark?.from ? `${title} (${mark.from})` : title}
+                detail={`${mark?.ms ?? "-"} ms`}
+              />
+            );
+          })}
         </Section>
       ) : null}
       {pageTimings ? (
