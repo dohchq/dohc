@@ -456,16 +456,9 @@ function LinkRowActions(props: {
   });
   const idCopy = useCopy({ getText: () => props.grantId, words: LINK_ID_COPY_WORDS });
   const [lastCopy, setLastCopy] = useState<"agent" | "id">("agent");
-  const startedCopies = useRef(0);
-  const landedCopy = useRef(0);
   const shown = lastCopy === "id" ? idCopy : agentCopy;
   const copyAs = (kind: "agent" | "id", copied: Promise<void>) => {
-    const copy = ++startedCopies.current;
-    void copied.then(() => {
-      if (copy < landedCopy.current) return;
-      landedCopy.current = copy;
-      setLastCopy(kind);
-    });
+    void copied.then(() => setLastCopy(kind));
   };
   const copyForAgent = (setupId: string | null) => copyAs("agent", agentCopy.copy(setupId));
   const copies: MenuEntry[] = [
