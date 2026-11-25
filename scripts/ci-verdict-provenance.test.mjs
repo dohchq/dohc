@@ -1053,7 +1053,7 @@ test("the Windows package job runs the release's packaged smoke and receives no 
 
 test("cloud matrices run every JavaScript and Rust shard with separate evidence", () => {
   const { jobs } = load(workflow);
-  assert.equal(JS_SHARDS, 10);
+  assert.equal(JS_SHARDS, 12);
   assert.equal(RUST_SHARDS, 5);
   for (const [name, count] of [
     ["javascript-workers", JS_SHARDS],
@@ -1088,7 +1088,7 @@ test("the workflow graph pins its total and peak concurrent jobs", () => {
     names = Object.keys(jobs);
   assert.equal(
     names.reduce((total, name) => total + legs(jobs[name]), 0),
-    24,
+    26,
   );
   const ancestors = (name) => {
     const needs = jobs[name].needs ?? [];
@@ -1132,7 +1132,7 @@ test("the workflow graph pins its total and peak concurrent jobs", () => {
   assert.equal(concurrent(initial), JS_SHARDS + 5);
   assert.equal(concurrent(phaseTwoPeak), JS_SHARDS + RUST_SHARDS + 5);
   assert.equal(peak, concurrent(phaseTwoPeak));
-  assert.equal(peak, 20);
+  assert.equal(peak, 22);
   assert.ok(peak <= 60, "one combined gate fits the plan limit");
 });
 

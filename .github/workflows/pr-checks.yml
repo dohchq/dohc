@@ -480,6 +480,8 @@ jobs:
           - 7
           - 8
           - 9
+          - 10
+          - 11
     env:
       DOHC_CONFINEMENT_SUITES: exclude
       CARGO_INCREMENTAL: '0'
