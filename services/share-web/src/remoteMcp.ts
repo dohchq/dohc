@@ -905,15 +905,20 @@ export async function serveRemoteMcp(
   if (!body) return { body: null, status: 429, headers: new Headers() };
   try {
     const parsedBody = body.value;
-    return (
-      refuseBatchedWrite(parsedBody, [COLLECTION_WRITE_TOOL, "dohc_switch_automation"]) ??
-      (await answerMcp(
-        request,
-        parsedBody,
-        () => buildServer(options, metadata, channel),
-        options.signal,
-        options.onAnalyticsEvent,
-      ))
+    const refused = refuseBatchedWrite(parsedBody, [
+      COLLECTION_WRITE_TOOL,
+      "dohc_switch_automation",
+    ]);
+    if (refused) {
+      options.onAnalyticsEvent?.({ kind: "tool_invoked", outcome: "refused", write: true });
+      return refused;
+    }
+    return await answerMcp(
+      request,
+      parsedBody,
+      () => buildServer(options, metadata, channel),
+      options.signal,
+      options.onAnalyticsEvent,
     );
   } finally {
     body.release();
@@ -975,35 +980,53 @@ function reportMcpAnalytics(
     }
   });
   const byId = new Map(replies.filter((m) => "id" in m).map((m) => [m.id, m] as const));
-  const emit = (event: McpAnalyticsEvent) => {
-    try {
-      onEvent(event);
-    } catch {
-      // Analytics never breaks MCP responses.
-    }
-  };
   for (const item of requests) {
-    if (item.method === "initialize" && status === 200) {
-      emit({ kind: "connected" });
+    const hasId = "id" in item && item.id !== undefined;
+    const reply = hasId ? byId.get(item.id) : undefined;
+    if (item.method === "initialize") {
+      if (status === 200 && reply && reply.error === undefined && reply.result !== undefined) {
+        onEvent({ kind: "connected" });
+      }
       continue;
     }
     if (item.method !== "tools/call") continue;
     const toolName = asRecord(item.params)?.name;
     const write = typeof toolName === "string" && MCP_WRITE_TOOLS.has(toolName);
-    const reply = "id" in item ? byId.get(item.id) : replies[0];
-    const result = asRecord(reply?.result);
-    const code = asRecord(result?.structuredContent)?.code;
-    const outcome: "ok" | "error" | "refused" =
-      status === 401 || status === 403 || status === 429
-        ? "refused"
-        : status >= 400 || reply?.error !== undefined
-          ? "error"
-          : result?.isError === true
-            ? typeof code === "string" && MCP_REFUSAL_CODES.has(code)
-              ? "refused"
-              : "error"
-            : "ok";
-    if (write || outcome !== "ok") emit({ kind: "tool_invoked", outcome, write });
+    if (!hasId && status < 400) continue;
+    let outcome: "ok" | "error" | "refused";
+    if (status === 401 || status === 403 || status === 429) {
+      outcome = "refused";
+    } else if (status >= 400 || !reply || reply.error !== undefined) {
+      outcome = "error";
+    } else {
+      const result = asRecord(reply.result);
+      const structured = asRecord(result?.structuredContent);
+      const code = structured?.code;
+      const writeOutcome = structured?.outcome;
+      const switchStatus = asRecord(structured?.result)?.status;
+      if (result?.isError === true) {
+        outcome =
+          (typeof code === "string" && MCP_REFUSAL_CODES.has(code)) ||
+          writeOutcome === "refused" ||
+          writeOutcome === "rate-limited" ||
+          writeOutcome === "stale"
+            ? "refused"
+            : "error";
+      } else if (
+        switchStatus === "refused-write" ||
+        switchStatus === "refused" ||
+        switchStatus === "conflict" ||
+        switchStatus === "reformats" ||
+        switchStatus === "unreadable"
+      ) {
+        outcome = "refused";
+      } else if (switchStatus === "unavailable" || switchStatus === "unknown") {
+        outcome = "error";
+      } else {
+        outcome = "ok";
+      }
+    }
+    if (write || outcome !== "ok") onEvent({ kind: "tool_invoked", outcome, write });
   }
 }
 

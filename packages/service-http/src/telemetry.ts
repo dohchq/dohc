@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 
 const POSTHOG_KEY_PATTERN = /^phc_\w{10,100}$/;
+const MAX_QUEUE = 500;
+const REQUEST_TIMEOUT_MS = 10_000;
+const MAX_RETRY_AGE_MS = 30 * 60_000;
+const MAX_BACKOFF_MS = 60_000;
 
 export interface PostHogProject {
   key: string;
@@ -23,15 +27,15 @@ export class AnalyticsConfigError extends Error {}
 
 export function posthogProject(key: string, host: string): PostHogProject | null {
   const trimmedKey = key.trim();
-  if (!POSTHOG_KEY_PATTERN.test(trimmedKey)) return null;
+  const trimmedHost = host.trim();
+  if (!POSTHOG_KEY_PATTERN.test(trimmedKey) || /[?#]/.test(trimmedHost)) return null;
   let base: URL;
   try {
-    base = new URL(host.trim());
+    base = new URL(trimmedHost);
   } catch {
     return null;
   }
-  if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash)
-    return null;
+  if (base.protocol !== "https:" || base.username || base.password) return null;
   return { key: trimmedKey, base };
 }
 
@@ -83,32 +87,39 @@ export function createServiceAnalyticsClient(options: {
   random?: () => number;
   flushMs?: number;
   batchSize?: number;
-  maxQueue?: number;
-  requestTimeoutMs?: number;
   shutdownTimeoutMs?: number;
-  maxRetryAgeMs?: number;
   baseBackoffMs?: number;
-  maxBackoffMs?: number;
 }): ServiceAnalyticsClient {
   const send = options.fetch ?? fetch;
   const now = options.now ?? Date.now;
   const random = options.random ?? Math.random;
   const flushMs = options.flushMs ?? 15_000;
   const batchSize = options.batchSize ?? 50;
-  const maxQueue = options.maxQueue ?? 500;
-  const requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
   const shutdownTimeoutMs = options.shutdownTimeoutMs ?? 3_000;
-  const maxRetryAgeMs = options.maxRetryAgeMs ?? 30 * 60_000;
   const baseBackoffMs = options.baseBackoffMs ?? 1_000;
-  const maxBackoffMs = options.maxBackoffMs ?? 60_000;
   const queue: QueuedEvent[] = [];
   let timer: ReturnType<typeof setTimeout> | null = null;
   let sending: AbortController | null = null;
   let draining: Promise<void> | null = null;
+  let flushing: Promise<void> | null = null;
   let pausedUntilMs = 0;
   let failures = 0;
   let quitting = false;
   let ended = false;
+
+  const clearTimer = () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+  };
+
+  const dropExpired = () => {
+    const cutoff = now() - MAX_RETRY_AGE_MS;
+    let keep = 0;
+    for (let i = 0; i < queue.length; i += 1) {
+      if (queue[i]!.queuedAtMs >= cutoff) queue[keep++] = queue[i]!;
+    }
+    queue.length = keep;
+  };
 
   const schedule = (delayMs: number) => {
     if (quitting || ended || timer || queue.length === 0) return;
@@ -124,7 +135,7 @@ export function createServiceAnalyticsClient(options: {
 
   const pauseForBackoff = () => {
     failures += 1;
-    const backoff = Math.min(maxBackoffMs, baseBackoffMs * 2 ** (failures - 1));
+    const backoff = Math.min(MAX_BACKOFF_MS, baseBackoffMs * 2 ** (failures - 1));
     pausedUntilMs = now() + Math.round(backoff * (0.75 + 0.5 * random()));
   };
 
@@ -140,7 +151,7 @@ export function createServiceAnalyticsClient(options: {
           batch: batch.map(({ queuedAtMs: _queued, ...payload }) => payload),
         }),
         redirect: "error",
-        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(requestTimeoutMs)]),
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
       });
       await response.body?.cancel().catch(() => {});
       if (response.ok) {
@@ -166,16 +177,23 @@ export function createServiceAnalyticsClient(options: {
 
   const drain = (ignorePause = false): Promise<void> => {
     if (draining) return draining;
-    if (ended || queue.length === 0 || (!ignorePause && now() < pausedUntilMs))
+    dropExpired();
+    if (ended || queue.length === 0) return Promise.resolve();
+    if (!ignorePause && now() < pausedUntilMs) {
+      schedule(pausedUntilMs - now());
       return Promise.resolve();
+    }
+    clearTimer();
     draining = (async () => {
       try {
-        while (!ended && queue.length > 0 && (ignorePause || now() >= pausedUntilMs)) {
+        while (!ended) {
+          dropExpired();
+          if (queue.length === 0 || (!ignorePause && now() < pausedUntilMs)) break;
           const batch = queue.splice(0, batchSize);
           if ((await sendBatch(batch)) === "retry") {
             if (!quitting && !ended) {
-              const kept = batch.filter((item) => item.queuedAtMs >= now() - maxRetryAgeMs);
-              const room = Math.max(0, maxQueue - queue.length);
+              const kept = batch.filter((item) => item.queuedAtMs >= now() - MAX_RETRY_AGE_MS);
+              const room = Math.max(0, MAX_QUEUE - queue.length);
               if (room > 0 && kept.length > 0) queue.unshift(...kept.slice(kept.length - room));
               schedule(pausedUntilMs - now());
             }
@@ -192,18 +210,18 @@ export function createServiceAnalyticsClient(options: {
 
   return {
     track(event, properties = {}) {
-      if (ended || quitting || queue.length >= maxQueue) return;
+      if (ended || quitting || queue.length >= MAX_QUEUE) return;
       const atMs = now();
       queue.push({
         event,
         distinct_id: randomUUID(),
         uuid: randomUUID(),
         properties: {
+          ...properties,
           $process_person_profile: false,
           $geoip_disable: true,
           $lib: `dohc-${options.service}`,
           service: options.service,
-          ...properties,
         },
         timestamp: new Date(atMs).toISOString(),
         queuedAtMs: atMs,
@@ -211,22 +229,24 @@ export function createServiceAnalyticsClient(options: {
       if (queue.length >= batchSize) void drain();
       else schedule(flushMs);
     },
-    async flush() {
-      if (quitting) return;
+    flush() {
+      if (flushing) return flushing;
       quitting = true;
-      if (timer) clearTimeout(timer);
-      timer = null;
-      let deadline: ReturnType<typeof setTimeout> | undefined;
-      await Promise.race([
-        drain(true).catch(() => {}),
-        new Promise<void>((resolve) => {
-          deadline = setTimeout(resolve, shutdownTimeoutMs);
-        }),
-      ]);
-      clearTimeout(deadline);
-      ended = true;
-      sending?.abort();
-      queue.length = 0;
+      clearTimer();
+      flushing = (async () => {
+        let deadline: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          drain(true).catch(() => {}),
+          new Promise<void>((resolve) => {
+            deadline = setTimeout(resolve, shutdownTimeoutMs);
+          }),
+        ]);
+        clearTimeout(deadline);
+        ended = true;
+        sending?.abort();
+        queue.length = 0;
+      })();
+      return flushing;
     },
   };
 }

@@ -109,13 +109,7 @@ export function createWorkspaceReplicationRoutes(
       if (identity !== null) {
         assertWorkspaceIdentityResult(storage.claimWorkspaceIdentity({ workspaceId, ...identity }));
       }
-      if (result === "created") {
-        try {
-          onWorkspaceCreated?.();
-        } catch {
-          // Analytics never breaks workspace registration.
-        }
-      }
+      if (result === "created") onWorkspaceCreated?.();
       return jsonResponse({ ok: true, workspaceId, created: result === "created" });
     }
 

@@ -2260,11 +2260,7 @@ export function createShareWebApplication({
           };
           seal(token, session);
           sessions.set(token, session, nowMs());
-          try {
-            analytics?.track("share_link_opened");
-          } catch {
-            // Analytics never breaks share opening.
-          }
+          analytics?.track("share_link_opened");
           const responseHeaders = new Headers();
           responseHeaders.append("set-cookie", sessionCookie(token, session, nowMs()));
           responseHeaders.append("set-cookie", profileCookie(discriminator, profile));

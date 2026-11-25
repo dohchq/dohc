@@ -41,6 +41,14 @@ describe("posthogProject and readAnalyticsEnvConfig", () => {
     expect(
       posthogProject("phc_1234567890", "https://user:pass@dohc.computer/telemetry"),
     ).toBeNull();
+    expect(posthogProject("phc_1234567890", "https://dohc.computer/telemetry?a=1")).toBeNull();
+    expect(posthogProject("phc_1234567890", "https://dohc.computer/telemetry#frag")).toBeNull();
+    expect(() =>
+      readAnalyticsEnvConfig({
+        DOHC_ANALYTICS_KEY: "phc_1234567890",
+        DOHC_ANALYTICS_HOST: "https://dohc.computer/telemetry?x=1",
+      }),
+    ).toThrow(AnalyticsConfigError);
   });
 
   it("resolves valid https batch URLs with or without a trailing slash", () => {
@@ -180,5 +188,103 @@ describe("createServiceAnalyticsClient", () => {
     expect(aborted).toHaveBeenCalledOnce();
     client.track("share_link_opened");
     expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("retries when a batchSize flush fails while a flushMs timer is already armed", async () => {
+    vi.useFakeTimers();
+    let nowMs = 10_000;
+    const batches: Array<Array<{ event: string }>> = [];
+    const responses = [new Response("down", { status: 503 }), new Response("ok", { status: 200 })];
+    const client = createServiceAnalyticsClient({
+      service: "share-web",
+      config,
+      now: () => nowMs,
+      random: () => 0.5,
+      flushMs: 5_000,
+      batchSize: 2,
+      baseBackoffMs: 200,
+      fetch: vi.fn(async (_url, init) => {
+        const parsed = JSON.parse(String(init?.body)) as { batch: Array<{ event: string }> };
+        batches.push(parsed.batch);
+        return responses.shift() ?? new Response("ok", { status: 200 });
+      }),
+    });
+
+    client.track("share_link_opened");
+    client.track("published_app_launched");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(batches).toHaveLength(1);
+
+    nowMs += 200;
+    await vi.advanceTimersByTimeAsync(200);
+    expect(batches).toHaveLength(2);
+    expect(batches[1]).toHaveLength(2);
+    await client.flush();
+  });
+
+  it("drops events that exceed the 30-minute retry age before sending after a long 429 pause", async () => {
+    vi.useFakeTimers();
+    let nowMs = 1_000;
+    const fetchMock = vi.fn(
+      async () =>
+        new Response("slow down", {
+          status: 429,
+          headers: { "retry-after": "3600" },
+        }),
+    );
+    const client = createServiceAnalyticsClient({
+      service: "workspace-api",
+      config,
+      now: () => nowMs,
+      flushMs: 100,
+      fetch: fetchMock,
+    });
+
+    client.track("drive_signup_completed");
+    nowMs += 100;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    nowMs += 3_600_000;
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await client.flush();
+  });
+
+  it("shares one in-flight promise across concurrent flush calls and preserves privacy fields", async () => {
+    const received: Array<Record<string, unknown>> = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const client = createServiceAnalyticsClient({
+      service: "sync-relay",
+      config,
+      fetch: vi.fn(async (_url, init) => {
+        const parsed = JSON.parse(String(init?.body)) as { batch: Array<Record<string, unknown>> };
+        received.push(...parsed.batch);
+        await gate;
+        return new Response("{}", { status: 200 });
+      }),
+    });
+
+    client.track("sync_workspace_activated", {
+      $geoip_disable: false,
+      $process_person_profile: true,
+      service: "spoofed",
+    });
+    const first = client.flush();
+    const second = client.flush();
+    expect(second).toBe(first);
+    release();
+    await second;
+
+    expect(received).toHaveLength(1);
+    expect(received[0]!.properties).toEqual({
+      $process_person_profile: false,
+      $geoip_disable: true,
+      $lib: "dohc-sync-relay",
+      service: "sync-relay",
+    });
   });
 });

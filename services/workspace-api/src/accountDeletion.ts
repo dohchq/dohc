@@ -105,11 +105,7 @@ export function createAccountDeletion(options: {
         );
       await client.query("DELETE FROM account_deletion_jobs WHERE user_id=$1", [user.id]);
       await client.query("COMMIT");
-      try {
-        options.onDeleted?.();
-      } catch {
-        // Analytics never breaks account deletion.
-      }
+      options.onDeleted?.();
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;

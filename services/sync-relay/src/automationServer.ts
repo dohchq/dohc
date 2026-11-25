@@ -1261,11 +1261,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       onRunEnded(run) {
         changing.delete(keyOf(run));
         if (run.outcome) {
-          try {
-            options.onRunCompleted?.(run.outcome.state === "failed" ? "failed" : "succeeded");
-          } catch {
-            // Analytics never breaks automation runs.
-          }
+          options.onRunCompleted?.(run.outcome.state === "failed" ? "failed" : "succeeded");
         }
         // A sync that begins now sends everything the run changed. A run
         // whose end is not on record counts as unsent, which is never wrong.

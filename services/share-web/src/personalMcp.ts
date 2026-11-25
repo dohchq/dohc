@@ -265,15 +265,17 @@ export async function servePersonalMcp(
       : { value: undefined, release: () => {} };
   if (!body) return { body: null, status: 429, headers: new Headers() };
   try {
-    return (
-      refuseBatchedWrite(body.value, [COLLECTION_WRITE_TOOL]) ??
-      (await answerMcp(
-        request,
-        body.value,
-        () => buildServer(options, reach),
-        options.signal,
-        options.onAnalyticsEvent,
-      ))
+    const refused = refuseBatchedWrite(body.value, [COLLECTION_WRITE_TOOL]);
+    if (refused) {
+      options.onAnalyticsEvent?.({ kind: "tool_invoked", outcome: "refused", write: true });
+      return refused;
+    }
+    return await answerMcp(
+      request,
+      body.value,
+      () => buildServer(options, reach),
+      options.signal,
+      options.onAnalyticsEvent,
     );
   } finally {
     body.release();
