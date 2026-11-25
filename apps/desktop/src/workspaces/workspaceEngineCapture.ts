@@ -5375,6 +5375,7 @@ export function createWorkspaceEngineCapture(
       let updatesSettled = 0;
       let changedOutside = false;
       let lastKnownDiskSha: string | null = null;
+      let changedOutsideProbed = false;
       // Capture keeps a note's unsaved text in History when it records an
       // outside version, but has no such copy for a drawing's strokes. A
       // drawing keeps its guarded close instead.
@@ -5628,6 +5629,7 @@ export function createWorkspaceEngineCapture(
               !shuttingDown &&
               liveYDocSessions.get(input.path) === entry
             ) {
+              changedOutsideProbed = true;
               entry.changedOutside();
             }
           }
@@ -6278,6 +6280,13 @@ export function createWorkspaceEngineCapture(
       // reopen within capture's next tick would take the lease again first.
       // Until capture records it, an open of this path waits (see
       // `outsideWritesUnrecorded`).
+      const outsideChangeUnrecorded = async (): Promise<boolean> => {
+        if (await outsideWriteWaits(input.path)) return true;
+        if (!changedOutsideProbed) return false;
+        const snapshot = await engine.readTextFile({ workspaceId, versionId, path: input.path });
+        const disk = await digestSettledFile(rootPath, input.path);
+        return disk.kind === "sha256" && snapshot?.sha256 !== disk.sha256;
+      };
       const recordOutsideWrite = async (): Promise<void> => {
         const deadline = Date.now() + OUTSIDE_WRITE_RECORD_DEADLINE_MS;
         try {
@@ -6285,7 +6294,7 @@ export function createWorkspaceEngineCapture(
             if (
               stopped ||
               shuttingDown ||
-              !(await outsideWriteWaits(input.path).catch((error: unknown) => {
+              !(await outsideChangeUnrecorded().catch((error: unknown) => {
                 if (isCaptureBusy(error)) return true;
                 throw error;
               }))
@@ -6751,7 +6760,7 @@ export function createWorkspaceEngineCapture(
           .readTextFile({ workspaceId, versionId, path: input.path })
           .catch(() => null);
         const disk = await digestSettledFile(rootPath, input.path);
-        if (disk.kind === "sha256") lastKnownDiskSha ??= disk.sha256;
+        lastKnownDiskSha ??= snapshot?.sha256 ?? (disk.kind === "sha256" ? disk.sha256 : null);
         const checkedClean =
           snapshot !== null && disk.kind === "sha256" && disk.sha256 === snapshot.sha256;
         const drifted =

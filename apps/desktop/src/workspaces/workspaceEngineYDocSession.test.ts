@@ -170,9 +170,9 @@ function daemonSessions(): EngineWorkspaceSessions {
           return {
             id: request.id,
             result: {
-              deferredWrites: [busyOutsideCapture.path],
-              settled: false,
-              running: true,
+              deferredWrites: busyOutsideCapture.hideDeferredWrite ? [] : [busyOutsideCapture.path],
+              settled: busyOutsideCapture.hideDeferredWrite === true,
+              running: !busyOutsideCapture.hideDeferredWrite,
               degraded: false,
               heldFiles: [],
             },
@@ -977,7 +977,7 @@ it("reports a replaced note before the import's watcher lists the outside write"
     typeIntoBody(editor, "Typed in dohc.");
     await writeFile(join(root, `${PATH}.tmp`), outside, "utf8");
     await rename(join(root, `${PATH}.tmp`), join(root, PATH));
-    busyOutsideCapture = { path: PATH, text: outside, flushes: 2, hideDeferredWrite: true };
+    busyOutsideCapture = { path: PATH, text: outside, flushes: 100, hideDeferredWrite: true };
     settleRefusal = wireRefusal("conflict-stale-target");
     closeRefusal = wireRefusal("ydoc-unsettled-close");
     capture.start();
@@ -989,6 +989,7 @@ it("reports a replaced note before the import's watcher lists the outside write"
     expect(states).not.toContain("error");
     expect(onChangedOutside).toHaveBeenCalledExactlyOnceWith(true);
 
+    busyOutsideCapture!.flushes = 2;
     await session.close();
     expect(methodCount(YDOC_METHOD.evict)).toBe(1);
     expect(busyOutsideCapture).toBeNull();
