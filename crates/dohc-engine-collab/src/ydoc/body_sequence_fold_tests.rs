@@ -120,18 +120,29 @@ fn markdown(lines: &[String]) -> String {
     format!("{}\n", lines.join("\n\n"))
 }
 
-fn brake_cases() -> Vec<(&'static str, String)> {
+enum Bar {
+    Runs { runs: usize, lines: usize },
+    Whole,
+}
+
+fn brake_cases() -> Vec<(&'static str, String, Bar)> {
     let note = long_note(numbered);
     let edited = |edit: &dyn Fn(&mut Vec<String>)| {
         let mut lines = note.clone();
         edit(&mut lines);
         markdown(&lines)
     };
+    let runs = |lines| Bar::Runs { runs: 1, lines };
     vec![
-        ("one letter", edited(&|lines| lines[LINES / 2].push('b'))),
+        (
+            "one letter",
+            edited(&|lines| lines[LINES / 2].push('b')),
+            runs(0),
+        ),
         (
             "a line at the top",
             edited(&|lines| lines.insert(0, "new".into())),
+            runs(1),
         ),
         (
             "a join",
@@ -139,18 +150,22 @@ fn brake_cases() -> Vec<(&'static str, String)> {
                 let below = lines.remove(LINES / 2 + 1);
                 lines[LINES / 2].push_str(&below);
             }),
+            runs(0),
         ),
         (
             "an edit at line 1",
             edited(&|lines| lines[0].insert(0, 'b')),
+            runs(0),
         ),
         (
             "an edit at the last line",
             edited(&|lines| lines[LINES - 1].push('b')),
+            runs(0),
         ),
         (
             "the whole file replaced",
             markdown(&long_note(|line| format!("{line:z<60}"))),
+            Bar::Whole,
         ),
     ]
 }
@@ -187,8 +202,18 @@ fn a_fold_of_a_long_note_does_work_and_writes_bytes_in_proportion_to_its_change(
     reading_body_sequence_here(|| {
         let file = markdown(&long_note(numbered));
         let (one, two) = (seeded(1, &file), seeded(2, &file));
+        let boundary = {
+            let note = seeded(2, "a\n");
+            let fold = |file: &str| {
+                copy(&note)
+                    .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, file)
+                    .expect("a small fold")
+                    .len()
+            };
+            fold("a\n\nb\n") - fold("ab\n")
+        };
         let mut over = Vec::new();
-        for (name, edited) in brake_cases() {
+        for (name, edited, bar) in brake_cases() {
             let format_one = copy(&one)
                 .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &edited)
                 .expect("format 1")
@@ -203,9 +228,13 @@ fn a_fold_of_a_long_note_does_work_and_writes_bytes_in_proportion_to_its_change(
             let visited = body_sequence_fold::SLOTS_VISITED.with(std::cell::Cell::get);
             let allowed = 2 * (before + sequence_length(&doc));
             assert_eq!(doc.project(ContentKind::Richdoc).unwrap().content, edited);
-            if visited > allowed || format_two * 10 > format_one * 11 {
+            let bytes = match bar {
+                Bar::Runs { runs, lines } => format_one * 11 / 10 + 16 * runs + boundary * lines,
+                Bar::Whole => format_one * 13 / 10,
+            };
+            if visited > allowed || format_two > bytes {
                 over.push(format!(
-                    "{name}: {visited} slots of {allowed}, {format_two} bytes beside {format_one}"
+                    "{name}: {visited} slots of {allowed}, {format_two} bytes of {bytes} beside {format_one}"
                 ));
             }
         }
