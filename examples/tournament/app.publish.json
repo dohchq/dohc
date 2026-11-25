@@ -8,11 +8,16 @@
       "liveSnapshot",
       "matchLog",
       "createTournament",
+      "setVisibility",
       "seedDemo",
       "startMatch",
+      "returnToQueue",
       "scorePoint",
       "undoPoint",
-      "completeMatch"
+      "completeMatch",
+      "awardWalkover",
+      "reportResult",
+      "reopenMatch"
     ]
   }
 }

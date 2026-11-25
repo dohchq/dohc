@@ -8,34 +8,109 @@
       "sqlName": "tournaments",
       "primaryKey": "id",
       "fields": [
-        { "name": "ID", "sqlColumn": "id", "type": "text" },
-        { "name": "Name", "sqlColumn": "name", "type": "text", "required": true },
+        {
+          "name": "ID",
+          "sqlColumn": "id",
+          "type": "text"
+        },
+        {
+          "name": "Name",
+          "sqlColumn": "name",
+          "type": "text",
+          "required": true
+        },
         {
           "name": "Sport",
           "sqlColumn": "sport",
           "type": "select",
           "required": true,
-          "options": ["Pickleball", "Esports", "Tabletop"]
+          "options": [
+            "Pickleball",
+            "Esports",
+            "Tabletop"
+          ]
+        },
+        {
+          "name": "Format",
+          "sqlColumn": "format",
+          "type": "select",
+          "required": true,
+          "options": [
+            "single",
+            "double"
+          ]
+        },
+        {
+          "name": "Best of",
+          "sqlColumn": "best_of",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Visibility",
+          "sqlColumn": "visibility",
+          "type": "select",
+          "required": true,
+          "options": [
+            "shared",
+            "private"
+          ]
         },
         {
           "name": "Status",
           "sqlColumn": "status",
           "type": "select",
           "required": true,
-          "options": ["live", "finished"]
+          "options": [
+            "live",
+            "finished"
+          ]
         },
-        { "name": "Bracket size", "sqlColumn": "bracket_size", "type": "number", "required": true },
-        { "name": "Points to win", "sqlColumn": "points_to_win", "type": "number", "required": true },
-        { "name": "Win by", "sqlColumn": "win_by", "type": "number", "required": true },
-        { "name": "Rating K-factor", "sqlColumn": "k_factor", "type": "number", "required": true },
+        {
+          "name": "Bracket size",
+          "sqlColumn": "bracket_size",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Points to win",
+          "sqlColumn": "points_to_win",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Win by",
+          "sqlColumn": "win_by",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Rating K-factor",
+          "sqlColumn": "k_factor",
+          "type": "number",
+          "required": true
+        },
         {
           "name": "Champion",
           "sqlColumn": "champion_id",
           "type": "relation",
-          "relation": { "table": "players", "field": "id" }
+          "relation": {
+            "table": "players",
+            "field": "id"
+          }
         },
-        { "name": "Created", "sqlColumn": "created_at", "type": "number", "required": true },
-        { "name": "Updated", "sqlColumn": "updated_at", "type": "number", "required": true }
+        {
+          "name": "Created",
+          "sqlColumn": "created_at",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Updated",
+          "sqlColumn": "updated_at",
+          "type": "number",
+          "required": true
+        }
       ]
     },
     {
@@ -43,24 +118,79 @@
       "sqlName": "players",
       "primaryKey": "id",
       "fields": [
-        { "name": "ID", "sqlColumn": "id", "type": "text" },
+        {
+          "name": "ID",
+          "sqlColumn": "id",
+          "type": "text"
+        },
         {
           "name": "Tournament",
           "sqlColumn": "tournament_id",
           "type": "relation",
           "required": true,
-          "relation": { "table": "tournaments", "field": "id" }
+          "relation": {
+            "table": "tournaments",
+            "field": "id"
+          }
         },
-        { "name": "Name", "sqlColumn": "name", "type": "text", "required": true },
-        { "name": "Club", "sqlColumn": "club", "type": "text" },
-        { "name": "Seed", "sqlColumn": "seed", "type": "number", "required": true },
-        { "name": "Rating", "sqlColumn": "rating", "type": "number", "required": true },
-        { "name": "Starting rating", "sqlColumn": "start_rating", "type": "number", "required": true },
-        { "name": "Wins", "sqlColumn": "wins", "type": "number", "required": true },
-        { "name": "Losses", "sqlColumn": "losses", "type": "number", "required": true },
-        { "name": "Points for", "sqlColumn": "points_for", "type": "number", "required": true },
-        { "name": "Points against", "sqlColumn": "points_against", "type": "number", "required": true },
-        { "name": "Out in round", "sqlColumn": "eliminated_round", "type": "number" }
+        {
+          "name": "Name",
+          "sqlColumn": "name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "Club",
+          "sqlColumn": "club",
+          "type": "text"
+        },
+        {
+          "name": "Seed",
+          "sqlColumn": "seed",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Rating",
+          "sqlColumn": "rating",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Starting rating",
+          "sqlColumn": "start_rating",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Wins",
+          "sqlColumn": "wins",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Losses",
+          "sqlColumn": "losses",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Points for",
+          "sqlColumn": "points_for",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Points against",
+          "sqlColumn": "points_against",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Out in round",
+          "sqlColumn": "eliminated_round",
+          "type": "number"
+        }
       ]
     },
     {
@@ -68,16 +198,33 @@
       "sqlName": "courts",
       "primaryKey": "id",
       "fields": [
-        { "name": "ID", "sqlColumn": "id", "type": "text" },
+        {
+          "name": "ID",
+          "sqlColumn": "id",
+          "type": "text"
+        },
         {
           "name": "Tournament",
           "sqlColumn": "tournament_id",
           "type": "relation",
           "required": true,
-          "relation": { "table": "tournaments", "field": "id" }
+          "relation": {
+            "table": "tournaments",
+            "field": "id"
+          }
         },
-        { "name": "Name", "sqlColumn": "name", "type": "text", "required": true },
-        { "name": "Position", "sqlColumn": "position", "type": "number", "required": true }
+        {
+          "name": "Name",
+          "sqlColumn": "name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "Position",
+          "sqlColumn": "position",
+          "type": "number",
+          "required": true
+        }
       ]
     },
     {
@@ -85,64 +232,205 @@
       "sqlName": "matches",
       "primaryKey": "id",
       "fields": [
-        { "name": "ID", "sqlColumn": "id", "type": "text" },
+        {
+          "name": "ID",
+          "sqlColumn": "id",
+          "type": "text"
+        },
         {
           "name": "Tournament",
           "sqlColumn": "tournament_id",
           "type": "relation",
           "required": true,
-          "relation": { "table": "tournaments", "field": "id" }
+          "relation": {
+            "table": "tournaments",
+            "field": "id"
+          }
         },
-        { "name": "Round", "sqlColumn": "round", "type": "number", "required": true },
-        { "name": "Slot", "sqlColumn": "slot", "type": "number", "required": true },
+        {
+          "name": "Match number",
+          "sqlColumn": "number",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Bracket",
+          "sqlColumn": "bracket",
+          "type": "select",
+          "required": true,
+          "options": [
+            "winners",
+            "losers",
+            "final"
+          ]
+        },
+        {
+          "name": "Round",
+          "sqlColumn": "round",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Slot",
+          "sqlColumn": "slot",
+          "type": "number",
+          "required": true
+        },
         {
           "name": "Player A",
           "sqlColumn": "player_a_id",
           "type": "relation",
-          "relation": { "table": "players", "field": "id" }
+          "relation": {
+            "table": "players",
+            "field": "id"
+          }
         },
         {
           "name": "Player B",
           "sqlColumn": "player_b_id",
           "type": "relation",
-          "relation": { "table": "players", "field": "id" }
+          "relation": {
+            "table": "players",
+            "field": "id"
+          }
         },
         {
           "name": "Winner goes to",
           "sqlColumn": "next_match_id",
           "type": "relation",
-          "relation": { "table": "matches", "field": "id" }
+          "relation": {
+            "table": "matches",
+            "field": "id"
+          }
         },
         {
           "name": "Winner's side",
           "sqlColumn": "next_slot",
           "type": "select",
-          "options": ["a", "b"]
+          "options": [
+            "a",
+            "b"
+          ]
+        },
+        {
+          "name": "Loser goes to",
+          "sqlColumn": "loser_next_match_id",
+          "type": "relation",
+          "relation": {
+            "table": "matches",
+            "field": "id"
+          }
+        },
+        {
+          "name": "Loser's side",
+          "sqlColumn": "loser_next_slot",
+          "type": "select",
+          "options": [
+            "a",
+            "b"
+          ]
         },
         {
           "name": "Court",
           "sqlColumn": "court_id",
           "type": "relation",
-          "relation": { "table": "courts", "field": "id" }
+          "relation": {
+            "table": "courts",
+            "field": "id"
+          }
         },
         {
           "name": "Status",
           "sqlColumn": "status",
           "type": "select",
           "required": true,
-          "options": ["waiting", "ready", "live", "done", "bye"]
+          "options": [
+            "waiting",
+            "ready",
+            "live",
+            "done",
+            "bye",
+            "skipped"
+          ]
         },
-        { "name": "Score A", "sqlColumn": "score_a", "type": "number", "required": true },
-        { "name": "Score B", "sqlColumn": "score_b", "type": "number", "required": true },
+        {
+          "name": "Score A",
+          "sqlColumn": "score_a",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Score B",
+          "sqlColumn": "score_b",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Games A",
+          "sqlColumn": "games_a",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Games B",
+          "sqlColumn": "games_b",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Game scores",
+          "sqlColumn": "game_scores",
+          "type": "text"
+        },
+        {
+          "name": "Serving",
+          "sqlColumn": "server",
+          "type": "select",
+          "options": [
+            "a",
+            "b"
+          ]
+        },
+        {
+          "name": "Outcome",
+          "sqlColumn": "outcome",
+          "type": "select",
+          "options": [
+            "played",
+            "walkover",
+            "reported"
+          ]
+        },
         {
           "name": "Winner",
           "sqlColumn": "winner_id",
           "type": "relation",
-          "relation": { "table": "players", "field": "id" }
+          "relation": {
+            "table": "players",
+            "field": "id"
+          }
         },
-        { "name": "Started", "sqlColumn": "started_at", "type": "number" },
-        { "name": "Finished", "sqlColumn": "finished_at", "type": "number" },
-        { "name": "Version", "sqlColumn": "version", "type": "number", "required": true }
+        {
+          "name": "Started",
+          "sqlColumn": "started_at",
+          "type": "number"
+        },
+        {
+          "name": "Finished",
+          "sqlColumn": "finished_at",
+          "type": "number"
+        },
+        {
+          "name": "Rating change",
+          "sqlColumn": "rating_change",
+          "type": "number"
+        },
+        {
+          "name": "Version",
+          "sqlColumn": "version",
+          "type": "number",
+          "required": true
+        }
       ]
     },
     {
@@ -150,35 +438,117 @@
       "sqlName": "match_events",
       "primaryKey": "id",
       "fields": [
-        { "name": "ID", "sqlColumn": "id", "type": "text" },
+        {
+          "name": "ID",
+          "sqlColumn": "id",
+          "type": "text"
+        },
         {
           "name": "Tournament",
           "sqlColumn": "tournament_id",
           "type": "relation",
           "required": true,
-          "relation": { "table": "tournaments", "field": "id" }
+          "relation": {
+            "table": "tournaments",
+            "field": "id"
+          }
         },
         {
           "name": "Match",
           "sqlColumn": "match_id",
           "type": "relation",
           "required": true,
-          "relation": { "table": "matches", "field": "id" }
+          "relation": {
+            "table": "matches",
+            "field": "id"
+          }
         },
-        { "name": "Sequence", "sqlColumn": "seq", "type": "number", "required": true },
+        {
+          "name": "Sequence",
+          "sqlColumn": "seq",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Game",
+          "sqlColumn": "game",
+          "type": "number",
+          "required": true
+        },
         {
           "name": "Kind",
           "sqlColumn": "kind",
           "type": "select",
           "required": true,
-          "options": ["bye", "start", "point", "undo", "complete"]
+          "options": [
+            "bye",
+            "start",
+            "point",
+            "undo",
+            "game",
+            "complete",
+            "report",
+            "walkover",
+            "reopen",
+            "cancel"
+          ]
         },
-        { "name": "Side", "sqlColumn": "side", "type": "select", "options": ["a", "b"] },
-        { "name": "Score A", "sqlColumn": "score_a", "type": "number", "required": true },
-        { "name": "Score B", "sqlColumn": "score_b", "type": "number", "required": true },
-        { "name": "Court", "sqlColumn": "court_id", "type": "text" },
-        { "name": "Changed by", "sqlColumn": "actor", "type": "text", "required": true },
-        { "name": "At", "sqlColumn": "at", "type": "number", "required": true }
+        {
+          "name": "Side",
+          "sqlColumn": "side",
+          "type": "select",
+          "options": [
+            "a",
+            "b"
+          ]
+        },
+        {
+          "name": "Player A",
+          "sqlColumn": "player_a",
+          "type": "relation",
+          "relation": {
+            "table": "players",
+            "field": "id"
+          }
+        },
+        {
+          "name": "Player B",
+          "sqlColumn": "player_b",
+          "type": "relation",
+          "relation": {
+            "table": "players",
+            "field": "id"
+          }
+        },
+        {
+          "name": "Score A",
+          "sqlColumn": "score_a",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Score B",
+          "sqlColumn": "score_b",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "Court",
+          "sqlColumn": "court_id",
+          "type": "text"
+        },
+        {
+          "name": "Changed by",
+          "sqlColumn": "actor",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "At",
+          "sqlColumn": "at",
+          "type": "number",
+          "required": true
+        }
       ]
     }
   ],
@@ -192,19 +562,29 @@
       "readOnly": true,
       "fields": [
         "id",
+        "number",
+        "bracket",
         "round",
         "slot",
         "player_a_id",
         "player_b_id",
         "next_match_id",
         "next_slot",
+        "loser_next_match_id",
+        "loser_next_slot",
         "court_id",
         "status",
         "score_a",
         "score_b",
+        "games_a",
+        "games_b",
+        "game_scores",
+        "server",
+        "outcome",
         "winner_id",
         "started_at",
         "finished_at",
+        "rating_change",
         "version"
       ]
     },
@@ -215,7 +595,19 @@
       "kind": "read",
       "access": "helper",
       "readOnly": true,
-      "fields": ["seq", "kind", "side", "score_a", "score_b", "court_id", "actor", "at"]
+      "fields": [
+        "seq",
+        "game",
+        "kind",
+        "side",
+        "score_a",
+        "score_b",
+        "court_id",
+        "player_a",
+        "player_b",
+        "actor",
+        "at"
+      ]
     },
     {
       "name": "createTournament",
@@ -224,7 +616,29 @@
       "kind": "action",
       "access": "owner",
       "readOnly": false,
-      "fields": ["name", "sport", "bracket_size", "points_to_win", "win_by", "k_factor"]
+      "fields": [
+        "name",
+        "sport",
+        "format",
+        "best_of",
+        "visibility",
+        "bracket_size",
+        "points_to_win",
+        "win_by",
+        "k_factor"
+      ]
+    },
+    {
+      "name": "setVisibility",
+      "label": "Show or hide a tournament on share links",
+      "table": "tournaments",
+      "kind": "action",
+      "access": "owner",
+      "readOnly": false,
+      "fields": [
+        "visibility",
+        "updated_at"
+      ]
     },
     {
       "name": "seedDemo",
@@ -233,7 +647,11 @@
       "kind": "action",
       "access": "owner",
       "readOnly": false,
-      "fields": ["name", "sport", "bracket_size"]
+      "fields": [
+        "name",
+        "sport",
+        "bracket_size"
+      ]
     },
     {
       "name": "startMatch",
@@ -242,7 +660,27 @@
       "kind": "action",
       "access": "helper",
       "readOnly": false,
-      "fields": ["court_id", "status", "started_at", "version"]
+      "fields": [
+        "court_id",
+        "status",
+        "started_at",
+        "server",
+        "version"
+      ]
+    },
+    {
+      "name": "returnToQueue",
+      "label": "Return a started match with no points to the queue",
+      "table": "matches",
+      "kind": "action",
+      "access": "helper",
+      "readOnly": false,
+      "fields": [
+        "court_id",
+        "status",
+        "started_at",
+        "version"
+      ]
     },
     {
       "name": "scorePoint",
@@ -251,25 +689,113 @@
       "kind": "action",
       "access": "helper",
       "readOnly": false,
-      "fields": ["score_a", "score_b", "version"]
+      "fields": [
+        "score_a",
+        "score_b",
+        "server",
+        "version"
+      ]
     },
     {
       "name": "undoPoint",
-      "label": "Undo the last point",
+      "label": "Undo the last point, or the last game at 0–0",
       "table": "matches",
       "kind": "action",
       "access": "helper",
       "readOnly": false,
-      "fields": ["score_a", "score_b", "version"]
+      "fields": [
+        "score_a",
+        "score_b",
+        "games_a",
+        "games_b",
+        "game_scores",
+        "server",
+        "version"
+      ]
     },
     {
       "name": "completeMatch",
-      "label": "Complete a match and advance the winner",
+      "label": "Record a won game, and complete the match once a player takes it",
       "table": "matches",
       "kind": "action",
       "access": "helper",
       "readOnly": false,
-      "fields": ["status", "winner_id", "finished_at", "version"]
+      "fields": [
+        "status",
+        "score_a",
+        "score_b",
+        "games_a",
+        "games_b",
+        "game_scores",
+        "server",
+        "outcome",
+        "winner_id",
+        "finished_at",
+        "rating_change",
+        "version"
+      ]
+    },
+    {
+      "name": "awardWalkover",
+      "label": "Award a walkover when a player cannot play",
+      "table": "matches",
+      "kind": "action",
+      "access": "helper",
+      "readOnly": false,
+      "fields": [
+        "status",
+        "outcome",
+        "winner_id",
+        "finished_at",
+        "rating_change",
+        "version"
+      ]
+    },
+    {
+      "name": "reportResult",
+      "label": "Enter the final game scores of a match played off the board",
+      "table": "matches",
+      "kind": "action",
+      "access": "helper",
+      "readOnly": false,
+      "fields": [
+        "status",
+        "court_id",
+        "started_at",
+        "score_a",
+        "score_b",
+        "games_a",
+        "games_b",
+        "game_scores",
+        "outcome",
+        "winner_id",
+        "finished_at",
+        "rating_change",
+        "version"
+      ]
+    },
+    {
+      "name": "reopenMatch",
+      "label": "Reopen a completed match to correct its result",
+      "table": "matches",
+      "kind": "action",
+      "access": "helper",
+      "readOnly": false,
+      "fields": [
+        "status",
+        "court_id",
+        "score_a",
+        "score_b",
+        "games_a",
+        "games_b",
+        "game_scores",
+        "outcome",
+        "winner_id",
+        "started_at",
+        "finished_at",
+        "rating_change",
+        "version"
+      ]
     }
   ]
 }
