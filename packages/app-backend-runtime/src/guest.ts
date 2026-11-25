@@ -617,10 +617,7 @@ function run(
     }
   } catch (error) {
     // A trap or a failed QuickJS assertion ends the operation's instance, and the operation's code caused it.
-    if (error instanceof WebAssembly.RuntimeError) {
-      console.error("DIAGNOSTIC guest trap", { message: error.message, stack: error.stack, exhausted: exhausted(), interrupted, statements, thrown: thrown.length });
-      throw guestFailure("App operation failed.");
-    }
+    if (error instanceof WebAssembly.RuntimeError) throw guestFailure("App operation failed.");
     throw error;
   }
 }
