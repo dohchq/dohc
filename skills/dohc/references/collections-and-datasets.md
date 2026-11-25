@@ -85,7 +85,7 @@ globalThis.operations = {
 - `ctx.caller.kind` is `"owner"`, `"named"`, `"link"`, or `"automation"`. A `"link"` caller has `grantId`, the link's ID. The owner copies it from Share → Link options → **Copy link ID**; `dohc_publish_app` `createLink` returns it too.
 - Operations read and write only their own Collection's tables. No `ATTACH`, `PRAGMA`, schema changes, `load_extension`, `readfile`, `writefile`, `edit`, or `fts3_tokenizer`. `ctx.db.query` only reads.
 - Name rows by the table's primary key, not `rowid` (allowed only when the key is an `INTEGER PRIMARY KEY` that aliases `rowid`). Use `execute`'s `{ changes }`, not `changes()`, `total_changes()`, or `last_insert_rowid()`.
-- Default limits per run: 16 MiB database, 64 KiB input, 256 KiB result, 1,000 rows and 256 KiB per query, 128 statements, 128 parameters per statement, 24 MiB memory. The operation's code gets 1 s; the whole run, including SQL already started, stops at 8 s. Size and count refusals name the limit, its unit, and the actual usage; time and memory refusals name the limit.
+- Default limits per call: 64 KiB input, 256 KiB result, 1,000 rows and 256 KiB per query, 128 statements, 128 parameters per statement, 24 MiB memory, and 1 s for the operation's code. Size and count refusals name the limit, its unit, and the actual usage; time and memory refusals name the limit.
 
 ### `dohc_dataset` action cheat sheet
 

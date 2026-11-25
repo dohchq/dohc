@@ -440,8 +440,6 @@ export async function testWorkspace({
                 ? { DOHC_DESKTOP_TEST_ISOLATION: "all" }
                 : undefined;
             try {
-              if (task.name === "@dohc/desktop")
-                await command("browser-install", ["exec", "playwright", "install", "chromium"]);
               await command(task.name, task.args, { stepEnv });
             } finally {
               databasePending.delete(task.name);

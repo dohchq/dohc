@@ -1480,10 +1480,15 @@ codex mcp login dohc-share`);
     await waitFor(() => expect(said()).toContain("Copied for an agent"));
     expect(row.textContent).not.toContain("Copied link ID");
 
+    const pending = Promise.withResolvers<void>();
+    writeText.mockReturnValueOnce(pending.promise);
     await chooseLinkOption(user, row, "Copy link ID");
+    expect(writeText).toHaveBeenCalledTimes(3);
+    expect(row.textContent).toContain("Copied for an agent");
+    expect(row.textContent).not.toContain("Copied link ID");
+    await act(async () => pending.resolve());
     await waitFor(() => expect(said()).toContain("Copied link ID"));
     expect(row.textContent).not.toContain("Copied for an agent");
-    expect(writeText).toHaveBeenCalledTimes(3);
     expect(writeText).toHaveBeenLastCalledWith("grant-link-1");
   });
 

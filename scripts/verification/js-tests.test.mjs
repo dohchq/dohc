@@ -1382,7 +1382,6 @@ for (const scenario of [
         const database=new Set(['@dohc/share-web','@dohc/workspace-api']);
         const proofs=['proof-native','proof-browser','proof-accounts','proof-desktop'];
         export async function run(_command,args){
-          if(args[0]==='exec')return {stdout:''};
           if(args.includes('list'))return {stdout:JSON.stringify(['desktop','share-web','workspace-api','new-package','tail']
             .map(name=>({name:'@dohc/'+name,path:resolve('packages',name)})))};
           const name=args[0]==='proof'?args[1]:args[0]==='run'?'repository':args[3].startsWith('test:scripts:')?args[3]:args[1];
@@ -1632,7 +1631,7 @@ for (const {
         // Hold the running packages until the repository fails, so the queued one must not start.
         if(args[2]==='run' && process.env.FIXTURE_REPO_FAIL==='1' && process.env.FIXTURE_PACKAGE_FAIL!=='1')await waitFor('repository-failed');
         if(args[1]==='@dohc/new-package' && process.env.FIXTURE_PACKAGE_FAIL==='1'){writeFileSync('package-failed','yes');throw Error('fixture package failed');}
-        if(args.includes('chromium') && process.env.FIXTURE_CANCEL==='1') {
+        if(args.includes('test:unit') && process.env.FIXTURE_CANCEL==='1') {
           process.emit('SIGINT');
           throw Error('fixture command interrupted');
         }

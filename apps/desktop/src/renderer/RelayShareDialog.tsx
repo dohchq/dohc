@@ -521,7 +521,7 @@ function InvitedPersonRow(props: {
           onSelect: () => {
             setCopiedLast("invitation");
             resend.forget();
-            invitationCopy.copy();
+            void invitationCopy.copy();
           },
         },
         resendInvitationEntry(resend, `share-resend-invitation-${person.grantId}`),
@@ -534,7 +534,7 @@ function InvitedPersonRow(props: {
                 onSelect: () => {
                   setCopiedLast("code");
                   resend.forget();
-                  codeCopy.copy();
+                  void codeCopy.copy();
                 },
               },
             ]
