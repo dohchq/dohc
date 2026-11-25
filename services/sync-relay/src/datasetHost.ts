@@ -367,9 +367,11 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     datasetId: string,
   ): ShareAccess | null {
     const paths = collectionFilePaths(storage, workspaceId, datasetId);
-    const approved = paths && reach.levelAt(paths.approved);
-    const current = paths && reach.levelAt(paths.current ?? paths.approved);
-    return approved && current && lowerAccess(approved, current);
+    if (!paths) return null;
+    const current = paths.current ?? (paths.unnamed ? paths.approved : null);
+    const approved = reach.levelAt(paths.approved),
+      moved = current === null ? null : reach.levelAt(current);
+    return approved && moved && lowerAccess(approved, moved);
   }
   function named(
     workspaceId: string,
@@ -1275,7 +1277,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
           .all(auth.workspaceId, verified.principalKey)) {
           const level = reach && collectionLevel(reach, auth.workspaceId, String(row.dataset_id));
           if (reach && level === null) continue;
-          digest.update(JSON.stringify([row, level]));
+          digest.update(JSON.stringify(reach ? [row, level] : row));
         }
         return digest.digest("hex");
       },

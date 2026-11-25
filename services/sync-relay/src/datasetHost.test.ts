@@ -1031,6 +1031,7 @@ async function memberFixture(dataGrant = true) {
     operationSource: memberSource,
   });
   await f.activate();
+  pushFile(f.storage, "dataset", null, collectionFile());
   expect(
     f.storage.inviteWorkspaceMember({
       workspaceId: "w",
@@ -1230,6 +1231,10 @@ it("pages a member's Collections past ones they can't reach, without naming them
       grantId: "ana-grant",
       grant: anaGrant(other.revisionSha256),
     });
+    pushFile(f.storage, `dataset-${folder}`, null, {
+      path: `${folder}/dataset.json`,
+      text: JSON.stringify({ datasetId }),
+    });
   }
   f.rule(null, "hidden");
   const first = f.listed({ limit: 1 });
@@ -1243,7 +1248,6 @@ it("pages a member's Collections past ones they can't reach, without naming them
 
 it("hides a Collection from a member once it moves into a folder they can't reach", async () => {
   const f = await memberFixture();
-  pushFile(f.storage, "dataset", null, collectionFile());
   f.rule(null, "team");
   expect((await f.read()).result).toBe("edit");
   pushFile(
@@ -1254,4 +1258,22 @@ it("hides a Collection from a member once it moves into a folder they can't reac
   );
   expect(f.listed().datasets).toEqual([]);
   await expect(f.read()).rejects.toMatchObject(refused);
+});
+
+it("hides a Collection from a member once its dataset.json is deleted and written again elsewhere", async () => {
+  const f = await memberFixture();
+  f.rule(null, "team");
+  pushFile(f.storage, "dataset", collectionFile(), null);
+  pushFile(f.storage, "copied", null, collectionFile("team/registrations/dataset.json"));
+  expect(f.listed().datasets).toEqual([]);
+  await expect(f.read()).rejects.toMatchObject(refused);
+});
+
+it("keeps a Collection open to a member when its dataset.json names no Collection", async () => {
+  const f = await memberFixture();
+  pushFile(f.storage, "dataset", collectionFile(), {
+    path: "registrations/dataset.json",
+    text: "{}",
+  });
+  expect((await f.read()).result).toBe("edit");
 });
