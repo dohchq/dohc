@@ -823,8 +823,8 @@ impl<'a> Pairing<'a> {
             match self.cells[index] {
                 Cell::Open { close } => {
                     if close < to
-                        && !(self.opens_strike(index)
-                            && !self.strike_forms(index, to, before, &masked))
+                        && (!self.opens_strike(index)
+                            || self.strike_forms(index, to, before, &masked))
                     {
                         let (inner_from, inner_to) = self.inner(index);
                         self.lex(inner_from, inner_to)?;
