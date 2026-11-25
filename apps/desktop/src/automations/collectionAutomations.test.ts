@@ -1377,6 +1377,63 @@ describe("Collection automations", () => {
     states.set("write/Title", "not-accepted");
     await executor.reportRefusedSharedUpdates(report);
     expect(reported).toEqual([claim.claimId]);
+    expect(await w.baseStore.sharedWaiting()).toEqual([]);
+  });
+
+  it("reports a refused shared update from a run that is still waiting, and keeps it listed", async () => {
+    const w = await world({
+      automations: {
+        Tasks:
+          "  - id: finish\n    name: Finish\n    when: {field-changed: Status, to: Done}\n    do: [{set: {Note: saved}}]\n",
+      },
+    });
+    const record = w.addRecord("Tasks", "waiting", { Status: "Done" });
+    const claim = w.claim("collection:Tasks#finish", record);
+    const executor = w.makeExecutor({
+      withRecordWrites: async (_signal, work) =>
+        work({
+          setFields: async () => ({
+            replaced: { Note: null },
+            kept: {},
+            sharedFileUpdates: {
+              Note: {
+                outboxId: "outbox-waiting",
+                appendKey: "write/Note",
+                nativeHeadSequence: 2,
+                binding: {
+                  workspaceId: "workspace",
+                  mainVersionId: "main",
+                  objectId: "object",
+                  lineageClaimId: "a".repeat(64),
+                  currentPath: "Tasks/waiting.md",
+                  selectorPaths: ["Tasks"],
+                  restoreFenceGeneration: 0,
+                },
+              },
+            },
+          }),
+          create: async () => {
+            throw new Error("No added record");
+          },
+        }),
+    });
+    onTestFinished(() => executor.dispose());
+    let durableTries = 0;
+    w.engine.makeAutomationWritesDurable = async () => {
+      durableTries += 1;
+      throw new Error("The disk is busy.");
+    };
+    w.engine.sharedFileUpdateStates = async (writes) => writes.map(() => "not-accepted");
+    await executor.open();
+    await w.until(() => durableTries > 0);
+    const reported: string[] = [];
+    await executor.reportRefusedSharedUpdates(async (run) => {
+      reported.push(run.claimId);
+    });
+    expect(reported).toEqual([claim.claimId]);
+    expect(await w.baseStore.sharedWaiting()).toMatchObject([
+      { claimId: claim.claimId, told: true },
+    ]);
   });
 
   it("counts pending reversals once and keeps refused reversals retryable", async () => {

@@ -3491,9 +3491,9 @@ export class CollectionAutomations {
   }
 
   /**
-   * Tells `report` once about each listed run that ended with a field update
-   * a shared file did not accept. A run leaves the list once all its updates
-   * ended and its owner was told. Throws the first failure after trying every
+   * Tells `report` once about each listed run with a field update a shared
+   * file did not accept, finished or not. A run leaves the list once it finished, all its
+   * updates ended, and its owner was told. Throws the first failure after trying every
    * run.
    */
   async reportRefusedSharedUpdates(report: (run: StoredRun) => Promise<void>): Promise<void> {
@@ -3506,7 +3506,6 @@ export class CollectionAutomations {
           if (!found.unreadable) await this.options.store.settleSharedWaiting(listed, true);
           continue;
         }
-        if (run.finishedAtMs === null) continue;
         const writes = run.applied.flatMap((step) =>
           step.writes.flatMap((write) =>
             write.kind === "field" && write.sharedFileUpdate ? [write] : [],
@@ -3542,11 +3541,11 @@ export class CollectionAutomations {
           (write) => ended.get(sharedFileUpdateKey(write.sharedFileUpdate!)) === "not-accepted",
         );
         if (refused.length > 0 && !listed.told) await report(run);
-        const allEnded = writes.every((write) =>
-          ended.has(sharedFileUpdateKey(write.sharedFileUpdate!)),
-        );
-        if (allEnded || (refused.length > 0 && !listed.told))
-          await this.options.store.settleSharedWaiting(listed, allEnded);
+        const done =
+          run.finishedAtMs !== null &&
+          writes.every((write) => ended.has(sharedFileUpdateKey(write.sharedFileUpdate!)));
+        if (done || (refused.length > 0 && !listed.told))
+          await this.options.store.settleSharedWaiting(listed, done);
       } catch (error) {
         failures.push(error);
       }
