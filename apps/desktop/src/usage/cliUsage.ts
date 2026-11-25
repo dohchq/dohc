@@ -97,6 +97,8 @@ const DATASET_WRITE_ACTIONS: Readonly<Record<DatasetRequest["action"], boolean>>
   discardMigration: true,
   invoke: true,
   cancelInvoke: true,
+  sql: false,
+  trace: false,
 };
 
 const APP_PUBLICATION_WRITE_ACTIONS: Readonly<

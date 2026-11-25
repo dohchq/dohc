@@ -38,7 +38,6 @@ import { generateDatasetFormSources } from "../workspaces/datasetFormGenerator";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { datasetOwnerOnlyError } from "./errorWords";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
-import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
 import type { OwnerDatasetData } from "../workspaces/remoteDataset";
 import {
   approveLocalDatasetMigration,
@@ -1011,9 +1010,11 @@ export function createDatasetHandler<
                 signal: operation.signal,
               })
               .catch((error: unknown) => {
+                const code = (error as { code?: unknown } | undefined)?.code;
                 if (
-                  error instanceof PersistentRuntimeError &&
-                  (error.code === "invalid_input" || error.code === "not_authorized")
+                  error instanceof Error &&
+                  error.name === "PersistentRuntimeError" &&
+                  (code === "invalid_input" || code === "not_authorized")
                 )
                   throw new Error(error.message);
                 throw error;
