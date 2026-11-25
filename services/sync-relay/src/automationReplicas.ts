@@ -824,7 +824,7 @@ export async function startAutomationReplicas(options: {
             options.onChanged?.(workspaceId);
           }
           if (!canSync(workspaceId)) return;
-          if (row !== null && !replicas.has(workspaceId)) {
+          if (row !== null && !replicas.has(workspaceId) && !options.holdOnly?.(workspaceId)) {
             let opening: AutomationWorkspace | null = row;
             try {
               // The server lost this replica's folder, and its engine with it.

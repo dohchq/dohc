@@ -1867,6 +1867,20 @@ describe("the automation replicas", () => {
     expect(running.replica(WORKSPACE)).toBeDefined();
   });
 
+  it("never opens a copy that only a read's hold wants", async () => {
+    const { storage } = await relay();
+    const engine = fakeEngine();
+    let held = true;
+    const { running, pass } = await stepped(storage, () => new Map([[WORKSPACE, ["account"]]]), {
+      holdOnly: () => held,
+    });
+    expect(engine.methods()).not.toContain("workspace.open");
+    expect(running.replica(WORKSPACE)).toBeUndefined();
+    held = false;
+    await pass();
+    expect(running.replica(WORKSPACE)).toBeDefined();
+  });
+
   it("neither replays nor publishes a copy's phone writes while only a read's hold keeps it", async () => {
     const { storage } = await relay();
     const engine = fakeEngine();
