@@ -304,14 +304,9 @@ export async function forwardAppEvents(input: {
   }
   if (!Number.isSafeInteger(since) || (since as number) < 0) return opaqueLinkRefusal();
   const url = new URL(
-    `/sync/link/app-publications/${input.publicationId}/backend/events`,
+    `/sync/link/app-publications/${input.publicationId}/backend/events?authorityRevision=${input.authorityRevision}&since=${since as number}&hold=25000`,
     input.relayUrl,
   );
-  url.search = new URLSearchParams({
-    authorityRevision: String(input.authorityRevision),
-    since: String(since),
-    hold: "25000",
-  }).toString();
   let relay: Response;
   try {
     relay = await input.fetchRelay(new Request(url, { redirect: "manual", signal: input.signal }));
@@ -325,7 +320,6 @@ export async function forwardAppEvents(input: {
     !record(value) ||
     !exact(value, ["dataset", "revision"]) ||
     typeof value.dataset !== "string" ||
-    !/^(?:[a-z][a-z0-9_-]{0,63})?$/.test(value.dataset) ||
     !Number.isSafeInteger(value.revision) ||
     (value.revision as number) < 0
   )

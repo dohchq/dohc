@@ -58,7 +58,6 @@ export function createAppEventWaits(
     timer = undefined;
   };
   return {
-    /** Parks until the Collection may have moved past `since`, the link may have changed, or `holdMs` passes. */
     async wait(input: {
       workspaceId: string;
       datasetId: string;
@@ -69,12 +68,7 @@ export function createAppEventWaits(
     }): Promise<void> {
       const key = JSON.stringify([input.workspaceId, input.datasetId]);
       if (waiters.atCapacity(key, input.grantId)) throw relayError("link_read_rate_limited");
-      const group = groups.get(key) ?? {
-        workspaceId: input.workspaceId,
-        datasetId: input.datasetId,
-        revision: read(input.workspaceId, input.datasetId),
-        parked: 0,
-      };
+      const group = groups.get(key) ?? { ...input, revision: input.since, parked: 0 };
       groups.set(key, group);
       group.parked += 1;
       stopObserving ??= observeRelayWrites(storage, written);

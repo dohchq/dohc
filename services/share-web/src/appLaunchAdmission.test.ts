@@ -258,7 +258,7 @@ it("holds one change wait per launch, outside the document lane and the session'
   expect((await call("/status")).status).toBe(204);
   expect((await call("/events", { since: -1 })).status).toBe(404);
   expect((await call("/events", { since: 4, dataset: "votes" })).status).toBe(404);
-  f.relayEvents(async () => Response.json({ dataset: "Votes", revision: 5 }));
+  f.relayEvents(async () => Response.json({ dataset: "votes", revision: -1 }));
   expect((await call("/events", { since: 4 })).status).toBe(503);
   f.relayEvents(async () => Response.json(null, { status: 404 }));
   expect((await call("/events", { since: 4 })).status).toBe(404);
