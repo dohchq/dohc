@@ -81,7 +81,6 @@ body { font: 1rem/1.6 "Inter Variable", -apple-system, system-ui, sans-serif; }
 
 const head = `<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
-<script>typeof window.ReactNativeWebView?.postMessage === "function" && window.ReactNativeWebView.postMessage(JSON.stringify({ kind: "head", at: Date.now() }));</script>
 <style>${css}</style></head><body><div id="editor"></div>`;
 const pageHtml = `${head}<script src="page.js"></script></body></html>`;
 

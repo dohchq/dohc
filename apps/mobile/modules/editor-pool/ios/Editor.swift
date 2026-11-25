@@ -14,16 +14,15 @@ final class Editor: NSObject, WKNavigationDelegate, UIScrollViewDelegate {
   let page: URL
   let folder: URL
   let webView: WKWebView
-  private(set) var started = false
+  private var started: String?
   private var fontsLoaded = false
   private var lost = false
-  private var queue: [String] = []
   weak var slot: EditorSlot?
   var onReady: (() -> Void)?
   var onLost: ((_ ended: Bool) -> Void)?
   var onSettle: (() -> Void)?
 
-  var ready: Bool { started && fontsLoaded }
+  var ready: Bool { started != nil && fontsLoaded }
 
   init(page: URL, folder: URL) {
     self.page = page
@@ -62,9 +61,9 @@ final class Editor: NSObject, WKNavigationDelegate, UIScrollViewDelegate {
 
   func attach(_ slot: EditorSlot) {
     self.slot = slot
-    if started { slot.editorStarted() }
-    queue.forEach(slot.forward)
-    queue = []
+    guard let started else { return }
+    slot.editorStarted()
+    slot.forward(started)
   }
 
   func release() {
@@ -77,16 +76,16 @@ final class Editor: NSObject, WKNavigationDelegate, UIScrollViewDelegate {
 
   fileprivate func received(_ data: String) {
     if data.hasPrefix(#"{"kind":"started""#) {
-      started = true
+      started = data
       if fontsLoaded { onReady?() }
       slot?.editorStarted()
     } else if data.hasPrefix(#"{"kind":"fontsLoaded""#) {
       fontsLoaded = true
-      if started { onReady?() }
+      if started != nil { onReady?() }
     } else if data.hasPrefix(#"{"kind":"painted""#) || data.hasPrefix(#"{"kind":"fontsFailed""#) {
       settle()
     }
-    if let slot { slot.forward(data) } else { queue.append(data) }
+    slot?.forward(data)
   }
 
   private func settle() {
@@ -106,7 +105,7 @@ final class Editor: NSObject, WKNavigationDelegate, UIScrollViewDelegate {
     _ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
     decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void
   ) {
-    let own = action.targetFrame?.isMainFrame == true && action.request.url.map(normalized) == page
+    let own = action.targetFrame?.isMainFrame == true && action.request.url.map { normalized($0).path } == page.path
     decisionHandler(own ? .allow : .cancel)
   }
 
@@ -124,7 +123,7 @@ final class Editor: NSObject, WKNavigationDelegate, UIScrollViewDelegate {
     let cancelled =
       (error.domain == NSURLErrorDomain && error.code == NSURLErrorCancelled)
       || (error.domain == "WebKitErrorDomain" && error.code == 102)
-    if !cancelled { lose(ended: false) }
+    if !cancelled || started == nil { lose(ended: false) }
   }
 
   func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
