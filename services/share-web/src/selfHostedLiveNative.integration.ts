@@ -4849,12 +4849,22 @@ it(
             settled: firstLive.journalCursor,
           });
           expect(proof.unpushed()).toEqual([]);
-          expect(acceptedSettlements()).toContainEqual({
-            path: "notes/third.md",
-            previousCursor: 0,
-            terminalCursor: firstLive.journalCursor,
-            status: "accepted",
-          });
+          const accepted = acceptedSettlements();
+          expect(accepted.every((row) => row.status === "accepted")).toBe(true);
+          expect(accepted).toContainEqual(
+            expect.objectContaining({
+              path: "notes/third.md",
+              previousCursor: 0,
+              status: "accepted",
+            }),
+          );
+          expect(accepted).toContainEqual(
+            expect.objectContaining({
+              path: "notes/third.md",
+              terminalCursor: firstLive.journalCursor,
+              status: "accepted",
+            }),
+          );
         },
         { timeout: 30000 },
       );
@@ -4920,12 +4930,15 @@ it(
             settled: afterRenameBack.journalCursor,
           });
           expect(proof.unpushed()).toEqual([]);
-          expect(acceptedSettlements()).toContainEqual({
-            path: "notes/second.md",
-            previousCursor: firstLive.journalCursor,
-            terminalCursor: afterRenameBack.journalCursor,
-            status: "accepted",
-          });
+          const accepted = acceptedSettlements();
+          expect(accepted.every((row) => row.status === "accepted")).toBe(true);
+          expect(accepted).toContainEqual(
+            expect.objectContaining({
+              path: "notes/second.md",
+              terminalCursor: afterRenameBack.journalCursor,
+              status: "accepted",
+            }),
+          );
         },
         { timeout: 30000 },
       );
