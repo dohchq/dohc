@@ -15,15 +15,15 @@ export function createAppEventWaits(
   caps: WaiterCaps = { maxTotal: 1_024, maxPerGroup: 1_024, maxPerActor: 256 },
 ) {
   const waiters = new WaiterRegistry(caps);
-  const groups = new Map<
-    string,
-    { workspaceId: string; datasetId: string; revision: number; parked: number }
-  >();
+  const groups = new Map<string, { workspaceId: string; datasetId: string; revision: number }>();
   let stopObserving: (() => void) | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let dueAtMs = 0;
   let sweptAtMs = 0;
   let recheckedAtMs = 0;
   const schedule = (atMs: number) => {
+    clearTimeout(timer);
+    dueAtMs = atMs;
     timer = setTimeout(sweep, Math.max(0, atMs - Date.now()));
     timer.unref();
   };
@@ -49,7 +49,7 @@ export function createAppEventWaits(
     if (!recheck && groups.size) schedule(recheckedAtMs + RECHECK_MS);
   };
   const written = () => {
-    if (timer === undefined) schedule(sweptAtMs + SWEEP_MS);
+    if (timer === undefined || sweptAtMs + SWEEP_MS < dueAtMs) schedule(sweptAtMs + SWEEP_MS);
   };
   const close = () => {
     stopObserving?.();
@@ -68,20 +68,18 @@ export function createAppEventWaits(
     }): Promise<void> {
       const key = JSON.stringify([input.workspaceId, input.datasetId]);
       if (waiters.atCapacity(key, input.grantId)) throw relayError("link_read_rate_limited");
-      const group = groups.get(key) ?? { ...input, revision: input.since, parked: 0 };
-      groups.set(key, group);
-      group.parked += 1;
+      const { workspaceId, datasetId, since } = input;
+      if (!groups.has(key)) groups.set(key, { workspaceId, datasetId, revision: since });
       stopObserving ??= observeRelayWrites(storage, written);
       try {
         await waiters.park(key, input.grantId, {
           holdMs: input.holdMs,
           signal: input.signal,
           settle: () => undefined,
-          shouldPark: () => revision(input.workspaceId, input.datasetId) === input.since,
+          shouldPark: () => read(workspaceId, datasetId) === since,
         });
       } finally {
-        group.parked -= 1;
-        if (group.parked === 0) groups.delete(key);
+        if (!waiters.waiting(key)) groups.delete(key);
         if (groups.size === 0) close();
       }
     },

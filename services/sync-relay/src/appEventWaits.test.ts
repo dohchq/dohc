@@ -27,12 +27,13 @@ it("caps parked polls per link grant, and hears writes only while one waits", as
   expect(hasRelayWriteObservers(storage)).toBe(false);
 });
 
-it("wakes a Collection whose revision moved at most every 250 ms, and every poll within a second", async () => {
+it("wakes a Collection whose revision moved within 250 ms of a write, and every poll within a second", async () => {
   vi.useFakeTimers();
   const storage = {};
   const revisions = new Map([
     ["d", 1],
     ["e", 1],
+    ["f", 1],
   ]);
   const reads = vi.fn((_: string, datasetId: string) => revisions.get(datasetId)!);
   const waits = createAppEventWaits(storage, reads);
@@ -47,8 +48,7 @@ it("wakes a Collection whose revision moved at most every 250 ms, and every poll
   await vi.advanceTimersByTimeAsync(0);
   expect(woke.sort()).toEqual(["d", "e"]);
   woke.length = 0;
-  void wait("d");
-  void wait("e");
+  for (const datasetId of ["d", "e", "f"]) void wait(datasetId);
   revisions.set("d", 2);
   for (let n = 0; n < 20; n += 1) notifyRelayWrite(storage);
   await vi.advanceTimersByTimeAsync(0);
@@ -56,7 +56,11 @@ it("wakes a Collection whose revision moved at most every 250 ms, and every poll
   const sweeps = reads.mock.calls.length;
   await vi.advanceTimersByTimeAsync(250);
   expect(woke).toEqual(["d"]);
-  expect(reads.mock.calls.length - sweeps).toBeLessThanOrEqual(2);
-  await vi.advanceTimersByTimeAsync(750);
+  expect(reads.mock.calls.length - sweeps).toBeLessThanOrEqual(3);
+  revisions.set("e", 2);
+  notifyRelayWrite(storage);
+  await vi.advanceTimersByTimeAsync(250);
   expect(woke).toEqual(["d", "e"]);
+  await vi.advanceTimersByTimeAsync(500);
+  expect(woke).toEqual(["d", "e", "f"]);
 });

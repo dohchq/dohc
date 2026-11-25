@@ -313,19 +313,23 @@ export async function forwardAppEvents(input: {
   } catch {
     return unavailableLinkRefusal();
   }
-  if (relay.status !== 200 || relay.redirected || relay.headers.has("location"))
-    return relayLinkRefusal(relay, input.signal);
-  const value = await readBoundedJson(relay, 256, input.signal).catch(() => null);
-  if (
-    !record(value) ||
-    !exact(value, ["dataset", "revision"]) ||
-    typeof value.dataset !== "string" ||
-    !Number.isSafeInteger(value.revision) ||
-    (value.revision as number) < 0
-  )
-    return unavailableLinkRefusal();
-  return Response.json(
-    { dataset: value.dataset, revision: value.revision },
-    { headers: responseHeaders },
-  );
+  try {
+    if (relay.status !== 200 || relay.redirected || relay.headers.has("location"))
+      return await relayLinkRefusal(relay, input.signal);
+    const value = await readBoundedJson(relay, 256, input.signal).catch(() => null);
+    if (
+      !record(value) ||
+      !exact(value, ["dataset", "revision"]) ||
+      typeof value.dataset !== "string" ||
+      !Number.isSafeInteger(value.revision) ||
+      (value.revision as number) < 0
+    )
+      return unavailableLinkRefusal();
+    return Response.json(
+      { dataset: value.dataset, revision: value.revision },
+      { headers: responseHeaders },
+    );
+  } finally {
+    await relay.body?.cancel().catch(() => {});
+  }
 }
