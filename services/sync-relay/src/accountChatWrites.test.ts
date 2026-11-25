@@ -86,6 +86,7 @@ async function fixture() {
     signal: lifetime.signal,
     nextRequestId: () => ++requestId,
     withRecordWork: (work) => work(),
+    busy: () => false,
     sync: async () => {
       if (heldSync !== null) {
         heldSync.reached();

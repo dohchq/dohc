@@ -65,6 +65,8 @@ export interface AutomationReplica {
   nextRequestId(): number;
   /** Pushes the replica's own writes to the relay, then pulls what the relay has. */
   sync(signal?: AbortSignal): Promise<void>;
+  /** A sync is running or queued. */
+  busy(): boolean;
   /**
    * One bounded sync, queued behind the one running: pushes, then pulls, a
    * pass's rounds at most. Answers whether it caught up. Never call it from
@@ -163,7 +165,6 @@ export async function startAutomationReplicas(options: {
       close(): Promise<void>;
       pulledHead: number;
       reasons: readonly CopyReason[];
-      busy(): boolean;
       /**
        * Replays the copy's unfinished phone writes once, after any step caught it up, whoever made the step.
        * Answers `idle` with nothing to do, `replayed`, or `owed` when a replay failed and a later pass tries

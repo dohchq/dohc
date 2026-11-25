@@ -133,12 +133,22 @@ export async function runAccountOperation(
       await input.authorize();
       // The sync brings the copy at least this far.
       const cursor = currentAccountFeedCursor(server.storage, input.workspaceId);
-      await replica.sync(input.visitor.signal);
+      if (request.operation !== "documentRead" || !copyIsCurrent(server.storage, replica))
+        await replica.sync(input.visitor.signal);
       await input.authorize();
       const result = await answer(server.storage, replica, input.workspaceId, request);
       await input.authorize();
       return { result, cursor };
     },
+  );
+}
+
+/** Whether the copy already holds everything the relay's log has for its workspace, with no sync running. */
+function copyIsCurrent(storage: SyncRelayStorage, replica: AutomationReplica): boolean {
+  return (
+    !replica.busy() &&
+    storage.currentAutomationWorkspace(replica.workspaceId)?.incarnation === replica.incarnation &&
+    replica.pulledHead >= storage.automationWorkspaceLogHead(replica.workspaceId)
   );
 }
 

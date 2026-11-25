@@ -314,6 +314,7 @@ async function server(
     sync,
     step: async () => true,
     withRecordWork: (work) => work(),
+    busy: () => false,
     get pulledHead() {
       return pulledHead;
     },

@@ -57,6 +57,7 @@ async function copies(storage: SyncRelayStorage) {
         sync: async () => undefined,
         step: async () => true,
         withRecordWork: (work) => work(),
+        busy: () => false,
       });
       hooks!.onChanged?.(workspaceId);
     }

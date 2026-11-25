@@ -252,6 +252,7 @@ it.skipIf(engine.missing)(
       signal: copy.lifetime,
       nextRequestId: copy.nextRequestId,
       withRecordWork: (work) => work(),
+      busy: () => false,
       step: async () => true,
       sync: async () => {
         hooks?.onPulled?.(WORKSPACE, await copy.sync());

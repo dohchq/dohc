@@ -26,7 +26,7 @@ import {
   registered,
 } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
 import { phoneWriteIds, runPhoneWrite, type PhoneWrite } from "./accountChatWrites";
-import { ACCOUNT_FEED_WAITS_PER_ACCOUNT } from "./accountFeed";
+import { ACCOUNT_FEED_WAITS_PER_ACCOUNT, currentAccountFeedCursor } from "./accountFeed";
 import { createAccountDeletionRoute } from "./accountDeletionRoute";
 import { DiscussionActivityHub } from "./discussionActivity";
 import type { AutomationReplica } from "./automationReplicas";
@@ -117,6 +117,7 @@ async function serverCopies(storage: SyncRelayStorage, engine: TestEngine) {
   const syncs: string[] = [];
   let held: Promise<void> | null = null;
   let requestId = 0;
+  let opensCaughtUp = true;
   const lifetime = new AbortController();
   const copies = await startServerCopies({
     storage,
@@ -132,26 +133,37 @@ async function serverCopies(storage: SyncRelayStorage, engine: TestEngine) {
         for (const [workspaceId, reasons] of wanted) {
           const row = storage.joinAutomationWorkspace({ workspaceId, nowMs: 1, reasons });
           if (!row || open.has(workspaceId)) continue;
-          open.set(workspaceId, {
+          let running = 0;
+          const copy = {
             workspaceId,
             ownerUserId: row.ownerUserId,
             incarnation: row.incarnation,
             reasons: row.reasons,
             startedAtMs: 1,
-            pulledHead: 0,
+            // As a real copy's open, which steps until it catches up, unless the test says it fell short.
+            pulledHead: opensCaughtUp ? storage.automationWorkspaceLogHead(workspaceId) : 0,
             root: "unused",
             metadataDir: "unused",
             client: engine as unknown as EngineClient,
             workspace: workspaceId,
             signal: lifetime.signal,
             nextRequestId: () => ++requestId,
-            withRecordWork: (work) => work(),
+            withRecordWork: <T>(work: () => Promise<T>) => work(),
+            busy: () => running > 0,
             step: async () => true,
             sync: async () => {
               syncs.push(workspaceId);
-              await held;
+              running += 1;
+              try {
+                const head = storage.automationWorkspaceLogHead(workspaceId);
+                await held;
+                copy.pulledHead = Math.max(copy.pulledHead, head);
+              } finally {
+                running -= 1;
+              }
             },
-          });
+          } satisfies AutomationReplica;
+          open.set(workspaceId, copy);
           hooks.onChanged?.(workspaceId);
         }
         for (const workspaceId of [...open.keys()])
@@ -175,6 +187,9 @@ async function serverCopies(storage: SyncRelayStorage, engine: TestEngine) {
   return {
     copies,
     syncs,
+    opensBehind() {
+      opensCaughtUp = false;
+    },
     holdSyncs() {
       let release!: () => void;
       held = new Promise((resolve) => {
@@ -389,7 +404,7 @@ describe("an account's reads through the server's copy", () => {
       markdown: "# Plan\n\nStay in Alfama.\n",
     });
 
-    expect(syncs).toHaveLength(9);
+    expect(syncs, "a page read on a caught-up copy skips the sync").toHaveLength(8);
     expect(engine.methods()).not.toContain("chats.channels.ensureGeneral");
   });
 
@@ -505,7 +520,7 @@ describe("an account's reads through the server's copy", () => {
 
   it("answers as missing, with no result, when access ends once the result is ready", async () => {
     let reads = 0;
-    const { engine, h, syncs } = await relay({
+    const { storage, activity, engine, h, syncs, opensBehind } = await relay({
       resolve: async (request) => {
         const session = await resolveAccountSession(request);
         // Before the arguments, after them, once the copy opens, once it syncs, then once the result is ready.
@@ -513,6 +528,8 @@ describe("an account's reads through the server's copy", () => {
       },
     });
     await seedTrip(engine);
+    opensBehind();
+    logWriter(storage, activity)("files.change", {});
     const response = await h(op("trip", "documentRead", { path: "docs/plan.md" }));
     expect(reads).toBe(5);
     expect(syncs).toEqual(["trip"]);
@@ -541,6 +558,67 @@ describe("an account's reads through the server's copy", () => {
     } as RequestInit & { duplex: "half" });
     await denialBytes(await h(unread));
     expect(pulled).toBe(false);
+  });
+});
+
+describe("a page read on a caught-up copy", () => {
+  const read = op("trip", "documentRead", { path: "docs/plan.md" });
+
+  it("skips the sync and answers the feed's cursor for what the copy holds, while other reads still sync", async () => {
+    const { storage, activity, engine, h, syncs } = await relay();
+    await seedTrip(engine);
+    logWriter(storage, activity)("files.change", {});
+    const response = await h(read.clone());
+    expect(response.status).toBe(200);
+    expect(await json(response)).toEqual({
+      ok: true,
+      result: { ok: true, path: "docs/plan.md", markdown: "# Plan\n\nStay in Alfama.\n" },
+      cursor: currentAccountFeedCursor(storage, "trip"),
+    });
+    expect(syncs).toEqual([]);
+    await answer(await h(op("trip", "groups")));
+    expect(syncs).toEqual(["trip"]);
+  });
+
+  it("syncs a copy behind the relay's log", async () => {
+    const { storage, activity, engine, h, syncs, opensBehind } = await relay();
+    await seedTrip(engine);
+    opensBehind();
+    logWriter(storage, activity)("files.change", {});
+    await answer(await h(read.clone()));
+    expect(syncs).toEqual(["trip"]);
+  });
+
+  it("waits for a sync already running on the copy", async () => {
+    const { engine, h, holdSyncs, syncs } = await relay();
+    await seedTrip(engine);
+    const release = holdSyncs();
+    const groups = h(op("trip", "groups"));
+    await expect.poll(() => syncs.length).toBe(1);
+    const page = h(read.clone());
+    await expect.poll(() => syncs.length).toBe(2);
+    release();
+    await answer(await groups);
+    await answer(await page);
+  });
+
+  it("syncs a copy that is no longer the workspace's current one", async () => {
+    let reads = 0;
+    const { storage, engine, h, syncs } = await relay({
+      resolve: async (request) => {
+        // Once the copy opens, its row leaves, as when the workspace's identity changes.
+        if (++reads === 3)
+          (storage as StorageContext).db
+            .prepare(
+              "UPDATE sync_relay_automation_workspaces SET left_at_ms = 1 WHERE workspace_id = 'trip'",
+            )
+            .run();
+        return await resolveAccountSession(request);
+      },
+    });
+    await seedTrip(engine);
+    await answer(await h(read.clone()));
+    expect(syncs).toEqual(["trip"]);
   });
 });
 
@@ -1175,6 +1253,7 @@ describe("an account's chat writes through the server's copy", () => {
       signal: lifetime.signal,
       nextRequestId: () => ++requestId,
       withRecordWork: (work) => work(),
+      busy: () => false,
       sync: async () => {
         syncs.push("trip");
         if (syncError !== null) throw syncError;
