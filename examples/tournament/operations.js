@@ -527,14 +527,7 @@ function buildBracket(ctx, plan) {
   return state;
 }
 
-function startMatchIn(ctx, state, match, court, at, actor) {
-  if (match.status !== "ready")
-    ctx.refuse(
-      "match_not_ready",
-      match.status === "waiting"
-        ? `${matchLabel(state, match)} is still waiting for its players.`
-        : `${matchLabel(state, match)} has already started.`,
-    );
+function requireFreeCourt(ctx, state, match, court) {
   if (!court || court.tournament_id !== match.tournament_id)
     ctx.refuse("not_found", "That court is not part of this tournament.");
   for (const other of state.matches.values())
@@ -543,6 +536,17 @@ function startMatchIn(ctx, state, match, court, at, actor) {
         "court_busy",
         `${court.name} is already playing ${matchLabel(state, other)}. Complete that match first.`,
       );
+}
+
+function startMatchIn(ctx, state, match, court, at, actor) {
+  if (match.status !== "ready")
+    ctx.refuse(
+      "match_not_ready",
+      match.status === "waiting"
+        ? `${matchLabel(state, match)} is still waiting for its players.`
+        : `${matchLabel(state, match)} has already started.`,
+    );
+  requireFreeCourt(ctx, state, match, court);
   match.status = "live";
   match.court_id = court.id;
   match.started_at = at;
@@ -1036,6 +1040,7 @@ function publicHistory(rows) {
           : row.kind === "cancel"
             ? ["start"]
             : null;
+    if (row.kind === "cancel") while (stack.at(-1)?.kind === "move") stack.pop();
     if (!undone) {
       stack.push(row);
       continue;
@@ -1119,7 +1124,7 @@ globalThis.operations = {
       `SELECT id, match_id AS matchId, seq, game, kind, side, player_a AS playerA, player_b AS playerB,
         score_a AS scoreA, score_b AS scoreB,
         court_id AS courtId, at
-       FROM match_events WHERE tournament_id = ? AND kind IN ('point', 'undo', 'game', 'complete', 'report', 'walkover', 'reopen', 'start', 'cancel')
+       FROM match_events WHERE tournament_id = ? AND kind IN ('point', 'undo', 'game', 'complete', 'report', 'walkover', 'reopen', 'start', 'cancel', 'move')
        ORDER BY at DESC, seq DESC LIMIT ${fans ? 200 : 14}`,
       [chosen.id],
     );
@@ -1130,7 +1135,7 @@ globalThis.operations = {
         : null;
     const timeline = timelineFor
       ? ctx.db.query(
-          `SELECT seq, game, kind, side, player_a AS playerA, player_b AS playerB, score_a AS scoreA, score_b AS scoreB, at FROM match_events WHERE match_id = ? ORDER BY seq DESC LIMIT ${HISTORY_LIMIT}`,
+          `SELECT seq, game, kind, side, player_a AS playerA, player_b AS playerB, score_a AS scoreA, score_b AS scoreB, court_id AS courtId, at FROM match_events WHERE match_id = ? ORDER BY seq DESC LIMIT ${HISTORY_LIMIT}`,
           [timelineFor],
         )
       : null;
@@ -1245,6 +1250,21 @@ globalThis.operations = {
       match.started_at = null;
       touchMatch(state, match);
       touchTournament(state, at);
+    });
+  },
+
+  moveMatch(ctx, input) {
+    return liveMatchAction(ctx, input, (state, match) => {
+      requireLive(ctx, state, match);
+      const court = state.courts.get(idText(ctx, input?.courtId, "court"));
+      if (court?.id === match.court_id)
+        ctx.refuse("invalid_input", `${matchLabel(state, match)} is already on ${court.name}.`);
+      requireFreeCourt(ctx, state, match, court);
+      const at = ctx.nowMs;
+      match.court_id = court.id;
+      touchMatch(state, match);
+      touchTournament(state, at);
+      addEvent(state, match, "move", null, at, actorOf(ctx));
     });
   },
 

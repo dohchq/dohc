@@ -37,6 +37,7 @@ interface Completed {
 const LABELS: Record<string, string> = {
   startMatch: "start the match",
   returnToQueue: "return the match to the queue",
+  moveMatch: "move the match",
   scorePoint: "save the point",
   undoPoint: "undo the point",
   completeMatch: "record the game",
@@ -328,6 +329,8 @@ function Organizer() {
       reopen: (match: Match) => void run(match, "reopenMatch", {}, mutationKey("reopenMatch")),
       returnToQueue: (match: Match) =>
         void run(match, "returnToQueue", {}, mutationKey("returnToQueue")),
+      move: (match: Match, court: Court) =>
+        void run(match, "moveMatch", { courtId: court.id }, mutationKey("moveMatch")),
     }),
     [pending, stale, taps, sending, live.switching, owner, run, drain, setTapList],
   );

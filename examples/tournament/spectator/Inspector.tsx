@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from "react";
-import { Check, Flag, Play, RefreshCw, Search, Undo2, X } from "./Icons";
+import { ArrowRight, Check, Flag, Play, RefreshCw, Search, Undo2, X } from "./Icons";
 import {
   HISTORY_LIMIT,
   eventScore,
@@ -224,6 +224,8 @@ export function Inspector({
     if (entry.kind === "walkover") return `${who} won by walkover`;
     if (entry.kind === "reopen") return "Result reopened";
     if (entry.kind === "cancel") return "Start cancelled";
+    if (entry.kind === "move")
+      return `Moved to ${snapshot.courts.find((place) => place.id === entry.courtId)?.name ?? "another court"}`;
     return `Started, ${name(entry.playerA)} vs ${name(entry.playerB)}`;
   };
 
@@ -450,6 +452,30 @@ export function Inspector({
               Return to the queue
             </button>
           ) : null}
+        </div>
+      ) : null}
+      {actions && match.status === "live" ? (
+        <div className="co-inspector-actions">
+          <span className="co-rail-title">Move to</span>
+          {free.length === 0 ? (
+            <p className="co-rail-empty">All courts busy</p>
+          ) : (
+            <div className="co-queue-courts">
+              {free.map((entry: Court) => (
+                <button
+                  key={entry.id}
+                  type="button"
+                  className="co-chip"
+                  disabled={busy}
+                  aria-label={`Move to ${entry.name}`}
+                  onClick={() => actions.move(match, entry)}
+                >
+                  <ArrowRight size={11} />
+                  {entry.name}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       ) : null}
 

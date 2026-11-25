@@ -377,6 +377,86 @@ describe("tournament example on the real Collection host", () => {
       expect(event).toMatchObject({ playerA: opener.playerA, playerB: opener.playerB });
   }, 60_000);
 
+  it("drops a move from the public feed when its match goes back to the queue", async () => {
+    const f = await fixture();
+    const { view } = await createTournament(f, [1600, 1550, 1450, 1400]);
+    const [first, , spare] = view.courts.map((court: Json) => court.id);
+    const opener = matchAt(view, 1, 1);
+    const { match: started } = await playTo(f, opener.id, first, [], "scorer");
+    const moved = await f.call(
+      "moveMatch",
+      { matchId: opener.id, courtId: spare, expectedVersion: started.version },
+      "scorer",
+    );
+    await f.call("returnToQueue", { matchId: opener.id, expectedVersion: moved.version }, "scorer");
+    const owner = await f.snapshot();
+    const fanView = await f.snapshot(owner.tournament.id, "fan");
+    expect(fanView.recent.filter((entry: Json) => entry.matchId === opener.id)).toEqual([]);
+    expect(
+      (await f.call("matchLog", { matchId: opener.id }, "scorer")).map((entry: Json) => entry.kind),
+    ).toEqual(["cancel", "move", "start"]);
+  });
+
+  it("moves a live match with points to a free court, keeping its score, server, and start time", async () => {
+    const f = await fixture();
+    const { view } = await createTournament(f, [1600, 1550, 1450, 1400]);
+    const [first, second, spare] = view.courts.map((court: Json) => court.id);
+    const opener = matchAt(view, 1, 1);
+    const other = matchAt(view, 1, 2);
+    await expect(
+      f.call(
+        "moveMatch",
+        { matchId: opener.id, courtId: spare, expectedVersion: opener.version },
+        "scorer",
+      ),
+    ).rejects.toMatchObject({ refusal: { code: "match_not_live" } });
+    const { match: scored } = await playTo(f, opener.id, first, ["a", "a", "b"], "scorer");
+    await playTo(f, other.id, second, [], "scorer");
+    expect(scored).toMatchObject({ scoreA: 2, scoreB: 1, server: "b" });
+    const move = (courtId: string, expectedVersion: number) =>
+      f.call("moveMatch", { matchId: opener.id, courtId, expectedVersion }, "scorer");
+    await expect(move(second, scored.version)).rejects.toMatchObject({
+      refusal: { code: "court_busy" },
+    });
+    await expect(move(first, scored.version)).rejects.toMatchObject({
+      refusal: { code: "invalid_input" },
+    });
+    await expect(move(spare, scored.version - 1)).rejects.toMatchObject({
+      refusal: { code: "conflict" },
+    });
+    await expect(
+      f.call(
+        "moveMatch",
+        { matchId: opener.id, courtId: spare, expectedVersion: scored.version },
+        "fan",
+      ),
+    ).rejects.toThrow();
+    const moved = await move(spare, scored.version);
+    expect(moved).toMatchObject({
+      status: "live",
+      courtId: spare,
+      scoreA: 2,
+      scoreB: 1,
+      server: "b",
+      startedAt: scored.startedAt,
+      version: scored.version + 1,
+    });
+    const after = await f.snapshot();
+    const holding = (id: string) => after.courts.find((court: Json) => court.id === id).matchId;
+    expect([holding(first), holding(second), holding(spare)]).toEqual([null, other.id, opener.id]);
+    const logged = (await f.call("matchLog", { matchId: opener.id }, "scorer"))[0];
+    expect(logged).toMatchObject({
+      kind: "move",
+      courtId: spare,
+      scoreA: 2,
+      scoreB: 1,
+      playerA: opener.playerA,
+      playerB: opener.playerB,
+      actor: "named:scorer",
+    });
+    expect(after.recent[0]).toMatchObject({ kind: "move", matchId: opener.id, courtId: spare });
+  }, 60_000);
+
   it("completes a match atomically, updates ratings, frees the court, and advances the winner", async () => {
     const f = await fixture();
     const { view } = await createTournament(f, [1600, 1550, 1450, 1400], 1);
@@ -558,6 +638,10 @@ describe("tournament example on the real Collection host", () => {
         { matchId: opener.id, courtId: view.courts[0].id, expectedVersion: opener.version },
       ],
       ["returnToQueue", { matchId: opener.id, expectedVersion: opener.version }],
+      [
+        "moveMatch",
+        { matchId: opener.id, courtId: view.courts[1].id, expectedVersion: opener.version },
+      ],
       ["scorePoint", { matchId: opener.id, side: "a", expectedVersion: opener.version }],
       ["undoPoint", { matchId: opener.id, expectedVersion: opener.version }],
       ["completeMatch", { matchId: opener.id, expectedVersion: opener.version }],
