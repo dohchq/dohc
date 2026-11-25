@@ -6,9 +6,9 @@ use super::held_characters::{
     SCOPE_OPEN,
 };
 use super::{
-    active_mark, contains_same_mark, is_js_whitespace, js_value_string, remove_active,
-    set_active, split_leading_js_whitespace, split_trailing_js_whitespace, MarkKind,
-    MarkdownMark, ProjectionBuffer, ProjectionResult,
+    active_mark, contains_same_mark, is_js_whitespace, js_value_string, remove_active, set_active,
+    split_leading_js_whitespace, split_trailing_js_whitespace, MarkKind, MarkdownMark,
+    ProjectionBuffer, ProjectionResult,
 };
 
 pub(super) enum Piece {
@@ -70,7 +70,9 @@ fn loose_after(written: &str) -> bool {
 fn ends_with_escape(text: &str) -> bool {
     let mut end = text.chars().rev();
     end.next() == Some(OPAQUE_CLOSE)
-        && end.next().is_some_and(|character| character.is_ascii_punctuation())
+        && end
+            .next()
+            .is_some_and(|character| character.is_ascii_punctuation())
         && end.next() == Some('\\')
         && end.next() == Some(OPAQUE_OPEN)
 }
@@ -284,7 +286,13 @@ impl Writer<'_> {
             marks: after_marks,
         } = after
         else {
-            return matches!(after, Piece::Node { hard_break: true, .. });
+            return matches!(
+                after,
+                Piece::Node {
+                    hard_break: true,
+                    ..
+                }
+            );
         };
         let cut = after_text
             .char_indices()
@@ -383,7 +391,11 @@ impl Writer<'_> {
             !self.loose_after_run(end)
         });
         at.map_or_else(Vec::new, |at| {
-            self.active[at..].iter().rev().map(|mark| mark.kind).collect()
+            self.active[at..]
+                .iter()
+                .rev()
+                .map(|mark| mark.kind)
+                .collect()
         })
     }
 
@@ -499,7 +511,11 @@ pub(super) fn write_inline(pieces: &[Piece]) -> ProjectionResult<String> {
                     || starts_with_space
                     || edge.unwrap_or_else(|| loose_before(&writer.written_end()))
             };
-            writer.nest_picky_inside(index, marks_to_open(&writer.active, &current, next), &before)
+            writer.nest_picky_inside(
+                index,
+                marks_to_open(&writer.active, &current, next),
+                &before,
+            )
         };
         let active_closing: Vec<MarkKind> = to_close
             .iter()

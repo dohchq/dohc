@@ -6490,7 +6490,6 @@ impl MarkKind {
             Self::Underline => 6,
         }
     }
-
 }
 
 struct RenderContext<'a> {

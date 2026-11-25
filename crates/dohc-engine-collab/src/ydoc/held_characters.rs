@@ -527,7 +527,9 @@ impl<'a> Pairing<'a> {
     fn delimits(&self, index: usize, character: char) -> bool {
         match self.cells[index] {
             Cell::Delimiter(delimiter) => delimiter == character,
-            Cell::Held { character: held, .. } => held == character && !self.escaped[index],
+            Cell::Held {
+                character: held, ..
+            } => held == character && !self.escaped[index],
             _ => false,
         }
     }
@@ -554,7 +556,10 @@ impl<'a> Pairing<'a> {
     fn inner(&self, open: usize) -> (usize, usize) {
         let close = self.close_of(open);
         let opaque = |index: Option<usize>| {
-            matches!(index.and_then(|index| self.cells.get(index)), Some(Cell::Opaque(_)))
+            matches!(
+                index.and_then(|index| self.cells.get(index)),
+                Some(Cell::Opaque(_))
+            )
         };
         (
             open + 1 + usize::from(opaque(Some(open + 1))),
@@ -624,12 +629,15 @@ impl<'a> Pairing<'a> {
         }
         index += 1;
         plain(&mut index);
-        if pair(index) { index } else { from }
+        if pair(index) {
+            index
+        } else {
+            from
+        }
     }
 
     fn classify(star: bool, before: Option<Shown>, after: Option<Shown>) -> Option<Flank> {
-        let punctuation =
-            |shown: Shown| shown.punctuation() && !(star && shown.is('~'));
+        let punctuation = |shown: Shown| shown.punctuation() && !(star && shown.is('~'));
         let space_after = after.is_none_or(Shown::space);
         let Some(before) = before.filter(|before| !before.space()) else {
             return (!space_after).then_some(Flank::Open);
@@ -713,9 +721,7 @@ impl<'a> Pairing<'a> {
                     open += size;
                     continue;
                 }
-                Some(Flank::Both)
-                    if length % 3 != 0 && (length as isize + size) % 3 == 0 =>
-                {
+                Some(Flank::Both) if length % 3 != 0 && (length as isize + size) % 3 == 0 => {
                     middle += size;
                     continue;
                 }
@@ -728,7 +734,11 @@ impl<'a> Pairing<'a> {
             let used = size.min(size + open + middle);
             found = Some(Match {
                 from,
-                width: if (length as isize).min(used) % 2 != 0 { 1 } else { 2 },
+                width: if (length as isize).min(used) % 2 != 0 {
+                    1
+                } else {
+                    2
+                },
                 end: (start as isize + used) as usize,
             });
         }
@@ -764,7 +774,12 @@ impl<'a> Pairing<'a> {
         if opens && closes {
             return true;
         }
-        let around = [open.checked_sub(1), Some(open + 2), close.checked_sub(2), Some(close + 1)];
+        let around = [
+            open.checked_sub(1),
+            Some(open + 2),
+            close.checked_sub(2),
+            Some(close + 1),
+        ];
         for at in around.into_iter().flatten() {
             if let Some(Cell::Held { character, .. }) = self.cells.get(at) {
                 if *character != '\\' && self.delimits(at, *character) {
@@ -784,8 +799,8 @@ impl<'a> Pairing<'a> {
             return;
         }
         let end = last.last().expect("a run holds a backtick").index;
-        let at_end =
-            self.after(end + 1, to).is_none() && self.shown(end, Side::Last) == Some(Shown::Character('`'));
+        let at_end = self.after(end + 1, to).is_none()
+            && self.shown(end, Side::Last) == Some(Shown::Character('`'));
         if last.len() >= 2 && at_end {
             return;
         }
