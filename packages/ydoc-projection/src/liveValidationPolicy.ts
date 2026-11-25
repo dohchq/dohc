@@ -90,13 +90,15 @@ export function liveNoteWeight(doc: Y.Doc): LiveNoteWeight {
   return { structs, elements };
 }
 
-/**
- * Whether a note of this weight fits the capacity above. The structs the save's check visits are
- * not judged here: it counts the structs an update holds, and a note stores more of them where a
- * delete split one, so the check's own budget caps them.
- */
-export function fitsLiveNoteCapacity({ structs, elements }: LiveNoteWeight): boolean {
-  return structs + LIVE_NOTE_ELEMENT_WEIGHT * elements <= LIVE_NOTE_CAPACITY;
+/** Whether a note of this weight fits the capacity above. The journal visits each struct three times, so `policy` also caps its structs. */
+export function fitsLiveNoteCapacity(
+  { structs, elements }: LiveNoteWeight,
+  policy: OrderedLiveUpdateCutPolicy,
+): boolean {
+  return (
+    structs <= policy.maxStructVisits / 3 &&
+    structs + LIVE_NOTE_ELEMENT_WEIGHT * elements <= LIVE_NOTE_CAPACITY
+  );
 }
 
 /**
@@ -107,7 +109,7 @@ export function fitsNewNote(counts: NewNoteCounts, policy: OrderedLiveUpdateCutP
   const visits = (outside: number, inside: number, perRead: number) =>
     SAVE_VISITS_OUTSIDE_A_MARK * outside + perRead * inside;
   return (
-    fitsLiveNoteCapacity(counts) &&
+    fitsLiveNoteCapacity(counts, policy) &&
     SAVE_VISITS_PER_READ.maxStructVisits * counts.structs <= policy.maxStructVisits &&
     visits(counts.values, counts.markValues, SAVE_VISITS_PER_READ.maxValueNodeVisits) <=
       policy.maxValueNodeVisits &&
@@ -119,6 +121,6 @@ export function fitsNewNote(counts: NewNoteCounts, policy: OrderedLiveUpdateCutP
 }
 
 /** Whether `doc` fits the capacity above. */
-export function withinLiveNoteCapacity(doc: Y.Doc): boolean {
-  return fitsLiveNoteCapacity(liveNoteWeight(doc));
+export function withinLiveNoteCapacity(doc: Y.Doc, policy: OrderedLiveUpdateCutPolicy): boolean {
+  return fitsLiveNoteCapacity(liveNoteWeight(doc), policy);
 }

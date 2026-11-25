@@ -1369,7 +1369,7 @@ function validatePublicState(
   engineReader = false,
 ): string {
   // Projection and reimport are the costliest steps, so a note too dense for them is refused first.
-  if (!withinLiveNoteCapacity(scratch)) refuse("capacity-refused");
+  if (!withinLiveNoteCapacity(scratch, policy)) refuse("capacity-refused");
   const bodySequence = bodySequenceNotesAdmitted && holdsBodySequence(scratch);
   const roots = bodySequence ? BODY_SEQUENCE_NOTE_ROOTS : PUBLIC_ROOTS;
   if (
