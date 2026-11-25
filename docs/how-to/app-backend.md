@@ -192,8 +192,8 @@ globalThis.operations = {
 Declare those tables and operations in the dataset descriptor and schema.
 `ctx.db.query` returns rows; `ctx.db.execute` returns `{ changes }`.
 Operations read and write only their own Collection's tables. They cannot attach databases, run `PRAGMA`, change the schema, or call `load_extension`, `readfile`, `writefile`, `edit`, or `fts3_tokenizer`. `ctx.db.query` only reads.
-Name rows by the table's primary key, not `rowid`, unless that key is a single `INTEGER` column. Read affected rows from `execute`'s `{ changes }`, not `changes()`, `total_changes()`, or `last_insert_rowid()`.
-By default, a run gets a 16 MiB database, 64 KiB of input, a 256 KiB result, 1,000 rows and 256 KiB per query, 128 statements, 128 parameters per statement, and 24 MiB of memory. Statements must start within 1 s, and the run stops at 8 s. A refusal names the limit, its unit, and the actual usage.
+Name rows by the table's primary key, not `rowid`, unless that key is an `INTEGER PRIMARY KEY` that aliases `rowid`. Read affected rows from `execute`'s `{ changes }`, not `changes()`, `total_changes()`, or `last_insert_rowid()`.
+By default, a run gets a 16 MiB database, 64 KiB of input, a 256 KiB result, 1,000 rows and 256 KiB per query, 128 statements, 128 parameters per statement, and 24 MiB of memory. The operation's code gets 1 s, and the whole run, including SQL it already started, stops at 8 s. A size or count refusal names the limit, its unit, and the actual usage; a time or memory refusal names the limit.
 Parameters are strings, finite numbers, or null. The host verifies `ctx.caller`.
 `ctx.caller.kind` says who asked: `owner`, `named` for a person the owner granted access, `link` for someone with a share link, or `automation` for an automation on the Collection.
 A link caller has `grantId`, the link's ID. The owner copies it from **Share**, the link's **Link options**, then **Copy link ID**.
