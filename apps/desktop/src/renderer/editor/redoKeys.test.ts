@@ -6,17 +6,21 @@ import { Collaboration } from "@tiptap/extension-collaboration";
 import * as Y from "yjs";
 import { RedoKeys } from "./redoKeys";
 
-for (const { history, extensions } of [
+const cyrillicRedo = { key: "я", code: "KeyQ", keyCode: 81, shiftKey: true };
+
+for (const { history, extensions, cyrillic } of [
   {
     history: "the shared document's",
     extensions: (doc: Y.Doc) => [
       StarterKit.configure({ undoRedo: false, trailingNode: false }),
       Collaboration.configure({ document: doc, field: "body" }),
     ],
+    cyrillic: false,
   },
   {
     history: "the local editor's",
     extensions: () => [StarterKit.configure({ trailingNode: false })],
+    cyrillic: true,
   },
 ])
   it(`takes Redo with nothing left to redo in ${history} history without undoing or reaching the browser`, () => {
@@ -39,7 +43,9 @@ for (const { history, extensions } of [
       editor.commands.insertContent("Hello");
       key({ key: "z", keyCode: 90 });
       expect(editor.getText()).toBe("");
-      expect(key({ key: "z", keyCode: 90, shiftKey: true }).defaultPrevented).toBe(true);
+      key(cyrillicRedo);
+      expect(editor.getText()).toBe(cyrillic ? "Hello" : "");
+      key({ key: "z", keyCode: 90, shiftKey: true });
       expect(editor.getText()).toBe("Hello");
 
       // Caps Lock reports a lowercase key under Shift.
@@ -47,11 +53,12 @@ for (const { history, extensions } of [
         { key: "z", keyCode: 90, shiftKey: true },
         { key: "Z", keyCode: 90, shiftKey: true },
         { key: "y", keyCode: 89 },
-        { key: "я", code: "KeyQ", keyCode: 81, shiftKey: true },
       ]) {
         expect(key(redo).defaultPrevented).toBe(true);
         expect(editor.getText()).toBe("Hello");
       }
+      expect(key(cyrillicRedo).defaultPrevented).toBe(cyrillic);
+      expect(editor.getText()).toBe("Hello");
     } finally {
       editor.destroy();
       doc.destroy();

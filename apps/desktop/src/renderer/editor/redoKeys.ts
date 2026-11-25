@@ -2,7 +2,8 @@ import { Extension } from "@tiptap/core";
 
 // The history extensions' redo keys decline when nothing is left to redo, and
 // ProseMirror's keymap then retries Ctrl+Shift+z without Shift as Undo. These
-// run first and always take the key.
+// run first and always take the key. Only the editor's own history binds the
+// Cyrillic alias.
 export const RedoKeys = Extension.create({
   name: "dohcRedoKeys",
   priority: 1001,
@@ -11,6 +12,8 @@ export const RedoKeys = Extension.create({
       this.editor.commands.redo();
       return true;
     };
-    return { "Shift-Mod-z": redo, "Mod-y": redo, "Shift-Mod-я": redo };
+    const ownHistory = () =>
+      this.editor.extensionManager.extensions.some(({ name }) => name === "undoRedo");
+    return { "Shift-Mod-z": redo, "Mod-y": redo, "Shift-Mod-я": () => ownHistory() && redo() };
   },
 });
