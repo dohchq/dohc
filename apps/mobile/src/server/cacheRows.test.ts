@@ -442,17 +442,37 @@ describe("a relaunch", () => {
     expect(server.calls.filter((call) => call.method === "POST")).toHaveLength(reads);
   });
 
-  it("says a view shows the cache's value until a read from the server replaces it", async () => {
+  it("marks a value from the cache on the state that shows it, which a later server answer leaves as it was", async () => {
     const server = serverWithA();
     const disk = keptDisk();
     await readBeforeRelaunch(server, disk);
     const data = open(server, launch(disk).cache);
-    expect(data.fromCache(views.files)).toBe(false);
     data.subscribe(views.files, () => {});
     await vi.waitFor(() => expect(data.state(views.files).value).toEqual(A_FILES));
-    expect(data.fromCache(views.files)).toBe(true);
+    const rendered = data.state(views.files);
+    expect(rendered.fromCache).toBe(true);
     await data.refresh(views.files);
-    expect(data.fromCache(views.files)).toBe(false);
+    expect(rendered.fromCache).toBe(true);
+    expect(data.state(views.files).fromCache).toBeFalsy();
+    data.stop();
+  });
+
+  it("drops the cache mark with the value when a feed replace drops a view no screen has open", async () => {
+    const server = serverWithA();
+    const disk = keptDisk();
+    await readBeforeRelaunch(server, disk);
+    const feed = deferred<Answer>();
+    server.on("GET", feedPath("ws-a", "0.5.2"), () => feed.promise);
+    server.on("GET", feedPath("ws-a", "1.0.0"), held);
+    const data = open(server, launch(disk).cache);
+    data.subscribe(views.files, () => {});
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md"))).toMatchObject({ fromCache: true }),
+    );
+    await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.5.2"))).toBe(2));
+    feed.resolve({ status: 200, body: { ok: true, cursor: "1.0.0", replace: true } });
+    await vi.waitFor(() => expect(data.state(views.page("a.md")).value).toBeNull());
+    expect(data.state(views.page("a.md")).fromCache).toBeFalsy();
     data.stop();
   });
 

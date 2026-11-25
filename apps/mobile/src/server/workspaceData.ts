@@ -64,6 +64,8 @@ export interface ViewState<T> {
   readonly problem: ReadProblem | null;
   /** How many reads have failed, so each failure is reported once. */
   readonly failures: number;
+  /** The value came from the cache, and no read from the server has replaced it. */
+  readonly fromCache?: boolean;
 }
 
 /** Whether the feed is failing: why, and how many times the store has shown that it is, so each is reported once. */
@@ -403,8 +405,6 @@ export interface WorkspaceData {
   /** This store's number, different for each one made, so a screen can start afresh with a new store. */
   readonly instance: number;
   state<T>(view: View<T>): ViewState<T>;
-  /** Whether the view shows a value from the cache that no read from the server has replaced yet. */
-  fromCache(view: View<unknown>): boolean;
   /** Opens the view while any listener stays: it reads unless it already shows a fresh value. */
   subscribe(view: View<unknown>, listener: () => void): () => void;
   /** Reads the view now, as a screen about to open it would, unless it shows a fresh value or a read is on its way. */
@@ -483,21 +483,25 @@ export function createWorkspaceData(options: {
     feedState = next;
     for (const listener of feedListeners) listener();
   }
-  const cachedValues = new Set<string>();
   function seed(found: readonly Cached[]) {
     for (const cached of found) {
       if (cached.stale && cached.prefetched) continue;
-      cachedValues.add(cached.view.id);
       const target = entries.get(cached.view.id);
       if (target) {
-        target.state = { ...target.state, value: cached.value };
+        target.state = { ...target.state, value: cached.value, fromCache: true };
         target.stale = cached.stale;
         target.prefetched = cached.prefetched;
         shown(target);
       } else {
         entries.set(cached.view.id, {
           view: cached.view,
-          state: { value: cached.value, loading: false, problem: null, failures: 0 },
+          state: {
+            value: cached.value,
+            loading: false,
+            problem: null,
+            failures: 0,
+            fromCache: true,
+          },
           listeners: new Set(),
           stale: cached.stale,
           prefetched: cached.prefetched,
@@ -592,7 +596,6 @@ export function createWorkspaceData(options: {
       (answer) => {
         if (!live() || !target.reads.isLatest(request)) return;
         target.stale = false;
-        cachedValues.delete(target.view.id);
         const previous = unseen ? null : target.state.value;
         const value = target.view.carry ? target.view.carry(previous, answer.value) : answer.value;
         const shownAs = target.view.shownAs;
@@ -755,7 +758,6 @@ export function createWorkspaceData(options: {
     workspaceId,
     instance: ++instances,
     state: <T>(view: View<T>) => entry(view).state as ViewState<T>,
-    fromCache: (view) => cachedValues.has(view.id),
     subscribe(view, listener) {
       const target = entry(view);
       target.listeners.add(listener);
