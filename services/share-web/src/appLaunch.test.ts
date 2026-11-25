@@ -206,7 +206,7 @@ it("rechecks relay and keeps credentials out of opaque document", async () => {
   expect(text).toContain("App loaded");
   expect(text).not.toContain(app.proof);
   expect(text).not.toContain(app.cookie);
-  expect(f.requests).toHaveLength(4);
+  expect(f.requests).toHaveLength(5);
 });
 it("atomically consumes concurrent handoffs once", async () => {
   const f = fixture(),

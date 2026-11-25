@@ -96,9 +96,10 @@ function fixture() {
           },
         }),
       );
-      const proof = /const proof="([A-Za-z0-9_-]{43})"/.exec(await bootstrap.text())![1]!;
+      const html = await bootstrap.text();
+      const proof = /const proof="([A-Za-z0-9_-]{43})"/.exec(html)![1]!;
       const cookie = bootstrap.headers.get("set-cookie")!.split(";")[0]!;
-      return (path: string, body?: unknown) =>
+      const call = (path: string, body?: unknown) =>
         handler.handle(
           new Request(origin + path, {
             method: "POST",
@@ -112,6 +113,7 @@ function fixture() {
             },
           }),
         );
+      return { call, html };
     },
   };
 }
@@ -224,9 +226,22 @@ it("reserves issue capacity for other addresses and document builds, and release
   expect((await f.issue("profile-recovered")).status).toBe(200);
 });
 
+it("starts a launch's change loop only when the relay answers its Collection's revision", async () => {
+  const f = fixture();
+  const probes: string[] = [];
+  f.relayEvents(async (request) => {
+    probes.push(new URL(request.url).search);
+    return Response.json({ dataset: "", revision: 2 });
+  });
+  expect((await f.open("profile-collection")).html).toContain("void watch();");
+  expect(probes).toEqual(["?authorityRevision=1&since=0&hold=0"]);
+  f.relayEvents(async () => new Response(null, { status: 404 }));
+  expect((await f.open("profile-static")).html).not.toContain("void watch();");
+});
+
 it("holds one change wait per launch, outside the document lane and the session's request budget", async () => {
   const f = fixture();
-  const call = await f.open("profile-live");
+  const { call } = await f.open("profile-live");
   const relayed: Request[] = [];
   let release = (_answer: Response) => {};
   f.relayEvents((request) => {

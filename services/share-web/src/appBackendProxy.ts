@@ -284,15 +284,18 @@ export async function forwardAppBackend(input: {
   }
 }
 
-/** Waits for the link app's Collection to move past `since`, then answers its alias and revision. */
-export async function forwardAppEvents(input: {
-  request: Request;
+interface AppEventsRelay {
   relayUrl: string;
   publicationId: string;
   authorityRevision: number;
   signal: AbortSignal;
   fetchRelay(request: Request): Promise<Response>;
-}): Promise<Response> {
+}
+
+/** Waits for the link app's Collection to move past `since`, then answers its alias and revision. */
+export async function forwardAppEvents(
+  input: AppEventsRelay & { request: Request },
+): Promise<Response> {
   let since: unknown;
   try {
     if (input.request.headers.get("content-type") !== "application/json") throw Error();
@@ -303,8 +306,17 @@ export async function forwardAppEvents(input: {
     return opaqueLinkRefusal();
   }
   if (!Number.isSafeInteger(since) || (since as number) < 0) return opaqueLinkRefusal();
+  return relayAppEvents(input, since as number, 25_000);
+}
+
+/** The relay's answer for the link app's Collection after `since`, held up to `hold` ms. */
+export async function relayAppEvents(
+  input: AppEventsRelay,
+  since: number,
+  hold: number,
+): Promise<Response> {
   const url = new URL(
-    `/sync/link/app-publications/${input.publicationId}/backend/events?authorityRevision=${input.authorityRevision}&since=${since as number}&hold=25000`,
+    `/sync/link/app-publications/${input.publicationId}/backend/events?authorityRevision=${input.authorityRevision}&since=${since}&hold=${hold}`,
     input.relayUrl,
   );
   let relay: Response;
