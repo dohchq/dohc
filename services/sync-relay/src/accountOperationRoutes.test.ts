@@ -1,3 +1,6 @@
+import { request as httpRequest } from "node:http";
+import type { AddressInfo } from "node:net";
+import { serveFetchHandler } from "@dohc/service-http";
 import { streamsRequestBody } from "./server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
@@ -753,6 +756,68 @@ describe("an account read's deadline over its checks", () => {
     }
     pausing = false;
     expect((await h(op("trip", "groups"))).status, "every visit was freed").toBe(200);
+  });
+});
+
+describe("an account read's deadline over the HTTP adapter", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("answers server_busy while the arguments are still arriving", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let checks = 0;
+    const { h } = await relay({
+      resolve: async (request) => {
+        checks += 1;
+        return await resolveAccountSession(request);
+      },
+    });
+    const server = serveFetchHandler({
+      handler: h,
+      maxBodyBytes: () => 1024 * 1024,
+      streamBody: streamsRequestBody,
+      oversized: () => new Response(null, { status: 413 }),
+      failure: () => new Response(null, { status: 500 }),
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const answer = new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const sent = httpRequest({
+          host: "127.0.0.1",
+          port: (server.address() as AddressInfo).port,
+          path: "/sync/trip/ops/documentRead",
+          method: "POST",
+          headers: {
+            ...signedIn("ana"),
+            "content-type": "application/json",
+            "content-length": "64",
+          },
+        });
+        sent.on("response", (response) => {
+          let body = "";
+          response.setEncoding("utf8");
+          response.on("data", (chunk: string) => {
+            body += chunk;
+          });
+          response.on("end", () => {
+            sent.destroy();
+            resolve({ status: response.statusCode ?? 0, body });
+          });
+        });
+        sent.on("error", reject);
+        sent.write('{"path":');
+      });
+      await expect.poll(() => checks).toBe(1);
+      await new Promise((resolve) => setImmediate(resolve));
+      await vi.advanceTimersByTimeAsync(ACCOUNT_READ_DEADLINE_MS);
+      const busy = await answer;
+      expect(busy.status).toBe(503);
+      expect(JSON.parse(busy.body)).toMatchObject({ ok: false, code: "server_busy" });
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
 

@@ -184,7 +184,12 @@ export async function withAccountReadDeadline<T>(
   const deadline = new AbortController();
   const timer = setTimeout(() => deadline.abort(), ACCOUNT_READ_DEADLINE_MS);
   try {
-    return await read(AbortSignal.any([requestSignal, deadline.signal]));
+    // Answered at the deadline, while the read stops at its next wait: an upload still arriving is not cancelled,
+    // which would close the connection before the answer.
+    return await untilAborted(
+      read(AbortSignal.any([requestSignal, deadline.signal])),
+      deadline.signal,
+    );
   } catch (error) {
     if (deadline.signal.aborted && !requestSignal.aborted)
       throw new RelayError(

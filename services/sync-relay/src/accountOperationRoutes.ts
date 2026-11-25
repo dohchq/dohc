@@ -234,7 +234,7 @@ export function createAccountOperationRoute(options: {
       args = await readBoundedJson(
         request,
         ACCOUNT_OPERATION_MAX_BODY_BYTES,
-        AbortSignal.any([readSignal ?? request.signal, AbortSignal.timeout(BODY_RECEIPT_MS)]),
+        AbortSignal.any([request.signal, AbortSignal.timeout(BODY_RECEIPT_MS)]),
       );
     } catch (error) {
       throw error instanceof RangeError
