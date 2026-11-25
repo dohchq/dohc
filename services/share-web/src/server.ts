@@ -2644,6 +2644,6 @@ export function streamsRequestBody(url: URL, method: string): boolean {
     url.pathname.startsWith(MCP_PATH_PREFIX) ||
     url.pathname.startsWith(PERSONAL_MCP_PATH_PREFIX) ||
     url.pathname === COLLECTION_WRITES_PATH ||
-    (url.pathname === "/backend" && method === "POST")
+    ((url.pathname === "/backend" || url.pathname === "/file") && method === "POST")
   );
 }

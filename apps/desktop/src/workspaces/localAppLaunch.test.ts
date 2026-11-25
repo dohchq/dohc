@@ -423,7 +423,21 @@ it("binds binary upload and authorized binary file operations to the same approv
     operation: "receipt.read",
     input: {},
   };
-  const fileRes = await f.post("/backend", file, headers);
+  expect((await f.post("/backend", file, headers)).status).toBe(400);
+  expect((await f.post("/file", invoke, headers)).status).toBe(400);
+  const uploadOnFileRoute = await fetch(f.origin + "/file", {
+    method: "POST",
+    headers: {
+      origin: f.origin,
+      "content-type": "application/octet-stream",
+      "x-dohc-app-meta": encodeURIComponent(JSON.stringify({ ...meta, id: "wrong-route" })),
+      ...headers,
+    },
+    body: Buffer.from("%PDF"),
+  });
+  expect(uploadOnFileRoute.status).toBe(400);
+  expect(f.backend.readBrowserFile).not.toHaveBeenCalled();
+  const fileRes = await f.post("/file", file, headers);
   expect(fileRes.status).toBe(200);
   expect(fileRes.headers.get("content-type")).toBe("application/octet-stream");
   expect(JSON.parse(decodeURIComponent(fileRes.headers.get("x-dohc-app-file")!))).toMatchObject({
@@ -754,12 +768,8 @@ it("carries an owner's bulk invoke while other requests keep standard limits", a
   expect(attempt.status).toBe(413);
   f.backend.request.mockResolvedValue({ result: huge, revision: 1, replayed: false });
   expect((await f.post("/backend", invoke, headers)).status).toBe(503);
-  f.backend.request.mockResolvedValue({
-    profile: "bulk",
-    result: huge,
-    revision: 1,
-    replayed: false,
-  });
+  const bulkReply = { profile: "bulk", result: huge, revision: 1, replayed: false };
+  f.backend.request.mockResolvedValue(bulkReply);
   const result = await f.post("/backend", invoke, headers);
   expect(result.status).toBe(200);
   expect(((await result.json()) as { result: string }).result).toHaveLength(huge.length);
@@ -976,6 +986,22 @@ it("returns structured 429 rate-limit limit, unit, usage, and retry timing on to
     message:
       "Rate limit reached: 30 of 30 requests used in the 60 s burst window (refills 1 request every 2 s). Try again in 2 s.",
     retryAfterMs: 2000,
+  });
+  const file = {
+    op: "backend.file",
+    fileId: "file_0123456789abcdef",
+    operation: "photo",
+    input: {},
+  };
+  for (let i = 0; i < 120; i++)
+    expect((await post("/file", { ...file, id: `file-${i}` }, headers)).status).not.toBe(429);
+  const filesLimited = await post("/file", { ...file, id: "file-over" }, headers);
+  expect(filesLimited.status).toBe(429);
+  expect(await filesLimited.json()).toEqual({
+    code: "rate_limited",
+    message:
+      "Rate limit reached: 120 of 120 file reads used in the 30 s burst window (refills 1 file read every 250 ms). Try again in 250 ms.",
+    retryAfterMs: 250,
   });
   now += 2000;
   expect(

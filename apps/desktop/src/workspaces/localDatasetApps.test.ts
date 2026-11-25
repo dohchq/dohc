@@ -1527,7 +1527,7 @@ describe("local app write attribution", () => {
     });
     expect(attachRes.status).toBe(200);
 
-    const downloadRes = await fetch(origin + "/backend", {
+    const downloadRes = await fetch(origin + "/file", {
       method: "POST",
       headers: { ...authHeaders, "content-type": "application/json" },
       body: JSON.stringify({

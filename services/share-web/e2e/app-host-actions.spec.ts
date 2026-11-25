@@ -206,6 +206,7 @@ function SharedApp() {
   const [printStatus, setPrintStatus] = useState("idle");
   const [refusal, setRefusal] = useState("idle");
   const [fullscreen, setFullscreen] = useState("idle");
+  const [wall, setWall] = useState("idle");
   return (
     <div>
       <style>{\`
@@ -237,7 +238,22 @@ function SharedApp() {
             setFullscreen("err:" + err?.name);
           }
         }}>Full screen</button>
+        <button id="wall-btn" type="button" onClick={async () => {
+          const started = performance.now();
+          const photos = Promise.allSettled(
+            Array.from({ length: 100 }, (_, i) =>
+              client.file("photo-" + String(i).padStart(12, "0"), "photo"),
+            ),
+          );
+          const call = client.invoke("register", {}, "seat-2").catch(() => null);
+          await call;
+          const callMs = Math.round(performance.now() - started);
+          const results = await photos;
+          const loaded = results.filter((r) => r.status === "fulfilled").length;
+          setWall(loaded + ":" + callMs + ":" + Math.round(performance.now() - started));
+        }}>Photo wall</button>
       </div>
+      <p id="wall">{wall}</p>
       <p id="copy-status">{copyStatus}</p>
       <p id="refusal">{refusal}</p>
       <p id="fullscreen">{fullscreen}</p>
@@ -543,6 +559,7 @@ test("share-web app copyText and multi-page print work over HTTPS without weaken
   const blobs = new Map(compiled.files.map((file) => [file.sha256, file]));
   const viewer = "https://viewer.example.com";
   const publicationId = "b".repeat(64);
+  const photo = Buffer.alloc(64 * 1024, 7);
   const appHandler = createAppLaunchHandler({
     config: { viewerOrigin: viewer, appDomain: "example.net" },
     relayUrl: "https://relay.example.org",
@@ -559,10 +576,21 @@ test("share-web app copyText and multi-page print work over HTTPS without weaken
     fetchRelay: async (request) => {
       const path = new URL(request.url).pathname;
       if (path.endsWith("/backend/invoke"))
-        return Response.json(
-          { code: "full", message: "Every seat is taken." },
-          { status: 409 },
-        );
+        return Response.json({ code: "full", message: "Every seat is taken." }, { status: 409 });
+      if (path.endsWith("/backend/file")) {
+        const { fileId } = (await request.json()) as { fileId: string };
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return Response.json({
+          file: {
+            fileId,
+            name: "photo.jpg",
+            contentType: "image/jpeg",
+            byteLength: photo.byteLength,
+            sha256: createHash("sha256").update(photo).digest("hex"),
+          },
+          bytesBase64: photo.toString("base64"),
+        });
+      }
       if (path.includes("/blobs/")) {
         const sha = path.split("/").at(-1)!;
         const blob = blobs.get(sha)!;
@@ -670,6 +698,14 @@ test("share-web app copyText and multi-page print work over HTTPS without weaken
 
     await app.locator("#refuse-btn").click();
     await expect(app.locator("#refusal")).toHaveText("409:full");
+
+    await app.locator("#wall-btn").click();
+    await expect(app.locator("#wall")).toHaveText(/^100:\d+:\d+$/, { timeout: 20_000 });
+    const [, callMs, wallMs] = (await app.locator("#wall").textContent())!.split(":").map(Number);
+    console.log(
+      `photo wall: 100 reads in ${wallMs} ms, a call during the load settled in ${callMs} ms`,
+    );
+    expect(callMs).toBeLessThan(wallMs!);
 
     expect(await page.locator("iframe").getAttribute("allow")).toBe("fullscreen");
     await app.locator("#fullscreen-btn").click();

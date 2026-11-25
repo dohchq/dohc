@@ -20,7 +20,15 @@ function harness(
   Object.assign(frame, {
     contentWindow: {
       postMessage(message: unknown, target: string, ports: NodeMessagePort[]) {
-        expect(message).toEqual({ kind: "dohc-app-channel", version: 1 });
+        expect(message).toEqual({
+          kind: "dohc-app-channel",
+          version: 1,
+          budget: {
+            maxInFlight: 4,
+            calls: { burst: 30, refillMs: 2000 },
+            files: { burst: 120, refillMs: 250 },
+          },
+        });
         expect(target).toBe("*");
         expect(ports).toHaveLength(1);
         port = ports[0]!;
@@ -283,6 +291,22 @@ it("bounds backend workflow bursts while preserving the collection budget", asyn
         })
       ).status,
     ).toBe(429);
+    const read = (index: number) =>
+      f.request({
+        id: "f" + index,
+        op: "backend.file",
+        fileId: "file_0123456789abcdef",
+        operation: "photo",
+        input: { index },
+      });
+    for (let index = 0; index < 120; index++) expect((await read(index)).status).not.toBe(429);
+    expect(await read(120)).toMatchObject({
+      status: 429,
+      error: {
+        code: "rate_limited",
+        message: expect.stringContaining("120 of 120 file requests used"),
+      },
+    });
   } finally {
     f.close();
   }
@@ -462,8 +486,16 @@ it("observes handshake, pre-forward rejections, and post-validation outcomes wit
   const events: unknown[] = [];
   const replies = [
     () => Response.json({ result: { ok: 1 }, revision: 1, replayed: false }),
-    () => Response.json({ code: "workshop_full", message: "Full" }, { headers: { "x-dohc-app-refusal": "1" } }),
-    () => Response.json({ code: "bad", message: "bad", extra: true }, { headers: { "x-dohc-app-refusal": "1" } }),
+    () =>
+      Response.json(
+        { code: "workshop_full", message: "Full" },
+        { headers: { "x-dohc-app-refusal": "1" } },
+      ),
+    () =>
+      Response.json(
+        { code: "bad", message: "bad", extra: true },
+        { headers: { "x-dohc-app-refusal": "1" } },
+      ),
   ];
   const lifetime = new AbortController();
   attachAppCollectionBroker(
@@ -597,7 +629,16 @@ it("forwards one-way dataset.changed push events, accepts readOnly: true, and su
     broker.notifyDatasetChanged("BadAlias", 9);
     broker.notifyDatasetChanged("expenses", -1);
     frame.dispatchEvent(new Event("load"));
-    expect(handshake).toEqual({ kind: "dohc-app-channel", version: 1, maxInFlight: 8 });
+    expect(handshake).toEqual({
+      kind: "dohc-app-channel",
+      version: 1,
+      maxInFlight: 8,
+      budget: {
+        maxInFlight: 12,
+        calls: { burst: 120, refillMs: 50 },
+        files: { burst: 120, refillMs: 250 },
+      },
+    });
 
     const liveEvent = once(port, "message");
     broker.notifyDatasetChanged("BadAlias", 9);

@@ -179,7 +179,15 @@ describe("CLI, MCP, and app channel reference", () => {
     const frame = Object.assign(new EventTarget(), {
       contentWindow: {
         postMessage(message: unknown, _target: string, ports: NodeMessagePort[]) {
-          expect(message).toEqual({ kind: "dohc-app-channel", version: 1 });
+          expect(message).toEqual({
+            kind: "dohc-app-channel",
+            version: 1,
+            budget: {
+              maxInFlight: 4,
+              calls: { burst: 30, refillMs: 2000 },
+              files: { burst: 120, refillMs: 250 },
+            },
+          });
           port = ports[0];
         },
       },

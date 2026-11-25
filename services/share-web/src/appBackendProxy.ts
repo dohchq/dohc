@@ -43,6 +43,7 @@ export async function forwardAppBackend(input: {
   authorityRevision: number;
   capability?: string;
   profileSecret?: string;
+  fileRoute: boolean;
   signal: AbortSignal;
   fetchRelay(request: Request): Promise<Response>;
 }): Promise<Response> {
@@ -88,7 +89,8 @@ export async function forwardAppBackend(input: {
     !record(body) ||
     typeof body.id !== "string" ||
     !/^[A-Za-z0-9_-]{1,64}$/.test(body.id) ||
-    body.id.includes("\n")
+    body.id.includes("\n") ||
+    input.fileRoute !== (body.op === "backend.file")
   )
     return error(400);
   let action: "invoke" | "upload" | "file" | "attempt", payload: unknown;

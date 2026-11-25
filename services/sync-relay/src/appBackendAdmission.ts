@@ -11,6 +11,8 @@ type Rate = { capacity: number; refillPerSecond: number };
 export interface AppBackendAdmissionLimits {
   participant: Rate;
   link: Rate;
+  participantFile: Rate;
+  linkFile: Rate;
   dataset: Rate;
   global: Rate;
   organizer: Rate;
@@ -25,6 +27,8 @@ export interface AppBackendAdmissionLimits {
 export const DEFAULT_APP_BACKEND_ADMISSION_LIMITS: AppBackendAdmissionLimits = {
   participant: { capacity: 30, refillPerSecond: 0.5 },
   link: { capacity: 600, refillPerSecond: 10 },
+  participantFile: { capacity: 120, refillPerSecond: 4 },
+  linkFile: { capacity: 1200, refillPerSecond: 20 },
   dataset: { capacity: 1200, refillPerSecond: 20 },
   global: { capacity: 2400, refillPerSecond: 40 },
   // The owner's window sends one request a change, so quick typing and pasting stay under these.
@@ -57,6 +61,8 @@ export function createAppBackendAdmission(overrides: Partial<AppBackendAdmission
     new TokenBucketLimiter(rate.capacity, rate.refillPerSecond, keys);
   const participant = bucket(limits.participant),
     link = bucket(limits.link),
+    participantFile = bucket(limits.participantFile),
+    linkFile = bucket(limits.linkFile),
     dataset = bucket(limits.dataset);
   const global = bucket(limits.global, 1),
     organizer = bucket(limits.organizer),
@@ -72,6 +78,7 @@ export function createAppBackendAdmission(overrides: Partial<AppBackendAdmission
     const count = participants.get(participantKey) ?? 0;
     const recovering = action === "restore" || action === "export";
     const uploading = action === "upload";
+    const fileRead = action === "app-file";
     const refuse = () => {
       throw relayError("link_read_rate_limited");
     };
@@ -88,8 +95,8 @@ export function createAppBackendAdmission(overrides: Partial<AppBackendAdmission
       if (!organizer.allow(participantKey, nowMs) || !organizerGlobal.allow("global", nowMs))
         refuse();
     } else if (
-      !participant.allow(participantKey, nowMs) ||
-      (scope.link !== undefined && !link.allow(scope.link, nowMs)) ||
+      !(fileRead ? participantFile : participant).allow(participantKey, nowMs) ||
+      (scope.link !== undefined && !(fileRead ? linkFile : link).allow(scope.link, nowMs)) ||
       !dataset.allow(scope.dataset, nowMs) ||
       !global.allow("global", nowMs)
     )

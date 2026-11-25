@@ -103,6 +103,8 @@ const MAX_SESSIONS = 16,
   LOCAL_MAX_PENDING = 12,
   LOCAL_BACKEND_BURST = 120,
   LOCAL_BACKEND_REFILL_MS = 50,
+  FILE_BURST = 120,
+  FILE_REFILL_MS = 250,
   MAX_EVENTS_PENDING = 2,
   MAX_EVENTS_HOLD_MS = 25_000;
 const validEventAlias = (key: string) =>
@@ -283,12 +285,14 @@ export async function createLocalAppLaunchHost(options: {
         const highBudget = options.backend.localBudget ? options.backend.localBudget() : true;
         const maxPending = highBudget ? LOCAL_MAX_PENDING : 4,
           backendBurst = highBudget ? LOCAL_BACKEND_BURST : 30,
-          backendRefillMs = highBudget ? LOCAL_BACKEND_REFILL_MS : 2000;
+          backendRefillMs = highBudget ? LOCAL_BACKEND_REFILL_MS : 2000,
+          fileRefillMs = highBudget ? LOCAL_BACKEND_REFILL_MS : FILE_REFILL_MS;
+        const callBudget = { burst: backendBurst, refillMs: backendRefillMs, tokens: backendBurst },
+          fileBudget = { burst: FILE_BURST, refillMs: fileRefillMs, tokens: FILE_BURST };
         let handoffDigest: string | null = digest(handoff),
           origin = "",
           pending = 0,
           eventsPending = 0,
-          tokens = backendBurst,
           updated = Date.now();
         let expires = Date.now() + HANDOFF_MS,
           hardExpires = expires;
@@ -329,7 +333,7 @@ export async function createLocalAppLaunchHost(options: {
           ? "(event)=>{try{globalThis.__dohcVerifyObserve?.(JSON.stringify(event));}catch{}}"
           : "undefined";
         const brokerLimits = JSON.stringify({
-          ...(highBudget ? { maxPending, backendBurst, backendRefillMs } : {}),
+          ...(highBudget ? { maxPending, backendBurst, backendRefillMs, fileRefillMs } : {}),
           invokeRequestBytes: APP_BACKEND_BULK_LIMITS.requestBytes,
           invokeResultBytes: BULK_INVOKE_REPLY_BYTES,
           trustRateLimitDetails: true,
@@ -354,7 +358,7 @@ export async function createLocalAppLaunchHost(options: {
           const request=proof?fetch('/resume',{method:'POST',headers:{'x-dohc-app-proof':proof},signal:lifetime.signal}):fetch('/session',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({handoff}),signal:lifetime.signal});
           request.then(async r=>{if(!r.ok)throw Error();const value=await r.json();if(stopped)return;proof=value.proof;saveProof(proof);
             frame=document.createElement('iframe');frame.title='Local app';frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox';frame.style='display:block;border:0;width:100%;height:100vh';
-            const broker=(${attachAppCollectionBroker.toString()})(frame,(body,signal,request)=>{if(body.op==='backend.upload'){const{bytes,...meta}=body;return fetch('/backend',{method:'POST',headers:{'content-type':'application/octet-stream','x-dohc-app-proof':proof,'x-dohc-app-activated':request.activated?'1':'0','x-dohc-app-meta':encodeURIComponent(JSON.stringify(meta))},body:bytes,signal});}return fetch('/backend',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof,'x-dohc-app-activated':request.activated?'1':'0'},body:JSON.stringify(body),signal});},lifetime.signal,${observe},${brokerLimits});
+            const broker=(${attachAppCollectionBroker.toString()})(frame,(body,signal,request)=>{if(body.op==='backend.upload'){const{bytes,...meta}=body;return fetch('/backend',{method:'POST',headers:{'content-type':'application/octet-stream','x-dohc-app-proof':proof,'x-dohc-app-activated':request.activated?'1':'0','x-dohc-app-meta':encodeURIComponent(JSON.stringify(meta))},body:bytes,signal});}return fetch(body.op==='backend.file'?'/file':'/backend',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof,'x-dohc-app-activated':request.activated?'1':'0'},body:JSON.stringify(body),signal});},lifetime.signal,${observe},${brokerLimits});
             addEventListener('message',event=>{const scheme=event.data?.kind==='dohc-color-scheme'?event.data.scheme:null;if(event.source===frame.contentWindow&&(scheme==='light'||scheme==='dark'))frame.style.colorScheme=scheme;},{signal:lifetime.signal});
             frame.srcdoc=value.html;document.body.append(frame);const status=document.getElementById('status');status.textContent='';status.style.margin='0';
             ${eventLoop}
@@ -400,6 +404,7 @@ export async function createLocalAppLaunchHost(options: {
                 "/session",
                 "/resume",
                 "/backend",
+                "/file",
                 "/events",
                 "/status",
                 "/close",
@@ -514,30 +519,36 @@ export async function createLocalAppLaunchHost(options: {
                 unsubscribe();
               }
             }
-            if (url.pathname !== "/backend" && url.pathname !== "/resume")
+            if (!["/backend", "/file", "/resume"].includes(url.pathname))
               return reply(response, 404);
+            const fileRoute = url.pathname === "/file",
+              lane = fileRoute ? fileBudget : callBudget;
             const now = Date.now();
-            tokens = Math.min(backendBurst, tokens + (now - updated) / backendRefillMs);
+            for (const bucket of [callBudget, fileBudget])
+              bucket.tokens = Math.min(
+                bucket.burst,
+                bucket.tokens + (now - updated) / bucket.refillMs,
+              );
             updated = now;
             if (pending >= maxPending)
               return reply(response, 429, {
                 code: "rate_limited",
                 message: `Rate limit reached: at most ${maxPending} concurrent requests allowed (${pending} currently in flight). Wait for an active request to finish, then try again.`,
               });
-            if (tokens < 1) {
-              const retryAfterMs = Math.max(1, Math.ceil((1 - tokens) * backendRefillMs));
+            if (lane.tokens < 1) {
+              const retryAfterMs = Math.max(1, Math.ceil((1 - lane.tokens) * lane.refillMs));
               return reply(
                 response,
                 429,
                 {
                   code: "rate_limited",
-                  message: `Rate limit reached: ${backendBurst} of ${backendBurst} requests used in the ${formatRateLimitDuration(backendBurst * backendRefillMs)} burst window (refills 1 request every ${formatRateLimitDuration(backendRefillMs)}). Try again in ${formatRateLimitDuration(retryAfterMs)}.`,
+                  message: `Rate limit reached: ${lane.burst} of ${lane.burst} ${fileRoute ? "file reads" : "requests"} used in the ${formatRateLimitDuration(lane.burst * lane.refillMs)} burst window (refills 1 ${fileRoute ? "file read" : "request"} every ${formatRateLimitDuration(lane.refillMs)}). Try again in ${formatRateLimitDuration(retryAfterMs)}.`,
                   retryAfterMs,
                 },
                 { "retry-after": String(Math.max(1, Math.ceil(retryAfterMs / 1000))) },
               );
             }
-            tokens--;
+            lane.tokens--;
             pending++;
             admitted = true;
             if (url.pathname === "/resume") {
@@ -555,6 +566,8 @@ export async function createLocalAppLaunchHost(options: {
             // for a browser handed its URL, and so its proof, to whoever asked, an agent included, which can send this header.
             const activated =
               launchOptions?.keepAlive === true && request.headers["x-dohc-app-activated"] === "1";
+            if (fileRoute && request.headers["content-type"] !== "application/json")
+              return reply(response, 400);
             if (request.headers["content-type"] === "application/octet-stream") {
               const rawMeta = request.headers["x-dohc-app-meta"];
               if (typeof rawMeta !== "string" || !rawMeta || rawMeta.length > 4096)
@@ -609,6 +622,7 @@ export async function createLocalAppLaunchHost(options: {
               !/^[A-Za-z0-9_-]+$/.test(row.id)
             )
               return reply(response, 400);
+            if (fileRoute !== (row.op === "backend.file")) return reply(response, 400);
             const collection = row.op === "collection.list" || row.op === "collection.create";
             if (
               row.op !== "backend.invoke" &&

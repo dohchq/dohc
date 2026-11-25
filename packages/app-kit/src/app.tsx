@@ -283,6 +283,39 @@ export function mutationKey(kind: string): string {
   return `${kind}:${crypto.randomUUID()}`;
 }
 
+export interface AppBudget {
+  readonly maxInFlight: number;
+  readonly calls: { readonly burst: number; readonly refillMs: number };
+  readonly files: { readonly burst: number; readonly refillMs: number };
+}
+
+const budgetRate = (value: unknown) =>
+  isRecord(value) &&
+  Number.isSafeInteger(value.burst) &&
+  (value.burst as number) >= 1 &&
+  Number.isSafeInteger(value.refillMs) &&
+  (value.refillMs as number) >= 1
+    ? { burst: value.burst as number, refillMs: value.refillMs as number }
+    : null;
+
+function parseBudget(value: unknown): AppBudget | null {
+  if (!isRecord(value) || !Number.isSafeInteger(value.maxInFlight)) return null;
+  const maxInFlight = value.maxInFlight as number,
+    calls = budgetRate(value.calls),
+    files = budgetRate(value.files);
+  return maxInFlight >= 1 && calls && files ? { maxInFlight, calls, files } : null;
+}
+
+let resolveHostBudget: (budget: AppBudget | null) => void = () => {};
+const hostBudget = new Promise<AppBudget | null>((resolve) => {
+  resolveHostBudget = resolve;
+});
+
+/** The request budget dohc's host gives this app: resolves once the host connects, or null if it didn't say. */
+export function appBudget(): Promise<AppBudget | null> {
+  return hostBudget;
+}
+
 let capturedHostPort: MessagePort | null = null;
 let capturedHostMaxInFlight: number | undefined;
 const hostPortWaiters = new Set<(port: MessagePort, maxInFlight?: number) => void>();
@@ -305,6 +338,7 @@ function installHostChannelCapture() {
       typeof hint === "number" && Number.isSafeInteger(hint) && hint >= 1 && hint <= 12
         ? hint
         : undefined;
+    resolveHostBudget(parseBudget(event.data.budget));
     window.removeEventListener("message", onMessage);
     for (const waiter of hostPortWaiters) waiter(capturedHostPort, capturedHostMaxInFlight);
     hostPortWaiters.clear();
@@ -337,7 +371,8 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
 
   let port: MessagePort | undefined;
   let closed = false;
-  let inFlight = 0;
+  let inFlight = 0,
+    fileReadsInFlight = 0;
   const waiting: Pending[] = [];
   const waitingImmediate: Pending[] = [];
   const sent = new Map<string, Pending>();
@@ -367,14 +402,21 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
     if (!item.aborted) item.reject(new AppBackendError(status));
   };
 
+  const fileRead = (item: Pending) => item.message.op === "backend.file";
+  const settle = (item: Pending) => {
+    if (item.counted) inFlight -= 1;
+    if (fileRead(item)) fileReadsInFlight -= 1;
+  };
+
   const dispatch = (item: Pending) => {
     const id = item.message.id as string;
     clearTimeout(item.timer);
     if (item.counted) inFlight += 1;
+    if (fileRead(item)) fileReadsInFlight += 1;
     sent.set(id, item);
     item.timer = setTimeout(() => {
       if (sent.delete(id)) {
-        if (item.counted) inFlight -= 1;
+        settle(item);
         fail(item, 503);
         pump();
       }
@@ -384,7 +426,7 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
       else port!.postMessage(item.message);
     } catch {
       sent.delete(id);
-      if (item.counted) inFlight -= 1;
+      settle(item);
       fail(item, 503);
     }
   };
@@ -394,7 +436,10 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
       dispatch(waitingImmediate.shift()!);
     }
     while (port && !closed && inFlight < maxInFlight && waiting.length > 0) {
-      dispatch(waiting.shift()!);
+      const call = waiting.findIndex((item) => !fileRead(item));
+      const next = call >= 0 ? call : fileReadsInFlight < Math.max(1, maxInFlight - 1) ? 0 : -1;
+      if (next < 0) return;
+      dispatch(waiting.splice(next, 1)[0]!);
     }
   };
 
@@ -420,7 +465,7 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
       const item = sent.get(data.id);
       if (!item) return;
       sent.delete(data.id);
-      if (item.counted) inFlight -= 1;
+      settle(item);
       clearTimeout(item.timer);
       detachAbort(item);
       if (!item.aborted) {

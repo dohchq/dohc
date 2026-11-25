@@ -31,3 +31,27 @@ it("bounds datasets, global work, large bodies and participant-map churn", () =>
     createAppBackendAdmission({ participant: { capacity: 1, refillPerSecond: Infinity } }),
   ).toThrow();
 });
+
+it("gives a shared app's file reads their own participant and link budget", () => {
+  const admit = createAppBackendAdmission({
+    participant: { capacity: 2, refillPerSecond: 0.5 },
+    link: { capacity: 2, refillPerSecond: 0.5 },
+    participantFile: { capacity: 3, refillPerSecond: 1 },
+    linkFile: { capacity: 4, refillPerSecond: 1 },
+  });
+  const viewer = (participant: string) => ({
+    dataset: "d",
+    participant,
+    link: "l",
+    organizer: false,
+  });
+  admit(viewer("1"), "invoke", 0)();
+  admit(viewer("1"), "invoke", 0)();
+  expect(() => admit(viewer("1"), "invoke", 0)).toThrow();
+  for (let read = 0; read < 3; read++) admit(viewer("1"), "app-file", 0)();
+  expect(() => admit(viewer("1"), "app-file", 0)).toThrow();
+  admit(viewer("2"), "app-file", 0)();
+  expect(() => admit(viewer("3"), "app-file", 0)).toThrow();
+  expect(() => admit(viewer("3"), "file", 0)).toThrow();
+  admit(viewer("1"), "app-file", 1000)();
+});
