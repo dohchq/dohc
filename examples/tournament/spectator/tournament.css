@@ -4121,6 +4121,10 @@ body:has(.co-drawer) .co-toasts {
     grid-auto-rows: auto;
   }
 
+  .co-tv-next {
+    flex-shrink: 0;
+  }
+
   .co-app kbd,
   .co-tv kbd {
     display: none;
