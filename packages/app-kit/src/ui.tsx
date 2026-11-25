@@ -501,11 +501,12 @@ export function DateField({
   const field = useRef<HTMLInputElement>(null);
   useImperativeHandle(ref, () => field.current!, []);
   const [text, setText] = useState(value);
-  const [shown, setShown] = useState(value);
+  const [seen, setSeen] = useState(value);
+  const [sent, setSent] = useState(value);
   const [checked, setChecked] = useState(false);
-  if (value !== shown) {
-    setShown(value);
-    setText(value);
+  if (value !== seen) {
+    setSeen(value);
+    if (value !== sent) setText(value);
   }
   const problem = dateProblem(text, min, max);
   useLayoutEffect(() => field.current?.setCustomValidity(problem ?? ""), [problem]);
@@ -513,7 +514,7 @@ export function DateField({
   const commit = (next: string) => {
     setText(next);
     const date = next && !dateProblem(next, min, max) ? next : "";
-    setShown(date);
+    setSent(date);
     if (date !== value) onChange(date);
   };
 
@@ -540,6 +541,7 @@ export function DateField({
         onKeyDown?.(event);
         if (event.defaultPrevented || props.readOnly) return;
         if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+        if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
         event.preventDefault();
         commit(stepDate(text, event.key === "ArrowUp" ? 1 : -1, min, max));
       }}

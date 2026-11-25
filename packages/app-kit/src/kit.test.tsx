@@ -162,19 +162,35 @@ describe("DateField", () => {
     expect(stored()).toBe("2026-02-28");
   });
 
-  it("leaves a read-only DateField alone on ArrowUp", () => {
+  it("leaves the date alone on Shift+ArrowUp and in a read-only field", () => {
     const changes: string[] = [];
-    render(
+    const date = (readOnly: boolean) => (
       <DateField
         aria-label="Closed on"
         value="2026-04-20"
         onChange={(next) => changes.push(next)}
-        readOnly
-      />,
+        readOnly={readOnly}
+      />
     );
+    const { rerender } = render(date(false));
+    fireEvent.keyDown(screen.getByLabelText("Closed on"), { key: "ArrowUp", shiftKey: true });
+    rerender(date(true));
     fireEvent.keyDown(screen.getByLabelText("Closed on"), { key: "ArrowUp" });
     expect(changes).toEqual([]);
     expect(screen.getByLabelText<HTMLInputElement>("Closed on").value).toBe("2026-04-20");
+  });
+
+  it("keeps typed text while the app shows a fallback date", () => {
+    function Fallback() {
+      const [picked, setPicked] = useState("");
+      return <DateField aria-label="Void on" value={picked || "2026-11-25"} onChange={setPicked} />;
+    }
+    render(<Fallback />);
+    const input = screen.getByLabelText<HTMLInputElement>("Void on");
+    fireEvent.change(input, { target: { value: "2026-11-2" } });
+    expect(input.value).toBe("2026-11-2");
+    fireEvent.change(input, { target: { value: "2026-11-20" } });
+    expect(input.value).toBe("2026-11-20");
   });
 });
 
