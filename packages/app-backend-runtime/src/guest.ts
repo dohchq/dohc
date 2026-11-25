@@ -37,7 +37,12 @@ const unsafeFunctions = new Set([
   "edit",
   "fts3_tokenizer",
 ]);
+const tableFunctions = ["json_each", "json_tree"];
 const persistentRowidTables = new WeakMap<DatabaseSync, ReadonlySet<string>>();
+const denials = new WeakMap<DatabaseSync, string>();
+const notAllowed = "App operations can't run this kind of SQL statement.";
+const implicitRowid =
+  "Collection actions cannot use the implicit rowid. Use the table's primary key.";
 export function sqlTokens(
   sql: string,
 ): Array<{ value: string; quoted: boolean; literal: boolean }> {
@@ -111,21 +116,34 @@ export function authorize(
     initializing = false,
     sessionIntrospection = false,
     persistentConnection = false,
+    schemaTables: inventory = request.tables,
   }: AuthorizationOptions = {},
 ): void {
   const tables = new Set(request.tables.map((name) => name.toLowerCase()));
+  const realTables = new Set(inventory.map((name) => name.toLowerCase()));
+  const functions = new Set(tableFunctions.filter((name) => !realTables.has(name)));
   const schemaTables = new Set(["sqlite_master", "sqlite_schema"]);
   const admittedIndexes = new Set<string>();
   const writable = initializing || request.readOnly === false;
+  const deny = (reason: string) => {
+    denials.set(db, reason);
+    return constants.SQLITE_DENY;
+  };
+  const outside = (table: string, verb: string) =>
+    !table || /^(sqlite|dohc)_/.test(table)
+      ? deny(notAllowed)
+      : deny(
+          `App operation can't ${verb} ${table}: it isn't one of the tables this operation can use.`,
+        );
   db.setAuthorizer((action, first, second, database) => {
-    if (database !== null && database !== "main") return constants.SQLITE_DENY;
+    if (database !== null && database !== "main") return deny(notAllowed);
     const table = first?.toLowerCase() ?? "";
     if (action === constants.SQLITE_SELECT || action === constants.SQLITE_RECURSIVE)
       return constants.SQLITE_OK;
     if (action === constants.SQLITE_FUNCTION) {
       const name = (second ?? "").toLowerCase();
       return unsafeFunctions.has(name) || (persistentConnection && connectionCounters.has(name))
-        ? constants.SQLITE_DENY
+        ? deny(`App operations can't call ${name}().`)
         : constants.SQLITE_OK;
     }
     // SQLite's session extension reads table metadata while an admitted statement runs.
@@ -142,10 +160,10 @@ export function authorize(
         second?.toUpperCase() === "ROWID" &&
         !persistentRowidTables.get(db)?.has(table)
       )
-        return constants.SQLITE_DENY;
-      return tables.has(table) || (initializing && schemaTables.has(table))
+        return deny(implicitRowid);
+      return tables.has(table) || functions.has(table) || (initializing && schemaTables.has(table))
         ? constants.SQLITE_OK
-        : constants.SQLITE_DENY;
+        : outside(table, "read");
     }
     if (
       [constants.SQLITE_INSERT, constants.SQLITE_UPDATE, constants.SQLITE_DELETE].includes(action)
@@ -156,10 +174,12 @@ export function authorize(
         second?.toUpperCase() === "ROWID" &&
         !persistentRowidTables.get(db)?.has(table)
       )
-        return constants.SQLITE_DENY;
-      return writable && (tables.has(table) || (initializing && schemaTables.has(table)))
-        ? constants.SQLITE_OK
-        : constants.SQLITE_DENY;
+        return deny(implicitRowid);
+      if (writable && (tables.has(table) || (initializing && schemaTables.has(table))))
+        return constants.SQLITE_OK;
+      return tables.has(table)
+        ? deny(`This operation only reads, so it can't change ${table}.`)
+        : outside(table, "change");
     }
     if (initializing) {
       if (action === constants.SQLITE_CREATE_TABLE)
@@ -175,8 +195,26 @@ export function authorize(
           ? constants.SQLITE_OK
           : constants.SQLITE_DENY;
     }
-    return constants.SQLITE_DENY;
+    return deny(notAllowed);
   });
+}
+
+function calendarDate(ms: number, timeZone: string): string | undefined {
+  try {
+    const format = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    if (/^[+-]/.test(format.resolvedOptions().timeZone)) return undefined;
+    const part = Object.fromEntries(
+      format.formatToParts(ms).map(({ type, value }) => [type, value]),
+    );
+    return `${part.year}-${part.month}-${part.day}`;
+  } catch {
+    return undefined;
+  }
 }
 
 const MiB = 1024 * 1024,
@@ -339,6 +377,15 @@ function run(
     text.dispose();
     return { error };
   };
+  let uncaught: { error: QuickJSHandle; refusal: AppOperationRefusal } | undefined;
+  const refuseUnlessCaught = (refusal: AppOperationRefusal) => {
+    const failed = fail(refusal.message);
+    if (failed.error !== limitError) {
+      uncaught?.error.dispose();
+      uncaught = { error: failed.error.dup(), refusal };
+    }
+    return failed;
+  };
   const callback = (write: boolean) =>
     vm.newFunction(write ? "execute" : "query", (sqlValue, paramsValue) => {
       try {
@@ -370,12 +417,10 @@ function run(
           write &&
           insertsImplicitRowid(sql, persistentRowidTables.get(db)!)
         )
-          throw new Error(
-            "Collection actions cannot use the implicit rowid. Use the table's primary key.",
-          );
+          throw new Error(implicitRowid);
         const paramsJson = boundedText(
           vm.getString(paramsValue),
-          request.limits.inputBytes,
+          Math.max(request.limits.inputBytes, request.limits.queryBytes),
           "SQL parameters",
         );
         const params: unknown = JSON.parse(paramsJson);
@@ -384,18 +429,21 @@ function run(
           throw new AppBackendLimitError(
             appBackendLimit("SQL statement", MAX_SQL_PARAMETERS, params.length, "parameters"),
           );
-        if (
-          params.some(
-            (value) =>
-              value !== null &&
-              typeof value !== "string" &&
-              (typeof value !== "number" || !Number.isFinite(value)),
-          )
-        )
-          throw new Error("SQL parameters must be scalar values.");
+        const invalid = params.findIndex(
+          (value) =>
+            value !== null &&
+            typeof value !== "string" &&
+            (typeof value !== "number" || !Number.isFinite(value)),
+        );
+        if (invalid >= 0)
+          throw new AppBackendRuntimeError({
+            code: "invalid_input",
+            message: `SQL parameter ${invalid + 1} must be text, a finite number, or null.`,
+          });
         if (!write) authorize(db, { ...request, readOnly: true }, options);
         let output: string;
         try {
+          denials.delete(db);
           const statement = db.prepare(sql);
           if (write) {
             authorize(db, request, { ...options, sessionIntrospection: true });
@@ -434,18 +482,19 @@ function run(
         }
         return reply(output);
       } catch (error) {
-        if (error instanceof AppBackendLimitError) resourceLimit = error;
-        else if (
+        if (error instanceof AppBackendRuntimeError) return refuseUnlessCaught(error.refusal);
+        const sqlite =
           error &&
           typeof error === "object" &&
-          (error as { code?: unknown; errcode?: unknown }).code === "ERR_SQLITE_ERROR" &&
-          (error as { errcode?: unknown }).errcode === SQLITE_NOMEM
-        ) {
+          (error as { code?: unknown }).code === "ERR_SQLITE_ERROR";
+        if (error instanceof AppBackendLimitError) resourceLimit = error;
+        else if (sqlite && (error as { errcode?: unknown }).errcode === SQLITE_NOMEM) {
           resourceLimit = new AppBackendLimitError(
             `SQL statement exceeded its ${SQLITE_HARD_HEAP_LIMIT_BYTES / MiB} MiB SQLite memory limit.`,
           );
           return fail(resourceLimit.message);
-        }
+        } else if (sqlite && denials.has(db))
+          return refuseUnlessCaught({ code: "sql_not_allowed", message: denials.get(db)! });
         return fail(
           error instanceof Error ? error.message.slice(0, 1024) : "App database operation failed.",
         );
@@ -479,19 +528,32 @@ function run(
       attachedFileIds.add(id);
       return reply(JSON.stringify(file));
     });
+    const localDate = vm.newFunction("localDate", (zone) => {
+      const name = vm.typeof(zone) === "string" ? vm.getString(zone) : "";
+      const date = name.length <= 64 ? calendarDate(request.nowMs, name) : undefined;
+      return date
+        ? reply(date)
+        : refuseUnlessCaught({
+            code: "invalid_input",
+            message: `${JSON.stringify(name.slice(0, 64))} isn't a time zone name, such as "Asia/Singapore".`,
+          });
+    });
     vm.setProp(vm.global, "__refuse", refuse);
     vm.setProp(vm.global, "__attach", attach);
+    vm.setProp(vm.global, "__localDate", localDate);
     refuse.dispose();
     attach.dispose();
+    localDate.dispose();
     const bootstrap = `(() => {
-      const parse = JSON.parse, stringify = JSON.stringify, freeze = Object.freeze;
-      const q = globalThis.__query, e = globalThis.__execute, refuse=globalThis.__refuse, attach=globalThis.__attach;
-      delete globalThis.__query; delete globalThis.__execute; delete globalThis.__refuse; delete globalThis.__attach;
+      const parse = JSON.parse, stringify = JSON.stringify, freeze = Object.freeze, finite = Number.isFinite;
+      const q = globalThis.__query, e = globalThis.__execute, refuse=globalThis.__refuse, attach=globalThis.__attach, localDate=globalThis.__localDate;
+      delete globalThis.__query; delete globalThis.__execute; delete globalThis.__refuse; delete globalThis.__attach; delete globalThis.__localDate;
       const deepFreeze = value => { if (value && typeof value === 'object') { for (const key of Object.keys(value)) deepFreeze(value[key]); freeze(value); } return value; };
       const caller = deepFreeze(parse(${JSON.stringify(request.callerJson)}));
       const input = deepFreeze(parse(${JSON.stringify(request.inputJson)}));
-      const db = freeze({ query: (sql, params = []) => parse(q(sql, stringify(params))), execute: (sql, params = []) => parse(e(sql, stringify(params))) });
-      const ctx = freeze({ caller, db, refuse, files:freeze({attach:id=>deepFreeze(parse(attach(id)))}), nowMs: ${request.nowMs}, requestId: ${JSON.stringify(request.requestId)}, secret: ${JSON.stringify(request.secret)} });
+      const bind = params => stringify(params, function (key, value) { return this === params && value != null && typeof value !== 'string' && !(typeof value === 'number' && finite(value)) ? {} : value; });
+      const db = freeze({ query: (sql, params = []) => parse(q(sql, bind(params))), execute: (sql, params = []) => parse(e(sql, bind(params))) });
+      const ctx = freeze({ caller, db, refuse, files:freeze({attach:id=>deepFreeze(parse(attach(id)))}), localDate: zone => localDate(zone), nowMs: ${request.nowMs}, requestId: ${JSON.stringify(request.requestId)}, secret: ${JSON.stringify(request.secret)} });
       const hasOwn = Object.hasOwn;
       globalThis.__invokeOperation = () => {
         const operations = globalThis.operations;
@@ -526,10 +588,14 @@ function run(
       }
       if (result.error) {
         // No guest getters or coercion run while formatting an exception.
+        const escaped =
+          uncaught && vm.sameValue(result.error, uncaught.error) ? uncaught.refusal : undefined;
         result.error.dispose();
-        throw !interrupted && !exhausted() && resourceLimit
-          ? resourceLimit
-          : guestFailure("App operation failed.");
+        if (!interrupted && !exhausted()) {
+          if (resourceLimit) throw resourceLimit;
+          if (escaped) throw new AppBackendRuntimeError(escaped);
+        }
+        throw guestFailure("App operation failed.");
       }
       try {
         if (vm.typeof(result.value) !== "string")

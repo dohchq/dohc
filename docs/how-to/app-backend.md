@@ -194,7 +194,11 @@ Declare those tables and operations in the dataset descriptor and schema.
 Operations read and write only their own Collection's tables. They cannot attach databases, run `PRAGMA`, change the schema, or call `load_extension`, `readfile`, `writefile`, `edit`, or `fts3_tokenizer`. `ctx.db.query` only reads.
 Name rows by the table's primary key, not `rowid`, unless that key is an `INTEGER PRIMARY KEY` that aliases `rowid`. Read affected rows from `execute`'s `{ changes }`, not `changes()`, `total_changes()`, or `last_insert_rowid()`.
 By default, one call gets 64 KiB of input, a 256 KiB result, 1,000 rows and 256 KiB per query, 128 statements, 128 parameters per statement, 24 MiB of memory, and 1 s for the operation's code. A size or count refusal names the limit, its unit, and the actual usage; a time or memory refusal names the limit.
-Parameters are strings, finite numbers, or null. The host verifies `ctx.caller`.
+Parameters are strings, finite numbers, or null. Any other value is refused as `invalid_input`, unless the operation catches the error.
+One statement's parameters may use 256 KiB as JSON, so a large document fits in one write.
+To pass a list, bind it as JSON text and read it with `json_each`, such as `WHERE id IN (SELECT value FROM json_each(?))`.
+SQL that the operation can't use, such as a table outside its Collection, is refused as `sql_not_allowed` with the table or function named.
+The host verifies `ctx.caller`.
 `ctx.caller.kind` says who asked: `owner`, `named` for a person the owner granted access, `link` for someone with a share link, or `automation` for an automation on the Collection.
 A link caller has `grantId`, the link's ID. The owner copies it from **Share**, the link's **Link options**, then **Copy link ID**.
 An automation caller has `automationId`, such as `collection:Invoices#mark-paid`.
@@ -205,6 +209,12 @@ The host refuses to commit a result without it, and an automation run's Undo run
 `ctx.requestId` identifies the request. It and the operation context stay stable during host retries.
 A generated Collection names each new record by `ctx.requestId`, so with no sort, records list in the order they were added.
 If the clock steps back while the host restarts, a newer record can list before an older one.
+`ctx.localDate(timeZone)` returns the date at `ctx.nowMs` in a time zone name, such as `Asia/Singapore`, as `YYYY-MM-DD`.
+Use it for "today" checks, such as refusing an entry dated in the future.
+The app passes the person's zone in its input. A frontend reads it with `Intl.DateTimeFormat().resolvedOptions().timeZone`.
+The caller chooses the zone, so never use the date for access. It is always a date that is today somewhere on Earth at `ctx.nowMs`.
+A zone that isn't a time zone name is refused as `invalid_input`, unless the operation catches the error.
+Automations don't have `ctx.localDate`. They use `ctx.today()`.
 `ctx.files.attach(fileId)` associates an admitted upload with the transaction.
 `ctx.refuse(code, message)` rolls back a business-rule failure.
 Returning `{ ok: false }` is an ordinary successful result and keeps preceding writes.
