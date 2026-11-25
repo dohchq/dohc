@@ -1,3 +1,4 @@
+import { createServiceAnalyticsClient } from "@dohc/service-http/telemetry";
 import {
   createWorkspaceAuth,
   deviceCodeKind,
@@ -59,11 +60,15 @@ pool.on("connect", (client) =>
   client.on("error", () => console.error("[workspace-api] A database connection failed.")),
 );
 pool.on("error", () => undefined);
+const analytics = config.analytics
+  ? createServiceAnalyticsClient({ service: "workspace-api", config: config.analytics })
+  : null;
 const accountDeletion = createAccountDeletion({
   pool,
   secret: config.secret,
   serverOrigin: config.baseURL,
   relayUrl: config.internalRelayUrl,
+  ...(analytics ? { onDeleted: () => analytics.track("drive_account_deleted") } : {}),
 });
 const auth = createWorkspaceAuth({
   accountDeletion,
@@ -71,6 +76,14 @@ const auth = createWorkspaceAuth({
   baseURL: config.baseURL,
   secret: config.secret,
   sendEmail: email.sendEmail,
+  ...(analytics
+    ? {
+        onAuthEvent: (event) => {
+          if (event.kind === "signup_completed") analytics.track("drive_signup_completed");
+          else analytics.track("drive_signin_completed", { client_kind: event.clientKind });
+        },
+      }
+    : {}),
   ...(config.trustedOrigins.length > 0 ? { trustedOrigins: config.trustedOrigins } : {}),
   ...(config.signUp
     ? {
@@ -189,7 +202,7 @@ server.listen(config.port, config.bindHost, () => {
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     server.close(() => {
-      void pool.end().finally(() => process.exit(0));
+      void Promise.allSettled([analytics?.flush(), pool.end()]).finally(() => process.exit(0));
     });
   });
 }

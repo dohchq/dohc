@@ -9,6 +9,7 @@ import {
   serveFetchHandler,
   waitsOnQuery,
 } from "@dohc/service-http";
+import { createServiceAnalyticsClient } from "@dohc/service-http/telemetry";
 import { loadShareWebConfig } from "./config";
 import { createDeviceControlBridge } from "./deviceControlBridge";
 import { createLiveGateway, namedSessionCheckIntervalMs } from "./liveGateway";
@@ -45,7 +46,12 @@ try {
   fatal("share-web viewer assets are missing. Run: pnpm --filter @dohc/share-web build");
 }
 
+const analytics = config.analytics
+  ? createServiceAnalyticsClient({ service: "share-web", config: config.analytics })
+  : null;
+
 const application = createShareWebApplication({
+  ...(analytics ? { analytics } : {}),
   deleteAccountGateways(userId, workspaceIds) {
     namedGateway?.deleteAccount(userId, workspaceIds);
     linkGateway?.deleteAccount(userId, workspaceIds);
@@ -213,7 +219,13 @@ server.listen(config.port, config.bind, () => {
 
 installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
-  onClosed: () => process.exit(0),
+  onClosed: async () => {
+    try {
+      await analytics?.flush();
+    } finally {
+      process.exit(0);
+    }
+  },
 });
 
 function loadConfig() {

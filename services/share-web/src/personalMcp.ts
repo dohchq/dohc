@@ -22,6 +22,7 @@ import {
   sentPost,
   toolError,
   toolResult,
+  type McpAnalyticsEvent,
 } from "./remoteMcp";
 import { collectionWriteChanges, type CollectionWriteOutcome } from "./collectionWrites";
 import type { PersonalAgentAction, PersonalAgentClient } from "./personalAgentClient";
@@ -44,6 +45,7 @@ export interface PersonalMcpOptions {
   /** When `signal` aborts on its own, so a wait answers before it does. */
   deadlineAtMs: number;
   live?: { client: PersonalLiveClient; limits: NamedLiveBrowserLimits };
+  onAnalyticsEvent?: (event: McpAnalyticsEvent) => void;
 }
 
 export const PERSONAL_SIGN_IN_UNAVAILABLE =
@@ -265,7 +267,13 @@ export async function servePersonalMcp(
   try {
     return (
       refuseBatchedWrite(body.value, [COLLECTION_WRITE_TOOL]) ??
-      (await answerMcp(request, body.value, () => buildServer(options, reach), options.signal))
+      (await answerMcp(
+        request,
+        body.value,
+        () => buildServer(options, reach),
+        options.signal,
+        options.onAnalyticsEvent,
+      ))
     );
   } finally {
     body.release();

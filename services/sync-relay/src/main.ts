@@ -40,6 +40,12 @@ import {
   serveFetchHandler,
   waitsOnQuery,
 } from "@dohc/service-http";
+import {
+  AnalyticsConfigError,
+  createServiceAnalyticsClient,
+  readAnalyticsEnvConfig,
+  type ServiceAnalyticsConfig,
+} from "@dohc/service-http/telemetry";
 import { Pool, type QueryConfig } from "pg";
 import { compileDatasetOperations } from "./datasetCompiler";
 import { createVerifiedEmailLookups } from "./verifiedEmailLookups";
@@ -198,6 +204,17 @@ const relayExchangeKey = process.env.DOHC_RELAY_EXCHANGE_KEY;
 const relayExchangeKeyHash =
   relayExchangeKey === undefined ? undefined : hashRelayExchangeKey(relayExchangeKey);
 const selfHostedLive = process.env.DOHC_SELF_HOST_LIVE === "1";
+let analyticsConfig: ServiceAnalyticsConfig | null;
+try {
+  analyticsConfig = readAnalyticsEnvConfig(process.env);
+} catch (error) {
+  fatal(
+    `FATAL: ${error instanceof AnalyticsConfigError ? error.message : "invalid analytics configuration"}`,
+  );
+}
+const analytics = analyticsConfig
+  ? createServiceAnalyticsClient({ service: "sync-relay", config: analyticsConfig })
+  : null;
 if (
   process.env.DOHC_SELF_HOST_LIVE !== undefined &&
   !["0", "1"].includes(process.env.DOHC_SELF_HOST_LIVE)
@@ -720,6 +737,7 @@ let phonePages: PhonePages | undefined;
 let heldDocumentHost: (() => HeldDocumentHost | undefined) | undefined;
 const relayApplication = createSyncRelayHandler({
   discussionActivity,
+  ...(analytics ? { onWorkspaceCreated: () => analytics.track("sync_workspace_activated") } : {}),
   liveRooms: () => liveRooms,
   heldDocumentHost: () => heldDocumentHost?.(),
   storage,
@@ -1726,6 +1744,9 @@ automations =
           : {}),
         onError: (context, error) =>
           console.error(`[sync-relay] automations: ${context}:`, serverLogLine(error)),
+        ...(analytics
+          ? { onRunCompleted: (outcome) => analytics.track("server_automation_ran", { outcome }) }
+          : {}),
       })
     : undefined;
 copies =
@@ -1843,7 +1864,7 @@ installShutdown(server, {
     await relayApplication.dispose();
     storage.close();
     try {
-      await pool?.end();
+      await Promise.allSettled([analytics?.flush(), pool?.end()]);
     } finally {
       process.exit(0);
     }

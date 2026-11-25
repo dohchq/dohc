@@ -166,6 +166,7 @@ export function createAppLaunchHandler(options: {
     launchHost: string,
     signal: AbortSignal,
   ): Promise<AppNamedBrowserMaterial>;
+  onLaunched?: (callerKind: "link" | "named") => void;
 }) {
   const config = parseAppLaunchConfig(options.config),
     viewerHost = new URL(config.viewerOrigin).host;
@@ -566,6 +567,11 @@ export function createAppLaunchHandler(options: {
             expires: now() + HANDOFF_MS,
             handoffHash: hash(handoff),
           });
+          try {
+            options.onLaunched?.(namedMaterial(material) ? "named" : "link");
+          } catch {
+            // Analytics never breaks app launches.
+          }
           return Response.json(
             { action: `https://${launchHost}/bootstrap`, handoff },
             {

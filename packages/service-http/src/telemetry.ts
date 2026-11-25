@@ -1,0 +1,232 @@
+import { randomUUID } from "node:crypto";
+
+const POSTHOG_KEY_PATTERN = /^phc_\w{10,100}$/;
+
+export interface PostHogProject {
+  key: string;
+  base: URL;
+}
+
+export interface ServiceAnalyticsConfig {
+  url: URL;
+  key: string;
+}
+
+export type AnalyticsPropertyValue = string | number | boolean;
+
+export interface ServiceAnalyticsClient {
+  track(event: string, properties?: Readonly<Record<string, AnalyticsPropertyValue>>): void;
+  flush(): Promise<void>;
+}
+
+export class AnalyticsConfigError extends Error {}
+
+export function posthogProject(key: string, host: string): PostHogProject | null {
+  const trimmedKey = key.trim();
+  if (!POSTHOG_KEY_PATTERN.test(trimmedKey)) return null;
+  let base: URL;
+  try {
+    base = new URL(host.trim());
+  } catch {
+    return null;
+  }
+  if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash)
+    return null;
+  return { key: trimmedKey, base };
+}
+
+export function rateLimitMs(
+  response: Pick<Response, "status" | "headers">,
+  bounds: { defaultPauseMs?: number; maxPauseMs?: number } = {},
+): number {
+  if (response.status !== 429) return 0;
+  const defaultPauseMs = bounds.defaultPauseMs ?? 60_000;
+  const maxPauseMs = bounds.maxPauseMs ?? 3_600_000;
+  const retryAfter = Number(response.headers.get("retry-after"));
+  const seconds =
+    Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : defaultPauseMs / 1000;
+  return Math.min(seconds * 1000, maxPauseMs);
+}
+
+export function readAnalyticsEnvConfig(env: NodeJS.ProcessEnv): ServiceAnalyticsConfig | null {
+  const key = env.DOHC_ANALYTICS_KEY?.trim() ?? "";
+  const host = env.DOHC_ANALYTICS_HOST?.trim() ?? "";
+  if (!key && !host) return null;
+  if (!key || !host) {
+    throw new AnalyticsConfigError(
+      "DOHC_ANALYTICS_KEY and DOHC_ANALYTICS_HOST must both be set, or both left unset.",
+    );
+  }
+  const project = posthogProject(key, host);
+  if (!project) {
+    throw new AnalyticsConfigError(
+      "DOHC_ANALYTICS_KEY must be a valid phc_* key and DOHC_ANALYTICS_HOST must be an https URL without credentials, query, or fragment.",
+    );
+  }
+  return { url: new URL(`${project.base.href.replace(/\/+$/, "")}/batch/`), key: project.key };
+}
+
+interface QueuedEvent {
+  event: string;
+  distinct_id: string;
+  uuid: string;
+  properties: Record<string, unknown>;
+  timestamp: string;
+  queuedAtMs: number;
+}
+
+export function createServiceAnalyticsClient(options: {
+  service: string;
+  config: ServiceAnalyticsConfig;
+  fetch?: typeof fetch;
+  now?: () => number;
+  random?: () => number;
+  flushMs?: number;
+  batchSize?: number;
+  maxQueue?: number;
+  requestTimeoutMs?: number;
+  shutdownTimeoutMs?: number;
+  maxRetryAgeMs?: number;
+  baseBackoffMs?: number;
+  maxBackoffMs?: number;
+}): ServiceAnalyticsClient {
+  const send = options.fetch ?? fetch;
+  const now = options.now ?? Date.now;
+  const random = options.random ?? Math.random;
+  const flushMs = options.flushMs ?? 15_000;
+  const batchSize = options.batchSize ?? 50;
+  const maxQueue = options.maxQueue ?? 500;
+  const requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
+  const shutdownTimeoutMs = options.shutdownTimeoutMs ?? 3_000;
+  const maxRetryAgeMs = options.maxRetryAgeMs ?? 30 * 60_000;
+  const baseBackoffMs = options.baseBackoffMs ?? 1_000;
+  const maxBackoffMs = options.maxBackoffMs ?? 60_000;
+  const queue: QueuedEvent[] = [];
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let sending: AbortController | null = null;
+  let draining: Promise<void> | null = null;
+  let pausedUntilMs = 0;
+  let failures = 0;
+  let quitting = false;
+  let ended = false;
+
+  const schedule = (delayMs: number) => {
+    if (quitting || ended || timer || queue.length === 0) return;
+    timer = setTimeout(
+      () => {
+        timer = null;
+        void drain();
+      },
+      Math.max(0, delayMs, pausedUntilMs - now()),
+    );
+    timer.unref?.();
+  };
+
+  const pauseForBackoff = () => {
+    failures += 1;
+    const backoff = Math.min(maxBackoffMs, baseBackoffMs * 2 ** (failures - 1));
+    pausedUntilMs = now() + Math.round(backoff * (0.75 + 0.5 * random()));
+  };
+
+  const sendBatch = async (batch: QueuedEvent[]): Promise<"ok" | "retry" | "drop"> => {
+    const controller = new AbortController();
+    sending = controller;
+    try {
+      const response = await send(options.config.url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          api_key: options.config.key,
+          batch: batch.map(({ queuedAtMs: _queued, ...payload }) => payload),
+        }),
+        redirect: "error",
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(requestTimeoutMs)]),
+      });
+      await response.body?.cancel().catch(() => {});
+      if (response.ok) {
+        failures = 0;
+        return "ok";
+      }
+      if (response.status === 429) {
+        pausedUntilMs = now() + rateLimitMs(response);
+        return "retry";
+      }
+      if (response.status === 408 || response.status >= 500) {
+        pauseForBackoff();
+        return "retry";
+      }
+      return "drop";
+    } catch {
+      pauseForBackoff();
+      return "retry";
+    } finally {
+      if (sending === controller) sending = null;
+    }
+  };
+
+  const drain = (ignorePause = false): Promise<void> => {
+    if (draining) return draining;
+    if (ended || queue.length === 0 || (!ignorePause && now() < pausedUntilMs))
+      return Promise.resolve();
+    draining = (async () => {
+      try {
+        while (!ended && queue.length > 0 && (ignorePause || now() >= pausedUntilMs)) {
+          const batch = queue.splice(0, batchSize);
+          if ((await sendBatch(batch)) === "retry") {
+            if (!quitting && !ended) {
+              const kept = batch.filter((item) => item.queuedAtMs >= now() - maxRetryAgeMs);
+              const room = Math.max(0, maxQueue - queue.length);
+              if (room > 0 && kept.length > 0) queue.unshift(...kept.slice(kept.length - room));
+              schedule(pausedUntilMs - now());
+            }
+            break;
+          }
+        }
+      } finally {
+        draining = null;
+        if (!quitting && !ended && queue.length > 0) schedule(flushMs);
+      }
+    })();
+    return draining;
+  };
+
+  return {
+    track(event, properties = {}) {
+      if (ended || quitting || queue.length >= maxQueue) return;
+      const atMs = now();
+      queue.push({
+        event,
+        distinct_id: randomUUID(),
+        uuid: randomUUID(),
+        properties: {
+          $process_person_profile: false,
+          $geoip_disable: true,
+          $lib: `dohc-${options.service}`,
+          service: options.service,
+          ...properties,
+        },
+        timestamp: new Date(atMs).toISOString(),
+        queuedAtMs: atMs,
+      });
+      if (queue.length >= batchSize) void drain();
+      else schedule(flushMs);
+    },
+    async flush() {
+      if (quitting) return;
+      quitting = true;
+      if (timer) clearTimeout(timer);
+      timer = null;
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        drain(true).catch(() => {}),
+        new Promise<void>((resolve) => {
+          deadline = setTimeout(resolve, shutdownTimeoutMs);
+        }),
+      ]);
+      clearTimeout(deadline);
+      ended = true;
+      sending?.abort();
+      queue.length = 0;
+    },
+  };
+}

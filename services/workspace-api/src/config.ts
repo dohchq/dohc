@@ -1,3 +1,8 @@
+import {
+  AnalyticsConfigError,
+  readAnalyticsEnvConfig,
+  type ServiceAnalyticsConfig,
+} from "@dohc/service-http/telemetry";
 import { normalizeEmail } from "@dohc/workspace-auth/signUp";
 import {
   smtpSettingsFromEnv,
@@ -58,6 +63,8 @@ export interface WorkspaceApiConfig {
   crashReports: boolean;
   /** Null when anyone who can reach the server may create an account. */
   signUp: ClosedSignUp | null;
+  /** Optional unlinkable server analytics. Null when unset (off by default). */
+  analytics: ServiceAnalyticsConfig | null;
 }
 
 const DEFAULT_PORT = 1786;
@@ -122,6 +129,13 @@ export function readConfig(env: NodeJS.ProcessEnv): WorkspaceApiConfig {
   const emailTransport: EmailTransport = smtp ? "smtp" : nodeEnv === "test" ? "capture" : "none";
   const seamActive = testAuthSeam || emailTransport === "capture";
 
+  let analytics: ServiceAnalyticsConfig | null;
+  try {
+    analytics = readAnalyticsEnvConfig(env);
+  } catch (error) {
+    throw new ConfigError(error instanceof AnalyticsConfigError ? error.message : String(error));
+  }
+
   return {
     internalRelayUrl: env.WORKSPACE_API_RELAY_URL
       ? readInternalRelayOrigin(env.WORKSPACE_API_RELAY_URL)
@@ -146,6 +160,7 @@ export function readConfig(env: NodeJS.ProcessEnv): WorkspaceApiConfig {
     testAuthSeam,
     crashReports: readSwitch(env.DOHC_CRASH_REPORTS, "DOHC_CRASH_REPORTS"),
     signUp: readSignUp(env.DOHC_SIGN_UP_EMAILS, env.WORKSPACE_API_RELAY_URL),
+    analytics,
   };
 }
 

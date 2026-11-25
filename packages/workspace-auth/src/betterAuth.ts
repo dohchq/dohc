@@ -58,6 +58,9 @@ interface WorkspaceAuthOptions {
       confirmPassword: () => Promise<void>,
     ): Promise<Record<string, unknown>>;
   };
+  onAuthEvent?: (
+    event: { kind: "signup_completed" } | { kind: "signin_completed"; clientKind: SessionKind },
+  ) => void;
 }
 
 export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
@@ -79,10 +82,20 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
   // Anyone could have typed the sign-up name too, so the same write that
   // verifies the address replaces it with the name sent alongside the token,
   // or none.
+  const emitAuthEvent = (
+    event: { kind: "signup_completed" } | { kind: "signin_completed"; clientKind: SessionKind },
+  ): void => {
+    try {
+      options.onAuthEvent?.(event);
+    } catch {
+      // Analytics never breaks authentication.
+    }
+  };
   const verifyOnPasswordReset = async (userId: string, name: string): Promise<void> => {
     const { internalAdapter } = await auth.$context;
     await internalAdapter.deleteUserSessions(userId);
     await internalAdapter.updateUser(userId, { name, emailVerified: true });
+    emitAuthEvent({ kind: "signup_completed" });
   };
   // Better Auth drops `name` from the reset body before onPasswordReset runs,
   // so a hook reads it first and hands it over through the request they share.
@@ -107,22 +120,33 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
         }
       : {}),
     databaseHooks: {
-      ...(admitAccount
+      ...(admitAccount || (!closed && options.onAuthEvent)
         ? {
             user: {
               create: {
-                before: async (
-                  user: { email: string },
-                  context: { headers?: Headers; request?: Request } | null,
-                ) => {
-                  const headers = context?.headers ?? context?.request?.headers;
-                  refuseUnadmitted(
-                    await admitAccount(
-                      user.email,
-                      headers?.get(SIGN_UP_INVITE_LINK_HEADER) || null,
-                    ),
-                  );
-                },
+                ...(admitAccount
+                  ? {
+                      before: async (
+                        user: { email: string },
+                        context: { headers?: Headers; request?: Request } | null,
+                      ) => {
+                        const headers = context?.headers ?? context?.request?.headers;
+                        refuseUnadmitted(
+                          await admitAccount(
+                            user.email,
+                            headers?.get(SIGN_UP_INVITE_LINK_HEADER) || null,
+                          ),
+                        );
+                      },
+                    }
+                  : {}),
+                ...(!closed && options.onAuthEvent
+                  ? {
+                      after: async () => {
+                        emitAuthEvent({ kind: "signup_completed" });
+                      },
+                    }
+                  : {}),
               },
             },
           }
@@ -134,6 +158,13 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
           before: async (_session, context) => ({
             data: { clientKind: kindOfNewSession(context) },
           }),
+          after: async (session) => {
+            if (!options.onAuthEvent) return;
+            const kind = (session as Record<string, unknown>).clientKind;
+            const clientKind: SessionKind =
+              kind === "desktop" || kind === "phone" ? kind : "browser";
+            emitAuthEvent({ kind: "signin_completed", clientKind });
+          },
         },
         update: {
           before: async (session) => {

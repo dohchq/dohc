@@ -17,8 +17,10 @@ import {
 } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { selfHostLiveProfile } from "../../sync-relay/src/selfHostLiveProfile";
 import { canonicalIpAddress } from "@dohc/service-http";
+import { readAnalyticsEnvConfig, type ServiceAnalyticsConfig } from "@dohc/service-http/telemetry";
 
 export interface ShareWebConfig {
+  analytics: ServiceAnalyticsConfig | null;
   appLaunch?: AppLaunchConfig;
   publicEditRelease?: PublicEditRelease;
   relayUrl: string;
@@ -295,7 +297,10 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
   if (publicEditRelease && !linkLive)
     throw new Error("Public Edit release requires configured link live limits and relay exchange.");
 
+  const analytics = readAnalyticsEnvConfig(env);
+
   return {
+    analytics,
     appLaunch: env.DOHC_SHARE_WEB_APP_DOMAIN
       ? parseAppLaunchConfig({
           viewerOrigin: required(env, "DOHC_SHARE_WEB_PUBLIC_ORIGIN"),

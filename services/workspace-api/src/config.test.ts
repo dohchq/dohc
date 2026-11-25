@@ -189,4 +189,30 @@ describe("readConfig", () => {
       "DOHC_CRASH_REPORTS must be 0 or 1",
     );
   });
+
+  it("leaves server analytics off by default and rejects partial or invalid settings", () => {
+    expect(readConfig(env()).analytics).toBeNull();
+    expect(
+      readConfig(
+        env({
+          DOHC_ANALYTICS_KEY: "phc_driveProject123",
+          DOHC_ANALYTICS_HOST: "https://dohc.computer/telemetry",
+        }),
+      ).analytics,
+    ).toEqual({
+      key: "phc_driveProject123",
+      url: new URL("https://dohc.computer/telemetry/batch/"),
+    });
+    expect(() => readConfig(env({ DOHC_ANALYTICS_KEY: "phc_driveProject123" }))).toThrow(
+      ConfigError,
+    );
+    expect(() =>
+      readConfig(
+        env({
+          DOHC_ANALYTICS_KEY: "phc_driveProject123",
+          DOHC_ANALYTICS_HOST: "http://dohc.computer/telemetry",
+        }),
+      ),
+    ).toThrow(ConfigError);
+  });
 });

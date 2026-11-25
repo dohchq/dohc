@@ -18,6 +18,7 @@ export function createAccountDeletion(options: {
   serverOrigin: string;
   relayUrl: string | null;
   fetch?: typeof fetch;
+  onDeleted?: () => void;
 }) {
   const { pool } = options,
     key = accountDeletionKey(options.secret),
@@ -104,6 +105,11 @@ export function createAccountDeletion(options: {
         );
       await client.query("DELETE FROM account_deletion_jobs WHERE user_id=$1", [user.id]);
       await client.query("COMMIT");
+      try {
+        options.onDeleted?.();
+      } catch {
+        // Analytics never breaks account deletion.
+      }
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;

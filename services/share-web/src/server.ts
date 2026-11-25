@@ -23,6 +23,7 @@ import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { LINK_SECRET_PATTERN, SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { TokenBucketLimiter, readBoundedJson } from "@dohc/service-http";
+import type { ServiceAnalyticsClient } from "@dohc/service-http/telemetry";
 import { asRecord } from "@dohc/workspace-core";
 import {
   RELAY_API_VERSION,
@@ -46,7 +47,7 @@ import { linkRefusalBody, parseLinkRefusal } from "@dohc/security-contract/link-
 import { linkChatRefusalBody, opaqueLinkRefusal as refused } from "./linkRefusal";
 import { SHARE_WEB_CSP, SHARE_WEB_SECURITY_HEADERS } from "./securityHeaders";
 export { SHARE_WEB_CSP, SHARE_WEB_SECURITY_HEADERS } from "./securityHeaders";
-import { serveRemoteMcp } from "./remoteMcp";
+import { serveRemoteMcp, type McpAnalyticsEvent } from "./remoteMcp";
 import { createAgentChatClient } from "./agentChatClient";
 import {
   MCP_CORS_HEADERS,
@@ -245,6 +246,7 @@ interface RelayCall {
 }
 
 export interface CreateShareWebApplicationOptions {
+  analytics?: Pick<ServiceAnalyticsClient, "track">;
   appLaunch?: AppLaunchConfig;
   publicEditRelease?: PublicEditRelease;
   relayUrl: string;
@@ -1079,6 +1081,7 @@ async function streamingBlobResponse(
 }
 
 export function createShareWebApplication({
+  analytics,
   relayUrl,
   publicRelayUrl,
   relayExchangeKey,
@@ -1768,6 +1771,20 @@ export function createShareWebApplication({
           },
         })
       : undefined;
+  const trackMcp = (surface: "share" | "personal") =>
+    analytics
+      ? (event: McpAnalyticsEvent) => {
+          if (event.kind === "connected") {
+            analytics.track("remote_mcp_agent_connected", { surface });
+          } else {
+            analytics.track("remote_mcp_tool_invoked", {
+              surface,
+              outcome: event.outcome,
+              write: event.write,
+            });
+          }
+        }
+      : undefined;
   const appLaunch = appLaunchConfig
     ? createAppLaunchHandler({
         config: appLaunchConfig,
@@ -1776,6 +1793,12 @@ export function createShareWebApplication({
         nowMs,
         resolveMaterial: resolveLinkBrowserMaterial,
         resolveNamedMaterial: resolveNamedAppMaterial,
+        ...(analytics
+          ? {
+              onLaunched: (callerKind) =>
+                analytics.track("published_app_launched", { caller_kind: callerKind }),
+            }
+          : {}),
         // A phone's launch needs no account sign-in here: the relay checks its grant.
         ...(relayExchangeKey
           ? {
@@ -1972,6 +1995,7 @@ export function createShareWebApplication({
           const result = await servePersonalMcp(request, {
             signal,
             deadlineAtMs,
+            ...(analytics ? { onAnalyticsEvent: trackMcp("personal") } : {}),
             // A write's large body spends the agent's write budget and holds its one slot, whichever of its tokens sends it.
             // The relay limits the agent too.
             admitLargeBody: (agentId) => {
@@ -2005,6 +2029,7 @@ export function createShareWebApplication({
         const result = await serveRemoteMcp(request, {
           signal,
           deadlineAtMs,
+          ...(analytics ? { onAnalyticsEvent: trackMcp("share") } : {}),
           liveLimits: linkLiveConfig?.editor,
           ...(linkLive ? { live: linkLive.agent({ accessToken: bearer, resource }) } : {}),
           agentChat: createAgentChatClient({
@@ -2235,6 +2260,11 @@ export function createShareWebApplication({
           };
           seal(token, session);
           sessions.set(token, session, nowMs());
+          try {
+            analytics?.track("share_link_opened");
+          } catch {
+            // Analytics never breaks share opening.
+          }
           const responseHeaders = new Headers();
           responseHeaders.append("set-cookie", sessionCookie(token, session, nowMs()));
           responseHeaders.append("set-cookie", profileCookie(discriminator, profile));
