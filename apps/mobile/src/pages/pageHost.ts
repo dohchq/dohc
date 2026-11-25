@@ -47,6 +47,14 @@ export function createPageHost(options: {
       state.live?.end();
       set({ mount: state.mount + 1, painted: false, live: null, stopped: true });
     },
+    /** What the mounted web view needs once it has started (`started` is its mount): its page, the newer read once it
+     * has drawn, or a new web view when a session holds the text the newer read changes. */
+    next(started: number | null, sent: string | null, read: string | null) {
+      if (started !== state.mount || read === null || sent === read) return null;
+      if (sent === null) return "page";
+      if (state.live) return "remount";
+      return state.painted ? "replace" : null;
+    },
     /** Opens the mounted web view's session once it has drawn. */
     open(make: (post: (message: ToPage) => void) => PageLive) {
       if (!state.painted || state.live || state.stopped) return;

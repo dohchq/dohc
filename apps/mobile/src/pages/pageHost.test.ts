@@ -87,6 +87,36 @@ describe("a page's web view and its session", () => {
   });
 });
 
+// ServerPage on iPhone: the pooled editor has started before the read lands, since its `started` is replayed when the
+// slot claims it. Leaving with an edit ends the session, and a late report from the released editor changes nothing.
+describe("a page in an editor that started before its read", () => {
+  it("gets its page when the read lands, keeps the live text, and ignores the released editor", async () => {
+    const t = setup({ signIn: {}, workspaceId: "ws-1" }, createScopedEnds(), ready());
+    expect(t.host.next(0, null, null)).toBeNull();
+    expect(t.host.next(null, null, "# Plan")).toBeNull();
+    expect(t.host.next(0, null, "# Plan")).toBe("page");
+    expect(t.host.next(0, "# Plan", "# Plan v2")).toBeNull();
+
+    t.painted();
+    expect(t.host.next(0, "# Plan", "# Plan v2")).toBe("replace");
+    t.open();
+    await vi.waitFor(() => expect(t.sockets).toHaveLength(1));
+    t.latest().open();
+    const live = t.host.state().live!;
+    pageSide(live)(1)({ type: "state", facts: facts("live", 1) });
+    expect(liveMark(live.state())).toBe("saving");
+    expect(t.host.next(0, "# Plan", "# Plan v2")).toBe("remount");
+
+    t.host.gone();
+    expect(t.latest().closed).toBe(true);
+    t.host.painted(0);
+    t.open();
+    expect(t.host.next(0, "# Plan", "# Plan v2")).toBeNull();
+    expect(t.host.state()).toMatchObject({ mount: 1, painted: false, live: null });
+    expect(t.opens()).toBe(1);
+  });
+});
+
 describe("teardown", () => {
   it("replaces the page's web view with a read-only one at Sign out, a 401, another workspace and Show on phone off", async () => {
     for (const trigger of ["sign-out", "failed sign-out", "401", "another workspace", "hidden"]) {

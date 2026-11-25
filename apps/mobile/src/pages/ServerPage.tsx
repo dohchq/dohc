@@ -207,13 +207,12 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
     }
   };
   useEffect(() => {
-    const sent = sentTo(mount);
-    if (started !== mount || markdown === null || sent === markdown) return;
-    if (sent !== null && live) return host.gone();
-    if (sent !== null && !painted) return;
+    const next = host.next(started, sentTo(mount), markdown);
+    if (next === "remount") return host.gone();
+    if (next === null || markdown === null) return;
     given.current = { mount, markdown };
     web.current?.inject(
-      sent === null
+      next === "page"
         ? pageScript(path, markdown)
         : `window.__dohcReplaceRead?.(${JSON.stringify(markdown)}); true;`,
     );
