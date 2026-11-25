@@ -325,7 +325,7 @@ test("the accountant link reads reports, cannot write, and stops working when re
         entry(
           `${year}-01-10`,
           [
-            ["1100", 125_000, 0],
+            ["1010", 125_000, 0],
             ["4000", 0, 125_000],
           ],
           "Design retainer",
@@ -381,6 +381,30 @@ test("the accountant link reads reports, cannot write, and stops working when re
     ).toBe(true);
     await page.screenshot({ path: info.outputPath("accounting-portal-mobile.png") });
 
+    await page.setViewportSize({ width: 1280, height: 1000 });
+    await f.ownerInvoke("postJournalEntries", {
+      entries: Array.from({ length: 120 }, (_, index) =>
+        entry(
+          `${year}-01-03`,
+          [
+            ["1500", 100, 0],
+            ["1010", 0, 100],
+          ],
+          `Tool ${index + 1}`,
+        ),
+      ),
+    });
+    await portal.getByLabel("Account", { exact: true }).selectOption("1500");
+    const [ledgerDownload] = await Promise.all([
+      page.waitForEvent("download"),
+      portal.getByRole("button", { name: "Download printable HTML" }).click(),
+    ]);
+    const ledgerHtml = readFileSync((await ledgerDownload.path())!, "utf8");
+    expect(ledgerHtml).toContain("Tool 1<");
+    expect(ledgerHtml).toContain("Tool 120<");
+    expect(ledgerHtml).toContain("Closing balance");
+    expect(ledgerHtml).toContain("$120.00");
+
     const read = f.invokes.find(
       (call) => call.body.operation === "trialBalance" && call.status === 200,
     );
@@ -398,6 +422,8 @@ test("the accountant link reads reports, cannot write, and stops working when re
       "addFiscalYear",
       "lockPeriod",
       "keepDuplicateBankRow",
+      "confirmDuplicateBankRow",
+      "findBankMatches",
       "listEntries",
       "overview",
       "receiptAccess",
@@ -422,8 +448,10 @@ test("the accountant link reads reports, cannot write, and stops working when re
         400,
       );
     }
-    const entries = (await f.ownerInvoke("listEntries", {})) as { result: { entries: unknown[] } };
-    expect(entries.result.entries).toHaveLength(3);
+    const written = (await f.ownerInvoke("listEntries", { q: "Link write" })) as {
+      result: { entries: unknown[] };
+    };
+    expect(written.result.entries).toHaveLength(0);
     expect(
       (await replay({ ...read!.body, idempotencyKey: "link-read-before-revoke" })).status,
     ).toBe(200);

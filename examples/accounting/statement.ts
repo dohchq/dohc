@@ -4,37 +4,6 @@ export type StatementRow = [date: string, description: string, amount: string];
 const BATCH_ROWS = 500;
 const BATCH_BYTES = 60 * 1024;
 
-export function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = "";
-  let quoted = false;
-  const source = text.replace(/^﻿/, "");
-  for (let index = 0; index < source.length; index++) {
-    const char = source[index]!;
-    if (quoted) {
-      if (char === '"' && source[index + 1] === '"') {
-        field += '"';
-        index++;
-      } else if (char === '"') quoted = false;
-      else field += char;
-    } else if (char === '"' && field === "") quoted = true;
-    else if (char === ",") {
-      row.push(field);
-      field = "";
-    } else if (char === "\n" || char === "\r") {
-      if (char === "\r" && source[index + 1] === "\n") index++;
-      row.push(field);
-      if (row.some((cell) => cell.trim())) rows.push(row);
-      row = [];
-      field = "";
-    } else field += char;
-  }
-  row.push(field);
-  if (row.some((cell) => cell.trim())) rows.push(row);
-  return rows;
-}
-
 function isoDate(value: string, order: DateOrder): string | null {
   const text = value.trim();
   const parts =
@@ -52,9 +21,13 @@ function isoDate(value: string, order: DateOrder): string | null {
 function amount(value: string | undefined): string | null {
   const text = (value ?? "").trim().replace(/[$€£¥]/g, "").trim();
   if (!text) return null;
-  return /^(?:\(\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?\s*\)|[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?)$/.test(text)
+  return /^(?:\(\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,4})?\s*\)|[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,4})?)$/.test(text)
     ? text
     : null;
+}
+
+function blank(value: string | undefined): boolean {
+  return /^[-–—]?$/.test((value ?? "").trim().replace(/[$€£¥]/g, "").trim());
 }
 
 function unsignedAmount(value: string): string {
@@ -69,6 +42,7 @@ export function mapStatement(
   rows: string[][],
   columns: { date: number; description: number; amount: number; credit: number },
   order: DateOrder,
+  digits: number,
 ): { rows: StatementRow[]; errors: string[] } {
   const out: StatementRow[] = [];
   const errors: string[] = [];
@@ -77,8 +51,10 @@ export function mapStatement(
     const description = (row[columns.description] ?? "").trim().slice(0, 300);
     let value: string | null = null;
     let ambiguous = false;
+    let unreadable: string | null = null;
     if (columns.credit < 0) value = amount(row[columns.amount]);
     else {
+      for (const cell of [row[columns.amount], row[columns.credit]]) if (!unreadable && !blank(cell) && amount(cell) === null) unreadable = cell!.trim();
       const moneyOut = amount(row[columns.amount]);
       const moneyIn = amount(row[columns.credit]);
       const hasIn = moneyIn !== null && !isZeroAmount(moneyIn);
@@ -88,8 +64,11 @@ export function mapStatement(
     }
     if (value && isZeroAmount(value)) value = null;
     if (!date) errors.push(`Row ${index + 1} has no date in the chosen format.`);
+    else if (unreadable) errors.push(`Row ${index + 1} has an amount that can't be read: ${unreadable}.`);
     else if (ambiguous) errors.push(`Row ${index + 1} has amounts in both money-in and money-out columns.`);
-    else if (!value) errors.push(`Row ${index + 1} needs a nonzero amount with at most two decimals.`);
+    else if (!value) errors.push(`Row ${index + 1} needs a nonzero amount.`);
+    else if ((/\.(\d+)/.exec(value)?.[1]?.length ?? 0) > digits)
+      errors.push(`Row ${index + 1} has more than ${digits} ${digits === 1 ? "decimal" : "decimals"} for this currency.`);
     else out.push([date, description, value]);
   });
   return { rows: out, errors };

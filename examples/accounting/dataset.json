@@ -320,8 +320,54 @@
           }
         },
         {
+          "sqlColumn": "linked",
+          "name": "Matched to an existing entry",
+          "type": "checkbox",
+          "required": true
+        },
+        {
+          "sqlColumn": "confirmed",
+          "name": "Confirmed duplicate",
+          "type": "checkbox",
+          "required": true
+        },
+        {
           "sqlColumn": "imported_at_ms",
           "name": "Imported at",
+          "type": "number",
+          "required": true
+        }
+      ]
+    },
+    {
+      "sqlName": "business",
+      "name": "Business",
+      "primaryKey": "id",
+      "fields": [
+        {
+          "sqlColumn": "id",
+          "name": "ID",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "name",
+          "name": "Name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "sqlColumn": "email",
+          "name": "Email",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "address",
+          "name": "Address",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "updated_at_ms",
+          "name": "Updated at",
           "type": "number",
           "required": true
         }
@@ -456,15 +502,6 @@
           }
         },
         {
-          "sqlColumn": "payment_entry_id",
-          "name": "Payment entry",
-          "type": "relation",
-          "relation": {
-            "table": "journal_entries",
-            "field": "id"
-          }
-        },
-        {
           "sqlColumn": "void_entry_id",
           "name": "Void entry",
           "type": "relation",
@@ -474,9 +511,45 @@
           }
         },
         {
+          "sqlColumn": "paid_cents",
+          "name": "Paid cents",
+          "type": "number",
+          "required": true
+        },
+        {
           "sqlColumn": "paid_on",
           "name": "Paid on",
           "type": "date"
+        },
+        {
+          "sqlColumn": "seller_name",
+          "name": "Seller name",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "seller_email",
+          "name": "Seller email",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "seller_address",
+          "name": "Seller address",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "buyer_name",
+          "name": "Billed to",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "buyer_email",
+          "name": "Billed to email",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "buyer_address",
+          "name": "Billed to address",
+          "type": "text"
         },
         {
           "sqlColumn": "version",
@@ -551,6 +624,86 @@
             "table": "accounts",
             "field": "id"
           }
+        }
+      ]
+    },
+    {
+      "sqlName": "invoice_payments",
+      "name": "Invoice payments",
+      "primaryKey": "entry_id",
+      "fields": [
+        {
+          "sqlColumn": "entry_id",
+          "name": "Payment entry",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "invoice_id",
+          "name": "Invoice",
+          "type": "relation",
+          "required": true,
+          "relation": {
+            "table": "invoices",
+            "field": "id"
+          }
+        },
+        {
+          "sqlColumn": "paid_on",
+          "name": "Paid on",
+          "type": "date",
+          "required": true
+        },
+        {
+          "sqlColumn": "amount_cents",
+          "name": "Amount cents",
+          "type": "number",
+          "required": true
+        }
+      ]
+    },
+    {
+      "sqlName": "reconciliations",
+      "name": "Reconciliations",
+      "primaryKey": "id",
+      "fields": [
+        {
+          "sqlColumn": "id",
+          "name": "ID",
+          "type": "text"
+        },
+        {
+          "sqlColumn": "bank_account_id",
+          "name": "Bank account",
+          "type": "relation",
+          "required": true,
+          "relation": {
+            "table": "accounts",
+            "field": "id"
+          }
+        },
+        {
+          "sqlColumn": "currency",
+          "name": "Currency",
+          "type": "text",
+          "required": true
+        },
+        {
+          "sqlColumn": "statement_date",
+          "name": "Statement date",
+          "type": "date",
+          "required": true
+        },
+        {
+          "sqlColumn": "balance_cents",
+          "name": "Ending balance cents",
+          "type": "number",
+          "required": true
+        },
+        {
+          "sqlColumn": "created_at_ms",
+          "name": "Reconciled at",
+          "type": "number",
+          "required": true
         }
       ]
     }
@@ -682,7 +835,8 @@
       "kind": "action",
       "table": "journal_entries",
       "access": "owner",
-      "readOnly": false
+      "readOnly": false,
+      "profile": "bulk"
     },
     {
       "name": "reverseJournalEntry",
@@ -690,11 +844,20 @@
       "kind": "action",
       "table": "journal_entries",
       "access": "owner",
-      "readOnly": false
+      "readOnly": false,
+      "profile": "bulk"
     },
     {
       "name": "attachReceipt",
       "label": "Attach receipt",
+      "kind": "action",
+      "table": "journal_entries",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "removeReceipt",
+      "label": "Remove receipt",
       "kind": "action",
       "table": "journal_entries",
       "access": "owner",
@@ -714,7 +877,8 @@
       "kind": "action",
       "table": "bank_imports",
       "access": "owner",
-      "readOnly": false
+      "readOnly": false,
+      "profile": "bulk"
     },
     {
       "name": "listBankRows",
@@ -745,6 +909,78 @@
       "label": "Keep duplicate bank row",
       "kind": "action",
       "table": "bank_imports",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "confirmDuplicateBankRow",
+      "label": "Confirm or unconfirm a duplicate bank row",
+      "kind": "action",
+      "table": "bank_imports",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "findBankMatches",
+      "label": "Find entries a bank row could match",
+      "kind": "action",
+      "table": "bank_imports",
+      "access": "owner",
+      "readOnly": true
+    },
+    {
+      "name": "linkBankRow",
+      "label": "Match bank row to an entry",
+      "kind": "action",
+      "table": "bank_imports",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "unlinkBankRow",
+      "label": "Undo a bank row match",
+      "kind": "action",
+      "table": "bank_imports",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "reconcileStatus",
+      "label": "Check a bank account against a statement",
+      "kind": "action",
+      "table": "reconciliations",
+      "access": "owner",
+      "readOnly": true
+    },
+    {
+      "name": "reconcileBank",
+      "label": "Reconcile a bank account",
+      "kind": "action",
+      "table": "reconciliations",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "removeReconciliation",
+      "label": "Remove a reconciliation",
+      "kind": "action",
+      "table": "reconciliations",
+      "access": "owner",
+      "readOnly": false
+    },
+    {
+      "name": "getBusiness",
+      "label": "Read business details",
+      "kind": "action",
+      "table": "business",
+      "access": "owner",
+      "readOnly": true
+    },
+    {
+      "name": "saveBusiness",
+      "label": "Save business details",
+      "kind": "action",
+      "table": "business",
       "access": "owner",
       "readOnly": false
     },
