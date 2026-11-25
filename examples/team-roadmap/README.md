@@ -43,7 +43,7 @@ Some things to know before you share it:
 - The product manager approves every app's binding. A teammate who edits an app's source can't widen what it reaches.
 - A data grant belongs to a person, not an app. An engineer with a grant for `triageItem` can also call it from the CLI or MCP.
 - `rollup` returns totals to anyone with a link to an app that binds it. Leave it out of an app's binding to keep totals private.
-- The Collection's History names who made each change and the app they used, for its last 10,000 changes. Each item's Requested by, Triaged by, and Changed by fields keep who touched it for good.
+- The Collection's History names who made each change and the app they used, for its last 10,000 changes. Each item's Requested by, Triaged by, and Changed by fields keep who requested it, who triaged it, and who changed it last.
 
 ## Try it
 

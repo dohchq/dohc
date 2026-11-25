@@ -126,7 +126,7 @@ function Group({ group }: { group: CollectionConnections }) {
               <span className="flex min-w-0 items-center gap-1.5">
                 <AppWindow size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
                 <span className="sr-only">App </span>
-                <span className="truncate font-medium">
+                <span className="truncate font-medium" title={app.appRoot}>
                   {app.appRoot.slice(app.appRoot.lastIndexOf("/") + 1)}
                 </span>
                 {app.access && <span className="shrink-0 text-muted">{app.access}</span>}
