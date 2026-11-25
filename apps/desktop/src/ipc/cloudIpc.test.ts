@@ -276,7 +276,7 @@ async function harness() {
     release: (reservation, finalize) => authorities.releaseReservation(reservation, finalize),
     closeRelay: cleanup,
     rollbackComplete: notify,
-    lostDrawings: () => [],
+    unkeptTyping: async () => [],
     logError: vi.fn(),
   });
   const stopWorkspaceSync = vi.fn<Dependencies["stopWorkspaceSync"]>(async (operation) => ({

@@ -9,8 +9,6 @@ export const INVALID_AUTHOR_MESSAGE =
   "dohc could not read who wrote this typing. The kept copy stays on this computer.";
 export const HISTORY_MISSING_MESSAGE =
   "This file is no longer in History. The kept copy stays on this computer.";
-export const DRAWING_UNAVAILABLE_MESSAGE =
-  "dohc cannot keep drawing changes while it reconnects. Keep this window open.";
 export function typingRecoveryMessage(failure: TypingRecoveryFailure): string {
   switch (failure.reason) {
     case "author-refused":
@@ -19,8 +17,6 @@ export function typingRecoveryMessage(failure: TypingRecoveryFailure): string {
       return INVALID_AUTHOR_MESSAGE;
     case "history-missing":
       return HISTORY_MISSING_MESSAGE;
-    case "drawing-unavailable":
-      return DRAWING_UNAVAILABLE_MESSAGE;
     default:
       return failure.kind === "checkpoint" ? CHECKPOINT_FAILURE_MESSAGE : IMPORT_FAILURE_MESSAGE;
   }

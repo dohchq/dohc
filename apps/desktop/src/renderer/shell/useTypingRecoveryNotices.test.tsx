@@ -6,7 +6,6 @@ import type { TypingRecoveryFailure } from "../../workspaces/outageTypingRecover
 import {
   INVALID_AUTHOR_MESSAGE,
   AUTHOR_REFUSED_MESSAGE,
-  DRAWING_UNAVAILABLE_MESSAGE,
   CHECKPOINT_FAILURE_MESSAGE,
   IMPORT_FAILURE_MESSAGE,
 } from "../../workspaces/typingRecoveryWords";
@@ -161,7 +160,6 @@ it("names a refused author and omits retry for a permanent refusal", async () =>
         path: "note.md",
         detail: "remote-human-author",
         reason: "author-refused",
-        retryable: false,
       },
     ],
   });
@@ -180,44 +178,12 @@ it("names a refused author and omits retry for a permanent refusal", async () =>
   expect(reportShellFailure.mock.calls[0]![0]).toMatchObject({ message: AUTHOR_REFUSED_MESSAGE });
   expect(reportShellFailure.mock.calls[0]![0]).not.toHaveProperty("retry");
 });
-it("warns truthfully that drawing outage edits cannot be kept", async () => {
-  state.read.mockResolvedValue({
-    failures: [
-      {
-        kind: "checkpoint",
-        path: "drawing.excalidraw",
-        detail: "Error: dohc cannot keep drawing changes while it reconnects.",
-        reason: "drawing-unavailable",
-        retryable: true,
-      },
-    ],
-  });
-  const reportShellFailure = vi.fn();
-  renderHook(() =>
-    useTypingRecoveryNotices({
-      ...noticeOptions(),
-      workspaceId: "a",
-      ready: true,
-      reportShellFailure,
-      clearKind: vi.fn(),
-      clearIdentity: vi.fn(),
-    }),
-  );
-  await waitFor(() => expect(reportShellFailure).toHaveBeenCalledOnce());
-  expect(reportShellFailure.mock.calls[0]![0]).toMatchObject({
-    message: DRAWING_UNAVAILABLE_MESSAGE,
-    retry: expect.any(Function),
-    details: [["File", "drawing.excalidraw"]],
-  });
-});
-
 it("copies each refused record without clearing its row or discarding it", async () => {
   const one = {
     kind: "import" as const,
     path: "note.md",
     detail: "invalid-author",
     reason: "invalid-author" as const,
-    retryable: false,
     checkpointId: "one",
   };
   const two = { ...one, checkpointId: "two" };
@@ -263,9 +229,7 @@ it("keeps a dismissed row closed through activity and remounts in the same run",
     clearIdentity: vi.fn(),
   };
   state.read.mockResolvedValue({
-    failures: [
-      { kind: "import", path: "note.md", detail: "missing", checkpointId: "one", retryable: false },
-    ],
+    failures: [{ kind: "import", path: "note.md", detail: "missing", checkpointId: "one" }],
   });
   const hook = renderHook(() => useTypingRecoveryNotices(input));
   await waitFor(() => expect(input.reportShellFailure).toHaveBeenCalledOnce());
@@ -291,7 +255,6 @@ const refused: TypingRecoveryFailure = {
   path: "note.md",
   detail: "invalid-author",
   reason: "invalid-author",
-  retryable: false,
   checkpointId: "one",
 };
 function Harness(props: Parameters<typeof useTypingRecoveryNotices>[0]) {

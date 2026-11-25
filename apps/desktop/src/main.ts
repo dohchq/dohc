@@ -3230,10 +3230,12 @@ const createJoinedWorkspace = createJoinedWorkspaceRunner({
     refreshNativeWorkspaceSurfaces();
     notifyRenderer();
   },
-  lostDrawings: (workspaceId) =>
-    [...(typingRecoveryFailures.get(workspaceId)?.values() ?? [])].flatMap((failure) =>
-      failure.reason === "drawing-unavailable" && failure.path ? [failure.path] : [],
-    ),
+  unkeptTyping: async (workspaceId) => {
+    await flushTypingCheckpoints(workspaceId).catch(() => undefined);
+    return [...(typingRecoveryFailures.get(workspaceId)?.values() ?? [])].flatMap((failure) =>
+      failure.kind === "checkpoint" ? [failure.path] : [],
+    );
+  },
   logError: (message, error) => console.error(message, error),
 });
 
@@ -3649,18 +3651,11 @@ const typingQuitRecovery = createTypingQuitRecovery({
   quit: () => app.quit(),
   beforeQuit: (event) => quitGuard.beforeQuit(event),
   confirmLoss: async () => {
-    const drawing = [...typingRecoveryFailures.values()].some((rows) =>
-      [...rows.values()].some((f) => f.reason === "drawing-unavailable"),
-    );
     const answer = await showMessageBox({
       type: "warning",
-      title: drawing ? "Quit without your drawing changes?" : "Quit without your typing?",
-      message: drawing
-        ? "dohc could not keep your drawing changes on this computer."
-        : "dohc could not keep your typing on this computer.",
-      detail: drawing
-        ? "Your drawing changes since the last saved copy are lost when dohc quits."
-        : "Any typing dohc has not kept is lost when it quits.",
+      title: "Quit without your typing?",
+      message: "dohc could not keep your typing on this computer.",
+      detail: "Any typing dohc has not kept is lost when it quits.",
       buttons: ["Quit anyway", "Go back"],
       defaultId: 1,
       cancelId: 1,
@@ -3834,11 +3829,6 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
         },
         writeTypingCheckpointSync: (checkpoint) =>
           writeTypingCheckpointSync(join(stateDir(), "live-draft-recovery"), checkpoint),
-        onTypingCheckpointFailure: (path, error) =>
-          reportTypingRecoveryFailure(
-            workspace.workspaceId,
-            typingRecoveryFailure("checkpoint", path, error),
-          ),
         onTypingCheckpointRecovered: (path) => {
           typingRecoveryFailures.get(workspace.workspaceId)?.delete("checkpoint:" + path);
           notifyRenderer({ workspaceId: workspace.workspaceId });

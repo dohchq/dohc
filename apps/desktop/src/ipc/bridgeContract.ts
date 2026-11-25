@@ -6322,10 +6322,7 @@ export const TypingRecoveryFailureSchema = z
     path: z.string(),
     detail: z.string(),
     checkpointId: z.string().min(1).optional(),
-    reason: z
-      .enum(["author-refused", "invalid-author", "history-missing", "drawing-unavailable"])
-      .optional(),
-    retryable: z.boolean().optional(),
+    reason: z.enum(["author-refused", "invalid-author", "history-missing"]).optional(),
   })
   .strict();
 export const liveDraftRecoveryOperations = {

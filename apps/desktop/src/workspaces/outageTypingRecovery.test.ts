@@ -366,10 +366,8 @@ it("imports a crash-left checkpoint while a new session owns the same open file"
 it("distinguishes malformed attribution from a remote human", () => {
   expect(typingRecoveryFailure("import", "note.md", Error("invalid-author"))).toMatchObject({
     reason: "invalid-author",
-    retryable: false,
   });
   expect(typingRecoveryFailure("import", "note.md", Error("remote-human-author"))).toMatchObject({
     reason: "author-refused",
-    retryable: false,
   });
 });

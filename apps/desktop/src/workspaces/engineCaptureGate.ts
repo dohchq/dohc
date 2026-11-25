@@ -27,7 +27,6 @@ export function captureForWorkspace(
     | "hasRetainedLiveDraft"
     | "writeTypingCheckpoint"
     | "writeTypingCheckpointSync"
-    | "onTypingCheckpointFailure"
     | "onTypingCheckpointRecovered"
     | "retireTypingCheckpoint"
     | "waitForTypingRecovery"

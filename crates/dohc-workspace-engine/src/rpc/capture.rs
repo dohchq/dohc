@@ -1303,6 +1303,7 @@ mod tests {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ImportRecoveryParams {
     admitted_base_base64: String,
+    state_base64: String,
     version_id: String,
     object_id: String,
     path: String,
@@ -1344,6 +1345,14 @@ impl EngineService {
                     "capture-recovery-refused:invalid-admitted-base",
                 )
             })?;
+        let state = base64::engine::general_purpose::STANDARD
+            .decode(input.state_base64)
+            .map_err(|_| {
+                WireError::new(
+                    ErrorCode::InvalidParams,
+                    "capture-recovery-refused:invalid-state",
+                )
+            })?;
         let _serial = open.session_ops.lock().await;
         let updates = input
             .updates
@@ -1380,6 +1389,7 @@ impl EngineService {
                     expected_state_vector_sha256: input.expected_state_vector_sha256,
                     expected_disk_sha256: input.expected_disk_sha256,
                     admitted_base,
+                    state,
                     updates,
                     text: input.text,
                 },

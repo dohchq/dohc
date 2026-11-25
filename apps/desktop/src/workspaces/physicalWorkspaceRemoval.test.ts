@@ -140,7 +140,7 @@ it("takes a failed join's entry out of the list without asking, and keeps its ty
     release: (reservation, finalize) => h.owner.releaseReservation(reservation, finalize),
     closeRelay: vi.fn(async () => {}),
     rollbackComplete: h.notifyRenderer,
-    lostDrawings: () => [],
+    unkeptTyping: async () => [],
     logError,
   });
   await expect(

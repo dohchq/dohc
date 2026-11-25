@@ -21,6 +21,7 @@ pub struct RecoveryImport {
     pub expected_state_vector_sha256: String,
     pub expected_disk_sha256: Option<String>,
     pub admitted_base: Vec<u8>,
+    pub state: Vec<u8>,
     pub updates: Vec<RecoveryUpdate>,
     pub text: String,
 }
@@ -65,11 +66,22 @@ impl ActorHandle {
             let preparations = cache.retirement_preparations();
             let result = store.write_with(faults.as_ref(), |tx| -> Result<_, RuntimeError> {
                 dohc_engine_domain::validate_addressable_plaintext_path(&input.path)?;
-                if input.admitted_base.len() > 32 * 1024 * 1024 || input.updates.len() > 4096 || input.text.len() > 16 * 1024 * 1024 ||
+                if input.admitted_base.len() > 32 * 1024 * 1024 || input.state.len() > 32 * 1024 * 1024 || input.updates.len() > 4096 || input.text.len() > 16 * 1024 * 1024 ||
                     input.updates.iter().map(|u| u.update.len()).sum::<usize>() > 32 * 1024 * 1024 {
                     return Err(refused("checkpoint-too-large"));
                 }
+                dohc_engine_collab::Ydoc::validate_update(&input.state)?;
                 let marker = dohc_engine_collab::read_marker_in(tx, key)?;
+                let scene = marker.as_ref().map_or_else(
+                    || input.path.to_ascii_lowercase().ends_with(".excalidraw"),
+                    |m| m.content_kind == dohc_engine_collab::ContentKind::Scene);
+                let text = if scene {
+                    let state = dohc_engine_collab::Ydoc::wire();
+                    state.apply(&input.state)?;
+                    dohc_engine_sync::project_ydoc_with_store(tx, key, &state, dohc_engine_collab::ContentKind::Scene)?.content
+                } else {
+                    input.text.clone()
+                };
                 let mut authors = dohc_engine_collab::author_coverage::Authors::default();
                 for update in &input.updates {
                     if update.request_id.is_empty() || update.request_id.len() > 1024 {
@@ -116,7 +128,7 @@ impl ActorHandle {
                 }
                 let prepared = dohc_engine_sync::prepare_local_ydoc_lineage_in_tx(tx, key)?;
                 let projection = prepared.projection();
-                let covered = projection.is_some_and(|p| p.content == input.text);
+                let covered = projection.is_some_and(|p| p.content == text);
                 // Deleted objects keep a recovery preimage in their existing History.
                 let snapshot = dohc_engine_domain::store::recovery_snapshot_in(tx,
                     &key.workspace_id, &key.version_id, &key.object_id)?
@@ -127,14 +139,14 @@ impl ActorHandle {
                          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
                          AND metadata_origin NOT IN ('capture-recovery','capture-recovery-cleared','merge-removal','merge-removal-cleared')
                          ORDER BY moment_order DESC LIMIT 1) m WHERE m.operation='delete' AND m.payload_before_blob_sha256=?4)",
-                        params![key.workspace_id,key.version_id,key.object_id,hex_sha256(input.text.as_bytes())], |r|r.get(0))
+                        params![key.workspace_id,key.version_id,key.object_id,hex_sha256(text.as_bytes())], |r|r.get(0))
                         .map_err(StorageError::corrupt_public)?;
                     if covered || history_covered {
                         tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,-2,?3,'ydoc')",
                             params![receipt_id,digest,now_ms]).map_err(StorageError::persist_public)?;
                         return Ok(RecoveryImportOutcome::Covered);
                     }
-                    if !dohc_engine_domain::store::record_deleted_capture_recovery_in_tx(tx, &key.workspace_id, &key.version_id, &key.object_id, &input.text, &moment_id, authors.moment_json().as_deref(), now_ms)? { return Err(refused("object-history-missing")); }
+                    if !dohc_engine_domain::store::record_deleted_capture_recovery_in_tx(tx, &key.workspace_id, &key.version_id, &key.object_id, &text, &moment_id, authors.moment_json().as_deref(), now_ms)? { return Err(refused("object-history-missing")); }
                     return Ok(RecoveryImportOutcome::Imported {moment_id:moment_id.clone()});
                 };
                 let same_claim = marker.as_ref().is_some_and(|m| m.lineage_claim_id == input.expected_claim_id);
@@ -182,13 +194,13 @@ impl ActorHandle {
                     }
                     // Retirement requires the entire checkpoint text to be durable.
                     let actual = dohc_engine_sync::prepare_local_ydoc_lineage_in_tx(tx, key)?;
-                    if actual.projection().is_none_or(|p| p.content != input.text) {
+                    if actual.projection().is_none_or(|p| p.content != text) {
                         return Err(refused("acknowledged-state-missing"));
                     }
                     RecoveryImportOutcome::Replayed
                 } else {
                     dohc_engine_domain::store::record_keyed_capture_recovery_in_tx(tx,
-                        &key.workspace_id, &snapshot, &input.text, &moment_id,
+                        &key.workspace_id, &snapshot, &text, &moment_id,
                         authors.moment_json().as_deref(), now_ms)?;
                     RecoveryImportOutcome::Imported { moment_id: moment_id.clone() }
                 };

@@ -69,6 +69,7 @@ fn checkpoint(state: &YdocOpenState, doc: &Ydoc, bytes: Vec<u8>) -> RecoveryImpo
         },
         expected_disk_sha256: Some(hex_sha256(b"base\n")),
         admitted_base: state.initial_update.clone(),
+        state: doc.encode_full_state(),
         text: doc.plaintext_string(),
         updates: vec![RecoveryUpdate {
             request_id: "outage-update".into(),
@@ -464,6 +465,7 @@ fn checkpoint_at(
         expected_state_vector_sha256: hex_sha256(&doc.encode_state_vector()),
         expected_disk_sha256: Some(disk_sha256),
         admitted_base: doc.encode_full_state(),
+        state: doc.encode_full_state(),
         text: String::new(),
         updates: Vec::new(),
     }
@@ -571,6 +573,7 @@ async fn rich(seed: &str) -> Rich {
         doc.richdoc_append_paragraph("Typed after the quit."),
     ));
     input.text = doc.project(ContentKind::Richdoc).unwrap().content;
+    input.state = doc.encode_full_state();
     let settled = disk(scratch.path(), NOTE);
     Rich {
         scratch,
@@ -648,4 +651,151 @@ async fn a_checkpoint_from_another_serializer_is_refused_and_kept() {
     let text = input.text.clone();
     let outcome = import(&rich.actor, rich.scratch.path(), input).await;
     assert_eq!(assert_typing_kept(rich, &text, outcome).await, "refused");
+}
+
+const DRAWING: &str = "drawing.excalidraw";
+const EMPTY_SCENE: &str = r#"{"type":"excalidraw","version":2,"source":"https://excalidraw.com","elements":[],"appState":{},"files":{}}"#;
+
+async fn drawing() -> (
+    ScratchDir,
+    std::path::PathBuf,
+    WorkspaceSupervisor,
+    ActorHandle,
+    RecoveryImport,
+) {
+    let scratch = ScratchDir::new().unwrap();
+    std::fs::write(scratch.path().join(DRAWING), EMPTY_SCENE).unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    actor
+        .capture_ingest(
+            CaptureIngest {
+                path: DRAWING.into(),
+                ..input(EMPTY_SCENE, 1)
+            },
+            LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("capture");
+    let state = actor
+        .ydoc_open_state_with_artifact_seed(
+            WS.into(),
+            2,
+            true,
+            None,
+            "main".into(),
+            DRAWING.into(),
+            Some(ContentKind::Scene),
+            true,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("open");
+    settle(
+        &actor,
+        scratch.path(),
+        &state,
+        DRAWING,
+        ContentKind::Scene,
+        3,
+    )
+    .await;
+    let doc = Ydoc::wire();
+    doc.apply(&state.initial_update).unwrap();
+    let base = hex_sha256(&doc.encode_state_vector());
+    let stroke = dohc_engine_collab::import_portable_scene(
+        &serde_json::json!({
+            "type": "excalidraw",
+            "elements": [{
+                "id": "outage-stroke",
+                "type": "rectangle",
+                "x": 1,
+                "y": 2,
+                "width": 3,
+                "height": 4,
+                "index": "a0",
+                "version": 1,
+                "versionNonce": 1,
+                "isDeleted": false
+            }],
+            "files": {}
+        })
+        .to_string(),
+    )
+    .unwrap()
+    .initial_update;
+    doc.apply(&stroke).unwrap();
+    let input = RecoveryImport {
+        key: state.key.clone(),
+        path: DRAWING.into(),
+        expected_claim_id: state.lineage_claim_id.clone(),
+        expected_state_vector_sha256: base,
+        expected_disk_sha256: Some(hex_sha256(&disk(scratch.path(), DRAWING))),
+        admitted_base: state.initial_update.clone(),
+        state: doc.encode_full_state(),
+        text: "the editor's own scene JSON".into(),
+        updates: vec![typed("outage-stroke", stroke)],
+    };
+    (scratch, db, supervisor, actor, input)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drawing_checkpoint_replays_against_the_engine_projection() {
+    let (scratch, db, supervisor, actor, input) = drawing().await;
+    let key = input.key.clone();
+    assert_eq!(
+        import(&actor, scratch.path(), input).await.unwrap(),
+        RecoveryImportOutcome::Replayed
+    );
+    supervisor.close(&db).unwrap();
+    let projected = inspect(&db, |store| {
+        store
+            .read_with(|c| {
+                let doc = dohc_engine_collab::load_doc_in(c, &key).unwrap();
+                Ok::<_, StorageError>(
+                    dohc_engine_sync::project_ydoc_with_store(c, &key, &doc, ContentKind::Scene)
+                        .unwrap()
+                        .content,
+                )
+            })
+            .unwrap()
+    });
+    assert!(projected.contains("outage-stroke"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drawing_checkpoint_over_an_outside_change_imports_the_engine_projection() {
+    let (scratch, db, supervisor, actor, recovery) = drawing().await;
+    let outside = r#"{"type":"excalidraw","version":2,"source":"https://excalidraw.com","elements":[],"appState":{"theme":"dark"},"files":{}}"#;
+    std::fs::write(scratch.path().join(DRAWING), outside).unwrap();
+    actor
+        .capture_ingest(
+            CaptureIngest {
+                path: DRAWING.into(),
+                ..input(outside, 15)
+            },
+            LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("capture outside change");
+    let RecoveryImportOutcome::Imported { moment_id } =
+        import(&actor, scratch.path(), recovery).await.unwrap()
+    else {
+        panic!("must import")
+    };
+    let moment = actor
+        .get_moment(WS.into(), moment_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let kept = moment.before_text.unwrap();
+    assert!(kept.contains("outage-stroke"));
+    assert!(dohc_engine_collab::import_portable_scene(&kept).is_ok());
+    assert_eq!(disk(scratch.path(), DRAWING), outside.as_bytes());
+    supervisor.close(&db).unwrap();
 }

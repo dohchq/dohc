@@ -2641,6 +2641,7 @@ describe("outage typing recovery import", () => {
     expectedStateVectorSha256: "a".repeat(64),
     expectedDiskSha256: "b".repeat(64),
     admittedBaseBase64: "AAA=",
+    stateBase64: "AAA=",
     text: "kept typing",
     updates: [
       {
