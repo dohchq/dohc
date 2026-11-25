@@ -169,6 +169,7 @@ jobs:
               - 'examples/tournament/**'
               - 'examples/hex-tactics/**'
               - 'examples/quant-workbench/**'
+              - 'examples/team-roadmap/**'
               # The desktop daemon prebuild reads Cargo configuration.
               - '.cargo/**'
               # build-artifacts.test.mjs reads the desktop ignore rules.

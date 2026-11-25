@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "entryPath": "index.tsx",
+  "dataset": {
+    "kind": "dataset",
+    "datasetPath": "team-roadmap/roadmap/dataset.json",
+    "operations": ["listItems", "rollup", "createItem", "importItems", "createMilestone", "planItem", "archiveItem", "restoreItem"]
+  }
+}

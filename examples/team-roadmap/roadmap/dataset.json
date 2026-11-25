@@ -1,0 +1,158 @@
+{
+  "formatVersion": 2,
+  "datasetId": "5d5a4212-b33d-4a1f-aa3c-f97347a49dfc",
+  "name": "Roadmap",
+  "tables": [
+    {
+      "name": "Milestones",
+      "sqlName": "milestones",
+      "primaryKey": "id",
+      "fields": [
+        { "name": "ID", "sqlColumn": "id", "type": "text" },
+        { "name": "Name", "sqlColumn": "name", "type": "text", "required": true },
+        { "name": "Due", "sqlColumn": "due_on", "type": "date", "required": true },
+        { "name": "Created", "sqlColumn": "created_at", "type": "number", "required": true }
+      ]
+    },
+    {
+      "name": "Items",
+      "sqlName": "items",
+      "primaryKey": "id",
+      "fields": [
+        { "name": "ID", "sqlColumn": "id", "type": "text" },
+        { "name": "Title", "sqlColumn": "title", "type": "text", "required": true },
+        { "name": "Detail", "sqlColumn": "detail", "type": "text" },
+        {
+          "name": "Area",
+          "sqlColumn": "area",
+          "type": "select",
+          "required": true,
+          "options": ["platform", "apps", "sync", "mobile"]
+        },
+        {
+          "name": "Status",
+          "sqlColumn": "status",
+          "type": "select",
+          "required": true,
+          "options": ["new", "triaged", "planned", "in_progress", "done"]
+        },
+        { "name": "Priority", "sqlColumn": "priority", "type": "number" },
+        {
+          "name": "Milestone",
+          "sqlColumn": "milestone_id",
+          "type": "relation",
+          "relation": { "table": "milestones", "field": "id" }
+        },
+        { "name": "Estimate (days)", "sqlColumn": "estimate_days", "type": "number" },
+        { "name": "Triage note", "sqlColumn": "triage_note", "type": "text" },
+        { "name": "Requested by", "sqlColumn": "requested_by", "type": "text", "required": true },
+        { "name": "Triaged by", "sqlColumn": "triaged_by", "type": "text" },
+        { "name": "Changed by", "sqlColumn": "updated_by", "type": "text", "required": true },
+        { "name": "Archived", "sqlColumn": "archived_at", "type": "number" },
+        { "name": "Created", "sqlColumn": "created_at", "type": "number", "required": true },
+        { "name": "Updated", "sqlColumn": "updated_at", "type": "number", "required": true },
+        { "name": "Version", "sqlColumn": "version", "type": "number", "required": true }
+      ]
+    }
+  ],
+  "operations": [
+    {
+      "name": "listItems",
+      "label": "List roadmap items",
+      "table": "items",
+      "kind": "read",
+      "access": "helper",
+      "fields": [
+        "id",
+        "title",
+        "detail",
+        "area",
+        "status",
+        "priority",
+        "milestone_id",
+        "estimate_days",
+        "triage_note",
+        "requested_by",
+        "triaged_by",
+        "updated_by",
+        "created_at",
+        "updated_at",
+        "version"
+      ]
+    },
+    {
+      "name": "rollup",
+      "label": "Roadmap progress by status, milestone, and area",
+      "table": "items",
+      "kind": "read",
+      "access": "link",
+      "fields": ["area", "status", "priority", "milestone_id", "estimate_days"]
+    },
+    {
+      "name": "createItem",
+      "label": "Add a roadmap item",
+      "table": "items",
+      "kind": "action",
+      "access": "owner",
+      "fields": ["title", "detail", "area"]
+    },
+    {
+      "name": "importItems",
+      "label": "Import milestones and roadmap items",
+      "table": "items",
+      "kind": "action",
+      "access": "owner",
+      "profile": "bulk",
+      "fields": ["title", "detail", "area", "status", "priority", "milestone_id", "estimate_days"]
+    },
+    {
+      "name": "createMilestone",
+      "label": "Add a milestone",
+      "table": "milestones",
+      "kind": "action",
+      "access": "owner",
+      "fields": ["name", "due_on"]
+    },
+    {
+      "name": "planItem",
+      "label": "Set an item's priority and milestone",
+      "table": "items",
+      "kind": "action",
+      "access": "owner",
+      "fields": ["status", "priority", "milestone_id", "version"]
+    },
+    {
+      "name": "archiveItem",
+      "label": "Archive an item",
+      "table": "items",
+      "kind": "action",
+      "access": "owner",
+      "fields": ["archived_at", "version"],
+      "reversedBy": "restoreItem"
+    },
+    {
+      "name": "restoreItem",
+      "label": "Restore an archived item",
+      "table": "items",
+      "kind": "action",
+      "access": "owner",
+      "fields": ["archived_at", "version"]
+    },
+    {
+      "name": "triageItem",
+      "label": "Triage a new item",
+      "table": "items",
+      "kind": "action",
+      "access": "helper",
+      "fields": ["status", "estimate_days", "triage_note", "triaged_by", "version"]
+    },
+    {
+      "name": "updateStatus",
+      "label": "Start, finish, or reopen planned work",
+      "table": "items",
+      "kind": "action",
+      "access": "helper",
+      "fields": ["status", "version"]
+    }
+  ]
+}
