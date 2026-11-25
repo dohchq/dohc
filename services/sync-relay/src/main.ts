@@ -1822,7 +1822,9 @@ server.listen(requestedPort, host, () => {
       withinMs: RELAY_ANSWER_WAIT_MS,
       retryMs: 500,
       signal: relayProbe.signal,
-    }).then(relayAnswered.resolve);
+    }).then(() => {
+      if (!relayProbe.signal.aborted) relayAnswered.resolve();
+    });
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : requestedPort;
   console.log(`[sync-relay] listening on ${host}:${actualPort}`);

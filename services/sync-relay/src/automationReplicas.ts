@@ -131,7 +131,7 @@ export async function startAutomationReplicas(options: {
   engineExecutable: string;
   /** The relay's public HTTPS origin, which the engine reaches it at. */
   relayOrigin: string;
-  /** Work on a workspace waits for this, so no copy calls the relay before its public origin serves it. */
+  /** No copy opens or syncs before this resolves, so none calls the relay before its public origin serves it. */
   relayAnswers?: PromiseLike<void>;
   key: Uint8Array;
   namespace: string;
@@ -191,8 +191,9 @@ export async function startAutomationReplicas(options: {
   const busyRefusals = new Map<string, number>();
   // Sync failures wait on elapsed time, independently of retention's nowMs clock.
   const syncRetries = new Map<string, { at: number; delay: number; incarnation: number }>();
+  let relayAnswered = options.relayAnswers === undefined;
   const canSync = (workspaceId: string) =>
-    (syncRetries.get(workspaceId)?.at ?? 0) <= performance.now();
+    relayAnswered && (syncRetries.get(workspaceId)?.at ?? 0) <= performance.now();
   // When each copy with unsent phone writes tries next, on the same clock,
   // the wait before it, and how many reads of its receipts failed in a row.
   const publicationRetries = new Map<string, { at: number; delay: number; failures: number }>();
@@ -728,7 +729,6 @@ export async function startAutomationReplicas(options: {
    */
   async function each(workspaceId: string, work: () => Promise<void>): Promise<boolean> {
     signal.throwIfAborted();
-    await options.relayAnswers;
     try {
       await work();
       if (syncRetries.has(workspaceId)) return canSync(workspaceId);
@@ -1169,6 +1169,10 @@ export async function startAutomationReplicas(options: {
   const configPath = await writeEngineConfig(options.root);
   const stopWatching = observeRelayWrites(storage, () => schedule());
   schedule(0);
+  options.relayAnswers?.then(() => {
+    relayAnswered = true;
+    schedule(0);
+  });
   const worker = Effect.runFork(
     passes.pipe(
       Effect.tapCause((cause) =>

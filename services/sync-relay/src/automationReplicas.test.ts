@@ -852,30 +852,22 @@ describe("the automation replicas", () => {
     expect(errors).toHaveLength(2);
   });
 
-  it("sends the engine nothing before the relay answers at its public origin", async () => {
+  it("finishes its passes without opening a copy until the relay answers at its public origin", async () => {
     const { storage } = await relay();
     const engine = fakeEngine();
-    let sentBeforeAnswer: string[] | undefined;
+    const answered = Promise.withResolvers<void>();
     const running = await start(storage, {
       wanted: () => [WORKSPACE],
-      relayAnswers: {
-        then(answered, refused) {
-          sentBeforeAnswer ??= engine.sent.map((request) => request.method);
-          return Promise.resolve().then(answered, refused);
-        },
-      },
+      relayAnswers: answered.promise,
     });
     await running.settled();
-    expect(sentBeforeAnswer).toEqual([]);
-    expect(running.replica(WORKSPACE)).toBeDefined();
-  });
-
-  it("is available with no workspace to copy while the relay's public origin doesn't answer", async () => {
-    const { storage } = await relay();
-    fakeEngine();
-    const running = await start(storage, { relayAnswers: new Promise(() => {}) });
-    await running.settled();
     expect(running.unavailable).toBe(false);
+    expect(running.replica(WORKSPACE)).toBeUndefined();
+    expect(engine.sent).toEqual([]);
+    answered.resolve();
+    await vi.waitFor(() => expect(running.replica(WORKSPACE)).toBeDefined(), {
+      timeout: WAIT_TIMEOUT_MS,
+    });
   });
 
   it("opens a replica for each wanted workspace, joins its identity, and pulls when its log moves", async () => {
