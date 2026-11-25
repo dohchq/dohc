@@ -300,7 +300,10 @@ function contractBreak(
       (typeof sub === "object" && "enum" in sub && sub.enum.every((value) => typeof value === sup))
       ? undefined
       : path;
-  if (typeof sub === "string") return path;
+  if (typeof sub === "string")
+    return sub === "boolean" && "enum" in sup && sup.enum.includes(true) && sup.enum.includes(false)
+      ? undefined
+      : path;
   if ("enum" in sup)
     return "enum" in sub && sub.enum.every((value) => sup.enum.includes(value)) ? undefined : path;
   if ("array" in sup)

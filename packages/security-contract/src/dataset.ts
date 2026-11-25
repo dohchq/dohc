@@ -101,9 +101,9 @@ export interface DatasetOperationContract {
   input?: DatasetContractType;
   output?: DatasetContractType;
 }
-export const DATASET_CONTRACT_MAX_DEPTH = 8;
-export const DATASET_CONTRACT_MAX_TYPES = 256;
-export const DATASET_CONTRACT_MAX_MEMBERS = 64;
+const DATASET_CONTRACT_MAX_DEPTH = 8;
+const DATASET_CONTRACT_MAX_TYPES = 256;
+const DATASET_CONTRACT_MAX_MEMBERS = 64;
 /** The largest `undo` value a reversible action may return. */
 export const DATASET_UNDO_BYTES = 16 * 1024;
 /** Source-visible draft metadata. Parsing or sharing it grants no authority. */

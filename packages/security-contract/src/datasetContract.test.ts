@@ -268,6 +268,7 @@ describe("contract drift", () => {
       object({ id: "string" }, ["id"]),
       quiet,
     ],
+    ["a boolean spelled as both values", "boolean", { enum: [false, true] }, quiet],
   ])("input: %s", (_name, before, after, expected) => {
     expect(drift({ input: before }, { input: after })).toEqual(expected);
   });
@@ -335,6 +336,7 @@ describe("contract drift", () => {
       object({ id: "string" }),
       quiet,
     ],
+    ["a boolean spelled as both values", { enum: [false, true] }, "boolean", quiet],
   ])("output: %s", (_name, before, after, expected) => {
     expect(drift({ output: before }, { output: after })).toEqual(expected);
   });
