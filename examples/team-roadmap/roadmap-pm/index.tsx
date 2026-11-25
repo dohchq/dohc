@@ -77,13 +77,62 @@ const SAMPLE = {
     { name: "Launch", dueOn: "2027-05-03" },
   ],
   items: [
-    { title: "Offline edits sync on reconnect", area: "sync", status: "done", estimateDays: 8, priority: 0, milestone: "Alpha" },
-    { title: "Share a Collection with a teammate", area: "apps", status: "done", estimateDays: 5, priority: 0, milestone: "Alpha" },
-    { title: "Faster workspace open", area: "platform", status: "in_progress", estimateDays: 6, priority: 1, milestone: "Alpha" },
-    { title: "Phone app shows live changes", area: "mobile", status: "in_progress", estimateDays: 10, priority: 0, milestone: "Beta" },
-    { title: "Undo for bulk imports", area: "apps", status: "planned", estimateDays: 4, priority: 1, milestone: "Beta" },
-    { title: "Conflict view for documents", area: "sync", status: "planned", estimateDays: 9, priority: 2, milestone: "Beta" },
-    { title: "Self-hosting guide", area: "platform", status: "planned", estimateDays: 3, priority: 2, milestone: "Launch" },
+    {
+      title: "Offline edits sync on reconnect",
+      area: "sync",
+      status: "done",
+      estimateDays: 8,
+      priority: 0,
+      milestone: "Alpha",
+    },
+    {
+      title: "Share a Collection with a teammate",
+      area: "apps",
+      status: "done",
+      estimateDays: 5,
+      priority: 0,
+      milestone: "Alpha",
+    },
+    {
+      title: "Faster workspace open",
+      area: "platform",
+      status: "in_progress",
+      estimateDays: 6,
+      priority: 1,
+      milestone: "Alpha",
+    },
+    {
+      title: "Phone app shows live changes",
+      area: "mobile",
+      status: "in_progress",
+      estimateDays: 10,
+      priority: 0,
+      milestone: "Beta",
+    },
+    {
+      title: "Undo for bulk imports",
+      area: "apps",
+      status: "planned",
+      estimateDays: 4,
+      priority: 1,
+      milestone: "Beta",
+    },
+    {
+      title: "Conflict view for documents",
+      area: "sync",
+      status: "planned",
+      estimateDays: 9,
+      priority: 2,
+      milestone: "Beta",
+    },
+    {
+      title: "Self-hosting guide",
+      area: "platform",
+      status: "planned",
+      estimateDays: 3,
+      priority: 2,
+      milestone: "Launch",
+    },
     { title: "Tablet layout", area: "mobile", status: "triaged", estimateDays: 12 },
     { title: "Keyboard shortcuts sheet", area: "apps", status: "triaged", estimateDays: 2 },
     { title: "Export a workspace to a folder", area: "platform", status: "new" },
@@ -339,7 +388,11 @@ function Roadmap() {
             />
             {cursors.length || page?.next ? (
               <Stack direction="horizontal" gap={8} justify="end">
-                <Button size="sm" disabled={!cursors.length} onClick={() => setCursors(cursors.slice(0, -1))}>
+                <Button
+                  size="sm"
+                  disabled={!cursors.length}
+                  onClick={() => setCursors(cursors.slice(0, -1))}
+                >
                   Previous
                 </Button>
                 <Button

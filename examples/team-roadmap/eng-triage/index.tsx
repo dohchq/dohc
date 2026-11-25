@@ -81,7 +81,12 @@ function Triage() {
   const [failure, setFailure] = useState<Failure | null>(null);
   const [busy, setBusy] = useState(false);
 
-  async function run(operation: string, input: unknown, done?: () => void, key = mutationKey(operation)) {
+  async function run(
+    operation: string,
+    input: unknown,
+    done?: () => void,
+    key = mutationKey(operation),
+  ) {
     if (busy) return;
     setBusy(true);
     try {
@@ -252,7 +257,11 @@ function Triage() {
         />
         {cursors.length || page?.next ? (
           <Stack direction="horizontal" gap={8} justify="end">
-            <Button size="sm" disabled={!cursors.length} onClick={() => setCursors(cursors.slice(0, -1))}>
+            <Button
+              size="sm"
+              disabled={!cursors.length}
+              onClick={() => setCursors(cursors.slice(0, -1))}
+            >
               Previous
             </Button>
             <Button

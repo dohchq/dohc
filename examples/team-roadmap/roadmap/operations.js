@@ -27,7 +27,9 @@ const ITEM_COLUMNS = [
   "updated_at",
   "version",
 ];
-const selectItems = (detail) => `SELECT i.id, i.title, ${detail} AS detail, i.area, i.status, i.priority,
+const selectItems = (
+  detail,
+) => `SELECT i.id, i.title, ${detail} AS detail, i.area, i.status, i.priority,
   i.milestone_id AS milestoneId, m.name AS milestoneName, i.estimate_days AS estimateDays,
   i.triage_note AS triageNote, i.requested_by AS requestedBy, i.triaged_by AS triagedBy,
   i.updated_by AS updatedBy, i.created_at AS createdAt, i.updated_at AS updatedAt, i.version,
@@ -196,8 +198,12 @@ globalThis.operations = {
       where.push("i.milestone_id = ?");
       values.push(typeof input.milestoneId === "string" ? input.milestoneId : "");
     }
-    const limit = input.limit === undefined ? MAX_PAGE : whole(ctx, input.limit, 1, MAX_PAGE, "Page size");
-    const total = ctx.db.query(`SELECT count(*) AS n FROM items i WHERE ${where.join(" AND ")}`, values)[0].n;
+    const limit =
+      input.limit === undefined ? MAX_PAGE : whole(ctx, input.limit, 1, MAX_PAGE, "Page size");
+    const total = ctx.db.query(
+      `SELECT count(*) AS n FROM items i WHERE ${where.join(" AND ")}`,
+      values,
+    )[0].n;
     const after = input.after;
     if (after !== undefined) {
       const valid =
@@ -206,7 +212,8 @@ globalThis.operations = {
         Number.isInteger(after[0]) &&
         Number.isInteger(after[1]) &&
         typeof after[2] === "string";
-      if (!valid) ctx.refuse("invalid_input", "This page link is not valid. Start from the first page.");
+      if (!valid)
+        ctx.refuse("invalid_input", "This page link is not valid. Start from the first page.");
       where.push("(coalesce(i.priority, 4), i.created_at, i.id) > (?, ?, ?)");
       values.push(after[0], after[1], after[2]);
     }
@@ -275,7 +282,10 @@ globalThis.operations = {
     const items = input.items;
     if (!Array.isArray(incoming)) ctx.refuse("invalid_input", "Send milestones as a list.");
     if (!Array.isArray(items) || items.length < 1 || items.length > MAX_IMPORT)
-      ctx.refuse("invalid_input", `Send 1 to ${MAX_IMPORT} items at a time. This sent ${items?.length ?? 0}.`);
+      ctx.refuse(
+        "invalid_input",
+        `Send 1 to ${MAX_IMPORT} items at a time. This sent ${items?.length ?? 0}.`,
+      );
     const milestones = new Map(
       ctx.db.query("SELECT id, name FROM milestones").map((row) => [row.name, row.id]),
     );
