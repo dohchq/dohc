@@ -8,7 +8,7 @@ dohc's closed app compiler provides a pinned set of browser modules so apps can 
 | --- | --- |
 | `react`, `react/jsx-runtime` | React 19 hooks and JSX runtime |
 | `react-dom`, `react-dom/client` | ReactDOM (`createRoot`, `createPortal`) |
-| `dohc/app` | MessageChannel backend client, hooks, and host helpers (`AppProvider`, `useApp`, `useDatasetQuery`, `useDatasetMutation`, `createAppClient`, `mutationKey`, `copyText`, `print`, `AppBackendError`) |
+| `dohc/app` | MessageChannel backend client, hooks, and host helpers (`AppProvider`, `useApp`, `useDatasetQuery`, `useDatasetPages`, `useDatasetMutation`, `createAppClient`, `mutationKey`, `copyText`, `print`, `AppBackendError`) |
 | `dohc/ui` | Light and dark themed layout, data, and form components (`AppShell`, `PageHeader`, `Grid`, `Stack`, `Card`, `StatCard`, `Tabs`, `DataTable`, `Badge`, `ProgressBar`, `Callout`, `EmptyState`, `Skeleton`, `Button`, `Field`, `Input`, `Select`, `Textarea`, `DateField`, `Checkbox`, `Modal`, plus currency/number/percent/date formatters). `Input` and `Textarea` take a `ref`. `DateField` takes and returns `YYYY-MM-DD`, with optional `min` and `max`: ArrowUp and ArrowDown step one day, and `onChange` gets `""` while the text is not a real date inside the bounds |
 | `dohc/charts` | Responsive SVG charts with light and dark tokens: interactive `LineChart`, `BarChart`, and `DonutChart` (single-tab-stop arrow-key navigation), plus non-interactive `Sparkline`. `LineChart`'s `markerIndex` draws a rule at one label, such as a replay's current step |
 | `dohc/icons` | A curated set of [Lucide](https://lucide.dev) icons as React components (for example `Plus`, `Trash2`, `X`, `ZoomIn`, `PanelRight`, `Play`, `Receipt`, `CalendarDays`). Only the icons an app imports end up in its bundle |
@@ -57,9 +57,9 @@ function Dashboard() {
       ) : null}
       <StatCard
         label="This month"
-        value={loading ? "…" : data ? formatCurrency(data.total) : "—"}
+        value={data ? formatCurrency(data.total) : loading ? "…" : "—"}
       />
-      {!error && data ? (
+      {data ? (
         <Card title="Weekly trend">
           <LineChart variant="area" data={data.weekly} formatValue={(v) => formatCurrency(v)} />
         </Card>
@@ -74,6 +74,22 @@ createRoot(document.getElementById("root")!).render(
   </AppProvider>,
 );
 ```
+
+When a reload fails, `data` and `revision` keep the last good answer and `error` says why, so a page that calls `reload()` on a timer keeps showing data through one failed request. `data` clears when the operation, input, or Collection changes.
+
+## Paged reads
+
+`useDatasetPages` reads every page of an operation that pages with `nextCursor`, such as a generated row-list read (`ExpensePage` is defined in [Typed rows and operations](#typed-rows-and-operations)). It sends `input` for the first page, then `{ ...input, after: nextCursor }` until `nextCursor` is `null`, and returns the pages in order. It has the same options, live updates, and `reload` as `useDatasetQuery`.
+
+```tsx
+const { data } = useDatasetPages<ExpensePage>("listExpenses");
+const rows = useMemo(() => data?.flatMap((page) => page.rows) ?? [], [data]);
+```
+
+- `data` is set once the last page arrives. `revision` is the first page's revision.
+- If the Collection changes while pages load, the read starts again from the first page, at most twice.
+- When a page hits a rate limit, the read waits `retryAfterMs`, or 2 s when the host gives none, and asks for that page again.
+- A page without a `nextCursor` field, or a `nextCursor` the read already followed, fails with `error.status === 400`. `groupBy` reads, which return `nextGroupCursor`, and offset-paged reads need `useDatasetQuery`.
 
 ## Minimal `app.publish.json`
 
@@ -213,4 +229,4 @@ Published and local apps run inside an opaque-origin `srcdoc` iframe (`window.or
 - **Storage APIs.** `sessionStorage`, `localStorage`, `indexedDB`, and `document.cookie` throw `SecurityError` in an opaque origin. Keep transient UI state in React state or memory, and save durable data in an approved Collection.
 - **Clipboard.** Calling `navigator.clipboard.writeText` inside the app frame fails and logs a Chromium Permissions Policy console error, which fails `verifyFrontend`. Use `copyText(text)` from `dohc/app` inside a click or key handler instead. The trusted host bootstrap writes up to 65,536 UTF-8 bytes after a recent user click or key press, at most once per 1 s.
 - **Printing.** Calling `window.print()` inside the app frame is blocked because the sandbox omits `allow-modals`. Use `print()` from `dohc/app` inside a click or key handler so the trusted host bootstrap prints the app frame with its `@media print` styles, at most once per 5.5 s. When a report scrolls inside a fixed-height container (`height: 100vh; overflow: auto`), expand that container in `@media print` (`height: auto; overflow: visible`) and pass the expanded height with `print({ height })` (for example `document.documentElement.scrollHeight + (container.scrollHeight - container.clientHeight)`, up to 50,000 CSS px) so rows below the viewport are not clipped. On mobile WebViews where the OS print sheet is unavailable, or when people need a standalone file, export HTML through `allow-downloads`.
-- **Stale queries and rate limits.** `useDatasetQuery` cancels queued superseded requests when its operation, dataset, or input changes. When a request hits a rate limit (`error.status === 429`), `error.message` names the limit, unit, usage window, and retry timing, and `error.retryAfterMs` gives the retry delay in milliseconds when known.
+- **Stale queries and rate limits.** `useDatasetQuery` and `useDatasetPages` cancel queued superseded requests when their operation, dataset, or input changes. When a request hits a rate limit (`error.status === 429`), `error.message` names the limit, unit, usage window, and retry timing, and `error.retryAfterMs` gives the retry delay in milliseconds when known.

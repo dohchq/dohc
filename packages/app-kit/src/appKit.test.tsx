@@ -9,6 +9,7 @@ import {
   isAppBackendError,
   mutationKey,
   useDatasetMutation,
+  useDatasetPages,
   useDatasetQuery,
   type AppClient,
 } from "./app";
@@ -1644,6 +1645,279 @@ describe("dohc/ui and dohc/charts", () => {
       expect(screen.getByTestId("c").textContent).toBe("90d");
     });
     expect(new AppBackendError(429).message).toContain("Rate limit reached");
+    client.close();
+  });
+
+  it("keeps the last good data when a reload fails and clears it when the input changes", async () => {
+    const fake = makeFakePort();
+    const client = createAppClient({ port: fake.port });
+    const answer = (index: number, result: unknown, revision: number) =>
+      fake.reply({
+        id: fake.sent[index]!.id,
+        ok: true,
+        value: { result, revision, replayed: false },
+      });
+    let reloadQuery = () => {};
+
+    function Scoreboard({ round }: { round: number }) {
+      const query = useDatasetQuery<{ score: number }>("scores", { round });
+      reloadQuery = query.reload;
+      return (
+        <div>
+          <span data-testid="data">
+            {query.data ? `${query.data.score}@${query.revision}` : "none"}
+          </span>
+          <span data-testid="state">{`${query.loading}:${query.error?.status ?? "ok"}`}</span>
+        </div>
+      );
+    }
+
+    const view = (round: number) => (
+      <AppProvider client={client}>
+        <Scoreboard round={round} />
+      </AppProvider>
+    );
+    const { rerender } = render(view(1));
+    answer(0, { score: 3 }, 1);
+    await waitFor(() => expect(screen.getByTestId("data").textContent).toBe("3@1"));
+
+    reloadQuery();
+    await waitFor(() => expect(fake.sent).toHaveLength(2));
+    expect(screen.getByTestId("data").textContent).toBe("3@1");
+    fake.reply({ id: fake.sent[1]!.id, ok: false, status: 503 });
+    await waitFor(() => expect(screen.getByTestId("state").textContent).toBe("false:503"));
+    expect(screen.getByTestId("data").textContent).toBe("3@1");
+
+    reloadQuery();
+    await waitFor(() => expect(fake.sent).toHaveLength(3));
+    answer(2, { score: 4 }, 2);
+    await waitFor(() => {
+      expect(screen.getByTestId("data").textContent).toBe("4@2");
+      expect(screen.getByTestId("state").textContent).toBe("false:ok");
+    });
+
+    rerender(view(2));
+    await waitFor(() => expect(fake.sent).toHaveLength(4));
+    expect(screen.getByTestId("data").textContent).toBe("none");
+    fake.reply({ id: fake.sent[3]!.id, ok: false, status: 503 });
+    await waitFor(() => expect(screen.getByTestId("state").textContent).toBe("false:503"));
+    expect(screen.getByTestId("data").textContent).toBe("none");
+    client.close();
+  });
+
+  it("catches up a change that arrived during a reload that failed transiently", async () => {
+    const fake = makeFakePort();
+    const client = createAppClient({ port: fake.port });
+    let reloadQuery = () => {};
+
+    function Board() {
+      const query = useDatasetQuery<{ rev: number }>("board");
+      reloadQuery = query.reload;
+      return <span data-testid="data">{query.data ? String(query.data.rev) : "none"}</span>;
+    }
+
+    render(
+      <AppProvider client={client}>
+        <Board />
+      </AppProvider>,
+    );
+    fake.reply({
+      id: fake.sent[0]!.id,
+      ok: true,
+      value: { result: { rev: 1 }, revision: 1, replayed: false },
+    });
+    await waitFor(() => expect(screen.getByTestId("data").textContent).toBe("1"));
+
+    reloadQuery();
+    await waitFor(() => expect(fake.sent).toHaveLength(2));
+    fake.reply({ kind: "dataset.changed", dataset: "main", revision: 2 });
+    fake.reply({ id: fake.sent[1]!.id, ok: false, status: 503 });
+    await waitFor(() => expect(fake.sent).toHaveLength(3));
+    fake.reply({
+      id: fake.sent[2]!.id,
+      ok: true,
+      value: { result: { rev: 2 }, revision: 2, replayed: false },
+    });
+    await waitFor(() => expect(screen.getByTestId("data").textContent).toBe("2"));
+    client.close();
+  });
+
+  it("reads every page of a cursor-paged operation and rereads them on a live change", async () => {
+    const fake = makeFakePort();
+    const client = createAppClient({ port: fake.port });
+    const loadingHistory: boolean[] = [];
+    type Page = { assets: string[]; nextCursor: { id: string } | null };
+    const page = (index: number, assets: string[], nextCursor: Page["nextCursor"], revision = 4) =>
+      fake.reply({
+        id: fake.sent[index]!.id,
+        ok: true,
+        value: { result: { assets, nextCursor }, revision, replayed: false },
+      });
+
+    function Gallery() {
+      const pages = useDatasetPages<Page>("listAssets", { code: "spring" });
+      loadingHistory.push(pages.loading);
+      return (
+        <span data-testid="assets">
+          {pages.data
+            ? `${pages.data.flatMap((item) => item.assets).join(",")}@${pages.revision}`
+            : "none"}
+        </span>
+      );
+    }
+
+    render(
+      <AppProvider client={client}>
+        <Gallery />
+      </AppProvider>,
+    );
+    expect(fake.sent[0]!.input).toEqual({ code: "spring" });
+    page(0, ["a", "b"], { id: "b" });
+    await waitFor(() => expect(fake.sent).toHaveLength(2));
+    expect(fake.sent[1]!.input).toEqual({ code: "spring", after: { id: "b" } });
+    expect(fake.sent[1]!.readOnly).toBe(true);
+    expect(screen.getByTestId("assets").textContent).toBe("none");
+    page(1, ["c"], { id: "c" });
+    await waitFor(() => expect(fake.sent).toHaveLength(3));
+    expect(fake.sent[2]!.input).toEqual({ code: "spring", after: { id: "c" } });
+    page(2, ["d"], null);
+    await waitFor(() => expect(screen.getByTestId("assets").textContent).toBe("a,b,c,d@4"));
+
+    loadingHistory.length = 0;
+    fake.reply({ kind: "dataset.changed", dataset: "main", revision: 5 });
+    await waitFor(() => expect(fake.sent).toHaveLength(4));
+    expect(fake.sent[3]!.input).toEqual({ code: "spring" });
+    page(3, ["a"], { id: "a" }, 5);
+    await waitFor(() => expect(fake.sent).toHaveLength(5));
+    page(4, ["e"], null, 5);
+    await waitFor(() => expect(screen.getByTestId("assets").textContent).toBe("a,e@5"));
+    expect(loadingHistory.every((value) => value === false)).toBe(true);
+    client.close();
+  });
+
+  it("drops an in-flight paged read when its input changes and keeps pages when a reread fails", async () => {
+    const fake = makeFakePort();
+    const client = createAppClient({ port: fake.port });
+    type Page = { rows: string[]; nextCursor: string | null };
+    const page = (index: number, rows: string[], nextCursor: string | null) =>
+      fake.reply({
+        id: fake.sent[index]!.id,
+        ok: true,
+        value: { result: { rows, nextCursor }, revision: 1, replayed: false },
+      });
+    let reloadPages = () => {};
+
+    function Ledger({ year }: { year: number }) {
+      const pages = useDatasetPages<Page>("ledger", { year });
+      reloadPages = pages.reload;
+      return (
+        <div>
+          <span data-testid="rows">
+            {pages.data ? pages.data.flatMap((item) => item.rows).join(",") : "none"}
+          </span>
+          <span data-testid="error">{pages.error?.status ?? "ok"}</span>
+        </div>
+      );
+    }
+
+    const view = (year: number) => (
+      <AppProvider client={client}>
+        <Ledger year={year} />
+      </AppProvider>
+    );
+    const { rerender } = render(view(2025));
+    page(0, ["x1"], "x1");
+    await waitFor(() => expect(fake.sent).toHaveLength(2));
+    rerender(view(2026));
+    await waitFor(() => expect(fake.sent).toHaveLength(3));
+    expect(fake.sent[2]!.input).toEqual({ year: 2026 });
+    page(1, ["x2"], null);
+    page(2, ["y1"], null);
+    await waitFor(() => expect(screen.getByTestId("rows").textContent).toBe("y1"));
+
+    reloadPages();
+    await waitFor(() => expect(fake.sent).toHaveLength(4));
+    page(3, ["y1"], "y1");
+    await waitFor(() => expect(fake.sent).toHaveLength(5));
+    fake.reply({ id: fake.sent[4]!.id, ok: false, status: 503 });
+    await waitFor(() => expect(screen.getByTestId("error").textContent).toBe("503"));
+    expect(screen.getByTestId("rows").textContent).toBe("y1");
+    client.close();
+  });
+
+  it("retries a rate-limited page at its cursor, restarts torn reads, and refuses bad cursors", async () => {
+    const fake = makeFakePort();
+    const client = createAppClient({ port: fake.port });
+    type Page = { rows: number[]; nextCursor: number | null };
+    const page = (index: number, value: Record<string, unknown>, revision = 1) =>
+      fake.reply({
+        id: fake.sent[index]!.id,
+        ok: true,
+        value: { result: value, revision, replayed: false },
+      });
+
+    function List({ operation }: { operation: string }) {
+      const pages = useDatasetPages<Page>(operation, {});
+      return (
+        <div>
+          <span data-testid="rows">
+            {pages.data
+              ? `${pages.data.flatMap((item) => item.rows).join(",")}@${pages.revision}`
+              : "none"}
+          </span>
+          <span data-testid="error">{pages.error?.message ?? "ok"}</span>
+        </div>
+      );
+    }
+
+    const view = (operation: string) => (
+      <AppProvider client={client}>
+        <List operation={operation} />
+      </AppProvider>
+    );
+    const { rerender } = render(view("throttled"));
+    page(0, { rows: [1], nextCursor: 1 });
+    await waitFor(() => expect(fake.sent).toHaveLength(2));
+    fake.reply({
+      id: fake.sent[1]!.id,
+      ok: false,
+      status: 429,
+      error: { code: "rate_limited", message: "Rate limit reached.", retryAfterMs: 0 },
+    });
+    await waitFor(() => expect(fake.sent).toHaveLength(3));
+    expect(fake.sent[2]!.input).toEqual({ after: 1 });
+    page(2, { rows: [2], nextCursor: null });
+    await waitFor(() => expect(screen.getByTestId("rows").textContent).toBe("1,2@1"));
+
+    rerender(view("torn"));
+    await waitFor(() => expect(fake.sent).toHaveLength(4));
+    page(3, { rows: [1], nextCursor: 1 }, 1);
+    await waitFor(() => expect(fake.sent).toHaveLength(5));
+    page(4, { rows: [2], nextCursor: null }, 2);
+    await waitFor(() => expect(fake.sent).toHaveLength(6));
+    expect(fake.sent[5]!.input).toEqual({});
+    page(5, { rows: [1], nextCursor: 1 }, 2);
+    await waitFor(() => expect(fake.sent).toHaveLength(7));
+    page(6, { rows: [2], nextCursor: null }, 2);
+    await waitFor(() => expect(screen.getByTestId("rows").textContent).toBe("1,2@2"));
+
+    rerender(view("stuck"));
+    await waitFor(() => expect(fake.sent).toHaveLength(8));
+    page(7, { rows: [1], nextCursor: 1 });
+    await waitFor(() => expect(fake.sent).toHaveLength(9));
+    page(8, { rows: [1], nextCursor: 1 });
+    await waitFor(() =>
+      expect(screen.getByTestId("error").textContent).toContain("repeating nextCursor"),
+    );
+
+    rerender(view("grouped"));
+    await waitFor(() => expect(fake.sent).toHaveLength(10));
+    page(9, { groups: ["a"], nextGroupCursor: null });
+    await waitFor(() =>
+      expect(screen.getByTestId("error").textContent).toContain("without nextCursor"),
+    );
+    expect(screen.getByTestId("rows").textContent).toBe("none");
+    expect(fake.sent).toHaveLength(10);
     client.close();
   });
 

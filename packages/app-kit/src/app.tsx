@@ -770,10 +770,96 @@ function resolveTargetClient(client: AppClient, dataset: string | undefined): Ap
   }
 }
 
+type DatasetRead = (
+  target: AppClient,
+  operation: string,
+  input: unknown,
+  signal: AbortSignal,
+) => Promise<{ readonly result: unknown; readonly revision: number }>;
+
+const readOnce: DatasetRead = (target, operation, input, signal) =>
+  target.invoke(operation, input, undefined, { readOnly: true, signal });
+
+const MAX_TORN_PAGE_RESTARTS = 2;
+
+function pauseFor(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const stop = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", stop);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", stop, { once: true });
+  });
+}
+
+async function readPage(target: AppClient, operation: string, input: unknown, signal: AbortSignal) {
+  for (;;) {
+    if (signal.aborted) throw abortError();
+    try {
+      return await readOnce(target, operation, input, signal);
+    } catch (error) {
+      if (!isAppBackendError(error) || error.status !== 429) throw error;
+      await pauseFor(error.retryAfterMs ?? 2_000, signal);
+    }
+  }
+}
+
+const badPage = (operation: string, nextCursor: "without" | "repeating") =>
+  new AppBackendError(400, undefined, `"${operation}" returned a page ${nextCursor} nextCursor.`);
+
+const readAllPages: DatasetRead = async (target, operation, input, signal) => {
+  if (!isRecord(input)) throw new AppBackendError(400);
+  restart: for (let restarts = 0; ; restarts++) {
+    const pages: unknown[] = [];
+    const seen = new Set<string>();
+    let revision: number | undefined;
+    let cursor: unknown = null;
+    do {
+      const reply = await readPage(
+        target,
+        operation,
+        pages.length === 0 ? input : { ...input, after: cursor },
+        signal,
+      );
+      revision ??= reply.revision;
+      if (reply.revision !== revision && restarts < MAX_TORN_PAGE_RESTARTS) continue restart;
+      const page = reply.result;
+      if (!isRecord(page) || page.nextCursor === undefined) throw badPage(operation, "without");
+      pages.push(page);
+      cursor = page.nextCursor;
+      const key = JSON.stringify(cursor);
+      if (seen.has(key)) throw badPage(operation, "repeating");
+      seen.add(key);
+    } while (cursor !== null);
+    return { result: pages, revision: revision! };
+  }
+};
+
 export function useDatasetQuery<T = unknown>(
   operation: string,
   input?: unknown,
   options?: DatasetQueryOptions,
+): DatasetQueryState<T> {
+  return useDatasetRead<T>(operation, input, options, readOnce);
+}
+
+export function useDatasetPages<Page = unknown>(
+  operation: string,
+  input?: Readonly<Record<string, unknown>>,
+  options?: DatasetQueryOptions,
+): DatasetQueryState<readonly Page[]> {
+  return useDatasetRead<readonly Page[]>(operation, input, options, readAllPages);
+}
+
+function useDatasetRead<T>(
+  operation: string,
+  input: unknown,
+  options: DatasetQueryOptions | undefined,
+  read: DatasetRead,
 ): DatasetQueryState<T> {
   const client = useApp();
   const datasetAlias = options?.dataset;
@@ -871,55 +957,52 @@ export function useDatasetQuery<T = unknown>(
             : { scope, data: undefined, revision: null, loading: true, error: null },
         );
       }
-      target
-        .invoke<T>(operation, parsedInput, undefined, { readOnly: true, signal: controller.signal })
-        .then(
-          (reply) => {
-            if (!alive || token !== generation.current || controller.signal.aborted) return;
-            inFlight = false;
-            retryDelay = 250;
-            currentRev = reply.revision;
-            setState({
-              scope,
-              data: reply.result,
-              revision: reply.revision,
-              loading: false,
-              error: null,
-            });
-            const wanted = latestWanted();
-            if (wanted <= reply.revision) wantedRev = null;
-            else if (liveRef.current) {
-              wantedRev = wanted;
-              runFetch(true);
-            }
-          },
-          (caught: unknown) => {
-            if (!alive || token !== generation.current || controller.signal.aborted) return;
-            inFlight = false;
-            const error = caught instanceof AppBackendError ? caught : new AppBackendError(503);
-            setState((current) =>
-              background && current.scope === scope
-                ? { ...current, loading: false, error }
-                : { scope, data: undefined, revision: null, loading: false, error },
-            );
-            if (
-              background &&
-              error.uncertain &&
-              liveRef.current &&
-              wantedRev !== null &&
-              (currentRev === null || wantedRev > currentRev)
-            ) {
-              const delay = Math.max(retryDelay, Math.min(10_000, error.retryAfterMs ?? 0));
-              retryDelay = Math.min(4_000, retryDelay * 2);
-              retryTimer = setTimeout(() => {
-                retryTimer = undefined;
-                if (alive && liveRef.current && !inFlight) runFetch(true);
-              }, delay);
-            } else if (!background || !error.uncertain) {
-              wantedRev = null;
-            }
-          },
-        );
+      read(target, operation, parsedInput, controller.signal).then(
+        (reply) => {
+          if (!alive || token !== generation.current || controller.signal.aborted) return;
+          inFlight = false;
+          retryDelay = 250;
+          currentRev = reply.revision;
+          setState({
+            scope,
+            data: reply.result as T,
+            revision: reply.revision,
+            loading: false,
+            error: null,
+          });
+          const wanted = latestWanted();
+          if (wanted <= reply.revision) wantedRev = null;
+          else if (liveRef.current) {
+            wantedRev = wanted;
+            runFetch(true);
+          }
+        },
+        (caught: unknown) => {
+          if (!alive || token !== generation.current || controller.signal.aborted) return;
+          inFlight = false;
+          const error = caught instanceof AppBackendError ? caught : new AppBackendError(503);
+          setState((current) =>
+            current.scope === scope
+              ? { ...current, loading: false, error }
+              : { scope, data: undefined, revision: null, loading: false, error },
+          );
+          if (
+            error.uncertain &&
+            liveRef.current &&
+            wantedRev !== null &&
+            (currentRev === null || wantedRev > currentRev)
+          ) {
+            const delay = Math.max(retryDelay, Math.min(10_000, error.retryAfterMs ?? 0));
+            retryDelay = Math.min(4_000, retryDelay * 2);
+            retryTimer = setTimeout(() => {
+              retryTimer = undefined;
+              if (alive && liveRef.current && !inFlight) runFetch(true);
+            }, delay);
+          } else if (!error.uncertain) {
+            wantedRev = null;
+          }
+        },
+      );
     };
     syncLiveRef.current = () => {
       if (!alive) return;
@@ -949,7 +1032,7 @@ export function useDatasetQuery<T = unknown>(
       clearRetry();
       unsubscribe?.();
     };
-  }, [enabled, operation, scope, serializedInput, target, version]);
+  }, [enabled, operation, read, scope, serializedInput, target, version]);
 
   const matched = state.scope === scope;
   const invalidRequestError = invalidRequest ? new AppBackendError(400) : null;
