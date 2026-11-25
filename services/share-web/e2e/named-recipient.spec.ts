@@ -262,6 +262,19 @@ test("named invitation signs in, edits the current Y.Doc, and preserves a stoppe
     await expect.poll(() => yDocToMarkdown(doc)).toContain("- [ ] tick me");
     await expect(box).not.toBeChecked();
     await expect(box).toHaveAccessibleName("tick me");
+    await editor.getByText("Edit together.").click();
+    await page.keyboard.press("End");
+    await page.keyboard.insertText(" Redo check.");
+    await expect.poll(() => yDocToMarkdown(doc)).toContain("Redo check.");
+    await page.keyboard.press("Control+z");
+    await expect(editor).not.toContainText("Redo check.");
+    await page.keyboard.press("Control+Shift+z");
+    await expect(editor).toContainText("Redo check.");
+    for (const key of ["Control+Shift+z", "Control+Shift+Z", "Control+y"]) {
+      await page.keyboard.press(key);
+      expect(await editor.textContent()).toContain("Redo check.");
+    }
+    await expect.poll(() => yDocToMarkdown(doc)).toContain("Redo check.");
     expect(
       await editor.evaluate((node) => node.getBoundingClientRect().height),
     ).toBeGreaterThanOrEqual(360);

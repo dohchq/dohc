@@ -146,6 +146,47 @@ it("leaves the keyboard's Undo and Redo to the editor's keys, which raise no bef
   }
 });
 
+it("takes Redo with nothing left to redo without undoing or reaching the browser", () => {
+  const doc = new Y.Doc();
+  const editor = new Editor({
+    element: document.createElement("div"),
+    extensions: [
+      StarterKit.configure({ undoRedo: false, trailingNode: false }),
+      Collaboration.configure({ document: doc, field: "body" }),
+      CollaborationHistoryInput,
+    ],
+  });
+  const key = (init: KeyboardEventInit) => {
+    const event = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      ctrlKey: true,
+      ...init,
+    });
+    editor.view.dom.dispatchEvent(event);
+    return event;
+  };
+  try {
+    editor.commands.insertContent("Hello");
+    key({ key: "z", keyCode: 90 });
+    expect(key({ key: "z", keyCode: 90, shiftKey: true }).defaultPrevented).toBe(true);
+    expect(editor.getText()).toBe("Hello");
+
+    // Caps Lock reports a lowercase key under Shift.
+    for (const redo of [
+      { key: "z", keyCode: 90, shiftKey: true },
+      { key: "Z", keyCode: 90, shiftKey: true },
+      { key: "y", keyCode: 89 },
+    ]) {
+      expect(key(redo).defaultPrevented).toBe(true);
+      expect(editor.getText()).toBe("Hello");
+    }
+  } finally {
+    editor.destroy();
+    doc.destroy();
+  }
+});
+
 async function desktop(baseline: Uint8Array) {
   const shipped: Uint8Array[] = [];
   let remote: ((update: Uint8Array, generation: number) => void) | null = null;

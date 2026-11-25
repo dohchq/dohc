@@ -61,7 +61,13 @@ function setup(
 
   const dispatchKey = (
     key: string,
-    mods: { ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean; altKey?: boolean } = {},
+    mods: {
+      ctrlKey?: boolean;
+      metaKey?: boolean;
+      shiftKey?: boolean;
+      altKey?: boolean;
+      keyCode?: number;
+    } = {},
   ) => {
     const event = new KeyboardEvent("keydown", {
       key,
@@ -457,6 +463,40 @@ describe("mountLiveBodyEditor", () => {
       expect(images[0]!.getAttribute("alt")).toBe("Safe");
       expect(ctx.textbox.textContent).toContain("[Image: Remote]");
       expect(ctx.textbox.textContent).toContain("[Image: Evil]");
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  it("takes Redo with nothing left to redo without bringing back a deleted paragraph", () => {
+    const ctx = setup("Start line.\n\nDoomed block.\n\nEnd line.");
+    try {
+      const [, doomed, end] = ctx.textbox.querySelectorAll("p");
+      ctx.editor.focus();
+      const range = document.createRange();
+      range.setStart(doomed!.firstChild!, 0);
+      range.setEnd(end!.firstChild!, 0);
+      window.getSelection()!.removeAllRanges();
+      window.getSelection()!.addRange(range);
+      document.dispatchEvent(new Event("selectionchange"));
+      ctx.dispatchKey("Backspace");
+      const edited = "Start line.\n\nEnd line.\n";
+      expect(yDocToMarkdown(ctx.doc)).toBe(edited);
+
+      ctx.dispatchKey("z", { ctrlKey: true, keyCode: 90 });
+      expect(yDocToMarkdown(ctx.doc)).toContain("Doomed block.");
+      ctx.dispatchKey("Z", { ctrlKey: true, shiftKey: true, keyCode: 90 });
+      expect(yDocToMarkdown(ctx.doc)).toBe(edited);
+
+      // Caps Lock reports a lowercase key under Shift.
+      for (const [key, mods] of [
+        ["z", { ctrlKey: true, shiftKey: true, keyCode: 90 }],
+        ["Z", { ctrlKey: true, shiftKey: true, keyCode: 90 }],
+        ["y", { ctrlKey: true, keyCode: 89 }],
+      ] as const) {
+        expect(ctx.dispatchKey(key, mods).defaultPrevented).toBe(true);
+        expect(yDocToMarkdown(ctx.doc)).toBe(edited);
+      }
     } finally {
       ctx.cleanup();
     }
