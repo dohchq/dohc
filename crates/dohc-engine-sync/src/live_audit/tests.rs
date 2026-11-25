@@ -1551,6 +1551,12 @@ fn import_projection(
                 "UPDATE replication_log SET payload_json=json_set(payload_json,'$.path','wrong.md') WHERE workspace_id='ws' AND origin_id='owner-origin' AND origin_seq=?1",
                 [first_delta_seq],
             )).unwrap();
+            crate::tests::seed_text_head(
+                &mut receiver,
+                "object-wrong-occupant",
+                "wrong.md",
+                "occupied",
+            );
         }
         assert_eq!(
             count(&receiver, "live_audit_projection_authors"),
