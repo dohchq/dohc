@@ -4339,6 +4339,9 @@ pub(crate) fn retired_lineage_in_tx(
     }
     let (base, updates) = logged_lineage(tx, key, &claim)?;
     let (base_origin, content_kind, base) = base.ok_or_else(refused)?;
+    dohc_engine_collab::IncomingBase::new(&base)
+        .doc()
+        .map_err(|_| refused())?;
     let content_kind = ContentKind::parse(&content_kind).map_err(|_| refused())?;
     // The log may hold an update before one it builds on, so only the end
     // state must be complete.
@@ -8321,17 +8324,6 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                         record_facts: Vec::new(),
                     }))
                 } else if queues {
-                    if payload.is_base_state
-                        && dohc_engine_collab::read_marker_in(tx, &key)
-                            .map_err(map_collab_hard_error)?
-                            .and_then(|marker| marker.lineage_claim_id)
-                            .as_deref()
-                            != Some(payload.lineage_claim_id.as_str())
-                    {
-                        dohc_engine_collab::IncomingBase::new(&bytes)
-                            .doc()
-                            .map_err(|error| map_base_error(error, BASE_BYTES_INVALID))?;
-                    }
                     defer_ydoc_update_in_tx(
                         tx,
                         &key,

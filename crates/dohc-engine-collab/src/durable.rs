@@ -1768,8 +1768,6 @@ fn replace_base_snapshot(
         rusqlite::params![key.workspace_id, key.version_id, key.object_id],
     )
     .map_err(map_sql)?;
-    // `incoming_claim_id` IS `hex_sha256(base.bytes)` — the caller computed it
-    // from these exact bytes before the claim comparison above.
     let base_sha = put_binary_blob_with_sha(tx, base.bytes, incoming_claim_id)?;
     let sv_sha = put_binary_blob(tx, &state_vector)?;
     tx.execute(
@@ -1937,7 +1935,7 @@ pub fn replace_reviewed_lineage_with_successor_in_tx(
                 observed: marker.lineage_claim_id,
             });
         }
-        let doc = load_doc_in(tx, key)?;
+        let doc = stored_read(load_doc_in(tx, key))?;
         let vector = doc.encode_state_vector();
         if crate::hex_sha256(&vector) != local_vector {
             return Err(CollabError::LineageStateVectorMismatch {
@@ -1947,7 +1945,8 @@ pub fn replace_reviewed_lineage_with_successor_in_tx(
         }
         (marker, doc, vector)
     } else {
-        load_exact_active_lineage(tx, key, local_claim, local_vector)?
+        let lineage = load_exact_active_lineage(tx, key, local_claim, local_vector);
+        stored_read(lineage)?
     };
     let mut retained = vec![predecessor.encode_full_state()];
     if predecessor.has_pending_dependencies() {
@@ -1964,7 +1963,8 @@ pub fn replace_reviewed_lineage_with_successor_in_tx(
                 .map_err(map_sql)?,
         );
     }
-    let predecessor_full_state_sha = put_binary_blob(tx, &crate::merge_updates(&retained)?)?;
+    let predecessor_full_state = stored_read(crate::merge_updates(&retained))?;
+    let predecessor_full_state_sha = put_binary_blob(tx, &predecessor_full_state)?;
     let predecessor_state_vector_sha = put_binary_blob(tx, &predecessor_state_vector)?;
     tx.execute(
         "INSERT INTO ydoc_inactive_lineages (workspace_id, version_id, object_id, \
@@ -2055,6 +2055,13 @@ pub fn replace_reviewed_lineage_with_successor_in_tx(
         predecessor_claim_id: expected_predecessor_claim_id.to_owned(),
         successor_claim_id: successor.lineage_claim_id.clone(),
         record_facts,
+    })
+}
+
+fn stored_read<T>(read: Result<T, CollabError>) -> Result<T, CollabError> {
+    read.map_err(|error| match error {
+        CollabError::ReplayParityViolation { reason } => CollabError::Corrupt { reason },
+        other => other,
     })
 }
 
@@ -3837,7 +3844,8 @@ mod successor_validation_tests {
 
     #[test]
     fn a_successor_base_whose_delete_splits_an_emoji_fails_the_replay_check() {
-        let whole = successor_merged_with(super::base_replay_tests::whole_emoji_deleted());
+        let whole = crate::replay_parity::base_deleting_a_whole_emoji_for_test();
+        let whole = successor_merged_with(whole);
         validate_successor_base(&whole, None).expect("the successor without a split passes");
         let split = crate::replay_parity::base_splitting_an_emoji_for_test();
         let split = successor_merged_with(split);
@@ -4295,6 +4303,7 @@ mod passive_cache_tests;
 #[cfg(test)]
 mod base_replay_tests {
     use super::*;
+    use crate::replay_parity::base_deleting_a_whole_emoji_for_test as whole_emoji_deleted;
     use dohc_engine_storage::NoFaults;
     use dohc_test_scratch::ScratchDir;
 
@@ -4319,14 +4328,6 @@ mod base_replay_tests {
         base: &[u8],
     ) -> Result<TxnOutcome<ClaimOutcome>, CollabError> {
         claim_base(store, key, ContentKind::Plaintext, base, &NoFaults, 1)
-    }
-
-    pub(super) fn whole_emoji_deleted() -> Vec<u8> {
-        let writer = Ydoc::with_client_id(5);
-        writer.plaintext_insert(0, "\u{1f600}X");
-        let deletes_both_units = vec![0, 1, 5, 1, 0, 2];
-        let merged = crate::merge_updates(&[writer.encode_full_state(), deletes_both_units]);
-        merged.expect("a state and a delete merge")
     }
 
     #[test]

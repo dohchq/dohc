@@ -3218,3 +3218,79 @@ fn original_record_replay_after_compaction_and_restart_binds_complete_attributio
         );
     }
 }
+
+#[test]
+fn a_successor_install_reports_an_unreadable_stored_update_as_corruption() {
+    let scratch = unique_dir("successor-unreadable-update");
+    let mut store = open_at(&scratch, 1_000);
+    let key = test_key();
+    seed_parents(&mut store, &key, 1_000);
+    let (base, _) = plaintext_base_and_delta();
+    let claimed = claim_base(
+        &mut store,
+        &key,
+        ContentKind::Plaintext,
+        &base,
+        &NoFaults,
+        1_000,
+    );
+    let ClaimOutcome::Claimed { base_snapshot_sha } = committed(claimed.expect("claim")) else {
+        panic!("the first base must be claimed");
+    };
+    let unreadable = [2, 0, 5, 0, 0, 5, 0, 0];
+    let sha = store.put_binary_blob(&unreadable).expect("store the bytes");
+    committed(
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO ydoc_updates (workspace_id, version_id, object_id, seq, \
+                     update_blob_sha256, recorded_at_ms) VALUES (?1, ?2, ?3, 1, ?4, 0)",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id, sha],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                tx.execute(
+                    "UPDATE ydoc_docs SET head_update_seq=1, path='notes/a.txt' \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .expect("an unreadable stored update"),
+    );
+    let predecessor = Ydoc::wire();
+    predecessor.apply(&base).expect("the base applies");
+    let state_vector = dohc_engine_collab::hex_sha256(&predecessor.encode_state_vector());
+    let text = "the reviewed result\n";
+    let result = dohc_engine_collab::hex_sha256(text.as_bytes());
+    let identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+        key: &key,
+        predecessor_claim_id: &base_snapshot_sha,
+        predecessor_state_vector_sha256: &state_vector,
+        artifact_op_kind: "moment.append",
+        artifact_id: "moment-successor",
+        artifact_preimage_sha256: &result,
+        content_kind: ContentKind::Plaintext,
+        result_sha256: &result,
+    });
+    let successor = fresh_successor_base(&identity, text).expect("construct successor");
+    let refused = replace_lineage_with_successor(
+        &mut store,
+        SuccessorReplacement {
+            key: &key,
+            expected_predecessor_claim_id: &base_snapshot_sha,
+            expected_predecessor_state_vector_sha256: &state_vector,
+            path: "notes/a.txt",
+            successor: &successor,
+            scene_result: None,
+            author: SuccessorAuthor::default(),
+            now_ms: 1_200,
+        },
+        &NoFaults,
+    )
+    .map(drop);
+    assert!(
+        matches!(refused, Err(CollabError::Corrupt { .. })),
+        "{refused:?}"
+    );
+}

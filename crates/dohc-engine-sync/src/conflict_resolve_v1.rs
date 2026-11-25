@@ -5011,10 +5011,18 @@ mod tests {
     }
 
     fn split_successor_fixture() -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
-        receiver_fixture_shaped(false, ContentKind::Plaintext, |mut successor| {
-            let split = dohc_engine_collab::replay_parity::base_splitting_an_emoji_for_test();
+        let split = dohc_engine_collab::replay_parity::base_splitting_an_emoji_for_test();
+        successor_fixture_merged_with(split)
+    }
+
+    /// A rich-text successor of "resolved text" merged with `update`, which
+    /// touches only the plain-text root, so its result digest stays valid.
+    fn successor_fixture_merged_with(
+        update: Vec<u8>,
+    ) -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
+        receiver_fixture_shaped(false, ContentKind::Richdoc, |mut successor| {
             let merged =
-                dohc_engine_collab::merge_updates(&[successor.update, split]).expect("merge");
+                dohc_engine_collab::merge_updates(&[successor.update, update]).expect("merge");
             let doc = dohc_engine_collab::Ydoc::wire();
             doc.apply(&merged).expect("the successor applies");
             successor.state_vector = doc.encode_state_vector();
@@ -7408,6 +7416,26 @@ mod tests {
         assert_eq!(deferred_rows(&store), 2);
     }
 
+    /// A base that lost to the note's own base is logged but was never
+    /// checked. Keeping the other copy refuses it rather than installing it.
+    #[test]
+    fn keeping_the_other_copy_never_revives_a_lost_base_that_splits_an_emoji() {
+        let (_scratch, mut store) = store_with_doc();
+        let (base, _, _, _) = peer_editor_history();
+        let claim = dohc_engine_storage::hex_sha256(&base);
+        apply_peer_ydoc(&mut store, ("peer", 0, 1), &claim, &base, true);
+        let split = dohc_engine_collab::replay_parity::base_splitting_an_emoji_for_test();
+        let split_claim = dohc_engine_storage::hex_sha256(&split);
+        apply_peer_ydoc(&mut store, ("second", 0, 5), &split_claim, &split, true);
+        delete_doc(&mut store);
+        open_deletion_conflict(&mut store, None, Some(peer_snapshot("base text")));
+        let refusal = keep_other_copy(&mut store);
+        assert_eq!(refusal, Err("synced-deletion-revival-refused"));
+        let key = DocKey::new("ws", "main", "object-a").unwrap();
+        assert_eq!(active_claim(&store, &key), None);
+        assert_eq!(text_keep_open_rows(&store), 1);
+    }
+
     fn projected_ydoc_text(store: &mut EngineStore, key: &DocKey) -> String {
         let marker = dohc_engine_collab::read_marker(store, key)
             .expect("read receiver marker")
@@ -7520,6 +7548,44 @@ mod tests {
             })
             .expect("divergence state");
         assert_eq!((open, inactive), (0, 0));
+    }
+
+    #[test]
+    fn a_successor_that_deletes_a_whole_emoji_installs() {
+        let whole = dohc_engine_collab::replay_parity::base_deleting_a_whole_emoji_for_test();
+        let (_scratch, mut store, key, built) = successor_fixture_merged_with(whole);
+        let transition = built.validated.payload.lineage_transition.as_ref();
+        let successor = transition.unwrap().successor.clone().unwrap();
+        import_resolution(&mut store, &built);
+        let claim = successor.lineage_claim_id;
+        assert_eq!(active_claim(&store, &key), Some(claim));
+    }
+
+    #[test]
+    fn a_stored_update_the_note_cannot_read_stops_the_resolution() {
+        let (_scratch, mut store, key, built) = receiver_fixture();
+        let unreadable = [2, 0, 5, 0, 0, 5, 0, 0];
+        let sha = store.put_binary_blob(&unreadable).unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO ydoc_updates (workspace_id,version_id,object_id,seq,\
+                     update_blob_sha256,recorded_at_ms) VALUES ('ws','main','object-a',1,?1,0)",
+                    [&sha],
+                )
+                .map_err(SyncError::persist)?;
+                let sql = "UPDATE ydoc_docs SET head_update_seq=1 WHERE object_id='object-a'";
+                tx.execute(sql, []).map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        let before = active_claim(&store, &key);
+        let parent = imported_envelope(0, "conflict.resolve", built.value);
+        let leases = crate::NoLiveLeases;
+        let outcome = crate::apply_conflict_envelope(&mut store, &parent, &NoFaults, &leases);
+        let stopped = matches!(outcome, Err(SyncError::Storage(_)));
+        assert!(stopped, "{outcome:?}");
+        assert_eq!(active_claim(&store, &key), before);
     }
 
     #[test]

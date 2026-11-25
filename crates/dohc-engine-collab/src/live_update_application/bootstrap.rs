@@ -156,12 +156,11 @@ where
             params![binding.workspace_id, binding.main_version_id, binding.object_id, binding.current_path], |row| row.get(0)
         ).map_err(read_sql).map_err(E::from)?;
         let base = durable::IncomingBase::new(bytes);
-        let applied = base.doc();
-        if occupied && !applied.as_ref().is_ok_and(|doc| doc.has_reader_source()) {
+        let doc = base.doc().map_err(ApplicationError::from).map_err(E::from)?;
+        if occupied && !doc.has_reader_source() {
             return Err(E::from(ApplicationError::Conflict));
         }
-        let doc = applied.map_err(ApplicationError::from).map_err(E::from)?;
-        if occupied && doc.has_reader_source() {
+        if occupied {
             let other_occupant: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND (object_id=?3 OR path=?4) AND NOT (object_id=?3 AND path=?4))
                  OR EXISTS(SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND (object_id=?3 OR path=?4) AND NOT (object_id=?3 AND path=?4))
@@ -348,14 +347,18 @@ mod tests {
     }
 
     fn receive_reader_file(store: &mut EngineStore, vector: &Vector) {
+        receive_text(store, "object", &vector.markdown);
+    }
+
+    fn receive_text(store: &mut EngineStore, object_id: &str, text: &str) {
         dohc_engine_domain::VersionedTextStore::new(store)
             .write_text(
                 &WriteText {
                     workspace_id: "workspace".into(),
                     version_id: "main".into(),
-                    object_id: "object".into(),
+                    object_id: object_id.into(),
                     path: "notes/example.md".into(),
-                    text: vector.markdown.clone(),
+                    text: text.into(),
                     moment_id: "received-file".into(),
                     metadata_origin: "sync".into(),
                     metadata_summary: None,
@@ -1080,8 +1083,7 @@ mod tests {
         assert!(run(&mut store, &mut cache, &handle, &nonpublic, &NoFaults).is_err());
         assert_eq!(counts(&store), (0, 0, 0, 0));
     }
-    #[test]
-    fn a_baseline_whose_delete_splits_an_emoji_bootstraps_nothing() {
+    fn split_vector() -> Vector {
         let key = DocKey::new("workspace", "main", "object").unwrap();
         let writer = Ydoc::with_client_id(5);
         writer.richdoc_append_paragraph("\u{1f600}X");
@@ -1090,24 +1092,52 @@ mod tests {
         writer.apply(&version.unwrap()).unwrap();
         let deletes_first_unit = vec![0, 1, 5, 1, letters_end - 3, 1];
         let merged = crate::merge_updates(&[writer.encode_full_state(), deletes_first_unit]);
-        let split = Vector {
+        Vector {
             name: "split-emoji".into(),
             bytes: merged.unwrap(),
             markdown: String::new(),
             registration_accepted: false,
             kept_frontmatter: None,
             projection_refused: false,
-        };
+        }
+    }
+
+    fn fails_the_replay_check(result: &Result<BootstrapResult, Error>) -> bool {
+        matches!(
+            result,
+            Err(Error::Application(ApplicationError::Collab(
+                CollabError::ReplayParityViolation { .. }
+            )))
+        )
+    }
+
+    #[test]
+    fn a_baseline_whose_delete_splits_an_emoji_bootstraps_nothing() {
+        let split = split_vector();
         let (_dir, mut store, mut cache, _owner, handle) = fixture(&split);
         let refused = run(&mut store, &mut cache, &handle, &split, &NoFaults);
-        let replay_check = match &refused {
-            Err(Error::Application(ApplicationError::Collab(error))) => {
-                matches!(error, CollabError::ReplayParityViolation { .. })
-            }
-            _ => false,
-        };
-        assert!(replay_check, "{refused:?}");
+        assert!(fails_the_replay_check(&refused), "{refused:?}");
         assert_eq!(counts(&store), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn a_split_baseline_at_its_own_notes_path_reports_the_split() {
+        let split = split_vector();
+        let (_dir, mut store, mut cache, _owner, handle) = fixture(&split);
+        receive_text(&mut store, "object", "received\n");
+        let refused = run(&mut store, &mut cache, &handle, &split, &NoFaults);
+        assert!(fails_the_replay_check(&refused), "{refused:?}");
+        assert_eq!(store.table_row_count("ydoc_docs").unwrap(), 0);
+    }
+
+    #[test]
+    fn a_split_baseline_at_a_path_another_note_holds_reports_the_split() {
+        let split = split_vector();
+        let (_dir, mut store, mut cache, _owner, handle) = fixture(&split);
+        receive_text(&mut store, "foreign", "received\n");
+        let refused = run(&mut store, &mut cache, &handle, &split, &NoFaults);
+        assert!(fails_the_replay_check(&refused), "{refused:?}");
+        assert_eq!(store.table_row_count("ydoc_docs").unwrap(), 0);
     }
 
     #[test]

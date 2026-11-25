@@ -1058,6 +1058,17 @@ pub fn base_splitting_an_emoji_for_test() -> Vec<u8> {
     merged.expect("a state and a delete merge")
 }
 
+/// The same state with a delete of the whole emoji.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn base_deleting_a_whole_emoji_for_test() -> Vec<u8> {
+    let writer = Ydoc::with_client_id(5);
+    writer.plaintext_insert(0, "\u{1f600}X");
+    let deletes_both_units = vec![0, 1, 5, 1, 0, 2];
+    let merged = crate::merge_updates(&[writer.encode_full_state(), deletes_both_units]);
+    merged.expect("a state and a delete merge")
+}
+
 /// Validate and apply each update in order, reusing the batch's replay gate.
 /// Rejected updates leave the document unchanged and do not stop later updates.
 pub fn apply_replay_validated_batch(
