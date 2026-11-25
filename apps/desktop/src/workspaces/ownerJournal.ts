@@ -38,6 +38,9 @@ export class OwnerJournalPending extends Error {
  * Applies a retired note's saves that this computer has not applied, so a
  * release at the relay's last save writes all of them into the file. Returns
  * that last save's cursor, or null when the relay has not retired the note.
+ * With `through`, the relay's last save already known from its Stop, a
+ * computer that has applied it reads nothing, so it need not wait for the
+ * relay to finish retiring the note.
  */
 export async function catchUpFromJournal(options: {
   client: Pick<EngineClient, "ownerYDocReadState" | "ownerYDocApplyAcceptedFrame">;
@@ -45,11 +48,14 @@ export async function catchUpFromJournal(options: {
   target: { binding: LiveObjectBinding; relayDatabaseNamespace: string };
   read: OwnerJournalRead;
   signal: AbortSignal;
+  through?: number;
 }): Promise<number | null> {
   const { client, target, signal } = options;
   const request = () => ({ id: 0, workspace: options.workspaceHandle, deadlineMs: 30_000 });
   let position: { revision: number; acceptedCursor: number; nativeHeadSequence: number } =
     await client.ownerYDocReadState(request(), target, signal);
+  if (options.through !== undefined && position.acceptedCursor >= options.through)
+    return position.acceptedCursor;
   let after: number | null = position.acceptedCursor,
     last: number | undefined;
   while (after !== null) {

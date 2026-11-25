@@ -45,18 +45,21 @@ import { CHANNELS } from "./channels";
 import { registerOperations } from "./operationTable";
 import { isSharedLiveFileRefusal, readError, sharedLiveRestoreDetail } from "./errorWords";
 import { createOwnerRelayShareHandler } from "./ownerRelayShareHandler";
-import { isLiveStopWaiting } from "./liveEditingStop";
+import { isLiveStopWaiting, liveStopWaitingError } from "./liveEditingStop";
+import { isOwnerReleaseWaiting } from "../workspaces/ownerLiveStop";
 import type { OwnerLiveDocumentActionDependencies } from "./relaySharesIpc";
 
 /**
  * Stop and restore removes the page next, so a release that left edits
  * outside the file counts as kept: deferred, with its Markdown write held,
- * or failed after the server stopped live editing.
+ * or failed after the server stopped live editing. A release that has not
+ * run yet keeps the page until live editing stops.
  */
 export function watchReleaseOutsideFile<Workspace>(
   ownerLiveStop: OwnerLiveDocumentActionDependencies<Workspace>["ownerLiveStop"],
 ) {
-  let outsideFile = false;
+  let outsideFile = false,
+    waiting: unknown;
   const watched: typeof ownerLiveStop = async (...args) => {
     if (args[1] !== "release") return ownerLiveStop(...args);
     try {
@@ -64,11 +67,19 @@ export function watchReleaseOutsideFile<Workspace>(
       if (stop?.deferred || stop?.settlementReason) outsideFile = true;
       return stop;
     } catch (error) {
-      outsideFile = true;
+      if (isOwnerReleaseWaiting(error)) waiting = error;
+      else outsideFile = true;
       throw error;
     }
   };
-  return { ownerLiveStop: watched, outsideFile: () => outsideFile };
+  return {
+    ownerLiveStop: watched,
+    answer<Result extends { keptEdits: string }>(result: Result) {
+      if (outsideFile) return { keptEdits: "kept" as const };
+      if (waiting !== undefined && result.keptEdits !== "kept") throw liveStopWaitingError(waiting);
+      return result;
+    },
+  };
 }
 
 // A refused file's reason, as the person reads it. A file History no longer

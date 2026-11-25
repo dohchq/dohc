@@ -26,6 +26,18 @@ export async function withOwnerLiveStopTransition<T>(
   }
 }
 
+/**
+ * A release that has not run yet: a held save applies, discovery installs a
+ * restore successor, or the server finishes retiring the note first.
+ */
+export function isOwnerReleaseWaiting(error: unknown): boolean {
+  return (
+    error instanceof OwnerJournalPending ||
+    (error instanceof EngineRequestError &&
+      ["owner-stop-conflict", "owner-stop-restore-pending"].includes(error.message))
+  );
+}
+
 export type OwnerLiveStop = Awaited<ReturnType<EngineClient["ownerYDocStopRequest"]>>;
 export async function reconcileOwnerLiveStops(options: {
   client: EngineClient;
@@ -71,14 +83,8 @@ export async function reconcileOwnerLiveStops(options: {
           if (stop.binding) await options.release(stop.binding, acceptedCursor, options.signal);
           else await options.client.ownerYDocStopRetired(request(), stop.document, options.signal);
         } catch (error) {
-          // Still waiting: a held save applies, discovery installs a restore
-          // successor, or the server finishes retiring the note, before the next pass retries. The Stop has not finished.
-          if (
-            error instanceof OwnerJournalPending ||
-            (error instanceof EngineRequestError &&
-              ["owner-stop-conflict", "owner-stop-restore-pending"].includes(error.message))
-          )
-            return;
+          // The next pass retries. The Stop has not finished.
+          if (isOwnerReleaseWaiting(error)) return;
           // A release that committed ended the Stop even when it then could not write
           // the file, as for one deleted outside dohc. One that did not stays owed.
           const owed = (await options.client.ownerYDocStopList(request(), options.signal)).some(
