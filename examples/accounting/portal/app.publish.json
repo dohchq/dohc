@@ -4,6 +4,7 @@
   "inputs": [
     "../portal.tsx",
     "../shared.tsx",
+    "../amounts.ts",
     "../books.css"
   ],
   "dataset": {

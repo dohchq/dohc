@@ -17,7 +17,7 @@ function random(seed: number) {
   };
 }
 const day = (index: number, count: number) => {
-  const date = new Date(Date.UTC(2026, 0, 1) + Math.floor((index * 364) / count) * 86_400_000);
+  const date = new Date(Date.UTC(2025, 0, 1) + Math.floor((index * 364) / count) * 86_400_000);
   return date.toISOString().slice(0, 10);
 };
 function journal(next: () => number) {
@@ -122,7 +122,7 @@ describe("accounting example at 10,000 journal lines", () => {
     async () => {
       const f = await accountingFixture();
       try {
-        await f.result("addFiscalYear", { year: 2026 });
+        await f.result("addFiscalYear", { year: 2025 });
         const next = random(0x5eed);
         const sizesBefore = bytes(f.directory);
 
@@ -191,12 +191,16 @@ describe("accounting example at 10,000 journal lines", () => {
         const postRowTimes: number[] = [];
         let postedRows = 0;
         for (;;) {
-          const page = await f.result("listBankRows", { status: "new", limit: 100 });
-          if (!page.rows.length) break;
+          const review = (await f.result("listBankRows", { status: "new", limit: 100 })).rows;
+          const page = review.length
+            ? review
+            : (await f.result("listBankRows", { status: "matched", limit: 100 })).rows;
+          if (!page.length) break;
           const started = performance.now();
           const posted = await f.result("postBankRows", {
-            rows: page.rows.map((row: any) => ({
+            rows: page.map((row: any) => ({
               id: row.id,
+              notMatched: row.candidates.map((candidate: any) => candidate.id),
               accountId: row.amountCents > 0 ? "4000" : "6900",
             })),
           });
@@ -245,25 +249,25 @@ describe("accounting example at 10,000 journal lines", () => {
         };
         const tb = await timed(
           "trialBalance",
-          { asOf: "2026-12-31", currency: "USD" },
+          { asOf: "2025-12-31", currency: "USD" },
           "accountant",
         );
         const pnl = await timed(
           "incomeStatement",
-          { from: "2026-01-01", to: "2026-12-31", currency: "USD" },
+          { from: "2025-01-01", to: "2025-12-31", currency: "USD" },
           "accountant",
         );
         const bs = await timed(
           "balanceSheet",
-          { asOf: "2026-12-31", currency: "USD" },
+          { asOf: "2025-12-31", currency: "USD" },
           "accountant",
         );
         const ledger = await timed(
           "accountLedger",
-          { accountId: "1000", currency: "USD", from: "2026-01-01", to: "2026-12-31", limit: 500 },
+          { accountId: "1000", currency: "USD", from: "2025-01-01", to: "2025-12-31", limit: 500 },
           "accountant",
         );
-        const overview = await timed("overview", { today: "2026-12-31", currency: "USD" });
+        const overview = await timed("overview", { today: "2025-12-31", currency: "USD" });
         const baseline = await timed("booksInfo", {}, "accountant");
         expect(tb.last.balanced).toBe(true);
         expect(bs.last.balanced).toBe(true);
@@ -297,12 +301,12 @@ describe("accounting example at 10,000 journal lines", () => {
               .reduce((sum, [, size]) => sum + size, 0),
         };
 
-        const big = Array.from({ length: 500 }, (_, index) => [
-          "2026-06-01",
-          `${"x".repeat(200)} ${index}`,
+        const big = Array.from({ length: 5_000 }, (_, index) => [
+          "2025-06-01",
+          `${"x".repeat(240)} ${index}`,
           "-1.00",
         ]);
-        const nodes = Array.from({ length: 4_200 }, () => [0, 0, 0]);
+        const nodes = Array.from({ length: 4_400 }, () => Array.from({ length: 30 }, () => 0));
         const nodesPayload = {
           importId: "ceiling-nodes",
           bankAccountId: "1000",
@@ -310,33 +314,32 @@ describe("accounting example at 10,000 journal lines", () => {
           firstLine: 1,
           rows: nodes,
         };
-        const bank501Payload = {
+        const bank5001Payload = {
           importId: "ceiling-rows",
           bankAccountId: "1000",
           currency: "USD",
           firstLine: 1,
-          rows: Array.from({ length: 501 }, () => ["2026-06-01", "x", "1"]),
+          rows: Array.from({ length: 5_001 }, () => ["2025-06-01", "x", "1"]),
         };
         const minimalEntry: AppBackendJson = {
-          date: "2026-06-01",
+          date: "2025-06-01",
           currency: "USD",
           lines: [
             { accountId: "1000", debitCents: 1 },
             { accountId: "3000", creditCents: 1 },
           ],
         };
-        const post500Payload = {
-          entries: Array.from({ length: 500 }, () => minimalEntry),
+        const post5000Payload = {
+          entries: Array.from({ length: 5_000 }, () => minimalEntry),
         };
-        const post501Payload = {
-          entries: Array.from({ length: 501 }, () => minimalEntry),
+        const post5001Payload = {
+          entries: Array.from({ length: 5_001 }, () => minimalEntry),
         };
-        expect(Buffer.byteLength(JSON.stringify(nodesPayload))).toBeLessThan(64 * 1024);
-        expect(Buffer.byteLength(JSON.stringify(bank501Payload))).toBeLessThan(64 * 1024);
-        expect(Buffer.byteLength(JSON.stringify(post500Payload))).toBeLessThan(64 * 1024);
-        expect(Buffer.byteLength(JSON.stringify(post501Payload))).toBeLessThan(64 * 1024);
+        for (const payload of [nodesPayload, bank5001Payload, post5000Payload, post5001Payload]) {
+          expect(Buffer.byteLength(JSON.stringify(payload))).toBeLessThan(1024 * 1024);
+        }
         const ceilings = {
-          input65KiB: await failure(() =>
+          input1MiB: await failure(() =>
             f.call("stageBankRows", {
               importId: "ceiling-input",
               bankAccountId: "1000",
@@ -345,10 +348,10 @@ describe("accounting example at 10,000 journal lines", () => {
               rows: big,
             }),
           ),
-          jsonNodes16801: await failure(() => f.call("stageBankRows", nodesPayload)),
-          bankBatch501: await failure(() => f.call("stageBankRows", bank501Payload)),
-          postBatch500: await failure(() => f.call("postJournalEntries", post500Payload)),
-          postBatch501: await failure(() => f.call("postJournalEntries", post501Payload)),
+          jsonNodes136401: await failure(() => f.call("stageBankRows", nodesPayload)),
+          bankBatch5001: await failure(() => f.call("stageBankRows", bank5001Payload)),
+          postBatch5000: await failure(() => f.call("postJournalEntries", post5000Payload)),
+          postBatch5001: await failure(() => f.call("postJournalEntries", post5001Payload)),
           bankPage100: await failure(() =>
             f.call("listBankRows", { status: "posted", limit: 100 }),
           ),
@@ -359,14 +362,14 @@ describe("accounting example at 10,000 journal lines", () => {
             f.call("accountLedger", {
               accountId: "1000",
               currency: "USD",
-              from: "2026-01-01",
-              to: "2026-12-31",
+              from: "2025-01-01",
+              to: "2025-12-31",
               limit: 501,
             }),
           ),
           entry500Lines: await failure(() =>
             f.call("postJournalEntry", {
-              date: "2026-06-30",
+              date: "2025-06-30",
               currency: "USD",
               memo: "Largest entry",
               lines: Array.from({ length: 500 }, (_, index): AppBackendJson =>
@@ -378,7 +381,7 @@ describe("accounting example at 10,000 journal lines", () => {
           ),
           entry501Lines: await failure(() =>
             f.call("postJournalEntry", {
-              date: "2026-06-30",
+              date: "2025-06-30",
               currency: "USD",
               memo: "Too many lines",
               lines: Array.from({ length: 501 }, (_, index): AppBackendJson =>
@@ -390,12 +393,14 @@ describe("accounting example at 10,000 journal lines", () => {
           ),
         };
         report.ceilings = ceilings;
-        expect(ceilings.input65KiB).toMatch(/65536 bytes/);
-        expect(ceilings.jsonNodes16801).toMatch(/16384 JSON nodes/);
-        expect(ceilings.bankBatch501).toBe("refusal invalid_input: Send 1 to 500 rows at a time.");
-        expect(ceilings.postBatch500).toBe("accepted");
-        expect(ceilings.postBatch501).toBe(
-          "refusal invalid_input: Post 1 to 500 entries at a time.",
+        expect(ceilings.input1MiB).toMatch(/1048576 bytes/);
+        expect(ceilings.jsonNodes136401).toMatch(/131072 JSON nodes/);
+        expect(ceilings.bankBatch5001).toBe(
+          "refusal invalid_input: Send 1 to 5000 rows at a time.",
+        );
+        expect(ceilings.postBatch5000).toBe("accepted");
+        expect(ceilings.postBatch5001).toBe(
+          "refusal invalid_input: Post 1 to 5000 entries at a time.",
         );
         expect(ceilings.bankPage100).toBe("accepted");
         expect(ceilings.bankPage101).toBe(
