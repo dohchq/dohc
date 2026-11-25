@@ -2049,3 +2049,90 @@ fn a_refusal_its_projection_clears_stays_in_the_drain_report() {
         );
     }
 }
+
+#[test]
+fn a_queued_base_that_splits_an_emoji_is_refused_and_the_drain_goes_on() {
+    let (_scratch, _path, mut engine) = open_store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-split").expect("doc key");
+    let writer = dohc_engine_collab::Ydoc::wire();
+    writer.plaintext_insert(0, "base");
+    let lineage = engine
+        .put_binary_blob(&writer.encode_full_state())
+        .expect("base blob");
+    let delta = engine
+        .put_binary_blob(&writer.plaintext_insert(4, " more"))
+        .expect("delta blob");
+    let split = dohc_engine_collab::replay_parity::base_splitting_an_emoji_for_test();
+    let split = engine.put_binary_blob(&split).expect("split blob");
+    let payload = |blob: &str, claim: &str, base: bool| {
+        json!({
+            "versionId": "main",
+            "objectId": "object-split",
+            "path": "notes/split.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": blob,
+            "lineageClaimId": claim,
+            "isBaseState": base
+        })
+    };
+    let mut base = envelope(
+        "peer-a",
+        0,
+        "ydoc.update",
+        payload(&lineage, &lineage, true),
+    );
+    base.relay_seq = Some(5);
+    let arrived = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("the base arrives");
+    assert!(matches!(arrived.primary, ApplyDisposition::Applied(_)));
+    let mut queued = envelope("peer-b", 0, "ydoc.update", payload(&split, &split, true));
+    queued.relay_seq = Some(3);
+    let mut behind = envelope("peer-a", 1, "ydoc.update", payload(&delta, &lineage, false));
+    behind.relay_seq = Some(6);
+    for (op, claim) in [(&queued, &split), (&behind, &lineage)] {
+        let relay_seq = op.relay_seq.expect("relay sequence");
+        crate::apply_envelope_with(&mut engine, op, &NoFaults, |tx, op| {
+            crate::ydoc_apply::defer_ydoc_update_in_tx(tx, &key, op, claim, relay_seq, None)
+        })
+        .expect("queue");
+    }
+
+    let drained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("the drain goes on");
+    let refused: Vec<_> = drained
+        .refusals
+        .iter()
+        .map(|refusal| (refusal.origin_id.as_str(), refusal.reason.message()))
+        .collect();
+    assert_eq!(
+        refused,
+        [("peer-b", "ydoc.update base fails the replay check")]
+    );
+    let queue: i64 = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
+                row.get(0)
+            })
+        })
+        .expect("queue count");
+    assert_eq!(queue, 0);
+    let persisted = dohc_engine_collab::load_persisted(&engine, &key)
+        .expect("load lineage")
+        .expect("persisted lineage");
+    assert_eq!(persisted.doc.plaintext_string(), "base more");
+    assert_eq!(persisted.marker.lineage_claim_id, Some(lineage));
+}

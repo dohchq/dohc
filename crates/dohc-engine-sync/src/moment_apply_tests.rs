@@ -4114,6 +4114,84 @@ fn ended_recovery_retries_inserted_durable_update_blob() {
     assert_eq!(remaining, 0);
 }
 
+#[test]
+fn a_base_whose_delete_splits_an_emoji_is_refused_when_it_arrives() {
+    let (_scratch, mut store) = test_store();
+    let base = dohc_engine_collab::replay_parity::base_splitting_an_emoji_for_test();
+    let claim = store.put_binary_blob(&base).unwrap();
+    let mut arriving = envelope(
+        "peer",
+        0,
+        "ws",
+        json!({"versionId":"main","objectId":"object","path":"head.md","contentKind":"plaintext","updateBlobSha256":claim,"lineageClaimId":claim,"isBaseState":true}),
+    );
+    arriving.op_kind = "ydoc.update".into();
+    arriving.relay_seq = Some(1);
+    let outcome = apply_ydoc_envelope(
+        &mut store,
+        &mut Default::default(),
+        &arriving,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    let reason = match outcome.primary {
+        ApplyDisposition::Refused(ReplicationRefusal {
+            reason: RefusalReason::InvalidInput { reason },
+            ..
+        }) => reason,
+        _ => panic!("the base was not refused"),
+    };
+    assert_eq!(reason, "ydoc.update base fails the replay check");
+    let key = DocKey::new("ws", "main", "object").unwrap();
+    let marker = dohc_engine_collab::read_marker(&store, &key).unwrap();
+    assert!(marker.is_none());
+}
+
+#[test]
+fn a_losing_base_that_splits_an_emoji_raises_no_notice() {
+    let (_scratch, mut store) = test_store();
+    let kept = dohc_engine_collab::Ydoc::wire();
+    kept.plaintext_insert(0, "kept");
+    let kept = store.put_binary_blob(&kept.encode_full_state()).unwrap();
+    let split = dohc_engine_collab::replay_parity::base_splitting_an_emoji_for_test();
+    let split = store.put_binary_blob(&split).unwrap();
+    for (origin, claim, relay_seq) in [("first", &kept, 3), ("second", &split, 5)] {
+        let mut arriving = envelope(
+            origin,
+            0,
+            "ws",
+            json!({"versionId":"main","objectId":"object","path":"kept.md","contentKind":"plaintext","updateBlobSha256":claim,"lineageClaimId":claim,"isBaseState":true}),
+        );
+        arriving.op_kind = "ydoc.update".into();
+        arriving.relay_seq = Some(relay_seq);
+        let outcome = apply_ydoc_envelope(
+            &mut store,
+            &mut Default::default(),
+            &arriving,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome.primary, ApplyDisposition::Applied(_)),
+            "{origin}: {:?}",
+            outcome.primary
+        );
+        assert!(outcome.refusals.is_empty());
+    }
+    assert!(
+        crate::list_refusal_notices(&store, "ws")
+            .unwrap()
+            .is_empty()
+    );
+    let key = DocKey::new("ws", "main", "object").unwrap();
+    let marker = dohc_engine_collab::read_marker(&store, &key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(marker.lineage_claim_id.as_ref(), Some(&kept));
+}
+
 #[path = "moment_apply_tests/owner_retirement.rs"]
 mod owner_retirement;
 

@@ -58,9 +58,9 @@ pub use durable::{
     reinstall_lineage_in_tx, replace_lineage_with_successor, replace_lineage_with_successor_in_tx,
     replace_reviewed_lineage_with_successor_in_tx, rewrite_bare_marker_content_kind, settle,
     validate_remote_update, AppendOutcome, BaseCoordinateRecord, BaseRelayCoordinate, ClaimOutcome,
-    CloseOutcome, CloseProjection, CompactOutcome, FileExportLane, LineageClaimStatus,
-    LineageGuard, LineageOrigin, LocalAppend, LoggedBaseOrigin, LoggedUpdate, Marker,
-    MarkerCreation, OriginationBase, PersistedDoc, Regime, SettleOutcome, SuccessorAuthor,
+    CloseOutcome, CloseProjection, CompactOutcome, FileExportLane, IncomingBase,
+    LineageClaimStatus, LineageGuard, LineageOrigin, LocalAppend, LoggedBaseOrigin, LoggedUpdate,
+    Marker, MarkerCreation, OriginationBase, PersistedDoc, Regime, SettleOutcome, SuccessorAuthor,
     SuccessorInstallOutcome, SuccessorReplacement, LOGGED_SUCCESSORS,
 };
 pub use error::CollabError;

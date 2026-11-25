@@ -26,6 +26,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction};
 use crate::doc_cache::{GateBaseProbe, GateBaseSource, ServedGateBase, WriterDocCache};
 use crate::error::CollabError;
 use crate::limits::{DEFAULT_COMPACTION_THRESHOLD, MAX_YDOC_UPDATE_BYTES};
+use crate::replay_parity::validate_replay_parity_with_scratch;
 use crate::ydoc::{ContentKind, Projection, SuccessorBase, Ydoc};
 use crate::DocKey;
 
@@ -169,12 +170,43 @@ pub enum CompactOutcome {
     Skipped { pending: i64 },
 }
 
-/// The bytes that originate a lineage: its full-state base, and that base's
-/// state vector for provenance parity with compaction.
+/// The full-state base that originates a lineage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OriginationBase {
     pub base: Vec<u8>,
-    pub state_vector: Vec<u8>,
+}
+
+/// A base a claim may store. Its replay check runs once, the first time its
+/// note is read, so a claim that only resumes or loses never checks it.
+pub struct IncomingBase<'a> {
+    bytes: &'a [u8],
+    doc: std::cell::OnceCell<Ydoc>,
+}
+
+impl<'a> IncomingBase<'a> {
+    pub fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            doc: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// A base this device already stored, put back without the check.
+    pub fn stored(bytes: &'a [u8], doc: Ydoc) -> Self {
+        Self {
+            bytes,
+            doc: doc.into(),
+        }
+    }
+
+    pub fn doc(&self) -> Result<&Ydoc, CollabError> {
+        if let Some(doc) = self.doc.get() {
+            return Ok(doc);
+        }
+        validate_update_size(self.bytes)?;
+        let doc = validate_replay_parity_with_scratch(&Ydoc::wire(), self.bytes)?;
+        Ok(self.doc.get_or_init(|| doc))
+    }
 }
 
 /// The outcome of a base-once claim.
@@ -1407,16 +1439,9 @@ pub fn claim_base(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<ClaimOutcome>, CollabError> {
-    validate_update_bytes(base_bytes)?;
-    let sv_bytes = {
-        // The base's state vector, for provenance parity with compaction.
-        let doc = Ydoc::wire();
-        doc.apply(base_bytes)?;
-        doc.encode_state_vector()
-    };
-
+    let base = IncomingBase::new(base_bytes);
     store.write_with(faults, |tx| {
-        claim_base_in_tx(tx, key, content_kind, base_bytes, &sv_bytes, now_ms)
+        claim_base_in_tx(tx, key, content_kind, &base, now_ms)
     })
 }
 
@@ -1431,20 +1456,9 @@ pub fn claim_base_at_relay(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<ClaimOutcome>, CollabError> {
-    validate_update_bytes(base_bytes)?;
-    let doc = Ydoc::wire();
-    doc.apply(base_bytes)?;
-    let sv_bytes = doc.encode_state_vector();
+    let base = IncomingBase::new(base_bytes);
     store.write_with(faults, |tx| {
-        claim_base_at_relay_in_tx(
-            tx,
-            key,
-            content_kind,
-            base_bytes,
-            &sv_bytes,
-            coordinate,
-            now_ms,
-        )
+        claim_base_at_relay_in_tx(tx, key, content_kind, &base, coordinate, now_ms)
     })
 }
 
@@ -1456,11 +1470,10 @@ pub fn claim_base_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
     content_kind: ContentKind,
-    base_bytes: &[u8],
-    sv_bytes: &[u8],
+    base: &IncomingBase<'_>,
     now_ms: i64,
 ) -> Result<ClaimOutcome, CollabError> {
-    claim_base_with_coordinate_in_tx(tx, key, content_kind, base_bytes, sv_bytes, None, now_ms)
+    claim_base_with_coordinate_in_tx(tx, key, content_kind, base, None, now_ms)
 }
 
 /// Transaction-composable form of [`claim_base_at_relay`].
@@ -1468,33 +1481,23 @@ pub fn claim_base_at_relay_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
     content_kind: ContentKind,
-    base_bytes: &[u8],
-    sv_bytes: &[u8],
+    base: &IncomingBase<'_>,
     coordinate: &BaseRelayCoordinate,
     now_ms: i64,
 ) -> Result<ClaimOutcome, CollabError> {
-    claim_base_with_coordinate_in_tx(
-        tx,
-        key,
-        content_kind,
-        base_bytes,
-        sv_bytes,
-        Some(coordinate),
-        now_ms,
-    )
+    claim_base_with_coordinate_in_tx(tx, key, content_kind, base, Some(coordinate), now_ms)
 }
 
 fn claim_base_with_coordinate_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
     content_kind: ContentKind,
-    base_bytes: &[u8],
-    sv_bytes: &[u8],
+    base: &IncomingBase<'_>,
     coordinate: Option<&BaseRelayCoordinate>,
     now_ms: i64,
 ) -> Result<ClaimOutcome, CollabError> {
     crate::live_update_application::require_restore_open(tx, key)?;
-    validate_update_bytes(base_bytes)?;
+    let base_bytes = base.bytes;
     let incoming_claim_id = crate::hex_sha256(base_bytes);
     (|| {
         tx.execute(
@@ -1552,8 +1555,7 @@ fn claim_base_with_coordinate_in_tx(
                                     BaseSnapshotReplacement {
                                         key,
                                         content_kind,
-                                        base_bytes,
-                                        state_vector_bytes: sv_bytes,
+                                        base,
                                         coordinate,
                                         incoming_claim_id: &incoming_claim_id,
                                         now_ms,
@@ -1581,8 +1583,7 @@ fn claim_base_with_coordinate_in_tx(
                             BaseSnapshotReplacement {
                                 key,
                                 content_kind,
-                                base_bytes,
-                                state_vector_bytes: sv_bytes,
+                                base,
                                 coordinate,
                                 incoming_claim_id: &incoming_claim_id,
                                 now_ms,
@@ -1601,8 +1602,9 @@ fn claim_base_with_coordinate_in_tx(
             }
         }
 
+        let state_vector = base.doc()?.encode_state_vector();
         let base_sha = put_binary_blob_with_sha(tx, base_bytes, &incoming_claim_id)?;
-        let sv_sha = put_binary_blob(tx, sv_bytes)?;
+        let sv_sha = put_binary_blob(tx, &state_vector)?;
         // Seq 0 is the base snapshot. INSERT makes the primary key reject a
         // second base.
         tx.execute(
@@ -1736,8 +1738,7 @@ pub fn mark_base_coordinate_absent_in_tx(
 struct BaseSnapshotReplacement<'a> {
     key: &'a DocKey,
     content_kind: ContentKind,
-    base_bytes: &'a [u8],
-    state_vector_bytes: &'a [u8],
+    base: &'a IncomingBase<'a>,
     coordinate: &'a BaseRelayCoordinate,
     incoming_claim_id: &'a str,
     now_ms: i64,
@@ -1750,12 +1751,12 @@ fn replace_base_snapshot(
     let BaseSnapshotReplacement {
         key,
         content_kind,
-        base_bytes,
-        state_vector_bytes,
+        base,
         coordinate,
         incoming_claim_id,
         now_ms,
     } = replacement;
+    let state_vector = base.doc()?.encode_state_vector();
     crate::author_coverage::reset_in(tx, key, false)?;
     tx.execute(
         "DELETE FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
@@ -1767,10 +1768,8 @@ fn replace_base_snapshot(
         rusqlite::params![key.workspace_id, key.version_id, key.object_id],
     )
     .map_err(map_sql)?;
-    // `incoming_claim_id` IS `hex_sha256(base_bytes)` — the caller computed it
-    // from these exact bytes before the claim comparison above.
-    let base_sha = put_binary_blob_with_sha(tx, base_bytes, incoming_claim_id)?;
-    let sv_sha = put_binary_blob(tx, state_vector_bytes)?;
+    let base_sha = put_binary_blob_with_sha(tx, base.bytes, incoming_claim_id)?;
+    let sv_sha = put_binary_blob(tx, &state_vector)?;
     tx.execute(
         "INSERT INTO ydoc_snapshots (workspace_id,version_id,object_id,up_to_seq, \
          snapshot_blob_sha256,state_vector_blob_sha256,recorded_at_ms) \
@@ -1841,7 +1840,6 @@ pub fn replace_lineage_with_successor(
     replacement: SuccessorReplacement<'_>,
     faults: &dyn FaultInjector,
 ) -> Result<TxnOutcome<SuccessorInstallOutcome>, CollabError> {
-    validate_successor_base(replacement.successor, replacement.scene_result)?;
     store.write_with(faults, |tx| {
         replace_lineage_with_successor_in_tx(tx, replacement)
     })
@@ -1937,7 +1935,7 @@ pub fn replace_reviewed_lineage_with_successor_in_tx(
                 observed: marker.lineage_claim_id,
             });
         }
-        let doc = load_doc_in(tx, key)?;
+        let doc = stored_read(load_doc_in(tx, key))?;
         let vector = doc.encode_state_vector();
         if crate::hex_sha256(&vector) != local_vector {
             return Err(CollabError::LineageStateVectorMismatch {
@@ -1947,7 +1945,8 @@ pub fn replace_reviewed_lineage_with_successor_in_tx(
         }
         (marker, doc, vector)
     } else {
-        load_exact_active_lineage(tx, key, local_claim, local_vector)?
+        let lineage = load_exact_active_lineage(tx, key, local_claim, local_vector);
+        stored_read(lineage)?
     };
     let mut retained = vec![predecessor.encode_full_state()];
     if predecessor.has_pending_dependencies() {
@@ -1964,7 +1963,8 @@ pub fn replace_reviewed_lineage_with_successor_in_tx(
                 .map_err(map_sql)?,
         );
     }
-    let predecessor_full_state_sha = put_binary_blob(tx, &crate::merge_updates(&retained)?)?;
+    let predecessor_full_state = stored_read(crate::merge_updates(&retained))?;
+    let predecessor_full_state_sha = put_binary_blob(tx, &predecessor_full_state)?;
     let predecessor_state_vector_sha = put_binary_blob(tx, &predecessor_state_vector)?;
     tx.execute(
         "INSERT INTO ydoc_inactive_lineages (workspace_id, version_id, object_id, \
@@ -2055,6 +2055,13 @@ pub fn replace_reviewed_lineage_with_successor_in_tx(
         predecessor_claim_id: expected_predecessor_claim_id.to_owned(),
         successor_claim_id: successor.lineage_claim_id.clone(),
         record_facts,
+    })
+}
+
+fn stored_read<T>(read: Result<T, CollabError>) -> Result<T, CollabError> {
+    read.map_err(|error| match error {
+        CollabError::ReplayParityViolation { reason } => CollabError::Corrupt { reason },
+        other => other,
     })
 }
 
@@ -2207,7 +2214,8 @@ fn validate_successor_base(
     successor: &SuccessorBase,
     scene_result: Option<&str>,
 ) -> Result<Ydoc, CollabError> {
-    validate_update_bytes(&successor.update)?;
+    validate_update_size(&successor.update)?;
+    let doc = validate_replay_parity_with_scratch(&Ydoc::wire(), &successor.update)?;
     let observed_claim = crate::hex_sha256(&successor.update);
     if observed_claim != successor.lineage_claim_id {
         return Err(CollabError::InvalidSuccessorBase {
@@ -2216,8 +2224,6 @@ fn validate_successor_base(
             observed: observed_claim,
         });
     }
-    let doc = Ydoc::wire();
-    doc.apply(&successor.update)?;
     if doc.has_pending_dependencies() {
         return Err(CollabError::InvalidSuccessorBase {
             constraint: "successor base must be dependency-complete",
@@ -2562,8 +2568,9 @@ pub fn reinstall_lineage_in_tx(
 ) -> Result<(), CollabError> {
     let doc = Ydoc::wire();
     doc.apply(base)?;
-    let state_vector = doc.encode_state_vector();
-    let claim = claim_base_in_tx(tx, key, content_kind, base, &state_vector, now_ms)?;
+    let base = IncomingBase::stored(base, doc);
+    let claim = claim_base_in_tx(tx, key, content_kind, &base, now_ms)?;
+    let doc = base.doc()?;
     let ClaimOutcome::Claimed { base_snapshot_sha } = claim else {
         return Err(CollabError::Corrupt {
             reason: "a retired Y.Doc lineage is already active".into(),
@@ -2826,16 +2833,12 @@ pub fn encode_origination_base_in_tx(
             if !original.has_missing_updates()
                 && crate::replay_parity::structurally_equal_v2(&doc, &original)?
             {
-                return Ok(Some(OriginationBase {
-                    base: bytes,
-                    state_vector: doc.encode_state_vector(),
-                }));
+                return Ok(Some(OriginationBase { base: bytes }));
             }
         }
     }
     Ok(Some(OriginationBase {
         base: doc.encode_full_state(),
-        state_vector: doc.encode_state_vector(),
     }))
 }
 
@@ -3165,7 +3168,7 @@ pub fn close_session(
     })
 }
 
-pub(crate) fn validate_update_bytes(update: &[u8]) -> Result<(), CollabError> {
+fn validate_update_size(update: &[u8]) -> Result<(), CollabError> {
     if update.is_empty() {
         return Err(CollabError::EmptyUpdate);
     }
@@ -3175,6 +3178,11 @@ pub(crate) fn validate_update_bytes(update: &[u8]) -> Result<(), CollabError> {
             max: MAX_YDOC_UPDATE_BYTES,
         });
     }
+    Ok(())
+}
+
+pub(crate) fn validate_update_bytes(update: &[u8]) -> Result<(), CollabError> {
+    validate_update_size(update)?;
     // Constraint 5: reject truncated/malformed bytes before journaling.
     // `Ydoc::validate_update` runs the abort-safe pre-validator
     // (`replay_parity::prevalidate_update_bytes`) first — before any call that
@@ -3823,6 +3831,29 @@ mod successor_validation_tests {
         }
     }
 
+    fn successor_merged_with(update: Vec<u8>) -> SuccessorBase {
+        let mut successor = markdown_successor("A note.\n");
+        let merged = crate::merge_updates(&[successor.update, update]).expect("merge");
+        let doc = Ydoc::wire();
+        doc.apply(&merged).expect("the successor applies");
+        successor.state_vector = doc.encode_state_vector();
+        successor.lineage_claim_id = crate::hex_sha256(&merged);
+        successor.update = merged;
+        successor
+    }
+
+    #[test]
+    fn a_successor_base_whose_delete_splits_an_emoji_fails_the_replay_check() {
+        let whole = crate::replay_parity::base_deleting_a_whole_emoji_for_test();
+        let whole = successor_merged_with(whole);
+        validate_successor_base(&whole, None).expect("the successor without a split passes");
+        let split = crate::replay_parity::base_splitting_an_emoji_for_test();
+        let split = successor_merged_with(split);
+        let refused = validate_successor_base(&split, None).map(drop);
+        let replay_check = matches!(refused, Err(CollabError::ReplayParityViolation { .. }));
+        assert!(replay_check, "{refused:?}");
+    }
+
     fn assert_markdown_successor_roundtrip(artifact: &str) {
         let base = markdown_successor(artifact);
         validate_successor_base(&base, None).expect("validate Markdown successor");
@@ -4268,3 +4299,163 @@ pub fn record_recovery_update_in_tx(
 #[cfg(test)]
 #[path = "durable/passive_cache_tests.rs"]
 mod passive_cache_tests;
+
+#[cfg(test)]
+mod base_replay_tests {
+    use super::*;
+    use crate::replay_parity::base_deleting_a_whole_emoji_for_test as whole_emoji_deleted;
+    use dohc_engine_storage::NoFaults;
+    use dohc_test_scratch::ScratchDir;
+
+    const SEED: &str = "INSERT INTO versioned_workspaces(workspace_id,main_version_id)         VALUES('ws','main'); INSERT INTO file_objects(workspace_id,object_id,created_at_ms)         VALUES('ws','object',0);";
+
+    fn opened() -> (ScratchDir, EngineStore, DocKey) {
+        let scratch = ScratchDir::new_named("base-replay").expect("scratch");
+        let mut store = EngineStore::open(&scratch.join("engine.db"), 0).expect("open store");
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute_batch(SEED).map_err(map_sql)?;
+                Ok::<_, CollabError>(())
+            })
+            .expect("seed");
+        let key = DocKey::new("ws", "main", "object").expect("key");
+        (scratch, store, key)
+    }
+
+    fn claim(
+        store: &mut EngineStore,
+        key: &DocKey,
+        base: &[u8],
+    ) -> Result<TxnOutcome<ClaimOutcome>, CollabError> {
+        claim_base(store, key, ContentKind::Plaintext, base, &NoFaults, 1)
+    }
+
+    #[test]
+    fn refuses_a_base_whose_delete_splits_an_emoji() {
+        let (_scratch, mut store, key) = opened();
+        let base = crate::replay_parity::base_splitting_an_emoji_for_test();
+        let claimed = claim(&mut store, &key, &base).map(drop);
+        let refused = matches!(claimed, Err(CollabError::ReplayParityViolation { .. }));
+        assert!(refused, "{claimed:?}");
+        assert_eq!(store.table_row_count("ydoc_docs").expect("count"), 0);
+        assert_eq!(store.table_row_count("ydoc_snapshots").expect("count"), 0);
+    }
+
+    #[test]
+    fn claims_a_base_whose_delete_takes_a_whole_emoji() {
+        let (_scratch, mut store, key) = opened();
+        let claimed = claim(&mut store, &key, &whole_emoji_deleted());
+        let claimed = matches!(
+            claimed,
+            Ok(TxnOutcome::Committed(ClaimOutcome::Claimed { .. }))
+        );
+        assert!(claimed);
+    }
+
+    #[test]
+    fn keeps_its_base_when_the_one_that_would_replace_it_splits_an_emoji() {
+        let (_scratch, mut store, key) = opened();
+        let kept = whole_emoji_deleted();
+        let later = BaseRelayCoordinate::new("first", 0, 5).expect("coordinate");
+        let earlier = BaseRelayCoordinate::new("second", 0, 3).expect("coordinate");
+        let kind = ContentKind::Plaintext;
+        let first = claim_base_at_relay(&mut store, &key, kind, &kept, &later, &NoFaults, 1);
+        assert!(first.is_ok());
+        let split = crate::replay_parity::base_splitting_an_emoji_for_test();
+        let replaced = claim_base_at_relay(&mut store, &key, kind, &split, &earlier, &NoFaults, 2);
+        let replaced = replaced.map(drop);
+        let refused = matches!(replaced, Err(CollabError::ReplayParityViolation { .. }));
+        assert!(refused, "{replaced:?}");
+        let marker = read_marker(&store, &key)
+            .expect("marker")
+            .expect("a marker");
+        assert_eq!(marker.lineage_claim_id, Some(crate::hex_sha256(&kept)));
+    }
+
+    #[test]
+    fn a_losing_base_that_splits_an_emoji_changes_nothing() {
+        let (_scratch, mut store, key) = opened();
+        let kept = whole_emoji_deleted();
+        let earlier = BaseRelayCoordinate::new("first", 0, 3).expect("coordinate");
+        let later = BaseRelayCoordinate::new("second", 0, 5).expect("coordinate");
+        let kind = ContentKind::Plaintext;
+        let first = claim_base_at_relay(&mut store, &key, kind, &kept, &earlier, &NoFaults, 1);
+        assert!(first.is_ok());
+        let before = read_marker(&store, &key).expect("marker");
+        let split = crate::replay_parity::base_splitting_an_emoji_for_test();
+        let lost = claim_base_at_relay(&mut store, &key, kind, &split, &later, &NoFaults, 2);
+        let lost = matches!(
+            lost,
+            Ok(TxnOutcome::Committed(ClaimOutcome::AlreadyWon { .. }))
+        );
+        assert!(lost);
+        assert_eq!(read_marker(&store, &key).expect("marker"), before);
+        assert_eq!(store.table_row_count("ydoc_snapshots").expect("count"), 1);
+    }
+
+    #[test]
+    fn a_stored_base_that_splits_an_emoji_still_resumes() {
+        let (_scratch, mut store, key) = opened();
+        let split = crate::replay_parity::base_splitting_an_emoji_for_test();
+        let doc = Ydoc::wire();
+        doc.apply(&split).expect("the stored base applies");
+        let state_vector = doc.encode_state_vector();
+        store
+            .write_with(&NoFaults, |tx| {
+                let claim = put_binary_blob_with_sha(tx, &split, &crate::hex_sha256(&split))?;
+                let vector = put_binary_blob(tx, &state_vector)?;
+                tx.execute(
+                    "INSERT INTO ydoc_docs (workspace_id, version_id, object_id, content_kind, \
+                     regime, head_update_seq, head_snapshot_seq, lineage_claim_status, \
+                     lineage_claim_id, updated_at_ms) \
+                     VALUES ('ws', 'main', 'object', 'plaintext', 'replicated', 0, 0, \
+                     'exact', ?1, 1)",
+                    [&claim],
+                )
+                .map_err(map_sql)?;
+                tx.execute(
+                    "INSERT INTO ydoc_snapshots (workspace_id, version_id, object_id, \
+                     up_to_seq, snapshot_blob_sha256, state_vector_blob_sha256, \
+                     recorded_at_ms) VALUES ('ws', 'main', 'object', 0, ?1, ?2, 1)",
+                    [&claim, &vector],
+                )
+                .map_err(map_sql)?;
+                Ok::<_, CollabError>(())
+            })
+            .expect("install the stored lineage");
+        let resumed = claim(&mut store, &key, &split);
+        let ok = matches!(resumed, Ok(TxnOutcome::Committed(ClaimOutcome::Resumed)));
+        assert!(ok, "{resumed:?}");
+    }
+
+    #[test]
+    fn refuses_a_base_whose_insert_lands_inside_an_emoji() {
+        let (_scratch, mut store, key) = opened();
+        let mut base = vec![2, 1, 6, 0, 0x84, 5, 0, 1, b'X', 1, 5, 0, 4, 1, 9];
+        base.extend_from_slice(crate::ROOT_PLAINTEXT.as_bytes());
+        base.extend_from_slice(&[4, 0xf0, 0x9f, 0x98, 0x80, 0]);
+        let reason = match claim(&mut store, &key, &base) {
+            Err(CollabError::ReplayParityViolation { reason }) => reason,
+            other => panic!("the base was not refused: {other:?}"),
+        };
+        assert!(reason.contains("insert boundary"), "{reason}");
+        assert_eq!(store.table_row_count("ydoc_docs").expect("count"), 0);
+    }
+
+    #[test]
+    fn claims_a_base_that_keeps_an_emoji() {
+        let (_scratch, mut store, key) = opened();
+        let writer = Ydoc::with_client_id(5);
+        writer.plaintext_insert(0, "\u{1f600}X");
+        let claimed = claim(&mut store, &key, &writer.encode_full_state());
+        let claimed = matches!(
+            claimed,
+            Ok(TxnOutcome::Committed(ClaimOutcome::Claimed { .. }))
+        );
+        assert!(claimed);
+        let persisted = load_persisted(&store, &key)
+            .expect("load")
+            .expect("a lineage");
+        assert_eq!(persisted.doc.plaintext_string(), "\u{1f600}X");
+    }
+}
