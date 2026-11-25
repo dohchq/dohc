@@ -170,8 +170,14 @@ fn brake_cases() -> Vec<(&'static str, String, Bar)> {
     ]
 }
 
+const CLIENTS: [u64; 3] = [
+    0x1A_2B3C_4D5E_6F70,
+    0x1A_2B3C_4D5E_6F71,
+    0x1A_2B3C_4D5E_6F72,
+];
+
 fn seeded(format: u8, file: &str) -> Ydoc {
-    let doc = Ydoc::wire();
+    let doc = Ydoc::with_client_id(CLIENTS[0]);
     if format == 2 {
         let meta = doc.doc.get_or_insert_map(ROOT_META);
         meta.insert(
@@ -185,8 +191,8 @@ fn seeded(format: u8, file: &str) -> Ydoc {
     doc
 }
 
-fn copy(doc: &Ydoc) -> Ydoc {
-    let copy = Ydoc::wire();
+fn copy(doc: &Ydoc, client: u64) -> Ydoc {
+    let copy = Ydoc::with_client_id(client);
     copy.apply(&doc.encode_full_state()).expect("the copy");
     copy
 }
@@ -205,7 +211,7 @@ fn a_fold_of_a_long_note_does_work_and_writes_bytes_in_proportion_to_its_change(
         let boundary = {
             let note = seeded(2, "a\n");
             let fold = |file: &str| {
-                copy(&note)
+                copy(&note, CLIENTS[1])
                     .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, file)
                     .expect("a small fold")
                     .len()
@@ -214,11 +220,11 @@ fn a_fold_of_a_long_note_does_work_and_writes_bytes_in_proportion_to_its_change(
         };
         let mut over = Vec::new();
         for (name, edited, bar) in brake_cases() {
-            let format_one = copy(&one)
+            let format_one = copy(&one, CLIENTS[1])
                 .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &edited)
                 .expect("format 1")
                 .len();
-            let doc = copy(&two);
+            let doc = copy(&two, CLIENTS[1]);
             let before = sequence_length(&doc);
             body_sequence_fold::SLOTS_VISITED.with(|visited| visited.set(0));
             let format_two = doc
@@ -264,7 +270,7 @@ fn a_fold_keeps_the_letters_a_peer_is_typing_into() {
             ),
         ] {
             let base = seeded(2, note);
-            let (ours, theirs) = (copy(&base), copy(&base));
+            let (ours, theirs) = (copy(&base, CLIENTS[1]), copy(&base, CLIENTS[2]));
             let ours_update = ours
                 .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, folded)
                 .expect("our fold");
