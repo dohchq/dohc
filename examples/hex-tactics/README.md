@@ -18,10 +18,13 @@ HexClash is a two-player turn-based hex strategy game built as a workspace examp
 - `operations.js`: Isolated QuickJS server operations (`listGames`, `createGame`, `joinGame`, `startDemoMatch`, `getVisibleState`, `submitMove`, `replayGame`).
 - `app.publish.json`: App manifest binding `hex-tactics/dataset.json` by operation name.
 - `index.tsx`: Game shell, queries, turn flow, keyboard shortcuts, and the pass-and-play hand-off.
-- `hex-board.tsx`, `board-art.tsx`: SVG board, terrain and unit art, move, claim, and attack marks, and the last-move arrow.
+- `hud.tsx`, `dock.tsx`, `dialogs.tsx`: Top bar and seat toggle, end-turn and victory controls, notices, and the invite and resign dialogs.
+- `hex-board.tsx`, `board-art.tsx`, `geometry.ts`: SVG board, terrain and unit art, move, claim, and attack marks, the last-move arrow, and hex math.
 - `panels.tsx`, `lobby.tsx`: Tile card, combat preview, battle log and replay drawer, hand-off cover, and the lobby.
+- `selection.ts`, `orders.ts`: The selected stack and locked target, and the march targets and forecasts derived from them.
+- `sessions.ts`: Seats held on this device and which matches the Game menu lists.
 - `rules.ts`: Client copy of the combat math for the preview. Tests check it against real server outcomes.
-- `replay.ts`, `types.ts`, `styles.css`: Replay frames, shared types, and light and dark themes.
+- `replay.ts`, `use-replay.ts`, `types.ts`, `styles.css`: Replay frames and playback, shared types, and light and dark themes.
 - `hex-tactics.test.mts`: Automated security, combat, fog-of-war, replay, and closed-compiler tests.
 
 ## Try it
