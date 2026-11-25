@@ -17,7 +17,7 @@ export type Inline = string | Markup;
 
 const markup = (html: string): Markup => ({ [MARKUP]: html });
 
-export function escapeHtml(text: string): string {
+function escapeHtml(text: string): string {
   return text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -67,13 +67,16 @@ const DARK = `@media (prefers-color-scheme:dark){
 export const strong = (text: string): Markup =>
   markup(`<b class="ink" style="color:${INK};font-weight:600;">${escapeHtml(text)}</b>`);
 
-/** An address or host as plain text. It breaks only when it cannot fit a phone's width. */
+// Long addresses and hosts break only when they cannot fit a phone's width.
+const WRAP = "word-break:break-word;overflow-wrap:anywhere;";
+
+/** An address or host as plain text. */
 export const literal = (text: string): Markup =>
-  markup(`<span style="word-break:break-word;overflow-wrap:anywhere;">${escapeHtml(text)}</span>`);
+  markup(`<span style="${WRAP}">${escapeHtml(text)}</span>`);
 
 export const mailto = (address: string, color = MUTED): Markup =>
   markup(
-    `<a class="muted" href="mailto:${escapeHtml(address)}" style="color:${color};text-decoration:none;">${escapeHtml(address)}</a>`,
+    `<a class="muted" href="mailto:${escapeHtml(address)}" style="color:${color};text-decoration:none;${WRAP}">${escapeHtml(address)}</a>`,
   );
 
 const p = (cls: string, style: string, content: Inline | readonly Inline[]) =>
@@ -87,7 +90,7 @@ export const heading = (text: string, first = false): Markup =>
     `<h1 class="h1 ink" style="margin:${first ? 0 : 22}px 0 ${first ? 8 : 18}px;font-family:${FONT};font-size:24px;line-height:32px;font-weight:700;color:${INK};letter-spacing:-0.3px;">${escapeHtml(text)}</h1>`,
   );
 
-export const body = (content: Inline | readonly Inline[]): Markup =>
+const body = (content: Inline | readonly Inline[]): Markup =>
   markup(
     p("muted", `font-size:15px;line-height:24px;color:${MUTED};padding-bottom:24px;`, content),
   );
