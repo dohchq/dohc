@@ -868,7 +868,11 @@ test("@app-view owner data inspector toggles, shows live trace, runs SQL and EXP
         {
           protocolVersion: CLI_PROTOCOL_VERSION,
           verb: "dataset",
-          args: { cwd: workspace.rootPath, actor: "agent", request: { workspaceId, ...request } },
+          args: {
+            cwd: workspace.rootPath,
+            actor: "agent",
+            request: { workspaceId, ...request } as never,
+          },
         },
         { stateDir: workspace.homeDir },
       ) as Promise<Record<string, unknown>>;

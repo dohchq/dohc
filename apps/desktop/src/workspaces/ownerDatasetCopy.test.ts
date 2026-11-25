@@ -771,6 +771,7 @@ it("runs read-only SQL, EXPLAIN, and records traces on the synced owner copy", a
     schemaSql,
     operationSource,
   });
+  const heardRevisions: number[] = [];
   let heard: (() => void) | undefined;
   const changed = () =>
     new Promise<void>((resolve) => {
@@ -782,7 +783,10 @@ it("runs read-only SQL, EXPLAIN, and records traces on the synced owner copy", a
     ownerKey: "owner",
     origin: "https://relay",
     assertOwner() {},
-    onChanged: () => heard?.(),
+    onChanged: (change?: { revision?: number }) => {
+      if (change?.revision !== undefined) heardRevisions.push(change.revision);
+      heard?.();
+    },
   };
   await mkdir(options.directory);
   const copy = await createOwnerDatasetCopy(options);
@@ -810,14 +814,14 @@ it("runs read-only SQL, EXPLAIN, and records traces on the synced owner copy", a
   try {
     await host.activate(actor, { workspaceId: "w", revision, schemaSql, operationSource });
     const data = copy.data(remote, source, signal);
-    const updated = changed();
-    await data.invoke({
+    const added = await data.invoke({
       ...pinned,
       operationId: id(5),
       input: { name: "Ledger" },
       idempotencyKey: "add-1",
     });
-    await updated;
+    while (!heardRevisions.some((heardRevision) => heardRevision >= added.revision))
+      await changed();
     expect(
       await data.invoke({ ...pinned, operationId: id(6), input: {}, idempotencyKey: "list-1" }),
     ).toMatchObject({ result: [{ id: 1, name: "Ledger" }] });

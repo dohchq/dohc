@@ -789,6 +789,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     return head.cursor;
   }
   const traces = createDatasetTraceBuffer();
+  const traceKey = (key: DatasetScope) => JSON.stringify([key.workspaceId, key.datasetId]);
   const host = {
     /** For the trusted executor. Commits and presses claim through the host; deleting a dataset forgets its claims. */
     automationClaims: {
@@ -2339,14 +2340,14 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         });
       } catch (error) {
         traces.record(
-          key.datasetId,
+          traceKey(key),
           traceFailure(operation.name, permitted.authority.caller.kind, started, error),
         );
         throw error;
       }
       const { metrics, changesetBytes, ...publicResponse } = response;
       traces.record(
-        key.datasetId,
+        traceKey(key),
         traceSuccess(
           operation.name,
           permitted.authority.caller.kind,
@@ -2416,7 +2417,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           "invalid",
           `Choose a trace limit from 1 to ${DATASET_TRACE_CAPACITY}.`,
         );
-      return { entries: traces.list(key.datasetId, limit), limit };
+      return { entries: traces.list(traceKey(key), limit), limit };
     },
     /** Resolve a protected resource only while the operation's data revision and grants still hold. */
     async readOperation<T>(
@@ -2468,7 +2469,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
   };
   return Object.assign(host, {
     async retireScope(key: DatasetScope): Promise<void> {
-      traces.clear(key.datasetId);
+      traces.clear(traceKey(key));
       await options.supervisor.retire?.(key);
       for (const [id, saved] of migrationCandidates) {
         if (
