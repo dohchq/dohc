@@ -149,5 +149,18 @@ describe("bank row decisions", () => {
       none: true,
     });
     expect(chosen.invoice?.id).toBe("inv-2");
+    const paidElsewhere = { ...suggested, payables: [invoice] };
+    const stored = applyChoice(suggested, undefined, {
+      invoiceId: "inv-2",
+      entryId: undefined,
+      accountId: undefined,
+      splits: undefined,
+      override: false,
+      none: true,
+    });
+    expect(decide(paidElsewhere, stored)).toMatchObject({
+      invoice: undefined,
+      matchesOnEnter: false,
+    });
   });
 });

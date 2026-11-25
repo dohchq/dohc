@@ -21,6 +21,8 @@ interface InvoiceSummary {
 interface InvoicePage {
   invoices: InvoiceSummary[];
   counts: Record<string, number>;
+  status: Filter | null;
+  offset: number;
   nextOffset: number | null;
 }
 interface Invoice extends InvoiceSummary {
@@ -80,6 +82,7 @@ export function Invoices() {
   const [editing, setEditing] = useState<Invoice | "new" | null>(null);
   const list = useBooks<InvoicePage>("listInvoices", { limit: PAGE, offset, today: now, ...(filter === "all" ? {} : { status: filter }) }, { keep: true });
   const rows = list.data?.invoices ?? [];
+  const page = list.data && list.data.offset === offset && (list.data.status ?? "all") === filter ? list.data : undefined;
   const selected = route.invoice ?? null;
   const counts = list.data?.counts ?? {};
   const [cursorId, setCursorId] = useState<string | null>(selected);
@@ -218,7 +221,7 @@ export function Invoices() {
               <button type="button" className="b-btn b-btn-sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))}>
                 Previous
               </button>
-              <button type="button" className="b-btn b-btn-sm" disabled={list.data.nextOffset === null} onClick={() => setOffset(offset + PAGE)}>
+              <button type="button" className="b-btn b-btn-sm" disabled={!page || page.nextOffset === null} onClick={() => page?.nextOffset != null && setOffset(page.nextOffset)}>
                 Next
               </button>
             </div>

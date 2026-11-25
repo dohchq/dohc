@@ -1260,7 +1260,7 @@
     counts.overdue = ctx.db.query("SELECT count(*) AS n FROM invoices WHERE status='issued' AND due_date<?", [today])[0].n;
     const more = rows.length > size;
     if (more) rows.pop();
-    return { invoices: rows, counts, nextOffset: more ? offset + size : null };
+    return { invoices: rows, counts, status, offset, nextOffset: more ? offset + size : null };
   }
   function getInvoice(ctx, input) {
     owner(ctx);

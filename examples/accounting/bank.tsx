@@ -612,6 +612,7 @@ function BankInspector({ row, decision, onChoose, onPost, onPay, onLink, onUnlin
   const blocked = row.status === "new" && typeof decision.pick === "string" ? decision.pick : null;
   const splits = choice.splits;
   const other = invoice && invoice.id !== row.match?.id ? invoice : undefined;
+  const gone = choice.invoiceId !== undefined && !invoice;
   const nextKey = useRef(Math.max(10, ...(splits ?? []).map((split) => split.key + 1)));
   const keys = (event: KeyboardEvent) => {
     if (event.key === "Enter" && !event.shiftKey && row.status === "new" && (event.target as HTMLElement).tagName === "INPUT") {
@@ -728,13 +729,17 @@ function BankInspector({ row, decision, onChoose, onPost, onPay, onLink, onUnlin
             </button>
           </section>
         ) : null}
-        {row.status === "new" && row.payables.some((item) => item.id !== row.match?.id) && !(entry && row.candidates.some((candidate) => candidate.sure)) ? (
-          <details className="b-apply" open={Boolean(other) || undefined}>
+        {row.status === "new" &&
+        row.payables.length > 0 &&
+        (gone || !row.match || row.payables.some((item) => item.id !== row.match?.id)) &&
+        !(entry && row.candidates.some((candidate) => candidate.sure)) ? (
+          <details className="b-apply" open={Boolean(other || gone) || undefined}>
             <summary>
               <ChevronRight size={14} className="b-apply-chevron" aria-hidden />
               Pay an open invoice instead
             </summary>
             <div className="b-apply-body">
+              {gone ? <p className="b-hint">The invoice you chose is no longer open. Choose again.</p> : null}
               <div className="b-candidates" role="radiogroup" aria-label="Invoice to pay">
                 {row.payables.map((item) => (
                   <label key={item.id} className={cx("b-candidate is-invoice", item.id === invoice?.id && "is-on")}>
