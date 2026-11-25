@@ -32,6 +32,8 @@ const HOST_REFUSAL_REASONS: Readonly<Record<string, string>> = {
   paused: "Live editing is paused for this page. Resume it in dohc to edit here.",
   "conflict-parent-withheld":
     "A conflict was resolved in this page, so live editing can't resume. Open Live documents in dohc to make a copy that can go live.",
+  "session-host-diverged":
+    "The server's copy of this workspace no longer matches the synced one, so live editing stopped. Contact the server's operator.",
 };
 // A server that edits no pages live leaves the page to read, as the phone does.
 const READ_ONLY = "live_hosting_unsupported";

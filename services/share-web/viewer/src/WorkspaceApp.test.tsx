@@ -2807,6 +2807,10 @@ describe("the owner's page", () => {
       "conflict-parent-withheld",
       "A conflict was resolved in this page, so live editing can't resume. Open Live documents in dohc to make a copy that can go live.",
     ],
+    [
+      "session-host-diverged",
+      "The server's copy of this workspace no longer matches the synced one, so live editing stopped. Contact the server's operator.",
+    ],
   ])("tells the owner why a page refused with %s", async (code, sentence) => {
     server({ level: "edit", session: OWNER_SESSION });
     vi.mocked(openMemberPage).mockResolvedValue({ kind: "refused", code });
