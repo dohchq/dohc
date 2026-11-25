@@ -15,7 +15,7 @@ Treat this file as good defaults. The person you work with can override any of i
 5. **Agent agnostic.** dohc doesn't provide or supervise agents. A control does the action it names. It never opens an agent prompt.
 6. **Chat is part of the workspace.** Chat links to files, data, and apps, and what it produces can become real work.
 7. **Apps are real web apps.** Their source lives in the workspace. They see only what their owner exposes. Anyone can open a shared app by its URL.
-8. **Strict foundation, free workflow.** Ownership, sign-in, permissions, sync, history, and isolation are strict. Everything else is the user's choice. App source and Collection automations are files any agent can edit. Changing sharing, apps, or chat never changes how the others store data. dohc ships no fixed workflows or built-in business apps.
+8. **Strict foundation, free workflow.** Capability-secure microservices, disguised as Folders, Collections, and Apps. Ownership, sign-in, permissions, sync, history, and isolation are strict. Everything else is the user's choice. App source and Collection automations are files any agent can edit. Changing sharing, apps, or chat never changes how the others store data. dohc ships no fixed workflows or built-in business apps.
 9. **Serious engine, small audience.** "Small" means personal or small-group apps. Build a runtime engineers choose for real work. Keep the runtime and app tools fast and inspectable. Raise or remove accidental limits that block demanding apps. If an app needs new access, add a scoped capability its owner approves.
 
 ### Jobs to test ideas against
@@ -25,6 +25,7 @@ Treat this file as good defaults. The person you work with can override any of i
 - **Share work in progress.** The other person and their agents get everything they need to continue. A zip file is not enough.
 - **Tailor the workspace.** People and agents change, copy, and share apps and automations.
 - **Run real accounting.** One person keeps double-entry books in a workspace app. They import bank transactions and attach receipts. Their accountant checks reports through a read-only share link.
+- **Run a team on shared Collections.** A product manager owns a roadmap Collection with typed operations. Teammates build and share their own triage and rollup apps on top of it without copying data, breaking each other's apps, or widening anyone's permissions.
 
 ## Invariants
 
