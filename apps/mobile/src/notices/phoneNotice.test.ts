@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AccountWorkspace } from "../server/api";
 import type { NoticeRecord } from "../server/notices";
 import type { WorkspaceList } from "../server/workspaceList";
-import { phoneTarget, presentNotice } from "./phoneNotice";
+import { noticePages, phoneTarget, presentNotice } from "./phoneNotice";
 import { noticeDetails, noticeRowAccessibility, swipesUnread } from "./rowAccessibility";
 
 const record: NoticeRecord = {
@@ -71,6 +71,23 @@ describe("where a Notice opens on the phone", () => {
     ).toEqual({ kind: "agents" });
     expect(phoneTarget({ ...record, target: { share: "s1" } }, listed([trip]))).toBeNull();
     expect(phoneTarget({ ...record, target: null }, listed([trip]))).toBeNull();
+  });
+});
+
+describe("the pages Notices read ahead", () => {
+  it("reads only the pages the open workspace's Notices open", () => {
+    const camp: AccountWorkspace = { ...trip, workspaceId: "w2", name: "Camp" };
+    const records: NoticeRecord[] = [
+      { ...record, noticeId: "n1", target: { path: "plans/day.md" } },
+      record,
+      { ...record, noticeId: "n3", target: { path: "budget/automations.yaml" } },
+      { ...record, noticeId: "n4", workspaceId: "w2", target: { path: "camp.md" } },
+      { ...record, noticeId: "n5", target: { path: "packing.md" } },
+    ];
+    expect(noticePages(records, listed([trip, camp]), "w1")).toEqual([
+      "plans/day.md",
+      "packing.md",
+    ]);
   });
 });
 

@@ -7,11 +7,12 @@ import { useCallback, useEffect, useRef, type RefObject } from "react";
 import { Platform, StyleSheet, Text, View } from "react-native";
 import { SettingsButton } from "../account/SettingsButton";
 import { HeaderButton } from "../AndroidHeader";
+import { useAccount } from "../account/AccountProvider";
 import { useTheme } from "../theme";
 import { HoldRow } from "../workspace/ListStates";
 import { NoticeRow } from "./NoticeRow";
 import { useNotices } from "./NoticesState";
-import type { PhoneNotice } from "./phoneNotice";
+import { noticePages, type PhoneNotice } from "./phoneNotice";
 import { freeAnswer, useAnswerReveal } from "./useAnswerReveal";
 
 // The account's Notices, and failures held on this phone. The header shows at once. Until the whole list is known,
@@ -31,6 +32,11 @@ export function ServerNotices() {
     see(focused ? onScreen.current : null);
     return () => see(null);
   }, [focused, see]);
+  const { data, notices: records, workspaces } = useAccount();
+  useEffect(() => {
+    if (focused && data && records)
+      data.prefetchPages(noticePages(records.state().notices, workspaces, data.workspaceId));
+  }, [focused, data, records, workspaces, notices]);
   const onViewableItemsChanged = useCallback(
     ({ viewableItems }: OnViewableItemsChangedInfo<PhoneNotice>) => {
       onScreen.current = viewableItems.map(({ item }) => item.id);
