@@ -295,6 +295,19 @@ async function newQuickJS(memoryBytes: number): Promise<QuickJS> {
   };
 }
 
+// V8 runs a full garbage collection about every second 24 MiB memory, so a persistent worker makes its next
+// instance while it waits for a command. Each instance still serves one operation.
+let spare: { memoryBytes: number; quickjs: Promise<QuickJS | undefined> } | undefined;
+export function prepareQuickJS(memoryBytes: number): void {
+  spare ??= { memoryBytes, quickjs: newQuickJS(memoryBytes).catch(() => undefined) };
+}
+async function freshQuickJS(memoryBytes: number): Promise<QuickJS> {
+  const claimed = spare;
+  spare = undefined;
+  const ready = claimed?.memoryBytes === memoryBytes ? await claimed.quickjs : undefined;
+  return ready ?? newQuickJS(memoryBytes);
+}
+
 // The trusted caller owns the transaction and clears authorization before host metadata writes.
 export async function evaluate(
   db: DatabaseSync,
@@ -322,7 +335,7 @@ export async function evaluate(
     persistentRowidTables.set(db, tables);
   }
   authorize(db, request, options);
-  return run(await newQuickJS(request.limits.memoryBytes), db, request, options);
+  return run(await freshQuickJS(request.limits.memoryBytes), db, request, options);
 }
 
 function run(

@@ -15,7 +15,7 @@ import {
   datasetNumberText,
   losslessDatasetNumber,
 } from "@dohc/security-contract/dataset-conversion";
-import { authorize, evaluate, hasStatement, sqlTokens } from "./guest.js";
+import { authorize, evaluate, hasStatement, prepareQuickJS, sqlTokens } from "./guest.js";
 import {
   AppBackendLimitError,
   appBackendLimit,
@@ -412,6 +412,7 @@ async function handle(command: PersistentCommand): Promise<PersistentResult> {
     transaction = true;
     const session = db.createSession();
     const limits = operationLimits(config.limits, command.profile);
+    guestMemoryBytes = limits.memoryBytes;
     let result: JsonValue,
       attachedFileIds: string[],
       changeset: Uint8Array,
@@ -759,6 +760,7 @@ const parentPort = (
 const send = (reply: PersistentWorkerMessage) =>
   parentPort ? parentPort.postMessage(reply) : process.send!(reply);
 let activeId: number | undefined;
+let guestMemoryBytes: number | undefined;
 let batching = false;
 let step = "";
 // The CPU budget of the dataset check running now. The host lets its step stay quiet long enough to use it.
@@ -818,7 +820,11 @@ async function receive(message: { id: number; command: PersistentCommand }): Pro
     busy = false;
     activeId = undefined;
     batching = false;
+    setImmediate(prepareSpare);
   }
+}
+function prepareSpare(): void {
+  if (db && !busy && !pending && guestMemoryBytes) prepareQuickJS(guestMemoryBytes);
 }
 if (parentPort) parentPort.on("message", ({ data }) => void receive(data));
 else {

@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it, vi } from "vitest";
-import { evaluate, hasStatement } from "./guest.ts";
+import { evaluate, hasStatement, prepareQuickJS } from "./guest.ts";
 import type { GuestRequest } from "./guest.ts";
 import { DEFAULT_LIMITS } from "./protocol.ts";
 
@@ -269,6 +269,23 @@ describe("reusable guest evaluator", () => {
         blocked: [true, true, true],
         rows: [{ id: 1, value: "saved" }],
       });
+    });
+  });
+
+  it("starts each operation in a new instance when the worker made one ahead", async () => {
+    await withDatabase(async (db) => {
+      const persistent = { persistentConnection: true };
+      const hold =
+        "globalThis.held = []; for (let i = 0; i < 16; i++) held.push(new Uint8Array(1 << 20)); return held.length;";
+      for (let operation = 0; operation < 3; operation++) {
+        prepareQuickJS(DEFAULT_LIMITS.memoryBytes);
+        expect((await evaluate(db, request(hold), persistent)).resultJson).toBe("16");
+      }
+      prepareQuickJS(DEFAULT_LIMITS.memoryBytes);
+      const lowered = { limits: { ...DEFAULT_LIMITS, memoryBytes: 16 << 20 } };
+      await expect(evaluate(db, request(hold, lowered), persistent)).rejects.toThrow(
+        "App operation needed more than its 16 MiB memory limit, so it stopped.",
+      );
     });
   });
 
