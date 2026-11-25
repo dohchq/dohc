@@ -60,6 +60,12 @@ pub fn owner_holds_live_in(
 const OWNER_DRAFT_REFUSAL_ACTOR: &str = "owner-draft-refusal";
 const OWNER_DRAFT_QUARANTINE_ACTOR: &str = "owner-draft-quarantine";
 
+/// The source of the field history an owner's queued update writes. A Stop
+/// that releases the update records it under the same source.
+pub(crate) fn queued_history_source(update_digest: &str) -> String {
+    format!("owner-draft:{update_digest}")
+}
+
 /// Diff the visible owner fields against their current Collection index.
 pub(super) fn index_frontmatter_in_tx(
     tx: &rusqlite::Transaction<'_>,
@@ -67,6 +73,7 @@ pub(super) fn index_frontmatter_in_tx(
     visible: &crate::Ydoc,
     actor: Option<&str>,
     attribution: Option<&dohc_engine_domain::ChangeAttribution>,
+    source_update: Option<(&str, i64)>,
     now_ms: i64,
 ) -> Result<(), OwnerOutboxError> {
     let before = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
@@ -77,11 +84,21 @@ pub(super) fn index_frontmatter_in_tx(
     )
     .map_err(index_error)?;
     if let Some(before) = before {
-        index_frontmatter_from_in_tx(tx, binding, &before, visible, actor, attribution, now_ms)?;
+        index_frontmatter_from_in_tx(
+            tx,
+            binding,
+            &before,
+            visible,
+            actor,
+            attribution,
+            source_update,
+            now_ms,
+        )?;
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn index_frontmatter_from_in_tx(
     tx: &rusqlite::Transaction<'_>,
     binding: &LiveObjectBinding,
@@ -89,6 +106,7 @@ pub(super) fn index_frontmatter_from_in_tx(
     visible: &crate::Ydoc,
     actor: Option<&str>,
     attribution: Option<&dohc_engine_domain::ChangeAttribution>,
+    source_update: Option<(&str, i64)>,
     now_ms: i64,
 ) -> Result<(), OwnerOutboxError> {
     let after = visible.frontmatter_json();
@@ -104,7 +122,7 @@ pub(super) fn index_frontmatter_from_in_tx(
         None,
         actor,
         attribution,
-        None,
+        source_update,
         now_ms,
     )
     .map_err(index_error)?;
@@ -541,6 +559,7 @@ pub fn refuse_entry_in_tx(
             &parent.binding,
             &visible,
             Some(OWNER_DRAFT_REFUSAL_ACTOR),
+            None,
             None,
             now_ms,
         )?;
@@ -2414,6 +2433,7 @@ pub(crate) fn quarantine_in_tx(
                 &parent.binding,
                 &native,
                 Some(OWNER_DRAFT_QUARANTINE_ACTOR),
+                None,
                 None,
                 now_ms,
             )?;

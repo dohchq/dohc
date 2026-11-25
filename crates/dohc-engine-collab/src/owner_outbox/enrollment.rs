@@ -271,7 +271,7 @@ pub fn enroll_in_tx(
             &checkpoint,
             now_ms,
         )?;
-        index_frontmatter_in_tx(tx, &input.binding, &host, None, None, now_ms)?;
+        index_frontmatter_in_tx(tx, &input.binding, &host, None, None, None, now_ms)?;
         return Ok(draft);
     }
     host.apply(&local_bytes).map_err(collab)?;
@@ -304,7 +304,7 @@ pub fn enroll_in_tx(
         &input.host_vector,
         now_ms,
     )?;
-    index_frontmatter_in_tx(tx, &input.binding, &host, None, None, now_ms)?;
+    index_frontmatter_in_tx(tx, &input.binding, &host, None, None, None, now_ms)?;
     let observed = ObservedOwnerBinding {
         binding: input.binding.clone(),
         relay_database_namespace: input.relay_database_namespace.clone(),

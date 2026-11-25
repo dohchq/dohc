@@ -3458,15 +3458,69 @@ fn insert_field_history(
     author_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
     source_update: Option<(&str, i64)>,
+    released: bool,
     recorded_at_ms: i64,
 ) -> Result<Option<i64>, crate::DomainError> {
     let (source_origin_id, source_origin_seq) = source_update
         .map(|(origin_id, origin_seq)| (Some(origin_id), Some(origin_seq)))
         .unwrap_or((None, None));
     let run = attribution.and_then(|attribution| attribution.run.as_ref());
-    let inserted = conn
-        .execute(
-            "INSERT INTO collection_field_history \
+    let (previous_json, next_json) = (history_value(previous)?, history_value(next)?);
+    let values = params![
+        workspace_id,
+        version_id,
+        record_id,
+        field_name,
+        previous_json,
+        next_json,
+        author_origin_id,
+        source_origin_id,
+        source_origin_seq,
+        attribution.map(|attribution| attribution.actor_kind.as_str()),
+        attribution.and_then(|attribution| attribution.on_behalf_of.as_deref()),
+        attribution.map(|attribution| i64::from(attribution.depth)),
+        recorded_at_ms,
+        run.map(|run| run.claim_id.as_str()),
+        run.map(|run| run.automation_name.as_str()),
+    ];
+    if released && source_update.is_some() {
+        let queued = conn
+            .query_row(
+                "UPDATE collection_field_history SET author_origin_id=?7, actor_kind=?10, \
+                   on_behalf_of=?11, chain_depth=?12, automation_claim_id=?14, automation_name=?15 \
+                 WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3 AND field_name=?4 \
+                   AND previous_value_json IS ?5 AND next_value_json IS ?6 \
+                   AND source_origin_id=?8 AND source_origin_seq=?9 \
+                   AND NOT EXISTS(SELECT 1 FROM collection_field_history later \
+                     WHERE later.workspace_id=?1 AND later.version_id=?2 AND later.record_id=?3 \
+                       AND later.field_name=?4 AND later.source_origin_id IS NULL \
+                       AND later.history_id>collection_field_history.history_id) \
+                 RETURNING history_id",
+                values,
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(crate::DomainError::sql_persist)?;
+        if queued.is_some() {
+            return Ok(queued);
+        }
+        return insert_field_history(
+            conn,
+            workspace_id,
+            version_id,
+            record_id,
+            field_name,
+            previous,
+            next,
+            author_origin_id,
+            attribution,
+            None,
+            false,
+            recorded_at_ms,
+        );
+    }
+    conn.query_row(
+        "INSERT INTO collection_field_history \
          (workspace_id,version_id,record_id,field_name,previous_value_json, \
           next_value_json,author_origin_id,source_origin_id,source_origin_seq, \
           actor_kind,on_behalf_of,chain_depth,recorded_at_ms, \
@@ -3474,29 +3528,13 @@ fn insert_field_history(
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15) \
          ON CONFLICT(workspace_id,version_id,record_id,field_name, \
                      source_origin_id,source_origin_seq) \
-         WHERE source_origin_id IS NOT NULL DO NOTHING",
-            params![
-                workspace_id,
-                version_id,
-                record_id,
-                field_name,
-                history_value(previous)?,
-                history_value(next)?,
-                author_origin_id,
-                source_origin_id,
-                source_origin_seq,
-                attribution.map(|attribution| attribution.actor_kind.as_str()),
-                attribution.and_then(|attribution| attribution.on_behalf_of.as_deref()),
-                attribution.map(|attribution| i64::from(attribution.depth)),
-                recorded_at_ms,
-                run.map(|run| run.claim_id.as_str()),
-                run.map(|run| run.automation_name.as_str()),
-            ],
-        )
-        .map_err(crate::DomainError::sql_persist)?;
-    // A conflict-skipped insert (an already-recorded source coordinate) is a
-    // replay: no new row, no new fact.
-    Ok((inserted == 1).then(|| conn.last_insert_rowid()))
+         WHERE source_origin_id IS NOT NULL DO NOTHING \
+         RETURNING history_id",
+        values,
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(crate::DomainError::sql_persist)
 }
 
 /// Diff the applied frontmatter state, append attributed field history, and
@@ -3518,6 +3556,69 @@ pub fn index_collection_frontmatter_apply_in_tx(
     author_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
     source_update: Option<(&str, i64)>,
+    recorded_at_ms: i64,
+) -> Result<Option<CollectionRecordApplyFacts>, crate::DomainError> {
+    index_frontmatter_apply_in_tx(
+        conn,
+        workspace_id,
+        version_id,
+        object_id,
+        (before, after),
+        (authored_before, authored_after),
+        after_provenance,
+        author_origin_id,
+        attribution,
+        source_update,
+        false,
+        recorded_at_ms,
+    )
+}
+
+/// Index an owner's queued update that a Stop releases. A field change the
+/// queue already recorded under `queued_source` keeps its history row and
+/// takes the release's author. Any other change gets a row of its own.
+#[allow(clippy::too_many_arguments)]
+pub fn index_released_collection_frontmatter_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    before: &Value,
+    after: &Value,
+    author_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+    queued_source: &str,
+    recorded_at_ms: i64,
+) -> Result<Option<CollectionRecordApplyFacts>, crate::DomainError> {
+    index_frontmatter_apply_in_tx(
+        conn,
+        workspace_id,
+        version_id,
+        object_id,
+        (before, after),
+        (before, after),
+        None,
+        author_origin_id,
+        attribution,
+        Some((queued_source, 0)),
+        true,
+        recorded_at_ms,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn index_frontmatter_apply_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    (before, after): (&Value, &Value),
+    (authored_before, authored_after): (&Value, &Value),
+    after_provenance: Option<&FrontmatterProvenance>,
+    author_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+    source_update: Option<(&str, i64)>,
+    released: bool,
     recorded_at_ms: i64,
 ) -> Result<Option<CollectionRecordApplyFacts>, crate::DomainError> {
     let Some((record_id, collection_path, index_initialized)) =
@@ -3559,6 +3660,7 @@ pub fn index_collection_frontmatter_apply_in_tx(
                 author_origin_id,
                 attribution,
                 source_update,
+                released,
                 recorded_at_ms,
             )?;
             if let Some(history_id) = history_id {
@@ -3609,6 +3711,7 @@ pub fn index_collection_frontmatter_apply_in_tx(
                 author_origin_id,
                 attribution,
                 source_update,
+                released,
                 recorded_at_ms,
             )?;
             if let Some(history_id) = history_id {
@@ -3664,7 +3767,9 @@ pub fn index_collection_frontmatter_apply_in_tx(
         attribution: attribution.cloned(),
         shared_author: None,
         live_cursor: None,
-        source: source_update.map(|(origin_id, origin_seq)| (origin_id.to_owned(), origin_seq)),
+        source: source_update
+            .filter(|_| !released)
+            .map(|(origin_id, origin_seq)| (origin_id.to_owned(), origin_seq)),
         recorded_at_ms,
         fields: field_facts,
     }))

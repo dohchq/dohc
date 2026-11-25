@@ -3713,11 +3713,57 @@ async fn stop_records_each_edit_of_a_collection_record_apart() {
         .map(|status| f.doc.frontmatter_set("status", status).unwrap())
         .to_vec();
     let (f, supervisor, actor) = pending_release_fixture_updates(f, updates).await;
-    let queued = record_history(&f.store, RELEASED_RECORD);
     let rows = stop_action(&actor, &f, "release").await.unwrap();
     assert_eq!(f.store.table_row_count("ydoc_updates").unwrap(), 3);
-    assert_eq!(record_history(&f.store, RELEASED_RECORD) - queued, 3);
+    assert_eq!(record_history(&f.store, RELEASED_RECORD), 3);
     assert_eq!(rows[0].record_facts.len(), 3);
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn stop_lists_each_queued_field_change_once_in_record_history() {
+    let f = observed_record_release_fixture();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
+    for (index, status) in ["To do", "Doing", "Done"].into_iter().enumerate() {
+        actor
+            .owner_ydoc_append_draft(
+                "workspace".into(),
+                dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
+                    person_edit: true,
+                    binding: f.binding.clone(),
+                    expected_revision: Some(1),
+                    append_key: format!("status-{index}"),
+                    update: f.doc.frontmatter_set("status", status).unwrap(),
+                    now_ms: 10 + index as i64,
+                    agent_declaration: None,
+                    agent_run_id: None,
+                    automation_declaration: None,
+                },
+                CancellationToken::new(),
+                Arc::new(()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let queued = record_history_rows(&f.store, RELEASED_RECORD);
+    assert_eq!(
+        queued.iter().map(|(_, at)| *at).collect::<Vec<_>>(),
+        [10, 11, 12]
+    );
+    stop_action(&actor, &f, "request").await.unwrap();
+    let rows = stop_action(&actor, &f, "release").await.unwrap();
+    assert_eq!(record_history_rows(&f.store, RELEASED_RECORD), queued);
+    assert_eq!(
+        rows[0]
+            .record_facts
+            .iter()
+            .flat_map(|facts| facts.fields.iter().map(|field| field.history_id))
+            .collect::<Vec<_>>(),
+        queued.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+    );
     supervisor.close_all().unwrap();
 }
 
@@ -6044,6 +6090,18 @@ fn record_history(store: &EngineStore, record_id: &str) -> i64 {
                 [record_id],
                 |row| row.get(0),
             )
+        })
+        .unwrap()
+}
+
+fn record_history_rows(store: &EngineStore, record_id: &str) -> Vec<(i64, i64)> {
+    store
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT history_id, recorded_at_ms FROM collection_field_history WHERE record_id=?1 ORDER BY history_id",
+            )?
+            .query_map([record_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()
         })
         .unwrap()
 }
