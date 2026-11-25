@@ -1,8 +1,15 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { AUTOMATION_SERVER_MAX_WORKSPACES } from "@dohc/workspace-contracts/relay";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import type { AutomationReplica, startAutomationReplicas } from "./automationReplicas";
 import { RelayError } from "./errors";
-import { ACCOUNT_VISITS_PER_ACCOUNT, startServerCopies, type CopyVisitor } from "./serverCopies";
+import {
+  ACCOUNT_VISITS_PER_ACCOUNT,
+  READ_HOLD_MS,
+  startServerCopies,
+  type CopyAutomations,
+  type CopyVisitor,
+} from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
 import type { CopyReason } from "./storage/automationWorkspaces";
 import type { StorageContext } from "./storage/context";
@@ -32,7 +39,7 @@ async function relay(
   return storage;
 }
 
-async function copies(storage: SyncRelayStorage) {
+async function copies(storage: SyncRelayStorage, automations?: CopyAutomations) {
   const open = new Map<string, AutomationReplica>();
   let hooks: Parameters<typeof startAutomationReplicas>[0] | undefined;
   let opens = true;
@@ -74,6 +81,7 @@ async function copies(storage: SyncRelayStorage) {
     relayOrigin: "https://relay.example.test",
     key: new Uint8Array(32),
     namespace: "test",
+    ...(automations ? { automations } : {}),
     startReplicas: async (options) => {
       hooks = options;
       return {
@@ -182,6 +190,81 @@ describe("an account's visits to the server's copies", () => {
       .prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'ben' WHERE workspace_id = 'trip'")
       .run();
     expect((await refusal(visit)).code).toBe("not_found");
+  });
+});
+
+describe("the hold a read keeps on its copy", () => {
+  const read = (caller = "session-1"): CopyVisitor => ({
+    reason: "account",
+    caller,
+    signal: new AbortController().signal,
+    phone: true,
+    hold: true,
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("keeps the copy open for READ_HOLD_MS after the read, and only after a read", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const storage = await relay(["trip", "notes"]);
+    const run = await copies(storage);
+    await run.copies.withServerCopy(OWNER, "trip", read(), async () => undefined);
+    await run.copies.withServerCopy(OWNER, "notes", phone(), async () => undefined);
+    await vi.waitFor(() => expect(run.copies.replica("notes")).toBeUndefined());
+    expect(run.wanted()).toEqual(new Map([["trip", ["account"]]]));
+    expect(run.copies.replica("trip")).toBeDefined();
+    await vi.advanceTimersByTimeAsync(READ_HOLD_MS);
+    await vi.waitFor(() => expect(run.copies.replica("trip")).toBeUndefined());
+    expect(run.wanted()).toEqual(new Map());
+  });
+
+  it("counts toward no visit limit, and keeps an account's newest holds within its visit limit", async () => {
+    const ids = Array.from({ length: ACCOUNT_VISITS_PER_ACCOUNT + 1 }, (_, n) => `w-${n}`);
+    const storage = await relay(ids);
+    const run = await copies(storage);
+    for (const workspaceId of ids.slice(0, ACCOUNT_VISITS_PER_ACCOUNT))
+      await run.copies.withServerCopy(OWNER, workspaceId, read(), async () => undefined);
+    const last = ids.at(-1)!;
+    expect(
+      await run.copies.withServerCopy(OWNER, last, read(), async (replica) => replica.workspaceId),
+    ).toBe(last);
+    expect([...run.wanted().keys()].sort()).toEqual(ids.slice(1));
+  });
+
+  it("gives way at once to automations and a visit that need its place, and does not come back", async () => {
+    const automated = Array.from(
+      { length: AUTOMATION_SERVER_MAX_WORKSPACES - 1 },
+      (_, n) => `automated-${n}`,
+    );
+    const storage = await relay(["held", "next", ...automated]);
+    let running: string[] = [];
+    const run = await copies(storage, {
+      wanted: () => running,
+      running: () => running,
+      ready: () => true,
+    });
+    await run.copies.withServerCopy(OWNER, "held", read(), async () => undefined);
+    running = automated;
+    run.copies.reconcile();
+    await vi.waitFor(() => expect(run.copies.replica(automated.at(-1)!)).toBeDefined());
+    expect(run.wanted().has("held"), "the last place is free").toBe(true);
+    await run.copies.withServerCopy(OWNER, "next", phone(), async () => {
+      expect(run.wanted().has("held")).toBe(false);
+    });
+    expect(run.copies.replica("held")).toBeUndefined();
+    expect(run.wanted().has("held")).toBe(false);
+  });
+
+  it("ends when the workspace stops showing on the phone", async () => {
+    const storage = await relay();
+    const run = await copies(storage);
+    await run.copies.withServerCopy(OWNER, "trip", read(), async () => undefined);
+    storage.setShowOnPhone({ ownerUserId: OWNER, workspaceId: "trip", showOnPhone: false });
+    run.copies.reconcile("trip");
+    await vi.waitFor(() => expect(run.copies.replica("trip")).toBeUndefined());
+    storage.setShowOnPhone({ ownerUserId: OWNER, workspaceId: "trip", showOnPhone: true });
+    expect(run.wanted()).toEqual(new Map());
   });
 });
 

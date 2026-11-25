@@ -128,7 +128,7 @@ export async function runAccountOperation(
   return await server.copies.withServerCopy(
     input.owner,
     input.workspaceId,
-    input.visitor,
+    { ...input.visitor, hold: true },
     async (replica) => {
       await input.authorize();
       // The sync brings the copy at least this far.

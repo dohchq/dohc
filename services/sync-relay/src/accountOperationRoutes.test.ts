@@ -602,6 +602,22 @@ describe("a page read on a caught-up copy", () => {
     await answer(await page);
   });
 
+  it("keeps the copy open after a read until Show on phone turns off", async () => {
+    const { engine, h, copies } = await relay();
+    await seedTrip(engine);
+    await answer(await h(read.clone()));
+    await expect.poll(() => copies.replica("trip")).toBeDefined();
+    const hidden = await h(
+      new Request("http://relay.test/sync/account/workspaces/trip", {
+        method: "PATCH",
+        headers: { ...signedIn("ana"), "content-type": "application/json" },
+        body: JSON.stringify({ showOnPhone: false }),
+      }),
+    );
+    expect(hidden.status).toBe(200);
+    await expect.poll(() => copies.replica("trip")).toBeUndefined();
+  });
+
   it("syncs a copy that is no longer the workspace's current one", async () => {
     let reads = 0;
     const { storage, engine, h, syncs } = await relay({

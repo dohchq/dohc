@@ -876,7 +876,10 @@ export function createSyncRelayHandler({
         storage,
         resolveAccountSession: resolvePhoneCapableAccountSession,
         sockets: ownerSockets,
-        hidden: (userId, workspaceId) => phoneApps.end({ userId, workspaceId }),
+        hidden: (userId, workspaceId) => {
+          phoneApps.end({ userId, workspaceId });
+          serverCopies()?.reconcile(workspaceId);
+        },
       })
     : undefined;
   const accountFeedWaits = createAccountFeedWaits(storage, discussionActivity);

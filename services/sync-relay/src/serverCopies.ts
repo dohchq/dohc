@@ -11,6 +11,8 @@ export const ACCOUNT_VISITS_PER_ACCOUNT = 4;
 export const ACCOUNT_VISITS_PER_CALLER = 4;
 // A visit waits this long for its copy to open.
 const COPY_OPEN_MS = 30_000;
+/** How long a read's hold keeps the copy open after the visit, so the account's next read finds it caught up. */
+export const READ_HOLD_MS = 5 * 60_000;
 
 /**
  * Who a visit is for. An account visit names its credential, such as a
@@ -20,7 +22,14 @@ const COPY_OPEN_MS = 30_000;
  */
 export type CopyVisitor =
   | { reason: "automation" }
-  | { reason: "account"; caller: string; signal: AbortSignal; phone: boolean };
+  | {
+      reason: "account";
+      caller: string;
+      signal: AbortSignal;
+      phone: boolean;
+      /** Keep the copy open for READ_HOLD_MS after the visit, while its workspace shows on the phone. */
+      hold?: boolean;
+    };
 
 /** What the automation server tells the copies, when this server runs automations. */
 export interface CopyAutomations {
@@ -56,6 +65,12 @@ export async function startServerCopies(options: ServerCopiesOptions) {
   // Account visits held now, by credential and by account.
   const callerVisits = new Map<string, number>();
   const ownerVisits = new Map<string, number>();
+  // Copies kept open after a read, oldest first. A hold takes no visit's place and counts toward no limit.
+  const holds = new Map<string, { ownerUserId: string; timer: ReturnType<typeof setTimeout> }>();
+  const release = (workspaceId: string) => {
+    clearTimeout(holds.get(workspaceId)?.timer);
+    holds.delete(workspaceId);
+  };
   const waiters = new Set<() => void>();
   const recheck = () => {
     for (const check of [...waiters]) check();
@@ -119,13 +134,25 @@ export async function startServerCopies(options: ServerCopiesOptions) {
       0,
       AUTOMATION_SERVER_MAX_WORKSPACES,
     );
+    // A hold gives way to everything above, and ends once its workspace leaves the phone or its owner.
+    for (const [workspaceId, { ownerUserId }] of holds) {
+      const listed = ids.includes(workspaceId);
+      if (
+        !storage.workspaceIsOwnedBy(workspaceId, ownerUserId) ||
+        !storage.showsOnPhone(ownerUserId, workspaceId) ||
+        (!listed && ids.length >= AUTOMATION_SERVER_MAX_WORKSPACES)
+      )
+        release(workspaceId);
+      else if (!listed) ids.push(workspaceId);
+    }
     return new Map(
       ids.map((workspaceId) => {
         const visit = visits.get(workspaceId);
         const reasons: CopyReason[] = [];
         if (runs.has(workspaceId) || (visit !== undefined && visit.actions > visit.accountActions))
           reasons.push("automation");
-        if (visit !== undefined && visit.accountActions > 0) reasons.push("account");
+        if ((visit !== undefined && visit.accountActions > 0) || holds.has(workspaceId))
+          reasons.push("account");
         if (publishing.has(workspaceId)) reasons.push("publication");
         return [workspaceId, reasons];
       }),
@@ -315,6 +342,7 @@ export async function startServerCopies(options: ServerCopiesOptions) {
         ) {
           storage.endCopyReason(workspaceId, "account");
         }
+        if (visitor.reason === "account" && visitor.hold) hold(ownerUserId, workspaceId);
         if (current.actions > 1) {
           visits.set(workspaceId, { ...current, actions: current.actions - 1, accountActions });
         } else {
@@ -328,6 +356,20 @@ export async function startServerCopies(options: ServerCopiesOptions) {
     }
   }
 
+  /** Holds the copy open after a read, ending the account's oldest hold past its visit limit. */
+  function hold(ownerUserId: string, workspaceId: string): void {
+    release(workspaceId);
+    const mine = [...holds].filter(([, held]) => held.ownerUserId === ownerUserId);
+    const over = Math.max(0, mine.length + 1 - ACCOUNT_VISITS_PER_ACCOUNT);
+    for (const [id] of mine.slice(0, over)) release(id);
+    const timer = setTimeout(() => {
+      holds.delete(workspaceId);
+      replicas.reconcile();
+    }, READ_HOLD_MS);
+    timer.unref?.();
+    holds.set(workspaceId, { ownerUserId, timer });
+  }
+
   return {
     withServerCopy,
     /** The open copy of this workspace, or undefined. */
@@ -337,13 +379,19 @@ export async function startServerCopies(options: ServerCopiesOptions) {
     /** A copy became ready for automation visits. */
     notifyReady: recheck,
     async deleteWorkspaces(workspaceIds: readonly string[]) {
-      for (const id of workspaceIds) visits.delete(id);
+      for (const id of workspaceIds) {
+        visits.delete(id);
+        release(id);
+      }
       await replicas.deleteWorkspaces(workspaceIds);
     },
     /** Whether this server's copies of workspaces keep failing to open or sync. */
     get unavailable(): boolean {
       return replicas.unavailable;
     },
-    close: () => replicas.close(),
+    close: () => {
+      for (const id of [...holds.keys()]) release(id);
+      return replicas.close();
+    },
   };
 }
