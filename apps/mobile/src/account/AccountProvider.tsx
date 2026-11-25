@@ -187,10 +187,10 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   if (currentWorkspaceId && !choosing) launchTimings?.mark("chosen");
   const apps = useMemo(
     () =>
-      signIn && currentWorkspaceId
+      signIn && data
         ? createWorkspaceApps({
             signIn,
-            workspaceId: currentWorkspaceId,
+            workspaceId: data.workspaceId,
             runner,
             fetch,
             canOpen: canOpenApps,
@@ -198,15 +198,13 @@ export function AccountProvider({ children }: { children: ReactNode }) {
             ends: stores,
           })
         : null,
-    [signIn, currentWorkspaceId, runner, cache, stores],
+    [signIn, data, runner, cache, stores],
   );
   useEffect(() => () => apps?.stop(), [apps]);
   const collections = useMemo(
     () =>
-      signIn && currentWorkspaceId
-        ? createWorkspaceCollections(signIn, currentWorkspaceId, stores, cache)
-        : null,
-    [signIn, currentWorkspaceId, stores, cache],
+      signIn && data ? createWorkspaceCollections(signIn, data.workspaceId, stores, cache) : null,
+    [signIn, data, stores, cache],
   );
   useEffect(() => () => collections?.stop(), [collections]);
   useEffect(() => clearNoticeListsOnSignInChange(account, kept), [account, kept]);
