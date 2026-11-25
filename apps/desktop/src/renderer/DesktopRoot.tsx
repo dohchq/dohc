@@ -581,6 +581,8 @@ export function DesktopRoot() {
             <WorkspaceManager
               workspaces={workspaces}
               current={null}
+              userSettings={userSettings}
+              onUserSettingsChange={acceptUserSettings}
               handoffStatus={shareHandoffStatus}
               onDismissShareHandoff={dismissShareHandoff}
               onShareHandoffOpened={dismissShareHandoff}

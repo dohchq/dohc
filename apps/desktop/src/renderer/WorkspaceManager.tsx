@@ -11,16 +11,21 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ShareHandoffStatus } from "../ipc/bridgeContract";
+import type { DesktopUserSettingsResult, ShareHandoffStatus } from "../ipc/bridgeContract";
+import type { NoticeTarget } from "../notices/noticeTarget";
+import type { PrivacySettings } from "../settings/userSettings";
 import { bridge } from "./bridge";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { JoinSyncedWorkspace } from "./JoinSyncedWorkspace";
 import { displayPath, NewWorkspaceCard, openExistingFolder } from "./NewWorkspaceCard";
 import { OpenSharedView } from "./OpenSharedView";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
+import { ReportsPrivacyDialog } from "./settings/ReportsPrivacyDialog";
 import { ConnectionNotices, useConnectionNotices } from "./shell/connectionNotices";
 import { useKeptTyping } from "./shell/useKeptTyping";
 import { useCrashReport } from "./shell/useCrashReport";
+import { useStandaloneReportsNotice } from "./shell/useReportsNotice";
+import { ShellErrorReporter } from "./shell/useShellError";
 import { useWorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
 import { useMenuCommandsWithoutWorkspace } from "./appMenuCommands";
 import { JoinedWorkspaceMark, Titlebar, workspaceName } from "./Titlebar";
@@ -206,6 +211,10 @@ export function WorkspaceManager(props: {
   // The workspace open behind the manager, when there is one. Back returns
   // to it; removing it from the list drops to whatever remains.
   current: Workspace | null;
+  // Provided only on first run (no open workspace window), where this surface
+  // owns the reports notice and privacy dialog.
+  userSettings?: DesktopUserSettingsResult | null;
+  onUserSettingsChange?: (result: DesktopUserSettingsResult) => void;
   // May reject: the manager stays open and a toast says why.
   onOpenWorkspace: (workspace: Workspace) => void | Promise<void>;
   onForgot: () => Promise<unknown>;
@@ -215,6 +224,8 @@ export function WorkspaceManager(props: {
 }) {
   const [joining, setJoining] = useState(false);
   const [openingShare, setOpeningShare] = useState(false);
+  const [privacyOpen, setPrivacyOpen] = useState(false);
+  const [pendingPrivacy, setPendingPrivacy] = useState<PrivacySettings | null>(null);
   const [removing, setRemovingState] = useState<RemovalDialog | null>(null);
   // Written only with the state, so two requests in one turn see each other
   // whenever React renders.
@@ -229,6 +240,57 @@ export function WorkspaceManager(props: {
   const connectionNotices = useConnectionNotices();
   const keptTyping = useKeptTyping();
   const crashReportNotice = useCrashReport(connectionNotices);
+  const privacySaveRequest = useRequestSequence();
+  const userSettingsRef = useRef(props.userSettings ?? null);
+  userSettingsRef.current = props.userSettings ?? null;
+  const onUserSettingsChangeRef = useRef(props.onUserSettingsChange);
+  onUserSettingsChangeRef.current = props.onUserSettingsChange;
+  useEffect(() => {
+    setPendingPrivacy(null);
+  }, [props.userSettings]);
+  useEffect(
+    () => () => {
+      privacySaveRequest.next();
+    },
+    [privacySaveRequest],
+  );
+  const effectivePrivacy = pendingPrivacy ?? props.userSettings?.settings.privacy ?? null;
+  const { showReportsNotice: pushReportsNotice, reportsNotice } = connectionNotices;
+  const reportsNoticeShown = useStandaloneReportsNotice({
+    enabled: props.userSettings !== undefined,
+    privacy: effectivePrivacy,
+    notice: reportsNotice,
+    show: (reports) => pushReportsNotice(reports, () => setPrivacyOpen(true)),
+  });
+  const savePrivacy = useCallback(
+    async (privacy: PrivacySettings) => {
+      const current = userSettingsRef.current;
+      if (!current) return;
+      const requestId = privacySaveRequest.next();
+      setPendingPrivacy(privacy);
+      try {
+        const saved = await bridge().setUserSettings({
+          settings: { ...current.settings, privacy },
+          base: current.settings,
+        });
+        if (!privacySaveRequest.isCurrent(requestId)) return;
+        userSettingsRef.current = saved;
+        setPendingPrivacy(null);
+        onUserSettingsChangeRef.current?.(saved);
+      } catch (cause) {
+        if (!privacySaveRequest.isCurrent(requestId)) return;
+        setPendingPrivacy(null);
+        connectionNotices.reportError("dohc could not save your settings.", cause, () => {
+          void savePrivacy(privacy);
+        });
+      }
+    },
+    [connectionNotices.reportError, privacySaveRequest],
+  );
+  const openNoticeTarget = useCallback((target: NoticeTarget) => {
+    if (target.to === "privacy-settings") setPrivacyOpen(true);
+    return Promise.resolve(null);
+  }, []);
   // A folder the command line or the OS asked for that did not open.
   useWorkspacePathOpenFailures(null, connectionNotices.reportFailure);
   const update = useDesktopUpdate(connectionNotices.reportFailure);
@@ -269,6 +331,7 @@ export function WorkspaceManager(props: {
       !currentWorkspace ||
       joining ||
       openingShare ||
+      privacyOpen ||
       handoffStatus.status !== "idle" ||
       removing !== null
     )
@@ -289,7 +352,7 @@ export function WorkspaceManager(props: {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [currentWorkspace, handoffStatus.status, joining, openingShare, removing]);
+  }, [currentWorkspace, handoffStatus.status, joining, openingShare, privacyOpen, removing]);
 
   // A failed row action is a toast and a Notices row with Try again: the list
   // stays as it was, so the row is still there to act on. Each failure has an
@@ -591,6 +654,16 @@ export function WorkspaceManager(props: {
           onConfirm={() => void confirmRemoval(removing.workspace)}
         />
       ) : null}
+      {privacyOpen && effectivePrivacy ? (
+        <ShellErrorReporter.Provider value={connectionNotices.reportFailure}>
+          <ReportsPrivacyDialog
+            privacy={effectivePrivacy}
+            onChange={(privacy) => void savePrivacy(privacy)}
+            onError={(message, cause) => connectionNotices.reportError(message, cause, null)}
+            onClose={() => setPrivacyOpen(false)}
+          />
+        </ShellErrorReporter.Provider>
+      ) : null}
       <ConnectionNotices
         notices={connectionNotices.notices}
         reportFailure={connectionNotices.reportFailure}
@@ -598,6 +671,8 @@ export function WorkspaceManager(props: {
         onAction={connectionNotices.runNoticeAction}
         onHide={connectionNotices.hideNotice}
         onDismiss={connectionNotices.dismissNotice}
+        onShown={reportsNoticeShown}
+        onOpenTarget={openNoticeTarget}
         {...crashReportNotice}
         keptTyping={keptTyping.keptTyping}
         onDismissKeptTyping={keptTyping.dismiss}

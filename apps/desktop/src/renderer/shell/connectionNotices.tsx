@@ -1,9 +1,11 @@
 import { useCallback, useMemo, type ReactNode } from "react";
-import type { KeptTyping } from "../../ipc/bridgeContract";
+import type { KeptTyping, ReportKinds } from "../../ipc/bridgeContract";
+import type { NoticeTarget } from "../../notices/noticeTarget";
 import { bridge } from "../bridge";
 import {
   NoticeCenter,
   type CrashReportNotice,
+  type RowOpen,
   type WorkspaceErrorNotice,
 } from "../workbench/NoticeCenter";
 import { errorDetails } from "./copyDetails";
@@ -56,6 +58,7 @@ export function useConnectionNotices() {
     reportShellError,
     reportOpenFolderFailure,
     showSuccessNotice,
+    showReportsNotice,
     retryShellError,
     runShellErrorAction,
     hideShellError,
@@ -84,6 +87,7 @@ export function useConnectionNotices() {
     () =>
       shellErrors.map((error) => ({
         ...(error.tone ? { tone: error.tone } : {}),
+        ...(error.stays ? { stays: true } : {}),
         id: error.id,
         message: error.message,
         ...(error.title ? { title: error.title } : {}),
@@ -104,9 +108,14 @@ export function useConnectionNotices() {
           ? { additionalActionLabels: error.action.additional.map((action) => action.label) }
           : {}),
         seen: error.seen,
+        ...(error.target ? { target: error.target } : {}),
       })),
     [shellErrors],
   );
+  const reportsRow = shellErrors.find((error) => error.kind === "reports");
+  const reportsNotice: { id: string; reports: ReportKinds } | null = reportsRow?.reports
+    ? { id: reportsRow.id, reports: reportsRow.reports }
+    : null;
 
   return {
     reporter,
@@ -114,6 +123,8 @@ export function useConnectionNotices() {
     reportFailure: reportShellFailure,
     reportOpenFolderFailure,
     showSuccess: showSuccessNotice,
+    showReportsNotice,
+    reportsNotice,
     notices,
     retryNotice: retryShellError,
     runNoticeAction: runShellErrorAction,
@@ -164,6 +175,8 @@ export function ConnectionNotices(props: {
   onAction?: (id: string, index?: number) => void;
   onHide: (id: string) => void;
   onDismiss: (id: string) => void;
+  onShown?: (id: string) => void;
+  onOpenTarget?: (target: NoticeTarget, signal: AbortSignal) => RowOpen;
   crashReport?: CrashReportNotice | null;
   onSendCrashReport?: () => void;
   onDismissCrashReport?: () => void;
@@ -192,6 +205,8 @@ export function ConnectionNotices(props: {
           {...(props.onAction ? { onWorkspaceErrorAction: props.onAction } : {})}
           onHideWorkspaceError={props.onHide}
           onDismissWorkspaceError={props.onDismiss}
+          {...(props.onShown ? { onWorkspaceErrorShown: props.onShown } : {})}
+          {...(props.onOpenTarget ? { onOpenTarget: props.onOpenTarget } : {})}
           crashReport={props.crashReport ?? null}
           {...(props.onSendCrashReport ? { onSendCrashReport: props.onSendCrashReport } : {})}
           {...(props.onDismissCrashReport

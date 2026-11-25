@@ -3,13 +3,18 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  DesktopUserSettingsResult,
   KeptTyping,
   MenuCommand,
   ReadCrashReportResult,
+  ReadDiagnosticsResult,
+  ReportKinds,
   UpdateCheckResult,
 } from "../ipc/bridgeContract";
+import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { deferred } from "../testing/deferred";
+import { reportsNoticeText } from "./shell/useReportsNotice";
 import { WorkspaceManager } from "./WorkspaceManager";
 
 let menuListener: ((command: MenuCommand) => void) | null = null;
@@ -70,6 +75,19 @@ const bridge = {
   onNoticesChanged: vi.fn(() => () => undefined),
   listKeptTyping: vi.fn(async (): Promise<KeptTyping[]> => []),
   dismissKeptTyping: vi.fn(async () => undefined),
+  readReportsNotice: vi.fn(async (): Promise<ReportKinds> => ({ usage: false, errors: false })),
+  acknowledgeReportsNotice: vi.fn(async () => undefined),
+  setUserSettings: vi.fn(
+    async ({ settings }: { settings: DesktopUserSettingsResult["settings"] }) => ({
+      settings,
+      source: "stored" as const,
+    }),
+  ),
+  readDiagnostics: vi.fn(async (): Promise<ReadDiagnosticsResult> => ({
+    text: "dohc diagnostics",
+    available: { usage: true, errors: true },
+  })),
+  saveDiagnostics: vi.fn(async () => ({ saved: true })),
   windowRole: "workspace",
   platform: "linux" as NodeJS.Platform,
 };
@@ -691,5 +709,108 @@ describe("workspace manager with registered workspaces", () => {
     expect(screen.getByRole("button", { name: "Back" })).toBeTruthy();
     await user.keyboard("{Escape}");
     expect(screen.getByRole("button", { name: /Join a synced workspace/i })).toBeTruthy();
+  });
+
+  it("shows the reports notice on first run, opens the Privacy dialog, saves changes, and recovers on failure", async () => {
+    const user = userEvent.setup();
+    const initialSettings: DesktopUserSettingsResult = {
+      settings: structuredClone(DEFAULT_USER_SETTINGS),
+      source: "default",
+    };
+    const onUserSettingsChange = vi.fn();
+    bridge.readReportsNotice.mockResolvedValueOnce({ usage: true, errors: true });
+
+    const view = render(
+      <WorkspaceManager
+        workspaces={[]}
+        current={null}
+        userSettings={initialSettings}
+        onUserSettingsChange={onUserSettingsChange}
+        onForgot={async () => []}
+        onOpenWorkspace={() => {}}
+      />,
+    );
+
+    const noticeWords = reportsNoticeText({ usage: true, errors: true });
+    expect(await screen.findByText(noticeWords)).toBeTruthy();
+    await waitFor(() =>
+      expect(bridge.acknowledgeReportsNotice).toHaveBeenCalledExactlyOnceWith({
+        usage: true,
+        errors: true,
+      }),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Privacy settings" }));
+    const dialog = await screen.findByTestId("first-run-privacy-dialog");
+    expect(within(dialog).getByRole("heading", { name: "Privacy" })).toBeTruthy();
+
+    const usageSwitch = within(dialog).getByRole("switch", { name: "Send usage reports" });
+    expect(usageSwitch.getAttribute("aria-checked")).toBe("true");
+    await user.click(usageSwitch);
+    await waitFor(() =>
+      expect(bridge.setUserSettings).toHaveBeenCalledWith({
+        settings: {
+          ...initialSettings.settings,
+          privacy: { usageReports: false, errorReports: true },
+        },
+        base: initialSettings.settings,
+      }),
+    );
+    expect(onUserSettingsChange).toHaveBeenCalledWith({
+      settings: {
+        ...initialSettings.settings,
+        privacy: { usageReports: false, errorReports: true },
+      },
+      source: "stored",
+    });
+
+    const updatedSettings: DesktopUserSettingsResult = {
+      settings: {
+        ...initialSettings.settings,
+        privacy: { usageReports: false, errorReports: true },
+      },
+      source: "stored",
+    };
+    view.rerender(
+      <WorkspaceManager
+        workspaces={[]}
+        current={null}
+        userSettings={updatedSettings}
+        onUserSettingsChange={onUserSettingsChange}
+        onForgot={async () => []}
+        onOpenWorkspace={() => {}}
+      />,
+    );
+
+    bridge.setUserSettings.mockRejectedValueOnce(new Error("disk full"));
+    const errorSwitch = within(dialog).getByRole("switch", { name: "Send error reports" });
+    await user.click(errorSwitch);
+    expect(await screen.findByText(/dohc could not save your settings\./i)).toBeTruthy();
+    await waitFor(() => expect(errorSwitch.getAttribute("aria-checked")).toBe("true"));
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByTestId("first-run-privacy-dialog")).toBeNull();
+
+    // Clicking the durable row inside Notices reopens Privacy settings.
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(screen.getByText(noticeWords));
+    expect(await screen.findByTestId("first-run-privacy-dialog")).toBeTruthy();
+  });
+
+  it("does not read or show the reports notice in manager window mode (userSettings omitted)", async () => {
+    bridge.readReportsNotice.mockResolvedValue({ usage: true, errors: true });
+    render(
+      <WorkspaceManager
+        workspaces={KNOWN}
+        current={null}
+        onForgot={async () => KNOWN}
+        onOpenWorkspace={() => {}}
+      />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(bridge.readReportsNotice).not.toHaveBeenCalled();
+    expect(screen.queryByText(reportsNoticeText({ usage: true, errors: true }))).toBeNull();
   });
 });
