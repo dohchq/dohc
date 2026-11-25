@@ -486,7 +486,14 @@ it.each<[string, Edit | readonly Edit[], Edit, string, string]>([
     (doc: Y.Doc) => doc.getMap("frontmatter").set("count", 9007199254740993n),
     (doc: Y.Doc) => doc.getMap("frontmatter").set("count", 9007199254740995n),
     "---\ncount: 9007199254740995\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
-    'Set count to "9007199254740993". The note has "9007199254740995".\n',
+    "Set count to 9007199254740993. The note has 9007199254740995.\n",
+  ],
+  [
+    "a whole number too large for a float, in a field someone else set to text with the same digits",
+    (doc: Y.Doc) => doc.getMap("frontmatter").set("count", 9007199254740993n),
+    (doc: Y.Doc) => doc.getMap("frontmatter").set("count", "9007199254740993"),
+    "---\ncount: '9007199254740993'\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
+    'Set count to 9007199254740993. The note has "9007199254740993".\n',
   ],
   [
     "a to-do someone else set at the same moment",

@@ -78,7 +78,18 @@ function notDeleted(
 const json = (value: unknown) =>
   JSON.stringify(value, (_key, part: unknown) => (typeof part === "bigint" ? `${part}` : part));
 
-const same = (left: unknown, right: unknown) => json(left ?? null) === json(right ?? null);
+function same(left: unknown, right: unknown): boolean {
+  if (typeof left === "object" && typeof right === "object" && left !== null && right !== null) {
+    if (Array.isArray(left) !== Array.isArray(right)) return false;
+    const leftEntries = Object.entries(left);
+    const rightRecord = right as Record<string, unknown>;
+    return (
+      leftEntries.length === Object.keys(right).length &&
+      leftEntries.every(([key, part]) => Object.hasOwn(right, key) && same(part, rightRecord[key]))
+    );
+  }
+  return (left ?? null) === (right ?? null) || Object.is(left, right);
+}
 
 /**
  * The kept edits a rebuilt document dropped. Yjs merges a kept edit with
@@ -215,7 +226,11 @@ function editsNotInNote(doc: Y.Doc, kept: readonly Uint8Array[]): NotInNote[] {
 const shown = (value: unknown) =>
   value === undefined || value === null
     ? null
-    : `"${typeof value === "string" || typeof value === "bigint" ? value : json(value)}"`;
+    : typeof value === "string"
+      ? `"${value}"`
+      : typeof value === "bigint"
+        ? `${value}`
+        : json(value);
 
 function quoteOf(text: string): string {
   const line = text.replace(/\s+/gu, " ").trim();
