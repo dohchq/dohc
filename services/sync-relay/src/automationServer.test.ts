@@ -1449,29 +1449,7 @@ describe("the owner's routes to the server's runs", () => {
       const { storage, start } = await copies();
       const { fake } = await start(1);
       const refused = payRunRecord("claim-refused");
-      const write = {
-        kind: "field" as const,
-        recordId: "record-0",
-        path: "Tasks/0.md",
-        field: "Status",
-        before: "Open",
-        after: "Paid",
-        sharedFileUpdate: {
-          outboxId: "outbox-1",
-          appendKey: "seed-claim-refused/Status",
-          nativeHeadSequence: 1,
-          binding: {
-            workspaceId: WORKSPACE,
-            mainVersionId: "main",
-            objectId: "record-0",
-            lineageClaimId: "a".repeat(64),
-            currentPath: "Tasks/0.md",
-            selectorPaths: ["Tasks"],
-            restoreFenceGeneration: 0,
-          },
-        },
-      };
-      fake.executor.reportRefusedSharedUpdates = async (report) => report(refused, [write]);
+      fake.executor.reportRefusedSharedUpdates = async (report) => report(refused);
       fake.options.beforeEffect!(refused, setStatus(0));
       fake.options.onRunEnded!(refused);
       await vi.waitFor(() =>

@@ -692,7 +692,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     const { workspaceId, ownerUserId } = ws.replica;
     ws.reporting = ws.reporting
       .then(() =>
-        ws.executor.reportRefusedSharedUpdates(async (run, refused) => {
+        ws.executor.reportRefusedSharedUpdates(async (run) => {
           if (ws.closed) throw new Error("This workspace's copy closed.");
           const name = cutText(
             ws.executor.automationName(run.automationId) ??
@@ -707,10 +707,10 @@ export async function startAutomationServer(options: AutomationServerOptions) {
           };
           await posterOf(ws)(
             {
-              noticeId: `${SERVER_UPDATE_REFUSED_NOTICE_PREFIX}${sha256(workspaceId)}:${sha256(JSON.stringify(refused.map((write) => write.sharedFileUpdate!.appendKey)))}`,
+              noticeId: `${SERVER_UPDATE_REFUSED_NOTICE_PREFIX}${sha256(workspaceId)}:${sha256(JSON.stringify([run.automationId, run.claimId, run.keySeed]))}`,
               kind: "automation-failed",
               title: cutText(`Automation "${name}" changes were not saved`, NOTICE_TITLE_MAX_CHARS),
-              body: `The shared file did not accept ${refused.length === 1 ? "a change" : `${refused.length} changes`} this run made, so the record keeps its earlier value. Open the run to see what it saved.`,
+              body: "A shared file did not accept changes this run made, so those records keep their earlier values. Open the run to see what it saved.",
               target: isNoticeTarget(target)
                 ? target
                 : { automation: run.automationId, run: run.claimId },
@@ -779,14 +779,14 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         ws.flushRecordDelivery?.() ?? true,
         ws.replica.sync(),
       ]);
+      const running = hosted.get(workspaceId);
+      if (running === ws) reportRefusedUpdates(running);
       if (flushed.status === "rejected") throw flushed.reason;
       if (synced.status === "rejected") throw synced.reason;
       // A record update the flush left may hold an ended run's changes.
       if (flushed.value)
         storage.confirmAutomationServerRunsSent({ workspaceId, incarnation, runs: ended });
       reportLostRuns(ws);
-      const running = hosted.get(workspaceId);
-      if (running === ws) reportRefusedUpdates(running);
     })()
       .then(
         () => {
@@ -844,7 +844,9 @@ export async function startAutomationServer(options: AutomationServerOptions) {
   function executorOptions(ws: WorkspaceState, self: () => Hosted): CollectionAutomationsOptions {
     const { replica, adapter } = ws;
     const { workspaceId, ownerUserId } = replica;
-    const runStore = createAutomationRunStore(storeFolderOf(replica.metadataDir));
+    const runStore = createAutomationRunStore(storeFolderOf(replica.metadataDir), undefined, {
+      listSharedUpdates: true,
+    });
     const chat = replicaAutomationChat({
       runStore,
       replica,

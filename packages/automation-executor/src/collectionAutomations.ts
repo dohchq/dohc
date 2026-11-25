@@ -3491,23 +3491,22 @@ export class CollectionAutomations {
   }
 
   /**
-   * Tells `report` once about each listed run whose field updates to shared
-   * files all ended and some were not accepted. A run leaves the list once
-   * every update ended and `report` returned. Throws the first failure after
-   * trying every run.
+   * Tells `report` once about each listed run that ended with a field update
+   * a shared file did not accept. A run leaves the list once all its updates
+   * ended and its owner was told. Throws the first failure after trying every
+   * run.
    */
-  async reportRefusedSharedUpdates(
-    report: (run: StoredRun, refused: Array<Extract<RunWrite, { kind: "field" }>>) => Promise<void>,
-  ): Promise<void> {
+  async reportRefusedSharedUpdates(report: (run: StoredRun) => Promise<void>): Promise<void> {
     const failures: unknown[] = [];
     for (const listed of await this.options.store.sharedWaiting()) {
       try {
         const found = await this.options.store.runsOf(listed.automationId, listed.claimId);
         const run = found.runs.find((stored) => stored.keySeed === listed.keySeed);
         if (run === undefined) {
-          if (!found.unreadable) await this.options.store.forgetSharedWaiting(listed);
+          if (!found.unreadable) await this.options.store.settleSharedWaiting(listed, true);
           continue;
         }
+        if (run.finishedAtMs === null) continue;
         const writes = run.applied.flatMap((step) =>
           step.writes.flatMap((write) =>
             write.kind === "field" && write.sharedFileUpdate ? [write] : [],
@@ -3526,20 +3525,28 @@ export class CollectionAutomations {
           const states = await this.options.withEngine((engine) =>
             engine.sharedFileUpdateStates(open.map((write) => write.sharedFileUpdate!)),
           );
-          if (states === null || states.length !== open.length) continue;
-          const settlements = open.flatMap((write, index) => {
-            const state = states[index]!;
-            return state === "pending" ? [] : [{ draft: write.sharedFileUpdate!, state }];
-          });
-          if (settlements.length < open.length) continue;
-          await this.options.store.updateState(run, { sharedSettlements: settlements });
-          for (const { draft, state } of settlements) ended.set(sharedFileUpdateKey(draft), state);
+          const settlements =
+            states === null || states.length !== open.length
+              ? []
+              : open.flatMap((write, index) => {
+                  const state = states[index]!;
+                  return state === "pending" ? [] : [{ draft: write.sharedFileUpdate!, state }];
+                });
+          if (settlements.length > 0) {
+            await this.options.store.updateState(run, { sharedSettlements: settlements });
+            for (const { draft, state } of settlements)
+              ended.set(sharedFileUpdateKey(draft), state);
+          }
         }
         const refused = writes.filter(
           (write) => ended.get(sharedFileUpdateKey(write.sharedFileUpdate!)) === "not-accepted",
         );
-        if (refused.length > 0) await report(run, refused);
-        await this.options.store.forgetSharedWaiting(listed);
+        if (refused.length > 0 && !listed.told) await report(run);
+        const allEnded = writes.every((write) =>
+          ended.has(sharedFileUpdateKey(write.sharedFileUpdate!)),
+        );
+        if (allEnded || (refused.length > 0 && !listed.told))
+          await this.options.store.settleSharedWaiting(listed, allEnded);
       } catch (error) {
         failures.push(error);
       }

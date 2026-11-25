@@ -791,6 +791,7 @@ const SharedWaitingSchema = z.object({
       automationId: z.string().min(1),
       claimId: z.string().min(1),
       keySeed: z.string().min(1),
+      told: z.literal(true).optional(),
     }),
   ),
 });
@@ -1104,9 +1105,10 @@ export interface AutomationRunStore {
    * run was last saved, or null when their list cannot be read.
    */
   unfinishedUndos(): Promise<ReadonlySet<string> | null>;
-  /** The runs that saved a field update to a shared file whose outcome their owner has not heard yet. */
+  /** The runs that saved a field update to a shared file that has not ended, when the store lists them. */
   sharedWaiting(): Promise<SharedWaitingRun[]>;
-  forgetSharedWaiting(run: SharedWaitingRun): Promise<void>;
+  /** Marks a listed run's owner as told, or with `ended`, removes it from the list. */
+  settleSharedWaiting(run: SharedWaitingRun, ended: boolean): Promise<void>;
   readSubscriptions(): Promise<StoredSubscription[]>;
   saveSubscriptions(subscriptions: readonly StoredSubscription[]): Promise<void>;
   /**
@@ -1218,7 +1220,10 @@ export class AutomationStoreNotOpenedError extends Error {
 export function createAutomationRunStore(
   home: AutomationStoreFolder,
   assertCurrent: () => void = () => {},
-  { expireBatchRuns = EXPIRE_BATCH_RUNS }: { expireBatchRuns?: number } = {},
+  {
+    expireBatchRuns = EXPIRE_BATCH_RUNS,
+    listSharedUpdates = false,
+  }: { expireBatchRuns?: number; listSharedUpdates?: boolean } = {},
 ): AutomationRunStore {
   if (!Number.isInteger(expireBatchRuns) || expireBatchRuns < 1)
     throw new RangeError(
@@ -1922,7 +1927,10 @@ export function createAutomationRunStore(
     appendEffect(run, applied) {
       return serial(async () => {
         // Listed first, so a saved shared update always has its run listed.
-        if (applied.writes.some((write) => write.kind === "field" && write.sharedFileUpdate)) {
+        if (
+          listSharedUpdates &&
+          applied.writes.some((write) => write.kind === "field" && write.sharedFileUpdate)
+        ) {
           const listed = {
             automationId: run.automationId,
             claimId: run.claimId,
@@ -1938,11 +1946,15 @@ export function createAutomationRunStore(
     sharedWaiting() {
       return serial(readSharedWaiting);
     },
-    forgetSharedWaiting(run) {
+    settleSharedWaiting(run, ended) {
       return serial(async () => {
         const waiting = await readSharedWaiting();
         if (waiting.some((entry) => sameRun(entry, run)))
-          await writeSharedWaiting(waiting.filter((entry) => !sameRun(entry, run)));
+          await writeSharedWaiting(
+            ended
+              ? waiting.filter((entry) => !sameRun(entry, run))
+              : waiting.map((entry) => (sameRun(entry, run) ? { ...entry, told: true } : entry)),
+          );
       });
     },
     recordCreated(run, created) {

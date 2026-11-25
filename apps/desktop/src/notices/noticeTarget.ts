@@ -1,6 +1,5 @@
 import {
   isAutomationControlsTarget,
-  SERVER_RUN_FAILED_NOTICE_PREFIX,
   SERVER_UPDATE_REFUSED_NOTICE_PREFIX,
 } from "@dohc/workspace-contracts/relay";
 import type { NoticeRow, WorkspaceActivatedMessage } from "../ipc/bridgeContract";
@@ -131,10 +130,7 @@ export function sentNoticeTarget(
   // Only the computer that ran a run holds it, or the owner's server, which alone posts these ids.
   const ranHere =
     notice.postedHere ||
-    (notice.store === "account" &&
-      [SERVER_RUN_FAILED_NOTICE_PREFIX, SERVER_UPDATE_REFUSED_NOTICE_PREFIX].some((prefix) =>
-        notice.noticeId.startsWith(prefix),
-      ));
+    (notice.store === "account" && notice.noticeId.startsWith(SERVER_UPDATE_REFUSED_NOTICE_PREFIX));
   if (automation !== undefined && place.mount === null && !controls) {
     return {
       to: "automation",
