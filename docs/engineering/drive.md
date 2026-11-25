@@ -583,3 +583,7 @@ Salvage the files from the latest snapshot:
 - Delete downloaded snapshots, verified copies, and salvage output after use. They hold unencrypted workspace data.
 - After a move passes its checks, destroy the old Droplet. Never destroy or reformat the volume.
 - Keep the previous release bundle until the next update passes its checks.
+
+## Optional server product analytics
+
+Drive services send no analytics unless both `DOHC_ANALYTICS_KEY` (PostHog `phc_*` project key) and `DOHC_ANALYTICS_HOST` (for example `https://dohc.computer/telemetry`) are set in `/etc/dohc/drive.env`. Self-hosted deployments leave both unset. Every server event uses a fresh random `distinct_id` and records only aggregate counts (signups, sign-ins by client kind, account deletions, share link opens, published app launches, synced workspace activations, server automation outcomes, and remote MCP connections and write/error outcomes), never account identifiers, emails, workspace IDs, share secrets, or content.

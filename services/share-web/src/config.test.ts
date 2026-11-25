@@ -500,3 +500,26 @@ it.each(["named", "link"])(
     );
   },
 );
+
+it("keeps server analytics off by default and fails fast on partial configuration", () => {
+  const base = {
+    NODE_ENV: "test",
+    DOHC_SHARE_WEB_RELAY_URL: "http://relay:1788",
+    DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "https://relay.example.test",
+    DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
+  };
+  expect(loadShareWebConfig(base).analytics).toBeNull();
+  expect(
+    loadShareWebConfig({
+      ...base,
+      DOHC_ANALYTICS_KEY: "phc_driveProject123",
+      DOHC_ANALYTICS_HOST: "https://dohc.computer/telemetry",
+    }).analytics,
+  ).toEqual({
+    key: "phc_driveProject123",
+    url: new URL("https://dohc.computer/telemetry/batch/"),
+  });
+  expect(() => loadShareWebConfig({ ...base, DOHC_ANALYTICS_KEY: "phc_driveProject123" })).toThrow(
+    /DOHC_ANALYTICS_KEY/,
+  );
+});

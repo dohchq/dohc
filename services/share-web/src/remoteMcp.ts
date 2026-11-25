@@ -26,6 +26,21 @@ import {
   type CollectionFileWrite,
 } from "./collectionWrites";
 
+export type McpAnalyticsEvent =
+  | { kind: "connected" }
+  | { kind: "tool_invoked"; outcome: "ok" | "error" | "refused"; write: boolean };
+
+const MCP_WRITE_TOOLS = new Set(
+  "dohc_write_collection_files dohc_switch_automation dohc_post_discussion dohc_post_group dohc_post_channel dohc_delete_message dohc_edit_document".split(
+    " ",
+  ),
+);
+const MCP_REFUSAL_CODES = new Set(
+  "out_of_reach view_only edit_needed not_collection rate_limited conflict quota_exceeded".split(
+    " ",
+  ),
+);
+
 type RemoteRequest = (path: string, init?: RequestInit) => Promise<Response>;
 type RemoteOptions = {
   request: RemoteRequest;
@@ -42,6 +57,7 @@ type RemoteOptions = {
    * author, and it can wait for messages.
    */
   agentChat: AgentChatClient;
+  onAnalyticsEvent?: (event: McpAnalyticsEvent) => void;
 };
 
 // An ordinary request fits this. A Collection write carries up to 4 MiB of
@@ -889,14 +905,20 @@ export async function serveRemoteMcp(
   if (!body) return { body: null, status: 429, headers: new Headers() };
   try {
     const parsedBody = body.value;
-    return (
-      refuseBatchedWrite(parsedBody, [COLLECTION_WRITE_TOOL, "dohc_switch_automation"]) ??
-      (await answerMcp(
-        request,
-        parsedBody,
-        () => buildServer(options, metadata, channel),
-        options.signal,
-      ))
+    const refused = refuseBatchedWrite(parsedBody, [
+      COLLECTION_WRITE_TOOL,
+      "dohc_switch_automation",
+    ]);
+    if (refused) {
+      options.onAnalyticsEvent?.({ kind: "tool_invoked", outcome: "refused", write: true });
+      return refused;
+    }
+    return await answerMcp(
+      request,
+      parsedBody,
+      () => buildServer(options, metadata, channel),
+      options.signal,
+      options.onAnalyticsEvent,
     );
   } finally {
     body.release();
@@ -929,12 +951,92 @@ export function refuseBatchedWrite(
   return { body: result.body, status: result.status, headers: result.headers };
 }
 
+function reportMcpAnalytics(
+  parsedBody: unknown,
+  status: number,
+  bodyBytes: Buffer<ArrayBuffer> | null,
+  onEvent: (event: McpAnalyticsEvent) => void,
+): void {
+  const requests = (Array.isArray(parsedBody) ? parsedBody : [parsedBody])
+    .map(asRecord)
+    .filter((item): item is Record<string, unknown> => item !== null);
+  if (requests.length === 0) return;
+  const text = bodyBytes?.toString("utf8").trim() ?? "";
+  const rawPayloads =
+    text.startsWith("{") || text.startsWith("[")
+      ? [text]
+      : text
+          .split(/\r?\n/u)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim());
+  const replies = rawPayloads.flatMap((raw) => {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      return (Array.isArray(parsed) ? parsed : [parsed])
+        .map(asRecord)
+        .filter((item): item is Record<string, unknown> => item !== null);
+    } catch {
+      return [];
+    }
+  });
+  const byId = new Map(replies.filter((m) => "id" in m).map((m) => [m.id, m] as const));
+  for (const item of requests) {
+    const hasId = "id" in item && item.id !== undefined;
+    const reply = hasId ? byId.get(item.id) : undefined;
+    if (item.method === "initialize") {
+      if (status === 200 && reply && reply.error === undefined && reply.result !== undefined) {
+        onEvent({ kind: "connected" });
+      }
+      continue;
+    }
+    if (item.method !== "tools/call") continue;
+    const toolName = asRecord(item.params)?.name;
+    const write = typeof toolName === "string" && MCP_WRITE_TOOLS.has(toolName);
+    if (!hasId && status < 400) continue;
+    let outcome: "ok" | "error" | "refused";
+    if (status === 401 || status === 403 || status === 429) {
+      outcome = "refused";
+    } else if (status >= 400 || !reply || reply.error !== undefined) {
+      outcome = "error";
+    } else {
+      const result = asRecord(reply.result);
+      const structured = asRecord(result?.structuredContent);
+      const code = structured?.code;
+      const writeOutcome = structured?.outcome;
+      const switchStatus = asRecord(structured?.result)?.status;
+      if (result?.isError === true) {
+        outcome =
+          (typeof code === "string" && MCP_REFUSAL_CODES.has(code)) ||
+          writeOutcome === "refused" ||
+          writeOutcome === "rate-limited" ||
+          writeOutcome === "stale"
+            ? "refused"
+            : "error";
+      } else if (
+        switchStatus === "refused-write" ||
+        switchStatus === "refused" ||
+        switchStatus === "conflict" ||
+        switchStatus === "reformats" ||
+        switchStatus === "unreadable"
+      ) {
+        outcome = "refused";
+      } else if (switchStatus === "unavailable" || switchStatus === "unknown") {
+        outcome = "error";
+      } else {
+        outcome = "ok";
+      }
+    }
+    if (write || outcome !== "ok") onEvent({ kind: "tool_invoked", outcome, write });
+  }
+}
+
 /** Answers one MCP request with a server of its own: no session outlives the request, and nothing subscribes. */
 export async function answerMcp(
   request: Request,
   parsedBody: unknown,
   build: () => McpServer,
   signal: AbortSignal,
+  onEvent?: (event: McpAnalyticsEvent) => void,
 ): Promise<{ body: BodyInit | null; status: number; headers: Headers }> {
   if (
     parsedBody &&
@@ -952,8 +1054,10 @@ export async function answerMcp(
   const handler = createMcpHandler(build);
   try {
     const response = await handler.fetch(request, { parsedBody });
+    const body = response.body ? await boundedBytes(response, 4 * 1024 * 1024, signal) : null;
+    if (onEvent) reportMcpAnalytics(parsedBody, response.status, body, onEvent);
     return {
-      body: response.body ? await boundedBytes(response, 4 * 1024 * 1024, signal) : null,
+      body,
       status: response.status,
       headers: response.headers,
     };

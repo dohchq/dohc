@@ -87,6 +87,7 @@ export function createWorkspaceReplicationRoutes(
   replicaWatches: Pick<ReplicaWatches, "watched">,
   lookupUserDisplayName?: LogAuthorNameLookup,
   refreshMentionAccountNames?: RefreshMentionAccountNames,
+  onWorkspaceCreated?: () => void,
 ) {
   const accountNames = lookupUserDisplayName && cacheLogAuthorNames(lookupUserDisplayName, nowMs);
   async function respondToWorkspaceRegistration(
@@ -108,6 +109,7 @@ export function createWorkspaceReplicationRoutes(
       if (identity !== null) {
         assertWorkspaceIdentityResult(storage.claimWorkspaceIdentity({ workspaceId, ...identity }));
       }
+      if (result === "created") onWorkspaceCreated?.();
       return jsonResponse({ ok: true, workspaceId, created: result === "created" });
     }
 

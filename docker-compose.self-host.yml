@@ -75,6 +75,8 @@ services:
       DOHC_SMTP_FROM: ${DOHC_SMTP_FROM:?Set DOHC_SMTP_FROM}
       DOHC_SIGN_UP_EMAILS: ${DOHC_SIGN_UP_EMAILS:-}
       WORKSPACE_API_RELAY_URL: http://sync-relay:1788
+      DOHC_ANALYTICS_KEY: ${DOHC_ANALYTICS_KEY:-}
+      DOHC_ANALYTICS_HOST: ${DOHC_ANALYTICS_HOST:-}
     depends_on:
       postgres-migrate: {condition: service_completed_successfully}
     healthcheck:
@@ -118,6 +120,8 @@ services:
       DOHC_RELAY_APP_PUBLICATIONS: ${DOHC_RELAY_APP_PUBLICATIONS:-0}
       DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT: ${DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT:-1000}
       DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT: ${DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT:-0}
+      DOHC_ANALYTICS_KEY: ${DOHC_ANALYTICS_KEY:-}
+      DOHC_ANALYTICS_HOST: ${DOHC_ANALYTICS_HOST:-}
     depends_on:
       postgres-migrate: {condition: service_completed_successfully}
       relay-initialize: {condition: service_completed_successfully}
@@ -186,6 +190,8 @@ services:
       DOHC_SHARE_WEB_APP_DOMAIN: ${DOHC_SHARE_WEB_APP_DOMAIN:-}
       DOHC_SHARE_WEB_BIND: 0.0.0.0
       DOHC_SHARE_WEB_PORT: '1790'
+      DOHC_ANALYTICS_KEY: ${DOHC_ANALYTICS_KEY:-}
+      DOHC_ANALYTICS_HOST: ${DOHC_ANALYTICS_HOST:-}
     depends_on:
       sync-relay: {condition: service_healthy}
       workspace-api: {condition: service_healthy}

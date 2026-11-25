@@ -303,6 +303,7 @@ export interface CreateSyncRelayHandlerOptions {
   linkCurrentFileLimit?: number;
   newLinkBearer?: () => string;
   newLinkHandoffCode?: () => string;
+  onWorkspaceCreated?: () => void;
 }
 
 const MAX_LINK_CURRENT_FILES = 5_000;
@@ -427,6 +428,7 @@ export function createSyncRelayHandler({
   phonePages,
   accountOperationRateLimiter = createAccountOperationRateLimiter(),
   relayPublicOrigin,
+  onWorkspaceCreated,
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
   /** The browser sessions share-web's live socket resolves, when named browser sessions are enabled. */
@@ -759,6 +761,7 @@ export function createSyncRelayHandler({
       replicaWatches,
       lookupUserDisplayName,
       refreshMentionAccountNames,
+      onWorkspaceCreated,
     );
 
   const respondToWorkspaceBlobs = createWorkspaceBlobRoutes(storage, nowMs);

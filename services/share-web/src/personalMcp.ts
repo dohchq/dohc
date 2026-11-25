@@ -22,6 +22,7 @@ import {
   sentPost,
   toolError,
   toolResult,
+  type McpAnalyticsEvent,
 } from "./remoteMcp";
 import { collectionWriteChanges, type CollectionWriteOutcome } from "./collectionWrites";
 import type { PersonalAgentAction, PersonalAgentClient } from "./personalAgentClient";
@@ -44,6 +45,7 @@ export interface PersonalMcpOptions {
   /** When `signal` aborts on its own, so a wait answers before it does. */
   deadlineAtMs: number;
   live?: { client: PersonalLiveClient; limits: NamedLiveBrowserLimits };
+  onAnalyticsEvent?: (event: McpAnalyticsEvent) => void;
 }
 
 export const PERSONAL_SIGN_IN_UNAVAILABLE =
@@ -263,9 +265,17 @@ export async function servePersonalMcp(
       : { value: undefined, release: () => {} };
   if (!body) return { body: null, status: 429, headers: new Headers() };
   try {
-    return (
-      refuseBatchedWrite(body.value, [COLLECTION_WRITE_TOOL]) ??
-      (await answerMcp(request, body.value, () => buildServer(options, reach), options.signal))
+    const refused = refuseBatchedWrite(body.value, [COLLECTION_WRITE_TOOL]);
+    if (refused) {
+      options.onAnalyticsEvent?.({ kind: "tool_invoked", outcome: "refused", write: true });
+      return refused;
+    }
+    return await answerMcp(
+      request,
+      body.value,
+      () => buildServer(options, reach),
+      options.signal,
+      options.onAnalyticsEvent,
     );
   } finally {
     body.release();

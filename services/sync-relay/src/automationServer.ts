@@ -223,6 +223,7 @@ export interface AutomationServerOptions {
   lookupUserDisplayName(userId: string): Promise<string | null> | string | null;
   /** The notice route's limiter, so the server and the owner's computers share one limit per person. */
   noticeLimiter: TokenBucketLimiter;
+  onRunCompleted?: (outcome: "succeeded" | "failed") => void;
   /**
    * The live host, which claims the field changes of the live-shared records
    * it holds. Absent where this server holds no live documents.
@@ -1259,6 +1260,9 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       },
       onRunEnded(run) {
         changing.delete(keyOf(run));
+        if (run.outcome) {
+          options.onRunCompleted?.(run.outcome.state === "failed" ? "failed" : "succeeded");
+        }
         // A sync that begins now sends everything the run changed. A run
         // whose end is not on record counts as unsent, which is never wrong.
         try {
