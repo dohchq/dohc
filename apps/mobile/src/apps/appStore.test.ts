@@ -19,14 +19,20 @@ import {
   testServer,
   type Answer,
 } from "../server/testServer";
-import { createReadCache, type ReadCache } from "../server/workspaceData";
+import { createScopedEnds, type ScopedEnds } from "../pages/pageLive";
+import { cacheScope, createReadCache, type ReadCache } from "../server/workspaceData";
 import { appTeardown, createAppRunner, createWorkspaceApps } from "./appStore";
 
 const app = { ...version(A, true), name: "signup" };
 const still = new AbortController().signal;
 
 function setup(
-  options: { signIn?: ReturnType<typeof signedIn>; canOpen?: boolean; cache?: ReadCache } = {},
+  options: {
+    signIn?: ReturnType<typeof signedIn>;
+    canOpen?: boolean;
+    cache?: ReadCache;
+    ends?: ScopedEnds;
+  } = {},
 ) {
   const server = appServer();
   const signIn = options.signIn ?? signedIn(server);
@@ -38,6 +44,7 @@ function setup(
     fetch: server.fetch,
     canOpen: options.canOpen ?? true,
     cache: options.cache ?? createReadCache(),
+    ends: options.ends ?? createScopedEnds(),
   });
   return { server, signIn, runner, apps };
 }
@@ -197,6 +204,7 @@ describe("teardown", () => {
         fetch: server.fetch,
         canOpen: true,
         cache: createReadCache(),
+        ends: createScopedEnds(),
       });
       answerLaunch(server);
       expect(await apps.open(app, still)).toBe(true);
@@ -265,6 +273,7 @@ describe("teardown", () => {
       fetch: server.fetch,
       canOpen: true,
       cache: createReadCache(),
+      ends: createScopedEnds(),
     }).stop();
     expect(runner.state()).not.toBeNull();
   });
@@ -312,6 +321,23 @@ describe("the catalog", () => {
     expect(setup({ cache, signIn: signedIn(server) }).apps.state().apps).toEqual([
       version(A, true),
     ]);
+  });
+
+  it("empties at a 404 for the workspace, and a read on its way neither shows nor saves", async () => {
+    const cache = createReadCache();
+    const ends = createScopedEnds();
+    const { server, signIn, apps } = setup({ cache, ends });
+    const late = deferred<Answer>();
+    server.on("POST", "/sync/ws-1/ops/apps", page([version(A)]), () => late.promise);
+    await apps.refresh();
+    const reading = apps.refresh();
+    cache.drop(cacheScope(signIn, "ws-1"));
+    appTeardown(ends).hide("ws-1");
+    expect(apps.state()).toEqual({ apps: null, problem: null, failures: 0 });
+    late.resolve(page([version(B)]));
+    await reading;
+    expect(apps.state().apps).toBeNull();
+    expect(cache.get(cacheScope(signIn, "ws-1"), "apps")).toBeUndefined();
   });
 
   it("counts failures and keeps what it showed", async () => {

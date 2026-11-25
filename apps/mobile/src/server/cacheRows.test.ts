@@ -656,6 +656,7 @@ describe("the apps and Collections lists", () => {
       fetch: server.fetch,
       canOpen: true,
       cache,
+      ends: createScopedEnds(),
     }),
     collections: createWorkspaceCollections(signInTo(server), "ws-a", createScopedEnds(), cache),
   });

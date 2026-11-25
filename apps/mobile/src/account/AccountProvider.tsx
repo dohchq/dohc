@@ -115,14 +115,14 @@ const noOpen = { subscribe: () => () => undefined, state: () => NONE };
 // asks again at once. Only where its Sign out delete stands reaches the screen, so the rest of its changes render
 // nothing.
 //
-// A running app (src/apps/appStore.ts), a page edited live (src/pages/pageLive.ts) and the Collections read
-// (src/collections/collectionStore.ts) end before anything else happens at Sign out, a sign-in change (a 401 included),
-// a workspace switch and Show on phone off.
+// A running app and the apps read (src/apps/appStore.ts), a page edited live (src/pages/pageLive.ts) and the Collections
+// read (src/collections/collectionStore.ts) end before anything else happens at Sign out, a sign-in change (a 401
+// included), a workspace switch, Show on phone off and a 404 for the workspace.
 export function AccountProvider({ children }: { children: ReactNode }) {
   const [runner] = useState(createAppRunner);
   const [livePages] = useState(createScopedEnds);
-  const [collectionStores] = useState(createScopedEnds);
-  const [teardown] = useState(() => appTeardown(runner, livePages, collectionStores));
+  const [stores] = useState(createScopedEnds);
+  const [teardown] = useState(() => appTeardown(runner, livePages, stores));
   // Sign out deletes the account's kept.db rows: the sign-in ends, and its token goes, once that delete has committed.
   // With phone writes off it sends nothing, not even records an earlier build kept. Both files open once per install.
   const [kept] = useState(createKeptDatabase);
@@ -175,6 +175,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
             // A workspace that stops being the open one, here or from another device, ends its apps and live pages
             // before its store stops.
             beforeSwitch: teardown.open,
+            onGone: teardown.hide,
           })
         : null,
     [signIn, list, cache, outbox, teardown],
@@ -194,17 +195,18 @@ export function AccountProvider({ children }: { children: ReactNode }) {
             fetch,
             canOpen: canOpenApps,
             cache,
+            ends: stores,
           })
         : null,
-    [signIn, currentWorkspaceId, runner, cache],
+    [signIn, currentWorkspaceId, runner, cache, stores],
   );
   useEffect(() => () => apps?.stop(), [apps]);
   const collections = useMemo(
     () =>
       signIn && currentWorkspaceId
-        ? createWorkspaceCollections(signIn, currentWorkspaceId, collectionStores, cache)
+        ? createWorkspaceCollections(signIn, currentWorkspaceId, stores, cache)
         : null,
-    [signIn, currentWorkspaceId, collectionStores, cache],
+    [signIn, currentWorkspaceId, stores, cache],
   );
   useEffect(() => () => collections?.stop(), [collections]);
   useEffect(() => clearNoticeListsOnSignInChange(account, kept), [account, kept]);

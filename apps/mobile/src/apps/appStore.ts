@@ -1,3 +1,4 @@
+import type { ScopedEnds } from "../pages/pageLive";
 import type { Account, SignIn } from "../server/account";
 import { requestGenerations, shownProblem, type Fetch } from "../server/client";
 import {
@@ -131,7 +132,7 @@ export function appTeardown(...runners: readonly Ends[]) {
       }),
     /** The open workspace is now `workspaceId`, by a choice here or a change elsewhere. */
     open: (workspaceId: string | null) => end((scope) => scope.workspaceId !== workspaceId),
-    /** Show on phone off. */
+    /** Show on phone off, or a 404 for the workspace. */
     hide: (workspaceId: string) => end((scope) => scope.workspaceId === workspaceId),
   };
 }
@@ -173,6 +174,7 @@ export function createWorkspaceApps(options: {
   readonly workspaceId: string;
   readonly runner: AppRunner;
   readonly cache: ReadCache;
+  readonly ends: Pick<ScopedEnds, "add">;
   readonly fetch: Fetch;
   /** This build may run apps (src/apps/canOpenApps.ts). */
   readonly canOpen: boolean;
@@ -200,6 +202,16 @@ export function createWorkspaceApps(options: {
   });
 
   let reading: Promise<void> | null = null;
+  const remove = options.ends.add(
+    { signIn, workspaceId },
+    {
+      end() {
+        reads.next();
+        reading = null;
+        set({ apps: null, problem: null, failures: 0 });
+      },
+    },
+  );
   // A failed or incomplete read rejects, so only a complete catalog can end the running app.
   const refresh = () => {
     const request = reads.next();
@@ -265,6 +277,7 @@ export function createWorkspaceApps(options: {
       }
     },
     stop() {
+      remove();
       runner.end(mine());
       controller.abort();
     },

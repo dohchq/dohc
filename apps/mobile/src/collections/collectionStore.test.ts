@@ -3,7 +3,7 @@ import { appTeardown } from "../apps/appStore";
 import { createScopedEnds } from "../pages/pageLive";
 import { createAccount } from "../server/account";
 import { signedIn } from "../server/testApps";
-import { createReadCache } from "../server/workspaceData";
+import { cacheScope, createReadCache } from "../server/workspaceData";
 import {
   deferred,
   memoryStore,
@@ -67,9 +67,8 @@ async function sent(server: ReturnType<typeof testServer>, count: number) {
   while (server.calls.length < count) await new Promise((done) => setTimeout(done, 0));
 }
 
-function setup(isCurrent = () => true, cache = createReadCache()) {
+function setup(isCurrent = () => true, cache = createReadCache(), stores = createScopedEnds()) {
   const server = testServer();
-  const stores = createScopedEnds();
   const collections = createWorkspaceCollections(
     signedIn(server, isCurrent),
     "ws-1",
@@ -150,6 +149,22 @@ describe("the Collections list", () => {
       problem: "server-busy",
       failures: 1,
     });
+  });
+
+  it("empties at a 404 for the workspace, and a read on its way neither shows nor saves", async () => {
+    const cache = createReadCache();
+    const stores = createScopedEnds();
+    const { server, collections } = setup(() => true, cache, stores);
+    const late = deferred<Answer>();
+    server.on("POST", `${OPS}/collections`, () => late.promise);
+    const reading = collections.refresh();
+    const scope = cacheScope(signedIn(server), "ws-1");
+    cache.drop(scope);
+    appTeardown(stores).hide("ws-1");
+    late.resolve(ok({ collections: [{ datasetId: D, name: "Registrations" }], nextCursor: null }));
+    await reading;
+    expect(collections.state().collections).toBeNull();
+    expect(cache.get(scope, "collections")).toBeUndefined();
   });
 
   it("shows the list read last at once in the workspace's next store", async () => {
