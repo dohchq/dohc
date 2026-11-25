@@ -204,6 +204,14 @@ function handleClickBelowLastBlock(view: EditorView, event: MouseEvent): boolean
   return true;
 }
 
+// Tiptap's splitBlock picks its split position before it deletes the selection,
+// so Enter over a selection that ends in a later block throws.
+function deleteSelectionAcrossBlocks(view: EditorView): void {
+  const { selection } = view.state;
+  if (!(selection instanceof TextSelection) || selection.$from.sameParent(selection.$to)) return;
+  view.dispatch(view.state.tr.deleteSelection());
+}
+
 export function makeBlockExitPlugin(): Plugin {
   return new Plugin({
     key: blockExitKey,
@@ -226,6 +234,10 @@ export function makeBlockExitPlugin(): Plugin {
           return true;
         }
         if (event.metaKey || event.ctrlKey) return false;
+        if (event.key === "Enter") {
+          deleteSelectionAcrossBlocks(view);
+          return false;
+        }
         let handled = false;
         switch (event.key) {
           case "ArrowDown":
