@@ -5653,15 +5653,21 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
         }
         // Capture already installed the chosen snapshot here. Peers still
         // hold the lineage's previous settled source, so only that body may
-        // use the settled-rule exception. New bodies must pass the strict rule.
+        // use the settled-rule exception. New bodies must pass the strict rule,
+        // except in a format-2 note: it takes a file it cannot hold as the
+        // nearest reading, with the file as its source.
         let refolded = if canonical.content == chosen_text {
             canonical
         } else {
             let mut projection = canonical;
             if marker.content_kind == ContentKind::Richdoc
-                && let Some(source) = doc.settled_markdown_source(&projection.content, || {
-                    last_settled_text_in_tx(tx, key)
-                })?
+                && let Some(source) =
+                    doc.settled_markdown_source(&projection.content, || {
+                        match doc.note_schema_version() {
+                            2 => Ok(Some(chosen_text.to_owned())),
+                            _ => last_settled_text_in_tx(tx, key),
+                        }
+                    })?
             {
                 projection.content = source;
             }

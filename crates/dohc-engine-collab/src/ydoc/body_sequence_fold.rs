@@ -7,6 +7,7 @@
 use super::body_sequence::{self, Line, Slot, Stored, Trace, BOUNDARY, CONTAINERS, LEAVES};
 use super::body_sequence_writer::{self, NewBody, Piece};
 use super::*;
+use yrs::types::text::TextItem;
 use yrs::types::{Attrs, Delta};
 
 const FRESH_ID_LETTERS: usize = 12;
@@ -139,9 +140,10 @@ fn unit_in(slot: &Slot, surrogates: std::ops::Range<u16>) -> bool {
 pub(super) struct Fold {
     records: Vec<(String, Any)>,
     attributes: Vec<(yrs::XmlElementRef, &'static str, Any)>,
-    after: Vec<(u32, Piece)>,
+    after: Vec<(u32, Piece, Attrs)>,
     middle: Vec<Delta<Piece>>,
-    before: Vec<(u32, Piece)>,
+    placed: Vec<Delta<Piece>>,
+    before: Vec<(u32, Piece, Attrs)>,
 }
 
 pub(super) fn plan<T: ReadTxn>(
@@ -168,6 +170,14 @@ pub(super) fn plan<T: ReadTxn>(
         end += 1;
     }
     end -= usize::from(end > 0 && unit_in(&before.slots[have - end], 0xDC00..0xE000));
+    while start > 0
+        && end == have - start
+        && want - end > start
+        && matches!(before.slots[start - 1], Slot::Line(_))
+        && same(&before, &target, start - 1, want - 1 - end)
+    {
+        (start, end) = (start - 1, end + 1);
+    }
     visit(have);
     let mut offsets = Vec::with_capacity(have + 1);
     let mut offset = 0_u32;
@@ -196,6 +206,7 @@ pub(super) fn plan<T: ReadTxn>(
         attributes: Vec::new(),
         after: Vec::new(),
         middle: Vec::new(),
+        placed: Vec::new(),
         before: Vec::new(),
     };
     let boundary = |wanted: &WantedLine| {
@@ -207,6 +218,7 @@ pub(super) fn plan<T: ReadTxn>(
         }
     };
     let mut written = vec![false; before.lines.len()];
+    let mut promoted = Vec::new();
     for &(line, wanted) in &pairs {
         let (had, given) = (&before.lines[line], &target.lines[wanted]);
         let Some(element) = &had.boundary else {
@@ -222,6 +234,7 @@ pub(super) fn plan<T: ReadTxn>(
         (before.lines[line].slot, next)
     };
     let (low, high) = (start, have - end);
+    let edited = low < high || start < want - end;
     for &(line, wanted) in &pairs {
         let (had, given) = (&before.lines[line], &target.lines[wanted]);
         if had.boundary.is_some() {
@@ -233,28 +246,39 @@ pub(super) fn plan<T: ReadTxn>(
             (from, to) = (from.min(owner_from), to.max(owner_to));
         }
         let given_again = had.owner.is_some_and(|owner| written[owner])
-            || (low <= to && high >= from)
+            || (edited && low <= to && high >= from)
             || !changes(had, given, &before, &ids).is_empty();
         if given_again {
-            let promoted = (offsets[had.slot], boundary(given));
-            match had.slot < start {
-                true => fold.before.push(promoted),
-                false => fold.after.push(promoted),
-            }
+            promoted.push((had.slot < start, offsets[had.slot], boundary(given)));
         }
     }
-    fold.before.reverse();
-    fold.after.reverse();
     let (from, to) = (offsets[start], offsets[have - end]);
+    let middle = &target.slots[start..want - end];
+    let places_items = middle.iter().any(|slot| !matches!(slot, Wanted::Unit(..)));
+    let mut asked: Vec<u32> = promoted.iter().map(|(_, offset, _)| *offset).collect();
+    asked.extend(places_items.then_some(from));
+    let formatting = formatting_at(txn, sequence, asked);
+    for (above, offset, piece) in promoted.into_iter().rev() {
+        let promoted = (offset, piece, formatting[&offset].clone());
+        match above {
+            true => fold.before.push(promoted),
+            false => fold.after.push(promoted),
+        }
+    }
     if from > 0 {
         fold.middle.push(Delta::Retain(from, None));
     }
     if to > from {
         fold.middle.push(Delta::Deleted(to - from));
     }
-    let middle = &target.slots[start..want - end];
     visit(middle.len());
-    let mut at = 0;
+    let mut in_force = formatting.get(&from).cloned().unwrap_or_default();
+    let placed = places_items
+        && (!in_force.is_empty()
+            || middle.iter().any(
+                |slot| matches!(slot, Wanted::Unit(_, marks) if !target.marks[*marks].is_empty()),
+            ));
+    let (mut at, mut position, mut retained) = (0, from, 0);
     while at < middle.len() {
         let piece = match &middle[at] {
             Wanted::Unit(_, marks) => {
@@ -266,8 +290,10 @@ pub(super) fn plan<T: ReadTxn>(
                     units.push(*unit);
                     at += 1;
                 }
+                position += units.len() as u32;
                 let letters = String::from_utf16(&units).map_err(|_| refused())?;
-                let marks = Box::new(target.marks[*marks].clone());
+                in_force = target.marks[*marks].clone();
+                let marks = Box::new(in_force.clone());
                 fold.middle
                     .push(Delta::Inserted(Piece::Letters(letters), Some(marks)));
                 continue;
@@ -278,10 +304,58 @@ pub(super) fn plan<T: ReadTxn>(
             }
             Wanted::Line(line) => boundary(&target.lines[*line]),
         };
-        fold.middle.push(Delta::Inserted(piece, None));
-        at += 1;
+        match placed {
+            true => {
+                if position > retained {
+                    fold.placed.push(Delta::Retain(position - retained, None));
+                }
+                let formatting = Some(Box::new(in_force.clone()));
+                fold.placed.push(Delta::Inserted(piece, formatting));
+                retained = position + 1;
+            }
+            false => fold.middle.push(Delta::Inserted(piece, None)),
+        }
+        (at, position) = (at + 1, position + 1);
     }
     Ok(fold)
+}
+
+fn formatting_at<T: ReadTxn>(
+    txn: &T,
+    sequence: &yrs::TextRef,
+    mut asked: Vec<u32>,
+) -> HashMap<u32, Attrs> {
+    asked.sort_unstable();
+    asked.dedup();
+    let mut asked = asked.into_iter().peekable();
+    let mut found = HashMap::new();
+    if asked.next_if_eq(&0).is_some() {
+        found.insert(0, Attrs::new());
+    }
+    let (mut attrs, mut passed) = (Attrs::new(), 0_u32);
+    let _ = sequence.try_visit_items(txn, |item| {
+        if asked.peek().is_none() {
+            return Err(());
+        }
+        let width = match item {
+            TextItem::Letters(text) => text.encode_utf16().count() as u32,
+            TextItem::Format(key, Any::Null) => {
+                attrs.remove(key);
+                0
+            }
+            TextItem::Format(key, value) => {
+                attrs.insert(Arc::from(key), value.clone());
+                0
+            }
+            TextItem::Embed(_) | TextItem::Other => 1,
+        };
+        passed += width;
+        while let Some(offset) = asked.next_if(|offset| width > 0 && *offset <= passed) {
+            found.insert(offset, attrs.clone());
+        }
+        Ok(())
+    });
+    found
 }
 
 fn changes(had: &Line, given: &WantedLine, before: &Trace, ids: &Ids) -> Vec<(&'static str, Any)> {
@@ -316,6 +390,7 @@ fn changes(had: &Line, given: &WantedLine, before: &Trace, ids: &Ids) -> Vec<(&'
 struct Ids {
     ids: Vec<String>,
     kept: Vec<Option<usize>>,
+    origin: Vec<Option<usize>>,
 }
 
 impl Ids {
@@ -330,18 +405,28 @@ impl Ids {
         let mut kept: Vec<Option<usize>> = vec![None; target.frames.len()];
         for &(line, wanted) in pairs {
             let (had, given) = (&before.lines[line].frames, &target.lines[wanted].frames);
-            for (depth, (&frame, &wanted)) in had.iter().zip(given).enumerate() {
-                let parent_kept = depth == 0 || kept[given[depth - 1]] == Some(had[depth - 1]);
+            let (mut at, mut to) = (0, 0);
+            while let (Some(&frame), Some(&wanted)) = (had.get(at), given.get(to)) {
                 let kind = (before.frames[frame].kind, target.frames[wanted].kind);
+                let family = body_sequence_writer::same_family(kind.0, kind.1);
+                let (added, removed) = (given.len() - to, had.len() - at);
                 match kept[wanted] {
                     Some(kept) if kept == frame => {}
-                    None if parent_kept && body_sequence_writer::same_family(kind.0, kind.1) => {
-                        kept[wanted] = Some(frame);
+                    None if family => kept[wanted] = Some(frame),
+                    _ if !family && added > removed => {
+                        to += 1;
+                        continue;
+                    }
+                    _ if !family && removed > added => {
+                        at += 1;
+                        continue;
                     }
                     _ => break,
                 }
+                (at, to) = (at + 1, to + 1);
             }
         }
+        let origin = kept.clone();
         let mut used = BTreeSet::new();
         for frame in &mut kept {
             if frame.is_some_and(|frame| !used.insert(frame)) {
@@ -405,7 +490,7 @@ impl Ids {
                 None => fresh(),
             })
             .collect();
-        Ids { ids, kept }
+        Ids { ids, kept, origin }
     }
 
     fn path(&self, frames: &[usize]) -> Any {
@@ -424,20 +509,32 @@ impl Ids {
         target: &Target,
     ) -> Vec<(String, Any)> {
         let mut records = Vec::new();
+        let stored = |key: &str| match containers.get(txn, key) {
+            Some(Out::Any(value)) => Some(value),
+            _ => None,
+        };
         for (wanted, frame) in target.frames.iter().enumerate() {
             let id = &self.ids[wanted];
-            let had = self.kept[wanted].map(|frame| &before.frames[frame]);
-            let kind = (id.clone(), Any::from(frame.kind));
-            let named = frame
-                .records
-                .iter()
-                .map(|(name, value)| (format!("{id}.{name}"), value.clone()));
-            for (key, value) in std::iter::once(kind).chain(named) {
-                let stored = match had {
-                    Some(_) => containers.get(txn, &key),
-                    None => None,
+            let kept = self.kept[wanted].is_some();
+            let copied = self.origin[wanted]
+                .filter(|_| !kept)
+                .map(|frame| before.frames[frame].id.as_str());
+            let shown = body_sequence_writer::stored(frame.kind, |_| None);
+            let kind = (id.clone(), true, Any::from(frame.kind));
+            let named = frame.records.iter().map(|(name, given)| {
+                let shown = shown.contains_key(name.as_str());
+                let value = match copied {
+                    Some(copied) if !shown => stored(&format!("{copied}.{name}")),
+                    _ => None,
                 };
-                if !matches!(stored, Some(Out::Any(stored)) if stored == value) {
+                (
+                    format!("{id}.{name}"),
+                    shown,
+                    value.unwrap_or_else(|| given.clone()),
+                )
+            });
+            for (key, shown, value) in std::iter::once(kind).chain(named) {
+                if !kept || (shown && stored(&key).as_ref() != Some(&value)) {
                     records.push((key, value));
                 }
             }
@@ -459,12 +556,15 @@ impl Fold {
         for (element, name, value) in self.attributes {
             element.insert_attribute(txn, name, value);
         }
-        let one = |offset: u32, piece: Piece| match offset {
-            0 => vec![Delta::Inserted(piece, None)],
-            _ => vec![Delta::Retain(offset, None), Delta::Inserted(piece, None)],
+        let one = |offset: u32, piece: Piece, formatting: Attrs| {
+            let inserted = Delta::Inserted(piece, Some(Box::new(formatting)));
+            match offset {
+                0 => vec![inserted],
+                _ => vec![Delta::Retain(offset, None), inserted],
+            }
         };
-        for (offset, piece) in self.after {
-            sequence.apply_delta(txn, one(offset, piece));
+        for (offset, piece, formatting) in self.after {
+            sequence.apply_delta(txn, one(offset, piece, formatting));
         }
         if self
             .middle
@@ -473,8 +573,11 @@ impl Fold {
         {
             sequence.apply_delta(txn, self.middle);
         }
-        for (offset, piece) in self.before {
-            sequence.apply_delta(txn, one(offset, piece));
+        if !self.placed.is_empty() {
+            sequence.apply_delta(txn, self.placed);
+        }
+        for (offset, piece, formatting) in self.before {
+            sequence.apply_delta(txn, one(offset, piece, formatting));
         }
     }
 }
