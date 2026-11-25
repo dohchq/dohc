@@ -581,6 +581,7 @@ export async function startAutomationReplicas(options: {
     // has more to push still pulls. Answers whether it caught up.
     let running = 0;
     const syncRounds = (rounds: number, callerSignal?: AbortSignal): Promise<boolean> => {
+      if (callerSignal?.aborted) return Promise.reject(callerSignal.reason);
       running += 1;
       syncGeneration += 1;
       pulledCurrent = false;

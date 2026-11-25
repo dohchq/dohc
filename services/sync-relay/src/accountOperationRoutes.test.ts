@@ -724,6 +724,39 @@ describe("an account read's deadline over its checks", () => {
   });
 });
 
+describe("a cancelled account read", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("frees its visit at once, while its engine call is still pending", async () => {
+    // The deadline never passes, so only the cancel can free the visits.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { engine, h } = await relay();
+    await seedTrip(engine);
+    let reads = 0;
+    const send = engine.sendRequest.bind(engine);
+    engine.sendRequest = async (request) => {
+      if (request.method !== "versionedText.read") return await send(request);
+      reads += 1;
+      return await new Promise<never>(() => undefined);
+    };
+    const cancels = Array.from({ length: ACCOUNT_VISITS_PER_CALLER }, () => new AbortController());
+    const cancelled = cancels.map((cancel) =>
+      h(
+        new Request(op("trip", "documentRead", { path: "docs/plan.md" }), {
+          signal: cancel.signal,
+        }),
+      ).catch(() => undefined),
+    );
+    await expect.poll(() => reads).toBe(ACCOUNT_VISITS_PER_CALLER);
+    for (const cancel of cancels) cancel.abort(new Error("The phone tapped a page."));
+    expect((await h(op("trip", "groups"))).status).toBe(200);
+    await Promise.all(cancelled);
+    expect(reads, "no engine call answered or started again").toBe(ACCOUNT_VISITS_PER_CALLER);
+  });
+});
+
 describe("an account's share of the server", () => {
   it("answers server_busy past one sign-in's open visits", async () => {
     const { h, holdSyncs, syncs } = await relay();

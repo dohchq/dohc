@@ -980,6 +980,19 @@ describe("the automation replicas", () => {
     expect(count("sync.applyPull")).toBe(2);
   });
 
+  it("starts no sync for a caller that already gave up", async () => {
+    const { storage } = await relay();
+    const engine = fakeEngine();
+    const { replicas: running } = await replicas(storage, () => [WORKSPACE], { ms: 0 });
+    const replica = running.replica(WORKSPACE)!;
+    const pushes = engine.methods().filter((method) => method === "sync.push").length;
+    const sync = replica.sync(AbortSignal.abort(new Error("The phone went away.")));
+    expect(replica.busy()).toBe(false);
+    await expect(sync).rejects.toThrow("The phone went away.");
+    await running.settled();
+    expect(engine.methods().filter((method) => method === "sync.push")).toHaveLength(pushes);
+  });
+
   it("closes a replica whose workspace was deleted, and removes every folder no row names", async () => {
     const { storage, raw } = await relay();
     const engine = fakeEngine();
