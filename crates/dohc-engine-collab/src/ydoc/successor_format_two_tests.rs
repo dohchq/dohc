@@ -202,17 +202,11 @@ fn a_successor_of_a_note_with_kept_frontmatter_gives_the_same_bytes_each_time() 
 fn only_a_successor_writes_a_note_in_format_two() {
     reading_body_sequence_here(|| {
         let doc = Ydoc::wire();
-        let meta = doc.doc.get_or_insert_map(ROOT_META);
-        meta.insert(
-            &mut doc.doc.transact_mut(),
-            "schemaVersion",
-            Any::Number(2.0),
-        );
-        assert!(doc
-            .rewrite_content_to_markdown(ContentKind::Richdoc, "# a\n")
-            .is_err());
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "# a\n")
+            .expect("a format-1 rewrite");
         let sequence = doc.doc.get_or_insert_text(ROOT_SEQUENCE);
         assert_eq!(sequence.len(&doc.doc.transact()), 0);
+        assert_eq!(doc.note_schema_version(), 1);
     });
 }
 

@@ -48,6 +48,7 @@ use crate::error::CollabError;
 use crate::limits::{MAX_PROJECTION_BYTES, MAX_PROJECTION_DEPTH, MAX_PROJECTION_NODES};
 
 mod body_sequence;
+mod body_sequence_fold;
 mod body_sequence_writer;
 mod bounded_encoder;
 mod frontmatter_yaml;
@@ -1753,6 +1754,7 @@ impl Ydoc {
         self.stage_source_preserving_edit_bounded(markdown, None, false, false, |staged| {
             let map = staged.doc.get_or_insert_map(ROOT_FRONTMATTER);
             let meta = staged.doc.get_or_insert_map(ROOT_META);
+            let format_two = staged.body_sequence_roots().is_some();
             let mut transaction = staged.doc.transact_mut();
             let txn = &mut transaction;
             match meta.get(txn, "schemaVersion") {
@@ -1760,6 +1762,7 @@ impl Ydoc {
                     meta.insert(txn, "schemaVersion", Any::Number(1.0));
                 }
                 Some(Out::Any(Any::Number(1.0))) => {}
+                Some(Out::Any(Any::Number(2.0))) if format_two => {}
                 _ => {
                     return Err(CollabError::MalformedUpdate {
                         reason: "unsupported rich-document schema version".into(),
@@ -1825,15 +1828,7 @@ impl Ydoc {
             ContentKind::Richdoc => {
                 let meta = self.doc.get_or_insert_map(ROOT_META);
                 let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
-                let sequence_roots = self.body_sequence_roots().filter(|(sequence, containers)| {
-                    fold == FileFold::No
-                        && reading == MarkdownReading::Successor
-                        && body_sequence::holds_no_item([
-                            frag.as_ref(),
-                            sequence.as_ref(),
-                            containers.as_ref(),
-                        ])
-                });
+                let sequence_roots = self.body_sequence_roots();
                 let stored_version = meta.get(&self.doc.transact(), "schemaVersion");
                 let missing_schema_version = match stored_version {
                     None => true,
@@ -1856,19 +1851,31 @@ impl Ydoc {
                 let normalized_body =
                     normalize_list_tabs(normalized_body.as_deref().unwrap_or(body), reading);
                 let (blocks, refused) = parse_markdown_blocks_checked(&normalized_body, reading);
-                if refused || (fold == FileFold::Strict && refused_fold_item_bodies(&blocks)) {
+                let format_one_fold = sequence_roots.is_none() && fold == FileFold::Strict;
+                if refused || (format_one_fold && refused_fold_item_bodies(&blocks)) {
                     return Err(CollabError::MarkdownNotRepresentable);
                 }
-                if file_fold && quote_fold_overflows(&blocks, 0) {
+                if file_fold && sequence_roots.is_none() && quote_fold_overflows(&blocks, 0) {
                     return Err(CollabError::MarkdownQuoteDepthExceeded);
                 }
                 let new_body = match &sequence_roots {
-                    Some(_) => {
+                    Some((sequence, containers)) => {
                         let (mut nodes, mut bytes) = (MAX_PROJECTION_NODES, 0);
                         let read = read_blocks::<WIRE_SEED>(&blocks, &mut nodes, &mut bytes)
                             .map_err(|_| CollabError::MarkdownNotRepresentable)?;
                         let written = body_sequence_writer::new_body(&read)
                             .ok_or(CollabError::MarkdownNotRepresentable)?;
+                        let roots = [frag.as_ref(), sequence.as_ref(), containers.as_ref()];
+                        let written = match body_sequence::holds_no_item(roots) {
+                            true => body_sequence_fold::Written::New(written),
+                            false => body_sequence_fold::Written::Folded(body_sequence_fold::plan(
+                                &self.doc.transact(),
+                                self.doc.client_id(),
+                                sequence,
+                                containers,
+                                written,
+                            )?),
+                        };
                         Some((read, written))
                     }
                     None => None,
@@ -1904,7 +1911,7 @@ impl Ydoc {
                     if let (Some((sequence, containers)), Some(written)) =
                         (&sequence_roots, written)
                     {
-                        body_sequence_writer::write(txn, sequence, containers, written);
+                        written.write(txn, sequence, containers);
                         return;
                     }
                     // A live note keeps every block it deletes, so an outside
@@ -1953,7 +1960,13 @@ impl Ydoc {
                     if !same_reading(&written, read)
                         && markdown_document(&written)? != markdown_document(read)?
                     {
-                        return Err(CollabError::MarkdownNotRepresentable);
+                        let nearest = match reading {
+                            MarkdownReading::Successor => None,
+                            _ => body_sequence_fold::nearest_reading(read)?,
+                        };
+                        if !nearest.is_some_and(|nearest| same_reading(&written, &nearest)) {
+                            return Err(CollabError::MarkdownNotRepresentable);
+                        }
                     }
                 }
                 update
