@@ -1,8 +1,14 @@
+import UIKit
 import XCTest
 
 // On iPhone a page opens in an editor that loaded before the tap (modules/editor-pool). The sample's page-pool demo
 // shows "Editor ready" while a spare editor has loaded, and names how each page got its editor and when it drew.
 final class PageOpenSpeedTests: XCTestCase {
+  // iPad keeps its own web view per page, with no spare editor.
+  override func setUpWithError() throws {
+    try XCTSkipIf(UIDevice.current.userInterfaceIdiom == .pad, "The editor pool is iPhone only")
+  }
+
   @MainActor
   private func launch() -> XCUIApplication {
     let app = XCUIApplication()
