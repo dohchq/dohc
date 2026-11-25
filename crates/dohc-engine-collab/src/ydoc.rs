@@ -10936,6 +10936,48 @@ mod projection_tests {
     }
 
     #[test]
+    fn typed_backtick_runs_before_code_keep_their_bytes() {
+        let runs: Vec<String> = (2..=41).map(|width| "`".repeat(width)).collect();
+        let typed = format!(" {} ", runs.join(" "));
+        let cases = [
+            (
+                typed.clone(),
+                "x".repeat(20),
+                format!("{typed}`{}`", "x".repeat(20)),
+            ),
+            (
+                typed.clone(),
+                "a`".repeat(10),
+                format!(
+                    " &#96;&#96; {} `` {} ``",
+                    runs[1..].join(" "),
+                    "a`".repeat(10)
+                ),
+            ),
+            (
+                " ` ".to_owned(),
+                "a`b".to_owned(),
+                " &#96; ``a`b``".to_owned(),
+            ),
+            (
+                " `` x ".to_owned(),
+                "a`b``c".to_owned(),
+                " &#96;&#96; x ```a`b``c```".to_owned(),
+            ),
+        ];
+        for (typed, code, expected) in cases {
+            assert_eq!(
+                paragraph_markdown(vec![
+                    ("b", marks(&["bold"])),
+                    (&typed, Attrs::new()),
+                    (&code, marks(&["code"])),
+                ]),
+                format!("**b**{expected}\n")
+            );
+        }
+    }
+
+    #[test]
     fn marks_whose_old_order_reads_back_keep_it() {
         assert_eq!(
             paragraph_markdown(vec![

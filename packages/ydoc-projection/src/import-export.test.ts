@@ -763,6 +763,30 @@ it.each([
   expect(serializeRichdocBody(document)).toBe(`**b**${saved}`);
 });
 
+const typedBacktickRuns = Array.from({ length: 40 }, (_, at) => "`".repeat(at + 2));
+it.each([
+  [
+    "typed backtick runs before code with no backticks",
+    ` ${typedBacktickRuns.join(" ")} `,
+    "x".repeat(20),
+    ` ${typedBacktickRuns.join(" ")} \`${"x".repeat(20)}\``,
+  ],
+  [
+    "typed backtick runs before code full of backticks",
+    ` ${typedBacktickRuns.join(" ")} `,
+    "a`".repeat(10),
+    ` &#96;&#96; ${typedBacktickRuns.slice(1).join(" ")} \`\` ${"a`".repeat(10)} \`\``,
+  ],
+  ["a typed backtick that pairs inside code", " ` ", "a`b", " &#96; ``a`b``"],
+  ["typed backticks that pair inside code", " `` x ", "a`b``c", " &#96;&#96; x ```a`b``c```"],
+])("writes %s", (_name, typed, code, saved) => {
+  const document = {
+    type: "doc",
+    content: [{ type: "paragraph", content: [bold("b"), plain(typed), marked(code, "code")] }],
+  };
+  expect(serializeRichdocBody(document)).toBe(`**b**${saved}`);
+});
+
 it.each([
   [
     "bold and underline on text and the image after it",

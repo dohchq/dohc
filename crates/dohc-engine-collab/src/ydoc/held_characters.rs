@@ -1,3 +1,4 @@
+use std::cell::OnceCell;
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
@@ -154,11 +155,22 @@ impl Shown {
 }
 
 enum Cell {
-    Text { first: Shown, last: Shown },
+    Text {
+        first: Shown,
+        last: Shown,
+    },
     Delimiter(char),
-    Held { character: char, at: usize },
-    Opaque(String),
-    Open { close: usize },
+    Held {
+        character: char,
+        at: usize,
+    },
+    Opaque {
+        written: String,
+        shapes: Box<[OnceCell<BacktickShape>; 2]>,
+    },
+    Open {
+        close: usize,
+    },
     Close,
 }
 
@@ -309,7 +321,10 @@ fn cells_of(markdown: &str) -> Option<Vec<Cell>> {
                 } else {
                     depth -= 1;
                     if depth == 0 {
-                        cells.push(Cell::Opaque(std::mem::take(&mut opaque)));
+                        cells.push(Cell::Opaque {
+                            written: std::mem::take(&mut opaque),
+                            shapes: Default::default(),
+                        });
                     }
                 }
                 continue;
@@ -412,7 +427,7 @@ fn escapes_next(cells: &[Cell], escaped: &[bool], index: usize) -> bool {
 }
 
 fn ends_underline(cells: &[Cell], index: usize) -> bool {
-    matches!(cells.get(index + 1), Some(Cell::Opaque(written)) if written == "++")
+    matches!(cells.get(index + 1), Some(Cell::Opaque { written, .. }) if written == "++")
         && matches!(cells.get(index + 2), Some(Cell::Close))
 }
 
@@ -428,7 +443,7 @@ fn shown(cell: &Cell, escaped: &[bool], index: usize, side: Side) -> Option<Show
         } else {
             Shown::Character(*character)
         }),
-        Cell::Opaque(written) => match side {
+        Cell::Opaque { written, .. } => match side {
             Side::First => written.chars().next(),
             Side::Last => written.chars().next_back(),
         }
@@ -453,72 +468,174 @@ struct Backtick {
     held: bool,
 }
 
+#[derive(Default)]
+struct Run {
+    backticks: Vec<Backtick>,
+    width: usize,
+}
+
+struct BacktickShape {
+    head: usize,
+    inner: Vec<usize>,
+    inner_widths: HashSet<usize>,
+    tail: usize,
+    split: bool,
+}
+
+fn backtick_shape(written: &str, escapes: bool) -> BacktickShape {
+    let mut inner = Vec::new();
+    let (mut head, mut width, mut split) = (0, 0, false);
+    let mut characters = written.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '`' {
+            width += 1;
+            continue;
+        }
+        if escapes && character == '\\' && characters.peek().is_some_and(char::is_ascii_punctuation)
+        {
+            characters.next();
+        }
+        if !split {
+            head = width;
+        } else if width > 0 {
+            inner.push(width);
+        }
+        split = true;
+        width = 0;
+    }
+    if !split {
+        return BacktickShape {
+            head: width,
+            inner,
+            inner_widths: HashSet::new(),
+            tail: 0,
+            split,
+        };
+    }
+    let inner_widths = inner.iter().copied().collect();
+    BacktickShape {
+        head,
+        inner,
+        inner_widths,
+        tail: width,
+        split,
+    }
+}
+
+struct Runs {
+    found: Vec<Run>,
+    run: Run,
+    partner: bool,
+}
+
+impl Runs {
+    fn add(&mut self, index: usize, held: bool, width: usize) {
+        self.run.backticks.push(Backtick { index, held });
+        self.run.width += width;
+    }
+
+    fn end(&mut self) -> bool {
+        if self.run.width > 0 {
+            let run = std::mem::take(&mut self.run);
+            if !self.partner
+                || self
+                    .found
+                    .first()
+                    .is_none_or(|first| first.width == run.width)
+            {
+                self.found.push(run);
+            }
+        }
+        self.partner && self.found.len() > 1
+    }
+}
+
 fn backtick_runs(
     cells: &[Cell],
     escaped: &[bool],
     from: usize,
     to: usize,
     masking: bool,
-    until: impl Fn(&[Vec<Backtick>]) -> bool,
-) -> Vec<Vec<Backtick>> {
-    let mut found: Vec<Vec<Backtick>> = Vec::new();
-    let mut run: Vec<Backtick> = Vec::new();
-    let end = |found: &mut Vec<Vec<Backtick>>, run: &mut Vec<Backtick>| {
-        if !run.is_empty() {
-            found.push(std::mem::take(run));
-        }
-        until(found)
+    partner: bool,
+) -> Vec<Run> {
+    let mut runs = Runs {
+        found: Vec::new(),
+        run: Run::default(),
+        partner,
     };
     for index in from..to {
         match &cells[index] {
             Cell::Held { character, .. } => {
                 if *character == '`' && !escaped[index] {
-                    run.push(Backtick { index, held: true });
-                } else if end(&mut found, &mut run) {
-                    return found;
+                    runs.add(index, true, 1);
+                } else if runs.end() {
+                    return runs.found;
                 }
             }
-            Cell::Opaque(written) => {
+            Cell::Opaque { written, shapes } => {
                 let escapes = masking || !written.starts_with('`');
-                let mut characters = written.chars().peekable();
-                while let Some(character) = characters.next() {
-                    if escapes
-                        && character == '\\'
-                        && characters.peek().is_some_and(char::is_ascii_punctuation)
-                    {
-                        characters.next();
-                    } else if character == '`' {
-                        run.push(Backtick { index, held: false });
-                        continue;
+                let shape =
+                    shapes[usize::from(escapes)].get_or_init(|| backtick_shape(written, escapes));
+                if shape.head > 0 {
+                    runs.add(index, false, shape.head);
+                }
+                if !shape.split {
+                    continue;
+                }
+                if runs.end() {
+                    return runs.found;
+                }
+                match runs
+                    .found
+                    .first()
+                    .filter(|_| partner)
+                    .map(|first| first.width)
+                {
+                    Some(width) => {
+                        if shape.inner_widths.contains(&width) {
+                            runs.add(index, false, width);
+                            runs.end();
+                            return runs.found;
+                        }
                     }
-                    if end(&mut found, &mut run) {
-                        return found;
+                    None => {
+                        for &width in &shape.inner {
+                            runs.add(index, false, width);
+                            if runs.end() {
+                                return runs.found;
+                            }
+                        }
                     }
+                }
+                if shape.tail > 0 {
+                    runs.add(index, false, shape.tail);
                 }
             }
             Cell::Text { first, .. } => {
                 if first.is('`') {
-                    run.push(Backtick { index, held: false });
-                } else if end(&mut found, &mut run) {
-                    return found;
+                    runs.add(index, false, 1);
+                } else if runs.end() {
+                    return runs.found;
                 }
             }
             Cell::Delimiter(_) => {
-                if end(&mut found, &mut run) {
-                    return found;
+                if runs.end() {
+                    return runs.found;
                 }
             }
             Cell::Open { .. } | Cell::Close => {}
         }
     }
-    end(&mut found, &mut run);
-    found
+    runs.end();
+    runs.found
 }
 
 fn escape_backticks_beside_code(cells: &[Cell], escaped: &mut [bool]) {
-    for run in backtick_runs(cells, escaped, 0, cells.len(), false, |_| false) {
-        if run.iter().any(|backtick| backtick.held) && run.iter().any(|backtick| !backtick.held) {
-            for backtick in run.iter().filter(|backtick| backtick.held) {
+    for Run { backticks, .. } in backtick_runs(cells, escaped, 0, cells.len(), false, false) {
+        if backticks.iter().any(|backtick| backtick.held)
+            && backticks.iter().any(|backtick| !backtick.held)
+        {
+            for backtick in backticks.iter().filter(|backtick| backtick.held) {
                 escaped[backtick.index] = true;
             }
         }
@@ -608,7 +725,7 @@ impl<'a> Pairing<'a> {
         let opaque = |index: Option<usize>| {
             matches!(
                 index.and_then(|index| self.cells.get(index)),
-                Some(Cell::Opaque(_))
+                Some(Cell::Opaque { .. })
             )
         };
         (
@@ -618,25 +735,31 @@ impl<'a> Pairing<'a> {
     }
 
     fn is_link(&self, open: usize) -> bool {
-        matches!(self.cells.get(open + 1), Some(Cell::Opaque(written)) if written.starts_with('['))
+        matches!(self.cells.get(open + 1), Some(Cell::Opaque { written, .. }) if written.starts_with('['))
     }
 
     fn opens_strike(&self, index: usize) -> bool {
         matches!(self.cells.get(index), Some(Cell::Open { .. }))
-            && matches!(self.cells.get(index + 1), Some(Cell::Opaque(written)) if written == "~~")
+            && matches!(self.cells.get(index + 1), Some(Cell::Opaque { written, .. }) if written == "~~")
     }
 
-    fn runs(&self, from: usize, to: usize) -> Vec<Vec<Backtick>> {
-        backtick_runs(self.cells, &self.escaped, from, to, false, |_| false)
+    fn runs(&self, from: usize, to: usize) -> Vec<Run> {
+        backtick_runs(self.cells, &self.escaped, from, to, false, false)
     }
 
     fn code_spans(&self, from: usize, to: usize) -> Vec<Vec<Backtick>> {
-        let runs = backtick_runs(self.cells, &self.escaped, from, to, true, |_| false);
+        let runs = backtick_runs(self.cells, &self.escaped, from, to, true, false);
         let mut spans = Vec::new();
         let mut at = 0;
         while at + 1 < runs.len() {
-            if runs[at].len() == runs[at + 1].len() {
-                spans.push([runs[at].as_slice(), runs[at + 1].as_slice()].concat());
+            if runs[at].width == runs[at + 1].width {
+                spans.push(
+                    [
+                        runs[at].backticks.as_slice(),
+                        runs[at + 1].backticks.as_slice(),
+                    ]
+                    .concat(),
+                );
                 at += 1;
             }
             at += 1;
@@ -874,17 +997,17 @@ impl<'a> Pairing<'a> {
         if runs.len() % 2 == 0 {
             return;
         }
-        let end = last.last().expect("a run holds a backtick").index;
+        let end = last.backticks.last().expect("a run holds a backtick").index;
         let at_end = self.after(end + 1, to).is_none()
             && self.shown(end, Side::Last) == Some(Shown::Character('`'));
-        if last.len() >= 2 && at_end {
+        if last.width >= 2 && at_end {
             return;
         }
         if let Some(held) = runs
             .iter()
-            .find(|run| run.iter().all(|backtick| backtick.held))
+            .find(|run| run.backticks.iter().all(|backtick| backtick.held))
         {
-            for backtick in held {
+            for backtick in &held.backticks {
                 self.blockers[backtick.index] = true;
             }
         }
@@ -920,7 +1043,7 @@ impl<'a> Pairing<'a> {
                     index += 1;
                     continue;
                 }
-                Cell::Opaque(_) => {
+                Cell::Opaque { .. } => {
                     before = None;
                     index += 1;
                     continue;
@@ -931,12 +1054,9 @@ impl<'a> Pairing<'a> {
                 .shown(index, Side::First)
                 .expect("text shows a character");
             if matches!(self.cells[index], Cell::Held { .. }) && shown.is('`') {
-                let found = backtick_runs(self.cells, &self.escaped, index, to, false, |runs| {
-                    runs.len() > 1 && runs[runs.len() - 1].len() == runs[0].len()
-                });
-                let run = &found[0];
-                let last = &found[found.len() - 1];
-                let partner = (found.len() > 1 && last.len() == run.len()).then_some(last);
+                let found = backtick_runs(self.cells, &self.escaped, index, to, false, true);
+                let run = &found[0].backticks;
+                let partner = found.get(1).map(|partner| &partner.backticks);
                 let reach = partner.map_or(to, |partner| {
                     partner.last().expect("a run holds a backtick").index + 1
                 });

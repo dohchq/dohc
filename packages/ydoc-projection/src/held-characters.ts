@@ -1,10 +1,26 @@
 import type { InlineTokens } from "./inline-marks.js";
 
+type BacktickShape = {
+  head: number;
+  inner: number[];
+  innerWidths: Set<number>;
+  tail: number;
+  split: boolean;
+};
+
+type Opaque = {
+  kind: "opaque";
+  written: string;
+  first: string | undefined;
+  last: string | undefined;
+  shapes: [BacktickShape?, BacktickShape?];
+};
+
 type Cell =
   | { kind: "text"; first: string; last: string }
   | { kind: "delimiter"; character: string }
   | { kind: "held"; character: string; at: number }
-  | { kind: "opaque"; written: string }
+  | Opaque
   | { kind: "open"; close: number }
   | { kind: "close" };
 
@@ -115,7 +131,7 @@ function cellsOf(markdown: string, tokens: InlineTokens): Cell[] | undefined {
       if (marker === 1) depth -= 1;
       if (depth > 0) opaque += token;
       else {
-        cells.push({ kind: "opaque", written: tokens.write(opaque) });
+        cells.push(opaqueCell(tokens.write(opaque)));
         opaque = "";
       }
       if (held !== undefined) at += 1;
@@ -146,6 +162,44 @@ function cellsOf(markdown: string, tokens: InlineTokens): Cell[] | undefined {
   return cells;
 }
 
+function opaqueCell(written: string): Opaque {
+  const last = written.slice((written.codePointAt(written.length - 2) ?? 0) > 0xffff ? -2 : -1);
+  return {
+    kind: "opaque",
+    written,
+    first: written === "" ? undefined : String.fromCodePoint(written.codePointAt(0)!),
+    last: written === "" ? undefined : last,
+    shapes: [],
+  };
+}
+
+function backtickShape(cell: Opaque, escapes: boolean): BacktickShape {
+  const mode = escapes ? 1 : 0;
+  const known = cell.shapes[mode];
+  if (known) return known;
+  const { written } = cell;
+  const inner: number[] = [];
+  let head = 0;
+  let width = 0;
+  let split = false;
+  for (let at = 0; at < written.length; at += 1) {
+    if (written[at] === "`") {
+      width += 1;
+      continue;
+    }
+    if (escapes && written[at] === "\\" && ASCII_PUNCTUATION.test(written[at + 1] ?? "")) at += 1;
+    if (!split) head = width;
+    else if (width > 0) inner.push(width);
+    split = true;
+    width = 0;
+  }
+  const shape = split
+    ? { head, inner, innerWidths: new Set(inner), tail: width, split }
+    : { head: width, inner, innerWidths: new Set<number>(), tail: 0, split };
+  cell.shapes[mode] = shape;
+  return shape;
+}
+
 function escapesNext(cells: Cell[], escaped: Set<number>, index: number): boolean {
   if (endsUnderline(cells, index)) return false;
   const next = charAfter(cells, escaped, index + 1, cells.length, "first");
@@ -167,10 +221,8 @@ function shown(cell: Cell, escaped: Set<number>, index: number, side: "first" | 
       return cell.character;
     case "held":
       return escaped.has(index) ? REFERENCE : cell.character;
-    case "opaque": {
-      const characters = Array.from(cell.written);
-      return side === "first" ? characters[0] : characters.at(-1);
-    }
+    case "opaque":
+      return side === "first" ? cell.first : cell.last;
     default:
       return undefined;
   }
@@ -199,6 +251,7 @@ function charBefore(cells: Cell[], escaped: Set<number>, from: number): string |
 }
 
 type Backtick = { index: number; held: boolean };
+type Run = { backticks: Backtick[]; width: number };
 
 function backtickRuns(
   cells: Cell[],
@@ -206,31 +259,46 @@ function backtickRuns(
   from: number,
   to: number,
   masking = false,
-  until: (found: Backtick[][]) => boolean = () => false,
-): Backtick[][] {
-  const found: Backtick[][] = [];
-  let run: Backtick[] = [];
+  partner = false,
+): Run[] {
+  const found: Run[] = [];
+  let run: Run = { backticks: [], width: 0 };
+  const add = (index: number, held: boolean, width = 1): void => {
+    run.backticks.push({ index, held });
+    run.width += width;
+  };
   const end = (): boolean => {
-    if (run.length) found.push(run);
-    run = [];
-    return until(found);
+    if (run.width > 0) {
+      if (!partner || found.length === 0 || run.width === found[0]!.width) found.push(run);
+      run = { backticks: [], width: 0 };
+    }
+    return partner && found.length > 1;
   };
   for (let index = from; index < to; index += 1) {
     const cell = cells[index]!;
     if (cell.kind === "held") {
-      if (cell.character === "`" && !escaped.has(index)) run.push({ index, held: true });
+      if (cell.character === "`" && !escaped.has(index)) add(index, true);
       else if (end()) return found;
     } else if (cell.kind === "opaque") {
-      const pieces =
-        cell.written.startsWith("`") && !masking
-          ? Array.from(cell.written)
-          : (cell.written.match(/\\[!-/:-@[-`{-~]|[\s\S]/gu) ?? []);
-      for (const piece of pieces) {
-        if (piece === "`") run.push({ index, held: false });
-        else if (end()) return found;
+      const shape = backtickShape(cell, masking || !cell.written.startsWith("`"));
+      if (shape.head > 0) add(index, false, shape.head);
+      if (!shape.split) continue;
+      if (end()) return found;
+      if (partner && found.length > 0) {
+        if (shape.innerWidths.has(found[0]!.width)) {
+          add(index, false, found[0]!.width);
+          end();
+          return found;
+        }
+      } else {
+        for (const width of shape.inner) {
+          add(index, false, width);
+          if (end()) return found;
+        }
       }
+      if (shape.tail > 0) add(index, false, shape.tail);
     } else if (cell.kind === "text" && cell.first === "`") {
-      run.push({ index, held: false });
+      add(index, false);
     } else if ((cell.kind === "text" || cell.kind === "delimiter") && end()) {
       return found;
     }
@@ -240,9 +308,9 @@ function backtickRuns(
 }
 
 function escapeBackticksBesideCode(cells: Cell[], escaped: Set<number>): void {
-  for (const run of backtickRuns(cells, escaped, 0, cells.length)) {
-    if (run.some(({ held }) => held) && run.some(({ held }) => !held)) {
-      for (const { index, held } of run) if (held) escaped.add(index);
+  for (const { backticks } of backtickRuns(cells, escaped, 0, cells.length)) {
+    if (backticks.some(({ held }) => held) && backticks.some(({ held }) => !held)) {
+      for (const { index, held } of backticks) if (held) escaped.add(index);
     }
   }
 }
@@ -300,8 +368,8 @@ function escapePairs(cells: Cell[], escaped: Set<number>): boolean | undefined {
     const runs = backtickRuns(cells, escaped, from, to, true);
     const spans: Backtick[][] = [];
     for (let at = 0; at + 1 < runs.length; at += 1) {
-      if (runs[at]!.length !== runs[at + 1]!.length) continue;
-      spans.push([...runs[at]!, ...runs[at + 1]!]);
+      if (runs[at]!.width !== runs[at + 1]!.width) continue;
+      spans.push([...runs[at]!.backticks, ...runs[at + 1]!.backticks]);
       at += 1;
     }
     return spans;
@@ -446,13 +514,13 @@ function escapePairs(cells: Cell[], escaped: Set<number>): boolean | undefined {
     const runs = backtickRuns(cells, escaped, from, to);
     const last = runs.at(-1);
     if (runs.length % 2 === 0 || !last) return;
-    const end = last.at(-1)!.index;
+    const end = last.backticks.at(-1)!.index;
     const atEnd =
       charAfter(cells, escaped, end + 1, to, "first") === undefined &&
       shown(cells[end]!, escaped, end, "last") === "`";
-    if (last.length >= 2 && atEnd) return;
-    const held = runs.find((run) => run.every((backtick) => backtick.held));
-    if (held) for (const { index } of held) blockers.add(index);
+    if (last.width >= 2 && atEnd) return;
+    const held = runs.find((run) => run.backticks.every((backtick) => backtick.held));
+    if (held) for (const { index } of held.backticks) blockers.add(index);
   };
 
   const lex = (from: number, to: number): void => {
@@ -486,17 +554,9 @@ function escapePairs(cells: Cell[], escaped: Set<number>): boolean | undefined {
       }
       const character = shown(cell, escaped, index, "first")!;
       if (cell.kind === "held" && character === "`") {
-        const found = backtickRuns(
-          cells,
-          escaped,
-          index,
-          to,
-          false,
-          (runs) => runs.length > 1 && runs.at(-1)!.length === runs[0]!.length,
-        );
-        const run = found[0]!;
-        const last = found.at(-1)!;
-        const partner = found.length > 1 && last.length === run.length ? last : undefined;
+        const [first, second] = backtickRuns(cells, escaped, index, to, false, true);
+        const run = first!.backticks;
+        const partner = second?.backticks;
         spend((partner ? partner.at(-1)!.index + 1 : to) - index);
         if (partner) for (const { index: at } of run) consumed.add(at);
         else if (opensStrike(run.at(-1)!.index + 1))
