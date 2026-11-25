@@ -1300,3 +1300,69 @@ it("allows withdrawal while paused without publishing paused sources", async () 
   h.remote.mockRejectedValueOnce(new Error("wrong account"));
   await expect(h.invoke(input)).rejects.toThrow("wrong account");
 });
+
+it("refuses a link read for an action two of the app's Collections share", async () => {
+  const h = withDataset(harness(), true);
+  const definition = JSON.parse(Buffer.from(h.source.get("private/dataset.json")!).toString());
+  const copy = {
+    ...definition,
+    datasetId: id(11),
+    schemaPath: "copy/schema.sql",
+    operationsPath: "copy/actions.js",
+  };
+  const schemaSql = generateDatasetSchema(copy),
+    operationSource = generateDatasetOperations(copy),
+    revision = describeDatasetRevision({
+      definition: copy,
+      revision: 1,
+      schemaSql,
+      operationSource,
+    });
+  h.source.set("copy/dataset.json", Buffer.from(JSON.stringify(copy)));
+  const { dataset, ...manifest } = JSON.parse(
+    Buffer.from(h.source.get("app/app.publish.json")!).toString(),
+  );
+  h.source.set(
+    "app/app.publish.json",
+    Buffer.from(
+      JSON.stringify({
+        ...manifest,
+        datasets: {
+          responses: dataset,
+          copy: {
+            ...dataset,
+            datasetPath: "copy/dataset.json",
+            revisionSha256: revision.revisionSha256,
+          },
+        },
+      }),
+    ),
+  );
+  const previous = h.relay.getMockImplementation()!;
+  h.relay.mockImplementation(async (...args) =>
+    args[1].includes(id(11)) && args[1].endsWith("/artifacts")
+      ? {
+          ...h.approved,
+          revision,
+          schemaSql,
+          operationSource,
+          cursor: {
+            ...h.approved.cursor,
+            datasetId: id(11),
+            approvedRevisionHash: revision.revisionSha256,
+          },
+        }
+      : previous(...args),
+  );
+  const prepared = await h.prepare();
+  await expect(
+    h.invoke({
+      action: "approve",
+      workspaceId: "w",
+      approvalId: prepared.approvalId,
+      candidateDigest: prepared.candidateDigest,
+      linkReads: [{ operationId: id(6), fieldIds: [id(3), id(4)] }],
+    }),
+  ).rejects.toThrow("Two of this app's Collections share an action");
+  expect(h.upload).not.toHaveBeenCalled();
+});

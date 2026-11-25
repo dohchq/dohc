@@ -608,6 +608,14 @@ export function createOwnerAppPublicationHandler<
             )
           )
             throw new Error("This app has no Collection access to approve.");
+          if (
+            input.linkReads.some(
+              (read) => datasets.filter((dataset) => grants(dataset, read.operationId)).length > 1,
+            )
+          )
+            throw new Error(
+              "Two of this app's Collections share an action, so dohc can't tell which one a link read is for. Give people with the link no reads, or use one of those Collections.",
+            );
         }
         for (const dataset of datasets) {
           const reads = (input.linkReads ?? []).filter((read) => grants(dataset, read.operationId));
