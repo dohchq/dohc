@@ -112,8 +112,8 @@ export function createServiceAnalyticsClient(options: {
     timer = null;
   };
 
-  const dropExpired = () => {
-    const cutoff = now() - MAX_RETRY_AGE_MS;
+  const dropExpired = (atMs = now()) => {
+    const cutoff = atMs - MAX_RETRY_AGE_MS;
     let keep = 0;
     for (let i = 0; i < queue.length; i += 1) {
       if (queue[i]!.queuedAtMs >= cutoff) queue[keep++] = queue[i]!;
@@ -177,35 +177,45 @@ export function createServiceAnalyticsClient(options: {
 
   const drain = (ignorePause = false): Promise<void> => {
     if (draining) return draining;
-    dropExpired();
+    const atMs = now();
+    dropExpired(atMs);
     if (ended || queue.length === 0) return Promise.resolve();
-    if (!ignorePause && now() < pausedUntilMs) {
-      schedule(pausedUntilMs - now());
+    if (!ignorePause && atMs < pausedUntilMs) {
+      schedule(pausedUntilMs - atMs);
       return Promise.resolve();
     }
     clearTimer();
-    draining = (async () => {
-      try {
-        while (!ended) {
-          dropExpired();
-          if (queue.length === 0 || (!ignorePause && now() < pausedUntilMs)) break;
-          const batch = queue.splice(0, batchSize);
-          if ((await sendBatch(batch)) === "retry") {
-            if (!quitting && !ended) {
-              const kept = batch.filter((item) => item.queuedAtMs >= now() - MAX_RETRY_AGE_MS);
-              const room = Math.max(0, MAX_QUEUE - queue.length);
-              if (room > 0 && kept.length > 0) queue.unshift(...kept.slice(kept.length - room));
-              schedule(pausedUntilMs - now());
-            }
-            break;
-          }
+    const run = (async () => {
+      let first = true;
+      while (!ended) {
+        if (!first) {
+          const stepMs = now();
+          dropExpired(stepMs);
+          if (queue.length === 0 || (!ignorePause && stepMs < pausedUntilMs)) break;
         }
-      } finally {
-        draining = null;
-        if (!quitting && !ended && queue.length > 0) schedule(flushMs);
+        first = false;
+        const batch = queue.splice(0, batchSize);
+        if ((await sendBatch(batch)) === "retry") {
+          if (!quitting && !ended) {
+            const kept = batch.filter((item) => item.queuedAtMs >= now() - MAX_RETRY_AGE_MS);
+            const room = Math.max(0, MAX_QUEUE - queue.length);
+            if (room > 0 && kept.length > 0) queue.unshift(...kept.slice(kept.length - room));
+            clearTimer();
+            schedule(pausedUntilMs - now());
+          }
+          break;
+        }
       }
     })();
-    return draining;
+    const settled = run.finally(() => {
+      if (draining === settled) draining = null;
+      if (!quitting && !ended && queue.length > 0) {
+        if (queue.length >= batchSize && now() >= pausedUntilMs) void drain();
+        else schedule(flushMs);
+      }
+    });
+    draining = settled;
+    return settled;
   };
 
   return {
@@ -227,7 +237,7 @@ export function createServiceAnalyticsClient(options: {
         queuedAtMs: atMs,
       });
       if (queue.length >= batchSize) void drain();
-      else schedule(flushMs);
+      else if (!draining) schedule(flushMs);
     },
     flush() {
       if (flushing) return flushing;
@@ -235,8 +245,12 @@ export function createServiceAnalyticsClient(options: {
       clearTimer();
       flushing = (async () => {
         let deadline: ReturnType<typeof setTimeout> | undefined;
+        const finish = async () => {
+          while (draining) await draining;
+          await drain(true);
+        };
         await Promise.race([
-          drain(true).catch(() => {}),
+          finish().catch(() => {}),
           new Promise<void>((resolve) => {
             deadline = setTimeout(resolve, shutdownTimeoutMs);
           }),

@@ -287,4 +287,81 @@ describe("createServiceAnalyticsClient", () => {
       service: "sync-relay",
     });
   });
+
+  it("retries at backoff even when another event is tracked while the failing batch is in flight", async () => {
+    vi.useFakeTimers();
+    let nowMs = 10_000;
+    const batches: Array<Array<{ event: string }>> = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let call = 0;
+    const client = createServiceAnalyticsClient({
+      service: "share-web",
+      config,
+      now: () => nowMs,
+      random: () => 0.5,
+      flushMs: 5_000,
+      batchSize: 2,
+      baseBackoffMs: 200,
+      fetch: vi.fn(async (_url, init) => {
+        call += 1;
+        const parsed = JSON.parse(String(init?.body)) as { batch: Array<{ event: string }> };
+        batches.push(parsed.batch);
+        if (call === 1) {
+          await firstGate;
+          return new Response("down", { status: 503 });
+        }
+        return new Response("ok", { status: 200 });
+      }),
+    });
+
+    client.track("share_link_opened");
+    client.track("published_app_launched");
+    client.track("share_link_opened");
+    releaseFirst();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(batches).toHaveLength(1);
+
+    nowMs += 200;
+    await vi.advanceTimersByTimeAsync(200);
+    expect(batches).toHaveLength(3);
+    expect(batches[1]).toHaveLength(2);
+    expect(batches[2]).toHaveLength(1);
+    await client.flush();
+  });
+
+  it("never strands draining when the clock ticks across the 30-minute cutoff during drain", async () => {
+    vi.useFakeTimers();
+    const times = [
+      1_000, // track(first)
+      1_000 + 30 * 60_000, // drain() entry at cutoff
+      1_000 + 30 * 60_000 + 1, // subsequent check past cutoff
+      1_000 + 30 * 60_000 + 2, // track(fresh)
+    ];
+    let lastTime = times[0]!;
+    const sent: string[] = [];
+    const client = createServiceAnalyticsClient({
+      service: "workspace-api",
+      config,
+      now: () => {
+        lastTime = times.shift() ?? lastTime;
+        return lastTime;
+      },
+      flushMs: 100,
+      fetch: vi.fn(async (_url, init) => {
+        const parsed = JSON.parse(String(init?.body)) as { batch: Array<{ event: string }> };
+        sent.push(...parsed.batch.map((item) => item.event));
+        return new Response("ok", { status: 200 });
+      }),
+    });
+
+    client.track("drive_signup_completed");
+    await vi.advanceTimersByTimeAsync(100);
+    client.track("drive_signin_completed");
+    await client.flush();
+
+    expect(sent).toContain("drive_signin_completed");
+  });
 });
