@@ -74,6 +74,13 @@ export const phoneHeaders = { authorization: "Bearer owner-phone-token" };
 
 export const exchangeKey = "test-exchange-key-".repeat(3),
   relayHost = "relay.example.test";
+/** The owner's browser, as share-web forwards it: its cookie, origin and exchange key, and no Bearer. */
+export const browserScope = { ...phoneScope, sessionId: "browser-session" };
+export const browserHeaders = {
+  cookie: "account=browser:owner-1",
+  origin: audience,
+  "x-dohc-relay-exchange-key": exchangeKey,
+};
 export const frames = {
   receive: {
     maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES,
@@ -295,11 +302,21 @@ export async function fixture(
   const accountSession = vi.fn(async (request: Request): Promise<AccountSession> => {
     if (request.headers.get("authorization") === phoneHeaders.authorization)
       return await ownerPhone(request);
+    // `account=browser:<user>` is that account's browser sign-in. The owner's is `browser-session`.
+    const browser = /^account=browser:([\w-]+)$/u.exec(request.headers.get("cookie") ?? "")?.[1];
+    if (browser)
+      return {
+        userId: browser,
+        sessionId: browser === "owner-1" ? "browser-session" : `browser-${browser}`,
+        expiresAtMs: 8e12,
+        clientKind: "browser",
+      };
     const { userId } = await actor(request, "");
     return { userId, sessionId: `session-${userId}`, expiresAtMs: 8e12, clientKind: "desktop" };
   });
   const sessionRows = new Map<string, StoredAccountSession>([
     ["phone-session", { userId: "owner-1", expiresAtMs: 8e12, clientKind: "phone" }],
+    ["browser-session", { userId: "owner-1", expiresAtMs: 8e12, clientKind: "browser" }],
     ...(desktopSessions
       ? ([
           [
@@ -568,16 +585,18 @@ export async function fixture(
       {
         headers: desktop
           ? { host: relayHost, authorization: "Bearer reader-token", ...extra }
-          : owner
-            ? { host: relayHost, authorization: "Bearer owner-token", ...extra }
-            : {
-                host: relayHost,
-                origin: audience,
-                "x-dohc-relay-exchange-key": exchangeKey,
-                ...(cookie ? { cookie } : {}),
-                ...linkHeaders,
-                ...extra,
-              },
+          : owner && "x-dohc-relay-exchange-key" in extra
+            ? { host: relayHost, ...extra }
+            : owner
+              ? { host: relayHost, authorization: "Bearer owner-token", ...extra }
+              : {
+                  host: relayHost,
+                  origin: audience,
+                  "x-dohc-relay-exchange-key": exchangeKey,
+                  ...(cookie ? { cookie } : {}),
+                  ...linkHeaders,
+                  ...extra,
+                },
         perMessageDeflate: false,
         autoPong,
       },

@@ -69,7 +69,7 @@ export interface LiveGatewayLimits {
 export interface LiveGatewayOptions {
   readonly publicHosts: ReadonlySet<string>;
   readonly publicOrigin: string;
-  readonly path?: "/api/live" | "/api/live/link";
+  readonly path?: "/api/live" | "/api/live/link" | "/api/live/owner";
   readonly limits: LiveGatewayLimits;
   readonly bufferBudget?: ReturnType<typeof createLiveBufferBudget>;
   // The adapter resolves trusted route scope and the account cookie through

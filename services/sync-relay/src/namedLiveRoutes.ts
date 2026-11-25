@@ -195,9 +195,9 @@ type BrowserRouteOptions = LiveRouteOptions & {
 };
 type OwnerRouteOptions = LiveRouteOptions & {
   kind: "owner";
-  /** The Bearer sign-in, a phone's included. A phone also presents a ticket for the page. */
+  /** The Bearer sign-in, a phone's included, or the owner's browser cookie. A phone and a browser also present a ticket for the page. */
   resolveAccountSession: ResolveAccountSession;
-  /** Reads sign-ins with no cache. Without it and `tickets`, no phone connects. */
+  /** Reads sign-ins with no cache. Without it and `tickets`, no phone or browser connects. */
   accountSessions?: Pick<AccountSessions, "read">;
   tickets?: Pick<ReturnType<typeof createLiveTickets>, "redeem">;
   /** When on, a desktop or browser owner edits in the note's room and is sent its unsaved edits. */
@@ -352,10 +352,10 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
   const accountSessions = options.kind === "owner" || desktop ? options.accountSessions : undefined;
   const desktopResolveAccountSession = desktop ? options.resolveAccountSession : undefined;
   const ownerTickets = options.kind === "owner" ? options.tickets : undefined;
-  // A phone or desktop sign-in is read again on this schedule however busy its connection is. A read that fails closes them all.
+  // A phone, browser or desktop sign-in is read again on this schedule however busy its connection is. A read that fails closes them all.
   async function checkTrackedSessions() {
     const tracked = [...connectionScopes].flatMap(([stop, scope]) =>
-      scope.session && scope.userId && (desktop || scope.session.clientKind === "phone")
+      scope.session && scope.userId && (desktop || scope.session.clientKind !== "desktop")
         ? [{ stop, userId: scope.userId, session: scope.session, recheck: scope.recheck }]
         : [],
     );
@@ -439,9 +439,9 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
         verifyRelayExchangeKey(headers.get("x-dohc-relay-exchange-key"), keyHash));
   // A link route forwards only the headers present, so the agent resolver sees exactly what was sent, and refuses a cookie.
   const credentials = (headers: Headers): Record<string, string> =>
-    kind === "owner" || desktop
+    (kind === "owner" && headers.has("authorization")) || desktop
       ? { authorization: headers.get("authorization") ?? "" }
-      : kind === "named"
+      : kind === "named" || kind === "owner"
         ? { cookie: headers.get("cookie") ?? "" }
         : Object.fromEntries(
             [
@@ -663,7 +663,8 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
     let discriminator = "",
       token = "",
       personalWorkspaceId = "";
-    let ownerTarget: LiveDocumentKey | undefined;
+    let ownerTarget: LiveDocumentKey | undefined,
+      ownerBrowser = false;
     try {
       headers = new Headers();
       const selected = new Set([
@@ -685,17 +686,23 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
       if (kind === "owner") {
         const url = new URL(request.url ?? "", "https://owner.invalid");
         const path = /^\/sync\/workspaces\/([^/]+)\/live\/owner$/.exec(url.pathname);
-        // A desktop or browser offers only the live protocol. A phone also offers one ticket for the page.
+        // A desktop offers only the live protocol. A phone, and the owner's browser, also offer one ticket for the page.
         const offered = (headers.get("sec-websocket-protocol") ?? "")
           .split(",")
           .map((value) => value.trim());
         const ticketed = offered.filter((value) => value.startsWith("dohc-live-ticket."));
+        ownerBrowser = !headers.has("authorization");
         if (
           !path ||
           request.method !== "GET" ||
           !hosts.has(headers.get("host") ?? "") ||
-          (headers.has("origin") && headers.get("origin") !== origin) ||
-          !/^Bearer [^\s]+$/.test(headers.get("authorization") ?? "") ||
+          (ownerBrowser
+            ? !headers.has("cookie") ||
+              headers.get("origin") !== origin ||
+              !verifyRelayExchangeKey(headers.get("x-dohc-relay-exchange-key"), keyHash) ||
+              ticketed.length !== 1
+            : (headers.has("origin") && headers.get("origin") !== origin) ||
+              !/^Bearer [^\s]+$/.test(headers.get("authorization") ?? "")) ||
           offered.filter((value) => value === "dohc-live-v1").length !== 1 ||
           ticketed.length > 1 ||
           offered.length !== 1 + ticketed.length ||
@@ -917,15 +924,19 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
       }
       if (options.kind === "owner") {
         const document = ownerTarget!;
-        const account = await bearerAccountSession(
-          storage,
-          options.resolveAccountSession,
-          authenticated,
-        );
+        const account = ownerBrowser
+          ? await options.resolveAccountSession(authenticated)
+          : await bearerAccountSession(storage, options.resolveAccountSession, authenticated);
         signal.throwIfAborted();
         check();
         const actor = { userId: account.userId };
         const phone = account.clientKind === "phone";
+        if (
+          ownerBrowser &&
+          (account.clientKind !== "browser" || accountIsFenced(storage, actor.userId))
+        )
+          throw new Error();
+        const ticketed = phone || ownerBrowser;
         const ownerSession: OwnerSession = {
           sessionId: account.sessionId,
           clientKind: account.clientKind,
@@ -938,17 +949,17 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           session: ownerSession,
           recheck: () => host?.assertCurrent(),
         });
-        // A phone opens only with a ticket for this page. A desktop or browser never sends one.
-        if (phone !== (token !== "") || (phone && (!accountSessions || !ownerTickets)))
+        // A phone or the owner's browser opens only with a ticket for this page. A desktop never sends one.
+        if (ticketed !== (token !== "") || (ticketed && (!accountSessions || !ownerTickets)))
           throw new Error();
         // A sign-in that outlasts any timer ends at a periodic check instead.
         const remainingMs = Math.max(0, account.expiresAtMs - Date.now());
-        if (phone && remainingMs <= MAX_TIMER_MS) {
+        if (ticketed && remainingMs <= MAX_TIMER_MS) {
           sessionExpiry = setTimeout(stop, remainingMs);
           sessionExpiry.unref();
         }
         let ticket: RedeemedLiveTicket | null = null;
-        if (phone) {
+        if (ticketed) {
           ticket = await ownerTickets!.redeem(
             token,
             {
@@ -973,19 +984,19 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           )
             throw new Error();
         }
-        // Checked on every admission of a phone's connection: closing, its sign-in's expiry, the
-        // account's fence and ownership, and Show on phone. A move or rename changes the binding,
+        // Checked on every admission of a ticketed connection: closing, its sign-in's expiry, the
+        // account's fence and ownership, and a phone's Show on phone. A move or rename changes the binding,
         // which the capture's own check compares, so a hidden path needs no check here.
-        const guard = phone
+        const guard = ticketed
           ? () => {
               if (
                 done ||
                 Date.now() >= account.expiresAtMs ||
                 accountIsFenced(storage, account.userId) ||
                 !storage.workspaceIsOwnedBy(document.workspaceId, account.userId) ||
-                !storage.showsOnPhone(account.userId, document.workspaceId)
+                (phone && !storage.showsOnPhone(account.userId, document.workspaceId))
               )
-                throw new Error("The phone's access ended.");
+                throw new Error("The owner's access ended.");
             }
           : undefined;
         if (!storage.workspaceIsOwnedBy(document.workspaceId, actor.userId)) throw new Error();
@@ -1042,7 +1053,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
         const trustedAccount = await accountSnapshot(actor.userId);
         signal.throwIfAborted();
         check();
-        if (phone) {
+        if (ticketed) {
           // The sign-in, read again from the table now that capture has waited.
           const stored = await untilAborted(accountSessions!.read([account.sessionId]), signal);
           signal.throwIfAborted();
@@ -1064,9 +1075,11 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           reserveBytes,
           validationBudget,
           ...(guard ? { guard } : {}),
+          personOnly: ownerBrowser,
         });
-        // A phone stays on its own capture until it reads which room rows the host has saved.
-        host = options.rooms && !phone ? options.rooms.join(captured, { owner: true }) : captured;
+        // A phone or browser stays on its own capture until it reads which room rows the host has saved.
+        host =
+          options.rooms && !ticketed ? options.rooms.join(captured, { owner: true }) : captured;
       } else if (options.kind === "personal") {
         // The account's fence, read from Postgres for this open.
         const linkAuthority = options.linkAuthority;
@@ -1313,7 +1326,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
             stop();
             return;
           }
-          if (gatewayFronted) {
+          if (gatewayFronted || ownerBrowser) {
             try {
               host!.assertCurrent();
             } catch {

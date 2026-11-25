@@ -32,6 +32,8 @@ export function createNamedLiveRelayRoute(options: {
   publicOrigin: string;
   exchangeKey: string;
   handshakeTimeoutMs: number;
+  /** The owner's browser reaches the relay's owner socket for the page its query names. */
+  owner?: boolean;
 }): LiveGatewayOptions["openHostRoute"] {
   const relay = new URL(options.relayUrl),
     origin = new URL(options.publicOrigin);
@@ -57,9 +59,18 @@ export function createNamedLiveRelayRoute(options: {
         resolve(null);
         return;
       }
-      const url = new URL("/sync/live/named", relay);
+      const query = new URLSearchParams(
+        options.owner ? input.discriminator : { session: input.discriminator },
+      );
+      const workspaceId = encodeURIComponent(query.get("workspaceId") ?? "");
+      query.delete("workspaceId");
+      const url = new URL(
+        options.owner
+          ? `/sync/workspaces/${workspaceId}/live/owner?${query}`
+          : `/sync/live/named?${query}`,
+        relay,
+      );
       url.protocol = relay.protocol === "https:" ? "wss:" : "ws:";
-      url.searchParams.set("session", input.discriminator);
       const invalidated = new AbortController();
       let socket: WebSocket;
       let settled = false;

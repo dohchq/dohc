@@ -905,6 +905,9 @@ export function createSyncRelayHandler({
         phoneApps,
         phoneCollections: createPhoneCollections({ storage, host: datasetHost }),
         ...(phonePages ? { phonePages } : {}),
+        ...(shareWebOrigin && relayExchangeKeyHash
+          ? { browser: { origin: shareWebOrigin, hasExchangeKey: hasValidRelayExchangeKey } }
+          : {}),
       })
     : undefined;
   // The owner's computers claim wakes here; the phone reads wakes through its operations route.

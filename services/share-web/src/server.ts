@@ -2087,8 +2087,14 @@ export function createShareWebApplication({
       return response(result.body, { status: result.status, headers: result.headers });
     }
 
-    if (pathname === "/api/live/member-open" || pathname === "/api/live/member-ready") {
+    if (
+      pathname === "/api/live/member-open" ||
+      pathname === "/api/live/member-ready" ||
+      pathname === "/api/live/owner-open"
+    ) {
       mark(pathname);
+      if (pathname === "/api/live/owner-open" && (!memberLive || !namedLiveTickets))
+        return jsonResponse({ ok: false, code: "live_hosting_unsupported" }, { status: 409 });
       if (!memberLive) return refused();
       const result = await memberLive(request);
       return response(result.body, { status: result.status, headers: result.headers });

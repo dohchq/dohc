@@ -36,10 +36,13 @@ reads what the owner's computer reads. It reaches only the link read routes
 account's workspaces at `/sync/members/workspaces`. It also reaches the
 named-chat routes for the Groups and file Comments an admin reaches. The owner
 posts there only as a person, under the relay's own `relay:owner-browser:`
-origin, and deletes messages there as an admin does. The account
+origin, and deletes messages there as an admin does. The owner's browser
+edits a page live as the owner's phone does, through the page open and the
+one-use ticket for `/sync/workspaces/<id>/live/owner`, without the phone's Show
+on phone switch. Its edits are the owner's own and never an agent's, and the
+relay checks its sign-in every minute. The other account
 routes, member management, settings, and sharing still refuse a cookie. A
-browser can't read General, direct messages, or agent chats, or edit a page
-live. Each new read checks the session
+browser can't read General, direct messages, or agent chats. Each new read checks the session
 again, so signing the browser out ends its access. A history read already
 waiting for changes does not check the session again, so it can return the
 changes made during its wait. A member's browser behaves the same way.

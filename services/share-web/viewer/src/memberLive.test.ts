@@ -36,7 +36,7 @@ it("opens a page live, keeps the host's refusal code, and reads a refused grant 
   const fetch = vi.fn(async () => answers.shift()!);
   vi.stubGlobal("fetch", fetch);
   const signal = new AbortController().signal;
-  expect(await openMemberPage("grant-1", "trip/plan.md", signal)).toEqual({
+  expect(await openMemberPage({ grantId: "grant-1" }, "trip/plan.md", signal)).toEqual({
     kind: "open",
     discriminator: "abcdefghijkl",
     objectId: "object-1",
@@ -48,14 +48,55 @@ it("opens a page live, keeps the host's refusal code, and reads a refused grant 
   expect(sent[0]).toBe("/api/live/member-open");
   expect(JSON.parse(String(sent[1].body))).toEqual({ grantId: "grant-1", path: "trip/plan.md" });
   expect(new Headers(sent[1].headers).get("x-dohc-share-web-api-version")).not.toBeNull();
-  expect(await openMemberPage("grant-1", "trip/plan.md", signal)).toEqual({
+  expect(await openMemberPage({ grantId: "grant-1" }, "trip/plan.md", signal)).toEqual({
     kind: "refused",
     code: "live_host_full",
   });
-  await expect(openMemberPage("grant-1", "trip/plan.md", signal)).rejects.toBeInstanceOf(
-    LiveAuthorityUnavailableError,
-  );
+  await expect(
+    openMemberPage({ grantId: "grant-1" }, "trip/plan.md", signal),
+  ).rejects.toBeInstanceOf(LiveAuthorityUnavailableError);
   expect(await memberPageReady("grant-1", "trip/plan.md", signal)).toBe(true);
   expect(await memberPageReady("grant-1", "trip/plan.md", signal)).toBe(false);
   expect((fetch.mock.calls[3] as unknown as [string])[0]).toBe("/api/live/member-ready");
+});
+
+it("opens the owner's page by its workspace: preparing, then a ticket for the page, or the relay's reason", async () => {
+  const lineageClaimId = "c".repeat(64);
+  const answers: Response[] = [
+    jsonResponse({ preparing: true }),
+    jsonResponse({ objectId: "object-1", lineageClaimId, token: "ab".repeat(32), limits }),
+    jsonResponse({ ok: false, code: "live-document-without-lineage" }, 409),
+    jsonResponse({ ok: false, error: "not found" }, 404),
+    // A member's admission never opens the owner's page.
+    jsonResponse({
+      discriminator: "abcdefghijkl",
+      objectId: "object-1",
+      userId: "sam",
+      token: "ab".repeat(32),
+      limits,
+    }),
+  ];
+  const fetch = vi.fn(async () => answers.shift()!);
+  vi.stubGlobal("fetch", fetch);
+  const signal = new AbortController().signal,
+    owner = { workspaceId: "ws-1" };
+  expect(await openMemberPage(owner, "trip/plan.md", signal)).toEqual({ kind: "preparing" });
+  const sent = fetch.mock.calls[0] as unknown as [string, RequestInit];
+  expect(sent[0]).toBe("/api/live/owner-open");
+  expect(JSON.parse(String(sent[1].body))).toEqual({ workspaceId: "ws-1", path: "trip/plan.md" });
+  expect(await openMemberPage(owner, "trip/plan.md", signal)).toEqual({
+    kind: "owner",
+    objectId: "object-1",
+    lineageClaimId,
+    token: "ab".repeat(32),
+    limits,
+  });
+  expect(await openMemberPage(owner, "trip/plan.md", signal)).toEqual({
+    kind: "refused",
+    code: "live-document-without-lineage",
+  });
+  await expect(openMemberPage(owner, "trip/plan.md", signal)).rejects.toBeInstanceOf(
+    LiveAuthorityUnavailableError,
+  );
+  await expect(openMemberPage(owner, "trip/plan.md", signal)).rejects.toThrow("Unavailable");
 });

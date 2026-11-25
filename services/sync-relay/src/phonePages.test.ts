@@ -10,12 +10,15 @@ import { createAccountOperationRoute } from "./accountOperationRoutes";
 import { createChatWakeWaits } from "./chatWakeRoutes";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { errorResponse } from "./errors";
+import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import type { LiveTicketScope } from "./liveBrowserContext";
 import { binding, scope } from "./liveTickets.test-helper";
 import { personalRouteFixture } from "./personalLiveDocumentRoutes.test-helper";
 import { createPhonePages, PHONE_OWNER_DOCUMENTS_PER_ACCOUNT } from "./phonePages";
 import { selfHostLiveProfile } from "./selfHostLiveProfile";
 import { SERVICE_HOST_ENROLLMENTS } from "./storage/serviceHostEnrollment";
+import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
+import type { StorageContext } from "./storage/context";
 import { createLiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 
 const cleanup: Array<() => Promise<void> | void> = [];
@@ -28,19 +31,25 @@ afterEach(async () => {
 const namespace = "personal-live-route-test";
 const editorLimits = selfHostLiveProfile().editor;
 
-// `Bearer session:<user>:<session>:<kind>`, as the relay's phone-capable resolver answers it.
+// `Bearer session:<user>:<session>:<kind>`, or the cookie `account=<user>:<session>:<kind>`, as the relay's phone-capable resolver answers them.
 const resolveAccountSession: ResolveAccountSession = async (request) => {
-  const match = /^Bearer session:([\w-]+):([\w-]+):(phone|desktop)$/u.exec(
-    request.headers.get("authorization") ?? "",
-  );
+  const match =
+    /^Bearer session:([\w-]+):([\w-]+):(phone|desktop|browser)$/u.exec(
+      request.headers.get("authorization") ?? "",
+    ) ??
+    /^account=([\w-]+):([\w-]+):(phone|desktop|browser)$/u.exec(
+      request.headers.get("cookie") ?? "",
+    );
   if (!match) throw new UnauthorizedError();
   return {
     userId: match[1]!,
     sessionId: match[2]!,
     expiresAtMs: Number.MAX_SAFE_INTEGER,
-    clientKind: match[3] as "phone" | "desktop",
+    clientKind: match[3] as "phone" | "desktop" | "browser",
   };
 };
+const SHARE_WEB = "https://share.test",
+  EXCHANGE_KEY = "k".repeat(43);
 
 /**
  * The personal route fixture's workspace, with docs/a.md and the fake live
@@ -59,6 +68,7 @@ async function phone(options: { waitMs?: number } = {}) {
   // The session table, as the uncached read finds it. The phone's sign-in ends sooner than its resolver says.
   const stored = new Map<string, StoredAccountSession>([
     ["phone-1", { userId: "owner-1", expiresAtMs: 2_020, clientKind: "phone" }],
+    ["browser-1", { userId: "owner-1", expiresAtMs: 2_020, clientKind: "browser" }],
   ]);
   const sessions = {
     read: vi.fn(
@@ -112,6 +122,14 @@ async function phone(options: { waitMs?: number } = {}) {
     feedWaits: createAccountFeedWaits(f.storage, hub),
     wakeWaits: createChatWakeWaits(f.storage, hub),
     phonePages: () => pages,
+    browser: {
+      origin: SHARE_WEB,
+      hasExchangeKey: (request) =>
+        verifyRelayExchangeKey(
+          request.headers.get("x-dohc-relay-exchange-key"),
+          hashRelayExchangeKey(EXCHANGE_KEY),
+        ),
+    },
   });
   /** The phone's openPage, as `user:session:kind`, answered with its status and body. */
   async function open(path: string, as = "owner-1:phone-1:phone") {
@@ -125,7 +143,26 @@ async function phone(options: { waitMs?: number } = {}) {
     ).catch((error: unknown) => errorResponse(error));
     return { status: response.status, body: (await response.json()) as unknown };
   }
-  return { ...f, open, mint, sessions, stored, publish, reconcile };
+  /** The owner's browser's openPage as share-web forwards it. An empty header in `headers` is left out. */
+  async function browserOpen(path: string, headers: Record<string, string> = {}) {
+    const sent = {
+      cookie: "account=owner-1:browser-1:browser",
+      origin: SHARE_WEB,
+      "x-dohc-relay-exchange-key": EXCHANGE_KEY,
+      "content-type": "application/json",
+      ...headers,
+    };
+    const response = await route(
+      new Request(`http://relay.test/sync/${scope.workspaceId}/ops/openPage`, {
+        method: "POST",
+        headers: Object.fromEntries(Object.entries(sent).filter(([, value]) => value !== "")),
+        body: JSON.stringify({ path }),
+      }),
+      { route: "account-operation", workspaceId: scope.workspaceId, operation: "openPage" },
+    ).catch((error: unknown) => errorResponse(error));
+    return { status: response.status, body: (await response.json()) as unknown };
+  }
+  return { ...f, open, browserOpen, mint, sessions, stored, publish, reconcile };
 }
 
 const answer = (result: unknown) => ({ status: 200, body: { ok: true, result } });
@@ -338,4 +375,89 @@ it("enrolls no page past the account's bound on its owner's documents, and still
   expect(await f.open("docs/b.md")).toEqual(refused("live_host_full"));
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/b.md")).toBeNull();
   expect(await f.open(binding.currentPath)).toEqual(preparing);
+});
+
+it("opens a page for the owner's browser through share-web, whatever Show on phone says, with a ticket for its sign-in", async () => {
+  const f = await phone();
+  f.ready();
+  f.storage.setShowOnPhone({
+    ownerUserId: "owner-1",
+    workspaceId: scope.workspaceId,
+    showOnPhone: false,
+  });
+  expect(await f.browserOpen(binding.currentPath)).toEqual(ready);
+  expect(f.mint).toHaveBeenCalledWith(
+    { objectId: binding.objectId },
+    expect.objectContaining({ kind: "owner", userId: "owner-1", sessionId: "browser-1" }),
+    expect.any(AbortSignal),
+  );
+  // The phone still needs Show on phone.
+  expect(await f.open(binding.currentPath)).toEqual(notFound);
+});
+
+it("answers another account, a member, a fenced owner, and a browser share-web did not send exactly as a missing workspace", async () => {
+  const f = await phone();
+  f.ready();
+  // member-1 is an Edit member of the workspace.
+  f.raw
+    .prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?")
+    .run(JSON.stringify({ kind: "workspace" }), scope.shareId);
+  f.raw
+    .prepare(
+      "INSERT INTO sync_relay_workspace_memberships (workspace_id,share_id,member_level,workspace_name,created_at_ms) VALUES (?,?,'edit','Workspace',0)",
+    )
+    .run(scope.workspaceId, scope.shareId);
+  f.raw
+    .prepare(`INSERT INTO sync_relay_workspace_members (member_id,workspace_id,grant_id,user_id,email,role,state,invited_at_ms,joined_at_ms)
+    VALUES ('member',?,?,'member-1',NULL,'member','active',0,0)`)
+    .run(scope.workspaceId, scope.grantId);
+  for (const headers of <Record<string, string>[]>[
+    { cookie: "account=owner-2:browser-2:browser" },
+    { cookie: "account=member-1:browser-3:browser" },
+    // A phone's or a desktop's sign-in never opens through share-web.
+    { cookie: "account=owner-1:phone-1:phone" },
+    { cookie: "account=owner-1:desktop-1:desktop" },
+    { cookie: "" },
+    { cookie: "account=unknown" },
+    { origin: "https://elsewhere.test" },
+    { origin: "" },
+    { "x-dohc-relay-exchange-key": "x".repeat(43) },
+    { "x-dohc-relay-exchange-key": "" },
+  ])
+    expect(await f.browserOpen(binding.currentPath, headers), JSON.stringify(headers)).toEqual(
+      notFound,
+    );
+  // A browser's sign-in presented as a Bearer, as a phone's is, is refused too.
+  expect(await f.open(binding.currentPath, "owner-1:browser-1:browser")).toEqual(notFound);
+  const context = f.storage as StorageContext;
+  initializeAccountDeletion(context, "deletion-key");
+  fenceAccount(context, "deletion-key", "owner-1", "owner-1@dohc.test");
+  expect(await f.browserOpen(binding.currentPath)).toEqual(notFound);
+  expect(f.mint).not.toHaveBeenCalled();
+  expect(f.read()).toBeNull();
+});
+
+it("answers the owner's browser a secret file as a missing page, and a page no computer opened live with its reason", async () => {
+  const f = await phone();
+  f.seed("a/.env/b.md", "secret-object");
+  f.publish("secret-object");
+  expect(await f.browserOpen("docs/missing.md")).toEqual(refused("missing"));
+  expect(await f.browserOpen("a/.env/b.md")).toEqual(refused("missing"));
+  f.seed("docs/b.md", "object-b");
+  expect(await f.browserOpen("docs/b.md")).toEqual(refused("live-document-without-lineage"));
+  expect(f.storage.listServiceHostEnrollments(scope.workspaceId)).toEqual([]);
+});
+
+it("holds the account's bound on its owner's documents across its phone and its browser", async () => {
+  const f = await phone();
+  for (let index = 0; index < PHONE_OWNER_DOCUMENTS_PER_ACCOUNT - 1; index++)
+    f.agentOnly(scope.workspaceId, `owned-${index}`, `notes/${index}.md`);
+  f.raw.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_demand=1`).run();
+  // The phone takes the bound's last place, so the browser enrolls no more, and still opens the phone's page.
+  expect(await f.open(binding.currentPath)).toEqual(preparing);
+  f.seed("docs/b.md", "object-b");
+  f.publish("object-b");
+  expect(await f.browserOpen("docs/b.md")).toEqual(refused("live_host_full"));
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/b.md")).toBeNull();
+  expect(await f.browserOpen(binding.currentPath)).toEqual(preparing);
 });

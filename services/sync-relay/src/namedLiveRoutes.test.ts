@@ -14,6 +14,7 @@ import { LIVE_TICKET_LIFETIME_MS } from "@dohc/live-session-contract/live-ticket
 import { selfHostLiveProfile } from "./selfHostLiveProfile";
 import { observeRelayWrites } from "./relayWriteChanges";
 import { WORKSPACE_SHARE_SELECTOR_JSON } from "./storage/workspaceMembers";
+import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
 import type { StorageContext } from "./storage/context.js";
 import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
 import { once } from "node:events";
@@ -39,6 +40,7 @@ import { createNamedFrameChanges, type NamedFrameNativeHost } from "./namedLiveF
 import { audience, binding, host, key, scope, seedLinkAgent } from "./liveTickets.test-helper.js";
 import type { LiveUpdateJournalCut } from "./storage/types.js";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import type { LiveAuthorContext } from "@dohc/live-session-contract";
 import { NAMED_LIVE_STOPPED, linkRefusalBody } from "@dohc/security-contract/link-refusal";
 
 import {
@@ -52,6 +54,8 @@ import {
   phoneState,
   phoneScope,
   phoneHeaders,
+  browserHeaders,
+  browserScope,
   openProductionSync,
 } from "./namedLiveRoutes.test-helper";
 
@@ -1214,6 +1218,239 @@ describe("an owner's phone", () => {
       expect(phone.received.filter((frame) => frame.kind === "result")).toEqual([]);
     },
   );
+
+  describe("and browser", () => {
+    const mintBrowser = (f: Fixture, changed: Partial<typeof browserScope> = {}) =>
+      mintPhone(f, { ...browserScope, ...changed });
+    const openBrowser = async (f: Fixture) => {
+      const browser = f.connect((await mintBrowser(f)).token, "", browserHeaders);
+      const desktop = f.connect("");
+      expect([await browser.status, await desktop.status]).toEqual([101, 101]);
+      return { browser, desktop };
+    };
+
+    it("opens once per ticket that share-web forwards, on its own capture, reading its sign-in uncached", async () => {
+      const join = vi.fn((captured: NamedFrameRoomHost) => captured);
+      const f = await phoneFixture({ join } as unknown as LiveRooms);
+      const { token } = await mintBrowser(f);
+      const browser = f.connect(token, "", browserHeaders);
+      expect(await browser.status).toBe(101);
+      expect(browser.ws.protocol).toBe("dohc-live-v1");
+      await browser.until(() => browser.received.some((frame) => frame.kind === "welcome"));
+      expect(f.readSessions).toHaveBeenCalledWith(["browser-session"]);
+      expect(join).not.toHaveBeenCalled();
+      expect(await f.connect(token, "", browserHeaders).status).toBe(404);
+    });
+
+    const { cookie, origin } = browserHeaders;
+    const key = browserHeaders["x-dohc-relay-exchange-key"];
+    it.each<[string, Partial<typeof browserScope>, Record<string, string>]>([
+      ["another account", {}, { ...browserHeaders, cookie: "account=browser:owner-2" }],
+      ["a member", {}, { ...browserHeaders, cookie: `account=browser:${scope.userId}` }],
+      ["a desktop's sign-in", {}, { ...browserHeaders, cookie: "account=reader" }],
+      ["no cookie", {}, { origin, "x-dohc-relay-exchange-key": key }],
+      ["another origin", {}, { ...browserHeaders, origin: "https://foreign.example" }],
+      ["no origin", {}, { cookie, "x-dohc-relay-exchange-key": key }],
+      [
+        "a wrong exchange key",
+        {},
+        { ...browserHeaders, "x-dohc-relay-exchange-key": "x".repeat(54) },
+      ],
+      ["a ticket for the phone's sign-in", { sessionId: "phone-session" }, browserHeaders],
+      [
+        "a Bearer beside the cookie",
+        {},
+        { ...browserHeaders, authorization: "Bearer owner-token" },
+      ],
+    ])(
+      "refuses %s as a missing workspace, and spends no ticket",
+      async (_name, changed, headers) => {
+        const f = await phoneFixture();
+        const { token } = await mintBrowser(f, changed);
+        expect(await f.connect(token, "", headers).status).toBe(404);
+        expect(f.native.client.openLiveAppliedSync).not.toHaveBeenCalled();
+        if (Object.keys(changed).length === 0)
+          expect(await f.connect(token, "", browserHeaders).status).toBe(101);
+      },
+    );
+
+    it("refuses a browser with no ticket, and a fenced owner", async () => {
+      const f = await phoneFixture();
+      expect(await f.connect("", "", browserHeaders).status).toBe(404);
+      const { token } = await mintBrowser(f);
+      const context = f.storage as StorageContext;
+      initializeAccountDeletion(context, "deletion-key");
+      fenceAccount(context, "deletion-key", "owner-1", "owner-1@dohc.test");
+      expect(await f.connect(token, "", browserHeaders).status).toBe(404);
+      expect(f.native.client.openLiveAppliedSync).not.toHaveBeenCalled();
+    });
+
+    it.each(["a revoke", "a fence"])(
+      "closes at %s while frames flow, and leaves the host",
+      async (invalidation) => {
+        const f = await phoneFixture();
+        const { browser, desktop } = await openBrowser(f);
+        await closesWhileSending(browser, () => {
+          if (invalidation === "a revoke") f.routes.stopSession("owner-1", "browser-session");
+          else f.routes.deleteAccount("owner-1", []);
+        });
+        expect(f.native.invalidated.aborted).toBe(false);
+        if (invalidation !== "a fence") expect(desktop.ws.readyState).toBe(WebSocket.OPEN);
+      },
+    );
+
+    it("stays open when Show on phone turns off", async () => {
+      const f = await phoneFixture();
+      const { browser } = await openBrowser(f);
+      f.routes.stopPhoneWorkspace("owner-1", f.binding.workspaceId);
+      f.storage.setShowOnPhone({
+        ownerUserId: "owner-1",
+        workspaceId: f.binding.workspaceId,
+        showOnPhone: false,
+      });
+      f.changes.notifyWrite();
+      // A ping answered after the change shows the socket outlived it.
+      browser.ws.ping();
+      await once(browser.ws, "pong");
+      expect(browser.ws.readyState).toBe(WebSocket.OPEN);
+    });
+
+    it.each(["signed out", "standing"])(
+      "reads its sign-in again each minute and closes when it is %s",
+      async (state) => {
+        vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+        try {
+          const f = await phoneFixture();
+          const { browser, desktop } = await openBrowser(f);
+          f.readSessions.mockClear();
+          // share-web's sign-out deletes the session's row.
+          if (state === "signed out") f.sessionRows.delete("browser-session");
+          const closed = new Promise<void>((resolve) => browser.ws.once("close", () => resolve()));
+          await vi.advanceTimersByTimeAsync(OWNER_SESSION_CHECK_MS);
+          expect(f.readSessions).toHaveBeenCalledWith(["browser-session"]);
+          if (state === "standing") expect(browser.ws.readyState).toBe(WebSocket.OPEN);
+          else await closed;
+          expect(desktop.ws.readyState).toBe(WebSocket.OPEN);
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it("stays open while share-web's gateway pings it, and closes once the pings stop", async () => {
+      phoneState.expiresAt = 8e12;
+      const routeLimits = { ...limits, idleTimeoutMs: 1000 };
+      const f = await fixture(routeLimits, false, undefined, true);
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const browser = f.connect((await mintBrowser(f)).token, "", browserHeaders);
+        expect(await browser.status).toBe(101);
+        await browser.until(() => browser.received.some((frame) => frame.kind === "welcome"));
+        for (let elapsed = 0; elapsed < 3 * routeLimits.idleTimeoutMs; elapsed += 200) {
+          expect(await pingOutcome(browser)).toBe("pong");
+          await vi.advanceTimersByTimeAsync(200);
+        }
+        expect(browser.ws.readyState).toBe(WebSocket.OPEN);
+        await vi.advanceTimersByTimeAsync(routeLimits.idleTimeoutMs);
+        await browser.closed;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    // The note's room, as production runs it, beside the owner's desktop and browser.
+    const roomFixture = async () => {
+      let rooms: LiveRooms | undefined;
+      const f = await phoneFixture(
+        {
+          join: (captured: NamedFrameRoomHost, options?: { owner?: boolean }) =>
+            rooms!.join(captured, options),
+        } as unknown as LiveRooms,
+        true,
+      );
+      rooms = createLiveRooms({
+        storage: f.storage,
+        maxUpdateBytes: 1 << 20,
+        maxNoteBytes: 1 << 22,
+        maxAppliedBytes: 1 << 20,
+        saveEveryMs: 3_600_000,
+        log() {},
+        openSaver: async () =>
+          captureOwnerLiveFrameHost({
+            authenticatedUserId: "owner-1",
+            storage: f.storage,
+            native: f.native,
+            bounds: selfHostLiveProfile().namedLive.host,
+            validate: ({ retainStateUpdate: _retainStateUpdate, ...input }) =>
+              createLiveMarkdownJournalValidator(policy)(input),
+          }),
+      });
+      cleanups.push(async () => rooms!.close());
+      const browser = f.connect((await mintBrowser(f)).token, "", browserHeaders);
+      expect(await browser.status).toBe(101);
+      await openProductionSync(f, browser);
+      return { f, browser };
+    };
+    const paragraph = (text: string) => {
+      const doc = new Y.Doc(),
+        line = new Y.XmlElement("paragraph");
+      line.insert(0, [new Y.XmlText(text)]);
+      doc.getXmlFragment("body").insert(0, [line]);
+      return Y.encodeStateAsUpdate(doc);
+    };
+    const submit = (
+      f: Fixture,
+      socket: ReturnType<Fixture["connect"]>,
+      updateBytes: Uint8Array,
+      authorContext?: LiveAuthorContext,
+    ) => {
+      const encode = (frame: LiveFrame) => encodeLiveFrame(frame, f.frames.receive.maxFrameBytes);
+      socket.ws.send(
+        encode({
+          kind: "begin",
+          purpose: "submit-update",
+          deliveryId: "edit",
+          transferId: 2,
+          totalBytes: updateBytes.length,
+          digest: createHash("sha256").update(updateBytes).digest("hex"),
+          ...(authorContext ? { authorContext } : {}),
+        }),
+      );
+      socket.ws.send(encode({ kind: "chunk", transferId: 2, offset: 0, bytes: updateBytes }));
+    };
+
+    it("stays on its own capture with the note's room on, so another editor's unsaved edit never reaches it as a room row", async () => {
+      const { f, browser } = await roomFixture();
+      const desktop = f.connect("");
+      expect(await desktop.status).toBe(101);
+      await openProductionSync(f, desktop);
+      submit(f, desktop, paragraph("From the desktop"));
+      await desktop.until(() => desktop.received.some((frame) => frame.kind === "result"));
+      expect(desktop.received.find((frame) => frame.kind === "result")).toMatchObject({
+        result: "success",
+      });
+      // A ping answered after the desktop's edit was taken shows the browser had its chance to hear of it.
+      browser.ws.ping();
+      await once(browser.ws, "pong");
+      expect(
+        browser.received.filter((frame) => frame.kind === "begin" && frame.purpose === "room-row"),
+      ).toEqual([]);
+    });
+
+    it("refuses an edit from the browser that names an agent, with the note's room on", async () => {
+      const { f, browser } = await roomFixture();
+      submit(f, browser, paragraph("Written by a helper"), {
+        kind: "account",
+        accountId: "owner-1",
+        agent: { agentId: "helper", agentName: "Helper", depth: 0 },
+      });
+      await browser.until(() => browser.received.some((frame) => frame.kind === "result"));
+      expect(browser.received.find((frame) => frame.kind === "result")).toMatchObject({
+        result: "refused",
+        reason: "provenance-refused",
+      });
+    });
+  });
 });
 
 it.each([

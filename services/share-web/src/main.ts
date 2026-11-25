@@ -13,6 +13,7 @@ import { loadShareWebConfig } from "./config";
 import { createDeviceControlBridge } from "./deviceControlBridge";
 import { createLiveGateway, namedSessionCheckIntervalMs } from "./liveGateway";
 import { createNamedLiveRelayRoute, namedLiveGatewayRequest } from "./namedLiveRelayRoute";
+import { ownerLiveSession } from "./liveGatewayRequest";
 import { clientAddress } from "./clientAddress";
 import {
   createShareWebApplication,
@@ -48,6 +49,7 @@ try {
 const application = createShareWebApplication({
   deleteAccountGateways(userId, workspaceIds) {
     namedGateway?.deleteAccount(userId, workspaceIds);
+    ownerGateway?.deleteAccount(userId, workspaceIds);
     linkGateway?.deleteAccount(userId, workspaceIds);
   },
   appLaunch: config.appLaunch,
@@ -141,19 +143,20 @@ const gatewayBufferMaximum =
   config.namedLiveGatewayLimits?.maxBufferedBytes ?? config.linkLive?.gateway.maxBufferedBytes;
 const gatewayBuffers =
   gatewayBufferMaximum === undefined ? undefined : createLiveBufferBudget(gatewayBufferMaximum);
-let namedGateway: ReturnType<typeof createLiveGateway> | undefined;
-if (config.namedLiveGatewayLimits) {
-  namedGateway = createLiveGateway({
+function accountGateway(limits: NonNullable<typeof config.namedLiveGatewayLimits>, owner: boolean) {
+  const gateway = createLiveGateway({
     bufferBudget: gatewayBuffers,
     publicHosts: config.publicHosts,
     publicOrigin: config.accountAuth!.publicOrigin,
-    limits: config.namedLiveGatewayLimits,
+    ...(owner ? { path: "/api/live/owner" as const } : {}),
+    limits,
     resolveSession(request, discriminator, signal) {
       const authenticated = namedLiveGatewayRequest(
         request,
         config.accountAuth!.publicOrigin,
         signal,
       );
+      if (authenticated && owner) return Promise.resolve(ownerLiveSession(discriminator));
       return authenticated
         ? application.resolveNamedBrowserSession(authenticated, discriminator)
         : Promise.resolve(null);
@@ -162,12 +165,20 @@ if (config.namedLiveGatewayLimits) {
       relayUrl: config.relayUrl,
       publicOrigin: config.accountAuth!.publicOrigin,
       exchangeKey: config.relayExchangeKey!,
-      handshakeTimeoutMs: config.namedLiveGatewayLimits.upgradeTimeoutMs,
+      handshakeTimeoutMs: limits.upgradeTimeoutMs,
+      owner,
     }),
   });
-  process.once("SIGINT", namedGateway.close);
-  process.once("SIGTERM", namedGateway.close);
-  server.once("close", namedGateway.close);
+  process.once("SIGINT", gateway.close);
+  process.once("SIGTERM", gateway.close);
+  server.once("close", gateway.close);
+  return gateway;
+}
+let namedGateway: ReturnType<typeof createLiveGateway> | undefined,
+  ownerGateway: typeof namedGateway;
+if (config.namedLiveGatewayLimits) {
+  ownerGateway = accountGateway(config.namedLiveGatewayLimits, true);
+  namedGateway = accountGateway(config.namedLiveGatewayLimits, false);
 }
 const linkGateway =
   config.linkLive && application.linkLive
@@ -190,6 +201,9 @@ if (deviceControl || namedGateway || linkGateway)
   server.on("upgrade", (request, socket, head) => {
     if (request.url?.startsWith("/api/live/link?")) {
       if (linkGateway) void linkGateway.handleUpgrade(request, socket, head);
+      else socket.destroy();
+    } else if (request.url?.startsWith("/api/live/owner?")) {
+      if (ownerGateway) void ownerGateway.handleUpgrade(request, socket, head);
       else socket.destroy();
     } else if (request.url?.startsWith("/api/live?")) {
       if (namedGateway) void namedGateway.handleUpgrade(request, socket, head);

@@ -74,7 +74,8 @@ interface Options<Selection extends LiveSelection> {
   authorize?(
     selection: Selection,
     signal: AbortSignal,
-  ): Promise<{ ticketToken: string; discriminator: string; websocketUrl: string }>;
+    /** The owner's socket names its page in the URL and has no browser session. */
+  ): Promise<{ ticketToken: string; discriminator?: string; websocketUrl: string }>;
   publicOrigin: string;
   limits: NamedLiveBrowserLimits;
   fetch?: typeof fetch;
@@ -537,7 +538,7 @@ export function createNamedLiveBrowserTransport<
       try {
         await retiring;
         if (!current(held)) return;
-        let admitted: { discriminator: string; ticketToken: string; websocketUrl: string };
+        let admitted: { discriminator?: string; ticketToken: string; websocketUrl: string };
         if (options.authorize) {
           held.admitting = true;
           admitted = await options.authorize(target, held.controller.signal);
@@ -598,7 +599,10 @@ export function createNamedLiveBrowserTransport<
             websocketUrl: namedUrl.href,
           };
         }
-        if (!/^[A-Za-z0-9_-]{12}$/.test(admitted.discriminator))
+        if (
+          admitted.discriminator !== undefined &&
+          !/^[A-Za-z0-9_-]{12}$/.test(admitted.discriminator)
+        )
           throw new Error("Invalid admission.");
         parseLiveTicketToken(admitted.ticketToken);
         const token = admitted.ticketToken;
@@ -610,7 +614,7 @@ export function createNamedLiveBrowserTransport<
           url.username ||
           url.password ||
           url.hash ||
-          url.searchParams.get("session") !== admitted.discriminator
+          url.searchParams.get("session") !== (admitted.discriminator ?? null)
         )
           throw new Error("Invalid live route.");
         await attach(held, openSocket(url.href, ["dohc-live-v1", `dohc-live-ticket.${token}`]));

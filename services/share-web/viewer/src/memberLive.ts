@@ -12,6 +12,9 @@ import { fetchShareWeb } from "./apiVersion";
 const record = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 
+/** A member opens a page through their grant, and the owner through their workspace. */
+export type LivePageTarget = { grantId: string } | { workspaceId: string };
+
 export type MemberPageAdmission =
   | {
       kind: "open";
@@ -21,11 +24,13 @@ export type MemberPageAdmission =
       token: string;
       limits: unknown;
     }
+  | { kind: "owner"; objectId: string; lineageClaimId: string; token: string; limits: unknown }
+  | { kind: "preparing" }
   | { kind: "refused"; code: string };
 
 async function memberLive(
   path: string,
-  body: { grantId: string; path: string },
+  body: LivePageTarget & { path: string },
   signal: AbortSignal,
 ): Promise<{ status: number; value: unknown }> {
   const response = await fetchShareWeb(path, {
@@ -52,11 +57,16 @@ async function memberLive(
 
 /** Opens a page for editing. The host's refusal keeps its code, so the page can say why. */
 export async function openMemberPage(
-  grantId: string,
+  target: LivePageTarget,
   path: string,
   signal: AbortSignal,
 ): Promise<MemberPageAdmission> {
-  const { status, value } = await memberLive("/api/live/member-open", { grantId, path }, signal);
+  const owner = "workspaceId" in target;
+  const { status, value } = await memberLive(
+    owner ? "/api/live/owner-open" : "/api/live/member-open",
+    { ...target, path },
+    signal,
+  );
   if (
     status === 409 &&
     record(value) &&
@@ -65,7 +75,14 @@ export async function openMemberPage(
     typeof value.code === "string"
   )
     return { kind: "refused", code: value.code };
+  if (owner && status === 200 && record(value)) {
+    if (value.preparing === true) return { kind: "preparing" };
+    const { objectId, lineageClaimId, token, limits } = value;
+    if ([objectId, lineageClaimId, token].every((field) => typeof field === "string"))
+      return { kind: "owner", objectId, lineageClaimId, token, limits } as MemberPageAdmission;
+  }
   if (
+    owner ||
     status !== 200 ||
     !record(value) ||
     Object.keys(value).sort().join() !== "discriminator,limits,objectId,token,userId" ||
@@ -97,10 +114,9 @@ export async function memberPageReady(
   return value.ready;
 }
 
+type Selection = Omit<NamedLiveSelection, "grantId"> & { grantId?: string };
 export type MemberDocument = {
-  session: ReturnType<
-    ReturnType<typeof createNamedLiveBrowserTransport<NamedLiveSelection>>["select"]
-  >;
+  session: ReturnType<ReturnType<typeof createNamedLiveBrowserTransport<Selection>>["select"]>;
   close(): void;
 };
 
@@ -110,28 +126,42 @@ export type MemberDocument = {
  * code to `onRefused`.
  */
 export function memberDocument(input: {
-  grantId: string;
+  target: LivePageTarget;
   path: string;
   accountId: string;
-  admission: Extract<MemberPageAdmission, { kind: "open" }>;
+  admission: Extract<MemberPageAdmission, { kind: "open" | "owner" }>;
   onRefused(code: string): void;
 }): MemberDocument {
   let first: MemberPageAdmission | null = input.admission;
   const { objectId } = input.admission;
-  const transport = createNamedLiveBrowserTransport<NamedLiveSelection>({
+  const { grantId, workspaceId } = { grantId: undefined, workspaceId: undefined, ...input.target };
+  const transport = createNamedLiveBrowserTransport<Selection>({
     publicOrigin: location.origin,
     limits: parseNamedLiveBrowserLimits(input.admission.limits),
     fetch: fetchShareWeb,
     recordingContext: (selection) => ({ kind: "account", accountId: selection.accountId }),
     async authorize(_selection, signal) {
-      const admitted = first ?? (await openMemberPage(input.grantId, input.path, signal));
+      const admitted = first ?? (await openMemberPage(input.target, input.path, signal));
       first = null;
       if (admitted.kind === "refused") {
         input.onRefused(admitted.code);
         throw new LiveAuthorityUnavailableError(admitted.code);
       }
+      if (admitted.kind === "preparing") throw new Error("Preparing");
+      if (admitted.kind === "owner" && workspaceId && admitted.objectId === objectId) {
+        const { lineageClaimId } = admitted,
+          query = new URLSearchParams({ workspaceId, objectId, lineageClaimId });
+        return {
+          ticketToken: admitted.token,
+          websocketUrl: `wss://${location.host}/api/live/owner?${query}`,
+        };
+      }
       // The answer must be for this account and this page.
-      if (admitted.userId !== input.accountId || admitted.objectId !== objectId)
+      if (
+        admitted.kind !== "open" ||
+        admitted.userId !== input.accountId ||
+        admitted.objectId !== objectId
+      )
         throw new LiveAuthorityUnavailableError("Unavailable");
       const url = new URL("/api/live", location.origin);
       url.protocol = "wss:";
@@ -145,8 +175,8 @@ export function memberDocument(input: {
   });
   const session = transport.select({
     accountId: input.accountId,
-    workspaceId: `named:${input.grantId}`,
-    grantId: input.grantId,
+    workspaceId: workspaceId ?? `named:${grantId}`,
+    ...(grantId ? { grantId } : {}),
     objectId,
   });
   return { session, close: () => transport.close() };

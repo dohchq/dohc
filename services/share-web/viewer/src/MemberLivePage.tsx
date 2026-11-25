@@ -14,24 +14,33 @@ import { DiscardDraft, UNSENT_EDITS } from "./DiscardDraft";
 import { UnsentEditsRow } from "./UnsentEdits";
 import { Toast } from "./Toast";
 import { memberDocument, memberPageReady, openMemberPage, type MemberDocument } from "./memberLive";
+import type { LivePageTarget } from "./memberLive";
 
 /** How long a page waits for its owner's dohc, ring alone, before its toast. The desktop waits as long. */
 export const LIVE_HOST_WAIT_REPORT_MS = 15_000;
 const READY_RETRY_MS = 1_000,
   READY_RETRY_MAX_MS = 30_000;
-const WAITS_FOR_HOST = "live-document-without-lineage";
+const WAITS_FOR_HOST = "live-document-without-lineage",
+  WAITING = "Editing starts once the owner's dohc is online.";
 // Why the host would not take a page, in the desktop's words. A code dohc does not know gets no reason.
 const HOST_REFUSAL_REASONS: Readonly<Record<string, string>> = {
   live_host_full: "The server is editing too many pages right now.",
   live_paused_by_owner: "The owner paused live editing for this page.",
   "document-unavailable": "The page moved or was deleted.",
-  [WAITS_FOR_HOST]: "Editing starts once the owner's dohc is online.",
+  [WAITS_FOR_HOST]: "Open this page on a computer once to edit it here.",
+  paused: "Live editing is paused for this page. Resume it in dohc to edit here.",
+  "conflict-parent-withheld":
+    "A conflict was resolved in this page, so live editing can't resume. Open Live documents in dohc to make a copy that can go live.",
+  "session-host-diverged":
+    "The server's copy of this workspace no longer matches the synced one, so live editing stopped. Contact the server's operator.",
 };
+const READ_ONLY = "live_hosting_unsupported";
 
 type Phase =
   | { kind: "opening" }
   | { kind: "waiting"; reported: boolean }
   | { kind: "refused"; reason: string | null }
+  | { kind: "read" }
   | { kind: "live" };
 
 function wait(ms: number, signal: AbortSignal): Promise<void> {
@@ -60,7 +69,7 @@ function wait(ms: number, signal: AbortSignal): Promise<void> {
  * membership or an ended session, `onUnsent` gets the text that has not reached the workspace.
  */
 export default function MemberLivePage({
-  grantId,
+  target,
   accountId,
   path,
   draftName,
@@ -72,7 +81,7 @@ export default function MemberLivePage({
   leave,
   onUnsent,
 }: {
-  grantId: string;
+  target: LivePageTarget;
   accountId: string;
   path: string;
   draftName: string;
@@ -97,6 +106,8 @@ export default function MemberLivePage({
   const onUnsentRef = useRef(onUnsent);
   onUnsentRef.current = onUnsent;
   const name = path.slice(path.lastIndexOf("/") + 1);
+  const owner = "workspaceId" in target,
+    place = owner ? target.workspaceId : target.grantId;
   // The editor closes at once, so nothing more is sent. Text that had not reached the workspace stays with the person.
   const release = useCallback(() => {
     const closing = current.current,
@@ -114,12 +125,12 @@ export default function MemberLivePage({
   }, []);
 
   const refuse = useCallback((code: string) => {
-    if (code === WAITS_FOR_HOST) return;
+    if (code === READ_ONLY) return setPhase({ kind: "read" });
     setPhase({
       kind: "refused",
       reason: Object.hasOwn(HOST_REFUSAL_REASONS, code) ? HOST_REFUSAL_REASONS[code]! : null,
     });
-    setDismissed(false);
+    setDismissed(code === WAITS_FOR_HOST);
   }, []);
   const open = useCallback(() => {
     release();
@@ -131,19 +142,20 @@ export default function MemberLivePage({
     setPending(false);
     setDismissed(false);
     setPhase({ kind: "opening" });
+    const target = owner ? { workspaceId: place } : { grantId: place };
     void (async () => {
       let delay = READY_RETRY_MS;
       for (;;) {
-        const admitted = await openMemberPage(grantId, path, signal);
+        const admitted = await openMemberPage(target, path, signal);
         if (signal.aborted) return;
-        if (admitted.kind === "open") {
+        if (admitted.kind === "open" || admitted.kind === "owner") {
           const opened = memberDocument({
-            grantId,
+            target,
             path,
             accountId,
             admission: admitted,
             onRefused: (code) => {
-              if (!signal.aborted) refuse(code);
+              if (!signal.aborted && (owner || code !== WAITS_FOR_HOST)) refuse(code);
             },
           });
           current.current = opened;
@@ -151,7 +163,12 @@ export default function MemberLivePage({
           void opened.session.reconnect();
           return;
         }
-        if (admitted.code !== WAITS_FOR_HOST) {
+        if (admitted.kind === "preparing") {
+          await wait(delay, signal);
+          delay = Math.min(delay * 2, READY_RETRY_MAX_MS);
+          continue;
+        }
+        if (admitted.code !== WAITS_FOR_HOST || owner) {
           refuse(admitted.code);
           return;
         }
@@ -161,7 +178,7 @@ export default function MemberLivePage({
         );
         while (
           !signal.aborted &&
-          !(await memberPageReady(grantId, path, signal).catch(() => false))
+          !(await memberPageReady(place, path, signal).catch(() => false))
         ) {
           await wait(delay, signal);
           delay = Math.min(delay * 2, READY_RETRY_MAX_MS);
@@ -171,7 +188,7 @@ export default function MemberLivePage({
     })().catch(() => {
       if (!signal.aborted) setPhase({ kind: "refused", reason: null });
     });
-  }, [grantId, path, accountId, refuse, release]);
+  }, [owner, place, path, accountId, refuse, release]);
 
   useEffect(() => {
     open();
@@ -233,11 +250,7 @@ export default function MemberLivePage({
   };
 
   const reason =
-    phase.kind === "refused"
-      ? phase.reason
-      : phase.kind === "waiting"
-        ? HOST_REFUSAL_REASONS[WAITS_FOR_HOST]!
-        : null;
+    phase.kind === "refused" ? phase.reason : phase.kind === "waiting" ? WAITING : null;
   const toast =
     !dismissed && (phase.kind === "refused" || (phase.kind === "waiting" && phase.reported));
   // Waiting for the owner's dohc is a state dohc is fixing, not a failure. The desktop titles it the same.
@@ -249,7 +262,7 @@ export default function MemberLivePage({
   // The band says why the page is read-only. While dohc waits for the owner's dohc it is already trying, so only a refusal offers Try again.
   const band =
     phase.kind === "waiting"
-      ? HOST_REFUSAL_REASONS[WAITS_FOR_HOST]!
+      ? WAITING
       : reason
         ? toastBody
         : `dohc could not open this page for editing. ${toastBody}`;

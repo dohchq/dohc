@@ -30,6 +30,7 @@ export const SHARE_WEB_REQUEST_LOG = createRequestLog("share-web", [
   "/api/live/named-documents",
   "/api/live/member-open",
   "/api/live/member-ready",
+  "/api/live/owner-open",
   "/api/named-chat/*",
   "/api/push/*",
   "/api/account/*",
