@@ -469,3 +469,26 @@ describe("blockExit click below last non-paragraph block", () => {
     expect(editor.state.selection.$from.depth).toBe(1);
   });
 });
+
+describe("blockExit Enter over a selection across blocks", () => {
+  it("deletes a selection from a line's start to the line after a code block, then splits", () => {
+    const editor = makeEditor("ab\n\n```\ncd\n```\n\nef");
+    const from = textblockPos(editor, "ab").pos + 1;
+    const to = textblockPos(editor, "ef").pos + 1;
+    editor.commands.setTextSelection({ from, to });
+    press(editor, { key: "Enter" });
+    expect(topLevelTypes(editor)).toEqual(["paragraph", "paragraph"]);
+    expect(editor.state.doc.child(0).textContent).toBe("");
+    expect(editor.state.doc.child(1).textContent).toBe("ef");
+    expect(editor.state.selection.$from.parent.textContent).toBe("ef");
+  });
+
+  it("leaves Enter over a selection inside one line to the editor", () => {
+    const editor = makeEditor("abcd");
+    const { pos } = textblockPos(editor, "abcd");
+    editor.commands.setTextSelection({ from: pos + 2, to: pos + 4 });
+    press(editor, { key: "Enter" });
+    expect(editor.state.doc.child(0).textContent).toBe("a");
+    expect(editor.state.doc.child(1).textContent).toBe("d");
+  });
+});
