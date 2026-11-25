@@ -239,6 +239,14 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       onSelect: () => explorer.onIncludeArchivedCollections?.(!archived),
     });
   }
+  if (!refusal && explorer.onShowConnections) {
+    collectionActions.push({
+      id: "connections",
+      label: "Show connections",
+      testId: "collections-connections",
+      onSelect: explorer.onShowConnections,
+    });
+  }
   if (!refusal && explorer.onRestoreCollection && !explorer.shareView) {
     collectionActions.push({
       id: "restore",

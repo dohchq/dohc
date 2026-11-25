@@ -204,6 +204,7 @@ export interface ExplorerProps {
   onOpenDataCollection?: (datasetPath: string, tableId: string) => void;
   onMoreDataCollections?: () => void;
   onRestoreCollection?: () => void;
+  onShowConnections?: () => void;
   // Why this computer cannot list the workspace's Collections, in main's
   // words, such as another computer keeping them. The section says so in
   // place of the list.

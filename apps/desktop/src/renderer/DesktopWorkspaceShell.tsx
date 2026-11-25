@@ -128,6 +128,7 @@ import { useCrashReport } from "./shell/useCrashReport";
 import { useAutomationHolds } from "./shell/useAutomationHolds";
 import { CollectionFieldMarksProvider } from "./collections/collectionFieldMarks";
 import { WorkspaceSessionProvider } from "./workspace/workspaceSession";
+import { CollectionConnectionsDialog } from "./CollectionConnectionsDialog";
 import { MessageDeleteRole } from "./workbench/messageDelete";
 import {
   LiveRecoveryPackageNotices,
@@ -861,6 +862,7 @@ function WorkspaceShell(props: {
   const [newCollectionFolder, setNewCollectionFolder] = useState<string | null>(null);
   const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
   const [recoveryWorkspaceId, setRecoveryWorkspaceId] = useState<string | null>(null);
+  const [connectionsWorkspaceId, setConnectionsWorkspaceId] = useState<string | null>(null);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
   const [cloudOpen, setCloudOpen] = useState(false);
   // The address a failed attempt used. Only set when a notice's Try again has
@@ -4977,6 +4979,9 @@ function WorkspaceShell(props: {
   const onRestoreCollection = useCallback(() => {
     setRecoveryWorkspaceId(workspaceId);
   }, [workspaceId]);
+  const onShowConnections = useCallback(() => {
+    setConnectionsWorkspaceId(workspaceId);
+  }, [workspaceId]);
   const openGraphTab = useCallback(() => {
     openVirtualTab(GRAPH_TAB_PATH);
   }, [openVirtualTab]);
@@ -7888,6 +7893,11 @@ function WorkspaceShell(props: {
               ? onRestoreCollection
               : undefined
           }
+          onShowConnections={
+            workspaceIsReady && collectionsListed && datasets.length > 0
+              ? onShowConnections
+              : undefined
+          }
           collectionsRefusal={collectionsRefusal}
           onKeepCollections={keepCollectionsWithList}
           onRetryCollections={retryCollectionsList}
@@ -10411,6 +10421,15 @@ function WorkspaceShell(props: {
                                 reportShellError("dohc could not refresh workspace files.", error),
                               );
                             }}
+                          />
+                        ) : null}
+                        {connectionsWorkspaceId === workspaceId && workspaceIsReady ? (
+                          <CollectionConnectionsDialog
+                            workspaceId={workspaceId}
+                            datasets={datasets}
+                            owner={!shareView}
+                            more={!!nextDataset}
+                            onClose={() => setConnectionsWorkspaceId(null)}
                           />
                         ) : null}
                         {recoveryWorkspaceId === workspaceId &&
