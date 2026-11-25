@@ -341,6 +341,8 @@ describe("reusable guest evaluator", () => {
     ["Infinity", "Infinity", 2],
     ["a BigInt", "1n", 2],
     ["a Date", "new Date(0)", 2],
+    ["an object with toJSON", "{ toJSON: () => 7 }", 2],
+    ["an object whose toJSON throws", "{ toJSON() { throw new Error('mine'); } }", 2],
   ])("refuses %s as a SQL parameter as invalid input", async (_, value, index) => {
     await withDatabase(async (db) => {
       await expect(
@@ -443,6 +445,23 @@ describe("reusable guest evaluator", () => {
       ).rejects.toMatchObject({
         name: "AppBackendRuntimeError",
         refusal: { code: "sql_not_allowed", message },
+      });
+    });
+  });
+
+  it("names an insert into an implicit rowid", async () => {
+    await withDatabase(async (db) => {
+      db.exec("CREATE TABLE notes(id TEXT PRIMARY KEY)");
+      await expect(
+        evaluate(db, request("ctx.db.execute(\"INSERT INTO notes(rowid, id) VALUES(5, 'a')\");"), {
+          persistentConnection: true,
+          schemaTables: ["items", "notes"],
+        }),
+      ).rejects.toMatchObject({
+        refusal: {
+          code: "sql_not_allowed",
+          message: "Collection actions cannot use the implicit rowid. Use the table's primary key.",
+        },
       });
     });
   });

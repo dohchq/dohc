@@ -414,7 +414,7 @@ function run(
           write &&
           insertsImplicitRowid(sql, persistentRowidTables.get(db)!)
         )
-          throw new Error(implicitRowid);
+          throw new AppBackendRuntimeError({ code: "sql_not_allowed", message: implicitRowid });
         const paramsJson = boundedText(
           vm.getString(paramsValue),
           Math.max(request.limits.inputBytes, request.limits.queryBytes),
@@ -542,13 +542,14 @@ function run(
     attach.dispose();
     localDate.dispose();
     const bootstrap = `(() => {
-      const parse = JSON.parse, stringify = JSON.stringify, freeze = Object.freeze, finite = Number.isFinite;
+      const parse = JSON.parse, stringify = JSON.stringify, freeze = Object.freeze, finite = Number.isFinite, isArray = Array.isArray;
       const q = globalThis.__query, e = globalThis.__execute, refuse=globalThis.__refuse, attach=globalThis.__attach, localDate=globalThis.__localDate;
       delete globalThis.__query; delete globalThis.__execute; delete globalThis.__refuse; delete globalThis.__attach; delete globalThis.__localDate;
       const deepFreeze = value => { if (value && typeof value === 'object') { for (const key of Object.keys(value)) deepFreeze(value[key]); freeze(value); } return value; };
       const caller = deepFreeze(parse(${JSON.stringify(request.callerJson)}));
       const input = deepFreeze(parse(${JSON.stringify(request.inputJson)}));
-      const bind = params => stringify(params, function (key, value) { const raw = this[key]; return this === params && raw != null && typeof raw !== 'string' && !(typeof raw === 'number' && finite(raw)) ? {} : value; });
+      const scalar = value => value === null || typeof value === 'string' || (typeof value === 'number' && finite(value));
+      const bind = params => { if (!isArray(params)) return stringify(params); const bound = []; for (let i = 0; i < params.length; i++) bound[i] = params[i] === undefined ? null : scalar(params[i]) ? params[i] : {}; return stringify(bound); };
       const db = freeze({ query: (sql, params = []) => parse(q(sql, bind(params))), execute: (sql, params = []) => parse(e(sql, bind(params))) });
       const ctx = freeze({ caller, db, refuse, files:freeze({attach:id=>deepFreeze(parse(attach(id)))}), localDate: zone => localDate(zone), nowMs: ${request.nowMs}, requestId: ${JSON.stringify(request.requestId)}, secret: ${JSON.stringify(request.secret)} });
       const hasOwn = Object.hasOwn;
