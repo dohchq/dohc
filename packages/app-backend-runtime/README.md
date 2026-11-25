@@ -40,10 +40,18 @@ Operations are synchronous. They receive frozen input and a frozen context:
 - `db.execute(sql, params)`: returns `{ changes }`.
 - `refuse(code, message)`: refuses the candidate with a bounded public message. Catching the guest exception cannot cancel the refusal.
 - `files.attach(fileId)`: returns admitted file metadata and records its attachment. It does not expose bytes or commit the attachment.
+- `localDate(timeZone)`: the date at `nowMs` in an IANA time zone name, such as `Asia/Singapore`, as `YYYY-MM-DD`. Fixed offsets such as `+08:00` are refused.
 
-SQL parameters are strings, finite numbers, or null. Convert booleans to integers.
+SQL parameters are strings, finite numbers, or null. `undefined` binds as null. Convert booleans to integers.
+One statement's parameters, as JSON, may use as many bytes as a query result: 256 KiB, or 4 MiB for a bulk operation.
 Use `ctx.refuse` when a business rule fails. Returning `{ ok: false }` is an ordinary successful result and retains preceding writes.
 The caller receives `AppBackendRuntimeError` with `code: 'operation_refused'` and a `refusal` containing the supplied code and message.
+The host also refuses for the operation when one of these errors escapes it uncaught:
+
+- `invalid_input`: a SQL parameter of another type, named by its position, or a `localDate` zone that isn't a time zone name.
+- `sql_not_allowed`: SQL the authorizer denies, such as a table the operation can't use or an unsafe function. The message names the table or function.
+
+An operation that catches one of these errors can recover or refuse in its own words.
 Other guest exceptions return a generic error without invoking guest error getters.
 
 ## Snapshot evaluator isolation and limits
@@ -63,6 +71,7 @@ The parent deadline also covers native SQL, initialization, serialization, and c
 There is no operating-system filesystem sandbox around the child. Guest confinement depends on Wasm and the explicit callbacks.
 
 The SQL authorizer permits declared tables and denies transaction control, schema edits, attached databases, and unsafe file or extension functions.
+It also permits reads of SQLite's `json_each` and `json_tree` table-valued functions, which read only their arguments, unless one of the Collection's tables has that name.
 During admitted writes, SQLite's session extension can inspect declared table metadata.
 Guest statements cannot invoke that privileged metadata inspection directly.
 Read-only operations also refuse file attachments.

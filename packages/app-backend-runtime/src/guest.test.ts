@@ -327,9 +327,253 @@ describe("reusable guest evaluator", () => {
       );
       expect(JSON.parse(caught.resultJson)).toEqual({
         overLimit: "SQL statement exceeded its limit of 128 parameters. It used 129 parameters.",
-        nonScalar: "SQL parameters must be scalar values.",
+        nonScalar: "SQL parameter 1 must be text, a finite number, or null.",
         nonArray: "SQL parameters must be scalar values.",
       });
+    });
+  });
+
+  it.each([
+    ["an object", "{ nested: true }", 2],
+    ["an array", "[1]", 2],
+    ["a boolean", "true", 2],
+    ["NaN", "NaN", 2],
+    ["Infinity", "Infinity", 2],
+    ["a BigInt", "1n", 2],
+    ["a Date", "new Date(0)", 2],
+    ["an object with toJSON", "{ toJSON: () => 7 }", 2],
+    ["an object whose toJSON throws", "{ toJSON() { throw new Error('mine'); } }", 2],
+  ])("refuses %s as a SQL parameter as invalid input", async (_, value, index) => {
+    await withDatabase(async (db) => {
+      await expect(
+        evaluate(db, request(`return ctx.db.query('SELECT ?, ?', ['ok', ${value}]);`), {
+          persistentConnection: true,
+        }),
+      ).rejects.toMatchObject({
+        name: "AppBackendRuntimeError",
+        refusal: {
+          code: "invalid_input",
+          message: `SQL parameter ${index} must be text, a finite number, or null.`,
+        },
+      });
+    });
+  });
+
+  it("binds the SQL parameter values it checked", async () => {
+    await withDatabase(async (db) => {
+      const result = await evaluate(
+        db,
+        request(`
+          let reads = 0;
+          const params = [];
+          Object.defineProperty(params, 0, { enumerable: true, get: () => ++reads < 2 ? 'checked' : { toJSON: () => 'swapped' } });
+          let replaced;
+          try { ctx.db.query('SELECT ? AS v', { toJSON: () => ['swapped'] }); } catch (error) { replaced = error.message; }
+          return { bound: ctx.db.query('SELECT ? AS v', params), replaced };
+        `),
+      );
+      expect(JSON.parse(result.resultJson)).toEqual({
+        bound: [{ v: "checked" }],
+        replaced: "SQL parameters must be scalar values.",
+      });
+    });
+  });
+
+  it("lets an operation catch a refused SQL parameter and refuse in its own words", async () => {
+    await withDatabase(async (db) => {
+      await expect(
+        evaluate(
+          db,
+          request(
+            `
+            try { ctx.db.query('SELECT * FROM items WHERE id=?', [input.id]); }
+            catch { ctx.refuse('not_found', 'No such item.'); }
+          `,
+            { inputJson: '{"id":{}}' },
+          ),
+        ),
+      ).rejects.toMatchObject({ refusal: { code: "not_found", message: "No such item." } });
+    });
+  });
+
+  it("reads json_each and json_tree unless a real table has the name", async () => {
+    await withDatabase(async (db) => {
+      const listed = await evaluate(
+        db,
+        request(`
+          ctx.db.execute("INSERT INTO items VALUES(1,'a'),(2,'b'),(3,'c')");
+          return {
+            each: ctx.db.query('SELECT id FROM items WHERE id IN (SELECT value FROM json_each(?)) ORDER BY id', ['[1,3]']),
+            tree: ctx.db.query("SELECT count(*) AS n FROM JSON_TREE(?)", ['{"a":[1,2]}']),
+          };
+        `),
+        { persistentConnection: true },
+      );
+      expect(JSON.parse(listed.resultJson)).toEqual({
+        each: [{ id: 1 }, { id: 3 }],
+        tree: [{ n: 4 }],
+      });
+      db.setAuthorizer(null);
+      db.exec("CREATE TABLE json_each(id INTEGER PRIMARY KEY, value TEXT)");
+      await expect(
+        evaluate(db, request("return ctx.db.query('SELECT value FROM json_each');"), {
+          schemaTables: ["items", "json_each"],
+        }),
+      ).rejects.toMatchObject({
+        refusal: {
+          code: "sql_not_allowed",
+          message:
+            "App operation can't read json_each: it isn't one of the tables this operation can use.",
+        },
+      });
+    });
+  });
+
+  it.each([
+    [
+      "an undeclared table",
+      "ctx.db.query('SELECT * FROM notes')",
+      false,
+      "App operation can't read notes: it isn't one of the tables this operation can use.",
+    ],
+    [
+      "a write in a read-only operation",
+      "ctx.db.execute(\"INSERT INTO items VALUES(9, 'x')\")",
+      true,
+      "Only ctx.db.execute in an operation that writes can change items.",
+    ],
+    [
+      "a denied function",
+      "ctx.db.query('SELECT changes() AS n')",
+      false,
+      "App operations can't call changes().",
+    ],
+    [
+      "a dohc table",
+      "ctx.db.query('SELECT * FROM dohc_receipts')",
+      false,
+      "App operations can't run this kind of SQL statement.",
+    ],
+  ])("names what SQL the operation can't use: %s", async (_, call, readOnly, message) => {
+    await withDatabase(async (db) => {
+      db.exec("CREATE TABLE notes(id INTEGER PRIMARY KEY)");
+      await expect(
+        evaluate(db, request(`${call}; return null;`, { readOnly }), {
+          persistentConnection: true,
+          schemaTables: ["items", "notes"],
+        }),
+      ).rejects.toMatchObject({
+        name: "AppBackendRuntimeError",
+        refusal: { code: "sql_not_allowed", message },
+      });
+    });
+  });
+
+  it("names an insert into an implicit rowid", async () => {
+    await withDatabase(async (db) => {
+      db.exec("CREATE TABLE notes(id TEXT PRIMARY KEY)");
+      await expect(
+        evaluate(
+          db,
+          request("ctx.db.execute(\"INSERT INTO notes(rowid, id) VALUES(5, 'a')\");", {
+            tables: ["items", "notes"],
+          }),
+          {
+            persistentConnection: true,
+            schemaTables: ["items", "notes"],
+          },
+        ),
+      ).rejects.toMatchObject({
+        refusal: {
+          code: "sql_not_allowed",
+          message: "Collection actions cannot use the implicit rowid. Use the table's primary key.",
+        },
+      });
+    });
+  });
+
+  it("keeps a refusal that escapes after a caught one", async () => {
+    await withDatabase(async (db) => {
+      db.exec("CREATE TABLE notes(id INTEGER PRIMARY KEY)");
+      await expect(
+        evaluate(
+          db,
+          request(`
+            try { ctx.db.query('SELECT * FROM notes'); }
+            catch (error) { try { ctx.db.query('SELECT ?', [{}]); } catch {} throw error; }
+          `),
+        ),
+      ).rejects.toMatchObject({ refusal: { code: "sql_not_allowed" } });
+    });
+  });
+
+  it("reports a caught SQL refusal as the operation's own failure", async () => {
+    await withDatabase(async (db) => {
+      db.exec("CREATE TABLE notes(id INTEGER PRIMARY KEY)");
+      await expect(
+        evaluate(
+          db,
+          request("try { ctx.db.query('SELECT * FROM notes'); } catch {} throw new Error('mine');"),
+        ),
+      ).rejects.toThrow(/^App operation failed\.$/);
+    });
+  });
+
+  it("binds one statement's parameters up to the query result size, and names the limit past it", async () => {
+    await withDatabase(async (db) => {
+      const write = (characters: number) =>
+        evaluate(
+          db,
+          request(
+            `ctx.db.execute('INSERT OR REPLACE INTO items VALUES(1, ?)', ['x'.repeat(${characters})]); return null;`,
+          ),
+          { persistentConnection: true },
+        );
+      await write(150_000);
+      expect(db.prepare("SELECT length(value) AS n FROM items WHERE id=1").get()).toMatchObject({
+        n: 150_000,
+      });
+      await expect(write(DEFAULT_LIMITS.queryBytes)).rejects.toThrow(
+        `SQL parameters exceeded its limit of ${DEFAULT_LIMITS.queryBytes} bytes. It used ${DEFAULT_LIMITS.queryBytes + 4} bytes.`,
+      );
+    });
+  });
+
+  it("gives the date at the request's time in the caller's time zone", async () => {
+    await withDatabase(async (db) => {
+      const nowMs = Date.UTC(2026, 10, 24, 20, 30);
+      const dates = await evaluate(
+        db,
+        request(
+          `return ['Asia/Singapore', 'america/new_york', 'UTC', 'Pacific/Kiritimati', 'Etc/GMT+12'].map(ctx.localDate);`,
+          { nowMs },
+        ),
+      );
+      expect(JSON.parse(dates.resultJson)).toEqual([
+        "2026-11-25",
+        "2026-11-24",
+        "2026-11-24",
+        "2026-11-25",
+        "2026-11-24",
+      ]);
+      const fallback = await evaluate(
+        db,
+        request(
+          "try { return ctx.localDate('+08:00'); } catch (error) { return [error.message, ctx.localDate('UTC')]; }",
+          { nowMs },
+        ),
+      );
+      expect(JSON.parse(fallback.resultJson)).toEqual([
+        '"+08:00" isn\'t a time zone name, such as "Asia/Singapore".',
+        "2026-11-24",
+      ]);
+      for (const zone of ["'Mars/Olympus'", "8", "'x'.repeat(100)"])
+        await expect(
+          evaluate(db, request(`return ctx.localDate(${zone});`, { nowMs })),
+        ).rejects.toMatchObject({
+          name: "AppBackendRuntimeError",
+          refusal: { code: "invalid_input" },
+        });
     });
   });
 });
@@ -483,8 +727,9 @@ describe("guest memory", () => {
   it("answers a failed database call with a readable error however full the shape table and memory are", async () => {
     await withDatabase(async (db) => {
       const limit = "App operation needed more than its 24 MiB memory limit, so it stopped.";
+      const expected = { limited: true, named: true, other: 0, shapes: 20000, rows: [{ n: 0 }] };
       // Many shapes make QuickJS's shape table large. Each step frees a little memory and fails a query with a 1 KiB message.
-      const body = `const sql = 'SELECT ' + 'c'.repeat(1000) + ' FROM items';
+      const body = (fill: number) => `const sql = 'SELECT ' + 'c'.repeat(1000) + ' FROM items';
         const shapes = []; for (let i = 0; i < 20000; i++) shapes.push({ ['p' + i]: i });
         let limited = 0, named = 0, other = 0, steps = 0;
         let held = [];
@@ -492,7 +737,7 @@ describe("guest memory", () => {
         try { for (;;) held.push(new Uint8Array(4096)); } catch {}
         // Fill the last bytes too, so early steps leave less than the 1 KiB message free.
         // Smaller objects can leave the operation's own code no room to finish.
-        try { for (;;) held.push(new Uint8Array(64)); } catch {}
+        try { for (;;) held.push(new Uint8Array(${fill})); } catch {}
         for (; steps < 100 && held.length; steps++) {
           held.length -= 1;
           // The operation's own code can run out of memory too, so only a query's error is counted.
@@ -508,9 +753,18 @@ describe("guest memory", () => {
         }
         held = null;
         return { limited: limited > 0, named: named > 0, other, shapes: shapes.length, rows: ctx.db.query('SELECT count(*) AS n FROM items') };`;
-      expect(
-        JSON.parse((await evaluate(db, request(body), { persistentConnection: true })).resultJson),
-      ).toEqual({ limited: true, named: true, other: 0, shapes: 20000, rows: [{ n: 0 }] });
+      // QuickJS's own out-of-memory paths can stop an operation before its query, at points that depend on the heap
+      // layout, so several fills each end in the expected answers or the memory limit, and one reaches the queries.
+      const outcomes = [];
+      for (const fill of [32, 48, 64, 80, 96, 128])
+        outcomes.push(
+          await evaluate(db, request(body(fill)), { persistentConnection: true }).then(
+            (result) => JSON.parse(result.resultJson) as unknown,
+            (error: Error) => error.message,
+          ),
+        );
+      expect(outcomes).toContainEqual(expected);
+      for (const outcome of outcomes) expect([expected, limit]).toContainEqual(outcome);
     });
   });
 });

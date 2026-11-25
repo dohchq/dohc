@@ -265,6 +265,34 @@ describe("persistent dataset worker", () => {
     });
   });
 
+  it("reads json_each and refuses SQL an operation can't use by name", async () => {
+    await fixture(async ({ open }) => {
+      const worker = await open();
+      const run = (body: string) =>
+        worker.prepare({
+          ...operation(),
+          readOnly: true,
+          source: `globalThis.operations={run(ctx,input){${body}}}`,
+        });
+      expect(
+        (await run("return ctx.db.query('SELECT value FROM json_each(?)', ['[1,2]'])")).result,
+      ).toEqual([{ value: 1 }, { value: 2 }]);
+      await expect(run("return ctx.db.query('SELECT * FROM dohc_applied')")).rejects.toMatchObject({
+        name: "AppBackendRuntimeError",
+        refusal: {
+          code: "sql_not_allowed",
+          message: "App operations can't run this kind of SQL statement.",
+        },
+      });
+      await expect(run("return ctx.db.query('SELECT ?', [{}])")).rejects.toMatchObject({
+        refusal: {
+          code: "invalid_input",
+          message: "SQL parameter 1 must be text, a finite number, or null.",
+        },
+      });
+    });
+  });
+
   it("stops an operation at its memory limit and keeps serving the dataset", async () => {
     await fixture(async ({ open }) => {
       const worker = await open();
