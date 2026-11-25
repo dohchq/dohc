@@ -55,7 +55,7 @@ describe("collectionHistoryAuthors", () => {
       { kind: "person", name: "Someone you shared with", app: "an app" },
       { kind: "person", name: "You" },
     ]);
-    expect(result.every((row) => !("actor" in row))).toBe(true);
+    expect(result.every((row) => !("actor" in row) && row.callerReference === null)).toBe(true);
     const shown = JSON.stringify(result);
     for (const id of ["owner-1", "member-1", "member-2", "withdrawn", "broken", "local:device"])
       expect(shown).not.toContain(id);

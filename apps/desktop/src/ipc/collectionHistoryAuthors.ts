@@ -41,7 +41,8 @@ export async function collectionHistoryAuthors(
     return known;
   };
   return Promise.all(
-    entries.map(async ({ actor, ...entry }) => {
+    entries.map(async ({ actor, ...rest }) => {
+      const entry = { ...rest, callerReference: null };
       if (!actor) return entry;
       const through = actor.appId === undefined ? {} : { app: await app(actor.appId) };
       if (actor.kind === "agent")

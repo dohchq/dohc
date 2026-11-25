@@ -11398,7 +11398,7 @@ function registerIpcHandlers(): void {
         agent: (agentId) =>
           agentId === "dohc-mcp"
             ? "Agent"
-            : (cachedAgents.find(({ id }) => id === agentId)?.name ?? agentId),
+            : (cachedAgents.find(({ id }) => id === agentId)?.name ?? "Agent"),
       };
     },
     chooseRecoveryFile: async (_workspace, signal) => {

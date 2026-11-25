@@ -5,8 +5,6 @@ import { triggerParts, type Automation } from "./collections/automationSentence"
 export interface ConnectedApp {
   publicationId: string;
   appRoot: string;
-  alias?: string;
-  scope: DatasetBoundApp["scope"];
   /** Null when an operation the app was approved for is no longer in the Collection. */
   access: "Reads" | "Writes" | "Reads and writes" | null;
   status: DatasetBoundApp["status"];
@@ -95,29 +93,36 @@ export async function readCollectionConnections(
   signal: AbortSignal,
 ): Promise<CollectionConnections[]> {
   const sources = [
-    ...datasets.flatMap((dataset) =>
-      dataset.datasetPath === null || dataset.archived
+    ...datasets.flatMap(({ datasetPath, archived, ...dataset }) =>
+      datasetPath === null || archived
         ? []
-        : [{ key: dataset.datasetId, name: dataset.name, path: dataset.datasetPath, dataset }],
+        : [
+            {
+              key: dataset.datasetId,
+              name: dataset.name,
+              folder: datasetPath.includes("/")
+                ? datasetPath.slice(0, datasetPath.lastIndexOf("/"))
+                : "",
+              dataset: { ...dataset, datasetPath },
+            },
+          ],
     ),
-    ...documentFolders.map((path) => ({
-      key: `folder:${path}`,
-      name: path.slice(path.lastIndexOf("/") + 1),
-      path: `${path}/collection.yaml`,
+    ...documentFolders.map((folder) => ({
+      key: `folder:${folder}`,
+      name: folder.slice(folder.lastIndexOf("/") + 1),
+      folder,
       dataset: null,
     })),
   ];
   const read = async (source: (typeof sources)[number]): Promise<CollectionConnections> => {
-    const folder = source.path.includes("/")
-      ? source.path.slice(0, source.path.lastIndexOf("/"))
-      : "";
+    const { folder, dataset } = source;
     const base = { key: source.key, name: source.name };
     try {
       const [bound, file] = await Promise.all([
-        source.dataset && reads.apps ? reads.apps(source.path, source.dataset.datasetId) : null,
+        dataset && reads.apps ? reads.apps(dataset.datasetPath, dataset.datasetId) : null,
         folder ? reads.automations(folder) : null,
       ]);
-      const operations = new Map(source.dataset?.operations.map((op) => [op.operationId, op]));
+      const operations = new Map(dataset?.operations.map((op) => [op.operationId, op]));
       const { automations, unreadable } = file
         ? automationsOf(file)
         : { automations: [], unreadable: false };
@@ -131,8 +136,6 @@ export async function readCollectionConnections(
                 return {
                   publicationId: app.publicationId,
                   appRoot: app.appRoot,
-                  ...(app.alias === undefined ? {} : { alias: app.alias }),
-                  scope: app.scope,
                   access: ops.some((op) => op === undefined)
                     ? null
                     : ops.every((op) => op!.readOnly)

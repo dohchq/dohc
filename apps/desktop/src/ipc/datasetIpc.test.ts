@@ -791,7 +791,7 @@ it("names History's people and apps for the desktop, and leaves the owner CLI th
       { revision: 1, by: { kind: "person", name: "You", app: "an app" } },
     ],
   });
-  expect(JSON.stringify(shown)).not.toMatch(/member-1|hidden-app|secret-folder|"actor"/);
+  expect(JSON.stringify(shown)).not.toMatch(/member-1|hidden-app|secret-folder|"actor"|a{64}/);
   const cli = fixture({ history } as unknown as OwnerDatasetData);
   expect(await cli.handler("cli", request)).toEqual({ kind: "history", ...page });
 });

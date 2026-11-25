@@ -12,7 +12,6 @@ import { useWorkspaceSession } from "./workspace/workspaceSession";
 export interface CollectionConnectionsDialogProps {
   workspaceId: string;
   datasets: readonly AddressedDatasetDescription[];
-  /** Document Collection folders Home lists. */
   documentFolders: ReadonlySet<string>;
   /** Whether this viewer owns the workspace, and so can see which apps use its Collections. */
   owner: boolean;
@@ -127,12 +126,10 @@ function Group({ group }: { group: CollectionConnections }) {
               <span className="flex min-w-0 items-center gap-1.5">
                 <AppWindow size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
                 <span className="sr-only">App </span>
-                <span className="truncate font-medium" title={app.appRoot}>
+                <span className="truncate font-medium">
                   {app.appRoot.slice(app.appRoot.lastIndexOf("/") + 1)}
                 </span>
-                {app.alias && <span className="truncate text-muted">as {app.alias}</span>}
                 {app.access && <span className="shrink-0 text-muted">{app.access}</span>}
-                {app.scope === "link" && <span className="shrink-0 text-muted">Share link</span>}
               </span>
               {status && (
                 <span className="flex items-center gap-1 pl-[18px] text-warning">
