@@ -393,6 +393,38 @@ test("@app-backend-local personal control tower stages via CLI, approves from on
       )
       .toBe(true);
 
+    for (const theme of ["dark", "light"] as const) {
+      await browserPage.emulateMedia({ colorScheme: theme });
+      const contrasts = await app.locator("button.kit-btn").evaluateAll((buttons) => {
+        const luminance = (color: string) => {
+          const [r, g, b] = color
+            .match(/\d+(\.\d+)?/g)!
+            .slice(0, 3)
+            .map((part) => {
+              const value = Number(part) / 255;
+              return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+            });
+          return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!;
+        };
+        return buttons
+          .filter((button) => !(button as HTMLButtonElement).disabled)
+          .map((button) => {
+            const style = getComputedStyle(button);
+            const background =
+              style.backgroundColor === "rgba(0, 0, 0, 0)"
+                ? getComputedStyle(document.body).backgroundColor
+                : style.backgroundColor;
+            const [light, dark] = [luminance(background), luminance(style.color)].sort(
+              (a, b) => b - a,
+            );
+            return Math.round(((light! + 0.05) / (dark! + 0.05)) * 10) / 10;
+          });
+      });
+      expect(contrasts.length, `${theme} app-kit buttons`).toBeGreaterThan(0);
+      for (const contrast of contrasts)
+        expect(contrast, `${theme} button contrast`).toBeGreaterThanOrEqual(4.5);
+    }
+
     if (shotDir) {
       for (const theme of ["light", "dark"] as const) {
         await browserPage.emulateMedia({ colorScheme: theme });

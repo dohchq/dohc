@@ -261,7 +261,7 @@ body {
   cursor: pointer;
   background: var(--kit-bg);
   color: var(--kit-ink);
-  transition: background-color 120ms ease, border-color 120ms ease, opacity 120ms ease;
+  transition: opacity 120ms ease;
 }
 
 .kit-btn-sm {
