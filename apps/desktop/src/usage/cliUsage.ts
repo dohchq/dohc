@@ -44,6 +44,30 @@ export const DESKTOP_USAGE_COVERAGE = RENDERER_USAGE_COVERAGE.map((pair) => ({
       : pair.status,
 }));
 
+export function cliCapabilityId(request: CliRequest): CapabilityId {
+  return request.verb === "dataset"
+    ? DATASET_CAPABILITIES[request.args.request.action]
+    : request.verb === "appPublication"
+      ? APP_PUBLICATION_CAPABILITIES[request.args.request.action]
+      : request.verb === "ownerAppResponses"
+        ? APP_RESPONSE_CAPABILITIES[request.args.request.action]
+        : request.verb === "members"
+          ? MEMBERS_CAPABILITIES[request.args.request.action]
+          : CLI_CAPABILITIES[request.verb][0];
+}
+
+const EXTRA_CLI_WRITES = new Set<CapabilityId>([
+  "account.delete",
+  "chat.message.delete",
+  "group.create",
+  "share.link.agent.disconnect",
+  "workspace.sync.stop",
+]);
+
+export function isCliWriteCapability(id: CapabilityId): boolean {
+  return covered.has(id) || EXTRA_CLI_WRITES.has(id);
+}
+
 // Called only with the dispatcher's validated result. The collector receives
 // the aggregate pair, never arguments, content, paths or result objects.
 export function cliUsageInvocation(
@@ -51,16 +75,7 @@ export function cliUsageInvocation(
   result: CliResultByVerb[CliRequest["verb"]],
 ): CliUsageInvocation | null {
   if (result === null) return null;
-  const id =
-    request.verb === "dataset"
-      ? DATASET_CAPABILITIES[request.args.request.action]
-      : request.verb === "appPublication"
-        ? APP_PUBLICATION_CAPABILITIES[request.args.request.action]
-        : request.verb === "ownerAppResponses"
-          ? APP_RESPONSE_CAPABILITIES[request.args.request.action]
-          : request.verb === "members"
-            ? MEMBERS_CAPABILITIES[request.args.request.action]
-            : CLI_CAPABILITIES[request.verb][0];
+  const id = cliCapabilityId(request);
   if (!covered.has(id)) return null;
   if (request.door === "mcp" && !mcpCovered.has(id)) return null;
   if ("ok" in result && !result.ok) return null;

@@ -981,7 +981,17 @@ import { workspaceTrustHandlers } from "./ipc/workspaceTrustIpc";
 import { createCrashReportPreview } from "./crashReports/crashReportPreview";
 import { createCrashReportStore, crashReportEndpoint } from "./crashReports/crashReportStore";
 import { REPORTING_BUILD, resolveReporting } from "./telemetry/reportingConfig";
-import { createTelemetry, privacyInEffect, usageEventFor } from "./telemetry/telemetry";
+import {
+  classifyServerKind,
+  countBucket,
+  crashSignalFromEvent,
+  createTelemetry,
+  privacyInEffect,
+  updateEventFromTransition,
+  usageEventFor,
+  type WorkspaceKind,
+  type WorkspaceOpenTrigger,
+} from "./telemetry/telemetry";
 import { diagnosticsText, saveDiagnostics } from "./telemetry/diagnostics";
 import {
   createShareHandoffIntentSlot,
@@ -1022,8 +1032,20 @@ function usageRecordStopped(): void {
     sendIfOpen(window, CHANNELS.usageRecordStopped);
   }
 }
+function recordDesktopUsageSuccess(invocation: {
+  capabilityId: string;
+  door: "renderer" | "automation";
+}): void {
+  usageStore?.recordSuccess(invocation);
+  telemetry.track({
+    name: "feature_used",
+    capability_id: invocation.capabilityId,
+    door: invocation.door,
+  });
+  telemetry.markActive();
+}
 const rendererUsage = createRendererUsage<IpcMainInvokeEvent>((invocation) =>
-  usageStore?.recordSuccess(invocation),
+  recordDesktopUsageSuccess(invocation),
 );
 
 const crashFacts = () => ({
@@ -1120,11 +1142,14 @@ const telemetry = createTelemetry({
     arch: process.arch,
     electron: process.versions.electron ?? "unknown",
   }),
+  serverKind: () =>
+    classifyServerKind(
+      credentialSessionCache.snapshot().credentials?.serverUrl ??
+        listWorkspaces().find((workspace) => workspace.remote)?.remote?.serverUrl,
+    ),
   locate: createCodeLocations(codeRoots, process.platform),
   readCode: (path) => readFile(join(codeRoots[0]!, path), "utf8"),
 });
-// The report switches as the settings file sets them. A file main cannot
-// read turns both off.
 const readPrivacy = () =>
   readCachedUserSettingsFile(stateDir()).then(privacyInEffect, () => ({
     usageReports: false,
@@ -1133,10 +1158,39 @@ const readPrivacy = () =>
 if (telemetry.available.usage || telemetry.available.errors) {
   void readPrivacy().then((privacy) => telemetry.setPrivacy(privacy));
 }
-telemetry.track({ name: "app_launched" });
+let launchAnalyticsRecorded = false;
+let previousUpdateState: PublicUpdateState | null = null;
+const pendingWorkspaceOpenTriggers = new Map<string, WorkspaceOpenTrigger>();
+const windowsOpenedWorkspace = new WeakSet<WebContents>();
+
+function workspaceKindOf(workspace: RegistryEntry | null | undefined): WorkspaceKind | undefined {
+  if (!workspace) return undefined;
+  if (workspace.shareView !== undefined) return "received_share";
+  if (workspace.remote !== undefined) return "synced";
+  return "local";
+}
+
+function recordLaunchAnalytics(): void {
+  if (launchAnalyticsRecorded) return;
+  launchAnalyticsRecorded = true;
+  const workspaces = listWorkspaces();
+  const syncedCount = workspaces.filter(
+    (workspace) => workspace.remote !== undefined || workspace.shareView !== undefined,
+  ).length;
+  telemetry.track({
+    name: "app_launched",
+    workspace_count_bucket: countBucket(workspaces.length),
+    synced_workspace_count_bucket: countBucket(syncedCount),
+    has_agents_configured: cachedAgents.length > 0,
+  });
+  telemetry.observePreviousCrash(crashReports.read().report);
+}
+
 function recordCrash(event: CrashEvent): void {
   crashReports.record(event);
   telemetry.reportError({ kind: "crash", event });
+  const signal = crashSignalFromEvent(event);
+  if (signal) telemetry.track(signal);
 }
 installCrashCapture<WebContents>({
   process,
@@ -7137,7 +7191,7 @@ function createCollectionAutomationsFor(
     }),
     onRunsChanged: () => notifyAutomationRunsChanged(workspaceId),
     onUsageSuccess: (invocation) => {
-      usageStore?.recordSuccess(invocation);
+      recordDesktopUsageSuccess(invocation);
     },
     reportFailure: (report) =>
       sendFailureNotices(
@@ -8148,6 +8202,16 @@ const { startDesktopCliServer } = createDesktopCliServer({
   access: (workspaceId) =>
     accessCliQueries(accessOwner, (work) => withPhysicalWorkspaceOperation(workspaceId, work)),
   recordSuccess: (invocation) => usageStore?.recordSuccess(invocation),
+  onToolInvoked: (event) => {
+    telemetry.track({
+      name: "tool_invoked",
+      door: event.door,
+      capability_id: event.capabilityId,
+      outcome: event.outcome,
+      duration_ms: event.durationMs,
+    });
+    telemetry.markActive();
+  },
   serverAccount: serverAccountDeletion,
   dataset: (input, agent) => {
     if (!datasetForCli) throw new Error("Collections are not ready. Try again.");
@@ -8617,6 +8681,9 @@ function startUpdates(): Promise<AutoUpdateController | null> {
     restartApproved: () => exitRounds.approvedExit() === "update",
     stateDir: stateDir(),
     onState: (_state, state) => {
+      const updateEvent = updateEventFromTransition(previousUpdateState, state);
+      previousUpdateState = state;
+      if (updateEvent) telemetry.track(updateEvent);
       broadcastUpdateState(state);
     },
   })
@@ -9522,6 +9589,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
         session.defaultSession.setSpellCheckerEnabled(settings.editor.spellcheck);
       },
       registerHandlers: () => {
+        recordLaunchAnalytics();
         nativeTheme.on("updated", refreshTrayIcon);
         // A backoff can outlast a sleep. On wake, try each failing sync now.
         powerMonitor.on("resume", () => activity.retryFailingCloudSyncs());
@@ -9546,6 +9614,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
           console.error("[desktop] chat wake sign-in:", error),
         );
         app.on("browser-window-focus", () => {
+          telemetry.markActive();
           resumeRunNow();
           void automationWakeConsumer.resume();
           chatWakes.resume();
@@ -9813,6 +9882,7 @@ const openPathOpener = createOpenPathOpener<WorkspaceSummary, BrowserWindow>({
     );
   },
   activate: async (workspace, file, window) => {
+    pendingWorkspaceOpenTriggers.set(workspace.workspaceId, "deep_link");
     const shown = await sendWorkspaceActivated(window, workspace);
     if (file !== null) workspaceFileOpens.request(shown.webContents, workspace, file);
     refreshNativeWorkspaceSurfaces();
@@ -9865,8 +9935,41 @@ function handleIpc(channel: string, listener: Parameters<typeof ipcMain.handle>[
   ipcMain.handle(channel, async (event, ...args) => {
     try {
       const result: unknown = await listener(event, ...args);
-      const counted = usageEventFor(channel, result);
-      if (counted) telemetry.track(counted);
+      const counted = usageEventFor(channel, result, args[0], {
+        workspaceKind: (workspaceId) => workspaceKindOf(findWorkspace(workspaceId)),
+        workspaceOpenTrigger: (workspaceId) => {
+          const explicit = pendingWorkspaceOpenTriggers.get(workspaceId);
+          if (explicit) {
+            pendingWorkspaceOpenTriggers.delete(workspaceId);
+            windowsOpenedWorkspace.add(event.sender);
+            return explicit;
+          }
+          if (!windowsOpenedWorkspace.has(event.sender)) {
+            windowsOpenedWorkspace.add(event.sender);
+            return "auto_restore";
+          }
+          return "user";
+        },
+      });
+      if (counted) {
+        if (counted.name === "workspace_added" && result && typeof result === "object") {
+          const addedId =
+            "workspaceId" in result && typeof result.workspaceId === "string"
+              ? result.workspaceId
+              : "workspace" in result &&
+                  result.workspace &&
+                  typeof result.workspace === "object" &&
+                  "workspaceId" in result.workspace &&
+                  typeof result.workspace.workspaceId === "string"
+                ? result.workspace.workspaceId
+                : null;
+          if (addedId) pendingWorkspaceOpenTriggers.set(addedId, "user");
+        }
+        telemetry.track(counted);
+        if (!(counted.name === "workspace_opened" && counted.trigger === "auto_restore")) {
+          telemetry.markActive();
+        }
+      }
       return result;
     } catch (error) {
       throw ipcWireError(
@@ -9997,7 +10100,7 @@ const quitGuard = createQuitGuard({
   },
 });
 
-const installUpdate = createUpdateInstall<BrowserWindow>({
+const runInstallUpdate = createUpdateInstall<BrowserWindow>({
   currentUpdateState,
   exitRounds,
   quitGuard,
@@ -10005,6 +10108,12 @@ const installUpdate = createUpdateInstall<BrowserWindow>({
     return autoUpdateController;
   },
 });
+
+const installUpdate: typeof runInstallUpdate = async (...args) => {
+  const result = await runInstallUpdate(...args);
+  if (result.accepted) telemetry.track({ name: "app_update_event", stage: "install_started" });
+  return result;
+};
 
 // A failing build checks the feed before it gives up, so a person on a bad
 // release can still reach the release that fixes it.

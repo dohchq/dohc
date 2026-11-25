@@ -5,7 +5,22 @@ import { EngineDaemonUnavailableError } from "@dohc/workspace-engine-client/daem
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCodeLocations } from "../crashReports/crashReport";
 import type { Reporting } from "./reportingConfig";
-import { createTelemetry, privacyInEffect, REPORT_LIMITS } from "./telemetry";
+import { CHANNELS } from "../ipc/channels";
+import { datasetOperations } from "../ipc/datasetOperations";
+import { shareMountOperations } from "../ipc/shareOperations";
+import { sharedViewAccessOperations } from "../ipc/bridgeContract";
+import { workspaceFileOperations } from "../ipc/workspaceFileOperations";
+import {
+  classifyServerKind,
+  countBucket,
+  crashSignalFromEvent,
+  createTelemetry,
+  CURRENT_USAGE_NOTICE_VERSION,
+  privacyInEffect,
+  REPORT_LIMITS,
+  updateEventFromTransition,
+  usageEventFor,
+} from "./telemetry";
 
 const INSTALL = resolve("dohc-install", "Programs", "dohc");
 const BUNDLE = join(INSTALL, "resources", "app.asar", "dist", "main", "App-Ab12.js");
@@ -76,13 +91,19 @@ const FACTS = () => ({
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const statePath = () => join(dir, "reporting.json");
+const noticeMetaPath = () => join(dir, "reporting-notice.json");
 const savedState = () => JSON.parse(readFileSync(statePath(), "utf8")) as Record<string, unknown>;
+const savedNoticeMeta = () =>
+  JSON.parse(readFileSync(noticeMetaPath(), "utf8")) as Record<string, unknown>;
 const INSTALL_ID = "6f1c1c55-6a52-4a40-8d38-1b2d2e1c1f10";
 
 function telemetry(
   reporting: Reporting | null = REPORTING,
   overrides: Partial<
-    Pick<Parameters<typeof createTelemetry>[0], "facts" | "locate" | "statePath">
+    Pick<
+      Parameters<typeof createTelemetry>[0],
+      "facts" | "locate" | "statePath" | "serverKind" | "random"
+    >
   > = {},
 ) {
   return createTelemetry({
@@ -91,6 +112,7 @@ function telemetry(
     facts: FACTS,
     locate: createCodeLocations([INSTALL], process.platform),
     readCode,
+    random: () => 0.5,
     ...overrides,
     fetch: (async (url: URL | RequestInfo, init?: RequestInit) => {
       const call = { url: String(url), init: init ?? {} };
@@ -106,6 +128,7 @@ function shown(
   overrides: Parameters<typeof telemetry>[1] = {},
 ) {
   writeFileSync(statePath(), JSON.stringify({ usage: { installId: INSTALL_ID }, errors: true }));
+  writeFileSync(noticeMetaPath(), JSON.stringify({ usage: CURRENT_USAGE_NOTICE_VERSION }));
   return telemetry(reporting, overrides);
 }
 
@@ -189,21 +212,32 @@ describe("reports wait for the notice and the switches", () => {
     expect(usageCalls()).toHaveLength(1);
     const body = JSON.parse(String(usageCalls()[0]!.init.body)) as {
       api_key: string;
-      batch: Array<{ event: string; distinct_id: string; properties: Record<string, unknown> }>;
+      batch: Array<{
+        event: string;
+        distinct_id: string;
+        uuid: string;
+        properties: Record<string, unknown>;
+      }>;
     };
     expect(body.api_key).toBe("phc_abcdefghij0123");
     expect(body.batch).toHaveLength(1);
     expect(body.batch[0]!.event).toBe("app_launched");
     expect(body.batch[0]!.distinct_id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(body.batch[0]!.uuid).toMatch(UUID);
     expect(body.batch[0]!.properties).toEqual({
       $process_person_profile: false,
       $geoip_disable: true,
       $lib: "dohc-desktop",
+      schema_version: 2,
       app_version: "1.2.3",
       channel: "latest",
+      dist: "win-x64",
       os: "Windows_NT",
+      os_version: "10.0.22631",
       arch: "x64",
+      server_kind: "none",
     });
+    expect(savedNoticeMeta()).toEqual({ usage: CURRENT_USAGE_NOTICE_VERSION });
   });
 
   it("drops what waited when the saved switches are off at startup", async () => {
@@ -788,5 +822,226 @@ describe("the switches in effect", () => {
     expect(privacyInEffect({ settings, source: "stored", ignored: [{ key: "privacy" }] })).toEqual(
       OFF,
     );
+  });
+});
+
+describe("v2 usage events, notice versioning, crash signals, and retries", () => {
+  it("re-notices upgraded installs once for v2 usage while keeping reporting.json strict and preserving installId", async () => {
+    writeFileSync(statePath(), JSON.stringify({ usage: { installId: INSTALL_ID }, errors: true }));
+    const reports = telemetry(REPORTING, { serverKind: () => "drive" });
+    reports.setPrivacy(ON);
+    expect(reports.noticeDue(ON)).toEqual({ usage: true, errors: false });
+
+    reports.track({ name: "app_launched", workspace_count_bucket: "2-5" });
+    await settle();
+    expect(usageCalls()).toHaveLength(0);
+
+    reports.acknowledgeNotice({ usage: true, errors: false });
+    expect(reports.noticeDue(ON)).toEqual({ usage: false, errors: false });
+    expect(savedState()).toEqual({ usage: { installId: INSTALL_ID }, errors: true });
+    expect(savedNoticeMeta()).toEqual({ usage: CURRENT_USAGE_NOTICE_VERSION });
+
+    await settle();
+    expect(usageCalls()).toHaveLength(1);
+    const [event] = sentBody(usageCalls()[0]!).batch;
+    expect(event!.distinct_id).toBe(INSTALL_ID);
+    expect(event!.properties).toMatchObject({
+      schema_version: 2,
+      server_kind: "drive",
+      workspace_count_bucket: "2-5",
+    });
+  });
+
+  it("retries transient usage 5xx with the same event uuid, drops 4xx, and aborts retries when usageReports turns off", async () => {
+    const reports = shown();
+    reports.setPrivacy(ON);
+    const statuses = [503, 200, 400, 503];
+    respond = async () => new Response(null, { status: statuses.shift() ?? 200 });
+
+    reports.track({ name: "workspace_added", method: "create_local" });
+    nowMs += REPORT_LIMITS.usageFlushMs;
+    await vi.advanceTimersByTimeAsync(REPORT_LIMITS.usageFlushMs);
+    expect(usageCalls()).toHaveLength(1);
+    const firstUuid = sentBody(usageCalls()[0]!).batch[0]!.uuid;
+
+    nowMs += REPORT_LIMITS.usageBaseBackoffMs;
+    await vi.advanceTimersByTimeAsync(REPORT_LIMITS.usageBaseBackoffMs);
+    expect(usageCalls()).toHaveLength(2);
+    expect(sentBody(usageCalls()[1]!).batch[0]!.uuid).toBe(firstUuid);
+
+    reports.track({ name: "chat_message_sent" });
+    nowMs += REPORT_LIMITS.usageFlushMs;
+    await vi.advanceTimersByTimeAsync(REPORT_LIMITS.usageFlushMs);
+    expect(usageCalls()).toHaveLength(3);
+
+    nowMs += 60_000;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(usageCalls()).toHaveLength(3);
+
+    reports.track({ name: "workspace_added", method: "attach_folder" });
+    nowMs += REPORT_LIMITS.usageFlushMs;
+    await vi.advanceTimersByTimeAsync(REPORT_LIMITS.usageFlushMs);
+    expect(usageCalls()).toHaveLength(4);
+
+    reports.setPrivacy({ usageReports: false, errorReports: true });
+    nowMs += 60_000;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(usageCalls()).toHaveLength(4);
+  });
+
+  it("emits app_active_heartbeat once per UTC day and coarsens crash_signal timestamps to the UTC hour", async () => {
+    nowMs = Date.UTC(2026, 10, 25, 14, 37, 42);
+    const reports = shown();
+    reports.setPrivacy(ON);
+    reports.markActive();
+    reports.markActive();
+    nowMs += REPORT_LIMITS.usageFlushMs;
+    await settle();
+    nowMs = Date.UTC(2026, 10, 26, 0, 5, 19);
+    reports.markActive();
+    reports.observePreviousCrash({
+      revision: 1,
+      through: 4,
+      read: false,
+      source: "main",
+      problems: 1,
+      atMs: Date.UTC(2026, 10, 25, 23, 49, 12),
+      text: "dohc crash report\n\nUncaught exception\nError: <message withheld>",
+    });
+    reports.observePreviousCrash({
+      revision: 1,
+      through: 4,
+      read: false,
+      source: "main",
+      problems: 1,
+      atMs: Date.UTC(2026, 10, 25, 23, 49, 12),
+      text: "dohc crash report\n\nUncaught exception\nError: <message withheld>",
+    });
+    reports.observePreviousCrash({
+      revision: 2,
+      through: 5,
+      read: false,
+      source: "main",
+      problems: 2,
+      atMs: Date.UTC(2026, 10, 25, 23, 55, 0),
+      text: "dohc crash report\n\nUnhandled promise rejection\nError: <message withheld>",
+    });
+
+    await reports.flush();
+    const batch = usageCalls().flatMap((call) => sentBody(call).batch);
+    expect(batch.map((item) => item.event)).toEqual([
+      "app_active_heartbeat",
+      "app_active_heartbeat",
+      "crash_signal",
+    ]);
+    expect(batch[2]!.timestamp).toBe("2026-11-25T23:00:00.000Z");
+    expect(batch[2]!.properties).toMatchObject({ source: "main", reason: "uncaughtException" });
+    expect(savedNoticeMeta()).toMatchObject({ lastCrashSeq: 4 });
+  });
+
+  it("maps workspace, dataset, update, server kind, and crash helper inputs cleanly", () => {
+    expect(countBucket(0)).toBe("0");
+    expect(countBucket(1)).toBe("1");
+    expect(countBucket(5)).toBe("2-5");
+    expect(countBucket(6)).toBe("6+");
+    expect(classifyServerKind(null)).toBe("none");
+    expect(classifyServerKind("https://drive.dohc.computer/api")).toBe("drive");
+    expect(classifyServerKind("https://sync.example.test")).toBe("self_hosted");
+    expect(
+      crashSignalFromEvent({
+        kind: "main-exception",
+        origin: "unhandledRejection",
+        error: new Error("x"),
+      }),
+    ).toBeNull();
+    expect(
+      crashSignalFromEvent({
+        kind: "process-gone",
+        source: "gpu",
+        name: null,
+        reason: "oom",
+        exitCode: 1,
+      }),
+    ).toEqual({ name: "crash_signal", source: "gpu", reason: "oom" });
+    expect(
+      updateEventFromTransition(
+        {
+          status: "checking",
+          message: "",
+          currentVersion: "1.0.0",
+          channel: "latest",
+          canCheck: false,
+          canInstall: false,
+        },
+        {
+          status: "ready",
+          message: "",
+          currentVersion: "1.0.0",
+          channel: "latest",
+          canCheck: true,
+          canInstall: true,
+          version: "1.1.0",
+        },
+      ),
+    ).toEqual({ name: "app_update_event", stage: "downloaded" });
+    expect(
+      updateEventFromTransition(
+        {
+          status: "downloading",
+          message: "",
+          currentVersion: "1.0.0",
+          channel: "latest",
+          canCheck: false,
+          canInstall: false,
+        },
+        {
+          status: "error",
+          message: "failed",
+          currentVersion: "1.0.0",
+          channel: "latest",
+          canCheck: true,
+          canInstall: false,
+          failure: { step: "download", id: 1 },
+        },
+      ),
+    ).toEqual({ name: "app_update_event", stage: "failed", failure_step: "download" });
+    expect(usageEventFor(CHANNELS.attachWorkspaceFolder, {})).toEqual({
+      name: "workspace_added",
+      method: "attach_folder",
+    });
+    expect(usageEventFor(CHANNELS.cloudJoinWorkspace, {})).toEqual({
+      name: "workspace_added",
+      method: "join_cloud",
+    });
+    expect(usageEventFor(sharedViewAccessOperations.openSharedView.channel, {})).toEqual({
+      name: "workspace_added",
+      method: "open_shared_view",
+    });
+    expect(usageEventFor(shareMountOperations.mountShare.channel, {})).toEqual({
+      name: "workspace_added",
+      method: "mount_share",
+    });
+    expect(usageEventFor(workspaceFileOperations.createWorkspaceFile.channel, {})).toEqual({
+      name: "feature_used",
+      capability_id: "file.create",
+      door: "renderer",
+    });
+    expect(
+      usageEventFor(datasetOperations.dataset.channel, { ok: true }, { action: "list" }),
+    ).toBeNull();
+    expect(
+      usageEventFor(
+        datasetOperations.dataset.channel,
+        { ok: false, kind: "refused" },
+        { action: "create" },
+      ),
+    ).toBeNull();
+    expect(
+      usageEventFor(datasetOperations.dataset.channel, { ok: true }, { action: "create" }),
+    ).toEqual({
+      name: "feature_used",
+      capability_id: "dataset.create",
+      door: "renderer",
+    });
   });
 });
