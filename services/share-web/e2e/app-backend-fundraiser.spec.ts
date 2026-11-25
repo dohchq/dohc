@@ -242,8 +242,12 @@ test("actual fundraiser registers guests and organizers manage the same private 
       .poll(() => f.calls.slice(callsBefore).some((call) => call.status === 200))
       .toBe(true);
     await expect(refreshedApp.getByText("Players: First Player", { exact: true })).toBeVisible();
+    const checkStatus = refreshedApp.getByRole("button", { name: "Check status", exact: true });
+    await checkStatus.scrollIntoViewIfNeeded();
     f.advance(deletedCollectionGracePeriodMs);
-    await refreshedApp.getByRole("button", { name: "Check status", exact: true }).click();
+    await checkStatus.click({ timeout: 2_000 }).catch(async (error) => {
+      if ((await guest.locator("iframe").count()) !== 0) throw error;
+    });
     await expect(guest.getByRole("status")).toHaveText(LINK_REFUSALS.app_collection_missing.error);
     await expect(guest.locator("iframe")).toHaveCount(0);
     await guest.screenshot({ path: info.outputPath("fundraiser-collection-deleted-light.png") });
