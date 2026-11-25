@@ -13,6 +13,7 @@ pub(super) const LITERAL: char = '\u{e005}';
 const PAIRING_WORK_PER_CELL: usize = 256;
 const PAIRING_MINIMUM_CELLS: usize = 256;
 const PAIRING_WORK_LIMIT: usize = 1 << 21;
+const PAIRING_CELL_LIMIT: usize = 1 << 16;
 
 pub(super) fn is_marker(character: char) -> bool {
     (OPAQUE_OPEN..=LITERAL).contains(&character)
@@ -175,13 +176,13 @@ enum Side {
 /// punctuation is doubled. The others are written as they are, so text that
 /// reads back keeps its bytes. When `judged`, `strands` says whether a
 /// written bold, italic, or strike delimiter would read as text. Modeling how the reader
-/// pairs them takes at most [`PAIRING_WORK_PER_CELL`] steps per cell and
-/// [`PAIRING_WORK_LIMIT`] steps in all. Past that, every typed character is
-/// written as it is.
+/// pairs them takes at most [`PAIRING_CELL_LIMIT`] cells,
+/// [`PAIRING_WORK_PER_CELL`] steps per cell, and [`PAIRING_WORK_LIMIT`] steps
+/// in all. Past that, every typed character is written as it is.
 pub(super) fn write_held_characters(markdown: String, judged: bool) -> ProjectionResult<Written> {
     let holds = markdown.contains(TYPED);
     let (decided, strands) = if holds || (judged && markdown.contains(['*', '_', '~'])) {
-        decide(&cells_of(&markdown), holds)
+        cells_of(&markdown).map_or((Vec::new(), false), |cells| decide(&cells, holds))
     } else {
         (Vec::new(), false)
     };
@@ -255,7 +256,30 @@ fn decide(cells: &[Cell], holds: bool) -> (Vec<Option<String>>, bool) {
     (decided, strands)
 }
 
-fn cells_of(markdown: &str) -> Vec<Cell> {
+fn holds_past_cell_limit(markdown: &str) -> bool {
+    let mut held = 0usize;
+    let mut characters = markdown.chars();
+    while let Some(character) = characters.next() {
+        match character {
+            LITERAL => {
+                characters.next();
+            }
+            TYPED => {
+                held += 1;
+                if held > PAIRING_CELL_LIMIT {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn cells_of(markdown: &str) -> Option<Vec<Cell>> {
+    if holds_past_cell_limit(markdown) {
+        return None;
+    }
     let mut cells = Vec::new();
     let mut scopes: Vec<usize> = Vec::new();
     let mut plain = String::new();
@@ -264,6 +288,9 @@ fn cells_of(markdown: &str) -> Vec<Cell> {
     let mut at = 0usize;
     let mut characters = markdown.chars();
     while let Some(character) = characters.next() {
+        if cells.len() > PAIRING_CELL_LIMIT {
+            return None;
+        }
         let written = match character {
             TYPED => {
                 let held = characters.next().expect("a held character follows");
@@ -325,10 +352,13 @@ fn cells_of(markdown: &str) -> Vec<Cell> {
         }
     }
     flush(&mut cells, &mut plain);
+    if cells.len() > PAIRING_CELL_LIMIT {
+        return None;
+    }
     for open in scopes {
         cells[open] = Cell::Close;
     }
-    cells
+    Some(cells)
 }
 
 fn reference_len(text: &str) -> Option<usize> {
@@ -343,6 +373,9 @@ fn reference_len(text: &str) -> Option<usize> {
 fn flush(cells: &mut Vec<Cell>, plain: &mut String) {
     let mut rest = plain.as_str();
     while let Some(character) = rest.chars().next() {
+        if cells.len() > PAIRING_CELL_LIMIT {
+            break;
+        }
         let width = if character == '&' {
             reference_len(rest)
         } else if rest.starts_with("\\=") {

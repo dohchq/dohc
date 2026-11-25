@@ -10913,15 +10913,15 @@ mod projection_tests {
     // TypeScript writer's test has the same cases.
     #[test]
     fn a_paragraph_past_the_pairing_limit_keeps_its_typed_characters() {
-        let backticks = " `a".repeat(53_334);
+        let globs = " *.txt *.md".repeat(8_000);
         let backslash = format!(" {}\\!", "*_`\\x ".repeat(106));
-        for typed in [&backticks, &backslash] {
+        for typed in [&globs, &backslash] {
             assert_eq!(
                 paragraph_markdown(vec![("b", marks(&["bold"])), (typed, Attrs::new())]),
                 format!("**b**{typed}\n")
             );
         }
-        let before_code = format!("{backticks} `");
+        let before_code = format!("{globs} `");
         assert_eq!(
             paragraph_markdown(vec![
                 ("b", marks(&["bold"])),
@@ -10930,6 +10930,25 @@ mod projection_tests {
             ]),
             format!("**b**{before_code}`x`\n")
         );
+    }
+
+    // The writer models a block of at most 65,536 cells. The first paragraph
+    // has 65,536, so its typed asterisks are written as references. The second
+    // has 65,537, so they are written as typed. The TypeScript writer's test
+    // has the same cases.
+    #[test]
+    fn a_paragraph_past_the_cell_limit_keeps_its_typed_characters() {
+        let at = " a_b".repeat(32_763);
+        let past = " a_b".repeat(32_764);
+        for (typed, expected) in [
+            (format!("{at} *x*_"), format!("{at} &#42;x&#42;_")),
+            (format!("{past} *x*"), format!("{past} *x*")),
+        ] {
+            assert_eq!(
+                paragraph_markdown(vec![("b", marks(&["bold"])), (&typed, Attrs::new())]),
+                format!("**b**{expected}\n")
+            );
+        }
     }
 
     #[test]

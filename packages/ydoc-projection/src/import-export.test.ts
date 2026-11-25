@@ -726,7 +726,7 @@ it.each([
 // writer's limit of 2,097,152, so each of them is written as typed. The engine
 // writer's test has the same cases.
 it.each([
-  ["backticks", [plain(" `a".repeat(53_334))], " `a".repeat(53_334)],
+  ["globs", [plain(" *.txt *.md".repeat(8_000))], " *.txt *.md".repeat(8_000)],
   [
     "a backslash before punctuation",
     [plain(` ${"*_`\\x ".repeat(106)}\\!`)],
@@ -734,8 +734,8 @@ it.each([
   ],
   [
     "a backtick before code",
-    [plain(`${" `a".repeat(53_334)} \``), marked("x", "code")],
-    `${" `a".repeat(53_334)} \`\`x\``,
+    [plain(`${" *.txt *.md".repeat(8_000)} \``), marked("x", "code")],
+    `${" *.txt *.md".repeat(8_000)} \`\`x\``,
   ],
 ] satisfies Array<[string, JSONContent[], string]>)(
   "writes typed %s as typed in a paragraph past the pairing limit",
@@ -747,6 +747,21 @@ it.each([
     expect(serializeRichdocBody(document)).toBe(`**b**${typed}`);
   },
 );
+
+// The writer models a block of at most 65,536 cells. The first paragraph has
+// 65,536, so its typed asterisks are written as references. The second has
+// 65,537, so they are written as typed. The engine writer's test has the same
+// cases.
+it.each([
+  ["at", " a_b".repeat(32_763) + " *x*_", " a_b".repeat(32_763) + " &#42;x&#42;_"],
+  ["one past", " a_b".repeat(32_764) + " *x*", " a_b".repeat(32_764) + " *x*"],
+])("writes the typed characters of a paragraph %s the cell limit", (_name, typed, saved) => {
+  const document = {
+    type: "doc",
+    content: [{ type: "paragraph", content: [bold("b"), plain(typed)] }],
+  };
+  expect(serializeRichdocBody(document)).toBe(`**b**${saved}`);
+});
 
 it("keeps the spelling a note had when its marks read back that way", () => {
   const saved = "**++a++~~==b==~~**~~c~~";

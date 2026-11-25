@@ -14,6 +14,7 @@ const ASCII_PUNCTUATION = /^[!-/:-@[-`{-~]/u;
 const PAIRING_WORK_PER_CELL = 256;
 const PAIRING_MINIMUM_CELLS = 256;
 const PAIRING_WORK_LIMIT = 2 ** 21;
+const PAIRING_CELL_LIMIT = 2 ** 16;
 const REFERENCE = "";
 const TOKEN = /DOHC[A-Z]+\d+/gu;
 
@@ -24,8 +25,9 @@ const TOKEN = /DOHC[A-Z]+\d+/gu;
  * doubled. The others are written as they are, so text that reads back keeps
  * its bytes. When `judged`, `strands` says whether a written bold, italic, or
  * strike delimiter would read as text. Modeling how the reader pairs them takes at
- * most `PAIRING_WORK_PER_CELL` steps per cell and `PAIRING_WORK_LIMIT` steps
- * in all. Past that, every typed character is written as it is.
+ * most `PAIRING_CELL_LIMIT` cells, `PAIRING_WORK_PER_CELL` steps per cell, and
+ * `PAIRING_WORK_LIMIT` steps in all. Past that, every typed character is
+ * written as it is.
  */
 export function writeHeldCharacters(
   markdown: string,
@@ -35,6 +37,7 @@ export function writeHeldCharacters(
   const holds = tokens.held.size > 0 && markdown.includes("DOHCHELD");
   if (!holds && !(judged && /[*_~]/u.test(markdown))) return { written: markdown, strands: false };
   const cells = cellsOf(markdown, tokens);
+  if (cells === undefined) return { written: writtenAsTyped(markdown, tokens), strands: false };
   const escaped = new Set<number>();
   escapeBackticksBesideCode(cells, escaped);
   const strands = escapePairs(cells, escaped);
@@ -66,7 +69,19 @@ function writtenAsTyped(markdown: string, tokens: InlineTokens): string {
   });
 }
 
-function cellsOf(markdown: string, tokens: InlineTokens): Cell[] {
+function holdsPastCellLimit(markdown: string, tokens: InlineTokens): boolean {
+  let count = 0;
+  for (const token of tokens.held.keys()) {
+    for (let at = markdown.indexOf(token); at !== -1; at = markdown.indexOf(token, at + 1)) {
+      count += 1;
+      if (count > PAIRING_CELL_LIMIT) return true;
+    }
+  }
+  return false;
+}
+
+function cellsOf(markdown: string, tokens: InlineTokens): Cell[] | undefined {
+  if (holdsPastCellLimit(markdown, tokens)) return undefined;
   const cells: Cell[] = [];
   const scopes: number[] = [];
   let plain = "";
@@ -78,6 +93,7 @@ function cellsOf(markdown: string, tokens: InlineTokens): Cell[] {
     for (const [, reference, delimiter, other] of tokens
       .write(plain)
       .matchAll(/(&(?:amp;)?#\d+;|\\=)|([*_`])|([^*_`&\\]+|[\s\S])/gu)) {
+      if (cells.length > PAIRING_CELL_LIMIT) break;
       if (reference) {
         cells.push({ kind: "text", first: REFERENCE, last: REFERENCE });
       } else if (delimiter === "`") {
@@ -97,6 +113,7 @@ function cellsOf(markdown: string, tokens: InlineTokens): Cell[] {
     plain = "";
   };
   for (const match of markdown.matchAll(TOKEN)) {
+    if (cells.length > PAIRING_CELL_LIMIT) return undefined;
     const token = match[0];
     const held = tokens.held.get(token);
     const marker = [...tokens.opaque, ...tokens.scope].indexOf(token);
@@ -135,6 +152,7 @@ function cellsOf(markdown: string, tokens: InlineTokens): Cell[] {
   }
   plain += markdown.slice(last);
   flush();
+  if (cells.length > PAIRING_CELL_LIMIT) return undefined;
   for (const open of scopes) cells[open] = { kind: "close" };
   return cells;
 }
