@@ -371,7 +371,7 @@ describe("tournament example on the real Collection host", () => {
     ).rejects.toMatchObject({ refusal: { code: "match_not_live" } });
     const log = await f.call("matchLog", { matchId: opener.id }, "scorer");
     expect(log.map((event: Json) => event.kind)).toEqual(["cancel", "undo", "point", "start"]);
-    for (const event of log)
+    for (const event of log as Json[])
       expect(event).toMatchObject({ playerA: opener.playerA, playerB: opener.playerB });
   }, 60_000);
 
