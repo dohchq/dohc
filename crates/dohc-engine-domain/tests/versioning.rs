@@ -1,8 +1,8 @@
 use dohc_engine_domain::store::SourceCaptureBounds;
 use dohc_engine_domain::{
-    CreateNamedVersion, DeleteTextFile, ListMomentsQuery, MergeTextFileFromVersion,
-    MergeTextFileResult, NoFaults, RenameTextFile, RollbackTextFileMutation, VersionKind,
-    VersionedTextStore, WriteText,
+    CreateNamedVersion, DeleteTextFile, HistoryMomentPosition, ListMomentsQuery,
+    MergeTextFileFromVersion, MergeTextFileResult, NoFaults, RenameTextFile,
+    RollbackTextFileMutation, VersionKind, VersionedTextStore, WriteText,
 };
 use dohc_engine_storage::{EngineStore, StorageError, hex_sha256};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -590,6 +590,78 @@ fn list_moments_keyset_pagination_edges() {
             .expect_err("bad limit")
             .code(),
         "invalid-input"
+    );
+}
+
+#[test]
+fn history_pages_skip_unchanged_writes_after_creation_and_resume() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+
+    for (moment_id, text, at) in [
+        ("created", "", 10),
+        ("first-save", "", 20),
+        ("edited-while-stopped", "owner edit\n", 30),
+        ("first-save-after-resume", "owner edit\n", 40),
+    ] {
+        vt.write_text(
+            &write("main", "note.md", text, moment_id, "note", at),
+            &NO_FAULTS,
+        )
+        .expect("write");
+    }
+    for id in ["first-save", "first-save-after-resume"] {
+        let moment = vt
+            .get_moment(WS, id)
+            .expect("read moment")
+            .expect("stored moment");
+        assert!(moment.before_present);
+        assert_eq!(moment.before_blob_sha256, moment.after_blob_sha256);
+    }
+    vt.rename_text_file(
+        &rename("main", "note.md", "renamed.md", "renamed", 50),
+        &NO_FAULTS,
+    )
+    .expect("rename");
+    vt.delete_text_file(&delete("main", "renamed.md", "deleted", 60), &NO_FAULTS)
+        .expect("delete");
+
+    let workspace = vt
+        .history_page(WS, None, None, None, 50, None)
+        .expect("workspace page");
+    assert_eq!(
+        workspace
+            .moments
+            .iter()
+            .map(|row| row.moment_id.as_str())
+            .collect::<Vec<_>>(),
+        ["deleted", "renamed", "edited-while-stopped", "created"]
+    );
+
+    let mut cursor = vt
+        .history_page(WS, None, Some("note"), None, 1, None)
+        .expect("file page")
+        .cursor;
+    let mut listed = Vec::new();
+    loop {
+        let page = vt
+            .history_page(WS, None, Some("note"), None, 1, Some(cursor.clone()))
+            .expect("file page");
+        let Some(row) = page.moments.first() else {
+            break;
+        };
+        cursor.text = Some(HistoryMomentPosition {
+            recorded_at_ms: row.recorded_at_ms,
+            moment_order: row.moment_order,
+        });
+        listed.push(row.moment_id.clone());
+    }
+    assert_eq!(
+        listed,
+        ["deleted", "renamed", "edited-while-stopped", "created"]
     );
 }
 
