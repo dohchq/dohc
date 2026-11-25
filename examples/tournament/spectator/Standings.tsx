@@ -124,8 +124,12 @@ export function Standings({
             {rows.map((row) => (
               <tr key={row.id} className={row.eliminatedRound === null ? "is-alive" : "is-out"}>
                 <td className="is-num is-place" title={placeOf(row)[1]}>
-                  <span aria-hidden={placeOf(row)[1] === "Still playing" || undefined}>{placeOf(row)[0]}</span>
-                  {placeOf(row)[1] === "Still playing" ? <span className="co-sr">Still playing</span> : null}
+                  <span aria-hidden={placeOf(row)[1] === "Still playing" || undefined}>
+                    {placeOf(row)[0]}
+                  </span>
+                  {placeOf(row)[1] === "Still playing" ? (
+                    <span className="co-sr">Still playing</span>
+                  ) : null}
                 </td>
                 <td className="is-name">
                   <div className="co-name-cell">
@@ -140,7 +144,9 @@ export function Standings({
                         <strong>{row.name}</strong>
                         <small>
                           {row.club ?? "Independent"}
-                          <span className={`co-status-inline${statusOf(row)[1]}`}>{statusOf(row)[0]}</span>
+                          <span className={`co-status-inline${statusOf(row)[1]}`}>
+                            {statusOf(row)[0]}
+                          </span>
                         </small>
                       </span>
                     </button>
@@ -150,7 +156,9 @@ export function Standings({
                 <td className="is-num">
                   {row.wins}–{row.losses}
                 </td>
-                <td className={`is-num ${row.pointDiff > 0 ? "co-up" : row.pointDiff < 0 ? "co-down" : ""}`}>
+                <td
+                  className={`is-num ${row.pointDiff > 0 ? "co-up" : row.pointDiff < 0 ? "co-down" : ""}`}
+                >
                   {signed(row.pointDiff)}
                 </td>
                 <td className="is-num is-rating">{row.rating}</td>
@@ -181,7 +189,11 @@ export function Standings({
                   <span className="co-mover-track" aria-hidden="true">
                     <span
                       className={`co-mover-bar ${up ? "is-up" : "is-down"}`}
-                      style={up ? { left: "50%", width: `${width}%` } : { right: "50%", width: `${width}%` }}
+                      style={
+                        up
+                          ? { left: "50%", width: `${width}%` }
+                          : { right: "50%", width: `${width}%` }
+                      }
                     />
                   </span>
                   <span className={`co-mover-value co-num ${up ? "co-up" : "co-down"}`}>

@@ -76,8 +76,10 @@ export function TvBoard({ snapshot, people, now, freshness, syncedAt, onClose }:
     return () => window.clearInterval(timer);
   }, [pages, held]);
   const at = anchor === null ? -1 : playing.findIndex((entry) => entry.court.id === anchor);
-  const start = pages < 2 ? 0 : Math.min(at >= 0 ? at : (turn % pages) * perPage, playing.length - perPage);
-  const pageOf = (from: number) => (from + perPage >= playing.length ? pages - 1 : Math.floor(from / perPage));
+  const start =
+    pages < 2 ? 0 : Math.min(at >= 0 ? at : (turn % pages) * perPage, playing.length - perPage);
+  const pageOf = (from: number) =>
+    from + perPage >= playing.length ? pages - 1 : Math.floor(from / perPage);
   useEffect(() => {
     if (pages < 2 || (anchor !== null && at < 0)) setAnchor(null);
   }, [pages, anchor, at]);
@@ -146,24 +148,36 @@ export function TvBoard({ snapshot, people, now, freshness, syncedAt, onClose }:
           <span
             className={`co-live-tag is-tv${tournament.status === "finished" ? " is-final" : playingNow ? "" : " is-idle"}`}
           >
-            {tournament.status !== "finished" && playingNow ? <span className="co-dot" aria-hidden="true" /> : null}
+            {tournament.status !== "finished" && playingNow ? (
+              <span className="co-dot" aria-hidden="true" />
+            ) : null}
             {tournament.status === "finished" ? "Final" : playingNow ? "Live" : "Between matches"}
           </span>
         )}
         <strong className="co-tv-title">{tournament.name}</strong>
         <span className="co-tv-sub">
-          {tournament.sport} · {tournament.format === "double" ? "Double elimination" : "Single elimination"} ·{" "}
-          {rule}
+          {tournament.sport} ·{" "}
+          {tournament.format === "double" ? "Double elimination" : "Single elimination"} · {rule}
         </span>
         {pages > 1 ? (
           <span className="co-tv-page co-num">
-            <button type="button" className="co-tv-close" aria-label="Previous courts" onClick={() => step(-1)}>
+            <button
+              type="button"
+              className="co-tv-close"
+              aria-label="Previous courts"
+              onClick={() => step(-1)}
+            >
               <ChevronLeft size={15} />
             </button>
             <span aria-live="polite">
               Courts {start + 1}–{start + shown.length} of {playing.length}
             </span>
-            <button type="button" className="co-tv-close" aria-label="Next courts" onClick={() => step(1)}>
+            <button
+              type="button"
+              className="co-tv-close"
+              aria-label="Next courts"
+              onClick={() => step(1)}
+            >
               <ChevronRight size={15} />
             </button>
             <button
@@ -222,7 +236,9 @@ export function TvBoard({ snapshot, people, now, freshness, syncedAt, onClose }:
               return `${court.name}: final, ${a} ${match.gamesA} games, ${b} ${match.gamesB} games.`;
             if (final) return `${court.name}: final, ${a} ${match.scoreA}, ${b} ${match.scoreB}.`;
             const series = tournament.bestOf > 1 ? `, games ${match.gamesA}–${match.gamesB}` : "";
-            const pending = isDecided(tournament, match.scoreA, match.scoreB) ? ", result pending" : "";
+            const pending = isDecided(tournament, match.scoreA, match.scoreB)
+              ? ", result pending"
+              : "";
             return `${court.name}: ${a} ${match.scoreA}, ${b} ${match.scoreB}${series}${pending}.`;
           })
           .join(" ")}
@@ -233,7 +249,9 @@ export function TvBoard({ snapshot, people, now, freshness, syncedAt, onClose }:
           style={{ "--co-tv-cols": columns } as CSSProperties}
         >
           {shown.map(({ court, match, final }) => {
-            const pressure = final ? { a: false, b: false } : gamePoints(tournament, match.scoreA, match.scoreB);
+            const pressure = final
+              ? { a: false, b: false }
+              : gamePoints(tournament, match.scoreA, match.scoreB);
             const decided = final || isDecided(tournament, match.scoreA, match.scoreB);
             const games = gameScores(match);
             const tally = final && series;
@@ -305,9 +323,7 @@ export function TvBoard({ snapshot, people, now, freshness, syncedAt, onClose }:
                         </span>
                         <small>{who?.club ?? "Independent"}</small>
                         {decided && ahead && final ? (
-                          <em className="is-won">
-                            {walkover ? "Wins by walkover" : "Winner"}
-                          </em>
+                          <em className="is-won">{walkover ? "Wins by walkover" : "Winner"}</em>
                         ) : pressure[side] ? (
                           <em>{pressureLabel(tournament, match, side)}</em>
                         ) : (
@@ -345,7 +361,13 @@ export function TvBoard({ snapshot, people, now, freshness, syncedAt, onClose }:
                             );
                           })}
                           {tally ? null : (
-                            <b className={won > (side === "a" ? match.gamesB : match.gamesA) ? "is-lead" : undefined}>
+                            <b
+                              className={
+                                won > (side === "a" ? match.gamesB : match.gamesA)
+                                  ? "is-lead"
+                                  : undefined
+                              }
+                            >
                               {side === "a" ? (
                                 <span className="co-tv-cap" aria-hidden="true">
                                   Games

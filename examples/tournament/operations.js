@@ -184,7 +184,8 @@ function finishingPlaces(format, bracketSize, matches) {
           ? 1
           : 2
         : list.reduce(
-            (sum, { from, loser }) => sum + ((loser ? count(from) === 2 : count(from) >= 1) ? 1 : 0),
+            (sum, { from, loser }) =>
+              sum + ((loser ? count(from) === 2 : count(from) >= 1) ? 1 : 0),
             0,
           );
     entrants.set(match.id, total);
@@ -313,7 +314,8 @@ function send(state, match, winnerId, loserId, at, actor) {
 function retract(ctx, state, target, column, at, actor) {
   if (
     target.status === "done" ||
-    (target.status === "live" && target.score_a + target.score_b + target.games_a + target.games_b > 0)
+    (target.status === "live" &&
+      target.score_a + target.score_b + target.games_a + target.games_b > 0)
   )
     ctx.refuse(
       "next_started",
@@ -330,7 +332,14 @@ function retract(ctx, state, target, column, at, actor) {
       [target.loser_next_match_id, target.loser_next_slot],
     ])
       if (id && slot)
-        retract(ctx, state, state.matches.get(id), slot === "a" ? "player_a_id" : "player_b_id", at, actor);
+        retract(
+          ctx,
+          state,
+          state.matches.get(id),
+          slot === "a" ? "player_a_id" : "player_b_id",
+          at,
+          actor,
+        );
     target.winner_id = null;
     target.finished_at = null;
   }
@@ -677,7 +686,14 @@ function reopenMatchIn(ctx, state, match, at, actor) {
     [match.loser_next_match_id, match.loser_next_slot],
   ])
     if (id && slot)
-      retract(ctx, state, state.matches.get(id), slot === "a" ? "player_a_id" : "player_b_id", at, actor);
+      retract(
+        ctx,
+        state,
+        state.matches.get(id),
+        slot === "a" ? "player_a_id" : "player_b_id",
+        at,
+        actor,
+      );
   if (match.bracket === "final" && match.round === 1)
     retract(ctx, state, state.matches.get(match.next_match_id), null, at, actor);
   const walkover = match.outcome === "walkover";
@@ -741,7 +757,16 @@ function reopenMatchIn(ctx, state, match, at, actor) {
   match.outcome = null;
   touchMatch(state, match);
   touchTournament(state, at);
-  addEvent(state, match, "reopen", walkover ? null : aWon ? "a" : "b", at, actor, logged.game, logged.score);
+  addEvent(
+    state,
+    match,
+    "reopen",
+    walkover ? null : aWon ? "a" : "b",
+    at,
+    actor,
+    logged.game,
+    logged.score,
+  );
   return { ratingChange: -delta, courtId: match.court_id };
 }
 
@@ -840,7 +865,10 @@ function reportedGames(ctx, tournament, value) {
   const won = { a: 0, b: 0 };
   const games = value.map((game, index) => {
     if (won.a === need || won.b === need)
-      ctx.refuse("invalid_input", `The match was over after game ${index}. Remove game ${index + 1}.`);
+      ctx.refuse(
+        "invalid_input",
+        `The match was over after game ${index}. Remove game ${index + 1}.`,
+      );
     const [a, b] = Array.isArray(game) ? game : [];
     if (![a, b].every((points) => Number.isInteger(points) && points >= 0 && points <= 999))
       ctx.refuse("invalid_input", `Enter both scores for game ${index + 1}.`);
@@ -971,7 +999,7 @@ function buildDemo(ctx) {
     const a = state.players.get(match.player_a_id).rating;
     const b = state.players.get(match.player_b_id).rating;
     const chanceA = 0.5 + (1 / (1 + Math.pow(10, (b - a) / 400)) - 0.5) * 0.6;
-    for (let over = false; !over; ) over = game(match, random() < chanceA ? "a" : "b").matchOver;
+    for (let over = false; !over;) over = game(match, random() < chanceA ? "a" : "b").matchOver;
   };
   for (let slot = 1; slot <= 8; slot += 1) play("winners", 1, slot, courts[(slot - 1) % 4]);
   for (let slot = 1; slot <= 4; slot += 1) play("losers", 1, slot, courts[(slot - 1) % 4]);
@@ -1022,7 +1050,9 @@ const LISTED = 200;
 globalThis.operations = {
   liveSnapshot(ctx, input) {
     const shared =
-      ctx.caller.kind === "owner" || ctx.caller.kind === "named" ? "" : " WHERE visibility = 'shared'";
+      ctx.caller.kind === "owner" || ctx.caller.kind === "named"
+        ? ""
+        : " WHERE visibility = 'shared'";
     const fans = Boolean(shared) || input?.view === "public";
     const tournaments = ctx.db.query(
       `SELECT id, name, sport, status, visibility, created_at AS createdAt FROM tournaments${shared} ORDER BY created_at DESC, id DESC LIMIT ${LISTED}`,
@@ -1138,8 +1168,7 @@ globalThis.operations = {
     const bestOf = Number(input?.bestOf ?? 1);
     if (!BEST_OF.includes(bestOf)) ctx.refuse("invalid_input", "Matches are best of 1, 3, or 5.");
     const visibility = input?.visibility ?? "shared";
-    if (!VISIBILITY.includes(visibility))
-      ctx.refuse("invalid_input", "Choose shared or private.");
+    if (!VISIBILITY.includes(visibility)) ctx.refuse("invalid_input", "Choose shared or private.");
     const seeding = input?.seeding ?? "rating";
     if (!SEEDING.includes(seeding))
       ctx.refuse("invalid_input", "Seed by rating or by the order given.");
@@ -1174,8 +1203,7 @@ globalThis.operations = {
   setVisibility(ctx, input) {
     requireOrganizer(ctx);
     const visibility = input?.visibility;
-    if (!VISIBILITY.includes(visibility))
-      ctx.refuse("invalid_input", "Choose shared or private.");
+    if (!VISIBILITY.includes(visibility)) ctx.refuse("invalid_input", "Choose shared or private.");
     const id = idText(ctx, input?.tournamentId, "tournament");
     if (!ctx.db.query("SELECT 1 FROM tournaments WHERE id = ?", [id]).length)
       ctx.refuse("not_found", "That tournament no longer exists.");
@@ -1241,7 +1269,8 @@ globalThis.operations = {
         )[0];
       if (total === 0) {
         const games = match.game_scores.split(" ").filter(Boolean);
-        if (!games.length) ctx.refuse("nothing_to_undo", "There is no point to undo in this match.");
+        if (!games.length)
+          ctx.refuse("nothing_to_undo", "There is no point to undo in this match.");
         const [a, b] = games[games.length - 1].split("-").map(Number);
         match.game_scores = games.slice(0, -1).join(" ");
         if (a > b) match.games_a -= 1;

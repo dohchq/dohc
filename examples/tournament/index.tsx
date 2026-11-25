@@ -181,7 +181,11 @@ function Organizer() {
           return next;
         });
         setToasts((current) => current.filter((toast) => toast.matchId !== match.id));
-        if (operation === "completeMatch" || operation === "awardWalkover" || operation === "reportResult")
+        if (
+          operation === "completeMatch" ||
+          operation === "awardWalkover" ||
+          operation === "reportResult"
+        )
           announceRef.current(reply.result as Completed);
         if (!point && operation !== "undoPoint") void reload();
         return saved;
@@ -218,10 +222,10 @@ function Organizer() {
             action:
               away || point || operation === "reportResult"
                 ? undefined
-              : {
-                  label: "Try again",
-                  run: () => void runRef.current(match, operation, input, key),
-                },
+                : {
+                    label: "Try again",
+                    run: () => void runRef.current(match, operation, input, key),
+                  },
           });
         if (!away) {
           const failedAt = Date.now();
@@ -331,7 +335,9 @@ function Organizer() {
           ? "Forces a reset"
           : `Advances to ${matchRound(tournament, advanced, "short")}`
         : "",
-      dropped ? `${nameOf(result.loserId)} drops to ${matchRound(tournament, dropped, "short")}` : "",
+      dropped
+        ? `${nameOf(result.loserId)} drops to ${matchRound(tournament, dropped, "short")}`
+        : "",
       result.loserOut && !result.championId ? `${nameOf(result.loserId)} is out` : "",
     ].filter(Boolean);
     push({
@@ -473,13 +479,25 @@ function Organizer() {
               <Trophy size={22} />
             </span>
             <strong>No tournament yet</strong>
-            <span>Seed a bracket from your player list, or load the demo: a 16-player double elimination open, best of 3, with two matches live.</span>
+            <span>
+              Seed a bracket from your player list, or load the demo: a 16-player double elimination
+              open, best of 3, with two matches live.
+            </span>
             <div className="co-empty-actions">
-              <button type="button" className="co-btn is-primary" onClick={() => setSetupOpen(true)}>
+              <button
+                type="button"
+                className="co-btn is-primary"
+                onClick={() => setSetupOpen(true)}
+              >
                 <Plus size={14} />
                 New tournament
               </button>
-              <button type="button" className="co-btn" onClick={() => void seedDemo()} disabled={seeding}>
+              <button
+                type="button"
+                className="co-btn"
+                onClick={() => void seedDemo()}
+                disabled={seeding}
+              >
                 {seeding ? "Loading demo…" : "Load the 16-player demo"}
               </button>
             </div>
@@ -577,7 +595,10 @@ let entryKey = 0;
 
 function parsePlayers(text: string): { entries: Entry[]; problem: string | null } {
   const entries: Entry[] = [];
-  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
   for (const [index, line] of lines.entries()) {
     const [name = "", club = "", rating = ""] = line.split(",").map((part) => part.trim());
     if (!name) return { entries, problem: `Line ${index + 1} needs a name.` };
@@ -604,8 +625,7 @@ function rosterProblem(entries: Entry[]): string | null {
     if (!name) return `Seed ${index + 1} needs a name.`;
     if (seen.has(name.toLowerCase())) return `${name} is listed twice.`;
     seen.add(name.toLowerCase());
-    if (badRating(entry))
-      return `${name}'s rating must be a whole number from 100 to 3500.`;
+    if (badRating(entry)) return `${name}'s rating must be a whole number from 100 to 3500.`;
   }
   if (entries.length < 3 || entries.length > 32)
     return `A bracket needs 3 to 32 players. This list has ${entries.length}.`;
@@ -641,7 +661,8 @@ function SetupDrawer({
   const focusRow = (index: number, selector: string) =>
     window.requestAnimationFrame(() => {
       const found = [
-        ...(panel.current?.querySelectorAll<HTMLElement>(`[data-seed="${index}"]${selector}`) ?? []),
+        ...(panel.current?.querySelectorAll<HTMLElement>(`[data-seed="${index}"]${selector}`) ??
+          []),
         ...(panel.current?.querySelectorAll<HTMLElement>(`[data-seed="${index}"]`) ?? []),
       ];
       found.find((el) => !(el as HTMLButtonElement).disabled)?.focus();
@@ -697,20 +718,20 @@ function SetupDrawer({
     setError(null);
     try {
       const input = {
-          name: form.get("name"),
-          sport: form.get("sport"),
-          format: form.get("format"),
-          bestOf: Number(form.get("bestOf")),
-          visibility: form.get("visibility") ? "shared" : "private",
-          pointsToWin: Number(form.get("pointsToWin")),
-          winBy: Number(form.get("winBy")),
-          courts: Number(form.get("courts")),
-          seeding: "order",
-          players: entries.map((entry) => ({
-            name: entry.name.trim(),
-            club: entry.club.trim() || undefined,
-            rating: ratingOf(entry),
-          })),
+        name: form.get("name"),
+        sport: form.get("sport"),
+        format: form.get("format"),
+        bestOf: Number(form.get("bestOf")),
+        visibility: form.get("visibility") ? "shared" : "private",
+        pointsToWin: Number(form.get("pointsToWin")),
+        winBy: Number(form.get("winBy")),
+        courts: Number(form.get("courts")),
+        seeding: "order",
+        players: entries.map((entry) => ({
+          name: entry.name.trim(),
+          club: entry.club.trim() || undefined,
+          rating: ratingOf(entry),
+        })),
       };
       const body = JSON.stringify(input);
       const key =
@@ -750,7 +771,13 @@ function SetupDrawer({
       >
         <header className="co-drawer-head">
           <h2 id="co-setup-title">New tournament</h2>
-          <button type="button" className="co-icon-btn" onClick={onClose} disabled={busy} aria-label="Close">
+          <button
+            type="button"
+            className="co-icon-btn"
+            onClick={onClose}
+            disabled={busy}
+            aria-label="Close"
+          >
             <X size={16} />
           </button>
         </header>
@@ -817,9 +844,7 @@ function SetupDrawer({
                   ? `${entries.length} of at least 3`
                   : `${size}-player bracket · ${
                       format === "double" ? `${matchCount} or ${matchCount + 1}` : matchCount
-                    } matches${
-                      byes > 0 ? ` · ${byes} ${byes === 1 ? "bye" : "byes"}` : ""
-                    }`}
+                    } matches${byes > 0 ? ` · ${byes} ${byes === 1 ? "bye" : "byes"}` : ""}`}
               </span>
             </h3>
             {entries.length === 0 ? (
@@ -909,12 +934,21 @@ function SetupDrawer({
                   : null}
             </p>
             <div className="co-roster-actions">
-              <button type="button" className="co-btn" onClick={add} disabled={entries.length >= 32}>
+              <button
+                type="button"
+                className="co-btn"
+                onClick={add}
+                disabled={entries.length >= 32}
+              >
                 <Plus size={13} aria-hidden="true" />
                 Add player
               </button>
               {sorted ? null : (
-                <button type="button" className="co-btn is-quiet" onClick={() => setEntries(byRating)}>
+                <button
+                  type="button"
+                  className="co-btn is-quiet"
+                  onClick={() => setEntries(byRating)}
+                >
                   Sort by rating
                 </button>
               )}

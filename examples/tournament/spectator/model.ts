@@ -85,7 +85,16 @@ export interface MatchEvent {
   matchId: string;
   seq: number;
   game: number;
-  kind: "start" | "point" | "undo" | "game" | "complete" | "report" | "walkover" | "reopen" | "cancel";
+  kind:
+    | "start"
+    | "point"
+    | "undo"
+    | "game"
+    | "complete"
+    | "report"
+    | "walkover"
+    | "reopen"
+    | "cancel";
   side: Side | null;
   playerA: string | null;
   playerB: string | null;
@@ -237,10 +246,7 @@ export function useLiveSnapshot(
     };
   }, [client, tournamentId, pollMs, view]);
 
-  const isCurrent = useCallback(
-    (id: string | null) => id !== null && id === pinnedId.current,
-    [],
-  );
+  const isCurrent = useCallback((id: string | null) => id !== null && id === pinnedId.current, []);
   const reload = useCallback(() => loadRef.current(), []);
   const patchMatch = useCallback((forTournamentId: string, match: Match) => {
     if (forTournamentId !== pinnedId.current) return;
@@ -333,9 +339,12 @@ export function roundLabel(
     return length === "tiny" ? "GF2" : length === "short" ? "Reset" : "Grand final reset";
   }
   if (bracket === "losers") {
-    if (round === losersRounds(tournament))
-      return length === "tiny" ? "LF" : "Losers final";
-    return length === "tiny" ? `LR${round}` : length === "short" ? `Losers R${round}` : `Losers round ${round}`;
+    if (round === losersRounds(tournament)) return length === "tiny" ? "LF" : "Losers final";
+    return length === "tiny"
+      ? `LR${round}`
+      : length === "short"
+        ? `Losers R${round}`
+        : `Losers round ${round}`;
   }
   const double = tournament.format === "double";
   const remaining = winnersRounds(tournament) - round;
@@ -346,7 +355,11 @@ export function roundLabel(
         ? ["SF", "Semifinal", "Semifinals"]
         : remaining === 2
           ? ["QF", "Quarterfinal", "Quarterfinals"]
-          : [`R${2 ** (remaining + 1)}`, `R${2 ** (remaining + 1)}`, `Round of ${2 ** (remaining + 1)}`];
+          : [
+              `R${2 ** (remaining + 1)}`,
+              `R${2 ** (remaining + 1)}`,
+              `Round of ${2 ** (remaining + 1)}`,
+            ];
   const [tiny, short, full] = names as [string, string, string];
   if (!double) return length === "tiny" ? tiny : length === "short" ? short : full;
   if (length === "tiny") return `W${tiny}`;
@@ -354,7 +367,11 @@ export function roundLabel(
   return `Winners ${full.toLowerCase()}`;
 }
 
-export function matchRound(tournament: Tournament, match: Match, length: LabelLength = "full"): string {
+export function matchRound(
+  tournament: Tournament,
+  match: Match,
+  length: LabelLength = "full",
+): string {
   return roundLabel(tournament, match.bracket, match.round, length);
 }
 
@@ -394,7 +411,10 @@ export function gamesToWin(tournament: Tournament): number {
 export function pressureLabel(tournament: Tournament, match: Match, side: Side): string {
   const games = side === "a" ? match.gamesA : match.gamesB;
   if (games + 1 < gamesToWin(tournament)) return "Game point";
-  if (isTitleMatch(tournament, match) && !(match.bracket === "final" && match.round === 1 && side === "b"))
+  if (
+    isTitleMatch(tournament, match) &&
+    !(match.bracket === "final" && match.round === 1 && side === "b")
+  )
     return "Championship point";
   return "Match point";
 }
@@ -474,7 +494,8 @@ export function eventText(
   const court = snapshot.courts.find((entry) => entry.id === event.courtId)?.name ?? "a court";
   if (event.kind === "start") return `M${match?.number ?? ""} started · ${court}`;
   if (event.kind === "complete") return `${nameOf(event.side)} won M${match?.number ?? ""}`;
-  if (event.kind === "report") return `${nameOf(event.side)} won M${match?.number ?? ""} · score sheet`;
+  if (event.kind === "report")
+    return `${nameOf(event.side)} won M${match?.number ?? ""} · score sheet`;
   if (event.kind === "walkover") return `${nameOf(event.side)} won M${match?.number ?? ""}`;
   if (event.kind === "game") return `${nameOf(event.side)} took game ${event.game} · ${court}`;
   if (event.kind === "reopen") return `M${match?.number ?? ""} result reopened`;
@@ -494,7 +515,11 @@ export function eventScore(
 ): string {
   if (event.kind === "start" || event.kind === "cancel" || event.kind === "bye") return "";
   if (event.kind === "walkover" || (event.kind === "reopen" && !event.side)) return "W/O";
-  if (tournament.bestOf > 1 && (event.kind === "complete" || event.kind === "report" || event.kind === "reopen") && event.side) {
+  if (
+    tournament.bestOf > 1 &&
+    (event.kind === "complete" || event.kind === "report" || event.kind === "reopen") &&
+    event.side
+  ) {
     const won = gamesToWin(tournament);
     const lost = Math.max(0, event.game - won);
     return event.side === "a" ? `${won}–${lost}` : `${lost}–${won}`;

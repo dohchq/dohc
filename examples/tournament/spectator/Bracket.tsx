@@ -90,13 +90,18 @@ const colX = (index: number) => PAD_X + index * (NODE_W + GAP_X);
 const count = (value: number, unit: string) => `${value} ${unit}${value === 1 ? "" : "s"}`;
 
 const spansOf = (layout: Layout) => [
-  ...[...new Set([...layout.at.values()].map((spot) => spot.x))].map((left) => [left, left + NODE_W]),
+  ...[...new Set([...layout.at.values()].map((spot) => spot.x))].map((left) => [
+    left,
+    left + NODE_W,
+  ]),
   [layout.champion.x, layout.champion.x + CHAMP_W],
 ];
 
 function snapRight(layout: Layout, k: number, x: number, w: number) {
   if (w < 600) return { k, x, cut: null };
-  const cut = spansOf(layout).find(([left, right]) => x + left! * k < w - 8 && x + right! * k > w - 8);
+  const cut = spansOf(layout).find(
+    ([left, right]) => x + left! * k < w - 8 && x + right! * k > w - 8,
+  );
   if (!cut) return { k, x, cut: null };
   const start = (GUTTER - x) / k;
   const snug = (w - 16 - GUTTER) / (cut[1]! - start);
@@ -137,10 +142,22 @@ function layoutOf(tournament: Tournament | null, matches: Match[]): Layout {
       top: winnersY(index + 1, 1),
     });
   for (let index = 0; index < losers; index += 1)
-    columns.push({ key: `l${index}`, index, bracket: "losers", round: index + 1, top: losersY(index + 1, 1) });
+    columns.push({
+      key: `l${index}`,
+      index,
+      bracket: "losers",
+      round: index + 1,
+      top: losersY(index + 1, 1),
+    });
   if (losers > 0)
     for (const round of [1, 2])
-      columns.push({ key: `f${round}`, index: finalIndex + round - 1, bracket: "final", round, top: crownY });
+      columns.push({
+        key: `f${round}`,
+        index: finalIndex + round - 1,
+        bracket: "final",
+        round,
+        top: crownY,
+      });
   const championIndex = losers > 0 ? finalIndex + 2 : winners;
   return {
     at,
@@ -230,8 +247,16 @@ export function Bracket({
           return spans.some(([a, b]) => at + (a! - 28) * zoom < w && at + b! * zoom > w);
         };
         const k =
-          [fitted, ...spans.flatMap(([a, b]) => [(w + 2 - GUTTER) / (a! - 28 - left), (w - 2 - GUTTER) / (b! - left)])]
-            .filter((zoom) => Number.isFinite(zoom) && zoom >= 0.75 && zoom <= Math.max(most, fitted))
+          [
+            fitted,
+            ...spans.flatMap(([a, b]) => [
+              (w + 2 - GUTTER) / (a! - 28 - left),
+              (w - 2 - GUTTER) / (b! - left),
+            ]),
+          ]
+            .filter(
+              (zoom) => Number.isFinite(zoom) && zoom >= 0.75 && zoom <= Math.max(most, fitted),
+            )
             .sort((one, two) => Math.abs(one - fitted) - Math.abs(two - fitted))
             .find((zoom) => !tornRight(zoom)) ?? fitted;
         const x = GUTTER - left * k;
@@ -240,22 +265,30 @@ export function Bracket({
           .map((spot) => [spot.y - NODE_H / 2 - 18, spot.y + NODE_H / 2] as const);
         const tornTop = (y: number) => cards.some(([a, b]) => y + a * k < 0 && y + b * k > 0);
         const tornY = (y: number) =>
-          cards.filter(([a, b]) => (y + a * k < 0 && y + b * k > 0) || (y + a * k < h && y + b * k > h));
+          cards.filter(
+            ([a, b]) => (y + a * k < 0 && y + b * k > 0) || (y + a * k < h && y + b * k > h),
+          );
         const base = (h - (bottom - top) * k) / 2 - top * k;
-        const placesY = [base, ...cards.flatMap(([a, b]) => [2 - a * k, -2 - b * k, h - 2 - b * k, h + 2 - a * k])];
-        const showsY = (value: number) => value + top * k >= 0 && value + bottom * k <= h && !tornTop(value);
+        const placesY = [
+          base,
+          ...cards.flatMap(([a, b]) => [2 - a * k, -2 - b * k, h - 2 - b * k, h + 2 - a * k]),
+        ];
+        const showsY = (value: number) =>
+          value + top * k >= 0 && value + bottom * k <= h && !tornTop(value);
         const y = nearest(placesY, (value) => showsY(value) && tornY(value).length === 0, base);
         if (y !== undefined) return setView({ k, x, y });
         const torn = tornY(base);
-        const wider = [Math.min(top, ...torn.map(([a]) => a)), Math.max(bottom, ...torn.map(([, b]) => b))] as const;
+        const wider = [
+          Math.min(top, ...torn.map(([a]) => a)),
+          Math.max(bottom, ...torn.map(([, b]) => b)),
+        ] as const;
         if (Math.min(1, (h - 16) / (wider[1] - wider[0])) < 0.75)
           return setView({ k, x, y: nearest(placesY, showsY, base) ?? base });
         [top, bottom] = wider;
       }
     }
     const onCourt = snapshot.courts.find((court) => court.matchId)?.matchId;
-    const target =
-      open.find((match) => match.id === onCourt) ?? open[0] ?? snapshot.matches.at(-1);
+    const target = open.find((match) => match.id === onCourt) ?? open[0] ?? snapshot.matches.at(-1);
     const near = open.filter((match) => match.bracket === target?.bracket);
     const first = near.length
       ? Math.min(...near.map((match) => layout.at.get(match.id)?.x ?? PAD_X))
@@ -268,13 +301,19 @@ export function Bracket({
     const snapped = snapRight(
       layout,
       zoom,
-      w < 600 ? GUTTER - targetX * zoom : Math.min(GUTTER - first * zoom, w - 16 - (targetX + NODE_W) * zoom),
+      w < 600
+        ? GUTTER - targetX * zoom
+        : Math.min(GUTTER - first * zoom, w - 16 - (targetX + NODE_W) * zoom),
       w,
     );
     const k = snapped.k;
     const x = snapped.cut === null ? snapped.x : w - snapped.cut * k;
     const above = lane === null ? -1 : h - lane * k;
-    const base = losers ? 8 - lane! * k : above >= 0 ? Math.min(above, 32) : Math.min(32, h / 2 - y * k);
+    const base = losers
+      ? 8 - lane! * k
+      : above >= 0
+        ? Math.min(above, 32)
+        : Math.min(32, h / 2 - y * k);
     const floor = h - 4;
     const flag = 18 * k;
     const spots = [...layout.at.values()];
@@ -315,7 +354,11 @@ export function Bracket({
       const readable = Math.max(current.k, readableZoom(w));
       if (to && lane !== null) {
         const span = colX(to.index) - colX(from.index) + NODE_W;
-        const whole = Math.min(1.15, (w - 2 * GUTTER) / span, (el.clientHeight - 16) / (end - lane));
+        const whole = Math.min(
+          1.15,
+          (w - 2 * GUTTER) / span,
+          (el.clientHeight - 16) / (end - lane),
+        );
         if (whole >= 0.7)
           return {
             k: whole,
@@ -324,7 +367,9 @@ export function Bracket({
           };
       }
       const zoom =
-        lane === null ? readable : Math.max(readable, Math.min(1.15, (el.clientHeight - 16) / (end - lane)));
+        lane === null
+          ? readable
+          : Math.max(readable, Math.min(1.15, (el.clientHeight - 16) / (end - lane)));
       const anchor =
         (colX(column.index) - colX(from.index) + NODE_W) * zoom + 2 * GUTTER <= w ? from : column;
       const { k, x } = snapRight(
@@ -339,8 +384,8 @@ export function Bracket({
         x,
         y:
           lane !== null && (bottom - lane) * k + 8 <= el.clientHeight
-              ? 8 - lane * k
-              : tall
+            ? 8 - lane * k
+            : tall
               ? 40 - top * k
               : el.clientHeight / 2 - ((top + bottom) / 2) * k,
       };
@@ -456,8 +501,13 @@ export function Bracket({
       event.preventDefault();
       const rect = el.getBoundingClientRect();
       if (event.ctrlKey || event.metaKey)
-        zoomAt(Math.exp(-event.deltaY * 0.0025), event.clientX - rect.left, event.clientY - rect.top);
-      else pan(-(event.shiftKey ? event.deltaY : event.deltaX), -(event.shiftKey ? 0 : event.deltaY));
+        zoomAt(
+          Math.exp(-event.deltaY * 0.0025),
+          event.clientX - rect.left,
+          event.clientY - rect.top,
+        );
+      else
+        pan(-(event.shiftKey ? event.deltaY : event.deltaX), -(event.shiftKey ? 0 : event.deltaY));
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
@@ -477,7 +527,12 @@ export function Bracket({
       drag.current = { moved: false, startX: event.clientX, startY: event.clientY, pinch: 0 };
     else if (pointers.current.size === 2) {
       const [a, b] = [...pointers.current.values()];
-      drag.current = { moved: true, startX: 0, startY: 0, pinch: Math.hypot(a!.x - b!.x, a!.y - b!.y) };
+      drag.current = {
+        moved: true,
+        startX: 0,
+        startY: 0,
+        pinch: Math.hypot(a!.x - b!.x, a!.y - b!.y),
+      };
     }
   };
 
@@ -543,8 +598,7 @@ export function Bracket({
     crowning ??
     snapshot.matches.find(
       (match) =>
-        match.nextMatchId === null &&
-        (tournament.format === "single" || match.bracket === "final"),
+        match.nextMatchId === null && (tournament.format === "single" || match.bracket === "final"),
     );
   const liveIn = (bracket: BracketSide, round: number) =>
     snapshot.matches.filter(
@@ -574,14 +628,11 @@ export function Bracket({
   const labelLength = lengthFor(false);
   const laneLength = lengthFor(true);
   const inLosers =
-    layout.losersTop !== null &&
-    view.y + (layout.losersTop - LANE_GAP + 18) * view.k <= 16;
+    layout.losersTop !== null && view.y + (layout.losersTop - LANE_GAP + 18) * view.k <= 16;
   const losersSide =
-    layout.losersTop !== null &&
-    view.y + (layout.losersTop - LANE_GAP + 18) * view.k < box.h / 2;
+    layout.losersTop !== null && view.y + (layout.losersTop - LANE_GAP + 18) * view.k < box.h / 2;
   const losersInView =
-    layout.losersTop !== null &&
-    view.y + (layout.losersTop - LANE_GAP + 18) * view.k < box.h - 24;
+    layout.losersTop !== null && view.y + (layout.losersTop - LANE_GAP + 18) * view.k < box.h - 24;
 
   return (
     <div className="co-canvas">
@@ -589,7 +640,10 @@ export function Bracket({
         {layout.columns.map((column) => {
           if (column.bracket !== "final" && (column.bracket === "losers") !== inLosers) return null;
           const live = liveIn(column.bracket, column.round);
-          const place = header(view.x + colX(column.index) * view.k, (NODE_W + GAP_X) * view.k - 12);
+          const place = header(
+            view.x + colX(column.index) * view.k,
+            (NODE_W + GAP_X) * view.k - 12,
+          );
           if (place.width < 48) return null;
           const full = roundLabel(tournament, column.bracket, column.round);
           return (
@@ -645,7 +699,8 @@ export function Bracket({
         }}
         onKeyDown={onKeyDown}
         onFocus={(event) => {
-          if (event.target === event.currentTarget || !event.target.matches(":focus-visible")) return;
+          if (event.target === event.currentTarget || !event.target.matches(":focus-visible"))
+            return;
           const box = event.currentTarget.getBoundingClientRect();
           const card = event.target.getBoundingClientRect();
           const room = 24;
@@ -697,7 +752,9 @@ export function Bracket({
                       left: colX(lane.index),
                       width: NODE_W,
                       visibility:
-                        box.w > 0 && room < text.length * 8 + (live > 0 ? 56 : 0) ? "hidden" : undefined,
+                        box.w > 0 && room < text.length * 8 + (live > 0 ? 56 : 0)
+                          ? "hidden"
+                          : undefined,
                     }}
                   >
                     {text}
@@ -721,7 +778,10 @@ export function Bracket({
                   ? to.y
                   : to.y - NODE_H / 2 + (match.nextSlot === "b" ? ROW_H * 1.5 : ROW_H / 2);
               const mid = x2 - GAP_X / 2;
-              const advanced = match.nextSlot === null ? next.status !== "skipped" && next.status !== "waiting" : match.winnerId !== null;
+              const advanced =
+                match.nextSlot === null
+                  ? next.status !== "skipped" && next.status !== "waiting"
+                  : match.winnerId !== null;
               const lit =
                 focus !== null &&
                 match.winnerId === focus &&
@@ -738,7 +798,8 @@ export function Bracket({
             })}
             {focus
               ? snapshot.matches.map((match) => {
-                  if (!match.loserNextMatchId || !match.winnerId || match.winnerId === focus) return null;
+                  if (!match.loserNextMatchId || !match.winnerId || match.winnerId === focus)
+                    return null;
                   if (match.playerA !== focus && match.playerB !== focus) return null;
                   const from = layout.at.get(match.id);
                   const to = layout.at.get(match.loserNextMatchId);
@@ -817,10 +878,16 @@ export function Bracket({
         side={layout.losersTop === null ? null : losersSide ? "losers" : "winners"}
         losersInView={losersInView}
         onSide={showSide}
-        losersLive={snapshot.matches.filter((match) => match.status === "live" && match.bracket === "losers").length}
+        losersLive={
+          snapshot.matches.filter((match) => match.status === "live" && match.bracket === "losers")
+            .length
+        }
         rounds={layout.columns.map((column) => {
           const playing = snapshot.matches.filter(
-            (match) => match.status === "live" && match.bracket === column.bracket && match.round === column.round,
+            (match) =>
+              match.status === "live" &&
+              match.bracket === column.bracket &&
+              match.round === column.round,
           ).length;
           return {
             key: column.key,
@@ -883,7 +950,8 @@ function MatchNode({
       ? `${count(side === "a" ? match.gamesA : match.gamesB, "game")}, ${count(side === "a" ? match.scoreA : match.scoreB, "point")}`
       : result(side);
   const result = (side: "a" | "b") => {
-    if (walkover) return match.winnerId === (side === "a" ? match.playerA : match.playerB) ? "W/O" : "–";
+    if (walkover)
+      return match.winnerId === (side === "a" ? match.playerA : match.playerB) ? "W/O" : "–";
     if (done && series) return String(side === "a" ? match.gamesA : match.gamesB);
     if (done || live) return String(side === "a" ? match.scoreA : match.scoreB);
     return "";
@@ -899,9 +967,10 @@ function MatchNode({
         : reset
           ? "played only if the losers side wins the grand final"
           : match.status;
-  const label = `Match ${match.number}, ${matchRound(tournament, match)}, ${state}: ${name(match.playerA)} ${spoken(
-    "a",
-  )} vs ${name(match.playerB)} ${spoken("b")}`.replace(/ +/g, " ");
+  const label =
+    `Match ${match.number}, ${matchRound(tournament, match)}, ${state}: ${name(match.playerA)} ${spoken(
+      "a",
+    )} vs ${name(match.playerB)} ${spoken("b")}`.replace(/ +/g, " ");
   return (
     <div
       className={`co-node is-${match.status}${traced ? " is-traced" : ""}${
@@ -976,7 +1045,9 @@ function MatchNode({
               <span className="co-slot-seed">{player?.seed ?? ""}</span>
               <span className="co-slot-name">
                 {hint}
-                {live && !pending && match.server === side ? <span className="co-serve" title="Serving" /> : null}
+                {live && !pending && match.server === side ? (
+                  <span className="co-serve" title="Serving" />
+                ) : null}
               </span>
               {series && live ? <span className="co-slot-games">{games}</span> : null}
               <span
@@ -1033,13 +1104,14 @@ function CanvasTools({
   const quiet = useRef(false);
   const matches = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return (needle
-      ? people.filter(
-          (row) =>
-            row.name.toLowerCase().includes(needle) ||
-            (row.club ?? "").toLowerCase().includes(needle),
-        )
-      : [...people].sort((a, b) => a.seed - b.seed)
+    return (
+      needle
+        ? people.filter(
+            (row) =>
+              row.name.toLowerCase().includes(needle) ||
+              (row.club ?? "").toLowerCase().includes(needle),
+          )
+        : [...people].sort((a, b) => a.seed - b.seed)
     ).slice(0, 8);
   }, [people, query]);
   const pick = (row: Standing | undefined) => {
@@ -1086,7 +1158,9 @@ function CanvasTools({
               aria-autocomplete="list"
               aria-expanded={open && matches.length > 0}
               aria-controls={open && matches.length > 0 ? "co-trace-list" : undefined}
-              aria-activedescendant={open && matches[active] ? `co-trace-${matches[active]!.id}` : undefined}
+              aria-activedescendant={
+                open && matches[active] ? `co-trace-${matches[active]!.id}` : undefined
+              }
               onFocus={() => setOpen(!quiet.current)}
               onClick={() => setOpen(true)}
               onBlur={() => setOpen(false)}
@@ -1176,17 +1250,40 @@ function CanvasTools({
         </div>
       ) : null}
       <div className="co-tools-group" role="group" aria-label="Zoom">
-        <button type="button" className="co-tool co-tool-zoom" onClick={onZoomOut} aria-label="Zoom out" title="Zoom out  −">
+        <button
+          type="button"
+          className="co-tool co-tool-zoom"
+          onClick={onZoomOut}
+          aria-label="Zoom out"
+          title="Zoom out  −"
+        >
           <Minus size={15} />
         </button>
-        <button type="button" className="co-tool co-tool-pct co-tool-zoom" onClick={onActual} title="Actual size">
+        <button
+          type="button"
+          className="co-tool co-tool-pct co-tool-zoom"
+          onClick={onActual}
+          title="Actual size"
+        >
           {Math.round(zoom * 100)}%
         </button>
-        <button type="button" className="co-tool co-tool-zoom" onClick={onZoomIn} aria-label="Zoom in" title="Zoom in  +">
+        <button
+          type="button"
+          className="co-tool co-tool-zoom"
+          onClick={onZoomIn}
+          aria-label="Zoom in"
+          title="Zoom in  +"
+        >
           <Plus size={15} />
         </button>
         <span className="co-tools-sep co-tool-zoom" aria-hidden="true" />
-        <button type="button" className="co-tool" onClick={onFit} aria-label="Fit bracket" title="Fit  0">
+        <button
+          type="button"
+          className="co-tool"
+          onClick={onFit}
+          aria-label="Fit bracket"
+          title="Fit  0"
+        >
           <Scan size={15} />
         </button>
       </div>

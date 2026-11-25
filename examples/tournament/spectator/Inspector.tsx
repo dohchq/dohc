@@ -19,7 +19,17 @@ import type { ScoreActions } from "./Courts";
 export interface TimelineEntry {
   seq: number;
   game: number;
-  kind: "bye" | "start" | "point" | "undo" | "game" | "complete" | "report" | "walkover" | "reopen" | "cancel";
+  kind:
+    | "bye"
+    | "start"
+    | "point"
+    | "undo"
+    | "game"
+    | "complete"
+    | "report"
+    | "walkover"
+    | "reopen"
+    | "cancel";
   side: Side | null;
   playerA: string | null;
   playerB: string | null;
@@ -187,7 +197,9 @@ export function Inspector({
   const queued = match.status === "waiting" || match.status === "ready";
   const history = (timeline ?? []).some((entry) => entry.kind !== "bye");
   const played = (timeline ?? []).some((entry) => entry.kind === "point" || entry.kind === "game");
-  const scoreColumn = (timeline ?? []).some((entry) => entry.kind !== "bye" && eventScore(tournament, entry) !== "");
+  const scoreColumn = (timeline ?? []).some(
+    (entry) => entry.kind !== "bye" && eventScore(tournament, entry) !== "",
+  );
   const pending = match.status === "live" && isDecided(tournament, match.scoreA, match.scoreB);
   const status =
     match.status === "live"
@@ -208,7 +220,9 @@ export function Inspector({
   const games = gameScores(match);
   const busy = Boolean(
     actions &&
-      (actions.disabled || actions.pending.has(match.id) || (actions.taps.get(match.id)?.length ?? 0) > 0),
+    (actions.disabled ||
+      actions.pending.has(match.id) ||
+      (actions.taps.get(match.id)?.length ?? 0) > 0),
   );
   const [submitting, setSubmitting] = useState(false);
   const recording = confirm === "result" && submitting;
@@ -217,14 +231,16 @@ export function Inspector({
   }, [recording, onRecording]);
   useEffect(() => () => onRecording?.(false), [onRecording]);
   const winnerTo = () => {
-    if (match.bracket === "final" && match.round === 1) return "Champion, or a reset if the losers side wins";
+    if (match.bracket === "final" && match.round === 1)
+      return "Champion, or a reset if the losers side wins";
     return next ? `M${next.number} · ${matchRound(tournament, next)}` : "Champion";
   };
 
   const logText = (entry: TimelineEntry) => {
     const who = name(entry.side === "a" ? entry.playerA : entry.playerB);
     if (entry.kind === "point") return who;
-    if (entry.kind === "undo") return entry.side ? `Point removed, ${who}` : `Game ${entry.game} reopened`;
+    if (entry.kind === "undo")
+      return entry.side ? `Point removed, ${who}` : `Game ${entry.game} reopened`;
     if (entry.kind === "game") return `${who} took game ${entry.game}`;
     if (entry.kind === "complete") return `${who} won the match`;
     if (entry.kind === "report") return `Score sheet entered, ${who} won`;
@@ -296,7 +312,10 @@ export function Inspector({
                 : "–";
           const gamesWon = side === "a" ? match.gamesA : match.gamesB;
           return (
-            <div key={side} className={`co-insp-row${won ? " is-won" : ""}${lost ? " is-lost" : ""}`}>
+            <div
+              key={side}
+              className={`co-insp-row${won ? " is-won" : ""}${lost ? " is-lost" : ""}`}
+            >
               <span className="co-seed-box">{player?.seed ?? ""}</span>
               <span className="co-insp-name">
                 <span className="co-insp-who">
@@ -327,7 +346,10 @@ export function Inspector({
                   </small>
                 ) : null}
               </span>
-              <span className="co-insp-games co-num" aria-label={series ? "Game scores" : undefined}>
+              <span
+                className="co-insp-games co-num"
+                aria-label={series ? "Game scores" : undefined}
+              >
                 {series
                   ? games.map((game, index) => {
                       const mine = side === "a" ? game[0] : game[1];
@@ -479,8 +501,8 @@ export function Inspector({
           ) : confirm === "walkover" ? (
             <div className="co-reopen" role="group" aria-label="Record a walkover">
               <p>
-                Use this when a player cannot play. The other player goes through with no Elo change.
-                You can reopen it later.
+                Use this when a player cannot play. The other player goes through with no Elo
+                change. You can reopen it later.
               </p>
               <div className="co-reopen-buttons is-stacked">
                 {(["a", "b"] as const).map((side) => (
@@ -497,7 +519,11 @@ export function Inspector({
                     {sideName(side)} goes through
                   </button>
                 ))}
-                <button type="button" className="co-btn is-quiet is-wide" onClick={() => setConfirm(null)}>
+                <button
+                  type="button"
+                  className="co-btn is-quiet is-wide"
+                  onClick={() => setConfirm(null)}
+                >
                   Cancel
                 </button>
               </div>
@@ -505,12 +531,20 @@ export function Inspector({
           ) : (
             <>
               {match.scoreA + match.scoreB + match.gamesA + match.gamesB === 0 ? (
-                <button type="button" className="co-btn is-wide" onClick={() => setConfirm("result")}>
+                <button
+                  type="button"
+                  className="co-btn is-wide"
+                  onClick={() => setConfirm("result")}
+                >
                   <Check size={13} />
                   Enter the final score
                 </button>
               ) : null}
-              <button type="button" className="co-btn is-quiet is-wide" onClick={() => setConfirm("walkover")}>
+              <button
+                type="button"
+                className="co-btn is-quiet is-wide"
+                onClick={() => setConfirm("walkover")}
+              >
                 <Flag size={13} />
                 Record a walkover
               </button>
@@ -540,10 +574,16 @@ export function Inspector({
                     ? `takes ${name(match.winnerId === match.playerA ? match.playerB : match.playerA)} out of M${drop.number}`
                     : null,
                 ])}
-                {halted.map((entry) => `. M${entry.number} has no points yet, so it goes back to waiting`).join("")}
+                {halted
+                  .map(
+                    (entry) => `. M${entry.number} has no points yet, so it goes back to waiting`,
+                  )
+                  .join("")}
                 .
               </p>
-              {noCourt ? <p className="co-inline-error">Every court is playing. Complete one first.</p> : null}
+              {noCourt ? (
+                <p className="co-inline-error">Every court is playing. Complete one first.</p>
+              ) : null}
               <div className="co-reopen-buttons">
                 <button type="button" className="co-btn is-quiet" onClick={() => setConfirm(null)}>
                   Cancel
@@ -580,7 +620,11 @@ export function Inspector({
           {failed ? (
             <div className="co-inline-error" role="alert">
               <span>Could not load the points. {failed}</span>
-              <button type="button" className="co-btn" onClick={() => setAttempt((value) => value + 1)}>
+              <button
+                type="button"
+                className="co-btn"
+                onClick={() => setAttempt((value) => value + 1)}
+              >
                 <RefreshCw size={13} />
                 Try again
               </button>
@@ -597,7 +641,9 @@ export function Inspector({
                 />
               ) : null}
               {cut ? (
-                <p className="co-inspector-note">Showing the latest {HISTORY_LIMIT.toLocaleString()} events.</p>
+                <p className="co-inspector-note">
+                  Showing the latest {HISTORY_LIMIT.toLocaleString()} events.
+                </p>
               ) : null}
               <ol className={scoreColumn ? "co-log" : "co-log is-plain"}>
                 {timeline
@@ -611,7 +657,9 @@ export function Inspector({
                         ]
                       : []),
                     <li key={entry.seq} className={`is-${entry.kind}`}>
-                      {scoreColumn ? <span className="co-log-score co-num">{eventScore(tournament, entry)}</span> : null}
+                      {scoreColumn ? (
+                        <span className="co-log-score co-num">{eventScore(tournament, entry)}</span>
+                      ) : null}
                       <span className="co-log-text">
                         {logText(entry)}
                         {entry.actor && describeActor && entry.actor !== shown[index - 1]?.actor ? (
@@ -644,13 +692,16 @@ function Momentum({
   const points: Array<{ game: number; lead: number }> = [];
   const breaks: number[] = [];
   for (const entry of [...timeline].sort((left, right) => left.seq - right.seq)) {
-    if (entry.kind === "point") points.push({ game: entry.game, lead: entry.scoreA - entry.scoreB });
+    if (entry.kind === "point")
+      points.push({ game: entry.game, lead: entry.scoreA - entry.scoreB });
     else if (entry.kind === "undo" && entry.side) points.pop();
     else if (entry.kind === "game") breaks.push(points.length);
     else if (entry.kind === "undo") breaks.pop();
   }
   if (points.length < 2) return null;
-  const first = [...timeline].sort((left, right) => left.seq - right.seq).find((entry) => entry.kind === "point");
+  const first = [...timeline]
+    .sort((left, right) => left.seq - right.seq)
+    .find((entry) => entry.kind === "point");
   const opening = first ? first.scoreA - first.scoreB - (first.side === "a" ? 1 : -1) : 0;
   const peak = Math.max(3, Math.abs(opening), ...points.map((point) => Math.abs(point.lead)));
   const width = 300;
@@ -722,9 +773,17 @@ function sheetProblem(
   for (const [index, [a, b]] of entered.entries()) {
     const game = index + 1;
     if (Math.max(...wins) >= need)
-      return { row: index, cell: null, message: `The match was over after game ${index}. Clear game ${game}.` };
+      return {
+        row: index,
+        cell: null,
+        message: `The match was over after game ${index}. Clear game ${game}.`,
+      };
     if (a === "" || b === "")
-      return { row: index, cell: a === "" && b === "" ? null : index * 2 + (a === "" ? 0 : 1), message: `Enter both scores for game ${game}.` };
+      return {
+        row: index,
+        cell: a === "" && b === "" ? null : index * 2 + (a === "" ? 0 : 1),
+        message: `Enter both scores for game ${game}.`,
+      };
     const [high, low] = [Math.max(Number(a), Number(b)), Math.min(Number(a), Number(b))];
     if (high !== Math.max(pointsToWin, low + winBy) || (winBy === 1 && low >= pointsToWin))
       return {
@@ -756,7 +815,11 @@ function ResultForm({
 }: ResultFormProps) {
   const [rows, setRows] = useState(() => Array.from({ length: bestOf }, () => ["", ""]));
   const [reviewed, setReviewed] = useState(version);
-  const [problem, setProblem] = useState<{ row: number; cell: number | null; message: string } | null>(null);
+  const [problem, setProblem] = useState<{
+    row: number;
+    cell: number | null;
+    message: string;
+  } | null>(null);
   const inputs = useRef<Array<HTMLInputElement | null>>([]);
   useEffect(() => inputs.current[0]?.focus(), []);
   const need = Math.floor(bestOf / 2) + 1;
@@ -778,12 +841,14 @@ function ResultForm({
           inputs.current[found.cell ?? found.row * 2]?.focus();
           return;
         }
-        void onSubmit(rows.slice(0, filled).map(([a, b]) => [Number(a), Number(b)] as [number, number]));
+        void onSubmit(
+          rows.slice(0, filled).map(([a, b]) => [Number(a), Number(b)] as [number, number]),
+        );
       }}
     >
       <p>
-        For a score sheet handed in after play. Enter {bestOf > 1 ? "each game played" : "the game"} to{" "}
-        {pointsToWin}, win by {winBy}. The log shows who entered it.
+        For a score sheet handed in after play. Enter {bestOf > 1 ? "each game played" : "the game"}{" "}
+        to {pointsToWin}, win by {winBy}. The log shows who entered it.
       </p>
       <div className="co-result-grid">
         <span />
@@ -801,7 +866,8 @@ function ResultForm({
                 className="co-num"
                 disabled={busy}
                 aria-invalid={
-                  (problem?.row === index && (problem.cell === null || problem.cell === index * 2 + side)) ||
+                  (problem?.row === index &&
+                    (problem.cell === null || problem.cell === index * 2 + side)) ||
                   undefined
                 }
                 aria-describedby={problem?.row === index ? "co-result-problem" : undefined}
@@ -826,7 +892,8 @@ function ResultForm({
       </div>
       {reviewed !== version ? (
         <p className="co-inline-error" role="alert">
-          This match changed while you were entering scores. Your scores are kept. Check them, then record.
+          This match changed while you were entering scores. Your scores are kept. Check them, then
+          record.
         </p>
       ) : null}
       {problem ? (
@@ -838,7 +905,11 @@ function ResultForm({
         <button type="button" className="co-btn is-quiet" disabled={busy} onClick={onCancel}>
           Cancel
         </button>
-        <button type="submit" className="co-btn is-primary" disabled={busy || blocked || filled < need}>
+        <button
+          type="submit"
+          className="co-btn is-primary"
+          disabled={busy || blocked || filled < need}
+        >
           {busy ? "Recording…" : reviewed !== version ? "Use these scores" : "Record result"}
         </button>
       </div>

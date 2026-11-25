@@ -106,7 +106,9 @@ export function Dashboard({
   useEffect(() => {
     if (!openId || view !== "courts") return;
     const frame = window.requestAnimationFrame(() =>
-      document.querySelector(`.co-board[data-match="${openId}"]`)?.scrollIntoView({ block: "nearest" }),
+      document
+        .querySelector(`.co-board[data-match="${openId}"]`)
+        ?.scrollIntoView({ block: "nearest" }),
     );
     return () => window.cancelAnimationFrame(frame);
   }, [openId, view]);
@@ -195,166 +197,177 @@ export function Dashboard({
   return (
     <div className={`co-app is-${role}`}>
       <div className="co-chrome" inert={covered || tv}>
-      <div className="co-chrome" inert={sheet}>
-      {role === "spectator" ? (
-        <Ticker snapshot={snapshot} onOpenMatch={openMatch} />
-      ) : null}
-      <header className="co-bar">
-        <div className="co-event">
-          <span className="co-mark" aria-hidden="true">
-            <Trophy size={15} />
-          </span>
-          <div className="co-event-text">
-            <div className="co-event-name">
-              {snapshot.tournaments.length > 1 ? (
-                <>
-                  <h1 className="co-sr">{tournament.name}</h1>
-                  <select
-                    aria-label="Tournament"
-                    value={tournament.id}
-                    onChange={(event) => onPickTournament(event.target.value)}
-                  >
-                    {snapshot.tournaments.map((entry) => (
-                      <option key={entry.id} value={entry.id}>
-                        {entry.name}
-                        {entry.status === "finished" ? " (finished)" : ""}
-                      </option>
-                    ))}
-                  </select>
-                  <span aria-hidden="true">{tournament.name}</span>
-                  <ChevronDown size={14} aria-hidden="true" />
-                </>
-              ) : (
-                <h1>{tournament.name}</h1>
-              )}
+        <div className="co-chrome" inert={sheet}>
+          {role === "spectator" ? <Ticker snapshot={snapshot} onOpenMatch={openMatch} /> : null}
+          <header className="co-bar">
+            <div className="co-event">
+              <span className="co-mark" aria-hidden="true">
+                <Trophy size={15} />
+              </span>
+              <div className="co-event-text">
+                <div className="co-event-name">
+                  {snapshot.tournaments.length > 1 ? (
+                    <>
+                      <h1 className="co-sr">{tournament.name}</h1>
+                      <select
+                        aria-label="Tournament"
+                        value={tournament.id}
+                        onChange={(event) => onPickTournament(event.target.value)}
+                      >
+                        {snapshot.tournaments.map((entry) => (
+                          <option key={entry.id} value={entry.id}>
+                            {entry.name}
+                            {entry.status === "finished" ? " (finished)" : ""}
+                          </option>
+                        ))}
+                      </select>
+                      <span aria-hidden="true">{tournament.name}</span>
+                      <ChevronDown size={14} aria-hidden="true" />
+                    </>
+                  ) : (
+                    <h1>{tournament.name}</h1>
+                  )}
+                </div>
+                <span className="co-event-meta">
+                  <Stage snapshot={snapshot} />
+                  {onSetVisibility ? (
+                    <button
+                      type="button"
+                      className={`co-visibility is-${tournament.visibility}`}
+                      aria-label={
+                        tournament.visibility === "shared" ? "On share link" : "Hidden from link"
+                      }
+                      title={
+                        tournament.visibility === "shared"
+                          ? "Anyone with the spectator link can follow this tournament. Click to hide it."
+                          : "Hidden from the spectator link. Click to show it."
+                      }
+                      disabled={changingVisibility}
+                      onClick={() => {
+                        setChangingVisibility(true);
+                        void onSetVisibility(
+                          tournament,
+                          tournament.visibility === "shared" ? "private" : "shared",
+                        ).finally(() => setChangingVisibility(false));
+                      }}
+                    >
+                      {tournament.visibility === "shared" ? (
+                        <Eye size={13} />
+                      ) : (
+                        <EyeOff size={13} />
+                      )}
+                      <span className="co-hide-sm">
+                        {tournament.visibility === "shared" ? "On share link" : "Hidden from link"}
+                      </span>
+                    </button>
+                  ) : null}
+                </span>
+              </div>
             </div>
-            <span className="co-event-meta">
-              <Stage snapshot={snapshot} />
-              {onSetVisibility ? (
+            <nav className="co-views" aria-label="Views">
+              {VIEWS.map((entry) => (
                 <button
+                  key={entry.id}
                   type="button"
-                  className={`co-visibility is-${tournament.visibility}`}
-                  aria-label={tournament.visibility === "shared" ? "On share link" : "Hidden from link"}
-                  title={
-                    tournament.visibility === "shared"
-                      ? "Anyone with the spectator link can follow this tournament. Click to hide it."
-                      : "Hidden from the spectator link. Click to show it."
-                  }
-                  disabled={changingVisibility}
-                  onClick={() => {
-                    setChangingVisibility(true);
-                    void onSetVisibility(
-                      tournament,
-                      tournament.visibility === "shared" ? "private" : "shared",
-                    ).finally(() => setChangingVisibility(false));
-                  }}
+                  className="co-view"
+                  aria-current={view === entry.id ? "page" : undefined}
+                  aria-keyshortcuts={entry.key}
+                  title={`${role === "organizer" ? entry.organizer : entry.spectator}  ${entry.key}`}
+                  onClick={() => setView(entry.id)}
                 >
-                  {tournament.visibility === "shared" ? <Eye size={13} /> : <EyeOff size={13} />}
-                  <span className="co-hide-sm">
-                    {tournament.visibility === "shared" ? "On share link" : "Hidden from link"}
-                  </span>
+                  {role === "organizer" ? entry.organizer : entry.spectator}
+                  {entry.id === "courts" && playing.length > 0 ? (
+                    <span className="co-view-count co-num">{playing.length}</span>
+                  ) : null}
                 </button>
-              ) : null}
-            </span>
-          </div>
+              ))}
+            </nav>
+            <div className="co-bar-end">
+              <Freshness live={live} />
+              <button
+                type="button"
+                className="co-btn is-quiet"
+                onClick={() => setTv(true)}
+                aria-keyshortcuts="F"
+                aria-label="TV mode"
+                title="TV mode  F"
+              >
+                <Maximize size={14} />
+                <span className="co-hide-sm">TV</span>
+                <kbd className="co-hide-sm">F</kbd>
+              </button>
+              {barEnd}
+            </div>
+          </header>
+          {live.error ? (
+            <div className="co-stale" role="status">
+              <span>Scores may be out of date. {live.error.message}</span>
+              <button type="button" className="co-btn is-quiet" onClick={live.reload}>
+                <RefreshCw size={13} />
+                Try again
+              </button>
+            </div>
+          ) : null}
         </div>
-        <nav className="co-views" aria-label="Views">
-          {VIEWS.map((entry) => (
-            <button
-              key={entry.id}
-              type="button"
-              className="co-view"
-              aria-current={view === entry.id ? "page" : undefined}
-              aria-keyshortcuts={entry.key}
-              title={`${role === "organizer" ? entry.organizer : entry.spectator}  ${entry.key}`}
-              onClick={() => setView(entry.id)}
-            >
-              {role === "organizer" ? entry.organizer : entry.spectator}
-              {entry.id === "courts" && playing.length > 0 ? (
-                <span className="co-view-count co-num">{playing.length}</span>
-              ) : null}
-            </button>
-          ))}
-        </nav>
-        <div className="co-bar-end">
-          <Freshness live={live} />
-          <button
-            type="button"
-            className="co-btn is-quiet"
-            onClick={() => setTv(true)}
-            aria-keyshortcuts="F"
-            aria-label="TV mode"
-            title="TV mode  F"
+        <div className={`co-stage${opened ? " has-inspector" : ""}`}>
+          <main
+            className={`co-view-body is-${view}`}
+            aria-busy={live.switching || undefined}
+            inert={sheet}
           >
-            <Maximize size={14} />
-            <span className="co-hide-sm">TV</span>
-            <kbd className="co-hide-sm">F</kbd>
-          </button>
-          {barEnd}
-        </div>
-      </header>
-      {live.error ? (
-        <div className="co-stale" role="status">
-          <span>Scores may be out of date. {live.error.message}</span>
-          <button type="button" className="co-btn is-quiet" onClick={live.reload}>
-            <RefreshCw size={13} />
-            Try again
-          </button>
-        </div>
-      ) : null}
-      </div>
-      <div className={`co-stage${opened ? " has-inspector" : ""}`}>
-        <main className={`co-view-body is-${view}`} aria-busy={live.switching || undefined} inert={sheet}>
-          {view === "bracket" ? (
-            <Bracket
-              snapshot={snapshot}
-              selectedMatchId={openId}
-              tracedPlayer={traced}
-              onTrace={setTraced}
-              onOpenMatch={openMatch}
-            />
-          ) : view === "courts" ? (
-            <CourtDesk
-              key={tournament.id}
+            {view === "bracket" ? (
+              <Bracket
+                snapshot={snapshot}
+                selectedMatchId={openId}
+                tracedPlayer={traced}
+                onTrace={setTraced}
+                onOpenMatch={openMatch}
+              />
+            ) : view === "courts" ? (
+              <CourtDesk
+                key={tournament.id}
+                snapshot={snapshot}
+                people={people}
+                now={now}
+                actions={actions}
+                focusRequest={deskFocus}
+                onOpenMatch={openMatch}
+              />
+            ) : (
+              <Standings snapshot={snapshot} onTrace={trace} />
+            )}
+          </main>
+          {sheet ? <div className="co-sheet-scrim" aria-hidden="true" onClick={close} /> : null}
+          {opened ? (
+            <Inspector
+              modal={sheet}
+              key={`${opened.id}:${ask?.matchId === opened.id ? ask.seq : 0}`}
+              askReopen={ask?.matchId === opened.id}
+              match={opened}
               snapshot={snapshot}
               people={people}
               now={now}
+              loadTimeline={loadTimeline}
+              describeActor={describeActor}
               actions={actions}
-              focusRequest={deskFocus}
-              onOpenMatch={openMatch}
+              onScore={
+                actions
+                  ? (match) => {
+                      setDeskFocus((current) => ({
+                        matchId: match.id,
+                        seq: (current?.seq ?? 0) + 1,
+                      }));
+                      setView("courts");
+                      setOpenId(null);
+                    }
+                  : undefined
+              }
+              onTrace={trace}
+              onClose={close}
+              onRecording={onRecording}
             />
-          ) : (
-            <Standings snapshot={snapshot} onTrace={trace} />
-          )}
-        </main>
-        {sheet ? <div className="co-sheet-scrim" aria-hidden="true" onClick={close} /> : null}
-        {opened ? (
-          <Inspector
-            modal={sheet}
-            key={`${opened.id}:${ask?.matchId === opened.id ? ask.seq : 0}`}
-            askReopen={ask?.matchId === opened.id}
-            match={opened}
-            snapshot={snapshot}
-            people={people}
-            now={now}
-            loadTimeline={loadTimeline}
-            describeActor={describeActor}
-            actions={actions}
-            onScore={
-              actions
-                ? (match) => {
-                    setDeskFocus((current) => ({ matchId: match.id, seq: (current?.seq ?? 0) + 1 }));
-                    setView("courts");
-                    setOpenId(null);
-                  }
-                : undefined
-            }
-            onTrace={trace}
-            onClose={close}
-            onRecording={onRecording}
-          />
-        ) : null}
-      </div>
+          ) : null}
+        </div>
       </div>
       {tv ? (
         <TvBoard
@@ -389,7 +402,10 @@ function Stage({ snapshot }: { snapshot: Snapshot }) {
   const played = snapshot.matches.filter((match) => match.status === "done").length;
   const reset = snapshot.matches.some(
     (match) =>
-      match.bracket === "final" && match.round === 2 && match.status !== "waiting" && match.status !== "skipped",
+      match.bracket === "final" &&
+      match.round === 2 &&
+      match.status !== "waiting" &&
+      match.status !== "skipped",
   );
   const players = snapshot.standings.length;
   const playable = tournament.format === "double" ? 2 * players - 2 + (reset ? 1 : 0) : players - 1;
@@ -469,50 +485,50 @@ function Ticker({
   return (
     <div className="co-ticker" role="region" aria-label="Live scores">
       <div className="co-ticker-track">
-      {champion ? (
-        <span className="co-ticker-item">
-          <span className="co-ticker-tag is-final">Final</span>
-          <strong>{champion}</strong> wins {tournament.name}
-        </span>
-      ) : playing.length === 0 ? (
-        <span className="co-ticker-item">
-          <span className="co-ticker-tag is-idle">Next</span>
-          Next match starts soon
-        </span>
-      ) : (
-        playing.map(({ court, match }) => (
-          <button
-            type="button"
-            key={court.id}
-            className="co-ticker-item"
-            onClick={() => onOpenMatch(match)}
-            aria-label={`${court.name}, ${matchRound(tournament, match)}: ${name(match.playerA)} ${match.scoreA}, ${name(match.playerB)} ${match.scoreB}${series ? `, games ${match.gamesA}–${match.gamesB}` : ""}${isDecided(tournament, match.scoreA, match.scoreB) ? ", result pending" : ""}`}
-          >
-            <span className="co-ticker-tag">
-              <span className="co-dot" aria-hidden="true" />
-              {court.name}
-            </span>
-            <span className="co-ticker-round">{matchRound(tournament, match, "tiny")}</span>
-            <span className={match.scoreA > match.scoreB ? "is-lead" : undefined}>
-              {shortName(name(match.playerA))}
-            </span>
-            {series ? (
-              <span className="co-ticker-games co-num">
-                {match.gamesA}–{match.gamesB}
+        {champion ? (
+          <span className="co-ticker-item">
+            <span className="co-ticker-tag is-final">Final</span>
+            <strong>{champion}</strong> wins {tournament.name}
+          </span>
+        ) : playing.length === 0 ? (
+          <span className="co-ticker-item">
+            <span className="co-ticker-tag is-idle">Next</span>
+            Next match starts soon
+          </span>
+        ) : (
+          playing.map(({ court, match }) => (
+            <button
+              type="button"
+              key={court.id}
+              className="co-ticker-item"
+              onClick={() => onOpenMatch(match)}
+              aria-label={`${court.name}, ${matchRound(tournament, match)}: ${name(match.playerA)} ${match.scoreA}, ${name(match.playerB)} ${match.scoreB}${series ? `, games ${match.gamesA}–${match.gamesB}` : ""}${isDecided(tournament, match.scoreA, match.scoreB) ? ", result pending" : ""}`}
+            >
+              <span className="co-ticker-tag">
+                <span className="co-dot" aria-hidden="true" />
+                {court.name}
               </span>
-            ) : null}
-            <strong className="co-num">
-              {match.scoreA}–{match.scoreB}
-            </strong>
-            <span className={match.scoreB > match.scoreA ? "is-lead" : undefined}>
-              {shortName(name(match.playerB))}
-            </span>
-            {isDecided(tournament, match.scoreA, match.scoreB) ? (
-              <span className="co-ticker-games is-pending">Pending</span>
-            ) : null}
-          </button>
-        ))
-      )}
+              <span className="co-ticker-round">{matchRound(tournament, match, "tiny")}</span>
+              <span className={match.scoreA > match.scoreB ? "is-lead" : undefined}>
+                {shortName(name(match.playerA))}
+              </span>
+              {series ? (
+                <span className="co-ticker-games co-num">
+                  {match.gamesA}–{match.gamesB}
+                </span>
+              ) : null}
+              <strong className="co-num">
+                {match.scoreA}–{match.scoreB}
+              </strong>
+              <span className={match.scoreB > match.scoreA ? "is-lead" : undefined}>
+                {shortName(name(match.playerB))}
+              </span>
+              {isDecided(tournament, match.scoreA, match.scoreB) ? (
+                <span className="co-ticker-games is-pending">Pending</span>
+              ) : null}
+            </button>
+          ))
+        )}
       </div>
     </div>
   );
