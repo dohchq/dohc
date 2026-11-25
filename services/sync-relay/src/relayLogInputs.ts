@@ -42,6 +42,13 @@ export function workspaceAdminOrigin(memberId: string): string {
   return `${WORKSPACE_ADMIN_ORIGIN_PREFIX}${memberId}`;
 }
 
+// The owner's posts from a browser, one origin per account. Only the relay writes it.
+export const OWNER_BROWSER_ORIGIN_PREFIX = "relay:owner-browser:";
+
+export function ownerBrowserOrigin(userId: string): string {
+  return `${OWNER_BROWSER_ORIGIN_PREFIX}${userId}`;
+}
+
 // A message delete. Only the relay writes it, after it admits the deleter,
 // and every copy accepts the delete op only from this prefix. Every delete in
 // a workspace shares one origin, so the op does not say who deleted;
@@ -160,6 +167,9 @@ function assertUnreservedLogOrigin(originId: string, serviceHost: boolean): void
   }
   if (originId.startsWith(WORKSPACE_ADMIN_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for an admin's new Group");
+  }
+  if (originId.startsWith(OWNER_BROWSER_ORIGIN_PREFIX)) {
+    throw badRequest("originId is reserved for an owner's browser posts");
   }
   if (originId.startsWith(MESSAGE_DELETE_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for message deletes");

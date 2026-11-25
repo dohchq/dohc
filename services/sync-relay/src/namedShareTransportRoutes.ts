@@ -55,6 +55,14 @@ export type NamedShareTransportRoute =
   | { route: "share-log"; shareId: string }
   | { route: "share-blob"; shareId: string; sha256: string };
 
+/** The owner's browser post, which only the relay's named chat sends. `authorize` throws once the owner's access ends. */
+export interface OwnerBrowserPost {
+  originId: string;
+  authorize(): Pick<AuthorizedShareAction, "effectiveSelector"> & {
+    share: { shareId: string; workspaceId: string };
+  };
+}
+
 /** What a share reaches, without its level. */
 function shareScopeKey(selector: AnyShareSelector): string {
   if (isWorkspaceSelector(selector))
@@ -172,6 +180,7 @@ export function createNamedShareTransportRoutes(
     route: NamedShareTransportRoute,
     actor: { userId: string },
     browserMessageId?: string,
+    owner?: OwnerBrowserPost,
   ): Promise<Response> {
     if (route.route === "share-log" && request.method === "GET") {
       let authorized: AuthorizedShareAction;
@@ -459,7 +468,9 @@ export function createNamedShareTransportRoutes(
     // so workspace epoch enforcement does not apply on this route.
     if (route.route === "share-log" && request.method === "POST") {
       if (browserMessageId === undefined) await claimPendingShares(actor.userId);
-      const authorized = requireShareAction(route.shareId, actor.userId, "append");
+      const appendable = () =>
+        owner ? owner.authorize() : requireShareAction(route.shareId, actor.userId, "append");
+      const authorized = appendable();
       const share = { ...authorized.share, selector: authorized.effectiveSelector };
       const input = await readJsonObject(request);
       const originId = parseString(input.originId, "originId", MAX_ORIGIN_ID_CHARS);
@@ -580,7 +591,7 @@ export function createNamedShareTransportRoutes(
       const batch = {
         workspaceId: share.workspaceId,
         // Authentication, not the caller, selects the member sequence space.
-        originId: namedShareOrigin(share.shareId, actor.userId, originId),
+        originId: owner?.originId ?? namedShareOrigin(share.shareId, actor.userId, originId),
         ops,
         // Close the revoke race completely: the share is re-verified inside
         // the append's own BEGIN IMMEDIATE transaction (the same write lock
@@ -592,8 +603,8 @@ export function createNamedShareTransportRoutes(
         // current level on the same workspace bucket — a level
         // narrowed mid-flight loses the race the same way a revoke does.
         guard: () => {
-          shareActionGuard(route.shareId, actor.userId, "append", share.workspaceId)();
-          const fresh = requireShareAction(route.shareId, actor.userId, "append");
+          if (!owner) shareActionGuard(route.shareId, actor.userId, "append", share.workspaceId)();
+          const fresh = appendable();
           for (const op of ops) {
             if (
               !filterOpForShareAppend(fresh.effectiveSelector, op.opKind, op.payloadJson, resolver)

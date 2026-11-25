@@ -39,15 +39,12 @@ export interface MemberGroups {
   groups: NamedChatChannel[];
 }
 
-/** Every Group the member reaches, in the workspace's order. */
-export async function openMemberGroups(
-  grantId: string,
-  signal: AbortSignal,
-): Promise<MemberGroups> {
-  const value = await chatRequest(
-    `/api/named-chat/channels?${new URLSearchParams({ grantId })}`,
-    signal,
-  );
+/**
+ * Every Group the member reaches, in the workspace's order.
+ * `place` is `grantId=<grant>`, or on the owner's page `workspaceId=<workspace>`.
+ */
+export async function openMemberGroups(place: string, signal: AbortSignal): Promise<MemberGroups> {
+  const value = await chatRequest(`/api/named-chat/channels?${place}`, signal);
   if (
     typeof value.shareId !== "string" ||
     typeof value.userId !== "string" ||

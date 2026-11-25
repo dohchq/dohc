@@ -217,6 +217,61 @@ it("enforces same-origin writes, account cookie selection, and request bounds be
   expect((await f.web.handle(agentRead)).status).toBe(200);
 });
 
+it("forwards the owner's chat under their workspace, and only from their own page", async () => {
+  const f = await fixture(),
+    owned = { ...message, shareId: "owner:workspace" };
+  const channels = await f.web.handle(request("channels?workspaceId=workspace", "owner"));
+  expect(channels.status).toBe(200);
+  expect(await channels.json()).toMatchObject({
+    shareId: "owner:workspace",
+    userId: "owner",
+    moderates: false,
+    channels: [{ channelWireId: "wire", name: "Team", access: "read-write" }],
+  });
+  const posted = await f.web.handle(request("messages", "owner", owned));
+  expect(posted.status).toBe(200);
+  expect(await posted.json()).toMatchObject({
+    shareId: "owner:workspace",
+    message: { body: message.body, authorUserId: "owner", authorKind: "human" },
+  });
+  const read = await f.web.handle(
+    request("messages?shareId=owner:workspace&channelWireId=wire", "owner"),
+  );
+  expect(await read.json()).toMatchObject({
+    messages: [
+      expect.objectContaining({ body: message.body }),
+      expect.objectContaining({ body: "Welcome" }),
+    ],
+  });
+  expect(f.forwarded.map((r) => r.headers.get("authorization"))).toEqual(
+    Array(3).fill("DohcOwner workspace"),
+  );
+  // A member using the owner's form gets what a stranger gets.
+  expect((await f.web.handle(request("channels?workspaceId=workspace"))).status).toBe(404);
+  expect((await f.web.handle(request("messages", "alice", owned))).status).toBe(404);
+  const sent = f.forwarded.length;
+  for (const change of [
+    (r: Request) => r.headers.set("sec-fetch-site", "cross-site"),
+    (r: Request) => r.headers.set("origin", "https://other.test"),
+    (r: Request) => r.headers.delete("origin"),
+    (r: Request) => r.headers.set("content-type", "text/plain"),
+  ]) {
+    const incoming = request("messages", "owner", owned);
+    change(incoming);
+    expect((await f.web.handle(incoming)).status).toBe(404);
+  }
+  const crossSiteRead = request("channels?workspaceId=workspace", "owner");
+  crossSiteRead.headers.set("sec-fetch-site", "cross-site");
+  expect((await f.web.handle(crossSiteRead)).status).toBe(404);
+  expect((await f.web.handle(request("channels?workspaceId=work%20space", "owner"))).status).toBe(
+    404,
+  );
+  expect(
+    (await f.web.handle(request("messages", "owner", { ...owned, shareId: "owner:a/b" }))).status,
+  ).toBe(404);
+  expect(f.forwarded).toHaveLength(sent);
+});
+
 it("follows new messages and propagates disconnect cancellation to release the relay waiter", async () => {
   const f = await fixture();
   let entered!: () => void;
