@@ -6,7 +6,9 @@ const config = { viewerOrigin: "https://viewer.example.com", appDomain: "example
 const publicationId = "a".repeat(64);
 function fixture() {
   let probes = 0,
-    relayStatus = 200;
+    relayStatus = 200,
+    relayEvents = (_request: Request): Promise<Response> =>
+      Promise.resolve(Response.json({ dataset: "", revision: 0 }));
   const bytes = Buffer.from("console.log('loaded')");
   const file = {
     path: "bundle.js",
@@ -44,9 +46,11 @@ function fixture() {
     fetchRelay: async (request) =>
       relayStatus !== 200
         ? new Response(null, { status: relayStatus })
-        : new URL(request.url).pathname.includes("/blobs/")
-          ? new Response(bytes, { headers: { "content-type": file.contentType } })
-          : Response.json({ publicationId, authorityRevision: 1, files: [file] }),
+        : new URL(request.url).pathname.endsWith("/backend/events")
+          ? relayEvents(request)
+          : new URL(request.url).pathname.includes("/blobs/")
+            ? new Response(bytes, { headers: { "content-type": file.contentType } })
+            : Response.json({ publicationId, authorityRevision: 1, files: [file] }),
   });
   const issue = (
     profile: string,
@@ -74,6 +78,40 @@ function fixture() {
     probes: () => probes,
     relayStatus(status: number) {
       relayStatus = status;
+    },
+    relayEvents(answer: (request: Request) => Promise<Response>) {
+      relayEvents = answer;
+    },
+    async open(profile: string) {
+      const handoff = await (await issue(profile)).json();
+      const origin = new URL(handoff.action).origin;
+      const bootstrap = await handler.handle(
+        new Request(handoff.action, {
+          method: "POST",
+          body: new URLSearchParams({ handoff: handoff.handoff }).toString(),
+          headers: {
+            host: new URL(origin).host,
+            origin: config.viewerOrigin,
+            "content-type": "application/x-www-form-urlencoded",
+          },
+        }),
+      );
+      const proof = /const proof="([A-Za-z0-9_-]{43})"/.exec(await bootstrap.text())![1]!;
+      const cookie = bootstrap.headers.get("set-cookie")!.split(";")[0]!;
+      return (path: string, body?: unknown) =>
+        handler.handle(
+          new Request(origin + path, {
+            method: "POST",
+            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+            headers: {
+              host: new URL(origin).host,
+              origin,
+              cookie,
+              "x-dohc-app-proof": proof,
+              "content-type": "application/json",
+            },
+          }),
+        );
     },
   };
 }
@@ -184,4 +222,46 @@ it("reserves issue capacity for other addresses and document builds, and release
   for (const controller of controllers) controller.abort();
   expect((await Promise.all(stalled)).every((response) => response.status === 404)).toBe(true);
   expect((await f.issue("profile-recovered")).status).toBe(200);
+});
+
+it("holds one change wait per launch, outside the document lane and the session's request budget", async () => {
+  const f = fixture();
+  const call = await f.open("profile-live");
+  const relayed: Request[] = [];
+  let release = (_answer: Response) => {};
+  f.relayEvents((request) => {
+    relayed.push(request);
+    return new Promise((resolve) => {
+      release = resolve;
+    });
+  });
+  const held = call("/events", { since: 3 });
+  await expect.poll(() => relayed.length).toBe(1);
+  const url = new URL(relayed[0]!.url);
+  expect(relayed[0]!.method).toBe("GET");
+  expect(relayed[0]!.headers.get("authorization")).toBe("LinkCapability capability");
+  expect(url.pathname).toBe(`/sync/link/app-publications/${publicationId}/backend/events`);
+  expect(Object.fromEntries(url.searchParams)).toEqual({
+    authorityRevision: "1",
+    since: "3",
+    hold: "25000",
+  });
+  expect((await call("/events", { since: 3 })).status).toBe(429);
+  expect((await call("/status")).status).toBe(204);
+  release(Response.json({ dataset: "votes", revision: 4 }));
+  const answer = await held;
+  expect(answer.status).toBe(200);
+  expect(await answer.json()).toEqual({ dataset: "votes", revision: 4 });
+  f.relayEvents(async () => Response.json({ dataset: "", revision: 4 }));
+  for (let wait = 0; wait < 20; wait++)
+    expect((await call("/events", { since: 4 })).status).toBe(200);
+  expect((await call("/status")).status).toBe(204);
+  expect((await call("/events", { since: -1 })).status).toBe(404);
+  expect((await call("/events", { since: 4, dataset: "votes" })).status).toBe(404);
+  f.relayEvents(async () => Response.json({ dataset: "Votes", revision: 5 }));
+  expect((await call("/events", { since: 4 })).status).toBe(503);
+  f.relayEvents(async () => Response.json(null, { status: 404 }));
+  expect((await call("/events", { since: 4 })).status).toBe(404);
+  f.relayEvents(() => Promise.reject(new Error("offline")));
+  expect((await call("/events", { since: 4 })).status).toBe(503);
 });

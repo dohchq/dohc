@@ -277,6 +277,18 @@ Shared datasets have one configured writer; unavailable hosts cannot accept
 offline shared writes. Cross-dataset transactions are unsupported.
 See the [runtime contract](../../packages/app-backend-runtime/README.md).
 
+A link app hears that its Collection changed through a held read,
+`/sync/link/app-publications/<id>/backend/events`. It answers only the
+Collection's alias and revision, so a link holder learns when anyone writes
+there, but nothing about what was written. The relay answers only while the
+link can run one of the app's read operations: the same check an invoke makes,
+including pause, block, narrowing, archive, and withdrawal. A link that can only
+write gets no answer. The relay checks again before every answer, and wakes held
+reads at least once a second while writes happen, so an ended link's held read
+is refused within about a second. Held reads count against the link read
+budget, at most 256 per link grant and 1,024 in all.
+See the [route tests](../../services/sync-relay/src/datasetRoutes.test.ts).
+
 Persistent Collection workers isolate SQLite memory differently by host runtime.
 Desktop Electron utility processes and Node.js builds linked against a shared SQLite
 with `SQLITE_DEFAULT_MEMSTATUS=1` (such as Homebrew Node on macOS) enforce

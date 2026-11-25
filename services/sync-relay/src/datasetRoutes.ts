@@ -35,6 +35,8 @@ import type { AppBackendAuth } from "./appBackendAuthority";
 import type { AppBackendRoute } from "./appBackendRoutes";
 import { createAppBackendAdmission, type AppBackendAdmissionLimits } from "./appBackendAdmission";
 import { badRequest, notFound, relayError } from "./errors";
+import type { AppEventWaits } from "./appEventWaits";
+import { parseCursor, parseLinkLogHold } from "./requestInputs";
 import type { SyncRelayStorage } from "./storage";
 
 /** The largest JSON body a dataset action reads. */
@@ -922,6 +924,7 @@ export function createDatasetAppRoutes(
     shareSenderLabel?: (userId: string) => Promise<string>;
     /** Without app publishing, only an app the owner approved on their own computer runs here. */
     publications: boolean;
+    events?: AppEventWaits;
   },
 ) {
   const admit = createAppBackendAdmission(options.limits);
@@ -932,6 +935,27 @@ export function createDatasetAppRoutes(
     /** A phone launch: only a publication runs, never an app approved on a computer. */
     publishedOnly = false,
   ): Promise<Response> => {
+    if (route.action === "events") {
+      if (auth.kind !== "link" || !options.events) throw notFound();
+      if (request.method !== "GET") throw relayError("method_not_allowed");
+      const query = new URL(request.url).searchParams;
+      const authorityRevision = Number(query.get("authorityRevision"));
+      const since = parseCursor(query.get("since"));
+      const hold = parseLinkLogHold(query.get("hold"));
+      if (query.size !== 3 || !Number.isSafeInteger(authorityRevision)) throw notFound();
+      const signal = AbortSignal.any([request.signal, storage.unavailable]);
+      const deadlineAtMs = Date.now() + hold;
+      for (;;) {
+        const current = host.appEventRevision(auth, route.publicationId, authorityRevision);
+        const holdMs = deadlineAtMs - Date.now();
+        if (current.revision !== since || holdMs <= 0 || signal.aborted)
+          return Response.json(
+            { dataset: current.dataset, revision: current.revision },
+            { headers },
+          );
+        await options.events.wait({ ...current, since, holdMs, signal });
+      }
+    }
     const published = host.servedPublication(auth, route.publicationId);
     const get =
       route.action === "descriptor" || route.action === "summary" || route.action === "blob";

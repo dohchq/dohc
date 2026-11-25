@@ -1,4 +1,12 @@
-import { chromium, type Browser, type Frame } from "@playwright/test";
+import {
+  chromium,
+  expect,
+  type Browser,
+  type BrowserContextOptions,
+  type Frame,
+  type Page,
+} from "@playwright/test";
+import { viewerOrigin } from "./actualFundraiserFixture";
 import https from "node:https";
 import { testCertificate } from "./testCertificate";
 import type { actualFundraiserFixture } from "./actualFundraiserFixture";
@@ -96,4 +104,37 @@ export async function loadRequest(
       globalThis as unknown as { loadRequest(body: unknown): Promise<BrokerReply> }
     ).loadRequest(payload);
   }, body);
+}
+
+export async function openLoadApp(
+  browser: Browser,
+  options: BrowserContextOptions = {},
+  prepare: (page: Page) => void = () => {},
+) {
+  const context = await browser.newContext(options);
+  try {
+    const page = await context.newPage();
+    prepare(page);
+    page.setDefaultTimeout(30_000);
+    await page.goto(`${viewerOrigin}/fixture-open`);
+    const exchangeReply = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/exchange",
+    );
+    const launchReply = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/apps/launch",
+    );
+    // Both waits have handlers before either can reject during a failed exchange.
+    void launchReply.catch(() => {});
+    await page.getByRole("button", { name: "Open", exact: true }).click();
+    expect((await exchangeReply).status(), "Link exchange").toBe(200);
+    expect((await launchReply).status(), "App launch").toBe(200);
+    await expect(page).toHaveURL(/^https:\/\/[a-f0-9]{48}\.example\.net\/bootstrap$/);
+    await expect(page.frameLocator("iframe").locator("body")).toHaveAttribute("data-ready", "true");
+    const frame = page.frames().find((frame) => frame !== page.mainFrame());
+    if (!frame) throw Error("App frame unavailable");
+    return { context, page, frame };
+  } catch (error) {
+    await context.close();
+    throw error;
+  }
 }

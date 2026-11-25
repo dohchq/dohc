@@ -1,5 +1,5 @@
 import { readBoundedBytes, readBoundedJson } from "@dohc/service-http";
-import { opaqueLinkRefusal, relayLinkRefusal } from "./linkRefusal";
+import { opaqueLinkRefusal, relayLinkRefusal, unavailableLinkRefusal } from "./linkRefusal";
 import {
   parseDatasetAttemptRequest,
   parseDatasetAttemptResult,
@@ -282,4 +282,56 @@ export async function forwardAppBackend(input: {
   } finally {
     await relay.body?.cancel().catch(() => {});
   }
+}
+
+/** Waits for the link app's Collection to move past `since`, then answers its alias and revision. */
+export async function forwardAppEvents(input: {
+  request: Request;
+  relayUrl: string;
+  publicationId: string;
+  authorityRevision: number;
+  signal: AbortSignal;
+  fetchRelay(request: Request): Promise<Response>;
+}): Promise<Response> {
+  let since: unknown;
+  try {
+    if (input.request.headers.get("content-type") !== "application/json") throw Error();
+    const body = await readBoundedJson(input.request, 256, input.signal);
+    if (!record(body) || !exact(body, ["since"])) throw Error();
+    since = body.since;
+  } catch {
+    return opaqueLinkRefusal();
+  }
+  if (!Number.isSafeInteger(since) || (since as number) < 0) return opaqueLinkRefusal();
+  const url = new URL(
+    `/sync/link/app-publications/${input.publicationId}/backend/events`,
+    input.relayUrl,
+  );
+  url.search = new URLSearchParams({
+    authorityRevision: String(input.authorityRevision),
+    since: String(since),
+    hold: "25000",
+  }).toString();
+  let relay: Response;
+  try {
+    relay = await input.fetchRelay(new Request(url, { redirect: "manual", signal: input.signal }));
+  } catch {
+    return unavailableLinkRefusal();
+  }
+  if (relay.status !== 200 || relay.redirected || relay.headers.has("location"))
+    return relayLinkRefusal(relay, input.signal);
+  const value = await readBoundedJson(relay, 256, input.signal).catch(() => null);
+  if (
+    !record(value) ||
+    !exact(value, ["dataset", "revision"]) ||
+    typeof value.dataset !== "string" ||
+    !/^(?:[a-z][a-z0-9_-]{0,63})?$/.test(value.dataset) ||
+    !Number.isSafeInteger(value.revision) ||
+    (value.revision as number) < 0
+  )
+    return unavailableLinkRefusal();
+  return Response.json(
+    { dataset: value.dataset, revision: value.revision },
+    { headers: responseHeaders },
+  );
 }

@@ -41,7 +41,7 @@ it("classifies every served link route, including decoded route segments", () =>
     `/sync/link/app-publications/${publication}`,
     `/sync/link/app-publications/${publication}/collection`,
     `/sync/link/app-publications/${publication}/blobs/${blob}`,
-    ...["invoke", "upload", "file", "attempt"].map(
+    ...["invoke", "upload", "file", "attempt", "events"].map(
       (action) => `/sync/link/app-publications/${publication}/backend/${action}`,
     ),
     "/sync/live/link-tickets",

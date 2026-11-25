@@ -501,6 +501,12 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     if (missingSince.size >= 1024) missingSince.delete(missingSince.keys().next().value!);
     missingSince.set(key, now);
   }
+  function datasetRevision(workspaceId: string, datasetId: string): number {
+    const head = storage.db
+      .prepare("SELECT revision FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?")
+      .get(workspaceId, datasetId);
+    return head ? Number(head.revision) : 0;
+  }
   function capability(
     candidate: AppPublicationCandidate,
     workspaceId: string,
@@ -1281,6 +1287,40 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       historyRevision: host.historyRevision,
       publication,
       servedPublication,
+      /** The revision of a link app's Collection, only while the link can run one of its reads now. */
+      appEventRevision(auth: AppBackendAuth, publicationId: string, authorityRevision: number) {
+        const published = auth.kind === "link" ? publication(auth, publicationId) : null;
+        const cap = published?.capability;
+        if (!published || !cap || published.authorityRevision !== authorityRevision)
+          throw notFound();
+        const caller = published.authority.caller;
+        const readable = cap.operations.some((operation) => {
+          if (!operation.readOnly) return false;
+          try {
+            host.authorize(auth, {
+              workspaceId: published.workspaceId,
+              datasetId: cap.datasetId,
+              revision: cap.revision,
+              revisionSha256: cap.revisionSha256,
+              operationId: operation.operationId,
+              access: { kind: "app", appId: publicationId },
+            });
+            return true;
+          } catch (error) {
+            if (error instanceof DatasetHostError && error.code === "not_authorized") return false;
+            throw error;
+          }
+        });
+        if (!readable || caller.kind !== "link") throw notFound();
+        return {
+          workspaceId: published.workspaceId,
+          datasetId: cap.datasetId,
+          grantId: caller.grantId,
+          dataset: cap.alias ?? "",
+          revision: datasetRevision(published.workspaceId, cap.datasetId),
+        };
+      },
+      datasetRevision,
       requireCollectionFile,
       lifecycle: host.lifecycle,
       archiveDataset: host.archiveDataset,

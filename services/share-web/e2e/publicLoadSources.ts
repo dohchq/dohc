@@ -87,7 +87,10 @@ globalThis.loadRequest=body=>new Promise((resolve,reject)=>{
 });
 addEventListener('message',event=>{
   if(port||event.source!==parent||event.data?.kind!=='dohc-app-channel'||event.ports.length!==1)return;
-  port=event.ports[0];port.onmessage=event=>{pending.get(event.data.id)?.(event.data);pending.delete(event.data.id);};
+  port=event.ports[0];port.onmessage=event=>{
+    if(event.data?.kind==='dataset.changed'){document.body.dataset.revision=String(event.data.revision);return;}
+    pending.get(event.data.id)?.(event.data);pending.delete(event.data.id);
+  };
   port.start();document.body.dataset.ready='true';
 });
 `;
