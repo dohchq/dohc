@@ -3606,6 +3606,33 @@ describe("Collection automations that a Group message starts", () => {
       expect(w.errors).toHaveLength(1);
     });
 
+    it("reads a new host's verdicts while an older generation's read ahead waits", async () => {
+      let host = 3;
+      const older = Promise.withResolvers<void>();
+      const asked: number[] = [];
+      const { w, executor, opening } = await openingAt3({
+        groupHost: async () => host,
+        reachRelayRecord: async (generation) => {
+          asked.push(generation);
+          if (asked.length === 1) throw new TypeError("fetch failed");
+          if (generation === 3) await older.promise;
+          return { generation, reach: null, everShared: false };
+        },
+      });
+      await opening;
+
+      executor.relayAnswered();
+      await vi.waitFor(() => expect(asked).toEqual([3, 3]));
+      host = 5;
+      executor.hostChanged();
+      await vi.waitFor(async () =>
+        expect(await w.baseStore.readReachVerdicts()).toMatchObject({ taken: 5 }),
+      );
+      older.resolve();
+      await promptly(executor.resyncFileObservation());
+      expect(asked).toEqual([3, 3, 5]);
+    });
+
     it("reports a failed read ahead once when the next sync answer reads again", async () => {
       const handover = unanswered(false);
       const third = Promise.withResolvers<void>();

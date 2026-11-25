@@ -1511,7 +1511,10 @@ export class CollectionAutomations {
   private watchedGeneration: number | null = null;
   private handoverUnreadAt: number | null = null;
   private reachUnreadAt: number | null = null;
-  private readingRelay = { reach: false, handover: false };
+  private readingRelay: { reach: number | null; handover: number | null } = {
+    reach: null,
+    handover: null,
+  };
   // The newest Group message skip of each kind the owner was told about.
   private readonly groupSkipsTold: Record<GroupMessagesSkipped, number> = { ahead: 0, late: 0 };
   /** Serializes index loads and subscription reconciles. */
@@ -1917,7 +1920,7 @@ export class CollectionAutomations {
   private async readRelayAhead(): Promise<void> {
     if (this.opened === null) return;
     const busy = { ...this.readingRelay };
-    this.readingRelay = { reach: true, handover: true };
+    this.readingRelay = { reach: busy.reach ?? 0, handover: busy.handover ?? 0 };
     const reads = this.relayReads.signal;
     const generation = (await this.options.groupHost().catch(() => null)) ?? 0;
     const reconcile = async (answers: RelayAnswers) => {
@@ -1926,26 +1929,26 @@ export class CollectionAutomations {
         this.options.onError("update Group subscriptions for the automation host", error),
       );
     };
-    const reach = !busy.reach && generation !== 0 && generation !== this.reachTakenAt;
+    const reach = busy.reach === null && generation !== 0 && generation !== this.reachTakenAt;
     const handover =
-      !busy.handover &&
+      busy.handover === null &&
       generation !== 0 &&
       generation !== this.watchedGeneration &&
       (reach || generation === this.reachTakenAt);
-    if (!busy.reach && !reach) this.readingRelay.reach = false;
-    if (!busy.handover && !handover) this.readingRelay.handover = false;
+    if (busy.reach === null) this.readingRelay.reach = reach ? generation : null;
+    if (busy.handover === null) this.readingRelay.handover = handover ? generation : null;
     const readHandover = () =>
       settled(this.options.groupRelayRecord(generation, reads))
         .then((answer) => reconcile({ generation, handover: answer }))
-        .finally(() => (this.readingRelay.handover = false));
+        .finally(() => (this.readingRelay.handover = null));
     if (reach)
       void settled(this.options.reachRelayRecord(generation, reads))
         .then(async (answer) => {
           if (handover && answer.status === "fulfilled") void readHandover();
-          else if (handover) this.readingRelay.handover = false;
+          else if (handover) this.readingRelay.handover = null;
           await reconcile({ generation, reach: answer });
         })
-        .finally(() => (this.readingRelay.reach = false));
+        .finally(() => (this.readingRelay.reach = null));
     else if (handover) void readHandover();
     if (!reach && !handover) void reconcile({ generation });
   }
@@ -6580,7 +6583,8 @@ export class CollectionAutomations {
     if (generation === null || generation === 0 || generation === this.reachTakenAt) return true;
     const ahead = answers?.generation === generation ? answers.reach : undefined;
     if (this.reachUnreadAt === generation && ahead?.status !== "fulfilled") return false;
-    if (ahead === undefined && this.readingRelay.reach) return false;
+    if (ahead === undefined && [0, generation].includes(this.readingRelay.reach ?? -1))
+      return false;
     let record: ReachRelayRecord;
     let readStarted = false;
     try {
@@ -7022,7 +7026,7 @@ export class CollectionAutomations {
     let answer = await this.withLiveEngine((engine) => engine.watchAutomationGroups(input));
     if (answer?.needsHandover) {
       let relay: AutomationGroupRelayRecord;
-      if (ahead === undefined && this.readingRelay.handover) return;
+      if (ahead === undefined && [0, generation].includes(this.readingRelay.handover ?? -1)) return;
       try {
         relay =
           ahead === undefined
