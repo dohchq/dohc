@@ -593,7 +593,7 @@ export interface ModalProps {
   readonly children: ReactNode;
 }
 
-const openModalStack: symbol[] = [];
+const openModalStack: Element[] = [];
 
 export function Modal({ open, title, onClose, footer, children }: ModalProps) {
   const titleId = useId();
@@ -611,13 +611,11 @@ export function Modal({ open, title, onClose, footer, children }: ModalProps) {
   wasOpen.current = open;
 
   useEffect(() => {
-    if (!open) return;
-    const modalId = Symbol("kit-modal");
-    openModalStack.push(modalId);
-    const isTopModal = () => openModalStack[openModalStack.length - 1] === modalId;
-
     const dialog = dialogRef.current;
-    if (!dialog?.contains(document.activeElement)) dialog?.focus();
+    if (!open || !dialog) return;
+    openModalStack.push(dialog);
+    const isTopModal = () => openModalStack[openModalStack.length - 1] === dialog;
+    if (!dialog.contains(document.activeElement)) dialog.focus();
 
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (!isTopModal()) return;
@@ -626,7 +624,7 @@ export function Modal({ open, title, onClose, footer, children }: ModalProps) {
         onCloseRef.current();
         return;
       }
-      if (event.key !== "Tab" || !dialog) return;
+      if (event.key !== "Tab") return;
       const focusables = [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)].filter(
         isVisibleFocusable,
       );
@@ -650,13 +648,13 @@ export function Modal({ open, title, onClose, footer, children }: ModalProps) {
     };
 
     const onFocusIn = (event: FocusEvent) => {
-      if (!isTopModal() || !dialog) return;
-      if (event.target instanceof Element && !event.target.closest(".kit-modal")) {
-        const focusables = [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)].filter(
-          isVisibleFocusable,
-        );
-        (focusables[0] ?? dialog).focus();
-      }
+      if (!isTopModal()) return;
+      const owner = event.target instanceof Element ? event.target.closest(".kit-modal") : null;
+      if (owner === dialog || (owner && !openModalStack.includes(owner))) return;
+      const focusables = [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)].filter(
+        isVisibleFocusable,
+      );
+      (focusables[0] ?? dialog).focus();
     };
 
     window.addEventListener("keydown", onKeyDown);
@@ -665,9 +663,9 @@ export function Modal({ open, title, onClose, footer, children }: ModalProps) {
       window.removeEventListener("keydown", onKeyDown);
       document.removeEventListener("focusin", onFocusIn);
       const wasTop = isTopModal();
-      const index = openModalStack.lastIndexOf(modalId);
+      const index = openModalStack.lastIndexOf(dialog);
       if (index >= 0) openModalStack.splice(index, 1);
-      if (wasTop && !dialog?.isConnected && previousFocus.current?.isConnected) {
+      if (wasTop && !dialog.isConnected && previousFocus.current?.isConnected) {
         previousFocus.current.focus();
       }
     };

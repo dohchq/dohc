@@ -91,6 +91,7 @@ describe("dohc/ui", () => {
       return (
         <>
           <Modal open title="Edit trip" onClose={() => {}}>
+            <Input aria-label="Trip name" />
             <Button onClick={() => setConfirming(true)}>Delete trip</Button>
           </Modal>
           <Modal open={confirming} title="Delete trip" onClose={() => setConfirming(false)}>
@@ -104,6 +105,10 @@ describe("dohc/ui", () => {
     trigger.focus();
     fireEvent.click(trigger);
     expect(document.activeElement).toBe(screen.getByLabelText("Type the trip name"));
+    screen.getByLabelText("Trip name").focus();
+    expect(
+      screen.getByRole("dialog", { name: "Delete trip" }).contains(document.activeElement),
+    ).toBe(true);
     fireEvent.keyDown(window, { key: "Escape" });
     expect(document.activeElement).toBe(trigger);
   });
