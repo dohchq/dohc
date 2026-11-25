@@ -763,7 +763,7 @@ export function SlashCommandMenu({
   useEffect(() => {
     if (!state.open || !onDismiss) return;
     function onPointerDown(event: MouseEvent) {
-      if (listRef.current?.contains(event.target as Node)) return;
+      if (listRef.current && event.composedPath().includes(listRef.current)) return;
       onDismiss?.();
     }
     window.addEventListener("mousedown", onPointerDown, true);

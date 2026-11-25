@@ -106,7 +106,7 @@ export function UrlPasteOffer(props: {
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (event: MouseEvent) => {
-      if (!rowRef.current?.contains(event.target as Node)) onDismiss();
+      if (!rowRef.current || !event.composedPath().includes(rowRef.current)) onDismiss();
     };
     window.addEventListener("mousedown", onPointerDown, true);
     window.addEventListener("scroll", reposition, true);

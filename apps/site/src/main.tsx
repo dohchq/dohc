@@ -4,6 +4,12 @@ import { engineLoadFinished } from "./hero-engine";
 const host = document.getElementById("desktop-demo");
 
 if (host) {
+  const nav = document.querySelector<HTMLElement>(".nav");
+  if (nav) {
+    new ResizeObserver(() =>
+      host.style.setProperty("--dohc-page-covered-top", `${nav.offsetHeight}px`),
+    ).observe(nav);
+  }
   let mounted = false;
   const status = host.querySelector<HTMLElement>("[data-demo-status]");
   const retry = host.querySelector<HTMLButtonElement>("[data-demo-retry]");

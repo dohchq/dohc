@@ -629,3 +629,28 @@ describe("filterSlashCommands tiered scoring & code suppression", () => {
     peerDoc.destroy();
   });
 });
+
+describe("SlashCommandMenu inside a shadow root", () => {
+  it("stays open for a press on a command, and closes for one outside it", () => {
+    const host = document.body.appendChild(document.createElement("div"));
+    const container = host
+      .attachShadow({ mode: "open" })
+      .appendChild(document.createElement("div"));
+    const onDismiss = vi.fn();
+    render(
+      createElement(SlashCommandMenu, {
+        state: { ...OPEN_STATE_BASE },
+        onSelect: () => {},
+        onHover: () => {},
+        onDismiss,
+      }),
+      { container },
+    );
+    fireEvent.mouseDown(container.querySelector("[role='option']")!);
+    expect(onDismiss).not.toHaveBeenCalled();
+    fireEvent.mouseDown(document.body);
+    expect(onDismiss).toHaveBeenCalledOnce();
+    cleanup();
+    host.remove();
+  });
+});

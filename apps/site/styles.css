@@ -84,6 +84,7 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 html { scroll-behavior: smooth; }
+html:has(#desktop-demo:focus-within) { scroll-behavior: auto; }
 
 body {
   font-family: var(--font-sans);
@@ -332,7 +333,6 @@ body {
 [data-theme='dark'] .demo-stage { background: #131211; }
 
 #desktop-demo {
-  --dohc-page-covered-top: 60px;
   display: block;
   width: 100%;
   height: 100%;
