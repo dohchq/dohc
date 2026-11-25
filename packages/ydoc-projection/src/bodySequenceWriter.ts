@@ -93,17 +93,17 @@ export type BodyChange = {
   made: () => { index: number; attrs: SequenceAttrs }[];
 };
 
-type Planned = BodyLine & { fresh?: boolean };
+export type Planned = BodyLine & { fresh?: boolean };
 
 const ITEM_OF_LIST: Record<string, string> = {
   bulletList: "listItem",
   orderedList: "listItem",
   taskList: "taskItem",
 };
-const isList = (type: string | undefined) =>
+export const isList = (type: string | undefined) =>
   type !== undefined && Object.hasOwn(ITEM_OF_LIST, type);
-const isItem = (type: string | undefined) => type === "listItem" || type === "taskItem";
-const isBox = (type: string | undefined) => type === "blockquote" || type === "callout";
+export const isItem = (type: string | undefined) => type === "listItem" || type === "taskItem";
+export const isBox = (type: string | undefined) => type === "blockquote" || type === "callout";
 const isLeafKind = (schema: Schema, type: unknown) => {
   const node = typeof type === "string" ? schema.nodes[type] : undefined;
   const isLeaf = node?.isBlock === true && (node.isTextblock || node.isLeaf);
@@ -126,7 +126,7 @@ function plain(value: unknown): unknown {
   return Object.fromEntries(Object.entries(one).map(([key, held]) => [key, plain(held)]));
 }
 
-function same(left: unknown, right: unknown): boolean {
+export function same(left: unknown, right: unknown): boolean {
   const one = whole(left);
   const other = whole(right);
   if (one === other) return true;
@@ -501,7 +501,7 @@ function changeOf(
   }
 }
 
-function writesOf(
+export function writesOf(
   schema: Schema,
   doc: Y.Doc,
   read: Planned[],
@@ -541,10 +541,20 @@ function writesOf(
     above = line.path;
   }
 
+  for (const { path } of lines)
+    path.forEach((container, depth) => {
+      if (!path.slice(0, depth).some((outer) => outer.id === container.id)) return;
+      if (!container.starts) container.copies ??= container.id;
+      container.id = freshId();
+    });
+
   const held = [...new Set(lines.flatMap((line) => line.path))];
+  const holders = new Map<string, number>();
+  for (const { id } of held) holders.set(id, (holders.get(id) ?? 0) + 1);
   for (const container of held) {
-    const onTwo = held.some((other) => other !== container && other.id === container.id);
+    const onTwo = holders.get(container.id)! > 1;
     if (onTwo && container.changes.size > 0 && !container.starts && !container.copies) {
+      holders.set(container.id, holders.get(container.id)! - 1);
       container.copies = container.id;
       container.id = freshId();
     }
@@ -567,7 +577,7 @@ function writesOf(
 
   for (const line of lines) {
     const ids = idsOf(line.path);
-    if (ids.length > MAX_SEQUENCE_DEPTH || new Set(ids).size < ids.length) return null;
+    if (ids.length > MAX_SEQUENCE_DEPTH) return null;
     if (line.fresh === true)
       writes.added.push({ index: line.start, attrs: { ...line.attrs, path: ids } });
     else if (!same(ids, line.ids)) writes.attributes.set(line.boundary!, { path: ids });

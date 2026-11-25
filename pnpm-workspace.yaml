@@ -93,3 +93,4 @@ patchedDependencies:
   prosemirror-view@1.42.2: patches/prosemirror-view@1.42.2.patch
   react-native@0.88.1: patches/react-native@0.88.1.patch
   y-prosemirror@1.3.7: patches/y-prosemirror@1.3.7.patch
+  yjs@13.6.30: patches/yjs@13.6.30.patch

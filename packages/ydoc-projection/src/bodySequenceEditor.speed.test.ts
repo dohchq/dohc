@@ -1,11 +1,16 @@
 // @vitest-environment jsdom
-import { afterEach, it } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import * as Y from "yjs";
-import { EditorState, TextSelection } from "@tiptap/pm/state";
+import { lift, wrapIn } from "@tiptap/pm/commands";
+import { liftListItem, wrapInList } from "@tiptap/pm/schema-list";
+import { EditorState, TextSelection, type Command, type Transaction } from "@tiptap/pm/state";
 import { dropPoint } from "@tiptap/pm/transform";
 import type { EditorView } from "@tiptap/pm/view";
 import { bodySequenceAnchor, bodySequencePlugin } from "./bodySequenceEditor.js";
+import { recordsOfContainer } from "./bodySequenceGrammar.js";
+import { bodySequenceChangeLimit, bodySequenceChangeSize } from "./bodySequenceIntake.js";
 import { createBodyReader } from "./bodySequenceReading.js";
+import { WORKER_LIVE_VALIDATION_POLICY } from "./liveValidationPolicy.js";
 import {
   boundary,
   declared,
@@ -377,3 +382,115 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)(
   },
   900_000,
 );
+
+function selectLines(view: EditorView, first: number, last: number): void {
+  const starts: number[] = [];
+  view.state.doc.descendants((node, pos) => {
+    if (node.isTextblock) starts.push(pos + 1);
+    return !node.isTextblock;
+  });
+  view.dispatch(
+    view.state.tr.setSelection(TextSelection.create(view.state.doc, starts[first]!, starts[last]!)),
+  );
+}
+
+const toDoOnTheSharePage: Command = (state, dispatch) => {
+  const lifted: Transaction[] = [];
+  const wrapped: Transaction[] = [];
+  liftListItem(schema.nodes.listItem!)(state, (tr) => lifted.push(tr));
+  wrapInList(schema.nodes.taskList!)(state.apply(lifted[0]!), (tr) => wrapped.push(tr));
+  const combined = state.tr;
+  for (const step of [...lifted[0]!.steps, ...wrapped[0]!.steps]) combined.step(step);
+  dispatch?.(combined);
+  return true;
+};
+
+it("writes container changes to 1,000 lines of a note of 10,000 paragraphs in time, each within the room's limits", () => {
+  const long = note(...Array.from({ length: 10_000 }, () => LINE));
+  const base = page(long, 60);
+  const { view, release } = editorWithNoPage(base);
+  onStop(release);
+  const other = page(long, 61);
+  const report: string[] = [];
+  const act = (name: string, command: Command, lines: number) => {
+    selectLines(view, 0, lines - 1);
+    const from = base.sent.length;
+    const start = performance.now();
+    expect(command(view.state, view.dispatch), name).toBe(true);
+    const took = performance.now() - start;
+    const updates = base.sent.slice(from);
+    expect(updates, name).not.toHaveLength(0);
+    for (const update of updates) {
+      expect(bodySequenceChangeLimit(update, WORKER_LIVE_VALIDATION_POLICY), name).toBeUndefined();
+      const { structs, values, deletes } = bodySequenceChangeSize(update);
+      report.push(
+        `${name}: ${took.toFixed(0)} ms, ${String(update.length)} bytes, ${String(structs)} items, ${String(values)} values, ${String(deletes)} delete ranges`,
+      );
+      other.receive(update);
+    }
+    expect(readBodySequence(schema, other.doc).eq(view.state.doc), name).toBe(true);
+    return took;
+  };
+  expect(act("1,000 lines put in a quote", wrapIn(schema.nodes.blockquote!), 1_000)).toBeLessThan(
+    1_000,
+  );
+  expect(view.state.doc.child(0).childCount).toBe(1_000);
+  expect(act("the quote taken off them", lift, 1_000)).toBeLessThan(1_000);
+  expect(view.state.doc.child(0).type.name).toBe("paragraph");
+  act("1,000 lines made a bullet list", wrapInList(schema.nodes.bulletList!), 1_000);
+  act(
+    "the list made a to-do list as the share page does, a lift then a wrap",
+    toDoOnTheSharePage,
+    1_000,
+  );
+  expect(view.state.doc.child(0).type.name).toBe("taskList");
+  act("the to-do list turned off", liftListItem(schema.nodes.taskItem!), 1_000);
+  expect(view.state.doc.childCount).toBe(10_000);
+  console.log(report.join("\n"));
+});
+
+it.skipIf(!process.env.BODY_SEQUENCE_SPEED)("measures a tick in to-do lists of each length", () => {
+  const report: string[] = [];
+  for (const [items, around] of [
+    [100, 0],
+    [1_000, 0],
+    [10_000, 0],
+    [10, 9_990],
+  ] as const) {
+    const list = noteOf(({ sequence, containers }) => {
+      const records = (id: string, type: string) => {
+        for (const [key, value] of recordsOfContainer(schema, { id, type, attrs: {} }))
+          containers.set(key, value);
+      };
+      records("T", "taskList");
+      for (let item = 0; item < items; item++) {
+        records(`K${String(item)}`, "taskItem");
+        sequence.insertEmbed(sequence.length, boundary({ path: ["T", `K${String(item)}`] }), {});
+        sequence.insert(sequence.length, LINE, {});
+      }
+      for (let line = 0; line < around; line++) {
+        sequence.insertEmbed(sequence.length, boundary(), {});
+        sequence.insert(sequence.length, LINE, {});
+      }
+    });
+    const base = page(list, 70);
+    const { view, release } = editorWithNoPage(base);
+    onStop(release);
+    const pos = 1 + Math.floor(items / 2) * view.state.doc.child(0).child(0).nodeSize;
+    const sent = base.sent.length;
+    const took = median(
+      () => {
+        const { checked } = view.state.doc.nodeAt(pos)!.attrs;
+        view.dispatch(view.state.tr.setNodeAttribute(pos, "checked", !checked));
+      },
+      { samples: 5 },
+    );
+    expect(base.sent.length - sent).toBe(5);
+    const name =
+      around === 0
+        ? `${items.toLocaleString("en-US")} to-dos`
+        : `${items.toLocaleString("en-US")} to-dos above ${around.toLocaleString("en-US")} paragraphs`;
+    report.push(`a tick in the middle of ${name}, editor to sequence: ${took}`);
+  }
+  console.log(report.join("\n"));
+});

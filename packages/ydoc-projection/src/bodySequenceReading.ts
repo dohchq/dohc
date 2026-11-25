@@ -264,21 +264,6 @@ export function positionAt(reading: BodyReading, index: number): number {
   return boundaryAt(reading, 0) >= 0 ? reading.starts[0]! : reading.starts[0]! + 1;
 }
 
-/**
- * Whether the container that ends at one document position and the one that starts at another,
- * both children of one parent, share an id.
- */
-export function shareAContainerId(
-  reading: BodyReading,
-  endOfUpper: number,
-  startOfLower: number,
-): boolean {
-  const depth = reading.doc.resolve(startOfLower).depth;
-  const upper = reading.paths[countBelow(reading.starts, endOfUpper) - 1]?.[depth];
-  const lower = reading.paths[countBelow(reading.starts, startOfLower)]?.[depth];
-  return upper !== undefined && upper === lower;
-}
-
 const NO_PATH: readonly string[] = [];
 
 /** The ids of the containers around a document position, outermost first. */
@@ -617,6 +602,11 @@ export function createBodyReader(schema: Schema, sequence: Y.Text, containers: Y
         if (end > from) touch(line);
         at = end;
       }
+    },
+    /** Says that container records are about to be written. */
+    touchRecords(): void {
+      stale = true;
+      recordsChanged = true;
     },
     /** Takes the editor's document for the reading's own, once the two are known to be equal. */
     adopt(doc: ProseMirrorNode): void {

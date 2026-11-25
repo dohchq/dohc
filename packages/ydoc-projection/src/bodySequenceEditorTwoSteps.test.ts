@@ -23,9 +23,9 @@ afterEach(stopEveryone);
 
 const TWO_STEP_COUNTS = {
   pairs: 2600,
-  firstWroteNothing: 556,
-  secondWroteNothing: 338,
-  undone: 1706,
+  firstWroteNothing: 191,
+  secondWroteNothing: 192,
+  undone: 2217,
 };
 
 describe("the note reads as the document ProseMirror computed", () => {

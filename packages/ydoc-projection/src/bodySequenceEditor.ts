@@ -23,7 +23,6 @@ import {
   indexAt,
   positionAt,
   positionOf,
-  shareAContainerId,
   startBefore,
   tokenBefore,
   tokenFrom,
@@ -390,30 +389,10 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
       const unwritten = pending === flushed ? undefined : pending[0];
       if (showsWhatStands && !showsWhatStands(unwritten ? unwritten.before : state.doc))
         return false;
-      let reading: BodyReading | null | undefined;
-      const shareAnId = (at: number) => (endOfUpper: number, startOfLower: number) => {
-        if (reading === undefined) {
-          const read = bound?.reader.reading();
-          reading = read && (read.doc === state.doc || read.doc.eq(state.doc)) ? read : null;
-        }
-        if (!reading) return bound !== null;
-        const atStart = (pos: number, side: -1 | 1) => {
-          let mapped = pos;
-          for (let step = at - 1; step >= 0; step--)
-            mapped = transaction.mapping.maps[step]!.invert().map(mapped, side);
-          return mapped;
-        };
-        return shareAContainerId(reading, atStart(endOfUpper, -1), atStart(startOfLower, 1));
-      };
       return transaction.steps.every(
         (step, at) =>
           keepsPairs(step, transaction.docs[at]!) &&
-          keepsContainers(
-            step,
-            transaction.docs[at]!,
-            transaction.docs[at + 1] ?? transaction.doc,
-            shareAnId(at),
-          ),
+          keepsContainers(step, transaction.docs[at]!, transaction.docs[at + 1] ?? transaction.doc),
       );
     },
     props: {
