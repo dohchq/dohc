@@ -186,6 +186,7 @@ it("refuses /telemetry/batch/ when unconfigured, wrong media type, wrong key, wr
     { ASSETS: assets, ALLOWED_TELEMETRY_KEYS: ALLOWED_KEY },
   );
   expect(emptyBatch.status).toBe(400);
+  expect(await emptyBatch.text()).toContain("1 to 200 events (got 0 events)");
 
   const oversized = await worker.fetch(
     new Request("https://dohc.computer/telemetry/batch/", {
@@ -196,6 +197,7 @@ it("refuses /telemetry/batch/ when unconfigured, wrong media type, wrong key, wr
     { ASSETS: assets, ALLOWED_TELEMETRY_KEYS: ALLOWED_KEY },
   );
   expect(oversized.status).toBe(413);
+  expect(await oversized.text()).toContain("1048576 bytes (got at least 1048577 bytes)");
 
   const deepNested = await worker.fetch(
     new Request("https://dohc.computer/telemetry/batch/", {
@@ -206,6 +208,7 @@ it("refuses /telemetry/batch/ when unconfigured, wrong media type, wrong key, wr
     { ASSETS: assets, ALLOWED_TELEMETRY_KEYS: ALLOWED_KEY },
   );
   expect(deepNested.status).toBe(400);
+  expect(await deepNested.text()).toContain("32 levels (reached 33 levels)");
   expect(upstream).not.toHaveBeenCalled();
   expect(assets.fetch).not.toHaveBeenCalled();
 

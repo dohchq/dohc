@@ -39,10 +39,14 @@ function parseAllowedTelemetryKeys(raw: string | undefined): Set<string> {
   );
 }
 
-async function readBoundedText(request: Request, maxBytes: number): Promise<string | null> {
+type BoundedBody = { ok: true; text: string } | { ok: false; bytes: number; truncated: boolean };
+
+async function readBoundedText(request: Request, maxBytes: number): Promise<BoundedBody> {
   const contentLength = Number(request.headers.get("content-length"));
-  if (Number.isFinite(contentLength) && contentLength > maxBytes) return null;
-  if (!request.body) return "";
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    return { ok: false, bytes: contentLength, truncated: false };
+  }
+  if (!request.body) return { ok: true, text: "" };
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -53,7 +57,7 @@ async function readBoundedText(request: Request, maxBytes: number): Promise<stri
       total += value.byteLength;
       if (total > maxBytes) {
         await reader.cancel();
-        return null;
+        return { ok: false, bytes: total, truncated: true };
       }
       chunks.push(value);
     }
@@ -66,7 +70,7 @@ async function readBoundedText(request: Request, maxBytes: number): Promise<stri
     merged.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder().decode(merged);
+  return { ok: true, text: new TextDecoder().decode(merged) };
 }
 
 const DEPTH_EXCEEDED = Symbol("depth-exceeded");
@@ -93,15 +97,23 @@ function stripIpDeep(value: unknown, depth = 0): unknown {
   return cleaned;
 }
 
-function sanitizeBatchEvent(item: unknown): Record<string, unknown> | null {
-  if (!isPlainRecord(item)) return null;
+function sanitizeBatchEvent(
+  item: unknown,
+): { ok: true; event: Record<string, unknown> } | { ok: false; error: string } {
+  if (!isPlainRecord(item)) return { ok: false, error: "Invalid batch item" };
   const stripped = stripIpDeep(item);
-  if (stripped === DEPTH_EXCEEDED || !isPlainRecord(stripped)) return null;
+  if (stripped === DEPTH_EXCEEDED) {
+    return {
+      ok: false,
+      error: `Event nesting exceeds ${MAX_TELEMETRY_JSON_DEPTH} levels (reached ${MAX_TELEMETRY_JSON_DEPTH + 1} levels).`,
+    };
+  }
+  if (!isPlainRecord(stripped)) return { ok: false, error: "Invalid batch item" };
   const properties = Object.create(null) as Record<string, unknown>;
   if (isPlainRecord(stripped.properties)) Object.assign(properties, stripped.properties);
   properties.$geoip_disable = true;
   stripped.properties = properties;
-  return stripped;
+  return { ok: true, event: stripped };
 }
 
 function isJsonContentType(request: Request): boolean {
@@ -117,10 +129,16 @@ async function forwardTelemetryBatch(request: Request, env: Env): Promise<Respon
     return new Response("Telemetry proxy is not configured", { status: 503 });
   if (!isJsonContentType(request)) return new Response("Unsupported Media Type", { status: 415 });
   const rawBody = await readBoundedText(request, MAX_TELEMETRY_BODY_BYTES);
-  if (rawBody === null) return new Response("Payload Too Large", { status: 413 });
+  if (!rawBody.ok) {
+    const observed = rawBody.truncated ? `at least ${rawBody.bytes}` : String(rawBody.bytes);
+    return new Response(
+      `Payload exceeds ${MAX_TELEMETRY_BODY_BYTES} bytes (got ${observed} bytes).`,
+      { status: 413 },
+    );
+  }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(rawBody);
+    parsed = JSON.parse(rawBody.text);
   } catch {
     return new Response("Invalid JSON", { status: 400 });
   }
@@ -129,13 +147,17 @@ async function forwardTelemetryBatch(request: Request, env: Env): Promise<Respon
   if (!POSTHOG_KEY_PATTERN.test(apiKey) || !Array.isArray(parsed.batch))
     return new Response("Invalid batch payload", { status: 400 });
   if (!allowedKeys.has(apiKey)) return new Response("Forbidden", { status: 403 });
-  if (parsed.batch.length === 0 || parsed.batch.length > MAX_TELEMETRY_BATCH_EVENTS)
-    return new Response("Invalid batch size", { status: 400 });
+  if (parsed.batch.length === 0 || parsed.batch.length > MAX_TELEMETRY_BATCH_EVENTS) {
+    return new Response(
+      `Batch must hold 1 to ${MAX_TELEMETRY_BATCH_EVENTS} events (got ${parsed.batch.length} events).`,
+      { status: 400 },
+    );
+  }
   const batch: Record<string, unknown>[] = [];
   for (const item of parsed.batch) {
     const cleaned = sanitizeBatchEvent(item);
-    if (!cleaned) return new Response("Invalid batch item", { status: 400 });
-    batch.push(cleaned);
+    if (!cleaned.ok) return new Response(cleaned.error, { status: 400 });
+    batch.push(cleaned.event);
   }
   const body = JSON.stringify({
     api_key: apiKey,
