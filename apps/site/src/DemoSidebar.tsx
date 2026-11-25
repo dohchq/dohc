@@ -149,7 +149,6 @@ export function DemoSidebar(props: {
   const [openEditorsHeight, setOpenEditorsHeight] = useState(180);
   const [explorerMode, setExplorerMode] = useState<ExplorerMode>("home");
   const [expandedFolders, setExpandedFolders] = useState<string[]>(["Days"]);
-  // A reveal opens the folders above its rows, so the Explorer can show them.
   const [revealing, setRevealing] = useState(props.revealPaths);
   if (props.revealPaths !== revealing) {
     setRevealing(props.revealPaths);

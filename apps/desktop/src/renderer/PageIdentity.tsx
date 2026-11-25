@@ -507,8 +507,7 @@ export function PageIdentity(props: PageIdentityProps) {
     const container = pickerRef.current;
     if (container) modalFocusableElements(container)[0]?.focus();
 
-    // The composed path, not the target: in a shadow root the document sees
-    // the shadow host as the target of a press inside the picker.
+    // Inside a shadow root, the document sees the host as the target.
     function onPointerDown(event: MouseEvent) {
       if (pickerRef.current && !event.composedPath().includes(pickerRef.current)) {
         setPickerOpen(false);

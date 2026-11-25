@@ -2951,9 +2951,7 @@ body {
 .dohc-callout-type-menu[hidden] {
   display: none;
 }
-/* The open menu hangs below its callout. A top-level block that can skip its
- * layout clips what it paints and draws under the blocks after it, so the
- * block holding the menu lays out in full and sits above them. */
+/* content-visibility: auto clips what a block paints outside its box. */
 .dohc-notion-editor > :has(.dohc-callout-type-picker.is-open) {
   position: relative;
   z-index: 1;

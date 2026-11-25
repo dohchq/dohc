@@ -151,17 +151,10 @@
   outline: none;
 }
 
-/* A view's tabs keep the toolbar's row only while every tab fits beside it.
-   Otherwise the toolbar takes the row under them, before it cuts a tab. */
 [data-testid="collection-page"] div:has(> div > [data-testid="collection-view-switcher"]) {
   min-width: fit-content;
 }
 
-/* A table wider than its pane shades its right edge, so it reads as
-   scrolling on, until the last column is in view. The shade shows over an
-   empty Name cell too, as a fade to the background would not. A table that
-   fits draws none: its scroll timeline is inactive, so the shade keeps its
-   opacity of 0. */
 [data-testid="collection-page"] div:has(> [role="grid"][aria-rowcount]) {
   position: relative;
   timeline-scope: --demo-table-x;
@@ -201,9 +194,6 @@
   }
 }
 
-/* The demo's table pane is narrower than the desktop's, and a pinned Name
-   column would cover the columns that scroll under it. When the table fits,
-   nothing scrolls, so pinning has no effect anyway. */
 [data-testid="collection-page"] [role="grid"] .sticky:not(.left-0, .top-0) {
   position: relative;
   left: 0 !important;
@@ -215,10 +205,6 @@
   }
 }
 
-/* The desktop narrows Go to… to its icon below a 1100px window, where long
-   workspace names need the room. The demo's name is short, and the demo
-   window is narrower than the page, so Go to… keeps its word until the
-   window itself runs out of room. */
 @media (min-width: 721px) and (max-width: 1100px) {
   [data-testid="titlebar"] {
     --quick-open-width: clamp(5rem, 100vw - 37.5rem, 20rem);
@@ -230,16 +216,12 @@
     display: none;
   }
 
-  /* Without the window controls, the workspace name takes the room the
-     desktop reserves for them. */
   [data-testid="titlebar-left-group"] {
     min-width: 0;
     max-width: none !important;
     flex: 1;
   }
 
-  /* Too narrow to center Go to…: it and the sidebar toggle follow the name
-     in the row, as icons, inside the window. */
   [data-testid="titlebar-quick-open"],
   [data-testid="titlebar-right-group"] {
     position: static;
@@ -261,7 +243,6 @@
     width: 8px !important;
   }
 
-  /* The search box gives up width so New record keeps the toolbar's row. */
   [data-testid="collection-page"] form[role="search"] {
     flex: 1 1 0;
     min-width: 0;

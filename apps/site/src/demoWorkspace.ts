@@ -209,8 +209,6 @@ export const APP_SOURCE = `<!doctype html>
 </html>
 `;
 
-// The page's theme follows the site's switch. It arrives as a message, so a
-// change keeps what the app holds; reloading the document would reset it.
 const THEME_LISTENER = `<script>
   addEventListener("message", (event) => {
     const theme = event.source === parent && event.data && event.data.dohcTheme;

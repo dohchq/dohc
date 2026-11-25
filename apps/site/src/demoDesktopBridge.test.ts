@@ -200,6 +200,24 @@ describe("a delete's Undo", () => {
     await expect(undo()).resolves.toMatchObject({ ok: true });
     expect(restore).toHaveBeenCalledOnce();
   });
+
+  it("refuses while a file holds a folder the deleted page was in", async () => {
+    const { bridge, restore } = bridgeWith(["Days/Day 1.md"]);
+    const workspaceId = "marketing-demo";
+    const { operationId } = await bridge.deleteWorkspacePath({
+      workspaceId,
+      relativePath: "Days/Day 1.md",
+    });
+    await bridge.createWorkspaceFile({ workspaceId, relativePath: "Days", initialText: "" });
+    await expect(
+      bridge.undoHistoryOperation({ workspaceId, operationId: operationId! }),
+    ).resolves.toEqual({
+      ok: false,
+      reason: expect.any(String),
+      refusal: { code: "old-path-occupied", path: "Days" },
+    });
+    expect(restore).not.toHaveBeenCalled();
+  });
 });
 
 describe("Chats Home", () => {

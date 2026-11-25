@@ -185,13 +185,10 @@ function initialSidebarVisible(): boolean {
   return window.matchMedia("(min-width: 721px)").matches;
 }
 
-// At this width the sidebar lies over the whole editor (demo.css).
 function sidebarCoversEditor(): boolean {
   return window.matchMedia("(max-width: 720px)").matches;
 }
 
-// The app keeps its state when the page's theme changes: its document stays
-// as it loaded, and the theme arrives as a message.
 function DemoAppFrame(props: { theme: "light" | "dark"; hidden: boolean }) {
   const frame = useRef<HTMLIFrameElement>(null);
   const [srcDoc] = useState(() => appDocument(props.theme));
@@ -310,11 +307,7 @@ function ProductDemoWindow() {
     answer(confirmed: boolean): void;
   } | null>(null);
 
-  // Shell shortcuts only reach the demo while focus is inside it. When the
-  // focused control unmounts, such as a closed menu or palette, the browser
-  // drops focus to the page, so the window takes it back. A press on the page
-  // leaves focus there, even when it closed a menu. React skips the focusout
-  // of a node it is removing, so this listens on the demo's root.
+  // React skips the focusout of a node it removes, so this listens natively.
   const windowRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const demo = windowRef.current;
@@ -547,8 +540,21 @@ function ProductDemoWindow() {
     setExplorerReveal([path]);
   }, []);
 
-  // The desktop's tab menu draws natively at the pointer. The demo draws it in
-  // the page, at the point of the right-click the tab strip just received.
+  const copyPath = useCallback(
+    function copy(path: string) {
+      const copied = navigator.clipboard?.writeText(path) ?? Promise.reject();
+      copied.catch((cause: unknown) =>
+        reportShellFailure({
+          message: `Couldn't copy ${path}. The browser didn't allow it.`,
+          cause,
+          retry: () => copy(path),
+          identity: "demo-copy-path",
+        }),
+      );
+    },
+    [reportShellFailure],
+  );
+
   const tabMenuPoint = useRef({ x: 0, y: 0 });
   const [tabMenu, setTabMenu] = useState<{
     id: number;
@@ -571,9 +577,7 @@ function ProductDemoWindow() {
     }
     if (explorerPath) entries.push(MENU_SEPARATOR);
     if (filePath) {
-      entries.push(
-        item("copy-path", "Copy path", () => void navigator.clipboard?.writeText(filePath)),
-      );
+      entries.push(item("copy-path", "Copy path", () => copyPath(filePath)));
     }
     if (explorerPath) {
       entries.push(
@@ -734,7 +738,6 @@ function ProductDemoWindow() {
 
   const toggleSidebar = useCallback(() => setSidebarVisible((current) => !current), []);
 
-  // Where the sidebar covers the editor, what opens from it shows at once.
   const openFromSidebar = useCallback(
     (path: string) => {
       openDocument(path);

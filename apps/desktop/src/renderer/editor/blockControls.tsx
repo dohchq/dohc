@@ -789,9 +789,7 @@ export function BlockMenu({
     return () => handle?.setAttribute("aria-expanded", "false");
   }, [open, pos]);
 
-  // The menu is fixed where the handle was when it opened. A scroll outside
-  // the menu moves the handle away, so the menu closes. A scroll inside a
-  // shadow root reaches only that root, so the menu listens there too.
+  // A scroll inside a shadow root doesn't reach the document.
   useEffect(() => {
     const menu = menuRef.current;
     if (!open || !menu) return;

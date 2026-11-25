@@ -263,9 +263,7 @@ function buildCalloutHeader(
       setTypeMenuOpen(false);
     }
   });
-  // relatedTarget, not the active element: a microtask queued here runs
-  // before focus reaches the pressed option, while nothing has focus, and
-  // closed the menu under the press.
+  // The browser moves focus to the pressed option only after focusout.
   typePicker.addEventListener("focusout", (event) => {
     const next = event.relatedTarget;
     if (!(next instanceof globalThis.Node) || !typePicker.contains(next)) setTypeMenuOpen(false);

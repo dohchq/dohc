@@ -31,7 +31,6 @@ type DemoBridgeContext = {
   createFile: (path: string) => void;
   createFolder: (path: string) => void;
   movePath: (fromPath: string, toPath: string) => void;
-  // Answers how to put back what it removed.
   deletePath: (path: string) => () => void;
 };
 
@@ -46,7 +45,6 @@ let context: DemoBridgeContext = {
 };
 
 type UndoResult = Awaited<ReturnType<DohcDesktopBridge["undoHistoryOperation"]>>;
-// A delete's Undo, by the operation id its notice holds, for this session.
 const deleteUndos = new Map<string, () => Promise<UndoResult>>();
 
 const searchListeners = new Set<(batch: SearchResultsEvent) => void>();
@@ -288,8 +286,6 @@ type DemoDesktopBridge = Pick<
   | "revokeRelayShare"
   | "exportDocumentFile"
 > & {
-  // The demo has no trash, so a delete names no place it went. Its Undo,
-  // while this tab stays open, is the way back.
   deleteWorkspacePath: (
     payload: Parameters<DohcDesktopBridge["deleteWorkspacePath"]>[0],
   ) => Promise<Omit<DeleteWorkspacePathResult, "trashed">>;
@@ -515,8 +511,6 @@ function refuseFixed(path: string): void {
   }
 }
 
-// The desktop's Explorer menu, less what the demo cannot do: it has no
-// file system to import from or export to, no sharing, and one Collection.
 const DEMO_EXPLORER_COMMANDS: ReadonlySet<ExplorerMenuCommand> = new Set([
   "new-file",
   "new-folder",
@@ -569,11 +563,17 @@ async function restoreDeleted(
     ...context.fixedPaths,
     ...assetUrls.keys(),
   ]);
-  if (workspacePaths.includes(path)) {
+  const occupied = workspacePaths.includes(path)
+    ? path
+    : findFileAncestor(
+        context.documents.map((document) => document.path),
+        path,
+      );
+  if (occupied) {
     return {
       ok: false,
-      reason: `Something new is at ${path}.`,
-      refusal: { code: "old-path-occupied", path },
+      reason: `Something new is at ${occupied}.`,
+      refusal: { code: "old-path-occupied", path: occupied },
     };
   }
   restore();
@@ -729,7 +729,6 @@ const demoBridge = {
     const deleted = (path: string) => isPathAtOrBelow(path, payload.relativePath);
     const documents = context.documents.filter((document) => deleted(document.path));
     const folders = context.folders.filter(deleted);
-    // The asset URLs stay alive for Undo.
     const assets = [...assetUrls.entries()].filter(([path]) => deleted(path));
     await persistAssetMutation(() => rewriteStoredAssets(payload.relativePath, null));
     const restore = context.deletePath(payload.relativePath);
