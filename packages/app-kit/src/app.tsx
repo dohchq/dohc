@@ -898,6 +898,7 @@ function useDatasetRead<T>(
   liveRef.current = live;
   const shownRef = useRef(state);
   shownRef.current = state;
+  const pendingRef = useRef<{ scope: string; revision: number | null }>({ scope, revision: null });
   const syncLiveRef = useRef<(() => void) | null>(null);
 
   const reload = useCallback(() => {
@@ -930,7 +931,7 @@ function useDatasetRead<T>(
     let alive = true,
       inFlight = false,
       currentRev = shownRef.current.scope === scope ? shownRef.current.revision : null,
-      wantedRev: number | null = null,
+      wantedRev = pendingRef.current.scope === scope ? pendingRef.current.revision : null,
       retryDelay = 250,
       retryTimer: ReturnType<typeof setTimeout> | undefined,
       activeController: AbortController | null = null;
@@ -942,7 +943,6 @@ function useDatasetRead<T>(
     };
     const latestWanted = () =>
       Math.max(wantedRev ?? -1, latestRevisionLookup.get(target)?.() ?? -1);
-    if (currentRev !== null && latestWanted() > currentRev) wantedRev = latestWanted();
     const parsedInput: unknown = JSON.parse(serializedInput);
     const runFetch = (background: boolean) => {
       if (!alive) return;
@@ -1029,6 +1029,7 @@ function useDatasetRead<T>(
     runFetch(false);
     return () => {
       alive = false;
+      pendingRef.current = { scope, revision: wantedRev };
       activeController?.abort();
       activeController = null;
       syncLiveRef.current = null;
