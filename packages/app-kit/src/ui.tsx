@@ -538,8 +538,8 @@ export function DateField({
       }}
       onKeyDown={(event) => {
         onKeyDown?.(event);
-        if (event.defaultPrevented || (event.key !== "ArrowUp" && event.key !== "ArrowDown"))
-          return;
+        if (event.defaultPrevented || props.readOnly) return;
+        if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
         event.preventDefault();
         commit(stepDate(text, event.key === "ArrowUp" ? 1 : -1, min, max));
       }}
@@ -648,7 +648,7 @@ export function Modal({ open, title, onClose, footer, children }: ModalProps) {
 
     const onFocusIn = (event: FocusEvent) => {
       if (!isTopModal() || !dialog) return;
-      if (event.target instanceof Node && !dialog.contains(event.target)) {
+      if (event.target instanceof Element && !event.target.closest(".kit-modal")) {
         const focusables = [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)].filter(
           isVisibleFocusable,
         );

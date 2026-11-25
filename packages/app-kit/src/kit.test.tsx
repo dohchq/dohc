@@ -84,6 +84,29 @@ describe("dohc/ui", () => {
     fireEvent.click(screen.getByRole("button", { name: "Rename" }));
     expect(document.activeElement).toBe(screen.getByLabelText("Name"));
   });
+
+  it("keeps autoFocus in a Modal opened while another Modal is open", () => {
+    function Harness() {
+      const [confirming, setConfirming] = useState(false);
+      return (
+        <>
+          <Modal open title="Edit trip" onClose={() => {}}>
+            <Button onClick={() => setConfirming(true)}>Delete trip</Button>
+          </Modal>
+          <Modal open={confirming} title="Delete trip" onClose={() => setConfirming(false)}>
+            <Input aria-label="Type the trip name" autoFocus />
+          </Modal>
+        </>
+      );
+    }
+    render(<Harness />);
+    const trigger = screen.getByRole("button", { name: "Delete trip" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    expect(document.activeElement).toBe(screen.getByLabelText("Type the trip name"));
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(document.activeElement).toBe(trigger);
+  });
 });
 
 describe("DateField", () => {
@@ -137,6 +160,21 @@ describe("DateField", () => {
     expect(field().value).toBe("2026-03-01");
     fireEvent.keyDown(field(), { key: "ArrowDown" });
     expect(stored()).toBe("2026-02-28");
+  });
+
+  it("leaves a read-only DateField alone on ArrowUp", () => {
+    const changes: string[] = [];
+    render(
+      <DateField
+        aria-label="Closed on"
+        value="2026-04-20"
+        onChange={(next) => changes.push(next)}
+        readOnly
+      />,
+    );
+    fireEvent.keyDown(screen.getByLabelText("Closed on"), { key: "ArrowUp" });
+    expect(changes).toEqual([]);
+    expect(screen.getByLabelText<HTMLInputElement>("Closed on").value).toBe("2026-04-20");
   });
 });
 
