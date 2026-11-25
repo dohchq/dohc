@@ -1,3 +1,4 @@
+import { once } from "node:events";
 import { connect } from "node:net";
 import { afterEach, expect, it } from "vitest";
 import { createEngineClient, type EngineClient } from "./engineClient";
@@ -86,28 +87,24 @@ it("fails a request it could not write before its deadline as unsent", async () 
   const client = await engine();
   const held = await ask(client, "hold", 10_000);
   const { port } = held.result as { port: number };
-  const { large, late } = await new Promise<{ large: Promise<unknown>; late: Promise<unknown> }>(
-    (resolve) =>
-      setImmediate(() => {
-        // Larger than a pipe or socket buffer on every platform while the engine isn't reading, so the client holds
-        // the next request until this write drains.
-        const large = client.sendRequest({
-          id: ++id,
-          method: "answer",
-          params: { filler: "x".repeat(4_000_000) },
-          deadlineMs: 10_000,
-        });
-        large.catch(() => {});
-        const pending = ask(client);
-        pending.catch(() => {});
-        connect(port, "127.0.0.1").on("error", () => {});
-        busy(250);
-        resolve({ large, late: pending });
-      }),
-  );
-  await expect(late).rejects.toMatchObject({ name: "EngineRequestDeadlineError", unsent: true });
+  // Larger than a pipe or socket buffer on every platform while the engine isn't reading, so the client holds the
+  // next request until this write drains.
+  const large = client.sendRequest({
+    id: ++id,
+    method: "answer",
+    params: { filler: "x".repeat(4_000_000) },
+    deadlineMs: 10_000,
+  });
+  large.catch(() => {});
+  await expect(ask(client)).rejects.toMatchObject({
+    name: "EngineRequestDeadlineError",
+    unsent: true,
+  });
+  await once(connect(port, "127.0.0.1"), "close");
   await expect(large).resolves.toMatchObject({ result: { answered: true } });
-  await expect(ask(client)).resolves.toMatchObject({ result: { answered: true } });
+  await expect(ask(client, "answer", 10_000)).resolves.toMatchObject({
+    result: { answered: true },
+  });
 });
 
 // Proves: a sent request the engine does not answer fails as sent, so the relay still stops that engine.
