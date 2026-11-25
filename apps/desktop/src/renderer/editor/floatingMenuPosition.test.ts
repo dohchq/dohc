@@ -125,3 +125,22 @@ it("keeps a menu inside its bounds when the caret has scrolled out of them", () 
   expect(above.y).toBeGreaterThanOrEqual(bounds.top);
   expect(above.y + above.maxHeight).toBeLessThanOrEqual(bounds.bottom);
 });
+
+it("keeps a menu at its minimum height, inside its bounds when they hold it, on screen when not", () => {
+  const input = { viewportWidth: 1440, viewportHeight: 700, menuMaxHeight: 140, menuMinHeight: 46 };
+  const sliver = resolveFloatingMenuPosition({
+    ...input,
+    bounds: { top: 0, left: 0, right: 1440, bottom: 72 },
+    cursorRect: { left: 400, top: 46, bottom: 70 },
+  });
+  expect(sliver.maxHeight).toBe(46);
+  expect(sliver.y).toBeGreaterThanOrEqual(0);
+  expect(sliver.y + sliver.maxHeight).toBeLessThanOrEqual(72);
+  const strip = resolveFloatingMenuPosition({
+    ...input,
+    bounds: { top: 664, left: 0, right: 1440, bottom: 700 },
+    cursorRect: { left: 400, top: 907, bottom: 926 },
+  });
+  expect(strip.y).toBeGreaterThanOrEqual(0);
+  expect(strip.y + strip.maxHeight).toBeLessThanOrEqual(700);
+});

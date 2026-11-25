@@ -59,6 +59,8 @@ export type LinkMenuState =
       placement: FloatingMenuPlacement;
     };
 
+const LINK_FORM_HEIGHT = 46;
+
 export const CLOSED_LINK_MENU_STATE: LinkMenuState = { open: false };
 
 function isViewEditable(view: EditorView): boolean {
@@ -121,6 +123,7 @@ export function computeLinkMenuState(
       bounds: floatingMenuBounds(view.dom),
       menuWidth: 340,
       menuMaxHeight: 140,
+      menuMinHeight: LINK_FORM_HEIGHT,
     });
     x = position.x;
     y = position.y;
