@@ -342,6 +342,15 @@ body {
   padding: 7px 10px;
 }
 
+.kit-date-field {
+  max-width: 16ch;
+  font-variant-numeric: tabular-nums;
+}
+
+.kit-date-field[aria-invalid="true"] {
+  border-color: var(--kit-danger);
+}
+
 .kit-textarea {
   min-height: 84px;
   resize: vertical;

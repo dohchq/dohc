@@ -9,9 +9,9 @@ dohc's closed app compiler provides a pinned set of browser modules so apps can 
 | `react`, `react/jsx-runtime` | React 19 hooks and JSX runtime |
 | `react-dom`, `react-dom/client` | ReactDOM (`createRoot`, `createPortal`) |
 | `dohc/app` | MessageChannel backend client, hooks, and host helpers (`AppProvider`, `useApp`, `useDatasetQuery`, `useDatasetMutation`, `createAppClient`, `mutationKey`, `copyText`, `print`, `AppBackendError`) |
-| `dohc/ui` | Light and dark themed layout, data, and form components (`AppShell`, `PageHeader`, `Grid`, `Stack`, `Card`, `StatCard`, `Tabs`, `DataTable`, `Badge`, `ProgressBar`, `Callout`, `EmptyState`, `Skeleton`, `Button`, `Field`, `Input`, `Select`, `Textarea`, `Checkbox`, `Modal`, plus currency/number/percent/date formatters) |
-| `dohc/charts` | Responsive SVG charts with light and dark tokens: interactive `LineChart`, `BarChart`, and `DonutChart` (single-tab-stop arrow-key navigation), plus non-interactive `Sparkline` |
-| `dohc/icons` | A curated set of [Lucide](https://lucide.dev) icons as React components (for example `Plus`, `Trash2`, `Receipt`, `Wallet`, `Plane`, `CalendarDays`). Only the icons an app imports end up in its bundle |
+| `dohc/ui` | Light and dark themed layout, data, and form components (`AppShell`, `PageHeader`, `Grid`, `Stack`, `Card`, `StatCard`, `Tabs`, `DataTable`, `Badge`, `ProgressBar`, `Callout`, `EmptyState`, `Skeleton`, `Button`, `Field`, `Input`, `Select`, `Textarea`, `DateField`, `Checkbox`, `Modal`, plus currency/number/percent/date formatters). `Input` and `Textarea` take a `ref`. `DateField` takes and returns `YYYY-MM-DD`, with optional `min` and `max`: ArrowUp and ArrowDown step one day, and `onChange` gets `""` while the text is not a real date inside the bounds |
+| `dohc/charts` | Responsive SVG charts with light and dark tokens: interactive `LineChart`, `BarChart`, and `DonutChart` (single-tab-stop arrow-key navigation), plus non-interactive `Sparkline`. `LineChart`'s `markerIndex` draws a rule at one label, such as a replay's current step |
+| `dohc/icons` | A curated set of [Lucide](https://lucide.dev) icons as React components (for example `Plus`, `Trash2`, `X`, `ZoomIn`, `PanelRight`, `Play`, `Receipt`, `CalendarDays`). Only the icons an app imports end up in its bundle |
 | `dohc/money` | Exact money in whole minor units (cents): `formatCents(123400, { currency: "EUR", locale: "de-DE" })` gives `1.234,00 €` without floating-point rounding, and `parseCents("$1,234.50")` gives `123450`, or `null` for text that isn't an exact amount |
 | `dohc/csv` | RFC 4180 `parseCsv(text)` for quoted fields, embedded line breaks, and a leading byte order mark, and `toCsv(rows)`, which prefixes text cells that start with `=`, `+`, `-`, `@`, tab, or carriage return with `'` so spreadsheets don't run them as formulas. Pass amounts as numbers so negative values stay numeric |
 
@@ -22,6 +22,7 @@ The prefixes `react`, `react-dom`, `scheduler`, and `dohc` are reserved. Do not 
 - Importing `dohc/ui` automatically bundles the kit's light and dark styles into `bundle.css`.
 - Importing only `dohc/charts` bundles only the color tokens and chart rules without resetting page styles.
 - Importing only `dohc/app` or `react` adds no CSS.
+- Every app page starts with the kit's sans-serif font and `border-box` sizing, in a cascade layer that any app style overrides.
 
 ## Minimal example
 

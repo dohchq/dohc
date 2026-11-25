@@ -112,6 +112,9 @@ const COLOR_SCHEME_SCRIPT =
   "const watch=new MutationObserver(report);watch.observe(document.documentElement,{attributes:true});" +
   'watch.observe(document.head,{childList:true,subtree:true,attributeFilter:["content"]});report();}';
 const FRAME_SCRIPT = LINK_SCRIPT + COLOR_SCHEME_SCRIPT;
+const FRAME_STYLE =
+  '@layer dohc-frame{html{font-family:var(--kit-font-sans,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif)}' +
+  "*,::before,::after{box-sizing:border-box}}";
 
 /**
  * Embed only as srcdoc with sandbox="allow-scripts", without allow-same-origin.
@@ -175,7 +178,7 @@ export function createAppDocument(
     '<meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width, initial-scale=1">' +
     '<meta name="referrer" content="no-referrer">' +
-    `<meta http-equiv="Content-Security-Policy" content="${csp}"><script>${FRAME_SCRIPT}</script>`;
+    `<meta http-equiv="Content-Security-Policy" content="${csp}"><style>${FRAME_STYLE}</style><script>${FRAME_SCRIPT}</script>`;
   const html = page
     ? `<!doctype html><html${page.htmlAttributes.map(([name, value]) => ` ${name}="${attributeValue(value)}"`).join("")}><head>${policy}` +
       `<script>${script}</script>${page.head}</head>${page.body}</html>`

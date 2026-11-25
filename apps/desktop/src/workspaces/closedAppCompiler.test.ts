@@ -148,8 +148,40 @@ root.render(
 globalThis.unmountLedger = () => root.unmount();`);
     expect(ledger).not.toContain("lucide-trash-2");
     expect(ledger).not.toContain('"trash-2"');
+    const requested = [
+      "X",
+      "ZoomIn",
+      "ZoomOut",
+      "Crosshair",
+      "Keyboard",
+      "PanelLeft",
+      "PanelRight",
+      "Maximize",
+      "Maximize2",
+      "Minimize2",
+      "Scan",
+      "Trophy",
+      "Play",
+      "Pause",
+      "Tv",
+      "Shield",
+      "Swords",
+      "Crown",
+      "KeyRound",
+      "Split",
+      "Scale",
+      "BookOpen",
+      "LockOpen",
+      "Unlock",
+      "Ban",
+      "LayoutGrid",
+      "Square",
+      "Columns2",
+      "ArrowLeftRight",
+      "Aperture",
+    ].join(", ");
     const everyIcon = await compile(
-      "import * as icons from 'dohc/icons'; globalThis.icons = icons;",
+      `import * as icons from 'dohc/icons'; import { ${requested} } from 'dohc/icons'; globalThis.icons = [icons, ${requested}];`,
     );
     expect(everyIcon).toContain('"trash-2"');
     const { JSDOM } = createRequire(import.meta.url)("jsdom") as {
@@ -703,7 +735,7 @@ globalThis.unmountBrokerTest = () => root.unmount();`,
         ]),
       );
       expect(document.html).toMatch(
-        /^<!doctype html><html data-x="a&quot;b"><head><meta charset="utf-8">.*<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ('sha256-[A-Za-z0-9+/=]+' ?)+;[^"]*"><script>/,
+        /^<!doctype html><html data-x="a&quot;b"><head><meta charset="utf-8">.*<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ('sha256-[A-Za-z0-9+/=]+' ?)+;[^"]*"><style>[^<]*<\/style><script>/,
       );
       expect(document.html.indexOf("Content-Security-Policy")).toBeLessThan(
         document.html.indexOf('name="description"'),
