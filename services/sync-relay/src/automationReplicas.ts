@@ -131,6 +131,8 @@ export async function startAutomationReplicas(options: {
   engineExecutable: string;
   /** The relay's public HTTPS origin, which the engine reaches it at. */
   relayOrigin: string;
+  /** Passes wait for this, so no copy calls the relay before its public origin serves it. */
+  relayAnswers?: PromiseLike<void>;
   key: Uint8Array;
   namespace: string;
   wanted(): ReadonlyMap<string, readonly CopyReason[]>;
@@ -1090,6 +1092,7 @@ export async function startAutomationReplicas(options: {
   // A pass, then its look for the nearest deadline. Either failing fails the
   // pass; when both do, the pass's own failure is the one reported.
   async function passOnce(): Promise<boolean> {
+    await options.relayAnswers;
     deadline = undefined;
     let ok: boolean;
     try {
