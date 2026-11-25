@@ -1,6 +1,5 @@
 import { Directory, File, Paths } from "expo-file-system";
 import { editorPool } from "../../modules/editor-pool";
-import { demoMode } from "../demo";
 import { pageFonts, pageHtml, pageScript, pageVersion } from "../editorHtml.generated";
 
 // The page's web view loads its HTML from a file, and the HTML loads the ~690 KB script and the body's Inter files
@@ -12,11 +11,6 @@ const script = new File(folder, "page.js");
 const fonts = pageFonts.map((font) => ({ file: new File(folder, font.name), base64: font.base64 }));
 
 let pending: Promise<string> | null = null;
-
-// Design review only: page-fonts-missing opens a page whose font files are gone, so no spare editor may have loaded
-// them first. launch-plain-cold times a launch without one.
-const spares =
-  demoMode === "page-fonts-missing" || demoMode === "launch-plain-cold" ? null : editorPool;
 
 /** The file URI of the editor page. The files are checked on every call and written when missing: iOS can clear the
  * cache folder while the app runs, and Try again must then write them again. Callers at the same moment share one
@@ -32,7 +26,7 @@ export function editorHtmlUri(): Promise<string> {
       for (const font of fonts)
         if (!font.file.exists) await font.file.write(font.base64, { encoding: "base64" });
       if (!file.exists) await file.write(pageHtml);
-      void spares?.prepare(file.uri, folder.uri, missing);
+      void editorPool?.prepare(file.uri, folder.uri, missing);
       return file.uri;
     } catch (error) {
       // A write that failed (a full disk, say) may have left half a file: the folder goes, so the next try writes

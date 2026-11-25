@@ -10,7 +10,6 @@ vi.mock("../../modules/editor-pool", () => ({
       void prepared.push([page, folder, rewritten]),
   },
 }));
-vi.mock("../demo", () => ({ demoMode: null }));
 vi.mock("expo-file-system", () => {
   class Directory {
     readonly uri: string;
