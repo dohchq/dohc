@@ -408,7 +408,7 @@ test("a member reads a page, comments on it and posts in a Group in the browser 
     await expect(ownerPage).toHaveURL(`${viewer}/s/workspace/owner/${workspaceId}`);
     const ownerFiles = ownerPage.getByRole("navigation", { name: "Workspace files" });
     await expect(ownerFiles.getByRole("heading", { level: 1 })).toHaveText("Lisbon trip");
-    // Opening a page asks the relay for the owner's live editor, as the phone does. This relay hosts no live pages, so the page stays readable.
+    // Opening a page asks the relay for the owner's live editor, as the phone does. This relay hosts no live pages, so the page reads quietly.
     const ownerOpen = ownerPage.waitForResponse((response) =>
       response.url().endsWith("/api/live/owner-open"),
     );
@@ -420,9 +420,10 @@ test("a member reads a page, comments on it and posts in a Group in the browser 
       { ok: false, code: "live_hosting_unsupported" },
     ]);
     await expect(ownerPage.getByText("Hotel 780, flights 640.")).toBeVisible();
-    await expect(
-      ownerPage.getByText("dohc could not open this page for editing. You can still read it."),
-    ).toBeVisible();
+    await expect(ownerPage.getByText("Opening the file…")).toHaveCount(0);
+    await expect(ownerPage.locator(".workspace-toast")).toHaveCount(0);
+    await expect(ownerPage.locator("header + .page-band")).toHaveText("");
+    await expect(ownerPage.getByRole("button", { name: "Try again" })).toHaveCount(0);
     await ownerPage.screenshot({ path: testInfo.outputPath("owner-live.png") });
     await expect(ownerPage.getByText("Owner", { exact: true })).toBeVisible();
     const ownerChats = ownerPage.getByRole("region", { name: "Chats" });

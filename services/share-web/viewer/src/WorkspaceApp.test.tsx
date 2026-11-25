@@ -2824,7 +2824,9 @@ describe("the owner's page", () => {
     expect(container.querySelector(".workspace-toast")).toBeNull();
     expect(container.querySelector("header + .page-band")?.textContent ?? "").toBe("");
     expect(
-      [...container.querySelectorAll("button")].some((button) => button.textContent === "Try again"),
+      [...container.querySelectorAll("button")].some(
+        (button) => button.textContent === "Try again",
+      ),
     ).toBe(false);
   });
 

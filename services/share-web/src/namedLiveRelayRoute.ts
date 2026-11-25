@@ -4,7 +4,7 @@ import {
 } from "@dohc/live-session-contract/live-connection";
 import type { IncomingMessage } from "node:http";
 import { WebSocket } from "ws";
-import type { LiveGatewayOptions, LiveGatewayHostRoute, LiveGatewaySession } from "./liveGateway";
+import type { LiveGatewayOptions, LiveGatewayHostRoute } from "./liveGateway";
 import { namedAccountCookie } from "./namedAccountCookie";
 
 export function namedLiveGatewayRequest(
