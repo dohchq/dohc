@@ -1137,6 +1137,14 @@ it("caps a member's Collection level at their level on its folder, and never rai
   expect((await f.read()).result).toBe("comment");
 });
 
+it("still runs a member's granted write in a folder they can only view", async () => {
+  const f = await memberFixture();
+  f.rule("view");
+  const edited = await f.invoke(ana, id(7), { id: "x", name: "y" }, undefined, "edit");
+  expect(edited.result).toBe(true);
+  expect((await f.read()).result).toBe("view");
+});
+
 it("ends a member's held Collection access when a folder rule lowers it", async () => {
   const f = await memberFixture();
   const check = await f.storage.workReferenceDatasetAccess!({
