@@ -100,6 +100,24 @@ describe("useKeptCopyNotices", () => {
     expect(h.result.current.shellErrors).toEqual([]);
   });
 
+  it("shows a later copy that the engine lists under a saved copy's id", async () => {
+    const h = harness([{ id: 3, path: "a.md", keptAtMs: 1 }]);
+    await waitFor(() => expect(h.result.current.shellErrors).toHaveLength(1));
+    act(() => h.result.current.runShellErrorAction(h.result.current.shellErrors[0]!.id));
+    await waitFor(() =>
+      expect(h.result.current.shellErrors.map((error) => error.message)).toEqual([
+        "Saved the other copy of a.md as a (kept copy).md.",
+      ]),
+    );
+
+    h.keep([{ id: 3, path: "b.md", keptAtMs: 2 }]);
+    await act(async () => await h.result.current.refresh());
+    expect(h.result.current.shellErrors.map((error) => error.message)).toEqual([
+      "Saved the other copy of a.md as a (kept copy).md.",
+      keptCopyMessage("b.md"),
+    ]);
+  });
+
   it("keeps the row and offers Try again when the save fails", async () => {
     const h = harness([{ id: 3, path: "a.md", keptAtMs: 1 }]);
     h.bridge.saveKeptCopy.mockRejectedValueOnce(new Error("Another program has a.md open."));

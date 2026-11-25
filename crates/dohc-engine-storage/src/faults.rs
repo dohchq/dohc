@@ -81,6 +81,10 @@ pub enum FaultPoint {
     /// A known staged copy was removed, before the job completion commit.
     /// Process restart replays from history or the already placed target.
     MaterializeAfterKnownCopyDeletion,
+    /// A raced write put the outside bytes back and kept the job's content,
+    /// before the job is marked conflict. A crash here ⇒ restart leaves the
+    /// job settled, with no second copy. `materialize.after-swap-back`.
+    MaterializeAfterSwapBack,
 
     // ---- rollback post-commit response -----------------------------------
     /// The rollback transaction is durable, immediately before the runtime
@@ -158,6 +162,7 @@ impl FaultPoint {
             FaultPoint::MaterializeAfterKnownCopyDeletion => {
                 "materialize.after-known-copy-deletion"
             }
+            FaultPoint::MaterializeAfterSwapBack => "materialize.after-swap-back",
             FaultPoint::RollbackBeforeActiveVersionLookup => {
                 "rollback.before-active-version-lookup"
             }

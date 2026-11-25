@@ -1333,6 +1333,9 @@ export function useShellError(
       nextId.current += 1;
       return { ...fields, id: `shell-error-${nextId.current}`, atMs };
     };
+    for (const id of shownKeptCopies.current) {
+      if (!listed.has(id)) shownKeptCopies.current.delete(id);
+    }
     const arrived = copies.filter((copy) => !shownKeptCopies.current.has(copy.id));
     for (const copy of arrived) shownKeptCopies.current.add(copy.id);
     const summarized = arrived.length > 1;

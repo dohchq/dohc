@@ -1103,7 +1103,7 @@ impl EngineStore {
     }
 
     /// End a displacement row and, in the same transaction, give `job` a
-    /// terminal status.
+    /// terminal status if it is still pending.
     pub fn resolve_displacement(
         &self,
         displacement_id: i64,

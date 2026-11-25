@@ -797,6 +797,246 @@ fn a_kept_file_is_saved_as_a_visible_copy() {
     );
 }
 
+/// A note's text that its file refused, because another program saved the
+/// file before or during the write, stays kept and is saved beside the note.
+#[test]
+fn a_notes_text_an_outside_save_refused_is_kept_to_save_beside_it() {
+    for (tag, raced) in [("before", false), ("during", true)] {
+        let sc = Scratch::new(&format!("note-kept-{tag}"));
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        std::fs::write(sc.target("a.md"), PREIMAGE).expect("preimage on disk");
+        store.put_binary_blob(PREIMAGE).expect("preimage blob");
+        let job = spec(
+            "ydoc-mat_m1",
+            "a.md",
+            &hex_sha256(OURS),
+            Preimage::Present(hex_sha256(PREIMAGE)),
+            1,
+            10,
+        );
+        stage_job(&mut store, OURS, &job);
+        let racer = RaceBefore::new(
+            RenameStep::Displace,
+            write_in_place(sc.target("a.md"), OUTSIDE),
+        );
+        if !raced {
+            std::fs::write(sc.target("a.md"), OUTSIDE).expect("outside save");
+        }
+        let replacer: &dyn AtomicReplacer = if raced { &racer } else { &StdReplacer };
+
+        assert_eq!(
+            drain(&store, &sc, replacer, &NoFaults),
+            vec![JobOutcome::Conflict],
+            "{tag}"
+        );
+        assert_eq!(read(&sc, "a.md").as_deref(), Some(OUTSIDE), "{tag}");
+        let conflicts: Vec<_> = std::fs::read_dir(sc.workspace())
+            .expect("workspace")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".conflict"))
+            .collect();
+        assert_eq!(conflicts, Vec::<String>::new(), "{tag}");
+        let kept = store.list_kept_displacements("ws").expect("kept");
+        assert_eq!(kept.len(), 1, "{tag}: {kept:?}");
+        assert_eq!(
+            save_kept_displacement(
+                &store,
+                sc.workspace(),
+                "ws",
+                kept[0].displacement_id,
+                &kept_copy_options()
+            )
+            .expect("save"),
+            KeptCopySave::Saved("a (kept copy).md".to_owned()),
+            "{tag}"
+        );
+        assert_eq!(
+            read(&sc, "a (kept copy).md").as_deref(),
+            Some(OURS),
+            "{tag}"
+        );
+        assert_eq!(displaced_files(&sc), Vec::<String>::new(), "{tag}");
+    }
+}
+
+#[test]
+fn a_crash_after_a_notes_raced_write_kept_its_text_keeps_one_copy() {
+    let sc = Scratch::new("note-kept-crash");
+    {
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        std::fs::write(sc.target("a.md"), PREIMAGE).expect("preimage on disk");
+        store.put_binary_blob(PREIMAGE).expect("preimage blob");
+        let job = spec(
+            "ydoc-mat_m1",
+            "a.md",
+            &hex_sha256(OURS),
+            Preimage::Present(hex_sha256(PREIMAGE)),
+            1,
+            10,
+        );
+        stage_job(&mut store, OURS, &job);
+        let racer = RaceBefore::new(
+            RenameStep::Displace,
+            write_in_place(sc.target("a.md"), OUTSIDE),
+        );
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterSwapBack);
+        assert_eq!(
+            drain(&store, &sc, &racer, faults.as_ref()),
+            vec![JobOutcome::Crashed(FaultPoint::MaterializeAfterSwapBack)]
+        );
+    }
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+    assert_eq!(drain(&store, &sc, &StdReplacer, &NoFaults), vec![]);
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(OUTSIDE));
+    let kept = store.list_kept_displacements("ws").expect("kept");
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(
+        kept[0].displaced_sha256.as_deref(),
+        Some(hex_sha256(OURS).as_str())
+    );
+}
+
+#[test]
+fn a_notes_text_staged_before_a_crash_stays_kept_whether_or_not_its_file_is_there() {
+    for deleted in [false, true] {
+        let sc = Scratch::new(&format!("note-kept-recover-{deleted}"));
+        {
+            let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+            store.put_binary_blob(PREIMAGE).expect("preimage blob");
+            let job = spec(
+                "ydoc-mat_m1",
+                "a.md",
+                &hex_sha256(OURS),
+                Preimage::Present(hex_sha256(PREIMAGE)),
+                1,
+                10,
+            );
+            stage_job(&mut store, OURS, &job);
+            if !deleted {
+                std::fs::write(sc.target("a.md"), OUTSIDE).expect("outside save");
+            }
+            open_note_text_row(&sc, &store);
+        }
+        let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+        drain(&store, &sc, &StdReplacer, &NoFaults);
+        let outside = (!deleted).then_some(OUTSIDE);
+        assert_eq!(read(&sc, "a.md").as_deref(), outside, "{deleted}");
+        let kept = store.list_kept_displacements("ws").expect("kept");
+        assert_eq!(kept.len(), 1, "{deleted}: {kept:?}");
+        assert_eq!(
+            read(&sc, &staged("79646f632d6d61745f6d31.0")).as_deref(),
+            Some(OURS),
+            "{deleted}"
+        );
+        assert_eq!(
+            store
+                .load_materialization_job("ydoc-mat_m1")
+                .expect("load")
+                .expect("job")
+                .status,
+            JobStatus::Conflict,
+            "{deleted}"
+        );
+    }
+}
+
+/// The state a note's write leaves when it stops after moving its text into
+/// staging, before the text's row is kept.
+fn open_note_text_row(sc: &Scratch, store: &EngineStore) {
+    put_staged(sc, "79646f632d6d61745f6d31.0", OURS);
+    store
+        .open_displacement(&DisplacementSpec {
+            job_id: "ydoc-mat_m1".to_owned(),
+            workspace_id: "ws".to_owned(),
+            target_path: "a.md".to_owned(),
+            displaced_name: "79646f632d6d61745f6d31.0".to_owned(),
+            expected_sha256: hex_sha256(OURS),
+            content_sha256: Some(hex_sha256(OURS)),
+            now_ms: 5,
+        })
+        .expect("open row");
+}
+
+#[test]
+fn an_unchanged_notes_original_staged_before_a_crash_goes_back_to_its_path() {
+    let sc = Scratch::new("note-unchanged-recover");
+    {
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        let job = spec(
+            "ydoc-mat_m1",
+            "a.md",
+            &hex_sha256(OURS),
+            Preimage::Present(hex_sha256(OURS)),
+            1,
+            10,
+        );
+        stage_job(&mut store, OURS, &job);
+        open_note_text_row(&sc, &store);
+    }
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+    drain(&store, &sc, &StdReplacer, &NoFaults);
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(OURS));
+    assert_eq!(
+        store.list_kept_displacements("ws").expect("kept"),
+        Vec::new()
+    );
+}
+
+#[test]
+fn a_later_write_lands_while_recovery_keeps_an_earlier_notes_text() {
+    let sc = Scratch::new("note-kept-later-write");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    store.put_binary_blob(PREIMAGE).expect("preimage blob");
+    stage_job(
+        &mut store,
+        OURS,
+        &spec(
+            "ydoc-mat_m1",
+            "a.md",
+            &hex_sha256(OURS),
+            Preimage::Present(hex_sha256(PREIMAGE)),
+            1,
+            10,
+        ),
+    );
+    stage_job(
+        &mut store,
+        OUTSIDE,
+        &spec(
+            "ydoc-mat_m2",
+            "a.md",
+            &hex_sha256(OUTSIDE),
+            Preimage::Present(hex_sha256(PREIMAGE)),
+            2,
+            11,
+        ),
+    );
+    std::fs::write(sc.target("a.md"), OUTSIDE).expect("the later write's bytes");
+    open_note_text_row(&sc, &store);
+    let later = store
+        .load_materialization_job("ydoc-mat_m2")
+        .expect("load")
+        .expect("job");
+    assert_eq!(
+        materialize_one(&store, sc.workspace(), &later, &sweep_options()).expect("run"),
+        JobOutcome::AlreadyMaterialized
+    );
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(OUTSIDE));
+    let status = |id: &str| {
+        store
+            .load_materialization_job(id)
+            .expect("load")
+            .expect("job")
+            .status
+    };
+    assert_eq!(
+        (status("ydoc-mat_m1"), status("ydoc-mat_m2")),
+        (JobStatus::Conflict, JobStatus::Complete)
+    );
+    assert_eq!(store.list_kept_displacements("ws").expect("kept").len(), 1);
+}
+
 fn kept_copy_options() -> MaterializeOptions<'static> {
     MaterializeOptions {
         holds: None,

@@ -3305,3 +3305,107 @@ async fn author_threshold_queues_settlement_after_admission_without_explicit_set
     );
     call(&transport, &handle, 6, "workspace.close", json!({})).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_note_whose_write_met_an_outside_edit_keeps_its_text_as_a_copy_to_save() {
+    let QueuedWinner {
+        scratch,
+        transport,
+        handle,
+        session_id,
+        ..
+    } = queue_winning_lineage_behind_session("loser from B").await;
+    let file = scratch.path().join(CLOSE_WINNER_PATH);
+    std::fs::write(&file, "changed outside dohc").expect("outside edit");
+    let reply = |id: u64, method: &str, params: Value| {
+        call_with_busy_retry(
+            &transport,
+            RequestContext::unbounded(),
+            request(id, method, Some(handle.clone()), params),
+        )
+    };
+    let close = json!({ "sessionId": session_id, "settle": false });
+    let mut closed = None;
+    for id in [5, 6, 7] {
+        match reply(id, "ydoc.close", close.clone()).await {
+            Ok(answer) => {
+                closed = Some(answer.result);
+                break;
+            }
+            Err(error) => assert_eq!(error.message, "file-write-incomplete"),
+        }
+    }
+    assert_eq!(closed, Some(json!({ "closed": true })));
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("file"),
+        "changed outside dohc"
+    );
+    let siblings: Vec<_> = std::fs::read_dir(file.parent().expect("notes dir"))
+        .expect("notes dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".conflict"))
+        .collect();
+    assert_eq!(siblings, Vec::<String>::new());
+
+    let listed = reply(8, "keptCopies.list", json!({}))
+        .await
+        .expect("keptCopies.list")
+        .result;
+    let copies = listed["keptCopies"].as_array().expect("kept copies");
+    assert_eq!(copies.len(), 1, "{listed}");
+    assert_eq!(copies[0]["path"], CLOSE_WINNER_PATH);
+    let saved = reply(9, "keptCopies.save", json!({ "id": copies[0]["id"] }))
+        .await
+        .expect("keptCopies.save")
+        .result;
+    assert_eq!(
+        saved,
+        json!({ "status": "saved", "path": "notes/shared (kept copy).md" })
+    );
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("notes/shared (kept copy).md"))
+            .expect("saved copy"),
+        "loser from B plus remote edit"
+    );
+
+    reply(10, "capture.reconcile", json!({}))
+        .await
+        .expect("capture.reconcile");
+    reply(11, "capture.flush", json!({}))
+        .await
+        .expect("capture.flush");
+    let opened = reply(
+        12,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": CLOSE_WINNER_PATH, "contentKind": "plaintext" }),
+    )
+    .await
+    .expect("ydoc.open")
+    .result;
+    reply(
+        13,
+        "ydoc.recordUpdate",
+        json!({
+            "expectedLineageClaimId": opened["lineageClaimId"],
+            "sessionId": opened["sessionId"],
+            "updateBase64": plaintext_update("later edit "),
+        }),
+    )
+    .await
+    .expect("ydoc.recordUpdate");
+    reply(
+        14,
+        "ydoc.close",
+        json!({ "sessionId": opened["sessionId"], "settle": true }),
+    )
+    .await
+    .expect("ydoc.close");
+    assert!(
+        std::fs::read_to_string(&file)
+            .expect("file")
+            .contains("later edit"),
+        "the note's later edit didn't reach the file"
+    );
+    call(&transport, &handle, 15, "workspace.close", json!({})).await;
+}

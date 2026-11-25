@@ -281,6 +281,8 @@ async fn open_document_conflict_clears_its_claim_to_be_settled_on_disk() {
             assert_eq!(status, "conflict");
             let sha: Option<String> = c.query_row("SELECT last_settled_sha FROM ydoc_docs WHERE workspace_id=?1 AND object_id='source-0000'", [&ws], |r| r.get(0))?;
             assert_eq!(sha, None, "conflicted rewrite is not settled on disk");
+            let kept: i64 = c.query_row("SELECT COUNT(*) FROM materialization_displacements WHERE state='kept' AND job_id LIKE 'ydoc-mat_%'", [], |r| r.get(0))?;
+            assert_eq!(kept, 1, "the note's text is kept to save");
             Ok::<_, rusqlite::Error>(())
         }).map_err(StorageError::corrupt_public)?;
         Ok(())
@@ -289,7 +291,7 @@ async fn open_document_conflict_clears_its_claim_to_be_settled_on_disk() {
         std::fs::read_to_string(f.root.join("source-0000.md")).unwrap(),
         "external edit"
     );
-    assert!(std::fs::read_dir(&f.root).unwrap().any(|e| {
+    assert!(!std::fs::read_dir(&f.root).unwrap().any(|e| {
         e.unwrap()
             .file_name()
             .to_string_lossy()
