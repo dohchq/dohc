@@ -238,11 +238,13 @@ export class DohcMarkdownManager extends MarkdownManager {
     };
 
     nodes.forEach((node, i) => {
-      const next = nodes[i + 1] ?? null;
+      const after = nodes[i + 1];
+      const next =
+        after === undefined ? null : after.type === "text" ? after : { type: after.type };
       if (!node.type) return;
       if (node.type !== "text") {
         let before = "";
-        for (const [type, mark] of active) {
+        for (const [type, mark] of Array.from(active).reverse()) {
           before += closing(mark, modes.get(type) ?? "markdown", tokens);
         }
         active.clear();

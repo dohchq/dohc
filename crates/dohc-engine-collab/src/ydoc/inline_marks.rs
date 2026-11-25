@@ -492,7 +492,7 @@ fn write_marks(pieces: &[Piece], plain: bool) -> ProjectionResult<Option<String>
         let (source, marks) = match piece {
             Piece::Node { rendered, .. } => {
                 let mut written = String::new();
-                for mark in &writer.active {
+                for mark in writer.active.iter().rev() {
                     written.push_str(&closing(mark, writer.mode(mark.kind)));
                 }
                 writer.active.clear();

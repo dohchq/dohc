@@ -763,6 +763,77 @@ it.each([
   expect(serializeRichdocBody(document)).toBe(`**b**${saved}`);
 });
 
+it.each([
+  [
+    "bold and underline on text and the image after it",
+    [marked("hello", "bold", "underline")],
+    ["bold", "underline"],
+    "**++hello++**![A](https://example.com/a.png)",
+  ],
+  [
+    "a link and bold on text and the image after it",
+    [
+      {
+        ...marked("hello", "bold"),
+        marks: [{ type: "link", attrs: { href: "https://x.test" } }, { type: "bold" }],
+      },
+    ],
+    ["link", "bold"],
+    "[**hello**](https://x.test)![A](https://example.com/a.png)",
+  ],
+  [
+    "bold on text ending in a space and on the image after it",
+    [bold("hello ")],
+    ["bold"],
+    "**hello** ![A](https://example.com/a.png)",
+  ],
+  [
+    "bold and underline on text, the image after it, and the text after that",
+    [marked("a", "bold", "underline")],
+    ["bold", "underline"],
+    "**++a++**![A](https://example.com/a.png)**++b++**",
+    [marked("b", "bold", "underline")],
+  ],
+] satisfies Array<[string, JSONContent[], string[], string, JSONContent[]?]>)(
+  "writes %s so the text reads back",
+  (_name, before, imageMarks, saved, after = []) => {
+    const image: JSONContent = {
+      type: "image",
+      attrs: { src: "https://example.com/a.png", alt: "A", title: null },
+      marks: before[0]!.marks!.filter((mark) => imageMarks.includes(mark.type)),
+    };
+    const document = getDohcProseMirrorSchema()
+      .nodeFromJSON({
+        type: "doc",
+        content: [{ type: "paragraph", content: [...before, image, ...after] }],
+      })
+      .toJSON() as JSONContent;
+    expect(serializeRichdocBody(document)).toBe(saved);
+    const reopened = parseRichdocMarkdown(saved);
+    expect(markedCharactersOf(reopened)).toEqual(markedCharactersOf(document));
+    expect(serializeRichdocBody(reopened)).toBe(saved);
+  },
+);
+
+it("closes bold and underline in order before a marked line break", () => {
+  const document = getDohcProseMirrorSchema()
+    .nodeFromJSON({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            marked("a", "bold", "underline"),
+            { type: "hardBreak", marks: [{ type: "bold" }, { type: "underline" }] },
+            plain("b"),
+          ],
+        },
+      ],
+    })
+    .toJSON() as JSONContent;
+  expect(serializeRichdocBody(document)).toBe("**++a++**  \nb");
+});
+
 it("keeps the spelling a note had when its marks read back that way", () => {
   const saved = "**++a++~~==b==~~**~~c~~";
   expect(serializeRichdocBody(parseRichdocMarkdown(saved))).toBe(saved);
