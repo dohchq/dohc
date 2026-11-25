@@ -183,6 +183,48 @@ describe("saving views", () => {
     }
   });
 
+  it("writes an unchanged view's JSON once, and again when its value, cursor or flags change", async () => {
+    const disk = keptDisk();
+    const { files } = launch(disk);
+    let walks = 0;
+    const page = Object.defineProperty({}, "text", {
+      enumerable: true,
+      get: () => (walks++, "Packing list"),
+    });
+    const rowOf = () => String(disk.cache.sql("SELECT value FROM views")[0]?.value);
+    const saveAs = async (...views: SavedView[]) => {
+      files.write(SCOPE_A, () => views);
+      await files.flush();
+      return rowOf();
+    };
+    const list = { rows: ["a"] };
+    const first = await saveAs(saved("files", list), saved("page:p-1", page));
+    const once = walks;
+    expect(once).toBeGreaterThan(0);
+
+    expect(await saveAs(saved("files", { rows: ["a", "b"] }), saved("page:p-1", page))).toBe(
+      JSON.stringify([
+        saved("files", { rows: ["a", "b"] }),
+        saved("page:p-1", { text: "Packing list" }),
+      ]),
+    );
+    expect(walks).toBe(once);
+    expect(await saveAs(saved("files", list), saved("page:p-1", page))).toBe(first);
+    expect(walks).toBe(once);
+
+    await saveAs(saved("files", list), saved("page:p-1", page, "0.5.3"));
+    await saveAs(saved("files", list), saved("page:p-1", page, "0.5.3", true));
+    await saveAs(saved("files", list), {
+      ...saved("page:p-1", page, "0.5.3", true),
+      prefetched: true,
+    });
+    expect(walks).toBe(once * 4);
+    expect(JSON.parse(rowOf())[1]).toEqual({
+      ...saved("page:p-1", { text: "Packing list" }, "0.5.3", true),
+      prefetched: true,
+    });
+  });
+
   it("saves a scope at most once every 30 s in the foreground, and at once when the app goes to the background", async () => {
     vi.useFakeTimers();
     try {
