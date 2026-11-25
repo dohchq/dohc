@@ -23,6 +23,7 @@ import {
   parseDatasetAlias,
   parseDatasetDefinition,
   resolveAppDatasetReferenceBinding,
+  type AppDatasetCapability,
   type AppDatasetReference,
   type AppDatasetRevisionLookup,
   type DatasetRevision,
@@ -119,6 +120,14 @@ export interface AppPublicationPreparationDependencies {
   compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
   /** Resolves from the owner's approved catalog. Publication preparation cannot approve a dataset. */
   resolveDatasetRevision?(binding: AppDatasetRevisionLookup): Promise<DatasetRevision>;
+  /** Resolves a Personal app's Collection from what the member's own grant shows, in place of the owner's catalog. */
+  resolveDatasetCapability?(
+    reference: AppDatasetReference,
+    datasetId: string,
+    alias: string | undefined,
+  ): Promise<AppDatasetCapability>;
+  /** Where the app's dataset.json references resolve, when the app's files are read from elsewhere. */
+  datasetAdapter?: SourceAdapter;
   onCollectionSchema?(text: string): void;
 }
 function describeJsonSyntaxLocation(error: unknown): string | undefined {
@@ -610,7 +619,7 @@ async function prepareAppSources(
   const datasetBindings: ReadonlyArray<{ alias?: string; reference: AppDatasetReference }> =
     declared.datasets ?? (declared.dataset ? [{ reference: declared.dataset }] : []);
   if (datasetBindings.length > 0) {
-    if (!dependencies.resolveDatasetRevision)
+    if (!dependencies.resolveDatasetRevision && !dependencies.resolveDatasetCapability)
       throw new Error("This app's Collection is unavailable. Open the Collection and try again.");
     assertSourcePathsNotDeferred(
       dependencies.deferredWrites,
@@ -619,7 +628,7 @@ async function prepareAppSources(
     const seenDatasetIds = new Set<string>();
     for (const { alias, reference } of datasetBindings) {
       const datasetId = await resolveDatasetAddress(
-        adapter,
+        dependencies.datasetAdapter ?? adapter,
         input.workspaceId,
         reference.datasetPath,
         signal,
@@ -633,6 +642,12 @@ async function prepareAppSources(
         );
       }
       seenDatasetIds.add(datasetId);
+      if (dependencies.resolveDatasetCapability) {
+        capabilities.push(await dependencies.resolveDatasetCapability(reference, datasetId, alias));
+        assertCurrent();
+        signal.throwIfAborted();
+        continue;
+      }
       const { datasetPath: _path, ...rest } = reference;
       const lookup: AppDatasetRevisionLookup =
         "operationIds" in rest && rest.revision !== undefined
@@ -646,7 +661,7 @@ async function prepareAppSources(
                   }
                 : {}),
             };
-      const approved = await dependencies.resolveDatasetRevision(lookup);
+      const approved = await dependencies.resolveDatasetRevision!(lookup);
       assertCurrent();
       signal.throwIfAborted();
       const resolved = resolveAppDatasetReferenceBinding(reference, datasetId, approved);

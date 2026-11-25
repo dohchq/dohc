@@ -236,6 +236,7 @@ import { preloadMarkdownEditor } from "./editor/LazyMarkdownEditor";
 import { preloadRowView, preloadViewForPath, scheduleIdleViewPreloads } from "./viewPreloads";
 import { sendToFocusedEditor } from "./editor/editorMenuCommands";
 import { NewFileDialog } from "./NewFileDialog";
+import { PersonalAppsDialog } from "./PersonalAppsDialog";
 import { NewPage, type NewPageFile } from "./NewPage";
 import { displayFrontmatterValue, parseFrontmatter } from "./markdown/frontmatter";
 import { registerPendingEditorDraft } from "./pendingEditorDrafts";
@@ -857,6 +858,7 @@ function WorkspaceShell(props: {
   }, []);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
+  const [personalAppsOpen, setPersonalAppsOpen] = useState(false);
   // The New collection dialog: null = closed, otherwise the folder to
   // create inside ("" = workspace root).
   const [newCollectionFolder, setNewCollectionFolder] = useState<string | null>(null);
@@ -6822,6 +6824,7 @@ function WorkspaceShell(props: {
     () => ({
       "new-file": () => openNewPage(""),
       "new-file-at-path": () => setNewFileOpen(true),
+      "personal-apps": () => setPersonalAppsOpen(true),
       "new-drawing": () => void createUntitledDrawing(),
       "new-folder": requestExplorerFolder,
       "new-collection": () => setNewCollectionFolder(""),
@@ -10401,6 +10404,13 @@ function WorkspaceShell(props: {
                             pinned={wb.pinned}
                             onOpenPath={openFile}
                             onClose={() => setQuickOpenOpen(false)}
+                          />
+                        ) : null}
+                        {personalAppsOpen ? (
+                          <PersonalAppsDialog
+                            workspaceId={props.workspace.workspaceId}
+                            onClose={() => setPersonalAppsOpen(false)}
+                            reportError={reportShellError}
                           />
                         ) : null}
                         {newFileOpen ? (

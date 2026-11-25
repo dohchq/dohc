@@ -107,6 +107,7 @@ const APP_PUBLICATION_WRITE_ACTIONS: Readonly<
 > = {
   verifyFrontend: false,
   createLink: true,
+  personalFolder: false,
   listLocal: false,
   checkLocal: false,
   prepareLocal: true,

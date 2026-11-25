@@ -219,6 +219,7 @@
     "appPublication": [
       "app.frontend.verify",
       "app.link.create",
+      "app.personal.folder",
       "app.local.list",
       "app.local.check",
       "app.local.prepare",
@@ -422,6 +423,7 @@
     "dataset discardMigration": "dataset.migration.discard",
     "dataset invoke": "dataset.operation.invoke",
     "app createLink": "app.link.create",
+    "app personalFolder": "app.personal.folder",
     "app listLocal": "app.local.list",
     "app checkLocal": "app.local.check",
     "app prepareLocal": "app.local.prepare",

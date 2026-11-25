@@ -1941,6 +1941,14 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
       agentLabelNote,
     ],
   },
+  personalFolder: {
+    summary: "Show your Personal app folder for a joined workspace, and the apps in it.",
+    notes: [
+      "Each subfolder is one Personal app. It stays on this computer and never syncs to the workspace.",
+      "Run prepareLocal, listLocal, checkLocal, launchLocal, and withdraw with appRoot set to the subfolder's name, from the joined workspace's folder.",
+      "Set open to true to show the folder in your file manager.",
+    ],
+  },
   listLocal: { summary: "List an app's publications on this computer." },
   checkLocal: {
     summary: "Read an app's current source revision on this computer.",

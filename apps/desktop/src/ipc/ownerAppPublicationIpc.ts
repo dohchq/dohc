@@ -18,6 +18,7 @@ import { RelayShareLinkListResponse } from "./bridgeContract";
 import {
   OwnerAppPublicationRequest,
   OwnerAppPublicationResult,
+  PERSONAL_APP_ACTIONS,
 } from "./ownerAppPublicationContract";
 import {
   prepareOwnerAppPublication,
@@ -101,6 +102,13 @@ export function createOwnerAppPublicationHandler<
     operation: Operation,
     attribution: ApprovalAgent | null,
   ): Promise<OwnerAppPublicationResult | null>;
+  /** A joined workspace's Personal apps, which run on this computer as the member. */
+  personalPublication?(
+    input: OwnerAppPublicationRequest,
+    callerKey: string,
+    operation: Operation,
+    attribution: ApprovalAgent | null,
+  ): Promise<OwnerAppPublicationResult | null>;
   /** Reads a Collection's approved rules from whoever answers for it, in place of the server alone. */
   resolveDatasetRevision?(
     workspace: Workspace,
@@ -143,8 +151,19 @@ export function createOwnerAppPublicationHandler<
     const callerKey = dependencies.callerKey(caller);
     return dependencies.withWorkspaceOperation(caller, input.workspaceId, async (operation) => {
       operation.assertCurrent();
-      if (shareViewIsPresent(operation.workspace.shareView))
+      if (shareViewIsPresent(operation.workspace.shareView)) {
+        const personal = PERSONAL_APP_ACTIONS.has(input.action)
+          ? await dependencies.personalPublication?.(input, callerKey, operation, agent)
+          : null;
+        operation.assertCurrent();
+        operation.signal.throwIfAborted();
+        if (personal) return personal;
         throw new Error("Only the original workspace can publish this app.");
+      }
+      if (input.action === "personalFolder")
+        throw new Error(
+          "Personal apps are for workspaces you joined. Build apps in this workspace.",
+        );
       const local = await dependencies.localPublication?.(input, callerKey, operation, agent);
       operation.assertCurrent();
       operation.signal.throwIfAborted();

@@ -50,6 +50,13 @@ const ADMIN_COLLECTION_ACCESS = {
   edit: ["dohc_collection_access"],
 } as const;
 
+const publishAppTool = {
+  owner: ["dohc_publish_app"],
+  view: ["dohc_publish_app"],
+  comment: ["dohc_publish_app"],
+  edit: ["dohc_publish_app"],
+};
+
 function capability(
   description: string,
   exposure: {
@@ -1530,35 +1537,43 @@ const LISTED_CAPABILITIES = {
     {
       ipcReason:
         "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
-      mcp: { owner: ["dohc_publish_app"] },
+      mcp: publishAppTool,
     },
   ),
   "app.link.create": capability("Create a share link for an app.", {
     ipcReason:
       "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
-    mcp: { owner: ["dohc_publish_app"] },
+    mcp: publishAppTool,
   }),
+  "app.personal.folder": capability(
+    "Show a joined workspace's Personal app folder on this computer, and the apps in it.",
+    {
+      ipcReason:
+        "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
+      mcp: publishAppTool,
+    },
+  ),
   "app.local.list": capability("List an app's publications on this computer.", {
     ipcReason:
       "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
-    mcp: { owner: ["dohc_publish_app"] },
+    mcp: publishAppTool,
   }),
   "app.local.check": capability("Read an app's current source revision on this computer.", {
     ipcReason:
       "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
-    mcp: { owner: ["dohc_publish_app"] },
+    mcp: publishAppTool,
   }),
   "app.local.prepare": capability("Prepare an app to open on this computer.", {
     ipcReason:
       "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
-    mcp: { owner: ["dohc_publish_app"] },
+    mcp: publishAppTool,
   }),
   "app.local.stage": capability(
     "Stage an app and its new or updated Collections locally for one owner approval.",
     {
       ipcReason:
         "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
-      mcp: { owner: ["dohc_publish_app"] },
+      mcp: publishAppTool,
     },
   ),
   "app.local.staged.list": capability(
@@ -1566,7 +1581,7 @@ const LISTED_CAPABILITIES = {
     {
       ipcReason:
         "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
-      mcp: { owner: ["dohc_publish_app"] },
+      mcp: publishAppTool,
     },
   ),
   "app.local.staged.approve": capability(
@@ -1574,7 +1589,7 @@ const LISTED_CAPABILITIES = {
     {
       ipcReason:
         "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
-      mcp: { owner: ["dohc_publish_app"] },
+      mcp: publishAppTool,
     },
   ),
   "app.local.staged.discard": capability(
@@ -1582,50 +1597,50 @@ const LISTED_CAPABILITIES = {
     {
       ipcReason:
         "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
-      mcp: { owner: ["dohc_publish_app"] },
+      mcp: publishAppTool,
     },
   ),
   "app.local.launch": capability("Get a local URL for an approved app.", {
     ipcReason:
       "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
-    mcp: { owner: ["dohc_publish_app"] },
+    mcp: publishAppTool,
   }),
   "app.publication.list": capability("List an app's shared publications.", {
     ipcReason:
       "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
-    mcp: { owner: ["dohc_publish_app"] },
+    mcp: publishAppTool,
   }),
   "app.publication.prepare": capability("Prepare an app for a share link.", {
     ipcReason:
       "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
-    mcp: { owner: ["dohc_publish_app"] },
+    mcp: publishAppTool,
   }),
   "app.publication.approve": capability("Publish a prepared app.", {
     ipcReason:
       "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
-    mcp: { owner: ["dohc_publish_app"] },
+    mcp: publishAppTool,
   }),
   "app.publication.cancel": capability("Discard a prepared app before approval.", {
     ipcReason:
       "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
-    mcp: { owner: ["dohc_publish_app"] },
+    mcp: publishAppTool,
   }),
   "app.publication.withdraw": capability("Stop a shared publication.", {
     ipcReason:
       "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
-    mcp: { owner: ["dohc_publish_app"] },
+    mcp: publishAppTool,
   }),
   "app.collection.revoke": capability("Remove a shared publication's Collection access.", {
     ipcReason:
       "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
-    mcp: { owner: ["dohc_publish_app"] },
+    mcp: publishAppTool,
   }),
   "app.publication.reactivation.review": capability(
     "Prepare a stopped publication to publish again.",
     {
       ipcReason:
         "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
-      mcp: { owner: ["dohc_publish_app"] },
+      mcp: publishAppTool,
     },
   ),
   "app.responses.list": capability("List responses link holders sent through a share link.", {

@@ -47,7 +47,7 @@ it("does not advertise a tool with an empty capability id list", () => {
 
 it("derives the real multiplexed tools and the Edit-only exception", () => {
   expect(MCP_TOOL_LEVELS.dohc_dataset).toEqual(["owner"]);
-  expect(MCP_TOOL_LEVELS.dohc_publish_app).toEqual(["owner"]);
+  expect(MCP_TOOL_LEVELS.dohc_publish_app).toEqual(["owner", "view", "comment", "edit"]);
   expect(MCP_TOOL_LEVELS.dohc_switch_automation).toEqual(["edit"]);
 });
 

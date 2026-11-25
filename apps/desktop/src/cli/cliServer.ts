@@ -179,9 +179,10 @@ import {
   type LiveDocumentEditOrigin,
   type LiveDocumentEditOutcome,
 } from "../workspaces/engineYDocSessionIpc";
-import type {
-  OwnerAppPublicationRequest,
-  OwnerAppPublicationResult,
+import {
+  PERSONAL_APP_ACTIONS,
+  type OwnerAppPublicationRequest,
+  type OwnerAppPublicationResult,
 } from "@dohc/cli/app-publication";
 import type { DocumentEdit } from "@dohc/ydoc-projection";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
@@ -2779,7 +2780,7 @@ async function dispatch(
           args: {
             ...request.args,
             request:
-              "appRoot" in input && typeof input.appRoot === "string"
+              "appRoot" in input && typeof input.appRoot === "string" && !context.readOnly
                 ? {
                     ...input,
                     appRoot: paths.rebase(input.appRoot, "read"),
@@ -3406,7 +3407,11 @@ async function dispatchWorkspace(
       if (!context.access) throw new CliCommandError("Access observations are unavailable.");
       return context.access.sharing(request.args);
     case "appPublication": {
-      if (context.readOnly || !context.appPublication)
+      if (
+        (context.readOnly &&
+          !(context.joined && PERSONAL_APP_ACTIONS.has(request.args.request.action))) ||
+        !context.appPublication
+      )
         throw new CliCommandError("App publication requires the owning workspace.");
       if (request.args.request.workspaceId !== context.workspaceId)
         throw new CliCommandError(

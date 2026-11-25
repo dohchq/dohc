@@ -25,6 +25,7 @@ export const COMMAND_AVAILABILITY = {
   activeMarkdown: (context: CommandContext) => context.activeDocumentKind === "markdown",
   activeShareable: (context: CommandContext) => context.activeDocumentShareable,
   localWorkspace: (context: CommandContext) => context.shareView === null,
+  joinedWorkspace: (context: CommandContext) => context.shareView?.membership === true,
   updateAvailable: (context: CommandContext) => context.updateStatus === "available",
   updateReady: (context: CommandContext) => context.updateStatus === "ready",
   pinnedApp: (context: CommandContext, id: PinnedAppCommandId) =>
@@ -239,6 +240,14 @@ export const COMMAND_ROWS = {
     group: "Views",
     icon: "history",
     keywords: ["timeline", "changes", "diff", "restore"],
+  },
+  "personal-apps": {
+    label: "Personal apps…",
+    availability: "joinedWorkspace",
+    capabilityId: "app.personal.folder",
+    group: "Views",
+    icon: "app-window",
+    keywords: ["apps", "build", "private", "folder"],
   },
   "open-versions": {
     label: "Show all versions",
