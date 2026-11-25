@@ -1,10 +1,21 @@
 // @vitest-environment jsdom
 import { afterAll, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { dropPoint, StepMap, Transform } from "@tiptap/pm/transform";
+import {
+  dropPoint,
+  ReplaceAroundStep,
+  ReplaceStep,
+  StepMap,
+  Transform,
+} from "@tiptap/pm/transform";
 import { Fragment, Mark, Slice, type Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { EditorState, NodeSelection, TextSelection, type Transaction } from "@tiptap/pm/state";
-import { BLOCK_ELEMENT, recordsOfContainer } from "./bodySequenceGrammar.js";
+import {
+  BLOCK_ELEMENT,
+  BODY_CONTAINERS_FIELD,
+  BODY_SEQUENCE_FIELD,
+  recordsOfContainer,
+} from "./bodySequenceGrammar.js";
 import { isBodySequenceChange } from "./bodySequenceEditor.js";
 import {
   blockHolding,
@@ -202,26 +213,35 @@ ORACLE_NOTES.push(
 /** What the every-step oracle counts over all its notes. `ORACLE_PARTS` holds each file's share. */
 export const ORACLE_COUNTS = {
   outcomes: {
-    applied: 29871,
-    "filtered by keepsContainers": 9332,
-    "refused, as no trial settles": 144,
+    applied: 38719,
+    "filtered by keepsContainers": 0,
+    "refused, as no trial settles": 628,
     "not offered": 1069,
     "range error": 0,
   },
-  undone: 29352,
-  given: 18730,
-  typedInBySomeoneElse: 31466,
-  retypedBySomeoneElse: 23342,
+  undone: 37784,
+  given: 24322,
+  typedInBySomeoneElse: 40009,
+  retypedBySomeoneElse: 27814,
   excepted: {
     "a mark on an inline item": 560,
     "formatting stored under a code block's letters": 33,
   },
-  unsettled: { "a text drag of N-N to N": 144 } as Record<string, number>,
+  unsettled: {
+    "a text drag of N-N to N": 230,
+    "two paragraphs pasted over N-N": 51,
+    "two paragraphs pasted over N-N, the first whole": 51,
+    "an empty paragraph and a heading pasted over N-N": 51,
+    "Enter over N-N": 138,
+    "a divider over N-N": 3,
+    "a code block put over N-N": 3,
+    "a heading and a paragraph put over N-N": 3,
+    "a delete and a split over N-N": 98,
+  } as Record<string, number>,
   drags: {
-    "text, applied": 5018,
+    "text, applied": 7306,
     "block, applied": 724,
-    "text, refused, as no trial settles": 144,
-    "text, filtered by keepsContainers": 2374,
+    "text, refused, as no trial settles": 230,
   } as Record<string, number>,
 };
 
@@ -232,14 +252,14 @@ export type Agreement = {
   onTheWholeNote: number;
 };
 export const AGREEMENT_COUNTS: Agreement = {
-  compared: 39754,
-  trials: 22993,
-  inTheWindow: 22993,
-  onTheWholeNote: 0,
+  compared: 50782,
+  trials: 50782,
+  inTheWindow: 50771,
+  onTheWholeNote: 11,
 };
 export const AGREEMENT_IN_THE_DIFFERENTIAL: { sample: Agreement; full: Agreement } = {
-  sample: { compared: 1893, trials: 1032, inTheWindow: 1032, onTheWholeNote: 0 },
-  full: { compared: 9739, trials: 5336, inTheWindow: 5336, onTheWholeNote: 0 },
+  sample: { compared: 2147, trials: 2147, inTheWindow: 2147, onTheWholeNote: 0 },
+  full: { compared: 11435, trials: 11435, inTheWindow: 11435, onTheWholeNote: 0 },
 };
 
 type OracleCounts = typeof ORACLE_COUNTS;
@@ -264,56 +284,81 @@ export const ORACLE_PARTS: readonly {
     sample: {
       counts: {
         outcomes: {
-          applied: 2025,
-          "filtered by keepsContainers": 604,
-          "refused, as no trial settles": 7,
+          applied: 2609,
+          "filtered by keepsContainers": 0,
+          "refused, as no trial settles": 27,
           "not offered": 111,
           "range error": 0,
         },
-        undone: 1988,
-        given: 1202,
-        typedInBySomeoneElse: 1982,
-        retypedBySomeoneElse: 1484,
+        undone: 2541,
+        given: 1536,
+        typedInBySomeoneElse: 2470,
+        retypedBySomeoneElse: 1763,
         excepted: {
           "a mark on an inline item": 31,
           "formatting stored under a code block's letters": 8,
         },
-        unsettled: { "a text drag of N-N to N": 7 },
+        unsettled: {
+          "a text drag of N-N to N": 13,
+          "two paragraphs pasted over N-N": 2,
+          "two paragraphs pasted over N-N, the first whole": 2,
+          "an empty paragraph and a heading pasted over N-N": 2,
+          "Enter over N-N": 4,
+          "a delete and a split over N-N": 4,
+        },
         drags: {
-          "text, applied": 285,
+          "text, applied": 437,
           "block, applied": 52,
-          "text, refused, as no trial settles": 7,
-          "text, filtered by keepsContainers": 158,
+          "text, refused, as no trial settles": 13,
         },
       },
-      agreed: { compared: 2032, trials: 1210, inTheWindow: 1210, onTheWholeNote: 0 },
+      agreed: {
+        compared: 2636,
+        trials: 2636,
+        inTheWindow: 2635,
+        onTheWholeNote: 1,
+      },
     },
     full: {
       counts: {
         outcomes: {
-          applied: 15280,
-          "filtered by keepsContainers": 4980,
-          "refused, as no trial settles": 50,
+          applied: 20062,
+          "filtered by keepsContainers": 0,
+          "refused, as no trial settles": 248,
           "not offered": 593,
           "range error": 0,
         },
-        undone: 14981,
-        given: 9410,
-        typedInBySomeoneElse: 14825,
-        retypedBySomeoneElse: 11270,
+        undone: 19535,
+        given: 12255,
+        typedInBySomeoneElse: 18948,
+        retypedBySomeoneElse: 13603,
         excepted: {
           "a mark on an inline item": 292,
           "formatting stored under a code block's letters": 33,
         },
-        unsettled: { "a text drag of N-N to N": 50 },
+        unsettled: {
+          "a text drag of N-N to N": 82,
+          "two paragraphs pasted over N-N": 21,
+          "two paragraphs pasted over N-N, the first whole": 21,
+          "an empty paragraph and a heading pasted over N-N": 21,
+          "Enter over N-N": 55,
+          "a divider over N-N": 3,
+          "a code block put over N-N": 3,
+          "a heading and a paragraph put over N-N": 3,
+          "a delete and a split over N-N": 39,
+        },
         drags: {
-          "text, applied": 2284,
+          "text, applied": 3485,
           "block, applied": 367,
-          "text, refused, as no trial settles": 50,
-          "text, filtered by keepsContainers": 1233,
+          "text, refused, as no trial settles": 82,
         },
       },
-      agreed: { compared: 15330, trials: 9126, inTheWindow: 9126, onTheWholeNote: 0 },
+      agreed: {
+        compared: 20310,
+        trials: 20310,
+        inTheWindow: 20306,
+        onTheWholeNote: 4,
+      },
     },
   },
   {
@@ -322,50 +367,76 @@ export const ORACLE_PARTS: readonly {
     sample: {
       counts: {
         outcomes: {
-          applied: 1925,
-          "filtered by keepsContainers": 528,
-          "refused, as no trial settles": 10,
+          applied: 2415,
+          "filtered by keepsContainers": 0,
+          "refused, as no trial settles": 48,
           "not offered": 80,
           "range error": 0,
         },
-        undone: 1904,
-        given: 1205,
-        typedInBySomeoneElse: 2249,
-        retypedBySomeoneElse: 1641,
-        excepted: { "a mark on an inline item": 30 },
-        unsettled: { "a text drag of N-N to N": 10 },
+        undone: 2371,
+        given: 1540,
+        typedInBySomeoneElse: 2764,
+        retypedBySomeoneElse: 1889,
+        excepted: {
+          "a mark on an inline item": 30,
+        },
+        unsettled: {
+          "Enter over N-N": 14,
+          "a delete and a split over N-N": 10,
+          "a text drag of N-N to N": 18,
+          "two paragraphs pasted over N-N": 2,
+          "two paragraphs pasted over N-N, the first whole": 2,
+          "an empty paragraph and a heading pasted over N-N": 2,
+        },
         drags: {
-          "text, applied": 346,
+          "text, applied": 479,
           "block, applied": 46,
-          "text, filtered by keepsContainers": 141,
-          "text, refused, as no trial settles": 10,
+          "text, refused, as no trial settles": 18,
         },
       },
-      agreed: { compared: 1935, trials: 1084, inTheWindow: 1084, onTheWholeNote: 0 },
+      agreed: {
+        compared: 2463,
+        trials: 2463,
+        inTheWindow: 2461,
+        onTheWholeNote: 2,
+      },
     },
     full: {
       counts: {
         outcomes: {
-          applied: 14591,
-          "filtered by keepsContainers": 4352,
-          "refused, as no trial settles": 94,
+          applied: 18657,
+          "filtered by keepsContainers": 0,
+          "refused, as no trial settles": 380,
           "not offered": 476,
           "range error": 0,
         },
-        undone: 14371,
-        given: 9320,
-        typedInBySomeoneElse: 16641,
-        retypedBySomeoneElse: 12072,
-        excepted: { "a mark on an inline item": 268 },
-        unsettled: { "a text drag of N-N to N": 94 },
+        undone: 18249,
+        given: 12067,
+        typedInBySomeoneElse: 21061,
+        retypedBySomeoneElse: 14211,
+        excepted: {
+          "a mark on an inline item": 268,
+        },
+        unsettled: {
+          "a text drag of N-N to N": 148,
+          "Enter over N-N": 83,
+          "a delete and a split over N-N": 59,
+          "two paragraphs pasted over N-N": 30,
+          "two paragraphs pasted over N-N, the first whole": 30,
+          "an empty paragraph and a heading pasted over N-N": 30,
+        },
         drags: {
-          "text, applied": 2734,
-          "text, refused, as no trial settles": 94,
+          "text, applied": 3821,
+          "text, refused, as no trial settles": 148,
           "block, applied": 357,
-          "text, filtered by keepsContainers": 1141,
         },
       },
-      agreed: { compared: 14685, trials: 8531, inTheWindow: 8531, onTheWholeNote: 0 },
+      agreed: {
+        compared: 19037,
+        trials: 19037,
+        inTheWindow: 19030,
+        onTheWholeNote: 7,
+      },
     },
   },
 ];
@@ -443,6 +514,101 @@ export function amongMoreLines(lines: readonly StoredLine[]): Longer {
   return { baseline: noteOfLines([...above, ...lines, ...PADDING]), shift: above.length * 5 };
 }
 
+type ContainerRun = { id: string; depth: number; first: Y.ID; above: string };
+
+function containerRuns(doc: Y.Doc): ContainerRun[] {
+  const runs: ContainerRun[] = [];
+  let open: ContainerRun[] = [];
+  for (let item = doc.getText(BODY_SEQUENCE_FIELD)._start; item !== null; item = item.right) {
+    const type =
+      item.deleted || !(item.content instanceof Y.ContentType) ? null : item.content.type;
+    if (!(type instanceof Y.XmlElement) || type.nodeName !== BLOCK_ELEMENT) continue;
+    const path = type.getAttribute("path") as unknown;
+    let continues = true;
+    open = (Array.isArray(path) ? (path as string[]) : []).map((id, depth, ids) => {
+      continues &&= open[depth]?.id === id;
+      if (continues) return open[depth]!;
+      const run = { id, depth, first: item.id, above: ids.slice(0, depth).join() };
+      runs.push(run);
+      return run;
+    });
+  }
+  return runs;
+}
+
+const FAMILY_OF: Record<string, string> = {
+  bulletList: "list",
+  orderedList: "list",
+  taskList: "list",
+  listItem: "item",
+  taskItem: "item",
+  blockquote: "box",
+  callout: "box",
+};
+
+/**
+ * The record rules a change broke, which hold after any merge: no record key goes, and every
+ * container a path names has its type recorded, and each record its type is made with.
+ */
+export function recordRulesBroken(before: Y.Doc, after: Y.Doc): string[] {
+  const broken: string[] = [];
+  const records = after.getMap(BODY_CONTAINERS_FIELD);
+  for (const key of before.getMap(BODY_CONTAINERS_FIELD).keys())
+    if (!records.has(key)) broken.push(`the record ${key} went`);
+  for (const { id } of containerRuns(after)) {
+    const type = records.get(id);
+    if (typeof type !== "string") broken.push(`the container ${id} has no type`);
+    else
+      for (const [key] of recordsOfContainer(schema, { id, type, attrs: {} }))
+        if (!records.has(key)) broken.push(`the container ${id} has no record ${key}`);
+  }
+  return broken;
+}
+
+/**
+ * The container rules one person's write broke, checked from the stored note alone, so they hold
+ * whatever the writers decide: the record rules, no id comes to be shared by two containers that
+ * did not share it before, and no container's id goes while the leaf that led it still leads a
+ * container of its family under the same containers, unless another container shared that id or
+ * that leaf led the container now there already, as when a lift takes away the one around it, or
+ * a container it led shared its id and so took a fresh one. Merging two people's changes may leave one id on two containers, so these hold for a write, not
+ * for a merge.
+ */
+export function containerRulesBroken(before: Y.Doc, after: Y.Doc): string[] {
+  const broken = recordRulesBroken(before, after);
+  const recordsBefore = before.getMap(BODY_CONTAINERS_FIELD);
+  const records = after.getMap(BODY_CONTAINERS_FIELD);
+  const runsBefore = containerRuns(before);
+  const runs = containerRuns(after);
+  const sharedIn = (all: ContainerRun[]) => {
+    const seen = new Set<string>();
+    const shared = new Set<string>();
+    for (const { id } of all) (seen.has(id) ? shared : seen).add(id);
+    return shared;
+  };
+  const sharedBefore = sharedIn(runsBefore);
+  for (const id of sharedIn(runs))
+    if (!sharedBefore.has(id)) broken.push(`two containers now share the id ${id}`);
+  for (const was of runsBefore) {
+    if (sharedBefore.has(was.id) || runs.some((run) => run.id === was.id)) continue;
+    const now = runs.find(
+      (run) =>
+        Y.compareIDs(run.first, was.first) && run.depth === was.depth && run.above === was.above,
+    );
+    const family = (records: Y.Map<unknown>, id: string) => FAMILY_OF[String(records.get(id))];
+    const movedUp = (id: string) =>
+      runsBefore.some(
+        (run) =>
+          Y.compareIDs(run.first, was.first) &&
+          (run.id === id ||
+            (run.depth > was.depth && sharedBefore.has(run.id) && !recordsBefore.has(id))),
+      );
+    if (now && !movedUp(now.id) && family(records, now.id) === family(recordsBefore, was.id))
+      broken.push(`the container ${was.id}, still led by its first leaf, is now ${now.id}`);
+  }
+  return broken;
+}
+
 /**
  * Asks how to write some transactions, from a trial on the blocks around them and from one on
  * the whole note, and throws when the two differ in the lines they give first or in which
@@ -465,7 +631,16 @@ export function expectTheWindowToAgree(
     doc = transform.doc;
     return transform;
   });
-  const asked = vi.spyOn(Y.Doc.prototype, "getMap");
+  const copies = new Map<Y.Doc, boolean>();
+  const getText = Y.Doc.prototype.getText;
+  const asked = vi.spyOn(Y.Doc.prototype, "getText").mockImplementation(function (
+    this: Y.Doc,
+    name?: string,
+  ) {
+    if (this !== fresh.doc && !copies.has(this))
+      copies.set(this, this.share.has(BODY_SEQUENCE_FIELD));
+    return getText.call(this, name);
+  });
   const said = (how: ReturnType<typeof howToWrite>) =>
     JSON.stringify(how && [how.lines, how.transactions.map((each) => each.steps.length)]);
   let onTheWholeNote: string;
@@ -474,10 +649,10 @@ export function expectTheWindowToAgree(
   let copiedTheNote: boolean;
   try {
     onTheWholeNote = said(howToWrite(writing, moved, "note"));
-    ranATrial = asked.mock.calls.length > 0;
-    asked.mockClear();
+    ranATrial = copies.size > 0;
+    copies.clear();
     inTheWindow = said(howToWrite(writing, moved));
-    copiedTheNote = asked.mock.contexts.some((doc) => doc !== fresh.doc);
+    copiedTheNote = [...copies.values()].some(Boolean);
   } finally {
     asked.mockRestore();
     fresh.doc.destroy();
@@ -577,6 +752,20 @@ export function sampleOf(note: number) {
   };
 }
 
+const takesContainersApart = (transaction: Transaction) =>
+  transaction.steps.some((step, at) => {
+    if (step instanceof ReplaceAroundStep) return true;
+    if (!(step instanceof ReplaceStep)) return false;
+    let opens = false;
+    step.slice.content.descendants((node) => {
+      opens ||= node.isBlock && !node.isTextblock && !node.isLeaf;
+    });
+    const $from = transaction.docs[at]!.resolve(step.from);
+    const $to = transaction.docs[at]!.resolve(step.to);
+    const depthOf = ($pos: typeof $from) => $pos.depth - ($pos.parent.isTextblock ? 1 : 0);
+    return opens || $from.sharedDepth(step.to) < Math.max(depthOf($from), depthOf($to));
+  });
+
 type Outcome =
   | "applied"
   | "filtered by keepsContainers"
@@ -660,15 +849,15 @@ export function everyStepOracle(part: number): void {
           unsettled = howToWrite(writingOf(fresh), [wrote], "note") === null;
           const left = linesAWriteLeavesWanting(writingOf(fresh), [wrote]);
           fresh.doc.destroy();
-          if (unsettled && (left.isSettled || left.wanting.length === 0))
+          if (unsettled && left.moved.length === 0 && (left.isSettled || left.wanting.length === 0))
             throw new Error(
-              `${label} in ${before.toString()} was refused, and not because a boundary it makes would stand in front of what a line with none held`,
+              `${label} in ${before.toString()} was refused, and neither because a boundary it makes would stand in front of what a line with none held nor because it deletes the boundary a moved item's added paragraph would be given`,
             );
         }
         if (wrote && unsettled) {
-          if (label.startsWith("Enter"))
+          if (label.startsWith("Enter") && !takesContainersApart(wrote))
             throw new Error(
-              `${label} in ${before.toString()} was refused. Enter is written in every shape: at a caret, and over a selection in one block or across blocks.`,
+              `${label} in ${before.toString()} was refused. Enter is written in every shape that takes no container apart: at a caret, and over a selection in one block or across blocks.`,
             );
           a.expectMirror();
           expectTheWindowToAgree(agreement, longer, [wrote], `${label} in ${before.toString()}`);
@@ -678,6 +867,12 @@ export function everyStepOracle(part: number): void {
         } else if (wrote) {
           outcome = "applied";
           a.expectMirror();
+          const was = declared(93);
+          Y.applyUpdate(was.doc, baseline);
+          const broken = containerRulesBroken(was.doc, a.doc);
+          was.doc.destroy();
+          if (broken.length > 0)
+            throw new Error(`${label} in ${before.toString()}: ${broken.join("; ")}`);
           const read = readBodySequence(schema, a.doc);
           if (!read.eq(wrote.doc)) {
             const differences = markDifferences(before, wrote, read);
@@ -712,7 +907,7 @@ export function everyStepOracle(part: number): void {
         } else if (refused) {
           const docs = [...refused.docs, refused.doc];
           const byContainers = refused.steps.some(
-            (step, at) => !keepsContainers(step, docs[at]!, docs[at + 1]!, () => false),
+            (step, at) => !keepsContainers(step, docs[at]!, docs[at + 1]!),
           );
           if (!byContainers)
             throw new Error(`${label} in ${before.toString()} was refused for no listed reason`);

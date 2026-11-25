@@ -23,7 +23,6 @@ import {
   indexAt,
   positionAt,
   positionOf,
-  shareAContainerId,
   startBefore,
   tokenBefore,
   tokenFrom,
@@ -349,8 +348,7 @@ function holdSelection(
  * around its letters. It shows every change the note's document holds by then, also the ones
  * Yjs has not told of yet. Such a transaction is never written back.
  *
- * A transaction that would start, change or cut a list, quote, callout or table is refused, also
- * one that would remove the last line between two of them that share an id. So is one that would
+ * A transaction that would start, change or cut a table is refused. So is one that would
  * write between the two units of a surrogate pair or put in half of one, and one dispatched while
  * a Yjs transaction is open, while Yjs has not told of every finished one, or before the editor
  * shows a change the note's document holds: its offsets may be of a document the sequence no
@@ -390,30 +388,10 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
       const unwritten = pending === flushed ? undefined : pending[0];
       if (showsWhatStands && !showsWhatStands(unwritten ? unwritten.before : state.doc))
         return false;
-      let reading: BodyReading | null | undefined;
-      const shareAnId = (at: number) => (endOfUpper: number, startOfLower: number) => {
-        if (reading === undefined) {
-          const read = bound?.reader.reading();
-          reading = read && (read.doc === state.doc || read.doc.eq(state.doc)) ? read : null;
-        }
-        if (!reading) return bound !== null;
-        const atStart = (pos: number, side: -1 | 1) => {
-          let mapped = pos;
-          for (let step = at - 1; step >= 0; step--)
-            mapped = transaction.mapping.maps[step]!.invert().map(mapped, side);
-          return mapped;
-        };
-        return shareAContainerId(reading, atStart(endOfUpper, -1), atStart(startOfLower, 1));
-      };
       return transaction.steps.every(
         (step, at) =>
           keepsPairs(step, transaction.docs[at]!) &&
-          keepsContainers(
-            step,
-            transaction.docs[at]!,
-            transaction.docs[at + 1] ?? transaction.doc,
-            shareAnId(at),
-          ),
+          keepsContainers(step, transaction.docs[at]!, transaction.docs[at + 1] ?? transaction.doc),
       );
     },
     props: {

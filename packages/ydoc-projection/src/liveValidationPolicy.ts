@@ -1,6 +1,9 @@
 import * as Y from "yjs";
 import type { OrderedLiveUpdateCutPolicy } from "./orderedLiveUpdateCut.js";
 
+/** The most bytes one change to a note may hold for the relay to take it. */
+export const LIVE_UPDATE_MAX_BYTES = 2 * 1024 * 1024;
+
 /** Calibrated for the validation worker's 512 MB heap. */
 export const WORKER_LIVE_VALIDATION_POLICY: OrderedLiveUpdateCutPolicy = Object.freeze({
   maxStructVisits: 400_000,

@@ -14,8 +14,31 @@ import {
   BLOCK_ELEMENT,
   BODY_CONTAINERS_FIELD,
   BODY_SEQUENCE_FIELD,
+  startingRecords,
 } from "./bodySequenceGrammar.js";
-import { linesGiven, LONE_HALF } from "./bodySequenceWriter.js";
+import {
+  BODY_SEQUENCE_CHANGE_MAX_VALUES,
+  bodySequenceChangeLimit,
+  bodySequenceChangeSize,
+  bodySequenceRoomPolicy,
+} from "./bodySequenceIntake.js";
+import {
+  isBox,
+  isItem,
+  isList,
+  linesGiven,
+  LONE_HALF,
+  same,
+  writesOf,
+  type BodyContainer,
+  type Planned,
+} from "./bodySequenceWriter.js";
+import {
+  LIVE_NOTE_CAPACITY,
+  LIVE_NOTE_ELEMENT_WEIGHT,
+  LIVE_UPDATE_MAX_BYTES,
+  WORKER_LIVE_VALIDATION_POLICY,
+} from "./liveValidationPolicy.js";
 import { storedValue, visitPieces } from "./bodySequenceYjs.js";
 import {
   blockHolding,
@@ -35,7 +58,15 @@ import {
   type SequenceElement,
 } from "./bodySequenceReading.js";
 
-export type BodyWriting = { sequence: Y.Text; reader: BodyReader };
+export type BodyWriting = {
+  sequence: Y.Text;
+  reader: BodyReader;
+  /**
+   * Collects the blocks with no boundary of their own that a container change would move, by
+   * their index in the reading of that moment. The change is not written.
+   */
+  wanting?: number[];
+};
 
 type Token =
   | { letters: string; marks: readonly Mark[] }
@@ -60,74 +91,46 @@ function replaces(map: StepMap): boolean {
   return found;
 }
 
-const LIST_ITEMS: ReadonlySet<string> = new Set(["listItem", "taskItem"]);
+const isTablePart = (node: ProseMirrorNode) =>
+  holdsBlocks(node) && node.type.name.startsWith("table");
 
-function isInFirstBlockOfItem(doc: ProseMirrorNode, pos: number): boolean {
-  const $pos = doc.resolve(pos);
-  if (!$pos.parent.isTextblock || $pos.depth < 2) return false;
-  const item = $pos.depth - 1;
-  return LIST_ITEMS.has($pos.node(item).type.name) && $pos.index(item) === 0;
-}
-
-function startsBlock(doc: ProseMirrorNode, from: number, to: number): boolean {
-  let found = false;
-  doc.nodesBetween(from, to, (node, pos) => {
-    if (holdsNoBlocks(node) && pos >= from) found = true;
-    return !found && !node.isInline && !node.isTextblock;
-  });
-  return found;
-}
-
-/**
- * Whether a step leaves every list, quote, callout and table as it is: it starts none, changes
- * none, and removes one only whole. The sequence takes such a step with no change to a path or to
- * a container record. Any other step is refused until container changes are written here, by the
- * container writer's operations.
- *
- * A step that removes the last line between two containers is one of those when the two share an
- * id: they would read as one. The container writer first gives the later one a fresh id, and
- * that write goes here too. `shareAnId` says whether the container that ends at one place of
- * `before` and the one that starts at another share an id.
- *
- * So is a step that starts a block from inside the first block of a list item: Enter there, and
- * a paste of several paragraphs over it. Section 4 gives the line after the split a new item,
- * with a fresh id and its records, and the item's later blocks go with it. The paste is refused
- * although the item itself survives, because its second paragraph needs that new item. The
- * container writer's split lifts both. A split of a later block stays in its item and is taken.
- */
-export function keepsContainers(
+function leavesWhole(
   step: Step,
   before: ProseMirrorNode,
   after: ProseMirrorNode,
-  shareAnId: (endOfUpper: number, startOfLower: number) => boolean,
+  counts: (node: ProseMirrorNode) => boolean,
 ): boolean {
   let kept = true;
   let replaced = false;
   step.getMap().forEach((oldStart, oldEnd, newStart, newEnd) => {
     replaced = true;
-    if (isInFirstBlockOfItem(before, oldStart) && startsBlock(after, newStart, newEnd))
-      kept = false;
-    if (newStart === newEnd) {
-      const $joint = after.resolve(newStart);
-      const upper = $joint.nodeBefore;
-      const lower = $joint.nodeAfter;
-      if (upper && lower && holdsBlocks(upper) && holdsBlocks(lower) && shareAnId(oldStart, oldEnd))
-        kept = false;
-    }
     before.nodesBetween(oldStart, oldEnd, (node, pos) => {
-      if (holdsBlocks(node) && pos >= oldStart !== pos + node.nodeSize <= oldEnd) kept = false;
+      if (counts(node) && pos >= oldStart !== pos + node.nodeSize <= oldEnd) kept = false;
       return kept && !node.isTextblock;
     });
     after.nodesBetween(newStart, newEnd, (node, pos) => {
-      if (holdsBlocks(node) && (pos >= newStart || pos + node.nodeSize <= newEnd)) kept = false;
+      if (counts(node) && (pos >= newStart || pos + node.nodeSize <= newEnd)) kept = false;
       return kept && !node.isTextblock;
     });
   });
   if (!replaced && step instanceof AttrStep) {
     const node = before.nodeAt(step.pos);
-    if (node && holdsBlocks(node)) kept = false;
+    if (node && counts(node)) kept = false;
   }
   return kept;
+}
+
+/**
+ * Whether a step leaves every table as it is: it starts none, changes none, and removes one only
+ * whole. Any other step is refused until table changes are written here. What a step does to
+ * lists, list items, quotes and callouts, `writeTransaction` writes.
+ */
+export function keepsContainers(
+  step: Step,
+  before: ProseMirrorNode,
+  after: ProseMirrorNode,
+): boolean {
+  return leavesWhole(step, before, after, isTablePart);
 }
 
 const isHighSurrogate = (unit: number) => unit >= 0xd800 && unit <= 0xdbff;
@@ -242,12 +245,6 @@ function unitsBetween(doc: ProseMirrorNode, from: number, to: number): Unit[] {
   return units;
 }
 
-function sameValue(one: unknown, other: unknown): boolean {
-  if (one === other) return true;
-  if (!Array.isArray(one) || !Array.isArray(other) || one.length !== other.length) return false;
-  return one.every((value, at) => sameValue(value, other[at]));
-}
-
 function markAttributes(marks: readonly Mark[]): Attributes {
   return Object.fromEntries(marks.map((mark) => [mark.type.name, { ...mark.attrs }]));
 }
@@ -287,7 +284,7 @@ function setAttribute(
   key: string,
   value: object | string | number | boolean | null,
 ): void {
-  if (!sameValue(storedValue(element, key), value)) element.setAttribute(key, value);
+  if (!same(storedValue(element, key), value)) element.setAttribute(key, value);
 }
 
 function setBoundary(
@@ -299,7 +296,7 @@ function setBoundary(
   const sameKind = was.type === now.type;
   if (!sameKind) setAttribute(element, "type", now.type.name);
   for (const [key, value] of Object.entries(now.attrs))
-    if (!sameKind || !sameValue(was.attrs[key], value)) setAttribute(element, key, value);
+    if (!sameKind || !same(was.attrs[key], value)) setAttribute(element, key, value);
   if (path) setAttribute(element, "path", [...path]);
 }
 
@@ -554,30 +551,252 @@ function blockStartEdits(
   return edits;
 }
 
-function containersOf(doc: ProseMirrorNode): { pos: number; node: ProseMirrorNode }[] {
-  const found: { pos: number; node: ProseMirrorNode }[] = [];
-  doc.descendants((node, pos) => {
-    if (holdsBlocks(node)) found.push({ pos, node });
-    return holdsBlocks(node);
-  });
-  return found;
+type Known = { id: string; node: ProseMirrorNode; first: SequenceElement | null };
+type Around = { pos: number; node: ProseMirrorNode; first: number; last: number };
+const freshId = () => crypto.randomUUID().replaceAll("-", "");
+const beforeTheDispatch = new WeakMap<Y.Transaction, Map<SequenceElement, Known[]>>();
+
+function familyOf(node: ProseMirrorNode): string {
+  const type = node.type.name;
+  if (isList(type)) return "list";
+  if (isItem(type)) return "item";
+  if (isBox(type)) return "box";
+  return type === "tableHeader" ? "tableCell" : type;
 }
 
-function pathOfSameContainer(
+function containersBefore(
   reading: BodyReading,
+  isNew: (element: SequenceElement) => boolean,
+): Map<SequenceElement, Known[]> {
+  const known = new Map<SequenceElement, Known[]>();
+  let block = 0;
+  const visit = (node: ProseMirrorNode, chain: Known[]) =>
+    node.forEach((child) => {
+      if (holdsNoBlocks(child)) {
+        const element = boundaryElement(reading, block);
+        const own = chain.slice(0, reading.paths[block]!.length);
+        if (element && !isNew(element)) {
+          for (const each of own) each.first ??= element;
+          known.set(element, own);
+        }
+        block += 1;
+      } else if (holdsBlocks(child)) {
+        const id = reading.paths[block]?.[chain.length] ?? "";
+        visit(child, [...chain, { id, node: child, first: null }]);
+      }
+    });
+  visit(reading.doc, []);
+  return known;
+}
+
+function writeContainersThatDiffer(
+  writing: BodyWriting,
   after: ProseMirrorNode,
-  inAfter: number,
-  depth: number,
-): readonly string[] | null {
-  if (depth === 0) return [];
-  const wanted = containersOf(after);
-  const read = containersOf(reading.doc);
-  const ordinal = wanted.findIndex((container) => container.pos === inAfter);
-  const same = read[ordinal];
-  if (!same || read.length !== wanted.length || same.node.type !== wanted[ordinal]!.node.type)
+  skip: ReadonlySet<number>,
+): boolean | null {
+  const { sequence, reader } = writing;
+  const doc = sequence.doc!;
+  const change = doc._transaction;
+  if (!change) return false;
+  const records = doc.getMap(BODY_CONTAINERS_FIELD);
+  const reading = reader.reading();
+  const nodes: Around[] = [];
+  const chains: Around[][] = [];
+  const walk = (node: ProseMirrorNode, start: number, chain: Around[]) =>
+    node.forEach((child, offset) => {
+      if (holdsNoBlocks(child)) chains.push(chain);
+      else if (holdsBlocks(child)) {
+        const around = { pos: start + offset, node: child, first: chains.length, last: -1 };
+        nodes.push(around);
+        walk(child, start + offset + 1, [...chain, around]);
+        around.last = chains.length - 1;
+      }
+    });
+  walk(after, 0, []);
+  const shown = reading.blocks.map((_, at) => at).filter((at) => !skip.has(at));
+  if (chains.length !== shown.length) return false;
+
+  const started = change.beforeState.get(doc.clientID) ?? 0;
+  const isNew = ({ _item }: SequenceElement) =>
+    _item!.id.client === doc.clientID && _item!.id.clock >= started;
+  const history = beforeTheDispatch.get(change) ?? containersBefore(reading, isNew);
+  beforeTheDispatch.set(change, history);
+  const elementOf = (leaf: number) => boundaryElement(reading, shown[leaf]!);
+  const firstElement = ({ first, last }: Around) => {
+    for (let leaf = first; leaf <= last; leaf++) {
+      const element = elementOf(leaf);
+      if (element) return element;
+    }
     return null;
-  const path = reading.paths[countBelow(reading.starts, same.pos)];
-  return path && path.length >= depth ? path.slice(0, depth) : null;
+  };
+  const chainOf = ({ first, last }: Around) => {
+    const all = new Set<Known>();
+    for (let leaf = first; leaf <= last; leaf++)
+      for (const known of history.get(elementOf(leaf)!) ?? []) all.add(known);
+    return [...all];
+  };
+
+  const holder = new Map<Known, Around>();
+  const owned = new Map<Around, Known>();
+  const claim = (node: Around, known: Known | undefined) => {
+    if (!known) return;
+    holder.set(known, node);
+    owned.set(node, known);
+  };
+  const isFree = (known: Known) => !holder.has(known);
+  for (const node of nodes)
+    claim(
+      node,
+      chainOf(node).find((known) => known.node === node.node && isFree(known)),
+    );
+  const kinOf = (node: Around) => {
+    const element = firstElement(node);
+    return (element ? (history.get(element) ?? []) : [])
+      .toReversed()
+      .filter(
+        (known) =>
+          known.first === element && familyOf(known.node) === familyOf(node.node) && isFree(known),
+      );
+  };
+  const isAlike = (node: Around) => (known: Known) => known.node.type === node.node.type;
+  for (const node of nodes)
+    if (!owned.has(node))
+      claim(
+        node,
+        kinOf(node).find(
+          (known) => isAlike(node)(known) && known.node.content.eq(node.node.content),
+        ),
+      );
+  for (const node of nodes) {
+    if (owned.has(node)) continue;
+    const kin = kinOf(node);
+    claim(node, kin.find(isAlike(node)) ?? kin[0]);
+  }
+  const contains = (one: Around, other: Around) =>
+    one.pos <= other.pos && other.pos + other.node.nodeSize <= one.pos + one.node.nodeSize;
+  const splitFrom = new Map<Known, Known | null>();
+  for (const node of nodes) {
+    if (owned.has(node)) continue;
+    const kin = chainOf(node).filter((known) => familyOf(known.node) === familyOf(node.node));
+    const free = kin.find(isFree);
+    if (free) {
+      claim(node, free);
+      continue;
+    }
+    const isElsewhere = (known: Known) => {
+      const held = holder.get(known)!;
+      return !contains(held, node) && !contains(node, held);
+    };
+    const known = { id: freshId(), node: node.node, first: firstElement(node) };
+    splitFrom.set(known, kin.find(isElsewhere) ?? null);
+    claim(node, known);
+  }
+
+  const made = new Map<Around, BodyContainer>();
+  const containerOf = (node: Around): BodyContainer => {
+    const had = made.get(node);
+    if (had) return had;
+    const known = owned.get(node)!;
+    const type = node.node.type.name;
+    const source = splitFrom.get(known);
+    const container: BodyContainer = { id: known.id, type, changes: new Map() };
+    made.set(node, container);
+    if (source === null) container.starts = { ...node.node.attrs };
+    else {
+      const from = source ?? known;
+      if (source) container.copies = source.id;
+      if (from.node.type !== node.node.type && storedValue(records, from.id) !== type)
+        container.changes.set("", type);
+      for (const [name, value] of Object.entries(node.node.attrs))
+        if (
+          !same(from.node.attrs[name], value) &&
+          !same(storedValue(records, `${from.id}.${name}`), value)
+        )
+          container.changes.set(name, value);
+    }
+    return container;
+  };
+  const lines: Planned[] = chains.map((chain, leaf) => {
+    const boundary = elementOf(leaf) as Y.XmlElement | null;
+    return {
+      boundary,
+      bare: boundary ? "" : "spill",
+      start: 0,
+      text: "",
+      type: "",
+      attrs: {},
+      path: chain.map(containerOf),
+      ids: [...reading.paths[shown[leaf]!]!],
+    };
+  });
+  const moving = lines.flatMap((line, leaf) =>
+    line.boundary === null &&
+    !same(
+      line.path.map(({ id }) => id),
+      line.ids,
+    )
+      ? [shown[leaf]!]
+      : [],
+  );
+  if (moving.length > 0) {
+    writing.wanting?.push(...moving);
+    return false;
+  }
+  const isWellFormed = (value: unknown) => typeof value !== "string" || !LONE_HALF.test(value);
+  for (const { starts, changes } of made.values())
+    if (![...Object.values(starts ?? {}), ...changes.values()].every(isWellFormed)) return false;
+  const writes = writesOf(after.type.schema, doc, lines, freshId);
+  if (!writes) return false;
+  const recorded = [...writes.records].filter(
+    ([key, value]) => !same(storedValue(records, key), value),
+  );
+  if (recorded.length + writes.attributes.size === 0) return null;
+  let low = sequence.length;
+  let high = -1;
+  lines.forEach((line, leaf) => {
+    if (!line.boundary || !writes.attributes.has(line.boundary)) return;
+    const at = boundaryAt(reading, shown[leaf]!);
+    low = Math.min(low, at);
+    high = Math.max(high, at);
+  });
+  if (high >= 0) reader.touch(low, high);
+  if (recorded.length > 0) reader.touchRecords();
+  for (const [key, value] of recorded) records.set(key, value);
+  for (const [element, { path }] of writes.attributes)
+    setAttribute(element as SequenceElement, "path", path as string[]);
+
+  for (const node of nodes) {
+    const known = owned.get(node)!;
+    known.id = made.get(node)!.id;
+    known.node = node.node;
+    known.first = firstElement(node);
+  }
+  chains.forEach((chain, leaf) => {
+    const element = elementOf(leaf);
+    if (!element) return;
+    const chainNow = history.get(element) ?? [];
+    for (const around of chain) {
+      const known = owned.get(around)!;
+      if (!chainNow.includes(known)) chainNow.push(known);
+    }
+    history.set(element, chainNow);
+  });
+  return true;
+}
+
+function linesOnlyImplied(reading: BodyReading, after: ProseMirrorNode): Set<number> | null {
+  const bare = new Set<number>();
+  const kinds: string[] = [];
+  reading.blocks.forEach(({ node }, block) => {
+    if (boundaryAt(reading, block) < 0) bare.add(block);
+    else kinds.push(node.type.name);
+  });
+  const wanted: string[] = [];
+  after.descendants((node) => {
+    if (holdsNoBlocks(node)) wanted.push(node.type.name);
+    return holdsBlocks(node);
+  });
+  return bare.size > 0 && same(kinds, wanted) ? bare : null;
 }
 
 function writeBlockStartsThatDiffer(writing: BodyWriting, after: ProseMirrorNode): boolean {
@@ -601,29 +820,62 @@ function writeBlockStartsThatDiffer(writing: BodyWriting, after: ProseMirrorNode
     const stored = unitsBetween(read, start, a);
     const edits = blockStartEdits(stored, unitsBetween(after, start, b));
     if (edits === null) return false;
-    if (edits.length === 0) return true;
+    const implied = edits.some((edit) => "drop" in edit) ? linesOnlyImplied(reading, after) : null;
+    const added = implied ?? new Set<number>();
     let wrote = false;
-    for (const edit of edits) {
+    for (const edit of implied ? [] : edits) {
       if ("drop" in edit) {
         const block = blockStartingAt(reading, edit.drop.pos);
         const boundary = block < 0 ? -1 : boundaryAt(reading, block);
+        if (boundary < 0 && block >= 0) added.add(block);
         if (boundary < 0) continue;
         reader.touch(boundary - 1, boundary + 1);
         apply(sequence, [...retain(boundary), { delete: 1 }]);
         wrote = true;
         continue;
       }
-      const $block = after.resolve(edit.add.pos);
-      const depth = $block.depth;
-      const path = pathOfSameContainer(reading, after, depth > 0 ? $block.before(depth) : 0, depth);
-      if (path === null) return false;
       const index = indexAt(reading, stored[edit.before]?.pos ?? a);
-      insertBoundary(writing, index, $block.nodeAfter!, path);
+      insertBoundary(writing, index, after.resolve(edit.add.pos).nodeAfter!, []);
       wrote = true;
     }
-    if (!wrote) return false;
+    if (wrote) continue;
+    if (edits.length > 0 && added.size === 0) return false;
+    const did = writeContainersThatDiffer(writing, after, added);
+    if (!did) return did === null && edits.length === 0;
   }
   return false;
+}
+
+function sameLeaves(one: readonly Token[], other: readonly Token[]): boolean {
+  return (
+    one.length === other.length &&
+    one.every((token, at) => {
+      const against = other[at]!;
+      if ("letters" in token)
+        return (
+          "letters" in against &&
+          token.letters === against.letters &&
+          Mark.sameSet(token.marks, against.marks)
+        );
+      if ("item" in token) return "item" in against && token.item === against.item;
+      return "block" in against && token.block === against.block;
+    })
+  );
+}
+
+function keepsEveryLeaf(step: Step, before: ProseMirrorNode, after: ProseMirrorNode): boolean {
+  if (step instanceof AttrStep) {
+    const node = before.nodeAt(step.pos);
+    return node !== null && holdsBlocks(node);
+  }
+  let kept = replaces(step.getMap());
+  step.getMap().forEach((oldStart, oldEnd, newStart, newEnd) => {
+    kept &&= sameLeaves(
+      tokensBetween(before, oldStart, oldEnd),
+      tokensBetween(after, newStart, newEnd),
+    );
+  });
+  return kept;
 }
 
 function changedBlocks(
@@ -693,7 +945,7 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
         const token = tokenIn(reading, at, offset);
         takesNoMarks(token.index);
         const element = token.piece?.element;
-        const differs = ([key, value]: [string, unknown]) => !sameValue(left.attrs[key], value);
+        const differs = ([key, value]: [string, unknown]) => !same(left.attrs[key], value);
         if (element && left.type === right.type && Object.entries(right.attrs).some(differs)) {
           elements.push(() => {
             reader.touch(token.index, token.index);
@@ -782,12 +1034,23 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
  *
  * A step that leaves the editor's document as it was writes nothing.
  *
+ * Containers are written as section 4 has the container writer write them: paths and records,
+ * once the sequence reads as the editor's document but for its containers. A container keeps its
+ * id while a leaf it held before the transaction is still in it, the earlier part of a split
+ * keeps it and a later part gets a fresh id with a copy of its records, and a new container gets
+ * a fresh id and every record. Records are never deleted. A run of steps that keeps every leaf,
+ * the same boundaries and inline items in the same order, is written once at its end: a wrap, a
+ * lift, a join of two containers, and an attribute step on a container. Written after each such
+ * step, a wrap of many lines would write each line's path once for every step.
+ *
  * Returns false when it stopped at a step after which the sequence does not read as the editor's
- * document: two containers that share an id became neighbours and read as one.
- * `afterEachStep` is called with the editor's document once for each step that replaces, when
- * it is written, and once more for formatting steps that end the transaction. When it returns
- * false the writer stops there and returns false too: the next step's places are places in the
- * editor's document, and mean nothing in a sequence that does not read as it.
+ * document, and when the containers cannot be written: deeper than a path can be, a string
+ * attribute with half a surrogate pair, or a line with no boundary of its own that would move to
+ * other containers. `writing.wanting` then collects that line. `afterEachStep` is called with the
+ * editor's document once for each step that changes leaves, when it is written, once at the end
+ * of each run that keeps them, and once more for formatting steps that end the transaction. When
+ * it returns false the writer stops there and returns false too: the next step's places are
+ * places in the editor's document, and mean nothing in a sequence that does not read as it.
  */
 export function writeTransaction(
   writing: BodyWriting,
@@ -795,26 +1058,36 @@ export function writeTransaction(
   afterEachStep?: (shown: ProseMirrorNode) => boolean,
 ): boolean {
   const docs = [...transaction.docs, transaction.doc];
-  let formatted = -1;
+  type Run = { kind: "marks" | "containers"; from: number };
+  let run = null as Run | null;
+  const flush = (at: number, isLast: boolean) => {
+    if (!run) return true;
+    const { kind, from } = run;
+    run = null;
+    const shown = docs[at]!;
+    if (kind === "containers" && !writeBlockStartsThatDiffer(writing, shown)) return false;
+    if (kind === "marks") writeFormatting(writing, docs[from]!, shown);
+    return (kind === "marks" && !isLast) || afterEachStep?.(shown) !== false;
+  };
   for (let at = 0; at < transaction.steps.length; at++) {
-    const map = transaction.steps[at]!.getMap();
-    if (!replaces(map)) {
-      if (formatted < 0) formatted = at;
-      continue;
-    }
+    const step = transaction.steps[at]!;
+    const map = step.getMap();
     const before = docs[at]!;
     const after = docs[at + 1]!;
-    const ranges = rangesOf(before, after, map);
-    if (ranges.length === 0) continue;
-    if (formatted >= 0) writeFormatting(writing, docs[formatted]!, before);
-    formatted = -1;
-    for (const range of ranges.reverse()) writeRange(writing, after, ...range);
+    const ranges = replaces(map) ? rangesOf(before, after, map) : null;
+    if (ranges?.length === 0) continue;
+    const kind = keepsEveryLeaf(step, before, after) ? "containers" : ranges ? null : "marks";
+    if (kind !== null && run?.kind === kind) continue;
+    if (!flush(at, false)) return false;
+    if (kind !== null) {
+      run = { kind, from: at };
+      continue;
+    }
+    for (const range of ranges!.reverse()) writeRange(writing, after, ...range);
     if (!writeBlockStartsThatDiffer(writing, after)) return false;
     if (afterEachStep?.(after) === false) return false;
   }
-  if (formatted < 0) return true;
-  writeFormatting(writing, docs[formatted]!, transaction.doc);
-  return afterEachStep?.(transaction.doc) !== false;
+  return flush(transaction.steps.length, true);
 }
 
 type Line = { bare: "" | "start" | "item" | "spill"; owner?: Line };
@@ -834,8 +1107,6 @@ type Touched = {
   gone: Set<number>;
   from: number;
   to: number;
-  isSure: boolean;
-  isNearALineWithNoBoundary: boolean;
 };
 
 function whatStepsTouch(reading: BodyReading, transactions: readonly Transform[]): Touched {
@@ -850,8 +1121,6 @@ function whatStepsTouch(reading: BodyReading, transactions: readonly Transform[]
     gone,
     from: reading.doc.content.size,
     to: 0,
-    isSure: true,
-    isNearALineWithNoBoundary: false,
   };
   const maps: StepMap[] = [];
   const back = (pos: number, side: -1 | 1) => {
@@ -863,11 +1132,6 @@ function whatStepsTouch(reading: BodyReading, transactions: readonly Transform[]
   const near = (from: number, to: number) => {
     touched.from = Math.min(touched.from, from);
     touched.to = Math.max(touched.to, to);
-    let block = Math.max(0, countBelow(reading.starts, from + 1) - 2);
-    while (block > 0 && isAddedParagraph(reading, block - 1)) block--;
-    const last = Math.min(reading.blocks.length - 1, countBelow(reading.starts, to + 1));
-    for (; block <= last; block++)
-      if (boundaryAt(reading, block) < 0) touched.isNearALineWithNoBoundary = true;
   };
   const touch = (block: number) => {
     after.add(block);
@@ -893,9 +1157,11 @@ function whatStepsTouch(reading: BodyReading, transactions: readonly Transform[]
         });
       } else if (step instanceof AttrStep) {
         const pos = back(step.pos, 1);
+        const node = was.nodeAt(step.pos);
         const started = blockStartingAt(reading, pos);
         near(pos, pos);
-        edits.add(started >= 0 ? started : blockHolding(reading, pos));
+        if (!node || !holdsBlocks(node))
+          edits.add(started >= 0 ? started : blockHolding(reading, pos));
       } else {
         step.getMap().forEach((oldStart, oldEnd) => {
           touched.from = Math.min(touched.from, back(oldStart, -1));
@@ -916,20 +1182,7 @@ function whatStepsTouch(reading: BodyReading, transactions: readonly Transform[]
           const first = tokens[0];
           const startsWithBlock = first !== undefined && "block" in first;
           const opened = blockStartingAt(reading, from);
-          const keepsItsKind =
-            opened >= 0 &&
-            to === from + 1 &&
-            tokens.length === 1 &&
-            startsWithBlock &&
-            first.block.type === reading.blocks[opened]!.node.type;
-          const onlyClosesIt =
-            holder >= 0 &&
-            tokens.length === 0 &&
-            to === from + 1 &&
-            from === reading.starts[holder]! + 1 + reading.blocks[holder]!.node.content.size;
           near(from, to);
-          if (!keepsItsKind && !onlyClosesIt && (holder < 0 || endsIn !== holder))
-            touched.isSure = false;
           if (holder >= 0) {
             edits.add(holder);
             const startsALaterBlockAgain = endsIn > holder ? 1 : 0;
@@ -1269,22 +1522,32 @@ const TRIES = 3;
 /**
  * Writes some editor transactions to a note, a copy of the real one or a test's, and says which
  * of the blocks that had no boundary of their own should have had one first, by their index
- * before the write. `linesLeftWanting` is asked after each step, and once more for the whole
- * write against the note as it was before. `isRead` says whether the note read as the
- * editor's document after every step, marks aside; the write stops at the first step after
- * which it does not. `isSettled` says that it did, that no step
- * brought a line into being with no boundary of its own, and that no boundary the write made
- * is left in front of what a line with none held.
+ * before the write. `linesLeftWanting` is asked after each step that changes leaves and after
+ * each run of steps that keeps them, and once more for the whole write against the note as it was
+ * before. A line a container change would move is wanting too, and so is a list item's added
+ * paragraph whose item the write moves to other containers; `moved` lists those. `isRead` says
+ * whether the note read as the editor's document each time, marks aside; the write stops at the
+ * first time it does not. `isSettled` says that it did, that no step brought a line into being
+ * with no boundary of its own, and that no boundary the write made is left in front of what a
+ * line with none held.
  */
 export function linesAWriteLeavesWanting(
   writing: BodyWriting,
   transactions: readonly Transform[],
-): { wanting: number[]; isSettled: boolean; isRead: boolean } {
+): { wanting: number[]; moved: number[]; isSettled: boolean; isRead: boolean } {
   const note = writing.sequence.doc!;
   const stateOf = () => Y.decodeStateVector(Y.encodeStateVector(note));
   const first = linesWithNoBoundary(writing);
   const begun = stateOf();
+  const pathsBefore = writing.reader.reading().paths;
+  const owned = first.flatMap((line) =>
+    line.bare === "item" && line.owner
+      ? [{ block: line.block, owner: line.owner, path: pathsBefore[line.block]! }]
+      : [],
+  );
+  const into: BodyWriting = { ...writing, wanting: [] };
   const wanting = new Set<number>();
+  const moved: number[] = [];
   let before = first;
   let state = begun;
   let isRead = true;
@@ -1297,14 +1560,16 @@ export function linesAWriteLeavesWanting(
     (one.items[0] === undefined
       ? other.items[0] === undefined
       : other.items[0] !== undefined && Y.compareIDs(one.items[0], other.items[0]));
+  const wantedFirst = (block: number) => {
+    const line = before.find((each) => each.block === block);
+    const was = line && first.find((each) => isTheSameLine(each, line));
+    if (was) wanting.add(was.block);
+  };
   const look = (shown: ProseMirrorNode | null) => {
     const now = linesWithNoBoundary(writing);
     const reads = shown !== null && readsAlike(writing.reader.reading().doc, shown);
-    for (const block of linesLeftWanting(before, state, now, writing, !reads).wanting) {
-      const line = before.find((each) => each.block === block)!;
-      const was = first.find((each) => isTheSameLine(each, line));
-      if (was) wanting.add(was.block);
-    }
+    for (const block of linesLeftWanting(before, state, now, writing, !reads).wanting)
+      wantedFirst(block);
     isRead &&= reads;
     bringsNone &&= linesBroughtIntoBeing(before, now).length === 0;
     before = now;
@@ -1312,24 +1577,80 @@ export function linesAWriteLeavesWanting(
     return reads;
   };
   note.transact(() => {
-    const wrote = transactions.every((transaction) => writeTransaction(writing, transaction, look));
+    const wrote = transactions.every((transaction) => writeTransaction(into, transaction, look));
     if (!wrote && isRead) look(null);
+    into.wanting!.forEach(wantedFirst);
+    if (owned.length === 0) return;
+    const reading = writing.reader.reading();
+    const pathOf = new Map<string, readonly string[]>();
+    reading.blocks.forEach((_, block) => {
+      const id = boundaryElement(reading, block)?._item?.id;
+      if (id) pathOf.set(`${String(id.client)}:${String(id.clock)}`, reading.paths[block]!);
+    });
+    for (const { block, owner, path } of owned) {
+      const now = pathOf.get(`${String(owner.client)}:${String(owner.clock)}`);
+      if (now !== undefined && !same(now.slice(0, path.length), path)) moved.push(block);
+    }
   });
+  for (const block of moved) wanting.add(block);
   const whole = linesLeftWanting(first, begun, before, writing);
   for (const block of whole.wanting) wanting.add(block);
-  return { wanting: [...wanting], isSettled: isRead && bringsNone && !whole.isHeaded, isRead };
+  return {
+    wanting: [...wanting],
+    moved,
+    isSettled: isRead && bringsNone && !whole.isHeaded,
+    isRead,
+  };
 }
 
-type Copy = { writing: BodyWriting; transactions: readonly Transform[]; first: number };
+type Copy = {
+  writing: BodyWriting;
+  transactions: readonly Transform[];
+  first: number;
+  apart: number;
+  longer: number;
+};
 
 function copyOfNote({ sequence, reader }: BodyWriting, transactions: readonly Transform[]): Copy {
   const copy = new Y.Doc();
   Y.applyUpdate(copy, Y.encodeStateAsUpdate(sequence.doc!));
+  copy.clientID = sequence.doc!.clientID;
   const copied = copy.getText(BODY_SEQUENCE_FIELD);
   const records = copy.getMap(BODY_CONTAINERS_FIELD);
   const schema = reader.reading().doc.type.schema;
   const writing = { sequence: copied, reader: createBodyReader(schema, copied, records) };
-  return { writing, transactions, first: 0 };
+  return { writing, transactions, first: 0, apart: 0, longer: 0 };
+}
+
+function runsOfClocks(first: Y.Item | null, end: Y.Item | null): number {
+  let runs = 0;
+  let last: Y.Item | null = null;
+  for (let item = first; item !== null && item !== end; item = item.right) {
+    if (item.deleted) continue;
+    const { client, clock } = item.id;
+    if (!last || client !== last.id.client || clock !== last.id.clock + last.length) runs++;
+    last = item;
+    if (item.content instanceof Y.ContentType) runs += itemsWithin(item.content.type);
+  }
+  return runs;
+}
+
+function runsAmong(items: readonly Y.Item[]): number {
+  const sorted = items.toSorted((a, b) => a.id.client - b.id.client || a.id.clock - b.id.clock);
+  return sorted.filter((item, at) => {
+    const before = sorted[at - 1];
+    return (
+      !before ||
+      before.id.client !== item.id.client ||
+      before.id.clock + before.length !== item.id.clock
+    );
+  }).length;
+}
+
+function itemsWithin(type: Y.AbstractType<unknown>): number {
+  let items = runsOfClocks(type._start, null);
+  for (const item of type._map.values()) if (!item.deleted) items++;
+  return items;
 }
 
 function copyOfWindow(
@@ -1355,6 +1676,10 @@ function copyOfWindow(
   }
   const line = reading.lines[first];
   if (!line || given.some((block) => block < first || block > last)) return null;
+  const named = new Set(reading.paths.slice(first, last + 1).flat());
+  const isOutside = (block: number) => block < first || block > last;
+  if (reading.paths.some((path, block) => isOutside(block) && path.some((id) => named.has(id))))
+    return null;
   const head = line.item ?? sequence._start;
   const marks = new Map<string, unknown>();
   for (let item = sequence._start; item !== null && item !== head; item = item.right)
@@ -1373,9 +1698,23 @@ function copyOfWindow(
     }),
   );
   const copy = new Y.Doc();
+  copy.clientID = sequence.doc!.clientID;
   const copied = copy.getText(BODY_SEQUENCE_FIELD);
   copied.applyDelta(changes);
-  const records = sequence.doc!.getMap(BODY_CONTAINERS_FIELD);
+  const records = copy.getMap<unknown>(BODY_CONTAINERS_FIELD);
+  const recorded: Y.Item[] = [];
+  const live = sequence.doc!.getMap(BODY_CONTAINERS_FIELD);
+  for (const id of named) {
+    const type = storedValue(live, id);
+    if (typeof type !== "string") continue;
+    const names = startingRecords(base.type.schema, type).keys();
+    for (const key of [id, ...[...names].map((name) => `${id}.${name}`)]) {
+      const item = live._map.get(key);
+      if (!item || item.deleted) continue;
+      records.set(key, live.get(key));
+      recorded.push(item);
+    }
+  }
   const writing = { sequence: copied, reader: createBodyReader(base.type.schema, copied, records) };
   const start = posOf(child);
   const shift = StepMap.offset(-start);
@@ -1395,7 +1734,8 @@ function copyOfWindow(
     windowed.push(transform);
     doc = transform.doc;
   }
-  if (fits) return { writing, transactions: windowed, first };
+  const apart = runsOfClocks(head, reading.lines[last + 1]?.item ?? null) + runsAmong(recorded);
+  if (fits) return { writing, transactions: windowed, first, apart, longer: LONGER_NUMBERS_LIVE };
   copy.destroy();
   return null;
 }
@@ -1405,24 +1745,50 @@ function linesATrialGives(
   guessed: readonly number[],
 ): number[] | null | undefined {
   const never = new Set<number>();
+  const moved = new Set<number>();
   let given = [...guessed];
   for (let tries = 0; tries < TRIES; tries++) {
     const copy = open(given);
     if (!copy) return undefined;
-    const { writing: trial, transactions, first } = copy;
+    const { writing: trial, transactions, first, apart, longer } = copy;
     const note = trial.sequence.doc!;
     const there = given.map((block) => block - first);
+    const changes: Uint8Array[] = [];
+    note.on("update", (update: Uint8Array) => changes.push(update));
     note.transact(() => giveBoundaries(trial, there));
     const gave = there.map((block) => trial.reader.reading().lines[block]!.item!);
-    const { wanting, isSettled, isRead } = linesAWriteLeavesWanting(trial, transactions);
+    const left = linesAWriteLeavesWanting(trial, transactions);
+    for (const block of left.moved) moved.add(block + first);
     const taken = given.filter((_, at) => gave[at]!.deleted);
     for (const block of taken) never.add(block);
-    const more = wanting.map((block) => block + first).filter((block) => !never.has(block));
+    const more = left.wanting.map((block) => block + first).filter((block) => !never.has(block));
     note.destroy();
-    if (taken.length + more.length === 0) return isSettled ? given : isRead ? null : undefined;
-    given = [...given.filter((block) => !never.has(block)), ...more];
+    if (taken.some((block) => moved.has(block))) return null;
+    if (taken.length + more.length > 0) {
+      given = [...given.filter((block) => !never.has(block)), ...more];
+      continue;
+    }
+    if (!left.isSettled) return left.isRead ? null : undefined;
+    if (!changes.every((change) => passesTheRoom(change, 0, 0))) return null;
+    return changes.every((change) => passesTheRoom(change, apart, longer)) ? given : undefined;
   }
   return undefined;
+}
+
+const LONGER_NUMBERS_LIVE = 8;
+const RANGE_BYTES = 24;
+const ROOM_ITEMS = bodySequenceRoomPolicy(WORKER_LIVE_VALIDATION_POLICY).maxStructVisits;
+
+function passesTheRoom(change: Uint8Array, apart: number, longer: number): boolean {
+  if (change.byteLength + RANGE_BYTES * apart <= BODY_SEQUENCE_CHANGE_MAX_VALUES) return true;
+  if (bodySequenceChangeLimit(change, WORKER_LIVE_VALIDATION_POLICY) !== undefined) return false;
+  const { structs, deletes, elements } = bodySequenceChangeSize(change);
+  const items = structs + 2 * (deletes + apart);
+  return (
+    items <= ROOM_ITEMS &&
+    items + LIVE_NOTE_ELEMENT_WEIGHT * elements <= LIVE_NOTE_CAPACITY &&
+    change.byteLength + longer * (structs + deletes) + RANGE_BYTES * apart <= LIVE_UPDATE_MAX_BYTES
+  );
 }
 
 function linesToGiveFirst(
@@ -1433,7 +1799,6 @@ function linesToGiveFirst(
   const reading = writing.reader.reading();
   const touched = whatStepsTouch(reading, transactions);
   const guessed = linesTouched(reading, touched);
-  if (touched.isSure || !touched.isNearALineWithNoBoundary) return guessed;
   const inWindow =
     trial === "window"
       ? linesATrialGives((given) => copyOfWindow(writing, transactions, touched, given), guessed)
@@ -1462,7 +1827,7 @@ function asOneRange(transaction: Transform): Transform | null {
   const { before, doc } = transaction;
   const until = before.content.size - (doc.content.size - to);
   const step = new ReplaceStep(from, until, doc.slice(from, to));
-  if (!keepsPairs(step, before) || !keepsContainers(step, before, doc, () => true)) return null;
+  if (!keepsPairs(step, before) || !keepsContainers(step, before, doc)) return null;
   const whole = new Transform(before);
   try {
     return !whole.maybeStep(step).failed && whole.doc.eq(doc) ? whole : null;
@@ -1475,51 +1840,10 @@ function asOneRange(transaction: Transform): Transform | null {
 /**
  * How to write the transactions of one dispatch, the first of which starts from what the
  * sequence reads as now: `lines`, the blocks with no boundary of their own that get one first,
- * by their index in that reading, and `transactions`, what to write after them. Null when the
- * dispatch cannot be written and is to be refused.
- *
- * Nothing is written. A first guess is read from the steps: each says what it touches, as the
- * reference writer's operations do. The block a range starts in is edited, and so is each block a
- * mark or an attribute step changes. A block a range starts a block in is split, also when the
- * range replaces a selection. A block put right under another splits that one at its end, as a
- * new line under it does, and the end of an empty block is its start too. One put first in the
- * note, in a container or in a list item's stored content splits the block under it at its
- * start, and so do blocks put in front of a block whose start the range replaces and whose text
- * it keeps. A block whose start a range replaces with a start of another kind changes kind; with
- * a start of its own kind it only changes an attribute. A block whose start a range takes away
- * goes. A block that is split, changes kind or goes can alter the paragraph after it, and one
- * that goes, changes kind or is split at its start its list item's added first paragraph.
- * `linesGiven`, the rule the reference writer asks too, turns that into the blocks to give. A
- * block whose own start the dispatch takes away gets none.
- *
- * The guess is the answer when every range stays inside one block or only gives a block's start
- * another attribute, and when the dispatch comes within a block of no line with no boundary. Any
- * other dispatch is written to a copy with the guessed lines given, and
- * `linesAWriteLeavesWanting` says from what the writer did there which more lines to give. Those
- * are given on a new copy and the dispatch is written again, until it leaves no line wanting. A
- * line whose given boundary the dispatch deletes is given none.
- *
- * The copy is a window of the note: the top-level blocks the steps touch and one more on each
- * side, with whole lines, their live items only, the formatting in force where they start, and
- * the steps moved to start there. It reads the note's own container records. When the window
- * does not read as that part of the editor's document, before or after a step, or takes more
- * than three copies, the whole note is copied instead, which costs a read of the note; `trial`
- * `"note"` asks for that copy at once.
- *
- * A dispatch cannot be written as dispatched when a copy that read as the editor's document
- * after every step is still not settled once no more lines can be given: a boundary the dispatch
- * makes would stand in front of what a line with none held, which undo would take away with
- * whatever someone else made of that line. Nor can it when the whole note takes more than three
- * copies or does not read as the editor's document.
- *
- * It is then tried once more with each transaction whose steps touch written as one step. Enter
- * over a selection deletes into such a line and splits it off again; as one step the line keeps
- * the boundary it is given. A transaction has that form when at least two of its steps replace,
- * each one range, and each after the first starts or ends where the earlier ones reached, so the
- * one step holds no letter the dispatch did not put there; when that step passes `keepsPairs`
- * and `keepsContainers`; and when it gives the transaction's document. `transactions` then
- * holds that step in the transaction's place. A dispatch with no such transaction, or one that
- * does not settle this way either, is refused.
+ * by their index in that reading, and `transactions`, what to write after them, which may hold a
+ * transaction's steps joined into one. Nothing is written. Null when the dispatch cannot be
+ * written whole within every limit of the room, and is to be refused. `trial` `"note"` tries it
+ * on a copy of the whole note at once instead of on a window of it first.
  */
 export function howToWrite(
   writing: BodyWriting,
