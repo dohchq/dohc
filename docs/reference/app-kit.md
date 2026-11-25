@@ -87,7 +87,7 @@ const rows = useMemo(() => data?.flatMap((page) => page.rows) ?? [], [data]);
 ```
 
 - `data` is set once the last page arrives. `revision` is the first page's revision.
-- If the Collection changes while pages load, the read starts again from the first page, at most twice.
+- If the Collection changes while pages load, the read starts again from the first page, at most twice. After the second restart it keeps the pages it gets, even if they come from different revisions.
 - When a page hits a rate limit, the read waits `retryAfterMs`, or 2 s when the host gives none, and asks for that page again.
 - A page without a `nextCursor` field, or a `nextCursor` the read already followed, fails with `error.status === 400`. `groupBy` reads, which return `nextGroupCursor`, and offset-paged reads need `useDatasetQuery`.
 

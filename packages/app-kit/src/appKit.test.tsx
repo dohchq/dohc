@@ -1739,6 +1739,19 @@ describe("dohc/ui and dohc/charts", () => {
       value: { result: { rev: 2 }, revision: 2, replayed: false },
     });
     await waitFor(() => expect(screen.getByTestId("data").textContent).toBe("2"));
+
+    fake.reply({ kind: "dataset.changed", dataset: "main", revision: 3 });
+    await waitFor(() => expect(fake.sent).toHaveLength(4));
+    reloadQuery();
+    await waitFor(() => expect(fake.sent).toHaveLength(5));
+    fake.reply({ id: fake.sent[4]!.id, ok: false, status: 503 });
+    await waitFor(() => expect(fake.sent).toHaveLength(6));
+    fake.reply({
+      id: fake.sent[5]!.id,
+      ok: true,
+      value: { result: { rev: 3 }, revision: 3, replayed: false },
+    });
+    await waitFor(() => expect(screen.getByTestId("data").textContent).toBe("3"));
     client.close();
   });
 
