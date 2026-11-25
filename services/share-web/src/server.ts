@@ -2093,6 +2093,9 @@ export function createShareWebApplication({
       pathname === "/api/live/owner-open"
     ) {
       mark(pathname);
+      // With no owner gateway, the owner's page stays to read, as on a server that edits no pages live.
+      if (pathname === "/api/live/owner-open" && (!memberLive || !namedLiveTickets))
+        return jsonResponse({ ok: false, code: "live_hosting_unsupported" }, { status: 409 });
       if (!memberLive) return refused();
       const result = await memberLive(request);
       return response(result.body, { status: result.status, headers: result.headers });

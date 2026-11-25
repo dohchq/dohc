@@ -14,6 +14,7 @@ import {
   SHARE_WEB_API_VERSION_HEADER,
 } from "@dohc/workspace-contracts/relay-values";
 import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
+import { selfHostLiveProfile } from "../../sync-relay/src/selfHostLiveProfile";
 import { loadShareWebConfig } from "./config";
 import {
   createShareWebApplication,
@@ -4991,4 +4992,28 @@ it("serves account deletion only on its internal host with the correct key", asy
   expect(invalidate).not.toHaveBeenCalled();
   expect((await call("share-web:1790", accountDeletionKey(secret))).status).toBe(200);
   expect(invalidate).toHaveBeenCalledWith("deleted", ["owned"]);
+});
+
+describe("the owner's page open on a share-web with no owner gateway", () => {
+  it("leaves the page to read, as a server that edits no pages live does, and asks the relay nothing", async () => {
+    const fetchRelay = vi.fn(async () => new Response(null, { status: 500 }));
+    const handle = createShareWebHandler({
+      relayUrl: "http://127.0.0.1:1",
+      relayExchangeKey: HANDOFF_EXCHANGE_KEY,
+      publicHosts: new Set([HOST]),
+      accountAuth: { publicOrigin: `https://${HOST}`, upstreamUrl: "http://127.0.0.1:1" },
+      namedBrowserSessionLimits: selfHostLiveProfile().requests,
+      fetchRelay,
+    });
+    const answer = await handle(
+      request("/api/live/owner-open", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: `https://${HOST}` },
+        body: JSON.stringify({ workspaceId: "ws-1", path: "plan.md" }),
+      }),
+    );
+    expect(answer.status).toBe(409);
+    expect(await answer.json()).toEqual({ ok: false, code: "live_hosting_unsupported" });
+    expect(fetchRelay).not.toHaveBeenCalled();
+  });
 });

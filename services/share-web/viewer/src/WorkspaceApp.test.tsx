@@ -2801,13 +2801,19 @@ describe("the owner's page", () => {
   });
 
   // `paused` is the relay's answer to the owner's open of a paused page (phonePages.test.ts).
-  it("tells the owner a page is paused", async () => {
+  it.each([
+    ["paused", "Live editing is paused for this page. Resume it in dohc to edit here."],
+    [
+      "conflict-parent-withheld",
+      "A conflict was resolved in this page, so live editing can't resume. Open Live documents in dohc to make a copy that can go live.",
+    ],
+  ])("tells the owner why a page refused with %s", async (code, sentence) => {
     server({ level: "edit", session: OWNER_SESSION });
-    vi.mocked(openMemberPage).mockResolvedValue({ kind: "refused", code: "paused" });
+    vi.mocked(openMemberPage).mockResolvedValue({ kind: "refused", code });
     await render(OWNER);
     await settle(() => container.querySelector("header + .page-band [role=status]") !== null);
     expect(container.querySelector("header + .page-band [role=status]")?.textContent).toBe(
-      "Live editing is paused for this page. Resume it in dohc to edit here. You can still read it.",
+      `${sentence} You can still read it.`,
     );
   });
 

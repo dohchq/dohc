@@ -30,6 +30,8 @@ const HOST_REFUSAL_REASONS: Readonly<Record<string, string>> = {
   // Only the owner is refused these. A member waits for the owner's dohc instead.
   [WAITS_FOR_HOST]: "Open this page on a computer once to edit it here.",
   paused: "Live editing is paused for this page. Resume it in dohc to edit here.",
+  "conflict-parent-withheld":
+    "A conflict was resolved in this page, so live editing can't resume. Open Live documents in dohc to make a copy that can go live.",
 };
 // A server that edits no pages live leaves the page to read, as the phone does.
 const READ_ONLY = "live_hosting_unsupported";
