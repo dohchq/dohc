@@ -96,3 +96,9 @@ export function normalizeShareDiscussionDisplayName(
   }
   return { ok: true, value: normalized };
 }
+
+/** An account's name as a server shows it, normalized, or null when it has none to show. */
+export function accountDisplayNameOf(value: unknown): string | null {
+  const normalized = normalizeShareDiscussionDisplayName(value);
+  return normalized.ok ? normalized.value : null;
+}

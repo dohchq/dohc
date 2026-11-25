@@ -1,11 +1,12 @@
 import { chatWords } from "@dohc/interface-words/notices";
 import { workspaceWords } from "@dohc/interface-words/workspace";
 import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
+import type { LegendListRef } from "@legendapp/list/react-native";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { SymbolView } from "expo-symbols";
 import { documentWords } from "@dohc/interface-words/documents";
 import type { PhoneChatWake } from "@dohc/workspace-contracts/chat-wakes";
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { FileText } from "lucide-react-native";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { Composer } from "./Composer";
@@ -25,6 +26,7 @@ import {
   decisionOf,
 } from "./decisionAnswers";
 import { MessageRow } from "./MessageRow";
+import { ComposerBar, RevealAboveComposer, useRevealAboveComposer } from "./revealAboveComposer";
 import { streamRows, threadRows } from "./outboxMessages";
 import { reactionRecords, withReactions } from "./reactions";
 import { UNSHOWN_QUESTION, type ReplyTo } from "./ReplyContext";
@@ -107,6 +109,8 @@ export function SampleConversation() {
   // A file's chat opens its page from the header; the page's header comes back here.
   const pagePath = name && !inThread ? pagePathForFile[name] : undefined;
   const [composerHeight, setComposerHeight] = useState(90);
+  const list = useRef<LegendListRef>(null);
+  const { bar, reveal } = useRevealAboveComposer(list);
   const [outbox] = useState(() => createSampleOutbox(demoMode));
   const state = useOutboxState(outbox);
   const writes = useConversationWrites(outbox, true, always);
@@ -385,55 +389,60 @@ export function SampleConversation() {
             : undefined,
         }}
       />
-      <KeyboardAwareLegendList
-        data={items}
-        // Wakes and their Try again states change apart from the messages: their rows draw again.
-        extraData={wakeData}
-        keyExtractor={(item) => item.key}
-        getItemType={(item) => item.type}
-        estimatedItemSize={64}
-        alignItemsAtEnd
-        initialScrollAtEnd
-        maintainScrollAtEnd
-        keyboardDismissMode="interactive"
-        contentContainerStyle={{ paddingBottom: composerHeight + 16 }}
-        renderItem={({ item }) =>
-          item.type === "day" ? (
-            <View style={styles.dayRow}>
-              <Text style={[styles.day, { color: theme.muted, backgroundColor: theme.panel2 }]}>
-                {item.label}
-              </Text>
-            </View>
-          ) : (
-            <MessageRow
-              message={item.message}
-              continued={item.continued}
-              afterExtras={item.afterExtras}
-              actions={actions}
-              react={react}
-              onReply={onReply}
-              onOpenReplies={onOpenReplies}
-              answers={answers}
-              {...wakesFor(item.message)}
-            />
-          )
-        }
-      />
-      <Composer
-        placeholder={inThread ? chatWords.reply : chatWords.messageTo(shown)}
-        lanes={inThread ? REPLY_LANES : sampleLanes(chat.kind)}
-        blocked={blocked}
-        problem={null}
-        replies={inThread || chosen !== null}
-        replyTo={question?.to ?? chosen?.to ?? null}
-        closed={question?.target.kind === "closed" ? chatWords.answerClosed : null}
-        onCancelReply={() => {
-          setChosen(null);
-          setAnswering(null);
-        }}
-        onSubmit={submit}
-        onLayoutHeight={setComposerHeight}
-      />
+      <ComposerBar.Provider value={bar}>
+        <RevealAboveComposer.Provider value={reveal}>
+          <KeyboardAwareLegendList
+            ref={list}
+            data={items}
+            // Wakes and their Try again states change apart from the messages: their rows draw again.
+            extraData={wakeData}
+            keyExtractor={(item) => item.key}
+            getItemType={(item) => item.type}
+            estimatedItemSize={64}
+            alignItemsAtEnd
+            initialScrollAtEnd
+            maintainScrollAtEnd
+            keyboardDismissMode="interactive"
+            contentContainerStyle={{ paddingBottom: composerHeight + 16 }}
+            renderItem={({ item }) =>
+              item.type === "day" ? (
+                <View style={styles.dayRow}>
+                  <Text style={[styles.day, { color: theme.muted, backgroundColor: theme.panel2 }]}>
+                    {item.label}
+                  </Text>
+                </View>
+              ) : (
+                <MessageRow
+                  message={item.message}
+                  continued={item.continued}
+                  afterExtras={item.afterExtras}
+                  actions={actions}
+                  react={react}
+                  onReply={onReply}
+                  onOpenReplies={onOpenReplies}
+                  answers={answers}
+                  {...wakesFor(item.message)}
+                />
+              )
+            }
+          />
+          <Composer
+            placeholder={inThread ? chatWords.reply : chatWords.messageTo(shown)}
+            lanes={inThread ? REPLY_LANES : sampleLanes(chat.kind)}
+            blocked={blocked}
+            problem={null}
+            replies={inThread || chosen !== null}
+            replyTo={question?.to ?? chosen?.to ?? null}
+            closed={question?.target.kind === "closed" ? chatWords.answerClosed : null}
+            onCancelReply={() => {
+              setChosen(null);
+              setAnswering(null);
+            }}
+            onSubmit={submit}
+            onLayoutHeight={setComposerHeight}
+          />
+        </RevealAboveComposer.Provider>
+      </ComposerBar.Provider>
     </View>
   );
 }

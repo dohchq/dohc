@@ -103,6 +103,12 @@ function ServerChatList({ workspace }: { workspace: PhoneWorkspace }) {
     [data],
   );
   const [warmUnread] = useState(() => unreadPrefetch(phoneWrites));
+  const [pulling, setPulling] = useState(false);
+  const refresh = useCallback(() => {
+    if (!data) return;
+    setPulling(true);
+    void data.refresh(views.chats).finally(() => setPulling(false));
+  }, [data]);
   useEffect(() => {
     if (sections && data) warmUnread(data, sections);
   }, [sections, data, warmUnread]);
@@ -112,7 +118,7 @@ function ServerChatList({ workspace }: { workspace: PhoneWorkspace }) {
       sections={sections}
       onPressIn={prefetch}
       failure={state.problem ? { label: failed, onRetry: retry } : null}
-      onRefresh={retry}
+      refresh={{ refreshing: pulling, onRefresh: refresh }}
     />
   );
 }
@@ -127,7 +133,7 @@ export function ChatsScreen({
   failure,
   notice,
   list,
-  onRefresh,
+  refresh,
   onPressIn,
 }: {
   current: PhoneWorkspace | null;
@@ -138,8 +144,8 @@ export function ChatsScreen({
   /** Between the header and the list: why no workspace is open, or the sample's band. */
   notice?: ReactNode;
   list?: RefObject<LegendListRef | null>;
-  /** Pull to refresh: reads the chats again. */
-  onRefresh?: () => void;
+  /** Pull to refresh: reads the chats again, with the spinner while that read runs. */
+  refresh?: { readonly refreshing: boolean; onRefresh(): void };
   /** A finger is on a chat's row, before it opens. */
   onPressIn?: (row: ChatRowData) => void;
 }) {
@@ -205,7 +211,7 @@ export function ChatsScreen({
           scrollEventThrottle={32}
           onScroll={(event) => setScrolled(event.nativeEvent.contentOffset.y > 0)}
           contentContainerStyle={{ paddingTop: 0, paddingBottom: 120 }}
-          {...(onRefresh ? { refreshing: false, onRefresh } : {})}
+          {...(refresh ?? {})}
           renderItem={({ item }) =>
             item.type === "header" ? (
               <SectionHeader

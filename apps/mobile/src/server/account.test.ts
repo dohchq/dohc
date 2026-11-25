@@ -100,6 +100,37 @@ describe("restoring", () => {
   });
 });
 
+describe("the account's name", () => {
+  it("keeps the sign-in's format, and reads the name once a restored sign-in needs it, again after a failure", async () => {
+    const { server, account } = setup();
+    await account.restore();
+    const signIn = signedIn(account);
+    expect(server.paths()).not.toContain("GET /api/auth/get-session");
+    server.on("GET", "/api/auth/get-session", { status: 503, body: {} });
+    await expect(signIn.accountName()).rejects.toThrow();
+    server.on("GET", "/api/auth/get-session", {
+      status: 200,
+      body: { session: {}, user: { id: "u-1", email: "ice@example.com", name: "Ice" } },
+    });
+    expect(await signIn.accountName()).toBe("Ice");
+    expect(await signIn.accountName()).toBe("Ice");
+    expect(server.paths().filter((path) => path === "GET /api/auth/get-session")).toHaveLength(2);
+  });
+
+  it("takes the name a new sign-in read", async () => {
+    const { server, account } = setup(null);
+    await account.restore();
+    serveSignIn(server, {
+      status: 200,
+      body: { session: {}, user: { id: "u-2", email: "sam@example.com", name: "Sam" } },
+    });
+    await account.signIn(server.origin, () => {});
+    const reads = server.paths().length;
+    expect(await signedIn(account).accountName()).toBe("Sam");
+    expect(server.paths()).toHaveLength(reads);
+  });
+});
+
 describe("signing in", () => {
   it("saves the token with its server and account, then signs in", async () => {
     const { server, tokens, account } = setup(null);

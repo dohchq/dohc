@@ -159,6 +159,31 @@ describe("a workspace's reads", () => {
     expect(data.state(views.files).value).toHaveLength(2);
   });
 
+  it("refresh reads now, past a read on its way, and settles when its own read answers", async () => {
+    const server = testServer();
+    server.on("POST", "/sync/ws-a/ops/listFiles", ops(files(["a.md", "object-a"]), "0.1.1"));
+    server.on("GET", feedPath("ws-a", "0.1.1"), held);
+    const { data } = open(server);
+    data.subscribe(views.files, () => {});
+    await vi.waitFor(() => expect(data.state(views.files).value).toHaveLength(1));
+    const first = deferred<Answer>();
+    const pulled = deferred<Answer>();
+    const later = deferred<Answer>();
+    const answers = [first, pulled, later];
+    server.on("POST", "/sync/ws-a/ops/listFiles", () => answers.shift()!.promise);
+    data.retry(views.files);
+    const refreshed = vi.fn();
+    void data.refresh(views.files).then(refreshed);
+    void data.refresh(views.files);
+    await vi.waitFor(() => expect(count(server, "/sync/ws-a/ops/listFiles")).toBe(4));
+    pulled.resolve(ops(files(["a.md", "object-a"]), "0.1.1"));
+    await vi.waitFor(() => expect(refreshed).toHaveBeenCalled());
+    expect(data.state(views.files).loading).toBe(true);
+    later.resolve(ops(files(["a.md", "object-a"]), "0.1.1"));
+    await vi.waitFor(() => expect(data.state(views.files).loading).toBe(false));
+    first.resolve(ops(files(), "0.1.1"));
+  });
+
   it("answer a page that's gone and one too large to read", async () => {
     const server = testServer();
     server.on("POST", "/sync/ws-a/ops/documentRead", ({ body }) => {

@@ -183,6 +183,7 @@ function setup(
   const signIn = {
     origin: ORIGIN,
     userId: "u1",
+    accountName: async () => "Ice",
     // Once the sign-in has ended, the next check says so to the test: the store has taken what it was handling.
     isCurrent() {
       if (!current && checked) {

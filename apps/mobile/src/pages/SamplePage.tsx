@@ -1,6 +1,6 @@
 import { documentWords } from "@dohc/interface-words/documents";
 import { Stack, useIsFocused, useLocalSearchParams, useRouter } from "expo-router";
-import { AlertTriangle, EllipsisVertical } from "lucide-react-native";
+import { AlertTriangle, Check, EllipsisVertical } from "lucide-react-native";
 import { useEffect, useMemo, useRef, useState, type ComponentRef } from "react";
 import { PixelRatio, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { useReducedMotion } from "react-native-reanimated";
@@ -10,7 +10,7 @@ import { WebView } from "react-native-webview";
 import { PageScrollTop } from "../../modules/page-scroll-top";
 import { HeaderButton } from "../AndroidHeader";
 import { confirm } from "../confirm";
-import { copyText } from "../copy";
+import { copyText, useCopiedMark } from "../copy";
 import { demoMode } from "../demo";
 import { DohcMark } from "../DohcMark";
 import { ActionPill } from "../notices/ActionPill";
@@ -160,10 +160,15 @@ export function SamplePage() {
   }, [keyboardHeight]);
   const endEditing = () => web.current?.injectJavaScript("window.__dohcEndEditing?.(); true;");
   // A large file has no editor, and a page that didn't load has no web view: both copy the text as it was read.
+  const [copied, markCopied] = useCopiedMark();
+  const copyShown = (text: string) => {
+    copyText(text);
+    markCopied();
+  };
   const copyMarkdown = () => {
     if (!page) return;
     if (page.large || !web.current) {
-      copyText(page.markdown);
+      copyShown(page.markdown);
       return;
     }
     web.current.injectJavaScript(
@@ -226,11 +231,11 @@ export function SamplePage() {
     }
     // The editor's answer to Copy as Markdown: the page with the person's edits.
     if (data.kind === "markdown" && "markdown" in data && typeof data.markdown === "string") {
-      copyText(data.markdown);
+      copyShown(data.markdown);
       return;
     }
     if (data.kind === "markdownUnavailable") {
-      if (page) copyText(page.markdown);
+      if (page) copyShown(page.markdown);
       return;
     }
     if (!("at" in data) || typeof data.at !== "number") return;
@@ -326,7 +331,7 @@ export function SamplePage() {
                     <HeaderButton label="Done" onPress={endEditing} />
                   ) : (
                     <HeaderButton
-                      icon={EllipsisVertical}
+                      icon={copied ? Check : EllipsisVertical}
                       label={documentWords.documentActions}
                       onPress={() => void documentActions(copyMarkdown)}
                     />
@@ -349,7 +354,7 @@ export function SamplePage() {
           />
           <Stack.Toolbar.Menu
             hidden={typing}
-            icon="ellipsis"
+            icon={copied ? "checkmark" : "ellipsis"}
             accessibilityLabel={documentWords.documentActions}
           >
             <Stack.Toolbar.MenuAction icon="doc.on.doc" onPress={copyMarkdown}>

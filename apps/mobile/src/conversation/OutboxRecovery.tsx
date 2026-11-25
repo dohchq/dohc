@@ -3,18 +3,19 @@ import { useRouter } from "expo-router";
 import { useCallback, useMemo } from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { useAccount, useSignIn } from "../account/AccountProvider";
+import { useAccountName } from "../account/useAccountName";
 import { workspaceName } from "../chats/workspaceName";
 import { NotYet } from "../NotYet";
 import { ActionPill } from "../notices/ActionPill";
 import { phoneWrites } from "../server/phoneWrites";
-import { useTheme } from "../theme";
+import { useTheme, workspaceMarkFills } from "../theme";
 import { outboxProblem } from "./Composer";
 import { ProblemLine } from "../account/ProblemLine";
 import { blockedBy } from "./conversationWrites";
 import { DamagedKept } from "./DamagedKept";
 import { MessageRow } from "./MessageRow";
 import { recoveryRows, type RecoveryRow } from "./outboxMessages";
-import type { Author } from "./types";
+import { localAuthor } from "./serverMessages";
 import { useConversationWrites, useLocalActions, useOutboxState } from "./useOutbox";
 
 // Messages on this phone, from Settings: every message of the signed-in account that its outbox keeps and the server
@@ -32,15 +33,8 @@ export function OutboxRecovery() {
   const writes = useConversationWrites(outbox, phoneWrites, isCurrent);
   const blocked = state ? blockedBy(state, phoneWrites) : "loading";
   const actions = useLocalActions(writes, blocked !== null);
-  const you = useMemo<Author>(
-    () => ({
-      id: "local:you",
-      name: chatWords.you,
-      kind: "person",
-      initials: (signIn.email[0] ?? "").toUpperCase(),
-    }),
-    [signIn],
-  );
+  const accountName = useAccountName(signIn);
+  const you = useMemo(() => localAuthor(accountName, workspaceMarkFills), [accountName]);
   if (!phoneWrites) return <NotYet symbol="hammer" />;
 
   const { rows, unreadable } = state

@@ -4,7 +4,7 @@ import type { PhoneMentionCandidate } from "@dohc/workspace-contracts/chat-wakes
 import * as Haptics from "expo-haptics";
 import { SymbolView } from "expo-symbols";
 import { ArrowUp, SquarePen, X } from "lucide-react-native";
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useContext, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AccessibilityInfo,
   Platform,
@@ -12,6 +12,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from "react-native";
 import { KeyboardStickyView } from "react-native-keyboard-controller";
@@ -37,6 +38,7 @@ import {
   type SubmitOutcome,
 } from "./conversationWrites";
 import { MentionMenu } from "./MentionMenu";
+import { ComposerBar } from "./revealAboveComposer";
 import {
   acceptsReport,
   activeMention,
@@ -54,9 +56,17 @@ import {
   type Replacing,
 } from "./mentionDraft";
 
-/** The field's height: one line at the least, and about five at the body size before it scrolls inside itself. */
+/**
+ * The field's height: one line at the least, and five lines at the person's text size before it scrolls inside itself,
+ * but never more than a quarter of the window.
+ */
 const FIELD_MIN = 44;
-const FIELD_MAX = 132;
+/** Five lines at the 17 pt body size. */
+const FIVE_LINES = 110;
+/** The 11 pt the field keeps above and below its text. */
+const FIELD_INSETS = 22;
+const fieldMax = (fontScale: number, windowHeight: number) =>
+  Math.max(FIELD_MIN, Math.min(FIELD_INSETS + FIVE_LINES * fontScale, windowHeight / 4));
 /** The longest title the route takes. */
 const TITLE_MAX = 200;
 
@@ -154,6 +164,7 @@ export function Composer({
   useBackCloses(mode === "post" && lanes.send, () => choose("send"));
   useBackCloses(replyTo !== null && onCancelReply !== undefined, () => onCancelReply?.());
   const [height, setHeight] = useState(FIELD_MIN);
+  const window = useWindowDimensions();
   // The last clear asked of the field, and the draft it was for: null for a reply, whose clear closes nothing. Token 0
   // asks nothing. Send waits for its answer.
   const [clear, setClear] = useState<{
@@ -322,7 +333,12 @@ export function Composer({
               if (clearedBy(change, clear.request)) onCleared?.();
             }}
             onContentHeight={(event) => setHeight(event.nativeEvent.height)}
-            style={{ height: Math.min(Math.max(height, FIELD_MIN), FIELD_MAX) }}
+            style={{
+              height: Math.min(
+                Math.max(height, FIELD_MIN),
+                fieldMax(window.fontScale, window.height),
+              ),
+            }}
           />
         </View>
         <Pressable
@@ -392,12 +408,14 @@ function Dock({
 }) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  const bar = useContext(ComposerBar);
   return (
     <KeyboardStickyView
       offset={{ closed: 0, opened: insets.bottom - 6 + LIFT }}
       style={styles.sticky}
     >
       <View
+        ref={bar}
         onLayout={(event) => onLayoutHeight?.(event.nativeEvent.layout.height)}
         style={[
           styles.bar,

@@ -32,7 +32,7 @@ import type { ReadProblem } from "../server/workspaceData";
 import { useTheme } from "../theme";
 import { EmptyLine, HoldRow, ScreenFailure } from "../workspace/ListStates";
 import { useProblemText } from "../workspace/useView";
-import { editorKind, rowText, shownValue } from "./collectionFields";
+import { editorKind, recordName, rowText, shownValue } from "./collectionFields";
 import {
   canUndo,
   newRecordKey,
@@ -246,9 +246,7 @@ const RecordRow = memo(function RecordRow(props: {
   const { record, table, files } = props;
   const theme = useTheme();
   const lead = leadField(table);
-  const name =
-    (lead && rowText(shownValue(lead, record.values[lead.fieldId], files), lead.name)) ??
-    String(record.id);
+  const name = recordName(lead, record.values, files);
   const details = table.fields
     .filter((field) => field !== lead)
     .flatMap(
@@ -328,9 +326,7 @@ export function RecordScreen() {
       collections.remove();
   };
   const lead = leadField(table);
-  const title =
-    (lead && rowText(shownValue(lead, record.values[lead.fieldId], files), lead.name)) ??
-    String(record.id);
+  const title = recordName(lead, record.values, files);
   const edit = (fieldId: string, value?: RecordValue) =>
     router.push({
       pathname: "/collection-field",

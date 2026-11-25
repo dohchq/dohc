@@ -82,7 +82,7 @@ private struct FieldState: Equatable {
 /// VoiceOver doesn't read, since the text view carries the field's own name. Return is a new line. It keeps its text,
 /// reports each change to its text, selection and composition, and the height its text needs, and scrolls inside itself
 /// once the screen caps its height.
-final class ChatComposerView: ExpoView, UITextViewDelegate {
+final class ChatComposerView: ExpoView, UITextViewDelegate, UIGestureRecognizerDelegate {
   let textView = ComposerTextView()
   private let placeholder = UILabel()
   private var clearToken = 0
@@ -98,6 +98,8 @@ final class ChatComposerView: ExpoView, UITextViewDelegate {
   /// Set while the field changes its own text, which it then reports once.
   private var quiet = false
   private var reportedHeight: CGFloat = 0
+  /// Space above and below the text, outside the text view, so it stays put while the text scrolls.
+  private let inset: CGFloat = 11
   let onChangeText = EventDispatcher()
   let onContentHeight = EventDispatcher()
 
@@ -107,7 +109,7 @@ final class ChatComposerView: ExpoView, UITextViewDelegate {
     textView.font = font
     textView.adjustsFontForContentSizeCategory = true
     textView.backgroundColor = .clear
-    textView.textContainerInset = UIEdgeInsets(top: 11, left: 0, bottom: 11, right: 0)
+    textView.textContainerInset = .zero
     textView.textContainer.lineFragmentPadding = 0
     textView.returnKeyType = .default
     // A status-bar tap scrolls the conversation, as React Native's own text view leaves it to.
@@ -123,6 +125,18 @@ final class ChatComposerView: ExpoView, UITextViewDelegate {
     placeholder.numberOfLines = 1
     addSubview(textView)
     addSubview(placeholder)
+    let tap = UITapGestureRecognizer(target: self, action: #selector(focusText))
+    tap.delegate = self
+    addGestureRecognizer(tap)
+  }
+
+  /// A tap in the space above or below the text, outside the text view, starts typing as a tap on the text does.
+  @objc private func focusText() {
+    if textView.isEditable && !textView.isFirstResponder { textView.becomeFirstResponder() }
+  }
+
+  func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+    touch.view === self
   }
 
   func setPlaceholder(_ text: String) {
@@ -203,9 +217,9 @@ final class ChatComposerView: ExpoView, UITextViewDelegate {
 
   override func layoutSubviews() {
     super.layoutSubviews()
-    textView.frame = bounds
+    textView.frame = bounds.insetBy(dx: 0, dy: inset)
     let line = ceil(placeholder.font.lineHeight)
-    placeholder.frame = CGRect(x: 0, y: textView.textContainerInset.top, width: bounds.width, height: line)
+    placeholder.frame = CGRect(x: 0, y: inset, width: bounds.width, height: line)
     reportHeight()
   }
 
@@ -291,7 +305,7 @@ final class ChatComposerView: ExpoView, UITextViewDelegate {
   private func reportHeight() {
     guard bounds.width > 0 else { return }
     let fits = textView.sizeThatFits(CGSize(width: bounds.width, height: .greatestFiniteMagnitude))
-    let height = ceil(fits.height)
+    let height = ceil(fits.height) + 2 * inset
     if abs(height - reportedHeight) < 0.5 { return }
     reportedHeight = height
     onContentHeight(["height": height])

@@ -12,6 +12,7 @@ import {
 } from "@dohc/workspace-contracts/actor-identity";
 import type { ChatWakeView } from "@dohc/workspace-contracts/chat-wakes";
 import type { ChatMessage, ChatThread, ChatThreadLane } from "@dohc/workspace-contracts/engine";
+import { accountAuthorName } from "@dohc/workspace-contracts/names";
 import { asRecord } from "@dohc/workspace-core";
 import {
   CHATS_METHOD,
@@ -40,7 +41,6 @@ import { stableJsonStringify } from "./canonicalJson";
 import {
   frozenWakes,
   resolveWakeTargets,
-  shownName,
   TooManyWakeCandidates,
   type DmSource,
   type FrozenWakes,
@@ -262,12 +262,8 @@ function refusedByEngine(error: unknown): boolean {
 const toJson = (value: unknown): JsonValue => JSON.parse(JSON.stringify(value)) as JsonValue;
 
 // The name as the engine stores it, so the published row can be compared with it exactly.
-function authorName(name: string | null): string {
-  return shownName(name ?? "") || "Unnamed";
-}
-
 function authorOf(writer: PhoneWriter, workspaceId: string): AuthorSnapshot {
-  const displayName = authorName(writer.displayName);
+  const displayName = accountAuthorName(writer.displayName);
   let actorKey: string | null;
   try {
     actorKey = serializeActorKey(

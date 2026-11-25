@@ -148,6 +148,7 @@ function fakeAccount(onSignOut: (leave: () => Promise<void>) => Promise<void>) {
         userId,
         email: `${userId}@example.com`,
         isCurrent: () => id === generation,
+        accountName: async () => "Ice",
         client: createServerClient({
           origin: server.origin,
           token: `tok-${id}`,

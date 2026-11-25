@@ -1,7 +1,7 @@
 import { SymbolView } from "expo-symbols";
 import { useRouter } from "expo-router";
 import { Reply, SmilePlus, X } from "lucide-react-native";
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useContext, useEffect, useRef, useState } from "react";
 import {
   AccessibilityInfo,
   Pressable,
@@ -9,6 +9,7 @@ import {
   StyleSheet,
   Text,
   View,
+  type ScrollViewInstance,
   type ViewInstance,
 } from "react-native";
 import Animated, {
@@ -27,6 +28,7 @@ import { ActionPill } from "../notices/ActionPill";
 import { sampleBuild } from "../sampleBuild";
 import { useTheme, type Theme } from "../theme";
 import { DecisionCard } from "./DecisionCard";
+import { RevealAboveComposer } from "./revealAboveComposer";
 import { localOffers } from "./outboxMessages";
 import type { Author, LocalMark, Message, Reaction, ReactionMark, Segment } from "./types";
 import type { AnswerActions, LocalActions, ReactActions } from "./useOutbox";
@@ -359,6 +361,8 @@ function MessageActions({
 }) {
   const [picking, setPicking] = useState(false);
   const opener = useRef<ViewInstance>(null);
+  const reveal = useContext(RevealAboveComposer);
+  const picker = useRef<ScrollViewInstance>(null);
   const disabled = blocked || message.reactionsBusy === true;
   const problem = react.problems.get(message.id);
   const close = () => {
@@ -417,6 +421,10 @@ function MessageActions({
           showsHorizontalScrollIndicator={false}
           style={styles.pickerScroll}
           contentContainerStyle={styles.picker}
+          ref={picker}
+          onLayout={() => {
+            if (picker.current) reveal?.(picker.current);
+          }}
         >
           <Pressable
             onPress={close}

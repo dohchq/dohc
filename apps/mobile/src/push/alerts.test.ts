@@ -78,6 +78,7 @@ function setup(options: { disk?: KeptDisk; permission?: Permission } = {}) {
     userId: OWNER.userId,
     email: "ice@example.com",
     isCurrent: () => current,
+    accountName: async () => "Ice",
     client: createServerClient({
       origin: OWNER.origin,
       token: "t",
@@ -347,6 +348,7 @@ describe("a tapped alert", () => {
       userId: OWNER.userId,
       email: "ice@example.com",
       isCurrent: () => current,
+      accountName: async () => "Ice",
       client: createServerClient({
         origin: OWNER.origin,
         token: "t",

@@ -4,13 +4,23 @@ import type { PhoneChatWake, PhoneMentionCandidate } from "@dohc/workspace-contr
 import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import {
   LegendList,
+  type LegendListRef,
   type OnViewableItemsChangedInfo,
   type ViewabilityConfig,
 } from "@legendapp/list/react-native";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { useAccount, useSignIn } from "../account/AccountProvider";
+import { useAccountName } from "../account/useAccountName";
 import { ProblemLine } from "../account/ProblemLine";
 import { chatTitle } from "../chats/chatLabels";
 import type { ChatKind } from "../chats/types";
@@ -55,6 +65,7 @@ import {
   type ReplyTarget,
 } from "./conversationWrites";
 import { MessageRow } from "./MessageRow";
+import { ComposerBar, RevealAboveComposer, useRevealAboveComposer } from "./revealAboveComposer";
 import { streamRows, threadRows } from "./outboxMessages";
 import { confirmedReactions, reactionRecords, withReactions } from "./reactions";
 import { markShown, markShownPosts, shownMessages } from "./readMarks";
@@ -62,10 +73,13 @@ import { UNSHOWN_MESSAGE, UNSHOWN_QUESTION, type ReplyTo } from "./ReplyContext"
 import {
   conversationItems,
   localMessage,
+  localAuthor,
   type ConversationItem,
   serverMessage,
+  withMentions,
 } from "./serverMessages";
-import type { Author, Message } from "./types";
+import { phoneMentions } from "./mentionDraft";
+import type { Message } from "./types";
 import { useChatWakes } from "./useChatWakes";
 import { useVisible } from "./useVisible";
 import {
@@ -224,15 +238,8 @@ function useScreenWrites(target: string) {
     [signIn, workspaceId],
   );
   const react = useReact(writes, rowScope);
-  const you = useMemo<Author>(
-    () => ({
-      id: "local:you",
-      name: chatWords.you,
-      kind: "person",
-      initials: (signIn.email[0] ?? "").toUpperCase(),
-    }),
-    [signIn],
-  );
+  const accountName = useAccountName(signIn);
+  const you = useMemo(() => localAuthor(accountName, workspaceMarkFills), [accountName]);
   const reactionsByMessage = useMemo(
     () => (state && rowScope ? reactionRecords(state, rowScope) : null),
     [state, rowScope],
@@ -918,10 +925,16 @@ function Conversation({
   const problemText = useProblemText();
   const kept = useKeptContentProblem(state.problem, retry);
   const [composerHeight, setComposerHeight] = useState(90);
-  const items = useMemo(
-    () => (messages ? conversationItems(messages, Date.now(), local) : []),
-    [messages, local],
-  );
+  const list = useRef<LegendListRef>(null);
+  const { bar, reveal } = useRevealAboveComposer(list);
+  const mentions = wakes?.mentions;
+  const items = useMemo(() => {
+    if (!messages) return [];
+    const candidates = mentions?.length ? phoneMentions(mentions) : null;
+    const drawn = (list: readonly Message[]) =>
+      candidates ? list.map((entry) => withMentions(entry, candidates)) : list;
+    return conversationItems(drawn(messages), Date.now(), local && drawn(local));
+  }, [messages, local, mentions]);
   // Where the list opens: at the anchored message when this read has it, else at the end.
   const anchorIndex =
     anchor === null
@@ -1038,48 +1051,53 @@ function Conversation({
           <ProblemLine text={chatWords.wakeReadFailed} onRetry={retryWakes} />
         </View>
       ) : null}
-      {items.length === 0 ? (
-        <EmptyLine text={workspaceWords.noMessages} />
-      ) : composer === undefined ? (
-        <LegendList
-          data={items}
-          extraData={wakeData}
-          keyExtractor={(item) => item.key}
-          getItemType={(item) => item.type}
-          estimatedItemSize={64}
-          alignItemsAtEnd
-          initialScrollAtEnd={anchorIndex < 0}
-          {...(anchorIndex < 0 ? {} : { initialScrollIndex: anchorIndex })}
-          maintainScrollAtEnd
-          {...(onViewableItemsChanged
-            ? { onViewableItemsChanged, viewabilityConfig: onScreenConfig }
-            : {})}
-          contentContainerStyle={{ paddingBottom: 24 }}
-          renderItem={({ item }) => renderItem(item)}
-        />
-      ) : (
-        // Where writes are on, the list rides the keyboard with the composer, and its end clears the composer.
-        <KeyboardAwareLegendList
-          data={items}
-          extraData={wakeData}
-          keyExtractor={(item) => item.key}
-          getItemType={(item) => item.type}
-          estimatedItemSize={64}
-          alignItemsAtEnd
-          initialScrollAtEnd={anchorIndex < 0}
-          {...(anchorIndex < 0 ? {} : { initialScrollIndex: anchorIndex })}
-          maintainScrollAtEnd
-          keyboardDismissMode="interactive"
-          {...(onViewableItemsChanged
-            ? { onViewableItemsChanged, viewabilityConfig: onScreenConfig }
-            : {})}
-          contentContainerStyle={{ paddingBottom: (composer ? composerHeight : 0) + 24 }}
-          renderItem={({ item }) => renderItem(item)}
-        />
-      )}
-      {composer
-        ? composer(setComposerHeight, title, wakes && !wakes.failed ? wakes.mentions : null)
-        : null}
+      <ComposerBar.Provider value={bar}>
+        <RevealAboveComposer.Provider value={reveal}>
+          {items.length === 0 ? (
+            <EmptyLine text={workspaceWords.noMessages} />
+          ) : composer === undefined ? (
+            <LegendList
+              data={items}
+              extraData={wakeData}
+              keyExtractor={(item) => item.key}
+              getItemType={(item) => item.type}
+              estimatedItemSize={64}
+              alignItemsAtEnd
+              initialScrollAtEnd={anchorIndex < 0}
+              {...(anchorIndex < 0 ? {} : { initialScrollIndex: anchorIndex })}
+              maintainScrollAtEnd
+              {...(onViewableItemsChanged
+                ? { onViewableItemsChanged, viewabilityConfig: onScreenConfig }
+                : {})}
+              contentContainerStyle={{ paddingBottom: 24 }}
+              renderItem={({ item }) => renderItem(item)}
+            />
+          ) : (
+            // Where writes are on, the list rides the keyboard with the composer, and its end clears the composer.
+            <KeyboardAwareLegendList
+              ref={list}
+              data={items}
+              extraData={wakeData}
+              keyExtractor={(item) => item.key}
+              getItemType={(item) => item.type}
+              estimatedItemSize={64}
+              alignItemsAtEnd
+              initialScrollAtEnd={anchorIndex < 0}
+              {...(anchorIndex < 0 ? {} : { initialScrollIndex: anchorIndex })}
+              maintainScrollAtEnd
+              keyboardDismissMode="interactive"
+              {...(onViewableItemsChanged
+                ? { onViewableItemsChanged, viewabilityConfig: onScreenConfig }
+                : {})}
+              contentContainerStyle={{ paddingBottom: (composer ? composerHeight : 0) + 24 }}
+              renderItem={({ item }) => renderItem(item)}
+            />
+          )}
+          {composer
+            ? composer(setComposerHeight, title, wakes && !wakes.failed ? wakes.mentions : null)
+            : null}
+        </RevealAboveComposer.Provider>
+      </ComposerBar.Provider>
     </View>
   );
 }

@@ -396,6 +396,11 @@ export interface WorkspaceData {
   prefetch(view: View<unknown>): void;
   prefetchPages(paths: readonly string[]): void;
   retry(view: View<unknown>): void;
+  /**
+   * Reads the view now, in place of any read on its way, as a pull to refresh asks. Settles once this read answers,
+   * whatever a later read does.
+   */
+  refresh(view: View<unknown>): Promise<void>;
   feed(): FeedState;
   subscribeFeed(listener: () => void): () => void;
   /** Starts the feed again at once, with its backoff from the start. */
@@ -753,6 +758,15 @@ export function createWorkspaceData(options: {
       if (hasGone) return options.reopen?.();
       const target = entry(view);
       if (live() && !target.state.loading) void read(target);
+    },
+    refresh(view) {
+      if (hasGone) {
+        options.reopen?.();
+        return Promise.resolve();
+      }
+      const target = entry(view);
+      const start = () => (live() ? read(target) : Promise.resolve());
+      return restoring && restored ? restored.then(start) : start();
     },
     feed: () => feedState,
     subscribeFeed(listener) {

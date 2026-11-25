@@ -6,6 +6,7 @@ import {
   dayOf,
   draftOf,
   editorKind,
+  recordName,
   rowText,
   shownValue,
   valueOf,
@@ -199,5 +200,22 @@ describe("a date field's day", () => {
     for (const day of ["2026-02-30", "2026-13-01", "26-11-14", "2026-11-14T00:00", ""])
       expect(dateOf(day), day).toBeNull();
     expect(dayOf(dateOf("0099-01-02")!)).toBe("0099-01-02");
+  });
+});
+
+describe("recordName", () => {
+  const name = {
+    fieldId: "f-name",
+    name: "Name",
+    type: "text",
+    options: [],
+    editable: true,
+    reversible: true,
+  } as const;
+  it("names a record by its naming field, or Untitled when that's empty or only spaces", () => {
+    expect(recordName(name, { "f-name": "Seed signup" }, {})).toBe("Seed signup");
+    expect(recordName(name, { "f-name": "   " }, {})).toBe(collectionWords.untitledRecord);
+    expect(recordName(name, {}, {})).toBe(collectionWords.untitledRecord);
+    expect(recordName(null, {}, {})).toBe(collectionWords.untitledRecord);
   });
 });

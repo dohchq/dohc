@@ -37,6 +37,11 @@ export interface SignIn {
   readonly userId: string;
   readonly email: string;
   readonly client: ServerClient;
+  /**
+   * The account's name as the server has it, or null when it has none. Read once per sign-in, on first use, and read
+   * again after a read that failed.
+   */
+  accountName(): Promise<string | null>;
   /** False once this sign-in has ended. Check it before applying anything one of its requests answered. */
   isCurrent(): boolean;
 }
@@ -203,27 +208,40 @@ export function createAccount(options: {
   function signedIn(
     stored: StoredSignIn,
     current: { readonly id: number; readonly signal: AbortSignal },
+    name?: string | null,
   ): SignIn {
     saved = stored;
+    let named: Promise<string | null> | null = name === undefined ? null : Promise.resolve(name);
+    const client = createServerClient({
+      origin: stored.origin,
+      token: stored.token,
+      fetch,
+      signal: current.signal,
+      // The server ended the session, so there is nothing to revoke.
+      onSignedOut: () => {
+        if (current.id !== generation) return;
+        advance();
+        saved = null;
+        setState(signedOut(stored.origin, true));
+        void forget(stored.origin, stored.token);
+      },
+    });
     return {
       origin: stored.origin,
       userId: stored.userId,
       email: stored.email,
       isCurrent: () => current.id === generation,
-      client: createServerClient({
-        origin: stored.origin,
-        token: stored.token,
-        fetch,
-        signal: current.signal,
-        // The server ended the session, so there is nothing to revoke.
-        onSignedOut: () => {
-          if (current.id !== generation) return;
-          advance();
-          saved = null;
-          setState(signedOut(stored.origin, true));
-          void forget(stored.origin, stored.token);
-        },
-      }),
+      client,
+      accountName() {
+        named ??= readAccount(client).then(
+          (account) => account.name,
+          (error: unknown) => {
+            named = null;
+            throw error;
+          },
+        );
+        return named;
+      },
     };
   }
 
@@ -370,7 +388,7 @@ export function createAccount(options: {
           if (isCurrent()) await store.save(stored);
         });
         if (!isCurrent()) throw new ServerError("cancelled");
-        setState({ status: "signed-in", signIn: signedIn(stored, attempt) });
+        setState({ status: "signed-in", signIn: signedIn(stored, attempt, account.name) });
         return "signed-in";
       } catch (error) {
         // A session the server made for a superseded sign-in, or one whose account the phone couldn't read, ends here.

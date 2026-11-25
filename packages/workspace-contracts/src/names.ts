@@ -38,6 +38,20 @@ export function cutText(text: string, max: number): string {
         .trimEnd()}…`;
 }
 
+// The characters the engine drops from a name (names.rs, shown_name), keeping ZWNJ, ZWJ, and variation selectors.
+const HIDDEN_IN_NAMES =
+  /(?![\u200C\u200D\p{Variation_Selector}])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu;
+
+/** A name as the engine shows it: hidden characters dropped, trimmed, and cut to 40 characters. */
+export function shownName(name: string): string {
+  return cutText(name.replace(HIDDEN_IN_NAMES, "").trim(), 40);
+}
+
+/** The author name a server gives an account's phone writes, from the account's name. */
+export function accountAuthorName(name: string | null): string {
+  return shownName(name ?? "") || "Unnamed";
+}
+
 export function isReservedWindowsName(value: string): boolean {
   return /^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/iu.test(
     value,

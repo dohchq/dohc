@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../server/workspaceReads";
-import { conversationItems, localMessage, serverMessage } from "./serverMessages";
+import {
+  conversationItems,
+  localMessage,
+  mentionSegments,
+  localAuthor,
+  serverMessage,
+  withMentions,
+} from "./serverMessages";
 
 const at = new Date(2026, 10, 5, 12, 0).getTime();
 const entry = (
@@ -79,5 +86,51 @@ describe("a conversation's runs", () => {
     expect(
       continued(entry("m1", "automation", "Nova", 0), entry("m2", "human", "Nova", 1)),
     ).toEqual([false, false]);
+  });
+});
+
+describe("mentionSegments", () => {
+  const candidates = [
+    { id: "ice", kind: "user" as const, handle: "Ice", label: "Ice", connected: false },
+    { id: "claude", kind: "agent" as const, handle: "Claude", label: "Claude", connected: false },
+  ];
+
+  it("draws each @handle that names a candidate as a mention, as written", () => {
+    expect(mentionSegments("Can @ice and @Claude join? @Nobody", candidates)).toEqual([
+      { text: "Can " },
+      { mention: "ice" },
+      { text: " and " },
+      { mention: "Claude", agent: true },
+      { text: " join? @Nobody" },
+    ]);
+  });
+
+  it("leaves a handle in code as text", () => {
+    expect(mentionSegments("`@Ice`", candidates)).toEqual([{ text: "`@Ice`" }]);
+  });
+
+  it("keeps a message that names nobody as it was", () => {
+    const message = serverMessage(entry("hello", "human", "Ice", 0), null, ["#000000"]);
+    expect(withMentions(message, candidates)).toBe(message);
+    const named = serverMessage({ ...entry("m", "human", "Ice", 0), body: "@Ice" }, null, [
+      "#000000",
+    ]);
+    expect(withMentions(named, candidates).body).toEqual([{ mention: "Ice" }]);
+  });
+});
+
+describe("localAuthor", () => {
+  it("draws this phone's own message as the server will draw it once saved", () => {
+    const fills = ["#111111", "#222222", "#333333"];
+    const local = localAuthor(" Ice ", fills);
+    const saved = serverMessage(entry("m", "human", "Ice", 0), null, fills).author;
+    expect({ ...local, id: saved.id }).toEqual(saved);
+  });
+
+  it("names it as the server normalizes the account's name, and You until the name is read", () => {
+    const fills = ["#111111"];
+    expect(localAuthor("  Ice   de  Vera ", fills).name).toBe("Ice de Vera");
+    expect(localAuthor(null, fills).name).toBe("Unnamed");
+    expect(localAuthor(undefined, fills).name).toBe("You");
   });
 });
