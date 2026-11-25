@@ -358,31 +358,53 @@ test("local app copyText, multi-page print, anti-spam, and rapid parallel querie
 
     await page.addInitScript(() => {
       if (window !== top) return;
-      (window as unknown as { __printCount: number; __printHeights: string[] }).__printCount = 0;
-      (window as unknown as { __printHeights: string[] }).__printHeights = [];
+      const host = window as unknown as {
+        __printCount: number;
+        __printHeights: string[];
+        __brokerEvents: Array<Record<string, unknown>>;
+        __dohcVerifyObserve: (raw: string) => void;
+      };
+      host.__printCount = 0;
+      host.__printHeights = [];
+      host.__brokerEvents = [];
+      host.__dohcVerifyObserve = (raw: string) => {
+        host.__brokerEvents.push(JSON.parse(raw) as Record<string, unknown>);
+      };
       const origPrint = window.print.bind(window);
       window.print = () => {
-        (window as unknown as { __printCount: number }).__printCount += 1;
-        (window as unknown as { __printHeights: string[] }).__printHeights.push(
-          document.documentElement.style.getPropertyValue("--dohc-print-h"),
-        );
+        host.__printCount += 1;
+        host.__printHeights.push(document.documentElement.style.getPropertyValue("--dohc-print-h"));
         origPrint();
       };
     });
 
-    await page.goto(await launcher.launch(publication.publicationId, lifetime.signal));
+    const session = await launcher.launchSession(publication.publicationId, lifetime.signal, {
+      observeBroker: true,
+    });
+    await page.goto(session.url);
     const cdp = await context.newCDPSession(page);
+    const cdpEval = async <T>(expression: string): Promise<T> =>
+      (await cdp.send("Runtime.evaluate", { expression, returnByValue: true })).result.value as T;
     await expect
       .poll(
-        async () =>
-          (
-            await cdp.send("Runtime.evaluate", {
-              expression: "Boolean(document.querySelector('iframe'))",
-              returnByValue: true,
-            })
-          ).result.value,
+        () =>
+          cdpEval<Record<string, unknown> | null>(
+            "window.__brokerEvents?.find((e) => e.kind === 'completed' && e.op === 'host.copy') ?? null",
+          ),
+        { timeout: 15_000 },
       )
-      .toBe(true);
+      .toMatchObject({
+        kind: "completed",
+        op: "host.copy",
+        status: 409,
+        ok: false,
+        refusalCode: "user_activation_required",
+      });
+    await expect
+      .poll(() => cdpEval<boolean>("navigator.userActivation?.isActive === true"), {
+        timeout: 15_000,
+      })
+      .toBe(false);
     const app = page.frameLocator("iframe");
 
     await expect(app.locator("#startup-copy")).toHaveText("user_activation_required");
