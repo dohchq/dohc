@@ -4,6 +4,8 @@ import { accountWorkspace, each } from "./api";
 import type { CacheRows, SavedView } from "./cacheRows";
 import { requestGenerations, ServerError, shownProblem, type ServerClient } from "./client";
 import { sleep } from "./deviceFlow";
+import { appOperations, type PhoneApp } from "./phoneApps";
+import { collectionOperations, type PhoneCollection } from "./phoneCollections";
 import {
   earlierCursor,
   FEED_HOLD_MS,
@@ -81,7 +83,11 @@ export interface Known {
 
 export interface View<T> {
   readonly id: string;
-  read(client: ServerClient, workspaceId: string, signal: AbortSignal): Promise<Read<T>>;
+  read(
+    client: ServerClient,
+    workspaceId: string,
+    signal: AbortSignal,
+  ): Promise<Omit<Read<T>, "cursor"> & { readonly cursor: string | null }>;
   /** Whether `changes` can touch what the view shows now, `value`. */
   affectedBy(changes: FeedChanges, known: Known, value: T | null): boolean;
   /** What the view shows after a read, from what it showed before and what the read answered. */
@@ -102,6 +108,22 @@ export const views = {
     read: readChats,
     affectedBy: (changes) => changes.chats !== undefined,
   } satisfies View<readonly ChatGroup[]>,
+  apps: {
+    id: "apps",
+    read: (client, workspaceId, signal) =>
+      appOperations(client, workspaceId, signal)
+        .list()
+        .then((value) => ({ value, cursor: null })),
+    affectedBy: () => false,
+  } satisfies View<readonly PhoneApp[]>,
+  collections: {
+    id: "collections",
+    read: (client, workspaceId, signal) =>
+      collectionOperations(client, workspaceId, signal)
+        .list()
+        .then((value) => ({ value, cursor: null })),
+    affectedBy: () => false,
+  } satisfies View<readonly PhoneCollection[]>,
 
   /** A chat's stream: a change to one of its threads, or to a thread the store can't place in a chat yet. */
   stream(groupId: string): View<GroupStream | MissingChat> {
@@ -200,6 +222,8 @@ export const views = {
 export function viewOf(id: string): View<unknown> | null {
   if (id === views.files.id) return views.files;
   if (id === views.chats.id) return views.chats;
+  if (id === views.apps.id) return views.apps;
+  if (id === views.collections.id) return views.collections;
   const [kind, ...rest] = id.split(":");
   const key = rest.join(":");
   if (key === "") return null;
@@ -213,7 +237,7 @@ export function viewOf(id: string): View<unknown> | null {
 export interface Cached {
   readonly view: View<unknown>;
   readonly value: unknown;
-  readonly cursor: string;
+  readonly cursor: string | null;
   /** A change the feed reported may have touched it since. */
   readonly stale: boolean;
   readonly prefetched?: boolean;
@@ -321,7 +345,7 @@ export function createReadCache(files?: CacheRows): ReadCache {
           const views = new Map<string, Cached>();
           for (const item of found) {
             const view = viewOf(item.id);
-            if (view && isCursor(item.cursor))
+            if (view && (item.cursor === null || isCursor(item.cursor)))
               views.set(view.id, {
                 view,
                 value: item.value,
@@ -396,7 +420,22 @@ export function createReadCache(files?: CacheRows): ReadCache {
   return cache;
 }
 
-const isListing = (view: View<unknown>) => view.id === views.files.id || view.id === views.chats.id;
+const isListing = (view: View<unknown>) =>
+  [views.files, views.chats, views.apps, views.collections].some((each) => each.id === view.id);
+
+export function cachedList<T>(
+  cache: ReadCache,
+  signIn: Pick<SignIn, "origin" | "userId">,
+  workspaceId: string,
+  view: View<T>,
+) {
+  const scope = cacheScope(signIn, workspaceId);
+  return {
+    value: () => (cache.get(scope, view.id)?.value as T | undefined) ?? null,
+    restored: cache.restore(scope) ?? Promise.resolve(),
+    save: (value: T) => cache.set(scope, { view, value, cursor: null, stale: false }),
+  };
+}
 
 export interface WorkspaceData {
   readonly workspaceId: string;
@@ -506,7 +545,8 @@ export function createWorkspaceData(options: {
           reads: requestGenerations(),
         });
       }
-      cursor = cursor === null ? cached.cursor : earlierCursor(cursor, cached.cursor);
+      if (cached.cursor !== null)
+        cursor = cursor === null ? cached.cursor : earlierCursor(cursor, cached.cursor);
     }
   }
   seed(cache.entries(scope));
@@ -605,7 +645,8 @@ export function createWorkspaceData(options: {
         cache.set(scope, { ...saved, prefetched: target.prefetched || undefined });
         set(target, { value, loading: false, problem: null, failures: target.state.failures });
         if (target.view.messages) options.onMessages?.(target.view.messages(value));
-        follow(from === null ? answer.cursor : laterCursor(answer.cursor, from));
+        if (answer.cursor !== null)
+          follow(from === null ? answer.cursor : laterCursor(answer.cursor, from));
       },
       (error: unknown) => {
         // An answer that no longer counts says nothing, not even that the workspace has gone.

@@ -75,7 +75,7 @@ interface AccountValue {
   readonly runner: AppRunner;
   /** The open workspace's published apps. */
   readonly apps: WorkspaceApps | null;
-  /** The open workspace's transactional Collections, read into memory only. */
+  /** The open workspace's transactional Collections. */
   readonly collections: WorkspaceCollections | null;
   /** Pages edited live, which end with their sign-in and workspace, as a running app does. */
   readonly livePages: ScopedEnds;
@@ -193,17 +193,18 @@ export function AccountProvider({ children }: { children: ReactNode }) {
             runner,
             fetch,
             canOpen: canOpenApps,
+            cache,
           })
         : null,
-    [signIn, currentWorkspaceId, runner],
+    [signIn, currentWorkspaceId, runner, cache],
   );
   useEffect(() => () => apps?.stop(), [apps]);
   const collections = useMemo(
     () =>
       signIn && currentWorkspaceId
-        ? createWorkspaceCollections(signIn, currentWorkspaceId, collectionStores)
+        ? createWorkspaceCollections(signIn, currentWorkspaceId, collectionStores, cache)
         : null,
-    [signIn, currentWorkspaceId, collectionStores],
+    [signIn, currentWorkspaceId, collectionStores, cache],
   );
   useEffect(() => () => collections?.stop(), [collections]);
   useEffect(() => clearNoticeListsOnSignInChange(account, kept), [account, kept]);

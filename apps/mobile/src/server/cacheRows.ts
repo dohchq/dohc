@@ -9,7 +9,7 @@ import type { CacheStore, Sql } from "./keptStore";
 export interface SavedView {
   readonly id: string;
   readonly value: unknown;
-  readonly cursor: string;
+  readonly cursor: string | null;
   readonly stale: boolean;
   readonly prefetched?: boolean;
 }
@@ -273,7 +273,7 @@ function savedViews(text: unknown): readonly SavedView[] | null {
     if (
       !isRecord(item) ||
       typeof item.id !== "string" ||
-      typeof item.cursor !== "string" ||
+      (typeof item.cursor !== "string" && item.cursor !== null) ||
       typeof item.stale !== "boolean" ||
       item.value === undefined ||
       item.value === null

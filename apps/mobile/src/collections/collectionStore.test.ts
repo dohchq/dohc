@@ -3,6 +3,7 @@ import { appTeardown } from "../apps/appStore";
 import { createScopedEnds } from "../pages/pageLive";
 import { createAccount } from "../server/account";
 import { signedIn } from "../server/testApps";
+import { createReadCache } from "../server/workspaceData";
 import {
   deferred,
   memoryStore,
@@ -66,10 +67,15 @@ async function sent(server: ReturnType<typeof testServer>, count: number) {
   while (server.calls.length < count) await new Promise((done) => setTimeout(done, 0));
 }
 
-function setup(isCurrent = () => true) {
+function setup(isCurrent = () => true, cache = createReadCache()) {
   const server = testServer();
   const stores = createScopedEnds();
-  const collections = createWorkspaceCollections(signedIn(server, isCurrent), "ws-1", stores);
+  const collections = createWorkspaceCollections(
+    signedIn(server, isCurrent),
+    "ws-1",
+    stores,
+    cache,
+  );
   server.on("POST", `${OPS}/collection`, description);
   return { server, stores, collections };
 }
@@ -93,7 +99,7 @@ async function signedInStore(
   await account.restore();
   const state = account.state();
   if (state.status !== "signed-in") throw Error("not signed in");
-  collections = createWorkspaceCollections(state.signIn, "ws-1", stores);
+  collections = createWorkspaceCollections(state.signIn, "ws-1", stores, createReadCache());
   server.on("POST", `${OPS}/collection`, description);
   pages(server);
   await collections.open(D);
@@ -144,6 +150,19 @@ describe("the Collections list", () => {
       problem: "server-busy",
       failures: 1,
     });
+  });
+
+  it("shows the list read last at once in the workspace's next store", async () => {
+    const cache = createReadCache();
+    const { server, collections } = setup(() => true, cache);
+    const listed = [{ datasetId: D, name: "Registrations" }];
+    server.on("POST", `${OPS}/collections`, ok({ collections: listed, nextCursor: null }));
+    await collections.refresh();
+    collections.stop();
+    const next = createWorkspaceCollections(signedIn(server), "ws-1", createScopedEnds(), cache);
+    expect(next.state().collections).toEqual(listed);
+    const other = createWorkspaceCollections(signedIn(server), "ws-2", createScopedEnds(), cache);
+    expect(other.state().collections).toBeNull();
   });
 });
 

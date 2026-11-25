@@ -87,4 +87,6 @@ export const signedIn = (server: Server, isCurrent = () => true) => ({
     signal: new AbortController().signal,
   }),
   isCurrent,
+  origin: server.origin,
+  userId: "u-1",
 });

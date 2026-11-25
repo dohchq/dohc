@@ -17,9 +17,10 @@ import {
   type RecordValue,
   type WriteRefusal,
 } from "../server/phoneCollections";
-import type { ReadProblem } from "../server/workspaceData";
+import { cachedList, views, type ReadCache, type ReadProblem } from "../server/workspaceData";
 
-// The open workspace's transactional Collections, and the one Collection on screen, in memory only.
+// The open workspace's transactional Collections, and the one Collection on screen, in memory only. The list is also kept
+// in the read cache with the workspace's views.
 //
 // One store per sign-in and workspace. Its answers land only while its sign-in is current and it hasn't stopped, and
 // each read only while it is the latest of its kind, so a late answer never paints another workspace or table. The
@@ -155,9 +156,10 @@ export interface WorkspaceCollections {
 const NO_LIST: CollectionsState = { collections: null, problem: null, failures: 0 };
 
 export function createWorkspaceCollections(
-  signIn: Pick<SignIn, "client" | "isCurrent">,
+  signIn: Pick<SignIn, "client" | "isCurrent" | "origin" | "userId">,
   workspaceId: string,
   ends: Pick<ScopedEnds, "add">,
+  cache: ReadCache,
 ): WorkspaceCollections {
   let controller = new AbortController();
   let operations = collectionOperations(signIn.client, workspaceId, controller.signal);
@@ -166,7 +168,8 @@ export function createWorkspaceCollections(
   const viewReads = requestGenerations();
   const recordReads = requestGenerations();
   const listeners = new Set<() => void>();
-  let list = NO_LIST;
+  const listed = cachedList(cache, signIn, workspaceId, views.collections);
+  let list: CollectionsState = { ...NO_LIST, collections: listed.value() };
   let view: CollectionView | null = null;
   let changes: ReadonlyMap<string, RecordChange> = new Map();
   let actions: ReadonlyMap<string, RecordAction> = new Map();
@@ -197,6 +200,12 @@ export function createWorkspaceCollections(
     emit();
   };
   const remove = ends.add({ signIn, workspaceId }, { end: clear });
+  void listed.restored.then(() => {
+    const collections = listed.value();
+    if (!isLive() || list.collections !== null || !collections) return;
+    list = { ...list, collections };
+    emit();
+  });
 
   const setChange = (key: string, next: RecordChange | null) => {
     const copy = new Map(changes);
@@ -323,8 +332,9 @@ export function createWorkspaceCollections(
     const request = listReads.next();
     const lands = () => isLive() && listReads.isLatest(request);
     try {
-      const collections = await operations.list();
+      const [collections] = await Promise.all([operations.list(), listed.restored]);
       if (!lands()) return;
+      listed.save(collections);
       list = { collections, problem: null, failures: list.failures };
       emit();
     } catch (error) {

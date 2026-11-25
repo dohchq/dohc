@@ -6,7 +6,7 @@ import {
   type AppOperations,
   type PhoneApp,
 } from "../server/phoneApps";
-import type { ReadProblem } from "../server/workspaceData";
+import { cachedList, views, type ReadCache, type ReadProblem } from "../server/workspaceData";
 
 // The app running on the phone, and the open workspace's published apps.
 //
@@ -159,9 +159,10 @@ export interface WorkspaceApps {
 }
 
 export function createWorkspaceApps(options: {
-  readonly signIn: Pick<SignIn, "client" | "isCurrent">;
+  readonly signIn: Pick<SignIn, "client" | "isCurrent" | "origin" | "userId">;
   readonly workspaceId: string;
   readonly runner: AppRunner;
+  readonly cache: ReadCache;
   readonly fetch: Fetch;
   /** This build may run apps (src/apps/canOpenApps.ts). */
   readonly canOpen: boolean;
@@ -172,7 +173,8 @@ export function createWorkspaceApps(options: {
   const operations = appOperations(signIn.client, workspaceId, signal);
   const reads = requestGenerations();
   const listeners = new Set<() => void>();
-  let state: AppsState = { apps: null, problem: null, failures: 0 };
+  const saved = cachedList(options.cache, signIn, workspaceId, views.apps);
+  let state: AppsState = { apps: saved.value(), problem: null, failures: 0 };
   const isLive = () => !signal.aborted && signIn.isCurrent();
   const mine = (publicationId?: string) => (scope: AppScope) =>
     scope.signIn === signIn &&
@@ -182,15 +184,20 @@ export function createWorkspaceApps(options: {
     state = next;
     for (const listener of listeners) listener();
   };
+  void saved.restored.then(() => {
+    const apps = saved.value();
+    if (isLive() && state.apps === null && apps) set({ ...state, apps });
+  });
 
   let reading: Promise<void> | null = null;
   // A failed or incomplete read rejects, so only a complete catalog can end the running app.
   const refresh = () => {
     const request = reads.next();
     const lands = () => isLive() && reads.isLatest(request);
-    const read = operations.list().then(
-      (apps) => {
+    const read = Promise.all([operations.list(), saved.restored]).then(
+      ([apps]) => {
         if (!lands()) return;
+        saved.save(apps);
         runner.end(
           (scope) =>
             mine()(scope) &&

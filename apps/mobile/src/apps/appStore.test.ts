@@ -19,12 +19,15 @@ import {
   testServer,
   type Answer,
 } from "../server/testServer";
+import { createReadCache, type ReadCache } from "../server/workspaceData";
 import { appTeardown, createAppRunner, createWorkspaceApps } from "./appStore";
 
 const app = { ...version(A, true), name: "signup" };
 const still = new AbortController().signal;
 
-function setup(options: { signIn?: ReturnType<typeof signedIn>; canOpen?: boolean } = {}) {
+function setup(
+  options: { signIn?: ReturnType<typeof signedIn>; canOpen?: boolean; cache?: ReadCache } = {},
+) {
   const server = appServer();
   const signIn = options.signIn ?? signedIn(server);
   const runner = createAppRunner();
@@ -34,6 +37,7 @@ function setup(options: { signIn?: ReturnType<typeof signedIn>; canOpen?: boolea
     runner,
     fetch: server.fetch,
     canOpen: options.canOpen ?? true,
+    cache: options.cache ?? createReadCache(),
   });
   return { server, signIn, runner, apps };
 }
@@ -164,6 +168,7 @@ describe("teardown", () => {
         runner,
         fetch: server.fetch,
         canOpen: true,
+        cache: createReadCache(),
       });
       answerLaunch(server);
       expect(await apps.open(app, still)).toBe(true);
@@ -231,6 +236,7 @@ describe("teardown", () => {
       runner,
       fetch: server.fetch,
       canOpen: true,
+      cache: createReadCache(),
     }).stop();
     expect(runner.state()).not.toBeNull();
   });
@@ -267,6 +273,17 @@ describe("the catalog", () => {
     // Once it has finished, the next check reads again.
     await apps.check();
     expect(apps.state().apps).toEqual([version(B)]);
+  });
+
+  it("shows the catalog read last at once in the workspace's next store", async () => {
+    const cache = createReadCache();
+    const { server, apps } = setup({ cache });
+    server.on("POST", "/sync/ws-1/ops/apps", page([version(A, true)]));
+    await apps.refresh();
+    apps.stop();
+    expect(setup({ cache, signIn: signedIn(server) }).apps.state().apps).toEqual([
+      version(A, true),
+    ]);
   });
 
   it("counts failures and keeps what it showed", async () => {
