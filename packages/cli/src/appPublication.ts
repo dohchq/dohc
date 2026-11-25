@@ -192,6 +192,7 @@ const APP_VERIFY_BROKER_OP = z.enum([
   "collection.create",
   "host.copy",
   "host.print",
+  "host.notice",
   "unknown",
 ]);
 const APP_VERIFY_OPERATION_NAME = z.string().regex(/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/);

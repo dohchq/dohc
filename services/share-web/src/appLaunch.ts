@@ -186,7 +186,8 @@ export function createAppLaunchHandler(options: {
   const issueByAddress = new Map<string, number>();
   let issuePending = 0;
   const collectionRate = new TokenBucketLimiter(12, 0.2, MAX_LAUNCHES),
-    backendRate = new TokenBucketLimiter(30, 0.5, MAX_LAUNCHES);
+    backendRate = new TokenBucketLimiter(30, 0.5, MAX_LAUNCHES),
+    fileRate = new TokenBucketLimiter(120, 4, MAX_LAUNCHES);
   let pending = 0,
     statusPending = 0,
     collectionPending = 0,
@@ -390,7 +391,8 @@ export function createAppLaunchHandler(options: {
       prune();
       const statusRequest = url.pathname === "/status" && appHost(host);
       const eventsRequest = url.pathname === "/events" && appHost(host);
-      const collectionRequest = ["/collection", "/backend"].includes(url.pathname) && appHost(host);
+      const collectionRequest =
+        ["/collection", "/backend", "/file"].includes(url.pathname) && appHost(host);
       const bootstrapRequest = url.pathname === "/bootstrap" && appHost(host);
       // A browser navigating to /bootstrap, such as a reload after the session ended, gets the stopped page. Other callers keep the JSON refusal.
       const navigation = bootstrapRequest && request.headers.get("sec-fetch-mode") === "navigate";
@@ -689,7 +691,7 @@ export function createAppLaunchHandler(options: {
             launch.expires = now() + SESSION_MS;
             options.onLaunched?.(namedMaterial(launch.material) ? "named" : "link");
           }
-          const script = `(()=>{history.replaceState(null,'','/bootstrap');const proof=${JSON.stringify(proof)};let stopped=false,polling=false,pollTimer=0;const frame=document.createElement('iframe');frame.title='Shared app';frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox';frame.style='display:block;border:0;width:100%;height:100vh;height:100dvh';const lifetime=new AbortController();addEventListener('message',e=>{const s=e.data?.kind==='dohc-color-scheme'?e.data.scheme:null;if(frame.contentWindow&&e.source===frame.contentWindow&&(s==='light'||s==='dark'))frame.style.colorScheme=s;},{signal:lifetime.signal});const broker=(${attachAppCollectionBroker.toString()})(frame,(body,signal)=>{const upload=body.op==='backend.upload';const{bytes,...meta}=upload?body:{bytes:null};return fetch(body.op.startsWith('backend.')?'/backend':'/collection',{method:'POST',headers:{'content-type':upload?'application/octet-stream':'application/json',...(upload?{'x-dohc-app-meta':encodeURIComponent(JSON.stringify(meta))}:{}),'x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store',body:upload?bytes:JSON.stringify(body),signal}).then(r=>{if(r.status===410)gone();return r;});},lifetime.signal);const stop=()=>{stopped=true;clearTimeout(pollTimer);lifetime.abort();frame.remove();document.body.dataset.state='stopped';document.getElementById('status').textContent=${JSON.stringify(SESSION_ENDED)};};const gone=()=>{stop();document.getElementById('status').textContent=${JSON.stringify(LINK_REFUSALS.app_collection_missing.error)};};const call=path=>fetch(path,{method:'POST',headers:{'x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store'});const readDocument=async()=>{let r=await call('/document');if(r.status===503)r=await call('/document');return r;};readDocument().then(async r=>{if(r.status===410){gone();return;}if(!r.ok)throw Error();const html=await r.text();if(stopped)return;frame.srcdoc=html;document.body.append(frame);document.body.dataset.state='running';document.getElementById('status').textContent='';${(await watchable) ? "void watch();" : ""}}).catch(stop);const watch=async()=>{let since=0,wait=500;while(!stopped){try{const r=await fetch('/events',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store',body:JSON.stringify({since}),signal:lifetime.signal});if(r.status===410){gone();return;}if(r.status===404)return;if(!r.ok)throw Error();const e=await r.json();if(e.revision!==since)broker.notifyDatasetChanged(e.dataset,e.revision);since=e.revision;wait=500;}catch{if(stopped)return;await new Promise(ok=>setTimeout(ok,wait));wait=Math.min(wait*2,30000);}}};let misses=0;const poll=async()=>{if(stopped||polling)return;polling=true;clearTimeout(pollTimer);try{const r=await call('/status');if(r.status===404){stop();return;}if(r.status===410){gone();return;}if(!r.ok)throw Error();misses=0;}catch{if(++misses>=2)stop();}finally{polling=false;}if(!stopped){clearTimeout(pollTimer);pollTimer=setTimeout(poll,15000);}};pollTimer=setTimeout(poll,15000);setTimeout(stop,${Math.max(1, launch.expires - now())});addEventListener('pagehide',e=>{if(!e.persisted)stop();});addEventListener('pageshow',e=>{if(e.persisted&&!stopped)void poll();});})();`;
+          const script = `(()=>{history.replaceState(null,'','/bootstrap');const proof=${JSON.stringify(proof)};let stopped=false,polling=false,pollTimer=0;const frame=document.createElement('iframe');frame.title='Shared app';frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox';frame.allow='fullscreen';frame.allowFullscreen=true;frame.style='display:block;border:0;width:100%;height:100vh;height:100dvh';const lifetime=new AbortController();addEventListener('message',e=>{const s=e.data?.kind==='dohc-color-scheme'?e.data.scheme:null;if(frame.contentWindow&&e.source===frame.contentWindow&&(s==='light'||s==='dark'))frame.style.colorScheme=s;},{signal:lifetime.signal});const broker=(${attachAppCollectionBroker.toString()})(frame,(body,signal)=>{const upload=body.op==='backend.upload';const{bytes,...meta}=upload?body:{bytes:null};return fetch(body.op==='backend.file'?'/file':body.op.startsWith('backend.')?'/backend':'/collection',{method:'POST',headers:{'content-type':upload?'application/octet-stream':'application/json',...(upload?{'x-dohc-app-meta':encodeURIComponent(JSON.stringify(meta))}:{}),'x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store',body:upload?bytes:JSON.stringify(body),signal}).then(r=>{if(r.status===410)gone();return r;});},lifetime.signal);const stop=()=>{stopped=true;clearTimeout(pollTimer);lifetime.abort();frame.remove();document.body.dataset.state='stopped';document.getElementById('status').textContent=${JSON.stringify(SESSION_ENDED)};};const gone=()=>{stop();document.getElementById('status').textContent=${JSON.stringify(LINK_REFUSALS.app_collection_missing.error)};};const call=path=>fetch(path,{method:'POST',headers:{'x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store'});const readDocument=async()=>{let r=await call('/document');if(r.status===503)r=await call('/document');return r;};readDocument().then(async r=>{if(r.status===410){gone();return;}if(!r.ok)throw Error();const html=await r.text();if(stopped)return;frame.srcdoc=html;document.body.append(frame);document.body.dataset.state='running';document.getElementById('status').textContent='';${(await watchable) ? "void watch();" : ""}}).catch(stop);const watch=async()=>{let since=0,wait=500;while(!stopped){try{const r=await fetch('/events',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store',body:JSON.stringify({since}),signal:lifetime.signal});if(r.status===410){gone();return;}if(r.status===404)return;if(!r.ok)throw Error();const e=await r.json();if(e.revision!==since)broker.notifyDatasetChanged(e.dataset,e.revision);since=e.revision;wait=500;}catch{if(stopped)return;await new Promise(ok=>setTimeout(ok,wait));wait=Math.min(wait*2,30000);}}};let misses=0;const poll=async()=>{if(stopped||polling)return;polling=true;clearTimeout(pollTimer);try{const r=await call('/status');if(r.status===404){stop();return;}if(r.status===410){gone();return;}if(!r.ok)throw Error();misses=0;}catch{if(++misses>=2)stop();}finally{polling=false;}if(!stopped){clearTimeout(pollTimer);pollTimer=setTimeout(poll,15000);}};pollTimer=setTimeout(poll,15000);setTimeout(stop,${Math.max(1, launch.expires - now())});addEventListener('pagehide',e=>{if(!e.persisted)stop();});addEventListener('pageshow',e=>{if(e.persisted&&!stopped)void poll();});})();`;
           const source = `'sha256-${createHash("sha256").update(script).digest("base64")}'`;
           const csp = `default-src 'none'; script-src ${source} ${doc.scriptSources.join(" ")}; style-src 'unsafe-inline'; connect-src https: http: wss: ws:; img-src data: blob: https: http:; font-src data: https: http:; media-src data: blob: https: http:; frame-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
           return new Response(
@@ -740,9 +742,11 @@ export function createAppLaunchHandler(options: {
           !(
             url.pathname === "/backend"
               ? backendRate
-              : collectionRequest
-                ? collectionRate
-                : sessionRate
+              : url.pathname === "/file"
+                ? fileRate
+                : collectionRequest
+                  ? collectionRate
+                  : sessionRate
           ).allow(rateKey(launch, host), now())
         )
           return namedMaterial(launch.material) ? unavailable() : refusal();
@@ -757,9 +761,10 @@ export function createAppLaunchHandler(options: {
             signal,
             fetchRelay: (request) => fetchForLaunch(launch, request),
           });
-        if (url.pathname === "/backend")
+        if (url.pathname === "/backend" || url.pathname === "/file")
           return await forwardAppBackend({
             request,
+            fileRoute: url.pathname === "/file",
             relayUrl: options.relayUrl,
             publicationId: launch.publicationId,
             authorityRevision: launch.revision,

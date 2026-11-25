@@ -5,6 +5,7 @@ import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import {
   createLocalAppLaunchHost,
   LocalAppUnavailableError,
+  type AppNotice,
   type LocalAppLaunchHost,
 } from "./localAppLaunch";
 
@@ -15,7 +16,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
   await Promise.all(hosts.splice(0).map((host) => host.close()));
 });
-async function fixture(keepAlive = false) {
+async function fixture(keepAlive = false, onNotice?: (notice: AppNotice) => void) {
   const lifetime = new AbortController(),
     session = new AbortController();
   let revision = 1,
@@ -69,7 +70,10 @@ async function fixture(keepAlive = false) {
   const host = await createLocalAppLaunchHost({ backend, lifetime: lifetime.signal });
   hosts.push(host);
   const managed = keepAlive
-    ? await host.launchSession(publicationId, session.signal, { keepAlive: true })
+    ? await host.launchSession(publicationId, session.signal, {
+        keepAlive: true,
+        ...(onNotice ? { onNotice } : {}),
+      })
     : undefined;
   const url = managed?.url ?? (await host.launch(publicationId, session.signal)),
     origin = new URL(url).origin,
@@ -320,6 +324,58 @@ it("takes a click from the bootstrap's header and never from the app's request",
   expect(html).toContain("navigator.userActivation?.isActive");
 });
 
+it("records an app's notice for dohc's own tab, one per cooldown, and only single lines within limits", async () => {
+  const onNotice = vi.fn();
+  const f = await fixture(true, onNotice),
+    opened = await f.open(),
+    headers = { "x-dohc-app-proof": opened.proof };
+  expect(await (await fetch(f.origin + "/bootstrap")).text()).toContain("fetch('/notice'");
+  for (const body of [
+    { message: "Import failed\nat row 3" },
+    { message: "x".repeat(201) },
+    { message: " " },
+    { message: "Import failed", detail: "y".repeat(501) },
+    { message: "Import failed", retry: true },
+  ])
+    expect((await f.post("/notice", body, headers)).status).toBe(400);
+  expect((await f.post("/notice", { message: "Import failed" })).status).toBe(404);
+  expect(onNotice).not.toHaveBeenCalled();
+
+  let now = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  const notice = { message: "Bank import stopped at row 40", detail: "Row 40 has no date." };
+  const first = await f.post("/notice", notice, headers);
+  expect(first.status).toBe(200);
+  expect(await first.json()).toEqual({ recorded: true });
+  expect(onNotice).toHaveBeenCalledWith(notice);
+  const soon = await f.post("/notice", { message: "Again" }, headers);
+  expect(await soon.json()).toEqual({ recorded: false });
+  expect(onNotice).toHaveBeenCalledTimes(1);
+  now += 5_000;
+  expect(await (await f.post("/notice", { message: "Again" }, headers)).json()).toEqual({
+    recorded: true,
+  });
+  expect(onNotice).toHaveBeenLastCalledWith({ message: "Again" });
+
+  const browser = await f.host.launchSession(publicationId, f.session.signal, { onNotice });
+  const origin = new URL(browser.url).origin;
+  const send = (path: string, body: unknown, extra: Record<string, string> = {}) =>
+    fetch(origin + path, {
+      method: "POST",
+      headers: { origin, "content-type": "application/json", ...extra },
+      body: JSON.stringify(body),
+    });
+  const session = (await (
+    await send("/session", { handoff: new URL(browser.url).hash.slice(1) })
+  ).json()) as { proof: string };
+  expect(await (await fetch(origin + "/bootstrap")).text()).not.toContain("/notice");
+  expect(
+    (await send("/notice", { message: "Import failed" }, { "x-dohc-app-proof": session.proof }))
+      .status,
+  ).toBe(404);
+  expect(onNotice).toHaveBeenCalledTimes(2);
+  await browser.stop();
+});
 it("carries exact Collection list and create requests and answers an unavailable engine with 503", async () => {
   const f = await fixture(),
     opened = await f.open(),
@@ -423,7 +479,21 @@ it("binds binary upload and authorized binary file operations to the same approv
     operation: "receipt.read",
     input: {},
   };
-  const fileRes = await f.post("/backend", file, headers);
+  expect((await f.post("/backend", file, headers)).status).toBe(400);
+  expect((await f.post("/file", invoke, headers)).status).toBe(400);
+  const uploadOnFileRoute = await fetch(f.origin + "/file", {
+    method: "POST",
+    headers: {
+      origin: f.origin,
+      "content-type": "application/octet-stream",
+      "x-dohc-app-meta": encodeURIComponent(JSON.stringify({ ...meta, id: "wrong-route" })),
+      ...headers,
+    },
+    body: Buffer.from("%PDF"),
+  });
+  expect(uploadOnFileRoute.status).toBe(400);
+  expect(f.backend.readBrowserFile).not.toHaveBeenCalled();
+  const fileRes = await f.post("/file", file, headers);
   expect(fileRes.status).toBe(200);
   expect(fileRes.headers.get("content-type")).toBe("application/octet-stream");
   expect(JSON.parse(decodeURIComponent(fileRes.headers.get("x-dohc-app-file")!))).toMatchObject({
@@ -692,11 +762,13 @@ it("returns only validated app refusals after rechecking current authority", asy
     new AppBackendRuntimeError({ code: "full", message: "This session is full." }),
   );
   const response = await f.post("/backend", invoke, headers);
-  expect(response.status).toBe(409);
+  expect(response.status).toBe(200);
+  expect(response.headers.get("x-dohc-app-refusal")).toBe("1");
   expect(await response.json()).toEqual({ code: "full", message: "This session is full." });
   f.backend.request.mockRejectedValue(new Error("private implementation failure"));
   const internal = await f.post("/backend", invoke, headers);
   expect(internal.status).toBe(404);
+  expect(internal.headers.get("x-dohc-app-refusal")).toBeNull();
   expect(await internal.text()).toBe("");
   f.backend.request.mockImplementation(async () => {
     f.narrow();
@@ -726,6 +798,37 @@ it("routes readOnly: true backend.invoke to query and rejects invalid readOnly v
     expect.any(AbortSignal),
     false,
   );
+});
+
+it("carries an owner's bulk invoke while other requests keep standard limits", async () => {
+  const f = await fixture(),
+    opened = await f.open(),
+    headers = { "x-dohc-app-proof": opened.proof },
+    large = "x".repeat(200 * 1024),
+    huge = "x".repeat(2 * 1024 * 1024);
+  f.backend.request.mockResolvedValue({ result: null, revision: 1, replayed: false });
+  const bulk = await f.post("/backend", { ...invoke, input: { large } }, headers);
+  expect(bulk.status).toBe(200);
+  expect(f.backend.request).toHaveBeenLastCalledWith(
+    publicationId,
+    "invoke",
+    expect.objectContaining({ input: { large } }),
+    expect.any(AbortSignal),
+    false,
+  );
+  const attempt = await f.post(
+    "/backend",
+    { id: "attempt", op: "backend.attempt", operation: "register", request: { large } },
+    headers,
+  );
+  expect(attempt.status).toBe(413);
+  f.backend.request.mockResolvedValue({ result: huge, revision: 1, replayed: false });
+  expect((await f.post("/backend", invoke, headers)).status).toBe(503);
+  const bulkReply = { profile: "bulk", result: huge, revision: 1, replayed: false };
+  f.backend.request.mockResolvedValue(bulkReply);
+  const result = await f.post("/backend", invoke, headers);
+  expect(result.status).toBe(200);
+  expect(((await result.json()) as { result: string }).result).toHaveLength(huge.length);
 });
 
 it("serves authenticated POST /events long-poll with alias revisions and aborts cleanly on withdrawal", async () => {
@@ -865,6 +968,7 @@ it("keeps conservative concurrency and broker limits on server-backed launches",
     handoff = new URL(url).hash.slice(1);
   const html = await (await fetch(origin + "/bootstrap")).text();
   expect(html).not.toContain('"maxPending":12');
+  expect(html).toContain('"invokeRequestBytes":2097152,"invokeResultBytes":4198400');
   const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
     fetch(origin + path, {
       method: "POST",
@@ -938,6 +1042,22 @@ it("returns structured 429 rate-limit limit, unit, usage, and retry timing on to
     message:
       "Rate limit reached: 30 of 30 requests used in the 60 s burst window (refills 1 request every 2 s). Try again in 2 s.",
     retryAfterMs: 2000,
+  });
+  const file = {
+    op: "backend.file",
+    fileId: "file_0123456789abcdef",
+    operation: "photo",
+    input: {},
+  };
+  for (let i = 0; i < 120; i++)
+    expect((await post("/file", { ...file, id: `file-${i}` }, headers)).status).not.toBe(429);
+  const filesLimited = await post("/file", { ...file, id: "file-over" }, headers);
+  expect(filesLimited.status).toBe(429);
+  expect(await filesLimited.json()).toEqual({
+    code: "rate_limited",
+    message:
+      "Rate limit reached: 120 of 120 file reads used in the 30 s burst window (refills 1 file read every 250 ms). Try again in 250 ms.",
+    retryAfterMs: 250,
   });
   now += 2000;
   expect(

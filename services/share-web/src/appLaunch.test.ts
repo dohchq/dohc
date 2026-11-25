@@ -196,7 +196,7 @@ it("rechecks relay and keeps credentials out of opaque document", async () => {
     "Secure; HttpOnly; SameSite=Strict; Path=/",
   );
   expect(app.html).toContain(
-    "frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox'",
+    "frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox';frame.allow='fullscreen';frame.allowFullscreen=true;",
   );
   expect(app.html).not.toContain("server-capability");
   expect(app.html).not.toContain("server-profile");
@@ -560,6 +560,46 @@ it("bounds backend workflow bursts without changing collection or status admissi
     ).status,
   ).toBe(404);
   expect((await app.read("/status")).status).toBe(204);
+});
+
+it("gives file reads their own budget on the file route", async () => {
+  const f = fixture(),
+    app = await launch(f);
+  expect(app.html).toContain("body.op==='backend.file'?'/file'");
+  const send = (path: string, body: unknown) =>
+    f.handler.handle(
+      f.request(app.origin + path, JSON.stringify(body), {
+        origin: app.origin,
+        cookie: app.cookie,
+        "x-dohc-app-proof": app.proof,
+        "content-type": "application/json",
+      }),
+    );
+  const read = (index: number) =>
+    send("/file", {
+      id: "read-" + index,
+      op: "backend.file",
+      fileId: "file_0123456789abcdef",
+      operation: "photo",
+      input: { index },
+    });
+  const relayed = () =>
+    f.requests.filter((request) => new URL(request.url).pathname.endsWith("/backend/file")).length;
+  for (let index = 0; index < 30; index++)
+    await send("/backend", {
+      id: "invoke",
+      op: "backend.invoke",
+      operation: "register",
+      idempotencyKey: "attempt-" + index,
+      input: {},
+    });
+  for (let index = 0; index < 120; index++) await read(index);
+  expect(relayed()).toBe(120);
+  expect((await read(120)).status).toBe(404);
+  expect(relayed()).toBe(120);
+  f.advance(250);
+  await read(121);
+  expect(relayed()).toBe(121);
 });
 
 it("authenticates refresh from its cookie, rebuilds current bytes, and rotates only the parent proof", async () => {

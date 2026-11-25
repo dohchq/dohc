@@ -442,7 +442,7 @@ export function createServerDatasetApps(options: {
           signal,
         );
       }
-      const { authorityRevision, ...input } = parseAppBackendInvokeRequest(raw);
+      const { authorityRevision, ...input } = parseAppBackendInvokeRequest(raw, "bulk");
       const cap = selectDatasetCapability(
         current(publicationId, authorityRevision).capabilities,
         input.dataset,

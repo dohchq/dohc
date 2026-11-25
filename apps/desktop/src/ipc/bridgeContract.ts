@@ -4336,6 +4336,12 @@ export const AppViewResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("colorScheme") }).strict(),
 ]);
 export type AppViewResult = z.infer<typeof AppViewResult>;
+const appNoticeLine = (max: number) =>
+  z
+    .string()
+    .max(max)
+    .regex(/^[^\p{Cc}\p{Zl}\p{Zp}]*$/u)
+    .refine((value) => value.trim() !== "");
 export const AppViewEvent = z.discriminatedUnion("kind", [
   z.object({ viewId: AppViewId, kind: z.literal("approval-ended") }).strict(),
   z.object({ viewId: AppViewId, kind: z.literal("session-ended") }).strict(),
@@ -4343,6 +4349,14 @@ export const AppViewEvent = z.discriminatedUnion("kind", [
     .object({ viewId: AppViewId, kind: z.literal("download-blocked"), filename: z.string() })
     .strict(),
   z.object({ viewId: AppViewId, kind: z.literal("external-link"), url: z.string() }).strict(),
+  z
+    .object({
+      viewId: AppViewId,
+      kind: z.literal("app-notice"),
+      message: appNoticeLine(200),
+      detail: appNoticeLine(500).optional(),
+    })
+    .strict(),
   z
     .object({
       viewId: AppViewId,

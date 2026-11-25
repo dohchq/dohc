@@ -1127,6 +1127,7 @@ function WorkspaceShell(props: {
     reportSyncFailure,
     showSyncRefusals,
     clearSyncFailure,
+    reportAppNotice,
     reportCollectionsWaiting,
     clearCollectionsWaiting,
     reportDriveLimit,
@@ -1833,11 +1834,6 @@ function WorkspaceShell(props: {
     }),
     [clearIdentity, reportShellFailure],
   );
-  // An app's notices: one row per tab and kind, which a later success takes back.
-  const appNotices = useMemo<AppViewNotices>(
-    () => ({ report: reportShellFailure, clear: clearIdentity }),
-    [clearIdentity, reportShellFailure],
-  );
   // What can explain an Access answer that covers nothing. About derives the
   // cause for each file from these facts (accessReasonFor).
   const isShareView = props.workspace.shareView !== undefined;
@@ -1924,6 +1920,8 @@ function WorkspaceShell(props: {
     resolveMomentDiffPath,
     resolveAppTitle,
   } = useTabTitles(workspaceId);
+  const knownTabLabelsRef = useRef(knownTabLabels);
+  knownTabLabelsRef.current = knownTabLabels;
   // App tabs that have shown, in the order they first showed. Each app's page
   // stays mounted under the editor area while its tab is open, and lies over
   // the group that holds the tab. Switching or moving tabs changes only its
@@ -4491,6 +4489,22 @@ function WorkspaceShell(props: {
   const openAppTab = useCallback(
     (siteRoot: string) => openPathWithHeading(siteTabPath(siteRoot)),
     [openPathWithHeading],
+  );
+  // An app's notices: one row per tab and kind, which a later success takes back.
+  const appNotices = useMemo<AppViewNotices>(
+    () => ({
+      report: reportShellFailure,
+      clear: clearIdentity,
+      appNotice: ({ appRoot, message, detail }) =>
+        reportAppNotice({
+          identity: `app-notice:${appRoot}`,
+          title: `${knownTabLabelsRef.current.get(siteTabPath(appRoot)) ?? (appRoot.split("/").pop() || appRoot)} reported a problem`,
+          message,
+          ...(detail ? { detail } : {}),
+          retry: () => openAppTab(appRoot),
+        }),
+    }),
+    [clearIdentity, reportShellFailure, reportAppNotice, openAppTab],
   );
   const openVirtualTab = useCallback(
     (path: string, recent = false, once = false) => {

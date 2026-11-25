@@ -7,6 +7,7 @@ export type AppBrokerOp =
   | "backend.file"
   | "host.copy"
   | "host.print"
+  | "host.notice"
   | "unknown";
 
 export type AppBrokerLocalRejectionReason =
@@ -42,12 +43,17 @@ export interface AppBrokerLimits {
   readonly maxPending?: number;
   readonly backendBurst?: number;
   readonly backendRefillMs?: number;
+  readonly fileBurst?: number;
+  readonly fileRefillMs?: number;
+  readonly invokeRequestBytes?: number;
+  readonly invokeResultBytes?: number;
   readonly trustRateLimitDetails?: boolean;
 }
 
 export interface AppBrokerHostActions {
   copyText?(text: string): Promise<void>;
   print?(options: { height?: number }): Promise<void>;
+  notice?(notice: { message: string; detail?: string }): Promise<boolean>;
 }
 
 export interface AppBrokerHandle {
@@ -73,6 +79,10 @@ export function attachAppCollectionBroker(
   const maxPending = bounded(limits?.maxPending, 1, 16, 4),
     backendBurst = bounded(limits?.backendBurst, 1, 240, 30),
     backendRefillMs = bounded(limits?.backendRefillMs, 10, 10_000, 2000),
+    fileBurst = bounded(limits?.fileBurst, 1, 240, 120),
+    fileRefillMs = bounded(limits?.fileRefillMs, 10, 10_000, 250),
+    invokeRequestBytes = bounded(limits?.invokeRequestBytes, 131_072, 2_097_152, 131_072),
+    invokeResultBytes = bounded(limits?.invokeResultBytes, 1_048_576, 4_198_400, 1_048_576),
     trustRateLimitDetails = limits?.trustRateLimitDetails === true,
     collectionBurst = 12,
     collectionRefillMs = 5000,
@@ -84,12 +94,14 @@ export function attachAppCollectionBroker(
     loaded = false,
     pending = 0,
     backendTokens = backendBurst,
+    fileTokens = fileBurst,
     collectionTokens = collectionBurst,
     updated = Date.now(),
     copying = false,
     nextCopyAt = 0,
     printing = false,
-    nextPrintAt = 0;
+    nextPrintAt = 0,
+    noticing = false;
   const channel = new MessageChannel(),
     controller = new AbortController(),
     ids = new Set<string>();
@@ -115,7 +127,8 @@ export function attachAppCollectionBroker(
     v === "backend.upload" ||
     v === "backend.file" ||
     v === "host.copy" ||
-    v === "host.print"
+    v === "host.print" ||
+    v === "host.notice"
       ? v
       : "unknown";
   const knownOperation = (v: unknown): string | undefined =>
@@ -214,10 +227,15 @@ export function attachAppCollectionBroker(
       return;
     }
     loaded = true;
+    const budget = {
+      maxInFlight: maxPending,
+      calls: { burst: backendBurst, refillMs: backendRefillMs },
+      files: { burst: fileBurst, refillMs: fileRefillMs },
+    };
     const handshake =
       maxPending > 4
-        ? { kind: "dohc-app-channel", version: 1, maxInFlight: Math.min(maxPending, 8) }
-        : { kind: "dohc-app-channel", version: 1 };
+        ? { kind: "dohc-app-channel", version: 1, maxInFlight: Math.min(maxPending, 8), budget }
+        : { kind: "dohc-app-channel", version: 1, budget };
     frame.contentWindow?.postMessage(handshake, "*", [channel.port2]);
     emit({ kind: "handshake-delivered" });
   });
@@ -370,6 +388,38 @@ export function attachAppCollectionBroker(
       }
       return;
     }
+    if (body.op === "host.notice") {
+      const line = (v: unknown, max: number) =>
+        typeof v === "string" &&
+        v.trim() !== "" &&
+        v.length <= max &&
+        !/[\p{Cc}\p{Zl}\p{Zp}]/u.test(v);
+      if (
+        !["id,message,op", "detail,id,message,op"].includes(keys) ||
+        !line(body.message, 200) ||
+        (Object.hasOwn(body, "detail") && !line(body.detail, 500))
+      )
+        return rejectLocal("invalid_keys", 400);
+      const owns = !noticing;
+      noticing = true;
+      ids.add(id);
+      emit({ kind: "started", id, op });
+      try {
+        const notice =
+          typeof body.detail === "string"
+            ? { message: body.message as string, detail: body.detail }
+            : { message: body.message as string };
+        const recorded =
+          owns && hostActions?.notice ? await hostActions.notice(notice).catch(() => false) : false;
+        if (closed) return;
+        channel.port1.postMessage({ id, ok: true, value: { recorded: recorded === true } });
+        emit({ kind: "completed", id, op, status: 200, ok: true });
+      } finally {
+        if (owns) noticing = false;
+        ids.delete(id);
+      }
+      return;
+    }
     if (upload) {
       if (!(body.bytes instanceof ArrayBuffer)) return rejectLocal("invalid_keys", 400);
       if (body.bytes.byteLength > maxFileBytes) return rejectLocal("payload_too_large", 413);
@@ -384,7 +434,13 @@ export function attachAppCollectionBroker(
     } catch {
       return rejectLocal("unserializable", 400);
     }
-    const requestBytes = upload ? 4096 : backend ? 128 * 1024 : 16_384;
+    const requestBytes = upload
+      ? 4096
+      : body.op === "backend.invoke"
+        ? invokeRequestBytes
+        : backend
+          ? 128 * 1024
+          : 16_384;
     if (new TextEncoder().encode(encoded).byteLength > requestBytes)
       return rejectLocal("payload_too_large", 413);
     const validAlias =
@@ -420,6 +476,7 @@ export function attachAppCollectionBroker(
     if (!valid) return rejectLocal("invalid_keys", 400);
     const now = Date.now();
     backendTokens = Math.min(backendBurst, backendTokens + (now - updated) / backendRefillMs);
+    fileTokens = Math.min(fileBurst, fileTokens + (now - updated) / fileRefillMs);
     collectionTokens = Math.min(
       collectionBurst,
       collectionTokens + (now - updated) / collectionRefillMs,
@@ -430,19 +487,21 @@ export function attachAppCollectionBroker(
         code: "rate_limited",
         message: `Rate limit reached: at most ${maxPending} concurrent requests allowed (${pending} currently in flight). Wait for an active request to finish, then try again.`,
       });
-    const activeTokens = backend ? backendTokens : collectionTokens;
+    const fileRead = body.op === "backend.file";
+    const activeTokens = fileRead ? fileTokens : backend ? backendTokens : collectionTokens;
     if (activeTokens < 1) {
-      const burst = backend ? backendBurst : collectionBurst;
-      const refillMs = backend ? backendRefillMs : collectionRefillMs;
+      const burst = fileRead ? fileBurst : backend ? backendBurst : collectionBurst;
+      const refillMs = fileRead ? fileRefillMs : backend ? backendRefillMs : collectionRefillMs;
       const retryAfterMs = Math.max(1, Math.ceil((1 - activeTokens) * refillMs));
-      const kind = backend ? "backend" : "collection";
+      const kind = fileRead ? "file" : backend ? "backend" : "collection";
       return rejectLocal("rate_limited", 429, {
         code: "rate_limited",
         message: `Rate limit reached: ${burst} of ${burst} ${kind} requests used in the ${formatDuration(burst * refillMs)} burst window (refills 1 request every ${formatDuration(refillMs)}). Try again in ${formatDuration(retryAfterMs)}.`,
         retryAfterMs,
       });
     }
-    if (backend) backendTokens--;
+    if (fileRead) fileTokens--;
+    else if (backend) backendTokens--;
     else collectionTokens--;
     pending++;
     ids.add(id);
@@ -468,9 +527,10 @@ export function attachAppCollectionBroker(
       }
       const refusal =
         backend &&
-        response.status === 409 &&
+        response.status === 200 &&
+        response.headers.get("x-dohc-app-refusal") === "1" &&
         response.headers.get("content-type")?.split(";", 1)[0] === "application/json";
-      if (!response.ok && !refusal) {
+      if (!response.ok) {
         const status = [400, 404, 409, 413, 429].includes(response.status) ? response.status : 503;
         if (status === 429) {
           let trustedError: { code: string; message: string; retryAfterMs?: number } | undefined;
@@ -556,7 +616,13 @@ export function attachAppCollectionBroker(
         return finish(status, false);
       }
       const binaryFile = !refusal && body.op === "backend.file";
-      const responseBytes = refusal ? 8192 : binaryFile ? maxFileBytes : 1024 * 1024;
+      const responseBytes = refusal
+        ? 8192
+        : binaryFile
+          ? maxFileBytes
+          : body.op === "backend.invoke"
+            ? invokeResultBytes
+            : 1024 * 1024;
       let fileMeta: Record<string, unknown> | undefined;
       if (binaryFile) {
         const mime = response.headers.get("content-type")?.split(";", 1)[0];

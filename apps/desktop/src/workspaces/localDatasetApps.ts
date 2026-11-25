@@ -380,7 +380,7 @@ export function createLocalDatasetApps(options: {
           },
         );
       }
-      const input = parseAppBackendInvokeRequest(raw);
+      const input = parseAppBackendInvokeRequest(raw, "bulk");
       return inContext(
         publicationId,
         input.authorityRevision,

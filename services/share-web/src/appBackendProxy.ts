@@ -43,6 +43,7 @@ export async function forwardAppBackend(input: {
   authorityRevision: number;
   capability?: string;
   profileSecret?: string;
+  fileRoute: boolean;
   signal: AbortSignal;
   fetchRelay(request: Request): Promise<Response>;
 }): Promise<Response> {
@@ -88,7 +89,8 @@ export async function forwardAppBackend(input: {
     !record(body) ||
     typeof body.id !== "string" ||
     !/^[A-Za-z0-9_-]{1,64}$/.test(body.id) ||
-    body.id.includes("\n")
+    body.id.includes("\n") ||
+    input.fileRoute !== (body.op === "backend.file")
   )
     return error(400);
   let action: "invoke" | "upload" | "file" | "attempt", payload: unknown;
@@ -215,7 +217,9 @@ export async function forwardAppBackend(input: {
         await readBoundedJson(relay, APP_BACKEND_REFUSAL_BYTES, input.signal),
       );
       input.signal.throwIfAborted();
-      return Response.json(refusal, { status: 409, headers: responseHeaders });
+      return Response.json(refusal, {
+        headers: { ...responseHeaders, "x-dohc-app-refusal": "1" },
+      });
     }
     if (relay.status !== 200 || relay.redirected || relay.headers.has("location"))
       return input.capability || relay.status === 410

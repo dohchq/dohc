@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AppBackendError,
   AppProvider,
+  appBudget,
   createAppClient,
   isAppBackendError,
   mutationKey,
@@ -194,13 +195,19 @@ describe("dohc/app", () => {
     const fakeParent = {} as Window;
     const originalParent = Object.getOwnPropertyDescriptor(window, "parent");
     Object.defineProperty(window, "parent", { configurable: true, value: fakeParent });
+    const budget = {
+      maxInFlight: 4,
+      calls: { burst: 30, refillMs: 2000 },
+      files: { burst: 120, refillMs: 250 },
+    };
     const event = new MessageEvent("message", {
-      data: { kind: "dohc-app-channel", version: 1 },
+      data: { kind: "dohc-app-channel", version: 1, budget },
       ports: [fake.port],
     });
     Object.defineProperty(event, "source", { value: fakeParent });
     window.dispatchEvent(event);
     if (originalParent) Object.defineProperty(window, "parent", originalParent);
+    await expect(appBudget()).resolves.toEqual(budget);
 
     function Probe() {
       const q = useDatasetQuery<{ ok: boolean }>("ping");
@@ -1933,6 +1940,35 @@ describe("dohc/ui and dohc/charts", () => {
     client.close();
   });
 
+  it("keeps a slot for calls while file reads wait, and sends waiting calls first", async () => {
+    const fake = makeFakePort();
+    const client = createAppClient({ port: fake.port, maxInFlight: 3 });
+    const photos = Array.from({ length: 5 }, (_, index) =>
+      client.file(`file_${String(index).padStart(16, "0")}`, "photo").catch(() => null),
+    );
+    expect(fake.sent.map((message) => message.op)).toEqual(["backend.file", "backend.file"]);
+    const heart = client.invoke("heart", {}, "heart-1");
+    expect(fake.sent.at(-1)!.op).toBe("backend.invoke");
+    const note = client.invoke("note", {}, "note-1");
+    expect(fake.sent).toHaveLength(3);
+    fake.reply({ id: fake.sent[0]!.id, ok: false, status: 503 });
+    await waitFor(() => expect(fake.sent).toHaveLength(4));
+    expect(fake.sent[3]!.operation).toBe("note");
+    for (const message of fake.sent.slice(2))
+      fake.reply({
+        id: message.id,
+        ok: true,
+        value: { result: null, revision: 1, replayed: false },
+      });
+    await expect(heart).resolves.toMatchObject({ revision: 1 });
+    await expect(note).resolves.toMatchObject({ revision: 1 });
+    await waitFor(() =>
+      expect(fake.sent.filter((message) => message.op === "backend.file")).toHaveLength(3),
+    );
+    client.close();
+    await Promise.all(photos);
+  });
+
   it("sends host.copy and host.print immediately ahead of queued backend calls and parses 413/429 host errors", async () => {
     const fake = makeFakePort();
     const client = createAppClient({ port: fake.port, maxInFlight: 1 });
@@ -1985,6 +2021,39 @@ describe("dohc/ui and dohc/charts", () => {
       value: { result: "q", revision: 1, replayed: false },
     });
     await expect(queuedRead).resolves.toBe("q");
+    client.close();
+  });
+
+  it("sends a notice ahead of queued calls and says whether dohc recorded it", async () => {
+    const fake = makeFakePort();
+    const client = createAppClient({ port: fake.port, maxInFlight: 1 });
+    const slowRead = client.read("slow");
+
+    const recorded = client.notice!({
+      message: "Bank import stopped at row 40",
+      detail: "Row 40 has no date.",
+    });
+    expect(fake.sent).toHaveLength(2);
+    expect(fake.sent[1]).toEqual({
+      id: expect.any(String),
+      op: "host.notice",
+      message: "Bank import stopped at row 40",
+      detail: "Row 40 has no date.",
+    });
+    fake.reply({ id: fake.sent[1]!.id, ok: true, value: { recorded: true } });
+    await expect(recorded).resolves.toBe(true);
+
+    const shared = client.notice!({ message: "Payment failed" });
+    expect(Object.keys(fake.sent[2]!).sort()).toEqual(["id", "message", "op"]);
+    fake.reply({ id: fake.sent[2]!.id, ok: true, value: { recorded: false } });
+    await expect(shared).resolves.toBe(false);
+
+    fake.reply({
+      id: fake.sent[0]!.id,
+      ok: true,
+      value: { result: "ok", revision: 1, replayed: false },
+    });
+    await expect(slowRead).resolves.toBe("ok");
     client.close();
   });
 });

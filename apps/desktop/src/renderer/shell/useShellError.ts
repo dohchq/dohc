@@ -800,6 +800,26 @@ export function useShellError(
     [push],
   );
   const clearSyncFailure = useCallback(() => clearKind("cloud-sync"), [clearKind]);
+  const reportAppNotice = useCallback(
+    (notice: {
+      identity: string;
+      title: string;
+      message: string;
+      detail?: string;
+      retry: () => void;
+    }) =>
+      push(
+        {
+          title: notice.title,
+          message: notice.message,
+          ...(notice.detail ? { details: [["Detail", notice.detail]] as const } : {}),
+          retry: notice.retry,
+          identity: notice.identity,
+        },
+        "keep",
+      ),
+    [push],
+  );
   // One row while Collection updates wait for an unfinished pull. A newer
   // report replaces it, keeping its toast unless the report toasts. The wait
   // itself is a warning; a reopen that failed is a failure.
@@ -1678,6 +1698,7 @@ export function useShellError(
     reportSyncFailure,
     showSyncRefusals,
     clearSyncFailure,
+    reportAppNotice,
     reportCollectionsWaiting,
     clearCollectionsWaiting,
     reportDriveLimit,

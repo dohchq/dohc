@@ -650,7 +650,8 @@ describe("verifyLocalAppFrontend", () => {
               idempotencyKey: "k2",
               input: { name: "Bob", seats: 4 },
             });
-            expect(fullRes.status).toBe(409);
+            expect(fullRes.status).toBe(200);
+            expect(fullRes.headers.get("x-dohc-app-refusal")).toBe("1");
             expect(await fullRes.json()).toEqual({
               code: "workshop_full",
               message: "All 8 seats are booked.",
@@ -1210,7 +1211,8 @@ describe("verifyLocalAppFrontend", () => {
               idempotencyKey: "k-missing",
               input: { name: "bad-1", mode: "missing" },
             });
-            expect(missing.status).toBe(409);
+            expect(missing.status).toBe(200);
+            expect(missing.headers.get("x-dohc-app-refusal")).toBe("1");
             expect(await missing.json()).toMatchObject({ code: "undo_missing" });
 
             const oversize = await backend({
@@ -1220,7 +1222,8 @@ describe("verifyLocalAppFrontend", () => {
               idempotencyKey: "k-oversize",
               input: { name: "bad-2", mode: "oversize" },
             });
-            expect(oversize.status).toBe(409);
+            expect(oversize.status).toBe(200);
+            expect(oversize.headers.get("x-dohc-app-refusal")).toBe("1");
             expect(await oversize.json()).toMatchObject({ code: "undo_missing" });
 
             const emptyList = await backend({

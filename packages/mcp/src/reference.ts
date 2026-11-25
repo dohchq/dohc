@@ -1186,9 +1186,11 @@ ${cliSection()}
 
 ## App channel
 
-An app page reads and changes its Collection through the app channel. The channel works in two places: a published app opened from a share link, and a local app opened with \`dohc app launchLocal\`. An app open in a dohc tab has no channel.
+An app page reads and changes its Collection through the app channel. The channel works in three places: an app open in a dohc tab, a published app opened from a share link, and a local app opened with \`dohc app launchLocal\`.
 
-When the page loads, its parent window posts \`{ kind: "dohc-app-channel", version: 1 }\` with one \`MessagePort\`. The page keeps that port and posts each request to it as \`{ id, op, ...fields }\`. \`id\` is 1 to 64 letters, digits, \`_\`, or \`-\`, and no two requests in flight share one. The port answers \`{ id, ok: true, value }\`, or \`{ id, ok: false, status }\` with status 400, 404, 409, 413, 429, or 503. At most four requests can wait at once.
+When the page loads, its parent window posts \`{ kind: "dohc-app-channel", version: 1, budget }\` with one \`MessagePort\`. The page keeps that port and posts each request to it as \`{ id, op, ...fields }\`. \`id\` is 1 to 64 letters, digits, \`_\`, or \`-\`, and no two requests in flight share one. The port answers \`{ id, ok: true, value }\`, or \`{ id, ok: false, status }\` with status 400, 404, 409, 413, 429, or 503.
+
+The handshake's \`budget\` is \`{ maxInFlight, calls: { burst, refillMs }, files: { burst, refillMs } }\`. \`maxInFlight\` is how many requests can wait at once. Operation calls, uploads, and pending submissions spend \`calls\`, and file reads spend \`files\`, so a wall of photos never holds up a save. Each holds \`burst\` requests and gets one back every \`refillMs\` milliseconds. A request past either answers status 429.
 
 The app calls only the operations its owner approved when publishing it. \`app.publish.json\` names them under \`dataset.operationIds\`. The page never sends a workspace, user, or revision, because the host supplies them.
 

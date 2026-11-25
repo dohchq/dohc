@@ -37,6 +37,7 @@ type AppViewEvent =
   | { viewId: string; kind: "session-ended" }
   | { viewId: string; kind: "download-blocked"; filename: string }
   | { viewId: string; kind: "external-link"; url: string }
+  | { viewId: string; kind: "app-notice"; message: string; detail?: string }
   | {
       viewId: string;
       kind: "shortcut";
@@ -194,7 +195,7 @@ const viewIdOf = () =>
 const opens = () => appView.mock.calls.filter(([request]) => request.action === "open").length;
 const toolbar = () => within(screen.getByTestId("site-preview-page").querySelector("header")!);
 
-const notices = { report: vi.fn(), clear: vi.fn() };
+const notices = { report: vi.fn(), clear: vi.fn(), appNotice: vi.fn() };
 function Page(props: Partial<ComponentProps<typeof SitePreviewPage>>) {
   return (
     <SitePreviewPage
@@ -337,6 +338,25 @@ describe("an owner app in its tab", () => {
     expect(
       await screen.findByText("This app's approval ended. Review it to open again."),
     ).toBeTruthy();
+  });
+
+  it("hands the shell what the app reported, as its own words for its own app", async () => {
+    render(<Page />);
+    await openedView();
+    emit({
+      viewId: viewIdOf(),
+      kind: "app-notice",
+      message: "Bank import stopped at row 40",
+      detail: "Row 40 has no date.",
+    });
+    emit({ viewId: "another-view", kind: "app-notice", message: "Not this app" });
+    expect(notices.appNotice).toHaveBeenCalledOnce();
+    expect(notices.appNotice).toHaveBeenCalledWith({
+      appRoot: "preorders",
+      message: "Bank import stopped at row 40",
+      detail: "Row 40 has no date.",
+    });
+    expect(notices.report).not.toHaveBeenCalled();
   });
 
   it("leaves focus where it went if the tab lost focus before the app opened", async () => {

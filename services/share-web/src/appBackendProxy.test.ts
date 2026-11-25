@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import {
   APP_BACKEND_REQUEST_BYTES,
   APP_BACKEND_UPLOAD_BYTES,
@@ -52,6 +52,24 @@ it("forwards only the exact scoped rate refusal", async () => {
   }
 });
 
+it("takes file reads only on the file route and nothing else there", async () => {
+  const relay = vi.fn(async () => Response.json({}));
+  const open = new AbortController().signal;
+  for (const [body, fileRoute] of [
+    [readFile, false],
+    [invoke, true],
+    [upload, true],
+  ] as const) {
+    expect((await forward(body, relay, "application/json", open, false, fileRoute)).status).toBe(
+      400,
+    );
+    expect((await forward(body, relay, "application/json", open, true, fileRoute)).status).toBe(
+      404,
+    );
+  }
+  expect(relay).not.toHaveBeenCalled();
+});
+
 it("forwards a deleted Collection's refusal to link and named apps", async () => {
   const body = linkRefusalBody("app_collection_missing");
   const link = await forward(invoke, async () => Response.json(body, { status: 410 }));
@@ -74,6 +92,7 @@ function forward(
   contentType = "application/json",
   signal = new AbortController().signal,
   link = true,
+  fileRoute = (body as { op?: unknown } | null)?.op === "backend.file",
 ) {
   const isBinaryUpload =
     contentType === "application/json" &&
@@ -98,7 +117,7 @@ function forward(
     requestBody = JSON.stringify(body);
   }
   return forwardAppBackend({
-    request: new Request("https://app.example.net/backend", {
+    request: new Request(`https://app.example.net/${fileRoute ? "file" : "backend"}`, {
       method: "POST",
       body: requestBody,
       headers,
@@ -107,6 +126,7 @@ function forward(
     publicationId: "a".repeat(64),
     authorityRevision: 7,
     ...(link ? { capability: "server-cap", profileSecret: "server-profile" } : {}),
+    fileRoute,
     signal,
     fetchRelay,
   });
@@ -427,8 +447,13 @@ it("bounds relay bodies and refuses a response after launch cancellation", async
 it("passes only bounded typed app refusals while discarding private or malformed error details", async () => {
   const refusal = { code: "capacity_full", message: "This session is full." };
   const response = await forward(invoke, async () => Response.json(refusal, { status: 409 }));
-  expect(response.status).toBe(409);
+  expect(response.status).toBe(200);
+  expect(response.headers.get("x-dohc-app-refusal")).toBe("1");
   expect(await response.json()).toEqual(refusal);
+  const forged = await forward(invoke, async () =>
+    Response.json(refusal, { headers: { "x-dohc-app-refusal": "1" } }),
+  );
+  expect(forged.headers.get("x-dohc-app-refusal")).toBeNull();
   for (const invalid of [
     { ...refusal, stack: "private" },
     { code: "private\n", message: "bad" },

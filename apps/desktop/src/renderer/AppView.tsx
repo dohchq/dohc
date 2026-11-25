@@ -25,6 +25,7 @@ export type AppViewNotices = {
     action?: { label: string; run: () => void; ends?: boolean };
   }): void;
   clear(identity: string): void;
+  appNotice(notice: { appRoot: string; message: string; detail?: string }): void;
 };
 
 export const APP_OPEN_FAILED = "dohc could not open this app.";
@@ -291,13 +292,19 @@ export function useAppView(options: {
             ends: true,
           },
         });
+      } else if (event.kind === "app-notice") {
+        notices?.appNotice({
+          appRoot,
+          message: event.message,
+          ...(event.detail ? { detail: event.detail } : {}),
+        });
       } else if (event.kind === "external-link") {
         void openLinkExternally(event.url);
       } else if (event.kind === "shortcut") {
         onShortcut(event);
       }
     });
-  }, [enabled, viewId, failureId, sessionId, downloadId, onShortcut]);
+  }, [enabled, appRoot, viewId, failureId, sessionId, downloadId, onShortcut]);
 
   useEffect(() => {
     if (!options.visible || !relaunchWhenShown.current) return;

@@ -4,7 +4,7 @@ import {
   type MessagePort as NodeMessagePort,
 } from "node:worker_threads";
 import { once } from "node:events";
-import { attachAppCollectionBroker } from "@dohc/app-browser/broker";
+import { attachAppCollectionBroker, type AppBrokerLimits } from "@dohc/app-browser/broker";
 
 function harness(
   send: (
@@ -12,6 +12,7 @@ function harness(
     signal: AbortSignal,
     request: { activated: boolean },
   ) => Promise<Response> = async (body) => Response.json(body),
+  limits?: AppBrokerLimits,
 ) {
   vi.stubGlobal("MessageChannel", NodeMessageChannel);
   const frame = new EventTarget();
@@ -19,7 +20,15 @@ function harness(
   Object.assign(frame, {
     contentWindow: {
       postMessage(message: unknown, target: string, ports: NodeMessagePort[]) {
-        expect(message).toEqual({ kind: "dohc-app-channel", version: 1 });
+        expect(message).toEqual({
+          kind: "dohc-app-channel",
+          version: 1,
+          budget: {
+            maxInFlight: 4,
+            calls: { burst: 30, refillMs: 2000 },
+            files: { burst: 120, refillMs: 250 },
+          },
+        });
         expect(target).toBe("*");
         expect(ports).toHaveLength(1);
         port = ports[0]!;
@@ -27,7 +36,7 @@ function harness(
     },
   });
   const lifetime = new AbortController();
-  attachAppCollectionBroker(frame as HTMLIFrameElement, send, lifetime.signal);
+  attachAppCollectionBroker(frame as HTMLIFrameElement, send, lifetime.signal, undefined, limits);
   frame.dispatchEvent(new Event("load"));
   const request = (body: unknown) => {
     const response = once(port, "message");
@@ -282,6 +291,22 @@ it("bounds backend workflow bursts while preserving the collection budget", asyn
         })
       ).status,
     ).toBe(429);
+    const read = (index: number) =>
+      f.request({
+        id: "f" + index,
+        op: "backend.file",
+        fileId: "file_0123456789abcdef",
+        operation: "photo",
+        input: { index },
+      });
+    for (let index = 0; index < 120; index++) expect((await read(index)).status).not.toBe(429);
+    expect(await read(120)).toMatchObject({
+      status: 429,
+      error: {
+        code: "rate_limited",
+        message: expect.stringContaining("120 of 120 file requests used"),
+      },
+    });
   } finally {
     f.close();
   }
@@ -417,7 +442,11 @@ it("returns safe app refusal text and hides invalid backend errors", async () =>
     { code: "full", message: "private", stack: "secret" },
     { code: "full", message: "x".repeat(8193) },
   ];
-  const f = harness(async () => Response.json(values.shift(), { status: 409 }));
+  const f = harness(async () =>
+    values.length === 0
+      ? Response.json({ code: "full", message: "Untrusted" }, { status: 409 })
+      : Response.json(values.shift(), { headers: { "x-dohc-app-refusal": "1" } }),
+  );
   try {
     const request = {
       op: "backend.invoke",
@@ -433,6 +462,11 @@ it("returns safe app refusal text and hides invalid backend errors", async () =>
     });
     for (const id of ["private", "large"])
       expect(await f.request({ ...request, id })).toEqual({ id, ok: false, status: 503 });
+    expect(await f.request({ ...request, id: "bare" })).toEqual({
+      id: "bare",
+      ok: false,
+      status: 409,
+    });
   } finally {
     f.close();
   }
@@ -452,8 +486,16 @@ it("observes handshake, pre-forward rejections, and post-validation outcomes wit
   const events: unknown[] = [];
   const replies = [
     () => Response.json({ result: { ok: 1 }, revision: 1, replayed: false }),
-    () => Response.json({ code: "workshop_full", message: "Full" }, { status: 409 }),
-    () => Response.json({ code: "bad", message: "bad", extra: true }, { status: 409 }),
+    () =>
+      Response.json(
+        { code: "workshop_full", message: "Full" },
+        { headers: { "x-dohc-app-refusal": "1" } },
+      ),
+    () =>
+      Response.json(
+        { code: "bad", message: "bad", extra: true },
+        { headers: { "x-dohc-app-refusal": "1" } },
+      ),
   ];
   const lifetime = new AbortController();
   attachAppCollectionBroker(
@@ -587,7 +629,16 @@ it("forwards one-way dataset.changed push events, accepts readOnly: true, and su
     broker.notifyDatasetChanged("BadAlias", 9);
     broker.notifyDatasetChanged("expenses", -1);
     frame.dispatchEvent(new Event("load"));
-    expect(handshake).toEqual({ kind: "dohc-app-channel", version: 1, maxInFlight: 8 });
+    expect(handshake).toEqual({
+      kind: "dohc-app-channel",
+      version: 1,
+      maxInFlight: 8,
+      budget: {
+        maxInFlight: 12,
+        calls: { burst: 120, refillMs: 50 },
+        files: { burst: 120, refillMs: 250 },
+      },
+    });
 
     const liveEvent = once(port, "message");
     broker.notifyDatasetChanged("BadAlias", 9);
@@ -976,5 +1027,137 @@ it("gates host.copy and host.print on user activation, size bounds, and anti-spa
     nowSpy.mockRestore();
     lifetime.abort();
     vi.unstubAllGlobals();
+  }
+});
+
+it("raises request and reply caps only for invokes and only when the host grants them", async () => {
+  const large = "x".repeat(200 * 1024),
+    huge = "x".repeat(2 * 1024 * 1024);
+  const invoke = { op: "backend.invoke", operation: "importRows", idempotencyKey: "k", input: {} };
+  const reply = async (body: unknown) =>
+    Response.json((body as { input?: { huge?: true } }).input?.huge ? { result: huge } : body);
+  const standard = harness(reply);
+  try {
+    expect(await standard.request({ ...invoke, id: "big", input: { large } })).toEqual({
+      id: "big",
+      ok: false,
+      status: 413,
+    });
+    expect(await standard.request({ ...invoke, id: "reply", input: { huge: true } })).toEqual({
+      id: "reply",
+      ok: false,
+      status: 503,
+    });
+  } finally {
+    standard.close();
+  }
+  const bulk = harness(reply, { invokeRequestBytes: 2_097_152, invokeResultBytes: 4_198_400 });
+  try {
+    expect((await bulk.request({ ...invoke, id: "big", input: { large } })).ok).toBe(true);
+    expect((await bulk.request({ ...invoke, id: "reply", input: { huge: true } })).ok).toBe(true);
+    expect(
+      await bulk.request({
+        id: "attempt",
+        op: "backend.attempt",
+        operation: "importRows",
+        request: { large },
+      }),
+    ).toEqual({ id: "attempt", ok: false, status: 413 });
+  } finally {
+    bulk.close();
+  }
+});
+
+it("hands the host one notice at a time and only single lines within their limits", async () => {
+  vi.stubGlobal("MessageChannel", NodeMessageChannel);
+  const frame = new EventTarget();
+  let port!: NodeMessagePort;
+  Object.assign(frame, {
+    contentWindow: {
+      postMessage(_message: unknown, _target: string, ports: NodeMessagePort[]) {
+        port = ports[0]!;
+      },
+    },
+  });
+  const notices: unknown[] = [];
+  let release!: (recorded: boolean) => void;
+  const lifetime = new AbortController();
+  attachAppCollectionBroker(
+    frame as HTMLIFrameElement,
+    async () => Response.json({}),
+    lifetime.signal,
+    undefined,
+    undefined,
+    {
+      notice: (notice) => {
+        notices.push(notice);
+        return new Promise<boolean>((resolve) => {
+          release = resolve;
+        });
+      },
+    },
+  );
+  try {
+    frame.dispatchEvent(new Event("load"));
+    const send = (body: unknown) => {
+      const reply = once(port, "message");
+      port.postMessage(body);
+      return reply.then(([value]) => value);
+    };
+    const invalid: Array<[string, Record<string, unknown>]> = [
+      ["n-newline", { message: "Import failed\nat row 3" }],
+      ["n-separator", { message: `Import failed${String.fromCharCode(0x2028)}at row 3` }],
+      ["n-long", { message: "x".repeat(201) }],
+      ["n-blank", { message: "   " }],
+      ["n-detail", { message: "Import failed", detail: "y".repeat(501) }],
+      ["n-extra", { message: "Import failed", retry: true }],
+      ["n-type", { message: 7 }],
+    ];
+    for (const [id, body] of invalid)
+      expect(await send({ id, op: "host.notice", ...body })).toEqual({
+        id,
+        ok: false,
+        status: 400,
+      });
+    expect(notices).toEqual([]);
+
+    port.postMessage({
+      id: "n-1",
+      op: "host.notice",
+      message: "Bank import stopped at row 40",
+      detail: "Row 40 has no date.",
+    });
+    await vi.waitFor(() => expect(notices).toHaveLength(1));
+    for (const id of ["n-2", "n-3"])
+      expect(await send({ id, op: "host.notice", message: "Again" })).toEqual({
+        id,
+        ok: true,
+        value: { recorded: false },
+      });
+    const first = once(port, "message");
+    release(true);
+    expect((await first)[0]).toEqual({ id: "n-1", ok: true, value: { recorded: true } });
+    const later = send({ id: "n-4", op: "host.notice", message: "Later" });
+    await vi.waitFor(() => expect(notices).toHaveLength(2));
+    release(false);
+    expect(await later).toEqual({ id: "n-4", ok: true, value: { recorded: false } });
+    expect(notices).toEqual([
+      { message: "Bank import stopped at row 40", detail: "Row 40 has no date." },
+      { message: "Later" },
+    ]);
+  } finally {
+    lifetime.abort();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("answers a notice as not recorded where the host keeps no Notices", async () => {
+  const shared = harness();
+  try {
+    expect(await shared.request({ id: "n", op: "host.notice", message: "Payment failed" })).toEqual(
+      { id: "n", ok: true, value: { recorded: false } },
+    );
+  } finally {
+    shared.close();
   }
 });

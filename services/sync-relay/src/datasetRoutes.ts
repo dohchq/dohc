@@ -1033,7 +1033,7 @@ export function createDatasetAppRoutes(
             : {}),
           organizer: authority.caller.kind === "owner",
         },
-        route.action,
+        route.action === "file" ? "app-file" : route.action,
         options.nowMs(),
       );
     } catch (error) {

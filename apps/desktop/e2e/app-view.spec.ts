@@ -40,7 +40,10 @@ document.body.append(main);
 document.getElementById('popup').addEventListener('click', () => window.open('https://example.com/popup'));
 document.getElementById('permission').addEventListener('click', async () => { document.getElementById('permission-result').textContent = await Notification.requestPermission(); });
 document.getElementById('counter').addEventListener('click', () => { const out = document.getElementById('count'); out.textContent = String(Number(out.textContent) + 1); });
+addEventListener('message', (event) => { if (event.data?.kind === 'dohc-app-channel' && event.ports[0]) window.hostPort = event.ports[0]; });
 `;
+const sendNotice = (id: string, notice: { message: string; detail?: string }) =>
+  `new Promise((resolve) => { window.hostPort.onmessage = (event) => resolve(event.data); window.hostPort.postMessage(${JSON.stringify({ id, op: "host.notice", ...notice })}); })`;
 
 async function guestIds(app: ElectronApplication) {
   return app.evaluate(({ webContents }) =>
@@ -590,6 +593,86 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
         })
         .catch(() => {});
     }
+    await cleanupDesktopWorkspace(desktop, workspace);
+  }
+});
+
+test("@app-view an app's notice stays in Notices after its tab closes, and Try again opens the app", async ({}, testInfo) => {
+  test.setTimeout(180_000);
+  const workspace = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    desktop = await launchDesktopApp({ workspace });
+    const { page, app: electronApp } = desktop;
+    const consoleErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await openWorkspaceFromFirstRun(page, workspace);
+    await createFormApp(electronApp, page, workspace);
+    await openExplorerHome(page);
+    await page.locator(`[data-testid="sites-row"][data-root="${appRoot}"]`).click();
+    await page.getByTestId("app-view-review").click();
+    const review = page.getByTestId("app-publication-dialog");
+    await expect(review.getByTestId("app-publication-approve")).toBeEnabled();
+    await review.getByTestId("app-publication-approve").click();
+    await hidden(review);
+    await ready(page);
+    const guestId = (await guestIds(electronApp))[0]!;
+    await expect
+      .poll(() => inFrame(electronApp, guestId, "!!window.hostPort").catch(() => false))
+      .toBe(true);
+
+    expect(
+      await inFrame(
+        electronApp,
+        guestId,
+        sendNotice("first", {
+          message: "Bank import stopped at row 40",
+          detail: "Row 40 has no date. Fix it in the statement and import again.",
+        }),
+      ),
+    ).toEqual({ id: "first", ok: true, value: { recorded: true } });
+    expect(
+      await inFrame(electronApp, guestId, sendNotice("soon", { message: "Another failure" })),
+    ).toEqual({ id: "soon", ok: true, value: { recorded: false } });
+    await expect(
+      page.locator('[data-testid^="workspace-shell-"]').filter({ hasText: "reported a problem" }),
+    ).toHaveCount(0);
+
+    const appTab = page.getByTestId(editorTabTestId(siteTabPath(appRoot)));
+    await appTab.hover();
+    await appTab.getByRole("button", { name: /^Close / }).click();
+    await expect(appTab).toHaveCount(0);
+
+    await page.getByTestId("notice-center-toggle").click();
+    const row = page
+      .getByTestId("notice-center")
+      .locator("[data-notice-row]")
+      .filter({ hasText: "Registrations reported a problem" });
+    await expect(row).toHaveCount(1);
+    await expect(row).toContainText("Bank import stopped at row 40");
+    await expect(row).not.toContainText("Another failure");
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate(
+        (value) => document.documentElement.setAttribute("data-theme", value),
+        theme,
+      );
+      await page.screenshot({
+        animations: "disabled",
+        path: testInfo.outputPath(`app-notice-${theme}.png`),
+      });
+    }
+    await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
+
+    await row.getByRole("button", { name: "Try again", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    await expect(appTab).toHaveCount(1);
+    await ready(page);
+    expect(consoleErrors).toEqual([]);
+    expect(desktop.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+  } finally {
     await cleanupDesktopWorkspace(desktop, workspace);
   }
 });
