@@ -340,6 +340,7 @@ describe("reusable guest evaluator", () => {
     ["NaN", "NaN", 2],
     ["Infinity", "Infinity", 2],
     ["a BigInt", "1n", 2],
+    ["a Date", "new Date(0)", 2],
   ])("refuses %s as a SQL parameter as invalid input", async (_, value, index) => {
     await withDatabase(async (db) => {
       await expect(
@@ -443,6 +444,21 @@ describe("reusable guest evaluator", () => {
         name: "AppBackendRuntimeError",
         refusal: { code: "sql_not_allowed", message },
       });
+    });
+  });
+
+  it("keeps a refusal that escapes after a caught one", async () => {
+    await withDatabase(async (db) => {
+      db.exec("CREATE TABLE notes(id INTEGER PRIMARY KEY)");
+      await expect(
+        evaluate(
+          db,
+          request(`
+            try { ctx.db.query('SELECT * FROM notes'); }
+            catch (error) { try { ctx.db.query('SELECT ?', [{}]); } catch {} throw error; }
+          `),
+        ),
+      ).rejects.toMatchObject({ refusal: { code: "sql_not_allowed" } });
     });
   });
 

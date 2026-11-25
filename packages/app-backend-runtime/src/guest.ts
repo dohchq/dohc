@@ -377,13 +377,10 @@ function run(
     text.dispose();
     return { error };
   };
-  let uncaught: { error: QuickJSHandle; refusal: AppOperationRefusal } | undefined;
+  const thrown: { error: QuickJSHandle; refusal: AppOperationRefusal }[] = [];
   const refuseUnlessCaught = (refusal: AppOperationRefusal) => {
     const failed = fail(refusal.message);
-    if (failed.error !== limitError) {
-      uncaught?.error.dispose();
-      uncaught = { error: failed.error.dup(), refusal };
-    }
+    if (failed.error !== limitError) thrown.push({ error: failed.error.dup(), refusal });
     return failed;
   };
   const callback = (write: boolean) =>
@@ -551,7 +548,7 @@ function run(
       const deepFreeze = value => { if (value && typeof value === 'object') { for (const key of Object.keys(value)) deepFreeze(value[key]); freeze(value); } return value; };
       const caller = deepFreeze(parse(${JSON.stringify(request.callerJson)}));
       const input = deepFreeze(parse(${JSON.stringify(request.inputJson)}));
-      const bind = params => stringify(params, function (key, value) { return this === params && value != null && typeof value !== 'string' && !(typeof value === 'number' && finite(value)) ? {} : value; });
+      const bind = params => stringify(params, function (key, value) { const raw = this[key]; return this === params && raw != null && typeof raw !== 'string' && !(typeof raw === 'number' && finite(raw)) ? {} : value; });
       const db = freeze({ query: (sql, params = []) => parse(q(sql, bind(params))), execute: (sql, params = []) => parse(e(sql, bind(params))) });
       const ctx = freeze({ caller, db, refuse, files:freeze({attach:id=>deepFreeze(parse(attach(id)))}), localDate: zone => localDate(zone), nowMs: ${request.nowMs}, requestId: ${JSON.stringify(request.requestId)}, secret: ${JSON.stringify(request.secret)} });
       const hasOwn = Object.hasOwn;
@@ -588,8 +585,7 @@ function run(
       }
       if (result.error) {
         // No guest getters or coercion run while formatting an exception.
-        const escaped =
-          uncaught && vm.sameValue(result.error, uncaught.error) ? uncaught.refusal : undefined;
+        const escaped = thrown.find(({ error }) => vm.sameValue(result.error!, error))?.refusal;
         result.error.dispose();
         if (!interrupted && !exhausted()) {
           if (resourceLimit) throw resourceLimit;
