@@ -20,34 +20,46 @@ import { workspaceRoleOf } from "./workspaceMembers";
 // Group was created with, outlives the rule: a member's visibility signature
 // compares against it.
 
-const MARKER = "workspace-group-rules-v1";
+const V1_MARKER = "workspace-group-rules-v1";
+const MARKER = "workspace-group-rules-v2";
 const GROUP_RULES = "sync_relay_group_rules";
-const GROUP_RULES_SQL = `CREATE TABLE ${GROUP_RULES} (
+const groupRulesSql = (changedBy: string) => `CREATE TABLE ${GROUP_RULES} (
   workspace_id TEXT NOT NULL REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
   channel_wire_id TEXT NOT NULL CHECK (length(channel_wire_id) BETWEEN 1 AND 256),
   rule_text TEXT,
   created_rule_text TEXT,
-  changed_by_user_id TEXT NOT NULL,
+  changed_by_user_id ${changedBy},
   changed_at_ms INTEGER NOT NULL CHECK (changed_at_ms >= 0),
   PRIMARY KEY (workspace_id, channel_wire_id)
 ) STRICT`;
+const V1_SQL = groupRulesSql("TEXT NOT NULL");
+const GROUP_RULES_SQL = groupRulesSql("TEXT");
 
 const normalize = (sql: string) => sql.trim().replace(/;$/u, "").replace(/\s+/gu, " ");
 
 export function initializeGroupRuleSchema(db: SqliteDb): void {
-  const assert = () => {
+  const assert = (expected: string) => {
     const row = db.prepare("SELECT sql FROM sqlite_schema WHERE name = ?").get(GROUP_RULES);
-    if (typeof row?.sql !== "string" || normalize(row.sql) !== normalize(GROUP_RULES_SQL)) {
+    if (typeof row?.sql !== "string" || normalize(row.sql) !== normalize(expected)) {
       throw new Error("group rule schema is missing or damaged");
     }
   };
-  if (db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(MARKER))
-    return assert();
-  if (db.prepare("SELECT 1 FROM sqlite_schema WHERE name = ?").get(GROUP_RULES)) {
+  const marked = (marker: string) =>
+    db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(marker) !==
+    undefined;
+  if (marked(MARKER)) return assert(GROUP_RULES_SQL);
+  if (marked(V1_MARKER)) {
+    assert(V1_SQL);
+    db.exec(`ALTER TABLE ${GROUP_RULES} RENAME TO ${GROUP_RULES}_v1;
+      ${GROUP_RULES_SQL};
+      INSERT INTO ${GROUP_RULES} SELECT * FROM ${GROUP_RULES}_v1;
+      DROP TABLE ${GROUP_RULES}_v1;`);
+  } else if (db.prepare("SELECT 1 FROM sqlite_schema WHERE name = ?").get(GROUP_RULES)) {
     throw new Error("unmarked group rule schema already exists");
+  } else {
+    db.exec(GROUP_RULES_SQL);
   }
-  db.exec(GROUP_RULES_SQL);
-  assert();
+  assert(GROUP_RULES_SQL);
   db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(
     MARKER,
     Date.now(),
