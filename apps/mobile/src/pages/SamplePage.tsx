@@ -132,6 +132,8 @@ export function SamplePage() {
   // When the page's Inter faces had loaded, just before it drew: the part of the first text that waits for the font.
   const fontsAt = useRef<number | null>(null);
   const claim = useRef<EditorClaim | null>(null);
+  const warmAgain = useRef<{ remove(): void } | undefined>(undefined);
+  useEffect(() => () => warmAgain.current?.remove(), []);
   // Design review only: "page-pool" names how the page got its editor and when it drew, for the speed test.
   const [opened, setOpened] = useState<string | null>(null);
   const reduceMotion = useReducedMotion();
@@ -278,12 +280,12 @@ export function SamplePage() {
             pathname: "/page",
             params: { path, t0: String(Date.now()), run: String(Number(run) + 1) },
           });
-        const spare = editorPool?.addListener("spareReady", ({ ready }) => {
+        warmAgain.current = editorPool?.addListener("spareReady", ({ ready }) => {
           if (!ready) return;
-          spare?.remove();
+          warmAgain.current?.remove();
           again();
         });
-        if (!spare) setTimeout(again, 800);
+        if (!warmAgain.current) setTimeout(again, 800);
       }
     }
   };
