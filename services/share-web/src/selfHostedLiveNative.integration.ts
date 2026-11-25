@@ -1979,10 +1979,10 @@ async function openSelfHostProof(name: string) {
       firstVersion?.(doc);
       const baseline = Y.encodeStateAsUpdate(doc);
       closes.push(async () => doc.destroy());
-      const edit = async (change: (doc: Y.Doc) => void, seed?: Uint8Array) => {
+      const edit = async (change: (doc: Y.Doc) => void, seed?: Uint8Array, editPath = path) => {
         const editor = await rpc("ydoc.open", {
           versionId: mainVersionId,
-          path,
+          path: editPath,
           expectedObjectId: objectId,
           contentKind: "richdoc",
         });
@@ -2041,7 +2041,7 @@ async function openSelfHostProof(name: string) {
           lineageClaimId: hash(baseline),
         },
         markdown: () => yDocToMarkdown(doc),
-        edit: (change: (doc: Y.Doc) => void) => edit(change),
+        edit: (change: (doc: Y.Doc) => void, editPath = path) => edit(change, undefined, editPath),
         open,
       };
     };
@@ -4786,6 +4786,176 @@ it(
         beforeStop: beforeStop.journalCursor,
         ownerAfter: ownerAfter.journalCursor,
         collabAfter: collabAfter.journalCursor,
+      };
+    }),
+  180000,
+);
+
+it(
+  "settles, stops, and resumes a note renamed twice before its first live activation",
+  () =>
+    withSelfHostProof("self-host-renamed-before-first-live", async (proof) => {
+      const note = await proof.ownerDocument("notes/first.md", "Initial\n");
+      await proof.ownerRename("notes/first.md", "notes/second.md");
+      await note.edit(
+        (doc) => doc.getMap("frontmatter").set("atSecondName", "ordinary-owner"),
+        "notes/second.md",
+      );
+      await proof.ownerRename("notes/second.md", "notes/third.md");
+
+      expect(await proof.route("POST", { path: "notes/third.md", open: true })).toMatchObject({
+        status: 202,
+        body: {
+          ok: true,
+          path: "notes/third.md",
+          objectId: note.objectId,
+          status: "preparing",
+          changed: true,
+        },
+      });
+      await vi.waitFor(
+        async () => expect(await proof.documents()).toContainEqual(proof.ready("notes/third.md")),
+        { timeout: 30000 },
+      );
+
+      const acceptedSettlements = () =>
+        proof.relayRead
+          .prepare(
+            "SELECT payload_json,settlement_admission_json FROM sync_relay_log WHERE workspace_id='workspace' AND op_kind='moment.append'",
+          )
+          .all()
+          .flatMap((row) => {
+            const payload = JSON.parse(String(row.payload_json)) as Record<string, any>;
+            if (payload.objectId !== note.objectId || !payload.settlementReference) return [];
+            const admission =
+              row.settlement_admission_json === null
+                ? null
+                : (JSON.parse(String(row.settlement_admission_json)) as { status?: string });
+            return [
+              {
+                path: payload.payloadAfterPath as string,
+                previousCursor: payload.settlementReference.record.previousCursor as number,
+                terminalCursor: payload.settlementReference.record.terminalCursor as number,
+                status: admission?.status ?? null,
+              },
+            ];
+          });
+
+      const firstLive = await proof.liveEdit("firstLiveEdit", "live", note.document);
+      await vi.waitFor(
+        () => {
+          expect(proof.settlement(note.objectId)).toEqual({
+            applied: firstLive.journalCursor,
+            settled: firstLive.journalCursor,
+          });
+          expect(proof.unpushed()).toEqual([]);
+          const accepted = acceptedSettlements();
+          expect(accepted.every((row) => row.status === "accepted")).toBe(true);
+          expect(accepted).toContainEqual(
+            expect.objectContaining({
+              path: "notes/third.md",
+              previousCursor: 0,
+              status: "accepted",
+            }),
+          );
+          expect(accepted).toContainEqual(
+            expect.objectContaining({
+              path: "notes/third.md",
+              terminalCursor: firstLive.journalCursor,
+              status: "accepted",
+            }),
+          );
+        },
+        { timeout: 30000 },
+      );
+      await vi.waitFor(
+        () => {
+          const text = readFileSync(join(proof.store, "notes/third.md"), "utf8");
+          expect(text).toContain("beforeActivation: ordinary-owner");
+          expect(text).toContain("atSecondName: ordinary-owner");
+          expect(text).toContain("firstLiveEdit: live");
+        },
+        { timeout: 15000 },
+      );
+      expect(proof.reports).toEqual([]);
+
+      expect(
+        (await proof.route("DELETE", { path: "notes/third.md", retire: true })).body,
+      ).toMatchObject({ status: "retired" });
+      await vi.waitFor(
+        () => {
+          expect(proof.hosted(note.objectId)?.state).toBe("parked");
+          expect(
+            proof.storage.readServiceHostEnrollment("workspace", "notes/third.md")?.hostDrainedAtMs,
+          ).toEqual(expect.any(Number));
+        },
+        { timeout: 30000 },
+      );
+
+      await proof.ownerRename("notes/third.md", "notes/second.md");
+      await vi.waitFor(
+        async () => {
+          const { body } = await proof.route("GET", undefined, "?retired=1");
+          expect(body.documents).toContainEqual(
+            expect.objectContaining({
+              path: "notes/third.md",
+              movedTo: "notes/second.md",
+              actions: ["resume"],
+            }),
+          );
+        },
+        { timeout: 30000 },
+      );
+
+      expect(await proof.route("POST", { path: "notes/second.md" })).toMatchObject({
+        status: 202,
+        body: {
+          ok: true,
+          path: "notes/second.md",
+          objectId: note.objectId,
+          status: "preparing",
+          changed: true,
+        },
+      });
+      await vi.waitFor(
+        async () => expect(await proof.documents()).toContainEqual(proof.ready("notes/second.md")),
+        { timeout: 30000 },
+      );
+
+      const afterRenameBack = await proof.liveEdit("afterRenameBack", "live", note.document);
+      await vi.waitFor(
+        () => {
+          expect(proof.settlement(note.objectId)).toEqual({
+            applied: afterRenameBack.journalCursor,
+            settled: afterRenameBack.journalCursor,
+          });
+          expect(proof.unpushed()).toEqual([]);
+          const accepted = acceptedSettlements();
+          expect(accepted.every((row) => row.status === "accepted")).toBe(true);
+          expect(accepted).toContainEqual(
+            expect.objectContaining({
+              path: "notes/second.md",
+              terminalCursor: afterRenameBack.journalCursor,
+              status: "accepted",
+            }),
+          );
+        },
+        { timeout: 30000 },
+      );
+      await vi.waitFor(
+        () => {
+          const text = readFileSync(join(proof.store, "notes/second.md"), "utf8");
+          expect(text).toContain("beforeActivation: ordinary-owner");
+          expect(text).toContain("atSecondName: ordinary-owner");
+          expect(text).toContain("firstLiveEdit: live");
+          expect(text).toContain("afterRenameBack: live");
+        },
+        { timeout: 15000 },
+      );
+      expect(proof.reports).toEqual([]);
+      return {
+        firstLive: firstLive.journalCursor,
+        afterRenameBack: afterRenameBack.journalCursor,
       };
     }),
   180000,
