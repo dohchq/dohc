@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { JSONContent } from "@tiptap/core";
+import { EditorState } from "@tiptap/pm/state";
 import { getDefaults, Lexer, Tokenizer } from "marked";
 import pipelineFixtureJson from "../../../crates/dohc-engine-domain/tests/fixtures/collection-field-pipeline.json";
 import frontmatterFixtureJson from "../../../crates/dohc-engine-domain/tests/fixtures/collection-frontmatter.json";
@@ -696,16 +697,59 @@ it.each([
   },
 );
 
-// Modeling how the reader pairs these backticks takes 2,687,147 steps, past
-// the writer's limit of 2,097,152, so they are written as typed. The engine
-// writer's test has the same case.
-it("writes typed characters as typed in a paragraph past the pairing limit", () => {
-  const typed = " `a".repeat(53_334);
-  const document = {
+// Modeling how the reader pairs these characters takes more steps than the
+// writer's limit of 2,097,152, so each of them is written as typed. The engine
+// writer's test has the same cases.
+it.each([
+  ["backticks", [plain(" `a".repeat(53_334))], " `a".repeat(53_334)],
+  [
+    "a backslash before punctuation",
+    [plain(` ${"*_`\\x ".repeat(106)}\\!`)],
+    ` ${"*_`\\x ".repeat(106)}\\!`,
+  ],
+  [
+    "a backtick before code",
+    [plain(`${" `a".repeat(53_334)} \``), marked("x", "code")],
+    `${" `a".repeat(53_334)} \`\`x\``,
+  ],
+] satisfies Array<[string, JSONContent[], string]>)(
+  "writes typed %s as typed in a paragraph past the pairing limit",
+  (_name, content, typed) => {
+    const document = {
+      type: "doc",
+      content: [{ type: "paragraph", content: [bold("b"), ...content] }],
+    };
+    expect(serializeRichdocBody(document)).toBe(`**b**${typed}`);
+  },
+);
+
+it("keeps the spelling a note had when its marks read back that way", () => {
+  const saved = "**++a++~~==b==~~**~~c~~";
+  expect(serializeRichdocBody(parseRichdocMarkdown(saved))).toBe(saved);
+});
+
+it("writes an underlined image after an asterisk without reopening the underline", () => {
+  const schema = getDohcProseMirrorSchema();
+  const doc = schema.nodeFromJSON({
     type: "doc",
-    content: [{ type: "paragraph", content: [bold("b"), plain(typed)] }],
-  };
-  expect(serializeRichdocBody(document)).toBe(`**b**${typed}`);
+    content: [
+      {
+        type: "paragraph",
+        content: [plain("a*"), { type: "image", attrs: { src: "/a.png", alt: "A", title: null } }],
+      },
+    ],
+  });
+  const state = EditorState.create({ schema, doc });
+  const underlined = state.apply(
+    state.tr.addMark(1, doc.content.size - 1, schema.marks.underline!.create()),
+  );
+  expect(
+    underlined.doc
+      .child(0)
+      .child(1)
+      .marks.map((mark) => mark.type.name),
+  ).toEqual(["underline"]);
+  expect(serializeRichdocBody(underlined.doc.toJSON())).toBe("++a*++![A]()");
 });
 
 // The underline opens on the space and is written outside the italic. Opened

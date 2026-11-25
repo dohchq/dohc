@@ -30,7 +30,7 @@
 //!    the whole update before applying, so a truncated update is rejected with
 //!    state unchanged, and the caller persists only bytes an apply accepted.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -8363,10 +8363,10 @@ fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
                 if index != 0 {
                     raw.push_str(GFM_TABLE_CELL_BLOCK_SEPARATOR)?;
                 }
-                let render = || render_table_cell_block(child, tag, attrs, children, index);
+                let rendered = render_table_cell_block(child, tag, attrs, children, index)?;
                 // Per block, as Tiptap renders a cell, so a backtick in one
                 // block doesn't open a code span in the next.
-                raw.push_str(&write_table_cell_breaks_outside_links(render()?, render)?)?;
+                raw.push_str(&write_table_cell_breaks(&rendered))?;
             }
             let text = collapse_js_whitespace(&table_cell_line_breaks(
                 &prepare_rendered_table_cell(&raw.into_string())?,
@@ -8488,26 +8488,6 @@ fn render_table_cell_block(
             table_cell: true,
         },
     )
-}
-
-fn write_table_cell_breaks_outside_links(
-    rendered: String,
-    render: impl FnOnce() -> ProjectionResult<String>,
-) -> ProjectionResult<String> {
-    let written = write_table_cell_breaks(&rendered);
-    if written == rendered {
-        return Ok(written);
-    }
-    let present: HashSet<char> = rendered.chars().filter(|c| *c > '\u{e006}').collect();
-    let Some(sentinel) = ('\u{e007}'..='\u{f8ff}')
-        .chain('\u{f0000}'..='\u{ffffd}')
-        .find(|candidate| !present.contains(candidate))
-    else {
-        return Ok(written);
-    };
-    let again = held_characters::writing_link_ampersands_as(sentinel, render)?;
-    let ampersand = held_characters::link_ampersand().to_string();
-    ensure_projection_string(write_table_cell_breaks(&again).replace(sentinel, &ampersand))
 }
 
 /// Writes a break spelled in a cell's text as `<br>`, as the TypeScript
@@ -8713,7 +8693,6 @@ fn render_inline(
     enum Held {
         Character(char),
         Reference(u32),
-        LinkAmpersand,
     }
 
     // An empty link the importer keeps as the file holds it reads back only
@@ -8725,10 +8704,7 @@ fn render_inline(
         text.push(held_characters::OPAQUE_OPEN);
         let mut starts_line = false;
         for character in link.chars() {
-            if character == '&' && !starts_line {
-                text.push(HELD);
-                held.push(Held::LinkAmpersand);
-            } else if matches!(character, '&' | '<' | '>' | '\u{a0}' | HELD)
+            if matches!(character, '&' | '<' | '>' | '\u{a0}' | HELD)
                 || (starts_line && !matches!(character, '\n' | '\r'))
             {
                 if highlighted && character == '=' {
@@ -9535,9 +9511,15 @@ fn render_inline(
                 literal_markdown,
             } => {
                 run.text.chars().all(is_js_whitespace)
-                    && written_run_text(run, *literal_markdown, code_context, escape_block_syntax)?
-                        .chars()
-                        .all(is_js_whitespace)
+                    && written_run_text(
+                        run,
+                        *literal_markdown,
+                        code_context,
+                        escape_block_syntax,
+                        formatted_beyond_code,
+                    )?
+                    .chars()
+                    .all(is_js_whitespace)
             }
             InlinePart::Node(_) => false,
         });
@@ -9625,8 +9607,13 @@ fn render_inline(
                 if run_written > MAX_PROJECTION_BYTES {
                     return Err(projection_too_large(run_written));
                 }
-                let mut text =
-                    written_run_text(&run, literal_markdown, code_context, escape_block_syntax)?;
+                let mut text = written_run_text(
+                    &run,
+                    literal_markdown,
+                    code_context,
+                    escape_block_syntax,
+                    formatted_beyond_code,
+                )?;
                 if holds && text.contains(HELD) {
                     let mut written =
                         ProjectionBuffer::with_capacity(held_characters::written_len(&text))?;
@@ -9638,9 +9625,6 @@ fn render_inline(
                         match held.next().expect("one held entry for each") {
                             Held::Character(character) => written.push(character)?,
                             Held::Reference(code) => written.push_str(&format!("&#{code};"))?,
-                            Held::LinkAmpersand => {
-                                written.push(held_characters::LINK_AMPERSAND)?;
-                            }
                         }
                     }
                     text = written.into_string();
@@ -9687,12 +9671,14 @@ fn written_run_text(
     literal_markdown: bool,
     code_context: bool,
     escape_block_syntax: bool,
+    hold: bool,
 ) -> ProjectionResult<String> {
-    let mut text = if !literal_markdown && !code_context && !has_mark(&run.marks, MarkKind::Code) {
-        held_characters::hold_typed(&run.text)
-    } else {
-        run.text.clone()
-    };
+    let mut text =
+        if hold && !literal_markdown && !code_context && !has_mark(&run.marks, MarkKind::Code) {
+            held_characters::hold_typed(&run.text)
+        } else {
+            run.text.clone()
+        };
     if !literal_markdown && has_mark(&run.marks, MarkKind::Highlight) {
         text = escape_highlight_equals(&text)?;
     }
@@ -10890,15 +10876,58 @@ mod projection_tests {
         }
     }
 
-    // Modeling how the reader pairs these backticks takes 2,687,147 steps,
-    // past the writer's limit of 2,097,152, so they are written as typed. The
-    // TypeScript writer's test has the same case.
+    // Modeling how the reader pairs these characters takes more steps than the
+    // writer's limit of 2,097,152, so each of them is written as typed. The
+    // TypeScript writer's test has the same cases.
     #[test]
     fn a_paragraph_past_the_pairing_limit_keeps_its_typed_characters() {
-        let typed = " `a".repeat(53_334);
+        let backticks = " `a".repeat(53_334);
+        let backslash = format!(" {}\\!", "*_`\\x ".repeat(106));
+        for typed in [&backticks, &backslash] {
+            assert_eq!(
+                paragraph_markdown(vec![("b", marks(&["bold"])), (typed, Attrs::new())]),
+                format!("**b**{typed}\n")
+            );
+        }
+        let before_code = format!("{backticks} `");
         assert_eq!(
-            paragraph_markdown(vec![("b", marks(&["bold"])), (&typed, Attrs::new())]),
-            format!("**b**{typed}\n")
+            paragraph_markdown(vec![
+                ("b", marks(&["bold"])),
+                (&before_code, Attrs::new()),
+                ("x", marks(&["code"])),
+            ]),
+            format!("**b**{before_code}`x`\n")
+        );
+    }
+
+    #[test]
+    fn marks_whose_old_order_reads_back_keep_it() {
+        assert_eq!(
+            paragraph_markdown(vec![
+                ("a", marks(&["bold", "underline"])),
+                ("b", marks(&["bold", "strike", "highlight"])),
+                ("c", marks(&["strike"])),
+            ]),
+            "**++a++~~==b==~~**~~c~~\n"
+        );
+    }
+
+    #[test]
+    fn a_heading_without_marks_keeps_its_typed_backslash() {
+        let source = Ydoc::wire();
+        let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        {
+            let mut txn = source.doc.transact_mut();
+            let heading = body.push_back(&mut txn, XmlElementPrelim::empty("heading"));
+            heading.insert_attribute(&mut txn, "level", "1");
+            heading.push_back(&mut txn, XmlTextPrelim::new("a \\!"));
+        }
+        assert_eq!(
+            source
+                .project(ContentKind::Richdoc)
+                .expect("projection")
+                .content,
+            "# a \\!\n"
         );
     }
 

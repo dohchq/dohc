@@ -1339,9 +1339,8 @@ export const GFM_TABLE_CELL_BLOCK_SEPARATOR = "<br>";
 // The projector holds some written text as tokens until it has serialized the
 // document. A table pads its columns to the widths it measures, so each cell
 // writes its tokens' text first.
-type CellTokenWriter = (markdown: string, writeBreaks: (markdown: string) => string) => string;
-let writeTableCellTokens: CellTokenWriter | undefined;
-export function writingTableCellTokens<T>(write: CellTokenWriter, render: () => T): T {
+let writeTableCellTokens: ((markdown: string) => string) | undefined;
+export function writingTableCellTokens<T>(write: (markdown: string) => string, render: () => T): T {
   const previous = writeTableCellTokens;
   writeTableCellTokens = write;
   try {
@@ -1417,7 +1416,7 @@ function prepareRenderedTableCell(markdown: string): string {
 
   // After the pipes, which a token's text must not change. A token's text can
   // spell a break too, as the engine reads it once written.
-  return writeTableCellTokens ? writeTableCellTokens(output, writeTableCellBreaks) : output;
+  return writeTableCellTokens ? writeTableCellBreaks(writeTableCellTokens(output)) : output;
 }
 
 const tableTokenizer = Table.config.markdownTokenizer!;

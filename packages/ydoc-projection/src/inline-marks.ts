@@ -136,6 +136,27 @@ export class DohcMarkdownManager extends MarkdownManager {
     separator: string,
     level: number,
   ): string {
+    const rendered = new Map<number, string>();
+    const layered = nodes.some((node) => (node.marks?.length ?? 0) > 1);
+    const plain = layered
+      ? this.writeMarks(nodes, parentNode, separator, level, true, rendered)
+      : undefined;
+    const nested = this.writeMarks(nodes, parentNode, separator, level, false, rendered)!;
+    if (plain !== undefined && plain !== nested) {
+      const kept = writeHeldCharacters(plain, this.tokens, true);
+      if (!kept.strands) return kept.written;
+    }
+    return writeHeldCharacters(nested, this.tokens).written;
+  }
+
+  private writeMarks(
+    nodes: JSONContent[],
+    parentNode: JSONContent | undefined,
+    separator: string,
+    level: number,
+    plain: boolean,
+    rendered: Map<number, string>,
+  ): string | undefined {
     const result: string[] = [];
     const active = new Map<string, Mark>();
     const modes = new Map<string, OpeningMode>();
@@ -146,13 +167,13 @@ export class DohcMarkdownManager extends MarkdownManager {
       boldOpenedWithItalic = modes.get("bold") === "markdown" && opened[at - 1]?.type === "italic";
     };
     let reopened = new Set<string>();
+    let tangled = false;
     // Whether an opening delimiter here reads whatever follows it. The
     // reader starts afresh after a delimiter or a node, as at a space, and
     // takes an opening delimiter right after another as one run with it.
     let looseEdge: boolean | undefined = true;
     const tokens = this.tokens;
     const opaque = nodes.some((node) => node.type === "text") ? tokens.opaque : ["", ""];
-    const rendered = new Map<number, string>();
     const writtenEnd = (): string => {
       let end = "";
       for (let at = result.length - 1; at >= 0 && end.length < 64; at -= 1) {
@@ -242,7 +263,8 @@ export class DohcMarkdownManager extends MarkdownManager {
       const from = Math.min(...closing.map((type) => order.indexOf(type)));
       const inner = order.slice(from);
       const keeps = inner.some((type) => !closing.includes(type));
-      const closes = keeps && inner.some((type) => !STARRED.has(type)) ? inner : closing;
+      tangled ||= inner.some((type) => !closing.includes(type) && !STARRED.has(type));
+      const closes = !plain && keeps && inner.some((type) => !STARRED.has(type)) ? inner : closing;
       return closes.slice().sort((a, b) => order.indexOf(b) - order.indexOf(a));
     };
 
@@ -250,27 +272,14 @@ export class DohcMarkdownManager extends MarkdownManager {
       const next = nodes[i + 1] ?? null;
       if (!node.type) return;
       if (node.type !== "text") {
-        const nodeMarks = new Set((node.marks ?? []).map((mark) => mark.type));
-        const reopen = Array.from(active).filter(([type]) => nodeMarks.has(type));
-        const reopenModes = new Map(reopen.map(([type]) => [type, modes.get(type) ?? "markdown"]));
         let before = "";
         for (const [type, mark] of active) {
           before += closing(mark, modes.get(type) ?? "markdown", tokens);
         }
         active.clear();
         modes.clear();
-        const rendered = this.renderNodeToMarkdown(node, parentNode, i, level);
-        let after = "";
-        if (node.type !== "hardBreak") {
-          for (const [type, mark] of reopen) {
-            const mode = reopenModes.get(type) ?? "markdown";
-            modes.set(type, mode);
-            after += opening(mark, mode, tokens);
-            active.set(type, mark);
-          }
-          noteRun(reopen.map(([, mark]) => mark).reverse());
-        }
-        result.push(before + opaque[0] + rendered + opaque[1] + after);
+        const written = this.renderNodeToMarkdown(node, parentNode, i, level);
+        result.push(before + opaque[0] + written + opaque[1]);
         looseEdge = true;
         return;
       }
@@ -291,7 +300,7 @@ export class DohcMarkdownManager extends MarkdownManager {
       // whitespace.
       const blank = /^\s*$/u.test(text);
       let reopensHere = false;
-      if (!blank) {
+      if (!blank && !plain) {
         let head = "";
         for (const type of reopensOutside(i, this.marksToOpen(active, current, next))) {
           head += closing(active.get(type)!, modes.get(type) ?? "markdown", tokens);
@@ -309,7 +318,9 @@ export class DohcMarkdownManager extends MarkdownManager {
         reopensHere || /^\s/u.test(text) || (looseEdge ?? looseBefore(writtenEnd()));
       const toOpen = blank
         ? []
-        : nestPickyInside(i, this.marksToOpen(active, current, next), before);
+        : plain
+          ? this.marksToOpen(active, current, next)
+          : nestPickyInside(i, this.marksToOpen(active, current, next), before);
       const activeClosing = toClose.filter((type) => active.has(type));
       const crossed = activeClosing.length > 0 && toOpen.length > 0;
 
@@ -356,6 +367,7 @@ export class DohcMarkdownManager extends MarkdownManager {
         for (const mark of toOpen) {
           if (nextTypes.has(mark.type) && STARRED.has(mark.type)) reopened.add(mark.type);
         }
+        tangled ||= reopened.size > 0;
         closeAtEnd = [...toOpen.map((mark) => mark.type), ...closesWith(activeClosing)];
       } else {
         closeAtEnd = closesWith(marksToCloseAtEnd(active, current, next));
@@ -375,7 +387,7 @@ export class DohcMarkdownManager extends MarkdownManager {
       looseEdge = closed && trailing === "" && middleTrailing === "" ? true : undefined;
       result.push(text + trailing + middleTrailing);
     });
-    return writeHeldCharacters(result.join(separator), tokens);
+    return plain && tangled ? undefined : result.join(separator);
   }
 
   private marksToOpen(

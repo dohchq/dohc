@@ -22,17 +22,24 @@ const TOKEN = /DOHC[A-Z]+\d+/gu;
  * reader would take as a delimiter, or one that keeps a written delimiter from
  * pairing, is written as a reference. A backslash before ASCII punctuation is
  * doubled. The others are written as they are, so text that reads back keeps
- * its bytes. Modeling how the reader pairs them takes at most
- * `PAIRING_WORK_PER_CELL` steps per cell and `PAIRING_WORK_LIMIT` steps in
- * all. Past that, only a backtick beside code is written as a reference.
+ * its bytes. When `judged`, `strands` says whether a written bold, italic, or
+ * strike delimiter would read as text. Modeling how the reader pairs them takes at
+ * most `PAIRING_WORK_PER_CELL` steps per cell and `PAIRING_WORK_LIMIT` steps
+ * in all. Past that, every typed character is written as it is.
  */
-export function writeHeldCharacters(markdown: string, tokens: InlineTokens): string {
-  if (tokens.held.size === 0 || !markdown.includes("DOHCHELD")) return markdown;
+export function writeHeldCharacters(
+  markdown: string,
+  tokens: InlineTokens,
+  judged = false,
+): { written: string; strands: boolean } {
+  const holds = tokens.held.size > 0 && markdown.includes("DOHCHELD");
+  if (!holds && !(judged && /[*_~]/u.test(markdown))) return { written: markdown, strands: false };
   const cells = cellsOf(markdown, tokens);
-  const beside = new Set<number>();
-  escapeBackticksBesideCode(cells, beside);
-  const paired = new Set(beside);
-  const escaped = escapePairs(cells, paired) ? paired : beside;
+  const escaped = new Set<number>();
+  escapeBackticksBesideCode(cells, escaped);
+  const strands = escapePairs(cells, escaped);
+  if (strands === undefined) return { written: writtenAsTyped(markdown, tokens), strands: false };
+  if (!holds) return { written: markdown, strands };
   const decided = new Map<number, string>();
   cells.forEach((cell, index) => {
     if (cell.kind !== "held") return;
@@ -42,12 +49,20 @@ export function writeHeldCharacters(markdown: string, tokens: InlineTokens): str
     } else decided.set(cell.at, tokens.raw(cell.character));
   });
   let at = 0;
-  return markdown.replace(TOKEN, (token) => {
+  const written = markdown.replace(TOKEN, (token) => {
     const character = tokens.held.get(token);
     if (character === undefined) return token;
     const written = decided.get(at) ?? tokens.raw(character);
     at += 1;
     return written;
+  });
+  return { written, strands };
+}
+
+function writtenAsTyped(markdown: string, tokens: InlineTokens): string {
+  return markdown.replace(TOKEN, (token) => {
+    const character = tokens.held.get(token);
+    return character === undefined ? token : tokens.raw(character);
   });
 }
 
@@ -120,6 +135,7 @@ function cellsOf(markdown: string, tokens: InlineTokens): Cell[] {
   }
   plain += markdown.slice(last);
   flush();
+  for (const open of scopes) cells[open] = { kind: "close" };
   return cells;
 }
 
@@ -226,7 +242,7 @@ type Match = { from: number; width: number; end: number };
 
 class PairingTooLong extends Error {}
 
-function escapePairs(cells: Cell[], escaped: Set<number>): boolean {
+function escapePairs(cells: Cell[], escaped: Set<number>): boolean | undefined {
   let work = Math.min(
     Math.max(cells.length, PAIRING_MINIMUM_CELLS) * PAIRING_WORK_PER_CELL,
     PAIRING_WORK_LIMIT,
@@ -377,6 +393,7 @@ function escapePairs(cells: Cell[], escaped: Set<number>): boolean {
   };
 
   const blockers = new Set<number>();
+  let broken = false;
   const opensStrike = (index: number): boolean => {
     const delimiter = cells[index + 1];
     return (
@@ -400,6 +417,7 @@ function escapePairs(cells: Cell[], escaped: Set<number>): boolean {
     const closes =
       letter(last) || (last !== undefined && !SPACE.test(last) && last !== "~" && !letter(next));
     if (opens && closes) return true;
+    broken = true;
     for (const at of [open - 1, open + 2, close - 2, close + 1]) {
       const cell = cells[at];
       if (cell?.kind === "held" && cell.character !== "\\" && delimits(at, cell.character)) {
@@ -429,6 +447,7 @@ function escapePairs(cells: Cell[], escaped: Set<number>): boolean {
     for (let index = from; index < to;) {
       const cell = cells[index]!;
       if (cell.kind === "open") {
+        if (cell.close >= to) broken = true;
         if (cell.close < to && !(opensStrike(index) && !strikeForms(index, to, before, masked))) {
           const [innerFrom, innerTo] = inner(index);
           lex(innerFrom, innerTo);
@@ -441,6 +460,7 @@ function escapePairs(cells: Cell[], escaped: Set<number>): boolean {
         continue;
       }
       if (cell.kind === "close") {
+        broken = true;
         index += 1;
         continue;
       }
@@ -505,6 +525,7 @@ function escapePairs(cells: Cell[], escaped: Set<number>): boolean {
     for (;;) {
       consumed.clear();
       blockers.clear();
+      broken = false;
       lex(0, cells.length);
       const taken = cells.flatMap((cell, index) =>
         cell.kind === "held" && consumed.has(index) ? [index] : [],
@@ -534,10 +555,10 @@ function escapePairs(cells: Cell[], escaped: Set<number>): boolean {
         return kind === undefined ? [] : [index];
       });
       for (const index of blocking) escapeRun(index);
-      if (blocking.length === 0) return true;
+      if (blocking.length === 0) return stranded.length > 0 || broken;
     }
   } catch (error) {
-    if (error instanceof PairingTooLong) return false;
+    if (error instanceof PairingTooLong) return undefined;
     throw error;
   }
 }

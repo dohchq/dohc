@@ -1,4 +1,3 @@
-use std::cell::Cell as Shared;
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
@@ -10,33 +9,13 @@ pub(super) const SCOPE_OPEN: char = '\u{e002}';
 pub(super) const SCOPE_CLOSE: char = '\u{e003}';
 pub(super) const TYPED: char = '\u{e004}';
 pub(super) const LITERAL: char = '\u{e005}';
-pub(super) const LINK_AMPERSAND: char = '\u{e006}';
 
 const PAIRING_WORK_PER_CELL: usize = 256;
 const PAIRING_MINIMUM_CELLS: usize = 256;
 const PAIRING_WORK_LIMIT: usize = 1 << 21;
 
-thread_local! {
-    static WRITTEN_LINK_AMPERSAND: Shared<char> = const { Shared::new('&') };
-}
-
-pub(super) fn link_ampersand() -> char {
-    WRITTEN_LINK_AMPERSAND.with(Shared::get)
-}
-
-pub(super) fn writing_link_ampersands_as<T>(written: char, write: impl FnOnce() -> T) -> T {
-    struct Restore(char);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            WRITTEN_LINK_AMPERSAND.with(|ampersand| ampersand.set(self.0));
-        }
-    }
-    let _restore = Restore(WRITTEN_LINK_AMPERSAND.with(|ampersand| ampersand.replace(written)));
-    write()
-}
-
 pub(super) fn is_marker(character: char) -> bool {
-    (OPAQUE_OPEN..=LINK_AMPERSAND).contains(&character)
+    (OPAQUE_OPEN..=LITERAL).contains(&character)
 }
 
 /// The bytes of `text` that are written, leaving out the markers.
@@ -94,7 +73,6 @@ pub(super) fn resolved(text: &str) -> String {
         match character {
             OPAQUE_OPEN | OPAQUE_CLOSE | SCOPE_OPEN | SCOPE_CLOSE => {}
             TYPED | LITERAL => written.extend(characters.next()),
-            LINK_AMPERSAND => written.push('&'),
             _ => written.push(character),
         }
     }
@@ -195,20 +173,24 @@ enum Side {
 /// the reader would take as a delimiter, or one that keeps a written delimiter
 /// from pairing, is written as a reference. A backslash before ASCII
 /// punctuation is doubled. The others are written as they are, so text that
-/// reads back keeps its bytes. Modeling how the reader pairs them takes at
-/// most [`PAIRING_WORK_PER_CELL`] steps per cell and [`PAIRING_WORK_LIMIT`]
-/// steps in all. Past that, only a backtick beside code is written as a
-/// reference.
-pub(super) fn write_held_characters(markdown: String) -> ProjectionResult<String> {
-    if !markdown.chars().any(is_marker) {
-        return Ok(markdown);
-    }
-    let decided = if markdown.contains(TYPED) {
-        decide(&cells_of(&markdown))
+/// reads back keeps its bytes. When `judged`, `strands` says whether a
+/// written bold, italic, or strike delimiter would read as text. Modeling how the reader
+/// pairs them takes at most [`PAIRING_WORK_PER_CELL`] steps per cell and
+/// [`PAIRING_WORK_LIMIT`] steps in all. Past that, every typed character is
+/// written as it is.
+pub(super) fn write_held_characters(markdown: String, judged: bool) -> ProjectionResult<Written> {
+    let holds = markdown.contains(TYPED);
+    let (decided, strands) = if holds || (judged && markdown.contains(['*', '_', '~'])) {
+        decide(&cells_of(&markdown), holds)
     } else {
-        Vec::new()
+        (Vec::new(), false)
     };
-    let ampersand = link_ampersand();
+    if !markdown.chars().any(is_marker) {
+        return Ok(Written {
+            text: markdown,
+            strands,
+        });
+    }
     let mut written = ProjectionBuffer::with_capacity(written_len(&markdown))?;
     let mut at = 0usize;
     let mut characters = markdown.chars();
@@ -220,7 +202,6 @@ pub(super) fn write_held_characters(markdown: String) -> ProjectionResult<String
                     written.push(literal)?;
                 }
             }
-            LINK_AMPERSAND => written.push(ampersand)?,
             TYPED => {
                 let held = characters.next().expect("a held character follows");
                 match decided.get(at).and_then(Option::as_deref) {
@@ -232,18 +213,28 @@ pub(super) fn write_held_characters(markdown: String) -> ProjectionResult<String
             _ => written.push(character)?,
         }
     }
-    Ok(written.into_string())
+    Ok(Written {
+        text: written.into_string(),
+        strands,
+    })
 }
 
-fn decide(cells: &[Cell]) -> Vec<Option<String>> {
-    let mut beside = vec![false; cells.len()];
-    escape_backticks_beside_code(cells, &mut beside);
-    let mut pairing = Pairing::new(cells, beside.clone());
-    let escaped = if pairing.escape_pairs().is_ok() {
-        pairing.escaped
-    } else {
-        beside
+pub(super) struct Written {
+    pub(super) text: String,
+    pub(super) strands: bool,
+}
+
+fn decide(cells: &[Cell], holds: bool) -> (Vec<Option<String>>, bool) {
+    let mut escaped = vec![false; cells.len()];
+    escape_backticks_beside_code(cells, &mut escaped);
+    let mut pairing = Pairing::new(cells, escaped);
+    let Ok(strands) = pairing.escape_pairs() else {
+        return (Vec::new(), false);
     };
+    if !holds {
+        return (Vec::new(), strands);
+    }
+    let escaped = pairing.escaped;
     let mut decided = Vec::new();
     for (index, cell) in cells.iter().enumerate() {
         let Cell::Held { character, at } = *cell else {
@@ -261,7 +252,7 @@ fn decide(cells: &[Cell]) -> Vec<Option<String>> {
         }
         decided[at] = Some(decision);
     }
-    decided
+    (decided, strands)
 }
 
 fn cells_of(markdown: &str) -> Vec<Cell> {
@@ -289,7 +280,6 @@ fn cells_of(markdown: &str) -> Vec<Cell> {
                 continue;
             }
             LITERAL => characters.next(),
-            LINK_AMPERSAND => Some('&'),
             OPAQUE_OPEN => {
                 if depth == 0 {
                     flush(&mut cells, &mut plain);
@@ -335,6 +325,9 @@ fn cells_of(markdown: &str) -> Vec<Cell> {
         }
     }
     flush(&mut cells, &mut plain);
+    for open in scopes {
+        cells[open] = Cell::Close;
+    }
     cells
 }
 
@@ -531,6 +524,7 @@ struct Pairing<'a> {
     escaped: Vec<bool>,
     consumed: Vec<bool>,
     blockers: Vec<bool>,
+    broken: bool,
     work: isize,
 }
 
@@ -543,6 +537,7 @@ impl<'a> Pairing<'a> {
             escaped,
             consumed: vec![false; cells.len()],
             blockers: vec![false; cells.len()],
+            broken: false,
             work: isize::try_from(work).unwrap_or(isize::MAX),
         }
     }
@@ -806,6 +801,7 @@ impl<'a> Pairing<'a> {
         if opens && closes {
             return true;
         }
+        self.broken = true;
         let around = [
             open.checked_sub(1),
             Some(open + 2),
@@ -854,6 +850,7 @@ impl<'a> Pairing<'a> {
         while index < to {
             match self.cells[index] {
                 Cell::Open { close } => {
+                    self.broken |= close >= to;
                     if close < to
                         && (!self.opens_strike(index)
                             || self.strike_forms(index, to, before, &masked))
@@ -871,6 +868,7 @@ impl<'a> Pairing<'a> {
                     continue;
                 }
                 Cell::Close => {
+                    self.broken = true;
                     index += 1;
                     continue;
                 }
@@ -954,11 +952,12 @@ impl<'a> Pairing<'a> {
         }
     }
 
-    fn escape_pairs(&mut self) -> Pairs<()> {
+    fn escape_pairs(&mut self) -> Pairs<bool> {
         let cells = self.cells;
         loop {
             self.consumed.fill(false);
             self.blockers.fill(false);
+            self.broken = false;
             self.lex(0, cells.len())?;
             let taken: Vec<usize> = (0..cells.len())
                 .filter(|&index| matches!(cells[index], Cell::Held { .. }) && self.consumed[index])
@@ -1011,7 +1010,7 @@ impl<'a> Pairing<'a> {
                 self.escape_run(index);
             }
             if blocking.is_empty() {
-                return Ok(());
+                return Ok(!stranded.is_empty() || self.broken);
             }
         }
     }

@@ -205,6 +205,8 @@ struct Writer<'p> {
     modes: BTreeMap<MarkKind, Mode>,
     bold_opened_with_italic: bool,
     ends: RefCell<Vec<(usize, usize, MarkdownMark)>>,
+    plain: bool,
+    tangled: bool,
 }
 
 impl Writer<'_> {
@@ -404,7 +406,7 @@ impl Writer<'_> {
         })
     }
 
-    fn closes_with(&self, closing: &[MarkKind]) -> Vec<MarkKind> {
+    fn closes_with(&mut self, closing: &[MarkKind]) -> Vec<MarkKind> {
         let order: Vec<MarkKind> = self.active.iter().map(|mark| mark.kind).collect();
         let position = |kind: &MarkKind| order.iter().position(|active| active == kind);
         let Some(from) = closing.iter().filter_map(position).min() else {
@@ -412,7 +414,10 @@ impl Writer<'_> {
         };
         let inner = &order[from..];
         let keeps = inner.iter().any(|kind| !closing.contains(kind));
-        let mut closes = if keeps && inner.iter().any(|kind| !starred(*kind)) {
+        self.tangled |= inner
+            .iter()
+            .any(|kind| !closing.contains(kind) && !starred(*kind));
+        let mut closes = if !self.plain && keeps && inner.iter().any(|kind| !starred(*kind)) {
             inner.to_vec()
         } else {
             closing.to_vec()
@@ -450,6 +455,25 @@ impl Writer<'_> {
 /// Writes inline content with dohc's own mark delimiters, as the TypeScript
 /// writer's `DohcMarkdownManager` does, so both writers choose the same ones.
 pub(super) fn write_inline(pieces: &[Piece]) -> ProjectionResult<String> {
+    let layered = pieces
+        .iter()
+        .any(|piece| matches!(piece, Piece::Text { marks, .. } if marks.len() > 1));
+    let plain = if layered {
+        write_marks(pieces, true)?
+    } else {
+        None
+    };
+    let nested = write_marks(pieces, false)?.expect("the nested order always writes");
+    if let Some(plain) = plain.filter(|plain| *plain != nested) {
+        let kept = write_held_characters(plain, true)?;
+        if !kept.strands {
+            return Ok(kept.text);
+        }
+    }
+    Ok(write_held_characters(nested, false)?.text)
+}
+
+fn write_marks(pieces: &[Piece], plain: bool) -> ProjectionResult<Option<String>> {
     let mut writer = Writer {
         pieces,
         result: Vec::with_capacity(pieces.len()),
@@ -459,6 +483,8 @@ pub(super) fn write_inline(pieces: &[Piece]) -> ProjectionResult<String> {
         modes: BTreeMap::new(),
         bold_opened_with_italic: false,
         ends: RefCell::new(Vec::new()),
+        plain,
+        tangled: false,
     };
     let mut loose_edge = Some(true);
     let mut reopened: Vec<MarkKind> = Vec::new();
@@ -495,7 +521,7 @@ pub(super) fn write_inline(pieces: &[Piece]) -> ProjectionResult<String> {
             .collect();
         let blank = source.chars().all(is_js_whitespace);
         let mut reopens_here = false;
-        if !blank {
+        if !blank && !plain {
             let to_open = marks_to_open(&writer.active, &current, next);
             let mut closings = String::new();
             for kind in writer.reopens_outside(index, &to_open) {
@@ -508,6 +534,8 @@ pub(super) fn write_inline(pieces: &[Piece]) -> ProjectionResult<String> {
         }
         let to_open = if blank {
             Vec::new()
+        } else if plain {
+            marks_to_open(&writer.active, &current, next)
         } else {
             let starts_with_space = source.chars().next().is_some_and(is_js_whitespace);
             let edge = loose_edge;
@@ -580,6 +608,7 @@ pub(super) fn write_inline(pieces: &[Piece]) -> ProjectionResult<String> {
                     reopened.push(mark.kind);
                 }
             }
+            writer.tangled |= !reopened.is_empty();
             to_open
                 .iter()
                 .map(|mark| mark.kind)
@@ -604,9 +633,12 @@ pub(super) fn write_inline(pieces: &[Piece]) -> ProjectionResult<String> {
         text.push_str(middle_trailing);
         writer.push(text)?;
     }
+    if plain && writer.tangled {
+        return Ok(None);
+    }
     let mut joined = ProjectionBuffer::new();
     for text in &writer.result {
         joined.push_str(text)?;
     }
-    write_held_characters(joined.into_string())
+    Ok(Some(joined.into_string()))
 }

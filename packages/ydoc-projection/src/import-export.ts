@@ -1140,7 +1140,6 @@ export function serializeRichdocBody(root: JSONContent): string {
   };
   const encodeRaw = (text: string): string =>
     replaceCharacters(text, characterSentinels, () => reserveToken("CHARACTER"), /[\s\S]+/g);
-  const linkAmpersands = new Map<string, string>();
   const heldCharacters = new Map<string, string>();
   const heldTokens = new Map<string, string>();
   const holdCharacter = (character: string): string => {
@@ -1193,15 +1192,10 @@ export function serializeRichdocBody(root: JSONContent): string {
   const asWritten = (text: string, highlighted: boolean): string => {
     if (!opensBlock(text)) {
       const kept = replaceCharacters(
-        replaceCharacters(
-          text,
-          characterSentinels,
-          () => reserveToken("CHARACTER"),
-          /[<>\u00a0*_`\\]|(?<=\n)[^\n\r]/g,
-        ),
-        linkAmpersands,
-        () => reserveToken("LINK"),
-        /&/g,
+        text,
+        characterSentinels,
+        () => reserveToken("CHARACTER"),
+        /[&<>\u00a0*_`\\]|(?<=\n)[^\n\r]/g,
       );
       return opaque[0] + kept + opaque[1];
     }
@@ -1334,19 +1328,8 @@ export function serializeRichdocBody(root: JSONContent): string {
     ...heldCharacters,
     ...[...opaque, ...scope].map((marker) => [marker, ""] as const),
   ]);
-  const ampersands = new Map(
-    Array.from(linkAmpersands, ([character, token]) => [token, character] as const),
-  );
-  const othersAndAmpersands = new Map([...others, ...ampersands]);
   const writeTokens = (text: string) =>
-    restoreCharacterSentinels(restoreCharacterSentinels(text, characters), othersAndAmpersands);
-  // An empty link reads back only from its own bytes, so a break it spells is
-  // not written as a cell's `<br>`.
-  const writeTableCellTokens = (text: string, writeBreaks: (markdown: string) => string) =>
-    restoreCharacterSentinels(
-      writeBreaks(restoreCharacterSentinels(restoreCharacterSentinels(text, characters), others)),
-      ampersands,
-    );
+    restoreCharacterSentinels(restoreCharacterSentinels(text, characters), others);
   const inlineTokens: InlineTokens = {
     write: writeTokens,
     held: heldCharacters,
@@ -1357,7 +1340,7 @@ export function serializeRichdocBody(root: JSONContent): string {
   };
   // The library writes a note of only `&nbsp;` as empty, for its blank lines.
   // A sealed piece holding that text is the file's own, so it is written.
-  let markdown = writingTableCellTokens(writeTableCellTokens, () =>
+  let markdown = writingTableCellTokens(writeTokens, () =>
     markdownManager.writingTokens(inlineTokens, () =>
       holdsSealedPiece(prepared)
         ? markdownManager.renderNodes(prepared, prepared)

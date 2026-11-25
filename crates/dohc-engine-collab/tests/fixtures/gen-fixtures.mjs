@@ -976,9 +976,10 @@ const RICHDOC_PROJECTION_CASES = [
           tableRow([tableCell("tableCell", "[](a&lt;br&gt;b)")]),
           tableRow([tableCell("tableCell", [xmlText("&lt;br&gt;", { code: {} })])]),
           tableRow([tableCell("tableCell", [xmlText("&amp;lt;br&amp;gt;", { code: {} })])]),
-          // A backtick or backslash in the text is escaped, so it can't
-          // move where the reader finds the code spans that keep a spelled
-          // break.
+          // A backtick or backslash in the text moves where both writers
+          // find the code spans that keep a spelled break. Their written
+          // form is a known gap, not the wanted output: a cell writes its
+          // text's backticks and backslashes unescaped.
           tableRow([
             tableCell("tableCell", [xmlText("a ` <br> b "), xmlText("x", { code: {} })]),
           ]),
@@ -1167,7 +1168,8 @@ const RICHDOC_PROJECTION_CASES = [
     // #4139: marks nest in an order whose delimiters the reader reads back.
     // In a paragraph with a mark other than code, a typed `*`, `_`, backtick,
     // or backslash the reader would read as syntax is escaped. The last
-    // paragraph has no such mark, so it is written as typed.
+    // paragraph and the heading have no such mark, so they are written as
+    // typed. Marks whose old order reads back keep it.
     name: "mixed-formatting",
     makeDoc: () =>
       directRichdoc([
@@ -1192,17 +1194,29 @@ const RICHDOC_PROJECTION_CASES = [
         paragraph([xmlRuns([["b", { bold: {} }], [" a\\*b*"]])]),
         paragraph([xmlRuns([["b", { bold: {} }], [" 😀_b_😀"]])]),
         paragraph("*a b* _a b_ a*b* 2 * 3 snake_case_name a ** b"),
+        xmlElement("heading", { level: 1 }, [xmlText("a \\!")]),
+        paragraph([
+          xmlRuns([
+            ["a", { bold: {}, underline: {} }],
+            ["b", { bold: {}, strike: {}, highlight: {} }],
+            ["c", { strike: {} }],
+          ]),
+        ]),
       ]),
   },
   {
     // Both writers spend the same pairing work: the first paragraph is the
     // longest of these whose typed characters are still escaped, and the
-    // second is written as typed.
+    // others are written as typed, a backslash before punctuation included.
     name: "pairing-budget",
     makeDoc: () =>
       directRichdoc(
-        [104, 105].map((repeats) =>
-          paragraph([xmlRuns([["b", { bold: {} }], [" " + "*_`\\x ".repeat(repeats)]])]),
+        [
+          [104, ""],
+          [105, ""],
+          [106, "\\!"],
+        ].map(([repeats, end]) =>
+          paragraph([xmlRuns([["b", { bold: {} }], [" " + "*_`\\x ".repeat(repeats) + end]])]),
         ),
       ),
   },
