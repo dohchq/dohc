@@ -102,7 +102,7 @@ export interface EngineYdocProviderSessionOptions {
   // A settle FAILED. The debounced settle is the only path that writes the
   // user's edits to the file, so a dropped failure here is silent data loss:
   // the caller must surface it, not just retry-if-reconnectable.
-  onSettleError?: (error: unknown, token: number) => void;
+  onSettleError?: (error: unknown, token: number) => void | Promise<void>;
   // Return false when artifact verification failed, so close retries settlement.
   onSettled?: (result: YdocSettleResult, token: number) => boolean | void | Promise<boolean | void>;
   settleDebounceMs?: number;
@@ -283,9 +283,9 @@ export async function openEngineYdocProviderSession(
     }
   }
 
-  function notifySettleError(error: unknown, token: number): void {
+  async function notifySettleError(error: unknown, token: number): Promise<void> {
     try {
-      options.onSettleError?.(error, token);
+      await options.onSettleError?.(error, token);
     } catch {
       // Observer boundary: a status hook must never re-enter the transport.
     }
@@ -332,7 +332,7 @@ export async function openEngineYdocProviderSession(
         transientRetryMs = settleDebounceMs;
         return result;
       } catch (error) {
-        notifySettleError(error, token);
+        await notifySettleError(error, token);
         throw error;
       }
     });
@@ -620,7 +620,7 @@ export async function openEngineYdocProviderSession(
               } catch (error) {
                 // Reuse has no success callback. Give failures an observable token.
                 notifySettleStart(token);
-                notifySettleError(error, token);
+                await notifySettleError(error, token);
                 throw error;
               }
             }

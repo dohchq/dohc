@@ -2832,7 +2832,7 @@ export function createWorkspaceEngineCapture(
       generation: number,
     ) => boolean | void | Promise<boolean | void>;
     onSettleStart: (token: number, generation: number) => void;
-    onSettleError: (error: unknown, token: number, generation: number) => void;
+    onSettleError: (error: unknown, token: number, generation: number) => void | Promise<void>;
     // The first generation's answers to "does the entered version have a
     // snapshot for this path", "did the daemon resume durable CRDT state", and
     // "does that state hold updates the file may not".
@@ -3421,7 +3421,7 @@ export function createWorkspaceEngineCapture(
                 updatesSettled = updatesCounted;
                 settleForgiven = true;
               }
-              input.onSettleError(error, token, generation);
+              return input.onSettleError(error, token, generation);
             },
             onSettled: (result, token) => {
               const key = `${generation}:${token}`;
@@ -5374,6 +5374,7 @@ export function createWorkspaceEngineCapture(
       let updatesSeen = 0;
       let updatesSettled = 0;
       let changedOutside = false;
+      let lastKnownDiskSha: string | null = null;
       // Capture keeps a note's unsaved text in History when it records an
       // outside version, but has no such copy for a drawing's strokes. A
       // drawing keeps its guarded close instead.
@@ -5467,6 +5468,7 @@ export function createWorkspaceEngineCapture(
           reportSaveState("error", takeSaveToken(token, generation), "outcome");
           return false;
         }
+        lastKnownDiskSha = result.sha256;
         // The engine just wrote this path's settled content to disk — the
         // proof a stand-down marker denies. This fires for every
         // settle on this session, including the pre-close one a rename's
@@ -5595,7 +5597,7 @@ export function createWorkspaceEngineCapture(
       // Keying on the error itself is what the close already matches on, and
       // a WeakMap keeps the record exactly as long as the error exists.
       const settleFailureTokens = new WeakMap<object, number>();
-      const onSettleError = (error: unknown, token: number, generation: number) => {
+      const onSettleError = async (error: unknown, token: number, generation: number) => {
         // This settle carried nothing to History, so its claim is dropped
         // unredeemed — and only its claim, whichever settle finishes first.
         settleClaims.delete(settleId(token, generation));
@@ -5607,9 +5609,31 @@ export function createWorkspaceEngineCapture(
         if (!(error instanceof YdocOwnerDraftPendingError)) {
           onError(`ydoc settle of ${input.path}`, error);
         }
-        if (isConflictStaleTargetCause(error)) setTextAside();
+        const staleTarget = isConflictStaleTargetCause(error);
+        if (staleTarget) {
+          setTextAside();
+          const expected = lastKnownDiskSha;
+          if (
+            !changedOutside &&
+            keepsTextInHistory &&
+            entry !== null &&
+            expected !== null &&
+            hasUnsavedEdits()
+          ) {
+            const disk = await digestSettledFile(rootPath, input.path);
+            if (
+              disk.kind === "sha256" &&
+              disk.sha256 !== expected &&
+              !stopped &&
+              !shuttingDown &&
+              liveYDocSessions.get(input.path) === entry
+            ) {
+              entry.changedOutside();
+            }
+          }
+        }
         reportSaveState(
-          changedOutside && keepsTextInHistory && isConflictStaleTargetCause(error)
+          changedOutside && keepsTextInHistory && staleTarget
             ? "changed-on-disk"
             : settleFailureSaveState(error),
           saveToken,
@@ -6574,6 +6598,7 @@ export function createWorkspaceEngineCapture(
       if (head === "absent") {
         const disk = await absentHeadDiskState(rootPath, input.path);
         absentHeadDisk = disk;
+        if (disk === "empty") lastKnownDiskSha ??= sha256Bytes(new Uint8Array());
         // Three rules, in this order. The order is the correctness
         // argument:
         //
@@ -6722,21 +6747,16 @@ export function createWorkspaceEngineCapture(
       };
       if (head === "present") {
         const openingUpdates = updatesSeen;
-        let drifted = false;
-        let checkedClean = false;
-        try {
-          const snapshot = await engine.readTextFile({ workspaceId, versionId, path: input.path });
-          if (snapshot) {
-            const disk = await digestSettledFile(rootPath, input.path);
-            drifted =
-              disk.kind === "changed" ||
-              (disk.kind === "sha256" && disk.sha256 !== snapshot.sha256);
-            checkedClean = disk.kind === "sha256" && disk.sha256 === snapshot.sha256;
-          }
-        } catch {
-          // A failed read does not prove drift. Keep the existing state and
-          // let the next ordinary settle report a retryable read failure.
-        }
+        const snapshot = await engine
+          .readTextFile({ workspaceId, versionId, path: input.path })
+          .catch(() => null);
+        const disk = await digestSettledFile(rootPath, input.path);
+        if (disk.kind === "sha256") lastKnownDiskSha ??= disk.sha256;
+        const checkedClean =
+          snapshot !== null && disk.kind === "sha256" && disk.sha256 === snapshot.sha256;
+        const drifted =
+          snapshot !== null &&
+          (disk.kind === "changed" || (disk.kind === "sha256" && !checkedClean));
         if (drifted) {
           if (updatesSeen === openingUpdates && lastSettledSha === null) {
             // The retained Y.Doc text is not a History moment yet, so the

@@ -1,4 +1,4 @@
-import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -125,7 +125,12 @@ function transportLost(): Error {
   });
 }
 let captureErrors: string[] = [];
-let busyOutsideCapture: { path: string; text: string; flushes: number } | null = null;
+let busyOutsideCapture: {
+  path: string;
+  text: string;
+  flushes: number;
+  hideDeferredWrite?: boolean;
+} | null = null;
 let versioned: VersionedLoopbackEngine;
 let ydoc: YdocLoopbackEngine;
 // The daemon's disk side: ingests the folder on `capture.flush`, rewrites it
@@ -154,7 +159,7 @@ function daemonSessions(): EngineWorkspaceSessions {
           ...ready,
           result: {
             ...(ready.result as Record<string, JsonValue>),
-            deferredWrites: [busyOutsideCapture.path],
+            deferredWrites: busyOutsideCapture.hideDeferredWrite ? [] : [busyOutsideCapture.path],
             phase: busyOutsideCapture.flushes > 0 ? "importing" : "ready",
           },
         };
@@ -956,6 +961,43 @@ it("reopens a note that changed outside dohc once a busy capture records the cha
   await reopened.close();
 });
 
+it("reports a replaced note before the import's watcher lists the outside write", async () => {
+  claimedLineage = true;
+  const onChangedOutside = vi.fn<(unsaved: boolean) => void>();
+  const states: string[] = [];
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate() {},
+    onChangedOutside,
+    onSaveState: (state) => states.push(state),
+  });
+  const editor = mirrorEditor(session);
+  const outside = "# Solo\n\nEdited in another app.\n";
+  try {
+    typeIntoBody(editor, "Typed in dohc.");
+    await writeFile(join(root, `${PATH}.tmp`), outside, "utf8");
+    await rename(join(root, `${PATH}.tmp`), join(root, PATH));
+    busyOutsideCapture = { path: PATH, text: outside, flushes: 2, hideDeferredWrite: true };
+    settleRefusal = wireRefusal("conflict-stale-target");
+    closeRefusal = wireRefusal("ydoc-unsettled-close");
+    capture.start();
+    await vi.waitFor(() => expect(methodCount("watcher.status")).toBeGreaterThan(0));
+    expect(onChangedOutside).not.toHaveBeenCalled();
+
+    await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
+    expect(states.at(-1)).toBe("changed-on-disk");
+    expect(states).not.toContain("error");
+    expect(onChangedOutside).toHaveBeenCalledExactlyOnceWith(true);
+
+    await session.close();
+    expect(methodCount(YDOC_METHOD.evict)).toBe(1);
+    expect(busyOutsideCapture).toBeNull();
+    expect(await readFile(join(root, PATH), "utf8")).toBe(outside);
+  } finally {
+    editor.destroy();
+  }
+});
+
 it("releases a verified synced document and reports changed-on-disk after a terminal close settle refusal", async () => {
   claimedLineage = true;
   const states: string[] = [];
@@ -1154,9 +1196,11 @@ it("stays on settling for a busy engine store, because the retry is coming", asy
 
 it("keeps the close loud when the file still holds this document's bytes", async () => {
   const states: string[] = [];
+  const onChangedOutside = vi.fn();
   const session = await capture.openYDocSession({
     path: PATH,
     onRemoteUpdate: () => undefined,
+    onChangedOutside,
     onSaveState: (state) => states.push(state),
   });
   const editor = mirrorEditor(session);
@@ -1165,8 +1209,11 @@ it("keeps the close loud when the file still holds this document's bytes", async
   states.length = 0;
   captureErrors = [];
 
+  typeIntoBody(editor, "More typing in dohc.");
   settleRefusal = wireRefusal("conflict-stale-target");
   await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
+  expect(states.at(-1)).toBe("error");
+  expect(onChangedOutside).not.toHaveBeenCalled();
   states.length = 0;
   captureErrors = [];
   await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);

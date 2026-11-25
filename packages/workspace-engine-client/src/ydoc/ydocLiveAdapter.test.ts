@@ -4382,7 +4382,7 @@ describe("YdocLiveAdapter", () => {
       settleDebounceMs: 100,
       onRemoteUpdate: () => undefined,
       onSettleStart: () => settleStarts.push(settleStarts.length),
-      onSettleError: (error) => settleErrors.push(error),
+      onSettleError: (error) => void settleErrors.push(error),
       onSettled: (result) => {
         settled.push(result);
       },
@@ -4477,7 +4477,7 @@ describe("YdocLiveAdapter", () => {
         ? { settleDebounceMs: options.settleDebounceMs }
         : {}),
       onRemoteUpdate: () => undefined,
-      onSettleError: (error) => settleErrors.push(error),
+      onSettleError: (error) => void settleErrors.push(error),
       onSettled: (result) => {
         settled.push(result);
       },
@@ -4632,7 +4632,7 @@ describe("YdocLiveAdapter", () => {
         path: PATH,
         contentKind: "plaintext",
         onRemoteUpdate: () => undefined,
-        onSettleError: (error) => settleErrors.push(error),
+        onSettleError: (error) => void settleErrors.push(error),
         scheduleSettle: settleScheduler().schedule,
       });
       const peer = new Y.Doc();
@@ -4696,7 +4696,7 @@ describe("YdocLiveAdapter", () => {
         path: PATH,
         contentKind: "plaintext",
         onRemoteUpdate: () => undefined,
-        onSettleError: (error) => settleErrors.push(error),
+        onSettleError: (error) => void settleErrors.push(error),
         scheduleSettle: settleScheduler().schedule,
       });
       await expect(
@@ -4933,7 +4933,7 @@ describe("YdocLiveAdapter", () => {
       contentKind: "plaintext",
       settleDebounceMs: 100,
       onRemoteUpdate: () => undefined,
-      onSettleError: (error) => settleErrors.push(error),
+      onSettleError: (error) => void settleErrors.push(error),
       onSettled: (result) => {
         settled.push(result);
       },
@@ -5590,7 +5590,7 @@ describe("YdocLiveAdapter", () => {
       path: PATH,
       contentKind: "plaintext",
       onRemoteUpdate: () => undefined,
-      onSettleError: (error) => settleErrors.push(error),
+      onSettleError: (error) => void settleErrors.push(error),
       onSettled: () => {
         throw landingFailure;
       },
@@ -5624,7 +5624,7 @@ describe("YdocLiveAdapter", () => {
       path: PATH,
       contentKind: "plaintext",
       onRemoteUpdate: () => undefined,
-      onSettleError: (error) => settleErrors.push(error),
+      onSettleError: (error) => void settleErrors.push(error),
       scheduleSettle: () => () => undefined,
     });
 
@@ -5839,7 +5839,7 @@ describe("YdocLiveAdapter", () => {
       path: PATH,
       contentKind: "plaintext",
       onRemoteUpdate: () => undefined,
-      onSettleError: (error) => settleErrors.push(error),
+      onSettleError: (error) => void settleErrors.push(error),
       scheduleSettle: () => () => undefined,
     });
 
