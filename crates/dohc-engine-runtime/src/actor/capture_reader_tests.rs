@@ -144,23 +144,55 @@ fn commit(
 async fn outside_reader_fold_owner_and_joined_keep_tree_marks_settle_and_history() {
     for joined in [false, true] {
         for source in [
+            "Changed\n\n- parent\n  - child",
+            "Changed\n\n- parent\n  - child\n",
+            "Changed\r\n\r\n- parent\r\n  - child",
             "Changed beside list\n\n- parent\n  - child\n",
             "A **bold** word, an *italic* word, and a [link](https://example.com).\n\n- parent\n  - child\n",
             "Changed\r\n\r\n- parent\r\n  - child\r\n",
         ] {
             let (scratch, mut store, key) = fixture(joined);
             std::fs::write(scratch.path().join("note.md"), source).unwrap();
+            let missing_newline = !source.ends_with('\n');
+            if missing_newline {
+                let held = capture_ingest_on_store(
+                    &mut store,
+                    &input(source),
+                    &CaptureIndexing::Skip,
+                    &LeaseRegistry::new(),
+                    &NoFaults,
+                    &CancellationToken::new(),
+                );
+                assert!(matches!(held, Err(RuntimeError::CaptureFileHeld { .. })));
+                store
+                    .write_with(&NoFaults, |tx| {
+                        assert!(capture_file_holds::request_retry_in(tx, "w", "note.md")?);
+                        Ok::<_, StorageError>(())
+                    })
+                    .unwrap();
+            }
             let prepared = fold(&store, &key, source).await;
             let before = store
                 .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
                 .unwrap();
             let result = commit(&mut store, scratch.path(), source, prepared).unwrap();
+            assert_eq!(result.released_capture_hold, missing_newline);
+            assert!(
+                store
+                    .read_with(|conn| capture_file_holds::list_in(conn, "w"))
+                    .unwrap()
+                    .is_empty()
+            );
             assert_eq!(result.snapshot.text, source);
+            assert_eq!(
+                std::fs::read_to_string(scratch.path().join("note.md")).unwrap(),
+                source
+            );
             let doc = store
                 .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
                 .unwrap();
             assert!(!doc.has_reader_source());
-            assert!(doc.markdown_source_reference().is_none());
+            assert_eq!(doc.markdown_source_reference().is_some(), missing_newline);
             assert_eq!(
                 store
                     .read_with(|conn| dohc_engine_sync::project_ydoc_with_store(
@@ -198,34 +230,40 @@ async fn outside_reader_fold_owner_and_joined_keep_tree_marks_settle_and_history
             let marker = dohc_engine_collab::read_marker(&store, &key)
                 .unwrap()
                 .unwrap();
-            super::super::super::ydoc::ydoc_settle_on_store(
-                &mut store,
-                &mut dohc_engine_collab::WriterDocCache::new(),
-                scratch.path(),
-                &key,
-                "note.md",
-                ContentKind::Richdoc,
-                true,
-                marker.lineage_claim_id.as_deref(),
-                Some(result.snapshot.blob_sha256.clone()),
-                None,
-                "test-session",
-                &(),
-                7,
-                &NoFaults,
-                &CancellationToken::new(),
-                None,
-                None,
-                None,
-                super::super::super::ydoc::SettlementKind::Document,
-                false,
-                None,
-            )
-            .unwrap();
+            let db = store.database_path().to_owned();
+            drop(store);
+            let supervisor = crate::WorkspaceSupervisor::new();
+            let actor = supervisor.open(&db, 7).unwrap().actor;
+            actor
+                .configure_reader_resolver(Arc::new(resolver()))
+                .await
+                .unwrap();
+            actor
+                .ydoc_settle(
+                    scratch.path().into(),
+                    key,
+                    "note.md".into(),
+                    ContentKind::Richdoc,
+                    marker.lineage_claim_id,
+                    Some(result.snapshot.blob_sha256),
+                    "test-session".into(),
+                    Arc::new(()),
+                    8,
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            supervisor.close(&db).unwrap();
             let newline = if source.contains('\r') { "\r\n" } else { "\n" };
             assert_eq!(
                 std::fs::read_to_string(scratch.path().join("note.md")).unwrap(),
-                format!("{source}{newline}Added in dohc{newline}")
+                format!(
+                    "{}{newline}{newline}Added in dohc{newline}",
+                    source.strip_suffix(newline).unwrap_or(source)
+                )
             );
         }
     }

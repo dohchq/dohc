@@ -3,6 +3,7 @@ import { LIVE_MARKDOWN_MAX_BYTES } from "@dohc/live-session-contract/limits";
 import { updateYFragment, yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
 import * as Y from "yjs";
 import { readMarkdownSourceWitness } from "./artifact-markdown.js";
+import { omitsFinalMarkdownNewline } from "./artifact-markdown-guard.js";
 import {
   sameFrontmatterValue,
   FRONTMATTER_SOURCE_META_KEY,
@@ -158,7 +159,7 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
     delta: Uint8Array,
     doc: Y.Doc,
     canonical: string,
-    expired = false,
+    projectCanonical = false,
   ): Proof & { readonly kind: "accepted" } {
     requireReading(delta.length <= MAX_UPDATE_BYTES, "capacity-refused");
     const result = journal({
@@ -173,7 +174,7 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
         result.reason === "capacity-refused" ? "capacity-refused" : "journal-refused",
       );
     const sourceSha256 = sha(input.source);
-    const expected = expired ? utf8.encode(canonical) : input.source;
+    const expected = projectCanonical ? utf8.encode(canonical) : input.source;
     requireReading(
       result.evidence.projectedMarkdownSha256 === sha(expected) &&
         result.evidence.projectedMarkdownByteLength === expected.length,
@@ -246,7 +247,8 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
         const native = input.nativeFold === true;
         if (native)
           requireReading(
-            !meta.has("dohcMarkdownSourceReader") && source === canonical,
+            !meta.has("dohcMarkdownSourceReader") &&
+              (source === canonical || omitsFinalMarkdownNewline(source, canonical)),
             "reading-mismatch",
           );
         doc.transact(() => {
@@ -287,7 +289,7 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
         compareReadings(doc, imported);
         // Full-state encoding repeats historical deletes even for a no-op; keep only this construction's updates.
         const delta = Y.diffUpdate(Y.mergeUpdates(updates), before);
-        return { ...validate(input, delta, doc, canonical), delta };
+        return { ...validate(input, delta, doc, canonical, native), delta };
       } catch (error) {
         return refused(error);
       } finally {

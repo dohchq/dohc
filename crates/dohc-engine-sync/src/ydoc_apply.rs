@@ -3398,7 +3398,10 @@ impl PreparedLocalYdocLineage {
                 }
                 Err(error) => return Err(error),
             };
-            if projection.content == source {
+            if projection.content == source
+                || dohc_engine_collab::ydoc::without_final_markdown_newline(&projection.content)
+                    == Some(source)
+            {
                 self.reader_delta = Some(fold.delta.clone());
             }
         }

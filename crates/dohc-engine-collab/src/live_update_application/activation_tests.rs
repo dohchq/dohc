@@ -138,6 +138,53 @@ fn imported_activation_retains_original_source_without_minting_native_seed() {
     assert!(ack.adoption_replayed);
 }
 
+#[test]
+fn imported_activation_keeps_a_file_saved_without_a_final_newline() {
+    for (projection, source) in [
+        ("# Owner note\n\nText\n", "# Owner note\n\nText"),
+        ("# Owner note\r\n\r\nText\r\n", "# Owner note\r\n\r\nText"),
+    ] {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, projection)
+            .unwrap();
+        assert_eq!(
+            doc.project(ContentKind::Richdoc).unwrap().content,
+            projection
+        );
+        assert!(doc.markdown_source_reference().is_none());
+        let mut f = imported_source_fixture(Fixture::with_source(
+            projection.into(),
+            doc.encode_full_state(),
+        ));
+        let artifact = VersionedTextStore::new(&mut f.store)
+            .write_text(
+                &WriteText {
+                    workspace_id: f.key.workspace_id.clone(),
+                    version_id: f.key.version_id.clone(),
+                    object_id: f.key.object_id.clone(),
+                    path: f.binding.current_path.clone(),
+                    text: source.into(),
+                    moment_id: "without-newline".into(),
+                    metadata_origin: "ydoc".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 4,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        let captured = capture_imported(&mut f, 1_000_000).unwrap();
+        assert_eq!(captured.source.source_moment_id, "without-newline");
+        assert_eq!(captured.source.source_digest, artifact.snapshot.blob_sha256);
+        assert_eq!(captured.source.source_byte_length, source.len() as i64);
+        assert_eq!(captured.baseline_bytes, f.cut.baseline_bytes);
+        let resumed = resume_imported(&mut f, &captured.activation_id, 1_000_000).unwrap();
+        assert_eq!(resumed.source, captured.source);
+    }
+}
+
 /// A registration that serves no activation outlives Phase A. After a
 /// reconnect, one could adopt the retired activation and commit an adoption
 /// whose answer is withheld, so the replacement owner keeps the retired set
