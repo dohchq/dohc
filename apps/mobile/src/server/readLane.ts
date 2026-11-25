@@ -1,8 +1,9 @@
 export const PREFETCH_AT_ONCE = 2;
 
-/** One sign-in's reads. A screen's read aborts read-ahead on its way, and none starts until it settles. */
+/** One sign-in's reads. No read-ahead starts while a screen's read is on its way. */
 export interface ReadLane {
-  screen<T>(read: () => Promise<T>): Promise<T>;
+  /** A screen's read. One a person started, `byPerson`, also aborts read-ahead on its way. */
+  screen<T>(read: () => Promise<T>, byPerson: boolean): Promise<T>;
   /** Read-ahead, at most `PREFETCH_AT_ONCE` at once, with a signal that `signal` or a screen's read aborts. */
   ahead<T>(signal: AbortSignal, read: (signal: AbortSignal) => Promise<T>): Promise<T>;
   free(): boolean;
@@ -10,6 +11,14 @@ export interface ReadLane {
 }
 
 const lanes = new WeakMap<object, ReadLane>();
+
+function start<T>(read: () => Promise<T>): Promise<T> {
+  try {
+    return read();
+  } catch (error) {
+    return Promise.reject(error);
+  }
+}
 
 export function readLane(signIn: object): ReadLane {
   const found = lanes.get(signIn);
@@ -21,10 +30,10 @@ export function readLane(signIn: object): ReadLane {
     for (const listener of [...listeners]) listener();
   };
   const lane: ReadLane = {
-    screen(read) {
+    screen(read, byPerson) {
       screens += 1;
-      for (const controller of ahead) controller.abort();
-      return read().finally(() => {
+      if (byPerson) for (const controller of ahead) controller.abort();
+      return start(read).finally(() => {
         screens -= 1;
         settled();
       });
@@ -33,8 +42,9 @@ export function readLane(signIn: object): ReadLane {
       const controller = new AbortController();
       const abort = () => controller.abort();
       signal.addEventListener("abort", abort);
+      if (signal.aborted) abort();
       ahead.add(controller);
-      return read(controller.signal).finally(() => {
+      return start(() => read(controller.signal)).finally(() => {
         signal.removeEventListener("abort", abort);
         ahead.delete(controller);
         settled();

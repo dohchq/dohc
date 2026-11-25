@@ -1111,6 +1111,69 @@ describe("prefetching pages", () => {
     );
   });
 
+  it("reads a page a person's read aborted after the batches listed since", async () => {
+    const shown = deferred<Answer>();
+    const server = testServer();
+    server.on(
+      "POST",
+      "/sync/ws-a/ops/documentRead",
+      () => new Promise<Answer>(() => {}),
+      () => new Promise<Answer>(() => {}),
+      () => shown.promise,
+      page("Read ahead"),
+    );
+    server.on("GET", feedPath("ws-a", "0.1.1"), held);
+    const { data } = open(server);
+    data.prefetchPages(["a.md", "b.md"]);
+    await vi.waitFor(() => expect(reads(server)).toBe(PREFETCH_AT_ONCE));
+    data.prefetchPages(["c.md"]);
+    data.subscribe(views.page("open.md"), () => {});
+    shown.resolve(page("Shown"));
+    await vi.waitFor(() => expect(reads(server)).toBe(6));
+    const bodies = server.calls
+      .filter((call) => call.path.endsWith("/ops/documentRead"))
+      .map((call) => call.body);
+    expect(bodies.slice(3)).toEqual([{ path: "c.md" }, { path: "a.md" }, { path: "b.md" }]);
+  });
+
+  it("gives Notices' pages their own ten", async () => {
+    const server = serve("ws-prefetch-notices", page("Read ahead"));
+    const { data } = open(server, "ws-prefetch-notices");
+    data.prefetchPages(paths(PREFETCH_MAX));
+    await vi.waitFor(() => expect(reads(server)).toBe(PREFETCH_MAX));
+    data.prefetchPages(["noted.md"], "notices");
+    await vi.waitFor(() => expect(data.state(views.page("noted.md")).value).not.toBeNull());
+  });
+
+  it("keeps reading ahead while the feed rereads an open page", async () => {
+    const change = deferred<Answer>();
+    const server = testServer();
+    server.on(
+      "POST",
+      "/sync/ws-a/ops/documentRead",
+      page("Shown"),
+      () => new Promise<Answer>(() => {}),
+      page("Shown again"),
+    );
+    server.on("GET", feedPath("ws-a", "0.1.1"), () => change.promise);
+    server.on("GET", feedPath("ws-a", "0.2.1"), held);
+    const { data } = open(server);
+    data.subscribe(views.page("open.md"), () => {});
+    await vi.waitFor(() => expect(data.state(views.page("open.md")).value).not.toBeNull());
+    data.prefetchPages(["a.md"]);
+    await vi.waitFor(() => expect(reads(server)).toBe(2));
+    change.resolve(feed({ cursor: "0.2.1", changed: { files: ["object-a"] } }));
+    await vi.waitFor(() =>
+      expect(data.state(views.page("open.md")).value).toEqual({
+        kind: "page",
+        markdown: "Shown again",
+      }),
+    );
+    const ahead = server.calls.filter((call) => call.path.endsWith("/ops/documentRead"))[1];
+    expect(ahead?.body).toEqual({ path: "a.md" });
+    expect(ahead?.signal.aborted).toBe(false);
+  });
+
   it("waits for a screen's read, and shares two reads at once across the sign-in's stores", async () => {
     const shown = deferred<Answer>();
     const ahead = deferred<Answer>();

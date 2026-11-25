@@ -448,10 +448,10 @@ export interface WorkspaceData {
   /** Reads the view now, as a screen about to open it would, unless it shows a fresh value or a read is on its way. */
   prefetch(view: View<unknown>): void;
   /**
-   * Reads these pages ahead, those listed last first. Each page is tried once for this store, unless a screen's read
-   * aborts it, and each folder reads at most `PREFETCH_MAX` pages.
+   * Reads these pages ahead, those listed last first. Each page is tried once for this store, unless a person's read
+   * aborts it, and each folder, or `bucket` when given, reads at most `PREFETCH_MAX` pages.
    */
-  prefetchPages(paths: readonly string[]): void;
+  prefetchPages(paths: readonly string[], bucket?: string): void;
   retry(view: View<unknown>): void;
   /**
    * Reads the view now, in place of any read on its way, as a pull to refresh asks. Settles once this read answers,
@@ -629,14 +629,19 @@ export function createWorkspaceData(options: {
     if (cached) cache.set(scope, { ...cached, prefetched: undefined });
   }
 
-  function read(target: Entry, ahead?: AbortSignal) {
+  /** Resolves to the value this read showed, if it showed one. */
+  function read(target: Entry, by: "person" | "feed" | AbortSignal = "person"): Promise<unknown> {
     const request = target.reads.next();
     const from = cursor;
     const unseen = target.prefetched || target.state.value === null;
+    const ahead = typeof by === "string" ? null : by;
     if (!ahead) set(target, { ...target.state, loading: true });
     const reading = ahead
       ? target.view.read(signIn.client, workspaceId, ahead)
-      : lane.screen(() => target.view.read(signIn.client, workspaceId, everything.signal));
+      : lane.screen(
+          () => target.view.read(signIn.client, workspaceId, everything.signal),
+          by === "person",
+        );
     return reading.then(
       (answer) => {
         if (!live() || !target.reads.isLatest(request)) return;
@@ -654,6 +659,7 @@ export function createWorkspaceData(options: {
         if (target.view.messages) options.onMessages?.(target.view.messages(value));
         if (answer.cursor !== null)
           follow(from === null ? answer.cursor : laterCursor(answer.cursor, from));
+        return value;
       },
       (error: unknown) => {
         // An answer that no longer counts says nothing, not even that the workspace has gone.
@@ -671,36 +677,35 @@ export function createWorkspaceData(options: {
     );
   }
 
-  let queued: string[] = [];
+  let queued: { readonly path: string; readonly bucket: string }[] = [];
   const tried = new Set<string>();
-  const folders = new Map<string, { kept: number; reading: number }>();
+  const buckets = new Map<string, { kept: number; reading: number }>();
   function drain() {
     let next = 0;
     while (next < queued.length && running && live() && !restoring && lane.free()) {
-      const path = queued[next];
-      const name = path.slice(0, path.lastIndexOf("/") + 1);
-      const folder = folders.get(name) ?? { kept: 0, reading: 0 };
-      folders.set(name, folder);
-      if (folder.kept < PREFETCH_MAX && folder.kept + folder.reading >= PREFETCH_MAX) {
+      const { path, bucket } = queued[next];
+      const allowance = buckets.get(bucket) ?? { kept: 0, reading: 0 };
+      buckets.set(bucket, allowance);
+      if (allowance.kept < PREFETCH_MAX && allowance.kept + allowance.reading >= PREFETCH_MAX) {
         next += 1;
         continue;
       }
       queued.splice(next, 1);
-      if (folder.kept >= PREFETCH_MAX) continue;
+      if (allowance.kept >= PREFETCH_MAX) continue;
       const view = views.page(path);
       const found = entries.get(view.id);
       if (found && (found.listeners.size > 0 || found.state.value !== null || found.state.loading))
         continue;
       tried.add(path);
-      folder.reading += 1;
+      allowance.reading += 1;
       const target = found ?? entry(view);
       void lane.ahead(everything.signal, async (signal) => {
-        await read(target, signal);
-        folder.reading -= 1;
-        if ((target.state.value as PageRead | null)?.kind === "page") folder.kept += 1;
+        const value = await read(target, signal);
+        allowance.reading -= 1;
+        if ((value as PageRead | undefined)?.kind === "page") allowance.kept += 1;
         else if (signal.aborted) {
           tried.delete(path);
-          queued.unshift(path);
+          queued.push({ path, bucket });
         }
       });
     }
@@ -792,7 +797,7 @@ export function createWorkspaceData(options: {
       cache.drop(scope);
       for (const [id, target] of entries) {
         if (target.listeners.size > 0) {
-          void read(target);
+          void read(target, "feed");
           continue;
         }
         forget(target);
@@ -807,7 +812,7 @@ export function createWorkspaceData(options: {
     for (const target of entries.values()) {
       if (!target.view.affectedBy(answer.changed, known, target.state.value)) continue;
       if (target.listeners.size > 0) {
-        void read(target);
+        void read(target, "feed");
         continue;
       }
       forget(target);
@@ -832,9 +837,16 @@ export function createWorkspaceData(options: {
       const target = entry(view);
       if (due(target)) void read(target);
     },
-    prefetchPages(paths) {
-      const fresh = new Set(paths.filter((path) => !tried.has(path)));
-      queued = [...fresh, ...queued.filter((path) => !fresh.has(path))];
+    prefetchPages(paths, bucket) {
+      const fresh = new Map(
+        paths
+          .filter((path) => !tried.has(path))
+          .map((path) => [
+            path,
+            { path, bucket: bucket ?? path.slice(0, path.lastIndexOf("/") + 1) },
+          ]),
+      );
+      queued = [...fresh.values(), ...queued.filter((next) => !fresh.has(next.path))];
       drain();
     },
     retry(view) {
@@ -848,7 +860,9 @@ export function createWorkspaceData(options: {
         return Promise.resolve();
       }
       const target = entry(view);
-      const start = () => (live() ? read(target) : Promise.resolve());
+      const start = async () => {
+        if (live()) await read(target);
+      };
       return restoring && restored ? restored.then(start) : start();
     },
     feed: () => feedState,

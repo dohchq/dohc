@@ -240,9 +240,12 @@ export function createNoticeTargets(options: {
     const { workspaceId, threadId } = target;
     const post =
       target.answer === true && readPost
-        ? lane.screen(() => readPost(workspaceId, threadId, controller.signal))
+        ? lane.screen(() => readPost(workspaceId, threadId, controller.signal), true)
         : undefined;
-    Promise.all([lane.screen(() => read(workspaceId, threadId, controller.signal)), post]).then(
+    Promise.all([
+      lane.screen(() => read(workspaceId, threadId, controller.signal), true),
+      post,
+    ]).then(
       ([answer, isPostThread]) => {
         if (!current()) return;
         running.delete(key);

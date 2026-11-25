@@ -11,6 +11,7 @@ import {
   type WakeTarget,
 } from "../server/chatWakes";
 import { shownProblem, type ServerClient } from "../server/client";
+import { readLane } from "../server/readLane";
 
 // The wakes of the conversations on screen, one sign-in's, in memory only. Only a visible conversation, or a Notice row
 // on screen, wants a conversation's wakes. Each wanted conversation reads its context once, then one held wake-changes
@@ -268,7 +269,11 @@ export function createChatWakes(options: {
     const controller = new AbortController();
     entry.read = controller;
     const current = () => entry.read === controller && live();
-    readConversationWakes(signIn.client, workspaceId, entry.target, controller.signal).then(
+    const reading = readLane(signIn).screen(
+      () => readConversationWakes(signIn.client, workspaceId, entry.target, controller.signal),
+      false,
+    );
+    reading.then(
       (answer) => {
         if (!current()) return;
         entry.read = null;
