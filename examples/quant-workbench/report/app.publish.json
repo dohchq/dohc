@@ -2,13 +2,17 @@
   "version": 1,
   "entryPath": "index.tsx",
   "inputs": [
-    "index.tsx"
+    "index.tsx",
+    "trend.tsx",
+    "model.ts",
+    "format.ts",
+    "use-size.ts",
+    "trend.css",
+    "report.css"
   ],
   "dataset": {
     "kind": "dataset",
     "datasetPath": "quant-workbench/data/dataset.json",
-    "operations": [
-      "publishedReport"
-    ]
+    "operations": ["publishedReport"]
   }
 }

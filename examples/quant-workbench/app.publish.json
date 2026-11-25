@@ -4,9 +4,23 @@
   "inputs": [
     "index.tsx",
     "workbench.tsx",
+    "rail.tsx",
+    "importer.tsx",
+    "analysis.tsx",
+    "notes.tsx",
+    "controls.tsx",
     "charts.tsx",
+    "query-error.tsx",
+    "hooks.ts",
+    "stats.ts",
+    "types.ts",
     "ingest.ts",
-    "theme.css"
+    "theme.css",
+    "report/trend.tsx",
+    "report/model.ts",
+    "report/format.ts",
+    "report/use-size.ts",
+    "report/trend.css"
   ],
   "dataset": {
     "kind": "dataset",
@@ -22,7 +36,8 @@
       "listNotes",
       "readNote",
       "saveNote",
-      "setReportLink"
+      "setReportLink",
+      "setShortcuts"
     ]
   }
 }

@@ -39,12 +39,6 @@
           "sqlColumn": "domain",
           "type": "text",
           "required": true
-        },
-        {
-          "name": "Color",
-          "sqlColumn": "color",
-          "type": "number",
-          "required": true
         }
       ]
     },
@@ -195,6 +189,32 @@
           "sqlColumn": "grant_id",
           "type": "text",
           "unique": true
+        },
+        {
+          "name": "Link version",
+          "sqlColumn": "link_version",
+          "type": "number",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "Settings",
+      "sqlName": "settings",
+      "primaryKey": "key",
+      "fields": [
+        {
+          "name": "Key",
+          "sqlColumn": "key",
+          "type": "text",
+          "required": true,
+          "unique": true
+        },
+        {
+          "name": "Value",
+          "sqlColumn": "value",
+          "type": "text",
+          "required": true
         }
       ]
     }
@@ -215,6 +235,7 @@
       "table": "observations",
       "kind": "action",
       "access": "owner",
+      "profile": "bulk",
       "readOnly": false,
       "fields": []
     },
@@ -294,6 +315,15 @@
       "name": "setReportLink",
       "label": "Set a report link",
       "table": "research_notes",
+      "kind": "action",
+      "access": "owner",
+      "readOnly": false,
+      "fields": []
+    },
+    {
+      "name": "setShortcuts",
+      "label": "Turn single-key shortcuts on or off",
+      "table": "settings",
       "kind": "action",
       "access": "owner",
       "readOnly": false,
