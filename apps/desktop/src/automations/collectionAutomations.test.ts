@@ -1436,6 +1436,71 @@ describe("Collection automations", () => {
     ]);
   });
 
+  it("keeps a run listed when Try again saves another shared update while it is checked", async () => {
+    const w = await world({
+      automations: {
+        Tasks:
+          "  - id: finish\n    name: Finish\n    when: {field-changed: Status, to: Done}\n    do: [{set: {Note: saved}}, {set: {Title: kept}}]\n",
+      },
+    });
+    const record = w.addRecord("Tasks", "again", { Status: "Done" });
+    const claim = w.claim("collection:Tasks#finish", record);
+    const draft = (field: string) => ({
+      outboxId: "outbox-again",
+      appendKey: `write/${field}`,
+      nativeHeadSequence: 2,
+      binding: {
+        workspaceId: "workspace",
+        mainVersionId: "main",
+        objectId: "object",
+        lineageClaimId: "a".repeat(64),
+        currentPath: "Tasks/again.md",
+        selectorPaths: ["Tasks"],
+        restoreFenceGeneration: 0,
+      },
+    });
+    let titleRefused = true;
+    const executor = w.makeExecutor({
+      withRecordWrites: async (_signal, work) =>
+        work({
+          setFields: async (input) => {
+            const [field] = Object.keys(input.fields);
+            if (field === "Title" && titleRefused) throw new Error("Title is busy.");
+            return {
+              replaced: { [field!]: null },
+              kept: {},
+              sharedFileUpdates: { [field!]: draft(field!) },
+            };
+          },
+          create: async () => {
+            throw new Error("No added record");
+          },
+        }),
+    });
+    onTestFinished(() => executor.dispose());
+    await executor.open();
+    expect((await w.settledClaim(claim)).state).toBe("failed");
+    const checked: string[] = [];
+    w.engine.sharedFileUpdateStates = async (writes) => {
+      checked.push(...writes.map((write) => write.appendKey));
+      if (titleRefused) {
+        titleRefused = false;
+        await executor.retry({
+          automationId: claim.automationId,
+          claimId: claim.claimId,
+          startOver: false,
+        });
+        await w.until(() => claim.state === "done");
+      }
+      return writes.map(() => "settled");
+    };
+    await executor.reportRefusedSharedUpdates(async () => {});
+    expect(await w.baseStore.sharedWaiting()).toMatchObject([{ claimId: claim.claimId }]);
+    await executor.reportRefusedSharedUpdates(async () => {});
+    expect(checked).toEqual(["write/Note", "write/Title"]);
+    expect(await w.baseStore.sharedWaiting()).toEqual([]);
+  });
+
   it("counts pending reversals once and keeps refused reversals retryable", async () => {
     const definition =
       "  - id: finish\n    name: Finish\n    when: {field-changed: Status, to: Done}\n    do: [{set: {Note: saved}}]\n";

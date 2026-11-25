@@ -3503,7 +3503,7 @@ export class CollectionAutomations {
         const found = await this.options.store.runsOf(listed.automationId, listed.claimId);
         const run = found.runs.find((stored) => stored.keySeed === listed.keySeed);
         if (run === undefined) {
-          if (!found.unreadable) await this.options.store.settleSharedWaiting(listed, true);
+          if (!found.unreadable) await this.options.store.settleSharedWaiting(listed, 0);
           continue;
         }
         const writes = run.applied.flatMap((step) =>
@@ -3545,7 +3545,7 @@ export class CollectionAutomations {
           run.finishedAtMs !== null &&
           writes.every((write) => ended.has(sharedFileUpdateKey(write.sharedFileUpdate!)));
         if (done || (refused.length > 0 && !listed.told))
-          await this.options.store.settleSharedWaiting(listed, done);
+          await this.options.store.settleSharedWaiting(listed, done ? run.applied.length : null);
       } catch (error) {
         failures.push(error);
       }

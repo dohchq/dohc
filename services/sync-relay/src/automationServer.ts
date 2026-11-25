@@ -687,7 +687,6 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       );
   }
 
-  /** Tells the owner, once for each run, which of its changes to shared records the shared file did not accept. */
   function reportRefusedUpdates(ws: Hosted): void {
     const { workspaceId, ownerUserId } = ws.replica;
     ws.reporting = ws.reporting

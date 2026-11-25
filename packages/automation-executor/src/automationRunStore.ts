@@ -1107,8 +1107,11 @@ export interface AutomationRunStore {
   unfinishedUndos(): Promise<ReadonlySet<string> | null>;
   /** The runs that saved a field update to a shared file that has not ended, when the store lists them. */
   sharedWaiting(): Promise<SharedWaitingRun[]>;
-  /** Marks a listed run's owner as told, or with `ended`, removes it from the list. */
-  settleSharedWaiting(run: SharedWaitingRun, ended: boolean): Promise<void>;
+  /**
+   * With null, marks a listed run's owner as told. With the number of effects
+   * checked, removes the run from the list unless it has saved more since.
+   */
+  settleSharedWaiting(run: SharedWaitingRun, checkedEffects: number | null): Promise<void>;
   readSubscriptions(): Promise<StoredSubscription[]>;
   saveSubscriptions(subscriptions: readonly StoredSubscription[]): Promise<void>;
   /**
@@ -1416,7 +1419,6 @@ export function createAutomationRunStore(
     undos = next;
   };
   const sharedWaitingFile = async () => join(await base(), "shared-waiting.json");
-  // A list that cannot be read starts again empty.
   const readSharedWaiting = async () => {
     const parsed = SharedWaitingSchema.safeParse(await readStoredJson("shared-waiting.json"));
     return parsed.success ? parsed.data.runs : [];
@@ -1926,7 +1928,6 @@ export function createAutomationRunStore(
     },
     appendEffect(run, applied) {
       return serial(async () => {
-        // Listed first, so a saved shared update always has its run listed.
         if (
           listSharedUpdates &&
           applied.writes.some((write) => write.kind === "field" && write.sharedFileUpdate)
@@ -1946,15 +1947,23 @@ export function createAutomationRunStore(
     sharedWaiting() {
       return serial(readSharedWaiting);
     },
-    settleSharedWaiting(run, ended) {
+    settleSharedWaiting(run, checkedEffects) {
       return serial(async () => {
         const waiting = await readSharedWaiting();
-        if (waiting.some((entry) => sameRun(entry, run)))
+        if (!waiting.some((entry) => sameRun(entry, run))) return;
+        if (checkedEffects === null) {
           await writeSharedWaiting(
-            ended
-              ? waiting.filter((entry) => !sameRun(entry, run))
-              : waiting.map((entry) => (sameRun(entry, run) ? { ...entry, told: true } : entry)),
+            waiting.map((entry) => (sameRun(entry, run) ? { ...entry, told: true } : entry)),
           );
+          return;
+        }
+        const stored = await readRun(
+          await runsFolder(run.automationId),
+          runName(run.claimId, run.keySeed),
+          run.automationId,
+        );
+        if ((stored?.applied.length ?? 0) === checkedEffects)
+          await writeSharedWaiting(waiting.filter((entry) => !sameRun(entry, run)));
       });
     },
     recordCreated(run, created) {

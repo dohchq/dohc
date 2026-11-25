@@ -127,15 +127,14 @@ export function sentNoticeTarget(
       ...(sharedFile === undefined ? {} : { sharedFile }),
     };
   }
-  // Only the computer that ran a run holds it, or the owner's server, which alone posts these ids.
-  const ranHere =
+  const holdsRun =
     notice.postedHere ||
     (notice.store === "account" && notice.noticeId.startsWith(SERVER_UPDATE_REFUSED_NOTICE_PREFIX));
   if (automation !== undefined && place.mount === null && !controls) {
     return {
       to: "automation",
       automation,
-      ...(ranHere && run !== undefined ? { run } : {}),
+      ...(holdsRun && run !== undefined ? { run } : {}),
     };
   }
   if (place.path !== null) return { to: "file", path: place.path };
