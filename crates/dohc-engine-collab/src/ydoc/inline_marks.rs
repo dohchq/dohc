@@ -28,7 +28,7 @@ enum Mode {
     Underscore,
 }
 
-fn picky(kind: MarkKind) -> bool {
+fn flanking(kind: MarkKind) -> bool {
     matches!(kind, MarkKind::Bold | MarkKind::Italic | MarkKind::Strike)
 }
 
@@ -314,12 +314,12 @@ impl Writer<'_> {
             .filter(|mark| !contains_same_mark(marks, mark))
             .peekable();
         if opens.peek().is_some() {
-            return !opens.any(|mark| picky(mark.kind));
+            return !opens.any(|mark| flanking(mark.kind));
         }
         loose_after(&head)
     }
 
-    fn nest_picky_inside(
+    fn nest_flanking_inside(
         &self,
         index: usize,
         to_open: Vec<MarkdownMark>,
@@ -327,13 +327,13 @@ impl Writer<'_> {
     ) -> Vec<MarkdownMark> {
         let order: Vec<&MarkdownMark> = to_open.iter().rev().collect();
         let tight = order.iter().enumerate().any(|(at, mark)| {
-            if !picky(mark.kind) {
+            if !flanking(mark.kind) {
                 return false;
             }
             let inside: Vec<&MarkdownMark> = order[at + 1..]
                 .iter()
                 .copied()
-                .filter(|other| !picky(other.kind))
+                .filter(|other| !flanking(other.kind))
                 .collect();
             if inside.is_empty() {
                 return false;
@@ -363,8 +363,8 @@ impl Writer<'_> {
         }
         let mut nested: Vec<MarkdownMark> = order
             .iter()
-            .filter(|mark| !picky(mark.kind))
-            .chain(order.iter().filter(|mark| picky(mark.kind)))
+            .filter(|mark| !flanking(mark.kind))
+            .chain(order.iter().filter(|mark| flanking(mark.kind)))
             .map(|mark| (*mark).clone())
             .collect();
         nested.reverse();
@@ -372,7 +372,8 @@ impl Writer<'_> {
     }
 
     fn reopens_outside(&self, index: usize, to_open: &[MarkdownMark]) -> Vec<MarkKind> {
-        let opening: Vec<&MarkdownMark> = to_open.iter().filter(|mark| !picky(mark.kind)).collect();
+        let opening: Vec<&MarkdownMark> =
+            to_open.iter().filter(|mark| !flanking(mark.kind)).collect();
         if opening.is_empty()
             || self
                 .result
@@ -382,7 +383,7 @@ impl Writer<'_> {
             return Vec::new();
         }
         let at = self.active.iter().enumerate().position(|(at, mark)| {
-            if !picky(mark.kind) {
+            if !flanking(mark.kind) {
                 return false;
             }
             let end = self.end_of(index, mark);
@@ -452,8 +453,6 @@ impl Writer<'_> {
     }
 }
 
-/// Writes inline content with dohc's own mark delimiters, as the TypeScript
-/// writer's `DohcMarkdownManager` does, so both writers choose the same ones.
 pub(super) fn write_inline(pieces: &[Piece]) -> ProjectionResult<String> {
     let layered = pieces
         .iter()
@@ -545,7 +544,7 @@ fn write_marks(pieces: &[Piece], plain: bool) -> ProjectionResult<Option<String>
                     || starts_with_space
                     || edge.unwrap_or_else(|| loose_before(&writer.written_end()))
             };
-            writer.nest_picky_inside(
+            writer.nest_flanking_inside(
                 index,
                 marks_to_open(&writer.active, &current, next),
                 &before,

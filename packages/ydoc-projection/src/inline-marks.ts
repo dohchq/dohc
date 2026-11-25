@@ -26,43 +26,29 @@ const DELIMITERS: Record<string, string> = {
 
 const UNDERSCORES: Record<string, string> = { bold: "__", italic: "_" };
 
-// The reader takes these delimiters as marks only beside the right
-// characters. Underline, highlight, and link delimiters read anywhere.
-const PICKY = new Set(["bold", "italic", "strike"]);
-// Asterisks can close in any order, so these two may cross.
+const FLANKING = new Set(["bold", "italic", "strike"]);
 const STARRED = new Set(["bold", "italic"]);
 
-// Whitespace, or ASCII punctuation other than `*`, `_`, and `~`, which the
-// reader takes as part of a delimiter or as a letter.
 const LOOSE = /^[\s!-)+-/:-@[-^`{-}]/u;
 
-/** Whether a bold, italic, or strike delimiter after `written` reads whatever follows it. */
 function looseBefore(written: string): boolean {
   if (written === "") return true;
   if (/#\d+;$/u.test(written)) return false;
   return LOOSE.test(written.slice(-1));
 }
 
-/** Whether a bold, italic, or strike delimiter before `written` reads whatever precedes it. */
 function looseAfter(written: string): boolean {
   if (written === "") return true;
   if (/^&(?:amp;)?#/u.test(written)) return false;
   return LOOSE.test(written);
 }
 
-/** How the writer writes the tokens the text holds. */
 export type InlineTokens = {
-  /** Writes each token as the bytes it stands for, and a held character as it is. */
   write: (text: string) => string;
-  /** The typed character each held token stands for. */
   held: ReadonlyMap<string, string>;
-  /** Tokens around written text no delimiter reads into. */
   opaque: readonly [string, string];
-  /** Tokens around a link, underline, highlight, or strike, which reads as one piece. */
   scope: readonly [string, string];
-  /** The token that writes `text` as it is. */
   raw: (text: string) => string;
-  /** The token that writes `character` as a reference read back as that character. */
   reference: (character: string) => string;
 };
 
@@ -99,14 +85,9 @@ function closing(mark: Mark, mode: OpeningMode, tokens: InlineTokens): string {
 const carries = (marks: Mark[] | undefined, mark: Mark): boolean =>
   (marks ?? []).some((other) => other.type === mark.type && attrsEqual(other.attrs, mark.attrs));
 
-/**
- * Writes inline content with dohc's own mark delimiters, so both Markdown
- * writers choose the same delimiters.
- */
 export class DohcMarkdownManager extends MarkdownManager {
   private tokens: InlineTokens = NO_TOKENS;
 
-  /** Renders with `tokens` saying how the text's tokens are written. */
   writingTokens<T>(tokens: InlineTokens, render: () => T): T {
     const previous = this.tokens;
     this.tokens = tokens;
@@ -168,9 +149,6 @@ export class DohcMarkdownManager extends MarkdownManager {
     };
     let reopened = new Set<string>();
     let tangled = false;
-    // Whether an opening delimiter here reads whatever follows it. The
-    // reader starts afresh after a delimiter or a node, as at a space, and
-    // takes an opening delimiter right after another as one run with it.
     let looseEdge: boolean | undefined = true;
     const tokens = this.tokens;
     const opaque = nodes.some((node) => node.type === "text") ? tokens.opaque : ["", ""];
@@ -208,18 +186,15 @@ export class DohcMarkdownManager extends MarkdownManager {
       const head = tokens.write(textAt(end + 1).slice(0, 256));
       if (/^\s/u.test(head)) return true;
       const opens = (after.marks ?? []).filter((mark) => !carries(nodes[end]!.marks, mark));
-      if (opens.length > 0) return !opens.some((mark) => PICKY.has(mark.type));
+      if (opens.length > 0) return !opens.some((mark) => FLANKING.has(mark.type));
       return looseAfter(head);
     };
-    // A bold, italic, or strike delimiter beside an underline, highlight, or
-    // link delimiter reads only with a loose character on its other side.
-    // Where it would have none, those open outside it.
-    const nestPickyInside = (index: number, toOpen: Mark[], before: () => boolean): Mark[] => {
+    const nestFlankingInside = (index: number, toOpen: Mark[], before: () => boolean): Mark[] => {
       const order = toOpen.slice().reverse();
       const outer = Array.from(active.values());
       const tight = order.some((mark, at) => {
-        if (!PICKY.has(mark.type)) return false;
-        const inside = order.slice(at + 1).filter((other) => !PICKY.has(other.type));
+        if (!FLANKING.has(mark.type)) return false;
+        const inside = order.slice(at + 1).filter((other) => !FLANKING.has(other.type));
         if (inside.length === 0) return false;
         if (at === 0 && !before()) return true;
         const end = endOf(index, mark);
@@ -234,20 +209,16 @@ export class DohcMarkdownManager extends MarkdownManager {
       });
       if (!tight) return toOpen;
       return [
-        ...order.filter((mark) => !PICKY.has(mark.type)),
-        ...order.filter((mark) => PICKY.has(mark.type)),
+        ...order.filter((mark) => !FLANKING.has(mark.type)),
+        ...order.filter((mark) => FLANKING.has(mark.type)),
       ].reverse();
     };
-    // An open bold, italic, or strike mark that would close right after an
-    // underline, highlight, or link delimiter opening here, with no loose
-    // character after it, closes before them and opens again outside them.
-    // The marks inside it close with it.
     const reopensOutside = (index: number, toOpen: Mark[]): string[] => {
-      const opening = toOpen.filter((mark) => !PICKY.has(mark.type));
+      const opening = toOpen.filter((mark) => !FLANKING.has(mark.type));
       if (opening.length === 0 || /^\s*$/u.test(result.at(-1) ?? "")) return [];
       const order = Array.from(active.keys());
       const at = order.findIndex((type) => {
-        if (!PICKY.has(type)) return false;
+        if (!FLANKING.has(type)) return false;
         const end = endOf(index, active.get(type)!);
         if (!opening.some((other) => endOf(index, other) === end)) return false;
         const outer = order.slice(0, order.indexOf(type));
@@ -256,8 +227,6 @@ export class DohcMarkdownManager extends MarkdownManager {
       });
       return at === -1 ? [] : order.slice(at).reverse();
     };
-    // Closing a mark closes the marks inside it, which open again after it,
-    // unless they are all asterisks.
     const closesWith = (closing: string[]): string[] => {
       const order = Array.from(active.keys());
       const from = Math.min(...closing.map((type) => order.indexOf(type)));
@@ -296,8 +265,6 @@ export class DohcMarkdownManager extends MarkdownManager {
       const toClose = Array.from(current)
         .filter(([, mark]) => !next || !carries(next.marks, mark))
         .map(([type]) => type);
-      // Whitespace alone opens no mark: the next text opens it after the
-      // whitespace.
       const blank = /^\s*$/u.test(text);
       let reopensHere = false;
       if (!blank && !plain) {
@@ -320,7 +287,7 @@ export class DohcMarkdownManager extends MarkdownManager {
         ? []
         : plain
           ? this.marksToOpen(active, current, next)
-          : nestPickyInside(i, this.marksToOpen(active, current, next), before);
+          : nestFlankingInside(i, this.marksToOpen(active, current, next), before);
       const activeClosing = toClose.filter((type) => active.has(type));
       const crossed = activeClosing.length > 0 && toOpen.length > 0;
 

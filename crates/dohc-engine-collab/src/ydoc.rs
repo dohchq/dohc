@@ -6214,8 +6214,6 @@ fn end_with_line_break(out: &mut ProjectionBuffer, line_break: &str) -> Result<(
     out.push_str(line_break)
 }
 
-/// A projection being written. The inline writer's markers are never
-/// written, so they don't count toward the projection limit.
 struct ProjectionBuffer {
     value: String,
     markers: usize,
@@ -8699,7 +8697,7 @@ fn render_inline(
     // from the same bytes. Its `&`, `<`, `>`, and NBSP, and the first
     // character of each line it starts, are held, as the TypeScript writer
     // holds them, so no later pass writes them differently. A highlight
-    // writes a held `=` as the `\=` it reads. No delimiter reads into it.
+    // writes a held `=` as the `\=` it reads.
     fn hold_as_written(link: &str, highlighted: bool, text: &mut String, held: &mut Vec<Held>) {
         text.push(held_characters::OPAQUE_OPEN);
         let mut starts_line = false;
@@ -10725,10 +10723,6 @@ mod projection_tests {
         }
     }
 
-    // #4139: marks nest in an order whose delimiters the reader reads back.
-    // In a paragraph with a mark other than code, a typed `*`, `_`, backtick,
-    // or backslash the reader would read as syntax is escaped. The TypeScript
-    // writer's tests have the same cases.
     #[test]
     fn mixed_formatting_and_typed_markers_are_written_so_they_read_back() {
         let plain = Attrs::new;
@@ -10889,9 +10883,6 @@ mod projection_tests {
         }
     }
 
-    // A file's paragraph this reader can't follow is kept as the Markdown it
-    // spells, with no mark but code, so a paragraph like that keeps the bytes
-    // it had. The TypeScript writer's test has the same cases.
     #[test]
     fn a_paragraph_without_other_marks_keeps_its_typed_bytes() {
         let plain = Attrs::new;
@@ -10908,9 +10899,6 @@ mod projection_tests {
         }
     }
 
-    // Modeling how the reader pairs these characters takes more steps than the
-    // writer's limit of 2,097,152, so each of them is written as typed. The
-    // TypeScript writer's test has the same cases.
     #[test]
     fn a_paragraph_past_the_pairing_limit_keeps_its_typed_characters() {
         let globs = " *.txt *.md".repeat(8_000);
@@ -10932,10 +10920,6 @@ mod projection_tests {
         );
     }
 
-    // The writer models a block of at most 65,536 cells. The first paragraph
-    // has 65,536, so its typed asterisks are written as references. The second
-    // has 65,537, so they are written as typed. The TypeScript writer's test
-    // has the same cases.
     #[test]
     fn a_paragraph_past_the_cell_limit_keeps_its_typed_characters() {
         let at = " a_b".repeat(32_763);
@@ -10982,9 +10966,6 @@ mod projection_tests {
         );
     }
 
-    // Writing a paragraph's leading space as a reference splits its first
-    // text in two. Each image after it keeps its own Markdown. The TypeScript
-    // writer writes the same bytes.
     #[test]
     fn a_paragraph_with_a_leading_space_keeps_each_node_after_it() {
         let source = Ydoc::wire();
@@ -11008,10 +10989,6 @@ mod projection_tests {
         );
     }
 
-    // The writer holds each typed backslash with a three-byte marker while it
-    // decides how to write it. Each run here is 7,000,000 bytes as written
-    // and 17,500,000 bytes while held, past the 16 MiB projection limit. The
-    // paragraph is written in 14,000,005 bytes, so it fits.
     #[test]
     fn typed_characters_count_toward_the_projection_limit_as_written() {
         let typed = "\\a".repeat(3_500_000);

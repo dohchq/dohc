@@ -1152,11 +1152,6 @@ export function serializeRichdocBody(root: JSONContent): string {
   };
   const opaque = [reserveToken("MARK"), reserveToken("MARK")] as const;
   const scope = [reserveToken("MARK"), reserveToken("MARK")] as const;
-  // A typed `*`, `_`, backtick, or backslash is held until the inline writer
-  // sees what the reader would pair it with. A highlight's own `\=` is
-  // written as it is. Only a block with a mark other than code holds them:
-  // the engine keeps a block it can't read as the Markdown the file spells,
-  // with no mark but code, and that text must be written as it is.
   const formattedBeyondCode = (content: JSONContent[]): boolean =>
     content.some(
       (node) => node.type === "text" && node.marks?.some((mark) => mark.type !== "code"),
@@ -1311,8 +1306,7 @@ export function serializeRichdocBody(root: JSONContent): string {
     for (const character of ["*", "_", "`"]) encodeBlockEscape(character);
   }
   // A character token's text can hold the other tokens, so it is written
-  // first. Every token is reserved by now. The others write text that holds
-  // no token, so they are written together.
+  // first. Every token is reserved by now.
   const characters = new Map(
     Array.from(characterSentinels, ([character, sentinel]) => [sentinel, character] as const),
   );

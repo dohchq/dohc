@@ -18,17 +18,6 @@ const PAIRING_CELL_LIMIT = 2 ** 16;
 const REFERENCE = "";
 const TOKEN = /DOHC[A-Z]+\d+/gu;
 
-/**
- * Writes each typed `*`, `_`, backtick, and backslash `markdown` holds. One the
- * reader would take as a delimiter, or one that keeps a written delimiter from
- * pairing, is written as a reference. A backslash before ASCII punctuation is
- * doubled. The others are written as they are, so text that reads back keeps
- * its bytes. When `judged`, `strands` says whether a written bold, italic, or
- * strike delimiter would read as text. Modeling how the reader pairs them takes at
- * most `PAIRING_CELL_LIMIT` cells, `PAIRING_WORK_PER_CELL` steps per cell, and
- * `PAIRING_WORK_LIMIT` steps in all. Past that, every typed character is
- * written as it is.
- */
 export function writeHeldCharacters(
   markdown: string,
   tokens: InlineTokens,

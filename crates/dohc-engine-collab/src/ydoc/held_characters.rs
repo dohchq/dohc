@@ -19,7 +19,6 @@ pub(super) fn is_marker(character: char) -> bool {
     (OPAQUE_OPEN..=LITERAL).contains(&character)
 }
 
-/// The bytes of `text` that are written, leaving out the markers.
 pub(super) fn written_len(text: &str) -> usize {
     let lead = OPAQUE_OPEN.encode_utf8(&mut [0; 4]).as_bytes()[0];
     if !text.as_bytes().contains(&lead) {
@@ -66,7 +65,6 @@ pub(super) fn hold_typed(text: &str) -> String {
     held
 }
 
-/// The text as it is written, with each held character as itself.
 pub(super) fn resolved(text: &str) -> String {
     let mut written = String::with_capacity(text.len());
     let mut characters = text.chars();
@@ -170,15 +168,6 @@ enum Side {
     Last,
 }
 
-/// Writes each typed `*`, `_`, backtick, and backslash `markdown` holds. One
-/// the reader would take as a delimiter, or one that keeps a written delimiter
-/// from pairing, is written as a reference. A backslash before ASCII
-/// punctuation is doubled. The others are written as they are, so text that
-/// reads back keeps its bytes. When `judged`, `strands` says whether a
-/// written bold, italic, or strike delimiter would read as text. Modeling how the reader
-/// pairs them takes at most [`PAIRING_CELL_LIMIT`] cells,
-/// [`PAIRING_WORK_PER_CELL`] steps per cell, and [`PAIRING_WORK_LIMIT`] steps
-/// in all. Past that, every typed character is written as it is.
 pub(super) fn write_held_characters(markdown: String, judged: bool) -> ProjectionResult<Written> {
     let holds = markdown.contains(TYPED);
     let (decided, strands) = if holds || (judged && markdown.contains(['*', '_', '~'])) {
