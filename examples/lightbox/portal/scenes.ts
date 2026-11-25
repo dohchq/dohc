@@ -454,13 +454,13 @@ function boat(ctx: Ctx, w: number, h: number, rng: Rng) {
   const cx = w * between(rng, 0.38, 0.62);
   const cy = h * between(rng, 0.38, 0.62);
   const length = Math.min(w, h) * between(rng, 0.32, 0.42);
-  const beam = length * 0.33;
+  const breadth = length * 0.33;
   const hull = (c: Ctx) => {
     c.beginPath();
     c.moveTo(length * 0.55, 0);
-    c.bezierCurveTo(length * 0.35, -beam * 0.55, -length * 0.2, -beam * 0.52, -length * 0.45, -beam * 0.42);
-    c.lineTo(-length * 0.45, beam * 0.42);
-    c.bezierCurveTo(-length * 0.2, beam * 0.52, length * 0.35, beam * 0.55, length * 0.55, 0);
+    c.bezierCurveTo(length * 0.35, -breadth * 0.55, -length * 0.2, -breadth * 0.52, -length * 0.45, -breadth * 0.42);
+    c.lineTo(-length * 0.45, breadth * 0.42);
+    c.bezierCurveTo(-length * 0.2, breadth * 0.52, length * 0.35, breadth * 0.55, length * 0.55, 0);
     c.closePath();
   };
   const wake = layer(w, h, (c) => {
@@ -471,7 +471,7 @@ function boat(ctx: Ctx, w: number, h: number, rng: Rng) {
       const spread = t * length * 1.6;
       const side = rng() < 0.5 ? -1 : 1;
       const x = -length * 0.45 - t * length * 3.2;
-      const y = side * (beam * 0.3 + spread * 0.42) + (rng() - 0.5) * length * 0.05;
+      const y = side * (breadth * 0.3 + spread * 0.42) + (rng() - 0.5) * length * 0.05;
       oval(c, x, y, length * between(rng, 0.01, 0.05), length * 0.008, `rgba(255,255,255,${0.55 * (1 - t)})`, (rng() - 0.5) * 0.4);
     }
     const trail = c.createLinearGradient(-length * 0.45, 0, -length * 2.6, 0);
@@ -479,10 +479,10 @@ function boat(ctx: Ctx, w: number, h: number, rng: Rng) {
     trail.addColorStop(1, "rgba(255,255,255,0)");
     c.fillStyle = trail;
     c.beginPath();
-    c.moveTo(-length * 0.45, -beam * 0.3);
-    c.quadraticCurveTo(-length * 1.4, -beam * 0.12, -length * 2.6, -beam * 0.3);
-    c.lineTo(-length * 2.6, beam * 0.3);
-    c.quadraticCurveTo(-length * 1.4, beam * 0.12, -length * 0.45, beam * 0.3);
+    c.moveTo(-length * 0.45, -breadth * 0.3);
+    c.quadraticCurveTo(-length * 1.4, -breadth * 0.12, -length * 2.6, -breadth * 0.3);
+    c.lineTo(-length * 2.6, breadth * 0.3);
+    c.quadraticCurveTo(-length * 1.4, breadth * 0.12, -length * 0.45, breadth * 0.3);
     c.closePath();
     c.fill();
   });
@@ -499,7 +499,7 @@ function boat(ctx: Ctx, w: number, h: number, rng: Rng) {
   ctx.translate(cx, cy);
   ctx.rotate(angle);
   hull(ctx);
-  const side = ctx.createLinearGradient(0, -beam * 0.5, 0, beam * 0.5);
+  const side = ctx.createLinearGradient(0, -breadth * 0.5, 0, breadth * 0.5);
   side.addColorStop(0, "#ffffff");
   side.addColorStop(0.5, "#eeebe6");
   side.addColorStop(1, "#b9b6b2");
@@ -512,7 +512,7 @@ function boat(ctx: Ctx, w: number, h: number, rng: Rng) {
   ctx.fill();
   ctx.strokeStyle = "rgba(70,40,20,0.35)";
   ctx.lineWidth = Math.max(0.6, length * 0.004);
-  for (let plank = -beam * 0.4; plank < beam * 0.4; plank += beam * 0.08) {
+  for (let plank = -breadth * 0.4; plank < breadth * 0.4; plank += breadth * 0.08) {
     ctx.beginPath();
     ctx.moveTo(-length * 0.45, plank);
     ctx.lineTo(length * 0.4, plank * 0.6);
@@ -520,17 +520,17 @@ function boat(ctx: Ctx, w: number, h: number, rng: Rng) {
   }
   ctx.restore();
   ctx.fillStyle = "#f3eee4";
-  ctx.fillRect(-length * 0.36, -beam * 0.3, length * 0.22, beam * 0.6);
+  ctx.fillRect(-length * 0.36, -breadth * 0.3, length * 0.22, breadth * 0.6);
   ctx.fillStyle = "#26323a";
   ctx.beginPath();
-  ctx.moveTo(length * 0.08, -beam * 0.32);
-  ctx.quadraticCurveTo(length * 0.2, 0, length * 0.08, beam * 0.32);
-  ctx.lineTo(length * 0.02, beam * 0.3);
-  ctx.quadraticCurveTo(length * 0.12, 0, length * 0.02, -beam * 0.3);
+  ctx.moveTo(length * 0.08, -breadth * 0.32);
+  ctx.quadraticCurveTo(length * 0.2, 0, length * 0.08, breadth * 0.32);
+  ctx.lineTo(length * 0.02, breadth * 0.3);
+  ctx.quadraticCurveTo(length * 0.12, 0, length * 0.02, -breadth * 0.3);
   ctx.fill();
   if (rng() < 0.7) {
-    oval(ctx, -length * 0.26, -beam * 0.12, length * 0.05, length * 0.03, "#e8b07f");
-    oval(ctx, -length * 0.22, beam * 0.12, length * 0.05, length * 0.03, "#c98c66");
+    oval(ctx, -length * 0.26, -breadth * 0.12, length * 0.05, length * 0.03, "#e8b07f");
+    oval(ctx, -length * 0.22, breadth * 0.12, length * 0.05, length * 0.03, "#c98c66");
   }
   ctx.restore();
   for (let index = 0; index < 120; index++) {
