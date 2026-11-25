@@ -138,14 +138,24 @@ export function DemoSidebar(props: {
   onCloseTab: (path: string) => void;
   onCloseAllTabs: () => void;
   onOpenTabsChange: (update: (tabs: string[]) => string[]) => void;
-  onCreateDocument: () => void;
+  onCreateDocument: (folder: string) => void;
   onBeforeChanges: () => Promise<void>;
   onError: (message: string) => void;
+  onNotice: (message: string, undo?: () => void) => void;
+  revealPaths: readonly string[] | null;
+  onRevealed: () => void;
 }) {
   const [width, setWidth] = useState(305);
   const [openEditorsHeight, setOpenEditorsHeight] = useState(180);
   const [explorerMode, setExplorerMode] = useState<ExplorerMode>("home");
   const [expandedFolders, setExpandedFolders] = useState<string[]>(["Days"]);
+  // A reveal opens the folders above its rows, so the Explorer can show them.
+  const [revealing, setRevealing] = useState(props.revealPaths);
+  if (props.revealPaths !== revealing) {
+    setRevealing(props.revealPaths);
+    const ancestors = parentFolders([...(props.revealPaths ?? [])]);
+    setExpandedFolders((current) => [...new Set([...current, ...ancestors])]);
+  }
   const [searchError, setSearchError] = useState<{
     message: string;
     retry: () => void;
@@ -300,8 +310,9 @@ export function DemoSidebar(props: {
           onShare={() => undefined}
           onRefresh={() => DEMO_LISTING}
           onError={props.onError}
-          // The demo records no History operations, so it has nothing to undo.
-          onNotice={() => undefined}
+          onNotice={props.onNotice}
+          revealPaths={props.revealPaths}
+          onRevealed={props.onRevealed}
         />
       ) : props.activePanel === "search" ? (
         <div className="flex min-h-0 flex-1 flex-col">

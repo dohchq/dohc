@@ -38,6 +38,7 @@ if (host) {
         { createRoot },
         { createElement },
         { initKeyboardNavigation },
+        { style: editorCss },
       ] = await Promise.all([
         import("@fontsource-variable/inter/index.css"),
         import("@fontsource/ibm-plex-mono/400.css"),
@@ -48,6 +49,10 @@ if (host) {
         import("react-dom/client"),
         import("react"),
         import("../../desktop/src/renderer/keyboardNavigation"),
+        // TipTap adds its editor styles to the page's head, outside the demo's
+        // shadow root. Without them the editor's white-space is normal, not
+        // pre-wrap, and ProseMirror warns on every mount.
+        import("../../desktop/node_modules/@tiptap/core/src/style"),
       ]);
       await hydrateDemoWorkspaceAssets();
       // Browsers ignore @property inside a shadow root, which leaves
@@ -71,7 +76,8 @@ if (host) {
         };
       }
       const style = document.createElement("style");
-      style.textContent = demoCss;
+      // After the desktop's styles, as TipTap's head style comes after them.
+      style.textContent = demoCss + editorCss;
       const root = document.createElement("div");
       root.id = "root";
       root.style.height = "100%";

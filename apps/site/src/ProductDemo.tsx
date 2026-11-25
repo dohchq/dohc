@@ -18,6 +18,7 @@ import { QuickOpenPalette } from "../../desktop/src/renderer/QuickOpenPalette";
 import { Titlebar } from "../../desktop/src/renderer/Titlebar";
 import { DeleteCollectionRecordDialog } from "../../desktop/src/renderer/DeleteCollectionRecordDialog";
 import { TransactionalCollectionPage } from "../../desktop/src/renderer/TransactionalCollectionPage";
+import { Menu, MENU_SEPARATOR, type MenuEntry } from "../../desktop/src/renderer/ui/Menu";
 import {
   applyFrontmatter,
   parseFrontmatter,
@@ -37,6 +38,7 @@ import {
   ShellNoticeClear,
   useShellError,
 } from "../../desktop/src/renderer/shell/useShellError";
+import { WorkspaceSessionProvider } from "../../desktop/src/renderer/workspace/workspaceSession";
 import { matchShellShortcut } from "../../desktop/src/shortcuts/shortcutRegistry";
 import { DEMO_EDITOR_GROUP_ID, DemoSidebar, type DemoWorkspaceDocument } from "./DemoSidebar";
 import {
@@ -183,6 +185,34 @@ function initialSidebarVisible(): boolean {
   return window.matchMedia("(min-width: 721px)").matches;
 }
 
+// At this width the sidebar lies over the whole editor (demo.css).
+function sidebarCoversEditor(): boolean {
+  return window.matchMedia("(max-width: 720px)").matches;
+}
+
+// The app keeps its state when the page's theme changes: its document stays
+// as it loaded, and the theme arrives as a message.
+function DemoAppFrame(props: { theme: "light" | "dark"; hidden: boolean }) {
+  const frame = useRef<HTMLIFrameElement>(null);
+  const [srcDoc] = useState(() => appDocument(props.theme));
+  const sendTheme = useCallback(
+    () => frame.current?.contentWindow?.postMessage({ dohcTheme: props.theme }, "*"),
+    [props.theme],
+  );
+  useEffect(sendTheme, [sendTheme]);
+  return (
+    <iframe
+      ref={frame}
+      title={APP_TITLE}
+      hidden={props.hidden}
+      sandbox="allow-scripts allow-forms"
+      srcDoc={srcDoc}
+      onLoad={sendTheme}
+      className="demo-app min-h-0 flex-1 border-0 bg-bg"
+    />
+  );
+}
+
 // The demo records no versions, so it names Main without the picker's menu.
 function DemoVersion() {
   return (
@@ -206,7 +236,7 @@ const SESSION_ONLY_MESSAGES = {
 // The demo has no editing pipeline, so no tab ever holds a set-aside draft.
 const NO_PATHS: ReadonlySet<string> = new Set();
 
-export function ProductDemo() {
+function ProductDemoWindow() {
   const {
     shellErrors,
     reportShellFailure,
@@ -215,6 +245,7 @@ export function ProductDemo() {
     retryShellError,
     runShellErrorAction,
     clearIdentity,
+    showSuccessNotice,
   } = useShellError(WORKSPACE_ID);
   const reportFailureMessage = useCallback(
     (message: string) => reportShellFailure({ message }),
@@ -278,6 +309,18 @@ export function ProductDemo() {
     recordId: string | number;
     answer(confirmed: boolean): void;
   } | null>(null);
+
+  // A browser drops focus to the page when the focused overlay unmounts, and
+  // shell shortcuts only reach the demo while focus is inside it.
+  const windowRef = useRef<HTMLDivElement>(null);
+  const overlayOpen = palette !== null || deletion !== null;
+  const hadOverlay = useRef(overlayOpen);
+  useEffect(() => {
+    const closed = hadOverlay.current && !overlayOpen;
+    hadOverlay.current = overlayOpen;
+    if (closed && document.activeElement === document.body)
+      windowRef.current?.focus({ preventScroll: true });
+  }, [overlayOpen]);
 
   const activeTab = openTabs.includes(activePath) ? activePath : null;
   const activeKind = activeTab === null ? null : tabKind(activeTab);
@@ -464,6 +507,58 @@ export function ProductDemo() {
     setOpenTabs([]);
   }, [flushActiveDraft]);
 
+  const closeOtherTabs = useCallback(
+    (path: string) => {
+      openDocument(path);
+      setOpenTabs([path]);
+    },
+    [openDocument],
+  );
+
+  const [explorerReveal, setExplorerReveal] = useState<readonly string[] | null>(null);
+  const clearExplorerReveal = useCallback(() => setExplorerReveal(null), []);
+  const showInExplorer = useCallback((path: string) => {
+    setActiveActivity("explorer");
+    setSidebarVisible(true);
+    setExplorerReveal([path]);
+  }, []);
+
+  // The desktop's tab menu draws natively at the pointer. The demo draws it in
+  // the page, at the point of the right-click the tab strip just received.
+  const tabMenuPoint = useRef({ x: 0, y: 0 });
+  const [tabMenu, setTabMenu] = useState<{
+    id: number;
+    path: string;
+    at: { x: number; y: number };
+  } | null>(null);
+  const tabMenuItems = (path: string): MenuEntry[] => {
+    const kind = tabKind(path);
+    const filePath = kind === "page" || kind === "app-source" ? path : null;
+    const explorerPath = kind === "app" ? APP_ROOT : filePath;
+    const item = (id: string, label: string, run: () => void): MenuEntry => ({
+      id,
+      label,
+      testId: `tab-menu-item-${id}`,
+      onSelect: run,
+    });
+    const entries = [item("close-tab", "Close tab", () => closeTab(path))];
+    if (openTabs.length > 1) {
+      entries.push(item("close-other-tabs", "Close other tabs", () => closeOtherTabs(path)));
+    }
+    if (explorerPath) entries.push(MENU_SEPARATOR);
+    if (filePath) {
+      entries.push(
+        item("copy-path", "Copy path", () => void navigator.clipboard?.writeText(filePath)),
+      );
+    }
+    if (explorerPath) {
+      entries.push(
+        item("show-in-explorer", "Show in Explorer", () => showInExplorer(explorerPath)),
+      );
+    }
+    return entries;
+  };
+
   const moveTab = useCallback((path: string, toIndex: number) => {
     setOpenTabs((current) => {
       const next = current.filter((tab) => tab !== path);
@@ -486,20 +581,24 @@ export function ProductDemo() {
   const newPageMarkdown = (title: string) =>
     `---\ntitle: ${title}\nicon: 📝\n---\nStart writing here. Type **/** for commands or **[[** to link another page.\n`;
 
-  const createDocument = useCallback(() => {
-    flushActiveDraft();
-    const workspacePaths = new Set(
-      collectWorkspacePaths([...Object.keys(draftsRef.current), ...emptyFolders]),
-    );
-    let index = 1;
-    let path = "Untitled.md";
-    while (workspacePaths.has(path)) {
-      index += 1;
-      path = `Untitled ${index}.md`;
-    }
-    storeDraft(path, newPageMarkdown(filenameStem(path)));
-    showDocument(path);
-  }, [emptyFolders, flushActiveDraft, showDocument, storeDraft]);
+  const createDocument = useCallback(
+    (folder = "") => {
+      flushActiveDraft();
+      const workspacePaths = new Set(
+        collectWorkspacePaths([...Object.keys(draftsRef.current), ...emptyFolders]),
+      );
+      const prefix = folder ? `${folder}/` : "";
+      let index = 1;
+      let path = `${prefix}Untitled.md`;
+      while (workspacePaths.has(path)) {
+        index += 1;
+        path = `${prefix}Untitled ${index}.md`;
+      }
+      storeDraft(path, newPageMarkdown(filenameStem(path)));
+      showDocument(path);
+    },
+    [emptyFolders, flushActiveDraft, showDocument, storeDraft],
+  );
 
   const createDocumentAtPath = useCallback(
     (path: string) => {
@@ -533,6 +632,10 @@ export function ProductDemo() {
 
   const deleteDraftPath = useCallback(
     (path: string) => {
+      const deleted = (entry: string) => isPathAtOrBelow(entry, path);
+      const deletedDrafts = Object.entries(draftsRef.current).filter(([entry]) => deleted(entry));
+      const deletedFolders = emptyFolders.filter(deleted);
+      const deletedPins = pinnedPages.filter(deleted);
       const next = updateDrafts((current) =>
         Object.fromEntries(
           Object.entries(current).filter(([entry]) => !isPathAtOrBelow(entry, path)),
@@ -556,8 +659,13 @@ export function ProductDemo() {
         current.filter((entry) => entry !== path && !entry.startsWith(`${path}/`)),
       );
       setPinnedPages((current) => current.filter((entry) => !isPathAtOrBelow(entry, path)));
+      return () => {
+        updateDrafts((current) => ({ ...current, ...Object.fromEntries(deletedDrafts) }));
+        setEmptyFolders((current) => [...new Set([...current, ...deletedFolders])]);
+        setPinnedPages((current) => [...new Set([...current, ...deletedPins])]);
+      };
     },
-    [activePath, openTabs, updateDrafts],
+    [activePath, emptyFolders, openTabs, pinnedPages, updateDrafts],
   );
 
   const updateIdentity = useCallback(
@@ -601,6 +709,23 @@ export function ProductDemo() {
   );
 
   const toggleSidebar = useCallback(() => setSidebarVisible((current) => !current), []);
+
+  // Where the sidebar covers the editor, what opens from it shows at once.
+  const openFromSidebar = useCallback(
+    (path: string) => {
+      openDocument(path);
+      if (sidebarCoversEditor()) setSidebarVisible(false);
+    },
+    [openDocument],
+  );
+
+  const createFromSidebar = useCallback(
+    (folder: string) => {
+      createDocument(folder);
+      if (sidebarCoversEditor()) setSidebarVisible(false);
+    },
+    [createDocument],
+  );
 
   const showNeighbourTab = useCallback(
     (step: 1 | -1) => {
@@ -648,6 +773,26 @@ export function ProductDemo() {
     toggleSource,
   ]);
 
+  const openSettings = useCallback(
+    () =>
+      reportShellFailure({
+        tone: "warning",
+        identity: "demo-settings",
+        message: "The demo has no settings. Download dohc to change yours.",
+      }),
+    [reportShellFailure],
+  );
+
+  const createGroupRight = useCallback(
+    () =>
+      reportShellFailure({
+        tone: "warning",
+        identity: "demo-editor-group",
+        message: "The demo has one editor group. Download dohc to split the editor.",
+      }),
+    [reportShellFailure],
+  );
+
   // Shell shortcuts work while focus is in the demo. A browser keeps some
   // for itself, such as closing its own tab.
   const runShortcut = useCallback(
@@ -668,12 +813,25 @@ export function ProductDemo() {
                     ? () => showNeighbourTab(1)
                     : id === "previous-tab"
                       ? () => showNeighbourTab(-1)
-                      : null;
+                      : id === "settings"
+                        ? openSettings
+                        : id === "new-editor-group-right" && activeTab !== null
+                          ? createGroupRight
+                          : null;
       if (!run) return;
       event.preventDefault();
       if (!deletion) run();
     },
-    [activeTab, closeTab, createDocument, deletion, showNeighbourTab, toggleSidebar],
+    [
+      activeTab,
+      closeTab,
+      createDocument,
+      createGroupRight,
+      deletion,
+      openSettings,
+      showNeighbourTab,
+      toggleSidebar,
+    ],
   );
 
   const createFolder = useCallback((path: string) => {
@@ -807,13 +965,7 @@ export function ProductDemo() {
             aria-label={`Read-only source of ${APP_ENTRY}`}
           />
         )}
-        <iframe
-          title={APP_TITLE}
-          hidden={showSource}
-          sandbox="allow-scripts allow-forms"
-          srcDoc={appDocument(theme)}
-          className="demo-app min-h-0 flex-1 border-0 bg-bg"
-        />
+        <DemoAppFrame theme={theme} hidden={showSource} />
       </>
     );
   } else if (activeKind === "app-source") {
@@ -864,9 +1016,11 @@ export function ProductDemo() {
 
   return (
     <div
+      ref={windowRef}
       className="demo-window"
       data-theme={theme}
       data-sidebar-visible={sidebarVisible}
+      tabIndex={-1}
       onKeyDown={runShortcut}
     >
       <Titlebar
@@ -894,6 +1048,7 @@ export function ProductDemo() {
           onSelectView={(view) => {
             if (isDemoPanelId(view)) selectActivity(view);
           }}
+          onOpenSettings={openSettings}
           notices={
             <NoticeCenter
               workspaceId={WORKSPACE_ID}
@@ -901,7 +1056,7 @@ export function ProductDemo() {
               agentActive={false}
               conflictSummaries={[]}
               onOpenHistory={() => selectActivity("history")}
-              onOpenSettings={() => undefined}
+              onOpenSettings={openSettings}
               onOpenConflicts={() => undefined}
               onRefreshShareView={() => undefined}
               onRebuildEngineStore={() => undefined}
@@ -932,16 +1087,24 @@ export function ProductDemo() {
           onTogglePinnedPage={togglePinnedPage}
           onSetAppPinned={setAppPinned}
           onNewCollection={newCollection}
-          onOpenDocument={openDocument}
+          onOpenDocument={openFromSidebar}
           onCloseTab={closeTab}
           onCloseAllTabs={closeAllTabs}
           onOpenTabsChange={setOpenTabs}
-          onCreateDocument={createDocument}
+          onCreateDocument={createFromSidebar}
           onBeforeChanges={async () => flushActiveDraft()}
           onError={reportFailureMessage}
+          onNotice={showSuccessNotice}
+          revealPaths={explorerReveal}
+          onRevealed={clearExplorerReveal}
         />
 
-        <main className="flex min-w-0 flex-1 flex-col bg-bg">
+        <main
+          className="flex min-w-0 flex-1 flex-col bg-bg"
+          onContextMenuCapture={(event) => {
+            tabMenuPoint.current = { x: event.clientX, y: event.clientY };
+          }}
+        >
           <EditorGroupFrame
             tabs={(actionsRef) => (
               <EditorTabs
@@ -956,15 +1119,34 @@ export function ProductDemo() {
                 recoveryPaths={NO_PATHS}
                 onActivate={(_groupId, path) => openDocument(path)}
                 onClose={(_groupId, path) => closeTab(path)}
-                onContextMenu={() => undefined}
+                onContextMenu={(_groupId, path) =>
+                  setTabMenu((current) => ({
+                    id: (current?.id ?? 0) + 1,
+                    path,
+                    at: tabMenuPoint.current,
+                  }))
+                }
                 onMove={(_groupId, path, toIndex) => moveTab(path, toIndex)}
                 onMoveToGroup={() => undefined}
-                onCreateGroupRight={() => undefined}
+                onCreateGroupRight={createGroupRight}
               />
             )}
           >
             {view}
           </EditorGroupFrame>
+          {tabMenu ? (
+            <Menu
+              key={tabMenu.id}
+              label={TAB_LABELS.get(tabMenu.path) ?? filename(tabMenu.path)}
+              at={tabMenu.at}
+              open
+              onOpenChange={(open) => {
+                if (!open) setTabMenu(null);
+              }}
+              items={tabMenuItems(tabMenu.path)}
+              menuTestId="tab-menu"
+            />
+          ) : null}
         </main>
       </div>
       {deletion ? (
@@ -1004,5 +1186,13 @@ export function ProductDemo() {
         </div>
       ) : null}
     </div>
+  );
+}
+
+export function ProductDemo() {
+  return (
+    <WorkspaceSessionProvider workspaceId={WORKSPACE_ID}>
+      <ProductDemoWindow />
+    </WorkspaceSessionProvider>
   );
 }

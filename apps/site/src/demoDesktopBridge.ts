@@ -1,9 +1,14 @@
 import type {
+  DeleteWorkspacePathResult,
   DohcDesktopBridge,
+  ExplorerMenuCommand,
+  ExplorerMenuEntry,
+  ReadExplorerMenuPayload,
   SearchResultsEvent,
   SearchResultsEventEntry,
   WorkspaceActivityEvent,
 } from "../../desktop/src/ipc/bridgeContract";
+import { explorerMenuEntries } from "../../desktop/src/workspaces/explorerMenu";
 import {
   collectWorkspacePaths,
   resolveDemoWikilink,
@@ -26,7 +31,8 @@ type DemoBridgeContext = {
   createFile: (path: string) => void;
   createFolder: (path: string) => void;
   movePath: (fromPath: string, toPath: string) => void;
-  deletePath: (path: string) => void;
+  // Answers how to put back what it removed.
+  deletePath: (path: string) => () => void;
 };
 
 let context: DemoBridgeContext = {
@@ -36,8 +42,12 @@ let context: DemoBridgeContext = {
   createFile: () => undefined,
   createFolder: () => undefined,
   movePath: () => undefined,
-  deletePath: () => undefined,
+  deletePath: () => () => undefined,
 };
+
+type UndoResult = Awaited<ReturnType<DohcDesktopBridge["undoHistoryOperation"]>>;
+// A delete's Undo, by the operation id its notice holds, for this session.
+const deleteUndos = new Map<string, () => Promise<UndoResult>>();
 
 const searchListeners = new Set<(batch: SearchResultsEvent) => void>();
 const activityListeners = new Set<(event: WorkspaceActivityEvent) => void>();
@@ -154,15 +164,11 @@ async function persistAssetMutation(mutation: () => Promise<void>): Promise<void
   }
 }
 
-function rewriteAssetUrls(prefix: string, nextPrefix: string | null): void {
+function rewriteAssetUrls(prefix: string, nextPrefix: string): void {
   const affected = [...assetUrls.entries()].filter(([path]) => isPathAtOrBelow(path, prefix));
   for (const [path] of affected) assetUrls.delete(path);
   for (const [path, url] of affected) {
-    if (nextPrefix === null) {
-      URL.revokeObjectURL(url);
-    } else {
-      assetUrls.set(rewritePathPrefix(path, prefix, nextPrefix), url);
-    }
+    assetUrls.set(rewritePathPrefix(path, prefix, nextPrefix), url);
   }
 }
 
@@ -242,8 +248,8 @@ type DemoDesktopBridge = Pick<
   | "createWorkspaceFile"
   | "createWorkspaceFolder"
   | "moveWorkspacePath"
-  | "deleteWorkspacePath"
   | "readExplorerMenu"
+  | "undoHistoryOperation"
   | "exportWorkspaceZip"
   | "getDroppedFilePaths"
   | "pickImageFiles"
@@ -255,6 +261,8 @@ type DemoDesktopBridge = Pick<
   | "listChatChannelShares"
   | "listJoinedSharedChannels"
   | "directConversations"
+  | "workspaceMembers"
+  | "listPersonalChatFeed"
   | "onDirectChanged"
   | "listChannelThreads"
   | "listChatMessages"
@@ -279,7 +287,13 @@ type DemoDesktopBridge = Pick<
   | "leaveSharedChannel"
   | "revokeRelayShare"
   | "exportDocumentFile"
->;
+> & {
+  // The demo has no trash, so a delete names no place it went. Its Undo,
+  // while this tab stays open, is the way back.
+  deleteWorkspacePath: (
+    payload: Parameters<DohcDesktopBridge["deleteWorkspacePath"]>[0],
+  ) => Promise<Omit<DeleteWorkspacePathResult, "trashed">>;
+};
 
 export type DemoSearchOptions = {
   query: string;
@@ -402,6 +416,7 @@ const THREADS: Record<string, DemoPost[]> = {
       ageMs: 3_600_000,
     },
   ],
+  "file-budget": [{ author: "sam", body: "Who still owes a deposit?", ageMs: 7_200_000 }],
 };
 
 function channel(id: string, name: string, kind: "channel" | "agent" = "channel") {
@@ -458,6 +473,20 @@ function message(threadId: string, id: string, post: DemoPost) {
   };
 }
 
+function feedItem(key: string, listed?: ReturnType<typeof channel>) {
+  const posts = THREADS[key] ?? [];
+  const { id, title, createdAtMs, updatedAtMs } = thread(key, posts);
+  return {
+    message: message(id, `message-${key}-0`, posts[0] ?? yourPost(title)),
+    thread: { id, title, createdAtMs, updatedAtMs },
+    ...(listed
+      ? { channel: { id: listed.id, name: listed.name, slug: listed.slug, kind: listed.kind } }
+      : {}),
+    reactions: [],
+    matchedBy: [],
+  };
+}
+
 function yourPost(body: string): DemoPost {
   return { author: "you", body, ageMs: 0 };
 }
@@ -478,10 +507,93 @@ export function demoLinkEdges(documents: readonly DemoBridgeDocument[]) {
   return entries;
 }
 
+function holdsFixed(fixedPaths: readonly string[], path: string): boolean {
+  return fixedPaths.some((fixed) => isPathAtOrBelow(fixed, path));
+}
+
 function refuseFixed(path: string): void {
-  if (context.fixedPaths.some((fixed) => isPathAtOrBelow(fixed, path))) {
+  if (holdsFixed(context.fixedPaths, path)) {
     throw new Error("The demo keeps its app and Collection where they are.");
   }
+}
+
+// The desktop's Explorer menu, less what the demo cannot do: it has no
+// file system to import from or export to, no sharing, and one Collection.
+const DEMO_EXPLORER_COMMANDS: ReadonlySet<ExplorerMenuCommand> = new Set([
+  "new-file",
+  "new-folder",
+  "rename",
+  "delete",
+  "pin",
+  "unpin",
+]);
+
+export function demoExplorerMenu(
+  input: Pick<ReadExplorerMenuPayload, "path" | "kind" | "pinned" | "count">,
+  fixedPaths: readonly string[],
+): ExplorerMenuEntry[] {
+  const fixed = input.path !== undefined && holdsFixed(fixedPaths, input.path);
+  const offered = explorerMenuEntries(
+    {
+      kind: input.kind,
+      pinned: input.pinned,
+      ...(input.count !== undefined && input.kind !== "root" ? { count: input.count } : {}),
+      isMountPath: false,
+      hasMountRecord: false,
+      canShare: false,
+      shareView: null,
+    },
+    DEMO_PLATFORM,
+  ).filter(
+    (entry) =>
+      entry.kind === "separator" ||
+      (DEMO_EXPLORER_COMMANDS.has(entry.id) &&
+        !(fixed && (entry.id === "rename" || entry.id === "delete"))),
+  );
+  return offered.filter(
+    (entry, index) =>
+      entry.kind === "item" ||
+      (offered[index - 1]?.kind === "item" &&
+        offered.slice(index + 1).some((next) => next.kind === "item")),
+  );
+}
+
+async function restoreDeleted(
+  path: string,
+  documents: readonly DemoBridgeDocument[],
+  folders: readonly string[],
+  assets: ReadonlyArray<readonly [string, string]>,
+  restore: () => void,
+): Promise<UndoResult> {
+  const workspacePaths = collectWorkspacePaths([
+    ...context.documents.map((document) => document.path),
+    ...context.folders,
+    ...context.fixedPaths,
+    ...assetUrls.keys(),
+  ]);
+  if (workspacePaths.includes(path)) {
+    return {
+      ok: false,
+      reason: `Something new is at ${path}.`,
+      refusal: { code: "old-path-occupied", path },
+    };
+  }
+  restore();
+  context.documents = [...context.documents, ...documents];
+  context.folders = [...context.folders, ...folders];
+  for (const [assetPath, url] of assets) assetUrls.set(assetPath, url);
+  await persistAssetMutation(async () => {
+    for (const [assetPath, url] of assets) {
+      const bytes = await (await fetch(url)).arrayBuffer();
+      await persistAsset({ path: assetPath, mediaType: mediaTypeForPath(assetPath), bytes });
+    }
+  });
+  return {
+    ok: true,
+    tracked: { state: "restored", momentCount: 0 },
+    restored: [path],
+    remaining: [],
+  };
 }
 
 export function answerDemoJoinedLane(
@@ -490,13 +602,15 @@ export function answerDemoJoinedLane(
   return channelWireIds.map((channelWireId) => ({ channelWireId, joined: null }));
 }
 
+// The desktop renderer chooses each shortcut's modifier from the platform.
+const DEMO_PLATFORM = /Mac|iP(hone|[oa]d)/.test(navigator.platform)
+  ? "darwin"
+  : /Win/.test(navigator.platform)
+    ? "win32"
+    : "linux";
+
 const demoBridge = {
-  // The desktop renderer chooses each shortcut's modifier from the platform.
-  platform: /Mac|iP(hone|[oa]d)/.test(navigator.platform)
-    ? "darwin"
-    : /Win/.test(navigator.platform)
-      ? "win32"
-      : "linux",
+  platform: DEMO_PLATFORM,
   onUpdateState() {
     return () => undefined;
   },
@@ -614,19 +728,37 @@ const demoBridge = {
     if (!workspacePaths.some((path) => isPathAtOrBelow(path, payload.relativePath))) {
       throw new Error(`No workspace entry exists at ${payload.relativePath}`);
     }
+    const deleted = (path: string) => isPathAtOrBelow(path, payload.relativePath);
+    const documents = context.documents.filter((document) => deleted(document.path));
+    const folders = context.folders.filter(deleted);
+    // The asset URLs stay alive for Undo.
+    const assets = [...assetUrls.entries()].filter(([path]) => deleted(path));
     await persistAssetMutation(() => rewriteStoredAssets(payload.relativePath, null));
-    context.deletePath(payload.relativePath);
-    context.documents = context.documents.filter(
-      (document) => !isPathAtOrBelow(document.path, payload.relativePath),
+    const restore = context.deletePath(payload.relativePath);
+    context.documents = context.documents.filter((document) => !deleted(document.path));
+    context.folders = context.folders.filter((folder) => !deleted(folder));
+    for (const [path] of assets) assetUrls.delete(path);
+    const operationId = `dohc-operation:${crypto.randomUUID()}`;
+    deleteUndos.set(operationId, () =>
+      restoreDeleted(payload.relativePath, documents, folders, assets, restore),
     );
-    context.folders = context.folders.filter(
-      (folder) => !isPathAtOrBelow(folder, payload.relativePath),
-    );
-    rewriteAssetUrls(payload.relativePath, null);
-    return { trashed: true };
+    return { operationId, undo: { available: true as const } };
   },
-  async readExplorerMenu() {
-    return [];
+  async undoHistoryOperation(payload: { operationId: string }): Promise<UndoResult> {
+    const undo = deleteUndos.get(payload.operationId);
+    if (!undo) {
+      return {
+        ok: false,
+        reason: "The demo keeps a delete's Undo only while this tab stays open.",
+        refusal: { code: "unexplained" },
+      };
+    }
+    const result = await undo();
+    if (result.ok) deleteUndos.delete(payload.operationId);
+    return result;
+  },
+  async readExplorerMenu(payload: ReadExplorerMenuPayload) {
+    return demoExplorerMenu(payload, context.fixedPaths);
   },
   async exportWorkspaceZip() {
     return { path: "demo-workspace.zip" };
@@ -697,6 +829,18 @@ const demoBridge = {
   // The demo is signed out, so Chats shows no People section.
   async directConversations() {
     return { available: false as const };
+  },
+  async workspaceMembers() {
+    return { status: "refused" as const };
+  },
+  async listPersonalChatFeed() {
+    return {
+      items: [
+        feedItem("channel-trip", channel("channel-trip", "lisbon-trip")),
+        feedItem("file-budget"),
+        feedItem("channel-bookings", channel("channel-bookings", "bookings")),
+      ],
+    };
   },
   onDirectChanged() {
     return () => {};

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Editor, Extension } from "@tiptap/core";
 import { NodeSelection } from "@tiptap/pm/state";
 import { StarterKit } from "@tiptap/starter-kit";
@@ -274,6 +274,29 @@ describe("callout type menu", () => {
 
     expect(menu.hidden).toBe(true);
     outside.remove();
+  });
+
+  // A press on an option moves focus there from the trigger. Chromium sends
+  // focusout with the option as relatedTarget while nothing has focus yet.
+  it("stays open while focus moves from the trigger to a pressed option", async () => {
+    const editor = makeEditor("> [!note] Original\n> body");
+    const trigger = editor.view.dom.querySelector<HTMLButtonElement>(".dohc-callout-type-trigger");
+    const menu = editor.view.dom.querySelector<HTMLElement>(".dohc-callout-type-menu");
+    const tip = editor.view.dom.querySelector<HTMLButtonElement>(
+      ".dohc-callout-type-option[data-callout-type='tip']",
+    );
+    if (!trigger || !menu || !tip) throw new Error("callout type menu not rendered");
+    trigger.focus();
+    click(trigger);
+
+    const active = vi.spyOn(document, "activeElement", "get").mockReturnValue(document.body);
+    trigger.dispatchEvent(new FocusEvent("focusout", { bubbles: true, relatedTarget: tip }));
+    await Promise.resolve();
+    active.mockRestore();
+    expect(menu.hidden).toBe(false);
+
+    click(tip);
+    expect(liveType(editor)).toBe("tip");
   });
 });
 

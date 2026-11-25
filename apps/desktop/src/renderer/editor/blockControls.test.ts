@@ -264,6 +264,35 @@ describe("BlockMenu on the Menu part's recipe and rule", () => {
     document.removeEventListener("keydown", parentEscape);
   });
 
+  it("closes when the page or a pane scrolls, but not when its own list scrolls", () => {
+    const { menu, onClose } = openMenu();
+    fireEvent.scroll(menu);
+    expect(onClose).not.toHaveBeenCalled();
+    const pane = document.body.appendChild(document.createElement("div"));
+    fireEvent.scroll(pane);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    fireEvent.scroll(document);
+    expect(onClose).toHaveBeenCalledTimes(2);
+  });
+
+  it("closes when a pane in its own shadow root scrolls", () => {
+    const host = document.body.appendChild(document.createElement("div"));
+    const shadow = host.attachShadow({ mode: "open" });
+    const container = shadow.appendChild(document.createElement("div"));
+    const pane = shadow.appendChild(document.createElement("div"));
+    const onClose = vi.fn();
+    render(
+      createElement(BlockMenu, {
+        state: { open: true, pos: 0, x: 20, y: 20, maxHeight: 400, placement: "below" },
+        onSelect: vi.fn(),
+        onClose,
+      }),
+      { container },
+    );
+    fireEvent.scroll(pane);
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
   it("returns focus to the handle when a press on blank space that closed it ends", () => {
     const handle = document.createElement("button");
     document.body.append(handle);

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Profiler, useLayoutEffect, useState } from "react";
 import * as Y from "yjs";
@@ -435,6 +435,32 @@ describe("PageIdentity", () => {
 
       expect(screen.queryByTestId("page-icon-picker")).toBeNull();
       expect(document.activeElement).toBe(screen.getByTestId("page-icon"));
+    });
+
+    it("sets an icon from the picker inside a shadow root, and closes on a press outside it", async () => {
+      const host = document.body.appendChild(document.createElement("div"));
+      const container = host
+        .attachShadow({ mode: "open" })
+        .appendChild(document.createElement("div"));
+      try {
+        const user = userEvent.setup();
+        const view = within(container);
+        render(<ControlledPageIdentity initialBody={"# Body\n"} stem="note" />, { container });
+
+        await user.click(view.getByTestId("page-icon-add"));
+        await user.click(view.getByLabelText("Use 🚀"));
+        expect(parseFrontmatter(view.getByTestId("current-body").textContent ?? "").meta.icon).toBe(
+          "🚀",
+        );
+
+        await user.click(view.getByTestId("page-icon"));
+        expect(view.getByTestId("page-icon-picker")).toBeTruthy();
+        await user.click(view.getByTestId("current-body"));
+        expect(view.queryByTestId("page-icon-picker")).toBeNull();
+      } finally {
+        cleanup();
+        host.remove();
+      }
     });
 
     it("traps Tab focus within the open picker", async () => {
