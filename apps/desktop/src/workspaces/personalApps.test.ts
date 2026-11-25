@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, truncate, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
@@ -301,6 +301,8 @@ it("lets a member compile, approve, and launch a Personal app that runs a grante
   expect(m.openFolder).not.toHaveBeenCalled();
   await m.invoke({ action: "personalFolder", open: true });
   expect(m.openFolder).toHaveBeenCalledExactlyOnceWith(folder);
+  await writeFile(join(folder, "trip", "clip.mp4"), "");
+  await truncate(join(folder, "trip", "clip.mp4"), 129 * 1024 * 1024);
   const { prepared, publicationId } = await m.approve("trip");
   expect(prepared.sourcePaths).toEqual(["trip/app.publish.json", "trip/main.ts"]);
   expect(prepared.capabilities).toEqual([

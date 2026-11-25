@@ -77,7 +77,9 @@ async function walk(folder: string, under: string | undefined) {
       if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
       const path = relative ? `${relative}/${entry.name}` : entry.name;
       if (entry.isDirectory()) await visit(path);
-      else if (entry.isFile() && (found.push(path), found.length > MAX_FILES))
+      else if (!entry.isFile() || (await lstat(join(folder, ...path.split("/")))).size > MAX_BYTES)
+        continue;
+      else if ((found.push(path), found.length > MAX_FILES))
         throw new Error(
           `${under ?? "Your Personal app folder"} has more than ${MAX_FILES} files. Remove files you don't need.`,
         );
@@ -152,9 +154,7 @@ export function personalAppSource(
 /** Whether the member's level on a Collection's folder lets a Personal app change its records. */
 export function personalAppEdits(shareView: unknown, datasetPath: string) {
   const scope = shareViewWriteScopeOf(shareView, null);
-  const folder = datasetPath.includes("/")
-    ? datasetPath.slice(0, datasetPath.lastIndexOf("/"))
-    : "";
+  const folder = datasetPath.slice(0, Math.max(0, datasetPath.lastIndexOf("/")));
   return scope !== null && shareViewWriteLevel(scope, { folder }) === "edit";
 }
 

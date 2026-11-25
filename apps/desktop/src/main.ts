@@ -11629,6 +11629,10 @@ function registerIpcHandlers(): void {
       let pending = personalHosts.get(operation.signal);
       if (!pending) {
         const bound = operation.workspace;
+        const current = () => ({
+          ...bound,
+          shareView: findWorkspace(bound.workspaceId)?.shareView,
+        });
         pending = (async () => {
           const folder = personalAppFolder(stateDir(), workspace.workspaceId);
           await mkdir(folder, { recursive: true });
@@ -11636,20 +11640,18 @@ function registerIpcHandlers(): void {
             workspaceId: workspace.workspaceId,
             databasePath: `${folder}.approvals.sqlite`,
             lifetime: operation.signal,
-            data: (dataSignal) => datasetDependencies.namedDataForWorkspace(bound, dataSignal),
+            data: (dataSignal) => datasetDependencies.namedDataForWorkspace(current(), dataSignal),
             edits: async (datasetId, editSignal) => {
-              const signal = editSignal
-                ? AbortSignal.any([editSignal, operation.signal])
-                : operation.signal;
-              const data = await datasetDependencies.namedDataForWorkspace(bound, signal);
+              const signal = AbortSignal.any([editSignal ?? operation.signal, operation.signal]);
+              const workspace = current();
+              const data = await datasetDependencies.namedDataForWorkspace(workspace, signal);
               const description = await data.describe(datasetId);
               const [address] =
                 (await withEngineAdapter(bound, (adapter) =>
                   addressDatasets(adapter, bound.workspaceId, [description], signal),
                 )) ?? [];
               return (
-                !!address?.datasetPath &&
-                personalAppEdits(findWorkspace(bound.workspaceId)?.shareView, address.datasetPath)
+                !!address?.datasetPath && personalAppEdits(workspace.shareView, address.datasetPath)
               );
             },
           });
