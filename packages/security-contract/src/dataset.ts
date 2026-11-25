@@ -85,7 +85,25 @@ export interface DatasetOperation {
    * without a valid `undo` of at most DATASET_UNDO_BYTES.
    */
   reversedBy?: string;
+  /** An action's declared input and output. The host does not check values against it. */
+  contract?: DatasetOperationContract;
 }
+export type DatasetContractType =
+  | "string"
+  | "number"
+  | "boolean"
+  | "unknown"
+  | { enum: Array<string | number | boolean> }
+  | { array: DatasetContractType }
+  | { object: Record<string, DatasetContractType>; optional?: string[] }
+  | { nullable: DatasetContractType };
+export interface DatasetOperationContract {
+  input?: DatasetContractType;
+  output?: DatasetContractType;
+}
+export const DATASET_CONTRACT_MAX_DEPTH = 8;
+export const DATASET_CONTRACT_MAX_TYPES = 256;
+export const DATASET_CONTRACT_MAX_MEMBERS = 64;
 /** The largest `undo` value a reversible action may return. */
 export const DATASET_UNDO_BYTES = 16 * 1024;
 /** Source-visible draft metadata. Parsing or sharing it grants no authority. */
@@ -171,6 +189,7 @@ const ids = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
 const sqlNames = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const operationNames = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 const datasetAliases = /^[a-z][a-z0-9_-]{0,63}$/;
+const contractKeys = /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/;
 const forbidden = new Set(["__proto__", "prototype", "constructor"]);
 const fieldTypes = new Set<DatasetColumnFieldType>([
   "text",
@@ -466,7 +485,7 @@ function operation(value: unknown, index = 0): DatasetOperation {
   const row = record(
     value,
     ["operationId", "name", "label", "tableId", "kind", "access", "readOnly", "fieldIds"],
-    ["reversible", "reversedBy", "profile"],
+    ["reversible", "reversedBy", "profile", "contract"],
     path,
   );
   const name = text(row.name, 64, `${path}.name`);
@@ -518,8 +537,94 @@ function operation(value: unknown, index = 0): DatasetOperation {
       );
     result.reversedBy = reverse;
   }
+  if (Object.hasOwn(row, "contract")) {
+    if (result.kind !== "action")
+      fail(`${opLabel}.contract is only allowed on "action" operations.`);
+    result.contract = operationContract(row.contract, `${opLabel}.contract`);
+  }
   unique(result.fieldIds, `${opLabel}.fieldIds`, "fieldIds");
   return result;
+}
+function operationContract(value: unknown, path: string): DatasetOperationContract {
+  const row = record(value, [], ["input", "output"], path);
+  const sides = (["input", "output"] as const).filter((side) => Object.hasOwn(row, side));
+  if (sides.length === 0) fail(`${path} must declare input, output, or both.`);
+  const counted = { types: 0 };
+  const result: DatasetOperationContract = {};
+  for (const side of sides) result[side] = contractType(row[side], `${path}.${side}`, counted, 1);
+  if (counted.types > DATASET_CONTRACT_MAX_TYPES)
+    fail(`${path} has ${counted.types} types, over the ${DATASET_CONTRACT_MAX_TYPES}-type limit.`);
+  return result;
+}
+function contractType(
+  value: unknown,
+  path: string,
+  counted: { types: number },
+  depth: number,
+): DatasetContractType {
+  if (depth > DATASET_CONTRACT_MAX_DEPTH)
+    fail(
+      `${path} is nested ${depth} levels deep, over the ${DATASET_CONTRACT_MAX_DEPTH}-level limit.`,
+    );
+  counted.types += 1;
+  if (value === "string" || value === "number" || value === "boolean" || value === "unknown")
+    return value;
+  const kind =
+    value !== null && typeof value === "object"
+      ? ["enum", "array", "object", "nullable"].find((key) => Object.hasOwn(value, key))
+      : undefined;
+  if (kind === "enum") {
+    const values = boundedArray(
+      record(value, ["enum"], [], path).enum,
+      DATASET_CONTRACT_MAX_MEMBERS,
+      1,
+      `${path}.enum`,
+    ) as Array<string | number | boolean>;
+    const literals = values.map((entry) => JSON.stringify(entry));
+    if (values.some((entry) => !["string", "number", "boolean"].includes(typeof entry)))
+      fail(`${path}.enum values must be strings, numbers, or booleans.`);
+    if (values.some((entry) => typeof entry === "string" && encoder.encode(entry).byteLength > 128))
+      fail(`${path}.enum strings must be at most 128 bytes.`);
+    unique(literals, `${path}.enum`, "values");
+    return { enum: values.sort((a, b) => (JSON.stringify(a) < JSON.stringify(b) ? -1 : 1)) };
+  }
+  if (kind === "array") {
+    const array = record(value, ["array"], [], path).array;
+    return { array: contractType(array, `${path}.array`, counted, depth + 1) };
+  }
+  if (kind === "nullable") {
+    const nullable = record(value, ["nullable"], [], path).nullable;
+    const inner = contractType(nullable, `${path}.nullable`, counted, depth + 1);
+    if (inner === "unknown" || (typeof inner === "object" && "nullable" in inner))
+      fail(`${path}.nullable must not be "unknown" or another nullable type.`);
+    return { nullable: inner };
+  }
+  if (kind === "object") {
+    const row = record(value, ["object"], ["optional"], path);
+    const members = row.object as Record<string, unknown>;
+    if (members === null || typeof members !== "object" || Array.isArray(members))
+      fail(`${path}.object must be a JSON object.`);
+    const keys = Object.keys(members).sort();
+    if (keys.length < 1 || keys.length > DATASET_CONTRACT_MAX_MEMBERS)
+      fail(
+        `${path}.object has ${keys.length} properties. It must have 1 to ${DATASET_CONTRACT_MAX_MEMBERS}.`,
+      );
+    const object: Record<string, DatasetContractType> = {};
+    for (const key of keys) {
+      if (!contractKeys.test(key))
+        fail(`${path}.object key ${safeKey(key)} must match [A-Za-z_$][A-Za-z0-9_$]{0,63}.`);
+      object[key] = contractType(members[key], `${path}.object.${key}`, counted, depth + 1);
+    }
+    if (!Object.hasOwn(row, "optional")) return { object };
+    const optional = boundedArray(row.optional, keys.length, 1, `${path}.optional`) as string[];
+    if (optional.some((entry) => !keys.includes(entry)))
+      fail(`${path}.optional must name keys of ${path}.object.`);
+    unique(optional, `${path}.optional`, "keys");
+    return { object, optional: keys.filter((key) => optional.includes(key)) };
+  }
+  fail(
+    `${path} must be "string", "number", "boolean", "unknown", or an object with one of: enum, array, object, nullable.`,
+  );
 }
 function definition(value: unknown): DatasetDefinition {
   const row = record(
@@ -821,6 +926,7 @@ function normalizeV2Definition(
         "fieldIds",
         "reversible",
         "reversedBy",
+        "contract",
       ],
     );
     const hasTable = Object.hasOwn(opRow, "table");
@@ -868,6 +974,8 @@ function normalizeV2Definition(
     if (Object.hasOwn(opRow, "reversible")) normalized.reversible = opRow.reversible as true;
     if (Object.hasOwn(opRow, "reversedBy")) normalized.reversedBy = opRow.reversedBy as string;
     if (Object.hasOwn(opRow, "profile")) normalized.profile = opRow.profile as "bulk";
+    if (Object.hasOwn(opRow, "contract"))
+      normalized.contract = opRow.contract as DatasetOperationContract;
     return normalized;
   });
 
@@ -1551,6 +1659,7 @@ export function datasetRevisionsPreserveAccess(
       table.fields = datasetColumnFields(table);
       for (const field of table.fields) field.name = field.fieldId;
     }
+    for (const operation of definition.operations) delete operation.contract;
     return datasetDefinitionDigestContent(definition);
   };
   return contract(previous) === contract(current);

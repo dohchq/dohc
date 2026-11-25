@@ -62,13 +62,32 @@ const definition = parseDatasetDefinition(
         fields: ["posted_on", "cents", "account"],
       },
       { name: "deleteEntry", table: "entries", kind: "delete", access: "link", fields: [] },
+      {
+        name: "reconcile",
+        table: "entries",
+        kind: "action",
+        readOnly: false,
+        contract: {
+          input: {
+            object: {
+              entryId: "string",
+              kind: { enum: ["debit", "credit"] },
+              note: { nullable: "string" },
+              splits: { array: "number" },
+            },
+            optional: ["note"],
+          },
+          output: { object: { cleared: "boolean", status: { enum: ["open", "done", 3] } } },
+        },
+      },
+      { name: "recalculate", table: "entries", kind: "action", readOnly: false },
     ],
   },
   { descriptorPath: "finance/books/dataset.json" },
 );
 
 const usage = `
-import type { FieldIds, OperationName, Operations, Row } from "../.dohc/types/finance-books-11111111-1111-4111-8111-111111111101";
+import type { FieldIds, Input, OperationName, Operations, Output, Row } from "../.dohc/types/finance-books-11111111-1111-4111-8111-111111111101";
 
 const entry: Row<"entries"> = {
   id: "e1",
@@ -107,7 +126,17 @@ const page: ListedPage = {
 const added: Operations["addEntry"]["fields"] = { posted_on: "2026-11-24", cents: 1, account: 7 };
 const kind: Operations["deleteEntry"]["kind"] = "delete";
 const access: Operations["deleteEntry"]["access"] = "link";
-const names: OperationName[] = ["listEntries", "addEntry", "deleteEntry"];
+const names: OperationName[] = ["listEntries", "addEntry", "deleteEntry", "reconcile"];
+type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+const exactInput: Equal<
+  Input<"reconcile">,
+  { entryId: string; kind: "credit" | "debit"; note?: string | null; splits: Array<number> }
+> = true;
+const exactOutput: Equal<Output<"reconcile">, { cleared: boolean; status: 3 | "done" | "open" }> = true;
+const undeclared: Equal<Input<"recalculate">, unknown> & Equal<Output<"recalculate">, unknown> = true;
+const notAnAction: Equal<Input<"listEntries">, never> = true;
+// @ts-expect-error an action takes only its declared input
+const wrongInput: Input<"reconcile"> = { entryId: "e1", kind: "refund", splits: [] };
 const fieldId: FieldIds["entries"]["cents"] = "${definition.tables[1]!.fields[3]!.fieldId}";
 // @ts-expect-error a select takes only its options
 const wrongKind: Row<"entries">["kind"] = "refund";
@@ -123,7 +152,7 @@ const extra: Operations["listEntries"]["fields"] = { id: "e1", cents: 5, tags: n
 const unknown: OperationName = "dropEntries";
 // @ts-expect-error buttons store nothing
 const button: Row<"entries">["Reconcile"] = null;
-export { entry, account, listed, page, added, kind, access, names, fieldId, wrongKind, wrongCleared, missingCents, wrongAccount, extra, unknown, button };
+export { entry, account, listed, page, added, kind, access, names, exactInput, exactOutput, undeclared, notAnAction, wrongInput, fieldId, wrongKind, wrongCleared, missingCents, wrongAccount, extra, unknown, button };
 `;
 
 let root: string | undefined;

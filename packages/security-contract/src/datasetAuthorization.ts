@@ -9,6 +9,7 @@ import {
   type DatasetRevision,
   type AppDatasetBinding,
   type AppDatasetCapability,
+  type DatasetContractType,
   type DatasetOperation,
 } from "./dataset";
 import { generateDatasetOperations } from "./datasetOperations";
@@ -283,6 +284,74 @@ function fieldNamesLabel(
     : names.join(", ");
 }
 
+function contractBreak(
+  sub: DatasetContractType,
+  sup: DatasetContractType,
+  closed: boolean,
+  path: string,
+): string | undefined {
+  if (sup === "unknown") return undefined;
+  const subNullable = typeof sub === "object" && "nullable" in sub;
+  if (typeof sup === "object" && "nullable" in sup)
+    return contractBreak(subNullable ? sub.nullable : sub, sup.nullable, closed, path);
+  if (subNullable) return path;
+  if (typeof sup === "string")
+    return sub === sup ||
+      (typeof sub === "object" && "enum" in sub && sub.enum.every((value) => typeof value === sup))
+      ? undefined
+      : path;
+  if (typeof sub === "string") return path;
+  if ("enum" in sup)
+    return "enum" in sub && sub.enum.every((value) => sup.enum.includes(value)) ? undefined : path;
+  if ("array" in sup)
+    return "array" in sub ? contractBreak(sub.array, sup.array, closed, `${path}[]`) : path;
+  if (!("object" in sub)) return path;
+  const at = (key: string) => (path ? `${path}.${key}` : key);
+  const extra = Object.keys(sub.object).find((key) => !Object.hasOwn(sup.object, key));
+  if (closed && extra !== undefined) return at(extra);
+  for (const [key, type] of Object.entries(sup.object)) {
+    const optional = sup.optional?.includes(key) ?? false;
+    if (!Object.hasOwn(sub.object, key)) {
+      if (optional) continue;
+      return at(key);
+    }
+    if (!optional && sub.optional?.includes(key)) return at(key);
+    const broken = contractBreak(sub.object[key]!, type, closed, at(key));
+    if (broken !== undefined) return broken;
+  }
+  return undefined;
+}
+
+function contractChanges(previous: DatasetOperation, next: DatasetOperation): string[] {
+  const where = (path: string) => (path ? ` at ${path}` : "");
+  const reasons: string[] = [];
+  if (previous.contract?.input) {
+    const path = contractBreak(
+      previous.contract.input,
+      next.contract?.input ?? "unknown",
+      true,
+      "",
+    );
+    if (path !== undefined)
+      reasons.push(
+        `Action "${next.label}" no longer accepts the input it took before${where(path)}.`,
+      );
+  }
+  if (previous.contract?.output) {
+    const path = contractBreak(
+      next.contract?.output ?? "unknown",
+      previous.contract.output,
+      false,
+      "",
+    );
+    if (path !== undefined)
+      reasons.push(
+        `Action "${next.label}" can return output the app does not expect${where(path)}.`,
+      );
+  }
+  return reasons;
+}
+
 export function assessAppDatasetDrift(
   capability: AppDatasetCapability,
   targetRevision: DatasetRevision,
@@ -297,9 +366,6 @@ export function assessAppDatasetDrift(
   const target = parseDatasetRevision(targetRevision);
   if (parsed.datasetId !== target.datasetId)
     fail("capability datasetId does not match the Collection.");
-  if (options.bindingCurrent && options.preservesAccess !== false)
-    return { status: "compatible", reasons: [] };
-
   const pinned = options.pinnedRevision ? parseDatasetRevision(options.pinnedRevision) : undefined;
   if (
     pinned &&
@@ -318,6 +384,19 @@ export function assessAppDatasetDrift(
   const pinnedOps = new Map(
     (pinned?.definition.operations ?? []).map((op) => [op.operationId, op]),
   );
+  const finish = (quiet: AppDatasetDriftStatus): AppDatasetDrift => {
+    const bounded =
+      reasons.length > 16
+        ? [...reasons.slice(0, 15), `And ${reasons.length - 15} more changes.`]
+        : reasons;
+    return { status: bounded.length === 0 ? quiet : "incompatible", reasons: bounded };
+  };
+  for (const { operationId } of parsed.operations) {
+    const oldOp = pinnedOps.get(operationId);
+    const next = targetOps.get(operationId);
+    if (oldOp && next) for (const reason of contractChanges(oldOp, next)) push(reason);
+  }
+  if (options.bindingCurrent && options.preservesAccess !== false) return finish("compatible");
   const allTables = [...target.definition.tables, ...(pinned?.definition.tables ?? [])];
   const targetGenerated = hasGeneratedDatasetRevision(target);
   const pinnedGenerated = pinned ? hasGeneratedDatasetRevision(pinned) : undefined;
@@ -461,9 +540,5 @@ export function assessAppDatasetDrift(
       }
   }
 
-  const bounded =
-    reasons.length > 16
-      ? [...reasons.slice(0, 15), `And ${reasons.length - 15} more changes.`]
-      : reasons;
-  return { status: bounded.length === 0 ? "needs-refresh" : "incompatible", reasons: bounded };
+  return finish("needs-refresh");
 }

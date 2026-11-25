@@ -147,20 +147,18 @@ export async function discoverDatasetBoundApps(input: {
     bindingCurrent: boolean,
   ) => {
     let pinnedRevision: DatasetRevision | undefined;
-    if (!(bindingCurrent && preservesAccess)) {
-      const sha = cap.revisionSha256;
-      if (history.has(sha)) pinnedRevision = history.get(sha);
-      else if (input.historyRevision && !bounded.aborted) {
-        const saved = await safe(() => input.historyRevision!(sha), undefined);
-        pinnedRevision =
-          saved?.revision.datasetId === input.datasetId && saved.revision.revisionSha256 === sha
-            ? saved.revision
-            : undefined;
-        if (!pinnedRevision) incomplete = true;
-        history.set(sha, pinnedRevision);
-      } else if (bounded.aborted) {
-        incomplete = true;
-      }
+    const sha = cap.revisionSha256;
+    if (history.has(sha)) pinnedRevision = history.get(sha);
+    else if (input.historyRevision && !bounded.aborted) {
+      const saved = await safe(() => input.historyRevision!(sha), undefined);
+      pinnedRevision =
+        saved?.revision.datasetId === input.datasetId && saved.revision.revisionSha256 === sha
+          ? saved.revision
+          : undefined;
+      if (!pinnedRevision) incomplete = true;
+      history.set(sha, pinnedRevision);
+    } else if (bounded.aborted) {
+      incomplete = true;
     }
     const drift = assessAppDatasetDrift(cap, target, {
       scope: meta.scope,

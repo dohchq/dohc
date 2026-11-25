@@ -4,7 +4,12 @@ import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifac
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import type { AppPublicationCandidate } from "@dohc/security-contract/app-publication";
-import type { AppDatasetCapability, DatasetDefinition } from "@dohc/security-contract/dataset";
+import {
+  datasetRevisionsPreserveAccess,
+  type AppDatasetCapability,
+  type DatasetDefinition,
+  type DatasetOperationContract,
+} from "@dohc/security-contract/dataset";
 import { discoverDatasetBoundApps } from "./datasetBoundApps";
 import type { LocalAppRow } from "./localAppStore";
 
@@ -329,6 +334,95 @@ describe("discoverDatasetBoundApps", () => {
         pinnedRevisionSha256: rev1.revisionSha256,
         operationIds: [id(10)],
         status: "needs-refresh",
+      },
+    ]);
+  });
+
+  it("warns about a contract-only change to an action an app with current access uses", async () => {
+    const withAction = (revision: number, contract: DatasetOperationContract) => {
+      const definition = makeDef(id(1), "Orders");
+      definition.operations.push({
+        operationId: id(12),
+        name: "approveItem",
+        label: "Approve item",
+        tableId: id(2),
+        kind: "action",
+        access: "owner",
+        readOnly: false,
+        fieldIds: [],
+        contract,
+      });
+      return describeDatasetRevision({
+        definition,
+        revision,
+        schemaSql: "CREATE TABLE items(id TEXT PRIMARY KEY, name TEXT NOT NULL);",
+        operationSource: "export default {};",
+      });
+    };
+    const accepted = { input: { object: { id: "string" } } } satisfies DatasetOperationContract;
+    const older = withAction(1, accepted);
+    const previous = withAction(2, accepted);
+    const target = withAction(3, { input: { object: { id: "string", reason: "string" } } });
+    expect(datasetRevisionsPreserveAccess(previous, target)).toBe(true);
+    const app = (pinned: typeof older, name: string): [string, LocalAppRow] => {
+      const publicationId = sha(name);
+      const cap = resolveAppDatasetCapability(
+        {
+          kind: "dataset",
+          datasetId: pinned.datasetId,
+          revision: pinned.revision,
+          revisionSha256: pinned.revisionSha256,
+          operationIds: [id(12)],
+        },
+        pinned,
+      );
+      return [
+        publicationId,
+        {
+          kind: "dataset",
+          publicationId,
+          appRoot: `apps/${name}`,
+          resourceId: "",
+          authorityRevision: 1,
+          candidate: makeCandidate(`apps/${name}`, [cap]),
+          storageBytes: 1,
+          active: true,
+        },
+      ];
+    };
+    const rows = new Map([app(previous, "approvals"), app(older, "archive")]);
+    const historyRevision = vi.fn(async () => ({ revision: older }));
+    const result = await discoverDatasetBoundApps({
+      datasetId: target.datasetId,
+      targetRevision: target,
+      previousRevision: previous,
+      permissionsPage: async () => ({
+        permissions: [...rows.values()].map((row) => ({
+          kind: "app" as const,
+          principal: row.publicationId,
+          current: true,
+          metadata: row.candidate.capabilities[0] as AppDatasetCapability,
+        })),
+        nextCursor: null,
+      }),
+      historyRevision,
+      lookupLocalApps: async () => rows,
+      signal: new AbortController().signal,
+    });
+    expect(historyRevision).toHaveBeenCalledOnce();
+    expect(result.boundAppsIncomplete).toBeUndefined();
+    expect(
+      result.boundApps.map(({ appRoot, status, reasons }) => ({ appRoot, status, reasons })),
+    ).toEqual([
+      {
+        appRoot: "apps/approvals",
+        status: "incompatible",
+        reasons: ['Action "Approve item" no longer accepts the input it took before at reason.'],
+      },
+      {
+        appRoot: "apps/archive",
+        status: "incompatible",
+        reasons: ['Action "Approve item" no longer accepts the input it took before at reason.'],
       },
     ]);
   });

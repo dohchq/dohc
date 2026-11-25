@@ -5,6 +5,7 @@ import {
   datasetBaseFolder,
   datasetColumnFields,
   type DatasetColumnField,
+  type DatasetContractType,
   type DatasetDefinition,
   type DatasetRevision,
 } from "@dohc/security-contract/dataset";
@@ -32,6 +33,22 @@ const text = (value: string) =>
     .replace(/\u2029/g, "\\u2029");
 const union = (values: readonly string[], empty: string) =>
   values.length ? values.map(text).join(" | ") : empty;
+
+function contractText(type: DatasetContractType | undefined): string {
+  if (type === undefined) return "unknown";
+  if (typeof type === "string") return type;
+  if ("enum" in type)
+    return type.enum
+      .map((value) => (typeof value === "string" ? text(value) : String(value)))
+      .join(" | ");
+  if ("array" in type) return `Array<${contractText(type.array)}>`;
+  if ("nullable" in type) return `${contractText(type.nullable)} | null`;
+  const members = Object.entries(type.object).map(
+    ([key, value]) =>
+      `${text(key)}${type.optional?.includes(key) ? "?" : ""}: ${contractText(value)};`,
+  );
+  return `{ ${members.join(" ")} }`;
+}
 
 function valueType(definition: DatasetDefinition, field: DatasetColumnField) {
   const relation = field.relation;
@@ -89,13 +106,20 @@ export function datasetTypes({
       `    access: ${text(operation.access)};`,
       `    readOnly: ${operation.readOnly};`,
       `    fields: Pick<Tables[${text(table.sqlName)}], ${union(columns, "never")}>;`,
-      "  };",
     );
+    if (operation.kind === "action")
+      lines.push(
+        `    input: ${contractText(operation.contract?.input)};`,
+        `    output: ${contractText(operation.contract?.output)};`,
+      );
+    lines.push("  };");
   }
   lines.push(
     "}",
     "export type Row<Table extends keyof Tables> = Tables[Table];",
     "export type OperationName = keyof Operations;",
+    "export type Input<Name extends OperationName> = Operations[Name] extends { input: infer T } ? T : never;",
+    "export type Output<Name extends OperationName> = Operations[Name] extends { output: infer T } ? T : never;",
     "",
   );
   return lines.join("\n");
