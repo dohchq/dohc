@@ -103,3 +103,105 @@ fn a_format_two_note_takes_new_frontmatter_without_a_new_body() {
         assert_eq!(doc.project(ContentKind::Richdoc).unwrap().content, file);
     });
 }
+
+const LINES: usize = 10_000;
+
+fn long_note(letter: char) -> Vec<String> {
+    (0..LINES)
+        .map(|line| format!("{line:0>59}{letter}"))
+        .collect()
+}
+
+fn markdown(lines: &[String]) -> String {
+    format!("{}\n", lines.join("\n\n"))
+}
+
+fn brake_cases() -> Vec<(&'static str, String)> {
+    let note = long_note('a');
+    let edited = |edit: &dyn Fn(&mut Vec<String>)| {
+        let mut lines = note.clone();
+        edit(&mut lines);
+        markdown(&lines)
+    };
+    vec![
+        ("one letter", edited(&|lines| lines[LINES / 2].push('b'))),
+        (
+            "a line at the top",
+            edited(&|lines| lines.insert(0, "new".into())),
+        ),
+        (
+            "a join",
+            edited(&|lines| {
+                let below = lines.remove(LINES / 2 + 1);
+                lines[LINES / 2].push_str(&below);
+            }),
+        ),
+        (
+            "an edit at line 1",
+            edited(&|lines| lines[0].insert(0, 'b')),
+        ),
+        (
+            "an edit at the last line",
+            edited(&|lines| lines[LINES - 1].push('b')),
+        ),
+        ("the whole file replaced", markdown(&long_note('z'))),
+    ]
+}
+
+fn seeded(format: u8, file: &str) -> Ydoc {
+    let doc = Ydoc::wire();
+    if format == 2 {
+        let meta = doc.doc.get_or_insert_map(ROOT_META);
+        meta.insert(
+            &mut doc.doc.transact_mut(),
+            "schemaVersion",
+            Any::Number(2.0),
+        );
+    }
+    doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, file)
+        .expect("the seed");
+    doc
+}
+
+fn copy(doc: &Ydoc) -> Ydoc {
+    let copy = Ydoc::wire();
+    copy.apply(&doc.encode_full_state()).expect("the copy");
+    copy
+}
+
+fn sequence_length(doc: &Ydoc) -> usize {
+    let sequence = doc.doc.get_or_insert_text(ROOT_SEQUENCE);
+    let length = sequence.len(&doc.doc.transact());
+    length as usize
+}
+
+#[test]
+fn a_fold_of_a_long_note_does_work_and_writes_bytes_in_proportion_to_its_change() {
+    reading_body_sequence_here(|| {
+        let file = markdown(&long_note('a'));
+        let (one, two) = (seeded(1, &file), seeded(2, &file));
+        let mut over = Vec::new();
+        for (name, edited) in brake_cases() {
+            let format_one = copy(&one)
+                .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &edited)
+                .expect("format 1")
+                .len();
+            let doc = copy(&two);
+            let before = sequence_length(&doc);
+            body_sequence_fold::SLOTS_VISITED.with(|visited| visited.set(0));
+            let format_two = doc
+                .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &edited)
+                .expect("format 2")
+                .len();
+            let visited = body_sequence_fold::SLOTS_VISITED.with(std::cell::Cell::get);
+            let allowed = 2 * (before + sequence_length(&doc));
+            assert_eq!(doc.project(ContentKind::Richdoc).unwrap().content, edited);
+            if visited > allowed || format_two * 10 > format_one * 11 {
+                over.push(format!(
+                    "{name}: {visited} slots of {allowed}, {format_two} bytes beside {format_one}"
+                ));
+            }
+        }
+        assert!(over.is_empty(), "{}", over.join("\n"));
+    });
+}

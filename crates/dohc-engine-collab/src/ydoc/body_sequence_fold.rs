@@ -147,7 +147,7 @@ pub(super) struct Fold {
 
 pub(super) fn plan<T: ReadTxn>(
     txn: &T,
-    client: u64,
+    client: yrs::ClientID,
     sequence: &yrs::TextRef,
     containers: &MapRef,
     body: NewBody,
@@ -322,7 +322,7 @@ struct Ids {
 impl Ids {
     fn of<T: ReadTxn>(
         txn: &T,
-        client: u64,
+        client: yrs::ClientID,
         containers: &MapRef,
         before: &Trace,
         target: &Target,
