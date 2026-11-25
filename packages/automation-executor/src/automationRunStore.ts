@@ -784,6 +784,19 @@ const UnfinishedUndosSchema = z.object({
   ),
 });
 
+const SharedWaitingSchema = z.object({
+  version: z.literal(1),
+  runs: z.array(
+    z.object({
+      automationId: z.string().min(1),
+      claimId: z.string().min(1),
+      keySeed: z.string().min(1),
+      told: z.literal(true).optional(),
+    }),
+  ),
+});
+export type SharedWaitingRun = z.infer<typeof SharedWaitingSchema>["runs"][number];
+
 const EnabledAutomationsSchema = z.object({
   version: z.literal(1),
   collections: z.array(z.object({ path: z.string().min(1), enabled: z.array(z.string().min(1)) })),
@@ -1092,6 +1105,13 @@ export interface AutomationRunStore {
    * run was last saved, or null when their list cannot be read.
    */
   unfinishedUndos(): Promise<ReadonlySet<string> | null>;
+  /** The runs that saved a field update to a shared file that has not ended, when the store lists them. */
+  sharedWaiting(): Promise<SharedWaitingRun[]>;
+  /**
+   * With null, marks a listed run's owner as told. With the number of effects
+   * checked, removes the run from the list unless it has saved more since.
+   */
+  settleSharedWaiting(run: SharedWaitingRun, checkedEffects: number | null): Promise<void>;
   readSubscriptions(): Promise<StoredSubscription[]>;
   saveSubscriptions(subscriptions: readonly StoredSubscription[]): Promise<void>;
   /**
@@ -1203,7 +1223,10 @@ export class AutomationStoreNotOpenedError extends Error {
 export function createAutomationRunStore(
   home: AutomationStoreFolder,
   assertCurrent: () => void = () => {},
-  { expireBatchRuns = EXPIRE_BATCH_RUNS }: { expireBatchRuns?: number } = {},
+  {
+    expireBatchRuns = EXPIRE_BATCH_RUNS,
+    listSharedUpdates = false,
+  }: { expireBatchRuns?: number; listSharedUpdates?: boolean } = {},
 ): AutomationRunStore {
   if (!Number.isInteger(expireBatchRuns) || expireBatchRuns < 1)
     throw new RangeError(
@@ -1395,6 +1418,17 @@ export function createAutomationRunStore(
     );
     undos = next;
   };
+  const sharedWaitingFile = async () => join(await base(), "shared-waiting.json");
+  const readSharedWaiting = async () => {
+    const parsed = SharedWaitingSchema.safeParse(await readStoredJson("shared-waiting.json"));
+    return parsed.success ? parsed.data.runs : [];
+  };
+  const sameRun = (left: SharedWaitingRun, right: SharedWaitingRun) =>
+    left.automationId === right.automationId &&
+    left.claimId === right.claimId &&
+    left.keySeed === right.keySeed;
+  const writeSharedWaiting = async (runs: SharedWaitingRun[]) =>
+    writeCurrent(await sharedWaitingFile(), `${JSON.stringify({ version: 1, runs })}\n`);
   const parseRun = (
     text: string | null | undefined,
     name: string,
@@ -1893,7 +1927,44 @@ export function createAutomationRunStore(
       });
     },
     appendEffect(run, applied) {
-      return serial(() => appendLine(run, { kind: "effect", ...applied }));
+      return serial(async () => {
+        if (
+          listSharedUpdates &&
+          applied.writes.some((write) => write.kind === "field" && write.sharedFileUpdate)
+        ) {
+          const listed = {
+            automationId: run.automationId,
+            claimId: run.claimId,
+            keySeed: run.keySeed,
+          };
+          const waiting = await readSharedWaiting();
+          if (!waiting.some((entry) => sameRun(entry, listed)))
+            await writeSharedWaiting([...waiting, listed]);
+        }
+        await appendLine(run, { kind: "effect", ...applied });
+      });
+    },
+    sharedWaiting() {
+      return serial(readSharedWaiting);
+    },
+    settleSharedWaiting(run, checkedEffects) {
+      return serial(async () => {
+        const waiting = await readSharedWaiting();
+        if (!waiting.some((entry) => sameRun(entry, run))) return;
+        if (checkedEffects === null) {
+          await writeSharedWaiting(
+            waiting.map((entry) => (sameRun(entry, run) ? { ...entry, told: true } : entry)),
+          );
+          return;
+        }
+        const stored = await readRun(
+          await runsFolder(run.automationId),
+          runName(run.claimId, run.keySeed),
+          run.automationId,
+        );
+        if ((stored?.applied.length ?? 0) === checkedEffects)
+          await writeSharedWaiting(waiting.filter((entry) => !sameRun(entry, run)));
+      });
     },
     recordCreated(run, created) {
       return serial(() => appendLine(run, { kind: "created", ...created }));

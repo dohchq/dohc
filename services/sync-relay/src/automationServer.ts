@@ -61,6 +61,7 @@ import {
   NOTICE_TITLE_MAX_CHARS,
   SERVER_HOLD_NOTICE_PREFIX,
   SERVER_RUN_FAILED_NOTICE_PREFIX,
+  SERVER_UPDATE_REFUSED_NOTICE_PREFIX,
   isNoticeTarget,
   type RelayAutomationHost,
 } from "@dohc/workspace-contracts/relay";
@@ -186,6 +187,7 @@ export type ServerExecutor = Pick<
   | "removePendingRestore"
   | "confirmReach"
   | "inspectRelayedBatch"
+  | "reportRefusedSharedUpdates"
 >;
 
 export interface AutomationServerOptions {
@@ -686,6 +688,46 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       );
   }
 
+  function reportRefusedUpdates(ws: Hosted): void {
+    const { workspaceId, ownerUserId } = ws.replica;
+    ws.reporting = ws.reporting
+      .then(() =>
+        ws.executor.reportRefusedSharedUpdates(async (run) => {
+          if (ws.closed) throw new Error("This workspace's copy closed.");
+          const name = cutText(
+            ws.executor.automationName(run.automationId) ??
+              run.automationId.slice(run.automationId.lastIndexOf("#") + 1),
+            NOTICE_TITLE_MAX_CHARS - 40,
+          );
+          const collectionPath = collectionPathOf(run);
+          const target = {
+            automation: run.automationId,
+            run: run.claimId,
+            ...(collectionPath === null ? {} : { path: `${collectionPath}/automations.yaml` }),
+          };
+          await posterOf(ws)(
+            {
+              noticeId: `${SERVER_UPDATE_REFUSED_NOTICE_PREFIX}${sha256(workspaceId)}:${sha256(JSON.stringify([run.automationId, run.claimId, run.keySeed]))}`,
+              kind: "automation-failed",
+              title: cutText(`Automation "${name}" changes were not saved`, NOTICE_TITLE_MAX_CHARS),
+              body: "A shared file did not accept changes this run made, so those records keep their earlier values. Open the run to see what it saved.",
+              target: isNoticeTarget(target)
+                ? target
+                : { automation: run.automationId, run: run.claimId },
+              recipientUserId: ownerUserId,
+            },
+            ws.replica.signal,
+          );
+        }),
+      )
+      .catch((error: unknown) =>
+        options.onError(
+          `tell the owner of workspace "${workspaceId}" which automation changes were not accepted`,
+          error,
+        ),
+      );
+  }
+
   // The owner hears once a day that a workspace's runs wait for its budget.
   const toldOverBudget = new Map<string, string>();
   function overBudget(workspaceId: string): void {
@@ -737,6 +779,8 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         ws.flushRecordDelivery?.() ?? true,
         ws.replica.sync(),
       ]);
+      const running = hosted.get(workspaceId);
+      if (running === ws) reportRefusedUpdates(running);
       if (flushed.status === "rejected") throw flushed.reason;
       if (synced.status === "rejected") throw synced.reason;
       // A record update the flush left may hold an ended run's changes.
@@ -800,7 +844,9 @@ export async function startAutomationServer(options: AutomationServerOptions) {
   function executorOptions(ws: WorkspaceState, self: () => Hosted): CollectionAutomationsOptions {
     const { replica, adapter } = ws;
     const { workspaceId, ownerUserId } = replica;
-    const runStore = createAutomationRunStore(storeFolderOf(replica.metadataDir));
+    const runStore = createAutomationRunStore(storeFolderOf(replica.metadataDir), undefined, {
+      listSharedUpdates: true,
+    });
     const chat = replicaAutomationChat({
       runStore,
       replica,

@@ -2,6 +2,7 @@ import { jsonResponse, readBoundedJson, TokenBucketLimiter } from "@dohc/service
 import {
   AUTOMATION_SERVER_INSTALL_ID,
   SERVER_RUN_FAILED_NOTICE_PREFIX,
+  SERVER_UPDATE_REFUSED_NOTICE_PREFIX,
   AUTOMATION_WAKE_PREFIX,
   isNoticeBody,
   isNoticeLine,
@@ -287,7 +288,11 @@ export function createNoticeRoutes(
       // Only this server posts as the server, in process.
       if (notice.originInstallId === AUTOMATION_SERVER_INSTALL_ID)
         throw badRequest("originInstallId is reserved for the server");
-      if (notice.noticeId.startsWith(SERVER_RUN_FAILED_NOTICE_PREFIX))
+      if (
+        [SERVER_RUN_FAILED_NOTICE_PREFIX, SERVER_UPDATE_REFUSED_NOTICE_PREFIX].some((prefix) =>
+          notice.noticeId.startsWith(prefix),
+        )
+      )
         throw badRequest("noticeId is reserved for the server");
       if (notice.recipientUserId === userId) {
         if (notice.noticeId.startsWith(NOTICE_FROM_PREFIX)) {

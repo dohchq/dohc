@@ -1,4 +1,7 @@
-import { isAutomationControlsTarget } from "@dohc/workspace-contracts/relay";
+import {
+  isAutomationControlsTarget,
+  SERVER_UPDATE_REFUSED_NOTICE_PREFIX,
+} from "@dohc/workspace-contracts/relay";
 import type { NoticeRow, WorkspaceActivatedMessage } from "../ipc/bridgeContract";
 import type { SentNoticePlace } from "./sentNoticePlace";
 // Where a Notices row opens, as plain data. The shell's openNoticeTarget is
@@ -124,12 +127,14 @@ export function sentNoticeTarget(
       ...(sharedFile === undefined ? {} : { sharedFile }),
     };
   }
-  // Only the computer that ran a run holds it.
+  const holdsRun =
+    notice.postedHere ||
+    (notice.store === "account" && notice.noticeId.startsWith(SERVER_UPDATE_REFUSED_NOTICE_PREFIX));
   if (automation !== undefined && place.mount === null && !controls) {
     return {
       to: "automation",
       automation,
-      ...(notice.postedHere && run !== undefined ? { run } : {}),
+      ...(holdsRun && run !== undefined ? { run } : {}),
     };
   }
   if (place.path !== null) return { to: "file", path: place.path };

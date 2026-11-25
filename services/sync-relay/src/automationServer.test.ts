@@ -153,6 +153,7 @@ function fakeExecutor(
     relayedClaim: async () => null,
     inspectRelayedBatch: async (ids) =>
       ids.map(() => ({ kind: "unchecked", reason: "Host unavailable" })),
+    reportRefusedSharedUpdates: async () => undefined,
     pressRelayed: async (input, watch) => {
       pressed.push({ pressId: input.pressId, pressedBy: input.pressedBy });
       watch(`claim-${input.pressId}`, null);
@@ -1443,6 +1444,25 @@ describe("the owner's routes to the server's runs", () => {
       };
       return { storage, call, start };
     }
+
+    it("tells the owner which run's changes a shared file did not accept, with the run to open", async () => {
+      const { storage, start } = await copies();
+      const { fake } = await start(1);
+      const refused = payRunRecord("claim-refused");
+      fake.executor.reportRefusedSharedUpdates = async (report) => report(refused);
+      fake.options.beforeEffect!(refused, setStatus(0));
+      fake.options.onRunEnded!(refused);
+      await vi.waitFor(() =>
+        expect(notices(storage, OWNER)).toEqual([
+          expect.objectContaining({
+            noticeId: expect.stringMatching(/^server-update-refused:/u),
+            kind: "automation-failed",
+            title: 'Automation "Pay" changes were not saved',
+            target: { automation: PRESSED, run: "claim-refused", path: "Tasks/automations.yaml" },
+          }),
+        ]),
+      );
+    });
 
     it("shows the owner which runs' changes the lost copy may not have sent", async () => {
       const { storage, call, start } = await copies();

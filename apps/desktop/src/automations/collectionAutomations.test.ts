@@ -788,7 +788,9 @@ async function world(options: {
   // The store main makes, which writes only while the engine's open stands.
   const opened = { workspaceId: "workspace", rootPath: root };
   await localState.open(opened);
-  const baseStore = createAutomationRunStore(localAutomationStoreFolder(opened));
+  const baseStore = createAutomationRunStore(localAutomationStoreFolder(opened), undefined, {
+    listSharedUpdates: true,
+  });
   let failRecordAt: number | null = null;
   let beforeRecord: (() => void) | null = null;
   // Ids the engine treats as taken, so it adopts a file carrying one under a new id.
@@ -1307,6 +1309,196 @@ describe("Collection automations", () => {
       (await executor.runs(claim.automationId)).runs[0]?.sharedSettlementPending,
     ).toBeUndefined();
     expect(read).toHaveBeenCalledTimes(reads);
+  });
+
+  it("reports a run whose shared update was not accepted once, while another still waits", async () => {
+    const w = await world({
+      automations: {
+        Tasks:
+          "  - id: finish\n    name: Finish\n    when: {field-changed: Status, to: Done}\n    do: [{set: {Note: saved, Title: kept}}]\n",
+      },
+    });
+    const record = w.addRecord("Tasks", "pending", { Status: "Done" });
+    const claim = w.claim("collection:Tasks#finish", record);
+    const draft = (field: string) => ({
+      outboxId: "outbox-one",
+      appendKey: `write/${field}`,
+      nativeHeadSequence: 2,
+      binding: {
+        workspaceId: "workspace",
+        mainVersionId: "main",
+        objectId: "object",
+        lineageClaimId: "a".repeat(64),
+        currentPath: "Tasks/pending.md",
+        selectorPaths: ["Tasks"],
+        restoreFenceGeneration: 0,
+      },
+    });
+    const executor = w.makeExecutor({
+      withRecordWrites: async (_signal, work) =>
+        work({
+          setFields: async () => ({
+            replaced: { Note: null, Title: null },
+            kept: {},
+            sharedFileUpdates: { Note: draft("Note"), Title: draft("Title") },
+          }),
+          create: async () => {
+            throw new Error("No added record");
+          },
+        }),
+    });
+    onTestFinished(() => executor.dispose());
+    const states = new Map<string, "pending" | "not-accepted">([
+      ["write/Note", "pending"],
+      ["write/Title", "pending"],
+    ]);
+    w.engine.sharedFileUpdateStates = async (writes) =>
+      writes.map((write) => states.get(write.appendKey)!);
+    await executor.open();
+    expect((await w.settledClaim(claim)).state).toBe("done");
+    const reported: string[] = [];
+    const report = async (run: { claimId: string }) => {
+      reported.push(run.claimId);
+    };
+    await executor.reportRefusedSharedUpdates(report);
+    expect(reported).toEqual([]);
+    states.set("write/Note", "not-accepted");
+    expect(await executor.run(claim.automationId, claim.claimId)).toMatchObject({
+      sharedSettlementNotAccepted: true,
+      sharedSettlementPending: true,
+    });
+    await expect(
+      executor.reportRefusedSharedUpdates(async () => {
+        throw new Error("The relay is away.");
+      }),
+    ).rejects.toThrow("The relay is away.");
+    await executor.reportRefusedSharedUpdates(report);
+    await executor.reportRefusedSharedUpdates(report);
+    states.set("write/Title", "not-accepted");
+    await executor.reportRefusedSharedUpdates(report);
+    expect(reported).toEqual([claim.claimId]);
+    expect(await w.baseStore.sharedWaiting()).toEqual([]);
+  });
+
+  it("reports a refused shared update from a run that is still waiting, and keeps it listed", async () => {
+    const w = await world({
+      automations: {
+        Tasks:
+          "  - id: finish\n    name: Finish\n    when: {field-changed: Status, to: Done}\n    do: [{set: {Note: saved}}]\n",
+      },
+    });
+    const record = w.addRecord("Tasks", "waiting", { Status: "Done" });
+    const claim = w.claim("collection:Tasks#finish", record);
+    const executor = w.makeExecutor({
+      withRecordWrites: async (_signal, work) =>
+        work({
+          setFields: async () => ({
+            replaced: { Note: null },
+            kept: {},
+            sharedFileUpdates: {
+              Note: {
+                outboxId: "outbox-waiting",
+                appendKey: "write/Note",
+                nativeHeadSequence: 2,
+                binding: {
+                  workspaceId: "workspace",
+                  mainVersionId: "main",
+                  objectId: "object",
+                  lineageClaimId: "a".repeat(64),
+                  currentPath: "Tasks/waiting.md",
+                  selectorPaths: ["Tasks"],
+                  restoreFenceGeneration: 0,
+                },
+              },
+            },
+          }),
+          create: async () => {
+            throw new Error("No added record");
+          },
+        }),
+    });
+    onTestFinished(() => executor.dispose());
+    let durableTries = 0;
+    w.engine.makeAutomationWritesDurable = async () => {
+      durableTries += 1;
+      throw new Error("The disk is busy.");
+    };
+    w.engine.sharedFileUpdateStates = async (writes) => writes.map(() => "not-accepted");
+    await executor.open();
+    await w.until(() => durableTries > 0);
+    const reported: string[] = [];
+    await executor.reportRefusedSharedUpdates(async (run) => {
+      reported.push(run.claimId);
+    });
+    expect(reported).toEqual([claim.claimId]);
+    expect(await w.baseStore.sharedWaiting()).toMatchObject([
+      { claimId: claim.claimId, told: true },
+    ]);
+  });
+
+  it("keeps a run listed when Try again saves another shared update while it is checked", async () => {
+    const w = await world({
+      automations: {
+        Tasks:
+          "  - id: finish\n    name: Finish\n    when: {field-changed: Status, to: Done}\n    do: [{set: {Note: saved}}, {set: {Title: kept}}]\n",
+      },
+    });
+    const record = w.addRecord("Tasks", "again", { Status: "Done" });
+    const claim = w.claim("collection:Tasks#finish", record);
+    const draft = (field: string) => ({
+      outboxId: "outbox-again",
+      appendKey: `write/${field}`,
+      nativeHeadSequence: 2,
+      binding: {
+        workspaceId: "workspace",
+        mainVersionId: "main",
+        objectId: "object",
+        lineageClaimId: "a".repeat(64),
+        currentPath: "Tasks/again.md",
+        selectorPaths: ["Tasks"],
+        restoreFenceGeneration: 0,
+      },
+    });
+    let titleRefused = true;
+    const executor = w.makeExecutor({
+      withRecordWrites: async (_signal, work) =>
+        work({
+          setFields: async (input) => {
+            const [field] = Object.keys(input.fields);
+            if (field === "Title" && titleRefused) throw new Error("Title is busy.");
+            return {
+              replaced: { [field!]: null },
+              kept: {},
+              sharedFileUpdates: { [field!]: draft(field!) },
+            };
+          },
+          create: async () => {
+            throw new Error("No added record");
+          },
+        }),
+    });
+    onTestFinished(() => executor.dispose());
+    await executor.open();
+    expect((await w.settledClaim(claim)).state).toBe("failed");
+    const checked: string[] = [];
+    w.engine.sharedFileUpdateStates = async (writes) => {
+      checked.push(...writes.map((write) => write.appendKey));
+      if (titleRefused) {
+        titleRefused = false;
+        await executor.retry({
+          automationId: claim.automationId,
+          claimId: claim.claimId,
+          startOver: false,
+        });
+        await w.until(() => claim.state === "done");
+      }
+      return writes.map(() => "settled");
+    };
+    await executor.reportRefusedSharedUpdates(async () => {});
+    expect(await w.baseStore.sharedWaiting()).toMatchObject([{ claimId: claim.claimId }]);
+    await executor.reportRefusedSharedUpdates(async () => {});
+    expect(checked).toEqual(["write/Note", "write/Title"]);
+    expect(await w.baseStore.sharedWaiting()).toEqual([]);
   });
 
   it("counts pending reversals once and keeps refused reversals retryable", async () => {

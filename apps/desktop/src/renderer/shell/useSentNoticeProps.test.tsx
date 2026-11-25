@@ -884,6 +884,17 @@ describe("a failed run's notice", () => {
       expect.any(AbortSignal),
     );
     expect(openFile).not.toHaveBeenCalled();
+    openAutomation.mockClear();
+    // Only the owner's server posts these ids, and it holds the run.
+    await result.current.onOpenSentNotice(
+      { ...failed, postedHere: false, noticeId: "server-update-refused:a:b" },
+      live(),
+    );
+    expect(openAutomation).toHaveBeenCalledWith(
+      "collection:Tasks#stamp",
+      "atc_1",
+      expect.any(AbortSignal),
+    );
     cleanup();
     const trip = workspace("trip");
     const elsewhere = setup([failed], [workspace("notes"), trip], "trip");
