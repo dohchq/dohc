@@ -1,4 +1,9 @@
-import { visibleSharePath } from "@dohc/security-contract/share-selector";
+import {
+  isShareAccessValue,
+  shareAccessRank,
+  visibleSharePath,
+  type ShareAccess,
+} from "@dohc/security-contract/share-selector";
 import { createDatasetAutomations, createDatasetAutomationAuthority } from "./datasetAutomations";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -46,15 +51,19 @@ import { readLinkEnrollment, linkWriteRefusal } from "./storage/linkEnrollment";
 import { authorizeShareGrantAction, authorizeShareAction } from "./shareAuthorization";
 import {
   effectiveShareSelector,
+  isWorkspaceSelector,
   parseStoredAnyShareSelectorJson,
   targetVersionId,
 } from "./shareFilter";
 import { badRequest, notFound, relayError } from "./errors";
 import { createDatasetFiles } from "./storage/datasetFiles";
 import { createDatasetRecoveryFiles } from "./storage/datasetRecoveryFiles";
-import { collectionFilePresent } from "./storage/collectionFilePresence";
+import { collectionFilePaths, collectionFilePresent } from "./storage/collectionFilePresence";
+import type { MemberReach } from "./storage/memberReach";
 
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
+const lowerAccess = (a: ShareAccess, b: ShareAccess) =>
+  shareAccessRank(a) < shareAccessRank(b) ? a : b;
 const ownerPrincipalKey = (workspaceId: string) =>
   hash(JSON.stringify(["dohc-dataset-owner-v1", workspaceId]));
 // A moved folder can reach the server as a delete and a later write, and a deleted file can come straight back.
@@ -333,7 +342,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         .run(workspaceId, datasetId, grantId, authority.principalKey);
     });
   }
-  function named(workspaceId: string, grantId: string, userId: string): DatasetAuthority {
+  function namedGrant(workspaceId: string, grantId: string, userId: string) {
     const result = authorizeShareGrantAction({
       storage,
       grantId,
@@ -343,15 +352,44 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     if (
       !result.ok ||
       result.share.workspaceId !== workspaceId ||
-      !["view", "comment", "edit"].includes(result.grant.access)
+      !isShareAccessValue(result.grant.access)
     )
       throw notFound();
+    return {
+      result,
+      access: result.grant.access,
+      reach: isWorkspaceSelector(result.effectiveSelector) ? result.effectiveSelector.reach : null,
+    };
+  }
+  function collectionLevel(
+    reach: MemberReach,
+    workspaceId: string,
+    datasetId: string,
+  ): ShareAccess | null {
+    const paths = collectionFilePaths(storage, workspaceId, datasetId);
+    if (!paths) return null;
+    const current = paths.current ?? (paths.unnamed ? paths.approved : null);
+    const approved = reach.levelAt(paths.approved),
+      moved = current === null ? null : reach.levelAt(current);
+    return approved && moved && lowerAccess(approved, moved);
+  }
+  function named(
+    workspaceId: string,
+    grantId: string,
+    userId: string,
+    datasetId?: string,
+  ): DatasetAuthority {
+    const { result, access, reach } = namedGrant(workspaceId, grantId, userId);
+    const level =
+      reach && datasetId !== undefined ? collectionLevel(reach, workspaceId, datasetId) : access;
+    if (level === null)
+      throw new DatasetHostError("not_authorized", "You do not have access to this Collection.");
     return {
       caller: {
         kind: "named",
         userId,
         grantId,
-        access: result.grant.access as "view" | "comment" | "edit",
+        access: lowerAccess(access, level),
         helper: false,
       },
       principalKey: datasetPrincipalKey(workspaceId, grantId, userId),
@@ -639,7 +677,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         ? { ...owner(auth, auth.workspaceId), agent: auth.agent }
         : owner(auth, auth.workspaceId);
     if (!auth.grantId || auth.agent) throw notFound();
-    return named(auth.workspaceId, auth.grantId, auth.userId);
+    return named(auth.workspaceId, auth.grantId, auth.userId, request.datasetId);
   }
   function publication(auth: AppBackendAuth, publicationId: string) {
     current();
@@ -1219,6 +1257,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         current();
         if (!auth.grantId) throw notFound();
         const verified = named(auth.workspaceId, auth.grantId, auth.userId);
+        const { reach } = namedGrant(auth.workspaceId, auth.grantId, auth.userId);
         const digest = createHash("sha256").update(
           JSON.stringify([
             "named-dataset-copy-v1",
@@ -1235,8 +1274,10 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
           ON c.workspace_id=g.workspace_id AND c.dataset_id=g.dataset_id
           LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=g.workspace_id AND l.dataset_id=g.dataset_id
           WHERE g.workspace_id=? AND g.principal_key=? ORDER BY g.dataset_id`)
-          .iterate(auth.workspaceId, verified.principalKey)) {
-          digest.update(JSON.stringify(row));
+          .all(auth.workspaceId, verified.principalKey)) {
+          const level = reach && collectionLevel(reach, auth.workspaceId, String(row.dataset_id));
+          if (reach && level === null) continue;
+          digest.update(JSON.stringify(reach ? [row, level] : row));
         }
         return digest.digest("hex");
       },
