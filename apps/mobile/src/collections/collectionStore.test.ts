@@ -281,6 +281,50 @@ describe("a Collection's records", () => {
     expect(names(collections.view()?.rows)).toEqual(["a0", "a1"]);
   });
 
+  it("shows a Collection opened again at once while it reads again, and keeps it through a failed read", async () => {
+    const { server, collections } = setup();
+    pages(server);
+    await collections.open(D);
+    collections.openRecord(collections.view()!.rows[0]!);
+    collections.close(D);
+    const held = deferred<Answer>();
+    server.on("POST", `${OPS}/collectionRecords`, () => held.promise);
+    const reopen = collections.open(D);
+    expect(collections.view()).toMatchObject({
+      description: { name: "Registrations" },
+      tableId: "t-people",
+      reading: "first",
+      opened: null,
+    });
+    expect(names(collections.view()?.rows)).toEqual(["a0", "a1"]);
+    held.resolve(records(["b0"], null));
+    await reopen;
+    expect(names(collections.view()?.rows)).toEqual(["b0"]);
+    collections.close(D);
+    server.on("POST", `${OPS}/collection`, "offline");
+    await collections.open(D);
+    expect(collections.view()).toMatchObject({ problem: { cause: "offline", more: false } });
+    expect(names(collections.view()?.rows)).toEqual(["b0"]);
+  });
+
+  it("shows a Collection the server refuses when opened again as on its first open, and forgets it", async () => {
+    const { server, collections } = setup();
+    pages(server);
+    await collections.open(D);
+    collections.close(D);
+    server.on("POST", `${OPS}/collection`, { status: 404 });
+    await collections.open(D);
+    expect(collections.view()).toMatchObject({
+      description: null,
+      rows: [],
+      problem: { cause: "refused", more: false },
+    });
+    collections.close(D);
+    server.on("POST", `${OPS}/collection`, () => new Promise<Answer>(() => {}));
+    void collections.open(D);
+    expect(collections.view()).toMatchObject({ description: null, rows: [], problem: null });
+  });
+
   it("leaves the Collection on close, unless another replaced it", async () => {
     const { server, collections } = setup();
     pages(server);

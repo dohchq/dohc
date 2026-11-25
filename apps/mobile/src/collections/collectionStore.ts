@@ -19,8 +19,9 @@ import {
 } from "../server/phoneCollections";
 import { cachedList, views, type ReadCache, type ReadProblem } from "../server/workspaceData";
 
-// The open workspace's transactional Collections, and the one Collection on screen, in memory only. The list is also kept
-// in the read cache with the workspace's views.
+// The open workspace's transactional Collections, and the one Collection on screen. The list is kept in the read
+// cache with the workspace's views. Each Collection opened stays in memory, so opening it again shows it at once while
+// it reads again; one the server refuses then shows as refused.
 //
 // One store per sign-in and workspace. Its answers land only while its sign-in is current and it hasn't stopped, and
 // each read only while it is the latest of its kind, so a late answer never paints another workspace or table. The
@@ -171,6 +172,7 @@ export function createWorkspaceCollections(
   const listed = cachedList(cache, signIn, workspaceId, views.collections);
   let list: CollectionsState = { ...NO_LIST, collections: listed.value() };
   let view: CollectionView | null = null;
+  const held = new Map<string, CollectionView>();
   let changes: ReadonlyMap<string, RecordChange> = new Map();
   let actions: ReadonlyMap<string, RecordAction> = new Map();
   const isLive = () => !stopped && signIn.isCurrent();
@@ -195,6 +197,7 @@ export function createWorkspaceCollections(
     recordReads.next();
     list = NO_LIST;
     view = null;
+    held.clear();
     changes = new Map();
     actions = new Map();
     emit();
@@ -400,11 +403,14 @@ export function createWorkspaceCollections(
       });
     } catch (error) {
       const cause = shownProblem(error);
-      if (lands())
-        update(datasetId, {
-          reading: null,
-          problem: cause ? { cause, more } : (view?.problem ?? null),
-        });
+      if (!lands()) return;
+      const refused = cause === "refused" && mode === "first" && describe;
+      if (refused) held.delete(datasetId);
+      update(datasetId, {
+        ...(refused ? { description: null, rows: [], files: {}, next: null } : {}),
+        reading: null,
+        problem: cause ? { cause, more } : (view?.problem ?? null),
+      });
     }
   }
 
@@ -420,24 +426,28 @@ export function createWorkspaceCollections(
     refresh,
     open(datasetId) {
       if (!isLive()) return Promise.resolve();
-      view = {
-        datasetId,
-        description: null,
-        tableId: null,
-        rows: [],
-        files: {},
-        next: null,
-        reading: null,
-        refused: false,
-        problem: null,
-        opened: null,
-      };
+      const last = held.get(datasetId);
+      view = last
+        ? { ...last, problem: null, opened: null }
+        : {
+            datasetId,
+            description: null,
+            tableId: null,
+            rows: [],
+            files: {},
+            next: null,
+            reading: null,
+            refused: false,
+            problem: null,
+            opened: null,
+          };
       emit();
       return read("first", true);
     },
     close(datasetId) {
       if (view?.datasetId !== datasetId) return;
       viewReads.next();
+      held.set(datasetId, { ...view, reading: null });
       view = null;
       emit();
     },
