@@ -1337,8 +1337,8 @@ const commentThread = (threadId: string, path: string) =>
 const comments = (shareId: string, path: string, query: Record<string, string> = {}) =>
   `messages?${new URLSearchParams({ shareId, path, limit: "50", ...query })}`;
 
-async function commented() {
-  const seeded = await seed();
+async function commented(overrides: Parameters<typeof seed>[1] = {}) {
+  const seeded = await seed(undefined, overrides);
   await ownerWrite(seeded.h, "docs/other.md", "another file");
   await ownerAppend(seeded.h, [
     commentThread("c-plan", "docs/plan.md"),
@@ -1435,7 +1435,7 @@ describe("a member's file Comments in a browser", () => {
       ops.find(
         (op) => op.opKind === "chat.thread.create" && op.payload.threadId === post.payload.threadId,
       )?.payload,
-    ).toMatchObject({ linkedObjectId: "object-docs/plan.md" });
+    ).toMatchObject({ linkedObjectId: "object-docs/plan.md", linkedAtMs: expect.any(Number) });
     const read = await json(await chat(h, comments(ana.shareId, "docs/plan.md"), "ana"));
     expect((read.messages as Array<{ body: string }>).map((item) => item.body)).toEqual([
       "from edit",
@@ -1618,4 +1618,443 @@ it("filters member browser feeds and blobs and stops an open download when folde
   const hidden = await memberRead(h, `/sync/link/blobs/${planSha}`, ana.grantId, "ana");
   const missing = await memberRead(h, `/sync/link/blobs/${sha256("missing")}`, ana.grantId, "ana");
   expect(await refusalBytes(hidden)).toBe(await refusalBytes(missing));
+});
+
+// The owner's own workspace in a browser: share-web names the workspace under
+// the owner's scheme, never a share or grant. The page's chat key is `owner:<workspace>`.
+const OWNER_CHAT = `owner:${WORKSPACE}`;
+const OWNER_ORIGIN = `relay:owner-browser:${OWNER}`;
+
+function ownerChat(
+  h: SyncRelayHandler,
+  path: string,
+  userId = OWNER,
+  init: RequestInit = {},
+  workspaceId = WORKSPACE,
+) {
+  return h(
+    new Request(`http://relay.test/sync/named-chat/${path}`, {
+      ...init,
+      headers: {
+        authorization: `DohcOwner ${workspaceId}`,
+        cookie: `session=${userId}`,
+        origin: SHARE_WEB_ORIGIN,
+        "x-dohc-relay-exchange-key": RELAY_EXCHANGE_KEY,
+        ...Object.fromEntries(new Headers(init.headers)),
+      },
+    }),
+  );
+}
+
+const ownerPost = (fields: Record<string, unknown>, shareId = OWNER_CHAT) =>
+  jsonBody({ shareId, id: "o-1", body: "from the owner", authorKind: "human", ...fields });
+
+// The owner's log as their desktop pulls it.
+async function ownerLog(h: SyncRelayHandler) {
+  const log = await json(await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=500`)));
+  return (
+    log.ops as Array<{
+      originId: string;
+      opKind: string;
+      payload?: Record<string, unknown>;
+      payloadJson?: string;
+    }>
+  ).map((op) => ({
+    originId: op.originId,
+    opKind: op.opKind,
+    payload: op.payload ?? (JSON.parse(op.payloadJson ?? "{}") as Record<string, unknown>),
+  }));
+}
+
+function fenceOwner(storage: SyncRelayStorage) {
+  const key = "account-deletion-key-at-least-32-bytes";
+  const context = storage as unknown as StorageContext;
+  initializeAccountDeletion(context, key);
+  fenceAccount(context, key, OWNER, `${OWNER}@dohc.test`);
+}
+
+describe("the owner's Chats and Comments in a browser", () => {
+  it("lists every ordinary Group as an admin reaches them, and never General, a direct message or an agent chat", async () => {
+    const { h, storage } = await seed();
+    await member(h, storage, "ana");
+    // A Group's rule hides it from members, never from the owner or an admin.
+    await hideGroup(h, GROUP);
+    const listed = await ownerChat(h, `channels?workspaceId=${WORKSPACE}`);
+    expect(listed.status, await listed.clone().text()).toBe(200);
+    expect(await json(listed)).toEqual({
+      shareId: OWNER_CHAT,
+      userId: OWNER,
+      maxPostBytes: limits.maxRequestBytes,
+      maxBodyBytes: expect.any(Number),
+      // The owner moderates as an admin does.
+      moderates: true,
+      channels: [
+        { channelWireId: GROUP, name: "team", kind: "channel", type: "both", access: "read-write" },
+      ],
+    });
+  });
+
+  it("reads and follows every Group, and wakes for a new message in one", async () => {
+    const { h, storage } = await seed();
+    const ana = await member(h, storage, "ana");
+    const first = await ownerChat(h, `messages?shareId=${OWNER_CHAT}&since=0&limit=50`);
+    expect(first.status, await first.clone().text()).toBe(200);
+    const page = await json(first);
+    expect(page).toMatchObject({
+      shareId: OWNER_CHAT,
+      messages: [expect.objectContaining({ messageId: "msg-team", channelWireId: GROUP })],
+    });
+    expect(JSON.stringify(page)).not.toContain("SENTINEL");
+    expect(
+      await json(
+        await ownerChat(h, `messages?shareId=${OWNER_CHAT}&channelWireId=${GROUP}&limit=50`),
+      ),
+    ).toMatchObject({
+      shareId: OWNER_CHAT,
+      channelWireId: GROUP,
+      messages: [expect.objectContaining({ messageId: "msg-team", body: "welcome to the team" })],
+    });
+
+    const held = ownerChat(
+      h,
+      `messages?shareId=${OWNER_CHAT}&since=${page.nextCursor}&hold=30000&limit=50`,
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const posted = await chat(
+      h,
+      "messages",
+      "ana",
+      jsonBody({
+        shareId: ana.shareId,
+        channelWireId: GROUP,
+        id: "a-1",
+        lane: "posts",
+        body: "hello owner",
+        authorKind: "human",
+      }),
+    );
+    expect(posted.status, await posted.clone().text()).toBe(200);
+    const next = await held;
+    expect(next.status, await next.clone().text()).toBe(200);
+    expect((await json(next)).messages).toEqual([
+      expect.objectContaining({
+        channelWireId: GROUP,
+        body: "hello owner",
+        authorUserId: "ana",
+        authorDisplayName: "Name ana",
+      }),
+    ]);
+  });
+
+  it("posts in a Group as the owner, under the owner's own origin, which the desktop and a member read", async () => {
+    const { h, storage } = await seed();
+    const ana = await member(h, storage, "ana");
+    const posted = await ownerChat(
+      h,
+      "messages",
+      OWNER,
+      ownerPost({ channelWireId: GROUP, lane: "posts" }),
+    );
+    expect(posted.status, await posted.clone().text()).toBe(200);
+    expect(await json(posted)).toMatchObject({
+      shareId: OWNER_CHAT,
+      channelWireId: GROUP,
+      message: {
+        body: "from the owner",
+        authorKind: "human",
+        authorUserId: OWNER,
+        authorDisplayName: `Name ${OWNER}`,
+        startsPost: true,
+      },
+    });
+    // The same post again answers with the same message and writes nothing more.
+    const again = await ownerChat(
+      h,
+      "messages",
+      OWNER,
+      ownerPost({ channelWireId: GROUP, lane: "posts" }),
+    );
+    expect(again.status, await again.clone().text()).toBe(200);
+    const ops = (await ownerLog(h)).filter((op) => op.originId === OWNER_ORIGIN);
+    expect(ops.map((op) => op.opKind)).toEqual(["chat.thread.create", "chat.message.append"]);
+    expect(ops[0]!.payload).toMatchObject({ channelWireId: GROUP, lane: "posts" });
+    expect(ops[1]!.payload).toMatchObject({
+      body: "from the owner",
+      authorKind: "human",
+      authorUserId: OWNER,
+      threadId: ops[0]!.payload.threadId,
+    });
+    const read = await json(
+      await chat(h, `messages?shareId=${ana.shareId}&channelWireId=${GROUP}&limit=50`, "ana"),
+    );
+    expect(read.messages).toContainEqual(
+      expect.objectContaining({ body: "from the owner", authorUserId: OWNER }),
+    );
+    // No client writes from the owner's browser origin.
+    const forged = await h(
+      request(OWNER, `/sync/${WORKSPACE}/log`, jsonBody({ originId: OWNER_ORIGIN, ops: [] })),
+    );
+    expect(forged.status).toBe(400);
+  });
+
+  it("refuses a post as an agent, and a read or post in General, a direct message or an agent chat", async () => {
+    const { h } = await seed();
+    const agent = await ownerChat(
+      h,
+      "messages",
+      OWNER,
+      ownerPost({
+        channelWireId: GROUP,
+        lane: "posts",
+        authorKind: "agent",
+        authorDisplayName: "Bot",
+      }),
+    );
+    expect(agent.status).toBe(400);
+    for (const wireId of [GENERAL_CHANNEL_WIRE_ID, DM, AGENT]) {
+      const refused = await ownerChat(
+        h,
+        "messages",
+        OWNER,
+        ownerPost({ channelWireId: wireId, lane: "posts", id: `o-${wireId}` }),
+      );
+      expect(refused.status, wireId).toBe(404);
+      expect(
+        (await ownerChat(h, `messages?shareId=${OWNER_CHAT}&channelWireId=${wireId}&limit=50`))
+          .status,
+        wireId,
+      ).toBe(404);
+    }
+    expect((await ownerLog(h)).some((op) => op.originId === OWNER_ORIGIN)).toBe(false);
+  });
+
+  it("reads, follows and posts on a file's Comments, bound to the file's object, and never a secret file's", async () => {
+    let now = 50_000;
+    const { h } = await commented({ nowMs: () => now });
+    await ownerWrite(h, ".env", "SECRET=SENTINEL");
+    const read = await ownerChat(h, comments(OWNER_CHAT, "docs/plan.md"));
+    expect(read.status, await read.clone().text()).toBe(200);
+    const page = await json(read);
+    expect(page).toMatchObject({
+      shareId: OWNER_CHAT,
+      path: "docs/plan.md",
+      messages: [expect.objectContaining({ messageId: "msg-plan" })],
+    });
+    expect(JSON.stringify(page)).not.toContain("SENTINEL");
+    const held = ownerChat(
+      h,
+      comments(OWNER_CHAT, "docs/plan.md", { since: String(page.nextCursor), hold: "30000" }),
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const posted = await ownerChat(h, "messages", OWNER, ownerPost({ path: "docs/plan.md" }));
+    expect(posted.status, await posted.clone().text()).toBe(200);
+    expect(await json(posted)).toMatchObject({
+      shareId: OWNER_CHAT,
+      path: "docs/plan.md",
+      message: { body: "from the owner", authorUserId: OWNER },
+    });
+    expect((await json(await held)).messages).toEqual([
+      expect.objectContaining({ body: "from the owner" }),
+    ]);
+    // A retry later returns the same message rather than a conflict.
+    now += 5_000;
+    const retried = await ownerChat(h, "messages", OWNER, ownerPost({ path: "docs/plan.md" }));
+    expect(retried.status, await retried.clone().text()).toBe(200);
+    const ops = (await ownerLog(h)).filter((op) => op.originId === OWNER_ORIGIN);
+    expect(ops).toHaveLength(2);
+    // The engine refuses a file's thread without the time it was linked.
+    expect(ops[0]).toMatchObject({
+      opKind: "chat.thread.create",
+      payload: { linkedObjectId: "object-docs/plan.md", linkedAtMs: 50_000 },
+    });
+    expect(ops[0]!.payload).not.toHaveProperty("linkedPath");
+    for (const path of [".env", "docs/missing.md"]) {
+      expect((await ownerChat(h, comments(OWNER_CHAT, path))).status, path).toBe(404);
+      expect(
+        (await ownerChat(h, "messages", OWNER, ownerPost({ path, id: `o-${path}` }))).status,
+        path,
+      ).toBe(404);
+    }
+  });
+
+  it("deletes a member's message in a Group, as an admin does", async () => {
+    const { h, storage } = await seed();
+    const ana = await member(h, storage, "ana");
+    const posted = await chat(h, "messages", "ana", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        shareId: ana.shareId,
+        channelWireId: GROUP,
+        lane: "posts",
+        id: "ana-1",
+        body: "from ana",
+        authorKind: "human",
+      }),
+    });
+    expect(posted.status, await posted.clone().text()).toBe(200);
+    const { messageId, threadId } = (await json(posted)).message as {
+      messageId: string;
+      threadId: string;
+    };
+    const deleted = await ownerChat(
+      h,
+      "messages/delete",
+      OWNER,
+      jsonBody({ shareId: OWNER_CHAT, threadId, messageId }),
+    );
+    expect(deleted.status, await deleted.clone().text()).toBe(200);
+  });
+
+  it("deletes the owner's own message, and none in a direct message, an agent chat or on a secret file", async () => {
+    const { h } = await seed();
+    await ownerWrite(h, ".env", "SECRET=1");
+    await ownerAppend(h, [
+      commentThread("c-env", ".env"),
+      message("msg-env", "c-env", "SENTINEL secret comment"),
+    ]);
+    const posted = await json(
+      await ownerChat(h, "messages", OWNER, ownerPost({ channelWireId: GROUP, lane: "posts" })),
+    );
+    const { messageId, threadId } = posted.message as { messageId: string; threadId: string };
+    const remove = (thread: string, message: string) =>
+      ownerChat(
+        h,
+        "messages/delete",
+        OWNER,
+        jsonBody({ shareId: OWNER_CHAT, threadId: thread, messageId: message }),
+      );
+    const deleted = await remove(threadId, messageId);
+    expect(deleted.status, await deleted.clone().text()).toBe(200);
+    expect(await json(deleted)).toMatchObject({
+      shareId: OWNER_CHAT,
+      deleted: { messageId, threadId },
+    });
+    const read = await json(
+      await ownerChat(h, `messages?shareId=${OWNER_CHAT}&channelWireId=${GROUP}&limit=50`),
+    );
+    expect(read.messages).toContainEqual(
+      expect.objectContaining({ messageId, body: null, deletedAtMs: expect.any(Number) }),
+    );
+    // Only a message in an ordinary Group or on a file a member could see deletes.
+    for (const [thread, message] of [
+      ["t-dm", "msg-dm"],
+      ["t-agent", "msg-agent"],
+      ["t-general", "msg-general"],
+      ["c-env", "msg-env"],
+    ] as const) {
+      expect((await remove(thread, message)).status, thread).toBe(404);
+    }
+    const log = JSON.stringify(await ownerLog(h));
+    for (const body of [
+      "SENTINEL direct message",
+      "SENTINEL agent chat",
+      "SENTINEL general",
+      "SENTINEL secret comment",
+    ])
+      expect(log).toContain(body);
+  });
+
+  it("refuses another account, a member, another workspace, a fenced owner, another site and a wrong key like an unknown share", async () => {
+    const { h, storage } = await commented();
+    await member(h, storage, "ana");
+    const read = (userId = OWNER, init: RequestInit = {}, workspaceId = WORKSPACE) =>
+      ownerChat(
+        h,
+        `messages?shareId=owner:${workspaceId}&since=0&limit=50`,
+        userId,
+        init,
+        workspaceId,
+      );
+    const list = (userId = OWNER, workspaceId = WORKSPACE) =>
+      ownerChat(h, `channels?workspaceId=${workspaceId}`, userId, {}, workspaceId);
+    const write = (userId = OWNER, headers: Record<string, string> = {}, workspaceId = WORKSPACE) =>
+      ownerChat(
+        h,
+        "messages",
+        userId,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            shareId: `owner:${workspaceId}`,
+            channelWireId: GROUP,
+            lane: "posts",
+            id: "o-refused",
+            body: "x",
+            authorKind: "human",
+          }),
+          headers: { "content-type": "application/json", ...headers },
+        },
+        workspaceId,
+      );
+    const unknown = await refusalBytes(
+      await chat(h, "messages?shareId=share-never&since=0&limit=50", OWNER),
+    );
+    expect(unknown.startsWith("404:")).toBe(true);
+    expect((await read()).status).toBe(200);
+    for (const [userId, workspaceId] of [
+      ["ana", WORKSPACE],
+      ["mallory", WORKSPACE],
+      [OWNER, "workspace-never"],
+    ] as const) {
+      const label = `${userId} ${workspaceId}`;
+      expect(await refusalBytes(await read(userId, {}, workspaceId)), label).toBe(unknown);
+      expect(await refusalBytes(await list(userId, workspaceId)), label).toBe(unknown);
+      expect(await refusalBytes(await write(userId, {}, workspaceId)), label).toBe(unknown);
+    }
+    // The chat key names the workspace the owner's scheme names, and only that scheme opens it.
+    expect(
+      await refusalBytes(
+        await ownerChat(h, "messages?shareId=owner:workspace-never&since=0&limit=50"),
+      ),
+    ).toBe(unknown);
+    expect(
+      await refusalBytes(await chat(h, `messages?shareId=${OWNER_CHAT}&since=0&limit=50`, OWNER)),
+    ).toBe(unknown);
+    expect(
+      await refusalBytes(await chat(h, `channels?workspaceId=${WORKSPACE}`, OWNER)),
+    ).not.toMatch(/^200:/u);
+    for (const headers of [
+      { origin: "https://elsewhere.test" },
+      { "x-dohc-relay-exchange-key": "wrong-key-wrong-key-wrong-key-wrong" },
+    ] as Record<string, string>[]) {
+      const label = JSON.stringify(headers);
+      expect(await refusalBytes(await read(OWNER, { headers })), label).toBe(unknown);
+      expect(await refusalBytes(await write(OWNER, headers)), label).toBe(unknown);
+    }
+    // With no cookie, the owner's form answers as an unknown share does with none.
+    const signedOut = await refusalBytes(
+      await h(
+        new Request("http://relay.test/sync/named-chat/messages?shareId=share-never&since=0", {
+          headers: { origin: SHARE_WEB_ORIGIN, "x-dohc-relay-exchange-key": RELAY_EXCHANGE_KEY },
+        }),
+      ),
+    );
+    expect(signedOut.startsWith("200:")).toBe(false);
+    expect(await refusalBytes(await read(OWNER, { headers: { cookie: "" } }))).toBe(signedOut);
+
+    fenceOwner(storage);
+    expect(await refusalBytes(await read())).toBe(unknown);
+    expect(await refusalBytes(await list())).toBe(unknown);
+    expect(await refusalBytes(await write())).toBe(unknown);
+  });
+
+  it("ends a held follow once the owner's account is fenced", async () => {
+    const { h, storage, activity } = await seed();
+    const page = await json(await ownerChat(h, `messages?shareId=${OWNER_CHAT}&since=0&limit=50`));
+    const held = ownerChat(
+      h,
+      `messages?shareId=${OWNER_CHAT}&since=${page.nextCursor}&hold=30000&limit=50`,
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    fenceOwner(storage);
+    // A new message wakes the follow, which checks the owner again before it reads.
+    await ownerAppend(h, [message("msg-after", "t-team", "SENTINEL after the fence")]).catch(
+      () => {},
+    );
+    activity.wakeLog(WORKSPACE);
+    const next = await held;
+    expect(next.status).toBe(404);
+    expect(await next.text()).not.toContain("SENTINEL");
+  });
 });

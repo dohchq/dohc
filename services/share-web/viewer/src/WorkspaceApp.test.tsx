@@ -2736,15 +2736,19 @@ describe("the owner's page", () => {
   const paths = (fetch: ReturnType<typeof server>) =>
     fetch.mock.calls.map(([input]) => new URL(String(input), "https://share.test").pathname);
 
-  it("reads the files with the owner's session, shows Markdown read-only, and reads no Groups or live page", async () => {
+  it("reads the files with the owner's session, shows Markdown read-only, and reads the Groups by workspace with no live page", async () => {
     const fetch = server({ level: "edit", session: OWNER_SESSION });
     await render(OWNER);
     await settle(() => text().includes("Leave at nine."));
     expect(container.querySelector(".workspace-name")?.textContent).toBe("Trip");
     expect(container.querySelector(".badge")?.textContent).toBe("Owner");
     expect(container.querySelector('[role="textbox"]')).toBeNull();
-    expect(container.querySelector(".workspace-side")).toBeNull();
-    expect(container.querySelector('[role="tab"]')).toBeNull();
+    await settle(() => groupPanel().textContent!.includes("plans"));
+    expect(
+      [...container.querySelectorAll('.side-tabs [role="tab"], .workspace-tabs [role="tab"]')].map(
+        (tab) => tab.textContent,
+      ),
+    ).toEqual(["Comments", "Chats"]);
     const all = container.querySelector<HTMLAnchorElement>('a[aria-label="All workspaces"]');
     expect(all?.getAttribute("href")).toBe("/workspaces");
     const views = fetch.mock.calls.filter(([input]) =>
@@ -2756,23 +2760,24 @@ describe("the owner's page", () => {
         new Headers(init?.headers).get("x-dohc-link-session") ??
           new URL(String(input), "https://share.test").searchParams.get("session"),
       ).toBe(OWNER_SESSION);
-    expect(
-      paths(fetch).filter(
-        (path) => path.startsWith("/api/named-chat") || path.startsWith("/api/live"),
-      ),
-    ).toEqual([]);
+    expect(paths(fetch).filter((path) => path.startsWith("/api/live"))).toEqual([]);
+    const listings = fetch.mock.calls
+      .map(([input]) => new URL(String(input), "https://share.test"))
+      .filter((url) => url.pathname === "/api/named-chat/channels");
+    expect(listings.map((url) => url.search)).toEqual(["?workspaceId=ws-1"]);
     expect(vi.mocked(openMemberPage)).not.toHaveBeenCalled();
   });
 
-  it("shows only Files and Page on a phone", async () => {
+  it("shows Files, Page, Comments and Chats on a phone", async () => {
     narrow = true;
     server({ level: "edit", session: OWNER_SESSION });
     await render(OWNER);
     await settle(() => text().includes("Leave at nine."));
-    expect([...container.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent)).toEqual([
-      "Files",
-      "Page",
-    ]);
+    expect(
+      [...container.querySelectorAll('.side-tabs [role="tab"], .workspace-tabs [role="tab"]')].map(
+        (tab) => tab.textContent,
+      ),
+    ).toEqual(["Files", "Page", "Comments", "Chats"]);
   });
 
   it("asks a signed-out browser to sign in with the account that owns the workspace", async () => {

@@ -894,6 +894,7 @@ export function appendBrowserChatBatch(
           payloadJson: JSON.stringify({
             ...payload,
             createdAtMs: recordedAtMs,
+            ...("linkedAtMs" in payload ? { linkedAtMs: recordedAtMs } : {}),
             ...(storedPayload && op.opKind === "chat.message.append"
               ? payload.authorKind === "human"
                 ? { authorDisplayName: storedPayload.authorDisplayName }

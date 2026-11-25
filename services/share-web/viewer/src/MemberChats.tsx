@@ -21,14 +21,14 @@ export const LISTING_FAILED = "dohc could not load Groups and comments";
 export type MemberListing = "loading" | "failed" | MemberGroups;
 
 /**
- * The membership's share and Groups, which Chats and Comments both use, read once `grantId` is set:
+ * The membership's share and Groups, which Chats and Comments both use, read once `place` is set:
  * after the workspace opens, so an account that holds no membership reads as refused, not ended. `retry` reads them again.
  * `refresh` reads them again without showing a load, so a Group added while the workspace is open appears.
  * Given an age, it reads only when the last read is older. A refresh that fails keeps the Groups shown, and the next one tries again.
  * `reads` counts the reads that arrived, including one that brought the same Groups.
  */
 export function useMemberListing(
-  grantId: string | null,
+  place: string | null,
   accountId: string,
   onEnded: (reason: Ended) => void,
 ) {
@@ -43,7 +43,7 @@ export function useMemberListing(
   useEffect(() => {
     setFound("loading");
     readAt.current = null;
-    if (grantId === null) return;
+    if (place === null) return;
     const controller = new AbortController();
     // A rule can change while a read is out. A refresh asked for then reads once more after it,
     // and only the newest read asked for shows, so an older answer never replaces a newer level.
@@ -52,7 +52,7 @@ export function useMemberListing(
     const read = () => {
       const number = asked;
       pending = true;
-      void openMemberGroups(grantId, controller.signal)
+      void openMemberGroups(place, controller.signal)
         .then(
           (groups) => {
             if (controller.signal.aborted || number !== asked) return;
@@ -101,7 +101,7 @@ export function useMemberListing(
       controller.abort();
       request.current = null;
     };
-  }, [grantId, accountId, attempt]);
+  }, [place, accountId, attempt]);
   const refresh = useCallback((olderThanMs = 0) => request.current?.(olderThanMs), []);
   return {
     found,

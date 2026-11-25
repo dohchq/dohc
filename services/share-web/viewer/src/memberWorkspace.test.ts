@@ -56,7 +56,7 @@ it("opens every Group the member reaches, each with its own access", async () =>
     }),
   );
   vi.stubGlobal("fetch", fetch);
-  const opened = await openMemberGroups("grant-1", new AbortController().signal);
+  const opened = await openMemberGroups("grantId=grant-1", new AbortController().signal);
   expect(String((fetch.mock.calls[0] as unknown[])[0])).toBe(
     "/api/named-chat/channels?grantId=grant-1",
   );
@@ -110,9 +110,9 @@ it("opens every Group the member reaches, each with its own access", async () =>
       }),
     ),
   );
-  await expect(openMemberGroups("grant-1", new AbortController().signal)).rejects.toBeInstanceOf(
-    NamedChatError,
-  );
+  await expect(
+    openMemberGroups("grantId=grant-1", new AbortController().signal),
+  ).rejects.toBeInstanceOf(NamedChatError);
 });
 
 it("follows every Group in one request, each message naming its Group", async () => {

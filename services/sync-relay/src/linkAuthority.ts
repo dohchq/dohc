@@ -109,7 +109,7 @@ export interface LinkAuthorityResolver {
 
 const AGENT_SCHEME = /^DohcAgent (.+)$/u;
 const MEMBER_SCHEME = /^DohcMember ([A-Za-z0-9_.:-]{1,256})$/u;
-const OWNER_SCHEME = /^DohcOwner ([A-Za-z0-9_.:-]{1,256})$/u;
+export const OWNER_SCHEME = /^DohcOwner ([A-Za-z0-9_.:-]{1,256})$/u;
 const AGENT_TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/u;
 

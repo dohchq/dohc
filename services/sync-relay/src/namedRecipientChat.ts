@@ -11,6 +11,7 @@ import {
   relayError,
   type RelayErrorCode,
 } from "./errors";
+import { OWNER_SCHEME } from "./linkAuthority";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import {
   browserChatWaitGroup,
@@ -24,6 +25,7 @@ import {
   linkChatOrigin,
   LINK_CHAT_MESSAGE_ID_PREFIX,
   namedShareOrigin,
+  ownerBrowserOrigin,
   personalAgentOrigin,
   PERSONAL_AGENT_ID_PREFIX,
   PERSONAL_AGENT_ORIGIN_PREFIX,
@@ -304,7 +306,10 @@ export function createNamedRecipientChat(options: {
   const followsByUser = new Map<string, number>();
   const followsByWorkspace = new Map<string, number>();
   const refuse = () =>
-    Response.json({ ok: false, error: "not found" }, { status: 404, headers: cacheHeaders });
+    Response.json(
+      { ok: false, error: "not found", code: "not_found" },
+      { status: 404, headers: cacheHeaders },
+    );
   const unavailable = () => new Response(null, { status: 503, headers: cacheHeaders });
   const cancelledResponse = (request: Request) =>
     request.signal.aborted ? refuse() : unavailable();
@@ -363,6 +368,9 @@ export function createNamedRecipientChat(options: {
     const work = (async () => {
       try {
         let input: Record<string, unknown> = {};
+        // The owner names their workspace, never a share or grant. Their page's chat key is `owner:<workspace>`.
+        const owned = OWNER_SCHEME.exec(request.headers.get("authorization") ?? "")?.[1];
+        const ownerKey = owned && `owner:${owned}`;
         if (request.method === "POST") {
           if (
             url.search ||
@@ -403,7 +411,7 @@ export function createNamedRecipientChat(options: {
             throw relayError("share_op_rejected");
         } else {
           const allowed = channels
-            ? ["grantId"]
+            ? [owned ? "workspaceId" : "grantId"]
             : ["shareId", "channelWireId", "path", "before", "since", "hold", "limit"];
           if (
             [...url.searchParams.keys()].some(
@@ -412,16 +420,23 @@ export function createNamedRecipientChat(options: {
           )
             throw badRequest("invalid query");
         }
-        const grantId = channels ? invitationId(url.searchParams.get("grantId")) : undefined;
+        const grantId =
+          channels && !owned ? invitationId(url.searchParams.get("grantId")) : undefined;
         const grant = grantId ? storage.getShareGrant(grantId) : undefined;
         const shareId = channels
-          ? grant?.shareId
+          ? owned
+            ? url.searchParams.get("workspaceId") === owned && ownerKey
+            : grant?.shareId
           : parseString(
               request.method === "POST" ? input.shareId : url.searchParams.get("shareId"),
               "shareId",
               256,
             );
-        const share = shareId && storage.getShare(shareId);
+        const share = owned
+          ? shareId === ownerKey
+            ? { workspaceId: owned }
+            : undefined
+          : shareId && storage.getShare(shareId);
         // Authenticate before answering either missing or existing coordinates.
         const actor = await options.resolveActor(
           new Request(request.url, {
@@ -431,7 +446,8 @@ export function createNamedRecipientChat(options: {
           share ? share.workspaceId : "",
         );
         controller.signal.throwIfAborted();
-        if (channels) await options.claimPendingShares(actor.userId, controller.signal);
+        // The owner holds the workspace, not an invite.
+        if (channels && !owned) await options.claimPendingShares(actor.userId, controller.signal);
         if (!share || !shareId || actor.workspaceId !== share.workspaceId) throw notFound();
         if (following) {
           const count = followsByUser.get(actor.userId) ?? 0;
@@ -446,8 +462,22 @@ export function createNamedRecipientChat(options: {
         }
         // A member's browser hears one refusal: a removed member reads like an unknown share, as the member's link reads do.
         const membership =
+          "selectorJson" in share &&
           (JSON.parse(share.selectorJson) as { kind?: unknown }).kind === "workspace";
-        const action = (kind: "read" | "append") => {
+        // The owner reaches their workspace as an admin does, checked again on every read, wake and write.
+        const action = (
+          kind: "read" | "append",
+        ): Pick<AuthorizedShareAction, "effectiveSelector"> & {
+          share: { shareId: string; workspaceId: string };
+        } => {
+          if (owned) {
+            if (storage.workspaceRoleOf(owned, actor.userId)?.role !== "owner") throw notFound();
+            const reach = storage.memberReach(owned, actor.userId, "admin", "edit");
+            return {
+              share: { shareId, workspaceId: owned },
+              effectiveSelector: { kind: "workspace", role: "admin", reach },
+            };
+          }
           try {
             return requireShareAction(shareId, actor.userId, kind);
           } catch (error) {
@@ -608,7 +638,8 @@ export function createNamedRecipientChat(options: {
           const id = parseString(input.id, "id", 256);
           if (!id.isWellFormed()) throw badRequest("invalid id");
           const authorKind = input.authorKind;
-          if (authorKind !== "human" && authorKind !== "agent")
+          // The owner's browser posts as the owner, never as an agent.
+          if (authorKind !== "human" && (owned || authorKind !== "agent"))
             throw badRequest("invalid author kind");
           if (authorKind === "human" && Object.hasOwn(input, "authorDisplayName"))
             throw relayError("share_op_rejected");
@@ -625,7 +656,9 @@ export function createNamedRecipientChat(options: {
           if (!body || Buffer.byteLength(body) > MAX_MESSAGE_BODY_BYTES)
             throw badRequest("invalid body");
           const originId = "browser-chat";
-          const storedOrigin = namedShareOrigin(shareId, actor.userId, originId);
+          const storedOrigin = owned
+            ? ownerBrowserOrigin(actor.userId)
+            : namedShareOrigin(shareId, actor.userId, originId);
           const messageId = `browser-message:${sha256Hex(JSON.stringify([shareId, actor.userId, id]))}`;
           // A new Group message starts a post, or joins the Group's chat, which is one conversation.
           // A reply names its thread, and a reply in the chat may name the message it answers.
@@ -689,7 +722,13 @@ export function createNamedRecipientChat(options: {
                     {
                       opKind: "chat.thread.create",
                       payload: file
-                        ? { threadId, title: "", linkedPath: file.filePath, createdAtMs }
+                        ? {
+                            threadId,
+                            title: "",
+                            linkedPath: file.filePath,
+                            linkedAtMs: createdAtMs,
+                            createdAtMs,
+                          }
                         : { threadId, title: "", channelWireId, lane: threadLane, createdAtMs },
                     },
                   ]
@@ -729,6 +768,7 @@ export function createNamedRecipientChat(options: {
               { route: "share-log", shareId },
               actor,
               messageId,
+              owned ? { originId: storedOrigin, authorize: () => action("append") } : undefined,
             );
           };
           const result = await append();

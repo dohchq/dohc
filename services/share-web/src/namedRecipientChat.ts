@@ -244,10 +244,11 @@ export function createNamedRecipientChatClient(options: {
       request,
       async (signal, relay) => {
         try {
-          let body: string | undefined;
+          let body: string | undefined, input: unknown;
           if (write) {
             try {
-              body = JSON.stringify(await readBoundedJson(request, limits.maxRequestBytes, signal));
+              input = await readBoundedJson(request, limits.maxRequestBytes, signal);
+              body = JSON.stringify(input);
             } catch (error) {
               if (error instanceof RangeError && !signal.aborted)
                 return Response.json(
@@ -262,6 +263,12 @@ export function createNamedRecipientChatClient(options: {
                 { status: 413, headers: cacheHeaders },
               );
           }
+          // The owner's page names their workspace, and keys its chat `owner:<workspace>`.
+          const key = write ? record(input) && input.shareId : url.searchParams.get("shareId");
+          const owned =
+            url.searchParams.get("workspaceId") ??
+            (typeof key === "string" && key.startsWith("owner:") ? key.slice(6) : null);
+          if (owned !== null && !/^[A-Za-z0-9_.:-]{1,256}$/u.test(owned)) return refuse();
           const relayUrl = new URL(url.pathname.replace("/api/", "/sync/"), options.relayUrl);
           relayUrl.search = url.search;
           const response = await relay(
@@ -274,6 +281,7 @@ export function createNamedRecipientChatClient(options: {
                 cookie,
                 origin: options.publicOrigin,
                 "x-dohc-relay-exchange-key": options.exchangeKey,
+                ...(owned === null ? {} : { authorization: `DohcOwner ${owned}` }),
                 ...(write ? { "content-type": "application/json" } : {}),
               },
             }),

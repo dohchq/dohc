@@ -386,7 +386,7 @@ test("a member reads a page, comments on it and posts in a Group in the browser 
       `/s/workspace/${encodeURIComponent(grantId!.grantId)}`,
     );
 
-    // The owner signs in on the list, opens the workspace, and reads it with no Groups or Comments.
+    // The owner signs in on the list, opens the workspace, reads it, and posts in a Group.
     const ownerPage = await ownerContext.newPage();
     ownerPage.on("pageerror", (error) => failures.push(String(error)));
     await ownerPage.goto(`${viewer}/workspaces`);
@@ -400,7 +400,31 @@ test("a member reads a page, comments on it and posts in a Group in the browser 
     await ownerFiles.getByRole("treeitem", { name: "budget.md" }).click();
     await expect(ownerPage.getByText("Hotel 780, flights 640.")).toBeVisible();
     await expect(ownerPage.getByText("Owner", { exact: true })).toBeVisible();
-    await expect(ownerPage.getByRole("region", { name: "Chats" })).toHaveCount(0);
+    const ownerChats = ownerPage.getByRole("region", { name: "Chats" });
+    await expect(ownerChats.getByText("I'll buy the train tickets.")).toBeVisible();
+    await ownerChats.getByRole("textbox", { name: "Message" }).fill("Thanks, Sam.");
+    await ownerChats.getByRole("button", { name: "Send", exact: true }).click();
+    await expect(ownerChats.getByText("Thanks, Sam.")).toBeVisible();
+    // The owner's desktop reads the post from the log as a message of theirs, from their browser, in that Group.
+    const ownerLog = (await (await owner(`/sync/${workspaceId}/log?since=0&limit=500`)).json()) as {
+      ops: Array<{ opKind: string; originId: string; payload?: unknown; payloadJson?: string }>;
+    };
+    const ownerOps = ownerLog.ops.map((op) => ({
+      opKind: op.opKind,
+      originId: op.originId,
+      ...((op.payload ?? JSON.parse(op.payloadJson ?? "{}")) as {
+        body?: string;
+        threadId?: string;
+      }),
+    }));
+    const thanks = ownerOps.find(
+      (op) => op.opKind === "chat.message.append" && op.body === "Thanks, Sam.",
+    );
+    expect(thanks).toMatchObject({ authorUserId: "owner", originId: "relay:owner-browser:owner" });
+    expect(
+      ownerOps.find((op) => op.opKind === "chat.thread.create" && op.threadId === thanks!.threadId),
+    ).toMatchObject({ channelWireId: "wire-planning" });
+    await ownerPage.screenshot({ path: testInfo.outputPath("owner-chat.png") });
     // A write from the owner's computer reaches the open page without a reload.
     await write("trip/budget.md", "# Budget\n\nHotel 780, flights 640, train 30.");
     await expect(ownerPage.getByText("Hotel 780, flights 640, train 30.")).toBeVisible();
