@@ -313,23 +313,37 @@ function ProductDemoWindow() {
   // Shell shortcuts only reach the demo while focus is inside it. When the
   // focused control unmounts, such as a closed menu or palette, the browser
   // drops focus to the page, so the window takes it back. A press on the page
-  // leaves focus there. React skips the focusout of a node it is removing, so
-  // this listens on the demo's root.
+  // leaves focus there, even when it closed a menu. React skips the focusout
+  // of a node it is removing, so this listens on the demo's root.
   const windowRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const root = windowRef.current?.getRootNode();
-    if (!root) return;
+    const demo = windowRef.current;
+    const root = demo?.getRootNode();
+    if (!demo || !root) return;
+    let pressedOutside = false;
+    const notePress = (event: PointerEvent) => {
+      pressedOutside = !event.composedPath().includes(root);
+    };
     const keepFocusInside = (event: Event) => {
       const left = event.target;
       if (!(event instanceof FocusEvent) || event.relatedTarget !== null) return;
       if (!(left instanceof Node)) return;
       window.setTimeout(() => {
-        if (!left.isConnected && document.activeElement === document.body)
-          windowRef.current?.focus({ preventScroll: true });
+        if (!pressedOutside && !left.isConnected && document.activeElement === document.body)
+          demo.focus({ preventScroll: true });
       });
     };
+    const noteFocusInside = () => {
+      pressedOutside = false;
+    };
+    document.addEventListener("pointerdown", notePress, true);
     root.addEventListener("focusout", keepFocusInside);
-    return () => root.removeEventListener("focusout", keepFocusInside);
+    root.addEventListener("focusin", noteFocusInside);
+    return () => {
+      document.removeEventListener("pointerdown", notePress, true);
+      root.removeEventListener("focusout", keepFocusInside);
+      root.removeEventListener("focusin", noteFocusInside);
+    };
   }, []);
 
   const activeTab = openTabs.includes(activePath) ? activePath : null;

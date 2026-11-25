@@ -201,6 +201,14 @@
   }
 }
 
+/* The demo's table pane is narrower than the desktop's, and a pinned Name
+   column would cover the columns that scroll under it. When the table fits,
+   nothing scrolls, so pinning has no effect anyway. */
+[data-testid="collection-page"] [role="grid"] .sticky:not(.left-0, .top-0) {
+  position: relative;
+  left: 0 !important;
+}
+
 @media (max-width: 1050px) {
   .demo-workbench > [data-testid="side-panel"] {
     width: 270px !important;
@@ -211,18 +219,6 @@
    workspace names need the room. The demo's name is short, and the demo
    window is narrower than the page, so Go to… keeps its word until the
    window itself runs out of room. */
-/* Beside an open sidebar the table pane is too narrow for a pinned Name
-   column: the other columns would scroll under it. */
-@media (max-width: 900px) {
-  .demo-window[data-sidebar-visible="true"]
-    [data-testid="collection-page"]
-    [role="grid"]
-    .sticky:not(.left-0, .top-0) {
-    position: relative;
-    left: 0 !important;
-  }
-}
-
 @media (min-width: 721px) and (max-width: 1100px) {
   [data-testid="titlebar"] {
     --quick-open-width: clamp(5rem, 100vw - 37.5rem, 20rem);
@@ -273,13 +269,6 @@
 
   [data-testid="collection-page"] form[role="search"] > input {
     width: 100%;
-  }
-
-  /* A pinned Name column would fill the table, and the other columns would
-     scroll under it. Here it scrolls with them. */
-  [data-testid="collection-page"] [role="grid"] .sticky:not(.left-0, .top-0) {
-    position: relative;
-    left: 0 !important;
   }
 
   .demo-workbench {
