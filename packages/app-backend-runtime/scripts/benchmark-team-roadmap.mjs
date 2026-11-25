@@ -1,4 +1,3 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -11,10 +10,6 @@ import { createDatasetHost } from "../dist/dataset-host.mjs";
 import { createDatasetJournal } from "../dist/journal.mjs";
 import { createDatasetSupervisor } from "../dist/supervisor.mjs";
 
-// Seeds the team roadmap Collection with 5,000 items, then runs a mixed closed-loop workload
-// through the real DatasetHost at each concurrency level. Each level runs twice from a fresh
-// seed: once plain for latency and throughput, once instrumented for the time breakdown.
-// Usage: node scripts/build.mjs && node scripts/benchmark-team-roadmap.mjs [ops per run] [levels]
 const OPS = Number(process.argv[2] ?? 2000);
 const LEVELS = (process.argv[3] ?? "10,30").split(",").map(Number);
 const WARMUP = 100;
@@ -73,24 +68,22 @@ const PEOPLE = {
 const person = (name) =>
   PEOPLE[name] ?? { kind: "named", userId: name, grantId: "eng", access: "edit", helper: false };
 
-// Host-side SQLite time, charged to the operation whose async context made the call.
-const operations = new AsyncLocalStorage();
+const usage = { hostSqlite: 0, ipc: 0, workerSqlite: 0, boot: 0, guest: 0, checkpoints: 0 };
 let instrumented = false;
-function chargeHost(owner, name) {
+function timeHost(owner, name) {
   const original = owner[name];
   owner[name] = function (...args) {
-    const trace = instrumented ? operations.getStore() : undefined;
-    if (!trace) return original.apply(this, args);
+    if (!instrumented) return original.apply(this, args);
     const start = performance.now();
     try {
       return original.apply(this, args);
     } finally {
-      trace.hostSqlite += performance.now() - start;
+      usage.hostSqlite += performance.now() - start;
     }
   };
 }
-for (const name of ["exec", "prepare"]) chargeHost(DatabaseSync.prototype, name);
-for (const name of ["run", "get", "all", "iterate"]) chargeHost(StatementSync.prototype, name);
+for (const name of ["exec", "prepare"]) timeHost(DatabaseSync.prototype, name);
+for (const name of ["run", "get", "all", "iterate"]) timeHost(StatementSync.prototype, name);
 
 function seeded(seed) {
   let state = seed >>> 0;
@@ -135,7 +128,6 @@ async function open(level) {
         windowsHide: true,
       },
     );
-    let lastPrepared;
     child.on("message", (message) => {
       const timing = message?.teamRoadmapTiming;
       const sent = commands.get(timing?.id ?? message?.id);
@@ -147,13 +139,15 @@ async function open(level) {
         commands.delete(message.id);
         const rtt = performance.now() - sent.at;
         if (sent.kind === "snapshot") snapshots.push(rtt);
-        if (sent.trace) {
+        if (instrumented) {
           const child = sent.child ?? { totalMs: rtt, sqliteMs: 0, bootMs: 0 };
-          sent.trace.ipc += rtt - child.totalMs;
-          sent.trace.workerSqlite += child.sqliteMs;
-          sent.trace.boot += child.bootMs;
-          sent.trace.guest += child.totalMs - child.sqliteMs - child.bootMs;
-          if (sent.kind === "prepare") sent.trace.prepared = performance.now();
+          usage.ipc += rtt - child.totalMs;
+          if (sent.kind === "snapshot") usage.checkpoints += child.totalMs;
+          else {
+            usage.workerSqlite += child.sqliteMs;
+            usage.boot += child.bootMs;
+            usage.guest += child.totalMs - child.sqliteMs - child.bootMs;
+          }
         }
       }
       options.onMessage(message);
@@ -162,14 +156,7 @@ async function open(level) {
     child.on("close", options.onExit);
     return {
       postMessage(message) {
-        const kind = message.command?.kind;
-        let trace;
-        if (kind === "prepare") {
-          trace = traces.get(JSON.parse(message.command.guest.inputJson)._trace);
-          if (trace) trace.dispatched = performance.now();
-          lastPrepared = trace;
-        } else if (kind === "finalize" || kind === "discard") trace = lastPrepared;
-        commands.set(message.id, { kind, at: performance.now(), trace });
+        commands.set(message.id, { kind: message.command?.kind, at: performance.now() });
         child.send(message, (error) => {
           if (error) options.onError(error);
         });
@@ -188,23 +175,11 @@ async function open(level) {
     runtime: { launch },
     maintenanceStorage: { authorize() {}, account() {} },
   });
-  const timedSupervisor = new Proxy(supervisor, {
-    get(target, property) {
-      const value = Reflect.get(target, property, target);
-      if (property === "invoke")
-        return (input) => {
-          const trace = operations.getStore();
-          if (trace) trace.queued = performance.now();
-          return value.call(target, input);
-        };
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
   const host = createDatasetHost({
     db,
     transaction,
     journal,
-    supervisor: timedSupervisor,
+    supervisor,
     resolveAuthority(name, request) {
       if (request.access.kind === "app" && !APPS.includes(request.access.appId))
         throw new Error("Unknown app");
@@ -230,40 +205,25 @@ async function open(level) {
       binding: resolveAppDatasetReferenceBinding(reference, definition.datasetId, revision),
     });
   }
-  const traces = new Map();
   let sequence = 0;
   async function call(name, app, operation, input = {}) {
-    const id = ++sequence;
-    const trace = {
-      operation,
-      start: performance.now(),
-      hostSqlite: 0,
-      ipc: 0,
-      workerSqlite: 0,
-      boot: 0,
-      guest: 0,
-    };
-    traces.set(id, trace);
+    const trace = { operation, start: performance.now() };
     try {
-      const reply = await operations.run(trace, () =>
-        host.invoke(name, {
-          ...scope,
-          revision: 1,
-          revisionSha256: revision.revisionSha256,
-          operationId: operationId(operation),
-          input: { ...input, _trace: id },
-          idempotencyKey: `bench-${id}`,
-          access: { kind: "app", appId: app },
-        }),
-      );
+      const reply = await host.invoke(name, {
+        ...scope,
+        revision: 1,
+        revisionSha256: revision.revisionSha256,
+        operationId: operationId(operation),
+        input,
+        idempotencyKey: `bench-${++sequence}`,
+        access: { kind: "app", appId: app },
+      });
       trace.end = performance.now();
       return { trace, result: reply.result };
     } catch (error) {
       trace.end = performance.now();
       trace.error = error?.refusal?.code ?? error?.code ?? "error";
       return { trace };
-    } finally {
-      traces.delete(id);
     }
   }
   return {
@@ -337,7 +297,6 @@ async function seed(f) {
     do {
       const { result, trace } = await f.call("pm", "roadmap-pm", "listItems", {
         status,
-        limit: 100,
         ...(after ? { after } : {}),
       });
       if (trace.error) throw new Error(`Listing failed: ${trace.error}`);
@@ -383,7 +342,7 @@ function nextCall(caller, random) {
   if (caller.role === "exec" || (caller.role === "pm" && roll < 0.2))
     return { operation: "rollup" };
   if (roll < (caller.role === "pm" ? 0.7 : 0.5))
-    return { operation: "listItems", input: { status: pick(STATUSES), limit: 50 } };
+    return { operation: "listItems", input: { status: pick(STATUSES) } };
   if (caller.role === "pm") {
     if (roll < 0.9) {
       const item = pick(caller.plannable);
@@ -467,51 +426,43 @@ async function runLevel(level, withTiming) {
     await workload(f, group, WARMUP, random, () => {});
     const traces = [];
     f.snapshots.length = 0;
+    for (const key of Object.keys(usage)) usage[key] = 0;
+    const loop = performance.eventLoopUtilization();
     const elapsed = await workload(f, group, OPS, random, (trace) => traces.push(trace));
-    return { level, seedMs, elapsed, traces, snapshots: [...f.snapshots], sqlite: f.sqliteVersion };
+    const hostBusy = performance.eventLoopUtilization(loop).active;
+    return {
+      level,
+      seedMs,
+      elapsed,
+      traces,
+      snapshots: [...f.snapshots],
+      sqlite: f.sqliteVersion,
+      usage: { ...usage },
+      hostBusy,
+    };
   } finally {
     await f.close();
     instrumented = false;
   }
 }
 
-function breakdown(traces) {
-  const fifo = traces.filter((trace) => trace.queued).sort((a, b) => a.queued - b.queued);
-  const queue = new Map(
-    fifo.map((trace, index) => [
-      trace,
-      index
-        ? Math.max(0, Math.min(fifo[index - 1].end, trace.dispatched ?? trace.end) - trace.queued)
-        : 0,
-    ]),
-  );
-  const ok = fifo.filter((trace) => !trace.error && trace.dispatched && trace.prepared);
-  const sums = {
-    queue: 0,
-    hostSqlite: 0,
-    hostJs: 0,
-    ipc: 0,
-    workerSqlite: 0,
-    boot: 0,
-    guest: 0,
-    total: 0,
+function breakdown(run) {
+  const ok = run.traces.filter((trace) => !trace.error);
+  const per = (value) => value / Math.max(1, ok.length);
+  const { hostSqlite, ipc, workerSqlite, boot, guest, checkpoints } = run.usage;
+  return {
+    wall: per(run.elapsed),
+    latency: per(ok.reduce((sum, trace) => sum + trace.end - trace.start, 0)),
+    hostBusy: per(run.hostBusy),
+    hostSqlite: per(hostSqlite),
+    hostJs: per(run.hostBusy - hostSqlite),
+    worker: per(workerSqlite + boot + guest + checkpoints),
+    workerSqlite: per(workerSqlite),
+    boot: per(boot),
+    guest: per(guest),
+    checkpoints: per(checkpoints),
+    ipc: per(ipc),
   };
-  for (const trace of ok) {
-    const total = trace.end - trace.start;
-    const waited = queue.get(trace);
-    sums.total += total;
-    sums.queue += waited;
-    sums.hostSqlite += trace.hostSqlite;
-    sums.ipc += trace.ipc;
-    sums.workerSqlite += trace.workerSqlite;
-    sums.boot += trace.boot;
-    sums.guest += trace.guest;
-    sums.hostJs +=
-      total - waited - trace.hostSqlite - trace.ipc - trace.workerSqlite - trace.boot - trace.guest;
-  }
-  return Object.fromEntries(
-    Object.entries(sums).map(([key, value]) => [key, value / Math.max(1, ok.length)]),
-  );
 }
 
 const print = (line = "") => console.log(line);
@@ -562,31 +513,36 @@ for (const { plain } of results) {
   }
 }
 print();
-print("Where an operation's time goes (instrumented run, mean ms per successful operation):");
+print("Where the time goes (instrumented run, ms per successful operation):");
 print();
 print(
-  "| Callers | Total | Lane queue | Host SQLite | Host JS | IPC + clone | Worker SQLite | QuickJS boot | QuickJS guest + worker JS | Instrumented p50 |",
+  "| Callers | Wall | Mean latency | Host thread busy | Host SQLite | Host JS | Worker busy | Worker SQLite | QuickJS boot | Guest + worker JS | Checkpoints | IPC + reply wait |",
 );
-print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
 for (const { timed } of results) {
-  const b = breakdown(timed.traces);
-  const latency = stats(timed.traces.map((trace) => trace.end - trace.start));
+  const b = breakdown(timed);
   print(
-    `| ${timed.level} | ${ms(b.total)} | ${ms(b.queue)} | ${ms(b.hostSqlite)} | ${ms(b.hostJs)} | ${ms(b.ipc)} | ${ms(b.workerSqlite)} | ${ms(b.boot)} | ${ms(b.guest)} | ${ms(latency.p50)} |`,
+    `| ${timed.level} | ${ms(b.wall)} | ${ms(b.latency)} | ${ms(b.hostBusy)} | ${ms(b.hostSqlite)} | ${ms(b.hostJs)} | ${ms(b.worker)} | ${ms(b.workerSqlite)} | ${ms(b.boot)} | ${ms(b.guest)} | ${ms(b.checkpoints)} | ${ms(b.ipc)} |`,
   );
 }
 print();
 print(
-  "One Collection has one lane, so its operations run one at a time. Lane queue is the time an operation waits for the one ahead of it, rebuilt from arrival order.",
+  "Wall is the measured run's duration divided by successful operations, so it is 1,000 / ops per second. Every other column is a total over the run divided by the same count, so no time is charged to the wrong operation.",
 );
 print(
-  "Host JS is the rest of the host's own work: authorization checks, hashing, JSON, and waiting for the shared event loop.",
+  "The host thread and the worker process run at the same time, so their busy times can add up to more than Wall. The side whose busy time is closest to Wall is the bottleneck.",
 );
 print(
-  "QuickJS boot is the 24 MiB Wasm memory plus instantiate; QuickJS runtime setup after instantiate counts as guest time.",
+  "One Collection runs one operation at a time, so Mean latency minus Wall is roughly time spent waiting behind other callers.",
 );
 print(
-  "Snapshots counts materialization checkpoints taken during the measured run; their time lands in the lane queue of the operations behind them.",
+  "Host thread busy is event loop utilization: host SQLite, host JS such as authorization, hashing and JSON, and the benchmark's own callers. Host JS is busy time minus host SQLite.",
+);
+print(
+  "QuickJS boot is the 24 MiB Wasm memory plus instantiate; QuickJS runtime setup after instantiate counts as guest time. Checkpoints are materialization snapshots the worker took during the run.",
+);
+print(
+  "IPC + reply wait is round-trip time minus the worker's own time, so it includes structured cloning and any wait for the busy host thread to read the reply.",
 );
 for (const { plain, timed } of results)
   for (const run of [plain, timed]) {

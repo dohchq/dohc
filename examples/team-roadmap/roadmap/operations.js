@@ -7,7 +7,8 @@ const MOVES = {
 };
 const MAX_MILESTONES = 100;
 const MAX_IMPORT = 1000;
-const MAX_PAGE = 100;
+const MAX_PAGE = 25;
+const PREVIEW = 280;
 const MAX_PARAMS = 128;
 const ITEM_COLUMNS = [
   "id",
@@ -26,7 +27,9 @@ const ITEM_COLUMNS = [
   "updated_at",
   "version",
 ];
-const SELECT_ITEM = `SELECT i.id, i.title, i.detail, i.area, i.status, i.priority,
+const SELECT_ITEM = `SELECT i.id, i.title,
+  CASE WHEN length(i.detail) > ${PREVIEW} THEN substr(i.detail, 1, ${PREVIEW - 1}) || '…' ELSE i.detail END AS detail,
+  i.area, i.status, i.priority,
   i.milestone_id AS milestoneId, m.name AS milestoneName, i.estimate_days AS estimateDays,
   i.triage_note AS triageNote, i.requested_by AS requestedBy, i.triaged_by AS triagedBy,
   i.updated_by AS updatedBy, i.created_at AS createdAt, i.updated_at AS updatedAt, i.version,
@@ -43,7 +46,6 @@ function requireTeam(ctx) {
 }
 
 function who(ctx) {
-  if (ctx.caller.kind === "automation") return `automation:${ctx.caller.automationId}`;
   return ctx.caller.userId ?? ctx.caller.kind;
 }
 
@@ -188,7 +190,7 @@ globalThis.operations = {
       where.push("i.milestone_id = ?");
       values.push(typeof input.milestoneId === "string" ? input.milestoneId : "");
     }
-    const limit = input.limit === undefined ? 50 : whole(ctx, input.limit, 1, MAX_PAGE, "Page size");
+    const limit = input.limit === undefined ? MAX_PAGE : whole(ctx, input.limit, 1, MAX_PAGE, "Page size");
     const total = ctx.db.query(`SELECT count(*) AS n FROM items i WHERE ${where.join(" AND ")}`, values)[0].n;
     const after = input.after;
     if (after !== undefined) {

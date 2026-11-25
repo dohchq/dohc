@@ -21,7 +21,7 @@ An item moves `new` → `triaged` → `planned` → `in_progress` → `done`. Th
 
 - Engineering triages a new item before product can plan it. Triage records an estimate of 1 to 60 days and an optional note.
 - Planning sets a priority from P0 to P3 and a milestone. Work starts only on planned items.
-- Every change takes the item's `version` and refuses with `conflict` if someone changed it first.
+- Every change to an existing item takes its `version` and refuses with `conflict` if someone changed it first.
 - Archiving hides an item from every list and total. Its undo is `restoreItem`.
 - Who requested, triaged, and last changed an item comes from the signed-in caller, never from the input.
 
@@ -55,9 +55,9 @@ Some things to know before you share it:
 
 ## Tests and benchmark
 
-[team-roadmap-example.test.ts](../../packages/app-backend-runtime/src/team-roadmap-example.test.ts) runs all three apps against one Collection through the real host, worker, and QuickJS sandbox. It checks that changes from product and engineering show up in the rollup, that every operation outside an app's binding or a person's grant is refused without a history entry, and that each change records the person and app behind it.
+[team-roadmap-example.test.ts](../../packages/app-backend-runtime/src/team-roadmap-example.test.ts) calls each app's operations through that app's own binding, against one Collection, through the real host, worker, and QuickJS sandbox. It doesn't render the screens. It checks that changes from product and engineering show up in the rollup, that every operation outside an app's binding or a person's grant is refused without a history entry, and that each change records the person and app behind it.
 
-The benchmark seeds 5,000 items and runs a mixed read and write load at 10 and 30 concurrent callers. It prints latency percentiles, throughput, and where the time goes: lane queue, host SQLite and JS, IPC, worker SQLite, QuickJS start, and guest code. It doesn't run in CI. From `packages/app-backend-runtime`:
+The benchmark seeds 5,000 items and runs a mixed read and write load at 10 and 30 concurrent callers. It prints latency percentiles, throughput, and where the time goes: host SQLite and JS, worker SQLite, QuickJS start, guest code, checkpoints, and IPC. It doesn't run in CI. From `packages/app-backend-runtime`:
 
 ```sh
 pnpm bench:team-roadmap            # 2,000 operations per run at 10 and 30 callers

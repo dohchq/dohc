@@ -1,6 +1,6 @@
-import { useState, type FormEvent } from "react";
+import { useState, type FormEvent, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import { AppProvider, mutationKey, useApp, useDatasetQuery } from "dohc/app";
+import { AppProvider, isAppBackendError, mutationKey, useApp, useDatasetQuery } from "dohc/app";
 import {
   AppShell,
   Badge,
@@ -24,8 +24,7 @@ const VIEWS = [
   { id: "done", label: "Done" },
 ] as const;
 const AREAS = { platform: "Platform", apps: "Apps", sync: "Sync", mobile: "Mobile" };
-const PAGE = 50;
-const MAX_PAGE = 100;
+const PAGE = 25;
 
 type View = (typeof VIEWS)[number]["id"];
 type Area = keyof typeof AREAS;
@@ -42,14 +41,17 @@ interface Item {
   version: number;
 }
 
+type Cursor = [number, number, string];
+
 interface Page {
   items: Item[];
   total: number;
+  next: Cursor | null;
 }
 
 interface Failure {
   message: string;
-  retry(): void;
+  retry?: () => void;
 }
 
 const MOVES: Partial<Record<View, { label: string; to: View }[]>> = {
@@ -68,11 +70,12 @@ function Triage() {
   const client = useApp();
   const [view, setView] = useState<View>("new");
   const [area, setArea] = useState("");
-  const [limit, setLimit] = useState(PAGE);
+  const [cursors, setCursors] = useState<Cursor[]>([]);
   const list = useDatasetQuery<Page>("listItems", {
     status: view,
-    limit,
+    limit: PAGE,
     ...(area ? { area } : {}),
+    ...(cursors.length ? { after: cursors.at(-1) } : {}),
   });
   const [triaging, setTriaging] = useState<Item | null>(null);
   const [failure, setFailure] = useState<Failure | null>(null);
@@ -85,13 +88,23 @@ function Triage() {
       setFailure(null);
       done?.();
     } catch (error) {
+      const refusal = isAppBackendError(error) ? error.refusal : undefined;
+      if (refusal?.code === "conflict" || refusal?.code === "not_found") {
+        setTriaging(null);
+        list.reload();
+      }
       setFailure({
         message: errorText(error),
-        retry: () => void run(operation, input, done, key),
+        retry: refusal ? undefined : () => void run(operation, input, done, key),
       });
     } finally {
       setBusy(false);
     }
+  }
+
+  function triage(item: Item | null) {
+    setFailure(null);
+    setTriaging(item);
   }
 
   const columns = [
@@ -130,7 +143,7 @@ function Triage() {
       render: (item: Item) => (
         <Stack direction="horizontal" gap={6} wrap>
           {view === "new" ? (
-            <Button size="sm" variant="primary" onClick={() => setTriaging(item)}>
+            <Button size="sm" variant="primary" onClick={() => triage(item)}>
               Triage
             </Button>
           ) : (
@@ -153,6 +166,21 @@ function Triage() {
   ];
 
   const page = list.data;
+  const alert = failure ? (
+    <Callout
+      tone="danger"
+      title="That change didn't go through"
+      action={
+        failure.retry ? (
+          <Button size="sm" disabled={busy} onClick={failure.retry}>
+            Try again
+          </Button>
+        ) : null
+      }
+    >
+      {failure.message}
+    </Callout>
+  ) : null;
   return (
     <AppShell width="wide">
       <PageHeader
@@ -161,19 +189,7 @@ function Triage() {
         subtitle="Estimate new requests so product can plan them, then move planned work along."
       />
       <Stack gap={16}>
-        {failure ? (
-          <Callout
-            tone="danger"
-            title="That change didn't go through"
-            action={
-              <Button size="sm" disabled={busy} onClick={failure.retry}>
-                Try again
-              </Button>
-            }
-          >
-            {failure.message}
-          </Callout>
-        ) : null}
+        {triaging ? null : alert}
         {list.error ? (
           <Callout
             tone="danger"
@@ -193,7 +209,7 @@ function Triage() {
             value={view}
             onChange={(next) => {
               setView(next as View);
-              setLimit(PAGE);
+              setCursors([]);
             }}
             items={VIEWS}
           />
@@ -203,7 +219,7 @@ function Triage() {
               value={area}
               onChange={(event) => {
                 setArea(event.target.value);
-                setLimit(PAGE);
+                setCursors([]);
               }}
             >
               <option value="">All areas</option>
@@ -227,23 +243,27 @@ function Triage() {
               : "Items move here as work progresses."
           }
         />
-        {page && page.total > page.items.length ? (
-          limit < MAX_PAGE ? (
-            <Button onClick={() => setLimit(Math.min(MAX_PAGE, limit + PAGE))}>
-              Show more ({page.items.length} of {page.total})
+        {cursors.length || page?.next ? (
+          <Stack direction="horizontal" gap={8} justify="end">
+            <Button size="sm" disabled={!cursors.length} onClick={() => setCursors(cursors.slice(0, -1))}>
+              Previous
             </Button>
-          ) : (
-            <span>
-              Showing {page.items.length} of {page.total}. Pick an area to narrow the list.
-            </span>
-          )
+            <Button
+              size="sm"
+              disabled={!page?.next}
+              onClick={() => page?.next && setCursors([...cursors, page.next])}
+            >
+              Next
+            </Button>
+          </Stack>
         ) : null}
       </Stack>
       {triaging ? (
         <TriageDialog
           item={triaging}
+          alert={alert}
           busy={busy}
-          onClose={() => setTriaging(null)}
+          onClose={() => triage(null)}
           onSubmit={(input) => void run("triageItem", input, () => setTriaging(null))}
         />
       ) : null}
@@ -253,6 +273,7 @@ function Triage() {
 
 function TriageDialog(props: {
   item: Item;
+  alert: ReactNode;
   busy: boolean;
   onClose(): void;
   onSubmit(input: { id: string; version: number; estimateDays: number; note: string }): void;
@@ -282,6 +303,7 @@ function TriageDialog(props: {
     >
       <form id="triage-item" onSubmit={submit}>
         <Stack gap={12}>
+          {props.alert}
           <Field label="Estimate in days" htmlFor="triage-estimate" hint="1 to 60 working days.">
             <Input
               id="triage-estimate"

@@ -1,6 +1,6 @@
-import { useState, type FormEvent } from "react";
+import { useState, type FormEvent, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import { AppProvider, mutationKey, useApp, useDatasetQuery } from "dohc/app";
+import { AppProvider, isAppBackendError, mutationKey, useApp, useDatasetQuery } from "dohc/app";
 import {
   AppShell,
   Badge,
@@ -29,7 +29,6 @@ const STATUS_LABELS: Record<Status, string> = {
 };
 const AREAS = { platform: "Platform", apps: "Apps", sync: "Sync", mobile: "Mobile" };
 const PAGE = 25;
-const MAX_PAGE = 100;
 
 type Status = (typeof STATUSES)[number];
 type Area = keyof typeof AREAS;
@@ -48,9 +47,12 @@ interface Item {
   version: number;
 }
 
+type Cursor = [number, number, string];
+
 interface Page {
   items: Item[];
   total: number;
+  next: Cursor | null;
 }
 
 interface Rollup {
@@ -99,11 +101,12 @@ function Roadmap() {
   const rollup = useDatasetQuery<Rollup>("rollup");
   const [status, setStatus] = useState<Status>("triaged");
   const [milestone, setMilestone] = useState("");
-  const [limit, setLimit] = useState(PAGE);
+  const [cursors, setCursors] = useState<Cursor[]>([]);
   const list = useDatasetQuery<Page>("listItems", {
     status,
-    limit,
+    limit: PAGE,
     ...(milestone ? { milestoneId: milestone } : {}),
+    ...(cursors.length ? { after: cursors.at(-1) } : {}),
   });
   const [dialog, setDialog] = useState<Dialog>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -122,15 +125,28 @@ function Roadmap() {
       setNotice(null);
       done?.(reply.result);
     } catch (error) {
+      const refusal = isAppBackendError(error) ? error.refusal : undefined;
+      if (refusal?.code === "conflict" || refusal?.code === "not_found") {
+        setDialog(null);
+        rollup.reload();
+        list.reload();
+      }
       setNotice({
         tone: "danger",
         title: "That change didn't go through",
         message: errorText(error),
-        action: { label: "Try again", run: () => void run(operation, input, done, key) },
+        action: refusal
+          ? undefined
+          : { label: "Try again", run: () => void run(operation, input, done, key) },
       });
     } finally {
       setBusy(false);
     }
+  }
+
+  function show(next: Dialog) {
+    setNotice(null);
+    setDialog(next);
   }
 
   function archive(item: Item) {
@@ -183,7 +199,7 @@ function Roadmap() {
       render: (item: Item) => (
         <Stack direction="horizontal" gap={6}>
           {item.status !== "new" && item.status !== "done" ? (
-            <Button size="sm" onClick={() => setDialog({ kind: "plan", item })}>
+            <Button size="sm" onClick={() => show({ kind: "plan", item })}>
               {item.status === "triaged" ? "Plan" : "Replan"}
             </Button>
           ) : null}
@@ -197,6 +213,21 @@ function Roadmap() {
 
   const empty = rollup.data && rollup.data.total === 0 && milestones.length === 0;
   const page = list.data;
+  const alert = notice ? (
+    <Callout
+      tone={notice.tone}
+      title={notice.title}
+      action={
+        notice.action ? (
+          <Button size="sm" disabled={busy} onClick={notice.action.run}>
+            {notice.action.label}
+          </Button>
+        ) : null
+      }
+    >
+      {notice.message ?? ""}
+    </Callout>
+  ) : null;
   return (
     <AppShell width="wide">
       <PageHeader
@@ -205,29 +236,15 @@ function Roadmap() {
         subtitle="Engineering triages new items. You set priority and milestone, and archive what's out."
         actions={
           <Stack direction="horizontal" gap={8} wrap>
-            <Button onClick={() => setDialog({ kind: "milestone" })}>New milestone</Button>
-            <Button variant="primary" onClick={() => setDialog({ kind: "item" })}>
+            <Button onClick={() => show({ kind: "milestone" })}>New milestone</Button>
+            <Button variant="primary" onClick={() => show({ kind: "item" })}>
               New item
             </Button>
           </Stack>
         }
       />
       <Stack gap={16}>
-        {notice ? (
-          <Callout
-            tone={notice.tone}
-            title={notice.title}
-            action={
-              notice.action ? (
-                <Button size="sm" disabled={busy} onClick={notice.action.run}>
-                  {notice.action.label}
-                </Button>
-              ) : null
-            }
-          >
-            {notice.message ?? ""}
-          </Callout>
-        ) : null}
+        {dialog ? null : alert}
         {rollup.error || list.error ? (
           <Callout
             tone="danger"
@@ -269,7 +286,7 @@ function Roadmap() {
                 value={status}
                 onChange={(next) => {
                   setStatus(next as Status);
-                  setLimit(PAGE);
+                  setCursors([]);
                 }}
                 items={STATUSES.map((id) => ({
                   id,
@@ -282,7 +299,7 @@ function Roadmap() {
                   value={milestone}
                   onChange={(event) => {
                     setMilestone(event.target.value);
-                    setLimit(PAGE);
+                    setCursors([]);
                   }}
                 >
                   <option value="">All milestones</option>
@@ -306,24 +323,28 @@ function Roadmap() {
                   : "Items show up here as they move through the roadmap."
               }
             />
-            {page && page.total > page.items.length ? (
-              limit < MAX_PAGE ? (
-                <Button onClick={() => setLimit(Math.min(MAX_PAGE, limit + PAGE))}>
-                  Show more ({page.items.length} of {page.total})
+            {cursors.length || page?.next ? (
+              <Stack direction="horizontal" gap={8} justify="end">
+                <Button size="sm" disabled={!cursors.length} onClick={() => setCursors(cursors.slice(0, -1))}>
+                  Previous
                 </Button>
-              ) : (
-                <span>
-                  Showing {page.items.length} of {page.total}. Pick a milestone to narrow the list.
-                </span>
-              )
+                <Button
+                  size="sm"
+                  disabled={!page?.next}
+                  onClick={() => page?.next && setCursors([...cursors, page.next])}
+                >
+                  Next
+                </Button>
+              </Stack>
             ) : null}
           </Stack>
         )}
       </Stack>
       <ItemDialog
         open={dialog?.kind === "item"}
+        alert={alert}
         busy={busy}
-        onClose={() => setDialog(null)}
+        onClose={() => show(null)}
         onSubmit={(input) =>
           void run("createItem", input, () => {
             setDialog(null);
@@ -333,16 +354,18 @@ function Roadmap() {
       />
       <MilestoneDialog
         open={dialog?.kind === "milestone"}
+        alert={alert}
         busy={busy}
-        onClose={() => setDialog(null)}
+        onClose={() => show(null)}
         onSubmit={(input) => void run("createMilestone", input, () => setDialog(null))}
       />
       {dialog?.kind === "plan" ? (
         <PlanDialog
           item={dialog.item}
           milestones={milestones}
+          alert={alert}
           busy={busy}
-          onClose={() => setDialog(null)}
+          onClose={() => show(null)}
           onSubmit={(input) => void run("planItem", input, () => setDialog(null))}
         />
       ) : null}
@@ -359,6 +382,7 @@ function submitWith(handler: () => void) {
 
 function ItemDialog(props: {
   open: boolean;
+  alert: ReactNode;
   busy: boolean;
   onClose(): void;
   onSubmit(input: { title: string; detail: string; area: Area }): void;
@@ -384,6 +408,7 @@ function ItemDialog(props: {
     >
       <form id="new-item" onSubmit={submitWith(() => props.onSubmit({ title, detail, area }))}>
         <Stack gap={12}>
+          {props.alert}
           <Field label="Title" htmlFor="item-title">
             <Input
               id="item-title"
@@ -423,6 +448,7 @@ function ItemDialog(props: {
 
 function MilestoneDialog(props: {
   open: boolean;
+  alert: ReactNode;
   busy: boolean;
   onClose(): void;
   onSubmit(input: { name: string; dueOn: string }): void;
@@ -447,6 +473,7 @@ function MilestoneDialog(props: {
     >
       <form id="new-milestone" onSubmit={submitWith(() => props.onSubmit({ name, dueOn }))}>
         <Stack gap={12}>
+          {props.alert}
           <Field label="Name" htmlFor="milestone-name">
             <Input
               id="milestone-name"
@@ -474,6 +501,7 @@ function MilestoneDialog(props: {
 function PlanDialog(props: {
   item: Item;
   milestones: Rollup["milestones"];
+  alert: ReactNode;
   busy: boolean;
   onClose(): void;
   onSubmit(input: { id: string; version: number; priority: number; milestoneId: string }): void;
@@ -510,6 +538,7 @@ function PlanDialog(props: {
         )}
       >
         <Stack gap={12}>
+          {props.alert}
           <Field label="Priority" htmlFor="plan-priority" hint="P0 is the most urgent.">
             <Select
               id="plan-priority"

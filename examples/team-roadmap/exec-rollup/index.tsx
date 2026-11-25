@@ -115,7 +115,7 @@ function Overview() {
                         valueLabel={`${milestone.done} of ${milestone.total}`}
                         tone={milestone.p0Open ? "warning" : "success"}
                       />
-                      <span>
+                      <span style={{ color: "var(--kit-muted)", fontSize: 12.5 }}>
                         {milestone.inProgress} in progress · {milestone.p0Open} open P0 ·{" "}
                         {milestone.openDays} days of work left
                       </span>

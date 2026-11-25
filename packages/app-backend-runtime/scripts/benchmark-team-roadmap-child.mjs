@@ -1,8 +1,6 @@
 import { DatabaseSync, StatementSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 
-// Times one persistent worker's commands, then runs the real worker entry unchanged.
-// Before each reply it sends one timing message, which the benchmark's launcher removes.
 let current;
 const clock = () => performance.now();
 

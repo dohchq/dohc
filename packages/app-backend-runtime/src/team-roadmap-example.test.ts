@@ -150,7 +150,7 @@ async function seed(f: Fixture) {
 }
 
 async function item(f: Fixture, id: string) {
-  const { items } = await f.call("pm", "roadmap-pm", "listItems", { limit: 100 });
+  const { items } = await f.call("pm", "roadmap-pm", "listItems", {});
   return items.find((entry: Json) => entry.id === id) as Json;
 }
 
@@ -280,6 +280,29 @@ describe("team roadmap example", () => {
     });
     expect(viaData.item).toMatchObject({ status: "triaged", triagedBy: "eng-1" });
     expect(f.events()).toHaveLength(before + 1);
+  });
+
+  it("pages through every item, however long its text", async () => {
+    const f = await fixture();
+    const items = Array.from({ length: 51 }, (_, n) => ({
+      title: `${n} ${"語".repeat(110)}`,
+      detail: "語".repeat(2000),
+      area: "apps",
+    }));
+    await f.call("pm", "roadmap-pm", "importItems", { items });
+    const seen: string[] = [];
+    let after: Json | null = null;
+    do {
+      const page = await f.call("eng-1", "eng-triage", "listItems", {
+        status: "new",
+        ...(after ? { after } : {}),
+      });
+      expect(page.total).toBe(51);
+      expect(page.items[0].detail).toHaveLength(280);
+      seen.push(...page.items.map((entry: Json) => entry.title.split(" ")[0]));
+      after = page.next;
+    } while (after);
+    expect(new Set(seen).size).toBe(51);
   });
 
   it("records the person and app behind every change", async () => {
