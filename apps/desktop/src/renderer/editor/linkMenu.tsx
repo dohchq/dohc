@@ -205,6 +205,15 @@ export function makeLinkMenuExtension({
   });
 }
 
+export function makeDocumentChangeAutolinkGuard(yTiptap: typeof import("@tiptap/y-tiptap")) {
+  return new Plugin({
+    filterTransaction(tr) {
+      if (tr.getMeta(yTiptap.ySyncPluginKey)?.isChangeOrigin) tr.setMeta("preventAutolink", true);
+      return true;
+    },
+  });
+}
+
 /** Click-to-edit/open + paste-URL-over-selection, as a single ProseMirror
  *  plugin (added into MarkdownEditor's existing dohcDecorations plugin
  *  array) so both behaviors live at the plugin level, not editorProps. */
