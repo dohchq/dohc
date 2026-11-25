@@ -1,6 +1,6 @@
 import type { ScopedEnds } from "../pages/pageLive";
 import type { SignIn } from "../server/account";
-import { requestGenerations, shownProblem } from "../server/client";
+import { requestGenerations, ServerError, shownProblem } from "../server/client";
 import {
   collectionOperations,
   type ChangeAnswer,
@@ -411,7 +411,8 @@ export function createWorkspaceCollections(
     } catch (error) {
       const cause = shownProblem(error);
       if (!lands()) return;
-      const refused = cause === "refused";
+      const refused =
+        cause === "refused" && !(error instanceof ServerError && error.status === 413);
       if (refused) held.delete(datasetId);
       update(datasetId, {
         ...(refused ? { description: null, rows: [], files: {}, next: null, opened: null } : {}),

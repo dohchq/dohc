@@ -391,6 +391,22 @@ describe("a Collection's records", () => {
     }
   });
 
+  it("keeps an open record and the rows when a reopened Collection's page is too large", async () => {
+    const { server, collections } = setup();
+    pages(server);
+    await collections.open(D);
+    collections.close(D);
+    const held = deferred<Answer>();
+    server.on("POST", `${OPS}/collectionRecords`, () => held.promise);
+    void collections.open(D);
+    await sent(server, 4);
+    collections.openRecord(collections.view()!.rows[0]!);
+    held.resolve({ status: 413 });
+    await vi.waitFor(() => expect(collections.view()?.reading).toBeNull());
+    expect(collections.view()?.opened).not.toBeNull();
+    expect(collections.view()?.rows.length).toBeGreaterThan(0);
+  });
+
   it("clears what a Collection showed when the server refuses its records", async () => {
     const { server, collections } = setup();
     pages(server);
