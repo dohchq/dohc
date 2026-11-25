@@ -94,3 +94,78 @@ fn accepted_unsorted_delete_set_is_contained() {
         ))
         .unwrap());
 }
+
+#[test]
+fn relay_history_counts_a_settlement_that_names_an_earlier_moment_held_here() {
+    use dohc_engine_domain::{VersionedTextStore, WriteText};
+    let root = ScratchDir::new_named("release-relay-history").unwrap();
+    let mut store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version("ws", "main", 1, &NoFaults)
+        .unwrap();
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &WriteText {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                object_id: "object".into(),
+                path: "note.md".into(),
+                text: "settled words".into(),
+                moment_id: "settled-moment".into(),
+                metadata_origin: "sync".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    let binding = crate::LiveObjectBinding {
+        workspace_id: "ws".into(),
+        main_version_id: "main".into(),
+        object_id: "object".into(),
+        lineage_claim_id: "lineage".into(),
+        current_path: "note.md".into(),
+        selector_paths: vec!["note.md".into()],
+        restore_fence_generation: 0,
+    };
+    let settle = |store: &mut EngineStore, id: &str, moment: &str, cursor: i64| {
+        let record = serde_json::json!({
+            "binding": binding,
+            "relayDatabaseNamespace": "relay",
+            "terminalCursor": cursor,
+            "momentId": moment,
+        })
+        .to_string();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO live_audit_settlements(settlement_id,workspace_id,record_digest,record_json,markdown_digest)
+                     SELECT ?1,'ws',?2,?3,after_blob_sha256 FROM moments WHERE moment_id='settled-moment'",
+                    rusqlite::params![id, hex_sha256(record.as_bytes()), record],
+                )
+                .map(|_| ())
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+    };
+    let arrived = |store: &EngineStore, namespace: &str, cursor: i64| {
+        store
+            .read_with(|conn| super::relay_history_arrived_in(conn, &binding, namespace, cursor))
+            .unwrap()
+    };
+
+    assert!(arrived(&store, "relay", 0));
+    assert!(!arrived(&store, "relay", 1));
+    settle(&mut store, "absent", "moment-not-here", 4);
+    assert!(!arrived(&store, "relay", 1));
+    settle(&mut store, "first", "settled-moment", 1);
+    assert!(arrived(&store, "relay", 1));
+    assert!(!arrived(&store, "relay", 2));
+    settle(&mut store, "unchanged", "settled-moment", 2);
+    assert!(arrived(&store, "relay", 2));
+    assert!(!arrived(&store, "relay", 3));
+    assert!(!arrived(&store, "other-relay", 1));
+}

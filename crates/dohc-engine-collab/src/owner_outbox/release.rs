@@ -460,6 +460,15 @@ pub fn release_in_tx(
     if !super::taken::read_in(tx, binding)?.is_empty() {
         return Err(OwnerOutboxError::StopConflict);
     }
+    if !relay_history_arrived_in(
+        tx,
+        binding,
+        &observed.relay_database_namespace,
+        accepted_cursor,
+    )? && !relay_history_wait_over_in(tx, &key, now_ms)?
+    {
+        return Err(OwnerOutboxError::StopConflict);
+    }
     super::taken::clear_in(tx, binding)?;
     tx.execute("DELETE FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id]).map_err(write_sql)?;
     tx.execute("DELETE FROM ydoc_owner_applied_frames WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id]).map_err(write_sql)?;
@@ -502,6 +511,58 @@ pub fn release_in_tx(
     stop.retirement_owed = false;
     save_in_tx(tx, &key, &stop, now_ms)?;
     Ok(stop)
+}
+
+pub const RELAY_HISTORY_WAIT_MS: i64 = 120_000;
+
+fn relay_history_wait_over_in(
+    conn: &Connection,
+    key: &DocKey,
+    now_ms: i64,
+) -> Result<bool, OwnerOutboxError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND requested_at_ms<=?4)",
+        params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            now_ms.saturating_sub(RELAY_HISTORY_WAIT_MS)
+        ],
+        |r| r.get(0),
+    )
+    .map_err(read_sql)
+}
+
+fn relay_history_arrived_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+    namespace: &str,
+    through_cursor: i64,
+) -> Result<bool, OwnerOutboxError> {
+    if through_cursor == 0 {
+        return Ok(true);
+    }
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM live_audit_settlements s JOIN moments m
+             ON m.workspace_id=s.workspace_id AND m.moment_id=json_extract(s.record_json,'$.momentId')
+            AND m.after_blob_sha256=s.markdown_digest
+           WHERE s.workspace_id=?1
+           AND json_extract(s.record_json,'$.binding.mainVersionId')=?2
+           AND json_extract(s.record_json,'$.binding.objectId')=?3
+           AND json_extract(s.record_json,'$.binding.lineageClaimId')=?4
+           AND json_extract(s.record_json,'$.relayDatabaseNamespace')=?5
+           AND json_extract(s.record_json,'$.terminalCursor')>=?6)",
+        params![
+            binding.workspace_id,
+            binding.main_version_id,
+            binding.object_id,
+            binding.lineage_claim_id,
+            namespace,
+            through_cursor
+        ],
+        |r| r.get(0),
+    )
+    .map_err(read_sql)
 }
 
 fn copy_digest_in(conn: &Connection, key: &DocKey) -> Result<Option<String>, OwnerOutboxError> {
