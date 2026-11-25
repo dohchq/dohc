@@ -14,6 +14,7 @@ import {
   BLOCK_ELEMENT,
   BODY_CONTAINERS_FIELD,
   BODY_SEQUENCE_FIELD,
+  startingRecords,
 } from "./bodySequenceGrammar.js";
 import {
   BODY_SEQUENCE_CHANGE_MAX_VALUES,
@@ -1607,16 +1608,18 @@ type Copy = {
   transactions: readonly Transform[];
   first: number;
   apart: number;
+  longer: number;
 };
 
 function copyOfNote({ sequence, reader }: BodyWriting, transactions: readonly Transform[]): Copy {
   const copy = new Y.Doc();
   Y.applyUpdate(copy, Y.encodeStateAsUpdate(sequence.doc!));
+  copy.clientID = sequence.doc!.clientID;
   const copied = copy.getText(BODY_SEQUENCE_FIELD);
   const records = copy.getMap(BODY_CONTAINERS_FIELD);
   const schema = reader.reading().doc.type.schema;
   const writing = { sequence: copied, reader: createBodyReader(schema, copied, records) };
-  return { writing, transactions, first: 0, apart: 0 };
+  return { writing, transactions, first: 0, apart: 0, longer: 0 };
 }
 
 function runsOfClocks(first: Y.Item | null, end: Y.Item | null): number {
@@ -1695,16 +1698,23 @@ function copyOfWindow(
     }),
   );
   const copy = new Y.Doc();
+  copy.clientID = sequence.doc!.clientID;
   const copied = copy.getText(BODY_SEQUENCE_FIELD);
   copied.applyDelta(changes);
   const records = copy.getMap<unknown>(BODY_CONTAINERS_FIELD);
   const recorded: Y.Item[] = [];
   const live = sequence.doc!.getMap(BODY_CONTAINERS_FIELD);
-  live._map.forEach((item, key) => {
-    if (item.deleted || !named.has(key.split(".")[0]!)) return;
-    records.set(key, live.get(key));
-    recorded.push(item);
-  });
+  for (const id of named) {
+    const type = storedValue(live, id);
+    if (typeof type !== "string") continue;
+    const names = startingRecords(base.type.schema, type).keys();
+    for (const key of [id, ...[...names].map((name) => `${id}.${name}`)]) {
+      const item = live._map.get(key);
+      if (!item || item.deleted) continue;
+      records.set(key, live.get(key));
+      recorded.push(item);
+    }
+  }
   const writing = { sequence: copied, reader: createBodyReader(base.type.schema, copied, records) };
   const start = posOf(child);
   const shift = StepMap.offset(-start);
@@ -1725,7 +1735,7 @@ function copyOfWindow(
     doc = transform.doc;
   }
   const apart = runsOfClocks(head, reading.lines[last + 1]?.item ?? null) + runsAmong(recorded);
-  if (fits) return { writing, transactions: windowed, first, apart };
+  if (fits) return { writing, transactions: windowed, first, apart, longer: LONGER_NUMBERS_LIVE };
   copy.destroy();
   return null;
 }
@@ -1740,7 +1750,7 @@ function linesATrialGives(
   for (let tries = 0; tries < TRIES; tries++) {
     const copy = open(given);
     if (!copy) return undefined;
-    const { writing: trial, transactions, first, apart } = copy;
+    const { writing: trial, transactions, first, apart, longer } = copy;
     const note = trial.sequence.doc!;
     const there = given.map((block) => block - first);
     const changes: Uint8Array[] = [];
@@ -1759,8 +1769,8 @@ function linesATrialGives(
       continue;
     }
     if (!left.isSettled) return left.isRead ? null : undefined;
-    if (!changes.every((change) => passesTheRoom(change, 0))) return null;
-    return changes.every((change) => passesTheRoom(change, apart)) ? given : undefined;
+    if (!changes.every((change) => passesTheRoom(change, 0, 0))) return null;
+    return changes.every((change) => passesTheRoom(change, apart, longer)) ? given : undefined;
   }
   return undefined;
 }
@@ -1769,7 +1779,7 @@ const LONGER_NUMBERS_LIVE = 8;
 const RANGE_BYTES = 24;
 const ROOM_ITEMS = bodySequenceRoomPolicy(WORKER_LIVE_VALIDATION_POLICY).maxStructVisits;
 
-function passesTheRoom(change: Uint8Array, apart: number): boolean {
+function passesTheRoom(change: Uint8Array, apart: number, longer: number): boolean {
   if (change.byteLength + RANGE_BYTES * apart <= BODY_SEQUENCE_CHANGE_MAX_VALUES) return true;
   if (bodySequenceChangeLimit(change, WORKER_LIVE_VALIDATION_POLICY) !== undefined) return false;
   const { structs, deletes, elements } = bodySequenceChangeSize(change);
@@ -1777,8 +1787,7 @@ function passesTheRoom(change: Uint8Array, apart: number): boolean {
   return (
     items <= ROOM_ITEMS &&
     items + LIVE_NOTE_ELEMENT_WEIGHT * elements <= LIVE_NOTE_CAPACITY &&
-    change.byteLength + LONGER_NUMBERS_LIVE * (structs + deletes) + RANGE_BYTES * apart <=
-      LIVE_UPDATE_MAX_BYTES
+    change.byteLength + longer * (structs + deletes) + RANGE_BYTES * apart <= LIVE_UPDATE_MAX_BYTES
   );
 }
 

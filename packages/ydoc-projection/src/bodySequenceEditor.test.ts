@@ -1714,7 +1714,10 @@ describe("a split inside a list item someone else stored", () => {
       a.expectMirror();
     }
     a.select([1, 2]);
+    const lines = a.lines();
     a.view.pasteHTML("<p>Xx</p><p>Yy</p>", new window.Event("paste") as ClipboardEvent);
+    expect(a.lines().length).toBe(lines.length + 1);
+    expect(a.lines().filter((line) => line.includes("Xx") || line.includes("Yy"))).toHaveLength(2);
     expect(containerRulesBroken(was.doc, a.doc)).toEqual([]);
     a.expectMirror();
     exchange(a, b);

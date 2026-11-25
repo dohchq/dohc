@@ -481,6 +481,18 @@ describe("a dispatch the editor writes whole or not at all", () => {
     refusedWhole(a, told, [""]);
   });
 
+  it("writes a paste whose change is two bytes under the room's limit", () => {
+    const probe = toldOf(note("a"));
+    probe.a.view.dispatch(probe.a.view.state.tr.insertText("x".repeat(1_000), 2));
+    const around = probe.a.sent[0]!.byteLength - 1_000 + 1;
+    const { a, told } = toldOf(note("a"));
+    const letters = LIVE_UPDATE_MAX_BYTES - 2 - around;
+    a.view.dispatch(a.view.state.tr.insertText("x".repeat(letters), 2));
+    expect(told).toEqual([]);
+    expect(a.sent.map((update) => update.byteLength)).toEqual([LIVE_UPDATE_MAX_BYTES - 2]);
+    expect(a.lines()).toEqual([`a${"x".repeat(letters)}`]);
+  });
+
   it("refuses a paste longer than the room takes in one change", () => {
     const { a, told } = toldOf(note("a"));
     a.view.dispatch(a.view.state.tr.insertText("x".repeat(2_200_000), 2));
@@ -1053,7 +1065,12 @@ describe.each([3, 4])(
       "read the same note and keep every record, and each write breaks no container rule, with changes delivered %s",
       (arrive) => {
         const tally: Tally = { runs: 0, acts: 0, wrote: 0, replayedOntoAShare: 0, refused: {} };
-        for (let seed = 1; seed <= 200; seed++) playAtRandom(size, arrive, seed, tally);
+        for (let seed = 1; seed <= 200; seed++)
+          try {
+            playAtRandom(size, arrive, seed, tally);
+          } finally {
+            stopEveryone();
+          }
         console.log(`${String(size)} people, ${arrive}: ${JSON.stringify(tally)}`);
         expect(tally.runs).toBe(200);
       },

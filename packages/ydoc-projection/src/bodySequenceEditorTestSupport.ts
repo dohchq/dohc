@@ -600,7 +600,8 @@ export function containerRulesBroken(before: Y.Doc, after: Y.Doc): string[] {
       runsBefore.some(
         (run) =>
           Y.compareIDs(run.first, was.first) &&
-          (run.id === id || (sharedBefore.has(run.id) && !recordsBefore.has(id))),
+          (run.id === id ||
+            (run.depth > was.depth && sharedBefore.has(run.id) && !recordsBefore.has(id))),
       );
     if (now && !movedUp(now.id) && family(records, now.id) === family(recordsBefore, was.id))
       broken.push(`the container ${was.id}, still led by its first leaf, is now ${now.id}`);
