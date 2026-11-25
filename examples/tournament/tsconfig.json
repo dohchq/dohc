@@ -12,7 +12,8 @@
       "react-dom/*": ["../../apps/desktop/node_modules/@types/react-dom/*"],
       "dohc/app": ["../../packages/app-kit/src/app.tsx"],
       "dohc/ui": ["../../packages/app-kit/src/ui.tsx"],
-      "dohc/charts": ["../../packages/app-kit/src/charts.tsx"]
+      "dohc/charts": ["../../packages/app-kit/src/charts.tsx"],
+      "dohc/icons": ["../../packages/app-kit/src/icons.ts"]
     }
   },
   "include": [

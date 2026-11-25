@@ -1,29 +1,46 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { AppProvider, useApp } from "dohc/app";
-import { AppShell, EmptyState } from "dohc/ui";
 import { Dashboard } from "./Dashboard";
-import { useLiveSnapshot } from "./model";
+import { Trophy } from "./Icons";
+import type { Timeline, TimelineEntry } from "./Inspector";
+import { useLiveSnapshot, type Match, type Snapshot } from "./model";
 import "./tournament.css";
 
 function Spectator() {
   const client = useApp();
   const [tournamentId, setTournamentId] = useState<string | null>(null);
-  const live = useLiveSnapshot(client, tournamentId, 5000);
+  const live = useLiveSnapshot(client, tournamentId, 5000, "public");
+  const current = live.data?.tournament?.id ?? tournamentId;
+  const loadTimeline = useCallback(
+    async (match: Match) => {
+      const reply = await client.read<
+        Snapshot & { timeline?: TimelineEntry[]; timelineCut?: boolean }
+      >("liveSnapshot", {
+        tournamentId: current,
+        matchId: match.id,
+        view: "public",
+      });
+      return { entries: reply.timeline ?? [], cut: reply.timelineCut ?? false } satisfies Timeline;
+    },
+    [client, current],
+  );
   return (
-    <AppShell width="wide">
-      <Dashboard
-        live={live}
-        eyebrow="Live results"
-        onPickTournament={setTournamentId}
-        empty={
-          <EmptyState
-            title="Nothing to watch yet"
-            description="The organizer hasn't started a tournament. This page fills in on its own when they do."
-          />
-        }
-      />
-    </AppShell>
+    <Dashboard
+      live={live}
+      role="spectator"
+      onPickTournament={setTournamentId}
+      loadTimeline={loadTimeline}
+      empty={
+        <div className="co-empty">
+          <span className="co-empty-mark" aria-hidden="true">
+            <Trophy size={22} />
+          </span>
+          <strong>No tournament yet</strong>
+          <span>This page fills in when the organizer starts one.</span>
+        </div>
+      }
+    />
   );
 }
 

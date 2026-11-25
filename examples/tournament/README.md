@@ -1,28 +1,39 @@
 # Tournament
 
-This example runs a single-elimination tournament on a dohc Collection. An organizer seeds a bracket, scorekeepers enter points court by court, and anyone with a link watches the bracket, the courts, and a big-screen board.
+This example runs a single- or double-elimination tournament on a dohc Collection. An organizer seeds a bracket, scorekeepers enter points court by court, and anyone with a link watches the bracket, the courts, and a big-screen board.
 
 It is ordinary workspace source. Copy the folder, then change the rules, the screens, or the sports.
 
 ## What it shows
 
-- **One Collection, five tables.** [schema.sql](schema.sql) holds `tournaments`, `players`, `courts`, `matches`, and `match_events`. [dataset.json](dataset.json) declares them and the eight operations.
+- **One Collection, five tables.** [schema.sql](schema.sql) holds `tournaments`, `players`, `courts`, `matches`, and `match_events`. [dataset.json](dataset.json) declares them and the thirteen operations.
 - **Rules on the server.** [operations.js](operations.js) runs each operation in one transaction:
-  - `createTournament` seeds 3 to 32 players by rating into a bracket of 4, 8, 16, or 32. Top seeds get the byes, and byes advance at once.
-  - `scorePoint` and `undoPoint` take the match version the scorekeeper saw. If someone else scored first, the operation refuses with `conflict` and the current score.
-  - `completeMatch` records the winner, updates both Elo ratings, frees the court, and moves the winner into the next match. The final crowns the champion.
-  - A unique index allows one live match per court. `startMatch` refuses a busy court.
-  - Every start, point, undo, and result goes into `match_events`, with who did it.
-- **Standings without SQL views.** `liveSnapshot` computes the leaderboard, bracket, courts, and recent events in one read.
-- **Three ways to watch.** The organizer app ([index.tsx](index.tsx)) has the scorekeeper board, the bracket, standings, and a TV board. The spectator app ([spectator/index.tsx](spectator/index.tsx)) shows the same views read-only and keeps all of its source inside `spectator/` so it publishes on a default View link.
+  - `createTournament` seeds 3 to 32 players into a bracket of 4, 8, 16, or 32, by rating or in the order given. Top seeds get the byes, and byes advance at once. The setup drawer lists players as editable rows in seed order. The organizer can add, remove, or move players, sort by rating, or paste a list.
+  - Double elimination adds a losers bracket. Each loser drops to a set losers match. The grand final plays a reset match only when the losers-side player wins the first one.
+  - A match is one game, or the best of 3 or 5 games. Scoring is rally scoring: the player who wins a point serves the next one.
+  - `scorePoint` and `undoPoint` take the match version the scorekeeper saw. If someone else scored first, the operation refuses with `conflict` and the current score. `undoPoint` at 0–0 reopens the last game.
+  - `completeMatch` records a won game. When a player has won enough games, it records the winner, updates both Elo ratings, frees the court, moves the winner on, and drops the loser to the losers bracket. The last match crowns the champion.
+  - `awardWalkover` sends a player through when the other cannot play. Walkovers do not change Elo.
+  - `reportResult` takes the game scores of a match played off the board, such as a score sheet a referee hands in. It checks each game against the rules, then completes the match like `completeMatch`. The log records who entered it, with no made-up points. Reopening a reported result puts the match back in the queue with no score, so a corrected sheet can be entered.
+  - `reopenMatch` corrects a wrong result until the next match for either player has a point. It reverses both Elo changes and takes both players back out of their next matches. A next match that started at 0–0 goes back to waiting and frees its court.
+  - A unique index allows one live match per court. `startMatch` refuses a busy court. `returnToQueue` sends a started match with no points back to the queue and frees its court.
+  - Every start, point, undo, game, result, walkover, reopen, and cancelled start goes into `match_events`, with who did it and who was playing.
+- **Standings without SQL views.** `liveSnapshot` computes the leaderboard, bracket, courts, and recent events in one read. Players knocked out at the same stage share a place. Pass a `matchId` from the shown tournament and it adds that match's point-by-point timeline, without who entered each point.
+- **One set of screens, two apps.** The organizer app ([index.tsx](index.tsx)) and the spectator app ([spectator/index.tsx](spectator/index.tsx)) share the views in `spectator/`:
+  - **Bracket**: a canvas you drag to pan and zoom with Ctrl or pinch. Winners run along the top and losers below, with the grand final at the end. Empty slots say which match feeds them. Hover a player to trace their path, and select a match to open its timeline.
+  - **Courts**: a scoreboard per live court with games, the server, and game, match, or championship point. Taps queue while earlier ones save, and points not yet saved show dimmed. Organizers score here.
+  - **Standings**: a sortable table with win–loss, point difference, and Elo change, beside an Elo movers chart.
+  - **TV mode**: a full-screen board for a venue screen. It says Out of date, with the last sync time, when it cannot reach the workspace.
+
+  The spectator app keeps all of its source inside `spectator/`, so it publishes on a default View link.
 
 ## Who can do what
 
 | Operation | Who |
 | --- | --- |
-| `liveSnapshot` | Anyone with a link |
-| `matchLog`, `startMatch`, `scorePoint`, `undoPoint`, `completeMatch` | The owner and helpers |
-| `createTournament`, `seedDemo` | The owner |
+| `liveSnapshot` | Anyone with a link. Link viewers see only tournaments shown on the share link. Named members, such as scorekeepers, also see hidden ones. The spectator app always gets public history, without undone points or reopened results. |
+| `matchLog`, `startMatch`, `returnToQueue`, `scorePoint`, `undoPoint`, `completeMatch`, `awardWalkover`, `reportResult`, `reopenMatch` | The owner and helpers. Scorekeepers correct results on purpose: whoever is at the court sees a wrong result first, and every reopen and walkover is logged with who did it. |
+| `createTournament`, `setVisibility`, `seedDemo` | The owner |
 
 `liveSnapshot` leaves out who entered each point. `matchLog` includes it.
 
@@ -30,13 +41,26 @@ It is ordinary workspace source. Copy the folder, then change the rules, the scr
 
 1. Copy this folder into a workspace as `tournament`.
 2. Publish `tournament` and approve the Collection. The app opens empty.
-3. Select **Load the 16-player demo**. It loads a pickleball open in the quarterfinals, with two matches live.
-4. On **Scorekeeper**, tap a player to add a point. Complete a match when it is won, then start the next one on the free court.
-5. Publish `tournament/spectator` to a share link for read-only viewers. Its manifest, [spectator/app.publish.json](spectator/app.publish.json), binds only `liveSnapshot`.
+3. Select **Load the 16-player demo**. It loads a double-elimination pickleball open, best of 3 games, with two matches live.
+4. On **Courts**, select a side or press 1 or 2 to add a point, and Z to undo. Press C when a game is won, then Enter to record it. Start the next match from a free court or Up next. To fix a wrong result, select Reopen on the result notice, or open the match in the bracket. A match that cannot be played gets **Record a walkover** in the same panel.
+5. Select **On share link** next to the event name to hide a tournament from spectators.
+6. Publish `tournament/spectator` to a share link for read-only viewers. Its manifest, [spectator/app.publish.json](spectator/app.publish.json), binds only `liveSnapshot`.
+
+## Keyboard
+
+| Key | Action |
+| --- | --- |
+| B, C, S | Bracket, Courts, Standings |
+| F | TV mode. Esc leaves it. |
+| 1, 2 | Point to the left or right player on the selected court |
+| Z | Undo the last point |
+| C, then Enter | Record a won game or complete a won match |
+| Tab | Next court |
+| Arrows, +, −, 0 | Pan, zoom, and fit the bracket |
 
 ## Limits
 
-- The apps poll `liveSnapshot` every 4 seconds (organizer) or 5 seconds (spectator), and pause while hidden. A scoring tap updates its match from the reply without another read.
-- An operation may run 128 statements with 128 values each. `operations.js` loads a tournament once and writes it back in bulk, so a 32-player bracket fits.
+- The organizer app updates the moment a score changes on this computer. Share links do not get change events, so the spectator app reads `liveSnapshot` every 5 seconds while visible. A scoring tap updates its match from the reply without another read.
+- An operation may run 128 statements with 128 values each. `operations.js` loads a tournament once and writes it back in bulk, so a 32-player double-elimination bracket fits.
 
 The tests are in [tournament-example.test.ts](../../packages/app-backend-runtime/src/tournament-example.test.ts). To typecheck the screens, run `pnpm exec tsc -p ../../examples/tournament/tsconfig.json` from `apps/desktop`.
