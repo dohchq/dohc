@@ -1,0 +1,187 @@
+name: Warm CI caches
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - "pnpm-lock.yaml"
+      - "apps/mobile/package.json"
+      - "apps/mobile/modules/**/android/**"
+      - ".github/workflows/pr-checks.yml"
+      - ".github/workflows/warm-ci-caches.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: warm-ci-caches
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+  CARGO_DENY_VERSION: "0.20.2"
+  CARGO_AUDIT_VERSION: "0.22.2"
+  CARGO_NEXTEST_VERSION: "0.9.143"
+
+jobs:
+  pnpm-linux:
+    name: Warm pnpm cache (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+      - id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - id: pnpm-cache
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: node-cache-${{ runner.os }}-x64-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: node-cache-${{ runner.os }}-x64-pnpm-
+      - name: Populate pnpm store
+        if: steps.pnpm-cache.outputs.cache-hit != 'true'
+        run: pnpm fetch --frozen-lockfile
+
+  rust-linux:
+    name: Warm Rust cache (${{ matrix.key }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        key:
+          - js-daemon
+          - engine-archive
+          - engine-policy
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - id: rust-cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        with:
+          shared-key: ${{ matrix.key }}
+          cache-workspace-crates: ${{ matrix.key != 'engine-archive' }}
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        if: steps.rust-cache.outputs.cache-hit != 'true' && matrix.key != 'engine-policy'
+        with:
+          tool: cargo-nextest@${{ env.CARGO_NEXTEST_VERSION }}
+      - name: Warm js-daemon target
+        if: steps.rust-cache.outputs.cache-hit != 'true' && matrix.key == 'js-daemon'
+        run: |
+          cargo build --locked -p dohc-workspace-engine --bin dohc-workspace-engine
+          cargo build --locked --release --manifest-path crates/dohc-compiler-owner/Cargo.toml --target x86_64-unknown-linux-gnu --target-dir target
+          cargo nextest run --locked --package dohc-compiler-owner --no-run
+      - name: Warm engine-archive target
+        if: steps.rust-cache.outputs.cache-hit != 'true' && matrix.key == 'engine-archive'
+        run: |
+          cargo nextest archive --locked --workspace --archive-file /tmp/warm-rust-tests.tar.zst --zstd-level=3
+          rm -f /tmp/warm-rust-tests.tar.zst
+      - name: Warm engine-policy target
+        if: steps.rust-cache.outputs.cache-hit != 'true' && matrix.key == 'engine-policy'
+        run: |
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+          cargo test --locked --workspace --doc
+
+  windows:
+    name: Warm Windows caches
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+      - id: pnpm-store
+        shell: bash
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - id: pnpm-cache
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: node-cache-${{ runner.os }}-x64-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: node-cache-${{ runner.os }}-x64-pnpm-
+      - name: Populate pnpm store
+        if: steps.pnpm-cache.outputs.cache-hit != 'true'
+        run: pnpm fetch --frozen-lockfile
+      - name: Rust toolchain
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add x86_64-pc-windows-msvc
+      - id: rust-cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        with:
+          shared-key: windows-package
+          cache-workspace-crates: true
+      - name: Warm Windows engine release build
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc -p dohc-workspace-engine --bin dohc-workspace-engine
+
+  android-gradle:
+    name: Warm Android Gradle cache
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      EXPO_NO_TELEMETRY: "1"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: 17
+      - id: gradle-cache
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('apps/mobile/package.json', 'pnpm-lock.yaml', 'apps/mobile/modules/**/android/**') }}
+          restore-keys: gradle-${{ runner.os }}-
+      - id: pnpm-store
+        if: steps.gradle-cache.outputs.cache-hit != 'true'
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        if: steps.gradle-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: node-cache-${{ runner.os }}-x64-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: node-cache-${{ runner.os }}-x64-pnpm-
+      - name: Install mobile dependencies
+        if: steps.gradle-cache.outputs.cache-hit != 'true'
+        run: pnpm --filter @dohc/mobile... install --frozen-lockfile
+      - name: Generate the Android project
+        if: steps.gradle-cache.outputs.cache-hit != 'true'
+        working-directory: apps/mobile
+        run: pnpm exec expo prebuild --platform android --no-install --template ./node_modules/expo/template.tgz
+      - name: Compile the app and its native modules
+        if: steps.gradle-cache.outputs.cache-hit != 'true'
+        working-directory: apps/mobile/android
+        run: ./gradlew compileDebugSources --no-daemon --console=plain --stacktrace

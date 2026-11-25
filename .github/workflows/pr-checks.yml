@@ -153,8 +153,9 @@ jobs:
               - 'docker-compose.self-host.yml'
               - '.env.self-host.example'
               - '.dockerignore'
-              # Release helper tests validate packaging workflow behavior.
+              # Workflow tests validate packaging and cache-warming workflows.
               - '.github/workflows/desktop-release.yml'
+              - '.github/workflows/warm-ci-caches.yml'
               # packages/mcp's reference test compares this page with its generator.
               - 'docs/reference/cli-mcp-sdk.md'
               # packages/mcp's eval case test validates YAML examples in the public skill.
@@ -365,6 +366,8 @@ jobs:
     # Confinement requires Landlock on GitHub's kernel.
     runs-on: ${{ fromJSON('["ubuntu-24.04"]') }}
     timeout-minutes: 30
+    outputs:
+      artifact: ${{ steps.prepared-artifact.outputs.name }}
     env:
       DOHC_CONFINEMENT_SUITES: exclude
       CARGO_INCREMENTAL: '0'
@@ -378,7 +381,15 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .node-version
-          cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
+      - id: pnpm-store
+        if: inputs.cache != 'cold'
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        if: inputs.cache != 'cold'
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: node-cache-${{ runner.os }}-x64-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: node-cache-${{ runner.os }}-x64-pnpm-
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - name: Install dependencies
@@ -387,6 +398,7 @@ jobs:
         if: inputs.cache != 'cold'
         with:
           shared-key: js-daemon
+          save-if: false
       - name: Build the native engine and desktop once
         run: node scripts/verification/cloud.mjs prepare
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -397,11 +409,10 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
-          compression-level: 0
       - name: Pack prepared artifacts
         run: >-
-          tar -I "zstd -T0 -1" -cf /tmp/javascript-prepared.tar.zst .dohc-dev/verification/build.json target/debug/dohc-workspace-engine
-          apps/desktop/target/debug/dohc-workspace-engine apps/desktop/dist apps/desktop/resources/cli-bin apps/desktop/resources/app-backend-runtime
+          tar -I "zstd -T0 -3" -cf /tmp/javascript-prepared.tar.zst .dohc-dev/verification/build.json target/debug/dohc-workspace-engine
+          apps/desktop/dist apps/desktop/resources/cli-bin apps/desktop/resources/app-backend-runtime
           apps/desktop/resources/app-compiler apps/desktop/resources/engine-reader services/share-web/viewer/dist services/sync-relay/dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -411,6 +422,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+      - name: Record prepared artifact name
+        id: prepared-artifact
+        run: echo "name=javascript-prepared-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-nextest@0.9.143
@@ -445,7 +459,6 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
-          compression-level: 0
 
   javascript-workers:
     name: JS worker ${{ matrix.shard }}
@@ -457,6 +470,7 @@ jobs:
       fail-fast: false
       matrix:
         shard:
+          - 0
           - 1
           - 2
           - 3
@@ -466,45 +480,6 @@ jobs:
           - 7
           - 8
           - 9
-          - 10
-          - 11
-          - 12
-    env:
-      DOHC_CONFINEMENT_SUITES: exclude
-      CARGO_INCREMENTAL: '0'
-      GITHUB_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 2
-          persist-credentials: false
-      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version-file: .node-version
-          cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
-      - name: Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
-      - name: Run the complete assigned inventory
-        run: node scripts/verification/cloud.mjs worker ${{ matrix.shard }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: verification-js-worker-${{ matrix.shard }}-${{ github.run_attempt }}
-          path: .agent-artifacts/verification/cloud/**
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
-  javascript:
-    name: typecheck + tests
-    needs: changes
-    if: always() && !cancelled() && ((github.event_name == 'workflow_dispatch' && (inputs.gate == 'all' || inputs.gate == 'js')) || needs.changes.outputs.js == 'true')
-    runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
-    timeout-minutes: 40
     env:
       DOHC_CONFINEMENT_SUITES: exclude
       CARGO_INCREMENTAL: '0'
@@ -527,118 +502,30 @@ jobs:
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: node-cache-${{ runner.os }}-x64-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: node-cache-${{ runner.os }}-x64-pnpm-
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - name: Install dependencies
         run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
       - name: Run the complete assigned inventory
-        run: node scripts/verification/cloud.mjs worker 0
+        run: node scripts/verification/cloud.mjs worker ${{ matrix.shard }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: verification-js-worker-0-${{ github.run_attempt }}
+          name: verification-js-worker-${{ matrix.shard }}-${{ github.run_attempt }}
           path: .agent-artifacts/verification/cloud/**
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
-          compression-level: 0
-      - name: Wait for the complete JavaScript group
-        run: node scripts/verification/cloud-aggregate.mjs wait js
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        with:
-          pattern: verification-js-*
-          path: .agent-artifacts/verification/downloaded
-          run-id: ${{ github.run_id }}
-          github-token: ${{ github.token }}
-      - name: Require complete proof and the JavaScript timing ceiling
-        if: always()
-        run: node scripts/verification/cloud-aggregate.mjs js
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: verification-js-${{ github.run_attempt }}
-          path: .agent-artifacts/verification/aggregate/js-result.json
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
 
-  rust-tests:
-    name: Rust tests ${{ matrix.shard }}
-    needs: changes
-    if: >-
-      always() && !cancelled() && needs.changes.result == 'success' &&
-      ((github.event_name == 'workflow_dispatch' && (inputs.gate == 'all' || inputs.gate == 'rust')) || needs.changes.outputs.rust == 'true')
-    runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
-    # The archive wait is capped at 25 minutes; the download and partition follow it.
-    timeout-minutes: 35
-    strategy:
-      fail-fast: false
-      matrix:
-        shard:
-          - 1
-          - 2
-          - 3
-          - 4
-          - 5
-    env:
-      NEXTEST_PROFILE: without-confinement
-      CARGO_INCREMENTAL: '0'
-      GITHUB_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 2
-          persist-credentials: false
-      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version-file: .node-version
-          cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf
-        with:
-          tool: cargo-nextest@0.9.143
-      - name: Wait for the shared Rust archive
-        id: rust-archive
-        run: node scripts/verification/wait-preparation.mjs rust
-      - id: rust-archive-download
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        timeout-minutes: 2
-        continue-on-error: true
-        with:
-          name: ${{ steps.rust-archive.outputs.name }}
-          path: .agent-artifacts/verification
-          run-id: ${{ github.run_id }}
-          github-token: ${{ github.token }}
-      - name: Download the shared Rust archive again after a stalled transfer
-        if: steps.rust-archive-download.outcome == 'failure'
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        timeout-minutes: 3
-        with:
-          name: ${{ steps.rust-archive.outputs.name }}
-          path: .agent-artifacts/verification
-          run-id: ${{ github.run_id }}
-          github-token: ${{ github.token }}
-      - name: Run every assigned test from the shared native archive
-        run: node scripts/verification/cloud-rust.mjs tests ${{ matrix.shard }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: verification-rust-tests-${{ matrix.shard }}-${{ github.run_attempt }}
-          path: .agent-artifacts/verification/cloud-rust/**
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
-  rust-policy:
-    name: Rust policy checks
+  rust-archive:
+    name: Rust build
     needs: changes
     if: always() && !cancelled() && needs.changes.result == 'success' && ((github.event_name == 'workflow_dispatch' && (inputs.gate == 'all' || inputs.gate == 'rust')) || needs.changes.outputs.rust == 'true')
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
     timeout-minutes: 25
+    outputs:
+      artifact: ${{ steps.archive-artifact.outputs.name }}
     env:
       NEXTEST_PROFILE: without-confinement
       CARGO_INCREMENTAL: '0'
@@ -648,54 +535,6 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 2
           persist-credentials: false
-      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version-file: .node-version
-          cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
-      - name: Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
-        if: inputs.cache != 'cold'
-        with:
-          shared-key: engine-policy
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf
-        with:
-          tool: cargo-deny@0.20.2,cargo-audit@0.22.2,cargo-nextest@0.9.143
-      - name: Run the remaining canonical Rust steps
-        run: |
-          set -o pipefail
-          mkdir -p .agent-artifacts/verification/cloud-rust/policy
-          node tools/rust-engine-program/run-rust-checks.mjs --prepared-runtime --policy-only --result .agent-artifacts/verification/cloud-rust/policy/result.json 2>&1 | tee .agent-artifacts/verification/cloud-rust/policy/gate.log
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: verification-rust-policy-${{ github.run_attempt }}
-          path: .agent-artifacts/verification/cloud-rust/**
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
-  rust:
-    name: engine gate
-    needs: changes
-    if: always() && !cancelled() && needs.changes.result == 'success' && ((github.event_name == 'workflow_dispatch' && (inputs.gate == 'all' || inputs.gate == 'rust')) || needs.changes.outputs.rust == 'true')
-    runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
-    # Covers the archive build (formerly its own 25-minute job), partition 0 and the group wait.
-    timeout-minutes: 55
-    env:
-      NEXTEST_PROFILE: without-confinement
-      CARGO_INCREMENTAL: '0'
-      GITHUB_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 2
-          persist-credentials: false
-      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .node-version
@@ -710,6 +549,7 @@ jobs:
         if: inputs.cache != 'cold'
         with:
           shared-key: engine-archive
+          save-if: false
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf
         with:
           tool: cargo-nextest@0.9.143
@@ -726,6 +566,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+      - name: Record Rust archive name
+        id: archive-artifact
+        run: echo "name=rust-tests-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -734,7 +577,37 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
-          compression-level: 0
+
+  rust-tests:
+    name: Rust tests ${{ matrix.shard }}
+    needs: [changes, rust-archive]
+    if: >-
+      always() && !cancelled() && needs.changes.result == 'success' && needs.rust-archive.result == 'success' &&
+      ((github.event_name == 'workflow_dispatch' && (inputs.gate == 'all' || inputs.gate == 'rust')) || needs.changes.outputs.rust == 'true')
+    runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - 0
+          - 1
+          - 2
+          - 3
+          - 4
+    env:
+      NEXTEST_PROFILE: without-confinement
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
       - id: pnpm-store
         if: inputs.cache != 'cold'
         run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
@@ -743,41 +616,94 @@ jobs:
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: node-cache-${{ runner.os }}-x64-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: node-cache-${{ runner.os }}-x64-pnpm-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
-      - name: Run every assigned test from the shared native archive
-        run: node scripts/verification/cloud-rust.mjs tests 0
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf
         with:
-          name: verification-rust-tests-0-${{ github.run_attempt }}
-          path: |-
-            .agent-artifacts/verification/cloud-rust/**
-            !.agent-artifacts/verification/cloud-rust/archive/**
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
-      - name: Wait for the complete Rust group
-        run: node scripts/verification/cloud-aggregate.mjs wait rust
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+          tool: cargo-nextest@0.9.143
+      - id: rust-archive-download
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        timeout-minutes: 2
+        continue-on-error: true
         with:
-          pattern: verification-rust-*
-          path: .agent-artifacts/verification/downloaded
+          name: ${{ needs.rust-archive.outputs.artifact }}
+          path: .agent-artifacts/verification
           run-id: ${{ github.run_id }}
           github-token: ${{ github.token }}
-      - name: Require complete proof and the Rust timing ceiling
-        if: always()
-        run: node scripts/verification/cloud-aggregate.mjs rust
+      - name: Download the shared Rust archive again after a stalled transfer
+        if: steps.rust-archive-download.outcome == 'failure'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        timeout-minutes: 3
+        with:
+          name: ${{ needs.rust-archive.outputs.artifact }}
+          path: .agent-artifacts/verification
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Run every assigned test from the shared native archive
+        run: node scripts/verification/cloud-rust.mjs tests ${{ matrix.shard }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: verification-rust-${{ github.run_attempt }}
-          path: .agent-artifacts/verification/aggregate/rust-result.json
+          name: verification-rust-tests-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: .agent-artifacts/verification/cloud-rust/**
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
-          compression-level: 0
+
+  rust-policy:
+    name: Rust policy checks
+    needs: changes
+    if: always() && !cancelled() && needs.changes.result == 'success' && ((github.event_name == 'workflow_dispatch' && (inputs.gate == 'all' || inputs.gate == 'rust')) || needs.changes.outputs.rust == 'true')
+    runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
+    timeout-minutes: 20
+    env:
+      NEXTEST_PROFILE: without-confinement
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+      - id: pnpm-store
+        if: inputs.cache != 'cold'
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        if: inputs.cache != 'cold'
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: node-cache-${{ runner.os }}-x64-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: node-cache-${{ runner.os }}-x64-pnpm-
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        if: inputs.cache != 'cold'
+        with:
+          shared-key: engine-policy
+          save-if: false
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf
+        with:
+          tool: cargo-deny@0.20.2,cargo-audit@0.22.2
+      - name: Run the remaining canonical Rust steps
+        run: |
+          set -o pipefail
+          mkdir -p .agent-artifacts/verification/cloud-rust/policy
+          node tools/rust-engine-program/run-rust-checks.mjs --prepared-runtime --policy-only --result .agent-artifacts/verification/cloud-rust/policy/result.json 2>&1 | tee .agent-artifacts/verification/cloud-rust/policy/gate.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: verification-rust-policy-${{ github.run_attempt }}
+          path: .agent-artifacts/verification/cloud-rust/**
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
 
   # The local verifier never compiles Android; this job's pass is the gate's only evidence.
   android:
@@ -798,12 +724,27 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .node-version
-          cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
+      - id: pnpm-store
+        if: inputs.cache != 'cold'
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        if: inputs.cache != 'cold'
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: node-cache-${{ runner.os }}-x64-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: node-cache-${{ runner.os }}-x64-pnpm-
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: 17
-          cache: ${{ inputs.cache != 'cold' && 'gradle' || '' }}
+      - uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        if: inputs.cache != 'cold'
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('apps/mobile/package.json', 'pnpm-lock.yaml', 'apps/mobile/modules/**/android/**') }}
+          restore-keys: gradle-${{ runner.os }}-
       - name: Install dependencies
         run: pnpm --filter @dohc/mobile... install --frozen-lockfile
       # apps/mobile ignores the generated android/ folder. The bundled template avoids a template download.
@@ -822,10 +763,10 @@ jobs:
   # gate's time: the job has its own filter and its own limit.
   together:
     name: ${{ matrix.suite }}
-    needs: changes
+    needs: [changes, javascript-prepare]
     if: (github.event_name == 'workflow_dispatch' && (inputs.gate == 'all' || inputs.gate == 'together')) || needs.changes.outputs.together == 'true'
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
-    timeout-minutes: 30
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -835,7 +776,6 @@ jobs:
     env:
       DOHC_CONFINEMENT_SUITES: exclude
       CARGO_INCREMENTAL: '0'
-      GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -846,38 +786,42 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .node-version
-          cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
+      - id: pnpm-store
+        if: inputs.cache != 'cold'
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        if: inputs.cache != 'cold'
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: node-cache-${{ runner.os }}-x64-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: node-cache-${{ runner.os }}-x64-pnpm-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
       - name: Install the browser
         run: pnpm --filter @dohc/desktop exec playwright install chromium
-      # Shared preparation publishes the engine and the share page while it goes on to its own tests.
-      - name: Wait for the prepared engine and share page
-        id: prepared
-        run: node scripts/verification/wait-preparation.mjs js
       - id: prepared-download
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         timeout-minutes: 2
         continue-on-error: true
         with:
-          name: ${{ steps.prepared.outputs.name }}
+          name: ${{ needs.javascript-prepare.outputs.artifact }}
           path: ${{ runner.temp }}
           run-id: ${{ github.run_id }}
           github-token: ${{ github.token }}
-      - name: Wait before retrying the prepared download
-        if: steps.prepared-download.outcome == 'failure'
-        run: sleep 20
       - name: Download the prepared engine and share page again
         if: steps.prepared-download.outcome == 'failure'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         timeout-minutes: 3
         with:
-          name: ${{ steps.prepared.outputs.name }}
+          name: ${{ needs.javascript-prepare.outputs.artifact }}
           path: ${{ runner.temp }}
           run-id: ${{ github.run_id }}
           github-token: ${{ github.token }}
       - name: Unpack the prepared engine and share page
-        run: tar -I zstd -xf "$RUNNER_TEMP/javascript-prepared.tar.zst"
+        run: |
+          tar -I zstd -xf "$RUNNER_TEMP/javascript-prepared.tar.zst"
+          mkdir -p apps/desktop/target/debug
+          cp target/debug/dohc-workspace-engine apps/desktop/target/debug/dohc-workspace-engine
       - name: Edit together
         if: matrix.suite == 'editing together'
         env:
@@ -887,6 +831,8 @@ jobs:
       - name: Open and use share links
         if: matrix.suite == 'share page'
         working-directory: services/share-web
+        env:
+          DOHC_SHARE_WEB_PREBUILT_VIEWER: '1'
         run: node ../../apps/desktop/scripts/run-playwright.mjs --config playwright.config.ts
       # Words and service output only: traces and screenshots stay on the runner.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -907,6 +853,8 @@ jobs:
     # Always GitHub's Windows runner, also when Blacksmith is on.
     runs-on: ${{ fromJSON('["windows-2025"]') }}
     timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -917,7 +865,16 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .node-version
-          cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
+      - id: pnpm-store
+        if: inputs.cache != 'cold'
+        shell: bash
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        if: inputs.cache != 'cold'
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: node-cache-${{ runner.os }}-x64-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: node-cache-${{ runner.os }}-x64-pnpm-
       - name: Rust toolchain
         shell: bash
         run: |
@@ -936,6 +893,7 @@ jobs:
         if: inputs.cache != 'cold'
         with:
           shared-key: windows-package
+          save-if: false
       - name: Build the desktop
         env:
           DOHC_DESKTOP_DIST: win-x64
@@ -962,7 +920,7 @@ jobs:
 
   verification:
     name: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'PR verification' || 'Manual verification' }}
-    needs: [changes, javascript, rust, javascript-prepare, android, together, windows]
+    needs: [changes, javascript-prepare, javascript-workers, rust-archive, rust-policy, rust-tests, android, together, windows]
     if: ${{ always() && !cancelled() && needs.changes.result != 'skipped' }}
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && '["blacksmith-2vcpu-ubuntu-2404"]' || '["ubuntu-24.04"]') }}
     timeout-minutes: 10
@@ -977,10 +935,18 @@ jobs:
           node-version: "24"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        if: needs.javascript.result == 'success'
+        if: needs.javascript-prepare.result == 'success' && needs.javascript-workers.result == 'success'
         with:
-          pattern: verification-js-[0-9]*
-          path: .agent-artifacts/verification/aggregate/published
+          pattern: verification-js-*-*
+          path: .agent-artifacts/verification/downloaded/js
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        if: needs.rust-archive.result == 'success' && needs.rust-policy.result == 'success' && needs.rust-tests.result == 'success'
+        with:
+          pattern: verification-rust-*-*
+          path: .agent-artifacts/verification/downloaded/rust
           run-id: ${{ github.run_id }}
           github-token: ${{ github.token }}
 
@@ -998,16 +964,24 @@ jobs:
           import { verifyCompletedCloud } from './scripts/verification/cloud-aggregate.mjs';
           const jobs = JSON.parse(process.env.JOBS);
           assert.equal(jobs.changes.result, 'success', 'Gate selection failed');
-          const verdicts = await Promise.allSettled([['js', 'javascript'], ['rust', 'rust'], ['android', 'android'], ['together', 'together'], ['windows', 'windows']].map(async ([gate, job]) => {
+          const gates = [
+            ['js', ['javascript-workers'], '.agent-artifacts/verification/downloaded/js'],
+            ['rust', ['rust-archive', 'rust-policy', 'rust-tests'], '.agent-artifacts/verification/downloaded/rust'],
+            ['android', ['android'], null],
+            ['together', ['together'], null],
+            ['windows', ['windows'], null],
+          ];
+          const verdicts = await Promise.allSettled(gates.map(async ([gate, gateJobs, directory]) => {
             if (process.env.EVENT_NAME === 'pull_request' || process.env.EVENT_NAME === 'merge_group') {
               assert.ok(['true', 'false'].includes(jobs.changes.outputs[gate]), `${gate} selection is missing`);
             }
             const selected = process.env.EVENT_NAME === 'workflow_dispatch'
               ? process.env.REQUESTED_GATE === 'all' || process.env.REQUESTED_GATE === gate
               : jobs.changes.outputs[gate] === 'true';
-            assert.equal(jobs[job].result, selected ? 'success' : 'skipped', `${gate} gate did not complete as selected`);
-            // Android, editing together, and the Windows package are one job each, so the job's success is its whole proof.
-            if (selected && gate !== 'android' && gate !== 'together' && gate !== 'windows') await verifyCompletedCloud(gate);
+            for (const job of gateJobs) {
+              assert.equal(jobs[job].result, selected ? 'success' : 'skipped', `${gate} gate (${job}) did not complete as selected`);
+            }
+            if (selected && directory) await verifyCompletedCloud(gate, { directory });
           }));
           // A manual run of Android or the Windows package alone starts no shared preparation.
           const confined = (process.env.EVENT_NAME === 'workflow_dispatch' && !['android', 'windows'].includes(process.env.REQUESTED_GATE)) || jobs.changes.outputs.js === 'true' || jobs.changes.outputs.rust === 'true';
@@ -1018,8 +992,24 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
+          name: verification-js-${{ github.run_attempt }}
+          path: .agent-artifacts/verification/aggregate/js-result.json
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: verification-rust-${{ github.run_attempt }}
+          path: .agent-artifacts/verification/aggregate/rust-result.json
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
           name: verification-completed-${{ github.run_attempt }}
           path: .agent-artifacts/verification/aggregate/*-completed-result.json
           include-hidden-files: true
+          if-no-files-found: ignore
           retention-days: 7
-          compression-level: 0

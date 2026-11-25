@@ -6,11 +6,14 @@ import { desktopProofTags } from "./verify.mjs";
 
 const slash = (path) => path.replaceAll("\\", "/");
 const fileId = (path) => slash(relative(repoRoot, path));
-export const JS_SHARDS = 13;
-// Median worker inventory plus artifact restoration in the recorded cloud run.
-export const JS_NATIVE_READY_SECONDS = 100;
+export const JS_SHARDS = 10;
+export const JS_NATIVE_READY_SECONDS = 75;
 const splitNativeFile = "services/share-web/src/selfHostedLiveNative.integration.ts";
 export const BROWSER_TEST_FILES = new Set(["examples/hex-tactics/hex-tactics.test.mts"]);
+export const SELF_HOST_BROWSER_FILES = new Set([
+  "services/share-web/src/namedRecipientAuthenticatedNative.integration.ts",
+  "services/share-web/src/publicLinkAuthenticatedNative.integration.ts",
+]);
 
 const databasePackages = new Set([
   "@dohc/workspace-postgres",
@@ -224,6 +227,9 @@ export const preparedArtifactPaths = [
   "services/share-web/viewer/dist",
   "services/sync-relay/dist",
 ];
+export const packedPreparedArtifactPaths = preparedArtifactPaths.filter(
+  (path) => path !== "apps/desktop/target/debug/dohc-workspace-engine",
+);
 
 function referencesPreparedArtifact(file, source) {
   if (/\bDOHC_TEST_(?:ENGINE_BINARY|RELAY_MAIN)\b/u.test(source)) return true;

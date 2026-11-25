@@ -232,9 +232,14 @@ readTreeAfter("native target");
 
 // An unverified host makes every later result unattributable, so nothing else
 // runs — and the expensive steps are the ones worth skipping.
-const archivedSteps = new Set(["test fixtures", "test --workspace", "reader tests"]);
+const distributedSteps = new Set([
+  "test fixtures",
+  "test --workspace",
+  "reader tests",
+  "build daemon",
+]);
 for (const step of native.ok
-  ? required.filter((step) => !policyOnly || !archivedSteps.has(step.name))
+  ? required.filter((step) => !policyOnly || !distributedSteps.has(step.name))
   : []) {
   console.log(`\n--- ${step.name} ---`);
   const r = run(step.cmd);

@@ -9,11 +9,7 @@ import test from "node:test";
 import { load } from "js-yaml";
 import { requireCiPassVerdict } from "../tools/rust-engine-program/require-ci-pass-verdict.mjs";
 import { JS_SHARDS } from "./verification/shards.mjs";
-import {
-  CLOUD_JOB_GRAPH,
-  RUST_ARCHIVE_BUILD_STEP,
-  RUST_ARCHIVE_WAIT_STEP,
-} from "./verification/cloud-aggregate.mjs";
+import { CLOUD_JOB_GRAPH } from "./verification/cloud-aggregate.mjs";
 import { RUST_SHARDS } from "./verification/cloud-rust.mjs";
 import { environmentInputs } from "./verification/build.mjs";
 import {
@@ -32,6 +28,10 @@ const check = (log, resolveHead = () => CHECKOUT_HEAD) => requireCiPassVerdict(l
 
 const workflow = await readFile(
   new URL("../.github/workflows/pr-checks.yml", import.meta.url),
+  "utf8",
+);
+const cacheWorkflow = await readFile(
+  new URL("../.github/workflows/warm-ci-caches.yml", import.meta.url),
   "utf8",
 );
 const passVerdict =
@@ -308,9 +308,9 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
   }
   for (const [name, tools] of [
     ["javascript-prepare", ["nextest"]],
+    ["rust-archive", ["nextest"]],
     ["rust-tests", ["nextest"]],
-    ["rust", ["nextest"]],
-    ["rust-policy", ["deny", "audit", "nextest"]],
+    ["rust-policy", ["deny", "audit"]],
   ]) {
     const install = jobs[name].steps.find((step) =>
       step.uses?.startsWith("taiki-e/install-action@"),
@@ -320,24 +320,8 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
       tools.map((tool) => `cargo-${tool}@${env[`CARGO_${tool.toUpperCase()}_VERSION`]}`).sort(),
     );
   }
-  assert.equal(jobs.javascript.needs, "changes");
-  assert.equal(jobs.rust.needs, "changes", "Rust compilation can overlap JavaScript");
+  assert.equal(jobs["rust-archive"].needs, "changes", "Rust compilation can overlap JavaScript");
   assert.equal(jobs["rust-policy"].needs, "changes", "cold policy checks can overlap JavaScript");
-  for (const [name, scope] of [
-    ["javascript", "js"],
-    ["rust", "rust"],
-  ]) {
-    const steps = jobs[name].steps;
-    const wait = steps.findIndex(
-      (step) => step.run === `node scripts/verification/cloud-aggregate.mjs wait ${scope}`,
-    );
-    const download = steps.findIndex((step) => step.with?.pattern);
-    const aggregate = steps.findIndex(
-      (step) => step.run === `node scripts/verification/cloud-aggregate.mjs ${scope}`,
-    );
-    assert.ok(wait >= 0 && wait < download && download < aggregate);
-    assert.equal(steps[aggregate].if, "always()", "failed waits must retain failure evidence");
-  }
   const workers = jobs["javascript-workers"];
   assert.equal(workers.needs, "changes", "pure work can start while native artifacts build");
   assert.equal(workers.env.GITHUB_TOKEN, "${{ github.token }}");
@@ -348,53 +332,32 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
   const tests = jobs["rust-tests"];
   assert.deepEqual(
     tests.needs,
-    "changes",
-    "Rust setup overlaps compilation without waiting for JavaScript",
+    ["changes", "rust-archive"],
+    "Rust test runners start only after the shared archive is built",
   );
   {
     const job = tests;
-    assert.equal(job.env.GITHUB_TOKEN, "${{ github.token }}");
     const install = job.steps.findIndex((step) => step.name === "Install dependencies");
-    const wait = job.steps.findIndex(
-      (step) => step.run === "node scripts/verification/wait-preparation.mjs rust",
-    );
     const download = job.steps.findIndex((step) =>
       step.uses?.startsWith("actions/download-artifact@"),
     );
-    assert.ok(install >= 0 && install < wait && wait < download);
-    assert.equal(job.steps[wait].id, "rust-archive");
-    assert.equal(job.steps[download].with.name, "${{ steps.rust-archive.outputs.name }}");
+    assert.ok(install >= 0 && install < download);
+    assert.equal(job.steps[download].with.name, "${{ needs.rust-archive.outputs.artifact }}");
+    assert.ok(
+      !job.steps.some((step) => step.run?.includes("wait-preparation.mjs")),
+      "Rust tests depend on rust-archive directly without polling",
+    );
   }
-  const steps = jobs.rust.steps;
+  const steps = jobs["rust-archive"].steps;
   const compile = steps.findIndex(
     (step) => step.run === "node scripts/verification/cloud-rust.mjs archive",
   );
   const upload = steps.findIndex(
     (step) => step.with?.name === "rust-tests-${{ github.run_attempt }}",
   );
-  const install = steps.findIndex((step) => step.name === "Install dependencies");
-  const run = steps.findIndex(
-    (step) => step.run === "node scripts/verification/cloud-rust.mjs tests 0",
-  );
-  assert.ok(compile >= 0 && upload > compile && install > upload && run > install);
-  assert.ok(
-    !steps.some((step) => step.run === "node scripts/verification/wait-preparation.mjs rust"),
-  );
-  assert.ok(
-    !steps.some(
-      (step) =>
-        step.with?.name === "rust-tests-${{ github.run_attempt }}" &&
-        step.uses?.startsWith("actions/download-artifact@"),
-    ),
-  );
-  assert.equal(jobs.rust.env.GITHUB_TOKEN, "${{ github.token }}");
-  const receipt = steps.find(
-    (step) => step.with?.name === "verification-rust-tests-0-${{ github.run_attempt }}",
-  );
-  assert.equal(
-    receipt.with.path,
-    ".agent-artifacts/verification/cloud-rust/**\n!.agent-artifacts/verification/cloud-rust/archive/**",
-  );
+  const record = steps.findIndex((step) => step.id === "archive-artifact");
+  assert.ok(compile >= 0 && upload > compile && record > upload);
+  assert.equal(jobs["rust-archive"].outputs.artifact, "${{ steps.archive-artifact.outputs.name }}");
 });
 
 test("downloads read each artifact from the attempt that produced it, not the current one", () => {
@@ -410,11 +373,11 @@ test("downloads read each artifact from the attempt that produced it, not the cu
     assert.equal(step.with["github-token"], "${{ github.token }}", id);
     assert.doesNotMatch(JSON.stringify(step.with), /run_attempt/u, id);
   }
-  const steps = jobs.together.steps,
-    wait = steps.findIndex(
-      (step) => step.run === "node scripts/verification/wait-preparation.mjs js",
-    );
-  assert.equal(steps[wait + 1].with.name, `\${{ steps.${steps[wait].id}.outputs.name }}`);
+  assert.deepEqual(jobs.together.needs, ["changes", "javascript-prepare"]);
+  assert.equal(
+    jobs.together.steps.find((step) => step.id === "prepared-download").with.name,
+    "${{ needs.javascript-prepare.outputs.artifact }}",
+  );
 });
 
 test("downloads list past a run's first 100 artifacts, where a later attempt finds earlier receipts", () => {
@@ -436,64 +399,60 @@ test("shared Rust archive downloads retry once under bounded step timeouts", () 
   const { jobs } = load(workflow);
   const action = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333";
   const inputs = {
-    name: "${{ steps.rust-archive.outputs.name }}",
+    name: "${{ needs.rust-archive.outputs.artifact }}",
     path: ".agent-artifacts/verification",
     "run-id": "${{ github.run_id }}",
     "github-token": "${{ github.token }}",
   };
-  {
-    const steps = jobs["rust-tests"].steps,
-      wait = steps.findIndex((step) => step.name === "Wait for the shared Rust archive");
-    assert.ok(wait >= 0);
-    assert.deepEqual(steps[wait + 1], {
-      id: "rust-archive-download",
-      uses: action,
-      "timeout-minutes": 2,
-      "continue-on-error": true,
-      with: inputs,
-    });
-    assert.deepEqual(steps[wait + 2], {
-      name: "Download the shared Rust archive again after a stalled transfer",
-      if: "steps.rust-archive-download.outcome == 'failure'",
-      uses: action,
-      "timeout-minutes": 3,
-      with: inputs,
-    });
-    assert.equal(
-      steps.filter((step) => step.with?.name === inputs.name).length,
-      2,
-      "there are exactly two archive attempts",
-    );
-    assert.equal(
-      steps[wait + 3].run,
-      "node scripts/verification/cloud-rust.mjs tests ${{ matrix.shard }}",
-    );
-    assert.equal(steps[wait + 3].if, undefined, "tests run only after a successful download");
-  }
+  const steps = jobs["rust-tests"].steps,
+    first = steps.findIndex((step) => step.id === "rust-archive-download");
+  assert.ok(first >= 0);
+  assert.deepEqual(steps[first], {
+    id: "rust-archive-download",
+    uses: action,
+    "timeout-minutes": 2,
+    "continue-on-error": true,
+    with: inputs,
+  });
+  assert.deepEqual(steps[first + 1], {
+    name: "Download the shared Rust archive again after a stalled transfer",
+    if: "steps.rust-archive-download.outcome == 'failure'",
+    uses: action,
+    "timeout-minutes": 3,
+    with: inputs,
+  });
+  assert.equal(
+    steps.filter((step) => step.with?.name === inputs.name).length,
+    2,
+    "there are exactly two archive attempts",
+  );
+  assert.equal(
+    steps[first + 2].run,
+    "node scripts/verification/cloud-rust.mjs tests ${{ matrix.shard }}",
+  );
+  assert.equal(steps[first + 2].if, undefined, "tests run only after a successful download");
 });
 
 test("together downloads retry once before unpacking the prepared archive", () => {
   const { jobs } = load(workflow);
   const steps = jobs.together.steps;
-  const wait = steps.findIndex((step) => step.id === "prepared");
-  assert.ok(wait >= 0);
+  const first = steps.findIndex((step) => step.id === "prepared-download");
+  assert.ok(first >= 0);
   const action = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333";
   const inputs = {
-    name: "${{ steps.prepared.outputs.name }}",
+    name: "${{ needs.javascript-prepare.outputs.artifact }}",
     path: "${{ runner.temp }}",
     "run-id": "${{ github.run_id }}",
     "github-token": "${{ github.token }}",
   };
-  assert.deepEqual(steps[wait + 1], {
+  assert.deepEqual(steps[first], {
     id: "prepared-download",
     uses: action,
     "timeout-minutes": 2,
     "continue-on-error": true,
     with: inputs,
   });
-  assert.equal(steps[wait + 2].if, "steps.prepared-download.outcome == 'failure'");
-  assert.equal(steps[wait + 2].run, "sleep 20");
-  assert.deepEqual(steps[wait + 3], {
+  assert.deepEqual(steps[first + 1], {
     name: "Download the prepared engine and share page again",
     if: "steps.prepared-download.outcome == 'failure'",
     uses: action,
@@ -501,8 +460,15 @@ test("together downloads retry once before unpacking the prepared archive", () =
     with: inputs,
   });
   assert.equal(steps.filter((step) => step.with?.name === inputs.name).length, 2);
-  assert.equal(steps[wait + 4].run, 'tar -I zstd -xf "$RUNNER_TEMP/javascript-prepared.tar.zst"');
-  assert.equal(steps[wait + 4].if, undefined);
+  assert.match(
+    steps[first + 2].run,
+    /tar -I zstd -xf "\$RUNNER_TEMP\/javascript-prepared\.tar\.zst"/,
+  );
+  assert.match(
+    steps[first + 2].run,
+    /cp target\/debug\/dohc-workspace-engine apps\/desktop\/target\/debug\/dohc-workspace-engine/,
+  );
+  assert.equal(steps[first + 2].if, undefined);
 });
 
 // These cases use string/boolean comparisons shared by JavaScript and Actions.
@@ -512,7 +478,9 @@ function workflowExpression(
   expression,
   { github, vars = {}, inputs = {}, needs = {}, cancelled = false },
 ) {
-  const source = expression.replace(/^\$\{\{\s*|\s*\}\}$/g, "");
+  const source = expression
+    .replace(/^\$\{\{\s*|\s*\}\}$/g, "")
+    .replace(/needs\.([a-z0-9-]+)\b/g, 'needs["$1"]');
   return Function(
     "github",
     "vars",
@@ -708,7 +676,7 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
   );
   for (const size of ["4", "8", "32", ""]) {
     const context = workflowContext({ enabled: "true", event: "workflow_dispatch", size });
-    for (const name of ["javascript", "rust"]) {
+    for (const name of ["javascript-workers", "rust-archive", "rust-tests"]) {
       assert.deepEqual(workflowExpression(jobs[name]["runs-on"], context), [
         `blacksmith-${size === "8" ? "8" : "4"}vcpu-ubuntu-2404`,
       ]);
@@ -726,18 +694,22 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
   );
   for (const name of ["javascript-prepare", "javascript-workers"])
     assert.equal(jobs[name].env.DOHC_CONFINEMENT_SUITES, "exclude");
-  for (const name of ["rust", "rust-tests", "rust-policy"])
+  for (const name of ["rust-archive", "rust-tests", "rust-policy"])
     assert.equal(jobs[name].env.NEXTEST_PROFILE, "without-confinement");
-  for (const name of ["rust-tests", "rust"]) assert.equal(jobs[name].needs, "changes");
+  assert.equal(jobs["rust-archive"].needs, "changes");
+  assert.deepEqual(jobs["rust-tests"].needs, ["changes", "rust-archive"]);
   for (const js of ["true", "false"])
     for (const rust of ["true", "false"])
       for (const android of ["true", "false"]) {
         const context = {
           ...workflowContext({ enabled: "true" }),
-          needs: { changes: { result: "success", outputs: { js, rust, android } } },
+          needs: {
+            changes: { result: "success", outputs: { js, rust, android } },
+            "rust-archive": { result: rust === "true" ? "success" : "skipped" },
+          },
         };
-        assert.equal(workflowExpression(jobs.javascript.if, context), js === "true");
-        for (const name of ["rust", "rust-tests", "rust-policy"])
+        assert.equal(workflowExpression(jobs["javascript-workers"].if, context), js === "true");
+        for (const name of ["rust-archive", "rust-tests", "rust-policy"])
           assert.equal(workflowExpression(jobs[name].if, context), rust === "true");
         assert.equal(
           workflowExpression(jobs["javascript-prepare"].if, context),
@@ -748,7 +720,10 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
   for (const together of ["true", "false"]) {
     const context = {
       ...workflowContext({ enabled: "true" }),
-      needs: { changes: { result: "success", outputs: { js: "true", together } } },
+      needs: {
+        changes: { result: "success", outputs: { js: "true", together } },
+        "javascript-prepare": { result: "success" },
+      },
     };
     assert.equal(workflowExpression(jobs.together.if, context), together === "true");
   }
@@ -763,10 +738,19 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
   for (const gate of ["all", "js", "rust", "android", "together", "windows"]) {
     const context = {
       ...workflowContext({ event: "workflow_dispatch", gate }),
-      needs: { changes: { result: "success", outputs: {} } },
+      needs: {
+        changes: { result: "success", outputs: {} },
+        "rust-archive": { result: gate === "all" || gate === "rust" ? "success" : "skipped" },
+      },
     };
-    assert.equal(workflowExpression(jobs.javascript.if, context), gate === "all" || gate === "js");
-    assert.equal(workflowExpression(jobs.rust.if, context), gate === "all" || gate === "rust");
+    assert.equal(
+      workflowExpression(jobs["javascript-workers"].if, context),
+      gate === "all" || gate === "js",
+    );
+    assert.equal(
+      workflowExpression(jobs["rust-archive"].if, context),
+      gate === "all" || gate === "rust",
+    );
     // Android and the Windows package use nothing that shared preparation builds.
     assert.equal(
       workflowExpression(jobs["javascript-prepare"].if, context),
@@ -790,53 +774,42 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
         ...context,
         needs: {
           changes: { result: "success", outputs: {} },
-          rust: { result },
+          "rust-archive": { result },
         },
       };
-      for (const name of ["rust-tests", "rust", "rust-policy"]) {
+      for (const name of ["rust-archive", "rust-policy"]) {
         assert.match(
           jobs[name].if,
           /^always\(\)/,
-          "Rust siblings must retain failure evidence when the build fails",
+          "Rust siblings must retain failure evidence when a sibling fails",
         );
         assert.equal(
           workflowExpression(jobs[name].if, selected),
           gate === "all" || gate === "rust",
         );
       }
+      assert.equal(
+        workflowExpression(jobs["rust-tests"].if, selected),
+        (gate === "all" || gate === "rust") && result === "success",
+      );
     }
     for (const result of ["failure", "skipped", "cancelled"]) {
       const failedSelection = {
         ...context,
-        needs: { changes: { result, outputs: {} } },
+        needs: { changes: { result, outputs: {} }, "rust-archive": { result: "skipped" } },
       };
-      for (const name of ["rust", "rust-tests", "rust-policy"])
+      for (const name of ["rust-archive", "rust-tests", "rust-policy"])
         assert.equal(workflowExpression(jobs[name].if, failedSelection), false);
     }
   }
-});
-
-test("the timing rule finds engine gate's archive upload and each Rust test job's archive wait", () => {
-  const { jobs } = load(workflow);
-  const steps = jobs.rust.steps,
-    built = steps.findIndex((step) => step.name === RUST_ARCHIVE_BUILD_STEP);
-  assert.equal(steps.filter((step) => step.name === RUST_ARCHIVE_BUILD_STEP).length, 1);
-  // The job API names an unnamed step "Run actions/upload-artifact@<sha>"; the rule matches that.
-  assert.equal(steps[built + 1].name, undefined);
-  assert.match(steps[built + 1].uses, /^actions\/upload-artifact@/u);
-  assert.equal(steps[built + 1].with.name, "rust-tests-${{ github.run_attempt }}");
-  assert.equal(
-    jobs["rust-tests"].steps.filter((step) => step.name === RUST_ARCHIVE_WAIT_STEP).length,
-    1,
-  );
 });
 
 test("shared preparation runs confinement after publishing worker artifacts", () => {
   const { jobs } = load(workflow),
     prepare = jobs["javascript-prepare"];
   // Rust tests read build-time paths, so the archive and its consumers share one runner type.
-  for (const name of ["rust-tests", "rust", "rust-policy"])
-    assert.equal(jobs[name]["runs-on"], jobs.rust["runs-on"], name);
+  for (const name of ["rust-tests", "rust-archive", "rust-policy"])
+    assert.equal(jobs[name]["runs-on"], jobs["rust-archive"]["runs-on"], name);
   const preparedUpload = prepare.steps.findIndex(
     (step) => step.with?.name === "javascript-prepared-${{ github.run_attempt }}",
   );
@@ -942,12 +915,11 @@ test("job names match the workflow graph and timeout backstops", () => {
       changes: 10,
       "javascript-prepare": 30,
       "javascript-workers": 25,
-      javascript: 40,
-      "rust-tests": 35,
-      "rust-policy": 25,
-      rust: 55,
+      "rust-archive": 25,
+      "rust-tests": 20,
+      "rust-policy": 20,
       android: 20,
-      together: 30,
+      together: 20,
       windows: 30,
       verification: 10,
     },
@@ -1081,28 +1053,16 @@ test("the Windows package job runs the release's packaged smoke and receives no 
 
 test("cloud matrices run every JavaScript and Rust shard with separate evidence", () => {
   const { jobs } = load(workflow);
-  assert.equal(JS_SHARDS, 13);
-  assert.equal(RUST_SHARDS, 6);
-  for (const [name, count, finalJob, scope, command] of [
-    [
-      "javascript-workers",
-      JS_SHARDS,
-      "javascript",
-      "js-worker",
-      "node scripts/verification/cloud.mjs worker 0",
-    ],
-    [
-      "rust-tests",
-      RUST_SHARDS,
-      "rust",
-      "rust-tests",
-      "node scripts/verification/cloud-rust.mjs tests 0",
-    ],
+  assert.equal(JS_SHARDS, 10);
+  assert.equal(RUST_SHARDS, 5);
+  for (const [name, count] of [
+    ["javascript-workers", JS_SHARDS],
+    ["rust-tests", RUST_SHARDS],
   ]) {
     const job = jobs[name];
     assert.deepEqual(
       job.strategy.matrix,
-      { shard: Array.from({ length: count - 1 }, (_, index) => index + 1) },
+      { shard: Array.from({ length: count }, (_, index) => index) },
       name,
     );
     assert.equal(
@@ -1117,35 +1077,6 @@ test("cloud matrices run every JavaScript and Rust shard with separate evidence"
       /\$\{\{ matrix\.shard \}\}/,
       "shards must not overwrite each other's evidence",
     );
-    const reporting = jobs[finalJob].steps;
-    const run = reporting.findIndex((step) => step.run === command);
-    const ownReceipt = reporting.findIndex(
-      (step) => step.with?.name === `verification-${scope}-0-\${{ github.run_attempt }}`,
-    );
-    const wait = reporting.findIndex((step) =>
-      step.run?.startsWith("node scripts/verification/cloud-aggregate.mjs wait "),
-    );
-    assert.ok(
-      run >= 0 && ownReceipt > run && wait > ownReceipt,
-      "partition zero must execute and publish its receipt before reporting waits",
-    );
-    assert.equal(
-      reporting[wait].name,
-      `Wait for the complete ${scope === "js-worker" ? "JavaScript" : "Rust"} group`,
-    );
-    const verify = reporting.findIndex(
-      (step) =>
-        step.run ===
-        `node scripts/verification/cloud-aggregate.mjs ${scope === "js-worker" ? "js" : "rust"}`,
-    );
-    assert.ok(verify > wait);
-    assert.match(reporting[verify].name, /^Require complete proof and /u);
-    const downloads = reporting
-      .slice(wait + 1, verify)
-      .filter((step) => step.uses?.startsWith("actions/download-artifact@"));
-    assert.equal(downloads.length, 1);
-    // The completed check finds this step by its default name.
-    assert.equal(downloads[0].name, undefined);
   }
 });
 
@@ -1157,7 +1088,7 @@ test("the workflow graph pins its total and peak concurrent jobs", () => {
     names = Object.keys(jobs);
   assert.equal(
     names.reduce((total, name) => total + legs(jobs[name]), 0),
-    27,
+    24,
   );
   const ancestors = (name) => {
     const needs = jobs[name].needs ?? [];
@@ -1167,11 +1098,16 @@ test("the workflow graph pins its total and peak concurrent jobs", () => {
   };
   const before = new Map(names.map((name) => [name, ancestors(name)]));
   const initial = [
-    "rust-tests",
-    "rust",
-    "javascript-workers",
-    "javascript",
     "javascript-prepare",
+    "javascript-workers",
+    "rust-archive",
+    "rust-policy",
+    "android",
+    "windows",
+  ];
+  const phaseTwoPeak = [
+    "javascript-workers",
+    "rust-tests",
     "rust-policy",
     "android",
     "together",
@@ -1193,9 +1129,10 @@ test("the workflow graph pins its total and peak concurrent jobs", () => {
       simultaneous.reduce((n, name) => n + legs(jobs[name]), 0),
     );
   }
-  assert.equal(concurrent(initial), JS_SHARDS + RUST_SHARDS + 6);
-  assert.equal(peak, concurrent(initial));
-  assert.equal(peak, 25);
+  assert.equal(concurrent(initial), JS_SHARDS + 5);
+  assert.equal(concurrent(phaseTwoPeak), JS_SHARDS + RUST_SHARDS + 5);
+  assert.equal(peak, concurrent(phaseTwoPeak));
+  assert.equal(peak, 20);
   assert.ok(peak <= 60, "one combined gate fits the plan limit");
 });
 
@@ -1233,49 +1170,72 @@ test("cloud selection uses the tested Git checkout and evidence has bounded rete
   assert.ok(base.run.includes('echo "sha=$(git rev-parse HEAD^1)" >> "$GITHUB_OUTPUT"'));
   assert.equal(filter.with.base, "${{ steps.merge-base.outputs.sha }}");
   assert.ok(jobs.changes.steps.indexOf(base) < jobs.changes.steps.indexOf(filter));
-  for (const name of ["javascript", "rust"]) {
-    const download = jobs[name].steps.find((step) => step.with?.pattern);
+  for (const scope of ["js", "rust"]) {
+    const download = jobs.verification.steps.find(
+      (step) => step.with?.pattern === `verification-${scope}-*-*`,
+    );
     assert.deepEqual(download.with, {
-      pattern: `verification-${name === "javascript" ? "js" : "rust"}-*`,
-      path: ".agent-artifacts/verification/downloaded",
+      pattern: `verification-${scope}-*-*`,
+      path: `.agent-artifacts/verification/downloaded/${scope}`,
       "run-id": "${{ github.run_id }}",
       "github-token": "${{ github.token }}",
     });
-    const upload = jobs[name].steps.find((step) => step.with?.path?.endsWith("-result.json"));
+    const upload = jobs.verification.steps.find(
+      (step) => step.with?.path === `.agent-artifacts/verification/aggregate/${scope}-result.json`,
+    );
     assert.equal(upload.if, "always()");
     assert.equal(upload.with["retention-days"], 7);
     assert.equal(upload.with["include-hidden-files"], true);
-    assert.equal(
-      upload.with.path,
-      `.agent-artifacts/verification/aggregate/${name === "javascript" ? "js" : "rust"}-result.json`,
-    );
   }
 });
 
-test("aggregate dependency caches restore the setup-node key without saving", () => {
-  const { jobs } = load(workflow);
-  for (const name of ["javascript", "rust"]) {
-    const { steps } = jobs[name];
-    assert.equal(
-      steps.find((step) => step.uses?.startsWith("actions/setup-node@")).with.cache,
-      undefined,
-    );
-    const store = steps.find((step) => step.id === "pnpm-store");
-    const restore = steps.find((step) => step.uses?.startsWith("actions/cache/restore@"));
-    assert.equal(store.if, "inputs.cache != 'cold'");
-    assert.equal(store.run, 'echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"');
-    assert.equal(restore.if, store.if);
-    assert.equal(restore.with.path, "${{ steps.pnpm-store.outputs.path }}");
-    assert.equal(
-      restore.with.key,
-      "node-cache-${{ runner.os }}-x64-pnpm-${{ hashFiles('pnpm-lock.yaml') }}",
-    );
-    assert.ok(steps.indexOf(store) < steps.indexOf(restore));
-    assert.ok(
-      steps.indexOf(restore) < steps.findIndex((step) => step.name === "Install dependencies"),
-    );
-    assert.ok(!steps.some((step) => /^actions\/cache(?:@|\/save@)/u.test(step.uses ?? "")));
+test("PR checks restore caches read-only and match the main cache warmer keys and Rust env", () => {
+  const pr = load(workflow);
+  const warmer = load(cacheWorkflow);
+  for (const [name, job] of Object.entries(pr.jobs)) {
+    for (const step of job.steps ?? []) {
+      if (step.uses?.startsWith("actions/setup-node@"))
+        assert.equal(step.with?.cache, undefined, `${name} setup-node must not save caches`);
+      if (step.uses?.startsWith("actions/setup-java@"))
+        assert.equal(step.with?.cache, undefined, `${name} setup-java must not save caches`);
+      assert.ok(
+        !/^actions\/cache(?:@|\/save@)/u.test(step.uses ?? ""),
+        `${name} must not save GitHub caches on PR or merge_group runs`,
+      );
+      if (step.uses?.startsWith("Swatinem/rust-cache@"))
+        assert.equal(step.with?.["save-if"], false, `${name} rust-cache must be restore-only`);
+    }
   }
+  assert.deepEqual(Object.keys(warmer.on).sort(), ["push", "workflow_dispatch"]);
+  assert.deepEqual(warmer.on.push.branches, ["main"]);
+  for (const [name, job] of Object.entries(warmer.jobs)) {
+    assert.ok(
+      ["ubuntu-24.04", "windows-2025"].includes(job["runs-on"]),
+      `${name} cache warmer must stay on GitHub standard runners`,
+    );
+  }
+  for (const key of [
+    "CARGO_PROFILE_DEV_DEBUG",
+    "CARGO_DENY_VERSION",
+    "CARGO_AUDIT_VERSION",
+    "CARGO_NEXTEST_VERSION",
+  ]) {
+    assert.equal(warmer.env[key], pr.env[key], `warmer env ${key} must match pr-checks`);
+  }
+  assert.equal(warmer.env.CARGO_INCREMENTAL, "0");
+  const prRustKeys = Object.entries(pr.jobs).flatMap(([name, job]) => {
+    const step = (job.steps ?? []).find((s) => s.uses?.startsWith("Swatinem/rust-cache@"));
+    if (!step) return [];
+    assert.equal(job.env?.CARGO_INCREMENTAL, "0", `${name} must match warmer CARGO_INCREMENTAL`);
+    return [step.with["shared-key"]];
+  });
+  const warmerRustKeys = [
+    ...warmer.jobs["rust-linux"].strategy.matrix.key,
+    warmer.jobs.windows.steps.find((s) => s.uses?.startsWith("Swatinem/rust-cache@")).with[
+      "shared-key"
+    ],
+  ];
+  assert.deepEqual(prRustKeys.sort(), warmerRustKeys.sort());
 });
 
 test("cloud JavaScript jobs do not inherit the event's base SHA", () => {
@@ -1297,9 +1257,11 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
   const job = load(workflow).jobs.verification;
   assert.deepEqual(job.needs, [
     "changes",
-    "javascript",
-    "rust",
     "javascript-prepare",
+    "javascript-workers",
+    "rust-archive",
+    "rust-policy",
+    "rust-tests",
     "android",
     "together",
     "windows",
@@ -1316,17 +1278,22 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
     "a partial manual run must not satisfy the PR check",
   );
   const verdictIndex = job.steps.findIndex((step) => step.name === "Require every selected gate");
-  const downloadIndex = job.steps.findIndex((step) =>
-    step.uses?.startsWith("actions/download-artifact@"),
+  const jsDownloadIndex = job.steps.findIndex(
+    (step) => step.with?.pattern === "verification-js-*-*",
   );
-  assert.ok(downloadIndex >= 0 && downloadIndex < verdictIndex);
-  assert.equal(job.steps[downloadIndex].if, "needs.javascript.result == 'success'");
-  assert.deepEqual(job.steps[downloadIndex].with, {
-    pattern: "verification-js-[0-9]*",
-    path: ".agent-artifacts/verification/aggregate/published",
-    "run-id": "${{ github.run_id }}",
-    "github-token": "${{ github.token }}",
-  });
+  const rustDownloadIndex = job.steps.findIndex(
+    (step) => step.with?.pattern === "verification-rust-*-*",
+  );
+  assert.ok(jsDownloadIndex >= 0 && jsDownloadIndex < verdictIndex);
+  assert.ok(rustDownloadIndex >= 0 && rustDownloadIndex < verdictIndex);
+  assert.equal(
+    job.steps[jsDownloadIndex].if,
+    "needs.javascript-prepare.result == 'success' && needs.javascript-workers.result == 'success'",
+  );
+  assert.equal(
+    job.steps[rustDownloadIndex].if,
+    "needs.rust-archive.result == 'success' && needs.rust-policy.result == 'success' && needs.rust-tests.result == 'success'",
+  );
   const directory = mkdtempSync(join(tmpdir(), "completed-flaky-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   assert.equal(
@@ -1342,15 +1309,7 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
   const source = job.steps[verdictIndex].run.match(/<<'NODE'\n([\s\S]*)\nNODE\s*$/)?.[1];
   assert.ok(source, "the final check must execute its verdict");
   const started = Date.parse("2026-11-09T00:00:00Z");
-  const jobNames = [
-    "what changed",
-    "shared preparation",
-    "typecheck + tests",
-    "engine gate",
-    "Rust policy checks",
-    ...Array.from({ length: JS_SHARDS - 1 }, (_, index) => `JS worker ${index + 1}`),
-    ...Array.from({ length: RUST_SHARDS - 1 }, (_, index) => `Rust tests ${index + 1}`),
-  ];
+  const jobNames = Object.values(CLOUD_JOB_GRAPH).flatMap((node) => node.names);
   const completed = jobNames.map((name) => ({
     name,
     status: "completed",
@@ -1360,15 +1319,76 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
     started_at: new Date(started).toISOString(),
     completed_at: new Date(started + 100_000).toISOString(),
   }));
+  const writeReceipts = (base, scope, commit) => {
+    const target = join(base, scope);
+    rmSync(target, { recursive: true, force: true });
+    mkdirSync(target, { recursive: true });
+    const count = scope === "js" ? JS_SHARDS : RUST_SHARDS;
+    const all = Array.from({ length: count }, (_, i) => `task-${i}`);
+    const records =
+      scope === "js"
+        ? [
+            { part: "prepare-0" },
+            ...all.map((id, index) => ({
+              part: `worker-${index}`,
+              planned: all,
+              assigned: [id],
+              completed: [id],
+              tests: [],
+              ...(!index ? { selfHostNative: {} } : {}),
+            })),
+          ]
+        : [
+            {
+              part: "policy",
+              steps: [
+                "tree provenance",
+                "native target",
+                "fixture drift",
+                "fmt --check",
+                "clippy -D warnings",
+                "doctests",
+                "cargo-deny",
+                "cargo-audit",
+                "scratch leak",
+              ].map((name) => ({ name, status: "PASS" })),
+            },
+            {
+              part: "archive-0",
+              planned: all,
+              steps: [{ name: "test fixtures", verdict: "PASS" }],
+            },
+            ...all.map((id, index) => ({
+              part: `tests-${index}`,
+              planned: all,
+              assigned: [id],
+              completed: [id],
+              steps: index === 1 ? [{ name: "reader tests", verdict: "PASS" }] : [],
+            })),
+          ];
+    for (const row of records) {
+      const folder = join(target, `verification-${scope}-${row.part}-1`);
+      mkdirSync(folder, { recursive: true });
+      writeFileSync(
+        join(folder, "result.json"),
+        JSON.stringify({
+          scope,
+          commit,
+          verdict: "PASS",
+          provenance: { status: "PASS" },
+          scratch: { status: "PASS" },
+          ...row,
+        }),
+      );
+    }
+  };
   const run = (jobs, event = "pull_request", gate = "all", rows = completed, checkout = "head") => {
-    mkdirSync(join(directory, "published"), { recursive: true });
-    writeFileSync(
-      join(directory, "published", "js-result.json"),
-      JSON.stringify({ verdict: "PASS", commit: checkout, flaky: [] }),
-    );
+    const receiptsRoot = join(directory, "downloaded");
+    writeReceipts(receiptsRoot, "js", checkout);
+    writeReceipts(receiptsRoot, "rust", checkout);
     const checkedSource = source.replace(
-      "verifyCompletedCloud(gate)",
-      `verifyCompletedCloud(gate, { outputDirectory: ${JSON.stringify(directory)} })`,
+      "verifyCompletedCloud(gate, { directory })",
+      `verifyCompletedCloud(gate, { directory: ${JSON.stringify(receiptsRoot)} + '/' + gate, outputDirectory: ${JSON.stringify(directory)} })`,
     );
     return spawnSync(
       process.execPath,
@@ -1410,8 +1430,10 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
       result: "success",
       outputs: { js, rust, android, together: "false", windows: "false" },
     },
-    javascript: { result: jsResult },
-    rust: { result: rustResult },
+    "javascript-workers": { result: jsResult },
+    "rust-archive": { result: rustResult },
+    "rust-policy": { result: rustResult },
+    "rust-tests": { result: rustResult },
     "javascript-prepare": { result: confinementResult },
     android: { result: androidResult },
     together: { result: "skipped" },
@@ -1470,7 +1492,7 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
       run({ ...alone, windows: { result: "skipped" } }, "workflow_dispatch", "windows").status,
       1,
     );
-    for (const name of ["javascript", "rust", "javascript-prepare"])
+    for (const name of ["javascript-workers", "rust-archive", "javascript-prepare"])
       assert.equal(
         run({ ...alone, [name]: { result: "success" } }, "workflow_dispatch", "windows").status,
         1,
@@ -1489,11 +1511,25 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
           android,
         );
         assert.equal(run(valid).status, 0);
-        for (const name of ["javascript", "rust", "javascript-prepare", "android"])
+        for (const name of [
+          "javascript-workers",
+          "rust-archive",
+          "rust-policy",
+          "rust-tests",
+          "javascript-prepare",
+          "android",
+        ])
           for (const result of ["failure", "cancelled", undefined]) {
             assert.equal(run({ ...valid, [name]: { result } }).status, 1);
           }
-        for (const name of ["javascript", "rust", "javascript-prepare", "android"]) {
+        for (const name of [
+          "javascript-workers",
+          "rust-archive",
+          "rust-policy",
+          "rust-tests",
+          "javascript-prepare",
+          "android",
+        ]) {
           const opposite = valid[name].result === "success" ? "skipped" : "success";
           assert.equal(run({ ...valid, [name]: { result: opposite } }).status, 1);
         }
@@ -1553,7 +1589,7 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
     "success",
   );
   assert.equal(run(androidOnly, "workflow_dispatch", "android").status, 0);
-  for (const name of ["javascript", "rust", "javascript-prepare"])
+  for (const name of ["javascript-workers", "rust-archive", "javascript-prepare"])
     assert.equal(
       run({ ...androidOnly, [name]: { result: "success" } }, "workflow_dispatch", "android").status,
       1,
@@ -1576,8 +1612,8 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
     "a failed JavaScript gate must not omit the Rust group's completed timing verdict",
   );
   for (const [gate, finalJob, target, budget] of [
-    ["js", "typecheck + tests", 300, 400],
-    ["rust", "engine gate", 600, 700],
+    ["js", "JS worker 0", 300, 400],
+    ["rust", "Rust tests 0", 600, 700],
   ]) {
     const manual = jobs(
       undefined,
@@ -1602,7 +1638,7 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
       ),
     );
     const late = run(manual, "workflow_dispatch", gate, at(budget + 1));
-    assert.equal(late.status, 1, `${gate} must include reporting after the aggregate receipt`);
+    assert.equal(late.status, 1, `${gate} must fail above the budget`);
     assert.match(late.stderr, /complete.*budget/);
   }
   assert.equal(
@@ -1632,9 +1668,7 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
       "success",
     );
     const rows = completed.filter((row) =>
-      gate === "js"
-        ? !row.name.startsWith("Rust ") && row.name !== "engine gate"
-        : !row.name.startsWith("JS ") && row.name !== "typecheck + tests",
+      gate === "js" ? !row.name.startsWith("Rust ") : !row.name.startsWith("JS "),
     );
     assert.equal(
       run(manual, "workflow_dispatch", gate, rows).status,
@@ -2108,7 +2142,7 @@ test("prepared uploads require success while failure evidence remains available"
   const { jobs } = load(workflow);
   for (const [job, prepared, evidence] of [
     ["javascript-prepare", "javascript-prepared", "verification-js-prepare"],
-    ["rust", "rust-tests", "verification-rust-archive"],
+    ["rust-archive", "rust-tests", "verification-rust-archive"],
   ]) {
     const upload = (name) =>
       jobs[job].steps.find(

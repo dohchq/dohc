@@ -6,9 +6,8 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import { join, relative, resolve, sep } from "node:path";
-import { setTimeout } from "node:timers/promises";
-import { carriedOver, cloudApi, GATE_POLL_MS, QUEUED_STATUSES } from "./cloud-api.mjs";
+import { join, relative, sep } from "node:path";
+import { carriedOver, cloudApi } from "./cloud-api.mjs";
 import { reportFlaky } from "./flaky.mjs";
 import { JS_SHARDS, assertTaskCoverage } from "./shards.mjs";
 import {
@@ -20,7 +19,6 @@ import {
 } from "./cloud-rust.mjs";
 
 export function newestAttemptFiles(directory, file) {
-  // download-artifact unpacks a pattern's only match straight into the folder, without its name.
   if (existsSync(join(directory, file))) return [join(directory, file)];
   const newest = new Map();
   for (const path of globSync(`${directory}/*/**/${file}`)) {
@@ -66,6 +64,7 @@ export function aggregateJavascript(records) {
     tasks: expected.length,
     flaky: shards.flatMap((record) => record.flaky ?? []),
     tests: shards.flatMap((record) => record.tests),
+    steps: shards.flatMap((record) => record.steps ?? []),
     parts: records.map(({ part, seconds }) => ({ part, seconds })),
   };
 }
@@ -140,16 +139,15 @@ export const CLOUD_JOB_GRAPH = {
   changes: { names: ["what changed"], needs: [] },
   "javascript-prepare": { names: ["shared preparation"], needs: ["changes"] },
   "javascript-workers": {
-    names: Array.from({ length: JS_SHARDS - 1 }, (_, index) => `JS worker ${index + 1}`),
+    names: Array.from({ length: JS_SHARDS }, (_, index) => `JS worker ${index}`),
     needs: ["changes"],
   },
-  javascript: { names: ["typecheck + tests"], needs: ["changes"] },
+  "rust-archive": { names: ["Rust build"], needs: ["changes"] },
   "rust-policy": { names: ["Rust policy checks"], needs: ["changes"] },
   "rust-tests": {
-    names: Array.from({ length: RUST_SHARDS - 1 }, (_, index) => `Rust tests ${index + 1}`),
-    needs: ["changes"],
+    names: Array.from({ length: RUST_SHARDS }, (_, index) => `Rust tests ${index}`),
+    needs: ["changes", "rust-archive"],
   },
-  rust: { names: ["engine gate"], needs: ["changes"] },
 };
 
 function gateJobNames(scope) {
@@ -190,68 +188,29 @@ function jobReadyAt(job, metadata) {
   return readyAt <= Date.parse(job.started_at) ? readyAt : createdAt;
 }
 
-export const RUST_ARCHIVE_BUILD_STEP = "Compile and inventory every workspace test";
-export const RUST_ARCHIVE_WAIT_STEP = "Wait for the shared Rust archive";
-
-// Rust test jobs start early and set up while engine gate builds their archive. A runner wait
-// delays such a job only by how late it reached its archive wait after the archive was
-// published. Returns null without the steps that show this, keeping the whole wait.
-function archiveLateSeconds(job, metadata) {
-  if (!CLOUD_JOB_GRAPH["rust-tests"].names.includes(job.name)) return null;
-  const gates = metadata.filter(
-    (gate) => gate.name === "engine gate" && gate.head_sha === job.head_sha,
-  );
-  const steps = gates.length === 1 && Array.isArray(gates[0].steps) ? gates[0].steps : [];
-  const built = steps.findIndex((step) => step.name === RUST_ARCHIVE_BUILD_STEP);
-  const upload = steps[built + 1];
-  const waits = (job.steps ?? []).filter((step) => step.name === RUST_ARCHIVE_WAIT_STEP);
-  if (
-    built < 0 ||
-    steps.filter((step) => step.name === RUST_ARCHIVE_BUILD_STEP).length !== 1 ||
-    !upload?.name.startsWith("Run actions/upload-artifact@") ||
-    waits.length !== 1
-  )
-    return null;
-  const late = (Date.parse(waits[0].started_at) - Date.parse(upload.completed_at)) / 1000;
-  return Number.isFinite(late) ? Math.max(0, late) : null;
-}
-
 const CONTENTION_SECONDS = 30;
-const JS_GROUP_WAIT_STEP = "Wait for the complete JavaScript group";
 
-function jsCompletionDelay(jobs) {
-  const reporting = jobs.find((job) => job.name === "typecheck + tests");
-  const wait = Array.isArray(reporting.steps)
-    ? reporting.steps.find((step) => step.name === JS_GROUP_WAIT_STEP)
-    : null;
-  const waitStartedAt = Date.parse(wait?.started_at);
-  const waitFinishedAt = Date.parse(wait?.completed_at);
-  if (
-    wait?.conclusion !== "success" ||
-    !(waitStartedAt >= Date.parse(reporting.started_at) && waitFinishedAt >= waitStartedAt)
-  )
-    return null;
-
-  let workFinishedAt = waitStartedAt;
-  let jobsFinishedAt = waitStartedAt;
+function gateCompletionDelay(jobs) {
+  let workFinishedAt = -Infinity;
+  let jobsFinishedAt = -Infinity;
   for (const job of jobs) {
-    if (job === reporting || job.name === "what changed") continue;
+    if (job.name === "what changed") continue;
     const step = Array.isArray(job.steps) ? job.steps.at(-1) : null;
     const stepEnd = Date.parse(step?.completed_at);
     const jobEnd = Date.parse(job.completed_at);
     if (
       step?.name !== "Complete job" ||
       step.conclusion !== "success" ||
-      !(Date.parse(job.started_at) <= stepEnd && stepEnd <= jobEnd && jobEnd <= waitFinishedAt)
+      !(Date.parse(job.started_at) <= stepEnd && stepEnd <= jobEnd)
     )
       return null;
     workFinishedAt = Math.max(workFinishedAt, stepEnd);
     jobsFinishedAt = Math.max(jobsFinishedAt, jobEnd);
   }
-  return (jobsFinishedAt - workFinishedAt) / 1000;
+  return Number.isFinite(workFinishedAt) ? (jobsFinishedAt - workFinishedAt) / 1000 : null;
 }
 
-function gateTiming(scope, required, metadata = required, transferSeconds = null) {
+function gateTiming(scope, required, metadata = required) {
   if (
     required.some(
       (job) =>
@@ -264,37 +223,29 @@ function gateTiming(scope, required, metadata = required, transferSeconds = null
   const start = Date.parse(required.find((job) => job.name === "what changed").started_at);
   const spanSeconds =
     (Math.max(...required.map((job) => Date.parse(job.completed_at))) - start) / 1000;
-  const wait = (job) => {
-    const seconds =
-      Math.max(0, (Date.parse(job.started_at) - jobReadyAt(job, metadata)) / 1000) || 0;
-    const late = archiveLateSeconds(job, metadata);
-    return late === null ? seconds : Math.min(seconds, late);
-  };
   const jobs = required.map((job) => ({
     name: job.name,
     createdAt: job.created_at,
     startedAt: job.started_at,
     finishedAt: job.completed_at,
     conclusion: job.conclusion,
-    runnerWaitSeconds: wait(job),
+    runnerWaitSeconds:
+      Math.max(0, (Date.parse(job.started_at) - jobReadyAt(job, metadata)) / 1000) || 0,
   }));
   const longest = jobs
     .filter((job) => job.name !== "what changed")
     .reduce((a, b) => (a.runnerWaitSeconds > b.runnerWaitSeconds ? a : b));
-  const completionDelaySeconds = scope === "js" ? jsCompletionDelay(required) : null;
+  const completionDelaySeconds = gateCompletionDelay(required);
   const runnerContended = longest.runnerWaitSeconds > CONTENTION_SECONDS;
-  const transferContended = transferSeconds > CONTENTION_SECONDS;
   const completionContended = completionDelaySeconds > CONTENTION_SECONDS;
-  const contended = runnerContended || transferContended || completionContended,
-    seconds = spanSeconds;
+  const seconds = spanSeconds;
   const targetSeconds = scope === "js" ? 300 : 600;
   const budgetSeconds = scope === "js" ? 400 : 700;
   const rerun = required.some(carriedOver);
-  // A pull request's own receipts set the transfer's size, so a slow transfer excuses only its own seconds.
+  const contended = runnerContended || completionContended;
   const excused =
     rerun ||
     runnerContended ||
-    (transferContended && seconds - transferSeconds <= budgetSeconds) ||
     (completionContended && seconds - completionDelaySeconds <= budgetSeconds);
   const timing =
     seconds <= targetSeconds
@@ -312,7 +263,6 @@ function gateTiming(scope, required, metadata = required, transferSeconds = null
   const delay = [
     rerun ? "part of the gate passed in an earlier attempt and did not run again" : null,
     runnerContended ? `longest ${waitingFor} ${longest.name}: ${longest.runnerWaitSeconds}s` : null,
-    transferContended ? `receipt transfer took ${transferSeconds}s` : null,
     completionContended
       ? `GitHub took ${completionDelaySeconds}s to mark finished jobs complete`
       : null,
@@ -324,8 +274,7 @@ function gateTiming(scope, required, metadata = required, transferSeconds = null
     seconds,
     targetSeconds,
     budgetSeconds,
-    transferSeconds,
-    ...(scope === "js" ? { completionDelaySeconds } : {}),
+    ...(completionDelaySeconds !== null ? { completionDelaySeconds } : {}),
     contended,
     timing,
     jobs,
@@ -345,49 +294,11 @@ function requireBudget(scope, timing) {
   if (timing.timing === "over budget")
     throw Object.assign(
       new Error(
-        `The complete ${scope} gate took ${timing.seconds}s, exceeding its ${timing.budgetSeconds}s budget including final reporting${timing.transferSeconds > CONTENTION_SECONDS ? `, even without its ${timing.transferSeconds}s receipt transfer` : ""}.`,
+        `The complete ${scope} gate took ${timing.seconds}s, exceeding its ${timing.budgetSeconds}s budget.`,
       ),
       { timing },
     );
   return timing;
-}
-
-function completedTransferSeconds(scope, jobs) {
-  const steps = jobs.find(
-    (job) => job.name === (scope === "js" ? "typecheck + tests" : "engine gate"),
-  )?.steps;
-  if (!Array.isArray(steps)) return null;
-  const wait = steps.findIndex(
-    (step) =>
-      step.name === (scope === "js" ? JS_GROUP_WAIT_STEP : "Wait for the complete Rust group"),
-  );
-  const verify = steps.findIndex(
-    (step, index) => index > wait && step.name.startsWith("Require complete proof and "),
-  );
-  if (wait < 0 || verify < 0) return null;
-  const downloads = steps
-    .slice(wait + 1, verify)
-    .filter((step) => step.name.startsWith("Run actions/download-artifact@"));
-  if (downloads.length !== 1) return null;
-  const seconds =
-    (Date.parse(downloads[0].completed_at) - Date.parse(downloads[0].started_at)) / 1000;
-  return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
-}
-
-function pendingTransferSeconds(scope, outputDirectory, startedAt, verificationStartedAt) {
-  try {
-    const { finishedAt } = JSON.parse(
-      readFileSync(`${outputDirectory}/${scope}-wait-finished.json`, "utf8"),
-    );
-    const waitedAt = Date.parse(finishedAt);
-    return Number.isFinite(waitedAt) &&
-      waitedAt >= Date.parse(startedAt) &&
-      waitedAt <= verificationStartedAt
-      ? (verificationStartedAt - waitedAt) / 1000
-      : null;
-  } catch {
-    return null;
-  }
 }
 
 export function completedGateTiming(scope, jobs, commit) {
@@ -404,21 +315,27 @@ export function completedGateTiming(scope, jobs, commit) {
   ) {
     throw new Error(`A completed ${scope} job is missing, unsuccessful, or from another commit.`);
   }
-  return requireBudget(
-    scope,
-    gateTiming(scope, required, jobs, completedTransferSeconds(scope, jobs)),
-  );
+  return requireBudget(scope, gateTiming(scope, required, jobs));
 }
 
 export async function verifyCompletedCloud(
   scope,
   {
+    directory = `.agent-artifacts/verification/downloaded/${scope}`,
     env = process.env,
     readJobs = () => cloudApi({ env }).jobs(),
     outputDirectory = ".agent-artifacts/verification/aggregate",
   } = {},
 ) {
-  const report = {
+  const fullReport = {
+    version: 1,
+    scope,
+    verdict: "FAIL",
+    complete: true,
+    commit: env.GITHUB_SHA,
+    steps: [],
+  };
+  const completedReport = {
     version: 1,
     scope,
     verdict: "FAIL",
@@ -426,170 +343,57 @@ export async function verifyCompletedCloud(
     commit: env.DOHC_WORKFLOW_HEAD_SHA,
   };
   try {
-    if (scope === "js") {
-      const results = newestAttemptFiles(join(outputDirectory, "published"), "js-result.json");
-      if (results.length !== 1)
-        throw new Error(`Expected one JavaScript aggregate, found ${results.length}.`);
-      const aggregate = JSON.parse(readFileSync(results[0], "utf8"));
-      if (aggregate.verdict !== "PASS" || !env.GITHUB_SHA || aggregate.commit !== env.GITHUB_SHA)
-        throw new Error("The JavaScript aggregate does not cover the checked-out commit.");
-      report.flaky = aggregate.flaky ?? [];
-    }
-    Object.assign(report, completedGateTiming(scope, await readJobs(), report.commit));
-    report.verdict = "PASS";
-  } catch (error) {
-    Object.assign(report, error.timing, { error: error.message });
-    throw error;
-  } finally {
-    mkdirSync(outputDirectory, { recursive: true });
-    writeFileSync(
-      `${outputDirectory}/${scope}-completed-result.json`,
-      JSON.stringify(report, null, 2) + "\n",
-    );
-    if (report.warning) {
-      console.warn(
-        "::warning::" +
-          report.warning.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A"),
-      );
-      if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, report.warning + "\n");
-    }
-    if (scope === "js")
-      reportFlaky(report.flaky, { summary: env.GITHUB_STEP_SUMMARY, annotate: true });
-    console.log(
-      `[verification] ${report.verdict} (${scope} completed group): ${JSON.stringify(report)}`,
-    );
-  }
-}
-
-// Partition zero publishes its own receipt before joining the other workers.
-export async function waitForGate(
-  scope,
-  {
-    readJobs,
-    pause = setTimeout,
-    now = Date.now,
-    outputDirectory = ".agent-artifacts/verification/aggregate",
-    ...options
-  } = {},
-) {
-  const deadline = now() + 20 * 60_000,
-    api = cloudApi({ ...options, pause, now, deadline });
-  const expected = gateJobNames(scope).filter(
-    (name) => name !== (scope === "js" ? "typecheck + tests" : "engine gate"),
-  );
-  let required = [];
-  try {
-    for (;;) {
-      if (now() < deadline) {
-        required = (
-          await (readJobs ? readJobs() : api.jobs({ conditional: true, slowUnchanged: false }))
-        ).filter((job) => expected.includes(job.name));
-        if (expected.some((name) => required.filter((job) => job.name === name).length > 1))
-          throw new Error(`Duplicate ${scope} jobs.`);
-        if (required.some((job) => job.status === "completed" && job.conclusion !== "success"))
-          throw new Error(`A required ${scope} job did not finish successfully.`);
-      }
-      if (now() >= deadline)
-        throw new Error(
-          `The ${scope} group exceeded its 20-minute wait cap; awaited jobs ${required.some((job) => QUEUED_STATUSES.includes(job.status)) ? "still queued for a runner" : required.some((job) => job.status === "in_progress") ? "still running" : "missing"}.`,
-        );
-      if (
-        required.length === expected.length &&
-        required.every((job) => job.status === "completed" && job.conclusion === "success")
-      ) {
-        mkdirSync(outputDirectory, { recursive: true });
-        writeFileSync(
-          `${outputDirectory}/${scope}-wait-finished.json`,
-          JSON.stringify({ finishedAt: new Date(now()).toISOString() }) + "\n",
-        );
-        return;
-      }
-      await pause(Math.min(GATE_POLL_MS[scope], deadline - now()));
-    }
-  } finally {
-    api.log(`${scope} group wait`);
-  }
-}
-
-export async function aggregateCloud(
-  scope,
-  directory = ".agent-artifacts/verification/downloaded",
-  {
-    readJobs = () => cloudApi().jobs(),
-    now = Date.now,
-    env = process.env,
-    outputDirectory = ".agent-artifacts/verification/aggregate",
-  } = {},
-) {
-  const verificationStartedAt = now();
-  const report = { version: 1, scope, verdict: "FAIL", complete: false, steps: [] };
-  try {
+    if (!["js", "rust"].includes(scope)) throw new Error(`Unknown distributed gate ${scope}.`);
     const records = newestAttemptFiles(directory, "result.json")
       .map((path) => JSON.parse(readFileSync(path, "utf8")))
       .filter((record) => record.scope === scope);
-    if (!["js", "rust"].includes(scope)) throw new Error(`Unknown distributed gate ${scope}.`);
     if (!env.GITHUB_SHA || records.some((record) => record.commit !== env.GITHUB_SHA))
       throw new Error("The gate evidence does not cover the requested commit.");
-    report.commit = env.GITHUB_SHA;
-    Object.assign(report, scope === "js" ? aggregateJavascript(records) : aggregateRust(records));
-    const finalJob = scope === "js" ? "typecheck + tests" : "engine gate";
-    const all = await readJobs();
-    const expected = gateJobNames(scope);
-    const required = all.filter((job) => expected.includes(job.name));
-    if (
-      required.length !== expected.length ||
-      expected.some((name) => required.filter((job) => job.name === name).length !== 1) ||
-      required.some(
-        (job) =>
-          job.name !== finalJob && (job.status !== "completed" || job.conclusion !== "success"),
-      )
-    )
-      throw new Error(`A required ${scope} job is missing or did not finish successfully.`);
-    const finishedAt = new Date(now()).toISOString();
-    const transferSeconds = pendingTransferSeconds(
-      scope,
-      outputDirectory,
-      required.find((job) => job.name === finalJob).started_at,
-      verificationStartedAt,
-    );
-    Object.assign(
-      report,
-      gateTiming(
-        scope,
-        required.map((job) => (job.name === finalJob ? { ...job, completed_at: finishedAt } : job)),
-        all,
-        transferSeconds,
-      ),
-    );
-    requireBudget(scope, report);
-    report.verdict = "PASS";
-    return report;
+    const aggregated = scope === "js" ? aggregateJavascript(records) : aggregateRust(records);
+    Object.assign(fullReport, aggregated);
+    if (scope === "js") completedReport.flaky = aggregated.flaky ?? [];
+    const timing = completedGateTiming(scope, await readJobs(), completedReport.commit);
+    Object.assign(fullReport, timing);
+    Object.assign(completedReport, timing);
+    fullReport.verdict = "PASS";
+    completedReport.verdict = "PASS";
+    return completedReport;
   } catch (error) {
-    report.error = error.message;
+    Object.assign(fullReport, error.timing, { error: error.message });
+    Object.assign(completedReport, error.timing, { error: error.message });
     throw error;
   } finally {
     mkdirSync(outputDirectory, { recursive: true });
     writeFileSync(
       `${outputDirectory}/${scope}-result.json`,
-      JSON.stringify(report, null, 2) + "\n",
+      JSON.stringify(fullReport, null, 2) + "\n",
+    );
+    writeFileSync(
+      `${outputDirectory}/${scope}-completed-result.json`,
+      JSON.stringify(completedReport, null, 2) + "\n",
     );
     if (scope === "rust") {
       console.log("\n== summary ==");
-      for (const step of report.steps) console.log(`  ${step.status} ${step.name}`);
-      console.log(`  ${report.verdict} complete gate${report.error ? `: ${report.error}` : ""}`);
+      for (const step of fullReport.steps) console.log(`  ${step.status} ${step.name}`);
+      console.log(
+        `  ${fullReport.verdict} complete gate${fullReport.error ? `: ${fullReport.error}` : ""}`,
+      );
     }
-    if (scope === "js") reportFlaky(report.flaky);
+    if (completedReport.warning) {
+      console.warn(
+        "::warning::" +
+          completedReport.warning
+            .replaceAll("%", "%25")
+            .replaceAll("\r", "%0D")
+            .replaceAll("\n", "%0A"),
+      );
+      if (env.GITHUB_STEP_SUMMARY)
+        appendFileSync(env.GITHUB_STEP_SUMMARY, completedReport.warning + "\n");
+    }
+    if (scope === "js")
+      reportFlaky(completedReport.flaky, { summary: env.GITHUB_STEP_SUMMARY, annotate: true });
     console.log(
-      `[verification] ${report.verdict} (${scope}): ${report.seconds ?? "unknown"}s (${report.timing ?? "unavailable"}), ${report.tasks ?? 0} tasks`,
+      `[verification] ${completedReport.verdict} (${scope} completed group): ${JSON.stringify(completedReport)}`,
     );
   }
-}
-
-if (process.argv[1] && resolve(process.argv[1]) === import.meta.filename) {
-  const action =
-    process.argv[2] === "wait" ? waitForGate(process.argv[3]) : aggregateCloud(process.argv[2]);
-  action.catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  });
 }

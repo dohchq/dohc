@@ -7,14 +7,8 @@ export async function waitForPreparation(
   scope,
   { env = process.env, request = fetch, pause = setTimeout, now = Date.now, download = false } = {},
 ) {
-  const preparation =
-    scope === "js"
-      ? { job: "shared preparation", artifact: "javascript-prepared", minutes: 15 }
-      : scope === "rust"
-        ? // Rust consumers start while engine gate compiles, so the cap covers a cold build.
-          { job: "engine gate", artifact: "rust-tests", minutes: 25 }
-        : null;
-  if (!preparation) throw new Error("Select js or rust preparation.");
+  if (scope !== "js") throw new Error("Only JavaScript workers wait for shared preparation.");
+  const preparation = { job: "shared preparation", artifact: "javascript-prepared", minutes: 15 };
   for (const key of [
     "GITHUB_API_URL",
     "GITHUB_REPOSITORY",

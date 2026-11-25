@@ -2,7 +2,6 @@ import { setTimeout as delay } from "node:timers/promises";
 
 export const QUEUED_STATUSES = ["queued", "waiting", "pending", "requested"];
 export const CLOUD_POLL_MS = 2_500;
-export const GATE_POLL_MS = { js: 3_000, rust: 10_000 };
 
 export class WorkflowAllowanceError extends Error {}
 

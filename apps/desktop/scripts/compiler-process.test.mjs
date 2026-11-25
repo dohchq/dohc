@@ -33,6 +33,7 @@ const bounds = {
   maxOutputBytes: 4096,
   maxErrorBytes: 8192,
 };
+const timeoutBounds = { ...bounds, timeoutMs: 5000 };
 // Real compiles get the app's 1 GiB memory bound. Off a staged compiler, the
 // source worker also bundles the built-in kit, Lucide icons included.
 const compileBounds = {
@@ -235,7 +236,7 @@ for (const [stream, reason] of [
     });
     assert.equal(alive(owner), false);
   });
-// Timeout mode waits out the full 20 s deadline after a loaded start, so these get 60 s.
+// Timeout mode waits out its 5 s deadline after a loaded start, so these get 60 s.
 for (const mode of ["cancel", "timeout", "normal-exit"])
   test(
     `${mode} closes owned descendants after their direct parent exits`,
@@ -254,7 +255,7 @@ for (const mode of ["cancel", "timeout", "normal-exit"])
       const controller = new AbortController();
       const running = runOwnedCompilerProcess(runtime, {
         input: Buffer.alloc(0),
-        bounds,
+        bounds: mode === "timeout" ? timeoutBounds : bounds,
         signal: controller.signal,
       });
       const outcome =
@@ -359,9 +360,8 @@ test("abrupt caller death closes its job and descendants", owned, async (t) => {
   for (const pid of [owner.pid, ids.worker, ids.descendant])
     assert.equal(await exited(pid, 16000), true, `process ${pid} exited`);
 });
-// The owner's deadline is the same 20 s as every other compile here, so a loaded
-// start of the worker still writes its marker first. The 20 s marker wait, the
-// 40 s exit wait and startup nest inside 90 s.
+// The owner's 5 s deadline still lets a loaded start of the worker write its marker
+// first. The 20 s marker wait, the 40 s exit wait and startup nest inside 90 s.
 test(
   "owner deadline still kills the build while the caller event loop is blocked",
   { ...owned, timeout: 90000 },
@@ -377,7 +377,7 @@ test(
       .href;
     await writeFile(
       callerPath,
-      `import{runOwnedCompilerProcess}from${JSON.stringify(supervisor)};import{writeFileSync}from'node:fs';const runtime=${JSON.stringify({ ...runtime, workerArgs: [join(directory, "ready.json")] })};runtime.onOwnerSpawn=pid=>{writeFileSync(${JSON.stringify(ownerMarker)},JSON.stringify({pid}));Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0);};void runOwnedCompilerProcess(runtime,{input:Buffer.alloc(0),bounds:${JSON.stringify(bounds)}});`,
+      `import{runOwnedCompilerProcess}from${JSON.stringify(supervisor)};import{writeFileSync}from'node:fs';const runtime=${JSON.stringify({ ...runtime, workerArgs: [join(directory, "ready.json")] })};runtime.onOwnerSpawn=pid=>{writeFileSync(${JSON.stringify(ownerMarker)},JSON.stringify({pid}));Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0);};void runOwnedCompilerProcess(runtime,{input:Buffer.alloc(0),bounds:${JSON.stringify(timeoutBounds)}});`,
     );
     const caller = spawn(process.execPath, [callerPath], { windowsHide: true, stdio: "ignore" });
     t.after(() => caller.kill());

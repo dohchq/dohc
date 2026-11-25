@@ -1,7 +1,7 @@
 import { test, expect, chromium } from "@playwright/test";
 import https from "node:https";
 import { execFileSync } from "node:child_process";
-import { writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { tripPollProductFixture } from "./tripPollProductFixture";
@@ -11,20 +11,27 @@ test("production viewer discovers and launches compiled trip poll with real shar
   test.setTimeout(120000);
   const evidence = testInfo.outputPath("product-proof");
   mkdirSync(evidence, { recursive: true });
-  const packageRoot = fileURLToPath(new URL("..", import.meta.url)),
+  const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+  const prebuiltViewerDir = join(packageRoot, "viewer/dist");
+  const usePrebuiltViewer =
+    process.env.DOHC_SHARE_WEB_PREBUILT_VIEWER === "1" &&
+    existsSync(join(prebuiltViewerDir, "index.html"));
+  let viewerAssetsDir = prebuiltViewerDir;
+  if (!usePrebuiltViewer) {
     viewerAssetsDir = join(evidence, "viewer");
-  execFileSync(
-    process.execPath,
-    [
-      join(packageRoot, "node_modules/vite/bin/vite.js"),
-      "build",
-      "--config",
-      "viewer/vite.config.ts",
-      "--outDir",
-      viewerAssetsDir,
-    ],
-    { cwd: packageRoot, windowsHide: true, stdio: "pipe" },
-  );
+    execFileSync(
+      process.execPath,
+      [
+        join(packageRoot, "node_modules/vite/bin/vite.js"),
+        "build",
+        "--config",
+        "viewer/vite.config.ts",
+        "--outDir",
+        viewerAssetsDir,
+      ],
+      { cwd: packageRoot, windowsHide: true, stdio: "pipe" },
+    );
+  }
   let fixture: Awaited<ReturnType<typeof tripPollProductFixture>> | undefined,
     server: ReturnType<typeof https.createServer> | undefined,
     browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
