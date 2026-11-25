@@ -75,6 +75,10 @@ function notDeleted(
   return spans;
 }
 
+/** JSON with each exact large integer, which JSON.stringify refuses, as its digits. */
+const json = (value: unknown) =>
+  JSON.stringify(value, (_key, part: unknown) => (typeof part === "bigint" ? `${part}` : part));
+
 function equal(left: unknown, right: unknown): boolean {
   if (typeof left === "object" && typeof right === "object" && left !== null && right !== null) {
     if (Array.isArray(left) !== Array.isArray(right)) return false;
@@ -145,7 +149,8 @@ function editsNotInNote(doc: Y.Doc, kept: readonly Uint8Array[]): NotInNote[] {
       const value = contentValue(item);
       if (parent === frontmatter) {
         // A value set at the same moment was kept instead.
-        const now = getDohcYDocFrontmatter(doc)[item.parentSub];
+        const fields = getDohcYDocFrontmatter(doc);
+        const now = Object.hasOwn(fields, item.parentSub) ? fields[item.parentSub] : undefined;
         if (!same(value, now)) found.push({ kind: "field", field: item.parentSub, value, now });
       } else if (
         parent instanceof Y.XmlElement &&
@@ -222,12 +227,20 @@ function editsNotInNote(doc: Y.Doc, kept: readonly Uint8Array[]): NotInNote[] {
   return found;
 }
 
+function yamlOrJson(value: unknown): string {
+  try {
+    return frontmatterValueFlowYaml(value);
+  } catch {
+    return json(value);
+  }
+}
+
 const shown = (value: unknown) =>
   value === undefined || value === null
     ? null
     : typeof value === "string"
       ? `"${value}"`
-      : frontmatterValueFlowYaml(value);
+      : yamlOrJson(value);
 
 function quoteOf(text: string): string {
   const line = text.replace(/\s+/gu, " ").trim();

@@ -503,6 +503,23 @@ it.each<[string, Edit | readonly Edit[], Edit, string, string]>([
     "Set counts to [9007199254740993]. The note has ['9007199254740993'].\n",
   ],
   [
+    "a field named like a built-in property, which someone else set and then removed",
+    (doc: Y.Doc) => doc.getMap("frontmatter").set("constructor", "kept"),
+    (doc: Y.Doc) => {
+      doc.getMap("frontmatter").set("constructor", "theirs");
+      doc.getMap("frontmatter").delete("constructor");
+    },
+    "# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
+    'Set constructor to "kept". The note has no constructor.\n',
+  ],
+  [
+    "bytes in a field someone else set at the same moment",
+    (doc: Y.Doc) => doc.getMap("frontmatter").set("count", Uint8Array.of(1, 2)),
+    (doc: Y.Doc) => doc.getMap("frontmatter").set("count", true),
+    "---\ncount: true\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
+    'Set count to {"0":1,"1":2}. The note has true.\n',
+  ],
+  [
     "a to-do someone else set at the same moment",
     (doc: Y.Doc) => task(doc).setAttribute("checked", true as never),
     (doc: Y.Doc) => task(doc).setAttribute("checked", false as never),
