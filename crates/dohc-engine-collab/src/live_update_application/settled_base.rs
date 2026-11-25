@@ -154,7 +154,11 @@ pub(super) fn settled_base(
                 .map(Option::flatten)
                 .map_err(read_sql)
             })?
-            .unwrap_or(projection),
+            .unwrap_or_else(|| {
+                crate::ydoc::without_final_markdown_newline(&projection)
+                    .filter(|file| hex_sha256(file.as_bytes()) == source_digest)
+                    .map_or_else(|| projection.clone(), str::to_owned)
+            }),
     };
     if text.len() as i64 != source_length || hex_sha256(text.as_bytes()) != source_digest {
         return Err(unexplained());

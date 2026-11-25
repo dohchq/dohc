@@ -140,9 +140,12 @@ fn imported_activation_retains_original_source_without_minting_native_seed() {
 
 #[test]
 fn imported_activation_keeps_a_file_saved_without_a_final_newline() {
-    for (projection, source) in [
-        ("# Owner note\n\nText\n", "# Owner note\n\nText"),
-        ("# Owner note\r\n\r\nText\r\n", "# Owner note\r\n\r\nText"),
+    for (projection, source, matches) in [
+        ("# Owner note\n\nText\n", "# Owner note\n\nText", true),
+        ("# Owner note\r\n\r\nText\r\n", "# Owner note\r\n\r\nText", true),
+        ("Text\n", "Text\n\n", false),
+        ("Text\n", "Text \n", false),
+        ("Text\n", "Text\r", false),
     ] {
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, projection)
@@ -175,7 +178,12 @@ fn imported_activation_keeps_a_file_saved_without_a_final_newline() {
                 &NoFaults,
             )
             .unwrap();
-        let captured = capture_imported(&mut f, 1_000_000).unwrap();
+        let captured = capture_imported(&mut f, 1_000_000);
+        if !matches {
+            assert!(matches!(captured, Err(ApplicationError::InvalidInput(_))), "{source:?}");
+            continue;
+        }
+        let captured = captured.unwrap();
         assert_eq!(captured.source.source_moment_id, "without-newline");
         assert_eq!(captured.source.source_digest, artifact.snapshot.blob_sha256);
         assert_eq!(captured.source.source_byte_length, source.len() as i64);

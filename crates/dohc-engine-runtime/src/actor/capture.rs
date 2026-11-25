@@ -2268,6 +2268,11 @@ fn prepare_capture_recovery_in(
         return Ok(prepared);
     }
     let sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
+    let file_sha = dohc_engine_collab::ydoc::without_final_markdown_newline(&projection.content)
+        .map_or_else(
+            || sha.clone(),
+            |file| dohc_engine_storage::hex_sha256(file.as_bytes()),
+        );
     // Committed moments cover typing even when their file write is pending or
     // cancelled. Capture supersedes that write in this transaction. Only a
     // pristine seed needs the absence of a pending job to prove coverage.
@@ -2278,14 +2283,14 @@ fn prepare_capture_recovery_in(
             JOIN moments m ON m.workspace_id=s.workspace_id AND m.version_id=s.version_id
             AND m.object_id=s.object_id AND m.moment_id=s.latest_moment_id
             WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3
-            AND d.settled_update_seq=d.head_update_seq AND m.after_blob_sha256=?5 AND s.blob_sha256=?5
-            AND d.last_settled_sha=?5) OR
+            AND d.settled_update_seq=d.head_update_seq AND m.after_blob_sha256 IN (?5,?7)
+            AND s.blob_sha256=m.after_blob_sha256 AND d.last_settled_sha=m.after_blob_sha256) OR
           EXISTS(SELECT 1 FROM live_device_settlements a JOIN moments m
             ON m.workspace_id=a.workspace_id AND m.moment_id=a.moment_id
             JOIN ydoc_docs d ON d.workspace_id=a.workspace_id AND d.version_id=a.main_version_id AND d.object_id=a.object_id
             WHERE a.workspace_id=?1 AND a.main_version_id=?2 AND a.object_id=?3
             AND a.lineage_claim_id=d.lineage_claim_id AND a.source_state_vector_digest=?6
-            AND a.markdown_digest=?5 AND m.after_blob_sha256=?5) OR
+            AND a.markdown_digest IN (?5,?7) AND m.after_blob_sha256=a.markdown_digest) OR
           (NOT EXISTS(SELECT 1 FROM materialization_jobs WHERE workspace_id IN (?1,'') AND target_path=?4 AND status='pending') AND
           EXISTS(SELECT 1 FROM ydoc_docs d WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3
             AND d.last_settled_sha IS NULL AND d.head_update_seq=1 AND d.head_snapshot_seq IN (0,1)
@@ -2293,7 +2298,7 @@ fn prepare_capture_recovery_in(
             AND EXISTS(SELECT 1 FROM ydoc_snapshots s WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.up_to_seq=d.head_snapshot_seq)
             AND NOT EXISTS(SELECT 1 FROM ydoc_snapshots s WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.up_to_seq NOT IN (0,1))
             AND EXISTS(SELECT 1 FROM moments m WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.after_blob_sha256=d.seed_source_sha256))))",
-        params![input.workspace_id,input.version_id,object_id,input.path,sha,projection.source_state_vector_sha256], |row| row.get(0),
+        params![input.workspace_id,input.version_id,object_id,input.path,sha,projection.source_state_vector_sha256,file_sha], |row| row.get(0),
     ).map_err(StorageError::corrupt_public)?;
     if covered {
         return Ok(prepared);

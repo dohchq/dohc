@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
 import * as projection from "./import-export.js";
 import * as artifact from "./index.js";
+import { omitsFinalMarkdownNewline } from "./artifact-markdown-guard.js";
 
 const source = '---\nzebra: last\ntitle: "Outside"\nalpha: first\n---\n\n- one\n- two\n\n';
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -15,6 +16,17 @@ function witnessed(text = source) {
 }
 const output = artifact.yDocToArtifactMarkdown;
 afterEach(() => vi.restoreAllMocks());
+
+it.each([
+  ["Text", "Text\n\n"],
+  ["Text", "Text\r"],
+  ["Text", "Text\r\r\n"],
+  ["Text", "Text \n"],
+  ["Text\n", "Text\r\n"],
+  ["", "\n"],
+])("refuses to match %j with %j as a missing final newline", (source, canonical) => {
+  expect(omitsFinalMarkdownNewline(source, canonical)).toBe(false);
+});
 
 it.each(["\n", "\r\n"])(
   "proves a nested list source that omits its final %j without importing it",

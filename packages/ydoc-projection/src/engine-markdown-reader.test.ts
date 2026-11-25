@@ -42,6 +42,7 @@ const context = { document, currentPath: "note.md" };
 it.each([
   "Changed\n\n- parent\n  - child",
   "Changed\r\n\r\n- parent\r\n  - child",
+  "Changed\r\n\r\n- parent\r\n  - child\r\n",
   "Changed beside the list\n\n- parent\n  - child\n",
   "A **bold** word, an *italic* word, and a [link](https://example.com).\n\n- parent\n  - child\n",
 ])("constructs an exact native outside fold for %j", (source) => {
@@ -81,6 +82,7 @@ it.each([
   "- first\ncontinuation",
   "- parent\n  - child\n\n",
   "- parent\n  - child\r",
+  "Changed\r\n\r\n- parent\r\n  - child\r",
   "- parent\r\n  - child\n",
   "- parent\n  - child \n",
 ])("refuses a non-exact native outside fold for %j", (source) => {

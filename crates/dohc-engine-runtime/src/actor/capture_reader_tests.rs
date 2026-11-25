@@ -60,19 +60,22 @@ fn input(text: &str) -> CaptureIngest {
 }
 
 fn fixture(joined: bool) -> (ScratchDir, EngineStore, DocKey) {
+    fixture_with_source(joined, "Before\n\n- parent\n  - child\n")
+}
+
+fn fixture_with_source(joined: bool, source: &str) -> (ScratchDir, EngineStore, DocKey) {
     let scratch = ScratchDir::new().unwrap();
     let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 1).unwrap();
     VersionedTextStore::new(&mut store)
         .ensure_main_version("w", "main", 1, &NoFaults)
         .unwrap();
-    let source = "Before\n\n- parent\n  - child\n";
     let snapshot = VersionedTextStore::new(&mut store)
         .capture_ingest(&input(source), &NoFaults)
         .unwrap()
         .snapshot;
     let key = DocKey::new("w", "main", snapshot.object_id).unwrap();
     let doc = Ydoc::wire();
-    doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
+    doc.rewrite_content_to_markdown(ContentKind::Richdoc, "Before\n\n- parent\n  - child\n")
         .unwrap();
     let base = doc.encode_full_state();
     if joined {
@@ -137,6 +140,34 @@ fn commit(
         &NoFaults,
         &CancellationToken::new(),
     )
+}
+
+#[tokio::test]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
+async fn outside_reader_fold_keeps_a_legacy_settlement_out_of_recovery() {
+    let previous = "Before\n\n- parent\n  - child";
+    for source in [
+        "Changed\n\n- parent\n  - child\n",
+        "Changed\n\n- parent\n  - child",
+    ] {
+        let (scratch, mut store, key) = fixture_with_source(false, previous);
+        let doc = store
+            .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
+            .unwrap();
+        assert!(doc.markdown_source_reference().is_none());
+        assert_eq!(
+            doc.project(ContentKind::Richdoc).unwrap().content,
+            format!("{previous}\n")
+        );
+        std::fs::write(scratch.path().join("note.md"), source).unwrap();
+        let prepared = fold(&store, &key, source).await;
+        let result = commit(&mut store, scratch.path(), source, prepared).unwrap();
+        assert_eq!(result.snapshot.text, source);
+        let recoveries = store
+            .read_with(|conn| dohc_engine_domain::capture_recoveries_in(conn, "w"))
+            .unwrap();
+        assert!(recoveries.is_empty(), "{source:?}: {recoveries:?}");
+    }
 }
 
 #[tokio::test]

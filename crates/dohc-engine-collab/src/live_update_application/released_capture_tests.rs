@@ -24,6 +24,12 @@ fn edited_from(f: &Fixture, moment: &str) -> String {
 }
 
 fn released_without_carried() -> Fixture {
+    released_without_carried_after(|f, covered| {
+        retire_settled(f, Some(covered), "retired").unwrap();
+    })
+}
+
+fn released_without_carried_after(settle: impl FnOnce(&mut Fixture, LiveUpdateReceipt)) -> Fixture {
     let mut f = Fixture::new();
     f.adopt().unwrap();
     let covered = native_tail_edit(&mut f, "# Covered\n", 11);
@@ -31,12 +37,40 @@ fn released_without_carried() -> Fixture {
     let covered = receipt_of(&covered.delivery_id, &covered.update_digest, 3);
     acknowledge_entry(&mut f, &covered);
     host_document(&mut f, true, true);
-    retire_settled(&mut f, Some(covered), "retired").unwrap();
+    settle(&mut f, covered);
     release_parked(&mut f);
     assert!(manifest(&f, "adoption").is_empty());
     importable(&mut f);
     returned(&mut f);
     f
+}
+
+#[test]
+fn a_released_window_folds_over_a_legacy_settlement_without_a_final_newline() {
+    let f = released_without_carried_after(|f, covered| {
+        let key = retirement_key(f, 10);
+        let doc_key = f.key.clone();
+        let reconstruction = NativeHistoryReconstruction { working_reserve_bytes: 8 * 1024 * 1024 };
+        with_retirement_settlement(&mut f.store, &retirement_scope(), &key, &retirement_host(), Some(covered), 128, reconstruction, |store, audit| {
+            let local;
+            let doc = match audit.accepted_prefix() {
+                Some(doc) => doc,
+                None => {
+                    local = store.read_with(|conn| durable::load_doc_in(conn, &doc_key))?;
+                    &local
+                }
+            };
+            assert!(doc.markdown_source_reference().is_none());
+            let projection = doc.project(ContentKind::Richdoc)?.content;
+            let file = projection.strip_suffix('\n').unwrap();
+            let vector = hex_sha256(&doc.encode_state_vector());
+            record_text(store, audit, "retired", file, &vector)
+        }).unwrap();
+    });
+    let head = local_doc(&f);
+    let saved = moment_text(&f, "retired");
+    assert!(!saved.ends_with('\n'));
+    assert_eq!(disk_capture(&f, &edited_on_disk(&f), &head).unwrap(), ReleasedCapture::Ordinary);
 }
 
 #[test]
