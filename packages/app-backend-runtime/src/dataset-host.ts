@@ -1965,13 +1965,13 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const verified = authority(context, { workspaceId }, { kind: "data" });
       const includeArchived = raw.includeArchived === true;
       if (includeArchived && verified.caller.kind !== "owner") denied();
-      const rows =
+      const page = (from: string) =>
         verified.caller.kind === "owner"
           ? db
               .prepare(
                 `SELECT c.dataset_id FROM dohc_dataset_catalog c LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id WHERE c.workspace_id=? AND c.dataset_id>? AND (?=1 OR COALESCE(l.archived,0)=0) AND ${CLAIMED} ORDER BY c.dataset_id LIMIT ?`,
               )
-              .all(workspaceId, after, includeArchived ? 1 : 0, limit + 1)
+              .all(workspaceId, from, includeArchived ? 1 : 0, limit + 1)
           : db
               .prepare(`SELECT c.dataset_id FROM dohc_dataset_catalog c JOIN dohc_dataset_data_grants g
             ON c.workspace_id=g.workspace_id AND c.dataset_id=g.dataset_id WHERE c.workspace_id=? AND g.principal_key=? AND c.dataset_id>?
@@ -1979,24 +1979,42 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
             AND json_extract(g.grant_json,'$.revisionSha256')=json_extract(c.revision_json,'$.revisionSha256')
             AND COALESCE((SELECT archived FROM dohc_dataset_lifecycle l WHERE l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id),0)=0
             AND ${CLAIMED} ORDER BY c.dataset_id LIMIT ?`)
-              .all(workspaceId, verified.principalKey, after, limit + 1);
-      const selected = rows.slice(0, limit),
-        datasets: Array<DatasetDescription & { archived: boolean }> = [];
-      let bytes = 0;
-      for (const row of selected) {
-        const key = { workspaceId, datasetId: String(row.dataset_id) };
-        const permitted = permissions(context, key, { kind: "data" }, includeArchived);
-        if (!permitted.discover) denied();
-        const description = { ...describePermission(permitted), archived: lifecycle(key).archived },
-          size = Buffer.byteLength(JSON.stringify(description));
-        if (bytes + size > 1024 * 1024) break;
-        datasets.push(description);
-        bytes += size;
+              .all(workspaceId, verified.principalKey, from, limit + 1);
+      const datasets: Array<DatasetDescription & { archived: boolean }> = [];
+      let bytes = 0,
+        more = false,
+        from = after;
+      scan: for (let rows = page(from); rows.length > 0; rows = page(from)) {
+        for (const row of rows) {
+          const key = { workspaceId, datasetId: (from = String(row.dataset_id)) };
+          let permitted: Permission;
+          try {
+            permitted = permissions(context, key, { kind: "data" }, includeArchived);
+          } catch (error) {
+            if (
+              verified.caller.kind === "named" &&
+              error instanceof DatasetHostError &&
+              error.code === "not_authorized"
+            )
+              continue;
+            throw error;
+          }
+          if (!permitted.discover) denied();
+          const description = {
+              ...describePermission(permitted),
+              archived: lifecycle(key).archived,
+            },
+            size = Buffer.byteLength(JSON.stringify(description));
+          if (datasets.length === limit || bytes + size > 1024 * 1024) {
+            more = true;
+            break scan;
+          }
+          datasets.push(description);
+          bytes += size;
+        }
+        if (rows.length <= limit) break;
       }
-      return {
-        datasets,
-        nextCursor: rows.length > datasets.length ? datasets.at(-1)!.datasetId : null,
-      };
+      return { datasets, nextCursor: more ? datasets.at(-1)!.datasetId : null };
     },
     /** Every unarchived dataset's id, owner only, without reading any dataset's rules. */
     datasetIds(context: Context, raw: { workspaceId: string }): string[] {

@@ -1000,3 +1000,258 @@ it("keeps an app working, on its own records only, when another Collection takes
   );
   expect(names((await f.invoke(owner, id(6))).result)).toEqual(["Moved", "Renamed", "Still moved"]);
 });
+
+const memberSource = operationSource.replace(
+  "read(ctx){return ctx.db.query('SELECT * FROM people ORDER BY id');}",
+  "read(ctx){return ctx.caller.access;}",
+);
+const memberRevision = describeDatasetRevision({
+  definition,
+  revision: 1,
+  schemaSql,
+  operationSource: memberSource,
+});
+const ana: AppBackendAuth = {
+  kind: "named",
+  workspaceId: "w",
+  userId: "ana",
+  grantId: "ana-grant",
+};
+const anaGrant = (revisionSha256 = memberRevision.revisionSha256) => ({
+  operationIds: [id(6), id(7)],
+  discover: true,
+  revision: 1,
+  revisionSha256,
+});
+
+async function memberFixture(dataGrant = true) {
+  const f = await fixture(false, {
+    revision: memberRevision,
+    schemaSql,
+    operationSource: memberSource,
+  });
+  await f.activate();
+  expect(
+    f.storage.inviteWorkspaceMember({
+      workspaceId: "w",
+      actorUserId: "owner",
+      workspaceName: "Team",
+      email: "ana@dohc.test",
+      recipientUserId: "ana",
+      newMemberId: () => "ana-entry",
+      newGrantId: () => "ana-grant",
+      newShareId: () => "members",
+      nowMs: 5,
+    }),
+  ).toMatchObject({ ok: true });
+  const level = (level: "view" | "comment" | "edit") =>
+    expect(
+      f.storage.setWorkspaceMemberLevel({
+        workspaceId: "w",
+        actorUserId: "owner",
+        level,
+        workspaceName: undefined,
+        newShareId: () => "unused",
+        nowMs: 6,
+      }),
+    ).toEqual({ ok: true });
+  level("edit");
+  if (dataGrant) f.host.setDataGrant(owner, { ...scope, grantId: "ana-grant", grant: anaGrant() });
+  const rule = (members: "view" | "edit" | null, folder = "registrations") => {
+    const result = f.storage.changeFolderRule({
+      workspaceId: "w",
+      actorUserId: "owner",
+      change: { kind: "create", folder, rule: { members, people: new Map() } },
+      nowMs: 7,
+    });
+    if (!result.ok) throw new Error(result.reason);
+    return result;
+  };
+  const admin = () =>
+    expect(
+      f.storage.setWorkspaceMemberRole({
+        workspaceId: "w",
+        actorUserId: "owner",
+        memberId: "ana-entry",
+        role: "admin",
+      }),
+    ).toEqual({ ok: true });
+  let request = 0;
+  const read = () => f.invoke(ana, id(6), {}, undefined, `read-${request++}`);
+  const listed = (page?: { after?: string; limit?: number }) =>
+    f.host.list(ana, { workspaceId: "w", ...page });
+  return { ...f, level, rule, admin, read, listed };
+}
+
+const refused = { code: "not_authorized" };
+
+it("hides a Collection in a folder a member can't reach, and every call on it", async () => {
+  const f = await memberFixture();
+  expect(f.listed().datasets.map((dataset) => dataset.datasetId)).toEqual([id(1)]);
+  expect((await f.read()).result).toBe("edit");
+  const fingerprint = f.host.offlineAccessFingerprint(ana);
+  f.rule(null);
+  expect(f.listed()).toEqual({ datasets: [], nextCursor: null });
+  expect(() => f.host.describe(ana, scope)).toThrow(expect.objectContaining(refused));
+  await expect(f.read()).rejects.toMatchObject(refused);
+  await expect(
+    f.invoke(ana, id(7), { id: "x", name: "y" }, undefined, "edit"),
+  ).rejects.toMatchObject(refused);
+  expect(() =>
+    f.host.dataReadFile(ana, {
+      ...scope,
+      revision: 1,
+      revisionSha256: memberRevision.revisionSha256,
+      fileId: "file",
+      fieldId: id(4),
+      operationId: id(6),
+      input: {},
+    }),
+  ).toThrow(expect.objectContaining(refused));
+  expect(
+    await f.storage.workReferenceDatasetAccess!({
+      workspaceId: "w",
+      userId: "ana",
+      grantId: "ana-grant",
+      target: { kind: "transactionalCollection", datasetId: id(1), tableId: id(2) },
+    }),
+  ).toBeNull();
+  expect(f.host.offlineAccessFingerprint(ana)).not.toBe(fingerprint);
+  f.admin();
+  expect(f.listed().datasets.map((dataset) => dataset.datasetId)).toEqual([id(1)]);
+  expect((await f.read()).result).toBe("edit");
+});
+
+it("caps a member's Collection level at their level on its folder, and never raises it", async () => {
+  const f = await memberFixture();
+  const { ruleId, revision } = f.rule("view");
+  expect((await f.read()).result).toBe("view");
+  f.level("comment");
+  f.storage.changeFolderRule({
+    workspaceId: "w",
+    actorUserId: "owner",
+    change: { kind: "change", ruleId, revision, rule: { members: "edit", people: new Map() } },
+    nowMs: 9,
+  });
+  expect((await f.read()).result).toBe("comment");
+});
+
+it("ends a member's held Collection access when a folder rule lowers it", async () => {
+  const f = await memberFixture();
+  const check = await f.storage.workReferenceDatasetAccess!({
+    workspaceId: "w",
+    userId: "ana",
+    grantId: "ana-grant",
+    target: { kind: "transactionalCollection", datasetId: id(1), tableId: id(2) },
+  });
+  expect(check?.()).toBe(true);
+  const fingerprint = f.host.offlineAccessFingerprint(ana);
+  f.rule("view");
+  expect(check!()).toBe(false);
+  expect(f.host.offlineAccessFingerprint(ana)).not.toBe(fingerprint);
+});
+
+it("refuses a member's running write when a folder rule hides its Collection before it commits", async () => {
+  const f = await memberFixture();
+  const original = f.storage.memberReach.bind(f.storage);
+  let hide = false;
+  const dispatched = () => {
+    const limit = Error.stackTraceLimit;
+    Error.stackTraceLimit = Infinity;
+    const stack = String(new Error().stack);
+    Error.stackTraceLimit = limit;
+    return stack.includes("supervisor.mjs");
+  };
+  vi.spyOn(f.storage, "memberReach").mockImplementation((...args) => {
+    if (hide && dispatched()) {
+      hide = false;
+      setImmediate(() => f.rule(null));
+    }
+    return original(...args);
+  });
+  const edit = (key: string) => f.invoke(ana, id(7), { id: "x", name: "y" }, undefined, key);
+  const { revision } = await edit("edit-0");
+  hide = true;
+  await expect(edit("edit-1")).rejects.toMatchObject(refused);
+  expect(hide).toBe(false);
+  f.admin();
+  expect((await edit("edit-2")).revision).toBe(revision + 1);
+});
+
+it("still needs a data grant where a folder rule gives a member Edit", async () => {
+  const f = await memberFixture(false);
+  f.rule("edit");
+  expect(f.listed().datasets).toEqual([]);
+  expect(() => f.host.describe(ana, scope)).toThrow(expect.objectContaining(refused));
+  await expect(f.read()).rejects.toMatchObject(refused);
+});
+
+it("keeps owner-only Collection actions from a member and an admin", async () => {
+  const f = await memberFixture();
+  f.rule("edit");
+  for (const promote of [() => {}, f.admin]) {
+    promote();
+    expect(() => f.host.archiveDataset(ana, scope)).toThrow(expect.objectContaining(refused));
+    expect(() =>
+      f.host.setDataGrant(ana, { ...scope, grantId: "ana-grant", grant: anaGrant() }),
+    ).toThrow(expect.objectContaining({ code: "not_found" }));
+    expect(() => f.host.lifecycle(ana, scope)).toThrow(expect.objectContaining(refused));
+  }
+  expect(f.host.lifecycle(owner, scope).archived).toBe(false);
+});
+
+it("pages a member's Collections past ones they can't reach, without naming them", async () => {
+  const f = await memberFixture();
+  for (const [datasetId, folder] of [
+    [id(11), "hidden"],
+    [id(12), "zeta"],
+  ] as const) {
+    const other = describeDatasetRevision({
+      definition: {
+        ...definition,
+        datasetId,
+        schemaPath: `${folder}/schema.sql`,
+        operationsPath: `${folder}/operations.js`,
+      },
+      revision: 1,
+      schemaSql,
+      operationSource: memberSource,
+    });
+    await f.host.activate(owner, {
+      workspaceId: "w",
+      revision: other,
+      schemaSql,
+      operationSource: memberSource,
+      capacityBytes: 1024 * 1024,
+    });
+    f.host.setDataGrant(owner, {
+      workspaceId: "w",
+      datasetId,
+      grantId: "ana-grant",
+      grant: anaGrant(other.revisionSha256),
+    });
+  }
+  f.rule(null, "hidden");
+  const first = f.listed({ limit: 1 });
+  expect(first.datasets.map((dataset) => dataset.datasetId)).toEqual([id(1)]);
+  expect(first.nextCursor).toBe(id(1));
+  const second = f.listed({ after: first.nextCursor!, limit: 1 });
+  expect(second.datasets.map((dataset) => dataset.datasetId)).toEqual([id(12)]);
+  expect(second.nextCursor).toBeNull();
+  expect(JSON.stringify([first, second])).not.toContain(id(11));
+});
+
+it("hides a Collection from a member once it moves into a folder they can't reach", async () => {
+  const f = await memberFixture();
+  pushFile(f.storage, "dataset", null, collectionFile());
+  f.rule(null, "team");
+  expect((await f.read()).result).toBe("edit");
+  pushFile(
+    f.storage,
+    "dataset",
+    collectionFile(),
+    collectionFile("team/registrations/dataset.json"),
+  );
+  expect(f.listed().datasets).toEqual([]);
+  await expect(f.read()).rejects.toMatchObject(refused);
+});
