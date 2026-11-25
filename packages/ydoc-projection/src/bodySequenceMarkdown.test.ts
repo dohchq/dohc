@@ -240,12 +240,16 @@ describe("the notes made in format 2 from each fixture's Markdown", () => {
       const counts = newBodyWeight(schema, parsedBody(markdown), byNumber)!;
       const doc = inFormat2(markdown);
       expect(marker(doc)).toBe(BODY_SEQUENCE_SCHEMA_VERSION);
+      const read = oneRead(doc);
       return {
         name,
         update: Buffer.from(Y.encodeStateAsUpdate(doc)).toString("base64"),
         engineNodes: counts.engineNodes,
         engineBytes: counts.engineBytes,
         noteNodes: counts.engineNodes + engineReadOfFrontmatter(doc.getMap("frontmatter")).nodes,
+        ...liveNoteWeight(doc),
+        valueNodeVisits: read.valueNodeVisits,
+        decodedPayloadByteVisits: read.decodedPayloadByteVisits,
       };
     });
     expect(written.at(-1)!.noteNodes).toBeGreaterThan(written.at(-1)!.engineNodes);

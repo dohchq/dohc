@@ -3855,16 +3855,19 @@ fn prepare_local_lineage_in_tx(
                     .result
                     .present()
                     .ok_or_else(|| corrupt_local("text successor has no result head"))?;
-                let identity = SuccessorIdentity::derive(SuccessorIdentityInput {
-                    key: &key,
-                    predecessor_claim_id: &predecessor_claim_id,
-                    predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
-                    artifact_op_kind: "conflict.resolve",
-                    artifact_id: &payload.conflict_id,
-                    artifact_preimage_sha256: &current.blob_sha256,
-                    content_kind: marker.content_kind,
-                    result_sha256: &result.blob_sha256,
-                });
+                let identity = SuccessorIdentity::derive_with_schema_version(
+                    SuccessorIdentityInput {
+                        key: &key,
+                        predecessor_claim_id: &predecessor_claim_id,
+                        predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
+                        artifact_op_kind: "conflict.resolve",
+                        artifact_id: &payload.conflict_id,
+                        artifact_preimage_sha256: &current.blob_sha256,
+                        content_kind: marker.content_kind,
+                        result_sha256: &result.blob_sha256,
+                    },
+                    doc.note_schema_version(),
+                );
                 let successor = fresh_successor_base(
                     &identity,
                     result_text

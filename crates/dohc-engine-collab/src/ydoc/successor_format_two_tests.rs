@@ -1,0 +1,185 @@
+use super::*;
+
+const WRITTEN_NOTES: &str =
+    include_str!("../../../../packages/ydoc-projection/src/fixtures/body-sequence.json");
+
+fn identity(artifact: &str, schema_version: u8) -> SuccessorIdentity {
+    let key = crate::DocKey::new("workspace", "main", "object").unwrap();
+    SuccessorIdentity::derive_with_schema_version(
+        SuccessorIdentityInput {
+            key: &key,
+            predecessor_claim_id: &"a".repeat(64),
+            predecessor_state_vector_sha256: &"b".repeat(64),
+            artifact_op_kind: "conflict.resolve",
+            artifact_id: "conflict",
+            artifact_preimage_sha256: &"c".repeat(64),
+            content_kind: ContentKind::Richdoc,
+            result_sha256: &crate::hex_sha256(artifact.as_bytes()),
+        },
+        schema_version,
+    )
+}
+
+fn successor(artifact: &str) -> SuccessorBase {
+    fresh_successor_base(&identity(artifact, 2), artifact).expect("successor")
+}
+
+struct Loaded {
+    schema_version: u8,
+    body_items: bool,
+    sequence_length: u32,
+    file: String,
+}
+
+fn loaded(base: &SuccessorBase) -> Loaded {
+    let doc = Ydoc::wire();
+    doc.apply(&base.update).expect("successor update");
+    let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
+    let sequence = doc.doc.get_or_insert_text(ROOT_SEQUENCE);
+    let txn = doc.doc.transact();
+    let (body_items, sequence_length) = (body.len(&txn) > 0, sequence.len(&txn));
+    drop(txn);
+    let projection = doc
+        .project(ContentKind::Richdoc)
+        .expect("projection")
+        .content;
+    Loaded {
+        schema_version: doc.note_schema_version(),
+        body_items,
+        sequence_length,
+        file: doc
+            .preserved_markdown_source(&projection)
+            .unwrap_or(projection),
+    }
+}
+
+#[test]
+fn a_successor_of_a_format_two_note_is_one_sequence_that_projects_its_artifact() {
+    let artifact = "# Title\n\nOne **bold** line\n\n- a\n- b\n\n> quoted\n";
+    reading_body_sequence_here(|| {
+        let base = successor(artifact);
+        let note = loaded(&base);
+        assert_eq!(note.schema_version, 2);
+        assert!(!note.body_items);
+        assert!(note.sequence_length > 0);
+        assert_eq!(note.file, artifact);
+        assert_eq!(base, successor(artifact));
+    });
+}
+
+#[test]
+fn the_format_two_version_is_part_of_the_epoch_and_any_other_version_is_format_one() {
+    let artifact = "text\n";
+    let key = crate::DocKey::new("workspace", "main", "object").unwrap();
+    let derived = SuccessorIdentity::derive(SuccessorIdentityInput {
+        key: &key,
+        predecessor_claim_id: &"a".repeat(64),
+        predecessor_state_vector_sha256: &"b".repeat(64),
+        artifact_op_kind: "conflict.resolve",
+        artifact_id: "conflict",
+        artifact_preimage_sha256: &"c".repeat(64),
+        content_kind: ContentKind::Richdoc,
+        result_sha256: &crate::hex_sha256(artifact.as_bytes()),
+    });
+    assert_eq!(derived, identity(artifact, 1));
+    assert_eq!(derived, identity(artifact, 7));
+    assert_ne!(identity(artifact, 2).epoch_tag, derived.epoch_tag);
+    assert_ne!(identity(artifact, 2).client_id, derived.client_id);
+}
+
+#[test]
+fn an_engine_that_does_not_read_format_two_refuses_to_write_its_successor() {
+    let error = fresh_successor_base(&identity("text\n", 2), "text\n").expect_err("refused");
+    assert!(matches!(
+        error,
+        CollabError::InvalidSuccessorBase {
+            constraint: "format-2 successor",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn a_successor_format_two_cannot_hold_is_written_in_format_one() {
+    let linked_code = "Run [`npm install`](https://example.com) first\n";
+    let many_lines = format!("{}a\n", "a\n\n".repeat(26_000));
+    reading_body_sequence_here(|| {
+        for artifact in [linked_code, many_lines.as_str()] {
+            let note = loaded(&successor(artifact));
+            assert_eq!(note.schema_version, 1);
+            assert_eq!(note.sequence_length, 0);
+            assert_eq!(note.file, artifact);
+        }
+        assert_eq!(successor(linked_code), successor(linked_code));
+    });
+}
+
+#[test]
+fn a_successor_of_an_empty_artifact_or_kept_source_stays_in_format_two() {
+    reading_body_sequence_here(|| {
+        let empty = loaded(&successor(""));
+        assert_eq!(
+            (
+                empty.schema_version,
+                empty.sequence_length,
+                empty.file.as_str()
+            ),
+            (2, 0, "")
+        );
+        let kept = loaded(&successor("* a\n* b\n"));
+        assert_eq!(kept.schema_version, 2);
+        assert!(kept.sequence_length > 0);
+        assert_eq!(kept.file, "* a\n* b\n");
+    });
+}
+
+#[test]
+fn each_shared_note_a_successor_takes_gives_the_pinned_bytes() {
+    #[derive(serde::Deserialize)]
+    struct Note {
+        name: String,
+        markdown: Option<String>,
+    }
+    use serde::Deserialize as _;
+    let mut json = serde_json::Deserializer::from_str(WRITTEN_NOTES);
+    json.disable_recursion_limit();
+    let notes = Vec::<Note>::deserialize(&mut json).unwrap();
+    let markdown: Vec<(&str, &str)> = notes
+        .iter()
+        .filter_map(|note| Some((note.name.as_str(), note.markdown.as_deref()?)))
+        .collect();
+    let (mut updates, mut not_format_two) = (Vec::new(), Vec::new());
+    reading_body_sequence_here(|| {
+        for (name, markdown) in &markdown {
+            let build = || fresh_successor_base(&identity(markdown, 2), markdown);
+            let Ok(first) = build() else {
+                not_format_two.push(format!("refused: {name}"));
+                continue;
+            };
+            for _ in 1..50 {
+                assert_eq!(build().unwrap().update, first.update, "{name}");
+            }
+            if loaded(&first).schema_version != 2 {
+                not_format_two.push(format!("format 1: {name}"));
+            }
+            updates.extend(first.update);
+        }
+    });
+    assert_eq!(markdown.len(), 22);
+    assert_eq!(
+        (crate::hex_sha256(&updates), not_format_two),
+        (
+            "3a60793a8a2263fac16d77f96da47d78d7e68a0ab8a2a36b0f5d04c7f6d00970".to_owned(),
+            [
+                "lists, a to-do, a callout and an uneven table",
+                "values and paths a reader must repair",
+                "what a listItem holds",
+                "what a taskItem holds",
+                "every path a reader repairs, and which lines share a container",
+                "what a block cannot hold goes to a paragraph after it",
+            ]
+            .map(|name| format!("refused: {name}"))
+            .to_vec()
+        )
+    );
+}

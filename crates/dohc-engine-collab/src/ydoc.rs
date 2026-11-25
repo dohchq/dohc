@@ -46,6 +46,7 @@ use crate::error::CollabError;
 use crate::limits::{MAX_PROJECTION_BYTES, MAX_PROJECTION_DEPTH, MAX_PROJECTION_NODES};
 
 mod body_sequence;
+mod body_sequence_writer;
 mod bounded_encoder;
 mod frontmatter_yaml;
 mod inline_reading;
@@ -119,8 +120,25 @@ pub const ROOT_SCENE_ASSETS: &str = "excalidraw:assets";
 pub const BODY_SEQUENCE_SETTING: &str = "DOHC_ENGINE_NOTE_BODY_SEQUENCE";
 
 fn body_sequence_setting() -> bool {
+    #[cfg(test)]
+    if READS_BODY_SEQUENCE_HERE.get() {
+        return true;
+    }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var(BODY_SEQUENCE_SETTING).is_ok_and(|value| value == "1"))
+}
+
+#[cfg(test)]
+thread_local! {
+    static READS_BODY_SEQUENCE_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn reading_body_sequence_here<R>(run: impl FnOnce() -> R) -> R {
+    READS_BODY_SEQUENCE_HERE.set(true);
+    let ran = run();
+    READS_BODY_SEQUENCE_HERE.set(false);
+    ran
 }
 
 /// Which offset mode a `Doc` is built with. `Utf16` is the only wire-safe mode;
@@ -232,6 +250,7 @@ pub struct SuccessorIdentity {
     epoch_tag: String,
     client_id: u64,
     content_kind: ContentKind,
+    schema_version: u8,
     predecessor_state_vector_sha256: String,
     artifact_preimage_sha256: String,
     result_sha256: String,
@@ -253,6 +272,18 @@ pub struct SuccessorIdentityInput<'a> {
 impl SuccessorIdentity {
     /// Bind a successor to its predecessor, artifact, object, and exact result.
     pub fn derive(input: SuccessorIdentityInput<'_>) -> Self {
+        Self::derive_with_schema_version(input, 1)
+    }
+
+    /// Bind a successor whose note is written in rich-document
+    /// `schema_version`. A successor of a format-2 note is written in format
+    /// 2 where that format holds it, and the version is part of its epoch tag.
+    /// Any other version derives what [`Self::derive`] derives.
+    pub fn derive_with_schema_version(
+        input: SuccessorIdentityInput<'_>,
+        schema_version: u8,
+    ) -> Self {
+        let schema_version = if schema_version == 2 { 2 } else { 1 };
         let SuccessorIdentityInput {
             key,
             predecessor_claim_id,
@@ -281,6 +312,10 @@ impl SuccessorIdentity {
             identity.extend_from_slice(&length.to_be_bytes());
             identity.extend_from_slice(field.as_bytes());
         }
+        if schema_version == 2 {
+            identity.extend_from_slice(&1_u64.to_be_bytes());
+            identity.extend_from_slice(b"2");
+        }
         let epoch_tag = crate::hex_sha256(&identity);
         let mut client_hash = Sha256::new();
         client_hash.update(SUCCESSOR_CLIENT_DOMAIN);
@@ -294,6 +329,7 @@ impl SuccessorIdentity {
             epoch_tag,
             client_id,
             content_kind,
+            schema_version,
             predecessor_state_vector_sha256: predecessor_state_vector_sha256.to_owned(),
             artifact_preimage_sha256: artifact_preimage_sha256.to_owned(),
             result_sha256: result_sha256.to_owned(),
@@ -331,6 +367,40 @@ pub fn fresh_successor_base(
             observed: observed_result,
         });
     }
+    let format_two = identity.schema_version == 2 && identity.content_kind == ContentKind::Richdoc;
+    if format_two && !body_sequence_setting() {
+        return Err(CollabError::InvalidSuccessorBase {
+            constraint: "format-2 successor",
+            expected: format!("an engine started with {BODY_SEQUENCE_SETTING}=1"),
+            observed: "an engine that does not read format 2".to_owned(),
+        });
+    }
+    let in_format_two = format_two
+        .then(|| successor_doc(identity, artifact, 2.0).ok())
+        .flatten()
+        .filter(|doc| body_sequence_writer::Weight::of(&doc.doc).fits_a_live_note());
+    let doc = match in_format_two {
+        Some(doc) => doc,
+        None => successor_doc(identity, artifact, 1.0)?,
+    };
+    let update = doc.encode_full_state();
+    Ok(SuccessorBase {
+        lineage_claim_id: crate::hex_sha256(&update),
+        epoch_tag: identity.epoch_tag.clone(),
+        content_kind: identity.content_kind,
+        predecessor_state_vector_sha256: identity.predecessor_state_vector_sha256.clone(),
+        artifact_preimage_sha256: identity.artifact_preimage_sha256.clone(),
+        result_sha256: identity.result_sha256.clone(),
+        state_vector: doc.encode_state_vector(),
+        update,
+    })
+}
+
+fn successor_doc(
+    identity: &SuccessorIdentity,
+    artifact: &str,
+    schema_version: f64,
+) -> Result<Ydoc, CollabError> {
     let item_blocks = if identity.content_kind == ContentKind::Richdoc {
         outside_markdown_allowlist(artifact).ok_or(CollabError::MarkdownNotRepresentable)?
     } else {
@@ -340,7 +410,7 @@ pub fn fresh_successor_base(
     let meta = doc.doc.get_or_insert_map(ROOT_META);
     {
         let mut txn = doc.doc.transact_mut();
-        meta.insert(&mut txn, "schemaVersion", Any::Number(1.0));
+        meta.insert(&mut txn, "schemaVersion", Any::Number(schema_version));
         if identity.content_kind == ContentKind::Plaintext {
             meta.insert(&mut txn, "contentKind", "plain-text");
         }
@@ -391,17 +461,7 @@ pub fn fresh_successor_base(
             observed_sha256: crate::hex_sha256(projected.as_bytes()),
         });
     }
-    let update = doc.encode_full_state();
-    Ok(SuccessorBase {
-        lineage_claim_id: crate::hex_sha256(&update),
-        epoch_tag: identity.epoch_tag.clone(),
-        content_kind: identity.content_kind,
-        predecessor_state_vector_sha256: identity.predecessor_state_vector_sha256.clone(),
-        artifact_preimage_sha256: identity.artifact_preimage_sha256.clone(),
-        result_sha256: identity.result_sha256.clone(),
-        state_vector: doc.encode_state_vector(),
-        update,
-    })
+    Ok(doc)
 }
 
 /// A content projection of a durable Y.Doc with its provenance. Constraint 4:
@@ -508,6 +568,44 @@ impl Ydoc {
     pub(crate) fn reading_body_sequence(mut self) -> Self {
         self.reads_body_sequence = true;
         self
+    }
+
+    /// The rich-document schema version this note is written in: 2 for a
+    /// note whose body is one sequence (format 2), otherwise 1.
+    pub fn note_schema_version(&self) -> u8 {
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let _reading = self.doc.transact();
+        match body_sequence::stored_under(&meta, "schemaVersion") {
+            Some(Any::Number(2.0)) => 2,
+            _ => 1,
+        }
+    }
+
+    pub(crate) fn check_format_two_base(&self) -> Result<(), CollabError> {
+        if self.note_schema_version() != 2 {
+            return Ok(());
+        }
+        let refused = |expected: String, observed: &str| CollabError::InvalidSuccessorBase {
+            constraint: "format-2 successor base",
+            expected,
+            observed: observed.to_owned(),
+        };
+        if !self.reads_body_sequence {
+            return Err(refused(
+                format!("an engine started with {BODY_SEQUENCE_SETTING}=1"),
+                "an engine that does not read format 2",
+            ));
+        }
+        let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        let sequence = self.doc.get_or_insert_text(ROOT_SEQUENCE);
+        let containers = self.doc.get_or_insert_map(ROOT_CONTAINERS);
+        if !body_sequence::roots_hold_only_their_own_items(&body, &sequence, &containers) {
+            return Err(refused(
+                "a body held only in the sequence and its containers".to_owned(),
+                "items under body, or items of the wrong kind",
+            ));
+        }
+        Ok(())
     }
 
     fn body_sequence_roots(&self) -> Option<(yrs::TextRef, MapRef)> {
@@ -1704,16 +1802,26 @@ impl Ydoc {
             }
             ContentKind::Richdoc => {
                 let meta = self.doc.get_or_insert_map(ROOT_META);
-                let missing_schema_version = match meta.get(&self.doc.transact(), "schemaVersion") {
+                let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+                let sequence_roots = self.body_sequence_roots().filter(|(sequence, containers)| {
+                    fold == FileFold::No
+                        && body_sequence::holds_no_item([
+                            frag.as_ref(),
+                            sequence.as_ref(),
+                            containers.as_ref(),
+                        ])
+                });
+                let stored_version = meta.get(&self.doc.transact(), "schemaVersion");
+                let missing_schema_version = match stored_version {
                     None => true,
                     Some(Out::Any(Any::Number(1.0))) => false,
+                    Some(Out::Any(Any::Number(2.0))) if sequence_roots.is_some() => false,
                     _ => {
                         return Err(CollabError::MalformedUpdate {
                             reason: "unsupported rich-document schema version".into(),
                         });
                     }
                 };
-                let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
                 let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
                 let (frontmatter, prefix, body) = split_markdown_frontmatter(markdown);
                 let uses_crlf = markdown.contains("\r\n");
@@ -1731,6 +1839,18 @@ impl Ydoc {
                 if file_fold && quote_fold_overflows(&blocks, 0) {
                     return Err(CollabError::MarkdownQuoteDepthExceeded);
                 }
+                let new_body = match &sequence_roots {
+                    Some(_) => {
+                        let (mut nodes, mut bytes) = (MAX_PROJECTION_NODES, 0);
+                        let read = read_blocks::<WIRE_SEED>(&blocks, &mut nodes, &mut bytes)
+                            .map_err(|_| CollabError::MarkdownNotRepresentable)?;
+                        let written = body_sequence_writer::new_body(&read)
+                            .ok_or(CollabError::MarkdownNotRepresentable)?;
+                        Some((read, written))
+                    }
+                    None => None,
+                };
+                let (read, written) = new_body.unzip();
                 let edit = |txn: &mut yrs::TransactionMut<'_>| {
                     if WIRE_SEED && missing_schema_version {
                         meta.insert(txn, "schemaVersion", Any::Number(1.0));
@@ -1758,6 +1878,12 @@ impl Ydoc {
                         map.insert(txn, key.as_str(), json_to_any(value));
                     }
                     keep_frontmatter_source(&map, &meta, txn, source.as_deref());
+                    if let (Some((sequence, containers)), Some(written)) =
+                        (&sequence_roots, written)
+                    {
+                        body_sequence_writer::write(txn, sequence, containers, written);
+                        return;
+                    }
                     // A live note keeps every block it deletes, so an outside
                     // save keeps the blocks it left alone at either end and
                     // adds only what changed.
@@ -1789,13 +1915,23 @@ impl Ydoc {
                         insert_md_block::<_, WIRE_SEED>(txn, &frag, start + paired, block, inline);
                     }
                 };
-                if WIRE_SEED {
+                let update = if WIRE_SEED {
                     self.with_delta(edit)
                 } else {
                     let mut txn = self.doc.transact_mut();
                     edit(&mut txn);
                     Vec::new()
+                };
+                if let (Some((sequence, containers)), Some(read)) = (&sequence_roots, &read) {
+                    let txn = self.doc.transact();
+                    let (mut nodes, mut bytes) = (MAX_PROJECTION_NODES, 0);
+                    let written =
+                        body_sequence::blocks(&txn, sequence, containers, &mut nodes, &mut bytes)?;
+                    if markdown_document(&written)? != markdown_document(read)? {
+                        return Err(CollabError::MarkdownNotRepresentable);
+                    }
                 }
+                update
             }
             ContentKind::Scene => {
                 return Err(CollabError::MarkdownRewriteUnsupported {
@@ -4936,14 +5072,28 @@ fn inline_reading_fits<T: ReadTxn, const WIRE_DEFAULTS: bool>(
     if !frontmatter_fits {
         return false;
     }
+    read_blocks::<WIRE_DEFAULTS>(blocks, &mut remaining, &mut bytes).is_ok()
+}
+
+fn read_blocks<const WIRE_DEFAULTS: bool>(
+    blocks: &[MdBlock<'_>],
+    remaining_nodes: &mut usize,
+    source_text_bytes: &mut usize,
+) -> ProjectionResult<Vec<MarkdownNode>> {
     let scratch = yrs::Doc::new();
     let body = scratch.get_or_insert_xml_fragment(ROOT_BODY);
     let mut scratch_txn = scratch.transact_mut();
     for block in blocks.iter().rev() {
         insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &body, 0, block, true);
     }
-    body.children(&scratch_txn)
-        .all(|child| markdown_node(&scratch_txn, child, 0, &mut remaining, &mut bytes).is_ok())
+    let mut read = Vec::new();
+    for child in body.children(&scratch_txn) {
+        let child = markdown_node(&scratch_txn, child, 0, remaining_nodes, source_text_bytes)?;
+        if !empty_list_or_item(&child) {
+            read.push(child);
+        }
+    }
+    Ok(read)
 }
 
 fn insert_md_paragraph<F: XmlFragment>(
@@ -12086,3 +12236,7 @@ mod fence_projection_tests {
 #[cfg(test)]
 #[path = "ydoc/nested1b_allowlist_tests.rs"]
 mod nested1b_allowlist_tests;
+
+#[cfg(test)]
+#[path = "ydoc/successor_format_two_tests.rs"]
+mod successor_format_two_tests;

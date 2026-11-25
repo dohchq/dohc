@@ -10,9 +10,9 @@ use yrs::branch::Branch;
 use yrs::types::text::TextItem;
 
 const TOP: &str = "doc";
-const BOUNDARY: &str = "block";
+pub(super) const BOUNDARY: &str = "block";
 const PARAGRAPH: &str = "paragraph";
-const MAX_PATH_ENTRIES: usize = 64;
+pub(super) const MAX_PATH_ENTRIES: usize = 64;
 const MAX_ID_BYTES: usize = 32;
 const MAX_COLUMN_WIDTHS: usize = 1000;
 const SAFE_INTEGER: u64 = (1 << 53) - 1;
@@ -29,7 +29,7 @@ thread_local! {
     static MARK_VALUES_COMPARED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-const LEAVES: [&str; 6] = [
+pub(super) const LEAVES: [&str; 6] = [
     PARAGRAPH,
     "heading",
     "codeBlock",
@@ -38,7 +38,7 @@ const LEAVES: [&str; 6] = [
     "rawBlock",
 ];
 
-const INLINE_ITEMS: [&str; 7] = [
+pub(super) const INLINE_ITEMS: [&str; 7] = [
     "hardBreak",
     "image",
     "escapedPunctuation",
@@ -48,7 +48,7 @@ const INLINE_ITEMS: [&str; 7] = [
     "rawInline",
 ];
 
-const CONTAINERS: [&str; 11] = [
+pub(super) const CONTAINERS: [&str; 11] = [
     "blockquote",
     "callout",
     "bulletList",
@@ -196,7 +196,23 @@ fn attributes_of(kind: &str) -> &'static [Attribute] {
     }
 }
 
-fn known(names: &'static [&'static str], name: &str) -> Option<&'static str> {
+pub(super) fn written_attributes(
+    kind: &str,
+    given: impl Fn(&str) -> Option<Value>,
+) -> impl Iterator<Item = (&'static str, Value)> {
+    attributes_of(kind).iter().map(move |attribute| {
+        let value = given(attribute.name).unwrap_or_else(|| attribute.missing.value());
+        (attribute.name, value)
+    })
+}
+
+pub(super) fn holds_no_item(roots: [&Branch; 3]) -> bool {
+    roots
+        .iter()
+        .all(|root| !root.holds_unkeyed_item() && !root.holds_keyed_item())
+}
+
+pub(super) fn known(names: &'static [&'static str], name: &str) -> Option<&'static str> {
     names.iter().copied().find(|known| *known == name)
 }
 
