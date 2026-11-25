@@ -606,9 +606,10 @@ fn a_path_never_holds_one_id_twice() {
         let file = "> a\n>\n> - \n>   > c\n";
         fold(&doc, file);
         assert_eq!(markdown_of(&doc), markdown_of(&seeded(2, file)));
-        let path = path_of(&doc, 1);
+        let path = path_of(&doc, boundaries(&doc).len() - 1);
+        assert_eq!(path.len(), 4, "{path:?}");
         assert_eq!(path[1..3], ["l", "i"]);
-        assert_eq!(path.iter().collect::<BTreeSet<_>>().len(), 4);
+        assert_eq!(path.iter().collect::<BTreeSet<_>>().len(), 4, "{path:?}");
     });
 }
 
