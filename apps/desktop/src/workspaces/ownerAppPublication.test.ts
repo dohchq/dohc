@@ -851,7 +851,7 @@ describe("owner dataset publication", () => {
     expect(h2.compile).not.toHaveBeenCalled();
   });
 
-  it("prepares multi-Collection manifests for local apps and refuses >1 Collection on shared links", async () => {
+  it("prepares multi-Collection manifests for shared links and local apps", async () => {
     const secondFields = approved.definition.tables[0]!.fields.map((field, index) => ({
       ...field,
       fieldId: id(12 + index),
@@ -911,8 +911,11 @@ describe("owner dataset publication", () => {
         },
       },
     });
-    // Shared link preparation refuses >1 Collection (Decision 1A).
-    await expect(h.prepare()).rejects.toThrow(/Shared links support at most one Collection/);
+    expect(
+      (await h.prepare()).candidate.capabilities.map((cap) =>
+        cap.kind === "dataset" ? cap.alias : null,
+      ),
+    ).toEqual(["expenses", "workouts"]);
 
     // Local preparation succeeds and sorts capabilities deterministically with aliases preserved.
     const localPrepared = await prepareLocalAppPublication(

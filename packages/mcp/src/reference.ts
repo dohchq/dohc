@@ -62,6 +62,7 @@ export const DATASET_RESULTS: Record<DatasetAction, DatasetKind[]> = {
   prepareHistoryRestore: ["migration-prepared"],
   permissions: ["permissions"],
   setGrant: ["grant-updated"],
+  setDefaults: ["grant-updated"],
   removeGrant: ["grant-updated"],
   lifecycle: ["lifecycle"],
   archive: ["lifecycle-updated"],

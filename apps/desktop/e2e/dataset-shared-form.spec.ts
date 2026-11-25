@@ -72,7 +72,7 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     await page.keyboard.press("ControlOrMeta+k");
     await page
       .getByTestId("command-palette")
-      .getByRole("option", { name: "New collection", exact: true })
+      .getByRole("option", { name: "New Collection", exact: true })
       .click();
     const create = page.getByTestId("new-collection-dialog");
     await create.getByLabel("Collection name").fill("Registrations");
@@ -273,7 +273,7 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     const original = publications.publications[0]!;
     const dashboard = await page.evaluate(
       async (input) => window.dohcDesktop!.publishOwnerApp({ action: "prepare", ...input }),
-      { workspaceId, appRoot, shareId: original.shareId, grantId: original.grantId },
+      { workspaceId, appRoot, shareId: original.shareId, grantId: original.grantId! },
     );
     if (dashboard.kind !== "prepared") throw Error("Expected dashboard review.");
     const publishedDashboard = await page.evaluate(

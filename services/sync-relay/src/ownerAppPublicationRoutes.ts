@@ -10,6 +10,8 @@ import { ticketRecord } from "./liveTicketInputs";
 import { parseShareId } from "./requestInputs";
 import type { SyncRelayStorage } from "./storage";
 import { readCurrentShareGrant } from "./storage/currentShareGrant";
+import { getWorkspaceMembership } from "./storage/workspaceMembers";
+import type { StorageContext } from "./storage/context";
 import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
@@ -172,39 +174,55 @@ export function createOwnerAppPublicationRoutes(options: {
             }),
       );
     }
-    const input = record(
-      raw,
-      ["shareId", "grantId", "expectedGrantGeneration", "candidate"],
-      ["agent"],
-    );
-    if (typeof input.shareId !== "string" || typeof input.grantId !== "string")
-      throw badRequest("Invalid publication share or grant.");
-    const shareId = parseShareId(input.shareId),
-      grantId = parseShareId(input.grantId);
-    const current = readCurrentShareGrant(storage, { grantId });
-    if (
-      !current ||
-      current.share.shareId !== shareId ||
-      current.share.workspaceId !== route.workspaceId ||
-      current.share.granterUserId !== ownerUserId
-    )
-      throw notFound();
-    const { grant } = current;
-    if (
-      !Number.isSafeInteger(input.expectedGrantGeneration) ||
-      Number(input.expectedGrantGeneration) < 1
-    )
-      throw badRequest("Invalid publication grant generation.");
-    if (input.expectedGrantGeneration !== grant.generation)
-      throw relayError("conflict", "Publication grant changed.");
+    const workspace =
+      !!raw && typeof raw === "object" && (raw as Record<string, unknown>).audience === "workspace";
+    const input = workspace
+      ? record(raw, ["audience", "candidate"], ["agent"])
+      : record(raw, ["shareId", "grantId", "expectedGrantGeneration", "candidate"], ["agent"]);
+    let owner;
+    if (workspace) {
+      const membership = getWorkspaceMembership(storage as StorageContext, route.workspaceId);
+      if (!membership)
+        throw relayError(
+          "conflict",
+          "This workspace has no members yet. Invite someone before you share an app with the workspace.",
+        );
+      owner = { workspaceId: route.workspaceId, shareId: membership.shareId, ownerUserId };
+    } else {
+      if (typeof input.shareId !== "string" || typeof input.grantId !== "string")
+        throw badRequest("Invalid publication share or grant.");
+      const shareId = parseShareId(input.shareId),
+        grantId = parseShareId(input.grantId);
+      const current = readCurrentShareGrant(storage, { grantId });
+      if (
+        !current ||
+        current.share.shareId !== shareId ||
+        current.share.workspaceId !== route.workspaceId ||
+        current.share.granterUserId !== ownerUserId
+      )
+        throw notFound();
+      const { grant } = current;
+      if (
+        !Number.isSafeInteger(input.expectedGrantGeneration) ||
+        Number(input.expectedGrantGeneration) < 1
+      )
+        throw badRequest("Invalid publication grant generation.");
+      if (input.expectedGrantGeneration !== grant.generation)
+        throw relayError("conflict", "Publication grant changed.");
+      owner = {
+        workspaceId: route.workspaceId,
+        ownerUserId,
+        shareId,
+        grantId,
+        generation: grant.generation,
+      };
+    }
     let candidate;
     try {
       candidate = parseAppPublicationCandidate(input.candidate, limits);
     } catch {
       throw badRequest("Invalid publication candidate.");
     }
-    if (candidate.capabilities.length > 1)
-      throw badRequest("Shared links support at most one Collection.");
     let agent;
     try {
       agent = parseApprovalAgent(input.agent);
@@ -213,12 +231,8 @@ export function createOwnerAppPublicationRoutes(options: {
     }
     return response(
       storage.publishAppPublication({
+        ...owner,
         agent,
-        workspaceId: route.workspaceId,
-        ownerUserId,
-        shareId,
-        grantId,
-        generation: grant.generation,
         candidate,
         limits,
         blobs: [],

@@ -202,7 +202,7 @@ Verify a candidate or approved local app frontend (verifyFrontend), create a sha
 
 Changes the workspace, so a shared view does not offer it.
 
-- `request`: `{ action: "verifyFrontend", workspaceId: string, appRoot?: string, publicationId?: SHA-256 hex, expectStartupBackend?: ({ op?: "backend.invoke" | "backend.attempt" | "backend.upload" | "backend.file" | "collection.list" | "collection.create" | "host.copy" | "host.print" | "host.notice" | "unknown", operation?: string, status?: integer, refusalCode?: string })[], steps?: ({ kind: "waitFor", selector: string, textIncludes?: string } | { kind: "fill", selector: string, value: string } | { kind: "click", selector: string, expectBackend?: { op?: "backend.invoke" | "backend.attempt" | "backend.upload" | "backend.file" | "collection.list" | "collection.create" | "host.copy" | "host.print" | "host.notice" | "unknown", operation?: string, status?: integer, refusalCode?: string } })[], timeoutMs?: integer } | { action: "createLink", workspaceId: string, appRoot: string, paths?: string[], access?: "view" | "comment" | "edit", operationId: UUID, agentLabel?: string } | { action: "listLocal", workspaceId: string, appRoot: string } | { action: "checkLocal", workspaceId: string, appRoot: string } | { action: "prepareLocal", workspaceId: string, appRoot: string } | { action: "stage", workspaceId: string, appRoot: string, migrations?: { [key: string]: string }, agentLabel?: string } | { action: "listStaged", workspaceId: string, appRoot?: string } | { action: "approveStaged", workspaceId: string, stageId: UUID, reviewDigest: SHA-256 hex, agentLabel?: string } | { action: "discardStaged", workspaceId: string, stageId: UUID } | { action: "launchLocal", workspaceId: string, publicationId: SHA-256 hex } | { action: "list", workspaceId: string, appRoot: string, cursor?: SHA-256 hex } | { action: "prepare", workspaceId: string, appRoot: string, shareId: string, grantId: string } | { action: "approve", workspaceId: string, approvalId: UUID, candidateDigest: SHA-256 hex, agentLabel?: string, linkReads?: ({ operationId: UUID, fieldIds: UUID[] })[] } | { action: "cancel", workspaceId: string, approvalId: UUID } | { action: "withdraw", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "revokeCollection", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "reviewReactivation", workspaceId: string, publicationId: SHA-256 hex }`. Required.
+- `request`: `{ action: "verifyFrontend", workspaceId: string, appRoot?: string, publicationId?: SHA-256 hex, expectStartupBackend?: ({ op?: "backend.invoke" | "backend.attempt" | "backend.upload" | "backend.file" | "collection.list" | "collection.create" | "host.copy" | "host.print" | "host.notice" | "unknown", operation?: string, status?: integer, refusalCode?: string })[], steps?: ({ kind: "waitFor", selector: string, textIncludes?: string } | { kind: "fill", selector: string, value: string } | { kind: "click", selector: string, expectBackend?: { op?: "backend.invoke" | "backend.attempt" | "backend.upload" | "backend.file" | "collection.list" | "collection.create" | "host.copy" | "host.print" | "host.notice" | "unknown", operation?: string, status?: integer, refusalCode?: string } })[], timeoutMs?: integer } | { action: "createLink", workspaceId: string, appRoot: string, paths?: string[], access?: "view" | "comment" | "edit", operationId: UUID, agentLabel?: string } | { action: "listLocal", workspaceId: string, appRoot: string } | { action: "checkLocal", workspaceId: string, appRoot: string } | { action: "prepareLocal", workspaceId: string, appRoot: string } | { action: "stage", workspaceId: string, appRoot: string, migrations?: { [key: string]: string }, agentLabel?: string } | { action: "listStaged", workspaceId: string, appRoot?: string } | { action: "approveStaged", workspaceId: string, stageId: UUID, reviewDigest: SHA-256 hex, agentLabel?: string } | { action: "discardStaged", workspaceId: string, stageId: UUID } | { action: "launchLocal", workspaceId: string, publicationId: SHA-256 hex } | { action: "list", workspaceId: string, appRoot: string, cursor?: SHA-256 hex } | { action: "prepare", workspaceId: string, appRoot: string, audience?: "workspace", shareId?: string, grantId?: string } | { action: "approve", workspaceId: string, approvalId: UUID, candidateDigest: SHA-256 hex, agentLabel?: string, linkReads?: ({ operationId: UUID, fieldIds: UUID[] })[] } | { action: "cancel", workspaceId: string, approvalId: UUID } | { action: "withdraw", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "revokeCollection", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "reviewReactivation", workspaceId: string, publicationId: SHA-256 hex }`. Required.
 
 Returns the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.
 
@@ -1987,7 +1987,7 @@ List app bindings and explicit data grants.
 - `after`: `string`
 - `limit`: `integer`
 
-Returns `{ kind: "permissions", permissions: ({ kind: "data", principal, current, metadata } | { kind: "app", principal, current, metadata })[], nextCursor, place?: { kind: "here" } | { kind: "server", host }, boundApps?: { scope, publicationId, authorityRevision, appRoot, alias?, shareId?, grantId?, pinnedRevision, pinnedRevisionSha256, operationIds, status, reasons? }[], boundAppsIncomplete?: true }`.
+Returns `{ kind: "permissions", defaults?: { view, comment, edit, revision, revisionSha256, generation } | null, permissions: ({ kind: "data", principal, current, metadata } | { kind: "app", principal, current, metadata })[], nextCursor, place?: { kind: "here" } | { kind: "server", host }, boundApps?: { scope, publicationId, authorityRevision, appRoot, alias?, shareId?, grantId?, pinnedRevision, pinnedRevisionSha256, operationIds, status, reasons? }[], boundAppsIncomplete?: true }`.
 
 #### `dohc dataset setGrant`
 
@@ -2000,6 +2000,19 @@ grant names revision, revisionSha256, operationIds, and discover.
 - `expectedDatasetId`: `UUID`
 - `grantId`: `string`. Required.
 - `grant`: `{ revision: integer, revisionSha256: SHA-256 hex, operationIds: UUID[], discover: boolean }`. Required.
+
+Returns `{ kind: "grant-updated" }`.
+
+#### `dohc dataset setDefaults`
+
+Set the actions each workspace level gets in a Collection by default.
+
+defaults names view, comment, and edit operationIds, with revision and revisionSha256. View and Comment get only reads. No level gets an owner-only action.
+
+- `workspaceId`: `string`. Required.
+- `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
+- `defaults`: `{ view: UUID[], comment: UUID[], edit: UUID[], revision: integer, revisionSha256: SHA-256 hex }`. Required.
 
 Returns `{ kind: "grant-updated" }`.
 
@@ -2452,7 +2465,7 @@ Review the source and any Collection access it asks for, then approve. The app f
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 
-Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access }, sourcePaths, capabilities, externalNetwork: true, local?: true }`.
+Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, capabilities, externalNetwork: true, local?: true }`.
 
 #### `dohc app stage`
 
@@ -2523,20 +2536,21 @@ listUnavailable means the server does not publish apps for this workspace.
 - `appRoot`: `string`. Required.
 - `cursor`: `SHA-256 hex`
 
-Returns `{ kind: "listed", publications: ({ operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: false, appRoot, sourceRevision } | { operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: true })[], nextCursor }` or `{ kind: "listUnavailable" }`.
+Returns `{ kind: "listed", publications: ({ operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, audience, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapabilities, manifestUnavailable: false, appRoot, sourceRevision } | { operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, audience, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapabilities, manifestUnavailable: true })[], nextCursor }` or `{ kind: "listUnavailable" }`.
 
 #### `dohc app prepare`
 
-Prepare an app for a share link.
+Prepare an app for a share link or for the workspace's members.
 
-Set `shareId` to `shareId` from `createLink`. Set `grantId` to `grantId` from `createLink`. shareId and grantId name the share and its link grant. Review the result, then approve.
+Set `shareId` to `shareId` from `createLink`. Set `grantId` to `grantId` from `createLink`. shareId and grantId name the share and its link grant. Review the result, then approve. For members, pass "audience": "workspace" without shareId or grantId. A member opens the app while they can see its folder and every Collection it uses.
 
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
-- `shareId`: `string`. Required.
-- `grantId`: `string`. Required.
+- `audience`: `"workspace"`
+- `shareId`: `string`
+- `grantId`: `string`
 
-Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access }, sourcePaths, capabilities, externalNetwork: true, local?: true }`.
+Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, capabilities, externalNetwork: true, local?: true }`.
 
 #### `dohc app approve`
 
@@ -2596,7 +2610,7 @@ Review the result, then approve.
 - `workspaceId`: `string`. Required.
 - `publicationId`: `SHA-256 hex`. Required.
 
-Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access }, sourcePaths, capabilities, externalNetwork: true, local?: true }`.
+Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access } | "workspace", sourcePaths, capabilities, externalNetwork: true, local?: true }`.
 
 #### `dohc app responses`
 

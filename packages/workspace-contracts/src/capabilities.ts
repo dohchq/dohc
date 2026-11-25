@@ -1377,6 +1377,15 @@ const LISTED_CAPABILITIES = {
     mcpReason:
       "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
   }),
+  "dataset.defaults.set": capability(
+    "Set the actions each workspace level gets in a Collection by default.",
+    {
+      ipc: ["dataset"],
+      mcp: { owner: ["dohc_dataset"] },
+      mcpReason:
+        "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
+    },
+  ),
   "dataset.grant.remove": capability("Remove an explicit data grant.", {
     ipc: ["dataset"],
     mcp: { owner: ["dohc_dataset"] },

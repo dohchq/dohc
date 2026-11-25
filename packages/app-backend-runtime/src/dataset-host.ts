@@ -173,6 +173,14 @@ export interface DatasetAuthority {
   /** Host permission/publication generation; changes invalidate in-flight work. */
   authorityToken?: string;
   /**
+   * A host ceiling on the operations this caller runs: only those listed, and
+   * only read-only ones when `readOnlyOnly` is set. Fold its inputs into
+   * `authorityToken`, so a narrower ceiling stops in-flight work.
+   */
+  operationCeiling?: { allowedOperationIds?: readonly string[]; readOnlyOnly?: boolean };
+  /** Operations a named caller holds by its Collection's workspace defaults, beside its own data grant. */
+  defaultOperationIds?: readonly string[];
+  /**
    * The chain depth an automation caller's writes declare, one more than the
    * change that started its run. Required for that caller, refused for any
    * other.
@@ -616,6 +624,8 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       person: person(result.person, caller),
       authorizeOperation: result.authorizeOperation,
       beforeCommit: result.beforeCommit,
+      operationCeiling: result.operationCeiling,
+      defaultOperationIds: caller.kind === "named" ? result.defaultOperationIds : undefined,
     };
     if (through.kind === "app" && verified.appId !== through.appId) denied();
     // An automation acts for its Collection, never as an app.
@@ -737,7 +747,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const binding = JSON.parse(String(row.binding_json)) as AppDatasetBinding;
       const boundRevision = resolveCompatibleDatasetRevision(db, key, binding, approved);
       let dataToken = "",
-        allowedHelperIds = new Set<string>();
+        allowedHelperIds = new Set(verified.defaultOperationIds);
       if (verified.caller.kind === "named") {
         const grant = db
           .prepare(
@@ -748,7 +758,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           const parsed = JSON.parse(String(grant.grant_json)) as StoredGrant;
           try {
             currentGrant(key, parsed, approved);
-            allowedHelperIds = new Set(parsed.operationIds);
+            for (const operationId of parsed.operationIds) allowedHelperIds.add(operationId);
           } catch (error) {
             if (!(error instanceof DatasetHostError) || error.code !== "conflict") throw error;
           }
@@ -777,8 +787,9 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           "SELECT grant_json,token FROM dohc_dataset_data_grants WHERE workspace_id=? AND dataset_id=? AND principal_key=?",
         )
         .get(key.workspaceId, key.datasetId, verified.principalKey);
-      if (!row) denied();
-      const grant = currentGrant(key, JSON.parse(String(row.grant_json)), approved);
+      const defaults = verified.defaultOperationIds ?? [];
+      if (!row && !defaults.length) denied();
+      const grant = row && currentGrant(key, JSON.parse(String(row.grant_json)), approved);
       // A data grant supplies organizer authority without requiring source Edit.
       if (verified.caller.kind === "named") verified.caller = { ...verified.caller, helper: true };
       const binding = {
@@ -786,12 +797,20 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         datasetId: approved.datasetId,
         revision: approved.revision,
         revisionSha256: approved.revisionSha256,
-        operationIds: grant.operationIds,
+        operationIds: [...new Set([...(grant?.operationIds ?? []), ...defaults])],
       };
       operations = boundOperations(JSON.stringify(binding), binding, approved, verified.caller);
-      token = String(row.token);
-      discover = grant.discover;
+      token = row ? String(row.token) : "";
+      discover = defaults.length > 0 || grant!.discover;
     }
+    const ceiling = verified.operationCeiling;
+    if (ceiling)
+      operations = operations.filter(
+        (operation) =>
+          (!ceiling.readOnlyOnly || operation.readOnly) &&
+          (!ceiling.allowedOperationIds ||
+            ceiling.allowedOperationIds.includes(operation.operationId)),
+      );
     return {
       authority: verified,
       revision: approved,

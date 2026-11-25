@@ -18,9 +18,11 @@ import {
 
 import {
   effectiveShareSelector,
+  MAIN_VERSION_ID,
   parseStoredAnyShareSelectorJson,
   targetVersionId,
 } from "../shareFilter";
+import { getWorkspaceMembership } from "./workspaceMembers";
 import { notFound, badRequest, relayError, RelayError } from "../errors";
 import { assertWorkspaceQuota } from "./workspaces";
 import type { StorageContext } from "./context";
@@ -29,24 +31,41 @@ import { authorizeLinkSession } from "../linkSecurity";
 import { readLinkEnrollment } from "./linkEnrollment";
 import { readCurrentShareGrant } from "./currentShareGrant";
 
-export interface PublicationOwner {
+export interface LinkPublicationOwner {
   workspaceId: string;
   shareId: string;
   grantId: string;
   generation: number;
   ownerUserId: string;
 }
-export interface PublishAppPublicationInput extends PublicationOwner {
+/** A Workspace Publication's owner: the workspace's own share, which every member reaches through. */
+export interface WorkspacePublicationOwner {
+  workspaceId: string;
+  shareId: string;
+  ownerUserId: string;
+}
+export type PublicationOwner = LinkPublicationOwner | WorkspacePublicationOwner;
+export const publicationAudience = (owner: PublicationOwner) =>
+  "grantId" in owner ? ("link" as const) : ("workspace" as const);
+export function publicationIdOf(owner: PublicationOwner, manifestHash: string): string {
+  const domain =
+    publicationAudience(owner) === "link"
+      ? "dohc-app-publication-v1"
+      : "dohc-app-workspace-publication-v1";
+  return sha(JSON.stringify([domain, owner, manifestHash]));
+}
+export type PublishAppPublicationInput = PublicationOwner & {
   agent?: ApprovalAgent | null;
   candidate: unknown;
   blobs: readonly { sha256: string; bytes: Uint8Array }[];
   limits: AppPublicationLimits;
   nowMs: number;
-}
+};
 export interface AppPublicationApproval {
   agent: ApprovalAgent | null;
   selector: unknown;
-  access: "view" | "comment" | "edit";
+  /** The link's access, or null for a Workspace Publication, which each member reaches at their own level. */
+  access: "view" | "comment" | "edit" | null;
   committedCandidateDigest: string;
   sourceRevision: string;
   capabilities: AppPublicationCandidate["capabilities"];
@@ -103,8 +122,8 @@ export interface LinkAppPublicationDescriptor {
 export interface LinkAppPublicationAuthority {
   descriptor: LinkAppPublicationDescriptor;
   workspaceId: string;
-  /** The Collection the app's backend reads and writes, if it has one. */
-  datasetId: string | null;
+  /** The Collections the app's backend reads and writes. */
+  datasetIds: string[];
   shareId: string;
   grantId: string;
   generation: number;
@@ -113,6 +132,7 @@ export interface LinkAppPublicationAuthority {
   expiresAtMs: number;
 }
 const sha = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
+const WHOLE_WORKSPACE = { paths: [], versionId: null, wholeWorkspace: true };
 const digest = (domain: string, value: unknown) => sha(JSON.stringify([domain, value]));
 function validateBuildIdentity(candidate: AppPublicationCandidate): void {
   const sourceDigest = digest("dohc-app-source-v2", {
@@ -150,6 +170,20 @@ function authority(
   owner: PublicationOwner,
   candidate?: AppPublicationCandidate,
 ): void {
+  if (!("grantId" in owner)) {
+    const share = storage.getShare(owner.shareId);
+    if (
+      getWorkspaceMembership(storage, owner.workspaceId)?.shareId !== owner.shareId ||
+      share?.granterUserId !== owner.ownerUserId ||
+      (candidate &&
+        (candidate.versionId !== MAIN_VERSION_ID ||
+          [candidate.appRoot, ...candidate.inputs.map((file) => file.path)].some(
+            (path) => visibleSharePath(WHOLE_WORKSPACE, path) !== path,
+          )))
+    )
+      throw notFound();
+    return;
+  }
   const current = readCurrentShareGrant(storage, {
     grantId: owner.grantId,
     generation: owner.generation,
@@ -212,13 +246,16 @@ function header(
     throw notFound();
   const state: AppPublicationState = {
     publicationId,
-    owner: {
-      workspaceId,
-      shareId: String(row.share_id),
-      grantId: String(row.grant_id),
-      generation: Number(row.grant_generation),
-      ownerUserId,
-    },
+    owner:
+      row.audience === "link"
+        ? {
+            workspaceId,
+            shareId: String(row.share_id),
+            grantId: String(row.grant_id),
+            generation: Number(row.grant_generation),
+            ownerUserId,
+          }
+        : { workspaceId, shareId: String(row.share_id), ownerUserId },
     active: row.active === 1,
     authorityRevision: Number(row.authority_revision),
     createdAtMs: Number(row.created_at_ms),
@@ -267,7 +304,6 @@ function stored(storage: StorageContext, input: ReadAppPublicationInput): AppPub
       JSON.parse(Buffer.from(bytes).toString("utf8")),
       limits,
     );
-    if (candidate.capabilities.length > 1) throw new PublicationManifestUnavailable();
     return { ...state, candidate };
   } catch {
     throw new PublicationManifestUnavailable();
@@ -278,20 +314,21 @@ export function publishAppPublication(
   input: PublishAppPublicationInput,
 ): AppPublicationRow {
   const candidate = parseAppPublicationCandidate(input.candidate, input.limits);
-  if (candidate.capabilities.length > 1)
-    throw badRequest("Shared links support at most one Collection.");
   validateBuildIdentity(candidate);
-  const owner = {
-    workspaceId: input.workspaceId,
-    shareId: input.shareId,
-    grantId: input.grantId,
-    generation: input.generation,
-    ownerUserId: input.ownerUserId,
-  };
+  const owner: PublicationOwner =
+    "grantId" in input
+      ? {
+          workspaceId: input.workspaceId,
+          shareId: input.shareId,
+          grantId: input.grantId,
+          generation: input.generation,
+          ownerUserId: input.ownerUserId,
+        }
+      : { workspaceId: input.workspaceId, shareId: input.shareId, ownerUserId: input.ownerUserId };
   const now = integer(input.nowMs),
     bytes = Buffer.from(JSON.stringify(candidate)),
     manifestHash = sha(bytes);
-  const publicationId = sha(JSON.stringify(["dohc-app-publication-v1", owner, manifestHash]));
+  const publicationId = publicationIdOf(owner, manifestHash);
   if (!Array.isArray(input.blobs) || input.blobs.length > candidate.files.length)
     throw badRequest("Invalid publication blob inventory.");
   const provided = new Map<string, Uint8Array>();
@@ -325,17 +362,18 @@ export function publishAppPublication(
     assertPublishingNotHeld(storage, owner.ownerUserId);
     put(storage, owner.workspaceId, manifestHash, bytes, now);
     storage.db
-      .prepare(`INSERT INTO sync_relay_app_publications(publication_id,workspace_id,share_id,grant_id,grant_generation,owner_user_id,manifest_sha256,created_at_ms,active,authority_revision)
-      VALUES(?,?,?,?,?,?,?,?,1,1)`)
+      .prepare(`INSERT INTO sync_relay_app_publications(publication_id,workspace_id,share_id,grant_id,grant_generation,owner_user_id,manifest_sha256,created_at_ms,active,authority_revision,audience)
+      VALUES(?,?,?,?,?,?,?,?,1,1,?)`)
       .run(
         publicationId,
         owner.workspaceId,
         owner.shareId,
-        owner.grantId,
-        owner.generation,
+        "grantId" in owner ? owner.grantId : null,
+        "grantId" in owner ? owner.generation : null,
         owner.ownerUserId,
         manifestHash,
         now,
+        publicationAudience(owner),
       );
     for (const hash of new Set([manifestHash, ...candidate.files.map((file) => file.sha256)])) {
       storage.db
@@ -385,16 +423,23 @@ export type AppPublicationListRow = {
   approvalProvenance?: AppPublicationApproval;
   publicationId: string;
   authorityRevision: number;
+  audience: "link" | "workspace";
   shareId: string;
-  grantId: string;
+  grantId: string | null;
   active: boolean;
   linkCurrent: boolean;
   collectionCapability: AppCollectionCapability | "unavailable" | null;
-  datasetCapability: AppDatasetCapability | "unavailable" | null;
+  datasetCapabilities: AppDatasetCapability[] | "unavailable";
 } & (
   | { manifestUnavailable: false; appRoot: string; sourceRevision: string }
   | { manifestUnavailable: true }
 );
+
+const listedOwner = (owner: PublicationOwner) => ({
+  audience: publicationAudience(owner),
+  shareId: owner.shareId,
+  grantId: "grantId" in owner ? owner.grantId : null,
+});
 
 export function publicationLinkIsCurrent(
   storage: StorageContext,
@@ -420,8 +465,6 @@ export function listAppPublications(storage: StorageContext, input: ListAppPubli
     const publications = rows.slice(0, 25).flatMap<AppPublicationListRow>((row) => {
       const publicationId = String(row.publication_id);
       let collectionCapability: AppPublicationListRow["collectionCapability"] = null;
-
-      let datasetCapability: AppPublicationListRow["datasetCapability"] = null;
       if (row.capability_json !== null) {
         try {
           collectionCapability = parseAppCollectionCapability(
@@ -438,10 +481,6 @@ export function listAppPublications(storage: StorageContext, input: ListAppPubli
         );
         if (input.appRoot !== undefined && publication.candidate.appRoot !== input.appRoot)
           return [];
-        const capability = publication.candidate.capabilities[0];
-
-        if (capability?.kind === "dataset")
-          datasetCapability = parseAppDatasetCapability(capability);
         return [
           {
             publicationId,
@@ -451,14 +490,15 @@ export function listAppPublications(storage: StorageContext, input: ListAppPubli
             approvalProvenance: publication.approvalProvenance,
             authorityRevision: publication.authorityRevision,
             manifestUnavailable: false,
-            shareId: publication.owner.shareId,
-            grantId: publication.owner.grantId,
+            ...listedOwner(publication.owner),
             appRoot: publication.candidate.appRoot,
             sourceRevision: publication.candidate.sourceRevision,
             active: publication.active,
             linkCurrent: publicationLinkIsCurrent(storage, publication.owner),
             collectionCapability,
-            datasetCapability,
+            datasetCapabilities: publication.candidate.capabilities.flatMap((capability) =>
+              capability.kind === "dataset" ? [parseAppDatasetCapability(capability)] : [],
+            ),
           },
         ];
       } catch (error) {
@@ -474,12 +514,11 @@ export function listAppPublications(storage: StorageContext, input: ListAppPubli
             approvalProvenance: state.approvalProvenance,
             authorityRevision: state.authorityRevision,
             manifestUnavailable: true,
-            shareId: state.owner.shareId,
-            grantId: state.owner.grantId,
+            ...listedOwner(state.owner),
             active: state.active,
             linkCurrent: publicationLinkIsCurrent(storage, state.owner),
             collectionCapability,
-            datasetCapability: null,
+            datasetCapabilities: "unavailable",
           },
         ];
       }
@@ -625,11 +664,13 @@ function recordApproval(
   candidate: AppPublicationCandidate,
   agent?: ApprovalAgent | null,
 ): AppPublicationApproval {
-  const grant = storage.getShareGrant(owner.grantId)!;
   const facts: AppPublicationApproval = {
     agent: parseApprovalAgent(agent),
     selector: JSON.parse(storage.getShare(owner.shareId)!.selectorJson),
-    access: grant.access as AppPublicationApproval["access"],
+    access:
+      "grantId" in owner
+        ? (storage.getShareGrant(owner.grantId)!.access as AppPublicationApproval["access"])
+        : null,
     committedCandidateDigest: sha(JSON.stringify(candidate)),
     sourceRevision: candidate.sourceRevision,
     capabilities: candidate.capabilities,
@@ -661,11 +702,7 @@ export function reactivateAppPublication(
     const candidate = stored(storage, input).candidate;
     authority(storage, current.owner, candidate);
     validateBuildIdentity(candidate);
-    const manifestHash = sha(JSON.stringify(candidate));
-    if (
-      sha(JSON.stringify(["dohc-app-publication-v1", current.owner, manifestHash])) !==
-      current.publicationId
-    )
+    if (publicationIdOf(current.owner, sha(JSON.stringify(candidate))) !== current.publicationId)
       throw badRequest("Publication identity mismatch.");
     for (const file of candidate.files) {
       const bytes = storage.getBlob(current.owner.workspaceId, file.sha256);
@@ -740,6 +777,7 @@ function currentLinkAppPublication(
   );
   if (
     !publication.active ||
+    !("grantId" in publication.owner) ||
     publication.owner.shareId !== authorized.share.shareId ||
     publication.owner.grantId !== authorized.grant.grantId ||
     publication.owner.generation !== authorized.grant.generation ||
@@ -763,10 +801,7 @@ function currentLinkAppPublication(
   }
   authority(storage, publication.owner, candidate);
   const manifestHash = verified?.manifestHash ?? sha(JSON.stringify(candidate));
-  if (
-    sha(JSON.stringify(["dohc-app-publication-v1", publication.owner, manifestHash])) !==
-    publication.publicationId
-  )
+  if (publicationIdOf(publication.owner, manifestHash) !== publication.publicationId)
     throw notFound();
   const result: LinkAppPublicationAuthority = {
     descriptor: {
@@ -775,7 +810,9 @@ function currentLinkAppPublication(
       files: candidate.files,
     },
     workspaceId: authorized.share.workspaceId,
-    datasetId: candidate.capabilities.find((value) => value.kind === "dataset")?.datasetId ?? null,
+    datasetIds: candidate.capabilities.flatMap((value) =>
+      value.kind === "dataset" ? [value.datasetId] : [],
+    ),
     shareId: authorized.share.shareId,
     grantId: session.grantId,
     generation: session.generation,
@@ -857,6 +894,7 @@ export function listLinkAppPublications(
             !state.active ||
             state.authorityRevision !== publication.authorityRevision ||
             state.owner.shareId !== authorized.share.shareId ||
+            !("grantId" in state.owner) ||
             state.owner.grantId !== session.grantId ||
             state.owner.generation !== session.generation ||
             row.manifest_sha256 !== publication.manifestHash

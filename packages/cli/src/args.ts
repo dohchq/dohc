@@ -1776,6 +1776,13 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
     summary: "Add or change an explicit data grant.",
     notes: ["grant names revision, revisionSha256, operationIds, and discover."],
   },
+  setDefaults: {
+    summary: "Set the actions each workspace level gets in a Collection by default.",
+    notes: [
+      "defaults names view, comment, and edit operationIds, with revision and revisionSha256.",
+      "View and Comment get only reads. No level gets an owner-only action.",
+    ],
+  },
   removeGrant: {
     summary: "Remove an explicit data grant.",
     take: [{ field: "principalKey", from: "permissions", path: "permissions[].principal" }],
@@ -1985,13 +1992,14 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
     notes: ["listUnavailable means the server does not publish apps for this workspace."],
   },
   prepare: {
-    summary: "Prepare an app for a share link.",
+    summary: "Prepare an app for a share link or for the workspace's members.",
     take: [
       { field: "shareId", from: "createLink", path: "shareId" },
       { field: "grantId", from: "createLink", path: "grantId" },
     ],
     notes: [
       "shareId and grantId name the share and its link grant. Review the result, then approve.",
+      'For members, pass "audience": "workspace" without shareId or grantId. A member opens the app while they can see its folder and every Collection it uses.',
     ],
   },
   approve: {

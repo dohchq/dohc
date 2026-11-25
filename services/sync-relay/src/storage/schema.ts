@@ -6,7 +6,10 @@ import {
   liveAuthorSchemaMarked,
   assertLiveAuthorColumns,
 } from "./liveAuthorshipSchema";
-import { initializeAppPublicationSchema } from "./publicationSchema";
+import {
+  initializeAppPublicationAudience,
+  initializeAppPublicationSchema,
+} from "./publicationSchema";
 import { initializeAppCollectionSchema } from "./appCollectionSchema";
 import { initializeLiveCommittedDeliverySchema } from "./liveCommittedDeliverySchema";
 import { initializeServiceActivationSchema } from "./serviceActivationSchema";
@@ -1662,6 +1665,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   initializeAppPublicationSchema(db);
   initializeLinkCreationSchema(db);
   initializeAppCollectionSchema(db);
+  initializeAppPublicationAudience(db);
   initializeLiveAuthorshipSchema(db);
   initializeLiveApplicationAuthorshipIndex(db);
   initializeHostedSettlementSchema(db);

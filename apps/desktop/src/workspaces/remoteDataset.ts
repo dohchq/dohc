@@ -143,6 +143,7 @@ export interface OwnerDatasetData {
     input: Extract<DatasetRequest, { action: "permissions" }>,
   ): Promise<DatasetPermissionsPage>;
   setGrant?(input: Extract<DatasetRequest, { action: "setGrant" | "removeGrant" }>): Promise<void>;
+  setDefaults?(input: Extract<DatasetRequest, { action: "setDefaults" }>): Promise<void>;
   /** Presses a button on the server, which runs its automation. The owner's route only. */
   press?(input: DatasetServerPressInput): Promise<CollectionAutomationPress>;
   querySql?(input: {
@@ -418,6 +419,11 @@ export function createRemoteDatasetData(input: {
       z.object({ ok: z.literal(true) })
         .strict()
         .parse(result);
+    },
+    async setDefaults(value) {
+      z.object({ generation: z.number().int().positive() })
+        .strict()
+        .parse(await request(`${path(value.datasetId)}/grants`, { defaults: value.defaults }));
     },
     async historyRevision(value) {
       if (input.shareId !== undefined)
@@ -1062,6 +1068,14 @@ export function routeEachDataset(
           "This Collection is only on this computer. Move it to your server to give a person access.",
         );
       await authority.setGrant(value);
+    },
+    setDefaults: async (value) => {
+      const authority = await target(value.datasetId);
+      if (!("setDefaults" in authority) || !authority.setDefaults)
+        throw new Error(
+          "This Collection is only on this computer. Move it to your server to give members access.",
+        );
+      await authority.setDefaults(value);
     },
     querySql: async (value) => {
       const authority = await target(value.datasetId);

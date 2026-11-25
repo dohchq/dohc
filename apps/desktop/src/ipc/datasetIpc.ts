@@ -518,6 +518,7 @@ export function createDatasetHandler<
             "prepareHistoryRestore",
             "permissions",
             "setGrant",
+            "setDefaults",
             "removeGrant",
             "lifecycle",
             "archive",
@@ -982,9 +983,13 @@ export function createDatasetHandler<
               ...bound,
             };
           }
-          if (input.action === "setGrant" || input.action === "removeGrant") {
+          if (
+            input.action === "setGrant" ||
+            input.action === "removeGrant" ||
+            input.action === "setDefaults"
+          ) {
             // A person reaches a Collection through the workspace's server.
-            if (input.action === "setGrant") {
+            if (input.action !== "removeGrant") {
               const place = await dependencies.collectionPlace?.(
                 operation.workspace,
                 input.datasetId,
@@ -994,9 +999,15 @@ export function createDatasetHandler<
               if (place?.kind === "here")
                 throw new Error("Sync this workspace with a server before giving a person access.");
             }
-            if (!("setGrant" in data) || !data.setGrant)
-              throw new Error("Collection access is unavailable on this computer.");
-            await data.setGrant(input);
+            if (input.action === "setDefaults") {
+              if (!("setDefaults" in data) || !data.setDefaults)
+                throw new Error("Collection access is unavailable on this computer.");
+              await data.setDefaults(input);
+            } else {
+              if (!("setGrant" in data) || !data.setGrant)
+                throw new Error("Collection access is unavailable on this computer.");
+              await data.setGrant(input);
+            }
             current();
             return { kind: "grant-updated" as const };
           }

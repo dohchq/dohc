@@ -121,7 +121,6 @@ export function createPhoneApps(options: {
       !row.active ||
       row.operatorTakedown ||
       hiddenFile(row.candidate.appRoot) ||
-      row.candidate.capabilities.length > 1 ||
       row.candidate.capabilities.some((capability) => capability.kind !== "dataset") ||
       !publicationLinkIsCurrent(storage as StorageContext, row.owner) ||
       !servable(userId, workspaceId, id)
@@ -193,7 +192,7 @@ export function createPhoneApps(options: {
             row.operatorTakedown ||
             !row.linkCurrent ||
             hiddenFile(row.appRoot) ||
-            row.datasetCapability === "unavailable" ||
+            row.datasetCapabilities === "unavailable" ||
             row.collectionCapability !== null ||
             // Serves only a dataset app or one that requests nothing; a Collection awaiting approval is neither.
             !servable(userId, workspaceId, row.publicationId)

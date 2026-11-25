@@ -1375,7 +1375,9 @@ function PublicationDialog(
                                   : "Published on a share link"}
                             </span>
                             <span className="shrink-0 text-[12px] text-muted">
-                              Link {publication.grantId.slice(0, 8)}
+                              {publication.grantId
+                                ? `Link ${publication.grantId.slice(0, 8)}`
+                                : "Workspace"}
                             </span>
                             {directAppUrl ? (
                               <CopyButton
@@ -1700,7 +1702,10 @@ function PublicationDialog(
                           >
                             <div className="min-w-0 text-[12px] text-muted">
                               <p className="m-0 break-all">
-                                Link {publication.grantId.slice(0, 8)} ·{" "}
+                                {publication.grantId
+                                  ? `Link ${publication.grantId.slice(0, 8)}`
+                                  : "Workspace"}{" "}
+                                ·{" "}
                                 {publication.operatorTakedown
                                   ? "Disabled by server operator"
                                   : !publication.linkCurrent
@@ -1760,20 +1765,23 @@ function PublicationDialog(
                                     />
                                   </div>
                                 </details>
-                              ) : publication.datasetCapability ? null : (
+                              ) : publication.datasetCapabilities.length ? null : (
                                 <p className="mb-0 mt-1">No Collection access</p>
                               )}
-                              {publication.datasetCapability === "unavailable" ? (
+                              {publication.datasetCapabilities === "unavailable" ? (
                                 <p className="mb-0 mt-1 text-warning">
                                   Collection access details unavailable.
                                 </p>
-                              ) : publication.datasetCapability ? (
-                                <PublishedDatasetDetails
-                                  reportError={reportError}
-                                  workspaceId={props.workspaceId}
-                                  capability={publication.datasetCapability}
-                                />
-                              ) : null}
+                              ) : (
+                                publication.datasetCapabilities.map((capability) => (
+                                  <PublishedDatasetDetails
+                                    key={capability.datasetId}
+                                    reportError={reportError}
+                                    workspaceId={props.workspaceId}
+                                    capability={capability}
+                                  />
+                                ))
+                              )}
                             </div>
                             <div className="flex shrink-0 flex-col items-end gap-2">
                               {directAppUrl ? (
@@ -1840,7 +1848,7 @@ function PublicationDialog(
                         publication.collectionCapability &&
                         publication.appRoot === props.appRoot,
                     )
-                    .map((publication) => publication.grantId),
+                    .flatMap((publication) => publication.grantId ?? []),
                 ),
               ].map((grantId) => (
                 <div key={grantId}>
