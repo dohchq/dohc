@@ -334,12 +334,8 @@ describe("createServiceAnalyticsClient", () => {
 
   it("never strands draining when the clock ticks across the 30-minute cutoff during drain", async () => {
     vi.useFakeTimers();
-    const times = [
-      1_000, // track(first)
-      1_000 + 30 * 60_000, // drain() entry at cutoff
-      1_000 + 30 * 60_000 + 1, // subsequent check past cutoff
-      1_000 + 30 * 60_000 + 2, // track(fresh)
-    ];
+    const cutoff = 1_000 + 30 * 60_000;
+    const times = [1_000, 1_000, cutoff, cutoff, cutoff + 1, cutoff + 2];
     let lastTime = times[0]!;
     const sent: string[] = [];
     const client = createServiceAnalyticsClient({
