@@ -328,7 +328,14 @@ export async function relayAppEvents(
   try {
     if (relay.status !== 200 || relay.redirected || relay.headers.has("location"))
       return await relayLinkRefusal(relay, input.signal);
-    const value = await readBoundedJson(relay, 256, input.signal).catch(() => null);
+    let value: unknown;
+    try {
+      value = await readBoundedJson(relay, 256, input.signal);
+    } catch (error) {
+      return error instanceof RangeError || error instanceof SyntaxError
+        ? opaqueLinkRefusal()
+        : unavailableLinkRefusal();
+    }
     if (
       !record(value) ||
       !exact(value, ["dataset", "revision"]) ||
