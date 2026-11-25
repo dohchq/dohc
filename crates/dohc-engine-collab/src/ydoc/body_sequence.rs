@@ -431,7 +431,15 @@ impl Budget<'_> {
         if let Some(stored) = &stored.code {
             return Ok(vec![self.mark(MarkKind::Code, "code", stored, depth)?]);
         }
+        self.stored_marks(stored, depth)
+    }
+
+    /// Every known mark the letters store, including those inline code hides.
+    fn stored_marks(&mut self, stored: &Formatting, depth: usize) -> ProjectionResult<Marks> {
         let mut marks = Marks::new();
+        if let Some(code) = &stored.code {
+            marks.push(self.mark(MarkKind::Code, "code", code, depth)?);
+        }
         for ((kind, name), stored) in MARKS.iter().zip(&stored.others) {
             if let Some(stored) = stored {
                 marks.push(self.mark(*kind, name, stored, depth)?);
@@ -702,7 +710,7 @@ impl Reader<'_> {
                 nodes: &mut nodes,
                 bytes: &mut bytes,
             };
-            let marks = budget.marks(&self.formatting, depth)?;
+            let marks = budget.stored_marks(&self.formatting, depth)?;
             trace.marks.push(body_sequence_writer::marks_of(&marks));
             trace.generation = Some(self.formatting.generation);
         }

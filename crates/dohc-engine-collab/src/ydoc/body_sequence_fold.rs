@@ -185,9 +185,11 @@ pub(super) fn plan<T: ReadTxn>(
         } {
             slid += 1;
         }
-        slid -= usize::from(slid > 0 && unit_in(&before.slots[start - slid], 0xDC00..0xE000));
-        let moved = &before.slots[start - slid..start];
-        if moved.iter().any(|slot| matches!(slot, Slot::Line(_))) {
+        let opens = |slid: usize| match have > want {
+            true => matches!(before.slots[start - slid], Slot::Line(_)),
+            false => matches!(target.slots[start - slid], Wanted::Line(_)),
+        };
+        if let Some(slid) = (0..=slid).find(|&slid| opens(slid)) {
             (start, end) = (start - slid, end + slid);
         }
     }
@@ -206,6 +208,7 @@ pub(super) fn plan<T: ReadTxn>(
     let kept = (0..start).map(|at| (at, at));
     let kept = kept.chain((have - end..have).map(|at| (at, at + want - have)));
     let (mut formats, mut cursor, mut last) = (Vec::new(), 0, None);
+    let mut touched = (usize::MAX, 0);
     for (at, wanted) in kept.clone() {
         let (Slot::Unit(_, had), Wanted::Unit(_, given)) =
             (&before.slots[at], &target.slots[wanted])
@@ -213,9 +216,11 @@ pub(super) fn plan<T: ReadTxn>(
             continue;
         };
         let (had, shown) = (&before.marks[*had as usize], &target.marks[*given]);
-        if had == shown || target.hidden[*given] {
+        let coded = had.contains_key("code") && shown.contains_key("code");
+        if had == shown || target.hidden[*given] || coded {
             continue;
         }
+        touched = (touched.0.min(at), at);
         let mut diff: Attrs = shown
             .iter()
             .filter(|(name, value)| had.get(*name) != Some(*value))
@@ -295,6 +300,7 @@ pub(super) fn plan<T: ReadTxn>(
         }
         let given_again = had.owner.is_some_and(|owner| written[owner])
             || (edited && low <= to && high >= from)
+            || (touched.0 < to && touched.1 >= from)
             || !changes(had, given, &before, &ids).is_empty();
         if given_again {
             let promoted = (offsets[had.slot], boundary(given));
@@ -317,7 +323,7 @@ pub(super) fn plan<T: ReadTxn>(
     }
     visit(middle.len());
     let mut in_force = match places_items {
-        true => formatting_at(txn, sequence, from),
+        true => formatting_at(txn, sequence, from, false),
         false => Attrs::new(),
     };
     for (name, value) in last.into_iter().flatten() {
@@ -328,10 +334,10 @@ pub(super) fn plan<T: ReadTxn>(
     }
     let placed = places_items
         && (!in_force.is_empty()
-            || middle.iter().any(
+            || middle.iter().chain(target.slots.get(want - end)).any(
                 |slot| matches!(slot, Wanted::Unit(_, marks) if !target.marks[*marks].is_empty()),
             )
-            || (to > from && !formatting_at(txn, sequence, to).is_empty()));
+            || (to > from && !formatting_at(txn, sequence, to, true).is_empty()));
     let (mut at, mut position, mut retained) = (0, from, 0);
     while at < middle.len() {
         let piece = match &middle[at] {
@@ -377,10 +383,17 @@ pub(super) fn plan<T: ReadTxn>(
     Ok(fold)
 }
 
-fn formatting_at<T: ReadTxn>(txn: &T, sequence: &yrs::TextRef, offset: u32) -> Attrs {
+/// The formatting in force after `offset` units. With `standing`, it also
+/// takes the formatting items that stand right after them.
+fn formatting_at<T: ReadTxn>(
+    txn: &T,
+    sequence: &yrs::TextRef,
+    offset: u32,
+    standing: bool,
+) -> Attrs {
     let (mut attrs, mut passed) = (Attrs::new(), 0_u32);
     let _ = sequence.try_visit_items(txn, |item| {
-        if passed >= offset {
+        if passed >= offset && !(standing && matches!(item, TextItem::Format(..))) {
             return Err(());
         }
         match item {
