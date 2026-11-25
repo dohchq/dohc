@@ -213,6 +213,9 @@ BEGIN SELECT RAISE(ABORT, 'invoice_issued: An issued invoice keeps its amounts. 
 CREATE TRIGGER invoices_issued_kept BEFORE DELETE ON invoices
 WHEN OLD.status <> 'draft'
 BEGIN SELECT RAISE(ABORT, 'invoice_issued: An issued invoice cannot be deleted. Void it instead.'); END;
+CREATE TRIGGER invoices_start_unpaid BEFORE INSERT ON invoices
+WHEN NEW.paid_cents <> 0
+BEGIN SELECT RAISE(ABORT, 'invoice_paid: The paid amount on an invoice is the sum of its payments.'); END;
 CREATE TRIGGER invoices_paid_matches AFTER UPDATE OF paid_cents ON invoices
 WHEN NEW.paid_cents <> (SELECT coalesce(sum(amount_cents), 0) FROM invoice_payments WHERE invoice_id = NEW.id)
 BEGIN SELECT RAISE(ABORT, 'invoice_paid: The paid amount on an invoice is the sum of its payments.'); END;

@@ -788,10 +788,16 @@ export function Composer({ onClose }: { onClose: () => void }) {
   };
   const autoBalance = () => {
     if (delta === 0) return;
-    const index = Math.max(0, parsed.findLastIndex((line) => !line.debitCents && !line.creditCents));
-    const target = parsed[index]?.debitCents || parsed[index]?.creditCents ? lines.length - 1 : index;
-    balanceLine(target, delta < 0 ? "debit" : "credit");
-    focusNext.current = `${lines[target]!.key}:${delta < 0 ? "debit" : "credit"}`;
+    const side = delta < 0 ? "debit" : "credit";
+    const target = parsed.findLastIndex((line) => !line.debitCents && !line.creditCents);
+    if (target < 0) {
+      const line = { ...blank(), [side]: centsInput(Math.abs(delta), code) };
+      setLines((list) => [...list, line]);
+      focusNext.current = `${line.key}:account`;
+      return;
+    }
+    balanceLine(target, side);
+    focusNext.current = `${lines[target]!.key}:${side}`;
   };
   const addLine = () => {
     const line = blank();
@@ -866,7 +872,7 @@ export function Composer({ onClose }: { onClose: () => void }) {
               <>
                 <span className="b-balance-label">{delta > 0 ? "Debits exceed credits by" : "Credits exceed debits by"}</span>
                 <strong className="b-mono">{money(Math.abs(delta), code)}</strong>
-                <button type="button" className="b-btn b-btn-sm" onClick={autoBalance} title="Fill the last empty line with the difference">
+                <button type="button" className="b-btn b-btn-sm" onClick={autoBalance} title="Put the difference on the last empty line, or on a new one">
                   Balance <Kbd>=</Kbd>
                 </button>
               </>

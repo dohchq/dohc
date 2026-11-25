@@ -109,6 +109,11 @@ test("the owner keeps books: entries with receipts, bank import, invoices, and b
     await expect(dialog.getByRole("button", { name: /Post entry/ })).toBeDisabled();
     await page.keyboard.press("Control+Enter");
     await expect(dialog).toBeVisible();
+    await dialog.getByRole("button", { name: /^Balance/ }).click();
+    await expect(dialog.getByRole("combobox", { name: "Account on line 3" })).toBeFocused();
+    await expect(dialog.getByLabel("Credit on line 3")).toHaveValue("0.01");
+    await expect(dialog.getByLabel("Credit on line 2")).toHaveValue("4999.99");
+    await dialog.getByRole("button", { name: "Remove line 3" }).click();
     await dialog.getByLabel("Credit on line 2").fill("");
     await dialog.getByLabel("Credit on line 2").press("=");
     await expect(dialog.getByLabel("Credit on line 2")).toHaveValue("5000.00");
@@ -137,6 +142,10 @@ test("the owner keeps books: entries with receipts, bank import, invoices, and b
     await expect(inspector.getByRole("link", { name: /Download/ })).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(inspector).toHaveCount(0);
+    await page.keyboard.press("g");
+    await page.keyboard.press("p");
+    await expect(app.getByRole("button", { name: `Open ${year - 1}`, exact: true })).toBeVisible();
+    await expect(app.getByRole("button", { name: `Open ${year + 1}`, exact: true })).toBeVisible();
 
     await nav("Bank");
     const csv = Buffer.from(

@@ -113,9 +113,12 @@ export function decide(row: BankRow, stored: Choice = {}): Decision {
   const entry =
     stored.none || stored.override || stored.invoiceId
       ? undefined
-      : (row.candidates.find((candidate) => candidate.id === stored.entryId) ??
-        (row.candidates.length === 1 && row.candidates[0]!.sure ? row.candidates[0] : undefined));
-  const invoice = row.match ?? row.payables.find((item) => item.id === stored.invoiceId);
+      : stored.entryId !== undefined
+        ? row.candidates.find((candidate) => candidate.id === stored.entryId)
+        : row.candidates.length === 1 && row.candidates[0]!.sure
+          ? row.candidates[0]
+          : undefined;
+  const invoice = row.payables.find((item) => item.id === stored.invoiceId) ?? row.match ?? undefined;
   const undecided = unseen && !entry;
   const overridden = Boolean(stored.override) && !unseen;
   return {

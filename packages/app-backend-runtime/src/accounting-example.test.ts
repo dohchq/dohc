@@ -1981,6 +1981,71 @@ describe("accounting example on the real dataset host", () => {
     expect(await f.result("lockPeriod", { periodId: "2026-01" })).toMatchObject({
       status: "locked",
     });
+    await expect(
+      f.call("reconcileBank", {
+        bankAccountId: "1000",
+        date: "2026-01-20",
+        currency: "USD",
+        balanceCents: 10_000,
+      }),
+    ).rejects.toMatchObject(refusal("period_closed"));
+  });
+
+  it("keeps a bank account open while a possible duplicate waits", async () => {
+    const f = await books();
+    const rows = [["2026-03-04", "Interest", "1.00"]];
+    await f.result("stageBankRows", {
+      importId: "import-savings-1",
+      bankAccountId: "1010",
+      currency: "USD",
+      firstLine: 1,
+      rows,
+    });
+    const [row] = (await unreviewed(f)) as any[];
+    await f.result("setBankRowsIgnored", { ids: [row.id], ignored: true });
+    await f.result("stageBankRows", {
+      importId: "import-savings-2",
+      bankAccountId: "1010",
+      currency: "USD",
+      firstLine: 1,
+      rows,
+    });
+    await expect(f.call("updateAccount", { id: "1010", archived: true })).rejects.toMatchObject(
+      refusal("account_in_use"),
+    );
+    const [twice] = (await f.result("listBankRows", { status: "duplicate" })).rows;
+    await f.result("confirmDuplicateBankRow", { id: twice.id, confirmed: true });
+    expect(await f.result("updateAccount", { id: "1010", archived: true })).toMatchObject({
+      archived: true,
+    });
+  });
+
+  it("shows each re-exported duplicate the row it repeats", async () => {
+    const f = await books();
+    const rows = [
+      ["2026-04-05", "CAFE", "-5.00"],
+      ["2026-04-05", "CAFE", "-5.00"],
+    ];
+    await f.result("stageBankRows", {
+      importId: "import-cafe-1",
+      bankAccountId: "1000",
+      currency: "USD",
+      firstLine: 1,
+      rows,
+    });
+    const second = ((await unreviewed(f)) as any[]).find((row) => row.lineNo === 2);
+    await f.result("postBankRows", { rows: [{ id: second.id, accountId: "6100" }] });
+    await f.result("stageBankRows", {
+      importId: "import-cafe-2",
+      bankAccountId: "1000",
+      currency: "USD",
+      firstLine: 1,
+      rows,
+    });
+    const repeats = (await f.result("listBankRows", { status: "duplicate" })).rows;
+    expect(
+      Object.fromEntries(repeats.map((row: any) => [row.lineNo, row.original.status])),
+    ).toEqual({ 1: "new", 2: "posted" });
   });
 
   it("confirms a re-exported row from a closed month on import", async () => {
@@ -2119,6 +2184,34 @@ describe("accounting example on the real dataset host", () => {
     });
     expect(first.rows.length + rest.rows.length).toBe(100);
     expect(rest.nextOffset).toBeNull();
+  });
+
+  it("fetches long candidate previews for a full bank page within the query limit", async () => {
+    const f = await books();
+    await f.result("updateAccount", { id: "4000", name: "売".repeat(120) });
+    const entries = Array.from({ length: 505 }, (_, index) => ({
+      ...entry("2026-04-15", [
+        ["1000", (Math.floor(index / 5) + 1) * 100, 0],
+        ["4000", 0, (Math.floor(index / 5) + 1) * 100],
+      ]),
+      memo: "記".repeat(120),
+    }));
+    for (let start = 0; start < entries.length; start += 101)
+      await f.result("postJournalEntries", { entries: entries.slice(start, start + 101) });
+    await f.result("stageBankRows", {
+      importId: "import-kanji",
+      bankAccountId: "1000",
+      currency: "USD",
+      firstLine: 1,
+      rows: Array.from({ length: 101 }, (_, index) => [
+        "2026-04-15",
+        `Deposit ${index}`,
+        `${index + 1}.00`,
+      ]),
+    });
+    const page = await f.result("listBankRows", { status: "new", limit: 100 });
+    expect(page.rows[0].candidates).toHaveLength(5);
+    expect(page.nextOffset).toBe(page.rows.length);
   });
 
   it("undoes a full page of posted bank rows in one reversal", async () => {
@@ -2661,6 +2754,11 @@ describe("accounting schema without the operations", () => {
     expect(() => pay("e5", 40, "2026-01-12")).toThrow(/overpaid/);
     expect(() => pay("e4", 40, "2026-01-13")).toThrow(/overpaid/);
     expect(() => db.exec("UPDATE invoices SET paid_cents=0 WHERE id='i'")).toThrow(/invoice_paid/);
+    expect(() =>
+      db.exec(`INSERT INTO invoices(id,number,client_id,issue_date,due_date,currency,tax_rate_bp,subtotal_cents,
+        tax_cents,total_cents,paid_cents,status,journal_entry_id,seller_name,buyer_name,created_at_ms)
+        VALUES('j','INV-0002','c','2026-01-10','2026-01-31','USD',0,100,0,100,40,'issued','e5','Seller','Client',0)`),
+    ).toThrow(/invoice_paid/);
     pay("e4", 40, "2026-01-12");
     expect(db.prepare("SELECT status,paid_cents,paid_on FROM invoices").get()).toEqual({
       status: "paid",

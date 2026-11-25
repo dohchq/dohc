@@ -75,7 +75,7 @@ export function ReconcileSheet({
   const closed = Boolean(lockedThrough && asOf.slice(0, 7) <= lockedThrough);
   const currencies = check.data?.currencies.length ? check.data.currencies : [currency];
   const previous = last.find((item) => item.bankAccountId === bankAccountId && item.currency === currency);
-  const ready = difference === 0 && !open && !already && current && pending === null;
+  const ready = difference === 0 && !open && !already && !closed && current && pending === null;
   const firstWaiting = current ? check.data?.firstWaiting ?? null : null;
   useEffect(() => {
     if (dated || !firstWaiting || firstWaiting > asOf) return;
@@ -127,8 +127,10 @@ export function ReconcileSheet({
                 : check.data!.reconciledCents === clearedCents
                   ? `Reconciled at ${money(check.data!.reconciledCents!, currency)} on this date`
                   : `Reconciled at ${money(check.data!.reconciledCents!, currency)}, the statement should now show ${money(clearedCents ?? 0, currency)}`
-              : open
-              ? `${open} ${open === 1 ? "row" : "rows"} to review first`
+              : closed
+                ? "This date is in a closed month"
+                : open
+                  ? `${open} ${open === 1 ? "row" : "rows"} to review first`
               : difference === null
                 ? previous
                   ? `Last reconciled through ${shortDate(previous.date, true)}`

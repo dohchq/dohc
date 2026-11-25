@@ -88,12 +88,6 @@ describe("bank row decisions", () => {
     expect(enterLabel(over, after(over, { invoiceId: invoice.id, none: true }))).toBe("choose");
   });
 
-  it("pays the invoice the row shows once it matches one exactly", () => {
-    const other = { ...invoice, id: "inv-2", number: "INV-0003", balanceCents: 90_000 };
-    const exact = row({ payables: [{ ...invoice, balanceCents: 120_000 }, other], match: other });
-    expect(after(exact, { invoiceId: invoice.id }).invoice?.id).toBe(other.id);
-  });
-
   it("waits for a choice while a possible entry is unreviewed", () => {
     const maybe = row({
       candidates: [candidate("entry-1", false)],
@@ -132,5 +126,28 @@ describe("bank row decisions", () => {
       ],
     });
     expect(decide(bankRow).pick).toBe("Choose the other account");
+  });
+
+  it("never swaps the entry the operator chose for another one", () => {
+    const left = row({ candidates: [candidate("entry-b", true)] });
+    expect(decide(left, { entryId: "entry-a" })).toMatchObject({
+      entry: undefined,
+      undecided: true,
+    });
+  });
+
+  it("pays the invoice the operator chose over the suggested one", () => {
+    const other = { ...invoice, id: "inv-2", number: "INV-0003", balanceCents: 180_000 };
+    const suggested = row({ match: invoice, payables: [invoice, other] });
+    expect(decide(suggested).invoice?.id).toBe("inv-1");
+    const chosen = after(suggested, {
+      invoiceId: "inv-2",
+      entryId: undefined,
+      accountId: undefined,
+      splits: undefined,
+      override: false,
+      none: true,
+    });
+    expect(chosen.invoice?.id).toBe("inv-2");
   });
 });

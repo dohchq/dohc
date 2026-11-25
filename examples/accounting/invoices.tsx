@@ -218,7 +218,7 @@ export function Invoices() {
               <button type="button" className="b-btn b-btn-sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))}>
                 Previous
               </button>
-              <button type="button" className="b-btn b-btn-sm" disabled={list.data.nextOffset === null} onClick={() => setOffset(list.data!.nextOffset ?? offset)}>
+              <button type="button" className="b-btn b-btn-sm" disabled={list.data.nextOffset === null} onClick={() => setOffset(offset + PAGE)}>
                 Next
               </button>
             </div>
@@ -255,10 +255,18 @@ function InvoicePane({ id, now, onClose, onEdit }: { id: string; now: string; on
       <ArrowLeft size={16} aria-hidden />
     </button>
   );
+  const close = (
+    <button type="button" className="b-btn b-btn-ghost b-btn-sm b-insp-close" onClick={onClose}>
+      Close <Kbd>Esc</Kbd>
+    </button>
+  );
   if (error)
     return (
       <aside className="b-inspector b-invoice-pane">
-        <header className="b-insp-head b-no-print">{back}</header>
+        <header className="b-insp-head b-no-print">
+          {back}
+          {close}
+        </header>
         <div className="b-pad">
           <Failure error={error} retry={reload} title="Could not load this invoice" />
         </div>
@@ -267,7 +275,10 @@ function InvoicePane({ id, now, onClose, onEdit }: { id: string; now: string; on
   if (!data)
     return (
       <aside className="b-inspector b-invoice-pane" aria-busy="true">
-        <header className="b-insp-head b-no-print">{back}</header>
+        <header className="b-insp-head b-no-print">
+          {back}
+          {close}
+        </header>
         <div className="b-pad">
           <Loading rows={10} />
         </div>
@@ -342,9 +353,7 @@ function InvoicePane({ id, now, onClose, onEdit }: { id: string; now: string; on
             Printable
           </button>
         </div>
-        <button type="button" className="b-btn b-btn-ghost b-btn-sm b-insp-close" onClick={onClose}>
-          Close <Kbd>Esc</Kbd>
-        </button>
+        {close}
       </header>
       {data.status === "issued" && data.paidCents > 0 ? <p className="b-hint b-touch-only">Reverse its payments to void this invoice.</p> : null}
       {mode === "pay" ? (
@@ -645,6 +654,8 @@ function InvoiceEditor({ invoice, onClose }: { invoice?: Invoice; onClose: (id?:
     ? "Name the client"
     : !creating && !clientId
       ? "Choose a client"
+      : !/^[A-Z]{3}$/.test(currency)
+        ? "Enter a three-letter currency code"
       : !Number.isFinite(taxRateBp) || taxRateBp < 0 || taxRateBp > 10000
         ? "Enter a tax rate from 0 to 100"
         : dueDate < issueDate

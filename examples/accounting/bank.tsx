@@ -33,7 +33,8 @@ export function BankWorkbench() {
   const mutate = useMutate();
   const { run, pending: acting } = useAction();
   const [queue, setQueue] = useState<Queue>((["new", "matched", "duplicate", "posted", "ignored"] as const).find((id) => id === route.show) ?? "new");
-  const [offset, setOffset] = useState(0);
+  const [starts, setStarts] = useState([0]);
+  const offset = starts[starts.length - 1]!;
   const [cursorId, setCursorId] = useState<string | null>(null);
   const [opened, setOpened] = useState(false);
   const [choices, setChoices] = useState<Record<string, Choice>>({});
@@ -368,7 +369,7 @@ export function BankWorkbench() {
             if (next === queue) return;
             void flush();
             setQueue(next);
-            setOffset(0);
+            setStarts([0]);
             setCursorId(null);
           }}
           items={tabs}
@@ -475,10 +476,10 @@ export function BankWorkbench() {
               <span className="b-muted">
                 {offset + 1}–{offset + page.rows.length}
               </span>
-              <button type="button" className="b-icon-btn" aria-label="Previous page" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))}>
+              <button type="button" className="b-icon-btn" aria-label="Previous page" disabled={offset === 0} onClick={() => setStarts((list) => list.slice(0, -1))}>
                 <ChevronLeft size={16} aria-hidden />
               </button>
-              <button type="button" className="b-icon-btn" aria-label="Next page" disabled={page.nextOffset === null} onClick={() => setOffset(page.nextOffset ?? offset)}>
+              <button type="button" className="b-icon-btn" aria-label="Next page" disabled={page.nextOffset === null} onClick={() => page.nextOffset !== null && setStarts((list) => [...list, page.nextOffset!])}>
                 <ChevronRight size={16} aria-hidden />
               </button>
             </div>
@@ -516,13 +517,13 @@ export function BankWorkbench() {
           }}
         />
       ) : null}
-      {importing ? <ImportSheet onClose={() => setImporting(false)} onDone={() => (setQueue("new"), setOffset(0))} /> : null}
+      {importing ? <ImportSheet onClose={() => setImporting(false)} onDone={() => (setQueue("new"), setStarts([0]))} /> : null}
       {reconciling ? (
         <ReconcileSheet
           last={list.data?.reconciled ?? []}
           initial={reconciling === true ? null : reconciling}
           onClose={() => setReconciling(null)}
-          onReview={(next) => (setReconciling(null), setQueue(next), setOffset(0))}
+          onReview={(next) => (setReconciling(null), setQueue(next), setStarts([0]))}
         />
       ) : null}
     </>
@@ -610,7 +611,8 @@ function BankInspector({ row, decision, onChoose, onPost, onPay, onLink, onUnlin
   const bank = accounts.find((account) => account.id === row.bankAccountId);
   const blocked = row.status === "new" && typeof decision.pick === "string" ? decision.pick : null;
   const splits = choice.splits;
-  const nextKey = useRef(10);
+  const other = invoice && invoice.id !== row.match?.id ? invoice : undefined;
+  const nextKey = useRef(Math.max(10, ...(splits ?? []).map((split) => split.key + 1)));
   const keys = (event: KeyboardEvent) => {
     if (event.key === "Enter" && !event.shiftKey && row.status === "new" && (event.target as HTMLElement).tagName === "INPUT") {
       event.preventDefault();
@@ -709,7 +711,7 @@ function BankInspector({ row, decision, onChoose, onPost, onPay, onLink, onUnlin
             ) : null}
           </section>
         ) : null}
-        {row.status === "new" && row.match ? (
+        {row.status === "new" && row.match && invoice?.id === row.match.id ? (
           <section className="b-match">
             <FileText size={16} aria-hidden />
             <div>
@@ -726,8 +728,8 @@ function BankInspector({ row, decision, onChoose, onPost, onPay, onLink, onUnlin
             </button>
           </section>
         ) : null}
-        {row.status === "new" && !row.match && row.payables.length && !(entry && row.candidates.some((candidate) => candidate.sure)) ? (
-          <details className="b-apply" open={Boolean(invoice) || undefined}>
+        {row.status === "new" && row.payables.some((item) => item.id !== row.match?.id) && !(entry && row.candidates.some((candidate) => candidate.sure)) ? (
+          <details className="b-apply" open={Boolean(other) || undefined}>
             <summary>
               <ChevronRight size={14} className="b-apply-chevron" aria-hidden />
               Pay an open invoice instead
@@ -757,9 +759,9 @@ function BankInspector({ row, decision, onChoose, onPost, onPay, onLink, onUnlin
                   </label>
                 ))}
               </div>
-              {invoice && row.amountCents > invoice.balanceCents ? (
+              {other && row.amountCents > other.balanceCents ? (
                 <label className="b-field b-apply-rest">
-                  <span className="b-field-label">The extra {money(row.amountCents - invoice.balanceCents, row.currency)} goes to</span>
+                  <span className="b-field-label">The extra {money(row.amountCents - other.balanceCents, row.currency)} goes to</span>
                   <AccountPicker
                     accounts={accounts}
                     value={choice.restAccountId ?? ""}
@@ -769,11 +771,11 @@ function BankInspector({ row, decision, onChoose, onPost, onPay, onLink, onUnlin
                   />
                 </label>
               ) : null}
-              {invoice ? (
+              {other ? (
                 <button
                   type="button"
                   className={cx("b-btn", matchesOnEnter && !entry && "b-btn-primary")}
-                  disabled={busy || undecided || (row.amountCents > invoice.balanceCents && !choice.restAccountId)}
+                  disabled={busy || undecided || (row.amountCents > other.balanceCents && !choice.restAccountId)}
                   onClick={onPay}
                 >
                   Record payment {matchesOnEnter && !entry ? <Kbd>↵</Kbd> : null}
@@ -1030,7 +1032,7 @@ function PayeeHistory({ row }: { row: BankRow }) {
   const { accounts, go } = useBooksContext();
   const bankName = accounts.find((account) => account.id === row.bankAccountId)?.name;
   const payee = row.description.slice(0, 12).trim();
-  const past = useBooks<{ entries: PastEntry[] }>("listEntries", { accountId: row.bankAccountId, currency: row.currency, q: payee, limit: 6 }, { enabled: payee.length >= 3 });
+  const past = useBooks<{ entries: PastEntry[] }>("listEntries", { accountId: row.bankAccountId, currency: row.currency, q: payee, to: row.date, limit: 6 }, { enabled: payee.length >= 3 });
   const entries = (past.data?.entries ?? []).filter((entry) => entry.id !== row.journalEntryId).slice(0, 5);
   if (!entries.length) return null;
   return (

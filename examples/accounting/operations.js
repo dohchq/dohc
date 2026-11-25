@@ -385,7 +385,7 @@
       const held = ctx.db.query(`SELECT e.currency,sum(l.debit_cents-l.credit_cents) AS net FROM journal_lines l JOIN journal_entries e ON e.id=l.entry_id
         WHERE l.account_id=? GROUP BY e.currency HAVING net<>0 LIMIT 1`, [account.id])[0];
       if (held) ctx.refuse("account_in_use", `${account.name} holds ${amountText(held.net, held.currency)}. Move the balance to another account before archiving it.`);
-      const waiting = ctx.db.query("SELECT count(*) AS n FROM bank_imports WHERE bank_account_id=? AND status='new'", [account.id])[0].n;
+      const waiting = ctx.db.query(`SELECT count(*) AS n FROM bank_imports b WHERE b.bank_account_id=? AND ${UNDECIDED}`, [account.id])[0].n;
       if (waiting) ctx.refuse("account_in_use", `${account.name} has ${waiting} bank ${waiting === 1 ? "row" : "rows"} to review. Post or skip them before archiving it.`);
     }
     execute(ctx, "UPDATE accounts SET name=?,archived=? WHERE id=?", [name, archived, account.id]);
@@ -498,6 +498,7 @@
   const MAX_CANDIDATES = 5;
   const PREVIEW = 120;
   const PAGE_BYTES = 240 * 1024;
+  const DETAIL_GROUP = 100;
   const GENERIC = ["pos", "ach", "debit", "credit", "card", "checkcard", "purchase", "payment", "pmt", "transfer", "xfer", "deposit", "withdrawal",
     "check", "chk", "visa", "sq", "tst", "direct", "online", "recurring", "bill", "from", "for", "the", "and", "ref", "inc", "llc", "ltd",
     "invoice", "inv", "received", "paid"];
@@ -729,7 +730,7 @@
       CASE WHEN b.status='duplicate' THEN (SELECT json_object('description',o.description,'status',o.status,'importedAtMs',o.imported_at_ms,
         'journalNumber',(SELECT e.number FROM journal_entries e WHERE e.id=o.journal_entry_id)) FROM bank_imports o
         WHERE o.bank_account_id=b.bank_account_id AND o.currency=b.currency AND o.posted_on=b.posted_on AND o.amount_cents=b.amount_cents
-          AND o.status<>'duplicate' AND o.id<>b.id ORDER BY o.base_hash=b.base_hash DESC,o.imported_at_ms,o.id LIMIT 1) END AS original
+          AND o.status<>'duplicate' AND o.id<>b.id ORDER BY o.row_hash=b.row_hash DESC,o.base_hash=b.base_hash DESC,o.imported_at_ms,o.id LIMIT 1) END AS original
       FROM bank_imports b WHERE b.status=? ${view === "matched" ? `AND ${MATCHED}` : view === "new" ? `AND NOT ${MATCHED}` : ""}
       ORDER BY b.posted_on DESC,b.id LIMIT ? OFFSET ?`, [view === "matched" ? "new" : view, size + 1, offset]);
     for (const row of rows) {
@@ -742,9 +743,11 @@
       [JSON.stringify(invoiceIds)]).map((row) => [row.id, row]) : []);
     for (const row of rows) row.candidateIds = (row.candidateIds ? JSON.parse(row.candidateIds) : []).map((pick) => ({ id: pick.slice(1), sure: pick[0] === "1" }));
     const entryIds = [...new Set(rows.flatMap((row) => row.candidateIds.map((pick) => pick.id)))];
-    const existing = new Map(entryIds.length ? ctx.db.query(`SELECT e.id,e.number,e.entry_date AS date,substr(e.memo,1,${PREVIEW}) AS memo,e.source,
-      substr((SELECT group_concat(a.name,', ') FROM journal_lines l JOIN accounts a ON a.id=l.account_id WHERE l.entry_id=e.id AND a.is_bank=0),1,${PREVIEW}) AS accounts
-      FROM journal_entries e WHERE e.id IN (${jsonList()})`, [JSON.stringify(entryIds)]).map((row) => [row.id, row]) : []);
+    const existing = new Map();
+    for (let start = 0; start < entryIds.length; start += DETAIL_GROUP)
+      for (const row of ctx.db.query(`SELECT e.id,e.number,e.entry_date AS date,substr(e.memo,1,${PREVIEW}) AS memo,e.source,
+        substr((SELECT group_concat(a.name,', ') FROM journal_lines l JOIN accounts a ON a.id=l.account_id WHERE l.entry_id=e.id AND a.is_bank=0),1,${PREVIEW}) AS accounts
+        FROM journal_entries e WHERE e.id IN (${jsonList()})`, [JSON.stringify(entryIds.slice(start, start + DETAIL_GROUP))])) existing.set(row.id, row);
     const counts = Object.fromEntries(ctx.db.query("SELECT CASE WHEN confirmed=1 THEN 'confirmed' ELSE status END AS status,count(*) AS n FROM bank_imports GROUP BY 1")
       .map((row) => [row.status, row.n]));
     const through = closedThrough(ctx);
@@ -783,19 +786,17 @@
   const CLEARED_LINES = `FROM journal_lines l JOIN journal_entries e ON e.id=l.entry_id
     LEFT JOIN bank_imports c ON c.journal_entry_id=e.id AND c.bank_account_id=l.account_id`;
   function reconciled(ctx) {
-    const shown = new Map();
-    for (const { clearedCents, ...row } of ctx.db.query(`SELECT r.id,r.bank_account_id AS bankAccountId,a.name AS accountName,r.currency,
+    return ctx.db.query(`WITH c AS (SELECT r.id,r.bank_account_id AS bankAccountId,a.name AS accountName,r.currency,
       r.statement_date AS date,r.balance_cents AS balanceCents,
       (SELECT count(*) FROM bank_imports b WHERE b.bank_account_id=r.bank_account_id AND b.currency=r.currency AND ${UNDECIDED}
         AND b.posted_on<=r.statement_date) AS waiting,
       (SELECT coalesce(sum(l.debit_cents-l.credit_cents),0) ${CLEARED_LINES} WHERE l.account_id=r.bank_account_id AND e.currency=r.currency
         AND ${clearedBy("r.statement_date", firstRow("r.bank_account_id", "r.currency"))}) AS clearedCents
-      FROM reconciliations r JOIN accounts a ON a.id=r.bank_account_id ORDER BY r.bank_account_id,r.currency,r.statement_date`)) {
-      const key = `${row.bankAccountId} ${row.currency}`;
-      if (shown.get(key)?.holds === false) continue;
-      shown.set(key, { ...row, holds: !row.waiting && clearedCents === row.balanceCents });
-    }
-    return [...shown.values()];
+      FROM reconciliations r JOIN accounts a ON a.id=r.bank_account_id),
+    k AS (SELECT *,waiting=0 AND clearedCents=balanceCents AS holds FROM c),
+    f AS (SELECT *,row_number() OVER (PARTITION BY bankAccountId,currency ORDER BY holds,CASE WHEN holds THEN NULL ELSE date END,date DESC) AS n FROM k)
+    SELECT id,bankAccountId,accountName,currency,date,balanceCents,waiting,holds FROM f WHERE n=1 ORDER BY bankAccountId,currency`)
+      .map((row) => ({ ...row, holds: row.holds === 1 }));
   }
   const MAX_OUTSTANDING = 200;
   function clearing(ctx, bankAccountId, code, asOf) {
@@ -854,6 +855,8 @@
     if (!Number.isSafeInteger(input.balanceCents) || Math.abs(input.balanceCents) > MAX_CENTS) invalid(ctx, "Enter the statement's ending balance in whole cents.");
     if (existing) ctx.refuse("already_reconciled", `${bank.name} is already reconciled on ${statementDate}. Remove that reconciliation first.`);
     if (waiting) ctx.refuse("unreviewed", `Review or confirm the ${waiting} statement ${waiting === 1 ? "row" : "rows"} dated on or before ${statementDate} first.`);
+    const through = closedThrough(ctx);
+    if (through && statementDate <= through) ctx.refuse("period_closed", `${statementDate} is in a closed month. Reconcile a later statement.`);
     if (clearedCents !== input.balanceCents)
       ctx.refuse("not_reconciled", `${bank.name} should show ${amountText(clearedCents, code)} on ${statementDate}: ${amountText(booksCents, code)} in the books, less what hasn't cleared. That is ${amountText(Math.abs(clearedCents - input.balanceCents), code)} from the statement.`);
     execute(ctx, "INSERT INTO reconciliations(id,bank_account_id,currency,statement_date,balance_cents,created_at_ms) VALUES(?,?,?,?,?,?)",

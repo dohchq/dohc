@@ -257,11 +257,24 @@ export function Periods() {
   }, [list, startMonth]);
   const firstOpen = list.find((period) => period.status === "open");
   const nextYear = list.length ? fiscalEndYear(list[list.length - 1]!.endDate, startMonth) + 1 : null;
-  const nextLabel = nextYear === null ? null : `${startMonth === 1 ? "" : "FY"}${nextYear}`;
+  const label = (year: number) => `${startMonth === 1 ? "" : "FY"}${year}`;
+  const nextLabel = nextYear === null ? null : label(nextYear);
   const lockedThrough = [...list].reverse().find((period) => period.status === "locked");
+  const earlierYear = list.length && !lockedThrough ? fiscalEndYear(list[0]!.startDate, startMonth) - 1 : null;
   return (
     <>
       <Topbar title="Periods" meta={lockedThrough ? `Closed through ${shortMonth(lockedThrough.id, true)}` : "No months closed"}>
+        {earlierYear !== null ? (
+          <button
+            type="button"
+            className="b-btn b-page-action"
+            disabled={pending !== null}
+            onClick={() => void run("addFiscalYear", { year: earlierYear }, { done: `Opened ${label(earlierYear)}`, failed: `Could not open ${label(earlierYear)}` })}
+          >
+            <Plus size={14} aria-hidden />
+            Open {label(earlierYear)}
+          </button>
+        ) : null}
         {nextYear !== null ? (
           <button
             type="button"
