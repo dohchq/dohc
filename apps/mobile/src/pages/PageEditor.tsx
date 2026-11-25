@@ -11,10 +11,8 @@ export interface PageEditorHandle {
 interface PageEditorProps {
   ref: Ref<PageEditorHandle>;
   uri: string;
-  /** The page's settings, set before the page starts. */
   startScript?: string;
   onMessage(data: string): void;
-  /** The page failed to load or its web process ended. */
   onLost(): void;
   onClaim?(claim: EditorClaim): void;
   style: StyleProp<ViewStyle>;
@@ -23,9 +21,11 @@ interface PageEditorProps {
 function slotEditor(Slot: NonNullable<typeof EditorSlot>) {
   return function SlotEditor(props: PageEditorProps) {
     const slot = useRef<EditorSlotHandle>(null);
-    useImperativeHandle(props.ref, () => ({
-      inject: (script) => void slot.current?.inject(script),
-    }));
+    useImperativeHandle(
+      props.ref,
+      () => ({ inject: (script) => void slot.current?.inject(script).catch(() => undefined) }),
+      [],
+    );
     return (
       <Slot
         ref={slot}
@@ -43,9 +43,11 @@ function slotEditor(Slot: NonNullable<typeof EditorSlot>) {
 
 function WebViewEditor(props: PageEditorProps) {
   const web = useRef<ComponentRef<typeof WebView>>(null);
-  useImperativeHandle(props.ref, () => ({
-    inject: (script) => web.current?.injectJavaScript(script),
-  }));
+  useImperativeHandle(
+    props.ref,
+    () => ({ inject: (script) => web.current?.injectJavaScript(script) }),
+    [],
+  );
   return (
     <WebView
       ref={web}
