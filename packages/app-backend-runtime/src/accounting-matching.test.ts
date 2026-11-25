@@ -134,6 +134,10 @@ describe("bank row decisions", () => {
       entry: undefined,
       undecided: true,
     });
+    const gone = row({ candidates: [], suggestedAccountId: "4000" });
+    const fallback = decide(gone, { entryId: "entry-a" });
+    expect(fallback).toMatchObject({ entry: undefined, undecided: false });
+    expect(enterLabel(gone, fallback)).toBe("post");
   });
 
   it("pays the invoice the operator chose over the suggested one", () => {

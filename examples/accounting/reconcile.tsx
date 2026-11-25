@@ -51,7 +51,7 @@ export function ReconcileSheet({
   const { accounts, currency: booksCurrency, overview } = useBooksContext();
   const { run, pending } = useAction();
   const toast = useToast();
-  const banks = accounts.filter((account) => account.isBank && !account.archived);
+  const banks = accounts.filter((account) => account.isBank && (!account.archived || account.id === initial?.bankAccountId));
   const [bankAccountId, setBankAccountId] = useState(initial?.bankAccountId ?? banks[0]?.id ?? "");
   const [chosen, setChosen] = useState<string | null>(initial?.currency ?? null);
   const [asOf, setAsOf] = useState(() => initial?.date ?? overview?.today ?? today());

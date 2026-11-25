@@ -665,6 +665,8 @@ function InvoiceEditor({ invoice, onClose }: { invoice?: Invoice; onClose: (id?:
         ? "Enter a three-letter currency code"
       : !Number.isFinite(taxRateBp) || taxRateBp < 0 || taxRateBp > 10000
         ? "Enter a tax rate from 0 to 100"
+        : !issueDate || !dueDate
+          ? "Enter the issue and due dates"
         : dueDate < issueDate
           ? "The due date is before the issue date"
           : parsed.some((line) => !line.description)

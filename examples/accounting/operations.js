@@ -835,7 +835,8 @@
     if (!bank || !bank.isBank) invalid(ctx, "Choose a bank account.");
     const statementDate = date(ctx, input.date, "Enter the statement date as YYYY-MM-DD.");
     notFuture(ctx, statementDate, "statement");
-    const currencies = accountCurrencies(ctx, bank.id);
+    const currencies = [...new Set([...accountCurrencies(ctx, bank.id),
+      ...ctx.db.query("SELECT DISTINCT currency FROM reconciliations WHERE bank_account_id=? ORDER BY currency", [bank.id]).map((row) => row.currency)])];
     const code = input.currency === undefined ? currencies[0] || reportCurrency(ctx, {}) : currency(ctx, input.currency);
     if (currencies.length && !currencies.includes(code)) invalid(ctx, `${bank.name} holds ${currencies.join(", ")}. Reconcile one of those.`);
     const waiting = waitingRows(ctx, bank.id, code, statementDate);

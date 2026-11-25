@@ -350,7 +350,7 @@ export function Register() {
               <button type="button" className="b-icon-btn" aria-label="Previous page" disabled={page === 0} onClick={() => (setPage(page - 1), setCursor(0), setKeyed(false))}>
                 <ChevronLeft size={16} aria-hidden />
               </button>
-              <button type="button" className="b-icon-btn" aria-label="Next page" disabled={current.nextOffset === null} onClick={() => (setPage(page + 1), setCursor(0), setKeyed(false))}>
+              <button type="button" className="b-icon-btn" aria-label="Next page" disabled={list.refreshing || current.nextOffset === null} onClick={() => (setPage(page + 1), setCursor(0), setKeyed(false))}>
                 <ChevronRight size={16} aria-hidden />
               </button>
             </div>

@@ -898,11 +898,13 @@ describe("accounting example on the real dataset host", () => {
 
   it("refuses future dates, keeps closed-month rows as they are, and never posts a known entry twice", async () => {
     const f = await books();
-    await f.result("addFiscalYear", { year: 2027 });
+    const ahead = new Date(Date.now() + 3 * 86_400_000).toISOString().slice(0, 10);
+    for (let year = 2027; year <= Number(ahead.slice(0, 4)); year += 1)
+      await f.result("addFiscalYear", { year });
     await expect(
       f.call(
         "postJournalEntry",
-        entry("2027-12-30", [
+        entry(ahead, [
           ["6000", 100, 0],
           ["1000", 0, 100],
         ]),
@@ -1494,6 +1496,12 @@ describe("accounting example on the real dataset host", () => {
     expect(
       (await f.result("listPeriods", {})).find((period: any) => period.id === "2026-05"),
     ).toMatchObject({ waiting: 2, reviewQueue: "new" });
+    await f.result("reconcileBank", {
+      bankAccountId: "1010",
+      date: "2026-05-01",
+      currency: "USD",
+      balanceCents: 0,
+    });
     await f.result("stageBankRows", {
       importId: "import-euro",
       bankAccountId: "1010",
@@ -1503,9 +1511,16 @@ describe("accounting example on the real dataset host", () => {
     });
     expect(
       await f.result("reconcileStatus", { bankAccountId: "1010", date: "2026-05-31" }),
-    ).toMatchObject({ currency: "EUR", currencies: ["EUR"], waiting: 1 });
+    ).toMatchObject({ currency: "EUR", currencies: ["EUR", "USD"], waiting: 1 });
+    expect(
+      await f.result("reconcileStatus", {
+        bankAccountId: "1010",
+        date: "2026-05-01",
+        currency: "USD",
+      }),
+    ).toMatchObject({ currency: "USD", reconciledCents: 0 });
     await expect(
-      f.call("reconcileStatus", { bankAccountId: "1010", date: "2026-05-31", currency: "USD" }),
+      f.call("reconcileStatus", { bankAccountId: "1010", date: "2026-05-31", currency: "GBP" }),
     ).rejects.toMatchObject(refusal("invalid_input"));
     await expect(
       f.call("reconcileBank", { bankAccountId: "1000", date: "2999-01-01", balanceCents: 0 }),
