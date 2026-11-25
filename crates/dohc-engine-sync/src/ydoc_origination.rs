@@ -268,8 +268,7 @@ pub fn originate_ydoc_base_in_tx(
         tx,
         key,
         marker.content_kind,
-        &encoded.base,
-        &encoded.state_vector,
+        &dohc_engine_collab::CheckedBase::new(&encoded.base).map_err(SyncError::corrupt)?,
         now_ms,
     )
     .map_err(SyncError::corrupt)?

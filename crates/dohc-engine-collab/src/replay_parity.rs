@@ -1046,6 +1046,18 @@ pub fn validate_replay_parity(base: &Ydoc, candidate: &[u8]) -> Result<(), Colla
     validate_replay_parity_contained(base, candidate, None, None, None, true, false).map(drop)
 }
 
+/// A plaintext state holding an emoji and a letter, with a delete of the
+/// emoji's first unit.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn base_splitting_an_emoji_for_test() -> Vec<u8> {
+    let writer = Ydoc::with_client_id(5);
+    writer.plaintext_insert(0, "\u{1f600}X");
+    let deletes_first_unit = vec![0, 1, 5, 1, 0, 1];
+    let merged = crate::merge_updates(&[writer.encode_full_state(), deletes_first_unit]);
+    merged.expect("a state and a delete merge")
+}
+
 /// Validate and apply each update in order, reusing the batch's replay gate.
 /// Rejected updates leave the document unchanged and do not stop later updates.
 pub fn apply_replay_validated_batch(

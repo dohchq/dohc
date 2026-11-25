@@ -1089,7 +1089,6 @@ fn apply_deferred_base(
     incoming_doc
         .apply(bytes)
         .map_err(|error| map_collab_payload_error(error, "parked Y.Doc base is invalid"))?;
-    let state_vector = incoming_doc.encode_state_vector();
     let key = key.clone();
     let payload = payload.clone();
     let bytes = bytes.to_vec();
@@ -1200,8 +1199,9 @@ fn apply_deferred_base(
             &key,
             dohc_engine_collab::ContentKind::parse(&payload.content_kind)
                 .map_err(map_collab_hard_error)?,
-            &bytes,
-            &state_vector,
+            &dohc_engine_collab::CheckedBase::new(&bytes).map_err(|error| {
+                map_collab_payload_error(error, "parked Y.Doc base is invalid")
+            })?,
             &dohc_engine_collab::BaseRelayCoordinate::new(origin_id.clone(), origin_seq, relay_seq)
                 .map_err(map_collab_hard_error)?,
             recorded_at_ms,
@@ -6128,8 +6128,7 @@ fn preserve_incomplete_base_in_tx(
         tx,
         key,
         kind,
-        &incoming_bytes,
-        &incoming_doc.encode_state_vector(),
+        &dohc_engine_collab::CheckedBase::new(&incoming_bytes).map_err(map_collab_hard_error)?,
         &dohc_engine_collab::BaseRelayCoordinate::new(origin_id, origin_seq, relay_seq)
             .map_err(map_collab_hard_error)?,
         now_ms,
@@ -8534,17 +8533,16 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
         // or divergent redelivery), leaving state for an unacked coordinate.
         let kind = dohc_engine_collab::ContentKind::parse(&payload.content_kind)
             .map_err(map_collab_hard_error)?;
-        let sv_bytes = {
-            let doc = dohc_engine_collab::Ydoc::wire();
-            if doc.apply(&bytes).is_err() {
-                return refuse_ydoc(
-                    store,
-                    envelope,
-                    faults,
-                    "ydoc.update base bytes fail validation",
-                );
+        let checked = match dohc_engine_collab::CheckedBase::new(&bytes) {
+            Ok(checked) => checked,
+            Err(dohc_engine_collab::CollabError::ReplayParityViolation { .. }) => {
+                let reason = "ydoc.update base fails the replay check";
+                return refuse_ydoc(store, envelope, faults, reason);
             }
-            doc.encode_state_vector()
+            Err(_) => {
+                let reason = "ydoc.update base bytes fail validation";
+                return refuse_ydoc(store, envelope, faults, reason);
+            }
         };
         let claim_key = key.clone();
         let claim_bytes = bytes.clone();
@@ -8608,8 +8606,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                     tx,
                     &claim_key,
                     kind,
-                    &claim_bytes,
-                    &sv_bytes,
+                    &checked,
                     &coordinate,
                     op.recorded_at_ms,
                 )
@@ -8810,8 +8807,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 tx,
                 &claim_key,
                 kind,
-                &claim_bytes,
-                &sv_bytes,
+                &checked,
                 &coordinate,
                 op.recorded_at_ms,
             )

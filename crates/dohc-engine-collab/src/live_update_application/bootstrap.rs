@@ -223,7 +223,7 @@ where
             now_ms: input.baseline_registered_at_ms, request_id: None,
         }).map_err(E::from)?;
         if written.deduped || written.snapshot.object_id != binding.object_id { return Err(E::from(ApplicationError::Conflict)); }
-        let claimed = durable::claim_base_in_tx(tx, &key, ContentKind::Richdoc, bytes, &doc.encode_state_vector(), input.baseline_registered_at_ms)
+        let claimed = durable::claim_base_in_tx(tx, &key, ContentKind::Richdoc, &durable::CheckedBase::new(bytes).map_err(ApplicationError::from).map_err(E::from)?, input.baseline_registered_at_ms)
             .map_err(ApplicationError::from).map_err(E::from)?;
         if !matches!(claimed, durable::ClaimOutcome::Claimed { ref base_snapshot_sha } if base_snapshot_sha == &input.baseline_digest) {
             return Err(E::from(ApplicationError::Conflict));
@@ -1079,6 +1079,36 @@ mod tests {
         assert!(run(&mut store, &mut cache, &handle, &nonpublic, &NoFaults).is_err());
         assert_eq!(counts(&store), (0, 0, 0, 0));
     }
+    #[test]
+    fn a_baseline_whose_delete_splits_an_emoji_bootstraps_nothing() {
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let writer = Ydoc::with_client_id(5);
+        writer.richdoc_append_paragraph("\u{1f600}X");
+        let letters_end = writer.encode_state_vector()[2];
+        let version = writer.missing_schema_version_update(&key).unwrap();
+        writer.apply(&version.unwrap()).unwrap();
+        let deletes_first_unit = vec![0, 1, 5, 1, letters_end - 3, 1];
+        let merged = crate::merge_updates(&[writer.encode_full_state(), deletes_first_unit]);
+        let split = Vector {
+            name: "split-emoji".into(),
+            bytes: merged.unwrap(),
+            markdown: String::new(),
+            registration_accepted: false,
+            kept_frontmatter: None,
+            projection_refused: false,
+        };
+        let (_dir, mut store, mut cache, _owner, handle) = fixture(&split);
+        let refused = run(&mut store, &mut cache, &handle, &split, &NoFaults);
+        let replay_check = match &refused {
+            Err(Error::Application(ApplicationError::Collab(error))) => {
+                matches!(error, CollabError::ReplayParityViolation { .. })
+            }
+            _ => false,
+        };
+        assert!(replay_check, "{refused:?}");
+        assert_eq!(counts(&store), (0, 0, 0, 0));
+    }
+
     #[test]
     fn existing_domain_object_and_retired_registration_cannot_be_bootstrapped() {
         let vector = vectors().remove(1);
