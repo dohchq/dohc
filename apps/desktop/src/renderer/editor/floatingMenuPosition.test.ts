@@ -26,6 +26,19 @@ describe("resolveFloatingMenuPosition", () => {
     ).toEqual({ x: 548, y: 314, maxHeight: 180, placement: "above", bottom: 106 });
   });
 
+  it("stays inside the given bounds, flipping above when they end below the cursor", () => {
+    expect(
+      resolveFloatingMenuPosition({
+        cursorRect: { left: 10, top: 300, bottom: 320 },
+        viewportWidth: 800,
+        viewportHeight: 600,
+        bounds: { top: 50, left: 100, right: 700, bottom: 400 },
+        menuWidth: 240,
+        menuMaxHeight: 180,
+      }),
+    ).toEqual({ x: 112, y: 114, maxHeight: 180, placement: "above", bottom: 306 });
+  });
+
   it("shrinks to the larger side when neither side has full height", () => {
     expect(
       resolveFloatingMenuPosition({

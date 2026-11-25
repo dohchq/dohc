@@ -3,7 +3,11 @@ import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import type { WikilinkFile } from "./wikilinkPlugin";
-import { resolveFloatingMenuPosition } from "./floatingMenuPosition";
+import {
+  floatingMenuBounds,
+  resolveFloatingMenuPosition,
+  useCloseOnScrollAway,
+} from "./floatingMenuPosition";
 import { dismissTrigger } from "./triggerPlugin";
 import {
   MENU_ACTIVE_OPTION,
@@ -198,9 +202,15 @@ export function WikilinkPicker({ state, files, view, insertMode = "text", onDism
         })()
       : null;
 
-  if (!state.open || !coords) return null;
+  useCloseOnScrollAway(listRef, view, state.open && coords ? state.from : null, () => {
+    if (view && state.open) dismissTrigger(view, state.from);
+    onDismiss();
+  });
+
+  if (!state.open || !view || !coords) return null;
   const position = resolveFloatingMenuPosition({
     cursorRect: coords,
+    bounds: floatingMenuBounds(view.dom),
     menuWidth: 360,
     menuMaxHeight: 260,
     gap: 4,

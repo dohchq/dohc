@@ -34,7 +34,9 @@ import {
 } from "../linkActivation";
 import {
   FLOATING_MENU_MAX_HEIGHT,
+  floatingMenuBounds,
   resolveFloatingMenuPosition,
+  useCloseOnScrollAway,
   type FloatingMenuPlacement,
 } from "./floatingMenuPosition";
 
@@ -114,6 +116,7 @@ export function computeLinkMenuState(
     const coords = view.coordsAtPos(from);
     const position = resolveFloatingMenuPosition({
       cursorRect: coords,
+      bounds: floatingMenuBounds(view.dom),
       menuWidth: 340,
       menuMaxHeight: 140,
     });
@@ -355,6 +358,13 @@ export function LinkMenu({
       window.removeEventListener("mousedown", onPointerDown, true);
     };
   }, [state.open, onDismiss, editor]);
+
+  useCloseOnScrollAway(
+    containerRef,
+    editor?.view ?? null,
+    state.open ? state.from : null,
+    onDismiss,
+  );
 
   if (!state.open || !editor || !isEditableEditor(editor)) return null;
   const openState = state;

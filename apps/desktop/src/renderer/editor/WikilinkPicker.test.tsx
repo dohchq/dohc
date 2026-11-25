@@ -325,3 +325,85 @@ describe("WikilinkPicker on the Menu part's recipe", () => {
     editor.destroy();
   });
 });
+
+describe("WikilinkPicker when something scrolls", () => {
+  function openPicker(container?: HTMLElement) {
+    const editor = makeEditor("[[ro");
+    container?.append(editor.view.dom);
+    let anchor = { left: 40, right: 40, top: 200, bottom: 220 };
+    vi.spyOn(editor.view, "coordsAtPos").mockImplementation(() => anchor);
+    const onDismiss = vi.fn();
+    render(
+      createElement(WikilinkPicker, {
+        state: { open: true, from: 1, query: "ro" },
+        files,
+        view: editor.view,
+        onDismiss,
+      }),
+      container ? { container } : undefined,
+    );
+    const moveAnchor = (top: number) => {
+      anchor = { ...anchor, top, bottom: top + 20 };
+    };
+    return { editor, onDismiss, moveAnchor };
+  }
+
+  it("closes when a scroll moves the [[, and not for one that leaves it in place", () => {
+    const { editor, onDismiss, moveAnchor } = openPicker();
+    const pane = document.body.appendChild(document.createElement("div"));
+    fireEvent.scroll(pane);
+    expect(onDismiss).not.toHaveBeenCalled();
+
+    moveAnchor(150);
+    fireEvent.scroll(screen.getByRole("listbox"));
+    expect(onDismiss).not.toHaveBeenCalled();
+    fireEvent.scroll(document);
+    expect(onDismiss).toHaveBeenCalledOnce();
+    editor.destroy();
+    pane.remove();
+  });
+
+  it("stays open when the editor scrolls to the caret after an edit, before the picker moves", () => {
+    const { editor, onDismiss, moveAnchor } = openPicker();
+    const pane = document.body.appendChild(document.createElement("div"));
+    editor.commands.insertContentAt(editor.state.doc.content.size - 1, "a");
+    moveAnchor(176);
+    fireEvent.scroll(pane);
+    expect(onDismiss).not.toHaveBeenCalled();
+
+    moveAnchor(100);
+    fireEvent.scroll(pane);
+    expect(onDismiss).toHaveBeenCalledOnce();
+    editor.destroy();
+    pane.remove();
+  });
+
+  it("closes when a pane in its own shadow root scrolls", () => {
+    const host = document.body.appendChild(document.createElement("div"));
+    const shadow = host.attachShadow({ mode: "open" });
+    const container = shadow.appendChild(document.createElement("div"));
+    const pane = shadow.appendChild(document.createElement("div"));
+    const { editor, onDismiss, moveAnchor } = openPicker(container);
+    moveAnchor(150);
+    fireEvent.scroll(pane);
+    expect(onDismiss).toHaveBeenCalledOnce();
+    editor.destroy();
+    host.remove();
+  });
+
+  it("stays inside the shadow root's host, opening above when the host ends below the [[", () => {
+    const host = document.body.appendChild(document.createElement("div"));
+    vi.spyOn(host, "getBoundingClientRect").mockReturnValue(
+      DOMRect.fromRect({ x: 0, y: 0, width: 1024, height: 300 }),
+    );
+    const container = host
+      .attachShadow({ mode: "open" })
+      .appendChild(document.createElement("div"));
+    const { editor } = openPicker(container);
+    expect(container.querySelector(".dohc-wikilink-picker")?.getAttribute("data-placement")).toBe(
+      "above",
+    );
+    editor.destroy();
+    host.remove();
+  });
+});

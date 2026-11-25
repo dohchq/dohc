@@ -56,7 +56,9 @@ import { compareRelativePositions, type RelativePosition, type XmlFragment } fro
 import { isComposingKey } from "../ui/keys";
 import {
   FLOATING_MENU_MAX_HEIGHT,
+  floatingMenuBounds,
   resolveFloatingMenuPosition,
+  useCloseOnScrollAway,
   type FloatingMenuPlacement,
 } from "./floatingMenuPosition";
 import { MERMAID_STARTER_SNIPPET } from "./mermaidRender";
@@ -389,7 +391,10 @@ function readSlashCommandState(view: EditorView, previous: SlashCommandState): S
         rect && (rect.width > 0 || rect.height > 0)
           ? { left: rect.left, top: rect.bottom, bottom: rect.bottom }
           : view.coordsAtPos(anchorPos);
-      const position = resolveFloatingMenuPosition({ cursorRect });
+      const position = resolveFloatingMenuPosition({
+        cursorRect,
+        bounds: floatingMenuBounds(view.dom),
+      });
       x = position.x;
       y = position.y;
       bottom = position.bottom ?? null;
@@ -429,7 +434,10 @@ function readSlashCommandState(view: EditorView, previous: SlashCommandState): S
   let placement: FloatingMenuPlacement = "below";
   try {
     const coords = view.coordsAtPos(from);
-    const position = resolveFloatingMenuPosition({ cursorRect: coords });
+    const position = resolveFloatingMenuPosition({
+      cursorRect: coords,
+      bounds: floatingMenuBounds(view.dom),
+    });
     x = position.x;
     y = position.y;
     bottom = position.bottom ?? null;
@@ -720,11 +728,13 @@ function groupSlashCommands(items: SlashCommandItem[]): Array<{
 // itself to show it.
 export function SlashCommandMenu({
   state,
+  view = null,
   onSelect,
   onHover,
   onDismiss,
 }: {
   state: SlashCommandState;
+  view?: EditorView | null;
   onSelect: (id: SlashCommandId) => void;
   onHover: (index: number) => void;
   onDismiss?: () => void;
@@ -748,6 +758,10 @@ export function SlashCommandMenu({
     window.addEventListener("mousedown", onPointerDown, true);
     return () => window.removeEventListener("mousedown", onPointerDown, true);
   }, [state.open, onDismiss]);
+
+  useCloseOnScrollAway(listRef, view, state.open && onDismiss ? state.from : null, () =>
+    onDismiss?.(),
+  );
 
   if (!state.open) return null;
   const items = filterSlashCommands(state.query);

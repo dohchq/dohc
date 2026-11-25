@@ -1225,6 +1225,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           <>
             <SlashCommandMenu
               state={slashState}
+              view={pickerView}
               onSelect={runSlashCommand}
               onHover={(index) =>
                 publishSlashState((current) =>

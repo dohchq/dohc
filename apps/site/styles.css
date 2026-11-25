@@ -317,7 +317,7 @@ body {
 
 /* ---------- real desktop demo ---------- */
 
-.section.demo-section { max-width: 1360px; padding-top: clamp(20px, 4vh, 44px); }
+.section.demo-section { max-width: 1360px; padding-top: clamp(20px, 4vh, 44px); scroll-margin-top: 64px; }
 
 .demo-stage {
   height: min(820px, 84vh);

@@ -373,6 +373,43 @@ describe("SlashCommandMenu placement anchoring", () => {
   });
 });
 
+describe("SlashCommandMenu when something scrolls", () => {
+  it("closes when a scroll moves its slash, and not for one that leaves it in place", () => {
+    const editor = new Editor({
+      element: document.createElement("div"),
+      extensions: [StarterKit.configure({ trailingNode: false })],
+      content: "<p>/</p>",
+    });
+    let top = 200;
+    vi.spyOn(editor.view, "coordsAtPos").mockImplementation(() => ({
+      left: 40,
+      right: 40,
+      top,
+      bottom: top + 20,
+    }));
+    const onDismiss = vi.fn();
+    render(
+      createElement(SlashCommandMenu, {
+        state: { ...OPEN_STATE_BASE },
+        view: editor.view,
+        onSelect: () => {},
+        onHover: () => {},
+        onDismiss,
+      }),
+    );
+    const pane = document.body.appendChild(document.createElement("div"));
+    fireEvent.scroll(pane);
+    expect(onDismiss).not.toHaveBeenCalled();
+    top = 150;
+    fireEvent.scroll(screen.getByRole("listbox", { name: "Slash commands" }));
+    expect(onDismiss).not.toHaveBeenCalled();
+    fireEvent.scroll(pane);
+    expect(onDismiss).toHaveBeenCalledOnce();
+    editor.destroy();
+    pane.remove();
+  });
+});
+
 describe("SlashCommandMenu on the Menu part's recipe", () => {
   it("marks the active option and scrolls only the list to show it", () => {
     const restore = mockListLayout(200);
