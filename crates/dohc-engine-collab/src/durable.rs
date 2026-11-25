@@ -2494,19 +2494,16 @@ pub(crate) fn record_credited_updates_in_tx(
         )?;
         let record_facts = if let Some(before) = before {
             let after = doc.frontmatter_json();
-            dohc_engine_domain::index_collection_frontmatter_apply_in_tx(
+            dohc_engine_domain::index_released_collection_frontmatter_in_tx(
                 tx,
                 &key.workspace_id,
                 &key.version_id,
                 &key.object_id,
                 &before,
                 &after,
-                &before,
-                &after,
-                None,
                 actor.as_deref(),
                 attribution.as_ref(),
-                None,
+                &crate::owner_outbox::queued_history_source(&sha),
                 now_ms,
             )
             .map_err(|error| CollabError::Corrupt {

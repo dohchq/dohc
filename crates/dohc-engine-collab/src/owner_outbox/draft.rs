@@ -1095,7 +1095,16 @@ fn append_prepared_draft_in_tx(
         Some(&draft.doc)
     };
     if let Some(visible) = visible {
-        index_frontmatter_in_tx(tx, binding, visible, actor, attribution.as_ref(), now_ms)?;
+        let source = super::queued_history_source(&result.update_digest);
+        index_frontmatter_in_tx(
+            tx,
+            binding,
+            visible,
+            actor,
+            attribution.as_ref(),
+            Some((&source, 0)),
+            now_ms,
+        )?;
     }
     Ok((result, encoded_len))
 }

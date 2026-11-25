@@ -5,8 +5,9 @@ use dohc_engine_domain::{
     CollectionSchemaReasonCode, CollectionSchemaStatus, CollectionSort, DeleteTextFile,
     DomainError, FieldDefinition, MAX_COLLECTION_QUERY_LIMIT, NoFaults, RenameTextFile, TxnOutcome,
     VersionedTextStore, ViewSortDirection, WriteText, get_collection, get_collection_record,
-    index_collection_frontmatter_apply_in_tx, list_collections, query_collection_records,
-    reconcile_collections_in_tx, set_collection_adoption_state_in_tx,
+    index_collection_frontmatter_apply_in_tx, index_released_collection_frontmatter_in_tx,
+    list_collections, query_collection_records, reconcile_collections_in_tx,
+    set_collection_adoption_state_in_tx,
 };
 use dohc_engine_storage::{EngineStore, StorageError, hex};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -1767,4 +1768,125 @@ fn every_read_answers_for_a_degraded_collection() {
         .expect("degraded record exists");
     assert_eq!(record.collection.status, CollectionSchemaStatus::Degraded);
     assert_eq!(record.record.values[0].value, json!("survives"));
+}
+
+#[test]
+fn a_released_queued_change_keeps_its_history_row_only_when_it_records_that_change() {
+    const OBJECT_ID: &str = "object-6";
+    let (_scratch, mut store) = seeded_store();
+    let rank = |rank: i64| json!({"id": FIRST_TASK_ID, "Title": "Alpha", "Status": "Broken", "Rank": rank, "Owner": PERSON_ID});
+    let queue = |store: &mut EngineStore,
+                 source: Option<&str>,
+                 from: i64,
+                 to: i64,
+                 author: &str,
+                 at: i64| {
+        store
+            .write_with(&NoFaults, |tx| {
+                index_collection_frontmatter_apply_in_tx(
+                    tx,
+                    WORKSPACE_ID,
+                    VERSION_ID,
+                    OBJECT_ID,
+                    &rank(from),
+                    &rank(to),
+                    &rank(from),
+                    &rank(to),
+                    None,
+                    Some(author),
+                    None,
+                    source.map(|source| (source, 0)),
+                    at,
+                )
+            })
+            .expect("queue")
+    };
+    let release = |store: &mut EngineStore, source: &str, from: i64, to: i64, at: i64| match store
+        .write_with(&NoFaults, |tx| {
+            index_released_collection_frontmatter_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                OBJECT_ID,
+                &rank(from),
+                &rank(to),
+                Some("released"),
+                None,
+                source,
+                at,
+            )
+        })
+        .expect("release")
+    {
+        TxnOutcome::Committed(Some(facts)) => facts
+            .fields
+            .iter()
+            .map(|field| field.history_id)
+            .collect::<Vec<_>>(),
+        other => panic!("release recorded no record change: {other:?}"),
+    };
+    let history = |store: &EngineStore| {
+        store
+            .read_with(|conn| {
+                let mut rows = conn
+                    .prepare(
+                        "SELECT history_id,previous_value_json,next_value_json,author_origin_id, \
+                         recorded_at_ms FROM collection_field_history \
+                         WHERE record_id=?1 AND field_name='Rank' ORDER BY history_id",
+                    )
+                    .map_err(StorageError::corrupt_public)?;
+                rows.query_map(params![FIRST_TASK_ID], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                })
+                .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+                .map_err(StorageError::corrupt_public)
+            })
+            .expect("history")
+    };
+    let row = |id: i64, from: i64, to: i64, author: &str, at: i64| {
+        (id, from.to_string(), to.to_string(), author.to_owned(), at)
+    };
+
+    queue(&mut store, Some("owner-draft:one"), 1, 2, "owner", 10);
+    let queued = history(&store)[0].0;
+    queue(&mut store, Some("owner-draft:one"), 1, 2, "peer", 11);
+    assert_eq!(history(&store), [row(queued, 1, 2, "owner", 10)]);
+
+    assert_eq!(release(&mut store, "owner-draft:one", 1, 2, 12), [queued]);
+    assert_eq!(history(&store), [row(queued, 1, 2, "released", 10)]);
+
+    queue(&mut store, Some("owner-draft:two"), 2, 3, "owner", 13);
+    let second = history(&store)[1].0;
+    let [moved] = release(&mut store, "owner-draft:two", 5, 3, 14)[..] else {
+        panic!("one released row");
+    };
+    assert_eq!(
+        history(&store),
+        [
+            row(queued, 1, 2, "released", 10),
+            row(second, 2, 3, "owner", 13),
+            row(moved, 5, 3, "released", 14),
+        ]
+    );
+
+    queue(&mut store, Some("owner-draft:three"), 3, 4, "owner", 15);
+    queue(&mut store, None, 4, 3, "rollback", 16);
+    let [third, rollback] = [history(&store)[3].0, history(&store)[4].0];
+    let [again] = release(&mut store, "owner-draft:three", 3, 4, 17)[..] else {
+        panic!("one released row");
+    };
+    assert_eq!(
+        history(&store)[3..],
+        [
+            row(third, 3, 4, "owner", 15),
+            row(rollback, 4, 3, "rollback", 16),
+            row(again, 3, 4, "released", 17),
+        ]
+    );
 }

@@ -280,7 +280,7 @@ fn apply_ordered_in_tx(
             draft::PendingReplay::Checkpoint,
         ) {
             Ok(()) => {
-                index_frontmatter_from_in_tx(tx, b, &before, &visible, None, None, now_ms)?;
+                index_frontmatter_from_in_tx(tx, b, &before, &visible, None, None, None, now_ms)?;
             }
             Err(OwnerOutboxError::Storage(error)) => return Err(error.into()),
             // Replay-state errors preserve the index; storage errors abort the transaction.
