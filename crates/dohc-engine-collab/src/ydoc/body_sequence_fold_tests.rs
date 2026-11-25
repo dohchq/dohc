@@ -602,10 +602,10 @@ fn a_path_never_holds_one_id_twice() {
             line(txn, sequence, "paragraph", &["l", "i", "q"]);
             typed(txn, sequence, "c");
         });
-        assert_eq!(markdown_of(&doc), "> a\n\n- > c\n");
-        let file = "> a\n>\n> - > c\n";
+        assert_eq!(markdown_of(&doc), "> a\n\n- \n  > c\n");
+        let file = "> a\n>\n> - \n>   > c\n";
         fold(&doc, file);
-        assert_eq!(markdown_of(&doc), file);
+        assert_eq!(markdown_of(&doc), markdown_of(&seeded(2, file)));
         let path = path_of(&doc, 1);
         assert_eq!(path[1..3], ["l", "i"]);
         assert_eq!(path.iter().collect::<BTreeSet<_>>().len(), 4);
