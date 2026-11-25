@@ -1,16 +1,19 @@
+import { connect } from "node:net";
 import { afterEach, expect, it } from "vitest";
 import { createEngineClient, type EngineClient } from "./engineClient";
 
 // An engine in its own process, so its reply reaches the pipe while this thread is busy. It answers each request at
-// once, except a "stall" request, after which it stops reading its input.
+// once. After a "stall" request it stops reading its input. After a "hold" request it stops until something connects
+// to the port its answer names.
 const ENGINE = `
+const net = require("net");
 let buffered = Buffer.alloc(0), reading = true;
 const send = envelope => {
   const payload = Buffer.from(JSON.stringify(envelope), "utf8"), frame = Buffer.alloc(12 + payload.length);
   frame.write("DOP1", 0, "ascii"); frame[4] = 1; frame[5] = 0; frame.writeUInt16LE(0, 6); frame.writeUInt32LE(payload.length, 8);
   payload.copy(frame, 12); process.stdout.write(frame);
 };
-const limits = {maxFrameBytes: 1048576, maxBlobChunkBytes: 65536, maxStringBytes: 1048576, maxCollectionLen: 1024, maxBatchLen: 64, maxJsonDepth: 32};
+const limits = {maxFrameBytes: 8388608, maxBlobChunkBytes: 65536, maxStringBytes: 1048576, maxCollectionLen: 1024, maxBatchLen: 64, maxJsonDepth: 32};
 process.stdin.on("data", bytes => {
   if (!reading) return;
   buffered = Buffer.concat([buffered, bytes]);
@@ -19,6 +22,11 @@ process.stdin.on("data", bytes => {
     buffered = buffered.subarray(12 + length);
     if (envelope.type === "hello") send({type: "helloAck", protocolVersion: 2, sessionGeneration: 1, capabilities: ["core"], limits});
     else if (envelope.type === "request" && envelope.method === "stall") {reading = false; process.stdin.pause();}
+    else if (envelope.type === "request" && envelope.method === "hold") {
+      process.stdin.pause();
+      const release = net.createServer(socket => {socket.destroy(); release.close(); process.stdin.resume();});
+      release.listen(0, "127.0.0.1", () => send({type: "response", id: envelope.id, result: {port: release.address().port}}));
+    }
     else if (envelope.type === "request") send({type: "response", id: envelope.id, result: {answered: true}});
   }
 });`;
@@ -76,25 +84,29 @@ it.each(["immediate", "timer", "reply"] as const)(
 
 it("fails a request it could not write before its deadline as unsent", async () => {
   const client = await engine();
-  await ask(client);
-  const { late } = await new Promise<{ late: Promise<unknown> }>((resolve) =>
-    setImmediate(() => {
-      // Larger than a pipe and the stream's buffer on every platform, so the client holds the next request until this
-      // write drains.
-      const large = client.sendRequest({
-        id: ++id,
-        method: "answer",
-        params: { filler: "x".repeat(200_000) },
-        deadlineMs: 10_000,
-      });
-      large.catch(() => {});
-      const pending = ask(client);
-      pending.catch(() => {});
-      busy(250);
-      resolve({ late: pending });
-    }),
+  const held = await ask(client, "hold", 10_000);
+  const { port } = held.result as { port: number };
+  const { large, late } = await new Promise<{ large: Promise<unknown>; late: Promise<unknown> }>(
+    (resolve) =>
+      setImmediate(() => {
+        // Larger than a pipe or socket buffer on every platform while the engine isn't reading, so the client holds
+        // the next request until this write drains.
+        const large = client.sendRequest({
+          id: ++id,
+          method: "answer",
+          params: { filler: "x".repeat(4_000_000) },
+          deadlineMs: 10_000,
+        });
+        large.catch(() => {});
+        const pending = ask(client);
+        pending.catch(() => {});
+        connect(port, "127.0.0.1").on("error", () => {});
+        busy(250);
+        resolve({ large, late: pending });
+      }),
   );
   await expect(late).rejects.toMatchObject({ name: "EngineRequestDeadlineError", unsent: true });
+  await expect(large).resolves.toMatchObject({ result: { answered: true } });
   await expect(ask(client)).resolves.toMatchObject({ result: { answered: true } });
 });
 
