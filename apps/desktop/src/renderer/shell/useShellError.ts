@@ -816,7 +816,7 @@ export function useShellError(
           retry: notice.retry,
           identity: notice.identity,
         },
-        "quiet",
+        "keep",
       ),
     [push],
   );

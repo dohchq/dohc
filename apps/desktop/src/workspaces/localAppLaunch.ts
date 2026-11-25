@@ -87,7 +87,7 @@ export interface AppNotice {
   message: string;
   detail?: string;
 }
-export const isAppNoticeLine = (value: unknown, max: number): value is string =>
+const isAppNoticeLine = (value: unknown, max: number): value is string =>
   typeof value === "string" &&
   value.trim() !== "" &&
   value.length <= max &&

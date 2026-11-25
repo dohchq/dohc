@@ -530,7 +530,7 @@ export function attachAppCollectionBroker(
         response.status === 200 &&
         response.headers.get("x-dohc-app-refusal") === "1" &&
         response.headers.get("content-type")?.split(";", 1)[0] === "application/json";
-      if (!response.ok && !refusal) {
+      if (!response.ok) {
         const status = [400, 404, 409, 413, 429].includes(response.status) ? response.status : 503;
         if (status === 429) {
           let trustedError: { code: string; message: string; retryAfterMs?: number } | undefined;
