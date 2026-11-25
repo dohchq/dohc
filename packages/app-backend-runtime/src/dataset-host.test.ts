@@ -808,6 +808,13 @@ it("refuses on the next call after warm permissions change their stored rules, b
   await expect(call("helper", id(7))).rejects.toThrow("You do not have access to this Collection.");
   grant([id(7)]);
   await call("helper", id(7), {}, "form");
+  grant([id(6)]);
+  await expect(call("helper", id(7))).rejects.toThrow("You do not have access to this Collection.");
+  await expect(call("helper", id(7), {}, "form")).rejects.toThrow(
+    "You do not have access to this Collection.",
+  );
+  grant([id(7)]);
+  await call("helper", id(7));
 
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding([id(7)]) });
   await expect(call("friend", id(6), { value: "narrowed" }, "form")).rejects.toThrow(

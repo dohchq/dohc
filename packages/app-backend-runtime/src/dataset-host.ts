@@ -486,6 +486,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
   const grantedOperations = new WeakMap<DatasetRevision, Map<string, DatasetOperation[]>>();
   function boundOperations(
     bindingJson: string,
+    binding: unknown,
     bound: DatasetRevision,
     caller: AppBackendCaller,
   ): DatasetOperation[] {
@@ -501,9 +502,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       remember(
         byBinding,
         key,
-        frozen(
-          effectiveDatasetOperations(JSON.parse(bindingJson), bound, caller, generatedRevision),
-        ),
+        frozen(effectiveDatasetOperations(binding, bound, caller, generatedRevision)),
       )
     );
   }
@@ -753,7 +752,12 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         }
         verified.caller = { ...verified.caller, helper: allowedHelperIds.size > 0 };
       }
-      operations = boundOperations(String(row.binding_json), boundRevision, verified.caller).filter(
+      operations = boundOperations(
+        String(row.binding_json),
+        binding,
+        boundRevision,
+        verified.caller,
+      ).filter(
         (operation) =>
           verified.caller.kind === "owner" ||
           operation.access !== "helper" ||
@@ -773,17 +777,14 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const grant = currentGrant(key, JSON.parse(String(row.grant_json)), approved);
       // A data grant supplies organizer authority without requiring source Edit.
       if (verified.caller.kind === "named") verified.caller = { ...verified.caller, helper: true };
-      operations = boundOperations(
-        JSON.stringify({
-          kind: "dataset",
-          datasetId: approved.datasetId,
-          revision: approved.revision,
-          revisionSha256: approved.revisionSha256,
-          operationIds: grant.operationIds,
-        }),
-        approved,
-        verified.caller,
-      );
+      const binding = {
+        kind: "dataset",
+        datasetId: approved.datasetId,
+        revision: approved.revision,
+        revisionSha256: approved.revisionSha256,
+        operationIds: grant.operationIds,
+      };
+      operations = boundOperations(JSON.stringify(binding), binding, approved, verified.caller);
       token = String(row.token);
       discover = grant.discover;
     }
