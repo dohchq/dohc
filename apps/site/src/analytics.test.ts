@@ -100,3 +100,37 @@ it("names the build in a download click, and skips a click that only scrolls", a
     ["download_clicked", { asset: "mac-arm64", platform: "mac" }, { send_instantly: true }],
   ]);
 });
+
+it("records closed-enum waitlist submission outcomes and ignores unknown outcomes", async () => {
+  for (const outcome of ["succeeded", "rate_limited", "failed", "email@example.com"]) {
+    document.dispatchEvent(new CustomEvent("dohc:waitlist-submitted", { detail: { outcome } }));
+  }
+  await vi.runAllTimersAsync();
+  expect(posthog.capture.mock.calls).toEqual([
+    ["waitlist_submitted", { outcome: "succeeded" }, { send_instantly: true }],
+    ["waitlist_submitted", { outcome: "rate_limited" }, { send_instantly: true }],
+    ["waitlist_submitted", { outcome: "failed" }, { send_instantly: true }],
+  ]);
+});
+
+it("resolves configured PostHog keys and extracts only allowlisted campaign parameters", async () => {
+  const { resolveSitePostHogToken, readAllowedCampaignParams } = await import("./analytics");
+  expect(resolveSitePostHogToken("phc_siteProjectKey12345")).toBe("phc_siteProjectKey12345");
+  expect(resolveSitePostHogToken("not-a-key")).toBe(
+    "phc_4EUB88JK9BzR2LEtJ24xVwMV8pczEBs95yTMpwJuvu4",
+  );
+  expect(
+    readAllowedCampaignParams(
+      "?utm_source=GitHub&utm_medium=referral&utm_campaign=launch&email=ada@example.com",
+    ),
+  ).toEqual({
+    utm_source: "github",
+    utm_medium: "referral",
+    utm_campaign: "launch",
+  });
+  expect(
+    readAllowedCampaignParams(
+      "?utm_source=alice-smith&utm_medium=custom&utm_campaign=secret-deal-42",
+    ),
+  ).toEqual({});
+});

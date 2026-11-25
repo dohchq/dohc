@@ -20,7 +20,10 @@ pnpm --filter @dohc/site dev
 
 The site is a Cloudflare Worker, `dohc-site`, that serves `dist` as static
 files (`wrangler.jsonc`). Its script, `src/worker.ts`, forwards `/ingest/*` to
-PostHog for the analytics that `src/analytics.ts` loads. The [Site deploy workflow](../../.github/workflows/site-deploy.yml)
+PostHog for the analytics that `src/analytics.ts` loads (project key from
+`VITE_SITE_POSTHOG_KEY`), and forwards `POST /telemetry/batch/` for desktop and
+dohc Drive analytics when `ALLOWED_TELEMETRY_KEYS` allows the project key. The
+[Site deploy workflow](../../.github/workflows/site-deploy.yml)
 tests, builds and deploys it after a change on `main` reaches the site, the
 desktop source its demo imports, or a shared package.
 

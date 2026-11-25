@@ -5,13 +5,45 @@
 import type { PostHog } from "posthog-js";
 
 // A project's client token is public. Browsers send it with every event.
-const POSTHOG_TOKEN = "phc_4EUB88JK9BzR2LEtJ24xVwMV8pczEBs95yTMpwJuvu4";
+const DEFAULT_POSTHOG_TOKEN = "phc_4EUB88JK9BzR2LEtJ24xVwMV8pczEBs95yTMpwJuvu4";
+const POSTHOG_KEY_PATTERN = /^phc_\w{10,100}$/;
 const DOWNLOAD_LINK = "[data-download-primary], [data-download-card], [data-download-asset]";
+const WAITLIST_OUTCOMES = new Set(["succeeded", "failed", "rate_limited"]);
+
+const ALLOWED_CAMPAIGN_VALUES = {
+  utm_source: new Set(
+    "x twitter hn hackernews reddit github producthunt lobsters youtube discord bluesky linkedin newsletter blog docs email direct drive".split(
+      " ",
+    ),
+  ),
+  utm_medium: new Set(
+    "social referral community email docs video search launch partner direct".split(" "),
+  ),
+  utm_campaign: new Set("launch alpha nightly beta waitlist drive docs release".split(" ")),
+} as const;
+
+export function resolveSitePostHogToken(configured: string | undefined): string {
+  const trimmed = configured?.trim() ?? "";
+  return POSTHOG_KEY_PATTERN.test(trimmed) ? trimmed : DEFAULT_POSTHOG_TOKEN;
+}
+
+export function readAllowedCampaignParams(search: string): Record<string, string> {
+  const params = new URLSearchParams(search);
+  const allowed: Record<string, string> = {};
+  for (const [key, values] of Object.entries(ALLOWED_CAMPAIGN_VALUES)) {
+    const candidate = params.get(key)?.trim().toLowerCase();
+    if (candidate && values.has(candidate)) allowed[key] = candidate;
+  }
+  return allowed;
+}
+
+const POSTHOG_TOKEN = resolveSitePostHogToken(import.meta.env.VITE_SITE_POSTHOG_KEY);
 
 let loading: Promise<PostHog> | undefined;
 
 function loadAnalytics(): Promise<PostHog> {
   return (loading ??= import("posthog-js").then(({ default: posthog }) => {
+    const campaignParams = readAllowedCampaignParams(window.location.search);
     posthog.init(POSTHOG_TOKEN, {
       api_host: "/ingest",
       ui_host: "https://us.posthog.com",
@@ -35,14 +67,18 @@ function loadAnalytics(): Promise<PostHog> {
       // model, which Chrome reveals only when asked, are not on it.
       disable_scroll_properties: true,
       disableDeviceModel: true,
-      // A link can carry anything after its ? or #, such as campaign tags or
-      // an email address, so reports hold only the page's own address.
+      // A link can carry arbitrary parameters, so PostHog's own campaign
+      // capture stays off and only the allowlisted tags above are attached.
       save_campaign_params: false,
       before_send: (event) => {
         if (!event) return event;
         // PostHog's GeoIP step skips an event that carries this, so no report
         // gains a location, whatever the order of PostHog's pipeline.
-        const properties: Record<string, unknown> = { ...event.properties, $geoip_disable: true };
+        const properties: Record<string, unknown> = {
+          ...event.properties,
+          ...campaignParams,
+          $geoip_disable: true,
+        };
         // The referrer too: from another page of this site, the browser sends
         // that page's whole address.
         for (const key of ["$current_url", "$referrer"]) {
@@ -61,7 +97,6 @@ function loadAnalytics(): Promise<PostHog> {
       // #__posthog= login, which also loads the toolbar's script.
       debug: false,
       __extensionClasses: { toolbar: undefined },
-      // The project records sessions for the desktop app. Not here.
       disable_session_recording: true,
       capture_heatmaps: false,
       capture_dead_clicks: false,
@@ -97,6 +132,14 @@ document.addEventListener(
   },
   { capture: true },
 );
+
+document.addEventListener("dohc:waitlist-submitted", (event) => {
+  const outcome = (event as CustomEvent<{ outcome?: unknown }>).detail?.outcome;
+  if (typeof outcome !== "string" || !WAITLIST_OUTCOMES.has(outcome)) return;
+  loadAnalytics().then((posthog) => {
+    posthog.capture("waitlist_submitted", { outcome }, { send_instantly: true });
+  }, ignore);
+});
 
 // A blocker may stop PostHog from loading. The page works the same without it.
 function ignore() {}
