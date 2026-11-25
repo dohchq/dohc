@@ -1331,6 +1331,11 @@ it("wakes a parked link app poll on a Collection change, and answers only while 
       )
     ).status,
   ).toBe(404);
+  const archived = events(`authorityRevision=1&since=${start + 1}&hold=20000`);
+  await vi.waitFor(() => expect(hasRelayWriteObservers(f.storage)).toBe(true));
+  expect((await f.http(`${f.path}/archive`, {})).status).toBe(200);
+  expect((await archived).status).toBe(404);
+  expect((await f.http(`${f.path}/restore`, {})).status).toBe(200);
   expect(hasRelayWriteObservers(f.storage)).toBe(false);
   const revoked = events(`authorityRevision=1&since=${start + 1}&hold=20000`);
   await vi.waitFor(() => expect(hasRelayWriteObservers(f.storage)).toBe(true));

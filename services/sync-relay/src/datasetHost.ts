@@ -1307,7 +1307,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
             });
             return true;
           } catch (error) {
-            if (error instanceof DatasetHostError && error.code === "not_authorized") return false;
+            if (error instanceof DatasetHostError) return false;
             throw error;
           }
         });
