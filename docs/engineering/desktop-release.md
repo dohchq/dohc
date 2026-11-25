@@ -518,7 +518,7 @@ desktop and Drive PostHog project):
 3. Update `POSTHOG_CLI_PROJECT_ID` alongside `DOHC_POSTHOG_KEY` so uploaded
    source maps land in the same PostHog project that receives `$exception`
    events. If using `https://dohc.computer/telemetry`, include the key in
-   `DOHC_TELEMETRY_ALLOWED_KEYS` on the site Worker.
+   `ALLOWED_TELEMETRY_KEYS` on the site Worker.
 
 The app caps the reports it sends in each launch. Usage reports retry transient
 failures (network errors, HTTP 408, 429, and 5xx) with backoff for up to 30

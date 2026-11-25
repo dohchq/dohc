@@ -254,6 +254,7 @@ export async function startAutoUpdates(options: {
   startupDelayMs?: number;
   pollIntervalMs?: number;
   onState?: (state: UpdateState, publicState: PublicUpdateState) => void;
+  onInstallStarted?: () => void;
   // Quits dohc through its ordinary close path, where every window can still
   // stop the quit. Restart to update quits this way on Windows. Elsewhere it
   // completes a restart already staged: quitAndInstall starts its own quit on
@@ -518,6 +519,7 @@ export async function startAutoUpdates(options: {
     failure = null;
     keepChosen(state.version);
     emit();
+    options.onInstallStarted?.();
     if (platform === "win32") {
       options.quit();
       return { accepted: true, state: publicState() };

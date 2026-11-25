@@ -18,7 +18,7 @@ import { relayShareOperations, shareMountOperations } from "../ipc/shareOperatio
 import { workspaceFileOperations } from "../ipc/workspaceFileOperations";
 import type { PrivacySettings } from "../settings/userSettings";
 import type { PublicUpdateState } from "../updates/electronUpdater";
-import { CLI_USAGE_ACTION_IDS } from "../usage/cliUsage";
+import { isDatasetWriteAction } from "../usage/cliUsage";
 import { errorReport, type ErrorFacts, type ErrorReport, type ReportedError } from "./errorReport";
 import type { ErrorSender } from "./posthogErrors";
 import type { Reporting } from "./reportingConfig";
@@ -27,7 +27,6 @@ export const CURRENT_USAGE_NOTICE_VERSION = 2;
 
 const DRIVE_SERVER_ORIGIN = "https://drive.dohc.computer";
 const CRASH_SIGNAL_REASON_PATTERN = /^[a-z-]{1,40}$/;
-const DATASET_WRITE_CAPABILITIES = new Set<string>(CLI_USAGE_ACTION_IDS);
 
 export type CountBucket = "0" | "1" | "2-5" | "6+";
 export type ServerKind = "none" | "drive" | "self_hosted";
@@ -37,7 +36,7 @@ export type WorkspaceAddMethod =
   | "join_cloud"
   | "open_shared_view"
   | "mount_share";
-export type WorkspaceOpenTrigger = "user" | "auto_restore" | "deep_link" | "cli";
+export type WorkspaceOpenTrigger = "user" | "auto_restore" | "deep_link";
 export type WorkspaceKind = "local" | "synced" | "received_share";
 export type UpdateEventStage =
   | "available"
@@ -145,12 +144,18 @@ function datasetFeatureEvent(input: unknown, result: unknown): UsageEvent | null
       ? (input as { action?: unknown }).action
       : undefined;
   if (typeof action !== "string" || !Object.hasOwn(DATASET_CAPABILITIES, action)) return null;
+  if (!isDatasetWriteAction(action)) return null;
   const capabilityId = DATASET_CAPABILITIES[action as keyof typeof DATASET_CAPABILITIES];
-  if (!DATASET_WRITE_CAPABILITIES.has(capabilityId)) return null;
   if (!result || typeof result !== "object") return null;
   const answer = result as { ok?: unknown; replayed?: unknown; kind?: unknown };
   if (answer.ok === false || answer.replayed === true) return null;
-  if (answer.kind === "refused" || answer.kind === "partial") return null;
+  if (
+    answer.kind === "refused" ||
+    answer.kind === "collections-refused" ||
+    answer.kind === "partial"
+  ) {
+    return null;
+  }
   return { name: "feature_used", capability_id: capabilityId, door: "renderer" };
 }
 
@@ -167,10 +172,10 @@ const USAGE_EVENTS: Readonly<
     name: "workspace_added",
     method: "open_shared_view",
   }),
-  [shareMountOperations.mountShare.channel]: () => ({
-    name: "workspace_added",
-    method: "mount_share",
-  }),
+  [shareMountOperations.mountShare.channel]: (result) =>
+    (result as { alreadyAdded?: unknown } | null)?.alreadyAdded === true
+      ? null
+      : { name: "workspace_added", method: "mount_share" },
   [CHANNELS.openWorkspace]: (_result, input, context) => {
     const workspaceId =
       input && typeof input === "object" && "workspaceId" in input
@@ -360,7 +365,10 @@ export function createTelemetry(deps: {
     target.timer = null;
   }
 
+  let usageGeneration = 0;
+
   function drop<Item>(target: Lane<Item>): void {
+    if (target === (usage as Lane<unknown>)) usageGeneration += 1;
     target.queue.length = 0;
     target.sending?.abort();
     clearTimer(target);
@@ -407,7 +415,10 @@ export function createTelemetry(deps: {
     usage.pausedUntilMs = now() + Math.round(backoff * (0.75 + 0.5 * random()));
   }
 
-  async function postUsageBatch(batch: QueuedUsageEvent[]): Promise<"ok" | "retry" | "drop"> {
+  async function postUsageBatch(
+    batch: QueuedUsageEvent[],
+    generation: number,
+  ): Promise<"ok" | "retry" | "drop"> {
     const service = reporting?.usage;
     const distinctId = named.usage?.installId;
     if (!service || !distinctId) return "drop";
@@ -431,6 +442,7 @@ export function createTelemetry(deps: {
         ]),
       });
       await response.body?.cancel().catch(() => {});
+      if (controller.signal.aborted || generation !== usageGeneration) return "drop";
       if (response.ok) {
         usage.failures = 0;
         return "ok";
@@ -445,6 +457,7 @@ export function createTelemetry(deps: {
       }
       return "drop";
     } catch {
+      if (controller.signal.aborted || generation !== usageGeneration) return "drop";
       if (usageOn()) pauseUsageBackoff();
       return "retry";
     } finally {
@@ -471,9 +484,10 @@ export function createTelemetry(deps: {
           if (usage.queue.length === 0 || (!ignorePause && stepMs < usage.pausedUntilMs)) break;
         }
         first = false;
+        const generation = usageGeneration;
         const batch = usage.queue.splice(0, REPORT_LIMITS.usageBatch);
-        if ((await postUsageBatch(batch)) === "retry") {
-          if (!quitting && usageOn()) {
+        if ((await postUsageBatch(batch, generation)) === "retry") {
+          if (!quitting && usageOn() && generation === usageGeneration) {
             const kept = batch.filter(
               (item) => item.queuedAtMs >= now() - REPORT_LIMITS.usageRetryMaxAgeMs,
             );
@@ -569,7 +583,7 @@ export function createTelemetry(deps: {
         os: facts.os,
         os_version: facts.osVersion,
         arch: facts.arch,
-        server_kind: deps.serverKind?.() ?? "none",
+        server_kind: safeServerKind(deps.serverKind),
       },
       timestamp: new Date(timestampMs).toISOString(),
       queuedAtMs: now(),
@@ -691,7 +705,10 @@ export function createTelemetry(deps: {
             ? { lastCrashSeq: Math.max(noticeMeta.lastCrashSeq ?? 0, pendingCrashSeq) }
             : {}),
         };
-        if (!persistNoticeMeta(nextMeta)) return;
+        if (!persistNoticeMeta(nextMeta)) {
+          schedule(errors, errorsOn, REPORT_LIMITS.errorFlushMs, drainErrors);
+          return;
+        }
       }
       scheduleUsage();
       schedule(errors, errorsOn, REPORT_LIMITS.errorFlushMs, drainErrors);
@@ -722,6 +739,14 @@ export function createTelemetry(deps: {
       return flushing;
     },
   };
+}
+
+function safeServerKind(read?: () => ServerKind): ServerKind {
+  try {
+    return read?.() ?? "none";
+  } catch {
+    return "none";
+  }
 }
 
 function fatalMainCrashReason(text: string): "uncaughtException" | "module-load" | null {

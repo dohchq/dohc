@@ -7,14 +7,15 @@ import { useWorkspaceSession } from "../workspace/workspaceSession";
 
 /** The notice's words for the reports it names. */
 export function reportsNoticeText(reports: ReportKinds): string {
-  const named =
-    reports.usage && reports.errors
-      ? "usage and error reports"
-      : reports.usage
-        ? "usage reports"
-        : "error reports";
-  const id = reports.usage ? " Usage reports include a random ID for this installation." : "";
-  return `dohc sends ${named} to its developers.${id} Reports hold no file names, content, chats, or links.`;
+  const usageDetails =
+    "usage reports (launches, active days, updates, workspaces, actions, CLI and MCP calls, sharing, apps, chat, and crash counts, with a random installation ID)";
+  if (reports.usage && reports.errors) {
+    return `dohc sends ${usageDetails} and error reports to its developers. Reports hold no file names, content, chats, prompts, account details, or links.`;
+  }
+  if (reports.usage) {
+    return `dohc sends ${usageDetails} to its developers. Reports hold no file names, content, chats, prompts, account details, or links.`;
+  }
+  return "dohc sends error reports to its developers. Reports hold no file names, content, chats, prompts, account details, or links.";
 }
 
 /**

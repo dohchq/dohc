@@ -93,6 +93,7 @@ async function startWith(
     currentVersion?: string;
     app?: ReturnType<typeof fakeApp>;
     restartApproved?: () => boolean;
+    onInstallStarted?: () => void;
     stateDir?: string;
     platform?: NodeJS.Platform;
   } = {},
@@ -107,6 +108,7 @@ async function startWith(
     quit: app.quit,
     onQuit: app.onQuit,
     restartApproved: options.restartApproved,
+    onInstallStarted: options.onInstallStarted,
     stateDir: options.stateDir,
     importUpdater: async () => ({ autoUpdater: updater }),
     platform: options.platform ?? "win32",
@@ -684,5 +686,43 @@ describe("electron updater after a quit", () => {
     expect(existsSync(path)).toBe(false);
     await controller.installUpdate();
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ version: "1.2.4", from: "1.2.3" });
+  });
+
+  it("fires onInstallStarted once before quitting even if installUpdate is called twice", async () => {
+    const updater = fakeUpdater();
+    const app = fakeApp(updater);
+    const order: string[] = [];
+    app.quit.mockImplementation(() => {
+      order.push("quit");
+    });
+    const controller = (await startWith(updater, {
+      platform: "win32",
+      app,
+      onInstallStarted: () => order.push("install_started"),
+    }))!;
+    offer(updater, "1.2.4");
+    controller.downloadUpdate();
+    updater.emit("update-downloaded", { version: "1.2.4" });
+
+    await expect(controller.installUpdate()).resolves.toMatchObject({ accepted: true });
+    await expect(controller.installUpdate()).resolves.toMatchObject({ accepted: true });
+    expect(order).toEqual(["install_started", "quit", "quit"]);
+
+    const macUpdater = fakeUpdater();
+    const macOrder: string[] = [];
+    macUpdater.quitAndInstall.mockImplementation(() => {
+      macOrder.push("quitAndInstall");
+    });
+    const macController = (await startWith(macUpdater, {
+      platform: "darwin",
+      onInstallStarted: () => macOrder.push("install_started"),
+    }))!;
+    offer(macUpdater, "1.2.4");
+    macController.downloadUpdate();
+    macUpdater.emit("update-downloaded", { version: "1.2.4" });
+
+    await expect(macController.installUpdate()).resolves.toMatchObject({ accepted: true });
+    await expect(macController.installUpdate()).resolves.toMatchObject({ accepted: true });
+    expect(macOrder).toEqual(["install_started", "quitAndInstall"]);
   });
 });

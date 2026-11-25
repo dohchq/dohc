@@ -215,16 +215,18 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
   function sendWorkspaceActivated(
     window: BrowserWindow | undefined,
     workspace: WorkspaceSummary,
+    onTarget?: (window: BrowserWindow) => void,
   ): Promise<BrowserWindow> {
     const target =
       window && workspaceWindows.allLive().includes(window) ? window : liveWorkspaceWindow();
     if (target) {
       setPreferredWorkspaceId(workspace.workspaceId, target.webContents);
+      onTarget?.(target);
       target.webContents.send(CHANNELS.workspaceActivated, workspace);
       focusShareHandoffWindow(target);
       return Promise.resolve(target);
     }
-    return openWorkspaceInWindow(workspace, () => false);
+    return openWorkspaceInWindow(workspace, () => false, onTarget);
   }
 
   function reportActivationFailure(workspace: WorkspaceSummary, error: unknown): void {
@@ -574,7 +576,9 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     { window: BrowserWindow; opening: Promise<BrowserWindow> }
   >();
 
-  function pendingOpenFor(workspaceId: string): Promise<BrowserWindow> | null {
+  function pendingOpenFor(
+    workspaceId: string,
+  ): { window: BrowserWindow; opening: Promise<BrowserWindow> } | null {
     const pending = pendingOpens.get(workspaceId);
     if (!pending) return null;
     const session = dependencies.rendererWorkspaceSessions.current(pending.window.webContents);
@@ -582,7 +586,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
       pendingOpens.delete(workspaceId);
       return null;
     }
-    return pending.opening;
+    return pending;
   }
 
   // A window for one workspace. Reuses a live window already showing it;
@@ -590,19 +594,24 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
   function openWorkspaceInWindow(
     workspace: WorkspaceSummary,
     isShowing: (window: BrowserWindow) => boolean,
+    onTarget?: (window: BrowserWindow) => void,
   ): Promise<BrowserWindow> {
     const existing = workspaceWindows.allLive().find(isShowing);
     if (existing) {
+      onTarget?.(existing);
       focusShareHandoffWindow(existing);
       return Promise.resolve(existing);
     }
     const pending = pendingOpenFor(workspace.workspaceId);
-    if (pending)
-      return pending.then((window) => {
+    if (pending) {
+      onTarget?.(pending.window);
+      return pending.opening.then((window) => {
         focusShareHandoffWindow(window);
         return window;
       });
+    }
     const window = createWorkspaceWindow(workspace.workspaceId);
+    onTarget?.(window);
     const entry = {
       window,
       opening: (async () => {

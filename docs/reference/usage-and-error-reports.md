@@ -22,13 +22,13 @@ backoff for up to 30 minutes and drop permanent errors immediately; turning
 | `app_active_heartbeat` | At most once per UTC day while dohc is running, on window focus or a tracked action. |
 | `app_update_event` | An update becomes available, starts downloading, finishes downloading, starts installing, or fails (with the failing step). |
 | `workspace_added` | You create a local workspace, open an existing folder, join a synced workspace, open a shared view, or mount a share. |
-| `workspace_opened` | A window opens a workspace. Carries how it opened (`user`, `auto_restore`, `deep_link`, or `cli`) and the workspace kind (`local`, `synced`, or `received_share`). |
+| `workspace_opened` | A window opens a workspace. Carries how it opened (`user`, `auto_restore`, or `deep_link`) and the workspace kind (`local`, `synced`, or `received_share`). |
 | `feature_used` | A core desktop action or automation succeeds. Carries its fixed capability ID and door (`renderer` or `automation`). |
 | `tool_invoked` | A local CLI or MCP write tool completes, or any CLI or MCP call fails or is refused. Carries the door (`cli` or `mcp`), capability ID, outcome (`ok`, `error`, or `refused`), and duration in ms. Successful read calls are skipped. |
 | `share_created` | You share with people, or create a share link. The event says which. |
 | `app_published` | You publish an app. The event says whether it runs locally. |
 | `chat_message_sent` | You send a chat message. |
-| `crash_signal` | A window, GPU, utility, engine, or prior fatal main process crash occurs. Carries only the source and fixed reason, with its timestamp rounded down to the UTC hour so it cannot be matched to an error report. |
+| `crash_signal` | A window, GPU, utility, engine, or prior fatal main process crash occurs. Carries only the source and fixed reason, with its timestamp rounded down to the UTC hour; error reports carry no installation ID. |
 
 Each usage event also carries a random ID made for this installation, a per-event
 UUID, `schema_version: 2`, the dohc version, release channel, package target

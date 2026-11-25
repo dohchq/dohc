@@ -24,7 +24,7 @@ import { atomicReplaceFileSync } from "../atomicReplaceFile";
 import {
   cliCapabilityId,
   cliUsageInvocation,
-  isCliWriteCapability,
+  isCliWriteRequest,
   type CliUsageInvocation,
 } from "../usage/cliUsage";
 import { nameSlug } from "@dohc/workspace-contracts/names";
@@ -5564,7 +5564,7 @@ export async function handleCliRequestLine(
 
   const startedAtMs = Date.now();
   const capabilityId = cliCapabilityId(parsed.data);
-  const isWrite = isCliWriteCapability(capabilityId);
+  const isWrite = isCliWriteRequest(parsed.data);
   const door = parsed.data.door ?? "cli";
   const reportTool = (outcome: "ok" | "error" | "refused") => {
     try {
@@ -5663,8 +5663,13 @@ function cliToolOutcome(
 ): "ok" | "error" | "refused" {
   if (refusal) return "refused";
   if (result && typeof result === "object") {
-    if ("kind" in result && result.kind === "refused") return "refused";
+    if ("kind" in result && (result.kind === "refused" || result.kind === "collections-refused")) {
+      return "refused";
+    }
     if ("kind" in result && result.kind === "partial") return "error";
+    if (request.verb === "automationPress" && "ok" in result && !result.ok && "confirm" in result) {
+      return "refused";
+    }
     if (
       request.verb === "automationSwitch" &&
       "result" in result &&

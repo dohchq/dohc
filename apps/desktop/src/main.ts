@@ -1042,7 +1042,7 @@ function recordDesktopUsageSuccess(invocation: {
     capability_id: invocation.capabilityId,
     door: invocation.door,
   });
-  telemetry.markActive();
+  if (invocation.door === "renderer") telemetry.markActive();
 }
 const rendererUsage = createRendererUsage<IpcMainInvokeEvent>((invocation) =>
   recordDesktopUsageSuccess(invocation),
@@ -1160,8 +1160,21 @@ if (telemetry.available.usage || telemetry.available.errors) {
 }
 let launchAnalyticsRecorded = false;
 let previousUpdateState: PublicUpdateState | null = null;
-const pendingWorkspaceOpenTriggers = new Map<string, WorkspaceOpenTrigger>();
-const windowsOpenedWorkspace = new WeakSet<WebContents>();
+const startupRestoreWindows = new WeakSet<WebContents>();
+const pendingWindowOpenTrigger = new WeakMap<
+  WebContents,
+  { workspaceId: string; trigger: WorkspaceOpenTrigger }
+>();
+
+function noteWorkspaceActivationTrigger(
+  window: BrowserWindow,
+  workspaceId: string,
+  trigger: WorkspaceOpenTrigger,
+): void {
+  startupRestoreWindows.delete(window.webContents);
+  if (rendererWorkspaceSessions.current(window.webContents)?.workspaceId === workspaceId) return;
+  pendingWindowOpenTrigger.set(window.webContents, { workspaceId, trigger });
+}
 
 function workspaceKindOf(workspace: RegistryEntry | null | undefined): WorkspaceKind | undefined {
   if (!workspace) return undefined;
@@ -8686,6 +8699,9 @@ function startUpdates(): Promise<AutoUpdateController | null> {
       if (updateEvent) telemetry.track(updateEvent);
       broadcastUpdateState(state);
     },
+    onInstallStarted: () => {
+      telemetry.track({ name: "app_update_event", stage: "install_started" });
+    },
   })
     .then((controller) => {
       autoUpdateController = controller;
@@ -9500,8 +9516,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
         }),
     },
     windows: {
-      create: () =>
-        trackWorkspaceWindow(
+      create: () => {
+        const window = trackWorkspaceWindow(
           createMainWindow({
             beforeRendererReload: prepareAfterRendererCrash,
             currentRendererDocumentId: (sender) =>
@@ -9510,7 +9526,10 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
             afterRendererCrashLoop,
             preloadArguments,
           }),
-        ),
+        );
+        if (listWorkspaces().length > 0) startupRestoreWindows.add(window.webContents);
+        return window;
+      },
       whenLoaded: (window) =>
         new Promise<boolean>((resolve) => {
           const contents = window.webContents;
@@ -9545,9 +9564,9 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       hasAny: () => BrowserWindow.getAllWindows().length !== 0,
       showOrCreate: showOrCreateMainWindow,
       activate: (window, workspace) => {
-        void sendWorkspaceActivated(window, workspace).catch((error: unknown) =>
-          desktopWindows.reportActivationFailure(workspace, error),
-        );
+        void sendWorkspaceActivated(window, workspace, (target) =>
+          noteWorkspaceActivationTrigger(target, workspace.workspaceId, "deep_link"),
+        ).catch((error: unknown) => desktopWindows.reportActivationFailure(workspace, error));
       },
     },
     workspaces: {
@@ -9584,12 +9603,12 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       applySettings: ({ settings }) => {
         cachedPreferredName = settings.profile.preferredName;
         cachedAgents = listAgents(settings);
+        recordLaunchAnalytics();
         desktopWindows.seedZoomLevel(settings.appearance.zoomLevel);
         applyThemeMode(settings.appearance.themeMode);
         session.defaultSession.setSpellCheckerEnabled(settings.editor.spellcheck);
       },
       registerHandlers: () => {
-        recordLaunchAnalytics();
         nativeTheme.on("updated", refreshTrayIcon);
         // A backoff can outlast a sleep. On wake, try each failing sync now.
         powerMonitor.on("resume", () => activity.retryFailingCloudSyncs());
@@ -9808,7 +9827,10 @@ const workLinkActivations = createWorkLinkActivations<{
     const entry = findWorkspace(place.workspaceId);
     if (!entry) return null;
     const workspace = workspaceSummaryFor(entry);
-    return { window: await sendWorkspaceActivated(liveWorkspaceWindow(), workspace), workspace };
+    const window = await sendWorkspaceActivated(liveWorkspaceWindow(), workspace, (target) =>
+      noteWorkspaceActivationTrigger(target, workspace.workspaceId, "deep_link"),
+    );
+    return { window, workspace };
   },
   deliver: ({ window, workspace }, place) => {
     workLinkOpens.request(window.webContents, workspace, {
@@ -9882,8 +9904,9 @@ const openPathOpener = createOpenPathOpener<WorkspaceSummary, BrowserWindow>({
     );
   },
   activate: async (workspace, file, window) => {
-    pendingWorkspaceOpenTriggers.set(workspace.workspaceId, "deep_link");
-    const shown = await sendWorkspaceActivated(window, workspace);
+    const shown = await sendWorkspaceActivated(window, workspace, (target) =>
+      noteWorkspaceActivationTrigger(target, workspace.workspaceId, "deep_link"),
+    );
     if (file !== null) workspaceFileOpens.request(shown.webContents, workspace, file);
     refreshNativeWorkspaceSurfaces();
   },
@@ -9938,32 +9961,18 @@ function handleIpc(channel: string, listener: Parameters<typeof ipcMain.handle>[
       const counted = usageEventFor(channel, result, args[0], {
         workspaceKind: (workspaceId) => workspaceKindOf(findWorkspace(workspaceId)),
         workspaceOpenTrigger: (workspaceId) => {
-          const explicit = pendingWorkspaceOpenTriggers.get(workspaceId);
-          if (explicit) {
-            pendingWorkspaceOpenTriggers.delete(workspaceId);
-            windowsOpenedWorkspace.add(event.sender);
-            return explicit;
+          const pending = pendingWindowOpenTrigger.get(event.sender);
+          if (pending) {
+            pendingWindowOpenTrigger.delete(event.sender);
+            if (pending.workspaceId === workspaceId) return pending.trigger;
           }
-          if (!windowsOpenedWorkspace.has(event.sender)) {
-            windowsOpenedWorkspace.add(event.sender);
-            return "auto_restore";
-          }
+          if (startupRestoreWindows.delete(event.sender)) return "auto_restore";
           return "user";
         },
       });
       if (counted) {
-        if (counted.name === "workspace_added" && result && typeof result === "object") {
-          const addedId =
-            "workspaceId" in result && typeof result.workspaceId === "string"
-              ? result.workspaceId
-              : "workspace" in result &&
-                  result.workspace &&
-                  typeof result.workspace === "object" &&
-                  "workspaceId" in result.workspace &&
-                  typeof result.workspace.workspaceId === "string"
-                ? result.workspace.workspaceId
-                : null;
-          if (addedId) pendingWorkspaceOpenTriggers.set(addedId, "user");
+        if (counted.name === "workspace_added" && counted.method !== "mount_share") {
+          startupRestoreWindows.delete(event.sender);
         }
         telemetry.track(counted);
         if (!(counted.name === "workspace_opened" && counted.trigger === "auto_restore")) {
@@ -10100,7 +10109,7 @@ const quitGuard = createQuitGuard({
   },
 });
 
-const runInstallUpdate = createUpdateInstall<BrowserWindow>({
+const installUpdate = createUpdateInstall<BrowserWindow>({
   currentUpdateState,
   exitRounds,
   quitGuard,
@@ -10108,12 +10117,6 @@ const runInstallUpdate = createUpdateInstall<BrowserWindow>({
     return autoUpdateController;
   },
 });
-
-const installUpdate: typeof runInstallUpdate = async (...args) => {
-  const result = await runInstallUpdate(...args);
-  if (result.accepted) telemetry.track({ name: "app_update_event", stage: "install_started" });
-  return result;
-};
 
 // A failing build checks the feed before it gives up, so a person on a bad
 // release can still reach the release that fixes it.

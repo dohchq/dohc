@@ -1021,6 +1021,9 @@ describe("v2 usage events, notice versioning, crash signals, and retries", () =>
       name: "workspace_added",
       method: "mount_share",
     });
+    expect(
+      usageEventFor(shareMountOperations.mountShare.channel, { alreadyAdded: true }),
+    ).toBeNull();
     expect(usageEventFor(workspaceFileOperations.createWorkspaceFile.channel, {})).toEqual({
       name: "feature_used",
       capability_id: "file.create",
@@ -1037,11 +1040,69 @@ describe("v2 usage events, notice versioning, crash signals, and retries", () =>
       ),
     ).toBeNull();
     expect(
+      usageEventFor(
+        datasetOperations.dataset.channel,
+        { kind: "collections-refused" },
+        { action: "create" },
+      ),
+    ).toBeNull();
+    expect(
+      usageEventFor(datasetOperations.dataset.channel, { ok: true }, { action: "types" }),
+    ).toEqual({
+      name: "feature_used",
+      capability_id: "dataset.types.write",
+      door: "renderer",
+    });
+    expect(
       usageEventFor(datasetOperations.dataset.channel, { ok: true }, { action: "create" }),
     ).toEqual({
       name: "feature_used",
       capability_id: "dataset.create",
       door: "renderer",
     });
+  });
+
+  it("drops an in-flight batch when usageReports turns off and back on before abort rejects", async () => {
+    const reports = shown();
+    reports.setPrivacy(ON);
+    let rejectPending!: (error: Error) => void;
+    respond = () =>
+      new Promise<Response>((_resolve, reject) => {
+        rejectPending = reject;
+      });
+
+    reports.track({ name: "chat_message_sent" });
+    nowMs += REPORT_LIMITS.usageFlushMs;
+    await vi.advanceTimersByTimeAsync(REPORT_LIMITS.usageFlushMs);
+    expect(usageCalls()).toHaveLength(1);
+
+    reports.setPrivacy({ usageReports: false, errorReports: true });
+    reports.setPrivacy(ON);
+    respond = async () => new Response(null, { status: 200 });
+    rejectPending(new Error("aborted"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    nowMs += 60_000;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(usageCalls()).toHaveLength(1);
+  });
+
+  it("still flushes queued error reports if reporting-notice.json fails to save", async () => {
+    const blocked = join(dir, "reporting-notice.json");
+    writeFileSync(blocked, "not a directory");
+    const reports = telemetry();
+    reports.setPrivacy(ON);
+    reports.reportError(anError());
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    // Replace reporting-notice.json with a directory so atomic replace cannot rename over it.
+    rmSync(blocked);
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(blocked);
+    reports.acknowledgeNotice({ usage: true, errors: true });
+    errorLog.mockRestore();
+
+    await vi.advanceTimersByTimeAsync(REPORT_LIMITS.errorFlushMs);
+    expect(errorCalls()).toHaveLength(1);
+    expect(reports.noticeDue(ON)).toEqual({ usage: true, errors: false });
   });
 });

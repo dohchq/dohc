@@ -1,4 +1,7 @@
 import { CLI_PROTOCOL_VERSION } from "@dohc/cli/protocol";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   handleCliRequestLine,
@@ -150,5 +153,57 @@ describe("CLI and MCP tool_invoked analytics", () => {
       controller.signal,
     );
     expect(events).toEqual([]);
+  });
+
+  it("classifies automationPress confirmation requirements as refused", async () => {
+    const rootPath = mkdtempSync(join(tmpdir(), "dohc-cli-analytics-"));
+    try {
+      const events: CliToolInvocationEvent[] = [];
+      const options: CliServerOptions = {
+        ...createOptions(events),
+        listWorkspaces: () => [{ workspaceId: "ws-1", rootPath }],
+        openWorkspace: async () =>
+          ({
+            workspaceId: "ws-1",
+            rootPath,
+            buttons: {
+              inspect: vi.fn(),
+              press: vi.fn(async () => ({
+                result: {
+                  confirm: [{ name: "send", label: "Send email" }],
+                },
+                waiting: null,
+              })),
+            },
+          }) as unknown as Awaited<ReturnType<CliServerOptions["openWorkspace"]>>,
+      };
+      await handleCliRequestLine(
+        JSON.stringify({
+          token,
+          protocolVersion: CLI_PROTOCOL_VERSION,
+          verb: "automationPress",
+          args: {
+            cwd: rootPath,
+            actor: "agent",
+            collectionPath: "tasks",
+            field: "go",
+            record: "rec-1",
+            confirm: [],
+          },
+        }),
+        token,
+        options,
+      );
+      expect(events).toEqual([
+        {
+          door: "cli",
+          capabilityId: "automation.button.press",
+          outcome: "refused",
+          durationMs: expect.any(Number),
+        },
+      ]);
+    } finally {
+      rmSync(rootPath, { recursive: true, force: true });
+    }
   });
 });
