@@ -2405,12 +2405,17 @@ export function createWorkspaceEngineCapture(
   const liveYDocSessions = new Map<string, LiveYDocSession>();
   // Paths whose close released the file while capture still held a change
   // made outside dohc to it. An open of one waits for that change first.
-  const outsideWritesUnrecorded = new Set<string>();
+  const outsideWritesUnrecorded = new Map<string, boolean>();
   // Whether capture still holds a change made outside dohc to this path.
-  async function outsideWriteWaits(path: string): Promise<boolean> {
+  async function outsideWriteWaits(path: string, diskProbed = false): Promise<boolean> {
     const engine = await engineStore();
     await engine.flushCapture?.();
-    return (await engine.watcherStatus?.())?.deferredWrites.includes(path) ?? false;
+    if ((await engine.watcherStatus?.())?.deferredWrites.includes(path)) return true;
+    if (!diskProbed) return false;
+    const versionId = await activeVersionIdOf(engine);
+    const snapshot = await engine.readTextFile({ workspaceId, versionId, path });
+    const disk = await digestSettledFile(rootPath, path);
+    return disk.kind === "sha256" && snapshot?.sha256 !== disk.sha256;
   }
   // Set-aside drafts of a deleted file's text that a newer draft or a save
   // replaced, and that the draft store has not removed yet. Every later draft
@@ -5279,7 +5284,10 @@ export function createWorkspaceEngineCapture(
       }
       if (outsideWritesUnrecorded.has(input.path)) {
         // A check that fails proves nothing, so the open still waits.
-        const waits = await outsideWriteWaits(input.path).catch((error: unknown) => ({ error }));
+        const waits = await outsideWriteWaits(
+          input.path,
+          outsideWritesUnrecorded.get(input.path),
+        ).catch((error: unknown) => ({ error }));
         if (waits !== false) {
           throw new YDocOutsideWriteWaitingError(
             input.path,
@@ -6280,13 +6288,6 @@ export function createWorkspaceEngineCapture(
       // reopen within capture's next tick would take the lease again first.
       // Until capture records it, an open of this path waits (see
       // `outsideWritesUnrecorded`).
-      const outsideChangeUnrecorded = async (): Promise<boolean> => {
-        if (await outsideWriteWaits(input.path)) return true;
-        if (!changedOutsideProbed) return false;
-        const snapshot = await engine.readTextFile({ workspaceId, versionId, path: input.path });
-        const disk = await digestSettledFile(rootPath, input.path);
-        return disk.kind === "sha256" && snapshot?.sha256 !== disk.sha256;
-      };
       const recordOutsideWrite = async (): Promise<void> => {
         const deadline = Date.now() + OUTSIDE_WRITE_RECORD_DEADLINE_MS;
         try {
@@ -6294,10 +6295,12 @@ export function createWorkspaceEngineCapture(
             if (
               stopped ||
               shuttingDown ||
-              !(await outsideChangeUnrecorded().catch((error: unknown) => {
-                if (isCaptureBusy(error)) return true;
-                throw error;
-              }))
+              !(await outsideWriteWaits(input.path, changedOutsideProbed).catch(
+                (error: unknown) => {
+                  if (isCaptureBusy(error)) return true;
+                  throw error;
+                },
+              ))
             ) {
               outsideWritesUnrecorded.delete(input.path);
               return;
@@ -6309,7 +6312,7 @@ export function createWorkspaceEngineCapture(
           }
         } catch (error) {
           if (stopped || shuttingDown) return;
-          outsideWritesUnrecorded.add(input.path);
+          outsideWritesUnrecorded.set(input.path, changedOutsideProbed);
           onError(`capture of ${input.path} after its close`, error);
         }
       };

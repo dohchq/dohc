@@ -999,6 +999,49 @@ it("reports a replaced note before the import's watcher lists the outside write"
   }
 });
 
+it("keeps a reopen waiting after the close stops waiting for an import to record a replaced note", async () => {
+  claimedLineage = true;
+  const onChangedOutside = vi.fn<(unsaved: boolean) => void>();
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate() {},
+    onChangedOutside,
+  });
+  const editor = mirrorEditor(session);
+  const outside = "# Solo\n\nEdited in another app.\n";
+  try {
+    typeIntoBody(editor, "Typed in dohc.");
+    await writeFile(join(root, `${PATH}.tmp`), outside, "utf8");
+    await rename(join(root, `${PATH}.tmp`), join(root, PATH));
+    busyOutsideCapture = { path: PATH, text: outside, flushes: 100, hideDeferredWrite: true };
+    settleRefusal = wireRefusal("conflict-stale-target");
+    closeRefusal = wireRefusal("ydoc-unsettled-close");
+    await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
+    expect(onChangedOutside).toHaveBeenCalledExactlyOnceWith(true);
+
+    let now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => (now += 6_000));
+    try {
+      await session.close();
+    } finally {
+      clock.mockRestore();
+    }
+    expect(captureErrors.some((error) => error.includes("after its close"))).toBe(true);
+    await expect(
+      capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined }),
+    ).rejects.toThrow("capture has not recorded that version yet");
+
+    busyOutsideCapture!.flushes = 0;
+    settleRefusal = null;
+    closeRefusal = null;
+    const reopened = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
+    expect(busyOutsideCapture).toBeNull();
+    await reopened.close();
+  } finally {
+    editor.destroy();
+  }
+});
+
 it("releases a verified synced document and reports changed-on-disk after a terminal close settle refusal", async () => {
   claimedLineage = true;
   const states: string[] = [];
