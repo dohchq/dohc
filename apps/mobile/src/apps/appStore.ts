@@ -31,36 +31,44 @@ export interface RunningApp extends AppScope, AppLaunch {
 
 export interface AppRunner {
   state(): RunningApp | null;
+  launching(): LaunchScope | null;
   subscribe(listener: () => void): () => void;
   /** Ends the running app, and any launch on its way, that `match` names, or every one. */
   end(match?: (scope: AppScope) => boolean): void;
   /** Starts a launch for `scope`, ending the last. Resolves whether it showed. */
-  start(scope: AppScope & { readonly name: string }, launch: Promise<AppLaunch>): Promise<boolean>;
+  start(scope: LaunchScope, launch: Promise<AppLaunch>): Promise<boolean>;
   /** Ends the running app because its web process died. Its review says so until the next launch, or until `end` names it. */
   stop(): void;
   /** The app `stop` ended, or null. */
   stopped(): AppScope | null;
 }
 
+type LaunchScope = AppScope & { readonly name: string };
+
 export function createAppRunner(): AppRunner {
   const listeners = new Set<() => void>();
   let running: RunningApp | null = null;
-  let pending: { readonly key: number; readonly scope: AppScope } | null = null;
+  let pending: { readonly key: number; readonly scope: LaunchScope } | null = null;
   let launches = 0;
   let stopped: AppScope | null = null;
-  const set = (next: RunningApp | null) => {
-    running = next;
+  const notify = () => {
     for (const listener of listeners) listener();
   };
+  const set = (next: RunningApp | null) => {
+    running = next;
+    notify();
+  };
   const end: AppRunner["end"] = (match = () => true) => {
-    if (pending && match(pending.scope)) pending = null;
+    const launch = pending !== null && match(pending.scope);
+    if (launch) pending = null;
     const forget = stopped !== null && match(stopped);
     if (forget) stopped = null;
     if (running && match(running)) set(null);
-    else if (forget) set(running);
+    else if (forget || launch) notify();
   };
   return {
     state: () => running,
+    launching: () => pending?.scope ?? null,
     subscribe(listener) {
       listeners.add(listener);
       return () => void listeners.delete(listener);
@@ -71,12 +79,14 @@ export function createAppRunner(): AppRunner {
       end();
       const key = ++launches;
       pending = { key, scope };
+      notify();
       let answer: AppLaunch;
       try {
         answer = await launch;
       } catch (error) {
         if (pending?.key !== key) return false;
         pending = null;
+        notify();
         throw error;
       }
       if (pending?.key !== key) return false;

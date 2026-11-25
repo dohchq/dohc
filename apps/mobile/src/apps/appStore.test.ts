@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createAccount } from "../server/account";
 import {
   A,
@@ -130,6 +130,34 @@ describe("a launch", () => {
     expect(runner.stopped()).toBe(kept);
     runner.end();
     expect(runner.stopped()).toBeNull();
+  });
+
+  it("names the app it launches until the launch shows, fails or ends", async () => {
+    const { server, runner, apps } = setup();
+    const changed = vi.fn();
+    runner.subscribe(changed);
+    const release = holdGrant(server);
+    const shown = apps.open(app, still);
+    expect(runner.launching()).toMatchObject({ publicationId: A, name: "signup" });
+    expect(changed).toHaveBeenCalled();
+    release();
+    expect(await shown).toBe(true);
+    expect(runner.launching()).toBeNull();
+
+    server.on("POST", "/sync/ws-1/ops/appLaunch", { status: 503 });
+    const failed = apps.open(app, still);
+    expect(runner.launching()).not.toBeNull();
+    await expect(failed).rejects.toThrow();
+    expect(runner.launching()).toBeNull();
+
+    const answer = holdGrant(server);
+    const ended = apps.open(app, still);
+    changed.mockClear();
+    runner.end();
+    expect(runner.launching()).toBeNull();
+    expect(changed).toHaveBeenCalled();
+    answer();
+    expect(await ended).toBe(false);
   });
 
   it("opens nothing in a build that can't run apps", async () => {

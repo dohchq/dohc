@@ -7,15 +7,16 @@ import { WebView } from "react-native-webview";
 import { AppWebView } from "../../modules/app-web-view";
 import { useAccount, useSignIn } from "../account/AccountProvider";
 import { useTheme } from "../theme";
+import { HoldRow } from "../workspace/ListStates";
 import { createNavigationRule, externalLink } from "./appNavigation";
 import type { RunningApp } from "./appStore";
 import { offerLink } from "./offerLink";
 
-// The running app, full screen in its own web view. Native Back closes it, and the
-// screen leaves whenever the runner ends the app. When its web process dies, the runner stops it, and its review says so
-// (AppReview.tsx). While it runs, the workspace's apps are read again every CHECK_MS
-// and on each return to the foreground, so a revoke on another phone or a withdrawn publication closes it within that
-// time; the server has already ended the app's access.
+// The running app, full screen in its own web view. The screen opens as its launch starts, and shows loading until it
+// runs. Native Back closes it, and the screen leaves whenever the runner ends the app or its launch. When its web
+// process dies, the runner stops it, and its review says so (AppReview.tsx). While it runs, the workspace's apps are
+// read again every CHECK_MS and on each return to the foreground, so a revoke on another phone or a withdrawn
+// publication closes it within that time; the server has already ended the app's access.
 //
 // On Android the app runs in AppWebView (modules/app-web-view), which decides its loads in native code. On iOS the
 // WebView's settings are pinned for the app sandbox:
@@ -34,9 +35,10 @@ export function AppRunScreen() {
   const { runner, apps } = useAccount();
   const { origin } = useSignIn();
   const running = useSyncExternalStore(runner.subscribe, runner.state);
+  const launching = useSyncExternalStore(runner.subscribe, runner.launching);
   useEffect(() => {
-    if (!running && router.canGoBack()) router.back();
-  }, [running, router]);
+    if (!running && !launching && router.canGoBack()) router.back();
+  }, [running, launching, router]);
   // Leaving the screen, by Back or otherwise, ends the app, but keeps a stopped app for its review to show.
   useEffect(
     () => () => {
@@ -58,7 +60,7 @@ export function AppRunScreen() {
   }, [apps]);
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
-      <Stack.Screen options={{ title: running?.name ?? "" }} />
+      <Stack.Screen options={{ title: running?.name ?? launching?.name ?? "" }} />
       {running && AppWebView ? (
         <AndroidAppView
           key={running.key}
@@ -73,6 +75,8 @@ export function AppRunScreen() {
           serverOrigin={origin}
           onStopped={() => runner.stop()}
         />
+      ) : launching ? (
+        <HoldRow />
       ) : null}
     </View>
   );
