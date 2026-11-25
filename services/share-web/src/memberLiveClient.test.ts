@@ -45,11 +45,13 @@ function client(answer: (request: Request) => Response) {
 }
 
 function open(
-  route: "open" | "ready" = "open",
+  route: "open" | "ready" | "owner" = "open",
   headers: Record<string, string> = {},
-  body: unknown = { grantId: "grant-1", path: "trip/plan.md" },
+  body: unknown = route === "owner"
+    ? { workspaceId: "ws-1", path: "trip/plan.md" }
+    : { grantId: "grant-1", path: "trip/plan.md" },
 ) {
-  return new Request(`${origin}/api/live/member-${route}`, {
+  return new Request(`${origin}/api/live/${route === "owner" ? "owner-open" : `member-${route}`}`, {
     method: "POST",
     body: JSON.stringify(body),
     headers: {
@@ -176,4 +178,78 @@ it("waits for readiness in its own pool, a few per account, beside the opens", a
       ([request]) => new URL(request.url).pathname === "/sync/live/member-ready",
     ),
   ).toHaveLength(4);
+});
+
+// The workspace's owner opens a page as their phone does: the relay's page open answers with a ticket for the owner's socket.
+const ownerReady = {
+  ok: true,
+  result: {
+    status: "ready",
+    objectId: "object-1",
+    lineageClaimId: "c".repeat(64),
+    ticket: "ab".repeat(32),
+    expiresAtMs: Date.now() + 60_000,
+    editorLimits,
+  },
+};
+
+it("opens the owner's page through the relay's page open with only the cookie, origin and exchange key", async () => {
+  const c = client(() => Response.json(ownerReady));
+  const response = await c.handle(open("owner"));
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({
+    objectId: "object-1",
+    lineageClaimId: "c".repeat(64),
+    token: "ab".repeat(32),
+    limits: editorLimits,
+  });
+  const sent = c.fetchRelay.mock.calls[0]![0];
+  expect(sent.method).toBe("POST");
+  expect(new URL(sent.url).pathname).toBe("/sync/ws-1/ops/openPage");
+  expect(sent.headers.get("cookie")).toBe(`${cookieName}=sam`);
+  expect(sent.headers.get("origin")).toBe(origin);
+  expect(sent.headers.get("x-dohc-relay-exchange-key")).toBe(exchangeKey);
+  expect(sent.headers.has("authorization")).toBe(false);
+  expect(await sent.json()).toEqual({ path: "trip/plan.md" });
+});
+
+it("answers the owner's preparing page, and keeps the relay's refusal reason", async () => {
+  const preparing = client(() => Response.json({ ok: true, result: { status: "preparing" } }));
+  expect(await (await preparing.handle(open("owner"))).json()).toEqual({ preparing: true });
+  for (const reason of ["live-document-without-lineage", "missing", "live_host_full", "paused"]) {
+    const refused = client(() =>
+      Response.json({ ok: true, result: { status: "refused", reason } }),
+    );
+    const response = await refused.handle(open("owner"));
+    expect(response.status, reason).toBe(409);
+    expect(await response.json()).toEqual({ ok: false, code: reason });
+  }
+});
+
+it.each([
+  ["a signed-out browser", { cookie: "other=secret" }, undefined],
+  ["another site", { origin: "https://elsewhere.test" }, undefined],
+  ["a cross-site request", { "sec-fetch-site": "cross-site" }, undefined],
+  ["another host", { host: "elsewhere.test" }, undefined],
+  ["a form post", { "content-type": "text/plain" }, undefined],
+  ["a grant beside the workspace", {}, { workspaceId: "ws-1", grantId: "grant-1", path: "a.md" }],
+  ["a file that is not a page", {}, { workspaceId: "ws-1", path: "trip/photo.png" }],
+] as const)(
+  "refuses the owner's open from %s before reaching the relay",
+  async (_, headers, body) => {
+    const c = client(() => Response.json(ownerReady));
+    expect((await c.handle(open("owner", headers, body))).status).toBe(404);
+    expect(c.fetchRelay).not.toHaveBeenCalled();
+  },
+);
+
+it("refuses the relay's not-found, an expired ticket, and a malformed reason alike", async () => {
+  for (const answer of [
+    () => Response.json({ ok: false, code: "not_found" }, { status: 404 }),
+    () => Response.json({ ok: false, code: "not_found" }, { status: 409 }),
+    () =>
+      Response.json({ ok: true, result: { ...ownerReady.result, expiresAtMs: Date.now() - 1 } }),
+    () => Response.json({ ok: true, result: { status: "refused", reason: "<script>" } }),
+  ])
+    expect((await client(answer).handle(open("owner"))).status).toBe(404);
 });

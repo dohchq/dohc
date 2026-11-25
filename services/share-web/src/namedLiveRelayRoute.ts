@@ -5,6 +5,7 @@ import {
 import type { IncomingMessage } from "node:http";
 import { WebSocket } from "ws";
 import type { LiveGatewayOptions, LiveGatewayHostRoute } from "./liveGateway";
+import { ownerLiveScope } from "./liveGatewayRequest";
 import { namedAccountCookie } from "./namedAccountCookie";
 
 export function namedLiveGatewayRequest(
@@ -32,6 +33,8 @@ export function createNamedLiveRelayRoute(options: {
   publicOrigin: string;
   exchangeKey: string;
   handshakeTimeoutMs: number;
+  /** The owner's browser reaches the relay's owner socket for the page its query names. */
+  owner?: boolean;
 }): LiveGatewayOptions["openHostRoute"] {
   const relay = new URL(options.relayUrl),
     origin = new URL(options.publicOrigin);
@@ -57,9 +60,22 @@ export function createNamedLiveRelayRoute(options: {
         resolve(null);
         return;
       }
-      const url = new URL("/sync/live/named", relay);
+      const scope = options.owner ? ownerLiveScope(input.discriminator) : undefined;
+      if (scope === null) {
+        resolve(null);
+        return;
+      }
+      const url = new URL(
+        scope
+          ? `/sync/workspaces/${encodeURIComponent(scope.workspaceId)}/live/owner`
+          : "/sync/live/named",
+        relay,
+      );
       url.protocol = relay.protocol === "https:" ? "wss:" : "ws:";
-      url.searchParams.set("session", input.discriminator);
+      if (scope) {
+        url.searchParams.set("objectId", scope.objectId);
+        url.searchParams.set("lineageClaimId", scope.lineageClaimId);
+      } else url.searchParams.set("session", input.discriminator);
       const invalidated = new AbortController();
       let socket: WebSocket;
       let settled = false;

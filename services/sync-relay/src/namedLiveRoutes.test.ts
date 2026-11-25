@@ -14,6 +14,7 @@ import { LIVE_TICKET_LIFETIME_MS } from "@dohc/live-session-contract/live-ticket
 import { selfHostLiveProfile } from "./selfHostLiveProfile";
 import { observeRelayWrites } from "./relayWriteChanges";
 import { WORKSPACE_SHARE_SELECTOR_JSON } from "./storage/workspaceMembers";
+import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
 import type { StorageContext } from "./storage/context.js";
 import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
 import { once } from "node:events";
@@ -52,6 +53,8 @@ import {
   phoneState,
   phoneScope,
   phoneHeaders,
+  browserHeaders,
+  browserScope,
   openProductionSync,
 } from "./namedLiveRoutes.test-helper";
 
@@ -1214,6 +1217,125 @@ describe("an owner's phone", () => {
       expect(phone.received.filter((frame) => frame.kind === "result")).toEqual([]);
     },
   );
+
+  describe("and browser", () => {
+    const mintBrowser = (f: Fixture, changed: Partial<typeof browserScope> = {}) =>
+      mintPhone(f, { ...browserScope, ...changed });
+    const openBrowser = async (f: Fixture) => {
+      const browser = f.connect((await mintBrowser(f)).token, "", browserHeaders);
+      const desktop = f.connect("");
+      expect([await browser.status, await desktop.status]).toEqual([101, 101]);
+      return { browser, desktop };
+    };
+
+    it("opens once per ticket that share-web forwards, in the owner's room, reading its sign-in uncached", async () => {
+      const join = vi.fn((captured: NamedFrameRoomHost) => captured);
+      const f = await phoneFixture({ join } as unknown as LiveRooms);
+      const { token } = await mintBrowser(f);
+      const browser = f.connect(token, "", browserHeaders);
+      expect(await browser.status).toBe(101);
+      expect(browser.ws.protocol).toBe("dohc-live-v1");
+      await browser.until(() => browser.received.some((frame) => frame.kind === "welcome"));
+      expect(f.readSessions).toHaveBeenCalledWith(["browser-session"]);
+      expect(join).toHaveBeenCalledOnce();
+      expect(await f.connect(token, "", browserHeaders).status).toBe(404);
+    });
+
+    const { cookie, origin } = browserHeaders;
+    const key = browserHeaders["x-dohc-relay-exchange-key"];
+    it.each<[string, Partial<typeof browserScope>, Record<string, string>]>([
+      ["another account", {}, { ...browserHeaders, cookie: "account=browser:owner-2" }],
+      ["a member", {}, { ...browserHeaders, cookie: `account=browser:${scope.userId}` }],
+      ["a desktop's sign-in", {}, { ...browserHeaders, cookie: "account=reader" }],
+      ["no cookie", {}, { origin, "x-dohc-relay-exchange-key": key }],
+      ["another origin", {}, { ...browserHeaders, origin: "https://foreign.example" }],
+      ["no origin", {}, { cookie, "x-dohc-relay-exchange-key": key }],
+      [
+        "a wrong exchange key",
+        {},
+        { ...browserHeaders, "x-dohc-relay-exchange-key": "x".repeat(54) },
+      ],
+      ["a ticket for the phone's sign-in", { sessionId: "phone-session" }, browserHeaders],
+      [
+        "a Bearer beside the cookie",
+        {},
+        { ...browserHeaders, authorization: "Bearer owner-token" },
+      ],
+    ])(
+      "refuses %s as a missing workspace, and spends no ticket",
+      async (_name, changed, headers) => {
+        const f = await phoneFixture();
+        const { token } = await mintBrowser(f, changed);
+        expect(await f.connect(token, "", headers).status).toBe(404);
+        expect(f.native.client.openLiveAppliedSync).not.toHaveBeenCalled();
+        if (Object.keys(changed).length === 0)
+          expect(await f.connect(token, "", browserHeaders).status).toBe(101);
+      },
+    );
+
+    it("refuses a browser with no ticket, and a fenced owner", async () => {
+      const f = await phoneFixture();
+      expect(await f.connect("", "", browserHeaders).status).toBe(404);
+      const { token } = await mintBrowser(f);
+      const context = f.storage as StorageContext;
+      initializeAccountDeletion(context, "deletion-key");
+      fenceAccount(context, "deletion-key", "owner-1", "owner-1@dohc.test");
+      expect(await f.connect(token, "", browserHeaders).status).toBe(404);
+      expect(f.native.client.openLiveAppliedSync).not.toHaveBeenCalled();
+    });
+
+    it.each(["a revoke", "a fence"])(
+      "closes at %s while frames flow, and leaves the host",
+      async (invalidation) => {
+        const f = await phoneFixture();
+        const { browser, desktop } = await openBrowser(f);
+        await closesWhileSending(browser, () => {
+          if (invalidation === "a revoke") f.routes.stopSession("owner-1", "browser-session");
+          else f.routes.deleteAccount("owner-1", []);
+        });
+        expect(f.native.invalidated.aborted).toBe(false);
+        if (invalidation !== "a fence") expect(desktop.ws.readyState).toBe(WebSocket.OPEN);
+      },
+    );
+
+    it("stays open when Show on phone turns off", async () => {
+      const f = await phoneFixture();
+      const { browser } = await openBrowser(f);
+      f.routes.stopPhoneWorkspace("owner-1", f.binding.workspaceId);
+      f.storage.setShowOnPhone({
+        ownerUserId: "owner-1",
+        workspaceId: f.binding.workspaceId,
+        showOnPhone: false,
+      });
+      f.changes.notifyWrite();
+      // A ping answered after the change shows the socket outlived it.
+      browser.ws.ping();
+      await once(browser.ws, "pong");
+      expect(browser.ws.readyState).toBe(WebSocket.OPEN);
+    });
+
+    it.each(["signed out", "standing"])(
+      "reads its sign-in again each minute and closes when it is %s",
+      async (state) => {
+        vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+        try {
+          const f = await phoneFixture();
+          const { browser, desktop } = await openBrowser(f);
+          f.readSessions.mockClear();
+          // share-web's sign-out deletes the session's row.
+          if (state === "signed out") f.sessionRows.delete("browser-session");
+          const closed = new Promise<void>((resolve) => browser.ws.once("close", () => resolve()));
+          await vi.advanceTimersByTimeAsync(OWNER_SESSION_CHECK_MS);
+          expect(f.readSessions).toHaveBeenCalledWith(["browser-session"]);
+          if (state === "standing") expect(browser.ws.readyState).toBe(WebSocket.OPEN);
+          else await closed;
+          expect(desktop.ws.readyState).toBe(WebSocket.OPEN);
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+  });
 });
 
 it.each([

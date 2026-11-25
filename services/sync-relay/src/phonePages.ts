@@ -12,9 +12,9 @@ import type { SyncRelayStorage } from "./storage";
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 import { LiveHostingRefusal, type ServiceHostEnrollment } from "./storage/serviceHostEnrollment";
 
-// The phone opens one of its account's pages to edit it live. The account
-// route has already checked the phone's sign-in, its fence, the workspace's
-// owner and Show on phone. This enrolls a page that already has live history
+// The phone, or the owner's browser through share-web, opens one of its account's pages to edit it live. The account
+// route has already checked the sign-in, its fence, the workspace's
+// owner and, for a phone, Show on phone. This enrolls a page that already has live history
 // as the owner's open, and once the live host is ready, mints the one-use
 // ticket the phone's owner connection presents. A page no computer has opened
 // live is refused, as it is for agents: its owner opens it on a desktop first.
@@ -112,8 +112,8 @@ export function createPhonePages(options: {
 
   return {
     async open({ caller, workspaceId, args, authorize, signal }) {
-      // A desktop or browser edits as the owner without a ticket, so only a phone opens a page here.
-      if (caller.clientKind !== "phone") throw notFound();
+      // A desktop edits as the owner without a ticket. A phone, and a browser through share-web, open a page here.
+      if (caller.clientKind === "desktop") throw notFound();
       const path = parsePath(args);
       const objectId = pageAt(workspaceId, path);
       if (objectId === undefined) return refused("missing");
@@ -168,7 +168,7 @@ export function createPhonePages(options: {
     );
     if (
       stored?.userId !== caller.userId ||
-      stored.clientKind !== "phone" ||
+      stored.clientKind !== caller.clientKind ||
       stored.expiresAtMs <= options.nowMs()
     )
       throw notFound();

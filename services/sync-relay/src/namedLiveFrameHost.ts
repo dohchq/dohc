@@ -337,6 +337,8 @@ export function captureOwnerLiveFrameHost(options: {
   reserveBytes?: (size: number) => () => void;
   validationBudget?: NamedFrameValidationBudget;
   guard?: () => void;
+  /** Refuses an edit that names an agent or an automation, as a browser's edits are the owner's own. */
+  personOnly?: boolean;
 }): NamedFrameRoomHost {
   const binding = parseLiveObjectBinding(options.native.binding);
   const document = {
@@ -374,6 +376,7 @@ function captureLiveFrameHost(options: {
   validationBudget?: NamedFrameValidationBudget;
   fresh?: PersonalFreshRead;
   guard?: () => void;
+  personOnly?: boolean;
 }): NamedFrameRoomHost {
   const guard = options.guard;
   const binding = parseLiveObjectBinding(options.binding);
@@ -584,6 +587,8 @@ function captureLiveFrameHost(options: {
           : parseLiveAuthorContext(input.authorContext);
       // Only the relay attributes work to a personal agent.
       if (!trustedAutomation && claimsPersonalAgent(authorContext))
+        return { result: "refused", reason: "provenance-refused" };
+      if (options.personOnly && (trustedAutomation || authorContext?.agent))
         return { result: "refused", reason: "provenance-refused" };
       if (updateBytes.length < 1) return { result: "refused", reason: "invalid-update" };
       if (updateBytes.length > bounds.maxSubmissionBytes)

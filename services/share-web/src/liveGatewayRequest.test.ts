@@ -248,3 +248,61 @@ describe("live gateway raw request validation", () => {
     }
   });
 });
+
+describe("the owner's live gateway", () => {
+  const owner = createLiveGatewayRequestParser({
+    publicHosts: new Set(["share.example.test"]),
+    publicOrigin: origin,
+    path: "/api/live/owner",
+  });
+  const page = `workspaceId=ws-1&objectId=object-1&lineageClaimId=${"c".repeat(64)}`;
+
+  it("takes only the page's canonical query in place of a session", () => {
+    expect(owner(request(headers, `/api/live/owner?${page}`))).toEqual({
+      session: page,
+      ticketToken: token,
+    });
+    expect(parse(request(headers, `/api/live/owner?${page}`))).toBeNull();
+    for (const url of [
+      `/api/live/owner?objectId=object-1&workspaceId=ws-1&lineageClaimId=${"c".repeat(64)}`,
+      `/api/live/owner?${page}&session=${session}`,
+      `/api/live/owner?workspaceId=ws-1&objectId=object-1&lineageClaimId=short`,
+      `/api/live/owner?session=${session}`,
+      target,
+    ])
+      expect(owner(request(headers, url)), url).toBeNull();
+  });
+
+  it("refuses another site and a missing ticket", () => {
+    expect(
+      owner(
+        request(
+          [
+            "Host",
+            "share.example.test",
+            "Origin",
+            "https://elsewhere.test",
+            "Sec-WebSocket-Protocol",
+            protocol,
+          ],
+          `/api/live/owner?${page}`,
+        ),
+      ),
+    ).toBeNull();
+    expect(
+      owner(
+        request(
+          [
+            "Host",
+            "share.example.test",
+            "Origin",
+            origin,
+            "Sec-WebSocket-Protocol",
+            "dohc-live-v1",
+          ],
+          `/api/live/owner?${page}`,
+        ),
+      ),
+    ).toBeNull();
+  });
+});

@@ -2087,7 +2087,11 @@ export function createShareWebApplication({
       return response(result.body, { status: result.status, headers: result.headers });
     }
 
-    if (pathname === "/api/live/member-open" || pathname === "/api/live/member-ready") {
+    if (
+      pathname === "/api/live/member-open" ||
+      pathname === "/api/live/member-ready" ||
+      pathname === "/api/live/owner-open"
+    ) {
       mark(pathname);
       if (!memberLive) return refused();
       const result = await memberLive(request);

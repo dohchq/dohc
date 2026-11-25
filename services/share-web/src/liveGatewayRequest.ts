@@ -3,10 +3,29 @@ import {
   parseLiveTicketAudience,
   parseLiveTicketToken,
 } from "@dohc/live-session-contract/live-ticket";
+import {
+  parseLiveUpdateDigest,
+  parseLiveUpdateIdentifier,
+} from "@dohc/live-session-contract/live-update-admission";
 import { isSessionDiscriminator } from "./sessionDiscriminator";
 
 const VERSION_PROTOCOL = "dohc-live-v1";
 const TICKET_PROTOCOL_PREFIX = "dohc-live-ticket.";
+
+/** The owner's page an owner socket's query names, or null unless the query is exactly its canonical form. */
+export function ownerLiveScope(query: string) {
+  try {
+    const params = new URLSearchParams(query);
+    const scope = {
+      workspaceId: parseLiveUpdateIdentifier(params.get("workspaceId")),
+      objectId: parseLiveUpdateIdentifier(params.get("objectId")),
+      lineageClaimId: parseLiveUpdateDigest(params.get("lineageClaimId")),
+    };
+    return new URLSearchParams(scope).toString() === query ? scope : null;
+  } catch {
+    return null;
+  }
+}
 
 function validHost(value: string): boolean {
   if (!/^(?:[A-Za-z0-9.-]+|\[[A-Fa-f0-9:.]+\])(?::[0-9]+)?$/.test(value)) return false;
@@ -20,13 +39,14 @@ function validHost(value: string): boolean {
 export function createLiveGatewayRequestParser(config: {
   publicHosts: ReadonlySet<string>;
   publicOrigin: string;
-  path?: "/api/live" | "/api/live/link";
+  path?: "/api/live" | "/api/live/link" | "/api/live/owner";
 }) {
   const publicOrigin = parseLiveTicketAudience(config.publicOrigin);
   const path = config.path ?? "/api/live";
-  if (path !== "/api/live" && path !== "/api/live/link")
+  if (path !== "/api/live" && path !== "/api/live/link" && path !== "/api/live/owner")
     throw new TypeError("Invalid live gateway path.");
-  const targetPrefix = `${path}?session=`;
+  // An owner socket names its page instead of a browser session.
+  const targetPrefix = path === "/api/live/owner" ? `${path}?` : `${path}?session=`;
   const publicHosts = new Set(
     [...config.publicHosts].map((host) => {
       if (!validHost(host))
@@ -60,7 +80,8 @@ export function createLiveGatewayRequestParser(config: {
     if (selected.get("origin") !== publicOrigin) return null;
     if (method !== "GET" || !url?.startsWith(targetPrefix)) return null;
     const session = url.slice(targetPrefix.length);
-    if (!isSessionDiscriminator(session)) return null;
+    if (path === "/api/live/owner" ? !ownerLiveScope(session) : !isSessionDiscriminator(session))
+      return null;
     const protocols = selected
       .get("sec-websocket-protocol")
       ?.split(",")

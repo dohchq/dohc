@@ -1739,3 +1739,22 @@ describe("a retrying page keeps its session", () => {
     expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "host-unavailable" });
   });
 });
+
+it("connects the owner's socket by the page its URL names, with no browser session", async () => {
+  const token = "ab".repeat(32),
+    page = `workspaceId=ws-1&objectId=document&lineageClaimId=${"c".repeat(64)}`;
+  const f = await live(async () => ({
+    ticketToken: token,
+    websocketUrl: `wss://share.example/api/live/owner?${page}`,
+  }));
+  expect(f.urls).toEqual([`wss://share.example/api/live/owner?${page}`]);
+  expect(f.protocols).toEqual([["dohc-live-v1", `dohc-live-ticket.${token}`]]);
+  expect(f.requests).toEqual([]);
+  // A URL that names a browser session needs the answer to give the same one.
+  const stray = fixture(limits(), async () => ({
+    ticketToken: token,
+    websocketUrl: "wss://share.example/api/live?session=abcdefghijkl",
+  }));
+  await stray.value.reconnect();
+  expect(stray.urls).toEqual([]);
+});

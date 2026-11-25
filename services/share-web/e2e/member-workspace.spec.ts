@@ -55,6 +55,17 @@ test("a member reads a page, comments on it and posts in a Group in the browser 
     discussionActivity: new DiscussionActivityHub(),
     shareWebOrigin: viewer,
     relayExchangeKey: exchangeKey,
+    // share-web forwards the owner's browser to open a page with the account cookie it signed in with.
+    resolvePhoneCapableAccountSession: async (request) => {
+      const account = accountFor(request.headers.get("cookie"));
+      if (!account) throw new UnauthorizedError();
+      return {
+        userId: account.id,
+        sessionId: `${account.id}-browser`,
+        expiresAtMs: Date.now() + 3_600_000,
+        clientKind: "browser",
+      };
+    },
     lookupUserDisplayName: (userId) =>
       userId === "owner"
         ? "Ana"
@@ -397,8 +408,22 @@ test("a member reads a page, comments on it and posts in a Group in the browser 
     await expect(ownerPage).toHaveURL(`${viewer}/s/workspace/owner/${workspaceId}`);
     const ownerFiles = ownerPage.getByRole("navigation", { name: "Workspace files" });
     await expect(ownerFiles.getByRole("heading", { level: 1 })).toHaveText("Lisbon trip");
+    // Opening a page asks the relay for the owner's live editor, as the phone does. This relay hosts no live pages, so the page stays readable.
+    const ownerOpen = ownerPage.waitForResponse((response) =>
+      response.url().endsWith("/api/live/owner-open"),
+    );
     await ownerFiles.getByRole("treeitem", { name: "budget.md" }).click();
+    const opened = await ownerOpen;
+    expect(opened.request().postDataJSON()).toEqual({ workspaceId, path: "trip/budget.md" });
+    expect([opened.status(), await opened.json()]).toEqual([
+      409,
+      { ok: false, code: "live_hosting_unsupported" },
+    ]);
     await expect(ownerPage.getByText("Hotel 780, flights 640.")).toBeVisible();
+    await expect(
+      ownerPage.getByText("dohc could not open this page for editing. You can still read it."),
+    ).toBeVisible();
+    await ownerPage.screenshot({ path: testInfo.outputPath("owner-live.png") });
     await expect(ownerPage.getByText("Owner", { exact: true })).toBeVisible();
     const ownerChats = ownerPage.getByRole("region", { name: "Chats" });
     await expect(ownerChats.getByText("I'll buy the train tickets.")).toBeVisible();

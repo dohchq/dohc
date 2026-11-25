@@ -40,7 +40,7 @@ function request(
   } as IncomingMessage;
 }
 
-async function fixture(reject = false) {
+async function fixture(reject = false, owner = false) {
   const server = createServer(),
     accepted = new WebSocketServer({
       noServer: true,
@@ -76,6 +76,7 @@ async function fixture(reject = false) {
     publicOrigin: origin,
     exchangeKey: "x".repeat(32),
     handshakeTimeoutMs: 10_000,
+    owner,
   });
   return { open, input: () => input, sockets };
 }
@@ -139,4 +140,42 @@ it("refuses anonymous and ambiguous account cookies before creating an upstream 
     ).toBeNull();
   }
   expect(f.input()).toBeUndefined();
+});
+
+it("takes the owner's browser to the relay's owner socket for the page its query names", async () => {
+  const f = await fixture(false, true),
+    abort = new AbortController();
+  const page = `workspaceId=ws-1&objectId=object-1&lineageClaimId=${"c".repeat(64)}`;
+  const route = await f.open(
+    { request: request(), discriminator: page, ticketToken: token },
+    abort.signal,
+    receive,
+  );
+  expect(route).not.toBeNull();
+  expect(f.input()!.url).toBe(
+    `/sync/workspaces/ws-1/live/owner?objectId=object-1&lineageClaimId=${"c".repeat(64)}`,
+  );
+  expect(f.input()!.headers).toMatchObject({
+    origin,
+    cookie: `${cookieName}=account-secret`,
+    "x-dohc-relay-exchange-key": "x".repeat(32),
+  });
+  expect(f.input()!.headers.authorization).toBeUndefined();
+  expect(f.input()!.headers["sec-websocket-protocol"]).toBe(
+    `dohc-live-v1,dohc-live-ticket.${token}`,
+  );
+  abort.abort();
+  // A query in another order, or with more, names no page.
+  for (const other of [
+    `objectId=object-1&workspaceId=ws-1&lineageClaimId=${"c".repeat(64)}`,
+    `${page}&session=abcdefghijkl`,
+    discriminator,
+  ])
+    expect(
+      await f.open(
+        { request: request(), discriminator: other, ticketToken: token },
+        new AbortController().signal,
+        receive,
+      ),
+    ).toBeNull();
 });

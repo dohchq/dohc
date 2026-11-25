@@ -434,9 +434,14 @@ function journal(f: Awaited<ReturnType<typeof setup>>) {
     });
 }
 
-function ownerCapture(f: Awaited<ReturnType<typeof setup>>, authenticatedUserId = "owner-1") {
+function ownerCapture(
+  f: Awaited<ReturnType<typeof setup>>,
+  authenticatedUserId = "owner-1",
+  personOnly = false,
+) {
   const capture = captureOwnerLiveFrameHost({
     authenticatedUserId,
+    personOnly,
     storage: f.storage,
     native: f.native,
     bounds: f.bounds,
@@ -1152,4 +1157,27 @@ it("keeps a member's live reads after an Edit drop, refuses submissions, and clo
   );
   await vi.waitFor(() => expect(capture.invalidated.aborted).toBe(true));
   sync.close();
+});
+
+it("refuses an owner's browser edit that names any agent, and takes the owner's own", async () => {
+  const f = await setup(),
+    capture = ownerCapture(f, "owner-1", true),
+    commit = journal(f);
+  const update = (agent?: { agentId: string; agentName: string; depth: number }) => ({
+    deliveryId: ack.deliveryId,
+    updateDigest: hash(bytes),
+    updateBytes: bytes,
+    authorContext: { kind: "account" as const, accountId: "owner-1", ...(agent ? { agent } : {}) },
+  });
+  expect(
+    await capture.submit(
+      update({ agentId: "helper", agentName: "Helper", depth: 0 }),
+      new AbortController().signal,
+    ),
+  ).toEqual({ result: "refused", reason: "provenance-refused" });
+  expect(commit).not.toHaveBeenCalled();
+  expect(await capture.submit(update(), new AbortController().signal)).toEqual({
+    result: "success",
+    ack,
+  });
 });

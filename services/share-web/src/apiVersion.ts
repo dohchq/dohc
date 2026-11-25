@@ -33,6 +33,7 @@ const METHODS: Readonly<Record<string, readonly string[]>> = {
   "/api/live/named-documents": ["POST"],
   "/api/live/member-open": ["POST"],
   "/api/live/member-ready": ["POST"],
+  "/api/live/owner-open": ["POST"],
   "/api/apps": ["GET"],
   "/api/apps/launch": ["POST"],
   "/api/apps/summary": ["POST"],

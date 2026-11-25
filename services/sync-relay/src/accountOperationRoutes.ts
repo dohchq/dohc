@@ -18,7 +18,9 @@ import { isPhoneCollectionOperation, type PhoneCollections } from "./phoneCollec
 import { bearerAccountSession } from "./accountWorkspaceRoutes";
 import type { ChatWakeWaits } from "./chatWakeRoutes";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
+import { verifyRelayExchangeKey } from "./linkSecurity";
 import type { PhonePages } from "./phonePages";
+import { accountIsFenced } from "./storage/accountDeletion";
 import { parseWorkspaceId } from "./requestInputs";
 import type { ServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
@@ -71,7 +73,8 @@ export function parseAccountOperationRoute(parts: readonly string[]): AccountOpe
  * (phoneCollections.ts); its change feed, at
  * `GET .../ops/changes?since=&hold=`; and its wake changes there, at
  * `GET .../ops/wakeChanges?since=&hold=`. Only a Bearer session
- * reaches them, and the route checks the operation and the owner before it
+ * reaches them, except a page open share-web forwards for the owner's browser.
+ * The route checks the operation and the owner before it
  * reads the arguments or the cursor. The sign-in, its fence, the owner and
  * "Show on phone" are checked again once the arguments arrive, after the
  * account's name is looked up for a write, once the copy is open, once it
@@ -102,10 +105,38 @@ export function createAccountOperationRoute(options: {
   phoneCollections?: PhoneCollections;
   /** Opens a page for the phone to edit live. Absent while this server hosts no live pages. */
   phonePages?: () => PhonePages | undefined;
+  /** share-web's origin and exchange key, with which it forwards the owner's browser to open a page. */
+  browser?: { origin: string; exchangeKeyHash: string };
 }) {
   const { storage, limiter } = options;
-  const session = (request: Request) =>
-    bearerAccountSession(storage, options.resolveAccountSession, request);
+  // Only share-web sends the owner's browser: the account cookie, its exact origin and the exchange key, with no Bearer.
+  const browserSession = async (request: Request) => {
+    const cookie = request.headers.get("cookie");
+    if (
+      !options.browser ||
+      !cookie ||
+      request.headers.get("origin") !== options.browser.origin ||
+      !verifyRelayExchangeKey(
+        request.headers.get("x-dohc-relay-exchange-key"),
+        options.browser.exchangeKeyHash,
+      )
+    )
+      throw notFound();
+    const caller = await options
+      .resolveAccountSession(
+        new Request(request.url, { headers: { cookie }, signal: request.signal }),
+      )
+      .catch(() => {
+        throw notFound();
+      });
+    if (caller.clientKind !== "browser" || accountIsFenced(storage, caller.userId))
+      throw notFound();
+    return caller;
+  };
+  const session = (request: Request, browser = false) =>
+    browser
+      ? browserSession(request)
+      : bearerAccountSession(storage, options.resolveAccountSession, request);
 
   return async function respondToAccountOperation(
     request: Request,
@@ -114,8 +145,12 @@ export function createAccountOperationRoute(options: {
     const feed = route.operation === "changes" && request.method === "GET";
     const wakeFeed = route.operation === "wakeChanges" && request.method === "GET";
     if (!feed && !wakeFeed && request.method !== "POST") throw relayError("method_not_allowed");
-    const caller = await session(request);
     const page = route.operation === "openPage";
+    // The owner's browser reaches a page open, and nothing else here.
+    const browser = page && !request.headers.has("authorization");
+    const caller = await session(request, browser);
+    // A phone opens with its Bearer sign-in, and a browser only through share-web.
+    if (page && caller.clientKind !== (browser ? "browser" : "phone")) throw notFound();
     if (
       !limiter.allow(caller.sessionId, options.nowMs()) ||
       // An open can enroll a page, so the account's sign-ins also share one pace for it.
@@ -133,10 +168,10 @@ export function createAccountOperationRoute(options: {
     // and its live host; every other operation needs a copy.
     if (!feed && !wakeFeed && !app && !collection && !page && options.copies() === undefined)
       throw copiesUnavailable();
-    // The phone reaches a workspace its account owns while it shows on the phone.
+    // The phone reaches a workspace its account owns while it shows on the phone. Signing in is the browser's only gate.
     const reaches = (userId: string) =>
       storage.workspaceIsOwnedBy(route.workspaceId, userId) &&
-      storage.showsOnPhone(userId, route.workspaceId);
+      (browser || storage.showsOnPhone(userId, route.workspaceId));
     const write = isPhoneWriteOperation(route.operation);
     const mark = route.operation === "markRead";
     const retry = route.operation === "retryWake";
@@ -158,7 +193,7 @@ export function createAccountOperationRoute(options: {
     )
       throw notFound();
     const authorize = async () => {
-      const current = await session(request);
+      const current = await session(request, browser);
       if (
         current.sessionId !== caller.sessionId ||
         current.userId !== caller.userId ||

@@ -767,7 +767,7 @@ function MemberWorkspace({
   nameFor(path: string): string;
 }) {
   const session = viewSession(target);
-  // The owner's page reads and posts in Groups and Comments as a member's does. Live editing is a member's only.
+  // The owner's page reads, posts and edits as a member's does. The owner edits every page.
   const owner = target.kind === "owner",
     grantId = target.kind === "member" ? target.grantId : null;
   const place = String(
@@ -986,8 +986,7 @@ function MemberWorkspace({
   // The open file's own level. A file whose level hasn't arrived offers nothing the relay might refuse.
   const level = selected ? (files.levels.get(selected.path) ?? "view") : files.meta.access;
   const live =
-    grantId !== null &&
-    level === "edit" &&
+    (owner || level === "edit") &&
     selected !== undefined &&
     selected.contentKind === "text" &&
     isMarkdown(selected.path);
@@ -1138,7 +1137,9 @@ function MemberWorkspace({
                       <Suspense fallback={readView}>
                         <MemberLivePage
                           key={selected.path}
-                          grantId={grantId}
+                          target={
+                            owner ? { workspaceId: target.workspaceId } : { grantId: grantId! }
+                          }
                           accountId={account.id}
                           path={selected.path}
                           draftName={nameFor(selected.path)}

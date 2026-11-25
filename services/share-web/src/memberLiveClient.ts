@@ -1,6 +1,9 @@
 import { readBoundedJson } from "@dohc/service-http";
 import { parseLiveTicketToken } from "@dohc/live-session-contract/live-ticket";
-import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
+import {
+  parseLiveUpdateDigest,
+  parseLiveUpdateIdentifier,
+} from "@dohc/live-session-contract/live-update-admission";
 import { namedAccountCookie } from "./namedAccountCookie";
 import {
   parseNamedLiveBrowserClientLimits,
@@ -12,6 +15,7 @@ import { selfHostLiveProfile } from "../../sync-relay/src/selfHostLiveProfile";
 
 export const MEMBER_OPEN_PATH = "/api/live/member-open";
 export const MEMBER_READY_PATH = "/api/live/member-ready";
+export const OWNER_OPEN_PATH = "/api/live/owner-open";
 const READY = "waiting\nready\n",
   UNAVAILABLE = "waiting\nunavailable\n";
 const REFUSAL_CODE = /^[a-z][a-z_-]{0,63}$/u;
@@ -20,7 +24,9 @@ const REFUSAL_CODE = /^[a-z][a-z_-]{0,63}$/u;
  * A workspace member's browser opens a page for editing. The relay finds the
  * person from the account cookie, enrolls the page with its host, and answers
  * with a live session this server's socket resolves. A host's refusal keeps
- * its code, so the page can say why.
+ * its code, so the page can say why. The workspace's owner opens a page as
+ * their phone does, through the relay's page open, which answers with a
+ * ticket for the owner's live socket.
  */
 export function createMemberLiveClient(options: {
   relayUrl: string;
@@ -70,13 +76,39 @@ export function createMemberLiveClient(options: {
   const readyByCookie = new Map<string, number>();
   const answer = (body: unknown, status = 200) =>
     Response.json(body, { status, headers: { "cache-control": "private, no-store" } });
+  // The relay's page open answers the owner's browser as it answers the phone, with a ticket for the owner's socket.
+  const ownerAnswer = (result: unknown) => {
+    if (!result || typeof result !== "object" || Array.isArray(result)) return refusal();
+    const row = result as Record<string, unknown>;
+    if (row.status === "preparing") return answer({ preparing: true });
+    if (row.status === "refused")
+      return typeof row.reason === "string" && REFUSAL_CODE.test(row.reason)
+        ? answer({ ok: false, code: row.reason }, 409)
+        : refusal();
+    if (
+      row.status !== "ready" ||
+      typeof row.expiresAtMs !== "number" ||
+      row.expiresAtMs <= Date.now() ||
+      !row.editorLimits ||
+      typeof row.editorLimits !== "object"
+    )
+      return refusal();
+    parseLiveTicketToken(row.ticket);
+    return answer({
+      objectId: parseLiveUpdateIdentifier(row.objectId, "object ID"),
+      lineageClaimId: parseLiveUpdateDigest(row.lineageClaimId),
+      token: row.ticket,
+      limits: row.editorLimits,
+    });
+  };
 
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
-    const ready = url.pathname === MEMBER_READY_PATH;
+    const ready = url.pathname === MEMBER_READY_PATH,
+      owner = url.pathname === OWNER_OPEN_PATH;
     const pool = ready ? readyCalls : calls;
     if (
-      (!ready && url.pathname !== MEMBER_OPEN_PATH) ||
+      (!ready && !owner && url.pathname !== MEMBER_OPEN_PATH) ||
       url.search ||
       request.method !== "POST" ||
       request.signal.aborted ||
@@ -99,19 +131,27 @@ export function createMemberLiveClient(options: {
           !input ||
           typeof input !== "object" ||
           Array.isArray(input) ||
-          Object.keys(input).sort().join() !== "grantId,path"
+          Object.keys(input).sort().join() !== (owner ? "path,workspaceId" : "grantId,path")
         )
           return refusal();
         const value = input as Record<string, unknown>;
         if (typeof value.path !== "string" || !/\.md$/iu.test(value.path)) return refusal();
-        const body = JSON.stringify({
-          grantId: parseLiveUpdateIdentifier(value.grantId, "grant ID"),
-          path: value.path,
-        });
+        const body = JSON.stringify(
+          owner
+            ? { path: value.path }
+            : { grantId: parseLiveUpdateIdentifier(value.grantId, "grant ID"), path: value.path },
+        );
         if (Buffer.byteLength(body) > limits.maxRequestBytes) return refusal();
         const response = await relay(
           new Request(
-            new URL(ready ? "/sync/live/member-ready" : "/sync/live/member-open", options.relayUrl),
+            new URL(
+              owner
+                ? `/sync/${encodeURIComponent(parseLiveUpdateIdentifier(value.workspaceId, "workspace ID"))}/ops/openPage`
+                : ready
+                  ? "/sync/live/member-ready"
+                  : "/sync/live/member-open",
+              options.relayUrl,
+            ),
             {
               method: "POST",
               redirect: "manual",
@@ -142,7 +182,7 @@ export function createMemberLiveClient(options: {
           }
           return answer({ ready: text === READY });
         }
-        if (response.status === 409 && kind === "application/json") {
+        if (!owner && response.status === 409 && kind === "application/json") {
           const refused = await readBoundedJson(response, 1024, signal).catch(() => null);
           const code =
             refused && typeof refused === "object" && !Array.isArray(refused)
@@ -157,6 +197,7 @@ export function createMemberLiveClient(options: {
         if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return refusal();
         const row = parsed as Record<string, unknown>,
           ticket = row.ticket as Record<string, unknown> | null;
+        if (owner) return ownerAnswer(row.ok === true ? row.result : null);
         if (
           row.kind !== "named" ||
           typeof row.discriminator !== "string" ||

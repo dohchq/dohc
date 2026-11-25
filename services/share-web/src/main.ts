@@ -13,6 +13,7 @@ import { loadShareWebConfig } from "./config";
 import { createDeviceControlBridge } from "./deviceControlBridge";
 import { createLiveGateway, namedSessionCheckIntervalMs } from "./liveGateway";
 import { createNamedLiveRelayRoute, namedLiveGatewayRequest } from "./namedLiveRelayRoute";
+import { ownerLiveScope } from "./liveGatewayRequest";
 import { clientAddress } from "./clientAddress";
 import {
   createShareWebApplication,
@@ -48,6 +49,7 @@ try {
 const application = createShareWebApplication({
   deleteAccountGateways(userId, workspaceIds) {
     namedGateway?.deleteAccount(userId, workspaceIds);
+    ownerGateway?.deleteAccount(userId, workspaceIds);
     linkGateway?.deleteAccount(userId, workspaceIds);
   },
   appLaunch: config.appLaunch,
@@ -141,8 +143,35 @@ const gatewayBufferMaximum =
   config.namedLiveGatewayLimits?.maxBufferedBytes ?? config.linkLive?.gateway.maxBufferedBytes;
 const gatewayBuffers =
   gatewayBufferMaximum === undefined ? undefined : createLiveBufferBudget(gatewayBufferMaximum);
-let namedGateway: ReturnType<typeof createLiveGateway> | undefined;
+let namedGateway: ReturnType<typeof createLiveGateway> | undefined,
+  ownerGateway: typeof namedGateway;
 if (config.namedLiveGatewayLimits) {
+  ownerGateway = createLiveGateway({
+    bufferBudget: gatewayBuffers,
+    publicHosts: config.publicHosts,
+    publicOrigin: config.accountAuth!.publicOrigin,
+    path: "/api/live/owner",
+    limits: config.namedLiveGatewayLimits,
+    // The relay admits only the workspace's owner, so the owner's sockets count under the workspace.
+    async resolveSession(request, query, signal) {
+      const workspaceId = ownerLiveScope(query)?.workspaceId,
+        owner = `owner:${workspaceId}`;
+      return workspaceId &&
+        namedLiveGatewayRequest(request, config.accountAuth!.publicOrigin, signal)
+        ? { kind: "named", userId: owner, workspaceId, shareId: owner, grantId: owner }
+        : null;
+    },
+    openHostRoute: createNamedLiveRelayRoute({
+      relayUrl: config.relayUrl,
+      publicOrigin: config.accountAuth!.publicOrigin,
+      exchangeKey: config.relayExchangeKey!,
+      handshakeTimeoutMs: config.namedLiveGatewayLimits.upgradeTimeoutMs,
+      owner: true,
+    }),
+  });
+  process.once("SIGINT", ownerGateway.close);
+  process.once("SIGTERM", ownerGateway.close);
+  server.once("close", ownerGateway.close);
   namedGateway = createLiveGateway({
     bufferBudget: gatewayBuffers,
     publicHosts: config.publicHosts,
@@ -190,6 +219,9 @@ if (deviceControl || namedGateway || linkGateway)
   server.on("upgrade", (request, socket, head) => {
     if (request.url?.startsWith("/api/live/link?")) {
       if (linkGateway) void linkGateway.handleUpgrade(request, socket, head);
+      else socket.destroy();
+    } else if (request.url?.startsWith("/api/live/owner?")) {
+      if (ownerGateway) void ownerGateway.handleUpgrade(request, socket, head);
       else socket.destroy();
     } else if (request.url?.startsWith("/api/live?")) {
       if (namedGateway) void namedGateway.handleUpgrade(request, socket, head);

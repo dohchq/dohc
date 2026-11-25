@@ -14,6 +14,7 @@ import { DiscardDraft, UNSENT_EDITS } from "./DiscardDraft";
 import { UnsentEditsRow } from "./UnsentEdits";
 import { Toast } from "./Toast";
 import { memberDocument, memberPageReady, openMemberPage, type MemberDocument } from "./memberLive";
+import type { LivePageTarget } from "./memberLive";
 
 /** How long a page waits for its owner's dohc, ring alone, before its toast. The desktop waits as long. */
 export const LIVE_HOST_WAIT_REPORT_MS = 15_000;
@@ -26,6 +27,11 @@ const HOST_REFUSAL_REASONS: Readonly<Record<string, string>> = {
   live_paused_by_owner: "The owner paused live editing for this page.",
   "document-unavailable": "The page moved or was deleted.",
   [WAITS_FOR_HOST]: "Editing starts once the owner's dohc is online.",
+};
+// The owner has no other dohc to wait for. The phone says the same.
+const OWNER_REFUSAL_REASONS: Readonly<Record<string, string>> = {
+  ...HOST_REFUSAL_REASONS,
+  [WAITS_FOR_HOST]: "Open this page on a computer once to edit it here.",
 };
 
 type Phase =
@@ -60,7 +66,7 @@ function wait(ms: number, signal: AbortSignal): Promise<void> {
  * membership or an ended session, `onUnsent` gets the text that has not reached the workspace.
  */
 export default function MemberLivePage({
-  grantId,
+  target,
   accountId,
   path,
   draftName,
@@ -72,7 +78,7 @@ export default function MemberLivePage({
   leave,
   onUnsent,
 }: {
-  grantId: string;
+  target: LivePageTarget;
   accountId: string;
   path: string;
   draftName: string;
@@ -97,6 +103,8 @@ export default function MemberLivePage({
   const onUnsentRef = useRef(onUnsent);
   onUnsentRef.current = onUnsent;
   const name = path.slice(path.lastIndexOf("/") + 1);
+  const owner = "workspaceId" in target,
+    place = owner ? target.workspaceId : target.grantId;
   // The editor closes at once, so nothing more is sent. Text that had not reached the workspace stays with the person.
   const release = useCallback(() => {
     const closing = current.current,
@@ -113,14 +121,15 @@ export default function MemberLivePage({
     current.current = null;
   }, []);
 
-  const refuse = useCallback((code: string) => {
-    if (code === WAITS_FOR_HOST) return;
-    setPhase({
-      kind: "refused",
-      reason: Object.hasOwn(HOST_REFUSAL_REASONS, code) ? HOST_REFUSAL_REASONS[code]! : null,
-    });
-    setDismissed(false);
-  }, []);
+  const refuse = useCallback(
+    (code: string) => {
+      if (code === WAITS_FOR_HOST && !owner) return;
+      const reasons = owner ? OWNER_REFUSAL_REASONS : HOST_REFUSAL_REASONS;
+      setPhase({ kind: "refused", reason: Object.hasOwn(reasons, code) ? reasons[code]! : null });
+      setDismissed(false);
+    },
+    [owner],
+  );
   const open = useCallback(() => {
     release();
     const controller = new AbortController(),
@@ -131,14 +140,15 @@ export default function MemberLivePage({
     setPending(false);
     setDismissed(false);
     setPhase({ kind: "opening" });
+    const target = owner ? { workspaceId: place } : { grantId: place };
     void (async () => {
       let delay = READY_RETRY_MS;
       for (;;) {
-        const admitted = await openMemberPage(grantId, path, signal);
+        const admitted = await openMemberPage(target, path, signal);
         if (signal.aborted) return;
-        if (admitted.kind === "open") {
+        if (admitted.kind === "open" || admitted.kind === "owner") {
           const opened = memberDocument({
-            grantId,
+            target,
             path,
             accountId,
             admission: admitted,
@@ -151,7 +161,13 @@ export default function MemberLivePage({
           void opened.session.reconnect();
           return;
         }
-        if (admitted.code !== WAITS_FOR_HOST) {
+        // The server is getting the owner's page ready. It stays opening, as on the phone.
+        if (admitted.kind === "preparing") {
+          await wait(delay, signal);
+          delay = Math.min(delay * 2, READY_RETRY_MAX_MS);
+          continue;
+        }
+        if (admitted.code !== WAITS_FOR_HOST || owner) {
           refuse(admitted.code);
           return;
         }
@@ -161,7 +177,7 @@ export default function MemberLivePage({
         );
         while (
           !signal.aborted &&
-          !(await memberPageReady(grantId, path, signal).catch(() => false))
+          !(await memberPageReady(place, path, signal).catch(() => false))
         ) {
           await wait(delay, signal);
           delay = Math.min(delay * 2, READY_RETRY_MAX_MS);
@@ -171,7 +187,7 @@ export default function MemberLivePage({
     })().catch(() => {
       if (!signal.aborted) setPhase({ kind: "refused", reason: null });
     });
-  }, [grantId, path, accountId, refuse, release]);
+  }, [owner, place, path, accountId, refuse, release]);
 
   useEffect(() => {
     open();

@@ -1264,13 +1264,13 @@ it("opens a page in the live editor at Edit, as the signed-in account", async ()
       !container.querySelector(".named-body-editor")?.hasAttribute("hidden"),
   );
   expect(vi.mocked(openMemberPage)).toHaveBeenCalledWith(
-    GRANT,
+    { grantId: GRANT },
     "trip/plan.md",
     expect.any(AbortSignal),
   );
   expect(vi.mocked(memberDocument)).toHaveBeenCalledWith(
     expect.objectContaining({
-      grantId: GRANT,
+      target: { grantId: GRANT },
       path: "trip/plan.md",
       accountId: "sam",
       admission: ADMITTED,
@@ -2164,7 +2164,7 @@ it("opens the editor and the comment box where a rule gives a View member Edit, 
   await render();
   await settle(() => container.querySelector('[role="textbox"]') !== null);
   expect(vi.mocked(openMemberPage)).toHaveBeenCalledWith(
-    GRANT,
+    { grantId: GRANT },
     "trip/plan.md",
     expect.any(AbortSignal),
   );
@@ -2736,13 +2736,29 @@ describe("the owner's page", () => {
   const paths = (fetch: ReturnType<typeof server>) =>
     fetch.mock.calls.map(([input]) => new URL(String(input), "https://share.test").pathname);
 
-  it("reads the files with the owner's session, shows Markdown read-only, and reads the Groups by workspace with no live page", async () => {
+  it("reads the files with the owner's session, opens Markdown live as the owner, and reads the Groups by workspace", async () => {
     const fetch = server({ level: "edit", session: OWNER_SESSION });
+    const admitted = {
+      kind: "owner",
+      objectId: "object-plan",
+      lineageClaimId: "c".repeat(64),
+      token: "ab".repeat(32),
+      limits: {},
+    } as const;
+    vi.mocked(openMemberPage).mockResolvedValue(admitted);
+    vi.mocked(memberDocument).mockReturnValue({ session: liveSession() as never, close: vi.fn() });
     await render(OWNER);
-    await settle(() => text().includes("Leave at nine."));
+    await settle(() => container.querySelector('[role="textbox"]') !== null);
     expect(container.querySelector(".workspace-name")?.textContent).toBe("Trip");
     expect(container.querySelector(".badge")?.textContent).toBe("Owner");
-    expect(container.querySelector('[role="textbox"]')).toBeNull();
+    expect(vi.mocked(openMemberPage)).toHaveBeenCalledWith(
+      { workspaceId: "ws-1" },
+      "trip/plan.md",
+      expect.any(AbortSignal),
+    );
+    expect(vi.mocked(memberDocument)).toHaveBeenCalledWith(
+      expect.objectContaining({ target: { workspaceId: "ws-1" }, admission: admitted }),
+    );
     await settle(() => groupPanel().textContent!.includes("plans"));
     expect(
       [...container.querySelectorAll('.side-tabs [role="tab"], .workspace-tabs [role="tab"]')].map(
@@ -2765,7 +2781,36 @@ describe("the owner's page", () => {
       .map(([input]) => new URL(String(input), "https://share.test"))
       .filter((url) => url.pathname === "/api/named-chat/channels");
     expect(listings.map((url) => url.search)).toEqual(["?workspaceId=ws-1"]);
-    expect(vi.mocked(openMemberPage)).not.toHaveBeenCalled();
+  });
+
+  it("tells the owner to open a page on a computer first", async () => {
+    server({ level: "edit", session: OWNER_SESSION });
+    vi.mocked(openMemberPage).mockResolvedValue({
+      kind: "refused",
+      code: "live-document-without-lineage",
+    });
+    await render(OWNER);
+    const sentence = "Open this page on a computer once to edit it here. You can still read it.";
+    await settle(() => container.querySelector(".workspace-toast") !== null);
+    expect(container.querySelector(".workspace-toast")?.textContent).toContain(sentence);
+    expect(container.querySelector("header + .page-band [role=status]")?.textContent).toBe(
+      sentence,
+    );
+    expect(text()).toContain("Leave at nine.");
+    expect(vi.mocked(memberPageReady)).not.toHaveBeenCalled();
+  });
+
+  it("keeps opening the owner's page while the server prepares it, with no toast", async () => {
+    server({ level: "edit", session: OWNER_SESSION });
+    vi.mocked(openMemberPage).mockResolvedValue({ kind: "preparing" });
+    await render(OWNER);
+    await settle(() => vi.mocked(openMemberPage).mock.calls.length === 1);
+    expect(container.querySelector(".named-document-status")?.textContent).toBe(
+      "Opening the file…",
+    );
+    expect(container.querySelector(".workspace-toast")).toBeNull();
+    expect(container.querySelector("header + .page-band [role=status]")).toBeNull();
+    expect(vi.mocked(memberPageReady)).not.toHaveBeenCalled();
   });
 
   it("shows Files, Page, Comments and Chats on a phone", async () => {
