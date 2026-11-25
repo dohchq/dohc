@@ -34,6 +34,7 @@ import type { AuthorizedShareAction } from "./shareAuthorization";
 import {
   chatSideFor,
   chatSideOf,
+  fileSideOf,
   filterOpForShareAppend,
   isGroupSelector,
   isWorkspaceSelector,
@@ -279,20 +280,14 @@ export function createNamedShareTransportRoutes(
         scan === "page" ? limit : undefined,
       );
       const hold = parseLinkLogHold(url.searchParams.get("hold"));
-      // A held read names the level its reader knew, so a change that landed
-      // while no read waited still ends the next hold. The stored grant
-      // decides; a value that names no level is ignored.
       const knew = url.searchParams.get("level");
-      if (
-        hold > 0 &&
-        isShareAccessValue(knew) &&
-        knew !==
-          (isWorkspaceSelector(authorized.effectiveSelector)
-            ? authorized.effectiveSelector.reach.evaluated.level
-            : "access" in authorized.effectiveSelector
-              ? authorized.effectiveSelector.access
-              : "view")
-      ) {
+      const effectiveAccess = isWorkspaceSelector(authorized.effectiveSelector)
+        ? authorized.effectiveSelector.reach.evaluated.level
+        : (() => {
+            const files = fileSideOf(authorized.effectiveSelector);
+            return files && "access" in files ? files.access : "view";
+          })();
+      if (isShareAccessValue(knew) && knew !== effectiveAccess) {
         return jsonResponse({
           ok: true,
           ops: [],

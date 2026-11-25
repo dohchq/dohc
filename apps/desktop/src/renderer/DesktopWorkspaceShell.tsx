@@ -3352,6 +3352,7 @@ function WorkspaceShell(props: {
     trigger: ShareViewRefreshTrigger;
     followUp?: Promise<ShareViewRefresh>;
   } | null>(null);
+  const [shareEditVerifiedEpoch, setShareEditVerifiedEpoch] = useState(0);
   const checkShareAccess = useSharedViewAccess({
     workspaceId,
     enabled: workspaceIsReady && !!shareView && !shareViewDamaged && !shareViewEnded,
@@ -3378,7 +3379,10 @@ function WorkspaceShell(props: {
     },
     onVerified: (result) => {
       if (!shareView) return;
-      if (result.status === "current") shareAccessCurrent.dispatchEvent(new Event("current"));
+      if (result.status === "current") {
+        shareAccessCurrent.dispatchEvent(new Event("current"));
+        if (result.access === "edit") setShareEditVerifiedEpoch((epoch) => epoch + 1);
+      }
       if (
         result.status === "ended" ||
         result.status === "needs-reopen" ||
@@ -3414,6 +3418,8 @@ function WorkspaceShell(props: {
       }
     },
   });
+  const checkShareAccessRef = useRef(checkShareAccess);
+  checkShareAccessRef.current = checkShareAccess;
   useEffect(() => {
     if (shareView)
       reportShareCapture(
@@ -7268,7 +7274,11 @@ function WorkspaceShell(props: {
     ],
   );
   refreshShareViewRef.current = refreshShareView;
-  const refreshAfterLiveReadOnly = useCallback(() => void refreshShareViewRef.current(), []);
+  const refreshAfterLiveReadOnly = useCallback(() => {
+    void refreshShareViewRef.current().then((pulled) => {
+      if (pulled === "current" || pulled === "changed") void checkShareAccessRef.current();
+    });
+  }, []);
 
   // ---- The recipient's own submitted changes ----
   // A submission exists only from Send changes: there is no draft at the
@@ -9081,7 +9091,7 @@ function WorkspaceShell(props: {
                                       // only on an active-version change: versionEpoch alone, not
                                       // history growth (which must not churn the live session).
                                       engineVersionKey={versionEpoch}
-                                      sharePullKey={shareContentEpoch}
+                                      sharePullKey={shareContentEpoch + shareEditVerifiedEpoch}
                                       onOpenPath={openPathWithHeading}
                                       drawingCollaboration={chatCollaboration}
                                       // A search or heading jump opens the file's tab, never a record's body.

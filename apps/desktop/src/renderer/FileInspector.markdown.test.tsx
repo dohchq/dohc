@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
+import { deferred } from "../testing/deferred";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { FileInspector } from "./FileInspector";
 import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
@@ -452,6 +454,47 @@ describe("FileInspector renders markdown through the shared component map", () =
       expect(bridgeMock.createWorkspaceFile).not.toHaveBeenCalled();
       expect(onOpenPath).not.toHaveBeenCalled();
     } finally {
+      if (read) bridgeMock.readWorkspaceText.mockImplementation(read);
+    }
+  });
+
+  it("rereads disk content without flashing stale pre-live text when a live note becomes read-only", async () => {
+    const read = bridgeMock.readWorkspaceText.getMockImplementation();
+    const liveDoc = markdownToYDoc("# Note\n\nWALKA1O1 WALKA3O1 WALKC2T1\n");
+    const reread = deferred<{ text: string; truncated: boolean; contentHash: string }>();
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      reads += 1;
+      if (reads === 1) {
+        return { text: "# Note\n\nWALKA1O1\n", truncated: false, contentHash: "hash-1" };
+      }
+      return reread.promise;
+    });
+    const prevAvailable = engineDocState.available;
+    const prevDoc = engineDocState.doc;
+    try {
+      engineDocState.available = true;
+      engineDocState.doc = liveDoc;
+      const view = render(<FileInspector workspaceId="ws-1" path="a.md" readOnly={false} />);
+      await waitFor(() => expect(reads).toBe(1));
+
+      engineDocState.available = false;
+      engineDocState.doc = null;
+      view.rerender(<FileInspector workspaceId="ws-1" path="a.md" readOnly={true} />);
+
+      await waitFor(() => expect(reads).toBe(2));
+      expect(screen.queryByText("WALKA1O1")).toBeNull();
+
+      reread.resolve({
+        text: "# Note\n\nWALKA1O1 WALKA3O1 WALKC2T1\n",
+        truncated: false,
+        contentHash: "hash-2",
+      });
+      await screen.findByText("WALKA1O1 WALKA3O1 WALKC2T1");
+    } finally {
+      engineDocState.available = prevAvailable;
+      engineDocState.doc = prevDoc;
+      liveDoc.destroy();
       if (read) bridgeMock.readWorkspaceText.mockImplementation(read);
     }
   });

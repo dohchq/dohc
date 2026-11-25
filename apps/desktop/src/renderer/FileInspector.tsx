@@ -395,6 +395,25 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
   // refusal arrives — which is the only way to have it, since the refusal
   // unmounts the reporter.
   const [pendingDraft, setPendingDraft] = useState(false);
+  const [readOnlyRefresh, setReadOnlyRefresh] = useState({
+    key,
+    readOnly: !!props.readOnly,
+    count: 0,
+    pending: false,
+  });
+  let { count: readOnlyRefreshCount, pending: readOnlyRefreshPending } = readOnlyRefresh;
+  if (readOnlyRefresh.key !== key || readOnlyRefresh.readOnly !== !!props.readOnly) {
+    const becameReadOnly =
+      readOnlyRefresh.key === key && !readOnlyRefresh.readOnly && !!props.readOnly && isText;
+    readOnlyRefreshCount += becameReadOnly ? 1 : 0;
+    readOnlyRefreshPending = becameReadOnly;
+    setReadOnlyRefresh({
+      key,
+      readOnly: !!props.readOnly,
+      count: readOnlyRefreshCount,
+      pending: readOnlyRefreshPending,
+    });
+  }
   const {
     text,
     loadedPath,
@@ -407,7 +426,18 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
     readSeq,
     refreshAfterConflict,
     markReadInitialized,
-  } = useTextContent(props.workspaceId, props.path, isText, props.refreshKey ?? 0, localBuffer);
+  } = useTextContent(
+    props.workspaceId,
+    props.path,
+    isText,
+    (props.refreshKey ?? 0) + readOnlyRefreshCount,
+    localBuffer,
+  );
+  const awaitingReadOnlyRead =
+    readOnlyRefreshPending && !error && contentRequestId < latestContentRequestId;
+  if (readOnlyRefreshPending && !awaitingReadOnlyRead) {
+    setReadOnlyRefresh((current) => (current.pending ? { ...current, pending: false } : current));
+  }
   const retriedFailedReadBuffer = useRef<SharedLocalDocument | null>(null);
   useEffect(() => {
     if (text !== null) {
@@ -756,7 +786,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
   const reading =
     isText &&
     !engineDocBound &&
-    (text === null || loadedPath !== props.path || readFailedUnchecked);
+    (text === null || loadedPath !== props.path || readFailedUnchecked || awaitingReadOnlyRead);
   // A new page waiting on this file hears when no document opens here to
   // take what was typed; MarkdownView answers for one that does.
   const { onEditorReady } = props;

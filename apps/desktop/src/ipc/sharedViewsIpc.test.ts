@@ -3110,7 +3110,7 @@ describe("background share pulls", () => {
     expect(result).not.toHaveProperty("nextCursor");
     expect(fetch).toHaveBeenCalledOnce();
     expect(fetch).toHaveBeenCalledWith(
-      "https://relay.example.test/sync/shares/share/log?since=42&scan=page",
+      "https://relay.example.test/sync/shares/share/log?since=42&scan=page&level=edit",
       expect.objectContaining({ headers: expect.any(Headers), signal: expect.any(AbortSignal) }),
     );
     expect(new Headers(fetch.mock.calls[0]![1]!.headers).get("authorization")).toBe("Bearer token");
@@ -3134,7 +3134,7 @@ describe("background share pulls", () => {
       held: true,
     });
     expect(fetch).toHaveBeenLastCalledWith(
-      "https://relay.example.test/sync/shares/share/log?since=42&scan=page&hold=25000",
+      "https://relay.example.test/sync/shares/share/log?since=42&scan=page&hold=25000&level=edit",
       expect.anything(),
     );
     const changed = await h.invoke(channel, { ...payload, trigger: "held" });
@@ -3165,6 +3165,10 @@ describe("background share pulls", () => {
       access: "comment",
       wholeWorkspace: true,
     };
+    h.fetchInfo.mockResolvedValue({
+      ...info,
+      selector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
+    });
     await h.invoke(channel, { workspaceId: "existing" });
     vi.clearAllMocks();
     const bodies = [
@@ -3197,6 +3201,95 @@ describe("background share pulls", () => {
     await h.invoke(channel, held);
     expect(fetch).toHaveBeenLastCalledWith(
       "https://relay.example.test/sync/shares/share/log?since=42&scan=page&hold=25000&level=edit",
+      expect.anything(),
+    );
+  });
+  it("tracks a path share's level across View to Edit recovery, scope refusal, and transient unverified checks", async () => {
+    const h = await harness();
+    h.workspace.shareView!.grantedSelector = { paths: ["docs"], versionId: null, access: "view" };
+    h.fetchInfo.mockResolvedValue({
+      ...info,
+      selector: { paths: ["docs"], versionId: null, access: "view" },
+    });
+    await h.invoke(channel, { workspaceId: "existing" });
+    vi.clearAllMocks();
+
+    const bodies = [
+      { ops: [], hasMore: false, nextCursor: 42, levelChanged: true },
+      { ops: [], hasMore: false, nextCursor: 42, levelChanged: true },
+      { ops: [], hasMore: false, nextCursor: 42 },
+      { ops: [], hasMore: false, nextCursor: 42 },
+    ];
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json(bodies.shift()));
+    h.probeLog.mockImplementation((input) =>
+      probeShareViewLog({ ...input, relay: { ...input.relay, fetch } }),
+    );
+
+    await expect(h.invoke(channel, payload)).resolves.toMatchObject({
+      probed: true,
+      levelChanged: true,
+    });
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://relay.example.test/sync/shares/share/log?since=42&scan=page&level=view",
+      expect.anything(),
+    );
+
+    // Transient unverified check restores the pending level so the next background poll still checks it.
+    h.fetchAccess.mockRejectedValueOnce(new Error("timeout"));
+    await expect(
+      h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
+        workspaceId: "existing",
+      }),
+    ).resolves.toEqual({ status: "unverified" });
+
+    await expect(h.invoke(channel, payload)).resolves.toMatchObject({
+      probed: true,
+      levelChanged: true,
+    });
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://relay.example.test/sync/shares/share/log?since=42&scan=page&level=view",
+      expect.anything(),
+    );
+
+    // Verified relayStatesMore clears the cached level so polling does not spin while manual refresh runs.
+    h.fetchAccess.mockResolvedValueOnce({ access: "edit" });
+    await expect(
+      h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
+        workspaceId: "existing",
+      }),
+    ).resolves.toEqual({ status: "current", access: "view", relayStatesMore: true });
+
+    await h.invoke(channel, payload);
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://relay.example.test/sync/shares/share/log?since=42&scan=page",
+      expect.anything(),
+    );
+
+    // A manual refresh that widens the path share caches the post-refresh Edit level.
+    h.fetchInfo.mockResolvedValueOnce({
+      ...info,
+      selector: { paths: ["docs"], versionId: null, access: "edit" },
+    });
+    await h.invoke(channel, { workspaceId: "existing", trigger: "manual" });
+    expect(h.workspace.shareView!.grantedSelector.access).toBe("edit");
+    await h.invoke(channel, payload);
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://relay.example.test/sync/shares/share/log?since=42&scan=page&level=edit",
+      expect.anything(),
+    );
+
+    // When a manual refresh refuses to widen (scope mismatch), the cached pull omits level so it never loops.
+    h.workspace.shareView!.grantedSelector = { paths: ["docs"], versionId: null, access: "view" };
+    h.fetchInfo.mockResolvedValueOnce({
+      ...info,
+      selector: { paths: ["docs", "other"], versionId: null, access: "edit" },
+    });
+    await h.invoke(channel, { workspaceId: "existing", trigger: "manual" });
+    expect(h.workspace.shareView!.grantedSelector.access).toBe("view");
+    bodies.push({ ops: [], hasMore: false, nextCursor: 42 });
+    await h.invoke(channel, payload);
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://relay.example.test/sync/shares/share/log?since=42&scan=page",
       expect.anything(),
     );
   });

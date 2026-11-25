@@ -291,8 +291,8 @@ export async function probeShareViewLog(input: {
   since: number;
   // How long the relay may wait for news before answering an empty page.
   hold?: number;
-  // The level this computer knows. The relay answers a hold at once when its
-  // own record differs.
+  // The level this computer knows. The relay answers at once with levelChanged
+  // when its own record differs.
   level?: ShareAccess;
   // The reach signatures this computer holds for a membership.
   reach?: ShareReachSignatures;
@@ -302,7 +302,7 @@ export async function probeShareViewLog(input: {
   // including group shares. Only shared-channel pulls pass a channel filter.
   const response = await shareFetch(
     input.relay,
-    `/sync/shares/${encodeURIComponent(input.shareId)}/log?since=${input.since}&scan=page${input.hold ? `&hold=${input.hold}` : ""}${input.hold && input.level ? `&level=${input.level}` : ""}`,
+    `/sync/shares/${encodeURIComponent(input.shareId)}/log?since=${input.since}&scan=page${input.hold ? `&hold=${input.hold}` : ""}${input.level ? `&level=${input.level}` : ""}`,
     { signal: input.signal },
   );
   const body: unknown = await response.json();
