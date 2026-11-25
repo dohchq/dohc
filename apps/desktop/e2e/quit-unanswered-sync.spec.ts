@@ -418,8 +418,9 @@ test("Collections work does not wait on an automation host read the sync server 
         })
         .toBe(true);
       const end = Date.now() + 20_000;
-      while (sync.openRead() === undefined && Date.now() < end)
-        await new Promise((resolve) => setTimeout(resolve, 250));
+      await expect
+        .poll(() => sync.openRead() !== undefined || Date.now() > end, { timeout: 30_000 })
+        .toBe(true);
     }
 
     const started = performance.now();

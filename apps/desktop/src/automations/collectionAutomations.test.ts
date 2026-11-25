@@ -3555,6 +3555,87 @@ describe("Collection automations that a Group message starts", () => {
         "read the last automation host's reach verdicts",
       ]);
     });
+
+    it("takes the reach verdicts while the Group handover read still waits", async () => {
+      const handover = unanswered(false);
+      let reachReads = 0;
+      const { w, executor, opening } = await openingAt3({
+        reachRelayRecord: async (generation) => {
+          if (++reachReads === 1) throw new TypeError("fetch failed");
+          return { generation, reach: null, everShared: false };
+        },
+        ...relayFor("Group handover", handover.read),
+      });
+      await opening;
+
+      executor.relayAnswered();
+      await promptly(handover.reading);
+      await vi.waitFor(async () =>
+        expect(await w.baseStore.readReachVerdicts()).toMatchObject({ pending: null, taken: 3 }),
+      );
+      expect(subscribed(w)).toBe(false);
+      handover.answer();
+      await promptly(w.until(() => subscribed(w)));
+      expect(handover.asked).toEqual([3]);
+    });
+
+    it("keeps a read ahead's answer when another sync answer arrives while it is used", async () => {
+      let reachReads = 0;
+      let hostReads = 0;
+      let answerAgainAt = Number.POSITIVE_INFINITY;
+      const { w, executor, opening } = await openingAt3({
+        groupHost: async () => {
+          if (++hostReads === answerAgainAt) executor.relayAnswered();
+          return 3;
+        },
+        reachRelayRecord: async (generation) => {
+          if (++reachReads === 1) throw new TypeError("fetch failed");
+          return { generation, reach: null, everShared: false };
+        },
+      });
+      await opening;
+
+      answerAgainAt = hostReads + 2;
+      executor.relayAnswered();
+      await vi.waitFor(async () =>
+        expect(await w.baseStore.readReachVerdicts()).toMatchObject({ pending: null, taken: 3 }),
+      );
+      await promptly(Promise.all([executor.resyncFileObservation(), executor.open()]));
+      expect(hostReads).toBeGreaterThanOrEqual(answerAgainAt);
+      expect(reachReads).toBe(3);
+      expect(w.errors).toHaveLength(1);
+    });
+
+    it("reads the relay again after a close ends a read ahead", async () => {
+      const reach = unanswered();
+      let failAhead = true;
+      let settledReads = 0;
+      const { w, executor, opening } = await openingAt3({
+        reachRelayRecord: async (generation, signal) => {
+          try {
+            await reach.read(generation, signal);
+            if (failAhead) throw new TypeError("fetch failed");
+            return { generation, reach: null, everShared: false };
+          } finally {
+            settledReads++;
+          }
+        },
+      });
+      await opening;
+
+      executor.relayAnswered();
+      await promptly(reach.reading);
+      await executor.close();
+      reach.answer();
+      await vi.waitFor(() => expect(settledReads).toBe(2));
+      failAhead = false;
+      await promptly(executor.open());
+      await vi.waitFor(async () =>
+        expect(await w.baseStore.readReachVerdicts()).toMatchObject({ pending: null, taken: 3 }),
+      );
+      expect(reach.asked).toEqual([3, 3, 3]);
+      expect(w.errors).toHaveLength(1);
+    });
   });
 
   describe("when the workspace closes during a relay read", () => {
