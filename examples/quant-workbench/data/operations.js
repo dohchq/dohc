@@ -1,7 +1,8 @@
 const DAY = 86_400_000;
 const SLUG = /^[a-z0-9][a-z0-9_-]{0,47}$/;
 const GRANT = /^[a-zA-Z0-9_-]{1,128}$/;
-const SERIES_COLUMNS = "id, slug, name, unit, domain, color";
+const SERIES_COLUMNS = "id, slug, name, unit, domain";
+const MAX_CHUNK_ROWS = 8192;
 const NOTE_COLUMNS = "id, title, date_start, date_end, series_ids_json, created_at_ms, grant_id";
 
 const BUCKETS = {
@@ -11,63 +12,96 @@ const BUCKETS = {
   year: ["date(observed_at, 'start of year')", "date(bucket, '+1 year', '-1 day')"],
 };
 
+const SNAPSHOT_PIECE = 12_000;
+const REPORT_KIB = 248;
+const CATALOG_PAGE = 100;
+const MIN_ADJACENT = 9;
+const MIN_PAIRS = 10;
+const TRENDED = 0.3;
+const BASELINE_DAYS = 7;
+const NOISE = 1e-13;
+const SCATTER_POINTS = 360;
+const scale = (column) => `max(abs(max(${column})), abs(min(${column})))`;
+const varies = (column) => `max(${column}) - min(${column}) > ${NOISE} * ${scale(column)}`;
+const CARRIED = `CASE WHEN x_varies AND y_varies
+  THEN max(0, min(0.99, coalesce(xa, 0) / xx * coalesce(ya, 0) / yy)) END`;
+const FITS = `n >= ${MIN_PAIRS} AND x_varies AND y_varies`;
 const SOURCE = `
   FROM observations AS o
   JOIN import_batches AS b ON b.id = o.import_batch_id AND b.imported_at_ms IS NOT NULL
 `;
 
 function seedDemo(ctx) {
-  const expected = 365 * 8 * 8;
-  if (ctx.db.query("SELECT id FROM import_batches LIMIT 1").length) return { inserted: 0 };
+  const days = 365;
+  const dailySeries = 7;
+  const portfolioSlots = 8;
+  const expected = days * (dailySeries + portfolioSlots);
+  if (ctx.db.query("SELECT id FROM import_batches WHERE imported_at_ms IS NOT NULL LIMIT 1").length)
+    return { inserted: 0 };
   insertRows(
     ctx,
-    "INSERT INTO series (id, slug, name, unit, domain, color)",
+    "INSERT INTO series (id, slug, name, unit, domain)",
     [
-      ["sample-sleep-hours", "Sleep duration", "h", "Sample health", 1],
-      ["sample-resting-hr", "Resting heart rate", "bpm", "Sample health", 2],
-      ["sample-steps", "Step count", "steps", "Sample health", 3],
-      ["sample-hrv", "Heart rate variability", "ms", "Sample health", 4],
-      ["sample-training-load", "Training load", "AU", "Sample health", 5],
-      ["sample-close", "Portfolio value", "USD", "Sample portfolio", 6],
-      ["sample-volume", "Trading volume", "shares", "Sample portfolio", 2],
-      ["sample-daily-return", "Daily return", "%", "Sample portfolio", 3],
+      ["sample-sleep-hours", "Sleep duration", "h", "Sample health"],
+      ["sample-resting-hr", "Resting heart rate", "bpm", "Sample health"],
+      ["sample-steps", "Step count", "steps", "Sample health"],
+      ["sample-hrv", "Heart rate variability", "ms", "Sample health"],
+      ["sample-training-load", "Training load", "AU", "Sample health"],
+      ["sample-close", "Portfolio value", "USD", "Sample portfolio"],
+      ["sample-volume", "Trading volume", "shares", "Sample portfolio"],
+      ["sample-daily-return", "Daily return", "%", "Sample portfolio"],
     ].map((item) => [item[0], ...item]),
+  );
+  const [{ batch, next }] = ctx.db.query(
+    `SELECT (SELECT coalesce(max(id), 0) + 1 FROM import_batches) AS batch,
+      (SELECT coalesce(max(id), 0) FROM observations) AS next`,
   );
   ctx.db.execute(
     `INSERT INTO import_batches (id, filename, sha256, row_count, received_rows, imported_at_ms)
-    VALUES (1, 'SignalBook sample', ?, ?, ?, ?)`,
+    VALUES (?, 'SignalBook sample', ?, ?, ?, ?)`,
     [
+      batch,
       "4d95b13b1aff44b5e42c4fc56b5829a0711f653c3fe309f437937c127747ca9c",
       expected,
       expected,
       ctx.nowMs,
     ],
   );
-  const { changes } = ctx.db.execute(`WITH RECURSIVE
-      days(day) AS (VALUES (0) UNION ALL SELECT day + 1 FROM days WHERE day < 364),
+  const { changes } = ctx.db.execute(
+    `WITH RECURSIVE
+      days(day) AS (VALUES (-2) UNION ALL SELECT day + 1 FROM days WHERE day < 364),
       slots(slot) AS (VALUES (0), (1), (2), (3), (4), (5), (6), (7)),
+      hashed AS (SELECT day, sin(day * 12.9898) * 43758.5453 AS hash FROM days),
+      cores AS (
+        SELECT day, 0.58 * sin(day / 11.0) + 1.2 * (hash - floor(hash) - 0.5) - 2 * (day % 89 = 0) AS core
+        FROM hashed
+      ),
       samples AS (
-        SELECT day, slot,
-          date('2025-01-01', printf('+%d days', day)) || printf('T%02d:00:00.000Z', slot * 3) AS stamp,
-          sin(day * 74.97 + slot * 6.6) AS noise,
-          day % 89 = 0 AND slot = 6 AS pulse,
-          0.58 * sin(day / 11.0) + 0.42 * sin(day * 1.3) AS sleep,
-          0.58 * sin((day - 2) / 11.0) + 0.42 * sin((day - 2) * 1.3) AS prior_sleep
-        FROM days CROSS JOIN slots
+        SELECT today.day AS day, slot,
+          date('2025-01-01', printf('+%d days', today.day)) || printf('T%02d:00:00.000Z', slot * 3) AS stamp,
+          sin(today.day * 74.97 + slot * 6.6) AS noise,
+          today.day % 89 = 0 AS pulse,
+          today.core AS sleep,
+          prior.core AS prior_sleep
+        FROM cores AS today JOIN cores AS prior ON prior.day = today.day - 2 CROSS JOIN slots
+        WHERE today.day >= 0
       )
     INSERT INTO observations (id, series_id, observed_at, value, tags_json, import_batch_id)
-    SELECT row_number() OVER (ORDER BY day, slot, series.id), series.id, stamp,
+    SELECT ?1 + row_number() OVER (ORDER BY day, slot, series.id), series.id, stamp,
       round(CASE series.id
-        WHEN 'sample-sleep-hours' THEN 7.2 + sleep + 0.14 * noise - pulse * 2
-        WHEN 'sample-resting-hr' THEN 62 - 4 * prior_sleep + 1.9 * cos(day / 6.0) + 0.6 * noise + pulse * 12
+        WHEN 'sample-sleep-hours' THEN 7.2 + sleep + 0.14 * noise
+        WHEN 'sample-resting-hr' THEN 62 - 4 * prior_sleep + 1.9 * cos(day / 6.0) + 0.6 * noise
         WHEN 'sample-steps' THEN 7800 + 1700 * sin(day / 8.0) + 1800 * noise + pulse * 9000
         WHEN 'sample-hrv' THEN 54 + 7 * sleep + 6 * sin(day / 21.0) + 3 * noise
         WHEN 'sample-training-load' THEN 58 + 26 * sin(day / 6.0) + 15 * noise + pulse * 65
         WHEN 'sample-close' THEN 24000 + 18 * day + 870 * sin(day / 14.0) + 180 * noise
-        WHEN 'sample-volume' THEN 340 + 110 * sin(day / 13.0) + 75 * noise + pulse * 500
+        WHEN 'sample-volume' THEN 340000 + 110000 * sin(day / 13.0) + 75000 * noise + pulse * 500000
         WHEN 'sample-daily-return' THEN 0.12 + 0.9 * sin(day / 14.0 + 1.57) + 0.25 * noise
-      END, 4), '{"source":"demo"}', 1
-    FROM samples CROSS JOIN series`);
+      END, 4), '{"source":"demo"}', ?2
+    FROM samples CROSS JOIN series
+    WHERE series.id LIKE 'sample-%' AND (series.id = 'sample-close' OR slot = 2)`,
+    [next, batch],
+  );
   if (changes !== expected)
     ctx.refuse("invalid_sample", "Could not create the sample observations.");
   return { inserted: changes };
@@ -102,7 +136,7 @@ function resolution(start, end, requested, max) {
   return choices[Math.max(choices.indexOf(requested), minimum)];
 }
 
-function rollup(ctx, id, start, end, grain) {
+function rollup(ctx, id, start, end, grain, lookback) {
   const [bucket, bucketEnd] = BUCKETS[grain];
   return ctx.db.query(
     `WITH RECURSIVE
@@ -110,7 +144,7 @@ function rollup(ctx, id, start, end, grain) {
       source AS MATERIALIZED (
         SELECT o.id, o.observed_at, o.value ${SOURCE}, bounds
         WHERE o.series_id = ?
-          AND o.observed_at >= date(start, '-29 days') || 'T00:00:00.000Z'
+          AND o.observed_at >= date(start, '-${lookback} days') || 'T00:00:00.000Z'
           AND o.observed_at <= finish || 'T23:59:59.999Z'
       ),
       daily AS (
@@ -118,14 +152,16 @@ function rollup(ctx, id, start, end, grain) {
         FROM source GROUP BY day
       ),
       calendar(day) AS (
-        SELECT date(start, '-29 days') FROM bounds
+        SELECT date(start, '-${lookback} days') FROM bounds
         UNION ALL SELECT date(day, '+1 day') FROM calendar, bounds WHERE day < finish
       ),
       rolling AS (
         SELECT day,
-          avg(mean) OVER (ORDER BY day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS ma7,
-          avg(mean) OVER (ORDER BY day ROWS BETWEEN 29 PRECEDING AND CURRENT ROW) AS ma30
-        FROM calendar LEFT JOIN daily USING (day)
+          CASE WHEN day >= date(start, '${6 - lookback} days')
+            THEN avg(mean) OVER (ORDER BY day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) END AS ma7,
+          CASE WHEN day >= date(start, '${29 - lookback} days')
+            THEN avg(mean) OVER (ORDER BY day ROWS BETWEEN 29 PRECEDING AND CURRENT ROW) END AS ma30
+        FROM calendar CROSS JOIN bounds LEFT JOIN daily USING (day)
       ),
       ordered AS (
         SELECT ${bucket} AS bucket, value,
@@ -147,13 +183,45 @@ function rollup(ctx, id, start, end, grain) {
   );
 }
 
-function readRollups(ctx, input, max) {
+function weekChange(ctx, id, start, end) {
+  const [row] = ctx.db.query(
+    `WITH RECURSIVE
+      bounds(start, finish) AS (VALUES (?, ?)),
+      daily AS (
+        SELECT substr(o.observed_at, 1, 10) AS day, avg(o.value) AS mean ${SOURCE}, bounds
+        WHERE o.series_id = ?
+          AND o.observed_at >= start || 'T00:00:00.000Z'
+          AND o.observed_at <= finish || 'T23:59:59.999Z'
+        GROUP BY day
+      ),
+      calendar(day) AS (
+        SELECT start FROM bounds
+        UNION ALL SELECT date(day, '+1 day') FROM calendar, bounds WHERE day < finish
+      ),
+      rolling AS (
+        SELECT day, avg(mean) OVER (ORDER BY day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS ma7
+        FROM calendar LEFT JOIN daily USING (day)
+      ),
+      eligible AS (
+        SELECT day, ma7 FROM rolling, bounds
+        WHERE day >= date(start, '+6 days') AND ma7 IS NOT NULL
+      )
+      SELECT julianday(max(day)) - julianday(min(day)) AS span,
+        (SELECT ma7 FROM eligible ORDER BY day LIMIT 1) AS first,
+        (SELECT ma7 FROM eligible ORDER BY day DESC LIMIT 1) AS last
+      FROM eligible`,
+    [start, end, id],
+  );
+  return row.span >= 7 ? { first: row.first, last: row.last } : null;
+}
+
+function readRollups(ctx, input, max, lookback = 29) {
   const { start, end, ids } = filters(ctx, input);
   const grain = resolution(start, end, input.grain, max);
   const series = ids.map((id) => {
     const meta = ctx.db.query(`SELECT ${SERIES_COLUMNS} FROM series WHERE id = ?`, [id])[0];
     if (!meta) ctx.refuse("unknown_series", "Choose a series that exists.");
-    return { ...meta, bars: rollup(ctx, id, start, end, grain) };
+    return { ...meta, bars: rollup(ctx, id, start, end, grain, lookback) };
   });
   return { start, end, grain, series };
 }
@@ -172,12 +240,12 @@ function importChunk(ctx, input) {
     offset < 0 ||
     !Array.isArray(rows) ||
     rows.length < 1 ||
-    rows.length > 512 ||
+    rows.length > MAX_CHUNK_ROWS ||
     offset + rows.length > total ||
     !Array.isArray(metadata) ||
     metadata.length > rows.length
   ) {
-    ctx.refuse("invalid_batch", "Send a valid CSV batch of 1 to 512 rows.");
+    ctx.refuse("invalid_batch", `Send a valid CSV batch of 1 to ${MAX_CHUNK_ROWS} rows.`);
   }
   const previous = ctx.db.query("SELECT * FROM import_batches WHERE sha256 = ?", [sha256])[0];
   const received = previous?.received_rows ?? 0;
@@ -241,13 +309,11 @@ function importChunk(ctx, input) {
   }
   const info = [...used].map((slug) => {
     const [name, unit, domain] = names.get(slug) ?? [slug, "", "Imported"];
-    const color =
-      1 + ([...slug].reduce((hash, char) => (31 * hash + char.charCodeAt(0)) % 997, 0) % 6);
-    return [slug, slug, name, unit, domain, color];
+    return [slug, slug, name, unit, domain];
   });
   insertRows(
     ctx,
-    "INSERT INTO series (id, slug, name, unit, domain, color)",
+    "INSERT INTO series (id, slug, name, unit, domain)",
     info,
     " ON CONFLICT(id) DO NOTHING",
   );
@@ -285,7 +351,7 @@ function insertRows(ctx, insert, rows, suffix = "") {
   }
 }
 
-function compare(ctx, input) {
+function pairing(ctx, input) {
   const { start, end, ids } = filters(ctx, input);
   const lag = input.lag ?? 0;
   if (ids.length !== 2 || !Number.isInteger(lag) || Math.abs(lag) > 30)
@@ -307,52 +373,217 @@ function compare(ctx, input) {
         JOIN daily x ON x.series_id = x_id
         JOIN daily y ON y.series_id = y_id AND y.day = date(x.day, printf('%+d days', lag))
       )`;
-  const params = [start, end, lag, ...ids];
-  const { n, r } = ctx.db.query(
+  return { lag, pairs, params: [start, end, lag, ...ids], start, end, ids };
+}
+
+function effective(n, p, adjacent) {
+  if (p === null || adjacent < Math.max(MIN_ADJACENT, n / 2)) return null;
+  return Math.round(((n * (1 - p)) / (1 + p)) * 10) / 10;
+}
+
+function correlation(ctx, input) {
+  return pearson(ctx, pairing(ctx, input));
+}
+
+function fit(ctx, { pairs, params }) {
+  return ctx.db.query(
     `${pairs},
-      means AS (SELECT count(*) AS n, avg(x) AS x_mean, avg(y) AS y_mean FROM pairs),
-      centered AS (SELECT x - x_mean AS dx, y - y_mean AS dy FROM pairs, means),
-      sums AS (SELECT sum(dx * dy) AS xy, sum(dx * dx) AS xx, sum(dy * dy) AS yy FROM centered)
-    SELECT n, CASE WHEN n > 1 AND xx > 0 AND yy > 0
-      THEN max(-1, min(1, xy / sqrt(xx) / sqrt(yy))) END AS r FROM means, sums`,
+      means AS (
+        SELECT count(*) AS n, avg(x) AS x_mean, avg(y) AS y_mean, min(x) AS x_min, max(x) AS x_max,
+          avg(julianday(day)) AS t_mean,
+          ${varies("x")} AS x_varies, ${varies("y")} AS y_varies,
+          ${scale("x")} AS x_scale, ${scale("y")} AS y_scale
+        FROM pairs
+      ),
+      centered AS MATERIALIZED (
+        SELECT day, (x - x_mean) / x_scale AS dx, (y - y_mean) / y_scale AS dy,
+          julianday(day) - t_mean AS dt
+        FROM pairs, means
+      ),
+      sums AS (
+        SELECT sum(dx * dy) AS xy, sum(dx * dx) AS xx, sum(dy * dy) AS yy,
+          sum(dt * dx) AS tx, sum(dt * dy) AS ty, sum(dt * dt) AS tt
+        FROM centered
+      ),
+      carry AS (
+        SELECT count(*) AS adjacent, sum(a.dx * b.dx) AS xa, sum(a.dy * b.dy) AS ya
+        FROM centered a JOIN centered b ON b.day = date(a.day, '+1 day')
+      ),
+      fitted AS MATERIALIZED (
+        SELECT dx - dt * tx / tt AS ex, dy - dt * ty / tt AS ey FROM centered, sums WHERE tt > 0
+      ),
+      residuals AS (
+        SELECT sum((ex - ex_mean) * (ey - ey_mean)) AS exy,
+          sum((ex - ex_mean) * (ex - ex_mean)) AS exx, sum((ey - ey_mean) * (ey - ey_mean)) AS eyy
+        FROM fitted, (SELECT avg(ex) AS ex_mean, avg(ey) AS ey_mean FROM fitted)
+      )
+    SELECT n, adjacent, ${CARRIED} AS p, x_min, x_max,
+      CASE WHEN ${FITS} THEN max(-1, min(1, xy / sqrt(xx) / sqrt(yy))) END AS r,
+      CASE WHEN ${FITS} THEN y_mean + xy / xx * ((x_min - x_mean) / x_scale) * y_scale END AS y_low,
+      CASE WHEN ${FITS} THEN y_mean + xy / xx * ((x_max - x_mean) / x_scale) * y_scale END AS y_high,
+      CASE WHEN ${FITS} AND tt > 0 THEN tx / sqrt(tt * xx) END AS x_trend,
+      CASE WHEN ${FITS} AND tt > 0 THEN ty / sqrt(tt * yy) END AS y_trend,
+      CASE WHEN ${FITS} AND exx > ${NOISE} * xx AND eyy > ${NOISE} * yy
+        THEN max(-1, min(1, exy / sqrt(exx) / sqrt(eyy))) END AS partial
+    FROM means, sums, carry, residuals`,
     params,
   )[0];
+}
+
+function detrended({ x_trend, y_trend, partial }) {
+  if (partial === null || Math.min(Math.abs(x_trend), Math.abs(y_trend)) < TRENDED) return null;
+  return partial;
+}
+
+function pearson(ctx, paired) {
+  const { n, adjacent, p, r } = fit(ctx, paired);
+  return { lag: paired.lag, n, r, effective: effective(n, p, adjacent) };
+}
+
+function compare(ctx, input) {
+  const paired = pairing(ctx, input);
+  const { lag } = paired;
+  const fitted = fit(ctx, paired);
+  const { n, adjacent, p, r, x_min, x_max, y_low, y_high } = fitted;
+  const { pairs, params } = paired;
   const points = ctx.db.query(
     `${pairs},
       ranked AS (
-        SELECT *, row_number() OVER (ORDER BY day) AS i, count(*) OVER () AS n FROM pairs
+        SELECT *, row_number() OVER (ORDER BY day) - 1 AS i, count(*) OVER () AS n FROM pairs
+      ),
+      blocks AS (SELECT *, i * min(n, ${SCATTER_POINTS}) / n AS block FROM ranked),
+      placed AS (
+        SELECT *, row_number() OVER (PARTITION BY block ORDER BY day) - 1 AS slot,
+          count(*) OVER (PARTITION BY block) AS size
+        FROM blocks
       )
-    SELECT day, y_day, x, y FROM ranked
-    WHERE (i - 1) % max(1, (n + 359) / 360) = 0 ORDER BY day`,
+    SELECT day, y_day, x, y FROM placed
+    WHERE slot = (block * 7919 + 13) % size
+    ORDER BY day`,
     params,
   );
-  return { lag, n, r, rSquared: r === null ? null : r * r, points };
+  return {
+    lag,
+    n,
+    effective: effective(n, p, adjacent),
+    r,
+    detrended: detrended(fitted),
+    line:
+      y_low === null
+        ? null
+        : [
+            [x_min, y_low],
+            [x_max, y_high],
+          ],
+    points,
+  };
+}
+
+function lagProfile(ctx, input) {
+  const { start, end, ids } = filters(ctx, input);
+  if (ids.length !== 2) return null;
+  const rows = ctx.db.query(
+    `WITH RECURSIVE
+      bounds(start, finish, x_id, y_id) AS (VALUES (?, ?, ?, ?)),
+      lags(lag) AS (VALUES (-30) UNION ALL SELECT lag + 1 FROM lags WHERE lag < 30),
+      daily AS MATERIALIZED (
+        SELECT o.series_id, CAST(julianday(substr(o.observed_at, 1, 10)) AS INTEGER) AS day,
+          avg(o.value) AS value
+        ${SOURCE}, bounds
+        WHERE o.series_id IN (x_id, y_id)
+          AND o.observed_at >= start || 'T00:00:00.000Z'
+          AND o.observed_at <= finish || 'T23:59:59.999Z'
+        GROUP BY o.series_id, day
+      ),
+      xs AS MATERIALIZED (SELECT day, value FROM daily, bounds WHERE series_id = x_id),
+      ys AS MATERIALIZED (SELECT day, value FROM daily, bounds WHERE series_id = y_id),
+      pairs AS MATERIALIZED (
+        SELECT lag, xs.day, xs.value AS x, ys.value AS y
+        FROM lags JOIN xs JOIN ys ON ys.day = xs.day + lag
+      ),
+      means AS (
+        SELECT lag, count(*) AS n, avg(x) AS x_mean, avg(y) AS y_mean,
+          ${varies("x")} AS x_varies, ${varies("y")} AS y_varies,
+          ${scale("x")} AS x_scale, ${scale("y")} AS y_scale
+        FROM pairs GROUP BY lag
+      ),
+      centered AS MATERIALIZED (
+        SELECT lag, day, (x - x_mean) / x_scale AS dx, (y - y_mean) / y_scale AS dy
+        FROM pairs JOIN means USING (lag)
+      ),
+      sums AS (
+        SELECT lag, sum(dx * dy) AS xy, sum(dx * dx) AS xx, sum(dy * dy) AS yy
+        FROM centered GROUP BY lag
+      ),
+      carry AS (
+        SELECT a.lag, count(*) AS adjacent, sum(a.dx * b.dx) AS xa, sum(a.dy * b.dy) AS ya
+        FROM centered a JOIN centered b ON b.lag = a.lag AND b.day = a.day + 1
+        GROUP BY a.lag
+      )
+    SELECT lag, n, coalesce(adjacent, 0) AS adjacent, ${CARRIED} AS p,
+      CASE WHEN ${FITS} THEN max(-1, min(1, xy / sqrt(xx) / sqrt(yy))) END AS r
+    FROM means JOIN sums USING (lag) LEFT JOIN carry USING (lag) ORDER BY lag`,
+    [start, end, ...ids],
+  );
+  return rows.map(({ adjacent, p, ...row }) => ({
+    ...row,
+    effective: effective(row.n, p, adjacent),
+  }));
 }
 
 function outliers(ctx, input) {
   const { start, end, ids } = filters(ctx, input);
   return ctx.db.query(
     `WITH
-      samples AS (
-        SELECT o.id, o.series_id, o.observed_at, o.value ${SOURCE}
-        WHERE o.series_id IN (?, ?)
-          AND o.observed_at >= ?
-          AND o.observed_at <= ?
+      daily AS (
+        SELECT o.series_id, substr(o.observed_at, 1, 10) AS day, avg(o.value) AS mean ${SOURCE}
+        WHERE o.series_id IN (?1, ?2)
+          AND o.observed_at >= date(?3, '-30 days') || 'T00:00:00.000Z'
+          AND o.observed_at <= ?4
+        GROUP BY o.series_id, day
       ),
-      means AS (SELECT series_id, avg(value) AS mean FROM samples GROUP BY series_id),
-      centered AS (
-        SELECT samples.*, value - mean AS delta FROM samples JOIN means USING (series_id)
+      baselines AS (
+        SELECT series_id, day, avg(mean) OVER trailing AS base, count(mean) OVER trailing AS days
+        FROM daily
+        WINDOW trailing AS (
+          PARTITION BY series_id ORDER BY julianday(day) RANGE BETWEEN 30 PRECEDING AND 1 PRECEDING
+        )
+      ),
+      centered AS MATERIALIZED (
+        SELECT o.id, o.series_id, o.observed_at, o.value, baselines.base AS mean,
+          o.value - baselines.base AS delta ${SOURCE}
+        JOIN baselines ON baselines.series_id = o.series_id AND baselines.day = substr(o.observed_at, 1, 10)
+        WHERE o.series_id IN (?1, ?2)
+          AND o.observed_at >= ?3 || 'T00:00:00.000Z'
+          AND o.observed_at <= ?4
+          AND baselines.days >= ${BASELINE_DAYS}
+      ),
+      biases AS (
+        SELECT series_id, avg(delta) AS bias, max(max(abs(value)), max(abs(mean))) AS scale
+        FROM centered GROUP BY series_id
       ),
       deviations AS (
-        SELECT series_id, sqrt(avg(delta * delta)) AS sd FROM centered GROUP BY series_id
+        SELECT series_id, bias, scale,
+          sqrt(avg(((delta - bias) / scale) * ((delta - bias) / scale))) AS spread
+        FROM centered JOIN biases USING (series_id) GROUP BY series_id
       ),
       scores AS (
-        SELECT id, series_id, observed_at, value, delta / sd AS z
-        FROM centered JOIN deviations USING (series_id) WHERE sd > 0
+        SELECT id, series_id, observed_at, value, mean + bias AS mean,
+          (delta - bias) / scale / spread AS z
+        FROM centered JOIN deviations USING (series_id) WHERE spread > ${NOISE}
       )
-    SELECT * FROM scores WHERE abs(z) > 2 ORDER BY abs(z) DESC, observed_at, id LIMIT 30`,
-    [ids[0], ids[1] ?? null, start + "T00:00:00.000Z", end + "T23:59:59.999Z"],
+    SELECT * FROM scores WHERE abs(z) > 2 ORDER BY abs(z) DESC, observed_at, id LIMIT 31`,
+    [ids[0], ids[1] ?? null, start, end + "T23:59:59.999Z"],
   );
+}
+
+function utf8Bytes(text) {
+  let bytes = 0;
+  for (const character of text) {
+    const code = character.codePointAt(0);
+    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+  }
+  return bytes;
 }
 
 function saveNote(ctx, input) {
@@ -363,9 +594,24 @@ function saveNote(ctx, input) {
       "invalid_note",
       "Enter a title of 1 to 120 characters and a note of 1 to 6,000 characters.",
     );
-  const snapshot = readRollups(ctx, input, 96);
+  const snapshot = readRollups(ctx, input, 400, 0);
   if (snapshot.series.every((series) => series.bars.length === 0))
     ctx.refuse("empty_snapshot", "Choose a date range with observations.");
+  snapshot.changes = snapshot.series.map((series) =>
+    weekChange(ctx, series.id, snapshot.start, snapshot.end),
+  );
+  if (snapshot.series.length === 2) snapshot.comparison = correlation(ctx, input);
+  const json = JSON.stringify(snapshot);
+  const bytes = utf8Bytes(JSON.stringify({ title, body })) + utf8Bytes(json);
+  if (bytes > REPORT_KIB * 1024)
+    ctx.refuse(
+      "snapshot_too_large",
+      `This snapshot and note take ${Math.ceil(bytes / 1024)} KiB, over the ${REPORT_KIB} KiB a saved report can hold. Choose a shorter range, coarser buckets, or a shorter note.`,
+    );
+  const pieces = [];
+  const characters = Array.from(json);
+  for (let at = 0; at < characters.length; at += SNAPSHOT_PIECE)
+    pieces.push(characters.slice(at, at + SNAPSHOT_PIECE).join(""));
   ctx.db.execute(
     `INSERT INTO research_notes
       (id, title, body_md, date_start, date_end, series_ids_json, created_at_ms, snapshot_json)
@@ -378,17 +624,24 @@ function saveNote(ctx, input) {
       snapshot.end,
       JSON.stringify(input.ids),
       ctx.nowMs,
-      JSON.stringify(snapshot),
+      pieces[0],
     ],
   );
+  for (const piece of pieces.slice(1))
+    ctx.db.execute("UPDATE research_notes SET snapshot_json = snapshot_json || ? WHERE id = ?", [
+      piece,
+      ctx.requestId,
+    ]);
   return { id: ctx.requestId };
 }
 
 function setReportLink(ctx, input) {
-  const { id, grant } = input ?? {};
+  const { id, grant, version } = input ?? {};
   if (
     typeof id !== "string" ||
-    (grant !== null && (typeof grant !== "string" || !GRANT.test(grant)))
+    (grant !== null && (typeof grant !== "string" || !GRANT.test(grant))) ||
+    !Number.isSafeInteger(version) ||
+    version < 0
   )
     ctx.refuse("invalid_report", "Choose a note and enter a valid link grant ID.");
   if (
@@ -396,9 +649,34 @@ function setReportLink(ctx, input) {
     ctx.db.query("SELECT id FROM research_notes WHERE grant_id = ? AND id <> ?", [grant, id]).length
   )
     ctx.refuse("grant_in_use", "This link already has a report. Remove that link first.");
-  const result = ctx.db.execute("UPDATE research_notes SET grant_id = ? WHERE id = ?", [grant, id]);
-  if (result.changes !== 1) ctx.refuse("unknown_note", "Choose a saved note.");
-  return { id, grant };
+  const [note] = ctx.db.query("SELECT grant_id, link_version FROM research_notes WHERE id = ?", [
+    id,
+  ]);
+  if (!note) ctx.refuse("unknown_note", "Choose a saved note.");
+  if (note.grant_id === grant)
+    return { id, grant, previous: note.grant_id, version: note.link_version };
+  if (note.link_version !== version)
+    ctx.refuse(
+      "link_changed",
+      "This snapshot's report link changed in another window. Check the current link and try again.",
+    );
+  ctx.db.execute("UPDATE research_notes SET grant_id = ?, link_version = ? WHERE id = ?", [
+    grant,
+    version + 1,
+    id,
+  ]);
+  return { id, grant, previous: note.grant_id, version: version + 1 };
+}
+
+function setShortcuts(ctx, input) {
+  if (typeof input?.enabled !== "boolean")
+    ctx.refuse("invalid_setting", "Choose whether single-key shortcuts are on.");
+  const value = input.enabled ? "on" : "off";
+  ctx.db.execute(
+    "INSERT INTO settings (key, value) VALUES ('shortcuts', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+    [value],
+  );
+  return { enabled: input.enabled };
 }
 
 function report(row) {
@@ -412,18 +690,87 @@ function report(row) {
 }
 
 const ownerOperations = {
-  overview(ctx) {
-    const series = ctx.db.query(
-      `SELECT s.id, s.slug, s.name, s.unit, s.domain, s.color, count(*) AS count,
-        substr(min(o.observed_at), 1, 10) AS start, substr(max(o.observed_at), 1, 10) AS end
+  overview(ctx, input) {
+    const query = input?.query ?? "";
+    const include = input?.include ?? [];
+    if (
+      typeof query !== "string" ||
+      query.length > 80 ||
+      !Array.isArray(include) ||
+      include.length > 2 ||
+      include.some((id) => typeof id !== "string" || id.length > 64)
+    )
+      ctx.refuse(
+        "invalid_filter",
+        "Search with up to 80 characters and keep up to two plotted series.",
+      );
+    const params = [query.trim().toLowerCase(), include[0] ?? null, include[1] ?? null];
+    const listed = `SELECT s.id, s.slug, s.name, s.unit, s.domain, count(*) AS count,
+        substr(min(o.observed_at), 1, 10) AS start, substr(max(o.observed_at), 1, 10) AS end,
+        max(o.observed_at) AS latest_at,
+        (?1 = '' OR instr(lower(s.name), ?1) > 0 OR instr(lower(s.slug), ?1) > 0
+          OR instr(lower(s.domain), ?1) > 0) AS matched,
+        (SELECT o.value ${SOURCE} WHERE o.series_id = s.id ORDER BY o.observed_at DESC, o.id DESC LIMIT 1)
+          AS latest
       ${SOURCE} JOIN series s ON s.id = o.series_id
-      GROUP BY s.id ORDER BY count DESC, s.id LIMIT 250`,
-    );
+      WHERE ?1 = '' OR instr(lower(s.name), ?1) > 0 OR instr(lower(s.slug), ?1) > 0
+        OR instr(lower(s.domain), ?1) > 0 OR s.id IN (?2, ?3)
+      GROUP BY s.id
+      ORDER BY s.id IN (?2, ?3) DESC, s.domain, s.name, s.id
+      LIMIT ${CATALOG_PAGE}`;
+    const series = ctx.db
+      .query(listed, params)
+      .sort(
+        (left, right) =>
+          left.domain.localeCompare(right.domain) ||
+          left.name.localeCompare(right.name) ||
+          left.id.localeCompare(right.id),
+      );
+    const spark = new Map(series.map((entry) => [entry.id, []]));
+    const sparks = [];
+    for (let offset = 0; offset < series.length; offset += 64) {
+      const group = series.slice(offset, offset + 64);
+      sparks.push(
+        ...ctx.db.query(
+          `WITH
+            ends(id, last) AS (VALUES ${group.map(() => "(?, ?)").join(", ")}),
+            daily AS (
+              SELECT o.series_id AS id,
+                CAST(julianday(ends.last) - julianday(substr(o.observed_at, 1, 10)) AS INTEGER) AS ago,
+                avg(o.value) AS mean
+              ${SOURCE} JOIN ends ON ends.id = o.series_id
+              WHERE o.observed_at >= date(ends.last, '-29 days') || 'T00:00:00.000Z'
+              GROUP BY o.series_id, substr(o.observed_at, 1, 10)
+            )
+          SELECT id, json_group_array(json_array(ago, mean)) AS points FROM daily GROUP BY id`,
+          group.flatMap((entry) => [entry.id, entry.end]),
+        ),
+      );
+    }
+    for (const row of sparks)
+      spark.set(
+        row.id,
+        JSON.parse(row.points).sort((left, right) => right[0] - left[0]),
+      );
     const imports = ctx.db.query(
       `SELECT count(*) AS batches, coalesce(sum(row_count), 0) AS observations
       FROM import_batches WHERE imported_at_ms IS NOT NULL`,
     )[0];
-    return { series, ...imports };
+    const counts = ctx.db.query(
+      `SELECT count(*) AS total,
+        coalesce(sum(?1 = '' OR instr(lower(s.name), ?1) > 0 OR instr(lower(s.slug), ?1) > 0
+          OR instr(lower(s.domain), ?1) > 0), 0) AS matches
+      FROM series s WHERE EXISTS (SELECT 1 ${SOURCE} WHERE o.series_id = s.id)`,
+      params.slice(0, 1),
+    )[0];
+    return {
+      series: series.map(({ matched, ...entry }) => ({ ...entry, spark: spark.get(entry.id) })),
+      shown: series.filter((entry) => entry.matched).length,
+      ...counts,
+      ...imports,
+      shortcuts:
+        ctx.db.query("SELECT value FROM settings WHERE key = 'shortcuts'")[0]?.value !== "off",
+    };
   },
   importChunk,
   seedDemo,
@@ -432,8 +779,7 @@ const ownerOperations = {
   outliers,
   analyze(ctx, input) {
     const rollups = readRollups(ctx, input, 400);
-    const comparison = input.ids.length === 2 ? compare(ctx, input) : null;
-    return { rollups, comparison, outliers: outliers(ctx, input) };
+    return { rollups, profile: lagProfile(ctx, input), outliers: outliers(ctx, input) };
   },
   listNotes(ctx, input) {
     const offset = input?.offset ?? 0;
@@ -446,13 +792,14 @@ const ownerOperations = {
   },
   readNote(ctx, input) {
     const row = ctx.db.query(
-      "SELECT title, body_md, created_at_ms, snapshot_json, grant_id FROM research_notes WHERE id = ?",
+      "SELECT title, body_md, created_at_ms, snapshot_json, grant_id, link_version FROM research_notes WHERE id = ?",
       [typeof input?.id === "string" ? input.id : ""],
     )[0];
-    return row ? { ...report(row), linked: row.grant_id !== null } : null;
+    return row ? { ...report(row), grant: row.grant_id, version: row.link_version } : null;
   },
   saveNote,
   setReportLink,
+  setShortcuts,
 };
 
 globalThis.operations = {

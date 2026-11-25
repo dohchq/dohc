@@ -1,3 +1,7 @@
+import { parseCsv } from "dohc/csv";
+
+export class CsvError extends Error {}
+
 export type Observation = [slug: string, timestamp: string, value: number, tags: string];
 type Metadata = [slug: string, name: string, unit: string, domain: string];
 type Batch = {
@@ -19,56 +23,37 @@ export type ImportProgress = {
   elapsedMs: number;
 };
 
-function parseRows(text: string) {
-  const records: string[][] = [];
-  let row: string[] = [];
-  let field = "";
-  let quoted = false;
-  let closed = false;
-  const pushField = () => {
-    row.push(field);
-    field = "";
-    closed = false;
-  };
-  const pushRow = () => {
-    pushField();
-    if (row.some((value) => value.trim() !== "")) records.push(row);
-    row = [];
-  };
-  for (let i = text.startsWith("\ufeff") ? 1 : 0; i < text.length; i++) {
-    const char = text[i];
-    if (quoted) {
-      if (char !== '"') field += char;
-      else if (text[i + 1] === '"') {
-        field += '"';
-        i++;
-      } else {
-        quoted = false;
-        closed = true;
-      }
-    } else if (char === ",") pushField();
-    else if (char === "\n" || char === "\r") {
-      if (char === "\r" && text[i + 1] === "\n") i++;
-      pushRow();
-    } else if (char === '"' && !closed && !field) quoted = true;
-    else if (closed || char === '"')
-      throw new Error(`CSV record ${records.length + 1} has an unexpected quote.`);
-    else field += char;
+export const APP_CHUNK_BYTES = 48 * 1024;
+export const BULK_CHUNK_BYTES = 960 * 1024;
+const MAX_CHUNK_ROWS = 8192;
+
+function readCsv(text: string) {
+  try {
+    return parseCsv(text);
+  } catch (caught) {
+    throw new CsvError(caught instanceof Error ? caught.message : "The CSV could not be read.");
   }
-  if (quoted) throw new Error(`CSV record ${records.length + 1} has an unclosed quote.`);
-  pushRow();
-  return records;
+}
+
+function decode(bytes: ArrayBuffer) {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new CsvError("The file is not UTF-8 text. Export the CSV as UTF-8 and choose it again.");
+  }
 }
 
 export function parseObservations(text: string) {
-  const [header, ...records] = parseRows(text);
+  const [header, ...records] = readCsv(text).filter((row) =>
+    row.some((value) => value.trim() !== ""),
+  );
   const columns = new Map(header?.map((name, i) => [name.trim(), i]));
   if (
     columns.size !== header?.length ||
     !["series", "observed_at", "value"].every((name) => columns.has(name)) ||
     !records.length
   ) {
-    throw new Error(
+    throw new CsvError(
       "Use a CSV with unique series, observed_at, and value columns and at least one row.",
     );
   }
@@ -76,13 +61,13 @@ export function parseObservations(text: string) {
   const rows = records.map((row, i): Observation => {
     const get = (key: string) => row[columns.get(key) ?? -1]?.trim() ?? "";
     const fail = (field: string) => {
-      throw new Error(`CSV record ${i + 2} has an invalid ${field}.`);
+      throw new CsvError(`CSV record ${i + 2} has an invalid ${field}.`);
     };
     if (row.length !== header.length) fail("column count");
     const slug = get("series");
     if (!/^[a-z0-9][a-z0-9_-]{0,47}$/.test(slug)) fail("series slug");
     if (slug.startsWith("sample-"))
-      throw new Error(`CSV record ${i + 2} uses a series slug reserved for sample data.`);
+      throw new CsvError(`CSV record ${i + 2} uses a series slug reserved for sample data.`);
     const at = get("observed_at");
     const day = at.slice(0, 10);
     const dayMs = Date.parse(day);
@@ -130,11 +115,10 @@ export async function importObservations(
   bytes: ArrayBuffer,
   commit: (chunk: Batch) => Promise<Commit>,
   onProgress: (progress: ImportProgress) => void = () => {},
+  chunkBytes = APP_CHUNK_BYTES,
 ) {
   const started = performance.now();
-  const { rows, metadata } = parseObservations(
-    new TextDecoder("utf-8", { fatal: true }).decode(bytes),
-  );
+  const { rows, metadata } = parseObservations(decode(bytes));
   const hash = await crypto.subtle.digest("SHA-256", bytes);
   const sha256 = Array.from(new Uint8Array(hash), (byte) =>
     byte.toString(16).padStart(2, "0"),
@@ -160,12 +144,12 @@ export async function importObservations(
     const batch: Batch = { sha256, filename, total, offset: received, rows: [], metadata: [] };
     const included = new Set<string>();
     let payloadBytes = byteCount(batch);
-    for (let index = received; index < total && batch.rows.length < 512; index++) {
+    for (let index = received; index < total && batch.rows.length < MAX_CHUNK_ROWS; index++) {
       const row = rows[index];
       const slug = row[0];
       const info = included.has(slug) ? undefined : metadata.get(slug);
       const size = byteCount(row) + 1 + (info ? byteCount(info) + 1 : 0);
-      if (payloadBytes + size > 48 * 1024) break;
+      if (payloadBytes + size > chunkBytes) break;
       batch.rows.push(row);
       if (info) {
         included.add(slug);

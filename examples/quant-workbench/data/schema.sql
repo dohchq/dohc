@@ -3,8 +3,7 @@ CREATE TABLE series (
   slug TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL,
   unit TEXT NOT NULL,
-  domain TEXT NOT NULL,
-  color INTEGER NOT NULL CHECK (color BETWEEN 1 AND 6)
+  domain TEXT NOT NULL
 ) STRICT;
 
 CREATE TABLE import_batches (
@@ -36,5 +35,11 @@ CREATE TABLE research_notes (
   series_ids_json TEXT NOT NULL,
   created_at_ms INTEGER NOT NULL,
   snapshot_json TEXT NOT NULL,
-  grant_id TEXT UNIQUE
+  grant_id TEXT UNIQUE,
+  link_version INTEGER NOT NULL DEFAULT 0
+) STRICT;
+
+CREATE TABLE settings (
+  key TEXT PRIMARY KEY NOT NULL,
+  value TEXT NOT NULL
 ) STRICT;
