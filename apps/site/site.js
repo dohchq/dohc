@@ -998,11 +998,22 @@ if (waitlist) {
   let pending = false;
 
   const failure = async (response) => {
-    if (response.status === 429)
-      return "Too many signups from this network. Try again in a few minutes.";
+    if (response.status === 429) {
+      return {
+        outcome: "rate_limited",
+        message: "Too many signups from this network. Try again in a few minutes.",
+      };
+    }
     const result = await response.json().catch(() => null);
     if (response.status === 200 && result?.success === true) return null;
-    return "Could not join the waitlist. Check the email address and try again.";
+    return {
+      outcome: "failed",
+      message: "Could not join the waitlist. Check the email address and try again.",
+    };
+  };
+
+  const notifyWaitlistOutcome = (outcome) => {
+    document.dispatchEvent(new CustomEvent("dohc:waitlist-submitted", { detail: { outcome } }));
   };
 
   waitlist.addEventListener("submit", async (event) => {
@@ -1020,15 +1031,18 @@ if (waitlist) {
         body: new URLSearchParams(new FormData(waitlist)).toString(),
         signal: AbortSignal.timeout?.(10000),
       });
-      const message = await failure(response);
+      const result = await failure(response);
       const focused = waitlist.contains(document.activeElement);
-      waitlist.dataset.state = message ? "error" : "joined";
-      status.textContent = message ?? "You're on the list. We'll email you when Drive opens.";
+      waitlist.dataset.state = result ? "error" : "joined";
+      status.textContent =
+        result?.message ?? "You're on the list. We'll email you when Drive opens.";
+      notifyWaitlistOutcome(result ? result.outcome : "succeeded");
       // Success hides the field; keep a keyboard user in place without pulling anyone else back.
-      if (!message && focused) status.focus();
+      if (!result && focused) status.focus();
     } catch {
       waitlist.dataset.state = "error";
       status.textContent = "Could not reach the waitlist. Check your connection and try again.";
+      notifyWaitlistOutcome("failed");
     } finally {
       pending = false;
       submit.removeAttribute("aria-disabled");

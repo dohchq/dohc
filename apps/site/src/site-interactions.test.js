@@ -561,19 +561,27 @@ describe("Drive waitlist", () => {
   };
 
   it("posts the email and source to the Loops form endpoint and confirms", async () => {
-    vi.mocked(fetch).mockImplementation(async () => Response.json({ success: true }));
-    const form = await join();
-    await vi.waitFor(() => expect(form.dataset.state).toBe("joined"));
-    const [url, request] = vi.mocked(fetch).mock.calls[0];
-    expect(url).toBe(form.action);
-    expect(url).toMatch(/^https:\/\/app\.loops\.so\/api\/newsletter-form\//);
-    expect(request.headers["Content-Type"]).toBe("application/x-www-form-urlencoded");
-    expect(Object.fromEntries(new URLSearchParams(request.body))).toEqual({
-      email: "ada@example.com",
-      source: "Drive waitlist",
-    });
-    expect(document.querySelector("[data-waitlist-status]").textContent).toContain("on the list");
-    expect(document.activeElement).toBe(document.querySelector("[data-waitlist-status]"));
+    const outcomes = [];
+    const onOutcome = (event) => outcomes.push(event.detail.outcome);
+    document.addEventListener("dohc:waitlist-submitted", onOutcome);
+    try {
+      vi.mocked(fetch).mockImplementation(async () => Response.json({ success: true }));
+      const form = await join();
+      await vi.waitFor(() => expect(form.dataset.state).toBe("joined"));
+      const [url, request] = vi.mocked(fetch).mock.calls[0];
+      expect(url).toBe(form.action);
+      expect(url).toMatch(/^https:\/\/app\.loops\.so\/api\/newsletter-form\//);
+      expect(request.headers["Content-Type"]).toBe("application/x-www-form-urlencoded");
+      expect(Object.fromEntries(new URLSearchParams(request.body))).toEqual({
+        email: "ada@example.com",
+        source: "Drive waitlist",
+      });
+      expect(document.querySelector("[data-waitlist-status]").textContent).toContain("on the list");
+      expect(document.activeElement).toBe(document.querySelector("[data-waitlist-status]"));
+      expect(outcomes).toEqual(["succeeded"]);
+    } finally {
+      document.removeEventListener("dohc:waitlist-submitted", onOutcome);
+    }
   });
 
   it("leaves focus alone when the visitor moved on before the signup finished", async () => {
@@ -594,15 +602,23 @@ describe("Drive waitlist", () => {
   });
 
   it("explains a rate limit and lets the visitor try again", async () => {
-    vi.mocked(fetch).mockImplementation(async () => new Response("{}", { status: 429 }));
-    const form = await join();
-    await vi.waitFor(() => expect(form.dataset.state).toBe("error"));
-    expect(document.querySelector("[data-waitlist-status]").textContent).toContain(
-      "Too many signups",
-    );
-    const submit = form.querySelector('button[type="submit"]');
-    expect(submit.hasAttribute("aria-disabled")).toBe(false);
-    expect(submit.textContent).toBe("Join the waitlist");
+    const outcomes = [];
+    const onOutcome = (event) => outcomes.push(event.detail.outcome);
+    document.addEventListener("dohc:waitlist-submitted", onOutcome);
+    try {
+      vi.mocked(fetch).mockImplementation(async () => new Response("{}", { status: 429 }));
+      const form = await join();
+      await vi.waitFor(() => expect(form.dataset.state).toBe("error"));
+      expect(document.querySelector("[data-waitlist-status]").textContent).toContain(
+        "Too many signups",
+      );
+      const submit = form.querySelector('button[type="submit"]');
+      expect(submit.hasAttribute("aria-disabled")).toBe(false);
+      expect(submit.textContent).toBe("Join the waitlist");
+      expect(outcomes).toEqual(["rate_limited"]);
+    } finally {
+      document.removeEventListener("dohc:waitlist-submitted", onOutcome);
+    }
   });
 
   it("announces a pending request, blocks a second submission, and reports the failure", async () => {

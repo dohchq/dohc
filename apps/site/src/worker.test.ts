@@ -60,3 +60,116 @@ it("serves every other path from the site's files", async () => {
   expect(assets.fetch).toHaveBeenCalledTimes(4);
   expect(upstream).not.toHaveBeenCalled();
 });
+
+const ALLOWED_KEY = "phc_desktop1234567890";
+const OTHER_KEY = "phc_other9876543210";
+
+it("forwards allowed /telemetry/batch/ JSON payloads while stripping IP headers and $ip fields", async () => {
+  const response = await worker.fetch(
+    new Request("https://dohc.computer/telemetry/batch/", {
+      method: "POST",
+      headers: {
+        cookie: "session=secret",
+        "cf-connecting-ip": "203.0.113.7",
+        "cf-ipcountry": "SG",
+        "x-forwarded-for": "203.0.113.7",
+        "x-real-ip": "203.0.113.7",
+        authorization: "Bearer phx_personal",
+        "content-type": "application/json",
+        "user-agent": "dohc/1.0",
+      },
+      body: JSON.stringify({
+        api_key: ALLOWED_KEY,
+        sent_at: "2026-11-25T05:00:00.000Z",
+        extra_field: "dropped",
+        batch: [
+          {
+            event: "app_launched",
+            distinct_id: "install-1",
+            $ip: "203.0.113.7",
+            properties: {
+              $ip: "203.0.113.7",
+              $geoip_disable: true,
+              channel: "nightly",
+            },
+          },
+        ],
+      }),
+    }),
+    { ASSETS: assets, ALLOWED_TELEMETRY_KEYS: `${ALLOWED_KEY}, phc_second1234567890` },
+  );
+  expect(response.status).toBe(200);
+  expect(response.headers.get("set-cookie")).toBeNull();
+  const [url, init] = upstream.mock.calls[0]!;
+  expect(url).toBe("https://us.i.posthog.com/batch/");
+  expect([...new Headers(init.headers)]).toEqual([["content-type", "application/json"]]);
+  expect(JSON.parse(init.body as string)).toEqual({
+    api_key: ALLOWED_KEY,
+    sent_at: "2026-11-25T05:00:00.000Z",
+    batch: [
+      {
+        event: "app_launched",
+        distinct_id: "install-1",
+        properties: { $geoip_disable: true, channel: "nightly" },
+      },
+    ],
+  });
+  expect(assets.fetch).not.toHaveBeenCalled();
+});
+
+it("refuses /telemetry/batch/ when unconfigured, wrong key, wrong method, wrong path, bad JSON, or oversized", async () => {
+  const validBody = JSON.stringify({ api_key: ALLOWED_KEY, batch: [{ event: "app_launched" }] });
+  const unconfigured = await worker.fetch(
+    new Request("https://dohc.computer/telemetry/batch/", { method: "POST", body: validBody }),
+    { ASSETS: assets },
+  );
+  expect(unconfigured.status).toBe(503);
+
+  const wrongMethod = await worker.fetch(
+    new Request("https://dohc.computer/telemetry/batch/", { method: "GET" }),
+    { ASSETS: assets, ALLOWED_TELEMETRY_KEYS: ALLOWED_KEY },
+  );
+  expect(wrongMethod.status).toBe(405);
+  expect(wrongMethod.headers.get("allow")).toBe("POST");
+
+  const wrongPath = await worker.fetch(
+    new Request("https://dohc.computer/telemetry/e/", { method: "POST", body: validBody }),
+    { ASSETS: assets, ALLOWED_TELEMETRY_KEYS: ALLOWED_KEY },
+  );
+  expect(wrongPath.status).toBe(404);
+
+  const forbidden = await worker.fetch(
+    new Request("https://dohc.computer/telemetry/batch/", {
+      method: "POST",
+      body: JSON.stringify({ api_key: OTHER_KEY, batch: [{ event: "app_launched" }] }),
+    }),
+    { ASSETS: assets, ALLOWED_TELEMETRY_KEYS: ALLOWED_KEY },
+  );
+  expect(forbidden.status).toBe(403);
+
+  const badJson = await worker.fetch(
+    new Request("https://dohc.computer/telemetry/batch/", { method: "POST", body: "not-json" }),
+    { ASSETS: assets, ALLOWED_TELEMETRY_KEYS: ALLOWED_KEY },
+  );
+  expect(badJson.status).toBe(400);
+
+  const emptyBatch = await worker.fetch(
+    new Request("https://dohc.computer/telemetry/batch/", {
+      method: "POST",
+      body: JSON.stringify({ api_key: ALLOWED_KEY, batch: [] }),
+    }),
+    { ASSETS: assets, ALLOWED_TELEMETRY_KEYS: ALLOWED_KEY },
+  );
+  expect(emptyBatch.status).toBe(400);
+
+  const oversized = await worker.fetch(
+    new Request("https://dohc.computer/telemetry/batch/", {
+      method: "POST",
+      body: "a".repeat(1_048_577),
+    }),
+    { ASSETS: assets, ALLOWED_TELEMETRY_KEYS: ALLOWED_KEY },
+  );
+  expect(oversized.status).toBe(413);
+  expect(upstream).not.toHaveBeenCalled();
+  expect(assets.fetch).not.toHaveBeenCalled();
+});
