@@ -1444,7 +1444,7 @@ it("lets an admin set Collection defaults and grant a member existing actions, b
   ).rejects.toMatchObject(refused);
 });
 
-it("lists a Collection a member reaches only by its defaults, and changes their offline copy's access when the defaults change", async () => {
+it("lists a Collection a member reaches only by its defaults, and changes their offline copy's access when the defaults change or the Collection is archived", async () => {
   const f = await memberFixture(false);
   expect(f.listed().datasets).toEqual([]);
   const defaults = (view: string[]) =>
@@ -1464,6 +1464,10 @@ it("lists a Collection a member reaches only by its defaults, and changes their 
   defaults([]);
   expect(f.listed().datasets).toEqual([]);
   expect(f.host.offlineAccessFingerprint(ana)).not.toBe(fingerprint);
+  defaults([id(6)]);
+  const restored = f.host.offlineAccessFingerprint(ana);
+  f.host.archiveDataset(owner, scope);
+  expect(f.host.offlineAccessFingerprint(ana)).not.toBe(restored);
 });
 
 it("pages a member's Collections past ones they can't reach, without naming them", async () => {

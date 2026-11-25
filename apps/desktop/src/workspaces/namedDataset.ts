@@ -45,6 +45,7 @@ export function createNamedDatasetData(input: {
     relayUrl?: unknown;
     grantedSelector?: unknown;
     ended?: unknown;
+    membersWorkspaceId?: unknown;
   } | null;
   if (marker?.ended === true)
     throw new Error("Your access to this share ended. Ask the owner to share it again.");
@@ -83,8 +84,22 @@ export function createNamedDatasetData(input: {
     throw new Error(JOINED_BY_ANOTHER_ACCOUNT);
   const shareId = marker.shareId;
   const data = createRemoteDatasetData({ ...input, shareId });
-  const { permissions, setGrant, setDefaults } = createRemoteDatasetData(input);
-  const managed = { permissions, setGrant, setDefaults };
+  const membersWorkspaceId =
+    recordedShareSelector(marker.grantedSelector)?.wholeWorkspace === true &&
+    typeof marker.membersWorkspaceId === "string" &&
+    marker.membersWorkspaceId
+      ? marker.membersWorkspaceId
+      : null;
+  const manager = () => {
+    if (!membersWorkspaceId)
+      throw new Error("Only an Admin of a joined workspace manages Collection access.");
+    return createRemoteDatasetData({ ...input, workspaceId: membersWorkspaceId });
+  };
+  const managed: Pick<NamedDatasetData, "permissions" | "setGrant" | "setDefaults"> = {
+    permissions: async (value) => manager().permissions(value),
+    setGrant: async (value) => manager().setGrant(value),
+    setDefaults: async (value) => manager().setDefaults(value),
+  };
   const exposed = {
     list: data.list,
     describe: data.describe,

@@ -83,3 +83,32 @@ it("refuses a joined workspace's Collections while another account is signed in,
   await createNamedDatasetData({ ...deps, shareView: joined }).list({});
   expect(deps.relayJson).toHaveBeenCalledOnce();
 });
+it("sends an Admin's Collection access requests to the owner's workspace, not the local copy", async () => {
+  const deps = {
+      ...input(),
+      relayJson: vi.fn(async (..._: unknown[]): Promise<unknown> => ({
+        permissions: [],
+        nextCursor: null,
+        defaults: null,
+      })),
+    },
+    request = {
+      workspaceId: "local-share-copy",
+      action: "permissions" as const,
+      datasetId: "00000000-0000-4000-8000-000000000001",
+    },
+    joined = {
+      ...marker,
+      grantedSelector: { paths: [], versionId: null, access: "edit", wholeWorkspace: true },
+      membersWorkspaceId: "owner-workspace",
+    };
+  await createNamedDatasetData({ ...deps, shareView: joined }).permissions(request);
+  expect(deps.relayJson).toHaveBeenCalledWith(
+    deps.credentials,
+    expect.stringMatching(/^\/sync\/owner-workspace\/datasets\//),
+    expect.anything(),
+  );
+  await expect(createNamedDatasetData(deps).permissions(request)).rejects.toThrow(
+    "Only an Admin of a joined workspace manages Collection access.",
+  );
+});

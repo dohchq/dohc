@@ -1427,7 +1427,12 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         for (const row of reach
           ? storage.db
               .prepare(
-                "SELECT dataset_id,generation FROM dohc_dataset_workspace_defaults WHERE workspace_id=? ORDER BY dataset_id",
+                `SELECT d.dataset_id,d.generation,
+                json_extract(c.revision_json,'$.revisionSha256') AS revision,COALESCE(l.generation,0) AS lifecycle
+                FROM dohc_dataset_workspace_defaults d JOIN dohc_dataset_catalog c
+                ON c.workspace_id=d.workspace_id AND c.dataset_id=d.dataset_id
+                LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=d.workspace_id AND l.dataset_id=d.dataset_id
+                WHERE d.workspace_id=? ORDER BY d.dataset_id`,
               )
               .all(auth.workspaceId)
           : []) {
