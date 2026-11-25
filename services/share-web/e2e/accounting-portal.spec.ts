@@ -375,6 +375,21 @@ test("the accountant link reads reports, cannot write, and stops working when re
     await page.emulateMedia({ media: "screen" });
     await portal.getByRole("tab", { name: "Account ledger" }).click();
     await expect(portal.getByRole("row", { name: /Closing balance/ })).toContainText("$3,200.00");
+    await f.ownerInvoke("postJournalEntries", {
+      entries: [
+        entry(
+          `${year}-01-20`,
+          [
+            ["1000", 10_000, 0],
+            ["4000", 0, 10_000],
+          ],
+          "Late deposit",
+        ),
+      ],
+    });
+    await expect(portal.getByRole("row", { name: /Closing balance/ })).toContainText("$3,300.00", {
+      timeout: 5_000,
+    });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(
       await portal.locator("body").evaluate((body) => body.scrollWidth <= innerWidth + 1),
