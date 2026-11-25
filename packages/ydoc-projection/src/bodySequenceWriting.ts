@@ -1075,7 +1075,7 @@ export function writeTransaction(
     if (!flush(at, false)) return false;
     if (kind !== null) {
       run = { kind, from: at };
-      if (insert) inserts.push([insert[0], at, insert]);
+      if (kind === "inserts") inserts.push([insert![0], at, insert!]);
       continue;
     }
     for (const range of ranges!.reverse())
