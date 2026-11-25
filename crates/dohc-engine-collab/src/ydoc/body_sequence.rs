@@ -579,8 +579,8 @@ fn inline_place<'leaf>(
 pub(super) type Stored = BTreeMap<&'static str, Any>;
 
 pub(super) enum Slot {
-    Unit(u16, usize),
-    Inline(&'static str, Stored),
+    Unit(u16, u32),
+    Inline(usize),
     Line(usize),
     Skipped,
 }
@@ -604,6 +604,7 @@ pub(super) struct Frame {
 pub(super) struct Trace {
     pub(super) slots: Vec<Slot>,
     pub(super) marks: Vec<yrs::types::Attrs>,
+    pub(super) inline: Vec<(&'static str, Stored)>,
     pub(super) lines: Vec<Line>,
     pub(super) frames: Vec<Frame>,
     pub(super) unknown_width: bool,
@@ -705,7 +706,7 @@ impl Reader<'_> {
             trace.marks.push(body_sequence_writer::marks_of(&marks));
             trace.generation = Some(self.formatting.generation);
         }
-        let marks = trace.marks.len() - 1;
+        let marks = (trace.marks.len() - 1) as u32;
         let units = text.encode_utf16().map(|unit| Slot::Unit(unit, marks));
         trace.slots.extend(units);
         Ok(())
@@ -750,9 +751,8 @@ impl Reader<'_> {
         let holds = Leaf::holds_inline_items;
         self.bare(holds);
         if let Some(trace) = self.trace.as_deref_mut() {
-            trace
-                .slots
-                .push(Slot::Inline(tag, stored_reading(tag, &attrs)));
+            trace.slots.push(Slot::Inline(trace.inline.len()));
+            trace.inline.push((tag, stored_reading(tag, &attrs)));
         }
         let place = inline_place(&mut self.leaf, &mut self.budget, holds, depth)?;
         place.push(element(tag, attrs, Vec::new()));

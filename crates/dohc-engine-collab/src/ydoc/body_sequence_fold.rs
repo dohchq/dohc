@@ -121,11 +121,10 @@ fn same(before: &Trace, target: &Target, at: usize, wanted: usize) -> bool {
     visit(1);
     match (&before.slots[at], &target.slots[wanted]) {
         (Slot::Unit(unit, marks), Wanted::Unit(other, wanted)) => {
-            unit == other && before.marks[*marks] == target.marks[*wanted]
+            unit == other && before.marks[*marks as usize] == target.marks[*wanted]
         }
-        (Slot::Inline(tag, attributes), Wanted::Inline(item)) => {
-            let (other, wanted) = &target.inline[*item];
-            tag == other && attributes == wanted
+        (Slot::Inline(item), Wanted::Inline(other)) => {
+            before.inline[*item] == target.inline[*other]
         }
         (Slot::Line(_), Wanted::Line(_)) => true,
         _ => false,
