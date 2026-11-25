@@ -1,7 +1,6 @@
 import type { SignIn } from "./account";
 import {
   cacheScope,
-  createReadLane,
   createWorkspaceData,
   type ReadCache,
   type WorkspaceData,
@@ -50,14 +49,12 @@ export function createOpenWorkspace(options: {
     choosing: saved !== null,
   };
   let unsubscribe: (() => void) | null = null;
-  const lane = createReadLane();
 
   function open(workspaceId: string): WorkspaceData {
     const data = createWorkspaceData({
       signIn,
       workspaceId,
       cache,
-      lane,
       onGone: () => {
         onGone?.(workspaceId);
         list.reload();

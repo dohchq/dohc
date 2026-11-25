@@ -5,15 +5,14 @@ import { deferred, memoryStore, serveSessionEnd, testServer, type Answer } from 
 import {
   cacheScope,
   createReadCache,
-  createReadLane,
   createWorkspaceData,
   FEED_FAILURES_SHOWN,
   FEED_RETRY_MS,
-  PREFETCH_AT_ONCE,
   PREFETCH_MAX,
   views,
   type ReadCache,
 } from "./workspaceData";
+import { PREFETCH_AT_ONCE } from "./readLane";
 import { FEED_HOLD_MS } from "./workspaceReads";
 
 type Server = ReturnType<typeof testServer>;
@@ -1052,10 +1051,64 @@ describe("prefetching pages", () => {
     waiting.shift()!.resolve(page("Read ahead"));
     waiting.shift()!.resolve(page("Read ahead"));
     await vi.waitFor(() => expect(reads(server)).toBe(4));
-    const bodies = server.calls
-      .filter((call) => call.path.endsWith("/ops/documentRead"))
-      .map((call) => call.body);
-    expect(bodies.slice(-2)).toEqual([{ path: "notes/a.md" }, { path: "notes/b.md" }]);
+    const bodies = () =>
+      server.calls
+        .filter((call) => call.path.endsWith("/ops/documentRead"))
+        .map((call) => call.body);
+    expect(bodies().slice(-2)).toEqual([{ path: "notes/a.md" }, { path: "notes/b.md" }]);
+    waiting.shift()!.resolve(page("Read ahead"));
+    await vi.waitFor(() => expect(reads(server)).toBe(5));
+    expect(bodies().at(-1)).toEqual({ path: "p3.md" });
+  });
+
+  it("reads a page listed twice in one batch once", async () => {
+    const server = serve("ws-prefetch-twice", page("Read ahead"));
+    const { data } = open(server, "ws-prefetch-twice");
+    data.prefetchPages(["a.md", "a.md"]);
+    await vi.waitFor(() => expect(data.state(views.page("a.md")).value).not.toBeNull());
+    await settled();
+    expect(reads(server)).toBe(1);
+  });
+
+  it("counts only pages that read toward a folder's ten", async () => {
+    const missing = ops({ ok: false, reason: "dohc: No document.", refusal: "missing" }, "0.1.1");
+    const server = testServer();
+    server.on("POST", "/sync/ws-a/ops/documentRead", (call) =>
+      (call.body as { path: string }).path.startsWith("gone") ? missing : page("Read ahead"),
+    );
+    server.on("GET", feedPath("ws-a", "0.1.1"), held);
+    const { data } = open(server);
+    data.prefetchPages([...paths(PREFETCH_MAX).map((path) => `gone-${path}`), ...paths(2)]);
+    await vi.waitFor(() => expect(reads(server)).toBe(PREFETCH_MAX + 2));
+    expect(data.state(views.page("p1.md")).value).not.toBeNull();
+  });
+
+  it("aborts read-ahead on its way when a screen reads, and reads it again after", async () => {
+    const shown = deferred<Answer>();
+    const server = testServer();
+    server.on(
+      "POST",
+      "/sync/ws-a/ops/documentRead",
+      () => new Promise<Answer>(() => {}),
+      () => shown.promise,
+      page("Read ahead"),
+    );
+    server.on("GET", feedPath("ws-a", "0.1.1"), held);
+    const { data } = open(server);
+    data.prefetchPages(["a.md"]);
+    await vi.waitFor(() => expect(reads(server)).toBe(1));
+    data.subscribe(views.page("open.md"), () => {});
+    await vi.waitFor(() => expect(reads(server)).toBe(2));
+    expect(
+      server.calls.find((call) => call.path.endsWith("/ops/documentRead"))?.signal.aborted,
+    ).toBe(true);
+    shown.resolve(page("Shown"));
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({
+        kind: "page",
+        markdown: "Read ahead",
+      }),
+    );
   });
 
   it("waits for a screen's read, and shares two reads at once across the sign-in's stores", async () => {
@@ -1071,11 +1124,10 @@ describe("prefetching pages", () => {
     server.on("POST", "/sync/ws-b/ops/documentRead", page("Read ahead"));
     server.on("GET", feedPath("ws-a", "0.1.1"), held);
     server.on("GET", feedPath("ws-b", "0.1.1"), held);
-    const lane = createReadLane();
     const signIn = signInTo(server);
     const cache = createReadCache();
-    const a = createWorkspaceData({ signIn, workspaceId: "ws-a", cache, lane });
-    const b = createWorkspaceData({ signIn, workspaceId: "ws-b", cache, lane });
+    const a = createWorkspaceData({ signIn, workspaceId: "ws-a", cache });
+    const b = createWorkspaceData({ signIn, workspaceId: "ws-b", cache });
     a.resume();
     b.resume();
     a.subscribe(views.page("open.md"), () => {});

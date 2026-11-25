@@ -6,6 +6,7 @@ import { requestGenerations, ServerError, shownProblem, type ServerClient } from
 import { sleep } from "./deviceFlow";
 import { appOperations, type PhoneApp } from "./phoneApps";
 import { collectionOperations, type PhoneCollection } from "./phoneCollections";
+import { readLane } from "./readLane";
 import {
   earlierCursor,
   FEED_HOLD_MS,
@@ -447,8 +448,8 @@ export interface WorkspaceData {
   /** Reads the view now, as a screen about to open it would, unless it shows a fresh value or a read is on its way. */
   prefetch(view: View<unknown>): void;
   /**
-   * Reads these pages ahead, those listed last first, each at most once for this store, and at most `PREFETCH_MAX` that
-   * read in each folder.
+   * Reads these pages ahead, those listed last first. Each page is tried once for this store, unless a screen's read
+   * aborts it, and each folder reads at most `PREFETCH_MAX` pages.
    */
   prefetchPages(paths: readonly string[]): void;
   retry(view: View<unknown>): void;
@@ -479,39 +480,9 @@ export interface WorkspaceData {
 export const FEED_RETRY_MS = 1000;
 export const FEED_RETRY_MAX_MS = 30_000;
 export const FEED_FAILURES_SHOWN = 3;
-export const PREFETCH_AT_ONCE = 2;
 export const PREFETCH_MAX = 10;
 
 let instances = 0;
-
-/** One sign-in's reads: read-ahead starts only while no screen's read is on its way, and at most `PREFETCH_AT_ONCE`. */
-export interface ReadLane {
-  run<T>(ahead: boolean, read: () => Promise<T>): Promise<T>;
-  free(): boolean;
-  onFree(listener: () => void): () => void;
-}
-
-export function createReadLane(): ReadLane {
-  let screen = 0;
-  let ahead = 0;
-  const listeners = new Set<() => void>();
-  return {
-    run(isAhead, read) {
-      if (isAhead) ahead += 1;
-      else screen += 1;
-      return read().finally(() => {
-        if (isAhead) ahead -= 1;
-        else screen -= 1;
-        for (const listener of [...listeners]) listener();
-      });
-    },
-    free: () => screen === 0 && ahead < PREFETCH_AT_ONCE,
-    onFree(listener) {
-      listeners.add(listener);
-      return () => void listeners.delete(listener);
-    },
-  };
-}
 
 interface Entry {
   readonly view: View<unknown>;
@@ -526,7 +497,6 @@ export function createWorkspaceData(options: {
   readonly signIn: Pick<SignIn, "client" | "isCurrent" | "origin" | "userId">;
   readonly workspaceId: string;
   readonly cache: ReadCache;
-  readonly lane?: ReadLane;
   readonly holdMs?: number;
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   /** The server answered 404 for the workspace: the store has stopped and cleared. */
@@ -540,7 +510,7 @@ export function createWorkspaceData(options: {
   const holdMs = options.holdMs ?? FEED_HOLD_MS;
   const wait = options.sleep ?? sleep;
   const scope = cacheScope(signIn, workspaceId);
-  const lane = options.lane ?? createReadLane();
+  const lane = readLane(signIn);
   const everything = new AbortController();
   const entries = new Map<string, Entry>();
   let stopped = false;
@@ -659,14 +629,14 @@ export function createWorkspaceData(options: {
     if (cached) cache.set(scope, { ...cached, prefetched: undefined });
   }
 
-  function read(target: Entry, prefetch = false) {
+  function read(target: Entry, ahead?: AbortSignal) {
     const request = target.reads.next();
     const from = cursor;
     const unseen = target.prefetched || target.state.value === null;
-    if (!prefetch) set(target, { ...target.state, loading: true });
-    const reading = lane.run(prefetch, () =>
-      target.view.read(signIn.client, workspaceId, everything.signal),
-    );
+    if (!ahead) set(target, { ...target.state, loading: true });
+    const reading = ahead
+      ? target.view.read(signIn.client, workspaceId, ahead)
+      : lane.screen(() => target.view.read(signIn.client, workspaceId, everything.signal));
     return reading.then(
       (answer) => {
         if (!live() || !target.reads.isLatest(request)) return;
@@ -690,7 +660,7 @@ export function createWorkspaceData(options: {
         if (!live() || !target.reads.isLatest(request)) return;
         if (isGone(error)) return gone();
         const problem = shownProblem(error);
-        if (problem === null || prefetch) return;
+        if (problem === null || ahead) return;
         set(target, {
           ...target.state,
           loading: false,
@@ -701,30 +671,37 @@ export function createWorkspaceData(options: {
     );
   }
 
-  const queued: string[] = [];
-  const listed = new Set<string>();
-  const taken = new Map<string, number>();
+  let queued: string[] = [];
+  const tried = new Set<string>();
+  const folders = new Map<string, { kept: number; reading: number }>();
   function drain() {
     let next = 0;
     while (next < queued.length && running && live() && !restoring && lane.free()) {
       const path = queued[next];
-      const folder = path.slice(0, path.lastIndexOf("/") + 1);
-      const count = taken.get(folder) ?? 0;
-      if (count >= PREFETCH_MAX) {
+      const name = path.slice(0, path.lastIndexOf("/") + 1);
+      const folder = folders.get(name) ?? { kept: 0, reading: 0 };
+      folders.set(name, folder);
+      if (folder.kept < PREFETCH_MAX && folder.kept + folder.reading >= PREFETCH_MAX) {
         next += 1;
         continue;
       }
       queued.splice(next, 1);
+      if (folder.kept >= PREFETCH_MAX) continue;
       const view = views.page(path);
       const found = entries.get(view.id);
       if (found && (found.listeners.size > 0 || found.state.value !== null || found.state.loading))
         continue;
-      taken.set(folder, count + 1);
+      tried.add(path);
+      folder.reading += 1;
       const target = found ?? entry(view);
-      void read(target, true).then(() => {
-        if (target.state.value !== null) return;
-        taken.set(folder, (taken.get(folder) ?? 1) - 1);
-        drain();
+      void lane.ahead(everything.signal, async (signal) => {
+        await read(target, signal);
+        folder.reading -= 1;
+        if ((target.state.value as PageRead | null)?.kind === "page") folder.kept += 1;
+        else if (signal.aborted) {
+          tried.delete(path);
+          queued.unshift(path);
+        }
       });
     }
   }
@@ -856,9 +833,8 @@ export function createWorkspaceData(options: {
       if (due(target)) void read(target);
     },
     prefetchPages(paths) {
-      const fresh = paths.filter((path) => !listed.has(path));
-      for (const path of fresh) listed.add(path);
-      queued.unshift(...fresh);
+      const fresh = new Set(paths.filter((path) => !tried.has(path)));
+      queued = [...fresh, ...queued.filter((path) => !fresh.has(path))];
       drain();
     },
     retry(view) {
