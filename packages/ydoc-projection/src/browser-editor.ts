@@ -483,6 +483,15 @@ export function mountLiveBodyEditor(
     for (const listener of listeners) listener(next);
   };
 
+  // A redo key the editor declines goes on to ProseMirror's keymap, which retries
+  // Ctrl+Shift+z without Shift as Undo, and then to the browser's own history.
+  const redoKey: Command = (state) => {
+    if (!input.canEdit()) return false;
+    redo(state);
+    notifyToolbar();
+    return true;
+  };
+
   const gated =
     (command: Command): Command =>
     (state, dispatch, editorView) =>
@@ -543,18 +552,8 @@ export function mountLiveBodyEditor(
             notifyToolbar();
             return ok;
           },
-          "Mod-Shift-z": (state) => {
-            if (!input.canEdit()) return false;
-            const ok = redo(state);
-            notifyToolbar();
-            return ok;
-          },
-          "Mod-y": (state) => {
-            if (!input.canEdit()) return false;
-            const ok = redo(state);
-            notifyToolbar();
-            return ok;
-          },
+          "Mod-Shift-z": redoKey,
+          "Mod-y": redoKey,
         }),
         keymap(formattingKeymap),
         keymap(baseKeymap),
