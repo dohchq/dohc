@@ -3,13 +3,21 @@
   "entryPath": "studio.tsx",
   "inputs": [
     "studio.tsx",
+    "camera.ts",
+    "studio-dialogs.tsx",
+    "studio-panels.tsx",
+    "studio-parts.tsx",
+    "studio-uploads.ts",
+    "studio-views.tsx",
+    "studio-writes.ts",
+    "studio.css",
     "portal/api.ts",
-    "portal/gallery.tsx",
-    "portal/inspector.tsx",
+    "portal/glyphs.tsx",
+    "portal/notes.tsx",
     "portal/photo.tsx",
     "portal/scenes.ts",
     "portal/toast.tsx",
-    "portal/lightbox.css"
+    "portal/base.css"
   ],
   "dataset": {
     "kind": "dataset",
@@ -26,9 +34,12 @@
       "setOwnerRating",
       "setColorLabel",
       "publishAsset",
-      "deleteAsset",
+      "deleteAssets",
       "resolveAnnotation",
-      "addPinnedAnnotation"
+      "addPinnedAnnotation",
+      "updateOwnNote",
+      "deleteOwnNote",
+      "restoreOwnNote"
     ]
   }
 }
