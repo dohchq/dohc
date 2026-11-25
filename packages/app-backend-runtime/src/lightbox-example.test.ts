@@ -146,11 +146,28 @@ async function fixture() {
   return { host, db, call, refusal, openFile, files, request };
 }
 
+async function send(f: Awaited<ReturnType<typeof fixture>>, caller?: Caller) {
+  const shown = (await f.call("listPublishedAssets", { code: CODE }, caller)).assets
+    .filter((asset: Result) => asset.picked)
+    .map((asset: Result) => asset.id);
+  return f.call("submitSelection", { code: CODE, assetIds: shown }, caller);
+}
+
+const previewFor = (file: File) => image(`prev_${file.fileId.slice(5)}`, "image/jpeg", 200 * 1024);
+
 async function upload(f: Awaited<ReturnType<typeof fixture>>, file: File, title: string) {
-  f.files.push(file);
+  const preview = previewFor(file);
+  f.files.push(file, preview);
   return f.call(
     "uploadAsset",
-    { shootId: "shoot_positano", fileId: file.fileId, width: 3000, height: 2000, title },
+    {
+      shootId: "shoot_positano",
+      fileId: file.fileId,
+      previewFileId: preview.fileId,
+      width: 3000,
+      height: 2000,
+      title,
+    },
     "owner",
   );
 }
@@ -166,6 +183,9 @@ describe("Lightbox proofing Collection", () => {
       status: "proofing",
       selectionLimit: 12,
       picksUsed: 0,
+      sentAtMs: null,
+      sentPicks: 0,
+      changedSinceSent: false,
     });
     expect(gallery.assets).toHaveLength(13);
     const publicIds = gallery.assets.map((asset: Result) => asset.id);
@@ -183,6 +203,8 @@ describe("Lightbox proofing Collection", () => {
       "noteCount",
       "openNoteCount",
       "picked",
+      "previewFileId",
+      "sent",
       "sortOrder",
       "title",
       "width",
@@ -271,10 +293,19 @@ describe("Lightbox proofing Collection", () => {
     );
     await f.call("updateShoot", { shootId: shoot.id, status: "proofing" }, "owner");
     const uploadTo = async (fileId: string, title: string) => {
-      f.files.push(image(fileId));
+      const file = image(fileId);
+      const preview = previewFor(file);
+      f.files.push(file, preview);
       return f.call(
         "uploadAsset",
-        { shootId: shoot.id, fileId, width: 1200, height: 800, title },
+        {
+          shootId: shoot.id,
+          fileId,
+          previewFileId: preview.fileId,
+          width: 1200,
+          height: 800,
+          title,
+        },
         "owner",
       );
     };
@@ -304,6 +335,18 @@ describe("Lightbox proofing Collection", () => {
     await f
       .refusal("updateShoot", { shootId: shoot.id, selectionLimit: 1 }, "owner")
       .toMatchObject({ refusal: { code: "selection_limit_too_low" } });
+
+    await f.call("submitSelection", { code: shoot.accessCode, assetIds: [first.id, second.id] });
+    await f.call("toggleClientPick", {
+      code: shoot.accessCode,
+      assetId: first.id,
+      selected: false,
+    });
+    await f.call("publishAsset", { assetIds: [first.id], published: false }, "owner");
+    await f.call("updateShoot", { shootId: shoot.id, selectionLimit: 1 }, "owner");
+    await f
+      .refusal("publishAsset", { assetIds: [first.id], published: true }, "owner")
+      .toMatchObject({ refusal: { code: "selection_limit_exceeded" } });
   });
 
   it("validates pinned note positions and text", async () => {
@@ -336,13 +379,176 @@ describe("Lightbox proofing Collection", () => {
     expect(notes.annotations).toHaveLength(1);
   });
 
+  it("marks a note as mine only for the link that pinned it, whatever name it typed", async () => {
+    const f = await fixture();
+    const input = { code: CODE, assetId: "pos_0012", xPct: 5, yPct: 5, body: "Warmer?" };
+    const saved = await f.call("addPinnedAnnotation", { ...input, authorName: "Theo" }, "mara");
+    expect(saved).toMatchObject({ authorName: "Theo", mine: true });
+    const read = async (caller: Caller) =>
+      (await f.call("listAnnotations", { code: CODE, assetId: "pos_0012" }, caller)).annotations;
+    expect(await read("mara")).toMatchObject([{ id: saved.id, mine: true }]);
+    expect(await read("theo")).toMatchObject([{ id: saved.id, mine: false }]);
+    const studio = await f.call("studioAnnotations", { assetId: "pos_0012" }, "owner");
+    expect(studio.annotations).toMatchObject([{ id: saved.id, mine: false }]);
+    await f
+      .refusal("addPinnedAnnotation", { ...input, authorName: "Mara", authorKey: "owner" } as never)
+      .toMatchObject({ refusal: { code: "invalid_input" } });
+  });
+
+  it("lets a link edit and delete only the notes it pinned, while the gallery is open", async () => {
+    const f = await fixture();
+    const pinned = await f.call("addPinnedAnnotation", {
+      code: CODE,
+      assetId: "pos_0012",
+      xPct: 10,
+      yPct: 10,
+      authorName: "Mara",
+      body: "Warmer?",
+    });
+    const edited = await f.call("updateOwnNote", {
+      code: CODE,
+      annotationId: pinned.id,
+      body: "  Much warmer?  ",
+    });
+    expect(edited).toMatchObject({ id: pinned.id, body: "Much warmer?", mine: true });
+    for (const caller of ["theo", "owner"] as const) {
+      await f
+        .refusal("updateOwnNote", { code: CODE, annotationId: pinned.id, body: "Mine now" }, caller)
+        .toMatchObject({ refusal: { code: "forbidden" } });
+      await f
+        .refusal("deleteOwnNote", { code: CODE, annotationId: pinned.id }, caller)
+        .toMatchObject({ refusal: { code: "forbidden" } });
+    }
+    await f
+      .refusal("deleteOwnNote", { code: CODE, annotationId: "note_seed_01" })
+      .toMatchObject({ refusal: { code: "forbidden" } });
+    await f
+      .refusal("updateOwnNote", { code: CODE, annotationId: pinned.id, body: " " })
+      .toMatchObject({ refusal: { code: "invalid_input" } });
+    await f.call("updateShoot", { shootId: "shoot_positano", status: "delivered" }, "owner");
+    await f
+      .refusal("deleteOwnNote", { code: CODE, annotationId: pinned.id })
+      .toMatchObject({ refusal: { code: "gallery_closed" } });
+    await f.call("updateShoot", { shootId: "shoot_positano", status: "proofing" }, "owner");
+    expect(await f.call("deleteOwnNote", { code: CODE, annotationId: pinned.id })).toEqual({
+      annotationId: pinned.id,
+      deleted: true,
+    });
+    await f
+      .refusal("deleteOwnNote", { code: CODE, annotationId: pinned.id })
+      .toMatchObject({ refusal: { code: "not_found" } });
+    const left = await f.call("listAnnotations", { code: CODE, assetId: "pos_0012" });
+    expect(left.annotations).toEqual([]);
+  });
+
+  it("restores each note the link deleted, with its original state", async () => {
+    const f = await fixture();
+    const pin = (body: string) =>
+      f.call("addPinnedAnnotation", {
+        code: CODE,
+        assetId: "pos_0012",
+        xPct: 20,
+        yPct: 30,
+        authorName: "Mara",
+        body,
+      });
+    const first = await pin("First");
+    const second = await pin("Second");
+    await f.call("resolveAnnotation", { annotationId: first.id, resolved: true }, "owner");
+    await f.call("deleteOwnNote", { code: CODE, annotationId: first.id });
+    await f
+      .refusal("restoreOwnNote", { code: CODE, annotationId: first.id }, "theo")
+      .toMatchObject({ refusal: { code: "not_found" } });
+    const back = await f.call("restoreOwnNote", { code: CODE, annotationId: first.id });
+    expect(back).toMatchObject({
+      id: first.id,
+      body: "First",
+      resolved: true,
+      createdAtMs: first.createdAtMs,
+      mine: true,
+    });
+    await f
+      .refusal("restoreOwnNote", { code: CODE, annotationId: first.id })
+      .toMatchObject({ refusal: { code: "not_found" } });
+    await f.call("deleteOwnNote", { code: CODE, annotationId: first.id });
+    await f.call("deleteOwnNote", { code: CODE, annotationId: second.id });
+    await f.call("restoreOwnNote", { code: CODE, annotationId: first.id });
+    await f.call("updateShoot", { shootId: "shoot_positano", status: "delivered" }, "owner");
+    await f
+      .refusal("restoreOwnNote", { code: CODE, annotationId: second.id })
+      .toMatchObject({ refusal: { code: "gallery_closed" } });
+    await f.call("updateShoot", { shootId: "shoot_positano", status: "proofing" }, "owner");
+    await f.call("restoreOwnNote", { code: CODE, annotationId: second.id });
+    const { annotations } = await f.call("listAnnotations", { code: CODE, assetId: "pos_0012" });
+    expect(annotations.map((note: Result) => note.id)).toEqual([first.id, second.id]);
+  });
+
+  it("deletes a batch of photos with their picks and notes, or none when one is missing", async () => {
+    const f = await fixture();
+    const note = await f.call("addPinnedAnnotation", {
+      code: CODE,
+      assetId: "pos_0012",
+      xPct: 20,
+      yPct: 30,
+      authorName: "Mara",
+      body: "Trash me",
+    });
+    await f.call("deleteOwnNote", { code: CODE, annotationId: note.id });
+    await f
+      .refusal("deleteAssets", { assetIds: ["pos_0012", "pos_9999"] }, "owner")
+      .toMatchObject({ refusal: { code: "not_found" } });
+    expect(await f.call("deleteAssets", { assetIds: ["pos_0012", "pos_0027"] }, "owner")).toEqual({
+      assetIds: ["pos_0012", "pos_0027"],
+      deleted: 2,
+    });
+    const { assets } = await f.call("studioAssets", { shootId: "shoot_positano" }, "owner");
+    expect(assets.map((asset: Result) => asset.id)).not.toContain("pos_0012");
+    expect(assets.map((asset: Result) => asset.id)).not.toContain("pos_0027");
+    await f
+      .refusal("restoreOwnNote", { code: CODE, annotationId: note.id })
+      .toMatchObject({ refusal: { code: "not_found" } });
+  });
+
+  it("rates and labels a batch of photos in one call", async () => {
+    const f = await fixture();
+    const assetIds = ["pos_0012", "pos_0027", "pos_0012"];
+    expect(await f.call("setOwnerRating", { assetIds, rating: 2 }, "owner")).toEqual({
+      assetIds: ["pos_0012", "pos_0027"],
+      rating: 2,
+    });
+    await f.call("setColorLabel", { assetIds, colorLabel: "purple" }, "owner");
+    const { assets } = await f.call("studioAssets", { shootId: "shoot_positano" }, "owner");
+    for (const id of ["pos_0012", "pos_0027"])
+      expect(assets.find((asset: Result) => asset.id === id)).toMatchObject({
+        rating: 2,
+        colorLabel: "purple",
+      });
+    await f
+      .refusal("setOwnerRating", { assetIds: ["pos_0012", "pos_9999"], rating: 1 }, "owner")
+      .toMatchObject({ refusal: { code: "not_found" } });
+    await f
+      .refusal("setOwnerRating", { assetIds: [], rating: 1 }, "owner")
+      .toMatchObject({ refusal: { code: "invalid_input" } });
+    await f
+      .refusal(
+        "setColorLabel",
+        { assetIds: Array.from({ length: 101 }, () => "pos_0012"), colorLabel: "red" },
+        "owner",
+      )
+      .toMatchObject({ refusal: { code: "invalid_input" } });
+    const after = await f.call("studioAssets", { shootId: "shoot_positano" }, "owner");
+    expect(after.assets.find((asset: Result) => asset.id === "pos_0012")).toMatchObject({
+      rating: 2,
+    });
+  });
+
   it("refuses owner actions from link callers, even through the owner's operation names", async () => {
     const f = await fixture();
     const ownerCalls: Array<[string, AppBackendJson]> = [
-      ["setOwnerRating", { assetId: "pos_0012", rating: 5 }],
-      ["setColorLabel", { assetId: "pos_0012", colorLabel: "red" }],
+      ["setOwnerRating", { assetIds: ["pos_0012"], rating: 5 }],
+      ["setColorLabel", { assetIds: ["pos_0012"], colorLabel: "red" }],
       ["publishAsset", { assetIds: ["pos_0152"], published: true }],
-      ["deleteAsset", { assetId: "pos_0012" }],
+      ["deleteAssets", { assetIds: ["pos_0012"] }],
       ["resolveAnnotation", { annotationId: "note_seed_01", resolved: true }],
       ["listShoots", {}],
       ["studioAssets", { shootId: "shoot_positano" }],
@@ -368,11 +574,14 @@ describe("Lightbox proofing Collection", () => {
     const f = await fixture();
     const draft = await upload(f, image("file_draft_0000000001"), "POS_0200");
     expect(draft).toMatchObject({ published: false, mimeType: "image/png", byteLength: 2048 });
-    expect(f.db.prepare("SELECT file_id FROM attachments").all()).toEqual([
-      { file_id: "file_draft_0000000001" },
-    ]);
-    const input = { code: CODE, assetId: draft.id };
-    await expect(f.openFile("assetFileAccess", input, draft.fileId)).rejects.toMatchObject({
+    expect(
+      f.db
+        .prepare("SELECT file_id FROM attachments ORDER BY file_id")
+        .all()
+        .map((row) => (row as { file_id: string }).file_id),
+    ).toEqual(["file_draft_0000000001", "prev_draft_0000000001"]);
+    const input = { code: CODE, assetId: draft.id, preview: true };
+    await expect(f.openFile("assetFileAccess", input, draft.previewFileId)).rejects.toMatchObject({
       refusal: { code: "not_found" },
     });
     await expect(
@@ -383,28 +592,181 @@ describe("Lightbox proofing Collection", () => {
     ).rejects.toThrow();
 
     await f.call("publishAsset", { assetIds: [draft.id], published: true }, "owner");
-    await expect(f.openFile("assetFileAccess", input, draft.fileId)).resolves.toBe("granted");
+    await expect(f.openFile("assetFileAccess", input, draft.previewFileId)).resolves.toBe(
+      "granted",
+    );
     await expect(
-      f.openFile("assetFileAccess", { code: CODE, assetId: "pos_0012" }, draft.fileId),
+      f.openFile("assetFileAccess", { code: CODE, assetId: draft.id }, draft.fileId),
+    ).rejects.toMatchObject({ refusal: { code: "not_delivered" } });
+    await expect(
+      f.openFile(
+        "assetFileAccess",
+        { code: CODE, assetId: "pos_0012", preview: true },
+        draft.previewFileId,
+      ),
     ).rejects.toMatchObject({ refusal: { code: "not_found" } });
     const other = await upload(f, image("file_other_0000000002"), "POS_0201");
     await f.call("publishAsset", { assetIds: [other.id], published: true }, "owner");
     await expect(
-      f.openFile("assetFileAccess", { code: CODE, assetId: other.id }, draft.fileId),
+      f.openFile(
+        "assetFileAccess",
+        { code: CODE, assetId: other.id, preview: true },
+        draft.previewFileId,
+      ),
     ).rejects.toThrow("does not grant access to the file");
 
     await f.call("publishAsset", { assetIds: [draft.id], published: false }, "owner");
-    await expect(f.openFile("assetFileAccess", input, draft.fileId)).rejects.toMatchObject({
+    await expect(f.openFile("assetFileAccess", input, draft.previewFileId)).rejects.toMatchObject({
       refusal: { code: "not_found" },
     });
     await f.call("updateShoot", { shootId: "shoot_positano", status: "draft" }, "owner");
     await f.call("publishAsset", { assetIds: [draft.id], published: true }, "owner");
-    await expect(f.openFile("assetFileAccess", input, draft.fileId)).rejects.toMatchObject({
+    await expect(f.openFile("assetFileAccess", input, draft.previewFileId)).rejects.toMatchObject({
       refusal: { code: "gallery_not_found" },
     });
   });
 
-  it("accepts only JPEG, PNG, and WebP uploads up to 5 MiB", async () => {
+  it("serves a small JPEG preview under the same rules as the photo", async () => {
+    const f = await fixture();
+    const original = image("file_full_0000000001", "image/jpeg", 18 * 1024 * 1024);
+    const small = image("file_prev_0000000001", "image/jpeg", 300 * 1024);
+    f.files.push(original, small);
+    const asset = await f.call(
+      "uploadAsset",
+      {
+        shootId: "shoot_positano",
+        fileId: original.fileId,
+        previewFileId: small.fileId,
+        width: 6000,
+        height: 4000,
+      },
+      "owner",
+    );
+    expect(asset).toMatchObject({
+      fileId: original.fileId,
+      previewFileId: small.fileId,
+      byteLength: 18 * 1024 * 1024,
+    });
+    const input = { code: CODE, assetId: asset.id, preview: true };
+    await expect(f.openFile("assetFileAccess", input, small.fileId)).rejects.toMatchObject({
+      refusal: { code: "not_found" },
+    });
+    await expect(
+      f.openFile("studioFileAccess", { assetId: asset.id, preview: true }, small.fileId, "owner"),
+    ).resolves.toBe("granted");
+    await f.call("publishAsset", { assetIds: [asset.id], published: true }, "owner");
+    await expect(f.openFile("assetFileAccess", input, small.fileId)).resolves.toBe("granted");
+    await expect(f.openFile("assetFileAccess", input, original.fileId)).rejects.toThrow(
+      "does not grant access to the file",
+    );
+    await expect(
+      f.openFile(
+        "assetFileAccess",
+        { code: CODE, assetId: "pos_0012", preview: true },
+        small.fileId,
+      ),
+    ).rejects.toMatchObject({ refusal: { code: "not_found" } });
+
+    const big = image("file_prev_big_000001", "image/jpeg", 1024 * 1024 + 1);
+    const png = image("file_prev_png_000001", "image/png", 1024);
+    const second = image("file_full_0000000002", "image/jpeg");
+    f.files.push(big, png, second);
+    const withPreview = (previewFileId: string) =>
+      f.call(
+        "uploadAsset",
+        {
+          shootId: "shoot_positano",
+          fileId: second.fileId,
+          previewFileId,
+          width: 6000,
+          height: 4000,
+        },
+        "owner",
+      );
+    await expect(withPreview(big.fileId)).rejects.toMatchObject({
+      refusal: { code: "file_too_large", message: expect.stringContaining("1048577 bytes") },
+    });
+    await expect(withPreview(png.fileId)).rejects.toMatchObject({
+      refusal: { code: "unsupported_type" },
+    });
+    await expect(withPreview(second.fileId)).rejects.toMatchObject({
+      refusal: { code: "invalid_input" },
+    });
+    await f
+      .refusal(
+        "uploadAsset",
+        { shootId: "shoot_positano", fileId: second.fileId, width: 6000, height: 4000 } as never,
+        "owner",
+      )
+      .toMatchObject({ refusal: { code: "invalid_input" } });
+    const full = { code: CODE, assetId: asset.id };
+    await expect(f.openFile("assetFileAccess", full, original.fileId)).rejects.toMatchObject({
+      refusal: { code: "not_delivered" },
+    });
+    await f.call("updateShoot", { shootId: "shoot_positano", status: "delivered" }, "owner");
+    await expect(f.openFile("assetFileAccess", full, original.fileId)).resolves.toBe("granted");
+    await expect(f.openFile("assetFileAccess", input, small.fileId)).resolves.toBe("granted");
+  });
+
+  it("stores the camera settings sent with an upload, and refuses settings out of range", async () => {
+    const f = await fixture();
+    const capture = {
+      camera: "FUJIFILM X100V",
+      iso: 400,
+      fNumber: 2,
+      exposureS: 0.004,
+      focalMm: 23,
+    };
+    const file = image("file_exif_0000000001", "image/jpeg");
+    const other = image("file_exif_0000000002", "image/jpeg");
+    f.files.push(file, other, previewFor(file), previewFor(other));
+    const asset = await f.call(
+      "uploadAsset",
+      {
+        shootId: "shoot_positano",
+        fileId: file.fileId,
+        previewFileId: previewFor(file).fileId,
+        width: 3000,
+        height: 2000,
+        capture,
+      },
+      "owner",
+    );
+    expect(asset.capture).toEqual({ ...capture, lens: null });
+    const listed = (await f.call("studioAssets", { shootId: "shoot_positano" }, "owner")).assets;
+    expect(listed.find((item: Result) => item.id === asset.id).capture).toEqual({
+      ...capture,
+      lens: null,
+    });
+    expect(listed.find((item: Result) => item.id === "pos_0012").capture).toMatchObject({
+      camera: "Sony A7 IV",
+      iso: 100,
+    });
+    for (const bad of [
+      { iso: 0 },
+      { fNumber: 200 },
+      { exposureS: -1 },
+      { focalMm: "35" },
+      { camera: "" },
+      { shutter: 1 },
+    ])
+      await f
+        .refusal(
+          "uploadAsset",
+          {
+            shootId: "shoot_positano",
+            fileId: other.fileId,
+            previewFileId: previewFor(other).fileId,
+            width: 10,
+            height: 10,
+            capture: bad,
+          } as never,
+          "owner",
+        )
+        .toMatchObject({ refusal: { code: "invalid_input" } });
+  });
+
+  it("accepts only JPEG, PNG, and WebP uploads up to 20 MiB", async () => {
     const f = await fixture();
     await expect(
       upload(f, image("file_pdf_00000000001", "application/pdf"), "Contract"),
@@ -412,35 +774,170 @@ describe("Lightbox proofing Collection", () => {
       refusal: { code: "unsupported_type" },
     });
     await expect(
-      upload(f, image("file_big_00000000001", "image/jpeg", 5 * 1024 * 1024 + 1), "Huge"),
+      upload(f, image("file_big_00000000001", "image/jpeg", 20 * 1024 * 1024 + 1), "Huge"),
     ).rejects.toMatchObject({
-      refusal: { code: "file_too_large", message: expect.stringContaining("5242881 bytes") },
+      refusal: { code: "file_too_large", message: expect.stringContaining("20971521 bytes") },
     });
     expect(f.db.prepare("SELECT file_id FROM attachments").all()).toEqual([]);
     const webp = await upload(
       f,
-      image("file_webp_0000000001", "image/webp", 5 * 1024 * 1024),
+      image("file_webp_0000000001", "image/webp", 20 * 1024 * 1024),
       "Edge",
     );
     expect(webp).toMatchObject({ mimeType: "image/webp", sortOrder: 170 });
   });
 
-  it("exports final picks and closes picking once the shoot is delivered", async () => {
+  it("refuses to send favorites that differ from the ones the client sees", async () => {
     const f = await fixture();
+    await f.call("toggleClientPick", { code: CODE, assetId: "pos_0012", selected: true }, "mara");
+    await f.call("toggleClientPick", { code: CODE, assetId: "pos_0027", selected: true }, "mara");
+    for (const assetIds of [
+      ["pos_0012"],
+      ["pos_0012", "pos_0027", "pos_0044"],
+      ["pos_0012", "pos_0031"],
+    ])
+      await f
+        .refusal("submitSelection", { code: CODE, assetIds }, "mara")
+        .toMatchObject({ refusal: { code: "selection_changed" } });
+    await f
+      .refusal("submitSelection", { code: CODE, assetIds: "pos_0012" }, "mara")
+      .toMatchObject({ refusal: { code: "invalid_input" } });
+    expect(
+      (await f.call("listPublishedAssets", { code: CODE }, "mara")).gallery.sentAtMs,
+    ).toBeNull();
+    await expect(
+      f.call("submitSelection", { code: CODE, assetIds: ["pos_0027", "pos_0012"] }, "mara"),
+    ).resolves.toMatchObject({ picksUsed: 2 });
+  });
+
+  it("keeps the sent count after a sent photo is hidden, so delivery does not say the client withdrew", async () => {
+    const f = await fixture();
+    await f.call("toggleClientPick", { code: CODE, assetId: "pos_0031", selected: true }, "theo");
+    await send(f, "theo");
+    const before = await f.call("listPublishedAssets", { code: CODE }, "theo");
+    expect(before.assets.find((asset: Result) => asset.id === "pos_0031")).toMatchObject({
+      picked: true,
+      sent: true,
+    });
+    await f.call("publishAsset", { assetIds: ["pos_0031"], published: false }, "owner");
+    await f.call("updateShoot", { shootId: "shoot_positano", status: "delivered" }, "owner");
+    expect((await f.call("listPublishedAssets", { code: CODE }, "theo")).gallery).toMatchObject({
+      status: "delivered",
+      picksUsed: 0,
+      sentPicks: 1,
+    });
+  });
+
+  it("records when each link sends its favorites, and marks them changed after a later pick", async () => {
+    const f = await fixture();
+    const gallery = async (caller: Caller) =>
+      (await f.call("listPublishedAssets", { code: CODE }, caller)).gallery;
+    await f
+      .refusal("submitSelection", { code: CODE, assetIds: [] }, "mara")
+      .toMatchObject({ refusal: { code: "no_picks" } });
+    await f.call("toggleClientPick", { code: CODE, assetId: "pos_0012", selected: true }, "mara");
+    const sent = await send(f, "mara");
+    expect(sent).toMatchObject({ picksUsed: 1, changedSinceSent: false });
+    expect(sent.sentAtMs).toEqual(expect.any(Number));
+    expect(await gallery("mara")).toMatchObject({
+      sentAtMs: sent.sentAtMs,
+      changedSinceSent: false,
+    });
+    expect(await gallery("theo")).toMatchObject({ sentAtMs: null, changedSinceSent: false });
+    await f.call("toggleClientPick", { code: CODE, assetId: "pos_0027", selected: true }, "mara");
+    expect(await gallery("mara")).toMatchObject({ changedSinceSent: true });
+    await send(f, "mara");
+    expect(await gallery("mara")).toMatchObject({ picksUsed: 2, changedSinceSent: false });
+    expect(
+      await f.call("toggleClientPick", { code: CODE, assetId: "pos_0044", selected: true }, "mara"),
+    ).toMatchObject({ changedSinceSent: true });
+    expect(
+      await f.call(
+        "toggleClientPick",
+        { code: CODE, assetId: "pos_0044", selected: false },
+        "mara",
+      ),
+    ).toMatchObject({ changedSinceSent: false });
+    expect(
+      await f.call(
+        "toggleClientPick",
+        { code: CODE, assetId: "pos_0044", selected: false },
+        "mara",
+      ),
+    ).toMatchObject({ changedSinceSent: false });
+    const shoots = (await f.call("listShoots", {}, "owner")).shoots;
+    expect(shoots.find((shoot: Result) => shoot.id === "shoot_positano")).toMatchObject({
+      sentCount: 2,
+    });
+    await f.call("toggleClientPick", { code: CODE, assetId: "pos_0012", selected: false }, "mara");
+    await f.call("toggleClientPick", { code: CODE, assetId: "pos_0027", selected: false }, "mara");
+    expect(await send(f, "mara")).toMatchObject({
+      picksUsed: 0,
+      changedSinceSent: false,
+    });
+    expect(
+      (await f.call("exportFinalPicksList", { shootId: "shoot_positano" }, "owner")).reviewerCount,
+    ).toBe(1);
+    await f.call("toggleClientPick", { code: CODE, assetId: "pos_0031", selected: true }, "theo");
+    await send(f, "theo");
+    await f.call("toggleClientPick", { code: CODE, assetId: "pos_0031", selected: false }, "theo");
+    await send(f, "theo");
+    const facts = (await f.call("listShoots", {}, "owner")).shoots.find(
+      (shoot: Result) => shoot.id === "shoot_positano",
+    );
+    expect(facts.sentCount).toBe(3);
+    expect(facts.reviewerCount).toBeGreaterThanOrEqual(facts.sentCount);
+    await f
+      .refusal("submitSelection", { code: "WRONG-CODE", assetIds: [] }, "mara")
+      .toMatchObject({ refusal: { code: "gallery_not_found" } });
+    await f.call("updateShoot", { shootId: "shoot_positano", status: "delivered" }, "owner");
+    await f
+      .refusal("submitSelection", { code: CODE, assetIds: [] }, "mara")
+      .toMatchObject({ refusal: { code: "gallery_closed" } });
+  });
+
+  it("exports only the favorites each link sent, and closes picking once the shoot is delivered", async () => {
+    const f = await fixture();
+    const exported = async () =>
+      f.call("exportFinalPicksList", { shootId: "shoot_positano" }, "owner");
     await f.call("toggleClientPick", { code: CODE, assetId: "pos_0012", selected: true });
-    const exported = await f.call("exportFinalPicksList", { shootId: "shoot_positano" }, "owner");
-    expect(exported).toMatchObject({ reviewerCount: 3, selectionLimit: 12 });
-    expect(exported.picks).toEqual([
-      ["POS_0012", 1],
-      ["POS_0027", 2],
+    expect(await exported()).toMatchObject({ reviewerCount: 1, selectionLimit: 12 });
+    expect((await exported()).picks).toEqual([
+      ["POS_0027", 1],
       ["POS_0044", 1],
-      ["POS_0071", 2],
+      ["POS_0071", 1],
       ["POS_0090", 1],
-      ["POS_0119", 1],
       ["POS_0125", 1],
     ]);
+    await send(f);
+    await f.call("toggleClientPick", { code: CODE, assetId: "pos_0012", selected: false });
+    await f.call("toggleClientPick", { code: CODE, assetId: "pos_0031", selected: true });
+    expect(await exported()).toMatchObject({ reviewerCount: 2 });
+    expect((await exported()).picks).toEqual([
+      ["POS_0012", 1],
+      ["POS_0027", 1],
+      ["POS_0044", 1],
+      ["POS_0071", 1],
+      ["POS_0090", 1],
+      ["POS_0125", 1],
+    ]);
+    await send(f);
+    expect((await exported()).picks.map(([title]: [string]) => title)).toEqual([
+      "POS_0027",
+      "POS_0031",
+      "POS_0044",
+      "POS_0071",
+      "POS_0090",
+      "POS_0125",
+    ]);
+    await f.call("toggleClientPick", { code: CODE, assetId: "pos_0031", selected: false });
+    await f.call("toggleClientPick", { code: CODE, assetId: "pos_0044", selected: true });
     await f.call("updateShoot", { shootId: "shoot_positano", status: "delivered" }, "owner");
-    expect((await f.call("listPublishedAssets", { code: CODE })).gallery.status).toBe("delivered");
+    const delivered = await f.call("listPublishedAssets", { code: CODE });
+    expect(delivered.gallery).toMatchObject({ status: "delivered", picksUsed: 1 });
+    expect(
+      delivered.assets.filter((asset: Result) => asset.picked).map((asset: Result) => asset.id),
+    ).toEqual(["pos_0031"]);
     await f
       .refusal("toggleClientPick", { code: CODE, assetId: "pos_0012", selected: false })
       .toMatchObject({ refusal: { code: "gallery_closed" } });
@@ -535,7 +1032,7 @@ describe("Lightbox proofing Collection", () => {
       exportedAll.push(...page.picks);
       after = page.nextCursor;
     } while (after);
-    expect(exportedAll).toHaveLength(6);
+    expect(exportedAll).toHaveLength(5);
     await f
       .refusal("exportFinalPicksList", { shootId: "shoot_positano", limit: 251 }, "owner")
       .toMatchObject({ refusal: { code: "invalid_input" } });

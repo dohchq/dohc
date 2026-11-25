@@ -133,18 +133,32 @@ it("stages the Lightbox studio and client portal, and a portal can read a photo 
     contentType: "image/jpeg",
     bytes: Uint8Array.from(jpeg),
   })) as { file: { fileId: string } };
+  const preview = Uint8Array.from([...jpeg.subarray(0, 11), 2, 0xff, 0xd9]);
+  const previewed = (await host.apps.request(studio.publicationId, "upload", {
+    authorityRevision: studio.authorityRevision,
+    idempotencyKey: "photo-preview",
+    name: "IMG_2041-preview.jpg",
+    contentType: "image/jpeg",
+    bytes: preview,
+  })) as { file: { fileId: string } };
   const asset = await call<{ id: string; published: boolean }>(studio, "uploadAsset", {
     shootId: positano.id,
     fileId: uploaded.file.fileId,
+    previewFileId: previewed.file.fileId,
     width: 3000,
     height: 2000,
   });
   expect(asset).toMatchObject({ published: false });
 
-  const read = (app: typeof studio, operation: string, input: object) =>
+  const read = (
+    app: typeof studio,
+    operation: string,
+    input: object,
+    fileId = uploaded.file.fileId,
+  ) =>
     host.apps.readBrowserFile(app.publicationId, {
       authorityRevision: app.authorityRevision,
-      fileId: uploaded.file.fileId,
+      fileId,
       operation,
       input,
     });
@@ -153,16 +167,24 @@ it("stages the Lightbox studio and client portal, and a portal can read a photo 
     bytes: Uint8Array.from(jpeg),
   });
   await expect(read(portal, "assetFileAccess", portalInput)).rejects.toThrow(
-    "isn't in the gallery",
+    "is not in the gallery",
   );
   await expect(read(portal, "studioFileAccess", { assetId: asset.id })).rejects.toThrow(
     "approved read action",
   );
 
   await call(studio, "publishAsset", { assetIds: [asset.id], published: true });
+  expect(
+    await read(portal, "assetFileAccess", { ...portalInput, preview: true }, previewed.file.fileId),
+  ).toMatchObject({ bytes: preview });
+  await expect(read(portal, "assetFileAccess", portalInput)).rejects.toThrow(
+    "once your photographer delivers the gallery",
+  );
+  await call(studio, "updateShoot", { shootId: positano.id, status: "delivered" });
   expect(await read(portal, "assetFileAccess", portalInput)).toMatchObject({
     bytes: Uint8Array.from(jpeg),
   });
+  await call(studio, "updateShoot", { shootId: positano.id, status: "proofing" });
 
   const gallery = await call<{ assets: { id: string }[] }>(portal, "listPublishedAssets", {
     code: positano.accessCode,
@@ -172,7 +194,7 @@ it("stages the Lightbox studio and client portal, and a portal can read a photo 
 
   await call(studio, "publishAsset", { assetIds: [asset.id], published: false });
   await expect(read(portal, "assetFileAccess", portalInput)).rejects.toThrow(
-    "isn't in the gallery",
+    "is not in the gallery",
   );
 });
 

@@ -4,16 +4,28 @@
   "inputs": [
     "portal.tsx",
     "api.ts",
-    "gallery.tsx",
-    "inspector.tsx",
+    "glyphs.tsx",
+    "notes.tsx",
     "photo.tsx",
     "scenes.ts",
     "toast.tsx",
-    "lightbox.css"
+    "viewer.tsx",
+    "base.css",
+    "portal.css"
   ],
   "dataset": {
     "kind": "dataset",
     "datasetPath": "lightbox/proofing/dataset.json",
-    "operations": ["listPublishedAssets", "assetFileAccess", "listAnnotations", "toggleClientPick", "addPinnedAnnotation"]
+    "operations": [
+      "listPublishedAssets",
+      "assetFileAccess",
+      "listAnnotations",
+      "toggleClientPick",
+      "submitSelection",
+      "addPinnedAnnotation",
+      "updateOwnNote",
+      "deleteOwnNote",
+      "restoreOwnNote"
+    ]
   }
 }

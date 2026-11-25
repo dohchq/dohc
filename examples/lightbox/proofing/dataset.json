@@ -58,6 +58,7 @@
         },
         { "name": "Title", "sqlColumn": "title", "type": "text", "required": true },
         { "name": "File", "sqlColumn": "file_id", "type": "attachment" },
+        { "name": "Preview", "sqlColumn": "preview_file_id", "type": "attachment" },
         { "name": "Demo scene", "sqlColumn": "demo_scene", "type": "text" },
         {
           "name": "Type",
@@ -79,6 +80,12 @@
           "options": ["none", "red", "yellow", "green", "blue", "purple"]
         },
         { "name": "Published", "sqlColumn": "is_published", "type": "checkbox", "required": true },
+        { "name": "Camera", "sqlColumn": "camera", "type": "text" },
+        { "name": "Lens", "sqlColumn": "lens", "type": "text" },
+        { "name": "ISO", "sqlColumn": "iso", "type": "number" },
+        { "name": "Aperture", "sqlColumn": "f_number", "type": "number" },
+        { "name": "Shutter seconds", "sqlColumn": "exposure_s", "type": "number" },
+        { "name": "Focal length mm", "sqlColumn": "focal_mm", "type": "number" },
         { "name": "Created at", "sqlColumn": "created_at_ms", "type": "number", "required": true }
       ]
     },
@@ -97,6 +104,7 @@
         },
         { "name": "Reviewer", "sqlColumn": "reviewer_key", "type": "text", "required": true },
         { "name": "Selected", "sqlColumn": "selected", "type": "checkbox", "required": true },
+        { "name": "Sent", "sqlColumn": "sent", "type": "checkbox", "required": true },
         { "name": "Updated at", "sqlColumn": "updated_at_ms", "type": "number", "required": true }
       ]
     },
@@ -119,6 +127,52 @@
         { "name": "Comment", "sqlColumn": "body", "type": "text", "required": true },
         { "name": "Resolved", "sqlColumn": "resolved", "type": "checkbox", "required": true },
         { "name": "Created at", "sqlColumn": "created_at_ms", "type": "number", "required": true }
+      ]
+    },
+    {
+      "name": "Sent favorites",
+      "sqlName": "submissions",
+      "primaryKey": "id",
+      "fields": [
+        { "name": "ID", "sqlColumn": "id", "type": "text" },
+        {
+          "name": "Shoot",
+          "sqlColumn": "shoot_id",
+          "type": "relation",
+          "required": true,
+          "relation": { "table": "shoots", "field": "id" }
+        },
+        { "name": "Reviewer", "sqlColumn": "reviewer_key", "type": "text", "required": true },
+        { "name": "Favorites sent", "sqlColumn": "picks", "type": "number", "required": true },
+        {
+          "name": "Changed since sent",
+          "sqlColumn": "changed",
+          "type": "checkbox",
+          "required": true
+        },
+        { "name": "Sent at", "sqlColumn": "sent_at_ms", "type": "number", "required": true }
+      ]
+    },
+    {
+      "name": "Deleted notes",
+      "sqlName": "deleted_annotations",
+      "primaryKey": "id",
+      "fields": [
+        { "name": "ID", "sqlColumn": "id", "type": "text" },
+        {
+          "name": "Asset",
+          "sqlColumn": "asset_id",
+          "type": "relation",
+          "required": true,
+          "relation": { "table": "assets", "field": "id" }
+        },
+        { "name": "X %", "sqlColumn": "x_pct", "type": "number", "required": true },
+        { "name": "Y %", "sqlColumn": "y_pct", "type": "number", "required": true },
+        { "name": "Author", "sqlColumn": "author_name", "type": "text", "required": true },
+        { "name": "Comment", "sqlColumn": "body", "type": "text", "required": true },
+        { "name": "Resolved", "sqlColumn": "resolved", "type": "checkbox", "required": true },
+        { "name": "Created at", "sqlColumn": "created_at_ms", "type": "number", "required": true },
+        { "name": "Deleted at", "sqlColumn": "deleted_at_ms", "type": "number", "required": true }
       ]
     }
   ],
@@ -160,8 +214,44 @@
       "fields": []
     },
     {
+      "name": "submitSelection",
+      "label": "Send favorites to the photographer",
+      "table": "submissions",
+      "kind": "action",
+      "access": "link",
+      "readOnly": false,
+      "fields": []
+    },
+    {
       "name": "addPinnedAnnotation",
       "label": "Pin a note on a photo",
+      "table": "annotations",
+      "kind": "action",
+      "access": "link",
+      "readOnly": false,
+      "fields": []
+    },
+    {
+      "name": "updateOwnNote",
+      "label": "Edit a note you pinned",
+      "table": "annotations",
+      "kind": "action",
+      "access": "link",
+      "readOnly": false,
+      "fields": []
+    },
+    {
+      "name": "deleteOwnNote",
+      "label": "Delete a note you pinned",
+      "table": "annotations",
+      "kind": "action",
+      "access": "link",
+      "readOnly": false,
+      "fields": []
+    },
+    {
+      "name": "restoreOwnNote",
+      "label": "Restore a note you deleted",
       "table": "annotations",
       "kind": "action",
       "access": "link",
@@ -242,7 +332,7 @@
     },
     {
       "name": "setOwnerRating",
-      "label": "Rate a photo",
+      "label": "Rate photos",
       "table": "assets",
       "kind": "action",
       "access": "owner",
@@ -251,7 +341,7 @@
     },
     {
       "name": "setColorLabel",
-      "label": "Label a photo",
+      "label": "Label photos",
       "table": "assets",
       "kind": "action",
       "access": "owner",
@@ -268,8 +358,8 @@
       "fields": []
     },
     {
-      "name": "deleteAsset",
-      "label": "Delete a photo",
+      "name": "deleteAssets",
+      "label": "Delete photos",
       "table": "assets",
       "kind": "action",
       "access": "owner",
