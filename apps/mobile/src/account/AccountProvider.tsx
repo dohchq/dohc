@@ -140,7 +140,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   );
   const state = useSyncExternalStore(account.subscribe, account.state);
   useEffect(() => {
-    void openNow([kept, cacheFile]).then(() => launchTimings?.mark("databases"));
+    void openNow([kept, cacheFile]).then((opened) => opened && launchTimings?.mark("databases"));
     void account.restore();
   }, [account, kept, cacheFile]);
   // Subscribed before the cache and the outbox follow the account, so it runs before either clears anything.

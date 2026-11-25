@@ -1218,7 +1218,7 @@ describe("a launch", () => {
     cache.follow(account);
     const opened = openNow([kept, cacheFile]);
     void account.restore();
-    await opened;
+    expect(await opened).toBe(true);
     expect(existsSync(disk.path)).toBe(true);
     expect(account.state().status).toBe("loading");
 
@@ -1250,6 +1250,16 @@ describe("a launch", () => {
     expect(account.state().status).toBe("signed-out");
     await files.flush();
     expect(existsSync(disk.cache.path)).toBe(false);
+  });
+
+  it("answers that the files didn't open while the phone is locked, and that they did once it opens", async () => {
+    const disk = keptDisk();
+    const kept = disk.launch();
+    const cacheFile = disk.cache.launch();
+    disk.locked = true;
+    expect(await openNow([kept, cacheFile])).toBe(false);
+    disk.locked = false;
+    expect(await openNow([kept, cacheFile])).toBe(true);
   });
 
   it("deletes cache.db when Try again finds a Sign out waiting, after the first check couldn't read kept.db", async () => {
