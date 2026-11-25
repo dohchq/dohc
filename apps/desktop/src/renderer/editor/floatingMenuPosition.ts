@@ -5,7 +5,13 @@ import type { EditorView } from "@tiptap/pm/view";
 
 export type FloatingMenuPlacement = "above" | "below";
 
-export type FloatingMenuBounds = { top: number; left: number; right: number; bottom: number };
+export type FloatingMenuBounds = {
+  top: number;
+  left: number;
+  right: number;
+  bottom: number;
+  screen?: { top: number; bottom: number };
+};
 
 export type FloatingMenuPosition = {
   x: number;
@@ -39,6 +45,7 @@ const FLOATING_MENU_VIEWPORT_MARGIN = 12;
 const FLOATING_MENU_CURSOR_GAP = 6;
 const FLOATING_MENU_WIDTH = 320;
 export const FLOATING_MENU_MAX_HEIGHT = 320;
+export const FLOATING_LIST_MIN_HEIGHT = 80;
 
 export function resolveFloatingMenuPosition({
   cursorRect,
@@ -62,7 +69,7 @@ export function resolveFloatingMenuPosition({
   const availableAbove = Math.max(0, anchorTop - bounds.top - gap - margin);
   const belowHeight = Math.min(menuMaxHeight, availableBelow);
   const aboveHeight = Math.min(menuMaxHeight, availableAbove);
-  const placement =
+  let placement: FloatingMenuPlacement =
     prefer === "above"
       ? aboveHeight >= menuMaxHeight || aboveHeight >= belowHeight
         ? "above"
@@ -76,13 +83,13 @@ export function resolveFloatingMenuPosition({
       ? Math.max(bounds.top + margin, anchorTop - gap - maxHeight)
       : Math.min(anchorBottom + gap, bounds.bottom - margin);
   if (maxHeight < menuMinHeight) {
-    const room =
-      bounds.bottom - bounds.top - 2 * margin >= menuMinHeight
-        ? bounds
-        : { top: 0, bottom: viewportHeight };
+    const screen = bounds.screen ?? { top: 0, bottom: viewportHeight };
+    const room = bounds.bottom - bounds.top >= menuMinHeight ? bounds : screen;
+    const inset = Math.max(0, Math.min(margin, (room.bottom - room.top - menuMinHeight) / 2));
     maxHeight = menuMinHeight;
     const ideal = placement === "above" ? anchorTop - gap - maxHeight : anchorBottom + gap;
-    y = Math.min(Math.max(ideal, room.top + margin), room.bottom - margin - maxHeight);
+    y = Math.min(Math.max(ideal, room.top + inset), room.bottom - inset - maxHeight);
+    placement = y - screen.top > screen.bottom - (y + maxHeight) ? "above" : "below";
   }
 
   if (placement === "above") {
@@ -95,15 +102,21 @@ export function resolveFloatingMenuPosition({
 
 export function floatingMenuBounds(node: Node): FloatingMenuBounds {
   const win = node.ownerDocument?.defaultView ?? window;
-  const bounds = { top: 0, left: 0, right: win.innerWidth, bottom: win.innerHeight };
   const root = node.getRootNode();
-  if (!(root instanceof ShadowRoot)) return bounds;
+  if (!(root instanceof ShadowRoot)) {
+    return { top: 0, left: 0, right: win.innerWidth, bottom: win.innerHeight };
+  }
+  const covered = parseFloat(
+    win.getComputedStyle(root.host).getPropertyValue("--dohc-page-covered-top"),
+  );
+  const screen = { top: Number.isFinite(covered) ? covered : 0, bottom: win.innerHeight };
   const host = root.host.getBoundingClientRect();
   return {
-    top: Math.max(bounds.top, host.top),
-    left: Math.max(bounds.left, host.left),
-    right: Math.min(bounds.right, host.right),
-    bottom: Math.min(bounds.bottom, host.bottom),
+    top: Math.max(screen.top, host.top),
+    left: Math.max(0, host.left),
+    right: Math.min(win.innerWidth, host.right),
+    bottom: Math.min(screen.bottom, host.bottom),
+    screen,
   };
 }
 

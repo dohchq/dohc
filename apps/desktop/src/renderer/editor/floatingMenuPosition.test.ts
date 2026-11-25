@@ -144,3 +144,30 @@ it("keeps a menu at its minimum height, inside its bounds when they hold it, on 
   expect(strip.y).toBeGreaterThanOrEqual(0);
   expect(strip.y + strip.maxHeight).toBeLessThanOrEqual(700);
 });
+
+it("fits a minimum-height menu into a strip of exactly its height", () => {
+  const position = resolveFloatingMenuPosition({
+    cursorRect: { left: 400, top: 907, bottom: 926 },
+    viewportWidth: 1440,
+    viewportHeight: 700,
+    bounds: { top: 654, left: 0, right: 1440, bottom: 700 },
+    menuMinHeight: 46,
+  });
+  expect(position.y).toBe(654);
+  expect(position.y + position.maxHeight).toBe(700);
+});
+
+it("keeps a menu that leaves its bounds out of the part of the screen the page covers", () => {
+  const screen = { top: 60, bottom: 700 };
+  const position = resolveFloatingMenuPosition({
+    cursorRect: { left: 400, top: 46, bottom: 70 },
+    viewportWidth: 1440,
+    viewportHeight: 700,
+    bounds: { top: 60, left: 0, right: 1440, bottom: 72, screen },
+    menuMinHeight: 80,
+  });
+  expect(position.y).toBeGreaterThanOrEqual(screen.top);
+  expect(position.y + position.maxHeight).toBeLessThanOrEqual(screen.bottom);
+  expect(position.placement).toBe("below");
+  expect(position.bottom).toBeUndefined();
+});

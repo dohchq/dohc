@@ -332,6 +332,7 @@ body {
 [data-theme='dark'] .demo-stage { background: #131211; }
 
 #desktop-demo {
+  --dohc-page-covered-top: 60px;
   display: block;
   width: 100%;
   height: 100%;

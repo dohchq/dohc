@@ -56,6 +56,7 @@ import { compareRelativePositions, type RelativePosition, type XmlFragment } fro
 import { isComposingKey } from "../ui/keys";
 import {
   FLOATING_MENU_MAX_HEIGHT,
+  FLOATING_LIST_MIN_HEIGHT,
   floatingMenuBounds,
   resolveFloatingMenuPosition,
   useCloseOnScrollAway,
@@ -397,6 +398,7 @@ function readSlashCommandState(view: EditorView, previous: SlashCommandState): S
       const position = resolveFloatingMenuPosition({
         cursorRect,
         bounds: floatingMenuBounds(view.dom),
+        menuMinHeight: FLOATING_LIST_MIN_HEIGHT,
       });
       x = position.x;
       y = position.y;
@@ -443,6 +445,7 @@ function readSlashCommandState(view: EditorView, previous: SlashCommandState): S
     const position = resolveFloatingMenuPosition({
       cursorRect: coords,
       bounds: floatingMenuBounds(view.dom),
+      menuMinHeight: FLOATING_LIST_MIN_HEIGHT,
     });
     x = position.x;
     y = position.y;

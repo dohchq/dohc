@@ -4,6 +4,7 @@ import { TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import type { WikilinkFile } from "./wikilinkPlugin";
 import {
+  FLOATING_LIST_MIN_HEIGHT,
   floatingMenuBounds,
   resolveFloatingMenuPosition,
   useCloseOnScrollAway,
@@ -213,6 +214,7 @@ export function WikilinkPicker({ state, files, view, insertMode = "text", onDism
     bounds: floatingMenuBounds(view.dom),
     menuWidth: 360,
     menuMaxHeight: 260,
+    menuMinHeight: FLOATING_LIST_MIN_HEIGHT,
     gap: 4,
   });
 

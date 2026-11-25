@@ -3,6 +3,7 @@ import { TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import { EMOJI_DATA, type EmojiEntry } from "./emojiData";
 import {
+  FLOATING_LIST_MIN_HEIGHT,
   floatingMenuBounds,
   resolveFloatingMenuPosition,
   useCloseOnScrollAway,
@@ -165,6 +166,7 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
     bounds: floatingMenuBounds(view.dom),
     menuWidth: 220,
     menuMaxHeight: 240,
+    menuMinHeight: FLOATING_LIST_MIN_HEIGHT,
     gap: 4,
   });
 
