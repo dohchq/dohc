@@ -486,7 +486,38 @@ it.each<[string, Edit | readonly Edit[], Edit, string, string]>([
     (doc: Y.Doc) => doc.getMap("frontmatter").set("count", 9007199254740993n),
     (doc: Y.Doc) => doc.getMap("frontmatter").set("count", 9007199254740995n),
     "---\ncount: 9007199254740995\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
-    'Set count to "9007199254740993". The note has "9007199254740995".\n',
+    "Set count to 9007199254740993. The note has 9007199254740995.\n",
+  ],
+  [
+    "a whole number too large for a float, in a field someone else set to text with the same digits",
+    (doc: Y.Doc) => doc.getMap("frontmatter").set("count", 9007199254740993n),
+    (doc: Y.Doc) => doc.getMap("frontmatter").set("count", "9007199254740993"),
+    "---\ncount: '9007199254740993'\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
+    'Set count to 9007199254740993. The note has "9007199254740993".\n',
+  ],
+  [
+    "a list holding a whole number too large for a float, in a field someone else set to text",
+    (doc: Y.Doc) => doc.getMap("frontmatter").set("counts", [9007199254740993n]),
+    (doc: Y.Doc) => doc.getMap("frontmatter").set("counts", ["9007199254740993"]),
+    "---\ncounts:\n  - '9007199254740993'\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
+    "Set counts to [9007199254740993]. The note has ['9007199254740993'].\n",
+  ],
+  [
+    "a field named like a built-in property, which someone else set and then removed",
+    (doc: Y.Doc) => doc.getMap("frontmatter").set("constructor", "kept"),
+    (doc: Y.Doc) => {
+      doc.getMap("frontmatter").set("constructor", "theirs");
+      doc.getMap("frontmatter").delete("constructor");
+    },
+    "# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
+    'Set constructor to "kept". The note has no constructor.\n',
+  ],
+  [
+    "bytes in a field someone else set at the same moment",
+    (doc: Y.Doc) => doc.getMap("frontmatter").set("count", Uint8Array.of(1, 2)),
+    (doc: Y.Doc) => doc.getMap("frontmatter").set("count", true),
+    "---\ncount: true\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
+    'Set count to {"0":1,"1":2}. The note has true.\n',
   ],
   [
     "a to-do someone else set at the same moment",
