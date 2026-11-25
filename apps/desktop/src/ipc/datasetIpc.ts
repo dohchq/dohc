@@ -38,6 +38,7 @@ import { generateDatasetFormSources } from "../workspaces/datasetFormGenerator";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { datasetOwnerOnlyError } from "./errorWords";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
+import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
 import type { OwnerDatasetData } from "../workspaces/remoteDataset";
 import {
   approveLocalDatasetMigration,
@@ -1000,14 +1001,23 @@ export function createDatasetHandler<
               throw new Error(
                 "Read-only SQL inspection needs a local Collection or a synced Collection copy on this computer.",
               );
-            const result = await data.querySql({
-              datasetId: input.datasetId,
-              sql: input.sql,
-              params: input.params,
-              explain: input.explain,
-              limit: input.limit,
-              signal: operation.signal,
-            });
+            const result = await data
+              .querySql({
+                datasetId: input.datasetId,
+                sql: input.sql,
+                params: input.params,
+                explain: input.explain,
+                limit: input.limit,
+                signal: operation.signal,
+              })
+              .catch((error: unknown) => {
+                if (
+                  error instanceof PersistentRuntimeError &&
+                  (error.code === "invalid_input" || error.code === "not_authorized")
+                )
+                  throw new Error(error.message);
+                throw error;
+              });
             current();
             return { kind: "sql" as const, ...result };
           }

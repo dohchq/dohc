@@ -11,7 +11,7 @@ import { expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
 import type { ShareLinkPublication } from "../workspaces/datasetBoundApps";
-import { isDatasetOwnerOnly } from "./errorWords";
+import { isDatasetOwnerOnly, readError } from "./errorWords";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { flushDatasetSourceCapture } from "../workspaces/datasetSourceCapture";
 import { createDatasetHandler } from "./datasetIpc";
@@ -24,6 +24,7 @@ import { generateDatasetSchema } from "../workspaces/datasetGenerator";
 import type { OwnerDatasetData } from "../workspaces/remoteDataset";
 import { DatasetResult, type DatasetPlace } from "@dohc/cli/dataset";
 import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
+import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
 
 const datasetId = "00000000-0000-4000-8000-000000000001";
 it("cancels the old workspace invocation after the window switches workspaces", async () => {
@@ -1889,6 +1890,19 @@ it("allows owner sql and trace while refusing both on shared views", async () =>
     }),
   );
   expect(traced).toMatchObject({ kind: "trace", limit: 20 });
+
+  const refusedWords =
+    "Only read-only SELECT queries against this Collection's approved tables are allowed.";
+  querySql.mockRejectedValueOnce(new PersistentRuntimeError("not_authorized", refusedWords));
+  const refusedSql = await f
+    .handler("window", {
+      action: "sql",
+      workspaceId: "workspace",
+      datasetPath: "data/dataset.json",
+      sql: "DELETE FROM responses",
+    })
+    .catch((error) => error);
+  expect(readError(refusedSql).words).toBe(refusedWords);
 
   f.workspace.shareView = { shareId: "share-1", grantId: "grant-1" };
   const sqlRefusal = await f
