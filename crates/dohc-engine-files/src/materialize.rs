@@ -1805,7 +1805,7 @@ fn materialize_ordinary_write(
             options,
         ),
         OrdinaryWritePlacement::ConflictSibling => {
-            record_write_conflict(store, target, &tmp, job, now_ms)
+            record_write_conflict(store, None, target, &tmp, job, options)
         }
     };
     if outcome.is_err() {
@@ -1841,7 +1841,7 @@ fn swap_in_temp(
                 // The old spelling's delete keeps its own preimage check, so
                 // a file changed since the merge stays and this write conflicts.
                 let Some(delete) = respelled else {
-                    return record_write_conflict(store, target, tmp, job, now_ms);
+                    return record_write_conflict(store, Some(staging), target, tmp, job, options);
                 };
                 match materialize_one(store, root, delete, options)? {
                     JobOutcome::Completed | JobOutcome::AlreadyMaterialized
@@ -1852,7 +1852,16 @@ fn swap_in_temp(
                         return Ok(outcome);
                     }
                     outcome @ JobOutcome::Crashed(_) => return Ok(outcome),
-                    _ => return record_write_conflict(store, target, tmp, job, now_ms),
+                    _ => {
+                        return record_write_conflict(
+                            store,
+                            Some(staging),
+                            target,
+                            tmp,
+                            job,
+                            options,
+                        );
+                    }
                 }
             }
             sync_parent_dir(store, target.parent(), policy)?;
@@ -1885,7 +1894,7 @@ fn swap_in_temp(
             return materialize_cross_volume(store, target, Some(tmp), job, options);
         }
         Stage::Conflict | Stage::Vanished => {
-            return record_write_conflict(store, target, tmp, job, now_ms);
+            return record_write_conflict(store, Some(&active), target, tmp, job, options);
         }
     };
     let staging = &active;
@@ -1909,7 +1918,7 @@ fn swap_in_temp(
                 store.keep_displacement(&spec, keep_sha256(&other))?;
             }
         }
-        return record_write_conflict(store, target, tmp, job, now_ms);
+        return record_write_conflict(store, Some(staging), target, tmp, job, options);
     }
     if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
         // Placed but not marked complete. Startup replay judges the staged
@@ -1949,6 +1958,9 @@ fn swap_in_temp(
         ));
     }
     swap_back(store, target, &moved, &inspected, options)?;
+    if should_crash(faults, FaultPoint::MaterializeAfterSwapBack) {
+        return Ok(JobOutcome::Crashed(FaultPoint::MaterializeAfterSwapBack));
+    }
     store.mark_materialization_conflict(&job.job_id, now_ms)?;
     Ok(JobOutcome::Conflict)
 }
@@ -1956,19 +1968,77 @@ fn swap_in_temp(
 /// Keep the target as it is and move the job's content to a `.conflict`
 /// sibling so it is not lost; mark the job conflict (never silently replayed).
 /// The artifact is on the path floor, so the scanner does not capture it as a
-/// new tracked document; a person or agent inspects and resolves it.
+/// new tracked document; a person or agent inspects and resolves it. A note's
+/// text instead stays in staging as a kept copy, which the person is told
+/// about and can save beside the note.
 fn record_write_conflict(
     store: &EngineStore,
+    staging: Option<&Staging>,
     target: &Path,
     tmp: &Path,
     job: &MaterializationJob,
-    now_ms: i64,
+    options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
+    let now_ms = options.now_ms;
+    if let Some(staging) = staging.filter(|_| job.job_id.starts_with("ydoc-mat_"))
+        && keep_note_text(store, staging, tmp, job, options)?
+    {
+        return Ok(JobOutcome::Conflict);
+    }
     let conflict_path = conflict_sibling(target, &job.job_id);
     std::fs::rename(tmp, &conflict_path)
         .map_err(|err| MaterializeError::io(&conflict_path, &err))?;
     store.mark_materialization_conflict(&job.job_id, now_ms)?;
     Ok(JobOutcome::Conflict)
+}
+
+fn keep_note_text(
+    store: &EngineStore,
+    staging: &Staging,
+    tmp: &Path,
+    job: &MaterializationJob,
+    options: &MaterializeOptions<'_>,
+) -> Result<bool, MaterializeError> {
+    let dir = job_staging_dir(store, &staging.root, &job.job_id, true)?;
+    let mut taken = staging.taken.clone();
+    taken.extend(
+        store
+            .list_displacements_for_job(&job.job_id)?
+            .into_iter()
+            .map(|row| row.displaced_name),
+    );
+    let spec = DisplacementSpec {
+        job_id: job.job_id.clone(),
+        workspace_id: job.workspace_id.clone(),
+        target_path: job.target_path.clone(),
+        displaced_name: unused_staged_name(&dir, &job.job_id, &taken)?,
+        expected_sha256: job.content_sha256.clone(),
+        content_sha256: Some(job.content_sha256.clone()),
+        now_ms: options.now_ms,
+    };
+    let kept = Moved::open(store, spec, &dir)?;
+    if let Err(err) = std::fs::rename(tmp, &kept.path) {
+        store.resolve_displacement(
+            kept.displacement_id,
+            DisplacementResolution::Discard,
+            None,
+            options.now_ms,
+        )?;
+        if err.kind() == ErrorKind::CrossesDevices {
+            return Ok(false);
+        }
+        return Err(MaterializeError::io(&kept.path, &err));
+    }
+    sync_staged(store, &dir, options.policy)?;
+    store.resolve_displacement(
+        kept.displacement_id,
+        DisplacementResolution::Keep {
+            displaced_sha256: Some(&job.content_sha256),
+        },
+        Some((&job.job_id, JobStatus::Conflict)),
+        options.now_ms,
+    )?;
+    Ok(true)
 }
 
 fn materialize_delete(
@@ -2244,7 +2314,7 @@ fn materialize_cross_volume(
     )?;
     if !replaced {
         if let Some(tmp) = tmp {
-            return record_write_conflict(store, target, tmp, job, options.now_ms);
+            return record_write_conflict(store, None, target, tmp, job, options);
         }
         store.mark_materialization_conflict(&job.job_id, options.now_ms)?;
         return Ok(JobOutcome::Conflict);
@@ -2838,10 +2908,10 @@ fn return_displaced(
 
 /// Put a displaced file whose bytes the store does not have back at its path.
 /// A write first moves the job's content, which it placed there, aside to the
-/// conflict sibling. Anything else at the target is someone's newer file: it
-/// stays, and the displaced file stays displaced with a kept row, as does a
-/// displaced file that cannot go back. Returns `true` when something stays
-/// displaced.
+/// conflict sibling, or keeps a note's text in staging. Anything else at the
+/// target is someone's newer file: it stays, and the displaced file stays
+/// displaced with a kept row, as does a displaced file that cannot go back.
+/// Returns `true` when something stays displaced.
 fn swap_back(
     store: &EngineStore,
     target: &Path,
@@ -2909,9 +2979,10 @@ fn swap_back(
     if let Some(aside) = aside {
         let conflict_path = conflict_sibling(target, &aside.job_id);
         let resolution = if !entry_exists(&aside.path)?
-            || staged_dacl::leave(store, &aside.path, options.now_ms, || {
-                Ok(std::fs::rename(&aside.path, &conflict_path).is_ok())
-            })? {
+            || (!aside.job_id.starts_with("ydoc-mat_")
+                && staged_dacl::leave(store, &aside.path, options.now_ms, || {
+                    Ok(std::fs::rename(&aside.path, &conflict_path).is_ok())
+                })?) {
             DisplacementResolution::Discard
         } else {
             // The job's content stays at its displaced name. Its kept row
@@ -2921,7 +2992,9 @@ fn swap_back(
                 displaced_sha256: aside.content_sha256.as_deref(),
             }
         };
-        store.resolve_displacement(aside.displacement_id, resolution, None, options.now_ms)?;
+        let settled = matches!(resolution, DisplacementResolution::Keep { .. })
+            .then_some((aside.job_id.as_str(), JobStatus::Conflict));
+        store.resolve_displacement(aside.displacement_id, resolution, settled, options.now_ms)?;
     }
     Ok(kept)
 }
@@ -3864,13 +3937,16 @@ fn conflict_if_pending(
     job_id: &str,
     now_ms: i64,
 ) -> Result<(), MaterializeError> {
-    if store
-        .load_materialization_job(job_id)?
-        .is_some_and(|job| job.status == JobStatus::Pending)
-    {
+    if job_is_pending(store, job_id)? {
         store.mark_materialization_conflict(job_id, now_ms)?;
     }
     Ok(())
+}
+
+fn job_is_pending(store: &EngineStore, job_id: &str) -> Result<bool, MaterializeError> {
+    Ok(store
+        .load_materialization_job(job_id)?
+        .is_some_and(|job| job.status == JobStatus::Pending))
 }
 
 /// Resolve the unfinished staged files of one path, from any job. The actor
@@ -4293,7 +4369,9 @@ fn recover_job_displacements(
         .collect();
     let mut kept = false;
     for entry in ordered_recovery(store, rowless, rows)? {
-        kept |= entry.recover(store, root, &dir, &job.workspace_id, options)?;
+        let other_pending = entry.job_id() != job.job_id && job_is_pending(store, entry.job_id())?;
+        kept |= entry.recover(store, root, &dir, &job.workspace_id, options)?
+            && (!other_pending || job_is_pending(store, entry.job_id())?);
     }
     taken = store
         .list_displacements_for_job(&job.job_id)?
@@ -4431,7 +4509,9 @@ fn recover_staged(
 /// the job, if pending, runs again against it. Otherwise the file is deleted
 /// when its bytes are now known, and goes back to its path, moving what is
 /// there aside, when they are not. A file no job identifies stays where it
-/// is. Returns `true` when a file stays staged.
+/// is. A note's own text that its write moved off the file or was keeping
+/// stays kept and marks the write conflict. Returns `true` when a file stays
+/// staged.
 fn recover_displacement(
     store: &EngineStore,
     root: &Path,
@@ -4485,6 +4565,26 @@ fn recover_displacement(
             )?;
             return Ok(false);
         }
+        return Ok(true);
+    }
+    if displacement.state == DisplacementState::Open
+        && displacement.job_id.starts_with("ydoc-mat_")
+        && displacement.content_sha256.as_deref() == Some(displacement.expected_sha256.as_str())
+        && store
+            .load_materialization_job(&displacement.job_id)?
+            .is_some_and(|job| {
+                job.preimage != Preimage::Present(displacement.expected_sha256.clone())
+            })
+        && matches!(moved.inspect(store)?, Inspected::Known { .. })
+    {
+        store.resolve_displacement(
+            moved.displacement_id,
+            DisplacementResolution::Keep {
+                displaced_sha256: Some(&displacement.expected_sha256),
+            },
+            Some((&displacement.job_id, JobStatus::Conflict)),
+            options.now_ms,
+        )?;
         return Ok(true);
     }
     if displacement.state == DisplacementState::Open

@@ -517,6 +517,55 @@ fn displacement_spec(job_id: &str, displaced_name: &str) -> DisplacementSpec {
     }
 }
 
+#[test]
+fn a_displacement_leaves_an_ended_jobs_status() {
+    let sc = Scratch::new("displacement-ended-job");
+    let mut store = EngineStore::open(&sc.db_path(), 1).expect("open");
+    let sha = store.put_binary_blob(b"content").expect("blob");
+    store
+        .write_with(&NoFaults, |tx| {
+            enqueue_job(
+                tx,
+                &MaterializationJobSpec {
+                    job_id: "j1".to_owned(),
+                    workspace_id: "ws".to_owned(),
+                    target_path: "notes/a.md".to_owned(),
+                    content_sha256: sha.clone(),
+                    preimage: Preimage::Absent,
+                    target_generation: 1,
+                    now_ms: 1,
+                },
+            )?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("enqueue");
+    let row = store
+        .open_displacement(&displacement_spec("j1", "6a31.0"))
+        .expect("open");
+    store
+        .mark_materialization_cancelled("j1", 6)
+        .expect("cancel");
+    store
+        .resolve_displacement(
+            row,
+            DisplacementResolution::Keep {
+                displaced_sha256: Some(&sha),
+            },
+            Some(("j1", JobStatus::Conflict)),
+            7,
+        )
+        .expect("keep");
+    assert_eq!(
+        store
+            .load_materialization_job("j1")
+            .expect("load")
+            .expect("job")
+            .status,
+        JobStatus::Cancelled
+    );
+    assert_eq!(store.list_kept_displacements("ws").expect("kept").len(), 1);
+}
+
 /// A row moves open, then kept or deleted, and its job's status changes in
 /// the same transaction as the row's end. A row can also start kept.
 #[test]

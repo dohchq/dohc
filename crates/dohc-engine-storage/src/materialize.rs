@@ -811,7 +811,8 @@ pub(crate) fn displacement_names(
         .map_err(StorageError::corrupt)
 }
 
-/// End a row and, in the same transaction, give its job a terminal status.
+/// End a row and, in the same transaction, give its job a terminal status if
+/// the job is still pending.
 pub(crate) fn resolve_displacement(
     conn: &Connection,
     displacement_id: i64,
@@ -836,7 +837,12 @@ pub(crate) fn resolve_displacement(
     }
     .map_err(StorageError::persist)?;
     if let Some((job_id, status)) = job {
-        set_status(&tx, job_id, status, now_ms)?;
+        tx.execute(
+            "UPDATE materialization_jobs SET status = ?2, completed_at_ms = ?3 \
+             WHERE job_id = ?1 AND status = 'pending'",
+            rusqlite::params![job_id, status.as_str(), now_ms],
+        )
+        .map_err(StorageError::persist)?;
     }
     tx.commit().map_err(StorageError::persist)
 }

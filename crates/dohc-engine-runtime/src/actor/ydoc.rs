@@ -6358,7 +6358,7 @@ mod pending_write_order_tests {
 
     /// A file that holds bytes the store does not know is a real conflict.
     /// It is not the note's head, so its writes run as before: the first
-    /// conflicts, its content is kept beside the file, and the file stays.
+    /// conflicts, its content is kept as a copy to save, and the file stays.
     #[test]
     fn a_replay_keeps_the_conflict_of_a_file_changed_outside() {
         let (scratch, mut store, writes) = two_hosted_writes();
@@ -6387,7 +6387,14 @@ mod pending_write_order_tests {
             std::fs::read_to_string(&note).expect("file"),
             "outside edit"
         );
-        assert_eq!(conflict_files(&scratch).len(), 1);
+        assert_eq!(conflict_files(&scratch), Vec::<String>::new());
+        assert_eq!(
+            store
+                .list_kept_displacements("workspace")
+                .expect("kept")
+                .len(),
+            1
+        );
     }
 
     /// A file that holds an earlier state of the note, not its head, is owed
@@ -6420,8 +6427,8 @@ mod pending_write_order_tests {
     }
 
     /// A store that is not a hosted replica replays a write the head
-    /// replaced, which conflicts and keeps that earlier state beside the
-    /// file. Whether a desktop or a server's automation replica reaches this
+    /// replaced, which conflicts and keeps that earlier state as a copy to
+    /// save. Whether a desktop or a server's automation replica reaches this
     /// state is not established. This test changes with the decision to apply
     /// the rule to them too.
     #[test]
@@ -6448,6 +6455,13 @@ mod pending_write_order_tests {
             [JobStatus::Conflict, JobStatus::Complete]
         );
         assert_eq!(std::fs::read_to_string(&note).expect("file"), "second edit");
-        assert_eq!(conflict_files(&scratch).len(), 1);
+        assert_eq!(conflict_files(&scratch), Vec::<String>::new());
+        assert_eq!(
+            store
+                .list_kept_displacements("workspace")
+                .expect("kept")
+                .len(),
+            1
+        );
     }
 }
