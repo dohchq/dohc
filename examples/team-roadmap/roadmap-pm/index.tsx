@@ -119,10 +119,13 @@ function Roadmap() {
     done?: (result: T) => void,
     key = mutationKey(operation),
   ) {
+    if (busy) return;
     setBusy(true);
     try {
       const reply = await client.invoke<T>(operation, input, key);
       setNotice(null);
+      rollup.reload();
+      list.reload();
       done?.(reply.result);
     } catch (error) {
       const refusal = isAppBackendError(error) ? error.refusal : undefined;
@@ -340,25 +343,29 @@ function Roadmap() {
           </Stack>
         )}
       </Stack>
-      <ItemDialog
-        open={dialog?.kind === "item"}
-        alert={alert}
-        busy={busy}
-        onClose={() => show(null)}
-        onSubmit={(input) =>
-          void run("createItem", input, () => {
-            setDialog(null);
-            setStatus("new");
-          })
-        }
-      />
-      <MilestoneDialog
-        open={dialog?.kind === "milestone"}
-        alert={alert}
-        busy={busy}
-        onClose={() => show(null)}
-        onSubmit={(input) => void run("createMilestone", input, () => setDialog(null))}
-      />
+      {dialog?.kind === "item" ? (
+        <ItemDialog
+          alert={alert}
+          busy={busy}
+          onClose={() => show(null)}
+          onSubmit={(input) =>
+            void run("createItem", input, () => {
+              setDialog(null);
+              setStatus("new");
+              setMilestone("");
+              setCursors([]);
+            })
+          }
+        />
+      ) : null}
+      {dialog?.kind === "milestone" ? (
+        <MilestoneDialog
+          alert={alert}
+          busy={busy}
+          onClose={() => show(null)}
+          onSubmit={(input) => void run("createMilestone", input, () => setDialog(null))}
+        />
+      ) : null}
       {dialog?.kind === "plan" ? (
         <PlanDialog
           item={dialog.item}
@@ -381,7 +388,6 @@ function submitWith(handler: () => void) {
 }
 
 function ItemDialog(props: {
-  open: boolean;
   alert: ReactNode;
   busy: boolean;
   onClose(): void;
@@ -392,7 +398,7 @@ function ItemDialog(props: {
   const [area, setArea] = useState<Area>("apps");
   return (
     <Modal
-      open={props.open}
+      open
       title="New roadmap item"
       onClose={props.onClose}
       footer={
@@ -447,7 +453,6 @@ function ItemDialog(props: {
 }
 
 function MilestoneDialog(props: {
-  open: boolean;
   alert: ReactNode;
   busy: boolean;
   onClose(): void;
@@ -457,7 +462,7 @@ function MilestoneDialog(props: {
   const [dueOn, setDueOn] = useState("");
   return (
     <Modal
-      open={props.open}
+      open
       title="New milestone"
       onClose={props.onClose}
       footer={

@@ -82,10 +82,12 @@ function Triage() {
   const [busy, setBusy] = useState(false);
 
   async function run(operation: string, input: unknown, done?: () => void, key = mutationKey(operation)) {
+    if (busy) return;
     setBusy(true);
     try {
       await client.invoke(operation, input, key);
       setFailure(null);
+      list.reload();
       done?.();
     } catch (error) {
       const refusal = isAppBackendError(error) ? error.refusal : undefined;
@@ -187,6 +189,7 @@ function Triage() {
         eyebrow="Engineering"
         title="Triage and track work"
         subtitle="Estimate new requests so product can plan them, then move planned work along."
+        actions={<Button onClick={list.reload}>Refresh</Button>}
       />
       <Stack gap={16}>
         {triaging ? null : alert}
@@ -279,6 +282,8 @@ function TriageDialog(props: {
   onSubmit(input: { id: string; version: number; estimateDays: number; note: string }): void;
 }) {
   const { item } = props;
+  const full = useDatasetQuery<Page>("listItems", { id: item.id });
+  const detail = full.data?.items[0]?.detail ?? item.detail;
   const [estimate, setEstimate] = useState("");
   const [note, setNote] = useState("");
   const submit = (event: FormEvent) => {
@@ -304,6 +309,7 @@ function TriageDialog(props: {
       <form id="triage-item" onSubmit={submit}>
         <Stack gap={12}>
           {props.alert}
+          {detail ? <p style={{ margin: 0, whiteSpace: "pre-wrap" }}>{detail}</p> : null}
           <Field label="Estimate in days" htmlFor="triage-estimate" hint="1 to 60 working days.">
             <Input
               id="triage-estimate"

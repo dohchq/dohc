@@ -303,6 +303,10 @@ describe("team roadmap example", () => {
       after = page.next;
     } while (after);
     expect(new Set(seen).size).toBe(51);
+    const full = await f.call("eng-1", "eng-triage", "listItems", {
+      id: (await f.call("eng-1", "eng-triage", "listItems", {})).items[0].id,
+    });
+    expect(full.items[0].detail).toHaveLength(2000);
   });
 
   it("records the person and app behind every change", async () => {

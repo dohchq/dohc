@@ -83,7 +83,13 @@ function timeHost(owner, name) {
   };
 }
 for (const name of ["exec", "prepare"]) timeHost(DatabaseSync.prototype, name);
-for (const name of ["run", "get", "all", "iterate"]) timeHost(StatementSync.prototype, name);
+for (const name of ["run", "get", "all"]) timeHost(StatementSync.prototype, name);
+const iterate = StatementSync.prototype.iterate;
+StatementSync.prototype.iterate = function (...args) {
+  const iterator = iterate.apply(this, args);
+  timeHost(iterator, "next");
+  return iterator;
+};
 
 function seeded(seed) {
   let state = seed >>> 0;
@@ -487,7 +493,9 @@ print();
 print("| Callers | Seed 5,000 (ms) | Ops/s | p50 ms | p95 ms | p99 ms | Refused | Snapshots |");
 print("| --- | --- | --- | --- | --- | --- | --- | --- |");
 for (const { plain } of results) {
-  const latency = stats(plain.traces.map((trace) => trace.end - trace.start));
+  const latency = stats(
+    plain.traces.filter((trace) => !trace.error).map((trace) => trace.end - trace.start),
+  );
   const ok = plain.traces.filter((trace) => !trace.error).length;
   const refused = plain.traces.length - ok;
   print(

@@ -27,14 +27,16 @@ const ITEM_COLUMNS = [
   "updated_at",
   "version",
 ];
-const SELECT_ITEM = `SELECT i.id, i.title,
-  CASE WHEN length(i.detail) > ${PREVIEW} THEN substr(i.detail, 1, ${PREVIEW - 1}) || '…' ELSE i.detail END AS detail,
-  i.area, i.status, i.priority,
+const selectItems = (detail) => `SELECT i.id, i.title, ${detail} AS detail, i.area, i.status, i.priority,
   i.milestone_id AS milestoneId, m.name AS milestoneName, i.estimate_days AS estimateDays,
   i.triage_note AS triageNote, i.requested_by AS requestedBy, i.triaged_by AS triagedBy,
   i.updated_by AS updatedBy, i.created_at AS createdAt, i.updated_at AS updatedAt, i.version,
   i.archived_at AS archivedAt, coalesce(i.priority, 4) AS rank
   FROM items i LEFT JOIN milestones m ON m.id = i.milestone_id`;
+const SELECT_ITEM = selectItems("i.detail");
+const SELECT_PAGE = selectItems(
+  `CASE WHEN length(i.detail) > ${PREVIEW} THEN substr(i.detail, 1, ${PREVIEW - 1}) || '…' ELSE i.detail END`,
+);
 
 function requireOwner(ctx) {
   if (ctx.caller.kind !== "owner") ctx.refuse("forbidden", "Only the roadmap owner can do this.");
@@ -178,6 +180,10 @@ globalThis.operations = {
     requireTeam(ctx);
     const where = ["i.archived_at IS NULL"];
     const values = [];
+    if (input.id !== undefined) {
+      where.push("i.id = ?");
+      values.push(typeof input.id === "string" ? input.id : "");
+    }
     if (input.status !== undefined) {
       where.push("i.status = ?");
       values.push(oneOf(ctx, input.status, STATUSES, "status"));
@@ -205,7 +211,7 @@ globalThis.operations = {
       values.push(after[0], after[1], after[2]);
     }
     const rows = ctx.db.query(
-      `${SELECT_ITEM} WHERE ${where.join(" AND ")} ORDER BY coalesce(i.priority, 4), i.created_at, i.id LIMIT ?`,
+      `${input.id === undefined ? SELECT_PAGE : SELECT_ITEM} WHERE ${where.join(" AND ")} ORDER BY coalesce(i.priority, 4), i.created_at, i.id LIMIT ?`,
       [...values, limit + 1],
     );
     const page = rows.slice(0, limit);
