@@ -1,412 +1,396 @@
-import { useId, useMemo, type KeyboardEvent } from "react";
-import { axialDistance, hexKeyOf } from "./replay";
+import { useId, useMemo, useRef, type CSSProperties, type KeyboardEvent } from "react";
+import { TerrainArt, UnitStack } from "./board-art";
+import { HEX_SIZE, arrowPath, hexCenter, hexKeyOf, hexPoints } from "./geometry";
+import { factionName } from "./rules";
 import type { VisibleTile } from "./types";
 
-export { axialDistance, hexKeyOf };
+export type TargetKind = "move" | "claim" | "attack";
 
-const HEX_SIZE = 34;
-const SQRT3 = Math.sqrt(3);
+export interface BoardForecast {
+  readonly fromHex: string;
+  readonly toHex: string;
+  readonly label: string;
+  readonly tone: "move" | "claim" | "capture" | "repelled";
+  readonly leaving: number;
+  readonly defenderLoss: number;
+  readonly gain: number;
+}
+
+export interface BoardFlash {
+  readonly hex: string;
+  readonly kind: "capture" | "hit" | "move" | "build";
+  readonly token: number;
+  readonly scope: string;
+}
 
 export interface HexBoardProps {
   readonly tiles: readonly VisibleTile[];
   readonly viewerSeat: 1 | 2 | null;
+  readonly interactive: boolean;
   readonly canAct: boolean;
   readonly selectedHex: string | null;
   readonly targetHex: string | null;
-  readonly validTargets: ReadonlySet<string>;
-  readonly lastMove: { readonly fromHex: string | null; readonly toHex: string | null } | null;
-  readonly onSelectHex: (tile: VisibleTile) => void;
+  readonly cursorHex: string | null;
+  readonly targets: ReadonlyMap<string, TargetKind>;
+  readonly lastMove: {
+    readonly fromHex: string | null;
+    readonly toHex: string | null;
+    readonly seat: 1 | 2 | null;
+    readonly token: number;
+  } | null;
+  readonly forecast: BoardForecast | null;
+  readonly flash: BoardFlash | null;
+  readonly highlightHexes: readonly string[];
+  readonly onActivate: (tile: VisibleTile, via: "pointer" | "enter" | "space") => void;
+  readonly onHover: (key: string | null) => void;
+  readonly onCursor: (key: string) => void;
 }
 
-function hexCenter(q: number, r: number): { x: number; y: number } {
-  return {
-    x: HEX_SIZE * SQRT3 * (q + r / 2),
-    y: HEX_SIZE * 1.5 * r,
-  };
+const SKIRT = 7;
+const NEIGHBORS: Record<string, readonly [number, number]> = {
+  ArrowLeft: [-1, 0],
+  ArrowRight: [1, 0],
+};
+
+function terrainKey(tile: VisibleTile): string {
+  return tile.visible ? (tile.terrain ?? "plains") : "fog";
 }
 
-function hexPolygonPoints(cx: number, cy: number, radius: number): string {
-  const pts: string[] = [];
-  for (let i = 0; i < 6; i += 1) {
-    const angle = ((60 * i - 30) * Math.PI) / 180;
-    const x = cx + radius * Math.cos(angle);
-    const y = cy + radius * Math.sin(angle);
-    pts.push(`${x.toFixed(2)},${y.toFixed(2)}`);
-  }
-  return pts.join(" ");
-}
+const MARK_GLYPH: Record<TargetKind, string> = {
+  move: "M -3 1.6 L 0 -1.6 L 3 1.6",
+  claim: "M -1.8 3 V -3 L 2.8 -1.5 L -1.8 0",
+  attack: "M -3.2 -3.2 L 2.2 2.2 M 3.2 -3.2 L -2.2 2.2 M 0.6 2.9 L 2.9 0.6 M -2.9 0.6 L -0.6 2.9",
+};
 
-function tileFill(tile: VisibleTile, fogPatternId: string): string {
-  if (!tile.visible) return `url(#${fogPatternId})`;
-  if (tile.ownerSeat === 1) return "var(--hex-p1-fill)";
-  if (tile.ownerSeat === 2) return "var(--hex-p2-fill)";
-  switch (tile.terrain) {
-    case "gold":
-      return "var(--hex-gold-fill)";
-    case "forest":
-      return "var(--hex-forest-fill)";
-    case "mountain":
-      return "var(--hex-mountain-fill)";
-    default:
-      return "var(--hex-plains-fill)";
-  }
-}
-
-function tileStroke(tile: VisibleTile): string {
-  if (!tile.visible) return "var(--hex-fog-stroke)";
-  if (tile.ownerSeat === 1) return "var(--hex-p1-stroke)";
-  if (tile.ownerSeat === 2) return "var(--hex-p2-stroke)";
-  if (tile.terrain === "gold") return "var(--hex-gold-ink)";
-  if (tile.terrain === "forest") return "var(--hex-forest-ink)";
-  if (tile.terrain === "mountain") return "var(--hex-mountain-ink)";
-  return "var(--hex-neutral-stroke)";
-}
-
-function tileAriaLabel(tile: VisibleTile, isTarget: boolean): string {
+function tileLabel(tile: VisibleTile, target: TargetKind | undefined): string {
   const coord = `Hex ${tile.q}, ${tile.r}`;
   if (!tile.visible) return `${coord}, hidden by fog of war`;
-  const owner =
-    tile.ownerSeat === 1 ? "Crimson" : tile.ownerSeat === 2 ? "Cobalt" : "Neutral";
-  const terrain = tile.terrain ?? "plains";
   const units = tile.units ?? 0;
-  const fortified = tile.fortified ? ", fortified" : "";
-  const moveHint = isTarget ? ", valid march target" : "";
-  return `${coord}, ${terrain}, ${owner}, ${units} unit${units === 1 ? "" : "s"}${fortified}${moveHint}`;
-}
-
-function TerrainGlyph({
-  terrain,
-  cx,
-  cy,
-}: {
-  readonly terrain: VisibleTile["terrain"];
-  readonly cx: number;
-  readonly cy: number;
-}) {
-  if (terrain === "mountain") {
-    return (
-      <g aria-hidden="true" stroke="var(--hex-mountain-ink)" strokeWidth={1.6} fill="none">
-        <path d={`M ${cx - 12} ${cy + 7} L ${cx - 3} ${cy - 8} L ${cx + 5} ${cy + 7} Z`} />
-        <path d={`M ${cx - 1} ${cy + 7} L ${cx + 6} ${cy - 4} L ${cx + 13} ${cy + 7} Z`} />
-      </g>
-    );
-  }
-  if (terrain === "gold") {
-    return (
-      <polygon
-        aria-hidden="true"
-        points={`${cx},${cy - 21} ${cx + 5.5},${cy - 15.5} ${cx},${cy - 10} ${cx - 5.5},${cy - 15.5}`}
-        fill="var(--hex-gold-ink)"
-        opacity={0.9}
-      />
-    );
-  }
-  if (terrain === "forest") {
-    return (
-      <g aria-hidden="true" stroke="var(--hex-forest-ink)" strokeWidth={1.5} fill="none">
-        <path d={`M ${cx} ${cy - 21} L ${cx - 5} ${cy - 13} L ${cx + 5} ${cy - 13} Z`} />
-        <line x1={cx} y1={cy - 13} x2={cx} y2={cy - 10} />
-      </g>
-    );
-  }
-  if (terrain === "capital") {
-    return (
-      <path
-        aria-hidden="true"
-        d={`M ${cx - 8} ${cy - 13} L ${cx - 7} ${cy - 21} L ${cx - 2.5} ${cy - 17} L ${cx} ${cy - 22} L ${cx + 2.5} ${cy - 17} L ${cx + 7} ${cy - 21} L ${cx + 8} ${cy - 13} Z`}
-        fill="var(--hex-gold-ink)"
-      />
-    );
-  }
-  return null;
+  const parts = [coord, tile.terrain ?? "plains", factionName(tile.ownerSeat)];
+  if (tile.terrain !== "mountain") parts.push(`${units} unit${units === 1 ? "" : "s"}`);
+  if (tile.fortified) parts.push("fortified");
+  if (target === "attack") parts.push("attack target");
+  if (target === "move") parts.push("move target");
+  if (target === "claim") parts.push("claim target");
+  return parts.join(", ");
 }
 
 export function HexBoard({
   tiles,
   viewerSeat,
+  interactive,
   canAct,
   selectedHex,
   targetHex,
-  validTargets,
+  cursorHex,
+  targets,
   lastMove,
-  onSelectHex,
+  forecast,
+  flash,
+  highlightHexes,
+  onActivate,
+  onHover,
+  onCursor,
 }: HexBoardProps) {
   const uid = useId().replace(/[^a-zA-Z0-9_-]/g, "");
-  const fogPatternId = `hc-fog-${uid}`;
-  const arrowMarkerId = `hc-arrow-${uid}`;
+  const ids = {
+    bevel: `hc-bevel-${uid}`,
+    grass: `hc-grass-${uid}`,
+    mist: `hc-mist-${uid}`,
+    blur: `hc-blur-${uid}`,
+    clip: `hc-clip-${uid}`,
+  };
+  const anchorX = useRef<number | null>(null);
 
   const layout = useMemo(() => {
     const positioned = tiles.map((tile) => {
-      const center = hexCenter(tile.q, tile.r);
-      return { tile, key: hexKeyOf(tile.q, tile.r), ...center };
+      const { x, y } = hexCenter(tile.q, tile.r);
+      return { tile, key: hexKeyOf(tile.q, tile.r), x, y, face: hexPoints(x, y, HEX_SIZE - 1) };
     });
     let minX = -200;
     let maxX = 200;
     let minY = -180;
     let maxY = 180;
     if (positioned.length > 0) {
-      minX = Math.min(...positioned.map((p) => p.x)) - HEX_SIZE - 14;
-      maxX = Math.max(...positioned.map((p) => p.x)) + HEX_SIZE + 14;
-      minY = Math.min(...positioned.map((p) => p.y)) - HEX_SIZE - 14;
-      maxY = Math.max(...positioned.map((p) => p.y)) + HEX_SIZE + 14;
+      minX = Math.min(...positioned.map((p) => p.x)) - HEX_SIZE - 8;
+      maxX = Math.max(...positioned.map((p) => p.x)) + HEX_SIZE + 8;
+      minY = Math.min(...positioned.map((p) => p.y)) - HEX_SIZE - 26;
+      maxY = Math.max(...positioned.map((p) => p.y)) + HEX_SIZE + SKIRT + 10;
     }
     const byKey = new Map(positioned.map((p) => [p.key, p]));
-    return {
-      positioned,
-      byKey,
-      viewBox: `${minX.toFixed(1)} ${minY.toFixed(1)} ${(maxX - minX).toFixed(1)} ${(maxY - minY).toFixed(1)}`,
-    };
+    return { positioned, byKey, minX, minY, width: maxX - minX, height: maxY - minY };
   }, [tiles]);
 
-  const arrowCoords = useMemo(() => {
-    if (!lastMove?.fromHex || !lastMove?.toHex) return null;
+  const tabStop = cursorHex && layout.byKey.has(cursorHex) ? cursorHex : (selectedHex ?? layout.positioned.find((p) => p.tile.ownerSeat === viewerSeat)?.key ?? layout.positioned[0]?.key ?? null);
+
+  const arrow = useMemo(() => {
+    if (!lastMove?.fromHex || !lastMove.toHex) return null;
     const from = layout.byKey.get(lastMove.fromHex);
     const to = layout.byKey.get(lastMove.toHex);
     if (!from || !to) return null;
-    const dx = to.x - from.x;
-    const dy = to.y - from.y;
-    const dist = Math.hypot(dx, dy);
-    if (dist < 1) return null;
-    const ux = dx / dist;
-    const uy = dy / dist;
-    return {
-      x1: from.x + ux * 14,
-      y1: from.y + uy * 14,
-      x2: to.x - ux * 16,
-      y2: to.y - uy * 16,
-    };
+    return arrowPath(from, to);
   }, [lastMove, layout.byKey]);
 
-  const handleKeyDown = (event: KeyboardEvent<SVGGElement>, tile: VisibleTile) => {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      onSelectHex(tile);
+  const moveCursor = (event: KeyboardEvent<SVGPolygonElement>, from: { x: number; y: number; tile: VisibleTile }) => {
+    let next: string | null = null;
+    const horizontal = NEIGHBORS[event.key];
+    if (horizontal) {
+      const key = hexKeyOf(from.tile.q + horizontal[0], from.tile.r + horizontal[1]);
+      if (layout.byKey.has(key)) next = key;
+      anchorX.current = layout.byKey.get(next ?? "")?.x ?? from.x;
+    } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      const dr = event.key === "ArrowUp" ? -1 : 1;
+      const candidates = [hexKeyOf(from.tile.q, from.tile.r + dr), hexKeyOf(from.tile.q - dr, from.tile.r + dr)]
+        .map((key) => layout.byKey.get(key))
+        .filter((p): p is NonNullable<typeof p> => Boolean(p));
+      const goal = anchorX.current ?? from.x;
+      candidates.sort((a, b) => Math.abs(a.x - goal) - Math.abs(b.x - goal) || a.x - b.x);
+      next = candidates[0]?.key ?? null;
+      if (anchorX.current === null) anchorX.current = from.x;
+    } else {
+      return;
+    }
+    event.preventDefault();
+    if (next) {
+      onCursor(next);
+      event.currentTarget.ownerSVGElement?.querySelector<SVGPolygonElement>(`.hc-hit[data-hex="${next}"]`)?.focus();
     }
   };
 
-  return (
-    <div className="hc-board-frame">
-      <svg
-        className="hc-board-svg"
-        viewBox={layout.viewBox}
-        role="group"
-        aria-label="HexClash tactical board"
-      >
+  const terrain = useMemo(() => {
+    const fogTiles = layout.positioned.filter((p) => !p.tile.visible);
+    return (
+      <>
         <defs>
-          <pattern
-            id={fogPatternId}
-            width="8"
-            height="8"
-            patternUnits="userSpaceOnUse"
-            patternTransform="rotate(45)"
-          >
-            <rect width="8" height="8" fill="var(--hex-fog-fill)" />
-            <line x1="0" y1="0" x2="0" y2="8" stroke="var(--hex-fog-hatch)" strokeWidth="2.5" />
+          <linearGradient id={ids.bevel} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stopColor="var(--hc-bevel-hi)" />
+            <stop offset="0.45" stopColor="var(--hc-bevel-hi)" stopOpacity="0" />
+            <stop offset="1" stopColor="var(--hc-bevel-lo)" />
+          </linearGradient>
+          <pattern id={ids.grass} width="23" height="17" patternUnits="userSpaceOnUse">
+            <path d="M 4 10 l 1.6 -3.4 l 1.6 3.4 M 15 4 l 1.4 -3 l 1.4 3" fill="none" stroke="var(--t-plains-ink)" strokeWidth="1" strokeLinecap="round" />
           </pattern>
-          <marker
-            id={arrowMarkerId}
-            markerWidth="8"
-            markerHeight="8"
-            refX="6"
-            refY="4"
-            orient="auto"
-          >
-            <path d="M 0 0 L 8 4 L 0 8 z" fill="var(--hex-arrow)" />
-          </marker>
+          <pattern id={ids.mist} width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="rotate(35)">
+            <path d="M 0 5 h 4" fill="none" stroke="var(--t-fog-ink)" strokeWidth="1.3" strokeLinecap="round" />
+          </pattern>
+          <filter id={ids.blur} x="-30%" y="-30%" width="160%" height="160%">
+            <feGaussianBlur stdDeviation="9" />
+          </filter>
+          <clipPath id={ids.clip}>
+            {layout.positioned.map(({ key, x, y }) => (
+              <polygon key={key} points={hexPoints(x, y, HEX_SIZE)} />
+            ))}
+            {layout.positioned.map(({ key, x, y }) => (
+              <polygon key={`s-${key}`} points={hexPoints(x, y + SKIRT, HEX_SIZE)} />
+            ))}
+          </clipPath>
         </defs>
 
-        {layout.positioned.map(({ tile, key, x, y }) => {
-          const isSelected = selectedHex === key;
-          const isTarget = validTargets.has(key);
-          const isChosenTarget = targetHex === key;
-          const isOwn = tile.visible && viewerSeat !== null && tile.ownerSeat === viewerSeat;
-          const interactive = Boolean(tile.visible && (isTarget || isSelected || (canAct && isOwn)));
-          const isEnemyOrNeutralTarget = isTarget && tile.ownerSeat !== viewerSeat;
-          const units = tile.units ?? 0;
+        <g className="hc-layer-tiles">
+          {layout.positioned.map(({ tile, key, x, y, face }) => {
+            const t = terrainKey(tile);
+            const owned = tile.visible && tile.ownerSeat !== null;
+            return (
+              <g key={key} className="hc-tile" data-t={t}>
+                <polygon points={hexPoints(x, y + SKIRT, HEX_SIZE - 1)} fill={`var(--t-${t}-side)`} />
+                <polygon points={face} fill={`var(--t-${t}-top)`} />
+                {t === "plains" || t === "capital" ? (
+                  <polygon points={face} fill={`url(#${ids.grass})`} opacity={0.5} />
+                ) : null}
+                {t === "fog" ? <polygon points={face} fill={`url(#${ids.mist})`} /> : null}
+                {owned ? (
+                  <polygon
+                    points={face}
+                    fill={tile.ownerSeat === 1 ? "var(--hc-p1-tint)" : "var(--hc-p2-tint)"}
+                  />
+                ) : null}
+                <polygon points={face} fill={`url(#${ids.bevel})`} />
+                {owned ? (
+                  <polygon
+                    points={hexPoints(x, y, HEX_SIZE - 4)}
+                    fill="none"
+                    stroke={tile.ownerSeat === 1 ? "var(--hc-p1-edge)" : "var(--hc-p2-edge)"}
+                    strokeWidth={2.4}
+                    strokeLinejoin="round"
+                  />
+                ) : null}
+              </g>
+            );
+          })}
+        </g>
 
-          return (
-            <g
-              key={key}
-              className="hc-hex-group"
-              data-hex={key}
-              data-visible={tile.visible ? "true" : "false"}
-              data-owner={tile.ownerSeat ?? "neutral"}
-              data-terrain={tile.terrain ?? "fog"}
-              data-interactive={interactive ? "true" : "false"}
-              role={interactive ? "button" : undefined}
-              tabIndex={interactive ? 0 : undefined}
-              aria-label={tileAriaLabel(tile, isTarget)}
-              aria-pressed={interactive ? isSelected || isChosenTarget : undefined}
-              onClick={interactive ? () => onSelectHex(tile) : undefined}
-              onKeyDown={interactive ? (event) => handleKeyDown(event, tile) : undefined}
-            >
-              <polygon
-                className="hc-hex-poly"
-                points={hexPolygonPoints(x, y, HEX_SIZE - 1.5)}
-                fill={tileFill(tile, fogPatternId)}
-                stroke={tileStroke(tile)}
-                strokeWidth={tile.ownerSeat ? 2 : 1.2}
+        <g className="hc-layer-art">
+          {layout.positioned.map(({ tile, key, x, y }) =>
+            tile.visible && tile.terrain ? (
+              <TerrainArt key={key} terrain={tile.terrain} x={x} y={y} ownerSeat={tile.ownerSeat} />
+            ) : null,
+          )}
+        </g>
+
+        {fogTiles.length > 0 ? (
+          <g className="hc-layer-fog" clipPath={`url(#${ids.clip})`} pointerEvents="none" aria-hidden="true">
+            <g filter={`url(#${ids.blur})`}>
+              {fogTiles.map(({ key, x, y }) => (
+                <polygon key={key} points={hexPoints(x, y + 3, HEX_SIZE + 6)} fill="var(--t-fog-haze)" />
+              ))}
+            </g>
+          </g>
+        ) : null}
+      </>
+    );
+  }, [layout, ids.bevel, ids.blur, ids.clip, ids.grass, ids.mist]);
+
+  const style = { "--hc-ratio": (layout.width / layout.height).toFixed(4) } as CSSProperties;
+
+  return (
+    <div className="hc-board" style={style} data-can-act={canAct ? "true" : "false"}>
+      <svg
+        className="hc-board-svg"
+        viewBox={`${layout.minX.toFixed(1)} ${layout.minY.toFixed(1)} ${layout.width.toFixed(1)} ${layout.height.toFixed(1)}`}
+        role="group"
+        aria-label="HexClash battlefield"
+        onPointerLeave={() => onHover(null)}
+      >
+        {terrain}
+
+        <g className="hc-layer-marks" pointerEvents="none" aria-hidden="true">
+          {layout.positioned.map(({ key, x, y, face }) => {
+            const kind = targets.get(key);
+            if (!kind) return null;
+            const chosen = targetHex === key;
+            return (
+              <g key={key} className={`hc-mark hc-mark-${kind}${chosen ? " hc-mark-chosen" : ""}`}>
+                <polygon points={face} className="hc-mark-fill" />
+                <polygon points={hexPoints(x, y, HEX_SIZE - 5)} className="hc-mark-edge" />
+                {kind === "attack" ? (
+                  <g className="hc-reticle">
+                    <circle cx={x} cy={y + 2} r={19} />
+                    <path d={`M ${x} ${y - 21} v 7 M ${x} ${y + 18} v 7 M ${x - 23} ${y + 2} h 7 M ${x + 16} ${y + 2} h 7`} />
+                  </g>
+                ) : null}
+                {!forecast || forecast.toHex === key ? (
+                  <g className="hc-mark-badge" transform={`translate(${x} ${y + 33}) scale(0.85)`}>
+                    <circle r={6.5} />
+                    <path d={MARK_GLYPH[kind]} />
+                  </g>
+                ) : null}
+              </g>
+            );
+          })}
+          {highlightHexes.map((hex) => {
+            const p = layout.byKey.get(hex);
+            return p ? <polygon key={`log-${hex}`} className="hc-log-ring" points={hexPoints(p.x, p.y, HEX_SIZE - 3)} /> : null;
+          })}
+          {selectedHex && layout.byKey.has(selectedHex) ? (
+            <polygon
+              className="hc-select-ring"
+              points={hexPoints(layout.byKey.get(selectedHex)!.x, layout.byKey.get(selectedHex)!.y, HEX_SIZE - 2)}
+            />
+          ) : null}
+          {flash && layout.byKey.get(flash.hex)?.tile.visible ? (
+            <polygon
+              key={`flash-${flash.token}`}
+              className={`hc-flash hc-flash-${flash.kind}`}
+              points={layout.byKey.get(flash.hex)!.face}
+            />
+          ) : null}
+        </g>
+
+        {arrow ? (
+          <g
+            key={`arrow-${lastMove?.token ?? 0}`}
+            className={`hc-arrow hc-arrow-${lastMove?.seat ?? 0}`}
+            pointerEvents="none"
+            aria-hidden="true"
+          >
+            <path d={arrow.d} pathLength={1} />
+            <polygon points={arrow.head} />
+          </g>
+        ) : null}
+
+        <g className="hc-layer-units">
+          {layout.positioned.map(({ tile, key, x, y }) => {
+            if (!tile.visible || tile.terrain === "mountain") return null;
+            const units = tile.units ?? 0;
+            if (units <= 0 && !(forecast?.toHex === key && forecast.gain > 0)) return null;
+            const isOwn = viewerSeat !== null && tile.ownerSeat === viewerSeat;
+            const pipLoss =
+              forecast?.toHex === key ? forecast.defenderLoss : forecast?.fromHex === key ? forecast.leaving : 0;
+            const pipGain = forecast?.toHex === key ? forecast.gain : 0;
+            const arrived = lastMove?.toHex === key;
+            return (
+              <UnitStack
+                key={arrived ? `${key}-${lastMove?.token}` : key}
+                x={x}
+                y={y + 15}
+                seat={tile.ownerSeat}
+                units={units}
+                fortified={tile.fortified}
+                exhausted={canAct && isOwn && units <= 1}
+                pipLoss={pipLoss}
+                pipGain={pipGain}
+                className={arrived ? "hc-units-arrived" : undefined}
               />
+            );
+          })}
+        </g>
 
-              {isSelected ? (
-                <polygon
-                  points={hexPolygonPoints(x, y, HEX_SIZE - 4.5)}
-                  fill="none"
-                  stroke="var(--hex-select)"
-                  strokeWidth={2.5}
-                  pointerEvents="none"
-                />
-              ) : null}
-
-              {isTarget ? (
-                <polygon
-                  points={hexPolygonPoints(x, y, HEX_SIZE - 4.5)}
-                  fill="none"
-                  stroke={
-                    isEnemyOrNeutralTarget
-                      ? "var(--hex-target-attack)"
-                      : "var(--hex-target-friendly)"
-                  }
-                  strokeWidth={isChosenTarget ? 3 : 2}
-                  strokeDasharray={isChosenTarget ? undefined : "5 3"}
-                  pointerEvents="none"
-                />
-              ) : null}
-
-              <polygon
-                className="hc-hex-focus"
-                points={hexPolygonPoints(x, y, HEX_SIZE - 0.5)}
-              />
-
-              {tile.visible ? (
+        {forecast && layout.byKey.has(forecast.toHex) ? (
+          <g className={`hc-forecast hc-forecast-${forecast.tone}`} pointerEvents="none" aria-hidden="true">
+            {(() => {
+              const p = layout.byKey.get(forecast.toHex)!;
+              const width = forecast.label.length * 5.9 + 10;
+              return (
                 <>
-                  <TerrainGlyph terrain={tile.terrain} cx={x} cy={y} />
-
-                  {tile.fortified ? (
-                    <path
-                      aria-hidden="true"
-                      d={`M ${x + 12} ${y - 17} L ${x + 18} ${y - 15} L ${x + 18} ${y - 9} C ${x + 18} ${y - 5.5} ${x + 15} ${y - 3.5} ${x + 12} ${y - 2} C ${x + 9} ${y - 3.5} ${x + 6} ${y - 5.5} ${x + 6} ${y - 9} L ${x + 6} ${y - 15} Z`}
-                      fill="var(--kit-bg)"
-                      stroke="var(--kit-ink)"
-                      strokeWidth={1.3}
-                    />
-                  ) : null}
-
-                  {tile.terrain !== "mountain" && (units > 0 || tile.ownerSeat !== null) ? (
-                    <g aria-hidden="true">
-                      {tile.ownerSeat === 1 ? (
-                        <circle
-                          cx={x}
-                          cy={y + 2}
-                          r={11.5}
-                          fill="var(--hex-p1)"
-                          stroke="var(--hex-p1-stroke)"
-                          strokeWidth={1.2}
-                        />
-                      ) : tile.ownerSeat === 2 ? (
-                        <rect
-                          x={x - 10.5}
-                          y={y - 8.5}
-                          width={21}
-                          height={21}
-                          rx={4}
-                          fill="var(--hex-p2)"
-                          stroke="var(--hex-p2-stroke)"
-                          strokeWidth={1.2}
-                        />
-                      ) : (
-                        <rect
-                          x={x - 10}
-                          y={y - 7.5}
-                          width={20}
-                          height={19}
-                          rx={9.5}
-                          fill="var(--kit-bg)"
-                          stroke="var(--hex-neutral-stroke)"
-                          strokeWidth={1.2}
-                        />
-                      )}
-                      <text
-                        x={x}
-                        y={y + 6.5}
-                        textAnchor="middle"
-                        className="hc-hex-units"
-                        fill={
-                          tile.ownerSeat === 1
-                            ? "var(--hex-p1-ink)"
-                            : tile.ownerSeat === 2
-                              ? "var(--hex-p2-ink)"
-                              : "var(--kit-ink)"
-                        }
-                      >
-                        {units}
-                      </text>
-                    </g>
-                  ) : null}
-
-                  <text x={x} y={y + 24} textAnchor="middle" className="hc-hex-coord">
-                    {tile.q},{tile.r}
+                  <rect x={p.x - width / 2} y={p.y - 33} width={width} height={15} rx={4} />
+                  <text x={p.x} y={p.y - 22.6} textAnchor="middle">
+                    {forecast.label}
                   </text>
                 </>
-              ) : (
-                <text
-                  x={x}
-                  y={y + 4}
-                  textAnchor="middle"
-                  fontSize="11"
-                  fontWeight="600"
-                  fill="var(--hex-fog-ink)"
-                  pointerEvents="none"
-                >
-                  ?
-                </text>
-              )}
-            </g>
-          );
-        })}
-
-        {arrowCoords ? (
-          <line
-            x1={arrowCoords.x1}
-            y1={arrowCoords.y1}
-            x2={arrowCoords.x2}
-            y2={arrowCoords.y2}
-            stroke="var(--hex-arrow)"
-            strokeWidth={2.4}
-            strokeLinecap="round"
-            markerEnd={`url(#${arrowMarkerId})`}
-            opacity={0.78}
-            pointerEvents="none"
-          />
+              );
+            })()}
+          </g>
         ) : null}
-      </svg>
 
-      <div className="hc-legend" aria-label="Board legend">
-        <span className="hc-legend-item">
-          <span className="hc-swatch hc-swatch-circle hc-swatch-p1" />
-          Crimson (circle)
-        </span>
-        <span className="hc-legend-item">
-          <span className="hc-swatch hc-swatch-p2" />
-          Cobalt (square)
-        </span>
-        <span className="hc-legend-item">
-          <span className="hc-swatch hc-swatch-gold" />
-          Gold mine (+2g, +1u)
-        </span>
-        <span className="hc-legend-item">
-          <span className="hc-swatch hc-swatch-forest" />
-          Forest (+1 def)
-        </span>
-        <span className="hc-legend-item">
-          <span className="hc-swatch hc-swatch-mountain" />
-          Mountain (blocked)
-        </span>
-        <span className="hc-legend-item">
-          <span className="hc-swatch hc-swatch-fog" />
-          Fog of war (range 2)
-        </span>
-      </div>
+        <g className="hc-layer-hit">
+          {layout.positioned.map(({ tile, key, x, y }) => {
+            const target = targets.get(key);
+            return (
+              <polygon
+                key={key}
+                className="hc-hit"
+                points={hexPoints(x, y, HEX_SIZE - 0.5)}
+                data-hex={key}
+                data-visible={tile.visible ? "true" : "false"}
+                data-owner={tile.ownerSeat ?? "neutral"}
+                data-terrain={tile.terrain ?? "fog"}
+                data-target={target ?? undefined}
+                data-interactive={interactive ? "true" : "false"}
+                role={interactive ? "button" : undefined}
+                tabIndex={interactive ? (key === tabStop ? 0 : -1) : undefined}
+                aria-label={tileLabel(tile, target)}
+                aria-pressed={interactive ? selectedHex === key || targetHex === key : undefined}
+                onClick={interactive ? () => onActivate(tile, "pointer") : undefined}
+                onPointerEnter={interactive ? () => onHover(key) : undefined}
+                onFocus={interactive ? () => onCursor(key) : undefined}
+                onKeyDown={
+                  interactive
+                    ? (event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          if (event.repeat) return;
+                          onActivate(tile, event.key === "Enter" ? "enter" : "space");
+                          return;
+                        }
+                        moveCursor(event, { x, y, tile });
+                      }
+                    : undefined
+                }
+              />
+            );
+          })}
+        </g>
+      </svg>
     </div>
   );
 }

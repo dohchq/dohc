@@ -57,6 +57,7 @@ export interface MoveOutcome {
   readonly attackerLosses?: number;
   readonly defenderLosses?: number;
   readonly captured?: boolean;
+  readonly claimed?: boolean;
   readonly capitalCaptured?: boolean;
   readonly newToUnits?: number;
   readonly newToFortified?: boolean;
@@ -94,7 +95,6 @@ export interface VisibleBoardState {
 
 export interface SeatCredential {
   readonly seat: 1 | 2;
-  readonly playerId: string;
   readonly name: string;
   readonly color: "crimson" | "cobalt";
   readonly playerToken: string;
