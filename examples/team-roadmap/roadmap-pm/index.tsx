@@ -354,6 +354,11 @@ function Roadmap() {
               setStatus("new");
               setMilestone("");
               setCursors([]);
+              setNotice({
+                tone: "success",
+                title: `Added “${input.title}”`,
+                message: "New items are listed oldest first, so it's on the last page.",
+              });
             })
           }
         />

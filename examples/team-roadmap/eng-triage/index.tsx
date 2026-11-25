@@ -189,7 +189,11 @@ function Triage() {
         eyebrow="Engineering"
         title="Triage and track work"
         subtitle="Estimate new requests so product can plan them, then move planned work along."
-        actions={<Button onClick={list.reload}>Refresh</Button>}
+        actions={
+          <Button size="sm" loading={list.loading && Boolean(page)} onClick={list.reload}>
+            Refresh
+          </Button>
+        }
       />
       <Stack gap={16}>
         {triaging ? null : alert}
@@ -309,6 +313,19 @@ function TriageDialog(props: {
       <form id="triage-item" onSubmit={submit}>
         <Stack gap={12}>
           {props.alert}
+          {full.error ? (
+            <Callout
+              tone="warning"
+              title="Showing the start of the note"
+              action={
+                <Button size="sm" onClick={full.reload}>
+                  Try again
+                </Button>
+              }
+            >
+              {full.error.message}
+            </Callout>
+          ) : null}
           {detail ? <p style={{ margin: 0, whiteSpace: "pre-wrap" }}>{detail}</p> : null}
           <Field label="Estimate in days" htmlFor="triage-estimate" hint="1 to 60 working days.">
             <Input

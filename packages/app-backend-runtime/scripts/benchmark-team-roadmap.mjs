@@ -87,7 +87,7 @@ for (const name of ["run", "get", "all"]) timeHost(StatementSync.prototype, name
 const iterate = StatementSync.prototype.iterate;
 StatementSync.prototype.iterate = function (...args) {
   const iterator = iterate.apply(this, args);
-  timeHost(iterator, "next");
+  if (instrumented) timeHost(iterator, "next");
   return iterator;
 };
 
