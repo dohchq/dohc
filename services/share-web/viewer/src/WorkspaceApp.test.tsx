@@ -2783,7 +2783,7 @@ describe("the owner's page", () => {
     expect(listings.map((url) => url.search)).toEqual(["?workspaceId=ws-1"]);
   });
 
-  it("tells the owner to open a page on a computer first", async () => {
+  it("tells the owner to open a page on a computer first, in the band alone", async () => {
     server({ level: "edit", session: OWNER_SESSION });
     vi.mocked(openMemberPage).mockResolvedValue({
       kind: "refused",
@@ -2791,11 +2791,16 @@ describe("the owner's page", () => {
     });
     await render(OWNER);
     const sentence = "Open this page on a computer once to edit it here. You can still read it.";
-    await settle(() => container.querySelector(".workspace-toast") !== null);
-    expect(container.querySelector(".workspace-toast")?.textContent).toContain(sentence);
+    await settle(() => container.querySelector("header + .page-band [role=status]") !== null);
     expect(container.querySelector("header + .page-band [role=status]")?.textContent).toBe(
       sentence,
     );
+    expect(container.querySelector(".workspace-toast")).toBeNull();
+    expect(
+      [...container.querySelectorAll("button")].filter(
+        (button) => button.textContent === "Try again",
+      ),
+    ).toHaveLength(1);
     expect(text()).toContain("Leave at nine.");
     expect(vi.mocked(memberPageReady)).not.toHaveBeenCalled();
   });

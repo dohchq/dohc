@@ -171,7 +171,6 @@ export function createMemberLiveClient(options: {
         const row = parsed as Record<string, unknown>,
           ticket = row.ticket as Record<string, unknown> | null;
         if (owner) {
-          // The relay's page open answers as it answers the phone. The page checks the ticket it carries.
           const result = row.ok === true ? (row.result as Record<string, unknown> | null) : null;
           if (result?.status === "preparing") return answer({ preparing: true });
           if (result?.status === "refused")

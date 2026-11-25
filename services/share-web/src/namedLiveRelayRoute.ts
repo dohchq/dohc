@@ -59,7 +59,6 @@ export function createNamedLiveRelayRoute(options: {
         resolve(null);
         return;
       }
-      // The gateway has checked that an owner's query names a page. The relay takes its workspace in the path.
       const query = new URLSearchParams(
         options.owner ? input.discriminator : { session: input.discriminator },
       );

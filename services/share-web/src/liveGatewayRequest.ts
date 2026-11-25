@@ -52,7 +52,6 @@ export function createLiveGatewayRequestParser(config: {
   const path = config.path ?? "/api/live";
   if (path !== "/api/live" && path !== "/api/live/link" && path !== "/api/live/owner")
     throw new TypeError("Invalid live gateway path.");
-  // An owner socket names its page instead of a browser session.
   const targetPrefix = path === "/api/live/owner" ? `${path}?` : `${path}?session=`;
   const publicHosts = new Set(
     [...config.publicHosts].map((host) => {

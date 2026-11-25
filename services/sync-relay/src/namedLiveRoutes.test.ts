@@ -1341,16 +1341,21 @@ describe("an owner's phone", () => {
       phoneState.expiresAt = 8e12;
       const routeLimits = { ...limits, idleTimeoutMs: 1000 };
       const f = await fixture(routeLimits, false, undefined, true);
-      const browser = f.connect((await mintBrowser(f)).token, "", browserHeaders);
-      expect(await browser.status).toBe(101);
-      await browser.until(() => browser.received.some((frame) => frame.kind === "welcome"));
-      // The gateway pings every half idle period; these come faster, for three idle periods.
-      const opened = performance.now();
-      while (performance.now() - opened < 3 * routeLimits.idleTimeoutMs) {
-        expect(await pingOutcome(browser)).toBe("pong");
-        await new Promise((resolve) => setTimeout(resolve, routeLimits.idleTimeoutMs / 5));
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const browser = f.connect((await mintBrowser(f)).token, "", browserHeaders);
+        expect(await browser.status).toBe(101);
+        await browser.until(() => browser.received.some((frame) => frame.kind === "welcome"));
+        for (let elapsed = 0; elapsed < 3 * routeLimits.idleTimeoutMs; elapsed += 200) {
+          expect(await pingOutcome(browser)).toBe("pong");
+          await vi.advanceTimersByTimeAsync(200);
+        }
+        expect(browser.ws.readyState).toBe(WebSocket.OPEN);
+        await vi.advanceTimersByTimeAsync(routeLimits.idleTimeoutMs);
+        await browser.closed;
+      } finally {
+        vi.useRealTimers();
       }
-      await browser.closed;
     });
 
     // The note's room, as production runs it, beside the owner's desktop and browser.

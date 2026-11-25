@@ -258,7 +258,7 @@ function useCornerAboveComposer(sidePanel: HTMLElement | null, corner: HTMLEleme
 
 /**
  * A workspace member's page: its files, a page, and its Groups, at the member's level.
- * Its owner's page has the same, with no live editing. The list page links to both.
+ * Its owner's page has the same. The list page links to both.
  */
 export default function WorkspaceApp({ target }: { target: WorkspaceTarget | null }) {
   const [unsent, setUnsent] = useState<Unsent[]>(readUnsent);

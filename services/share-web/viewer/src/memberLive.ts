@@ -147,9 +147,7 @@ export function memberDocument(input: {
         input.onRefused(admitted.code);
         throw new LiveAuthorityUnavailableError(admitted.code);
       }
-      // The host is still getting the page ready. The transport tries again.
       if (admitted.kind === "preparing") throw new Error("Preparing");
-      // The owner's socket names the page; the relay checks the ticket was minted for it, this sign-in and this owner.
       if (admitted.kind === "owner" && workspaceId && admitted.objectId === objectId) {
         const { lineageClaimId } = admitted,
           query = new URLSearchParams({ workspaceId, objectId, lineageClaimId });
@@ -177,7 +175,6 @@ export function memberDocument(input: {
   });
   const session = transport.select({
     accountId: input.accountId,
-    // The owner's socket sends the page's own workspace; a member's, the grant's.
     workspaceId: workspaceId ?? `named:${grantId}`,
     ...(grantId ? { grantId } : {}),
     objectId,

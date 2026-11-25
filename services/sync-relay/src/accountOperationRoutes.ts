@@ -108,7 +108,6 @@ export function createAccountOperationRoute(options: {
   browser?: { origin: string; hasExchangeKey(request: Request): boolean };
 }) {
   const { storage, limiter } = options;
-  // Only share-web sends the owner's browser: the account cookie, its exact origin and the exchange key, with no Bearer.
   const session = async (request: Request, browser = false) => {
     if (!browser) return bearerAccountSession(storage, options.resolveAccountSession, request);
     const cookie = request.headers.get("cookie");
@@ -138,10 +137,8 @@ export function createAccountOperationRoute(options: {
     const wakeFeed = route.operation === "wakeChanges" && request.method === "GET";
     if (!feed && !wakeFeed && request.method !== "POST") throw relayError("method_not_allowed");
     const page = route.operation === "openPage";
-    // The owner's browser reaches a page open, and nothing else here.
     const browser = page && !request.headers.has("authorization");
     const caller = await session(request, browser);
-    // Only a phone opens a page with its Bearer sign-in.
     if (page && !browser && caller.clientKind !== "phone") throw notFound();
     if (
       !limiter.allow(caller.sessionId, options.nowMs()) ||

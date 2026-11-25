@@ -27,7 +27,6 @@ const HOST_REFUSAL_REASONS: Readonly<Record<string, string>> = {
   live_host_full: "The server is editing too many pages right now.",
   live_paused_by_owner: "The owner paused live editing for this page.",
   "document-unavailable": "The page moved or was deleted.",
-  // Only the owner is refused these. A member waits for the owner's dohc instead.
   [WAITS_FOR_HOST]: "Open this page on a computer once to edit it here.",
   paused: "Live editing is paused for this page. Resume it in dohc to edit here.",
   "conflict-parent-withheld":
@@ -35,7 +34,6 @@ const HOST_REFUSAL_REASONS: Readonly<Record<string, string>> = {
   "session-host-diverged":
     "The server's copy of this workspace no longer matches the synced one, so live editing stopped. Contact the server's operator.",
 };
-// A server that edits no pages live leaves the page to read, as the phone does.
 const READ_ONLY = "live_hosting_unsupported";
 
 type Phase =
@@ -132,7 +130,7 @@ export default function MemberLivePage({
       kind: "refused",
       reason: Object.hasOwn(HOST_REFUSAL_REASONS, code) ? HOST_REFUSAL_REASONS[code]! : null,
     });
-    setDismissed(false);
+    setDismissed(code === WAITS_FOR_HOST);
   }, []);
   const open = useCallback(() => {
     release();
@@ -165,7 +163,6 @@ export default function MemberLivePage({
           void opened.session.reconnect();
           return;
         }
-        // The server is getting the owner's page ready. It stays opening, as on the phone.
         if (admitted.kind === "preparing") {
           await wait(delay, signal);
           delay = Math.min(delay * 2, READY_RETRY_MAX_MS);

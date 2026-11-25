@@ -143,7 +143,6 @@ const gatewayBufferMaximum =
   config.namedLiveGatewayLimits?.maxBufferedBytes ?? config.linkLive?.gateway.maxBufferedBytes;
 const gatewayBuffers =
   gatewayBufferMaximum === undefined ? undefined : createLiveBufferBudget(gatewayBufferMaximum);
-// A member's socket names its browser session, and the owner's a page of their own workspace.
 function accountGateway(limits: NonNullable<typeof config.namedLiveGatewayLimits>, owner: boolean) {
   const gateway = createLiveGateway({
     bufferBudget: gatewayBuffers,
