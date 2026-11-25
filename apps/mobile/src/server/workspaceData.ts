@@ -242,7 +242,7 @@ export interface ReadCache {
   flush(): void;
   /**
    * Empties the cache each time the account's sign-in changes: sign-out, a 401, or a new sign-in. The saved sign-in
-   * read at launch keeps it, and a launch with none empties it.
+   * read at launch, or on Try again after it couldn't be read, keeps it, and a read that finds none empties it.
    */
   follow(account: {
     state(): AccountState;
@@ -303,6 +303,7 @@ export function createReadCache(files?: CacheRows): ReadCache {
     clear() {
       epoch += 1;
       scopes.clear();
+      preloads.clear();
       void files?.removeAll();
     },
     restore(scope) {
@@ -384,7 +385,7 @@ export function createReadCache(files?: CacheRows): ReadCache {
         const last = serving;
         const next = account.state();
         serving = next;
-        if (last.status === "loading") {
+        if (last.status === "loading" || last.status === "unreadable") {
           if (next.status === "signed-out") cache.clear();
           return;
         }

@@ -1251,4 +1251,34 @@ describe("a launch", () => {
     await files.flush();
     expect(existsSync(disk.cache.path)).toBe(false);
   });
+
+  it("deletes cache.db when Try again finds a Sign out waiting, after the first check couldn't read kept.db", async () => {
+    const disk = keptDisk();
+    await launch(disk).files.writeList(JSON.stringify([SAVED.origin, SAVED.userId]), [
+      entry("ws-a"),
+    ]);
+    disk.cache.crash();
+    const { files, cache } = launch(disk);
+    let checks = 0;
+    const account = createAccount({
+      store: memoryStore(SAVED).store,
+      fetch: testServer().fetch,
+      pendingSignOuts: {
+        ...pendingSignOuts(disk.launch()),
+        isPending: async () => {
+          checks += 1;
+          if (checks === 1) throw new Error("kept.db couldn't be read");
+          return true;
+        },
+      },
+      onSaved: (saved) => cache.preload(saved),
+    });
+    cache.follow(account);
+    await account.restore();
+    expect(account.state().status).toBe("unreadable");
+    await account.restore();
+    expect(account.state().status).toBe("signed-out");
+    await files.flush();
+    expect(existsSync(disk.cache.path)).toBe(false);
+  });
 });
