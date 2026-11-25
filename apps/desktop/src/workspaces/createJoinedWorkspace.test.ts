@@ -45,7 +45,7 @@ function harness(rootPath = "/joined", canonicalizeRoot = (root: string) => root
   const rollbackComplete = vi.fn(() => {
     events.push("notify");
   });
-  const lostDrawings = vi.fn((_workspaceId: string): string[] => []);
+  const unkeptTyping = vi.fn(async (_workspaceId: string): Promise<string[]> => []);
   const run = createJoinedWorkspaceRunner({
     canonicalizeRoot,
     reserve: (input) => authorities.reserveBinding(input),
@@ -72,7 +72,7 @@ function harness(rootPath = "/joined", canonicalizeRoot = (root: string) => root
     release: (reservation, finalize) => authorities.releaseReservation(reservation, finalize),
     closeRelay: cleanup,
     rollbackComplete,
-    lostDrawings,
+    unkeptTyping,
     logError: vi.fn(),
   });
   const input = {
@@ -93,28 +93,28 @@ function harness(rootPath = "/joined", canonicalizeRoot = (root: string) => root
     createFolder,
     cleanup,
     rollbackComplete,
-    lostDrawings,
+    unkeptTyping,
     authorities,
   };
 }
 
 describe("joined workspace creation", () => {
-  it("says which drawings lose their changes when a failed join removes the workspace", async () => {
+  it("names the files whose changes were not kept when a failed join removes the workspace", async () => {
     const h = harness();
-    h.lostDrawings.mockImplementation(() => {
-      h.events.push("lost-drawings");
-      return ["plans/site.excalidraw", "board.excalidraw"];
+    h.unkeptTyping.mockImplementation(async () => {
+      h.events.push("unkept-typing");
+      return ["plans/site.excalidraw", "notes/today.md"];
     });
     h.input.populate.mockRejectedValue(new Error("download interrupted"));
 
     await expect(h.run(h.input)).rejects.toThrow(
-      "download failed dohc could not keep drawing changes made while it reconnected, so changes to plans/site.excalidraw and board.excalidraw since their last saved copy are lost.",
+      "download failed dohc could not keep changes made while it reconnected, so changes to plans/site.excalidraw and notes/today.md since their last saved copy are lost.",
     );
-    expect(h.lostDrawings).toHaveBeenCalledWith("joined");
-    expect(h.events.indexOf("lost-drawings")).toBeLessThan(h.events.indexOf("remove"));
+    expect(h.unkeptTyping).toHaveBeenCalledWith("joined");
+    expect(h.events.indexOf("unkept-typing")).toBeLessThan(h.events.indexOf("remove"));
   });
 
-  it("adds nothing to a failed join's words when no drawing lost changes", async () => {
+  it("adds nothing to a failed join's words when every change was kept", async () => {
     const h = harness();
     h.input.populate.mockRejectedValue(new Error("download interrupted"));
     await expect(h.run(h.input)).rejects.toThrow(/^download failed$/u);

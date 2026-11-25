@@ -11,7 +11,6 @@ import {
 import type { HistoryCursor, WatcherStatusResult } from "@dohc/workspace-engine-client";
 import { createTypingCheckpointWriter } from "./typingCheckpointWriter";
 import {
-  DrawingCheckpointUnavailable,
   registerTypingCheckpoint,
   typingRecoveryStateVectorSha256,
   type OutageTypingCheckpoint,
@@ -114,6 +113,7 @@ import {
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/limits";
 import * as Y from "yjs";
 import { yDocToMarkdown } from "@dohc/ydoc-projection";
+import { exportPortableScene } from "@dohc/excalidraw-scene";
 import { isTextMediaType, mediaTypeForPath } from "@dohc/workspace-fs";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, type Stats } from "node:fs";
@@ -1032,7 +1032,6 @@ export interface WorkspaceEngineCaptureOptions {
   waitForTypingRecovery?: () => Promise<void>;
   writeTypingCheckpoint?: (checkpoint: OutageTypingCheckpoint) => Promise<void>;
   writeTypingCheckpointSync?: (checkpoint: OutageTypingCheckpoint) => void;
-  onTypingCheckpointFailure?: (path: string, error: unknown) => void;
   onTypingCheckpointRecovered?: (path: string) => void;
   retireTypingCheckpoint?: (checkpoint: OutageTypingCheckpoint) => Promise<void>;
   // Outcome of each background HISTORY-CAPTURE task (batch capture and
@@ -2937,7 +2936,6 @@ export function createWorkspaceEngineCapture(
     const checkpointSnapshot = (): OutageTypingCheckpoint | null => {
       if (!checkpointBase || !canonicalDoc || !sessionObjectId || !options.writeTypingCheckpoint)
         return null;
-      if (checkpointContentKind === "scene") return null;
       const snapshot = new Y.Doc();
       try {
         Y.applyUpdate(snapshot, Y.encodeStateAsUpdate(canonicalDoc));
@@ -2945,7 +2943,9 @@ export function createWorkspaceEngineCapture(
         const text =
           checkpointContentKind === "plaintext"
             ? snapshot.getText("plainText").toString()
-            : yDocToMarkdown(snapshot);
+            : checkpointContentKind === "scene"
+              ? exportPortableScene(snapshot)
+              : yDocToMarkdown(snapshot);
         return {
           version: 2,
           checkpointId,
@@ -2999,11 +2999,6 @@ export function createWorkspaceEngineCapture(
         clearTimeout(checkpointTimer);
         checkpointTimer = null;
       }
-      if (checkpointBase && checkpointContentKind === "scene" && !checkpointTypingIsDurable()) {
-        const error = new DrawingCheckpointUnavailable();
-        options.onTypingCheckpointFailure?.(input.path, error);
-        return Promise.reject(error);
-      }
       const snapshot = checkpointSnapshot();
       const flushing =
         snapshot || (lastCheckpoint && checkpointTypingIsDurable())
@@ -3039,8 +3034,6 @@ export function createWorkspaceEngineCapture(
         clearTimeout(checkpointTimer);
         checkpointTimer = null;
       }
-      if (checkpointBase && checkpointContentKind === "scene" && !checkpointTypingIsDurable())
-        throw new DrawingCheckpointUnavailable();
       if (checkpointTypingIsDurable()) return;
       const snapshot = checkpointSnapshot();
       if (snapshot) checkpointWriter.flushSync(snapshot);
@@ -3753,13 +3746,11 @@ export function createWorkspaceEngineCapture(
       const refused = async (error: unknown): Promise<unknown> => {
         if (!hasRefusalInCauseChain(error, (cause) => cause instanceof YdocUpdateNotRecordedError))
           return error;
-        if (checkpointContentKind !== "scene") {
-          try {
-            await flushCheckpoint();
-          } catch (cause) {
-            onError("Typing checkpoint", cause);
-            return keyedWriteUncertain(error);
-          }
+        try {
+          await flushCheckpoint();
+        } catch (cause) {
+          onError("Typing checkpoint", cause);
+          return keyedWriteUncertain(error);
         }
         return keyedWriteNotRecorded(error);
       };
@@ -4085,10 +4076,9 @@ export function createWorkspaceEngineCapture(
           // Until the resend is recorded, the typing lives only in memory, so
           // it goes to the typing checkpoint, as in an outage. The engine's
           // acknowledgement retires it. Once the checkpoint has started,
-          // later typing reaches it on its timer. A drawing has no
-          // checkpoint, and a moment's wait does not warrant its outage notice.
+          // later typing reaches it on its timer.
           if (isTransientEngineCause(error)) {
-            if (checkpointContentKind !== "scene" && !checkpointBase) checkpointUnresolved();
+            if (!checkpointBase) checkpointUnresolved();
             armed();
             return true;
           }

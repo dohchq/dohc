@@ -120,13 +120,10 @@ export function useTypingRecoveryNotices(
             };
             reportShellFailure({
               message: typingRecoveryMessage(failure),
-              details:
-                failure.reason === "drawing-unavailable"
-                  ? [["File", failure.path]]
-                  : [
-                      ["File", failure.path],
-                      ["Reason", failure.detail],
-                    ],
+              details: [
+                ["File", failure.path],
+                ["Reason", failure.detail],
+              ],
               kind: noticeKind,
               repeat: true,
               target: { to: "file", path: failure.path },
@@ -153,7 +150,7 @@ export function useTypingRecoveryNotices(
                     },
                   }
                 : {}),
-              ...(failure.retryable === false
+              ...(failure.reason
                 ? {}
                 : {
                     retry: () => {

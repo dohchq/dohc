@@ -210,7 +210,7 @@ export async function createSharedViewsIpcHarness(
       surfaces();
       notify();
     },
-    lostDrawings: () => [],
+    unkeptTyping: async () => [],
     logError: vi.fn(),
   });
   const setView = vi.fn<Dependencies["setWorkspaceShareView"]>(async (id, shareView) => {

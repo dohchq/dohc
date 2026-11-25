@@ -8,6 +8,7 @@ import {
   writeTypingCheckpoint,
 } from "./outageTypingRecovery";
 import * as Y from "yjs";
+import { insertElementRevision } from "@dohc/excalidraw-scene";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import * as nodeFs from "node:fs";
@@ -4042,13 +4043,13 @@ it("retires already admitted typing without losing later outage edits", async ()
   expect(await readTypingCheckpoints(directory, workspaceId)).toEqual([]);
 });
 
-it("warns before quit when drawing edits cannot enter a text checkpoint", async () => {
-  const workspaceId = "scene-outage-warning";
+it("keeps drawing changes made while the engine is gone in a checkpoint", async () => {
+  const workspaceId = "scene-outage-checkpoint";
   const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
-    "scene-outage-warning-",
+    "scene-outage-checkpoint-",
     workspaceId,
   );
-  const failure = vi.fn();
+  const directory = join(rootPath, "recovery");
   const capture = createWorkspaceEngineCapture({
     workspaceId,
     rootPath,
@@ -4060,11 +4061,11 @@ it("warns before quit when drawing edits cannot enter a text checkpoint", async 
       versionId: "main",
     }),
     onError: () => {},
-    writeTypingCheckpoint: async () => {},
-    onTypingCheckpointFailure: failure,
+    writeTypingCheckpoint: (checkpoint) => writeTypingCheckpoint(directory, checkpoint),
+    writeTypingCheckpointSync: (checkpoint) => writeTypingCheckpointSync(directory, checkpoint),
   });
   const session = await capture.openYDocSession({
-    path: "note.md",
+    path: "drawing.excalidraw",
     contentKind: "scene",
     onRemoteUpdate: () => {},
   });
@@ -4076,12 +4077,34 @@ it("warns before quit when drawing edits cannot enter a text checkpoint", async 
     renderer.destroy();
   });
   state.daemonAlive = false;
-  typeInto(renderer, session, "DRAWING_OUTAGE");
+  const draw = (id: string) => {
+    const before = Y.encodeStateVector(renderer);
+    insertElementRevision(renderer, {
+      id,
+      type: "rectangle",
+      x: 1,
+      y: 2,
+      version: 1,
+      versionNonce: 1,
+      isDeleted: false,
+    });
+    session.applyLocalUpdate(Y.encodeStateAsUpdate(renderer, before));
+  };
+  draw("outage-stroke");
   await expect(session.settleNow()).rejects.toThrow();
-  await expect(flushTypingCheckpoints(workspaceId)).rejects.toThrow(
-    "dohc cannot keep drawing changes while it reconnects.",
-  );
-  expect(failure).toHaveBeenCalledWith("note.md", expect.any(Error));
+  await flushTypingCheckpoints(workspaceId);
+  const [kept] = await readTypingCheckpoints(directory, workspaceId);
+  expect(kept!.checkpoint.path).toBe("drawing.excalidraw");
+  expect(JSON.parse(kept!.checkpoint.text).elements.map((e: { id: string }) => e.id)).toEqual([
+    "outage-stroke",
+  ]);
+  draw("quit-stroke");
+  flushTypingCheckpointsSync(workspaceId);
+  const [atQuit] = await readTypingCheckpoints(directory, workspaceId);
+  expect(JSON.parse(atQuit!.checkpoint.text).elements.map((e: { id: string }) => e.id)).toEqual([
+    "outage-stroke",
+    "quit-stroke",
+  ]);
 });
 
 it("retires the final synchronous checkpoint after an aborted OS session end", async () => {

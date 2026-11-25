@@ -122,6 +122,7 @@ export type CaptureRecoveryImportParams = WorkspaceJsonObject & {
   expectedStateVectorSha256: string;
   expectedDiskSha256: string | null;
   admittedBaseBase64: string;
+  stateBase64: string;
   text: string;
   updates: {
     requestId: string;

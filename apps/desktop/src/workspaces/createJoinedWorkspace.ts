@@ -22,7 +22,7 @@ export function createJoinedWorkspaceRunner(dependencies: {
   release(reservation: WorkspaceAuthorityReservation, cleanup: () => Promise<void>): Promise<void>;
   closeRelay(workspaceId: string): Promise<void>;
   rollbackComplete(): void;
-  lostDrawings(workspaceId: string): string[];
+  unkeptTyping(workspaceId: string): Promise<string[]>;
   logError(message: string, error: unknown): void;
 }) {
   return async function createJoinedWorkspace(input: {
@@ -52,7 +52,7 @@ export function createJoinedWorkspaceRunner(dependencies: {
         `[desktop] ${input.rollbackLabel} rollback for ${input.rootPath}:`,
         error,
       );
-      const lostDrawings = dependencies.lostDrawings(input.workspaceId);
+      const unkept = await dependencies.unkeptTyping(input.workspaceId);
       try {
         // The empty-folder check cannot establish ownership of later writes.
         // Release resources, but keep all files for recovery in this folder.
@@ -68,14 +68,14 @@ export function createJoinedWorkspaceRunner(dependencies: {
       }
       dependencies.rollbackComplete();
       const failure = input.failure(error);
-      if (lostDrawings.length > 0) failure.message += ` ${lostDrawingsWarning(lostDrawings)}`;
+      if (unkept.length > 0) failure.message += ` ${unkeptTypingWarning(unkept)}`;
       throw failure;
     }
   };
 }
 
-function lostDrawingsWarning(paths: string[]): string {
+function unkeptTypingWarning(paths: string[]): string {
   const named =
     paths.length === 1 ? paths[0] : `${paths.slice(0, -1).join(", ")} and ${paths.at(-1)}`;
-  return `dohc could not keep drawing changes made while it reconnected, so changes to ${named} since their last saved copy are lost.`;
+  return `dohc could not keep changes made while it reconnected, so changes to ${named} since their last saved copy are lost.`;
 }

@@ -9,6 +9,7 @@ import type {
   CaptureRecoveryImportResult,
 } from "@dohc/workspace-engine-client";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
+import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 
 const attribution = z
   .object({
@@ -56,36 +57,22 @@ export type TypingRecoveryFailure = {
   path: string;
   detail: string;
   checkpointId?: string;
-  reason?: "author-refused" | "invalid-author" | "history-missing" | "drawing-unavailable";
-  retryable?: boolean;
+  reason?: "author-refused" | "invalid-author" | "history-missing";
 };
-export class DrawingCheckpointUnavailable extends Error {
-  constructor() {
-    super("dohc cannot keep drawing changes while it reconnects.");
-  }
-}
 export function typingRecoveryFailure(
   kind: "checkpoint" | "import",
   path: string,
   error: unknown,
 ): TypingRecoveryFailure {
   const detail = String(error);
-  const reason =
-    error instanceof DrawingCheckpointUnavailable
-      ? "drawing-unavailable"
-      : /remote-human-author/.test(detail)
-        ? "author-refused"
-        : /invalid-author/.test(detail)
-          ? "invalid-author"
-          : /object-history-missing/.test(detail)
-            ? "history-missing"
-            : undefined;
-  return {
-    kind,
-    path,
-    detail,
-    ...(reason ? { reason, retryable: reason === "drawing-unavailable" } : {}),
-  };
+  const reason = /remote-human-author/.test(detail)
+    ? "author-refused"
+    : /invalid-author/.test(detail)
+      ? "invalid-author"
+      : /object-history-missing/.test(detail)
+        ? "history-missing"
+        : undefined;
+  return { kind, path, detail, ...(reason ? { reason } : {}) };
 }
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
 export function typingRecoveryStateVectorSha256(vector: Uint8Array): string {
@@ -179,12 +166,6 @@ export async function readTypingCheckpoints(
       classifyEngineFilePathForRead(checkpoint.path, process.platform).kind !== "tracked"
     )
       throw new Error("Invalid typing recovery record.");
-    if (
-      Buffer.byteLength(checkpoint.text) > 16 * 1024 * 1024 ||
-      checkpoint.updates.reduce((n, u) => n + Buffer.from(u.updateBase64, "base64").length, 0) >
-        32 * 1024 * 1024
-    )
-      throw new Error("Typing recovery record exceeds its limit.");
     rows.push({ file, content, checkpoint });
   }
   return rows;
@@ -222,14 +203,26 @@ export async function importTypingCheckpoints(
       continue;
     let result: CaptureRecoveryImportResult;
     try {
+      if (
+        Buffer.byteLength(row.checkpoint.text) > 16 * 1024 * 1024 ||
+        row.checkpoint.updates.reduce(
+          (n, u) => n + Buffer.from(u.updateBase64, "base64").length,
+          0,
+        ) >
+          32 * 1024 * 1024
+      )
+        throw new Error("Typing recovery record exceeds its limit.");
       const {
         version: _version,
         checkpointId: _checkpointId,
         workspaceId: _workspace,
-        updateBase64: _update,
+        updateBase64: stateBase64,
         ...input
       } = row.checkpoint;
-      result = await importer(input);
+      result = await importer({
+        ...input,
+        stateBase64: liveDocumentKindForPath(input.path) === "scene" ? stateBase64 : "",
+      });
       if (result.committed !== true) throw new Error("Recovery was not committed.");
     } catch (error) {
       failure({
