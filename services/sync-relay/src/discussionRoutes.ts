@@ -12,7 +12,12 @@ import {
   relayError,
   RelayError,
 } from "./errors";
-import { isAgentRequest, type LinkAuthorityResolver, type LinkJsonResponse } from "./linkAuthority";
+import {
+  isAgentRequest,
+  readsAsAccount,
+  type LinkAuthorityResolver,
+  type LinkJsonResponse,
+} from "./linkAuthority";
 import { hashLinkProfileSecret, type ValidatedLinkCapability } from "./linkSecurity";
 import { agentName } from "./storage/agentConnections";
 import { cursorCodec, parseWorkspaceId, readJsonObject } from "./requestInputs";
@@ -272,8 +277,8 @@ export function createDiscussionRoutes(
       const input = parseLinkDiscussionAppendBody(await readJsonObject(request));
       requireFresh();
       if (capability.access === "view") return linkRefusal("link_view_access");
-      // A member's account never reaches a link's discussion.
-      if (credential.kind === "member") throw notFound();
+      // An account never reaches a link's discussion.
+      if (readsAsAccount(credential)) throw notFound();
       const writer =
         credential.kind === "agent"
           ? { agent: credential.check, now: nowMs }

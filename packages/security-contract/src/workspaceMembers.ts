@@ -155,6 +155,17 @@ export interface WorkspaceJoinResult {
   grantId: string;
 }
 
+/**
+ * The workspaces a browser signed in on share-web can open: the ones the
+ * account owns, and the ones it is a current member or admin of with the
+ * grant that opens each.
+ */
+export interface BrowserWorkspaceList {
+  ok: true;
+  owned: Array<{ workspaceId: string; name: string | null }>;
+  joined: Array<{ workspaceId: string; name: string; grantId: string }>;
+}
+
 export type InviteLinkAction = "turn-on" | "turn-off" | "reset";
 export const INVITE_LINK_ACTIONS: readonly InviteLinkAction[] = ["turn-on", "turn-off", "reset"];
 
@@ -213,6 +224,8 @@ export const WORKSPACE_MEMBER_ROUTES = {
   joinPreview: "/sync/members/join-preview",
   /** POST {token} → WorkspaceJoinResult. Signed in. */
   join: "/sync/members/join",
+  /** GET → BrowserWorkspaceList. Only share-web, for a signed-in browser. */
+  browserWorkspaces: "/sync/members/workspaces",
 } as const;
 
 export function isInviteLinkAction(value: unknown): value is InviteLinkAction {
@@ -249,6 +262,31 @@ export function parseWorkspaceJoinResult(value: unknown): WorkspaceJoinResult | 
   )
     return null;
   return { workspaceId, shareId, workspaceName, grantId };
+}
+
+export function parseBrowserWorkspaceList(value: unknown): BrowserWorkspaceList | null {
+  if (!isRecord(value) || value.ok !== true) return null;
+  const { owned, joined } = value;
+  if (!Array.isArray(owned) || !Array.isArray(joined)) return null;
+  const ownedRows = owned.map((row) =>
+    isRecord(row) && typeof row.workspaceId === "string" && isNullableString(row.name)
+      ? { workspaceId: row.workspaceId, name: row.name }
+      : null,
+  );
+  const joinedRows = joined.map((row) =>
+    isRecord(row) &&
+    typeof row.workspaceId === "string" &&
+    typeof row.name === "string" &&
+    typeof row.grantId === "string"
+      ? { workspaceId: row.workspaceId, name: row.name, grantId: row.grantId }
+      : null,
+  );
+  if (ownedRows.includes(null) || joinedRows.includes(null)) return null;
+  return {
+    ok: true,
+    owned: ownedRows as BrowserWorkspaceList["owned"],
+    joined: joinedRows as BrowserWorkspaceList["joined"],
+  };
 }
 
 /**

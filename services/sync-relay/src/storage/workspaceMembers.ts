@@ -390,6 +390,27 @@ export function workspaceMemberGrantId(
   return memberById(storage, workspaceId, role.memberId)?.grantId ?? null;
 }
 
+/** The workspaces this account is a current member or admin of, with the grant each holds. */
+export function listJoinedWorkspaces(
+  storage: StorageContext,
+  userId: string,
+): Array<{ workspaceId: string; name: string; grantId: string }> {
+  return storage.readTx(() =>
+    storage.db
+      .prepare(
+        `SELECT m.workspace_id, ms.workspace_name FROM ${MEMBERS} AS m
+       JOIN ${MEMBERSHIPS} AS ms ON ms.workspace_id = m.workspace_id
+       WHERE m.user_id = ? AND m.state = 'active' ORDER BY ms.workspace_name, m.workspace_id`,
+      )
+      .all(userId)
+      .flatMap((row) => {
+        const workspaceId = String(row.workspace_id);
+        const grantId = workspaceMemberGrantId(storage, workspaceId, userId);
+        return grantId ? [{ workspaceId, name: String(row.workspace_name), grantId }] : [];
+      }),
+  );
+}
+
 export function readWorkspaceMembers(
   storage: StorageContext,
   workspaceId: string,

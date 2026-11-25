@@ -16,7 +16,6 @@ import { Toast } from "./Toast";
 import { UnsentEditsRow } from "./UnsentEdits";
 import { LaunchFailure } from "./OpenSharedApp";
 import { readDraft, writeDraft } from "./drafts";
-import { memberSession } from "./memberWorkspace";
 import {
   filesFromAccumulator,
   isMarkdown,
@@ -27,6 +26,7 @@ import {
 } from "./model";
 import { accountUser, namedRequest } from "./namedRecipient";
 import { SignInForm, signInErrorMessage } from "./NamedSignIn";
+import { WORKSPACES_PATH } from "./pages";
 import { RETRY_INITIAL_MS, RETRY_MAX_MS } from "./retry";
 import {
   EpochFloorChangedError,
@@ -46,6 +46,8 @@ import {
   ViewResponseError,
   waitForRetry,
 } from "./viewFiles";
+import { viewSession, type WorkspaceTarget } from "./workspaceTarget";
+import { WorkspaceList, WorkspacesOpening } from "./WorkspaceList";
 import "./join.css";
 import "./workspace.css";
 
@@ -254,8 +256,11 @@ function useCornerAboveComposer(sidePanel: HTMLElement | null, corner: HTMLEleme
   }, [sidePanel, corner]);
 }
 
-/** A workspace member's page: its files, a page, and its Groups, at the member's level. */
-export default function WorkspaceApp({ grantId }: { grantId: string | null }) {
+/**
+ * A workspace member's page: its files, a page, and its Groups, at the member's level.
+ * Its owner's page reads the files, with no Groups or Comments yet. The list page links to both.
+ */
+export default function WorkspaceApp({ target }: { target: WorkspaceTarget | null }) {
   const [unsent, setUnsent] = useState<Unsent[]>(readUnsent);
   const unsentId = useRef(Math.max(0, ...unsent.map((item) => item.id)));
   const [toastSlot, setToastSlot] = useState<HTMLElement | null>(null);
@@ -310,7 +315,7 @@ export default function WorkspaceApp({ grantId }: { grantId: string | null }) {
   return (
     <>
       <MemberEntry
-        grantId={grantId}
+        target={target}
         onUnsent={keep}
         onAccount={setSignedIn}
         toastSlot={toastSlot}
@@ -325,16 +330,16 @@ export default function WorkspaceApp({ grantId }: { grantId: string | null }) {
   );
 }
 
-/** Signs the member in, then opens the workspace. */
+/** Signs the person in, then opens the workspace or the list of workspaces. */
 function MemberEntry({
-  grantId,
+  target,
   onUnsent,
   onAccount,
   toastSlot,
   kept,
   nameFor,
 }: {
-  grantId: string | null;
+  target: WorkspaceTarget | null;
   onUnsent(accountId: string, path: string, text: string, discarded?: boolean): void;
   onAccount(id: string | null): void;
   toastSlot: HTMLElement | null;
@@ -346,8 +351,9 @@ function MemberEntry({
     if (account !== undefined) onAccount(account?.id ?? null);
   }, [account, onAccount]);
   const [pending, setPending] = useState<"account" | "sign-in" | "sign-out" | null>(
-    grantId ? "account" : null,
+    target ? "account" : null,
   );
+  const targetKey = target && JSON.stringify(target);
   const [error, setError] = useState<string | null>(null);
   const request = useRef<AbortController | null>(null);
   const start = (work: "account" | "sign-in" | "sign-out") => {
@@ -377,9 +383,9 @@ function MemberEntry({
       });
   };
   useEffect(() => {
-    if (grantId) check();
+    if (targetKey) check();
     return () => request.current?.abort();
-  }, [grantId]);
+  }, [targetKey]);
   const signIn = (credentials: { email: string; password: string }) => {
     const controller = start("sign-in");
     void namedRequest("/api/account/sign-in", controller.signal, credentials).then(
@@ -416,13 +422,28 @@ function MemberEntry({
     setError(SESSION_ENDED);
   }, []);
 
-  if (!grantId)
+  if (!target)
     return (
       <StatePage icon="unlink" title="This workspace link isn't valid.">
-        <p>Open the workspace again from your invitation.</p>
+        <p>
+          Open it again from your invitation or <a href={WORKSPACES_PATH}>your workspaces</a>.
+        </p>
       </StatePage>
     );
-  if (account === undefined) return <WorkspaceOpening />;
+  if (account === undefined)
+    return target.kind === "list" ? (
+      <WorkspacesOpening />
+    ) : (
+      <WorkspaceOpening side={target.kind === "member"} />
+    );
+  const hint =
+    error === SESSION_ENDED
+      ? SESSION_ENDED
+      : target.kind === "member"
+        ? "Use the account the owner invited."
+        : target.kind === "owner"
+          ? "Use the account that owns this workspace."
+          : null;
   if (!account)
     return (
       <div className="state-page join-page">
@@ -434,8 +455,12 @@ function MemberEntry({
             <span className="tile">
               <Icon name="users" size={20} />
             </span>
-            <h1>Sign in to open this workspace</h1>
-            <p>{error === SESSION_ENDED ? SESSION_ENDED : "Use the account the owner invited."}</p>
+            <h1>
+              {target.kind === "list"
+                ? "Sign in to see your workspaces"
+                : "Sign in to open this workspace"}
+            </h1>
+            {hint && <p>{hint}</p>}
             <SignInForm
               busy={pending !== null}
               error={error === SESSION_ENDED || error === CHECK_FAILED ? null : error}
@@ -458,10 +483,20 @@ function MemberEntry({
         </main>
       </div>
     );
+  if (target.kind === "list")
+    return (
+      <WorkspaceList
+        account={account}
+        signingOut={pending === "sign-out"}
+        signOutError={error === SIGN_OUT_FAILED ? error : null}
+        onSignOut={signOut}
+        onSessionEnded={sessionEnded}
+      />
+    );
   return (
     <MemberWorkspace
-      key={`${account.id}\n${grantId}`}
-      grantId={grantId}
+      key={`${account.id}\n${targetKey}`}
+      target={target}
       account={account}
       signingOut={pending === "sign-out"}
       signOutError={error === SIGN_OUT_FAILED ? error : null}
@@ -664,7 +699,7 @@ function useMemberFiles(
 }
 
 // The workspace's shape while it loads: its files, the page and the side panel, or on a phone the page's header, the page and the tabs.
-function WorkspaceOpening() {
+function WorkspaceOpening({ side = true }: { side?: boolean }) {
   return (
     <div className="viewer link-page workspace-page workspace-opening" aria-busy="true">
       <div className="workspace-opening-files" aria-hidden="true">
@@ -694,17 +729,23 @@ function WorkspaceOpening() {
           <i />
         </div>
       </div>
-      <div className="workspace-opening-side" aria-hidden="true">
-        <i />
-        <i />
-        <i />
-        <i />
-      </div>
+      {side && (
+        <div className="workspace-opening-side" aria-hidden="true">
+          <i />
+          <i />
+          <i />
+          <i />
+        </div>
+      )}
       <div className="workspace-opening-tabs" aria-hidden="true">
         <i />
         <i />
-        <i />
-        <i />
+        {side && (
+          <>
+            <i />
+            <i />
+          </>
+        )}
       </div>
       <p className="sr-only">Opening the workspace</p>
     </div>
@@ -712,7 +753,7 @@ function WorkspaceOpening() {
 }
 
 function MemberWorkspace({
-  grantId,
+  target,
   account,
   signingOut,
   signOutError,
@@ -723,7 +764,7 @@ function MemberWorkspace({
   kept,
   nameFor,
 }: {
-  grantId: string;
+  target: Exclude<WorkspaceTarget, { kind: "list" }>;
   account: Account;
   signingOut: boolean;
   signOutError: string | null;
@@ -735,7 +776,10 @@ function MemberWorkspace({
   // The open page's row is named as the kept rows name theirs, so two of the same name read apart.
   nameFor(path: string): string;
 }) {
-  const session = memberSession(grantId);
+  const session = viewSession(target);
+  // The owner's page has no Groups, Comments or live editing yet.
+  const owner = target.kind === "owner",
+    grantId = target.kind === "member" ? target.grantId : null;
   const [attempt, setAttempt] = useState(0);
   const {
     view,
@@ -762,7 +806,7 @@ function MemberWorkspace({
   const [sideNode, setSideNode] = useState<HTMLDivElement | null>(null);
   useCornerAboveComposer(narrow ? sideNode : null, toastSlot?.parentElement ?? null);
   const files = view.status === "ready" ? view.files : null;
-  const name = files?.meta.subjectName ?? "Shared workspace";
+  const name = files?.meta.subjectName ?? (owner ? "Unnamed workspace" : "Shared workspace");
   // An ended membership reads nothing more, so its page names the workspace as it was last read.
   const lastName = useRef<string | null>(null);
   if (files?.meta.subjectName) lastName.current = files.meta.subjectName;
@@ -844,7 +888,8 @@ function MemberWorkspace({
     });
   }, [access]);
 
-  if (view.status === "ended")
+  // An owner's workspace does not end as a membership does. Its refusal says which account owns it.
+  if (view.status === "ended" && !owner)
     return (
       <StatePage
         icon="unlink"
@@ -891,12 +936,14 @@ function MemberWorkspace({
         {kept}
       </StatePage>
     );
-  if (view.status === "refused")
+  if (view.status === "refused" || view.status === "ended")
     return (
       <StatePage icon="unlink" title="dohc could not open this workspace with this account.">
         <p>
-          This browser is signed in as {account.name}. Ask the owner to invite this account, or
-          switch to another.
+          This browser is signed in as {account.name}.{" "}
+          {owner
+            ? "Switch to the account that owns this workspace."
+            : "Ask the owner to invite this account, or switch to another."}
         </p>
         <button
           className="handoff-button secondary"
@@ -946,6 +993,7 @@ function MemberWorkspace({
   // The open file's own level. A file whose level hasn't arrived offers nothing the relay might refuse.
   const level = selected ? (files.levels.get(selected.path) ?? "view") : files.meta.access;
   const live =
+    grantId !== null &&
     level === "edit" &&
     selected !== undefined &&
     selected.contentKind === "text" &&
@@ -969,6 +1017,7 @@ function MemberWorkspace({
     />
   ) : null;
   const shownTab = narrow ? tab : null;
+  const pageTabs = owner ? TABS.filter((item) => item.id === "files" || item.id === "page") : TABS;
   const panel = (id: Tab) =>
     narrow
       ? {
@@ -1018,13 +1067,24 @@ function MemberWorkspace({
   );
 
   return (
-    <div className="viewer link-page workspace-page" data-tab={shownTab ?? undefined}>
+    <div
+      className={`viewer link-page workspace-page${owner ? " owner-page" : ""}`}
+      data-tab={shownTab ?? undefined}
+    >
       <nav id="workspace-files" aria-label="Workspace files" {...panel("files")}>
         <div className="workspace-title">
           <span className="bar-mark">
             <DohcMark />
           </span>
           <h1 className="workspace-name">{name}</h1>
+          <a
+            className="icon-button workspace-all"
+            href={WORKSPACES_PATH}
+            aria-label="All workspaces"
+            title="All workspaces"
+          >
+            <Icon name="grid" size={16} />
+          </a>
         </div>
         {files.files.length ? (
           <FileTree
@@ -1072,7 +1132,7 @@ function MemberWorkspace({
                 {DATED}
               </span>
             )}
-            <span className="badge">{BADGE[level]}</span>
+            <span className="badge">{owner ? "Owner" : BADGE[level]}</span>
           </div>
         </header>
         <div className="page-band" ref={setBandSlot} />
@@ -1118,79 +1178,81 @@ function MemberWorkspace({
           </div>
         </div>
       </div>
-      <div
-        className="side-panel workspace-side"
-        ref={setSideNode}
-        {...(narrow ? { inert: showing === null, "data-shown": showing !== null } : {})}
-      >
-        {!narrow && (
-          <div
-            className="side-tabs"
-            role="tablist"
-            aria-label="Beside the page"
-            onKeyDown={moveTab(SIDES, side, setSide)}
-          >
-            {SIDES.map((item) => (
-              <button
-                key={item.id}
-                ref={(node) => {
-                  if (node) tabs.current.set(item.id, node);
-                }}
-                id={`side-tab-${item.id}`}
-                role="tab"
-                type="button"
-                aria-selected={side === item.id}
-                aria-controls={item.panel}
-                tabIndex={side === item.id ? 0 : -1}
-                onClick={() => setSide(item.id)}
-              >
-                {tabLabel(item)}
-              </button>
-            ))}
-          </div>
-        )}
-        <div className="side-stack">
-          <div id="workspace-comments" {...sidePanel("comments")}>
-            {showing === "comments" &&
-              (selected ? (
-                <MemberComments
-                  key={commentsRead}
-                  found={listing.found}
-                  onRetry={listing.retry}
-                  path={selected.path}
-                  objectId={selected.objectId ?? ""}
-                  access={level === "view" ? "read-only" : "read-write"}
-                  onEnded={(reason) => {
-                    commentsGone.current = true;
-                    placeGone(reason);
+      {!owner && (
+        <div
+          className="side-panel workspace-side"
+          ref={setSideNode}
+          {...(narrow ? { inert: showing === null, "data-shown": showing !== null } : {})}
+        >
+          {!narrow && (
+            <div
+              className="side-tabs"
+              role="tablist"
+              aria-label="Beside the page"
+              onKeyDown={moveTab(SIDES, side, setSide)}
+            >
+              {SIDES.map((item) => (
+                <button
+                  key={item.id}
+                  ref={(node) => {
+                    if (node) tabs.current.set(item.id, node);
                   }}
-                />
-              ) : (
-                <p className="chat-state">No files in this workspace yet.</p>
+                  id={`side-tab-${item.id}`}
+                  role="tab"
+                  type="button"
+                  aria-selected={side === item.id}
+                  aria-controls={item.panel}
+                  tabIndex={side === item.id ? 0 : -1}
+                  onClick={() => setSide(item.id)}
+                >
+                  {tabLabel(item)}
+                </button>
               ))}
-          </div>
-          <div className="workspace-chats" id="workspace-chats" {...sidePanel("chats")}>
-            <MemberChats
-              found={listing.found}
-              reads={listing.reads}
-              onRetry={listing.retry}
-              onUnlisted={refreshListing}
-              shown={showing === "chats"}
-              onEnded={placeGone}
-              onUnread={setUnread}
-              memberLevel={files.meta.access}
-            />
+            </div>
+          )}
+          <div className="side-stack">
+            <div id="workspace-comments" {...sidePanel("comments")}>
+              {showing === "comments" &&
+                (selected ? (
+                  <MemberComments
+                    key={commentsRead}
+                    found={listing.found}
+                    onRetry={listing.retry}
+                    path={selected.path}
+                    objectId={selected.objectId ?? ""}
+                    access={level === "view" ? "read-only" : "read-write"}
+                    onEnded={(reason) => {
+                      commentsGone.current = true;
+                      placeGone(reason);
+                    }}
+                  />
+                ) : (
+                  <p className="chat-state">No files in this workspace yet.</p>
+                ))}
+            </div>
+            <div className="workspace-chats" id="workspace-chats" {...sidePanel("chats")}>
+              <MemberChats
+                found={listing.found}
+                reads={listing.reads}
+                onRetry={listing.retry}
+                onUnlisted={refreshListing}
+                shown={showing === "chats"}
+                onEnded={placeGone}
+                onUnread={setUnread}
+                memberLevel={files.meta.access}
+              />
+            </div>
           </div>
         </div>
-      </div>
+      )}
       {narrow && (
         <div
           className="workspace-tabs"
           role="tablist"
           aria-label="Workspace"
-          onKeyDown={moveTab(TABS, tab, setTab)}
+          onKeyDown={moveTab(pageTabs, tab, setTab)}
         >
-          {TABS.map((item) => (
+          {pageTabs.map((item) => (
             <button
               key={item.id}
               ref={(node) => {

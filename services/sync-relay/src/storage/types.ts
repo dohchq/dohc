@@ -1919,6 +1919,7 @@ export interface SyncRelayStorage {
   workspaceMemberGrantIsCurrent: WorkspaceMembersMethod<"workspaceMemberGrantIsCurrent">;
   workspaceMemberGrantRole: WorkspaceMembersMethod<"workspaceMemberGrantRole">;
   workspaceRoleOf: WorkspaceMembersMethod<"workspaceRoleOf">;
+  listJoinedWorkspaces: WorkspaceMembersMethod<"listJoinedWorkspaces">;
   workspaceLevelChangedBy: WorkspaceMembersMethod<"workspaceLevelChangedBy">;
   readWorkspaceMembers: WorkspaceMembersMethod<"readWorkspaceMembers">;
   getWorkspaceMembershipByShare: WorkspaceMembersMethod<"getWorkspaceMembershipByShare">;

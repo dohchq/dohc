@@ -1,5 +1,5 @@
 import { mount } from "../mount";
 import WorkspaceApp from "../WorkspaceApp";
-import { namedInvitationGrant } from "../namedInvitation";
+import { workspaceTarget } from "../workspaceTarget";
 
-mount(<WorkspaceApp grantId={namedInvitationGrant(location.pathname, "workspace")} />);
+mount(<WorkspaceApp target={workspaceTarget(location.pathname)} />);

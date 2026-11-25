@@ -12,6 +12,8 @@ The relay checks every derived credential and open session as a `GrantBinding` w
 
 An agent connection binds one link grant, its current credential, and its generation. The relay checks that binding, the connection's status, and the access token's expiry on every read and in every write's transaction. A transition that retires the link's current credential also retires the link's agent connections, their tokens, and their pending consent. Undo of a revoke does not restore them.
 
+A workspace owner reading their own workspace in a browser holds no grant. The relay derives that authority from the workspace's owner on every read. See [the owner's browser](security-boundaries.md#an-owner-reads-their-workspace-in-a-browser-with-their-own-sign-in).
+
 ## Record invariants
 
 - An active grant has `status: "active"` and `revokedAt: null`.

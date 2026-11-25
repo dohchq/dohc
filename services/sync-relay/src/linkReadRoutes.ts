@@ -12,7 +12,9 @@ import {
 import { notFound, relayError } from "./errors";
 import type { createLinkResponseStreams } from "./linkResponseStreams";
 import {
+  isAccountRequest,
   isMemberRequest,
+  readsAsAccount,
   type LinkAuthority,
   type LinkAuthorityResolver,
   type LinkJsonResponse,
@@ -55,6 +57,7 @@ export function createLinkReadRoutes(
     | "workspaceRoleOf"
     | "workspaceLevelChangedBy"
     | "readShareTx"
+    | "listAccountWorkspaces"
   >,
   nowMs: () => number,
   linkCurrentFileLimit: number,
@@ -78,7 +81,7 @@ export function createLinkReadRoutes(
   // A member's answers carry their keyed reach signature. A change tells the browser to read the files again.
   const reachKey = linkKey ?? randomBytes(32);
   const memberReach = (fresh: LinkAuthority) =>
-    fresh.credential.kind === "member" &&
+    readsAsAccount(fresh.credential) &&
     "reach" in fresh.effectiveSelector &&
     fresh.effectiveSelector.reach
       ? { reach: fresh.effectiveSelector.reach.keyedSignature(reachKey) }
@@ -98,8 +101,15 @@ export function createLinkReadRoutes(
       : {};
   };
   // A membership's share names its workspace; a link's share keeps its own label.
-  // A member reads the label's file links through their own fresh reach.
-  const subjectName = (shareId: string, request: Request, readerFiles: ShareSelector) =>
+  // A member reads the label's file links through their own fresh reach. The owner reads their workspace's own name.
+  const subjectName = (fresh: LinkAuthority, request: Request, ownerName: string | null) =>
+    fresh.credential.kind === "owner"
+      ? ownerName
+      : linkSubjectName(fresh.shareId, request, fresh.effectiveSelector);
+  const ownedWorkspaceName = (userId: string, workspaceId: string) =>
+    storage.listAccountWorkspaces(userId).find((owned) => owned.workspaceId === workspaceId)
+      ?.name ?? null;
+  const linkSubjectName = (shareId: string, request: Request, readerFiles: ShareSelector) =>
     storage.getShareLabels(shareId, isMemberRequest(request) ? "member" : "link", readerFiles)
       .subjectName ??
     (isMemberRequest(request)
@@ -122,13 +132,23 @@ export function createLinkReadRoutes(
       route.route === "link-log" ? linkLogReadRateLimiter : linkReadRateLimiter;
     const grantRateLimiter =
       route.route === "link-log" ? linkGrantLogReadRateLimiter : linkGrantReadRateLimiter;
-    const capability = isMemberRequest(request)
+    const capability = isAccountRequest(request)
       ? await linkAuthority.requireMember(request, capabilityRateLimiter, grantRateLimiter)
       : linkAuthority.require(request, capabilityRateLimiter, grantRateLimiter);
     const requireFresh = () => linkAuthority.fresh(capability);
     if (request.method !== "GET") throw relayError("method_not_allowed");
-    const share = storage.getShare(capability.shareId);
+    // The owner's read names their workspace and holds no share.
+    const share =
+      capability.credential.kind === "owner"
+        ? { shareId: capability.shareId, workspaceId: capability.credential.workspaceId }
+        : storage.getShare(capability.shareId);
     if (!share) throw notFound();
+    // Read before a read's transaction, as the account's list opens its own.
+    const ownerName =
+      capability.credential.kind === "owner" &&
+      (route.route === "link-share" || route.route === "link-current")
+        ? ownedWorkspaceName(capability.credential.userId, share.workspaceId)
+        : null;
 
     if (route.route === "link-share") {
       const epochLogFloor = storage.getEpochLogFloor(share.workspaceId);
@@ -153,7 +173,7 @@ export function createLinkReadRoutes(
           receivedSource: identity.source(["link", fresh.grantId], share.workspaceId),
           effectiveSelector: presentation.selector,
           access: fresh.access,
-          subjectName: subjectName(fresh.shareId, request, fresh.effectiveSelector),
+          subjectName: subjectName(fresh, request, ownerName),
           ...linkChannel(fresh.grantId),
           ...freshness,
           // share-web learns a holder's grant at exchange. It learns an agent's
@@ -168,7 +188,7 @@ export function createLinkReadRoutes(
       // A member hears that the list is too long, once their grant proves fresh. A link holder's
       // refusal stays generic.
       const tooManyFiles = () => {
-        if (requireFresh().credential.kind !== "member") throw notFound();
+        if (!readsAsAccount(requireFresh().credential)) throw notFound();
         return linkRefusal("link_too_many_files");
       };
       // The page reads the files again after a level change, so this answer names who made it too.
@@ -184,7 +204,11 @@ export function createLinkReadRoutes(
           selectorPaths: capability.effectiveSelector.paths,
           limit: linkCurrentFileLimit * CURRENT_SCAN_FACTOR,
         });
-        if (snapshot.tooMany) throw notFound();
+        // A member's refusal stays generic, so it can't hint at hidden work. Nothing is hidden from the owner.
+        if (snapshot.tooMany) {
+          if (capability.credential.kind === "owner") return tooManyFiles();
+          throw notFound();
+        }
         const freshness = newestFilteredOpFreshness(
           share.workspaceId,
           () => requireFresh().effectiveSelector,
@@ -222,7 +246,7 @@ export function createLinkReadRoutes(
             ),
             blobSha256: file.blobSha256,
             contentKind: file.contentKind,
-            ...(fresh.credential.kind === "member"
+            ...(readsAsAccount(fresh.credential)
               ? { access: pathLevel(fresh.effectiveSelector, file.path) }
               : {}),
             ...(requestedFolder !== null && path === `${requestedFolder}/automations.yaml`
@@ -252,7 +276,7 @@ export function createLinkReadRoutes(
             ...memberReach(fresh),
             effectiveSelector: presentation.selector,
             access: fresh.access,
-            subjectName: subjectName(fresh.shareId, request, fresh.effectiveSelector),
+            subjectName: subjectName(fresh, request, ownerName),
             ...linkChannel(fresh.grantId),
             files,
             nextCursor: snapshot.nextCursor,
@@ -262,8 +286,9 @@ export function createLinkReadRoutes(
           request.signal,
         );
       };
-      const response = capability.credential.kind === "member" ? storage.readShareTx(read) : read();
-      storage.indexReceivedWorkTargets(observed);
+      const response = readsAsAccount(capability.credential) ? storage.readShareTx(read) : read();
+      // The owner holds no grant to file these under.
+      if (capability.credential.kind !== "owner") storage.indexReceivedWorkTargets(observed);
       return response;
     }
 
@@ -271,11 +296,11 @@ export function createLinkReadRoutes(
     if (route.route === "link-log") {
       const url = new URL(request.url);
       const currentOnly = url.searchParams.get("current") === "true";
-      if (!currentOnly && capability.credential.kind !== "member" && capability.access !== "edit")
+      if (!currentOnly && !readsAsAccount(capability.credential) && capability.access !== "edit")
         throw notFound();
       const freshRead = () => {
         const fresh = requireFresh();
-        if (!currentOnly && fresh.credential.kind !== "member" && fresh.access !== "edit")
+        if (!currentOnly && !readsAsAccount(fresh.credential) && fresh.access !== "edit")
           throw notFound();
         return fresh;
       };
@@ -435,7 +460,7 @@ export function createLinkReadRoutes(
     });
     const byteLength =
       currentByteLength ??
-      (capability.credential.kind === "member" || capability.access === "edit"
+      (readsAsAccount(capability.credential) || capability.access === "edit"
         ? linkRevisionByteLength(
             share.workspaceId,
             () => requireFresh().effectiveSelector,
@@ -470,14 +495,14 @@ export function createLinkReadRoutes(
       const fresh = requireFresh();
       if (
         currentByteLength === null &&
-        fresh.credential.kind !== "member" &&
+        !readsAsAccount(fresh.credential) &&
         fresh.access !== "edit"
       )
         throw notFound();
       // An agent's download checks its token before every chunk, so it stops
       // once the token expires or its connection or link ends.
       const guard =
-        capability.credential.kind === "agent" || capability.credential.kind === "member"
+        capability.credential.kind === "agent" || readsAsAccount(capability.credential)
           ? () => {
               requireFresh();
             }

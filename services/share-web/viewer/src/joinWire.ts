@@ -5,6 +5,9 @@ export const JOIN_API = {
   join: "/api/members/join",
 } as const;
 
+/** GET: the signed-in account's owned and joined workspaces, as the relay lists them. */
+export const WORKSPACES_API = "/api/workspaces";
+
 /** Why a join did not go through, in the words the page picks from. */
 export type JoinRefusal = "signed_out" | "link_off" | "removed" | "full" | "unavailable";
 export const JOIN_REFUSAL_STATUS: Record<JoinRefusal, number> = {

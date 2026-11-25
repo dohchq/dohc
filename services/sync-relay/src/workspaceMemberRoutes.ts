@@ -10,6 +10,7 @@ import {
 } from "@dohc/security-contract/access-rules";
 import { isShareAccessValue, type ShareAccess } from "@dohc/security-contract/share-selector";
 import {
+  type BrowserWorkspaceList,
   isGroupRuleLevel,
   isInviteLinkAction,
   type GroupRuleLevel,
@@ -56,6 +57,7 @@ export type WorkspaceMemberRoute =
   | { route: "members-group-rule"; workspaceId: string; channelWireId: string }
   | { route: "members-join-preview" }
   | { route: "members-join" }
+  | { route: "members-workspaces" }
   | { route: "members-group-create" }
   | { route: "members-message-delete"; workspaceId: string; messageId: string };
 
@@ -74,6 +76,7 @@ export const WORKSPACE_MEMBER_ROUTE_PATTERNS = {
   "members-group-rule": "/sync/:workspaceId/members/groups/:channelWireId/rule",
   "members-join-preview": "/sync/members/join-preview",
   "members-join": "/sync/members/join",
+  "members-workspaces": "/sync/members/workspaces",
   "members-group-create": "/sync/members/groups",
   "members-message-delete": "/sync/:workspaceId/chat/messages/:messageId/delete",
 } as const satisfies Record<WorkspaceMemberRoute["route"], string>;
@@ -122,6 +125,7 @@ export function parseWorkspaceMemberRoute(parts: readonly string[]): WorkspaceMe
   if (parts.length === 3 && parts[1] === "members") {
     if (parts[2] === "join") return { route: "members-join" };
     if (parts[2] === "join-preview") return { route: "members-join-preview" };
+    if (parts[2] === "workspaces") return { route: "members-workspaces" };
     if (parts[2] === "groups") return { route: "members-group-create" };
   }
   if (parts[2] !== "members" || parts.length < 3 || parts.length > 6) return null;
@@ -186,6 +190,9 @@ type MemberRouteStorage = Pick<
   | "changeFolderRule"
   | "removeFolderMarkers"
   | "readFolderRules"
+  | "listAccountWorkspaces"
+  | "listJoinedWorkspaces"
+  | "workspaceRoleOf"
 >;
 
 export function createWorkspaceMemberRoutes(options: {
@@ -200,6 +207,7 @@ export function createWorkspaceMemberRoutes(options: {
   lookupUserDisplayName?: LookupUserDisplayName;
   linkKey?: string | Uint8Array;
   shareWebOrigin?: string;
+  hasValidRelayExchangeKey(request: Request): boolean;
   discussionActivity: Pick<DiscussionActivityHub, "wakeLog">;
 }) {
   const { storage, linkKey, shareWebOrigin } = options;
@@ -482,6 +490,26 @@ export function createWorkspaceMemberRoutes(options: {
       // that became hidden leaves them now.
       options.discussionActivity.wakeLog(route.workspaceId);
       return respondWithView(route.workspaceId, userId);
+    }
+    if (route.route === "members-workspaces") {
+      if (request.method !== "GET") throw relayError("method_not_allowed");
+      // Only share-web asks, for the browser signed in with this cookie.
+      if (!request.headers.has("cookie") || !options.hasValidRelayExchangeKey(request))
+        throw notFound();
+      // An email invite becomes a membership once its person signs in.
+      await options.claimPendingShares(userId, request.signal);
+      const body: BrowserWorkspaceList = {
+        ok: true,
+        // The claim waits on a lookup, so the account may be fenced by now. The role says so.
+        owned: storage
+          .listAccountWorkspaces(userId)
+          .filter(
+            ({ workspaceId }) => storage.workspaceRoleOf(workspaceId, userId)?.role === "owner",
+          )
+          .map(({ workspaceId, name }) => ({ workspaceId, name })),
+        joined: storage.listJoinedWorkspaces(userId),
+      };
+      return jsonResponse(body, 200, { "cache-control": "private, no-store" });
     }
     if (request.method !== "POST") throw relayError("method_not_allowed");
 

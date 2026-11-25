@@ -67,7 +67,8 @@ import { servePersonalMcp } from "./personalMcp";
 import { createPersonalAgentClient } from "./personalAgentClient";
 import { createPersonalLiveClient } from "./personalLiveClient";
 import { COLLECTION_WRITES_PATH, MAX_COLLECTION_WRITE_ENVELOPE_BYTES } from "./collectionWrites";
-import { JOIN_PATH, viewerPage } from "../viewer/src/pages";
+import { JOIN_PATH, viewerPage, WORKSPACES_PATH } from "../viewer/src/pages";
+import { WORKSPACES_API } from "../viewer/src/joinWire";
 import { serveWorkLinkPage } from "./workLinkPage";
 import { SHARE_WEB_API_VERSIONS, mcpApiVersions, shareWebApiVersionRefusal } from "./apiVersion";
 
@@ -173,20 +174,20 @@ interface AgentCaller {
 }
 
 /**
- * A workspace member's browser, reading the workspace through the same view
- * routes as a link. It names its grant; the relay finds the person from the
- * account cookie.
+ * A person's account in a browser, reading a workspace through the same view
+ * routes as a link: a member names their grant, the owner names their
+ * workspace. The relay finds the person from the account cookie.
  */
 interface MemberCaller {
-  memberGrantId: string;
+  account: "member" | "owner";
+  id: string;
   cookie: string;
 }
 
 type LinkCaller = BrowserSession | AgentCaller | MemberCaller;
 
-/** The view routes' session token for a member's grant. */
-export const MEMBER_SESSION_PREFIX = "member.";
-const MEMBER_GRANT = /^[A-Za-z0-9_.:-]{1,256}$/u;
+/** The view routes' session token for a member's grant or an owner's workspace. */
+const ACCOUNT_SESSION = /^(member|owner)\.([A-Za-z0-9_.:-]{1,256})$/u;
 
 /**
  * The limits' identity for a caller's link. An agent's MCP request reads the
@@ -195,8 +196,8 @@ const MEMBER_GRANT = /^[A-Za-z0-9_.:-]{1,256}$/u;
 function linkKeyOf(caller: LinkCaller): string {
   return "session" in caller
     ? caller.session.grantId
-    : "memberGrantId" in caller
-      ? caller.memberGrantId
+    : "account" in caller
+      ? `${caller.account}:${caller.id}`
       : (caller.grantId ?? caller.addressKey);
 }
 
@@ -1371,24 +1372,24 @@ export function createShareWebApplication({
     return { discriminator, token, session, staleCookie: false };
   }
 
-  // A member's view request: the member token, the account cookie, and never another site.
+  // An account's view request: the member or owner token, the account cookie, and never another site.
   function readMember(request: Request): MemberCaller | null {
     const token =
       request.headers.get(LINK_SESSION_HEADER) ??
       new URL(request.url).searchParams.get("session") ??
       "";
-    const grantId = token.startsWith(MEMBER_SESSION_PREFIX)
-      ? token.slice(MEMBER_SESSION_PREFIX.length)
-      : "";
+    const session = ACCOUNT_SESSION.exec(token);
     if (
       !accountAuth ||
       !relayExchangeKey ||
-      !MEMBER_GRANT.test(grantId) ||
+      !session ||
       request.headers.get("sec-fetch-site") === "cross-site"
     )
       return null;
     const cookie = namedAccountCookie(request.headers.get("cookie"), accountAuth.publicOrigin);
-    return cookie ? { memberGrantId: grantId, cookie } : null;
+    return cookie
+      ? { account: session[1] as MemberCaller["account"], id: session[2]!, cookie }
+      : null;
   }
 
   function readSession(request: Request) {
@@ -1573,7 +1574,7 @@ export function createShareWebApplication({
     call: RelayCall,
   ): Promise<Response> {
     const browser = "session" in caller ? caller : null;
-    const member = "memberGrantId" in caller ? caller : null;
+    const member = "account" in caller ? caller : null;
     const agent = "accessToken" in caller ? caller : null;
     const refreshed = browser
       ? await refreshSession(browser)
@@ -1591,7 +1592,7 @@ export function createShareWebApplication({
         }
       : member
         ? {
-            authorization: `DohcMember ${member.memberGrantId}`,
+            authorization: `${member.account === "owner" ? "DohcOwner" : "DohcMember"} ${member.id}`,
             cookie: member.cookie,
             origin: accountAuth?.publicOrigin ?? "",
             "x-dohc-relay-exchange-key": relayExchangeKey ?? "",
@@ -1633,10 +1634,7 @@ export function createShareWebApplication({
             sessionKey(browser.discriminator, browser.token),
             browser.session.grantId,
           )
-        : call.limiter.acquire(
-            agent?.key ?? `member:${member?.memberGrantId ?? ""}`,
-            linkKeyOf(caller),
-          );
+        : call.limiter.acquire(agent?.key ?? linkKeyOf(caller), linkKeyOf(caller));
     // A full limiter is busy, not a refusal: the link still opens.
     if (!release)
       return answer(
@@ -2103,7 +2101,11 @@ export function createShareWebApplication({
       return response(result.body, { status: result.status, headers: result.headers });
     }
 
-    if (pathname === "/api/members/join-preview" || pathname === "/api/members/join") {
+    if (
+      pathname === "/api/members/join-preview" ||
+      pathname === "/api/members/join" ||
+      pathname === WORKSPACES_API
+    ) {
       mark(pathname);
       if (!workspaceJoin) return refused();
       const result = await workspaceJoin(request);
@@ -2111,8 +2113,9 @@ export function createShareWebApplication({
     }
 
     // The invite link page. Its token stays after `#` and never reaches here.
-    if (request.method === "GET" && pathname === JOIN_PATH) {
-      mark(JOIN_PATH);
+    // The workspaces page lists what the signed-in account can open.
+    if (request.method === "GET" && (pathname === JOIN_PATH || pathname === WORKSPACES_PATH)) {
+      mark(pathname);
       if (!workspaceJoin) return refused();
       return serveViewer(pathname);
     }

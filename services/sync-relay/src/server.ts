@@ -938,6 +938,7 @@ export function createSyncRelayHandler({
     lookupUserDisplayName,
     linkKey,
     shareWebOrigin,
+    hasValidRelayExchangeKey,
     discussionActivity,
   });
   const respondToDirectMessages = createDirectMessageRoutes({

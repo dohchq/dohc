@@ -24,6 +24,9 @@ import type { AgentAccessCheck, AgentConnectionRow } from "./storage/agentConnec
 //   - a workspace member's account, on the read routes only:
 //     `Authorization: DohcMember <grant>` with the account cookie and the
 //     relay exchange key. The person comes from the cookie's session.
+//   - a workspace owner's account, on the read routes only, the same way:
+//     `Authorization: DohcOwner <workspace>`. The owner holds no grant; their
+//     reach is an admin's, so the files a member never sees stay hidden.
 //
 // Nothing is cached. Every request authenticates, and `fresh` authenticates
 // again. Every refusal is the bytes of a link that never existed.
@@ -35,7 +38,14 @@ import type { AgentAccessCheck, AgentConnectionRow } from "./storage/agentConnec
 export type LinkCredential =
   | { kind: "holder"; capabilityToken: string; capability: ValidatedLinkCapability }
   | { kind: "agent"; check: AgentAccessCheck; connection: AgentConnectionRow }
-  | { kind: "member"; userId: string };
+  | { kind: "member"; userId: string }
+  | { kind: "owner"; userId: string; workspaceId: string };
+
+/** The reader is a person's account in a browser: a member's, or the owner's. */
+export const readsAsAccount = (
+  credential: LinkCredential,
+): credential is Extract<LinkCredential, { kind: "member" | "owner" }> =>
+  credential.kind === "member" || credential.kind === "owner";
 
 export interface LinkAuthority {
   shareId: string;
@@ -83,7 +93,7 @@ export interface LinkAuthorityResolver {
     callerLimiter: TokenBucketLimiter,
     grantLimiter: TokenBucketLimiter,
   ): LinkAuthority;
-  /** As `require`, for a workspace member's account (`isMemberRequest`). Only the read routes call it. */
+  /** As `require`, for a member's or the owner's account (`isAccountRequest`). Only the read routes call it. */
   requireMember(
     request: Request,
     callerLimiter: TokenBucketLimiter,
@@ -99,6 +109,7 @@ export interface LinkAuthorityResolver {
 
 const AGENT_SCHEME = /^DohcAgent (.+)$/u;
 const MEMBER_SCHEME = /^DohcMember ([A-Za-z0-9_.:-]{1,256})$/u;
+const OWNER_SCHEME = /^DohcOwner ([A-Za-z0-9_.:-]{1,256})$/u;
 const AGENT_TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/u;
 
@@ -110,6 +121,14 @@ export function isAgentRequest(request: Request): boolean {
 /** Whether the request names a workspace member's grant. */
 export function isMemberRequest(request: Request): boolean {
   return (request.headers.get("authorization") ?? "").startsWith("DohcMember ");
+}
+
+/** Whether the request names a member's grant or the owner's workspace, so an account reads it. */
+export function isAccountRequest(request: Request): boolean {
+  return (
+    isMemberRequest(request) ||
+    (request.headers.get("authorization") ?? "").startsWith("DohcOwner ")
+  );
 }
 
 /** An agent's access token and the MCP address it was sent to, hashed; null when either is malformed. */
@@ -146,8 +165,9 @@ export function createLinkAuthorityResolver(input: {
     | "authenticatePersonalAuthority"
     | "workspaceMemberGrantIsCurrent"
     | "workspaceRoleOf"
+    | "memberReach"
   >;
-  /** The account behind a member's cookie. A fenced account is already refused. */
+  /** The account behind a member's or the owner's cookie. A fenced account is already refused. */
   resolveActor: ResolveActor;
   /** share-web's origin, which a member's request names. */
   publicOrigin: string | undefined;
@@ -286,12 +306,49 @@ export function createLinkAuthorityResolver(input: {
     };
   };
 
-  // Only share-web sends a member's request: the account's cookie, and nothing a link or an agent sends.
+  // The owner's own workspace, read as an admin reads it: every file but the ones no member ever sees.
+  // There is no grant, so the workspace names the read's limits, and it is checked again on every read.
+  const owner = (
+    userId: string,
+    workspaceId: string,
+    expected?: Pick<LinkAuthority, "effectiveSelector">,
+  ): LinkAuthority => {
+    if (storage.workspaceRoleOf(workspaceId, userId)?.role !== "owner")
+      throw invalidLinkCapability();
+    const files = fileSideOf({
+      kind: "workspace",
+      role: "admin",
+      reach: storage.memberReach(workspaceId, userId, "admin", "edit"),
+    });
+    if (!files) throw invalidLinkCapability();
+    if (
+      expected &&
+      "reach" in expected.effectiveSelector &&
+      expected.effectiveSelector.reach &&
+      (!("reach" in files) ||
+        files.reach?.signature() !== expected.effectiveSelector.reach.signature())
+    )
+      throw invalidLinkCapability();
+    const key = `owner:${workspaceId}`;
+    return {
+      shareId: key,
+      grantId: key,
+      generation: 0,
+      access: "edit",
+      effectiveSelector: files,
+      callerKey: `owner:${userId}`,
+      credential: { kind: "owner", userId, workspaceId },
+    };
+  };
+
+  // Only share-web sends a member's or the owner's request: the account's cookie, and nothing a link or an agent sends.
   const memberRequest = async (request: Request): Promise<LinkAuthority> => {
-    const grantId = MEMBER_SCHEME.exec(request.headers.get("authorization") ?? "")?.[1];
+    const authorization = request.headers.get("authorization") ?? "";
+    const ownedWorkspaceId = OWNER_SCHEME.exec(authorization)?.[1];
+    const grantId = MEMBER_SCHEME.exec(authorization)?.[1];
     const cookie = request.headers.get("cookie");
     if (
-      !grantId ||
+      !(grantId || ownedWorkspaceId) ||
       !cookie ||
       !input.publicOrigin ||
       request.headers.get("origin") !== input.publicOrigin ||
@@ -302,7 +359,20 @@ export function createLinkAuthorityResolver(input: {
     ) {
       throw invalidLinkCapability();
     }
-    const grant = storage.getShareGrant(grantId);
+    if (ownedWorkspaceId) {
+      let actor;
+      try {
+        actor = await input.resolveActor(
+          new Request(request.url, { headers: { cookie }, signal: request.signal }),
+          ownedWorkspaceId,
+        );
+      } catch {
+        throw invalidLinkCapability();
+      }
+      if (actor.workspaceId !== ownedWorkspaceId) throw invalidLinkCapability();
+      return owner(actor.userId, ownedWorkspaceId);
+    }
+    const grant = storage.getShareGrant(grantId!);
     const share = grant && storage.getShare(grant.shareId);
     let actor;
     try {
@@ -314,7 +384,7 @@ export function createLinkAuthorityResolver(input: {
       throw invalidLinkCapability();
     }
     if (!share || actor.workspaceId !== share.workspaceId) throw invalidLinkCapability();
-    return member(actor.userId, grantId);
+    return member(actor.userId, grantId!);
   };
 
   const admit = (
@@ -380,6 +450,8 @@ export function createLinkAuthorityResolver(input: {
       if (credential.kind === "agent") return agent(credential.check, authority);
       if (credential.kind === "member")
         return member(credential.userId, authority.grantId, authority);
+      if (credential.kind === "owner")
+        return owner(credential.userId, credential.workspaceId, authority);
       return holder(
         credential.capabilityToken,
         input.requireFreshLinkRead(credential.capabilityToken, authority),

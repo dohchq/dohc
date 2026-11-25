@@ -21,11 +21,8 @@ import {
 } from "./namedChat";
 import { RETRY_INITIAL_MS, RETRY_MAX_MS } from "./retry";
 
-// A workspace member's browser reads the workspace through its grant. The account
+// A workspace member's browser reads the workspace's Groups through its grant. The account
 // cookie names the person; the page names only the grant.
-
-/** The view routes' session for a member: the grant, which the account cookie must hold. */
-export const memberSession = (grantId: string) => `member.${grantId}`;
 
 const record = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
