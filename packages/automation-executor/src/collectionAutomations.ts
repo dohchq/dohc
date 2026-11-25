@@ -1926,7 +1926,7 @@ export class CollectionAutomations {
           generation === this.reachTakenAt
             ? null
             : settled(this.options.reachRelayRecord(generation, reads)),
-          generation === handoverAt
+          generation !== this.watchedGeneration
             ? settled(this.options.groupRelayRecord(generation, reads))
             : null,
         ]);
@@ -7012,6 +7012,7 @@ export class CollectionAutomations {
       let relay: AutomationGroupRelayRecord;
       const ahead =
         this.relayAnswers?.generation === generation ? this.relayAnswers.handover : null;
+      if (ahead === null && this.readingRelay) return;
       try {
         relay =
           ahead === null

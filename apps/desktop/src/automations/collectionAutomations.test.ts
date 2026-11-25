@@ -3527,6 +3527,34 @@ describe("Collection automations that a Group message starts", () => {
       await executor.dispose();
       expect(w.errors).toHaveLength(1);
     });
+
+    it("reads the first Group handover without waiting once the reach verdicts answer", async () => {
+      const handover = unanswered(false);
+      let reachReads = 0;
+      const { w, executor, opening } = await openingAt3({
+        reachRelayRecord: async (generation) => {
+          if (++reachReads === 1) throw new TypeError("fetch failed");
+          return { generation, reach: null, everShared: false };
+        },
+        ...relayFor("Group handover", handover.read),
+      });
+      await opening;
+      expect(handover.asked).toEqual([]);
+
+      executor.relayAnswered();
+      await promptly(handover.reading);
+      await promptly(Promise.all([executor.resyncFileObservation(), executor.open()]));
+      expect(reachReads).toBe(2);
+      expect(handover.asked).toEqual([3]);
+      expect(subscribed(w)).toBe(false);
+
+      handover.answer();
+      await promptly(w.until(() => subscribed(w)));
+      expect(handover.asked).toEqual([3]);
+      expect(w.errors.map(({ context }) => context)).toEqual([
+        "read the last automation host's reach verdicts",
+      ]);
+    });
   });
 
   describe("when the workspace closes during a relay read", () => {
