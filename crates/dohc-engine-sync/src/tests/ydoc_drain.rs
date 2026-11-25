@@ -581,6 +581,12 @@ fn an_applied_then_refused_update_after_a_stopped_drain(restart: bool) {
             Ok::<_, SyncError>(())
         })
         .expect("name another path");
+    seed_text_head(
+        &mut engine,
+        "object-elsewhere-occupant",
+        "tasks/elsewhere.md",
+        "occupied",
+    );
     let state = |engine: &EngineStore| -> (i64, i64, i64) {
         engine
             .read_with(|conn| {

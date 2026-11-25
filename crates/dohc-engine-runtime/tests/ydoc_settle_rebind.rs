@@ -82,6 +82,25 @@ async fn settle_with_parked_remote_update(queued: bool) {
                 &NoFaults,
             )
             .expect("seed visible head");
+        versions
+            .write_text(
+                &WriteText {
+                    workspace_id: WS.to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "identity-refusal-other".to_owned(),
+                    path: WRONG_PATH.to_owned(),
+                    text: "other".to_owned(),
+                    moment_id: "identity-refusal-other-head".to_owned(),
+                    metadata_origin: "test".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("seed the other note at the named path");
         let head = versions
             .read_text(WS, "main", PATH)
             .expect("read head")

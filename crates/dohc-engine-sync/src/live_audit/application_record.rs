@@ -894,22 +894,22 @@ pub(crate) fn drained_coordinate_authors(
     origin: &str,
     seq: i64,
 ) -> Result<dohc_engine_collab::author_coverage::Authors, SyncError> {
-    let coverage: Option<(String, Option<String>)> = conn.query_row(
-        "SELECT r.payload_json,a.author_json FROM replication_log r \
-         LEFT JOIN live_audit_projection_authors a \
-         ON r.workspace_id=a.workspace_id AND r.origin_id=a.origin_id AND r.origin_seq=a.origin_seq \
-         AND json_extract(r.payload_json,'$.lineageClaimId')=a.lineage_claim_id \
-         AND a.version_id=?4 AND a.object_id=?5 AND a.path=?6 \
-         WHERE r.workspace_id=?1 AND r.origin_id=?2 AND r.origin_seq=?3 \
-         AND r.op_kind='ydoc.update' AND r.apply_disposition='applied' \
-         AND json_extract(r.payload_json,'$.versionId')=?4 \
-         AND json_extract(r.payload_json,'$.objectId')=?5 \
-         AND json_extract(r.payload_json,'$.path')=?6",
-        params![key.workspace_id, origin, seq, key.version_id, key.object_id, path],
-        |row| Ok((row.get(0)?,row.get(1)?)),
+    let row: Option<(String, String, Option<String>, Option<String>)> = conn.query_row(
+        "SELECT json_extract(r.payload_json,'$.path'),r.payload_json,a.path,a.author_json FROM replication_log r LEFT JOIN live_audit_projection_authors a ON r.workspace_id=a.workspace_id AND r.origin_id=a.origin_id AND r.origin_seq=a.origin_seq AND json_extract(r.payload_json,'$.lineageClaimId')=a.lineage_claim_id AND a.version_id=?4 AND a.object_id=?5 WHERE r.workspace_id=?1 AND r.origin_id=?2 AND r.origin_seq=?3 AND r.op_kind='ydoc.update' AND r.apply_disposition='applied' AND json_extract(r.payload_json,'$.versionId')=?4 AND json_extract(r.payload_json,'$.objectId')=?5",
+        params![key.workspace_id, origin, seq, key.version_id, key.object_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     ).optional().map_err(SyncError::corrupt)?;
+    let at_path = |named: &str| -> Result<bool, SyncError> {
+        Ok(crate::ydoc_apply::renamed_ydoc_path_in_tx(conn, key, named)? == path)
+    };
     let mut authors = dohc_engine_collab::author_coverage::Authors::default();
-    if let Some((payload, verified)) = coverage {
+    if let Some((named, payload, verified_path, verified)) = row
+        && at_path(&named)?
+    {
+        let verified = match verified_path {
+            Some(verified_path) if at_path(&verified_path)? => verified,
+            _ => None,
+        };
         if let Some(verified) = verified {
             authors.union_json(&verified).map_err(SyncError::corrupt)?;
         } else if !dohc_engine_collab::author_coverage::accepted_only_in(conn, key)

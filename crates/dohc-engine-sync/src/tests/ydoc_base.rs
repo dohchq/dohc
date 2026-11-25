@@ -3312,3 +3312,198 @@ fn nested1b_desktop_frontmatter_kept_entity() {
 fn nested1b_desktop_frontmatter_setext_holds() {
     assert_desktop_frontmatter_fold(6, [true, true]);
 }
+
+fn renamed_head_text(engine: &EngineStore, object_id: &str) -> (String, String) {
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT s.path, b.text FROM snapshots s JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                 WHERE s.workspace_id='ws' AND s.version_id='main' AND s.object_id=?1",
+                [object_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("head")
+}
+
+#[test]
+fn a_first_base_naming_the_path_before_a_rename_here_lands_at_the_current_path() {
+    let (_scratch, _path, mut engine) = open_store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','object-renamed',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            dohc_engine_domain::write_projected_text_in_tx(
+                tx,
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-renamed".to_owned(),
+                    path: "notes/old.md".to_owned(),
+                    text: "trip plan".to_owned(),
+                    moment_id: "m-local-renamed".to_owned(),
+                    metadata_origin: "local-file".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_500,
+                    request_id: None,
+                },
+            )
+            .map_err(|error| SyncError::corrupt(std::io::Error::other(error.to_string())))
+        })
+        .expect("local head");
+    VersionedTextStore::new(&mut engine)
+        .rename_text_file(
+            &RenameTextFile {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                from_path: "notes/old.md".to_owned(),
+                to_path: "notes/new.md".to_owned(),
+                moment_id: "m-rename-renamed".to_owned(),
+                request_id: None,
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1_600,
+            },
+            &NoFaults,
+        )
+        .expect("rename before the base arrives");
+
+    let base_doc = dohc_engine_collab::Ydoc::wire();
+    base_doc.plaintext_insert(0, "trip plan");
+    let base_sha = engine
+        .put_binary_blob(&base_doc.encode_full_state())
+        .expect("base blob");
+    let base_op = envelope(
+        "renamed-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-renamed",
+            "path": "notes/old.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha.clone(),
+            "isBaseState": true
+        }),
+    );
+    let outcome = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("a base that names the path before this device's rename must not stop the pull");
+    assert!(
+        matches!(outcome.primary, ApplyDisposition::Applied(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "renamed-peer").expect("ack"),
+        0
+    );
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-renamed").expect("key");
+    assert_eq!(
+        dohc_engine_collab::read_marker(&engine, &key)
+            .expect("marker read")
+            .expect("marker")
+            .lineage_claim_status,
+        dohc_engine_collab::LineageClaimStatus::Exact
+    );
+
+    let edit = |seq: i64, sha: String, live: bool, engine: &mut EngineStore| {
+        let mut payload = json!({
+            "versionId": "main",
+            "objectId": "object-renamed",
+            "path": "notes/old.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": sha,
+            "lineageClaimId": base_sha.clone(),
+            "isBaseState": false
+        });
+        if live {
+            payload["actorOriginId"] = json!("agent-x");
+            payload["attribution"] = json!({"actorKind": "agent", "depth": 0});
+        }
+        let op = envelope("renamed-peer", seq, "ydoc.update", payload);
+        let leases: &dyn crate::LeaseProbe = if live {
+            &crate::ydoc_apply::AlwaysLive
+        } else {
+            &NoLiveLeases
+        };
+        apply_ydoc_envelope(
+            engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            leases,
+        )
+        .expect("an edit applies or waits for the note to close");
+        op
+    };
+    for (seq, update) in [
+        (1, base_doc.plaintext_insert(0, "Our ")),
+        (2, base_doc.plaintext_insert(13, " for May")),
+    ] {
+        let sha = engine.put_binary_blob(&update).expect("open-note blob");
+        edit(seq, sha, true, &mut engine);
+    }
+    let drained = crate::drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("drain once the note closes");
+    assert!(drained.refusals.is_empty(), "{drained:?}");
+    assert_eq!(
+        renamed_head_text(&engine, "object-renamed"),
+        (
+            "notes/new.md".to_owned(),
+            "Our trip plan for May".to_owned()
+        )
+    );
+    let opened = VersionedTextStore::new(&mut engine)
+        .get_moment(
+            "ws",
+            &crate::ydoc_apply::ydoc_apply_moment_id(&key, "notes/new.md", "renamed-peer", 2),
+        )
+        .expect("moment read")
+        .expect("drained moment");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(opened.author_json.as_deref().unwrap()).unwrap(),
+        json!([{"kind":"agent","agentId":"agent-x"}])
+    );
+
+    let delta = base_doc.plaintext_insert(21, "!");
+    let delta_sha = engine.put_binary_blob(&delta).expect("delta blob");
+    let delta_op = edit(3, delta_sha, false, &mut engine);
+    assert_eq!(
+        renamed_head_text(&engine, "object-renamed"),
+        (
+            "notes/new.md".to_owned(),
+            "Our trip plan for May!".to_owned()
+        )
+    );
+    assert_eq!(
+        crate::ydoc_apply::redelivered_materialization_changes(&engine, &delta_op)
+            .expect("changed paths")
+            .into_iter()
+            .map(|change| change.path)
+            .collect::<Vec<_>>(),
+        ["notes/new.md"]
+    );
+}

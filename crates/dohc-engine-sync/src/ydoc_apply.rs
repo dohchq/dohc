@@ -922,23 +922,33 @@ pub(crate) fn redelivered_materialization_changes(
         // instead of wedging the pull by decoding the bad payload again.
         return Ok(Vec::new());
     };
-    let fingerprint = format!(
-        "{}\0{}\0{}\0{}\0{}\0{}",
-        envelope.workspace_id,
-        payload.version_id,
-        payload.object_id,
-        payload.path,
-        envelope.origin_id,
-        envelope.origin_seq
-    );
-    let job_id = format!(
-        "ydoc-mat_moment-ydoc-apply-{}",
-        dohc_engine_storage::hex_sha256(fingerprint.as_bytes())
-    );
+    let Ok(key) = DocKey::new(
+        &envelope.workspace_id,
+        &payload.version_id,
+        &payload.object_id,
+    ) else {
+        return Ok(Vec::new());
+    };
     let change = store.read_with(|conn| {
+        let current_path = conn
+            .query_row(
+                "SELECT path FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                params![key.workspace_id, key.version_id, key.object_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?
+            .unwrap_or_else(|| payload.path.clone());
+        let job_id = |path: &str| {
+            format!(
+                "ydoc-mat_{}",
+                ydoc_apply_moment_id(&key, path, &envelope.origin_id, envelope.origin_seq)
+            )
+        };
+        let (named, current) = (job_id(&payload.path), job_id(&current_path));
         conn.query_row(
-            "SELECT target_path, operation FROM materialization_jobs WHERE job_id IN (?1,?2) ORDER BY job_id LIMIT 1",
-            params![job_id, format!("{job_id}-local")],
+            "SELECT target_path, operation FROM materialization_jobs WHERE job_id IN (?1,?2,?3,?4) ORDER BY job_id LIMIT 1",
+            params![named, format!("{named}-local"), current, format!("{current}-local")],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()
@@ -2323,8 +2333,10 @@ fn drain_deferred_ydoc(
     let mut waiting = None;
     let mut queue: std::collections::VecDeque<DeferredRow> = pending.into();
     while let Some(row) = queue.pop_front() {
-        let (origin_id, origin_seq, relay_seq, recorded_at_ms, lineage_claim_id, payload, _) =
+        let (origin_id, origin_seq, relay_seq, recorded_at_ms, lineage_claim_id, mut payload, _) =
             row.clone();
+        let named_path = payload.path.clone();
+        payload.path = store.read_with(|conn| renamed_ydoc_path_in_tx(conn, key, &named_path))?;
         if let Some(leases) = recovery_leases {
             store.read_with(|conn| require_recovery_closed(conn, key, leases))?;
         }
@@ -2682,7 +2694,7 @@ fn drain_deferred_ydoc(
                 }
                 let incoming = Incoming::Update {
                     bytes: &remote.bytes,
-                    path: &payload.path,
+                    path: &named_path,
                 };
                 match drain_gate(tx, key, &winner_claim_id, &row, &tails, incoming, held) {
                     // The refusal its bytes are owed commits with them, so a
@@ -8614,7 +8626,12 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             // the base arrives. Retrying after the later delete/rename is
             // convergence-safe; refusing and ACKing would lose the base
             // forever on this receiver.
+            let base_path = renamed_ydoc_path_in_tx(tx, &claim_key, &base_path)?;
             validate_retryable_ydoc_identity(tx, &claim_key, &base_path)?;
+            let base_payload = &YdocUpdatePayload {
+                path: base_path.clone(),
+                ..base_payload.clone()
+            };
             tx.execute(
                 "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)                  VALUES (?1, ?2, ?3)",
                 rusqlite::params![claim_key.workspace_id, claim_key.object_id, op.recorded_at_ms],
@@ -9146,7 +9163,6 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             return Ok(outcome);
         }
     }
-    let update_path = payload.path.clone();
     let remote = RemoteUpdate {
         origin_id: envelope.origin_id.clone(),
         origin_seq: envelope.origin_seq,
@@ -9161,6 +9177,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
         envelope,
         faults,
         |tx, op| {
+            let update_path = renamed_ydoc_path_in_tx(tx, &key, &payload.path)?;
             hold_released_lineage(
                 tx,
                 &key,
@@ -9171,7 +9188,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 tails,
                 Incoming::Update {
                     bytes: &remote.bytes,
-                    path: &update_path,
+                    path: &payload.path,
                 },
             )?;
             let projected = apply_remote_update_in_transaction_with_projection(
@@ -9799,6 +9816,35 @@ fn validate_ydoc_identity(
         });
     }
     Ok(current)
+}
+
+pub(crate) fn renamed_ydoc_path_in_tx(
+    conn: &rusqlite::Connection,
+    key: &DocKey,
+    named: &str,
+) -> Result<String, SyncError> {
+    let mut statement = conn
+        .prepare_cached(
+            "SELECT path FROM path_aliases \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
+               AND NOT EXISTS(SELECT 1 FROM path_aliases \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?4) \
+               AND NOT EXISTS(SELECT 1 FROM snapshots \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?4)",
+        )
+        .map_err(SyncError::corrupt)?;
+    let paths = statement
+        .query_map(
+            params![key.workspace_id, key.version_id, key.object_id, named],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(SyncError::corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(SyncError::corrupt)?;
+    Ok(match paths.as_slice() {
+        [current] => current.clone(),
+        _ => named.to_owned(),
+    })
 }
 
 fn validate_retryable_ydoc_identity(

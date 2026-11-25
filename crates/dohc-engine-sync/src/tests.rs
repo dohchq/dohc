@@ -59,7 +59,12 @@ fn clock_collision_pair() -> (Vec<u8>, Vec<u8>) {
     )
 }
 
-fn seed_text_head(engine: &mut EngineStore, object_id: &str, path: &str, text: &str) -> String {
+pub(crate) fn seed_text_head(
+    engine: &mut EngineStore,
+    object_id: &str,
+    path: &str,
+    text: &str,
+) -> String {
     let sha = dohc_engine_storage::hex_sha256(text.as_bytes());
     engine
         .write_with(&NoFaults, |tx| {
