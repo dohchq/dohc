@@ -1948,7 +1948,7 @@ List saved operations, with values to undo edits.
 - `beforeRevision`: `integer`
 - `limit`: `integer`
 
-Returns `{ kind: "history", datasetId, name?, lineage?, olderRecordedAtMs?, archived?, headRevision, entries: { revision, operation, callerReference, recordedAtMs, approvedRevisionHash, changesetBytes, attachmentCount, undo?, automation?, approvalAgent?, schema? }[], nextBeforeRevision }`.
+Returns `{ kind: "history", datasetId, name?, lineage?, olderRecordedAtMs?, archived?, headRevision, entries: { revision, operation, callerReference, recordedAtMs, approvedRevisionHash, changesetBytes, attachmentCount, undo?, automation?, approvalAgent?, actor?, by?, schema? }[], nextBeforeRevision }`.
 
 #### `dohc dataset historyRevision`
 

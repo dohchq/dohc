@@ -340,6 +340,11 @@ export function purgeAccountRows(
             "DELETE FROM dohc_dataset_automation_claims WHERE json_extract(actor,'$.userId')=? RETURNING workspace_id,dataset_id,storage_bytes",
           )
           .all(userId),
+        ...storage.db
+          .prepare(
+            "DELETE FROM dohc_dataset_revision_actors WHERE json_extract(actor,'$.userId')=? RETURNING workspace_id,dataset_id,storage_bytes",
+          )
+          .all(userId),
       );
       for (const row of removed) {
         storage.db

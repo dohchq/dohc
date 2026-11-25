@@ -8,6 +8,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { createDatasetJournal, type DatasetScope } from "./journal.ts";
+import { readDatasetHistory } from "./dataset-history.ts";
 import { decodeChangeset } from "./dataset-change-facts.ts";
 import { createDatasetSupervisor } from "./supervisor.ts";
 import { createDatasetHost, type DatasetAuthority } from "./dataset-host.ts";
@@ -85,14 +86,18 @@ const tasks = (count: number) =>
   ).join(",");
 // Everything the ledger retains for the dataset, as it charged it.
 function retained(db: DatabaseSync): number {
-  return ["claims", "revisions", "failure_generations", "presses"].reduce(
+  return [
+    "automation_claims",
+    "automation_revisions",
+    "automation_failure_generations",
+    "automation_presses",
+    "revision_actors",
+  ].reduce(
     (sum, table) =>
       sum +
       Number(
         db
-          .prepare(
-            `SELECT coalesce(sum(storage_bytes),0) AS bytes FROM dohc_dataset_automation_${table}`,
-          )
+          .prepare(`SELECT coalesce(sum(storage_bytes),0) AS bytes FROM dohc_dataset_${table}`)
           .get()!.bytes,
       ),
     0,
@@ -456,6 +461,48 @@ it("never claims an automation's own commit, records it for History, and stops t
       error: DATASET_AUTOMATION_CHAIN_STOPPED,
     },
   ]);
+});
+
+it("records who made each change for History, without depths or pressing agents", () => {
+  const f = ledger();
+  f.commit("INSERT INTO tasks VALUES('a','Open','')", { kind: "owner", userId: "owner-1" });
+  f.commit("INSERT INTO tasks VALUES('b','Open','')", {
+    kind: "named",
+    userId: "member-1",
+    appId: "app-1",
+    agent: { depth: 1 },
+  });
+  f.commit("INSERT INTO tasks VALUES('c','Open','')", { kind: "link", appId: "app-2" });
+  f.commit("INSERT INTO tasks VALUES('d','Open','')", {
+    kind: "agent",
+    depth: 2,
+    agentId: "claude-code",
+    userId: "owner-1",
+  });
+  f.commit("INSERT INTO tasks VALUES('e','Open','')", {
+    kind: "automation",
+    automationId: "collection:tasks#a",
+    depth: 1,
+  });
+  expect(
+    readDatasetHistory(f.db, scope, undefined, Number.MAX_SAFE_INTEGER, 50).entries.map(
+      ({ actor, automation }) => actor ?? automation,
+    ),
+  ).toEqual([
+    { automationId: "collection:tasks#a", depth: 1 },
+    { kind: "agent", agentId: "claude-code", userId: "owner-1" },
+    { kind: "link", appId: "app-2" },
+    { kind: "named", userId: "member-1", appId: "app-1" },
+    { kind: "owner", userId: "owner-1" },
+  ]);
+  expect(
+    readDatasetHistory(f.db, scope, undefined, Number.MAX_SAFE_INTEGER, 50, true).entries.some(
+      (entry) => "actor" in entry,
+    ),
+  ).toBe(false);
+  expect(f.charged).toBe(retained(f.db));
+  f.claims.forget(scope);
+  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_revision_actors").get()!.n).toBe(0);
 });
 
 it("charges what it keeps, and keeps claims 30 days, and the newest failure longer", () => {

@@ -26,6 +26,14 @@ export const historyActivitySql = `(SELECT recorded_at_ms FROM (
   UNION ALL SELECT * FROM (SELECT revision,recorded_at_ms FROM dohc_dataset_checkpoint_times WHERE workspace_id=j.workspace_id AND dataset_id=j.dataset_id ORDER BY revision DESC LIMIT 1)
 ) ORDER BY revision DESC LIMIT 1)`;
 
+/** Who made a change, as `recordCommit` kept it. */
+export interface DatasetHistoryActor {
+  kind: "owner" | "named" | "link" | "agent";
+  userId?: string;
+  appId?: string;
+  agentId?: string;
+}
+
 /** Called inside an owner-authorized transaction. No input payloads or grants leave this boundary. */
 export function readDatasetHistory(
   db: JournalDb,
@@ -42,18 +50,19 @@ export function readDatasetHistory(
     SELECT e.revision,e.operation,e.caller_key,e.recorded_at_ms,e.approved_revision_hash,
       length(e.changeset) AS changeset_bytes,json_array_length(e.attached_file_ids) AS attachment_count,
       ${receipt} AS undo_receipt,
-      NULL AS previous_hash,a.automation_id,a.depth AS automation_depth FROM dohc_dataset_events e
+      NULL AS previous_hash,a.automation_id,a.depth AS automation_depth,${metadataOnly ? "NULL" : "r.actor"} AS actor FROM dohc_dataset_events e
       LEFT JOIN dohc_dataset_automation_revisions a ON a.workspace_id=e.workspace_id AND a.dataset_id=e.dataset_id AND a.revision=e.revision
+      ${metadataOnly ? "" : "LEFT JOIN dohc_dataset_revision_actors r ON r.workspace_id=e.workspace_id AND r.dataset_id=e.dataset_id AND r.revision=e.revision"}
       WHERE e.workspace_id=? AND e.dataset_id=? AND e.revision<?
     UNION ALL
     SELECT h.revision,'Fields and rules',NULL,t.recorded_at_ms,json_extract(h.cursor_json,'$.approvedRevisionHash'),0,0,NULL,
-      json_extract(h.previous_json,'$.approvedRevisionHash'),NULL,NULL FROM dohc_dataset_checkpoint_history h
+      json_extract(h.previous_json,'$.approvedRevisionHash'),NULL,NULL,NULL FROM dohc_dataset_checkpoint_history h
       LEFT JOIN dohc_dataset_checkpoint_times t ON t.workspace_id=h.workspace_id AND t.dataset_id=h.dataset_id AND t.revision=h.revision
       WHERE h.workspace_id=? AND h.dataset_id=? AND h.revision<? AND h.previous_json IS NOT NULL
         AND json_extract(h.previous_json,'$.approvedRevisionHash') != json_extract(h.cursor_json,'$.approvedRevisionHash')
     UNION ALL
     SELECT j.checkpoint_revision,'Fields and rules',NULL,t.recorded_at_ms,j.approved_revision_hash,0,0,NULL,
-      json_extract(j.checkpoint_previous_json,'$.approvedRevisionHash'),NULL,NULL FROM dohc_dataset_journals j
+      json_extract(j.checkpoint_previous_json,'$.approvedRevisionHash'),NULL,NULL,NULL FROM dohc_dataset_journals j
       LEFT JOIN dohc_dataset_checkpoint_times t ON t.workspace_id=j.workspace_id AND t.dataset_id=j.dataset_id AND t.revision=j.checkpoint_revision
       WHERE j.workspace_id=? AND j.dataset_id=? AND j.checkpoint_revision<? AND j.checkpoint_previous_json IS NOT NULL
         AND json_extract(j.checkpoint_previous_json,'$.approvedRevisionHash') != j.approved_revision_hash
@@ -129,6 +138,9 @@ export function readDatasetHistory(
               depth: Number(row.automation_depth),
             },
           }),
+      ...(row.actor === null
+        ? {}
+        : { actor: JSON.parse(String(row.actor)) as DatasetHistoryActor }),
       ...(row.previous_hash === null
         ? {}
         : {

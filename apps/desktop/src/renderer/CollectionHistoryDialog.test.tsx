@@ -70,6 +70,51 @@ function HistoryOwner(
 }
 afterEach(cleanup);
 describe("CollectionHistoryDialog", () => {
+  it("names who made each change, and reloads when names arrive", async () => {
+    let namesChanged: ((event: { workspaceId: string }) => void) | undefined;
+    window.dohcDesktop = {
+      onHistoryNamesChanged: (listener: (event: { workspaceId: string }) => void) => {
+        namesChanged = listener;
+        return () => {};
+      },
+    } as unknown as NonNullable<typeof window.dohcDesktop>;
+    let member = "Someone you shared with";
+    const onLoad = vi.fn(async (): Promise<DatasetHistoryPage> => ({
+      datasetId,
+      headRevision: 3,
+      entries: [
+        { ...entry(3), by: { kind: "agent", name: "Claude", person: "You", app: "roadmap-pm" } },
+        { ...entry(2), by: { kind: "person", name: member } },
+        entry(1),
+      ],
+      nextBeforeRevision: null,
+    }));
+    try {
+      render(
+        <CollectionHistoryDialog
+          workspaceId="w"
+          datasetId={datasetId}
+          name="Roadmap"
+          onLoad={onLoad}
+          onClose={() => {}}
+          onError={() => {}}
+        />,
+      );
+      const agent = await screen.findByText("Claude");
+      expect(agent.className).toContain("text-agent");
+      expect(agent.parentElement?.textContent).toBe("Claudefor Youthrough app roadmap-pm");
+      expect(screen.getByText("Someone you shared with")).toBeTruthy();
+      member = "dana@example.com";
+      act(() => namesChanged?.({ workspaceId: "other" }));
+      expect(onLoad).toHaveBeenCalledTimes(1);
+      act(() => namesChanged?.({ workspaceId: "w" }));
+      expect(await screen.findByText("dana@example.com")).toBeTruthy();
+      const oldest = screen.getAllByTitle("Revision").find((node) => node.textContent === "1")!;
+      expect(oldest.parentElement?.textContent).not.toMatch(/You|Link holder|Agent/);
+    } finally {
+      delete window.dohcDesktop;
+    }
+  });
   it.each([false, true])(
     "invalidates an old revision's pending undo without replaying it (in flight: %s)",
     async (inFlight) => {
@@ -272,7 +317,8 @@ describe("CollectionHistoryDialog", () => {
       />,
     );
     await screen.findByText("3");
-    expect(screen.getAllByText("Caller reference")).toHaveLength(2);
+    expect(screen.getAllByText("Approved rules")).toHaveLength(2);
+    expect(screen.queryByText("a".repeat(64))).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Older actions" }));
     await waitFor(() => expect(onLoad).toHaveBeenCalledTimes(2));
     expect(onLoad.mock.calls[1]![0]).toMatchObject({ datasetId, beforeRevision: 2, limit: 50 });

@@ -11385,6 +11385,22 @@ function registerIpcHandlers(): void {
     DesktopRendererWorkspaceOperation
   >({
     ...datasetDependencies,
+    historyPeople: (sender, { workspaceId }) => {
+      const labels = historyLabelsFor(sender);
+      return {
+        ownerId: findWorkspace(workspaceId)?.remote?.ownerUserId ?? localUserId(),
+        prepare: (userIds) =>
+          labels.prepare(
+            workspaceId,
+            userIds.map((userId) => ({ userId })),
+          ),
+        person: (userId) => labels.person(workspaceId, userId),
+        agent: (agentId) =>
+          agentId === "dohc-mcp"
+            ? "Agent"
+            : (cachedAgents.find(({ id }) => id === agentId)?.name ?? "Agent"),
+      };
+    },
     chooseRecoveryFile: async (_workspace, signal) => {
       const chosen = await dialog.showOpenDialog({
         title: "Restore Collection recovery",

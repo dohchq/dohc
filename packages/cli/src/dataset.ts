@@ -800,6 +800,26 @@ export const DatasetHistoryPage = z
               .strict()
               .optional(),
             approvalAgent: PublicationAgent.nullable().optional(),
+            // Who made the change, as the host derived it at commit. Older changes have none.
+            actor: z
+              .object({
+                kind: z.enum(["owner", "named", "link", "agent"]),
+                userId: z.string().min(1).max(1024).optional(),
+                appId: z.string().min(1).max(1024).optional(),
+                agentId: z.string().min(1).max(1024).optional(),
+              })
+              .strict()
+              .optional(),
+            // The desktop replaces `actor` with the names its History shows.
+            by: z
+              .object({
+                kind: z.enum(["person", "agent", "link"]),
+                name: z.string().min(1).max(320),
+                person: z.string().min(1).max(320).optional(),
+                app: z.string().min(1).max(256).optional(),
+              })
+              .strict()
+              .optional(),
             schema: z
               .object({ previousRevisionHash: sha256, revisionHash: sha256 })
               .strict()

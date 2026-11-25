@@ -145,6 +145,10 @@ function fixture(
   // Main's own host, which export opens first as main's does.
   localHost?: () => Promise<LocalDatasetHost>,
   collectionPlace?: () => Promise<DatasetPlace>,
+  extra: Pick<
+    Parameters<typeof createDatasetHandler>[0],
+    "historyPeople" | "readShareLinkPublication"
+  > = {},
 ) {
   const abort = new AbortController();
   const workspace = { workspaceId: "workspace", shareView: undefined as unknown };
@@ -292,6 +296,7 @@ function fixture(
     createSources,
     ...(automationName ? { automationName } : {}),
     ...(collectionPlace ? { collectionPlace } : {}),
+    ...extra,
   });
   const createForm = {
     action: "createForm",
@@ -715,6 +720,80 @@ it("names each automation in History once, as its Collection's automations.yaml 
     ],
   });
   expect(names).toHaveBeenCalledTimes(2);
+});
+it("names History's people and apps for the desktop, and leaves the owner CLI the raw actor", async () => {
+  const entry = (revision: number, actor: object) => ({
+    revision,
+    operation: "edit",
+    callerReference: "a".repeat(64),
+    recordedAtMs: 1000,
+    approvedRevisionHash: "b".repeat(64),
+    changesetBytes: 80,
+    attachmentCount: 0,
+    actor,
+  });
+  const page = {
+    datasetId,
+    headRevision: 3,
+    nextBeforeRevision: null,
+    entries: [
+      entry(3, { kind: "named", userId: "member-1", appId: "held" }),
+      entry(2, { kind: "link", appId: "taken-down" }),
+      entry(1, { kind: "owner", appId: "unknown" }),
+    ],
+  };
+  const heldDatasetApp = vi.fn((id: string) =>
+    id === "held" ? { appRoot: "team-roadmap/roadmap-pm" } : null,
+  );
+  const readShareLinkPublication = vi.fn(async (_workspace: unknown, id: string) =>
+    id === "taken-down"
+      ? {
+          publicationId: id,
+          active: true,
+          operatorTakedown: true,
+          authorityRevision: 1,
+          shareId: "share",
+          grantId: "grant",
+          candidate: { appRoot: "secret-folder/hidden-app" },
+        }
+      : null,
+  );
+  const history = vi.fn(async () => page);
+  const request = {
+    workspaceId: "workspace",
+    datasetPath: "data/dataset.json",
+    action: "history",
+  } as const;
+  const desktop = fixture(
+    { history } as unknown as OwnerDatasetData,
+    undefined,
+    undefined,
+    async () => ({ apps: { heldDatasetApp } }) as unknown as LocalDatasetHost,
+    undefined,
+    {
+      readShareLinkPublication,
+      historyPeople: (caller) => {
+        expect(caller).toBe("window");
+        return {
+          ownerId: "owner-1",
+          prepare: () => {},
+          person: (userId) => (userId === "member-1" ? "dana@example.com" : "Someone"),
+          agent: () => "Agent",
+        };
+      },
+    },
+  );
+  const shown = await desktop.handler("window", request);
+  expect(shown).toMatchObject({
+    entries: [
+      { revision: 3, by: { kind: "person", name: "dana@example.com", app: "roadmap-pm" } },
+      { revision: 2, by: { kind: "link", name: "Link holder", app: "an app" } },
+      { revision: 1, by: { kind: "person", name: "You", app: "an app" } },
+    ],
+  });
+  expect(JSON.stringify(shown)).not.toMatch(/member-1|hidden-app|secret-folder|"actor"|a{64}/);
+  const cli = fixture({ history } as unknown as OwnerDatasetData);
+  expect(await cli.handler("cli", request)).toEqual({ kind: "history", ...page });
 });
 it("allows named Collection data actions without opening a local owner store or source controls", async () => {
   const named = {
