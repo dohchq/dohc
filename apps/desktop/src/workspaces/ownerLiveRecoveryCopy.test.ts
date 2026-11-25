@@ -496,6 +496,13 @@ it.each<[string, Edit | readonly Edit[], Edit, string, string]>([
     'Set count to 9007199254740993. The note has "9007199254740993".\n',
   ],
   [
+    "a list holding a whole number too large for a float, in a field someone else set to text",
+    (doc: Y.Doc) => doc.getMap("frontmatter").set("counts", [9007199254740993n]),
+    (doc: Y.Doc) => doc.getMap("frontmatter").set("counts", ["9007199254740993"]),
+    "---\ncounts:\n  - '9007199254740993'\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
+    "Set counts to [9007199254740993]. The note has ['9007199254740993'].\n",
+  ],
+  [
     "a to-do someone else set at the same moment",
     (doc: Y.Doc) => task(doc).setAttribute("checked", true as never),
     (doc: Y.Doc) => task(doc).setAttribute("checked", false as never),
