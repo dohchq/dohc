@@ -38,6 +38,7 @@ import { currentAccountFeedCursor, hiddenFile } from "./accountFeed";
 import { replicaChatStore } from "./automationChatWrites";
 import type { AutomationReplica } from "./automationReplicas";
 import { badRequest, notFound, RelayError } from "./errors";
+import { untilAborted } from "./namedLiveFrameHost";
 import type { CopyVisitor, ServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
 
@@ -95,6 +96,9 @@ type ParsedOperation = {
   };
 }[ServerOperation];
 
+/** An account's read opens the copy, syncs it, and reads within this, inside the phone's 15 s wait. */
+export const ACCOUNT_READ_DEADLINE_MS = 12_000;
+
 // The server's own path rules: the copies live on its disk.
 const PLATFORM = process.platform;
 
@@ -107,8 +111,9 @@ export function isAccountOperation(name: string): name is ServerOperation {
  * Runs one read on the server's copy of `workspaceId` and answers its
  * result, with the change feed's cursor for what the copy had synced. An
  * unknown operation, a workspace the owner cannot open, and a copy whose
- * owner changed reject with not-found; a full server rejects with
- * server_busy; arguments outside the operation's schema, and the
+ * owner changed reject with not-found; a full server, and a read that
+ * passes ACCOUNT_READ_DEADLINE_MS, reject with server_busy; arguments
+ * outside the operation's schema, and the
  * operation's own refusals, reject with bad_request.
  *
  * The caller's duties:
@@ -125,22 +130,48 @@ export async function runAccountOperation(
   input: AccountOperationInput,
 ): Promise<{ result: AccountOperationResult; cursor: string }> {
   const request = parseOperation(input.operation, input.args);
-  return await server.copies.withServerCopy(
-    input.owner,
-    input.workspaceId,
-    { ...input.visitor, hold: true },
-    async (replica) => {
-      await input.authorize();
-      // The sync brings the copy at least this far.
-      const cursor = currentAccountFeedCursor(server.storage, input.workspaceId);
-      if (request.operation !== "documentRead" || !copyIsCurrent(server.storage, replica))
-        await replica.sync(input.visitor.signal);
-      await input.authorize();
-      const result = await answer(server.storage, replica, input.workspaceId, request);
-      await input.authorize();
-      return { result, cursor };
-    },
-  );
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), ACCOUNT_READ_DEADLINE_MS);
+  const signal = AbortSignal.any([input.visitor.signal, deadline.signal]);
+  const times = [performance.now()];
+  try {
+    return await server.copies.withServerCopy(
+      input.owner,
+      input.workspaceId,
+      { ...input.visitor, signal, hold: true },
+      async (replica) => {
+        times.push(performance.now());
+        await input.authorize();
+        // The sync brings the copy at least this far.
+        const cursor = currentAccountFeedCursor(server.storage, input.workspaceId);
+        if (request.operation !== "documentRead" || !copyIsCurrent(server.storage, replica))
+          await replica.sync(signal);
+        times.push(performance.now());
+        await input.authorize();
+        const result = await untilAborted(
+          answer(server.storage, replica, input.workspaceId, request),
+          signal,
+        );
+        times.push(performance.now());
+        await input.authorize();
+        return { result, cursor };
+      },
+    );
+  } catch (error) {
+    if (deadline.signal.aborted && !input.visitor.signal.aborted)
+      throw new RelayError(
+        "server_busy",
+        "Your server took too long to read this workspace. Try again.",
+        503,
+      );
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    const spent = ["open", "sync", "read"]
+      .slice(0, times.length - 1)
+      .map((step, index) => `${step}=${Math.round(times[index + 1]! - times[index]!)}ms`);
+    console.info(`[account-reads] ${request.operation} ${spent.join(" ")}`);
+  }
 }
 
 /** Whether the copy already holds everything the relay's log has for its workspace, with no sync running. */

@@ -27,6 +27,8 @@ import {
 } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
 import { phoneWriteIds, runPhoneWrite, type PhoneWrite } from "./accountChatWrites";
 import { ACCOUNT_FEED_WAITS_PER_ACCOUNT, currentAccountFeedCursor } from "./accountFeed";
+import { ACCOUNT_READ_DEADLINE_MS } from "./accountOperations";
+import { untilAborted } from "./namedLiveFrameHost";
 import { createAccountDeletionRoute } from "./accountDeletionRoute";
 import { DiscussionActivityHub } from "./discussionActivity";
 import type { AutomationReplica } from "./automationReplicas";
@@ -118,6 +120,7 @@ async function serverCopies(storage: SyncRelayStorage, engine: TestEngine) {
   let held: Promise<void> | null = null;
   let requestId = 0;
   let opensCaughtUp = true;
+  let opens = true;
   const lifetime = new AbortController();
   const copies = await startServerCopies({
     storage,
@@ -132,7 +135,7 @@ async function serverCopies(storage: SyncRelayStorage, engine: TestEngine) {
         const wanted = hooks.wanted();
         for (const [workspaceId, reasons] of wanted) {
           const row = storage.joinAutomationWorkspace({ workspaceId, nowMs: 1, reasons });
-          if (!row || open.has(workspaceId)) continue;
+          if (!row || open.has(workspaceId) || !opens) continue;
           let running = 0;
           const copy = {
             workspaceId,
@@ -151,12 +154,14 @@ async function serverCopies(storage: SyncRelayStorage, engine: TestEngine) {
             withRecordWork: <T>(work: () => Promise<T>) => work(),
             busy: () => running > 0,
             step: async () => true,
-            sync: async () => {
+            // As a real copy's sync, it stops waiting when its caller's signal aborts.
+            sync: async (signal?: AbortSignal) => {
               syncs.push(workspaceId);
               running += 1;
               try {
                 const head = storage.automationWorkspaceLogHead(workspaceId);
-                await held;
+                const wait = held ?? Promise.resolve();
+                await (signal ? untilAborted(wait, signal) : wait);
                 copy.pulledHead = Math.max(copy.pulledHead, head);
               } finally {
                 running -= 1;
@@ -189,6 +194,9 @@ async function serverCopies(storage: SyncRelayStorage, engine: TestEngine) {
     syncs,
     opensBehind() {
       opensCaughtUp = false;
+    },
+    holdOpens() {
+      opens = false;
     },
     holdSyncs() {
       let release!: () => void;
@@ -580,6 +588,21 @@ describe("a page read on a caught-up copy", () => {
     expect(syncs).toEqual(["trip"]);
   });
 
+  it("logs how long it spent opening the copy, syncing, and reading, and nothing else", async () => {
+    const { engine, h } = await relay();
+    await seedTrip(engine);
+    const log = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    try {
+      await answer(await h(read.clone()));
+      expect(log.mock.calls).toHaveLength(1);
+      expect(log.mock.calls[0]).toEqual([
+        expect.stringMatching(/^\[account-reads\] documentRead open=\d+ms sync=\d+ms read=\d+ms$/),
+      ]);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("syncs a copy behind the relay's log", async () => {
     const { storage, activity, engine, h, syncs, opensBehind } = await relay();
     await seedTrip(engine);
@@ -635,6 +658,39 @@ describe("a page read on a caught-up copy", () => {
     await seedTrip(engine);
     await answer(await h(read.clone()));
     expect(syncs).toEqual(["trip"]);
+  });
+});
+
+describe("an account read's deadline", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("answers server_busy before the phone's 15 s wait, whether the copy is opening, syncing, or reading", async () => {
+    expect(ACCOUNT_READ_DEADLINE_MS).toBeLessThan(15_000);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { engine, h, holdOpens, holdSyncs, syncs } = await relay();
+    await seedTrip(engine);
+    const late = async (request: Request, wait: () => Promise<unknown>) => {
+      const response = h(request);
+      await wait();
+      await vi.advanceTimersByTimeAsync(ACCOUNT_READ_DEADLINE_MS);
+      const busy = await response;
+      expect(busy.status).toBe(503);
+      expect(await json(busy)).toMatchObject({ ok: false, code: "server_busy" });
+    };
+    const release = holdSyncs();
+    await late(op("trip", "groups"), () => expect.poll(() => syncs.length).toBe(1));
+    release();
+    const send = engine.sendRequest.bind(engine);
+    engine.sendRequest = async (request) =>
+      request.method === "versionedText.read"
+        ? await new Promise<never>(() => undefined)
+        : await send(request);
+    await late(op("trip", "documentRead", { path: "docs/plan.md" }), async () => undefined);
+    holdOpens();
+    await late(op("budget", "groups", {}, signedIn("ben")), async () => undefined);
+    expect(syncs).toHaveLength(1);
   });
 });
 
