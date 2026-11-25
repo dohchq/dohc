@@ -1085,13 +1085,9 @@ fn apply_deferred_base(
     resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
     gate: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<(), SyncError>,
 ) -> Result<Option<YdocLineageReplacement>, SyncError> {
-    let incoming_doc = dohc_engine_collab::Ydoc::wire();
-    incoming_doc
-        .apply(bytes)
-        .map_err(|error| map_collab_payload_error(error, "parked Y.Doc base is invalid"))?;
+    let incoming_base = &dohc_engine_collab::IncomingBase::new(bytes);
     let key = key.clone();
     let payload = payload.clone();
-    let bytes = bytes.to_vec();
     let origin_id = origin_id.to_owned();
     let outcome = store.write_with(faults, move |tx| {
         if let Some(leases)=recovery_leases { require_recovery_closed(tx,&key,leases)?; }
@@ -1140,7 +1136,7 @@ fn apply_deferred_base(
             }
         };
         if let Some(result) = preserve_incomplete_base_in_tx(
-            tx, &key, &payload, &incoming_doc, relay_seq, &origin_id, origin_seq,
+            tx, &key, &payload, incoming_base, relay_seq, &origin_id, origin_seq,
             recorded_at_ms, search_policy, resolver,
         )? {
             record_ydoc_conflict_count(tx, &key.workspace_id, &origin_id, origin_seq, recorded_at_ms, result.conflicts_opened)?;
@@ -1199,16 +1195,12 @@ fn apply_deferred_base(
             &key,
             dohc_engine_collab::ContentKind::parse(&payload.content_kind)
                 .map_err(map_collab_hard_error)?,
-            &dohc_engine_collab::CheckedBase::new(&bytes).map_err(|error| {
-                map_collab_payload_error(error, "parked Y.Doc base is invalid")
-            })?,
+            incoming_base,
             &dohc_engine_collab::BaseRelayCoordinate::new(origin_id.clone(), origin_seq, relay_seq)
                 .map_err(map_collab_hard_error)?,
             recorded_at_ms,
         )
-        .map_err(|error| {
-            map_collab_payload_error(error, "parked Y.Doc base could not be claimed")
-        })?;
+        .map_err(|error| map_base_error(error, "parked Y.Doc base could not be claimed"))?;
         // A base this drain installs is a document from elsewhere. A resumed
         // claim was installed by an earlier attempt, and one another base
         // already won installs nothing.
@@ -1272,7 +1264,10 @@ fn apply_deferred_base(
         let winner_claim_id = winner.lineage_claim_id.clone().ok_or_else(|| {
             local_corruption("parked winning Y.Doc lineage has no claim identity")
         })?;
-        let projection = project_ydoc_with_store(tx, &key, &incoming_doc, winner.content_kind)?;
+        let incoming_doc = incoming_base
+            .doc()
+            .map_err(|error| map_base_error(error, "parked Y.Doc base is invalid"))?;
+        let projection = project_ydoc_with_store(tx, &key, incoming_doc, winner.content_kind)?;
         let (conflict, recovered_paths) = preserve_base_sides_in_tx(
             tx, &key, &payload.path,
             crate::ydoc_recovery::RecoveryEnvelopeBinding {
@@ -1295,7 +1290,7 @@ fn apply_deferred_base(
             tx,
             &key,
             &payload.path,
-            &incoming_doc,
+            incoming_doc,
             winner.content_kind,
             &origin_id,
             origin_seq,
@@ -2536,6 +2531,15 @@ fn drain_deferred_ydoc(
                 Err(SyncError::ValidationPending(pending)) => {
                     waiting = Some(pending);
                     break;
+                }
+                Err(SyncError::InvalidInput {
+                    reason: BASE_FAILS_REPLAY_CHECK,
+                }) => {
+                    let reason = BASE_FAILS_REPLAY_CHECK;
+                    let refusal =
+                        refuse_deferred_ydoc(store, key, &origin_id, origin_seq, reason, faults)?;
+                    refusals.push(refusal);
+                    continue;
                 }
                 Err(error) => return Err(error),
             }
@@ -5933,7 +5937,7 @@ fn preserve_incomplete_base_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
     payload: &YdocUpdatePayload,
-    incoming_doc: &dohc_engine_collab::Ydoc,
+    incoming_base: &dohc_engine_collab::IncomingBase<'_>,
     relay_seq: i64,
     origin_id: &str,
     origin_seq: i64,
@@ -5966,6 +5970,9 @@ fn preserve_incomplete_base_in_tx(
         .json();
     let kind = dohc_engine_collab::ContentKind::parse(&payload.content_kind)
         .map_err(map_collab_hard_error)?;
+    let incoming_doc = incoming_base
+        .doc()
+        .map_err(|error| map_base_error(error, BASE_BYTES_INVALID))?;
     let incoming = project_ydoc_with_store(tx, key, incoming_doc, kind)?.content;
     let current = validate_retryable_ydoc_identity(tx, key, &payload.path)?;
     let snapshot = current.snapshot.as_ref();
@@ -6117,18 +6124,11 @@ fn preserve_incomplete_base_in_tx(
             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
             params![key.workspace_id,key.version_id,key.object_id]).map_err(SyncError::persist)?;
     }
-    let incoming_bytes: Vec<u8> = tx
-        .query_row(
-            "SELECT bytes FROM binary_blobs WHERE sha256=?1",
-            [&payload.update_blob_sha256],
-            |row| row.get(0),
-        )
-        .map_err(SyncError::corrupt)?;
     dohc_engine_collab::claim_base_at_relay_in_tx(
         tx,
         key,
         kind,
-        &dohc_engine_collab::CheckedBase::new(&incoming_bytes).map_err(map_collab_hard_error)?,
+        incoming_base,
         &dohc_engine_collab::BaseRelayCoordinate::new(origin_id, origin_seq, relay_seq)
             .map_err(map_collab_hard_error)?,
         now_ms,
@@ -8321,6 +8321,17 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                         record_facts: Vec::new(),
                     }))
                 } else if queues {
+                    if payload.is_base_state
+                        && dohc_engine_collab::read_marker_in(tx, &key)
+                            .map_err(map_collab_hard_error)?
+                            .and_then(|marker| marker.lineage_claim_id)
+                            .as_deref()
+                            != Some(payload.lineage_claim_id.as_str())
+                    {
+                        dohc_engine_collab::IncomingBase::new(&bytes)
+                            .doc()
+                            .map_err(|error| map_base_error(error, BASE_BYTES_INVALID))?;
+                    }
                     defer_ydoc_update_in_tx(
                         tx,
                         &key,
@@ -8533,31 +8544,11 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
         // or divergent redelivery), leaving state for an unacked coordinate.
         let kind = dohc_engine_collab::ContentKind::parse(&payload.content_kind)
             .map_err(map_collab_hard_error)?;
-        let checked = match dohc_engine_collab::CheckedBase::new(&bytes) {
-            Ok(checked) => checked,
-            Err(dohc_engine_collab::CollabError::ReplayParityViolation { .. }) => {
-                let reason = "ydoc.update base fails the replay check";
-                return refuse_ydoc(store, envelope, faults, reason);
-            }
-            Err(_) => {
-                let reason = "ydoc.update base bytes fail validation";
-                return refuse_ydoc(store, envelope, faults, reason);
-            }
-        };
         let claim_key = key.clone();
-        let claim_bytes = bytes.clone();
         // Never union two independent lineages. The relay winner is installed
         // as its own CRDT. A losing local projection is captured below before
         // any of its rows are purged and is preserved for conflict review.
-        let incoming_doc = dohc_engine_collab::Ydoc::wire();
-        if incoming_doc.apply(&claim_bytes).is_err() {
-            return refuse_ydoc(
-                store,
-                envelope,
-                faults,
-                "ydoc.update base bytes fail validation",
-            );
-        }
+        let incoming_base = dohc_engine_collab::IncomingBase::new(&bytes);
         let base_path = payload.path.clone();
         let incoming = crate::ydoc_recovery::RecoveryEnvelopeBinding {
             content_kind: &payload.content_kind,
@@ -8606,7 +8597,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                     tx,
                     &claim_key,
                     kind,
-                    &checked,
+                    &incoming_base,
                     &coordinate,
                     op.recorded_at_ms,
                 )
@@ -8704,7 +8695,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 tx,
                 &claim_key,
                 base_payload,
-                &incoming_doc,
+                &incoming_base,
                 relay_seq,
                 &op.origin_id,
                 op.origin_seq,
@@ -8807,13 +8798,11 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 tx,
                 &claim_key,
                 kind,
-                &checked,
+                &incoming_base,
                 &coordinate,
                 op.recorded_at_ms,
             )
-            .map_err(|error| {
-                map_collab_payload_error(error, "ydoc.update base could not be claimed")
-            })?;
+            .map_err(|error| map_base_error(error, BASE_BYTES_INVALID))?;
             let (winner, losing_claim_id, replaced) = match claim {
                 dohc_engine_collab::ClaimOutcome::AlreadyWon { winner } => {
                     // Only the replaced peer has its complete local projection.
@@ -8849,7 +8838,10 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 .lineage_claim_id
                 .clone()
                 .ok_or_else(|| local_corruption("winning Y.Doc lineage has no claim identity"))?;
-            let projection = project_ydoc_with_store(tx, &claim_key, &incoming_doc, kind)?;
+            let incoming_doc = incoming_base
+                .doc()
+                .map_err(|error| map_base_error(error, BASE_BYTES_INVALID))?;
+            let projection = project_ydoc_with_store(tx, &claim_key, incoming_doc, kind)?;
             let (conflict, recovered_paths) = preserve_base_sides_in_tx(
                 tx,
                 &claim_key,
@@ -8885,7 +8877,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 tx,
                 &claim_key,
                 &base_path,
-                &incoming_doc,
+                incoming_doc,
                 winner.content_kind,
                 &op.origin_id,
                 op.origin_seq,
@@ -9736,6 +9728,19 @@ fn map_fold_edit_error(error: CollabError) -> SyncError {
         other => map_collab_payload_error(other, "Markdown conflict resolution fold failed"),
     }
 }
+
+const BASE_FAILS_REPLAY_CHECK: &str = "ydoc.update base fails the replay check";
+
+fn map_base_error(error: CollabError, reason: &'static str) -> SyncError {
+    match error {
+        CollabError::ReplayParityViolation { .. } => SyncError::InvalidInput {
+            reason: BASE_FAILS_REPLAY_CHECK,
+        },
+        other => map_collab_payload_error(other, reason),
+    }
+}
+
+const BASE_BYTES_INVALID: &str = "ydoc.update base bytes fail validation";
 
 fn map_collab_payload_error(error: CollabError, reason: &'static str) -> SyncError {
     match error {

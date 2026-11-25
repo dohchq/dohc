@@ -3058,7 +3058,7 @@ fn original_record_replay_after_compaction_and_restart_binds_complete_attributio
                     tx,
                     &key,
                     ContentKind::Plaintext,
-                    &dohc_engine_collab::CheckedBase::new(&doc.encode_full_state())?,
+                    &dohc_engine_collab::IncomingBase::new(&doc.encode_full_state()),
                     1_100,
                 )?;
                 Ok(())

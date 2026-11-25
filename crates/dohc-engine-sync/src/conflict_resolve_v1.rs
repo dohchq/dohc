@@ -2570,7 +2570,7 @@ fn validate_scene_successor_with_store(
     })?;
     let doc = dohc_engine_collab::Ydoc::wire();
     doc.apply(&successor.update)
-        .map_err(map_local_collab_error)?;
+        .map_err(map_successor_collab_error)?;
     let projected = crate::project_ydoc_with_store(tx, key, &doc, ContentKind::Scene)?;
     if projected.content != scene_result {
         return Err(SyncError::InvalidInput {
@@ -2763,7 +2763,7 @@ fn commit_imported_lineage(
                 .as_ref()
                 .map(|(claim, vector)| (claim.as_str(), vector.as_str())),
         )
-        .map_err(map_local_collab_error)?;
+        .map_err(map_successor_collab_error)?;
         if reviewed.is_some() {
             let review: Option<String> = tx
                 .query_row(
@@ -3244,8 +3244,11 @@ fn archive_conflicting_successor(
         return Ok(());
     }
     let base = imported_successor(tx, transition, successor)?;
-    let doc = dohc_engine_collab::Ydoc::wire();
-    doc.apply(&base.update).map_err(map_local_collab_error)?;
+    let doc = dohc_engine_collab::validate_replay_parity_with_scratch(
+        &dohc_engine_collab::Ydoc::wire(),
+        &base.update,
+    )
+    .map_err(map_successor_collab_error)?;
     if doc.has_pending_dependencies()
         || dohc_engine_storage::hex_sha256(&doc.encode_state_vector())
             != successor.state_vector_blob_sha256
@@ -3458,7 +3461,7 @@ pub fn commit_local_conflict_resolve_v1_in_tx(
                         now_ms: result.conflict.updated_at_ms,
                     },
                 )
-                .map_err(map_local_collab_error)?,
+                .map_err(map_successor_collab_error)?,
             )
         }
         LocalLineagePlan::ExactArchive {
@@ -4311,6 +4314,15 @@ fn map_local_collab_error(error: dohc_engine_collab::CollabError) -> SyncError {
     }
 }
 
+fn map_successor_collab_error(error: dohc_engine_collab::CollabError) -> SyncError {
+    match error {
+        dohc_engine_collab::CollabError::ReplayParityViolation { .. } => SyncError::InvalidInput {
+            reason: "ydoc-resolution-not-representable",
+        },
+        other => map_local_collab_error(other),
+    }
+}
+
 fn corrupt_local(reason: &'static str) -> SyncError {
     SyncError::Storage(StorageError::corrupt_public(std::io::Error::other(reason)))
 }
@@ -4995,6 +5007,28 @@ mod tests {
         passive: bool,
         kind: ContentKind,
     ) -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
+        receiver_fixture_shaped(passive, kind, |successor| successor)
+    }
+
+    fn split_successor_fixture() -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
+        receiver_fixture_shaped(false, ContentKind::Plaintext, |mut successor| {
+            let split = dohc_engine_collab::replay_parity::base_splitting_an_emoji_for_test();
+            let merged =
+                dohc_engine_collab::merge_updates(&[successor.update, split]).expect("merge");
+            let doc = dohc_engine_collab::Ydoc::wire();
+            doc.apply(&merged).expect("the successor applies");
+            successor.state_vector = doc.encode_state_vector();
+            successor.lineage_claim_id = dohc_engine_storage::hex_sha256(&merged);
+            successor.update = merged;
+            successor
+        })
+    }
+
+    fn receiver_fixture_shaped(
+        passive: bool,
+        kind: ContentKind,
+        shape: impl FnOnce(SuccessorBase) -> SuccessorBase,
+    ) -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
         let scratch = ScratchDir::new().expect("scratch");
         let path = dohc_engine_testkit::engine_db_path(&scratch).expect("db path");
         let mut store = if passive {
@@ -5062,6 +5096,7 @@ mod tests {
             result_sha256: &result_sha,
         });
         let successor = fresh_successor_base(&identity, "resolved text").expect("successor");
+        let successor = shape(successor);
         let update_blob_sha256 = store
             .put_binary_blob(&successor.update)
             .expect("successor update");
@@ -7390,6 +7425,101 @@ mod tests {
             panic!("projection transaction cannot crash without an injected fault");
         };
         projected
+    }
+
+    fn refuses_the_split_successor(store: &mut EngineStore, key: &DocKey, value: Value) {
+        let before = active_claim(store, key);
+        let parent = imported_envelope(0, "conflict.resolve", value);
+        let leases = crate::NoLiveLeases;
+        let outcome = crate::apply_conflict_envelope(store, &parent, &NoFaults, &leases);
+        let outcome = outcome.expect("the pull goes on");
+        let reason = match outcome.primary {
+            crate::ApplyDisposition::Refused(refusal) => refusal.reason.message().to_owned(),
+            _ => panic!("the successor was not refused"),
+        };
+        assert_eq!(reason, "ydoc-resolution-not-representable");
+        assert_eq!(active_claim(store, key), before);
+        let notices = crate::list_refusal_notices(store, "ws").expect("notices");
+        let named = notices.iter().any(|notice| {
+            notice
+                .document
+                .as_ref()
+                .is_some_and(|document| document.object_id == "object-a")
+        });
+        assert!(named, "{notices:?}");
+    }
+
+    #[test]
+    fn a_successor_that_splits_an_emoji_is_refused_and_the_pull_goes_on() {
+        let (_scratch, mut store, key, built) = split_successor_fixture();
+        refuses_the_split_successor(&mut store, &key, built.value);
+        let other = dohc_engine_collab::Ydoc::wire();
+        other.plaintext_insert(0, "other");
+        let claim = store
+            .put_binary_blob(&other.encode_full_state())
+            .expect("other base");
+        let mut next = imported_envelope(
+            1,
+            "ydoc.update",
+            json!({"versionId":"main","objectId":"object-b","path":"other.md","contentKind":"plaintext","updateBlobSha256":claim,"lineageClaimId":claim,"isBaseState":true}),
+        );
+        next.relay_seq = Some(1);
+        let applied = crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &next,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("the next note applies");
+        assert!(matches!(
+            applied.primary,
+            crate::ApplyDisposition::Applied(_)
+        ));
+        let other_key = DocKey::new("ws", "main", "object-b").expect("key");
+        assert_eq!(active_claim(&store, &other_key), Some(claim));
+    }
+
+    #[test]
+    fn a_diverged_note_refuses_a_successor_that_splits_an_emoji() {
+        let (_scratch, mut store, key, built) = split_successor_fixture();
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-a".to_owned(),
+                    path: "doc.md".to_owned(),
+                    text: "local newer".to_owned(),
+                    moment_id: "moment-local-newer".to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 20,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("advance local head");
+        refuses_the_split_successor(&mut store, &key, built.value);
+        let (open, inactive): (i64, i64) = store
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM conflicts WHERE workspace_id='ws' AND status='open'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM ydoc_inactive_lineages WHERE workspace_id='ws' AND disposition='conflicting-successor'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .expect("divergence state");
+        assert_eq!((open, inactive), (0, 0));
     }
 
     #[test]

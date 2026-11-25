@@ -1,5 +1,5 @@
 use super::*;
-use crate::{ContentKind, Ydoc};
+use crate::ContentKind;
 use dohc_engine_domain::{write_text_in_tx, DomainError, WriteResult, WriteText};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,12 +155,12 @@ where
                 OR EXISTS(SELECT 1 FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
             params![binding.workspace_id, binding.main_version_id, binding.object_id, binding.current_path], |row| row.get(0)
         ).map_err(read_sql).map_err(E::from)?;
-        let doc = Ydoc::wire();
-        let applied = doc.apply(bytes);
-        if occupied && (applied.is_err() || !doc.has_reader_source()) {
+        let base = durable::IncomingBase::new(bytes);
+        let applied = base.doc();
+        if occupied && !applied.as_ref().is_ok_and(|doc| doc.has_reader_source()) {
             return Err(E::from(ApplicationError::Conflict));
         }
-        applied.map_err(ApplicationError::from).map_err(E::from)?;
+        let doc = applied.map_err(ApplicationError::from).map_err(E::from)?;
         if occupied && doc.has_reader_source() {
             let other_occupant: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND (object_id=?3 OR path=?4) AND NOT (object_id=?3 AND path=?4))
@@ -198,7 +198,7 @@ where
             let authority = serde_json::to_string(&(&held.namespace, binding, &held.coordinate))
                 .map_err(|_| E::from(ApplicationError::Corrupt))?;
             let canonical = doc.project(ContentKind::Richdoc).map_err(ApplicationError::from).map_err(E::from)?.content;
-            let source = crate::reader_snapshot::resolve(tx, &key, &doc, &canonical,
+            let source = crate::reader_snapshot::resolve(tx, &key, doc, &canonical,
                 &crate::reader_snapshot::SnapshotIdentity {
                     moment: &moment, path: &binding.current_path, digest: &input.projected_markdown_digest,
                     lineage: &binding.lineage_claim_id, restore_fence: None, authority: &authority,
@@ -223,7 +223,7 @@ where
             now_ms: input.baseline_registered_at_ms, request_id: None,
         }).map_err(E::from)?;
         if written.deduped || written.snapshot.object_id != binding.object_id { return Err(E::from(ApplicationError::Conflict)); }
-        let claimed = durable::claim_base_in_tx(tx, &key, ContentKind::Richdoc, &durable::CheckedBase::new(bytes).map_err(ApplicationError::from).map_err(E::from)?, input.baseline_registered_at_ms)
+        let claimed = durable::claim_base_in_tx(tx, &key, ContentKind::Richdoc, &base, input.baseline_registered_at_ms)
             .map_err(ApplicationError::from).map_err(E::from)?;
         if !matches!(claimed, durable::ClaimOutcome::Claimed { ref base_snapshot_sha } if base_snapshot_sha == &input.baseline_digest) {
             return Err(E::from(ApplicationError::Conflict));
@@ -303,6 +303,7 @@ fn insert_bootstrap(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Ydoc;
     use dohc_test_scratch::ScratchDir;
 
     #[derive(Debug, thiserror::Error)]
