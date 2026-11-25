@@ -1686,8 +1686,8 @@ describe("the owner's Chats and Comments in a browser", () => {
       userId: OWNER,
       maxPostBytes: limits.maxRequestBytes,
       maxBodyBytes: expect.any(Number),
-      // The owner's browser deletes only their own messages.
-      moderates: false,
+      // The owner moderates as an admin does.
+      moderates: true,
       channels: [
         { channelWireId: GROUP, name: "team", kind: "channel", type: "both", access: "read-write" },
       ],
@@ -1868,6 +1868,35 @@ describe("the owner's Chats and Comments in a browser", () => {
         path,
       ).toBe(404);
     }
+  });
+
+  it("deletes a member's message in a Group, as an admin does", async () => {
+    const { h, storage } = await seed();
+    const ana = await member(h, storage, "ana");
+    const posted = await chat(h, "messages", "ana", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        shareId: ana.shareId,
+        channelWireId: GROUP,
+        lane: "posts",
+        id: "ana-1",
+        body: "from ana",
+        authorKind: "human",
+      }),
+    });
+    expect(posted.status, await posted.clone().text()).toBe(200);
+    const { messageId, threadId } = (await json(posted)).message as {
+      messageId: string;
+      threadId: string;
+    };
+    const deleted = await ownerChat(
+      h,
+      "messages/delete",
+      OWNER,
+      jsonBody({ shareId: OWNER_CHAT, threadId, messageId }),
+    );
+    expect(deleted.status, await deleted.clone().text()).toBe(200);
   });
 
   it("deletes the owner's own message, and none in a direct message, an agent chat or on a secret file", async () => {

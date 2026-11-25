@@ -36,7 +36,7 @@ reads what the owner's computer reads. It reaches only the link read routes
 account's workspaces at `/sync/members/workspaces`. It also reaches the
 named-chat routes for the Groups and file Comments an admin reaches. The owner
 posts there only as a person, under the relay's own `relay:owner-browser:`
-origin, and the page offers Delete only on their own messages. The account
+origin, and deletes messages there as an admin does. The account
 routes, member management, settings, and sharing still refuse a cookie. A
 browser can't read General, direct messages, or agent chats, or edit a page
 live. Each new read checks the session

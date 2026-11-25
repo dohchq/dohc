@@ -225,7 +225,7 @@ it("forwards the owner's chat under their workspace, and only from their own pag
   expect(await channels.json()).toMatchObject({
     shareId: "owner:workspace",
     userId: "owner",
-    moderates: false,
+    moderates: true,
     channels: [{ channelWireId: "wire", name: "Team", access: "read-write" }],
   });
   const posted = await f.web.handle(request("messages", "owner", owned));

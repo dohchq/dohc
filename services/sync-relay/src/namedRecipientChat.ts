@@ -446,7 +446,8 @@ export function createNamedRecipientChat(options: {
           share ? share.workspaceId : "",
         );
         controller.signal.throwIfAborted();
-        if (channels) await options.claimPendingShares(actor.userId, controller.signal);
+        // The owner holds the workspace, not an invite.
+        if (channels && !owned) await options.claimPendingShares(actor.userId, controller.signal);
         if (!share || !shareId || actor.workspaceId !== share.workspaceId) throw notFound();
         if (following) {
           const count = followsByUser.get(actor.userId) ?? 0;
@@ -551,8 +552,8 @@ export function createNamedRecipientChat(options: {
             const files = workspaceFileReach(fresh);
             return json({
               ...listing,
-              // The page offers Delete on others' messages; the delete route decides. The owner's page offers it on their own.
-              moderates: !owned && (role === "owner" || role === "admin"),
+              // The page offers Delete on others' messages; the delete route decides.
+              moderates: role === "owner" || role === "admin",
               channels: groups
                 .filter((group) => workspaceGroupReachable(fresh, group.channelWireId, resolver!))
                 .map((group) => ({
