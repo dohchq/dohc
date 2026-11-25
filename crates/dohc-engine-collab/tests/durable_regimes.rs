@@ -3219,76 +3219,152 @@ fn original_record_replay_after_compaction_and_restart_binds_complete_attributio
     }
 }
 
-#[test]
-fn a_successor_install_reports_an_unreadable_stored_update_as_corruption() {
-    let scratch = unique_dir("successor-unreadable-update");
+fn claimed_with_rows(
+    tag: &str,
+    base: &[u8],
+    rows: &[(i64, &[u8])],
+    head_snapshot_seq: i64,
+) -> (dohc_test_scratch::ScratchDir, EngineStore, DocKey, String) {
+    let scratch = unique_dir(tag);
     let mut store = open_at(&scratch, 1_000);
     let key = test_key();
     seed_parents(&mut store, &key, 1_000);
-    let (base, _) = plaintext_base_and_delta();
     let claimed = claim_base(
         &mut store,
         &key,
         ContentKind::Plaintext,
-        &base,
+        base,
         &NoFaults,
         1_000,
     );
     let ClaimOutcome::Claimed { base_snapshot_sha } = committed(claimed.expect("claim")) else {
         panic!("the first base must be claimed");
     };
-    let unreadable = [2, 0, 5, 0, 0, 5, 0, 0];
-    let sha = store.put_binary_blob(&unreadable).expect("store the bytes");
+    let mut shas = Vec::new();
+    for (seq, bytes) in rows {
+        let sha = store.put_binary_blob(bytes).expect("store the bytes");
+        shas.push((*seq, sha));
+    }
+    let head_update_seq = rows.iter().map(|(seq, _)| *seq).max().unwrap_or(0);
     committed(
         store
             .write_with(&NoFaults, |tx| {
+                let ids = (&key.workspace_id, &key.version_id, &key.object_id);
+                for (seq, sha) in &shas {
+                    tx.execute(
+                        "INSERT INTO ydoc_updates (workspace_id, version_id, object_id, seq, \
+                         update_blob_sha256, recorded_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                        rusqlite::params![ids.0, ids.1, ids.2, seq, sha],
+                    )
+                    .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                }
                 tx.execute(
-                    "INSERT INTO ydoc_updates (workspace_id, version_id, object_id, seq, \
-                     update_blob_sha256, recorded_at_ms) VALUES (?1, ?2, ?3, 1, ?4, 0)",
-                    rusqlite::params![key.workspace_id, key.version_id, key.object_id, sha],
+                    "INSERT OR IGNORE INTO ydoc_snapshots SELECT workspace_id, version_id, \
+                     object_id, ?4, snapshot_blob_sha256, state_vector_blob_sha256, \
+                     recorded_at_ms FROM ydoc_snapshots \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND up_to_seq=0",
+                    rusqlite::params![ids.0, ids.1, ids.2, head_snapshot_seq],
                 )
                 .map_err(dohc_engine_storage::StorageError::persist_public)?;
                 tx.execute(
-                    "UPDATE ydoc_docs SET head_update_seq=1, path='notes/a.txt' \
-                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    "UPDATE ydoc_docs SET head_update_seq=?4, head_snapshot_seq=?5, \
+                     path='notes/a.txt' WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    rusqlite::params![ids.0, ids.1, ids.2, head_update_seq, head_snapshot_seq],
                 )
                 .map_err(dohc_engine_storage::StorageError::persist_public)?;
                 Ok::<_, dohc_engine_storage::StorageError>(())
             })
-            .expect("an unreadable stored update"),
+            .expect("store the rows"),
     );
-    let predecessor = Ydoc::wire();
-    predecessor.apply(&base).expect("the base applies");
-    let state_vector = dohc_engine_collab::hex_sha256(&predecessor.encode_state_vector());
+    (scratch, store, key, base_snapshot_sha)
+}
+
+fn successor_over(
+    key: &DocKey,
+    claim: &str,
+    state_vector: &str,
+) -> dohc_engine_collab::SuccessorBase {
     let text = "the reviewed result\n";
     let result = dohc_engine_collab::hex_sha256(text.as_bytes());
     let identity = SuccessorIdentity::derive(SuccessorIdentityInput {
-        key: &key,
-        predecessor_claim_id: &base_snapshot_sha,
-        predecessor_state_vector_sha256: &state_vector,
+        key,
+        predecessor_claim_id: claim,
+        predecessor_state_vector_sha256: state_vector,
         artifact_op_kind: "moment.append",
         artifact_id: "moment-successor",
         artifact_preimage_sha256: &result,
         content_kind: ContentKind::Plaintext,
         result_sha256: &result,
     });
-    let successor = fresh_successor_base(&identity, text).expect("construct successor");
-    let refused = replace_lineage_with_successor(
-        &mut store,
-        SuccessorReplacement {
-            key: &key,
-            expected_predecessor_claim_id: &base_snapshot_sha,
-            expected_predecessor_state_vector_sha256: &state_vector,
-            path: "notes/a.txt",
-            successor: &successor,
-            scene_result: None,
-            author: SuccessorAuthor::default(),
-            now_ms: 1_200,
-        },
-        &NoFaults,
-    )
-    .map(drop);
+    fresh_successor_base(&identity, text).expect("construct successor")
+}
+
+fn replacement<'a>(
+    key: &'a DocKey,
+    claim: &'a str,
+    state_vector: &'a str,
+    successor: &'a dohc_engine_collab::SuccessorBase,
+) -> SuccessorReplacement<'a> {
+    SuccessorReplacement {
+        key,
+        expected_predecessor_claim_id: claim,
+        expected_predecessor_state_vector_sha256: state_vector,
+        path: "notes/a.txt",
+        successor,
+        scene_result: None,
+        author: SuccessorAuthor::default(),
+        now_ms: 1_200,
+    }
+}
+
+const UNREADABLE_UPDATE: [u8; 8] = [2, 0, 5, 0, 0, 5, 0, 0];
+
+#[test]
+fn a_successor_install_reports_an_unreadable_stored_update_as_corruption() {
+    let (base, _) = plaintext_base_and_delta();
+    let rows = [(1, &UNREADABLE_UPDATE[..])];
+    let (_scratch, mut store, key, claim) =
+        claimed_with_rows("successor-unreadable-update", &base, &rows, 0);
+    let predecessor = Ydoc::wire();
+    predecessor.apply(&base).expect("the base applies");
+    let state_vector = dohc_engine_collab::hex_sha256(&predecessor.encode_state_vector());
+    let successor = successor_over(&key, &claim, &state_vector);
+    let install = replacement(&key, &claim, &state_vector, &successor);
+    let refused = replace_lineage_with_successor(&mut store, install, &NoFaults);
+    let refused = refused.map(drop);
+    assert!(
+        matches!(refused, Err(CollabError::Corrupt { .. })),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn a_reviewed_install_reports_an_unreadable_compacted_update_as_corruption() {
+    let (base, _) = plaintext_base_and_delta();
+    let peer = Ydoc::wire();
+    peer.apply(&base).expect("the base applies");
+    let _first = peer.plaintext_insert(6, "a");
+    let waits_for_the_first = peer.plaintext_insert(7, "b");
+    let rows = [(1, &UNREADABLE_UPDATE[..]), (2, &waits_for_the_first[..])];
+    let (_scratch, mut store, key, claim) =
+        claimed_with_rows("reviewed-unreadable-update", &base, &rows, 1);
+    let loaded = load_persisted(&store, &key)
+        .expect("the tail after the snapshot loads")
+        .expect("a marker");
+    assert!(loaded.doc.has_pending_dependencies());
+    let state_vector = dohc_engine_collab::hex_sha256(&loaded.doc.encode_state_vector());
+    let successor = successor_over(&key, &claim, &state_vector);
+    let install = replacement(&key, &claim, &state_vector, &successor);
+    let local_predecessor = Some((claim.as_str(), state_vector.as_str()));
+    let refused = store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_collab::replace_reviewed_lineage_with_successor_in_tx(
+                tx,
+                install,
+                local_predecessor,
+            )
+        })
+        .map(drop);
     assert!(
         matches!(refused, Err(CollabError::Corrupt { .. })),
         "{refused:?}"
