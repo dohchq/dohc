@@ -502,3 +502,147 @@ fn a_frontmatter_only_save_gives_no_line_a_boundary() {
         assert_eq!(sequence_length(&doc), length);
     });
 }
+
+#[test]
+fn deleting_a_line_leaves_the_next_line_its_boundary() {
+    reading_body_sequence_here(|| {
+        let base = seeded(2, "- [ ] one\n- [ ] two\n- [ ] three\n");
+        let two = path_of(&base, 1);
+        let item = two[1].clone();
+        let (ours, theirs) = peers(&base);
+        fold(&ours, "- [ ] two\n- [ ] three\n");
+        edited(&theirs, move |txn, _, containers| {
+            containers.insert(txn, format!("{item}.checked"), Any::Bool(true));
+        });
+        let after = "- [x] two\n- [ ] three\n";
+        assert_eq!(merged(&ours, &theirs), [after, after]);
+        assert_eq!(path_of(&ours, 0), two);
+
+        let base = seeded(2, "Above\n\n# Title\n");
+        let (ours, theirs) = peers(&base);
+        fold(&ours, "# Title\n");
+        let title = boundaries(&theirs).pop().unwrap();
+        edited(&theirs, move |txn, _, _| {
+            title.insert_attribute(txn, "level", Any::Number(2.0));
+        });
+        assert_eq!(merged(&ours, &theirs), ["## Title\n", "## Title\n"]);
+
+        let base = seeded(2, "alpha\n\n# atlas\n");
+        let (ours, theirs) = peers(&base);
+        fold(&ours, "# atlas\n");
+        edited(&theirs, |txn, sequence, _| {
+            let at = sequence.len(txn) - 5;
+            sequence.remove_range(txn, at, 1);
+        });
+        assert_eq!(merged(&ours, &theirs), ["# tlas\n", "# tlas\n"]);
+    });
+}
+
+fn bold_code() -> Ydoc {
+    by_hand(|txn, sequence, _| {
+        typed(txn, sequence, "x");
+        line(txn, sequence, "codeBlock", &[]);
+        let at = sequence.len(txn);
+        sequence.insert_with_attributes(txn, at, "ab", marked("bold", bold()));
+    })
+}
+
+#[test]
+fn code_letters_that_leave_their_code_block_lose_the_marks_it_hid() {
+    reading_body_sequence_here(|| {
+        assert_eq!(markdown_of(&bold_code()), "x\n\n```\nab\n```\n");
+        for file in ["x\n\nab\n", "xab\n"] {
+            let doc = bold_code();
+            fold(&doc, file);
+            assert_eq!(markdown_of(&doc), file);
+        }
+    });
+}
+
+#[test]
+fn a_formatting_only_save_keeps_a_peer_delete() {
+    reading_body_sequence_here(|| {
+        let base = seeded(2, "ab\n");
+        let (ours, theirs) = peers(&base);
+        let length = sequence_length(&ours);
+        fold(&ours, "**ab**\n");
+        assert_eq!(sequence_length(&ours), length);
+        edited(&theirs, |txn, sequence, _| {
+            let at = sequence.len(txn) - 1;
+            sequence.remove_range(txn, at, 1);
+        });
+        assert_eq!(merged(&ours, &theirs), ["**a**\n", "**a**\n"]);
+    });
+}
+
+#[test]
+fn an_element_that_replaces_bold_letters_writes_no_formatting_a_peer_must_undo() {
+    reading_body_sequence_here(|| {
+        let base = seeded(2, "**ab**\n");
+        let (ours, theirs) = peers(&base);
+        fold(&ours, "![a](b.png)**b**\n");
+        edited(&theirs, |txn, sequence, _| {
+            let at = sequence.len(txn) - 2;
+            sequence.format(txn, at, 2, marked("bold", Any::Null))
+        });
+        let after = "![a](b.png)b\n";
+        assert_eq!(merged(&ours, &theirs), [after, after]);
+    });
+}
+
+#[test]
+fn a_path_never_holds_one_id_twice() {
+    reading_body_sequence_here(|| {
+        let doc = by_hand(|txn, sequence, containers| {
+            containers.insert(txn, "q", Any::from("blockquote"));
+            containers.insert(txn, "l", Any::from("bulletList"));
+            containers.insert(txn, "i", Any::from("listItem"));
+            line(txn, sequence, "paragraph", &["q"]);
+            typed(txn, sequence, "a");
+            line(txn, sequence, "paragraph", &["l", "i", "q"]);
+            typed(txn, sequence, "c");
+        });
+        assert_eq!(markdown_of(&doc), "> a\n\n- > c\n");
+        let file = "> a\n>\n> - > c\n";
+        fold(&doc, file);
+        assert_eq!(markdown_of(&doc), file);
+        let path = path_of(&doc, 1);
+        assert_eq!(path[1..3], ["l", "i"]);
+        assert_eq!(path.iter().collect::<BTreeSet<_>>().len(), 4);
+    });
+}
+
+#[test]
+fn another_replica_writes_the_file_a_format_two_note_took_as_its_source() {
+    reading_body_sequence_here(|| {
+        let base = seeded(2, "Run it first\n");
+        let (ours, theirs) = peers(&base);
+        let file = "Run [`npm install`](https://example.com) first\n";
+        fold(&ours, file);
+        ours.preserve_folded_markdown_source(file).unwrap();
+        theirs.apply(&ours.encode_full_state()).unwrap();
+        let projection = markdown_of(&theirs);
+        assert_ne!(projection, file);
+        let snapshot = || Ok::<_, ()>(Some("Run it first\n".to_owned()));
+        let source = theirs.settled_markdown_source(&projection, snapshot);
+        assert_eq!(source, Ok(Some(file.to_owned())));
+    });
+}
+
+#[test]
+fn merging_two_quotes_keeps_the_ids_of_a_list_in_the_second() {
+    reading_body_sequence_here(|| {
+        let base = seeded(2, "> a\n\nmiddle\n\n> - b\n");
+        let last = boundaries(&base).len() - 1;
+        let ids = path_of(&base, last)[1..].to_vec();
+        let list = ids[0].clone();
+        let (ours, theirs) = peers(&base);
+        fold(&ours, "> a\n>\n> middle\n>\n> - b\n");
+        edited(&theirs, move |txn, _, containers| {
+            containers.insert(txn, list, Any::from("orderedList"));
+        });
+        let after = "> a\n>\n> middle\n>\n> 1. b\n";
+        assert_eq!(merged(&ours, &theirs), [after, after]);
+        assert_eq!(path_of(&ours, last)[1..], ids);
+    });
+}
