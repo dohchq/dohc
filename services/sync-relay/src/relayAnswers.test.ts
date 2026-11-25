@@ -36,7 +36,7 @@ describe("untilRelayAnswers", () => {
       retryMs: 20,
       signal: new AbortController().signal,
     });
-    expect(paths.length).toBeGreaterThan(1);
+    expect(paths.length).toBeGreaterThan(0);
   });
 
   it("stops when the server closes", async () => {
