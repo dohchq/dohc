@@ -852,6 +852,24 @@ describe("the automation replicas", () => {
     expect(errors).toHaveLength(2);
   });
 
+  it("finishes its passes without opening a copy until the relay answers at its public origin", async () => {
+    const { storage } = await relay();
+    const engine = fakeEngine();
+    const answered = Promise.withResolvers<void>();
+    const running = await start(storage, {
+      wanted: () => [WORKSPACE],
+      relayAnswers: answered.promise,
+    });
+    await running.settled();
+    expect(running.unavailable).toBe(false);
+    expect(running.replica(WORKSPACE)).toBeUndefined();
+    expect(engine.sent).toEqual([]);
+    answered.resolve();
+    await vi.waitFor(() => expect(running.replica(WORKSPACE)).toBeDefined(), {
+      timeout: WAIT_TIMEOUT_MS,
+    });
+  });
+
   it("opens a replica for each wanted workspace, joins its identity, and pulls when its log moves", async () => {
     const { storage, log } = await relay();
     const engine = fakeEngine();

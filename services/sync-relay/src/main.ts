@@ -162,6 +162,7 @@ import { isPublicHttpsOrigin, removeAutomationReplicas } from "./automationRepli
 import { tombstoneSettledOperations } from "./operationPublication";
 import { sweepChatWakesInBatches } from "./chatWakes";
 import { startServerCopies, type ServerCopies } from "./serverCopies";
+import { untilRelayAnswers } from "./relayAnswers";
 import {
   AUTOMATION_REPLICA_BEARER_PREFIX,
   authorizeAutomationReplication,
@@ -173,6 +174,7 @@ import { createStartTimeline } from "./startTimeline";
 const startTimeline = createStartTimeline();
 startTimeline.done("code");
 
+const RELAY_ANSWER_WAIT_MS = 120_000;
 const SHUTDOWN_GRACE_PERIOD_MS = parseGracePeriodMs(
   process.env.NODE_ENV === "test"
     ? process.env.SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS
@@ -1700,12 +1702,15 @@ if (!copiesOn && automationRoot) {
 if (!automationsOn && copiesOn) storage.endCopyReasonEverywhere("automation");
 // No phone read is open at start, but one a crash cut short can leave the reason a pass gave back after "Show on phone" went off.
 if (copiesOn) storage.endAccountReasonsOfHiddenOrDisownedCopies();
+const relayAnswered = Promise.withResolvers<void>();
+const relayProbe = new AbortController();
 const copyReplicas =
   automationReplicaKey && automationRoot
     ? {
         root: automationRoot,
         engineExecutable: process.env.DOHC_RELAY_ENGINE_EXECUTABLE!,
         relayOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN!,
+        relayAnswers: relayAnswered.promise,
         ...automationReplicaKey,
       }
     : undefined;
@@ -1833,6 +1838,14 @@ server.listen(requestedPort, host, () => {
         .purge(job.user_id, job.email)
         .catch(() => console.error("[sync-relay] Account deletion remains pending."));
   })();
+  if (copyReplicas)
+    void untilRelayAnswers(copyReplicas.relayOrigin, {
+      withinMs: RELAY_ANSWER_WAIT_MS,
+      retryMs: 500,
+      signal: relayProbe.signal,
+    }).then(() => {
+      if (!relayProbe.signal.aborted) relayAnswered.resolve();
+    });
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : requestedPort;
   console.log(`[sync-relay] listening on ${host}:${actualPort}`);
@@ -1844,6 +1857,7 @@ server.listen(requestedPort, host, () => {
 installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
   onClosed: async () => {
+    relayProbe.abort();
     // The rooms save through the hosts closed below, so they save what they hold first.
     await liveRooms?.close();
     stopJournalCheck();
