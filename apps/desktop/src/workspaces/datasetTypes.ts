@@ -118,8 +118,8 @@ export function datasetTypes({
     "}",
     "export type Row<Table extends keyof Tables> = Tables[Table];",
     "export type OperationName = keyof Operations;",
-    "export type Input<Name extends OperationName> = Operations[Name] extends { input: infer T } ? T : never;",
-    "export type Output<Name extends OperationName> = Operations[Name] extends { output: infer T } ? T : never;",
+    "export type Input<Name extends OperationName> = Name extends unknown ? (Operations[Name] extends { input: infer T } ? T : never) : never;",
+    "export type Output<Name extends OperationName> = Name extends unknown ? (Operations[Name] extends { output: infer T } ? T : never) : never;",
     "",
   );
   return lines.join("\n");

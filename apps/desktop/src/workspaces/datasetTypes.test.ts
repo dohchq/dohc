@@ -134,7 +134,7 @@ const exactInput: Equal<
 > = true;
 const exactOutput: Equal<Output<"reconcile">, { cleared: boolean; status: 3 | "done" | "open" }> = true;
 const undeclared: Equal<Input<"recalculate">, unknown> & Equal<Output<"recalculate">, unknown> = true;
-const notAnAction: Equal<Input<"listEntries">, never> = true;
+const notAnAction: Equal<Input<"listEntries">, never> & Equal<Input<"reconcile" | "listEntries">, Input<"reconcile">> & Equal<Output<"reconcile" | "listEntries">, Output<"reconcile">> = true;
 // @ts-expect-error an action takes only its declared input
 const wrongInput: Input<"reconcile"> = { entryId: "e1", kind: "refund", splits: [] };
 const fieldId: FieldIds["entries"]["cents"] = "${definition.tables[1]!.fields[3]!.fieldId}";
