@@ -108,8 +108,8 @@ These limits come from dohc, not from this example. The example works inside the
 | Operation input | 64 KiB of JSON, or 1 MiB for the owner-only bulk profile | `postJournalEntries` and `stageBankRows` use the bulk profile and take up to 5,000 items. The app's own calls stay under 60 KiB. |
 | JSON structure | 16,384 nodes, or 131,072 with the bulk profile | Bulk batches stay under it. |
 | One query result | 1,000 rows, 256 KiB | Bank review pages hold up to 100 rows and end early once the rows reach 240 KiB, so a page of long descriptions with five candidate entries each stays under the limit; the register pages at 100 entries and the accountant ledger at 100 lines (max 500). |
-| SQL parameters | 128 per statement, each under 64 KiB | Bulk inserts send rows as one JSON parameter, in chunks. |
-| `json_each` | Refused | Operations read JSON arrays with a recursive query instead. |
+| SQL parameters | 128 per statement, 256 KiB of JSON per statement, or 4 MiB with the bulk profile | Bulk inserts send rows as one JSON parameter, in chunks. |
+| `json_each` | Allowed | Operations still read JSON arrays with a recursive query, written before dohc allowed `json_each`. |
 | App backend calls | 30 at once, then 1 every 2 seconds, per app session | Bank posting batches rows into one call, and undo reverses up to 100 entries in one call. |
 
 ## Tests
