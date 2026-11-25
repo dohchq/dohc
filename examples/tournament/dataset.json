@@ -490,7 +490,8 @@
             "report",
             "walkover",
             "reopen",
-            "cancel"
+            "cancel",
+            "move"
           ]
         },
         {
@@ -679,6 +680,18 @@
         "court_id",
         "status",
         "started_at",
+        "version"
+      ]
+    },
+    {
+      "name": "moveMatch",
+      "label": "Move a live match to another court",
+      "table": "matches",
+      "kind": "action",
+      "access": "helper",
+      "readOnly": false,
+      "fields": [
+        "court_id",
         "version"
       ]
     },

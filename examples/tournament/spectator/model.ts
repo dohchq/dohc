@@ -90,7 +90,8 @@ type EventKind =
   | "report"
   | "walkover"
   | "reopen"
-  | "cancel";
+  | "cancel"
+  | "move";
 
 interface MatchEvent {
   id: string;
@@ -109,7 +110,7 @@ interface MatchEvent {
 
 export type TimelineEntry = Pick<
   MatchEvent,
-  "seq" | "game" | "kind" | "side" | "playerA" | "playerB" | "scoreA" | "scoreB" | "at"
+  "seq" | "game" | "kind" | "side" | "playerA" | "playerB" | "scoreA" | "scoreB" | "courtId" | "at"
 > & { actor?: string };
 
 export interface Timeline {
@@ -543,6 +544,7 @@ export function eventText(
   if (event.kind === "game") return `${nameOf(event.side)} took game ${event.game} · ${court}`;
   if (event.kind === "reopen") return `M${match?.number ?? ""} result reopened`;
   if (event.kind === "cancel") return `M${match?.number ?? ""} start cancelled · ${court}`;
+  if (event.kind === "move") return `M${match?.number ?? ""} moved to ${court}`;
   if (event.kind === "undo")
     return event.side
       ? `Point removed · ${nameOf(event.side)} · ${court}`

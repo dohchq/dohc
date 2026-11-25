@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 export {
+  ArrowRight,
   Check,
   ChevronDown,
   ChevronLeft,

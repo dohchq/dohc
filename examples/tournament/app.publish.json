@@ -12,6 +12,7 @@
       "seedDemo",
       "startMatch",
       "returnToQueue",
+      "moveMatch",
       "scorePoint",
       "undoPoint",
       "completeMatch",

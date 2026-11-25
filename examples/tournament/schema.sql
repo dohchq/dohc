@@ -79,7 +79,7 @@ CREATE TABLE match_events (
   match_id TEXT NOT NULL REFERENCES matches (id),
   seq INTEGER NOT NULL CHECK (seq >= 1),
   game INTEGER NOT NULL CHECK (game >= 1),
-  kind TEXT NOT NULL CHECK (kind IN ('bye', 'start', 'point', 'undo', 'game', 'complete', 'report', 'walkover', 'reopen', 'cancel')),
+  kind TEXT NOT NULL CHECK (kind IN ('bye', 'start', 'point', 'undo', 'game', 'complete', 'report', 'walkover', 'reopen', 'cancel', 'move')),
   side TEXT CHECK (side IN ('a', 'b')),
   player_a TEXT REFERENCES players (id),
   player_b TEXT REFERENCES players (id),

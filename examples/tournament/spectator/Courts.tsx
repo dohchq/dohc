@@ -33,6 +33,7 @@ export interface ScoreActions {
   report(match: Match, games: Array<[number, number]>): Promise<boolean>;
   reopen(match: Match): void;
   returnToQueue(match: Match): void;
+  move(match: Match, court: Court): void;
   pending: ReadonlySet<string>;
   taps: ReadonlyMap<string, readonly Side[]>;
   sending: ReadonlyMap<string, number>;
