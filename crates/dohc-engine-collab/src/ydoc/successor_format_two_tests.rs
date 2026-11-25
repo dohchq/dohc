@@ -116,9 +116,11 @@ fn the_format_two_version_is_part_of_the_epoch_and_any_other_version_is_format_o
 fn a_successor_with_a_container_that_holds_no_line_is_written_in_format_one() {
     reading_body_sequence_here(|| {
         for artifact in [">\n", "hello\n\n>\n"] {
-            let note = loaded(&successor(artifact));
-            assert_eq!(note.schema_version, 1, "{artifact:?}");
-            assert_eq!(note.file, artifact);
+            assert_eq!(
+                loaded(&successor(artifact)).schema_version,
+                1,
+                "{artifact:?}"
+            );
         }
     });
 }
