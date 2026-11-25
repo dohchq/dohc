@@ -1075,6 +1075,7 @@ describe("the saved workspace list", () => {
     await vi.waitFor(() => expect(same.workspace.state().currentWorkspaceId).toBe("ws-b"));
     same.workspace.stop();
 
+    disk.cache.crash();
     await launch(disk).files.removeAll();
     server.on("GET", "/sync/account/workspaces", listAnswer(entry("ws-a"), entry("ws-b")));
     const emptied = relaunch(server, disk);
