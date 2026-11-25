@@ -120,17 +120,20 @@ function Roadmap() {
     key = mutationKey(operation),
   ) {
     if (busy) return;
+    const opened = dialog;
+    const close = () => setDialog((current) => (current === opened ? null : current));
     setBusy(true);
     try {
       const reply = await client.invoke<T>(operation, input, key);
       setNotice(null);
+      close();
       rollup.reload();
       list.reload();
       done?.(reply.result);
     } catch (error) {
       const refusal = isAppBackendError(error) ? error.refusal : undefined;
       if (refusal?.code === "conflict" || refusal?.code === "not_found") {
-        setDialog(null);
+        close();
         rollup.reload();
         list.reload();
       }
@@ -239,6 +242,14 @@ function Roadmap() {
         subtitle="Engineering triages new items. You set priority and milestone, and archive what's out."
         actions={
           <Stack direction="horizontal" gap={8} wrap>
+            <Button
+              onClick={() => {
+                rollup.reload();
+                list.reload();
+              }}
+            >
+              Refresh
+            </Button>
             <Button onClick={() => show({ kind: "milestone" })}>New milestone</Button>
             <Button variant="primary" onClick={() => show({ kind: "item" })}>
               New item
@@ -350,7 +361,6 @@ function Roadmap() {
           onClose={() => show(null)}
           onSubmit={(input) =>
             void run("createItem", input, () => {
-              setDialog(null);
               setStatus("new");
               setMilestone("");
               setCursors([]);
@@ -368,7 +378,7 @@ function Roadmap() {
           alert={alert}
           busy={busy}
           onClose={() => show(null)}
-          onSubmit={(input) => void run("createMilestone", input, () => setDialog(null))}
+          onSubmit={(input) => void run("createMilestone", input)}
         />
       ) : null}
       {dialog?.kind === "plan" ? (
@@ -378,7 +388,7 @@ function Roadmap() {
           alert={alert}
           busy={busy}
           onClose={() => show(null)}
-          onSubmit={(input) => void run("planItem", input, () => setDialog(null))}
+          onSubmit={(input) => void run("planItem", input)}
         />
       ) : null}
     </AppShell>
@@ -518,7 +528,8 @@ function PlanDialog(props: {
 }) {
   const { item } = props;
   const [priority, setPriority] = useState(item.priority ?? 2);
-  const [milestoneId, setMilestoneId] = useState(item.milestoneId ?? props.milestones[0]?.id ?? "");
+  const [picked, setMilestoneId] = useState(item.milestoneId ?? "");
+  const milestoneId = picked || props.milestones[0]?.id || "";
   return (
     <Modal
       open
