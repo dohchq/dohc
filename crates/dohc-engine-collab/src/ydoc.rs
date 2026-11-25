@@ -123,7 +123,7 @@ pub const ROOT_SCENE_ASSETS: &str = "excalidraw:assets";
 pub const BODY_SEQUENCE_SETTING: &str = "DOHC_ENGINE_NOTE_BODY_SEQUENCE";
 
 fn body_sequence_setting() -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if READS_BODY_SEQUENCE_HERE.get() {
         return true;
     }
@@ -131,13 +131,13 @@ fn body_sequence_setting() -> bool {
     *ON.get_or_init(|| std::env::var(BODY_SEQUENCE_SETTING).is_ok_and(|value| value == "1"))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static READS_BODY_SEQUENCE_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
-pub(crate) fn reading_body_sequence_here<R>(run: impl FnOnce() -> R) -> R {
+#[cfg(any(test, feature = "test-support"))]
+pub fn reading_body_sequence_here<R>(run: impl FnOnce() -> R) -> R {
     READS_BODY_SEQUENCE_HERE.set(true);
     let ran = run();
     READS_BODY_SEQUENCE_HERE.set(false);

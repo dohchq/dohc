@@ -285,3 +285,220 @@ fn a_fold_keeps_the_letters_a_peer_is_typing_into() {
         }
     });
 }
+
+fn edited(doc: &Ydoc, edit: impl FnOnce(&mut yrs::TransactionMut, &yrs::TextRef, &MapRef)) {
+    let sequence = doc.doc.get_or_insert_text(ROOT_SEQUENCE);
+    let containers = doc.doc.get_or_insert_map(ROOT_CONTAINERS);
+    edit(&mut doc.doc.transact_mut(), &sequence, &containers);
+}
+
+fn by_hand(write: impl FnOnce(&mut yrs::TransactionMut, &yrs::TextRef, &MapRef)) -> Ydoc {
+    let doc = Ydoc::with_client_id(CLIENTS[0]);
+    let meta = doc.doc.get_or_insert_map(ROOT_META);
+    meta.insert(
+        &mut doc.doc.transact_mut(),
+        "schemaVersion",
+        Any::Number(2.0),
+    );
+    edited(&doc, write);
+    doc
+}
+
+fn line(txn: &mut yrs::TransactionMut, sequence: &yrs::TextRef, kind: &str, path: &[&str]) {
+    let at = sequence.len(txn);
+    let stored = sequence.insert_embed(txn, at, XmlElementPrelim::empty(body_sequence::BOUNDARY));
+    let path: Vec<Any> = path.iter().map(|id| Any::from(*id)).collect();
+    stored.insert_attribute(txn, "type", Any::from(kind));
+    stored.insert_attribute(txn, "path", Any::from(path));
+}
+
+fn typed(txn: &mut yrs::TransactionMut, sequence: &yrs::TextRef, letters: &str) {
+    let at = sequence.len(txn);
+    sequence.insert(txn, at, letters);
+}
+
+fn marked(name: &str, value: Any) -> yrs::types::Attrs {
+    yrs::types::Attrs::from([(Arc::from(name), value)])
+}
+
+fn bold() -> Any {
+    Any::from(HashMap::<String, Any>::new())
+}
+
+fn boundaries(doc: &Ydoc) -> Vec<yrs::XmlElementRef> {
+    let sequence = doc.doc.get_or_insert_text(ROOT_SEQUENCE);
+    let mut found = Vec::new();
+    let _ = sequence.try_visit_items(&doc.doc.transact(), |item| {
+        if let yrs::types::text::TextItem::Embed(Out::YXmlElement(element)) = item {
+            if element.tag().as_ref() == body_sequence::BOUNDARY {
+                found.push(element);
+            }
+        }
+        Ok::<_, ()>(())
+    });
+    found
+}
+
+fn path_of(doc: &Ydoc, line: usize) -> Vec<String> {
+    let element = boundaries(doc).swap_remove(line);
+    let _reading = doc.doc.transact();
+    match body_sequence::stored_under(&element, "path") {
+        Some(Any::Array(ids)) => ids
+            .iter()
+            .map(|id| match id {
+                Any::String(id) => id.to_string(),
+                _ => String::new(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn record(doc: &Ydoc, key: &str) -> Option<Any> {
+    let containers = doc.doc.get_or_insert_map(ROOT_CONTAINERS);
+    let _reading = doc.doc.transact();
+    body_sequence::stored_under(&containers, key)
+}
+
+fn markdown_of(doc: &Ydoc) -> String {
+    doc.project(ContentKind::Richdoc).unwrap().content
+}
+
+fn fold(doc: &Ydoc, file: &str) {
+    doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, file)
+        .expect("the fold");
+}
+
+fn merged(ours: &Ydoc, theirs: &Ydoc) -> [String; 2] {
+    let (our_state, their_state) = (ours.encode_full_state(), theirs.encode_full_state());
+    ours.apply(&their_state).unwrap();
+    theirs.apply(&our_state).unwrap();
+    [markdown_of(ours), markdown_of(theirs)]
+}
+
+fn peers(base: &Ydoc) -> (Ydoc, Ydoc) {
+    (copy(base, CLIENTS[1]), copy(base, CLIENTS[2]))
+}
+
+#[test]
+fn a_fold_keeps_code_letters_whose_marks_the_code_block_hides() {
+    reading_body_sequence_here(|| {
+        let base = by_hand(|txn, sequence, _| {
+            line(txn, sequence, "codeBlock", &[]);
+            sequence.insert_with_attributes(txn, 1, "ab", marked("bold", bold()));
+        });
+        let code = "```\nab\n```\n";
+        assert_eq!(markdown_of(&base), code);
+        let (ours, theirs) = peers(&base);
+        fold(&ours, &format!("{code}\nmore\n"));
+        edited(&theirs, |txn, sequence, _| sequence.remove_range(txn, 2, 1));
+        let after = "```\na\n```\n\nmore\n";
+        assert_eq!(merged(&ours, &theirs), [after, after]);
+    });
+}
+
+#[test]
+fn a_new_line_above_a_line_leaves_that_line_its_boundary() {
+    reading_body_sequence_here(|| {
+        let base = seeded(2, "# Title\n");
+        let (ours, theirs) = peers(&base);
+        fold(&ours, "Above\n\n# Title\n");
+        let title = boundaries(&theirs).swap_remove(0);
+        edited(&theirs, move |txn, _, _| {
+            title.insert_attribute(txn, "level", Any::Number(2.0));
+        });
+        let after = "Above\n\n## Title\n";
+        assert_eq!(merged(&ours, &theirs), [after, after]);
+    });
+}
+
+#[test]
+fn a_line_split_inside_bold_letters_writes_no_formatting_a_peer_must_undo() {
+    reading_body_sequence_here(|| {
+        let base = seeded(2, "**ab**\n");
+        let (ours, theirs) = peers(&base);
+        fold(&ours, "**a**\n\n**b**\n");
+        edited(&theirs, |txn, sequence, _| {
+            sequence.format(txn, 1, 2, marked("bold", Any::Null))
+        });
+        let after = "a\n\nb\n";
+        assert_eq!(merged(&ours, &theirs), [after, after]);
+    });
+}
+
+fn a_bullet_that_was_a_task(lines: &'static [&'static str]) -> Ydoc {
+    by_hand(move |txn, sequence, containers| {
+        containers.insert(txn, "l", Any::from("bulletList"));
+        containers.insert(txn, "i", Any::from("listItem"));
+        containers.insert(txn, "i.checked", Any::Bool(true));
+        for letters in lines {
+            line(txn, sequence, "paragraph", &["l", "i"]);
+            typed(txn, sequence, letters);
+        }
+    })
+}
+
+#[test]
+fn a_fold_keeps_the_records_a_list_item_holds_for_another_kind() {
+    reading_body_sequence_here(|| {
+        let base = a_bullet_that_was_a_task(&["a"]);
+        assert_eq!(markdown_of(&base), "- a\n");
+        let (ours, theirs) = peers(&base);
+        fold(&ours, "- ab\n");
+        edited(&theirs, |txn, _, containers| {
+            containers.insert(txn, "l", Any::from("taskList"));
+            containers.insert(txn, "i", Any::from("taskItem"));
+        });
+        let after = "- [x] ab\n";
+        assert_eq!(merged(&ours, &theirs), [after, after]);
+        assert_eq!(path_of(&ours, 0), ["l", "i"]);
+
+        let split = a_bullet_that_was_a_task(&["a", "b"]);
+        assert_eq!(markdown_of(&split), "- a\n\n  b\n");
+        fold(&split, "- a\n- b\n");
+        let copied = path_of(&split, 1).swap_remove(1);
+        assert_ne!(copied, "i");
+        for item in ["i", copied.as_str()] {
+            let checked = record(&split, &format!("{item}.checked"));
+            assert_eq!(checked, Some(Any::Bool(true)), "{item}");
+        }
+    });
+}
+
+#[test]
+fn a_wrap_keeps_the_ids_of_the_list_it_wraps() {
+    reading_body_sequence_here(|| {
+        let base = seeded(2, "- a\n");
+        let ids = path_of(&base, 0);
+        let list = ids[0].clone();
+        let (ours, theirs) = peers(&base);
+        fold(&ours, "> - a\n");
+        edited(&theirs, move |txn, _, containers| {
+            containers.insert(txn, list, Any::from("orderedList"));
+        });
+        let after = "> 1. a\n";
+        assert_eq!(merged(&ours, &theirs), [after, after]);
+        assert_eq!(path_of(&ours, 0)[1..], ids);
+    });
+}
+
+#[test]
+fn a_frontmatter_only_save_gives_no_line_a_boundary() {
+    reading_body_sequence_here(|| {
+        let doc = by_hand(|txn, sequence, _| {
+            line(txn, sequence, "codeBlock", &[]);
+            typed(txn, sequence, "code");
+            let at = sequence.len(txn);
+            let image = sequence.insert_embed(txn, at, XmlElementPrelim::empty("image"));
+            image.insert_attribute(txn, "src", Any::from("b.png"));
+            image.insert_attribute(txn, "alt", Any::from("a"));
+        });
+        let body = markdown_of(&doc);
+        assert_eq!(body, "```\ncode\n```\n\n![a](b.png)\n");
+        let length = sequence_length(&doc);
+        let file = format!("---\ntitle: A\n---\n\n{body}");
+        fold(&doc, &file);
+        assert_eq!(markdown_of(&doc), file);
+        assert_eq!(sequence_length(&doc), length);
+    });
+}
