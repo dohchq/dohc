@@ -725,4 +725,36 @@ describe("electron updater after a quit", () => {
     await expect(macController.installUpdate()).resolves.toMatchObject({ accepted: true });
     expect(macOrder).toEqual(["install_started", "quitAndInstall"]);
   });
+
+  it("fires onInstallStarted once on ordinary quit for Windows and macOS, never Linux or after installUpdate", async () => {
+    for (const [platform, expected] of [
+      ["win32", 1],
+      ["darwin", 1],
+      ["linux", 0],
+    ] as const) {
+      const updater = fakeUpdater();
+      const started = vi.fn();
+      const controller = (await startWith(updater, { platform, onInstallStarted: started }))!;
+      offer(updater, "1.2.4");
+      controller.downloadUpdate();
+      updater.emit("update-downloaded", { version: "1.2.4" });
+
+      controller.noteQuitInstallStarted();
+      controller.noteQuitInstallStarted();
+      expect(started).toHaveBeenCalledTimes(expected);
+    }
+
+    const explicitUpdater = fakeUpdater();
+    const explicitStarted = vi.fn();
+    const explicitController = (await startWith(explicitUpdater, {
+      platform: "win32",
+      onInstallStarted: explicitStarted,
+    }))!;
+    offer(explicitUpdater, "1.2.4");
+    explicitController.downloadUpdate();
+    explicitUpdater.emit("update-downloaded", { version: "1.2.4" });
+    await explicitController.installUpdate();
+    explicitController.noteQuitInstallStarted();
+    expect(explicitStarted).toHaveBeenCalledTimes(1);
+  });
 });

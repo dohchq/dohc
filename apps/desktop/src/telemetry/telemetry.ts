@@ -237,11 +237,15 @@ const USAGE_EVENTS: Readonly<
     capability_id: "folder.create",
     door: "renderer",
   }),
-  [CHANNELS.createCollectionRecord]: () => ({
-    name: "feature_used",
-    capability_id: "dataset.record.create",
-    door: "renderer",
-  }),
+  [CHANNELS.createCollectionRecord]: (result) => {
+    const outcome = result as { kind?: unknown; delivery?: unknown } | null;
+    if (!outcome || outcome.kind === "partial" || outcome.delivery === "refused") return null;
+    return {
+      name: "feature_used",
+      capability_id: "collection.record.create",
+      door: "renderer",
+    };
+  },
   [CHANNELS.applyDatabaseEdit]: () => ({
     name: "feature_used",
     capability_id: "database.edit",
@@ -595,7 +599,11 @@ export function createTelemetry(deps: {
     return errors.draining ?? Promise.resolve();
   }
 
-  function enqueueUsage(event: UsageEvent, atMsOverride?: number): void {
+  function enqueueUsage(
+    event: UsageEvent,
+    atMsOverride?: number,
+    buildOverride?: { version?: string; channel?: string },
+  ): void {
     if (!usageMayQueue() || usageCount >= REPORT_LIMITS.usagePerLaunch) return;
     if (usage.queue.length >= REPORT_LIMITS.usageQueue) return;
     usageCount += 1;
@@ -613,8 +621,8 @@ export function createTelemetry(deps: {
         $geoip_disable: true,
         $lib: "dohc-desktop",
         schema_version: 2,
-        app_version: facts.version,
-        channel: facts.channel,
+        app_version: buildOverride?.version ?? facts.version,
+        channel: buildOverride?.channel ?? facts.channel,
         dist: reporting?.dist ?? `${process.platform}-${process.arch}`,
         os: facts.os,
         os_version: facts.osVersion,
@@ -658,10 +666,14 @@ export function createTelemetry(deps: {
       if (!reporting?.usage || !usageMayQueue() || !report || report.source !== "main") return;
       const seenSeq = Math.max(noticeMeta.lastCrashSeq ?? 0, pendingCrashSeq ?? 0);
       if (report.through <= seenSeq) return;
-      const reason = fatalMainCrashReason(report.text);
-      if (!reason) return;
+      const crash = parseFatalMainCrash(report.text);
+      if (!crash) return;
       pendingCrashSeq = report.through;
-      enqueueUsage({ name: "crash_signal", source: "main", reason }, report.atMs);
+      enqueueUsage(
+        { name: "crash_signal", source: "main", reason: crash.reason },
+        report.atMs,
+        crash,
+      );
       if (usageOn()) {
         persistNoticeMeta({ ...noticeMeta, lastCrashSeq: report.through });
       }
@@ -785,13 +797,24 @@ function safeServerKind(read?: () => ServerKind): ServerKind {
   }
 }
 
-function fatalMainCrashReason(text: string): "uncaughtException" | "module-load" | null {
+function parseFatalMainCrash(
+  text: string,
+): { reason: "uncaughtException" | "module-load"; version?: string; channel?: string } | null {
   const sections = text.split(/\n\n+/u);
   for (let i = sections.length - 1; i >= 0; i -= 1) {
     const section = sections[i]!;
-    if (section.includes("Uncaught exception")) return "uncaughtException";
-    if (section.includes("The main module failed to load")) return "module-load";
-    if (section.includes("Unhandled promise rejection")) return null;
+    let reason: "uncaughtException" | "module-load" | null = null;
+    if (section.includes("Uncaught exception")) reason = "uncaughtException";
+    else if (section.includes("The main module failed to load")) reason = "module-load";
+    else if (section.includes("Unhandled promise rejection")) return null;
+    if (reason) {
+      const versionLine = /^Version:\s*([^\s(]+)\s*\(([^,)\n]+)/m.exec(section);
+      return {
+        reason,
+        ...(versionLine?.[1] ? { version: versionLine[1] } : {}),
+        ...(versionLine?.[2] ? { channel: versionLine[2].trim() } : {}),
+      };
+    }
   }
   return null;
 }

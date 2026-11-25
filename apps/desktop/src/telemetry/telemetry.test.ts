@@ -1095,7 +1095,6 @@ describe("v2 usage events, notice versioning, crash signals, and retries", () =>
     reports.setPrivacy(ON);
     reports.reportError(anError());
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    // Replace reporting-notice.json with a directory so atomic replace cannot rename over it.
     rmSync(blocked);
     const { mkdirSync } = await import("node:fs");
     mkdirSync(blocked);
@@ -1105,6 +1104,59 @@ describe("v2 usage events, notice versioning, crash signals, and retries", () =>
     await vi.advanceTimersByTimeAsync(REPORT_LIMITS.errorFlushMs);
     expect(errorCalls()).toHaveLength(1);
     expect(reports.noticeDue(ON)).toEqual({ usage: true, errors: false });
+  });
+
+  it("attributes prior main-process crash signals to the crashed build version and channel", async () => {
+    const reports = shown();
+    reports.setPrivacy(ON);
+    reports.observePreviousCrash({
+      text: [
+        "dohc crash report",
+        [
+          "Time: 2026-04-12T07:34:56.000Z",
+          "Process: main",
+          "What happened: Uncaught exception",
+          "Version: 0.1.0-nightly.1 (nightly)",
+        ].join("\n"),
+      ].join("\n\n"),
+      source: "main",
+      problems: 1,
+      atMs: Date.parse("2026-04-12T07:34:56.000Z"),
+      revision: 1,
+      through: 1,
+      read: false,
+    });
+    await reports.flush();
+
+    const [event] = usageCalls().flatMap((call) => sentBody(call).batch);
+    expect(event).toMatchObject({
+      event: "crash_signal",
+      timestamp: "2026-04-12T07:00:00.000Z",
+      properties: {
+        source: "main",
+        reason: "uncaughtException",
+        app_version: "0.1.0-nightly.1",
+        channel: "nightly",
+      },
+    });
+  });
+
+  it("emits canonical collection.record.create and skips partial or refused creations", () => {
+    expect(
+      usageEventFor(CHANNELS.createCollectionRecord, { path: "tasks/1.md", recordId: "r1" }),
+    ).toEqual({
+      name: "feature_used",
+      capability_id: "collection.record.create",
+      door: "renderer",
+    });
+    expect(usageEventFor(CHANNELS.createCollectionRecord, { kind: "partial" })).toBeNull();
+    expect(
+      usageEventFor(CHANNELS.createCollectionRecord, {
+        path: "tasks/1.md",
+        recordId: "r1",
+        delivery: "refused",
+      }),
+    ).toBeNull();
   });
 
   it("preserves both auto_restore and deep_link triggers when a deep link overlaps startup restore", () => {

@@ -9740,7 +9740,10 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
         );
       },
       stopAgentIntegration: () => agentIntegration.stopAll(),
-      flushReports: () => telemetry.flush(),
+      flushReports: () => {
+        autoUpdateController?.noteQuitInstallStarted();
+        return telemetry.flush();
+      },
       closeWorkspaces: async () => {
         await workspaceAuthorities.close();
         await Promise.allSettled(
