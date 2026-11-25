@@ -478,9 +478,13 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
   }
   const parsedRevisions = new Map<string, DatasetRevision>();
   function parsedRevision(json: string): DatasetRevision {
-    return (
-      parsedRevisions.get(json) ??
-      remember(parsedRevisions, json, frozen(parseDatasetRevision(JSON.parse(json))), 16)
+    const hit = parsedRevisions.get(json);
+    parsedRevisions.delete(json);
+    return remember(
+      parsedRevisions,
+      json,
+      hit ?? frozen(parseDatasetRevision(JSON.parse(json))),
+      16,
     );
   }
   const grantedOperations = new WeakMap<DatasetRevision, Map<string, DatasetOperation[]>>();

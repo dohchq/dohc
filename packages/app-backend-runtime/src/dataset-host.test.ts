@@ -786,7 +786,7 @@ it("refuses on the next call after warm permissions change their stored rules, b
     await call("helper", id(7));
   }
 
-  const { revision } = f.host.authorize("helper", {
+  const { revision, operation } = f.host.authorize("helper", {
     ...scope,
     ...prepared.revision,
     operationId: id(7),
@@ -795,6 +795,7 @@ it("refuses on the next call after warm permissions change their stored rules, b
   expect(() => Object.assign(revision.definition.operations[0]!, { access: "link" })).toThrow(
     TypeError,
   );
+  expect(() => Object.assign(operation, { access: "link" })).toThrow(TypeError);
 
   rotateBeforeCommit = true;
   await expect(call("helper", id(7))).rejects.toThrow("You do not have access to this Collection.");
