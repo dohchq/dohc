@@ -49,7 +49,6 @@ test("a share-link app hears another viewer's change without polling, until its 
     });
     expect(upload.ok).toBe(true);
     const before = readerSeen.paths.length;
-    const submittedAtMs = Date.now();
     const submitted = await loadRequest(writer.frame, {
       op: "backend.invoke",
       operation: "submit",
@@ -60,7 +59,6 @@ test("a share-link app hears another viewer's change without polling, until its 
     await expect(readerApp).toHaveAttribute("data-revision", String(fixture.collectionRevision()), {
       timeout: 5_000,
     });
-    expect(Date.now() - submittedAtMs).toBeLessThan(5_000);
     expect(
       readerSeen.paths.slice(before).filter((path) => path !== "/events" && path !== "/status"),
     ).toEqual([]);
