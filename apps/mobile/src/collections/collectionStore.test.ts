@@ -340,6 +340,39 @@ describe("a Collection's records", () => {
     held.resolve(description);
   });
 
+  it("reads a reopened Collection's tables again for a table chosen before its first page answers", async () => {
+    const { server, collections } = setup();
+    pages(server);
+    await collections.open(D);
+    collections.close(D);
+    server.on("POST", `${OPS}/collection`, describedAs(4));
+    const held = deferred<Answer>();
+    server.on("POST", `${OPS}/collectionRecords`, (call: Call) =>
+      (call.body as { tableId: string }).tableId === "t-people"
+        ? held.promise
+        : ok({ status: "refused", reason: "no-read" }),
+    );
+    void collections.open(D);
+    await sent(server, 4);
+    await collections.chooseTable("t-notes");
+    expect(server.calls.filter((call) => call.path.endsWith("/collection"))).toHaveLength(3);
+    expect(collections.view()?.description?.revision).toBe(4);
+    held.resolve(records(["late"], null));
+  });
+
+  it("clears a table's records when its next page refuses them, and keeps none of it on reopen", async () => {
+    const { server, collections } = setup();
+    pages(server);
+    await collections.open(D);
+    server.on("POST", `${OPS}/collectionRecords`, ok({ status: "refused", reason: "no-read" }));
+    await collections.more();
+    expect(collections.view()).toMatchObject({ refused: true, rows: [], files: {}, next: null });
+    collections.close(D);
+    server.on("POST", `${OPS}/collection`, () => new Promise<Answer>(() => {}));
+    void collections.open(D);
+    expect(collections.view()).toMatchObject({ description: null, rows: [] });
+  });
+
   it("clears what a Collection showed when the server refuses its records", async () => {
     const { server, collections } = setup();
     pages(server);

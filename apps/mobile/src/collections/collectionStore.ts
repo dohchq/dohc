@@ -365,7 +365,6 @@ export function createWorkspaceCollections(
           ? await operations.describe(datasetId)
           : now.description;
       if (!lands()) return;
-      described = datasetId;
       const table =
         description.tables.find((table) => table.tableId === now.tableId) ?? description.tables[0];
       const page = table
@@ -385,16 +384,18 @@ export function createWorkspaceCollections(
         opened?.tableId === table?.tableId
           ? rows.find((row) => row.id === opened?.record.id)
           : undefined;
+      described = datasetId;
       update(datasetId, {
         description,
         tableId: table?.tableId ?? null,
         // A record added here can come again in a later page.
-        rows: more
-          ? [
-              ...view.rows.map((row) => pageRows.get(JSON.stringify(row.id)) ?? row),
-              ...rows.filter((row) => !held.has(JSON.stringify(row.id))),
-            ]
-          : rows,
+        rows:
+          more && ready
+            ? [
+                ...view.rows.map((row) => pageRows.get(JSON.stringify(row.id)) ?? row),
+                ...rows.filter((row) => !held.has(JSON.stringify(row.id))),
+              ]
+            : rows,
         files: !ready ? {} : more ? { ...view.files, ...ready.files } : ready.files,
         next: ready?.next ?? null,
         refused: page?.status === "refused",
@@ -452,7 +453,8 @@ export function createWorkspaceCollections(
     close(datasetId) {
       if (view?.datasetId !== datasetId) return;
       viewReads.next();
-      held.set(datasetId, { ...view, reading: null });
+      if (view.refused) held.delete(datasetId);
+      else held.set(datasetId, { ...view, reading: null });
       view = null;
       emit();
     },
