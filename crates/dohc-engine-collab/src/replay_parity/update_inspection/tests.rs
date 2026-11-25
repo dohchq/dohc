@@ -152,8 +152,7 @@ fn note_and_title() -> Ydoc {
 }
 
 /// The production desktop fold over canonical Markdown with no metadata writes
-/// removes the body block it changed, which the head holds; the delete set
-/// alone holds it.
+/// deletes text the head holds; the delete set alone holds it.
 #[test]
 fn a_desktop_fold_holds_on_its_deletions_alone() {
     let markdown = "First paragraph.\n\nSecond paragraph.\n";
@@ -166,7 +165,7 @@ fn a_desktop_fold_holds_on_its_deletions_alone() {
     let fold = doc
         .rewrite_content_to_markdown_for_fold(
             ContentKind::Richdoc,
-            "First paragraph.\n\nSecond paragraph, edited.",
+            "First paragraph.\n\nSecond line, edited.",
         )
         .unwrap();
     assert_eq!(inspect_update(&head, &fold), Hold(LiveDeletion));

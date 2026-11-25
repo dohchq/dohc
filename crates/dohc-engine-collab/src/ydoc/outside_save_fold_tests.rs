@@ -635,3 +635,196 @@ fn the_direct_comparison_never_keeps_a_block_holding_a_shared_type_or_value() {
         assert!(!same_xml(&txn, &same_block, &txn, &same_block));
     }
 }
+
+fn lines_of(doc: &Ydoc) -> Vec<yrs::XmlElementRef> {
+    blocks_of(doc)
+        .into_iter()
+        .map(|line| match line {
+            XmlOut::Element(line) => line,
+            other => panic!("{other:?}"),
+        })
+        .collect()
+}
+
+fn edited_in_place(before: &str, after: &str) {
+    let doc = folded(before);
+    let base = Ydoc::wire();
+    base.apply(&doc.encode_full_state()).unwrap();
+    let lines = lines_of(&doc);
+    let update = doc
+        .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, after)
+        .expect(after);
+    crate::validate_replay_parity(&base, &update)
+        .unwrap_or_else(|error| panic!("{before:?} -> {after:?}: {error}"));
+    assert_eq!(doc.project_richdoc().unwrap(), after, "{before:?}");
+    assert_eq!(
+        body_json(&doc),
+        body_json(&folded(after)),
+        "{before:?} -> {after:?}"
+    );
+    assert_eq!(lines_of(&doc), lines, "{before:?} -> {after:?}");
+}
+
+#[test]
+fn a_paragraph_saved_from_outside_line_by_line_grows_by_its_lines() {
+    let doc = folded("# Long history\n\nTyped by the owner.\n");
+    let mut file = "# Long history\n\nTyped by the owner.\n".to_owned();
+    for save in 1..=300 {
+        file.push_str(&format!("Line {save} saved on its own.\n"));
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &file)
+            .expect(&file);
+        if save % 100 == 0 {
+            let state = doc.encode_full_state().len();
+            assert!(
+                state < 2 * file.len() + 4096,
+                "{save} saves: {state} bytes of state for a {}-byte file",
+                file.len()
+            );
+        }
+    }
+    assert_eq!(doc.project_richdoc().unwrap(), file);
+}
+
+#[test]
+fn an_outside_edit_beside_an_emoji_passes_replay_parity_and_reads_back_exactly() {
+    for (before, after) in [
+        ("😀 middle 😀\n", "😁 middle 😁\n"),
+        ("😀 middle 😀\n", "😀😀 middle 😀😀\n"),
+        ("😀 middle 😀\n", "middle 😀 more\n"),
+        ("a😀b\n", "a😁b\n"),
+        ("😀\n", "😁\n"),
+        ("x😀\n", "x\n"),
+        ("**😀 bold** 😀\n", "**😁 bold** 😁\n"),
+    ] {
+        edited_in_place(before, after);
+    }
+}
+
+#[test]
+fn an_outside_edit_inside_a_line_keeps_the_marks_around_it() {
+    for (before, after) in [
+        (
+            "Plain **bold** and *italic* end.\n",
+            "Plain **bolder** and *italic* end.\n",
+        ),
+        ("**Bold**\n", "**Bolder** still\n"),
+        (
+            "Start [link](https://a.example) end.\n",
+            "Start [link](https://a.example) end. More.\n",
+        ),
+        ("`code` and text\n", "`code` and more text\n"),
+        ("~~gone~~ kept\n", "~~gone~~ kept, more\n"),
+        ("Line one  \nline two\n", "Line one  \nline two and three\n"),
+        ("# Title\n", "# Title two\n"),
+    ] {
+        edited_in_place(before, after);
+    }
+    for (before, after) in [
+        ("- one\n- two\n", "- one\n- two more\n"),
+        ("> Quoted.\n", "> Quoted, still.\n"),
+        ("**Bold** text\n", "Bold text\n"),
+        ("Bold text\n", "**Bold** text\n"),
+        ("- one\n", "- one\n- two\n"),
+        ("Text\n", "# Text\n"),
+        ("![a](a.png) text\n", "text ![a](a.png)\n"),
+    ] {
+        fold_over(before, after);
+    }
+}
+
+#[test]
+fn a_paragraph_saved_above_an_edited_one_does_not_take_in_a_collaborators_typing() {
+    let doc = folded("Apples.\n");
+    let peer = Ydoc::wire();
+    peer.apply(&doc.encode_full_state()).unwrap();
+    let text = peer.richdoc_block_text(0).unwrap();
+    {
+        let mut txn = peer.doc.transact_mut();
+        text.insert(&mut txn, 6, " from the orchard");
+    }
+    let markdown = "Cherries.\n\nApples in the basket.\n";
+    doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, markdown)
+        .expect(markdown);
+    doc.apply(&peer.encode_full_state()).unwrap();
+    let merged = doc.project_richdoc().unwrap();
+    assert!(!merged.contains("Cherries from the orchard"), "{merged}");
+}
+
+#[test]
+fn a_quote_whose_second_line_changes_kind_is_replaced_without_editing_its_first() {
+    let added = "and more ".repeat(100);
+    let before = "> The first line of the quote.\n>\n> Second.\n";
+    let after = format!("> The first line of the quote, {added}\n>\n> # Second.\n");
+    let doc = folded(before);
+    let start = clock(&doc);
+    fold_over(before, &after);
+    doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &after)
+        .expect(&after);
+    let grown = clock(&doc) - start;
+    assert!(grown < added.len() as u64 + 200, "grew {grown}");
+}
+
+#[test]
+fn a_save_that_shifts_paragraphs_does_not_move_a_collaborators_typing() {
+    let doc = folded("Apples.\n\nBananas.\n");
+    let peer = Ydoc::wire();
+    peer.apply(&doc.encode_full_state()).unwrap();
+    let text = peer.richdoc_block_text(0).unwrap();
+    {
+        let mut txn = peer.doc.transact_mut();
+        text.insert(&mut txn, 6, " from the orchard");
+    }
+    let markdown = "Cherries.\n\nApples in the basket.\n";
+    doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, markdown)
+        .expect(markdown);
+    doc.apply(&peer.encode_full_state()).unwrap();
+    let merged = doc.project_richdoc().unwrap();
+    assert!(!merged.contains("Cherries from the orchard"), "{merged}");
+}
+
+#[test]
+fn a_save_that_shifts_paragraphs_in_a_quote_does_not_move_a_collaborators_typing() {
+    let doc = folded("> Apples.\n>\n> Bananas.\n");
+    let peer = Ydoc::wire();
+    peer.apply(&doc.encode_full_state()).unwrap();
+    let text = {
+        let body = peer.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        let txn = peer.doc.transact();
+        let Some(XmlOut::Element(quote)) = body.get(&txn, 0) else {
+            panic!("no quote");
+        };
+        let Some(XmlOut::Element(apples)) = quote.get(&txn, 0) else {
+            panic!("no paragraph");
+        };
+        let Some(XmlOut::Text(text)) = apples.get(&txn, 0) else {
+            panic!("no text");
+        };
+        text
+    };
+    {
+        let mut txn = peer.doc.transact_mut();
+        text.insert(&mut txn, 6, " from the orchard");
+    }
+    let markdown = "> Cherries.\n>\n> Apples in the basket.\n";
+    doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, markdown)
+        .expect(markdown);
+    doc.apply(&peer.encode_full_state()).unwrap();
+    let merged = doc.project_richdoc().unwrap();
+    assert!(!merged.contains("Cherries from the orchard"), "{merged}");
+}
+
+#[test]
+fn a_line_holding_a_string_embed_is_replaced_rather_than_edited() {
+    let doc = folded("Placeholder.\n\nKept.\n");
+    let text = doc.richdoc_block_text(0).unwrap();
+    {
+        let mut txn = doc.doc.transact_mut();
+        let len = text.len(&txn);
+        text.remove_range(&mut txn, 0, len);
+        text.insert_embed(&mut txn, 0, Any::from("hello"));
+    }
+    let markdown = "X\n\nKept.\n";
+    doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, markdown)
+        .expect(markdown);
+    assert_eq!(body_json(&doc), body_json(&folded(markdown)));
+}

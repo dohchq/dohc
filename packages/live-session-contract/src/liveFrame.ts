@@ -110,11 +110,23 @@ export type LiveFrame =
         | "shutdown";
     };
 
+export type LiveFrameLimit = {
+  readonly name: string;
+  readonly unit: "bytes";
+  readonly limit: number;
+  readonly actual: number;
+};
 export class LiveFrameError extends Error {
-  constructor(readonly reason: "invalid" | "limit" | "state" | "credit" | "closed") {
+  constructor(
+    readonly reason: "invalid" | "limit" | "state" | "credit" | "closed",
+    readonly limit?: LiveFrameLimit,
+  ) {
     super(`Live frame ${reason}.`);
     this.name = "LiveFrameError";
   }
+}
+function requireWithin(name: string, actual: number, limit: number) {
+  if (actual > limit) throw new LiveFrameError("limit", { name, unit: "bytes", limit, actual });
 }
 function requireFrame(
   condition: unknown,
@@ -825,18 +837,17 @@ export function encodeLiveFrameSync(
   const binding = bindingSnapshot(r.binding),
     vector = byteView(r.hostVector),
     update = byteView(r.missingStateUpdate);
-  requireFrame(
-    vector.length > 0 &&
-      vector.length <= p.maxStateVectorBytes &&
-      update.length > 0 &&
-      update.length <= p.maxSyncBytes,
-    "limit",
-  );
-  return writeBytes(p.maxSyncBytes, (w) => {
+  requireFrame(vector.length > 0 && update.length > 0, "limit");
+  requireWithin("maxStateVectorBytes", vector.length, p.maxStateVectorBytes);
+  const write = (w: Writer) => {
     writeBinding(w, binding);
     w.blob(vector);
     w.blob(update);
-  });
+  };
+  const size = new Writer(Number.POSITIVE_INFINITY);
+  write(size);
+  requireWithin("maxSyncBytes", size.offset, p.maxSyncBytes);
+  return writeBytes(p.maxSyncBytes, write);
 }
 export function decodeLiveFrameSync(
   value: Uint8Array,

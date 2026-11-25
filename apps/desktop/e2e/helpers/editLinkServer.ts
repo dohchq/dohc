@@ -65,6 +65,8 @@ export async function openEditLinkOnServer(input: {
   env?: Record<string, string>;
   /** The relay's built entry file. Without it the relay runs from source. */
   compiledRelayMain?: string;
+  /** Runs once the owner has the note open, before the Edit link exists. */
+  beforeLink?: (ownerPage: Page, workspaceRoot: string) => Promise<void>;
 }): Promise<EditLinkServer> {
   const { workspaceId, path } = input;
   const token = `test:${input.owner}`;
@@ -157,6 +159,7 @@ export async function openEditLinkOnServer(input: {
       await explorerRow(ownerPage, path).click({ timeout: 15_000 });
       await editable();
     }
+    await input.beforeLink?.(ownerPage, temp.rootPath);
     const created = await relayJson(relay.baseUrl, token, `/sync/${workspaceId}/shares/links`, {
       method: "POST",
       body: JSON.stringify({ paths: [path, ...(input.alsoLinked ?? [])], access: "edit" }),

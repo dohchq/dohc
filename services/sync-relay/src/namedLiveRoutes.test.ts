@@ -1625,6 +1625,37 @@ it.each(["named", "owner", "link"])(
   },
 );
 
+it("names the limit and the size in the server log when a note is too large for a page's sync", async () => {
+  const f = await fixture(
+    selfHostLiveProfile().namedLive.transport,
+    true,
+    undefined,
+    false,
+    false,
+    createLiveConnectionAdmission(),
+    1,
+    1,
+    true,
+  );
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  vi.mocked(f.native.client.openLiveAppliedSync).mockResolvedValue({
+    binding: { ...f.binding, selectorPaths: [f.binding.currentPath] },
+    hostVector: Buffer.from([0]),
+    missingStateUpdate: Buffer.alloc(2000),
+    observedLocalYDocHeadSequence: 1,
+    position: { eventCount: 0, journalCursor: 0, evidenceDigest: "ab".repeat(32) },
+  });
+  const socket = f.connect((await f.mint()).token);
+  expect(await socket.status).toBe(101);
+  await openProductionSync(f, socket, false, { ...f.frames.receive, maxSyncBytes: 1024 });
+  await vi.waitFor(() => expect(socket.ws.readyState).toBe(WebSocket.CLOSED));
+  expect(logged.mock.calls.map(([line]) => String(line))).toContainEqual(
+    expect.stringMatching(
+      /^\[sync-relay\] live frame refused: maxSyncBytes is 1024 bytes, the frame needed \d{4} bytes$/,
+    ),
+  );
+});
+
 it("returns only the named grant binding in live frames", async () => {
   const f = await fixture();
   const minted = await f.mint(),

@@ -499,6 +499,21 @@ describe("initial sync container", () => {
     const source = { ...sync(), missingStateUpdate: new Uint8Array(100) };
     expect(decodeLiveFrameSync(encodeLiveFrameSync(source, p), p)).toEqual(source);
   });
+  it("names the limit, its unit and the frame's size when a full state is too large to sync", () => {
+    const source = { ...sync(), missingStateUpdate: new Uint8Array(8190) };
+    const frame = encodeLiveFrameSync(source, { ...receivePolicy, maxSyncBytes: 16384 });
+    let refusal: unknown;
+    try {
+      encodeLiveFrameSync(source, receivePolicy);
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(LiveFrameError);
+    expect(refusal).toMatchObject({
+      reason: "limit",
+      limit: { name: "maxSyncBytes", unit: "bytes", limit: 8192, actual: frame.length },
+    });
+  });
 });
 
 describe("live frame route ownership", () => {
