@@ -139,6 +139,7 @@ import {
   type HeadingNavigationTarget,
 } from "./OutlinePanel";
 import { intraBlockRange, type IntraBlockMatch } from "./intraBlock";
+import { RedoKeys } from "./redoKeys";
 import { SafeTrailingNode } from "./safeTrailingNode";
 import { hasFormattableSelection, selectionFormat } from "./selectionFormat";
 import {
@@ -290,6 +291,7 @@ const TABLE_EXTENSION = DohcMarkdownTable.configure({
   allowTableNodeSelection: true,
 });
 const STATIC_EDITOR_EXTENSIONS = [
+  RedoKeys,
   ListConversions,
   MarkdownBulletList,
   MarkdownListItem,

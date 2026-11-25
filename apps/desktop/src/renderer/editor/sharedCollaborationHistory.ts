@@ -6,20 +6,8 @@ import * as Y from "yjs";
 // beforeinput events, not keys. Collaboration binds only the keys, so
 // without this Chromium would undo its own record of DOM edits instead of
 // the document's history.
-//
-// Collaboration's redo keys decline when nothing is left to redo, and
-// ProseMirror's keymap then retries Ctrl+Shift+z without Shift as Undo. These
-// run first and always take the key.
 export const CollaborationHistoryInput = Extension.create({
   name: "dohcCollaborationHistoryInput",
-  priority: 1001,
-  addKeyboardShortcuts() {
-    const redo = () => {
-      this.editor.commands.redo();
-      return true;
-    };
-    return { "Shift-Mod-z": redo, "Mod-y": redo };
-  },
   addProseMirrorPlugins() {
     const editor = this.editor;
     return [

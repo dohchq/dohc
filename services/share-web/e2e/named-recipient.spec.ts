@@ -266,11 +266,11 @@ test("named invitation signs in, edits the current Y.Doc, and preserves a stoppe
     await page.keyboard.press("End");
     await page.keyboard.insertText(" Redo check.");
     await expect.poll(() => yDocToMarkdown(doc)).toContain("Redo check.");
-    await page.keyboard.press("Control+z");
+    await page.keyboard.press("ControlOrMeta+z");
     await expect(editor).not.toContainText("Redo check.");
-    await page.keyboard.press("Control+Shift+z");
+    await page.keyboard.press("ControlOrMeta+Shift+z");
     await expect(editor).toContainText("Redo check.");
-    for (const key of ["Control+Shift+z", "Control+Shift+Z", "Control+y"]) {
+    for (const key of ["ControlOrMeta+Shift+z", "ControlOrMeta+Shift+Z", "ControlOrMeta+y"]) {
       await page.keyboard.press(key);
       expect(await editor.textContent()).toContain("Redo check.");
     }
