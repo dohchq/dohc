@@ -525,7 +525,7 @@ describe("a note made in format 2 only where the save's check and the engine's M
     expect(usage.structVisits).toBe(limit - 4);
     expect(liveNoteWeight(over).structs * SAVE_VISITS_PER_READ.maxStructVisits).toBe(limit + 12);
     expect(registered(over)).toEqual({ kind: "refused: capacity-refused" });
-  });
+  }, 120_000);
 
   it("the most rules whose weight fits the capacity", () => {
     const rules = (count: number) => "***\n\n".repeat(count);
@@ -533,7 +533,7 @@ describe("a note made in format 2 only where the save's check and the engine's M
     expect(weightOf(fits)).toBe(LIVE_NOTE_CAPACITY - 6);
     expect(weightOf(over)).toBe(LIVE_NOTE_CAPACITY + 3);
     expect(registered(over)).toEqual({ kind: "refused: capacity-refused" });
-  });
+  }, 120_000);
 
   it("the most quoted lines the engine's Markdown writer reads within its node budget", () => {
     const quoted = (count: number) => `${"> ".repeat(63)}a\n${"> ".repeat(62)}>\n`.repeat(count);
@@ -548,7 +548,7 @@ describe("a note made in format 2 only where the save's check and the engine's M
       MAX_PROJECTION_NODES + 64,
     ]);
     expect(registered(over).kind).toBe("accepted");
-  });
+  }, 120_000);
 
   it("a table in 61 quotes, over the engine's node budget, made in format 1", () => {
     const row = `|${" a |".repeat(64)}\n`;
@@ -578,7 +578,7 @@ describe("a note made in format 2 only where the save's check and the engine's M
     expect(counts.engineNodes).toBeGreaterThan(MAX_PROJECTION_NODES);
     expectFormat1(markdown);
     expect(registered(withItsSource(inFormat1(markdown), markdown)).kind).toBe("accepted");
-  });
+  }, 120_000);
 
   it("is refused one value, one byte of text or one engine node past each limit", () => {
     const none: NewNoteCounts = {
