@@ -603,6 +603,15 @@ describe("a page read on a caught-up copy", () => {
     }
   });
 
+  it("keeps the copy open only after a read that succeeded", async () => {
+    const { engine, h, copies } = await relay();
+    await seedTrip(engine);
+    expect(
+      await answer(await h(op("trip", "documentRead", { path: "docs/missing.md" }))),
+    ).toMatchObject({ ok: false, refusal: "missing" });
+    await expect.poll(() => copies.replica("trip")).toBeUndefined();
+  });
+
   it("syncs a copy behind the relay's log", async () => {
     const { storage, activity, engine, h, syncs, opensBehind } = await relay();
     await seedTrip(engine);
@@ -697,6 +706,29 @@ describe("an account read's deadline", () => {
 describe("an account read's deadline over its checks", () => {
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("starts when the request arrives, and ends a first check of the sign-in that outlasts it", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let calls = 0;
+    const { h, holdOpens } = await relay({
+      resolve: async (request) => {
+        // A slow check before a cold open, then one slower than the deadline.
+        const slow = [4_000, ACCOUNT_READ_DEADLINE_MS + 1_000][calls++];
+        if (slow !== undefined) await new Promise((resolve) => setTimeout(resolve, slow));
+        return await resolveAccountSession(request);
+      },
+    });
+    holdOpens();
+    for (const _ of [1, 2]) {
+      let answered = false;
+      const response = h(op("trip", "groups")).finally(() => {
+        answered = true;
+      });
+      await vi.advanceTimersByTimeAsync(ACCOUNT_READ_DEADLINE_MS);
+      expect(answered).toBe(true);
+      expect((await response).status).toBe(503);
+    }
   });
 
   it("answers server_busy for a check of the sign-in that outlasts the deadline, and frees the visit", async () => {

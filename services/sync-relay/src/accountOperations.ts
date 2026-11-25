@@ -111,12 +111,13 @@ export function isAccountOperation(name: string): name is ServerOperation {
  * Runs one read on the server's copy of `workspaceId` and answers its
  * result, with the change feed's cursor for what the copy had synced. An
  * unknown operation, a workspace the owner cannot open, and a copy whose
- * owner changed reject with not-found; a full server, and a read that
- * passes ACCOUNT_READ_DEADLINE_MS, reject with server_busy; arguments
- * outside the operation's schema, and the
- * operation's own refusals, reject with bad_request.
+ * owner changed reject with not-found; a full server rejects with
+ * server_busy; arguments outside the operation's schema, and the
+ * operation's own refusals, reject with bad_request. A successful read
+ * keeps the copy open for the account's next one.
  *
  * The caller's duties:
+ * - Run it inside withAccountReadDeadline, and pass that signal as the visitor's.
  * - Authenticate the caller and check that `owner` owns the workspace before reading the arguments.
  * - Pass `phone: true` only from the phone's Bearer route.
  * - With `phone: false`, enforce the caller's own reach and level in `authorize`.
@@ -130,9 +131,7 @@ export async function runAccountOperation(
   input: AccountOperationInput,
 ): Promise<{ result: AccountOperationResult; cursor: string }> {
   const request = parseOperation(input.operation, input.args);
-  const deadline = new AbortController();
-  const timer = setTimeout(() => deadline.abort(), ACCOUNT_READ_DEADLINE_MS);
-  const signal = AbortSignal.any([input.visitor.signal, deadline.signal]);
+  const signal = input.visitor.signal;
   const authorize = () => untilAborted(input.authorize(), signal);
   const spent: string[] = [];
   const lap = (step: string, since: number) =>
@@ -150,7 +149,7 @@ export async function runAccountOperation(
     return await server.copies.withServerCopy(
       input.owner,
       input.workspaceId,
-      { ...input.visitor, signal, hold: true },
+      input.visitor,
       async (replica) => {
         lap("open", started);
         await authorize();
@@ -165,11 +164,29 @@ export async function runAccountOperation(
           untilAborted(answer(server.storage, replica, input.workspaceId, request), signal),
         );
         await authorize();
+        if (!("ok" in result) || result.ok) server.copies.hold(input.owner, input.workspaceId);
         return { result, cursor };
       },
     );
+  } finally {
+    console.info(`[account-reads] ${request.operation} ${spent.join(" ")}`);
+  }
+}
+
+/**
+ * Runs an account's read with a signal that aborts when the request goes or ACCOUNT_READ_DEADLINE_MS passes, and
+ * answers server_busy for a read past the deadline.
+ */
+export async function withAccountReadDeadline<T>(
+  requestSignal: AbortSignal,
+  read: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), ACCOUNT_READ_DEADLINE_MS);
+  try {
+    return await read(AbortSignal.any([requestSignal, deadline.signal]));
   } catch (error) {
-    if (deadline.signal.aborted && !input.visitor.signal.aborted)
+    if (deadline.signal.aborted && !requestSignal.aborted)
       throw new RelayError(
         "server_busy",
         "Your server took too long to read this workspace. Try again.",
@@ -178,13 +195,13 @@ export async function runAccountOperation(
     throw error;
   } finally {
     clearTimeout(timer);
-    console.info(`[account-reads] ${request.operation} ${spent.join(" ")}`);
   }
 }
 
 /** Whether the copy already holds everything the relay's log has for its workspace, with no sync running. */
 function copyIsCurrent(storage: SyncRelayStorage, replica: AutomationReplica): boolean {
   return (
+    !replica.signal.aborted &&
     !replica.busy() &&
     storage.currentAutomationWorkspace(replica.workspaceId)?.incarnation === replica.incarnation &&
     replica.pulledHead >= storage.automationWorkspaceLogHead(replica.workspaceId)

@@ -11,7 +11,12 @@ import {
 } from "./accountChatWrites";
 import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
 import { readAccountFeed, type AccountFeedWaits } from "./accountFeed";
-import { isAccountOperation, runAccountOperation } from "./accountOperations";
+import {
+  isAccountOperation,
+  runAccountOperation,
+  withAccountReadDeadline,
+} from "./accountOperations";
+import { untilAborted } from "./namedLiveFrameHost";
 import { parseChatContext, readWakeChanges, runAccountChatContext } from "./accountTalkContext";
 import { isPhoneAppOperation, type PhoneApps } from "./phoneApps";
 import { isPhoneCollectionOperation, type PhoneCollections } from "./phoneCollections";
@@ -129,16 +134,20 @@ export function createAccountOperationRoute(options: {
     return caller;
   };
 
-  return async function respondToAccountOperation(
+  const respond = async (
     request: Request,
     route: AccountOperationRoute,
-  ): Promise<Response> {
+    readSignal: AbortSignal | undefined,
+  ): Promise<Response> => {
     const feed = route.operation === "changes" && request.method === "GET";
     const wakeFeed = route.operation === "wakeChanges" && request.method === "GET";
     if (!feed && !wakeFeed && request.method !== "POST") throw relayError("method_not_allowed");
     const page = route.operation === "openPage";
     const browser = page && !request.headers.has("authorization");
-    const caller = await session(request, browser);
+    // A read's checks of the sign-in end at its deadline.
+    const check = () =>
+      readSignal ? untilAborted(session(request, browser), readSignal) : session(request, browser);
+    const caller = await check();
     if (page && !browser && caller.clientKind !== "phone") throw notFound();
     if (
       !limiter.allow(caller.sessionId, options.nowMs()) ||
@@ -182,7 +191,7 @@ export function createAccountOperationRoute(options: {
     )
       throw notFound();
     const authorize = async () => {
-      const current = await session(request, browser);
+      const current = await check();
       if (
         current.sessionId !== caller.sessionId ||
         current.userId !== caller.userId ||
@@ -225,7 +234,7 @@ export function createAccountOperationRoute(options: {
       args = await readBoundedJson(
         request,
         ACCOUNT_OPERATION_MAX_BODY_BYTES,
-        AbortSignal.any([request.signal, AbortSignal.timeout(BODY_RECEIPT_MS)]),
+        AbortSignal.any([readSignal ?? request.signal, AbortSignal.timeout(BODY_RECEIPT_MS)]),
       );
     } catch (error) {
       throw error instanceof RangeError
@@ -267,7 +276,7 @@ export function createAccountOperationRoute(options: {
     const visitor = {
       reason: "account",
       caller: caller.sessionId,
-      signal: request.signal,
+      signal: readSignal ?? request.signal,
       phone: true,
     } as const;
     if (write) {
@@ -347,5 +356,17 @@ export function createAccountOperationRoute(options: {
       },
     );
     return jsonResponse({ ok: true, result, cursor });
+  };
+
+  return async function respondToAccountOperation(
+    request: Request,
+    route: AccountOperationRoute,
+  ): Promise<Response> {
+    // A copy read's deadline starts here, so checking the sign-in and receiving the arguments count toward it.
+    if (request.method === "POST" && isAccountOperation(route.operation))
+      return await withAccountReadDeadline(request.signal, (signal) =>
+        respond(request, route, signal),
+      );
+    return await respond(request, route, undefined);
   };
 }
