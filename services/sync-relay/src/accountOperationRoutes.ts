@@ -144,10 +144,9 @@ export function createAccountOperationRoute(options: {
     if (!feed && !wakeFeed && request.method !== "POST") throw relayError("method_not_allowed");
     const page = route.operation === "openPage";
     const browser = page && !request.headers.has("authorization");
-    // A read's checks of the sign-in end at its deadline.
-    const check = () =>
+    const checkSignIn = () =>
       readSignal ? untilAborted(session(request, browser), readSignal) : session(request, browser);
-    const caller = await check();
+    const caller = await checkSignIn();
     if (page && !browser && caller.clientKind !== "phone") throw notFound();
     if (
       !limiter.allow(caller.sessionId, options.nowMs()) ||
@@ -191,7 +190,7 @@ export function createAccountOperationRoute(options: {
     )
       throw notFound();
     const authorize = async () => {
-      const current = await check();
+      const current = await checkSignIn();
       if (
         current.sessionId !== caller.sessionId ||
         current.userId !== caller.userId ||
@@ -362,7 +361,6 @@ export function createAccountOperationRoute(options: {
     request: Request,
     route: AccountOperationRoute,
   ): Promise<Response> {
-    // A copy read's deadline starts here, so checking the sign-in and receiving the arguments count toward it.
     if (request.method === "POST" && isAccountOperation(route.operation))
       return await withAccountReadDeadline(request.signal, (signal) =>
         respond(request, route, signal),

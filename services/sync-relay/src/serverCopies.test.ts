@@ -101,7 +101,6 @@ async function copies(storage: SyncRelayStorage, automations?: CopyAutomations) 
     copies: started,
     wanted: () => hooks!.wanted(),
     holdOnly: (workspaceId: string) => hooks!.holdOnly?.(workspaceId),
-    /** The copy goes, as when the engine exits. */
     lose: (workspaceId: string) => {
       open.delete(workspaceId);
     },
@@ -200,7 +199,6 @@ describe("an account's visits to the server's copies", () => {
 });
 
 describe("the hold a read keeps on its copy", () => {
-  // A successful read, which holds its copy before its visit ends.
   const read = (run: Run, workspaceId: string) =>
     run.copies.withServerCopy(OWNER, workspaceId, phone(), async () => {
       run.copies.hold(OWNER, workspaceId);
@@ -265,7 +263,6 @@ describe("the hold a read keeps on its copy", () => {
     await read(run, "trip");
     storage.setShowOnPhone({ ownerUserId: OWNER, workspaceId: "trip", showOnPhone: false });
     run.copies.endHold("trip");
-    // Turned on again before the pass the hidden hook asked for.
     storage.setShowOnPhone({ ownerUserId: OWNER, workspaceId: "trip", showOnPhone: true });
     await vi.waitFor(() => expect(run.copies.replica("trip")).toBeUndefined());
     expect(run.wanted()).toEqual(new Map());

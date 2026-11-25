@@ -11,7 +11,6 @@ export const ACCOUNT_VISITS_PER_ACCOUNT = 4;
 export const ACCOUNT_VISITS_PER_CALLER = 4;
 // A visit waits this long for its copy to open.
 const COPY_OPEN_MS = 30_000;
-/** How long a read's hold keeps the copy open after the visit, so the account's next read finds it caught up. */
 export const READ_HOLD_MS = 5 * 60_000;
 
 /**
@@ -58,14 +57,12 @@ export async function startServerCopies(options: ServerCopiesOptions) {
   // Account visits held now, by credential and by account.
   const callerVisits = new Map<string, number>();
   const ownerVisits = new Map<string, number>();
-  // Copies kept open after a read, oldest first. A hold takes no visit's place and counts toward no limit.
   const holds = new Map<string, { ownerUserId: string; timer: ReturnType<typeof setTimeout> }>();
   const release = (workspaceId: string) => {
     clearTimeout(holds.get(workspaceId)?.timer);
     holds.delete(workspaceId);
   };
-  // What else the last pass kept copies open for: automations and the phone's writes.
-  let needed = new Set<string>();
+  let wantedBesidesHolds = new Set<string>();
   const waiters = new Set<() => void>();
   const recheck = () => {
     for (const check of [...waiters]) check();
@@ -129,9 +126,7 @@ export async function startServerCopies(options: ServerCopiesOptions) {
       0,
       AUTOMATION_SERVER_MAX_WORKSPACES,
     );
-    needed = new Set([...running, ...publishing]);
-    // A hold gives way to everything above, newest first, and keeps only a copy that is open and current. It ends once
-    // its workspace leaves the phone or its owner.
+    wantedBesidesHolds = new Set([...running, ...publishing]);
     for (const [workspaceId, { ownerUserId }] of [...holds].reverse()) {
       const listed = ids.includes(workspaceId);
       const copy = replicas.replica(workspaceId);
@@ -166,7 +161,7 @@ export async function startServerCopies(options: ServerCopiesOptions) {
     ...options,
     wanted,
     holdOnly: (workspaceId) =>
-      holds.has(workspaceId) && !visits.has(workspaceId) && !needed.has(workspaceId),
+      holds.has(workspaceId) && !visits.has(workspaceId) && !wantedBesidesHolds.has(workspaceId),
     onChanged: (workspaceId) => {
       options.onChanged?.(workspaceId);
       recheck();
@@ -357,10 +352,6 @@ export async function startServerCopies(options: ServerCopiesOptions) {
     }
   }
 
-  /**
-   * Holds the copy open for READ_HOLD_MS after a successful read, ending the account's oldest hold past its visit
-   * limit. Call it inside the read's visit.
-   */
   function hold(ownerUserId: string, workspaceId: string): void {
     release(workspaceId);
     const mine = [...holds].filter(([, held]) => held.ownerUserId === ownerUserId);
@@ -381,7 +372,6 @@ export async function startServerCopies(options: ServerCopiesOptions) {
     replica: (workspaceId: string) => replicas.replica(workspaceId),
     /** Ask for a pass; a visit can retry its workspace immediately. */
     reconcile: (workspaceId?: string) => replicas.reconcile(workspaceId),
-    /** Ends a read's hold on the copy, as when its workspace stops showing on the phone. */
     endHold(workspaceId: string) {
       release(workspaceId);
       replicas.reconcile();

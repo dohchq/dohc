@@ -65,7 +65,6 @@ export interface AutomationReplica {
   nextRequestId(): number;
   /** Pushes the replica's own writes to the relay, then pulls what the relay has. */
   sync(signal?: AbortSignal): Promise<void>;
-  /** A sync is running or queued. */
   busy(): boolean;
   /**
    * One bounded sync, queued behind the one running: pushes, then pulls, a
@@ -138,7 +137,6 @@ export async function startAutomationReplicas(options: {
   key: Uint8Array;
   namespace: string;
   wanted(): ReadonlyMap<string, readonly CopyReason[]>;
-  /** A wanted copy kept open only for its next read: no pass pulls, replays, or publishes it, and that read syncs it. */
   holdOnly?(workspaceId: string): boolean;
   nowMs?(): number;
   /** A replica opened or closed, or the reasons its row keeps it for changed. */
@@ -1018,7 +1016,6 @@ export async function startAutomationReplicas(options: {
     };
     for (const replica of [...replicas.values()]) {
       const { workspaceId } = replica;
-      // A read's hold admits no replay or publication: they wait for a visit or a place of their own.
       if (options.holdOnly?.(workspaceId)) continue;
       // Whichever step or sync caught the copy up, its owed replay runs here, outside the sync lane, before publication pushes.
       await replay(replica);

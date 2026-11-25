@@ -948,7 +948,6 @@ describe("the automation replicas", () => {
     const engine = fakeEngine();
     const passes = passEnds();
     let ended = 0;
-    // A visit opens the copy; its hold keeps it after.
     let held = false;
     const opened = passes.next();
     const running = await start(storage, {
@@ -963,7 +962,6 @@ describe("the automation replicas", () => {
     await vi.advanceTimersByTimeAsync(0);
     await opened;
     held = true;
-    // Past a failed sync's first retry delay.
     const pass = async () => {
       const done = passes.next();
       running.reconcile();
@@ -982,7 +980,6 @@ describe("the automation replicas", () => {
       .replica(WORKSPACE)!
       .sync()
       .catch(() => undefined);
-    // Another copy keeps failing, so the passes wait on its backoff.
     engine.failPush(true, running.replica("other")!.workspace);
     await running
       .replica("other")!
@@ -1859,7 +1856,6 @@ describe("the automation replicas", () => {
     engine.receipts(new Map([receipt("sent", 1, "pending")]));
     await pass(WORKSPACE);
     held = true;
-    // A read's visit made the retry due as it began.
     await pass(WORKSPACE);
     const before = passes();
     await vi.advanceTimersByTimeAsync(5_000);

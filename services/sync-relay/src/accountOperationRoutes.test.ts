@@ -146,7 +146,6 @@ async function serverCopies(storage: SyncRelayStorage, engine: TestEngine) {
             incarnation: row.incarnation,
             reasons: row.reasons,
             startedAtMs: 1,
-            // As a real copy's open, which steps until it catches up, unless the test says it fell short.
             pulledHead: opensCaughtUp ? storage.automationWorkspaceLogHead(workspaceId) : 0,
             root: "unused",
             metadataDir: "unused",
@@ -157,7 +156,6 @@ async function serverCopies(storage: SyncRelayStorage, engine: TestEngine) {
             withRecordWork: <T>(work: () => Promise<T>) => work(),
             busy: () => running > 0,
             step: async () => true,
-            // As a real copy's sync, it stops waiting when its caller's signal aborts.
             sync: async (signal?: AbortSignal) => {
               syncs.push(workspaceId);
               running += 1;
@@ -657,7 +655,6 @@ describe("a page read on a caught-up copy", () => {
     let reads = 0;
     const { storage, engine, h, syncs } = await relay({
       resolve: async (request) => {
-        // Once the copy opens, its row leaves, as when the workspace's identity changes.
         if (++reads === 3)
           (storage as StorageContext).db
             .prepare(
@@ -716,7 +713,6 @@ describe("an account read's deadline over its checks", () => {
     let calls = 0;
     const { h, holdOpens } = await relay({
       resolve: async (request) => {
-        // A slow check before a cold open, then one slower than the deadline.
         const slow = [4_000, ACCOUNT_READ_DEADLINE_MS + 1_000][calls++];
         if (slow !== undefined) await new Promise((resolve) => setTimeout(resolve, slow));
         return await resolveAccountSession(request);
@@ -740,7 +736,6 @@ describe("an account read's deadline over its checks", () => {
     let pausing = true;
     const { engine, h } = await relay({
       resolve: async (request) => {
-        // Before the arguments, after them, once the copy opens, once it syncs, then once the result is ready.
         if (++calls % 5 === 0 && pausing) await new Promise<never>(() => undefined);
         return await resolveAccountSession(request);
       },
@@ -827,7 +822,6 @@ describe("a cancelled account read", () => {
   });
 
   it("frees its visit at once, while its engine call is still pending", async () => {
-    // The deadline never passes, so only the cancel can free the visits.
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const { engine, h } = await relay();
     await seedTrip(engine);

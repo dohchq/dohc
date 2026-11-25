@@ -96,7 +96,6 @@ type ParsedOperation = {
   };
 }[ServerOperation];
 
-/** An account's read opens the copy, syncs it, and reads within this, inside the phone's 15 s wait. */
 export const ACCOUNT_READ_DEADLINE_MS = 12_000;
 
 // The server's own path rules: the copies live on its disk.
@@ -113,11 +112,9 @@ export function isAccountOperation(name: string): name is ServerOperation {
  * unknown operation, a workspace the owner cannot open, and a copy whose
  * owner changed reject with not-found; a full server rejects with
  * server_busy; arguments outside the operation's schema, and the
- * operation's own refusals, reject with bad_request. A successful read
- * keeps the copy open for the account's next one.
+ * operation's own refusals, reject with bad_request.
  *
  * The caller's duties:
- * - Run it inside withAccountReadDeadline, and pass that signal as the visitor's.
  * - Authenticate the caller and check that `owner` owns the workspace before reading the arguments.
  * - Pass `phone: true` only from the phone's Bearer route.
  * - With `phone: false`, enforce the caller's own reach and level in `authorize`.
@@ -173,10 +170,6 @@ export async function runAccountOperation(
   }
 }
 
-/**
- * Runs an account's read with a signal that aborts when the request goes or ACCOUNT_READ_DEADLINE_MS passes, and
- * answers server_busy for a read past the deadline.
- */
 export async function withAccountReadDeadline<T>(
   requestSignal: AbortSignal,
   read: (signal: AbortSignal) => Promise<T>,
@@ -184,8 +177,7 @@ export async function withAccountReadDeadline<T>(
   const deadline = new AbortController();
   const timer = setTimeout(() => deadline.abort(), ACCOUNT_READ_DEADLINE_MS);
   try {
-    // Answered at the deadline, while the read stops at its next wait: an upload still arriving is not cancelled,
-    // which would close the connection before the answer.
+    // Cancelling an upload still arriving would close the connection before the answer.
     return await untilAborted(
       read(AbortSignal.any([requestSignal, deadline.signal])),
       deadline.signal,
@@ -203,7 +195,6 @@ export async function withAccountReadDeadline<T>(
   }
 }
 
-/** Whether the copy already holds everything the relay's log has for its workspace, with no sync running. */
 function copyIsCurrent(storage: SyncRelayStorage, replica: AutomationReplica): boolean {
   return (
     !replica.signal.aborted &&
