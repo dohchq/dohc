@@ -75,6 +75,7 @@ import {
   CLOSED_LINK_MENU_STATE,
   LinkBubbleButton,
   LinkMenu,
+  makeDocumentChangeAutolinkGuard,
   makeLinkMenuExtension,
   makeLinkMenuPlugin,
   type LinkMenuState,
@@ -706,6 +707,9 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
                 rowResizeEnabled: Boolean(collab?.ydoc),
               }),
               makeUrlPasteOfferPlugin(setUrlOffer, collaborationExtensions?.yTiptap ?? null),
+              ...(collaborationExtensions
+                ? [makeDocumentChangeAutolinkGuard(collaborationExtensions.yTiptap)]
+                : []),
             ];
           },
         }),
