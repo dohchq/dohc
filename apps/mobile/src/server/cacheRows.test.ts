@@ -1088,6 +1088,23 @@ describe("the saved workspace list", () => {
     return { list, workspace, choice };
   }
 
+  it("reads the choice saved last as the open workspace is made, before any screen subscribes", async () => {
+    const server = serverWithA();
+    const disk = keptDisk();
+    await chooseB(server, disk);
+    server.on("GET", "/sync/account/workspaces", held);
+    const { cache } = launch(disk);
+    const signIn = signInTo(server);
+    const list = createWorkspaceList(signIn, cache.savedList(signIn));
+    const workspace = createOpenWorkspace({ signIn, list, cache });
+    await vi.waitFor(() =>
+      expect(workspace.state()).toMatchObject({ currentWorkspaceId: "ws-b", choosing: false }),
+    );
+    workspace.subscribe(() => {});
+    expect(workspace.state().currentWorkspaceId).toBe("ws-b");
+    workspace.stop();
+  });
+
   it("shows no reason for an empty phone while the choice saved last is read after the list", async () => {
     const server = serverWithA();
     const { list, workspace, choice } = await slowChoice(server, keptDisk());

@@ -157,8 +157,9 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   );
   const workspaces = useSyncExternalStore((list ?? noList).subscribe, (list ?? noList).state);
   useEffect(() => list?.reload(), [list]);
-  // Made during render, so the first frame for a new workspace already reads from its own store. Making one starts
-  // nothing: subscribing follows the list, and the effect runs the feed and stops it all once another replaces it.
+  // Made during render, so the first frame for a new workspace already reads from its own store. Making one reads only
+  // the choice saved last: subscribing follows the list, and the effect runs the feed and stops it all once another
+  // replaces it.
   const open = useMemo(
     () =>
       signIn && list

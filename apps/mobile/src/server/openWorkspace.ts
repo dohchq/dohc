@@ -95,18 +95,18 @@ export function createOpenWorkspace(options: {
   }
 
   update();
+  void saved?.loadChosen().then((found) => {
+    if (stopped || !signIn.isCurrent()) return;
+    chosen ??= found;
+    endChoosing();
+  });
   return {
     state: () => state,
     subscribe(listener) {
       listeners.add(listener);
-      // The list is followed from the first subscriber, so making this starts nothing.
+      // The list is followed from the first subscriber.
       if (!unsubscribe) {
         unsubscribe = list.subscribe(update);
-        void saved?.loadChosen().then((found) => {
-          if (stopped || !signIn.isCurrent()) return;
-          chosen ??= found;
-          endChoosing();
-        });
         update();
       }
       return () => void listeners.delete(listener);
