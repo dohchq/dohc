@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useState } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -913,5 +914,82 @@ describe("workspace manager with registered workspaces", () => {
         errorReports: false,
       }),
     );
+  });
+
+  it("keeps the queued toggle off after a prior save error clears its notice and never re-reads diagnostics on failure", async () => {
+    const user = userEvent.setup();
+    const initial: DesktopUserSettingsResult = {
+      settings: {
+        ...structuredClone(DEFAULT_USER_SETTINGS),
+        privacy: { usageReports: false, errorReports: true },
+      },
+      source: "stored",
+    };
+    const saveOn = deferred<DesktopUserSettingsResult>();
+    const saveOff = deferred<DesktopUserSettingsResult>();
+    bridge.readReportsNotice.mockResolvedValueOnce({ usage: false, errors: true });
+    bridge.readDiagnostics.mockRejectedValueOnce(new Error("diagnostics unreadable"));
+    bridge.setUserSettings
+      .mockRejectedValueOnce(new Error("first failure"))
+      .mockImplementationOnce(async () => saveOn.promise)
+      .mockImplementationOnce(async () => saveOff.promise);
+
+    function Harness() {
+      const [settings, setSettings] = useState<DesktopUserSettingsResult>(initial);
+      return (
+        <WorkspaceManager
+          workspaces={[]}
+          current={null}
+          userSettings={settings}
+          onUserSettingsChange={setSettings}
+          onForgot={async () => []}
+          onOpenWorkspace={() => {}}
+        />
+      );
+    }
+
+    render(<Harness />);
+    expect(await screen.findByText(reportsNoticeText({ usage: false, errors: true }))).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Privacy settings" }));
+    const dialog = await screen.findByTestId("first-run-privacy-dialog");
+    expect(await screen.findByText(/diagnostics unreadable/i)).toBeTruthy();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(bridge.readDiagnostics).toHaveBeenCalledTimes(1);
+
+    const usageSwitch = within(dialog).getByRole("switch", { name: "Send usage reports" });
+    await user.click(usageSwitch);
+    expect(await screen.findByText(/dohc could not save your settings\./i)).toBeTruthy();
+    await waitFor(() => expect(usageSwitch.getAttribute("aria-checked")).toBe("false"));
+
+    await user.click(usageSwitch);
+    await user.click(usageSwitch);
+    expect(usageSwitch.getAttribute("aria-checked")).toBe("false");
+
+    await act(async () => {
+      saveOn.resolve({
+        settings: {
+          ...initial.settings,
+          privacy: { usageReports: true, errorReports: true },
+        },
+        source: "stored",
+      });
+    });
+    await waitFor(() => expect(bridge.setUserSettings).toHaveBeenCalledTimes(3));
+    expect(usageSwitch.getAttribute("aria-checked")).toBe("false");
+
+    await act(async () => {
+      saveOff.resolve({
+        settings: {
+          ...initial.settings,
+          privacy: { usageReports: false, errorReports: true },
+        },
+        source: "stored",
+      });
+    });
+    expect(usageSwitch.getAttribute("aria-checked")).toBe("false");
   });
 });

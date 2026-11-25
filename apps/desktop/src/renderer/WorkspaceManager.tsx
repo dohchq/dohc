@@ -239,6 +239,7 @@ export function WorkspaceManager(props: {
   const keptTyping = useKeptTyping();
   const crashReportNotice = useCrashReport(connectionNotices);
   const committedSettingsRef = useRef(props.userSettings ?? null);
+  const inFlightPrivacyRef = useRef<Partial<PrivacySettings>>({});
   const queuedPrivacyRef = useRef<Partial<PrivacySettings>>({});
   const savingPrivacyRef = useRef(false);
   const mountedRef = useRef(true);
@@ -256,7 +257,20 @@ export function WorkspaceManager(props: {
     };
   }, []);
   const committedPrivacy = props.userSettings?.settings.privacy ?? null;
-  const effectivePrivacy = committedPrivacy ? { ...committedPrivacy, ...pendingPrivacy } : null;
+  const committedUsage = committedPrivacy?.usageReports;
+  const committedErrors = committedPrivacy?.errorReports;
+  const pendingUsage = pendingPrivacy.usageReports;
+  const pendingErrors = pendingPrivacy.errorReports;
+  const effectivePrivacy = useMemo<PrivacySettings | null>(
+    () =>
+      committedUsage === undefined || committedErrors === undefined
+        ? null
+        : {
+            usageReports: pendingUsage ?? committedUsage,
+            errorReports: pendingErrors ?? committedErrors,
+          },
+    [committedUsage, committedErrors, pendingUsage, pendingErrors],
+  );
   const { showReportsNotice: pushReportsNotice, reportsNotice } = connectionNotices;
   const reportsNoticeShown = useStandaloneReportsNotice({
     enabled: props.userSettings !== undefined,
@@ -270,7 +284,7 @@ export function WorkspaceManager(props: {
       if (keys.length === 0) return;
       queuedPrivacyRef.current = { ...queuedPrivacyRef.current, ...patch };
       if (mountedRef.current) {
-        setPendingPrivacy((current) => ({ ...current, ...patch }));
+        setPendingPrivacy({ ...inFlightPrivacyRef.current, ...queuedPrivacyRef.current });
       }
       if (savingPrivacyRef.current) return;
       savingPrivacyRef.current = true;
@@ -280,11 +294,13 @@ export function WorkspaceManager(props: {
             const current = committedSettingsRef.current;
             if (!current) {
               queuedPrivacyRef.current = {};
+              inFlightPrivacyRef.current = {};
               if (mountedRef.current) setPendingPrivacy({});
               return;
             }
             const batch = queuedPrivacyRef.current;
             queuedPrivacyRef.current = {};
+            inFlightPrivacyRef.current = batch;
             const batchKeys = Object.keys(batch) as Array<keyof PrivacySettings>;
             const nextPrivacy: PrivacySettings = { ...current.settings.privacy, ...batch };
             try {
@@ -293,28 +309,20 @@ export function WorkspaceManager(props: {
                 base: current.settings,
               });
               committedSettingsRef.current = saved;
+              inFlightPrivacyRef.current = {};
+              const nextPending = { ...queuedPrivacyRef.current };
               if (mountedRef.current) {
                 onUserSettingsChangeRef.current?.(saved);
                 for (const key of batchKeys) {
                   connectionNotices.clearIdentity(`first-run-privacy:${key}`);
                 }
-                setPendingPrivacy((prev) => {
-                  const remaining: Partial<PrivacySettings> = { ...prev };
-                  for (const key of batchKeys) {
-                    if (!(key in queuedPrivacyRef.current)) delete remaining[key];
-                  }
-                  return remaining;
-                });
+                setPendingPrivacy(nextPending);
               }
             } catch (cause) {
+              inFlightPrivacyRef.current = {};
+              const nextPending = { ...queuedPrivacyRef.current };
               if (mountedRef.current) {
-                setPendingPrivacy((prev) => {
-                  const remaining: Partial<PrivacySettings> = { ...prev };
-                  for (const key of batchKeys) {
-                    if (!(key in queuedPrivacyRef.current)) delete remaining[key];
-                  }
-                  return remaining;
-                });
+                setPendingPrivacy(nextPending);
                 for (const key of batchKeys) {
                   const value = batch[key];
                   if (value === undefined) continue;
@@ -331,6 +339,7 @@ export function WorkspaceManager(props: {
             }
           }
         } finally {
+          inFlightPrivacyRef.current = {};
           savingPrivacyRef.current = false;
         }
       })();
