@@ -234,6 +234,7 @@ const OpenResultSchema = mutableStruct({
   // it from the head it seeds, so every device seeding that head sends the
   // same bytes and originates the same lineage.
   seedClientId: Schema.optionalKey(Schema.Int),
+  seedSchemaVersion: Schema.optionalKey(Schema.Literals([1, 2])),
   // Set instead of seedContent for a seed past the in-band cap: the digest
   // the client reads it by through versionedText.readBlob.
   seedBlobSha256: Schema.optionalKey(Schema.String),

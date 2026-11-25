@@ -2307,6 +2307,78 @@ describe("seeding an absent lineage", () => {
     expect(recordedUpdates(engine, true)).toHaveLength(1);
   });
 
+  /** The note a device seeds when the engine's open answer names a format for the seed. */
+  async function seededUnder(content: string, seedSchemaVersion?: number): Promise<Y.Doc> {
+    const engine = new YdocLoopbackEngine();
+    engine.seedFile({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      content,
+      contentKind: "richdoc",
+    });
+    const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        const response = await engine.sendRequest(request);
+        if (request.method !== YDOC_METHOD.open || seedSchemaVersion === undefined) return response;
+        const result = { ...(response.result as Record<string, JsonValue>), seedSchemaVersion };
+        return { id: response.id, result };
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    try {
+      const session = await adapter.openSession({
+        workspace: WORKSPACE,
+        versionId: VERSION,
+        path: PATH,
+        contentKind: "richdoc",
+      });
+      await session.close({ settle: false });
+    } finally {
+      adapter.dispose();
+    }
+    const seeds = recordedUpdates(engine, true);
+    expect(seeds).toHaveLength(1);
+    const note = new Y.Doc();
+    Y.applyUpdate(note, seeds[0]!);
+    return note;
+  }
+  const formatOf = (note: Y.Doc) => ({
+    marker: note.getMap("meta").get("schemaVersion"),
+    underBody: note.getXmlFragment("body").length > 0,
+    inSequence: note.getText("sequence").length > 0,
+    markdown: ydocProjection.yDocToMarkdown(note),
+  });
+
+  it("seeds a note in the format the engine's answer names: format 2 for 2, and format 1 for 1 or for none", async () => {
+    const content = "# Shared\n\n- one\n- two\n";
+    const first = { marker: 1, underBody: true, inSequence: false, markdown: content };
+    expect(formatOf(await seededUnder(content))).toEqual(first);
+    expect(formatOf(await seededUnder(content, 1))).toEqual(first);
+    expect(formatOf(await seededUnder(content, 2))).toEqual({
+      marker: 2,
+      underBody: false,
+      inSequence: true,
+      markdown: content,
+    });
+  });
+
+  it("seeds format 1 when the engine names 2 and the text holds what format 2 cannot: a link on inline code", async () => {
+    const content = "Run [`npm install`](https://docs.example/install) first.\n";
+    expect(formatOf(await seededUnder(content, 2))).toEqual({
+      marker: 1,
+      underBody: true,
+      inSequence: false,
+      markdown: content,
+    });
+  });
+
+  it("refuses an open answer that names a format it does not know, and seeds nothing", async () => {
+    await expect(seededUnder("# Shared\n", 3)).rejects.toThrow(/seedSchemaVersion/);
+  });
+
   it("refuses seed content that comes without a seed client", async () => {
     const engine = seedPlaintextEngine("seed");
     const transport: EngineTransport = {

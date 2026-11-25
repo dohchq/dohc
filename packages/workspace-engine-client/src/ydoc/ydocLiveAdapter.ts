@@ -4,7 +4,7 @@ import { YDOC_PENDING_MAX_BYTES, YDOC_PENDING_MAX_RECORDS } from "./ydocPendingL
 import { ydocUpdateDependsOn } from "./ydocUpdateDependencies";
 import { isWellFormedUtf16, Utf16Ledger } from "./utf16Ledger";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
-import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
+import { BodySequenceCannotHoldError, markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { EngineRequestDeadlineError, EngineRequestError } from "../daemon/engineClient";
 import {
   DaemonRefusalError,
@@ -298,6 +298,15 @@ function declareDohcRootSchema(doc: Y.Doc, contentKind?: YdocContentKind): void 
     doc.getMap(EXCALIDRAW_SCENE_ROOTS.revisions);
     doc.getMap(EXCALIDRAW_SCENE_ROOTS.appState);
     doc.getMap(EXCALIDRAW_SCENE_ROOTS.assets);
+  }
+}
+
+function seedRichdoc(markdown: string, clientID: number, schemaVersion: 1 | 2): Y.Doc {
+  try {
+    return markdownToYDoc(markdown, { clientID, schemaVersion });
+  } catch (error) {
+    if (error instanceof BodySequenceCannotHoldError) return markdownToYDoc(markdown, { clientID });
+    throw error;
   }
 }
 
@@ -1678,7 +1687,7 @@ export class YdocLiveAdapter {
         const seedDoc =
           result.contentKind === "plaintext"
             ? createPlaintextSeedDoc(seedContent, clientID)
-            : markdownToYDoc(seedContent, { clientID });
+            : seedRichdoc(seedContent, clientID, result.seedSchemaVersion ?? 1);
         try {
           if (result.contentKind === "richdoc") {
             let projection: string | undefined;

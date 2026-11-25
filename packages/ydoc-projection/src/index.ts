@@ -9,6 +9,7 @@
 // The schema definitions alone live in `@dohc/ydoc-projection/markdown-extensions`,
 // so an editor can build the schema without loading the conversions.
 export {
+  BodySequenceCannotHoldError,
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
   getDohcYDocMeta,

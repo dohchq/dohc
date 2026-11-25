@@ -1,4 +1,4 @@
-import type { Schema } from "@tiptap/pm/model";
+import type { Node as ProseMirrorNode, Schema } from "@tiptap/pm/model";
 import * as Y from "yjs";
 import {
   BLOCK_ELEMENT,
@@ -6,9 +6,11 @@ import {
   BODY_SEQUENCE_FIELD,
   MAX_SEQUENCE_DEPTH,
   allowedChildren,
+  flattenBody,
   leavesOfSequence,
   readBodyLeaves,
   recordsOfContainer,
+  writtenLeaves,
   type SequenceAttrs,
   type SequenceLeaf,
 } from "./bodySequenceGrammar.js";
@@ -1279,6 +1281,50 @@ export function writeBody(
     edits.sort((one, other) => other.index - one.index || one.rank - other.rank);
     for (const edit of edits) edit.make();
     bound(change.made());
+  }, origin);
+}
+
+/**
+ * Write a whole document as the body of a new note, in one change. Every line gets a boundary
+ * with its kind, every attribute of its kind and its path, and every container gets its type
+ * record and a record for every attribute of every kind it can become. `idFor` names each
+ * container, and no two may share a name. A note made this way has no line that is read with no
+ * boundary of its own, so nothing is written in a change of its own first.
+ *
+ * It throws for a note whose body already holds an item or a record, and a `RangeError` for a
+ * line that sits in more containers than a note holds. It writes what a note stores: a mark on an
+ * inline item is not written, and of the marks on a letter of inline code only `code` is read.
+ */
+export function writeNewBody(
+  schema: Schema,
+  doc: Y.Doc,
+  body: ProseMirrorNode,
+  idFor: (container: ProseMirrorNode, index: number) => string,
+  origin?: unknown,
+): void {
+  const sequence = doc.getText(BODY_SEQUENCE_FIELD);
+  const records = doc.getMap(BODY_CONTAINERS_FIELD);
+  if (sequence._start !== null || records._map.size > 0)
+    throw new Error("writeNewBody writes the body of a new note, and this note already holds one.");
+  const leaves = flattenBody(body, idFor);
+  const written = writtenLeaves(schema, leaves);
+  const element = (name: string, attrs: SequenceAttrs) => {
+    const made = new Y.XmlElement(name);
+    for (const [key, value] of Object.entries(attrs))
+      made.setAttribute(key, plain(value) as string);
+    return made;
+  };
+  const pieces = leaves.flatMap((leaf, at) => [
+    { insert: element(BLOCK_ELEMENT, written.boundaries[at]!), attributes: {} },
+    ...leaf.inline.map((piece) =>
+      "text" in piece
+        ? { insert: piece.text, attributes: plain(piece.marks) }
+        : { insert: element(piece.atom, piece.attrs), attributes: {} },
+    ),
+  ]);
+  doc.transact(() => {
+    for (const [key, value] of written.containers) records.set(key, plain(value));
+    sequence.applyDelta(pieces);
   }, origin);
 }
 
