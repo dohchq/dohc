@@ -21,7 +21,7 @@ import { cachedList, views, type ReadCache, type ReadProblem } from "../server/w
 
 // The open workspace's transactional Collections, and the one Collection on screen. The list is kept in the read
 // cache with the workspace's views. Each Collection opened stays in memory, so opening it again shows it at once while
-// it reads again; one the server refuses then shows as refused.
+// it reads again, its tables first whatever table is chosen meanwhile. One the server refuses shows as refused.
 //
 // One store per sign-in and workspace. Its answers land only while its sign-in is current and it hasn't stopped, and
 // each read only while it is the latest of its kind, so a late answer never paints another workspace or table. The
@@ -173,6 +173,7 @@ export function createWorkspaceCollections(
   let list: CollectionsState = { ...NO_LIST, collections: listed.value() };
   let view: CollectionView | null = null;
   const held = new Map<string, CollectionView>();
+  let described: string | null = null;
   let changes: ReadonlyMap<string, RecordChange> = new Map();
   let actions: ReadonlyMap<string, RecordAction> = new Map();
   const isLive = () => !stopped && signIn.isCurrent();
@@ -360,8 +361,11 @@ export function createWorkspaceCollections(
     update(datasetId, { reading: mode });
     try {
       const description =
-        describe || !now.description ? await operations.describe(datasetId) : now.description;
+        describe || !now.description || described !== datasetId
+          ? await operations.describe(datasetId)
+          : now.description;
       if (!lands()) return;
+      described = datasetId;
       const table =
         description.tables.find((table) => table.tableId === now.tableId) ?? description.tables[0];
       const page = table
@@ -404,7 +408,7 @@ export function createWorkspaceCollections(
     } catch (error) {
       const cause = shownProblem(error);
       if (!lands()) return;
-      const refused = cause === "refused" && mode === "first" && describe;
+      const refused = cause === "refused";
       if (refused) held.delete(datasetId);
       update(datasetId, {
         ...(refused ? { description: null, rows: [], files: {}, next: null } : {}),
@@ -427,6 +431,7 @@ export function createWorkspaceCollections(
     open(datasetId) {
       if (!isLive()) return Promise.resolve();
       const last = held.get(datasetId);
+      described = null;
       view = last
         ? { ...last, problem: null, opened: null }
         : {

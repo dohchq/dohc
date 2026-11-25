@@ -322,6 +322,37 @@ describe("a Collection's records", () => {
     expect(names(collections.view()?.rows)).toEqual(["b0"]);
   });
 
+  it("reads a reopened Collection's tables again when another table is chosen before they answer", async () => {
+    const { server, collections } = setup();
+    pages(server);
+    await collections.open(D);
+    collections.close(D);
+    const held = deferred<Answer>();
+    server.on("POST", `${OPS}/collection`, () => held.promise, { status: 404 });
+    void collections.open(D);
+    await collections.chooseTable("t-notes");
+    expect(server.calls.filter((call) => call.path.endsWith("/collection"))).toHaveLength(3);
+    expect(collections.view()).toMatchObject({
+      description: null,
+      rows: [],
+      problem: { cause: "refused", more: false },
+    });
+    held.resolve(description);
+  });
+
+  it("clears what a Collection showed when the server refuses its records", async () => {
+    const { server, collections } = setup();
+    pages(server);
+    await collections.open(D);
+    server.on("POST", `${OPS}/collectionRecords`, { status: 404 });
+    await collections.reload();
+    expect(collections.view()).toMatchObject({
+      description: null,
+      rows: [],
+      problem: { cause: "refused", more: false },
+    });
+  });
+
   it("shows a Collection the server refuses when opened again as on its first open, and forgets it", async () => {
     const { server, collections } = setup();
     pages(server);
