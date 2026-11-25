@@ -3514,8 +3514,195 @@ describe("Collection automations that a Group message starts", () => {
       executor.relayAnswered();
       await promptly(relay.reading);
       expect(relay.asked).toEqual([3, 3]);
+      await promptly(Promise.all([executor.resyncFileObservation(), executor.open()]));
+      expect(relay.asked).toEqual([3, 3]);
       expect(changes.slice(beforeAnswer).filter((change) => change !== "watch Groups")).toEqual([]);
+      expect(subscribed(w)).toBe(false);
+
+      relay.answer();
+      await promptly(w.until(() => subscribed(w)));
+      expect(relay.asked).toEqual([3, 3]);
+      if (kind === "reach verdicts")
+        expect(await w.baseStore.readReachVerdicts()).toMatchObject({ pending: null, taken: 3 });
       await executor.dispose();
+      expect(w.errors).toHaveLength(1);
+    });
+
+    it("reads the first Group handover without waiting once the reach verdicts answer", async () => {
+      const handover = unanswered(false);
+      let reachReads = 0;
+      const { w, executor, opening } = await openingAt3({
+        reachRelayRecord: async (generation) => {
+          if (++reachReads === 1) throw new TypeError("fetch failed");
+          return { generation, reach: null, everShared: false };
+        },
+        ...relayFor("Group handover", handover.read),
+      });
+      await opening;
+      expect(handover.asked).toEqual([]);
+
+      executor.relayAnswered();
+      await promptly(handover.reading);
+      await promptly(Promise.all([executor.resyncFileObservation(), executor.open()]));
+      expect(reachReads).toBe(2);
+      expect(handover.asked).toEqual([3]);
+      expect(subscribed(w)).toBe(false);
+
+      handover.answer();
+      await promptly(w.until(() => subscribed(w)));
+      expect(handover.asked).toEqual([3]);
+      expect(w.errors.map(({ context }) => context)).toEqual([
+        "read the last automation host's reach verdicts",
+      ]);
+    });
+
+    it("takes the reach verdicts while the Group handover read still waits", async () => {
+      const handover = unanswered(false);
+      let reachReads = 0;
+      const { w, executor, opening } = await openingAt3({
+        reachRelayRecord: async (generation) => {
+          if (++reachReads === 1) throw new TypeError("fetch failed");
+          return { generation, reach: null, everShared: false };
+        },
+        ...relayFor("Group handover", handover.read),
+      });
+      await opening;
+
+      executor.relayAnswered();
+      await promptly(handover.reading);
+      await vi.waitFor(async () =>
+        expect(await w.baseStore.readReachVerdicts()).toMatchObject({ pending: null, taken: 3 }),
+      );
+      expect(subscribed(w)).toBe(false);
+      handover.answer();
+      await promptly(w.until(() => subscribed(w)));
+      expect(handover.asked).toEqual([3]);
+    });
+
+    it("keeps a read ahead's answer when another sync answer arrives while it is used", async () => {
+      let reachReads = 0;
+      let hostReads = 0;
+      let answerAgainAt = Number.POSITIVE_INFINITY;
+      const { w, executor, opening } = await openingAt3({
+        groupHost: async () => {
+          if (++hostReads === answerAgainAt) executor.relayAnswered();
+          return 3;
+        },
+        reachRelayRecord: async (generation) => {
+          if (++reachReads === 1) throw new TypeError("fetch failed");
+          return { generation, reach: null, everShared: false };
+        },
+      });
+      await opening;
+
+      answerAgainAt = hostReads + 2;
+      executor.relayAnswered();
+      await vi.waitFor(async () =>
+        expect(await w.baseStore.readReachVerdicts()).toMatchObject({ pending: null, taken: 3 }),
+      );
+      await promptly(Promise.all([executor.resyncFileObservation(), executor.open()]));
+      expect(hostReads).toBeGreaterThanOrEqual(answerAgainAt);
+      expect(reachReads).toBe(2);
+      expect(w.errors).toHaveLength(1);
+    });
+
+    it("reads a new host's verdicts while an older generation's read ahead waits", async () => {
+      let host = 3;
+      const older = Promise.withResolvers<void>();
+      const asked: number[] = [];
+      const { w, executor, opening } = await openingAt3({
+        groupHost: async () => host,
+        reachRelayRecord: async (generation) => {
+          asked.push(generation);
+          if (asked.length === 1) throw new TypeError("fetch failed");
+          if (generation === 3) await older.promise;
+          return { generation, reach: null, everShared: false };
+        },
+      });
+      await opening;
+
+      executor.relayAnswered();
+      await vi.waitFor(() => expect(asked).toEqual([3, 3]));
+      host = 5;
+      executor.hostChanged();
+      await vi.waitFor(async () =>
+        expect(await w.baseStore.readReachVerdicts()).toMatchObject({ taken: 5 }),
+      );
+      older.resolve();
+      await promptly(executor.resyncFileObservation());
+      expect(asked).toEqual([3, 3, 5]);
+    });
+
+    it("reports a failed read ahead once when the next sync answer reads again", async () => {
+      const handover = unanswered(false);
+      const third = Promise.withResolvers<void>();
+      let reachReads = 0;
+      const { w, executor, opening } = await openingAt3({
+        reachRelayRecord: async (generation) => {
+          reachReads++;
+          if (reachReads <= 2) throw new TypeError("fetch failed");
+          await third.promise;
+          return { generation, reach: null, everShared: false };
+        },
+        ...relayFor("Group handover", handover.read),
+      });
+      await opening;
+
+      executor.relayAnswered();
+      await vi.waitFor(() => expect(w.errors).toHaveLength(2));
+      executor.relayAnswered();
+      await vi.waitFor(() => expect(reachReads).toBe(3));
+      handover.answer();
+      third.resolve();
+      await promptly(w.until(() => subscribed(w)));
+      expect(handover.asked).toEqual([3]);
+      expect(w.errors).toHaveLength(2);
+    });
+
+    it("lists a pulled automations file without reading the relay again", async () => {
+      const reach = unanswered();
+      const { w, executor, opening } = await openingAt3(relayFor("reach verdicts", reach.read));
+      await opening;
+
+      executor.relayAnswered();
+      await promptly(reach.reading);
+      executor.handlePulledPaths(["Tasks/automations.yaml"]);
+      reach.answer();
+      await promptly(executor.automationsIn("Tasks"));
+      await vi.waitFor(async () =>
+        expect(await w.baseStore.readReachVerdicts()).toMatchObject({ pending: null, taken: 3 }),
+      );
+      expect(reach.asked).toEqual([3, 3]);
+    });
+
+    it("reads the relay again after a close ends a read ahead", async () => {
+      const reach = unanswered();
+      let failAhead = true;
+      let settledReads = 0;
+      const { w, executor, opening } = await openingAt3({
+        reachRelayRecord: async (generation, signal) => {
+          try {
+            await reach.read(generation, signal);
+            if (failAhead) throw new TypeError("fetch failed");
+            return { generation, reach: null, everShared: false };
+          } finally {
+            settledReads++;
+          }
+        },
+      });
+      await opening;
+
+      executor.relayAnswered();
+      await promptly(reach.reading);
+      await executor.close();
+      reach.answer();
+      await vi.waitFor(() => expect(settledReads).toBe(2));
+      failAhead = false;
+      await promptly(executor.open());
+      await vi.waitFor(async () =>
+        expect(await w.baseStore.readReachVerdicts()).toMatchObject({ pending: null, taken: 3 }),
+      );
+      expect(reach.asked).toEqual([3, 3, 3]);
       expect(w.errors).toHaveLength(1);
     });
   });

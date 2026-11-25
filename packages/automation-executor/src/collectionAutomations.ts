@@ -357,6 +357,24 @@ export interface ScheduledAutomation {
   enabledSince: number | null;
 }
 
+type RelayAnswers = {
+  generation: number;
+  reach?: PromiseSettledResult<ReachRelayRecord>;
+  handover?: PromiseSettledResult<AutomationGroupRelayRecord>;
+};
+
+function settled<T>(read: Promise<T>): Promise<PromiseSettledResult<T>> {
+  return read.then(
+    (value) => ({ status: "fulfilled", value }),
+    (reason: unknown) => ({ status: "rejected", reason }),
+  );
+}
+
+function answered<T>(answer: PromiseSettledResult<T>): T {
+  if (answer.status === "rejected") throw answer.reason;
+  return answer.value;
+}
+
 /** Whether the Collection an automation id names is one whose automations a take over could not list. */
 function inUnprovenFolder(folders: ReadonlySet<string>, automationId: string): boolean {
   if (folders.size === 0) return false;
@@ -1493,6 +1511,10 @@ export class CollectionAutomations {
   private watchedGeneration: number | null = null;
   private handoverUnreadAt: number | null = null;
   private reachUnreadAt: number | null = null;
+  private readingRelay: { reach: number | null; handover: number | null } = {
+    reach: null,
+    handover: null,
+  };
   // The newest Group message skip of each kind the owner was told about.
   private readonly groupSkipsTold: Record<GroupMessagesSkipped, number> = { ahead: 0, late: 0 };
   /** Serializes index loads and subscription reconciles. */
@@ -1857,7 +1879,7 @@ export class CollectionAutomations {
     const unread = this.handoverUnreadAt !== null || this.reachUnreadAt !== null;
     this.handoverUnreadAt = null;
     this.reachUnreadAt = null;
-    if (unread || this.reachPending !== null) this.hostChanged();
+    if (unread || this.reachPending !== null) void this.readRelayAhead();
     // Every definition the relay had is on this computer now: hold those,
     // in every version, whether or not this computer indexed them or they
     // can run yet, and judge the ones current editors write from here as
@@ -1893,6 +1915,42 @@ export class CollectionAutomations {
         this.options.onError("hold the automations this computer could not vouch for", error),
       );
     }
+  }
+
+  private async readRelayAhead(): Promise<void> {
+    if (this.opened === null) return;
+    const busy = { ...this.readingRelay };
+    this.readingRelay = { reach: busy.reach ?? 0, handover: busy.handover ?? 0 };
+    const reads = this.relayReads.signal;
+    const generation = (await this.options.groupHost().catch(() => null)) ?? 0;
+    const reconcile = async (answers: RelayAnswers) => {
+      if (reads.aborted || this.opened === null) return;
+      await this.enqueue(() => this.reconcile(false, answers)).catch((error: unknown) =>
+        this.options.onError("update Group subscriptions for the automation host", error),
+      );
+    };
+    const reach = busy.reach === null && generation !== 0 && generation !== this.reachTakenAt;
+    const handover =
+      busy.handover === null &&
+      generation !== 0 &&
+      generation !== this.watchedGeneration &&
+      (reach || generation === this.reachTakenAt);
+    if (busy.reach === null) this.readingRelay.reach = reach ? generation : null;
+    if (busy.handover === null) this.readingRelay.handover = handover ? generation : null;
+    const readHandover = () =>
+      settled(this.options.groupRelayRecord(generation, reads))
+        .then((answer) => reconcile({ generation, handover: answer }))
+        .finally(() => (this.readingRelay.handover = null));
+    if (reach)
+      void settled(this.options.reachRelayRecord(generation, reads))
+        .then(async (answer) => {
+          if (handover && answer.status === "fulfilled") void readHandover();
+          else if (handover) this.readingRelay.handover = null;
+          await reconcile({ generation, reach: answer });
+        })
+        .finally(() => (this.readingRelay.reach = null));
+    else if (handover) void readHandover();
+    if (!reach && !handover) void reconcile({ generation });
   }
 
   /**
@@ -6508,7 +6566,10 @@ export class CollectionAutomations {
    * would allow until a current editor confirms it. Resolves false when the
    * relay did not answer, so nothing runs until it does.
    */
-  private async takeHostVerdicts(generation: number | null): Promise<boolean> {
+  private async takeHostVerdicts(
+    generation: number | null,
+    answers?: RelayAnswers,
+  ): Promise<boolean> {
     // The host moved on before the relay answered for a generation this
     // computer hosted at: that record is gone, so the claims it made then,
     // such as a handover's last schedule runs, run under the hold instead.
@@ -6520,13 +6581,19 @@ export class CollectionAutomations {
       this.clearWaits("roster");
     }
     if (generation === null || generation === 0 || generation === this.reachTakenAt) return true;
-    if (this.reachUnreadAt === generation) return false;
+    const ahead = answers?.generation === generation ? answers.reach : undefined;
+    if (this.reachUnreadAt === generation && ahead?.status !== "fulfilled") return false;
+    if (ahead === undefined && [0, generation].includes(this.readingRelay.reach ?? -1))
+      return false;
     let record: ReachRelayRecord;
     let readStarted = false;
     try {
       await this.markHostClaims(generation);
       readStarted = true;
-      record = await this.options.reachRelayRecord(generation, this.relayReads.signal);
+      record =
+        ahead === undefined
+          ? await this.options.reachRelayRecord(generation, this.relayReads.signal)
+          : answered(ahead);
     } catch (error) {
       // A read that the workspace close stopped is not an error.
       if (!this.relayReads.signal.aborted) {
@@ -6846,7 +6913,7 @@ export class CollectionAutomations {
    * `all` subscribes every one again, which heals a subscription the engine
    * lost; subscribing replaces a pair's filter, so it is safe to repeat.
    */
-  private async reconcile(all: boolean): Promise<void> {
+  private async reconcile(all: boolean, answers?: RelayAnswers): Promise<void> {
     await this.loadGroups();
     // Asked first, so a computer the relay names no host for yet claims it
     // before this decides, and does not drop its Group subscriptions only
@@ -6866,7 +6933,7 @@ export class CollectionAutomations {
     const generation = await this.options.groupHost();
     if (reads.aborted) return;
     this.groupTriggersHere = generation !== null;
-    const verdictsTaken = await this.takeHostVerdicts(generation);
+    const verdictsTaken = await this.takeHostVerdicts(generation, answers);
     if (reads.aborted) return;
     const desired = this.desiredSubscriptions();
     let changed = false;
@@ -6902,6 +6969,7 @@ export class CollectionAutomations {
       verdictsTaken ? generation : null,
       [...desired.values()].filter(isGroupSubscription),
       all,
+      answers,
     );
     await this.reconcileDatasets(all);
   }
@@ -6916,6 +6984,7 @@ export class CollectionAutomations {
     generation: number | null,
     wanted: GroupSubscription[],
     all: boolean,
+    answers?: RelayAnswers,
   ): Promise<void> {
     const tracked = [...this.subscribed.values()].filter(isGroupSubscription);
     if (generation === null) {
@@ -6927,7 +6996,7 @@ export class CollectionAutomations {
       left.automationId.localeCompare(right.automationId);
     const same = isDeepStrictEqual([...tracked].sort(byAutomation), [...wanted].sort(byAutomation));
     if (all || this.groupSubscriptionsUncertain || !same || this.watchedGeneration !== generation) {
-      await this.watchEngineGroups(generation, wanted);
+      await this.watchEngineGroups(generation, wanted, answers);
     }
   }
 
@@ -6937,10 +7006,15 @@ export class CollectionAutomations {
    * until it arrives, then takes a handover left here and claims each
    * stored message no host decided, in one write.
    */
-  private async watchEngineGroups(generation: number, wanted: GroupSubscription[]): Promise<void> {
+  private async watchEngineGroups(
+    generation: number,
+    wanted: GroupSubscription[],
+    answers?: RelayAnswers,
+  ): Promise<void> {
     // A watch may land even when its answer is lost.
     this.groupSubscriptionsUncertain = true;
-    if (this.handoverUnreadAt === generation) return;
+    const ahead = answers?.generation === generation ? answers.handover : undefined;
+    if (this.handoverUnreadAt === generation && ahead?.status !== "fulfilled") return;
     const input = {
       generation,
       subscriptions: wanted.map(({ automationId, groupId, startsWith }) =>
@@ -6952,8 +7026,12 @@ export class CollectionAutomations {
     let answer = await this.withLiveEngine((engine) => engine.watchAutomationGroups(input));
     if (answer?.needsHandover) {
       let relay: AutomationGroupRelayRecord;
+      if (ahead === undefined && [0, generation].includes(this.readingRelay.handover ?? -1)) return;
       try {
-        relay = await this.options.groupRelayRecord(generation, this.relayReads.signal);
+        relay =
+          ahead === undefined
+            ? await this.options.groupRelayRecord(generation, this.relayReads.signal)
+            : answered(ahead);
       } catch (error) {
         // Nothing changed in the engine. The next sync pull, or the next
         // open after a workspace close stopped the read, asks again.

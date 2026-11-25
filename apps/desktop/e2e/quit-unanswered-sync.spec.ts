@@ -19,6 +19,8 @@ import {
 // sync server takes each connection and never answers. One case leaves only
 // the push unanswered. The other also leaves the read of the relay's
 // automation host record unanswered. This spec does not cover the pull case.
+// A last case checks that Collections work doesn't wait on that read while
+// the workspace stays open.
 
 type Launched = Awaited<ReturnType<typeof launchDesktopApp>>;
 
@@ -351,3 +353,90 @@ for (const unanswered of ["push", "push and host read"] as const) {
     }
   });
 }
+
+test("Collections work does not wait on an automation host read the sync server never answers (#3251)", async () => {
+  test.setTimeout(300_000);
+  const temp = await createTempWorkspace();
+  const workspaceId = "collections-unanswered-host-read";
+  const hostRead = `GET /sync/${workspaceId}/automation-host/groups?generation=`;
+  const pushed = pushRequest(workspaceId);
+  let relay: SyncRelayHandle | null = null;
+  let server: Awaited<ReturnType<typeof startSyncServer>> | null = null;
+  let desktop: Launched | null = null;
+  try {
+    await seedWorkspaceManifest(temp, workspaceId);
+    await writeWorkspaceFiles(temp, [
+      { path: "notes/plan.md", contents: "draft\n" },
+      {
+        path: "Tasks/collection.yaml",
+        contents: "name: Tasks\nfields:\n  Title:\n    type: text\n",
+      },
+      { path: "Tasks/automations.yaml", contents: automations },
+    ]);
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
+    const sync = await startSyncServer(relay, hostRead, "hold-reads");
+    server = sync;
+    await seedWorkspaceRegistry(temp, [{ workspaceId, rootPath: temp.rootPath }]);
+    await seedCloudCredentials(temp, {
+      serverUrl: sync.baseUrl,
+      relayUrl: sync.baseUrl,
+      userId: "e2e-user",
+    });
+    desktop = await launchDesktopApp({
+      workspace: temp,
+      env: { DOHC_TEST_SYNC_DEBOUNCE_MS: "150" },
+    });
+    const { page } = desktop;
+    await openWorkspaceFromFirstRun(page, temp);
+    await page.evaluate(async (id) => {
+      await window.dohcDesktop!.cloudEnableSync({ workspaceId: id });
+    }, workspaceId);
+    await expect
+      .poll(() => syncStatus(page, workspaceId), { timeout: 60_000 })
+      .toEqual({ state: "synced", pendingChangeCount: 0 });
+    await expect
+      .poll(() => sync.openRead() !== undefined, {
+        timeout: 60_000,
+        message: "This computer claims the automation host and reads the relay's record",
+      })
+      .toBe(true);
+    await expect
+      .poll(() => sync.openRead() === undefined, {
+        timeout: 60_000,
+        message: "The client gives up on the first host read",
+      })
+      .toBe(true);
+
+    for (let pull = 1; sync.openRead() === undefined; pull++) {
+      if (pull > 3) throw new Error("3 pulls through the relay started no automation host read.");
+      const before = sync.seen.length;
+      await writeFile(join(temp.rootPath, "notes/warm-up.md"), `pull ${pull}\n`);
+      await expect
+        .poll(() => sync.seen.slice(before).some((line) => pushed.test(line)), {
+          timeout: 60_000,
+          message: "The push reaches the relay",
+        })
+        .toBe(true);
+      const end = Date.now() + 20_000;
+      await expect
+        .poll(() => sync.openRead() !== undefined || Date.now() > end, { timeout: 30_000 })
+        .toBe(true);
+    }
+
+    const started = performance.now();
+    await page.evaluate(async (id) => {
+      await window.dohcDesktop!.listCollectionAutomations({
+        workspaceId: id,
+        collectionPath: "Tasks",
+      });
+    }, workspaceId);
+    const listedMs = Math.round(performance.now() - started);
+    console.log(`#3251 e2e: listing Collection automations took ${listedMs} ms`);
+    expect(sync.openRead(), "The host read still waits on the sync server").toBeDefined();
+    expect(listedMs, "Listing doesn't wait for the host read").toBeLessThan(5_000);
+  } finally {
+    await server?.close();
+    await relay?.stop();
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
