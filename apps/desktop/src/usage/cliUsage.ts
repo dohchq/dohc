@@ -95,7 +95,7 @@ const DATASET_WRITE_ACTIONS: Readonly<Record<DatasetRequest["action"], boolean>>
   prepareSchemaChange: true,
   approveMigration: true,
   discardMigration: true,
-  invoke: false,
+  invoke: true,
   cancelInvoke: true,
 };
 
@@ -127,7 +127,8 @@ type DynamicVerb =
   | "members"
   | "appPublication"
   | "ownerAppResponses"
-  | "heldNoteChange";
+  | "heldNoteChange"
+  | "show";
 type StaticLegacyVerb = Exclude<CliVerb, DeclaredVerb | DynamicVerb>;
 
 const STATIC_LEGACY_WRITES: Readonly<Record<StaticLegacyVerb, boolean>> = {
@@ -147,7 +148,6 @@ const STATIC_LEGACY_WRITES: Readonly<Record<StaticLegacyVerb, boolean>> = {
   watch: false,
   inbox: false,
   notices: false,
-  show: false,
   post: true,
   reply: true,
   nothingToReport: true,
@@ -219,13 +219,18 @@ export function isCliWriteRequest(request: CliRequest): boolean {
     case "dataset":
       return DATASET_WRITE_ACTIONS[request.args.request.action];
     case "members":
-      return request.args.request.action !== "list";
+      return !(
+        request.args.request.action === "list" ||
+        (request.args.request.action === "group" && request.args.request.level === undefined)
+      );
     case "appPublication":
       return APP_PUBLICATION_WRITE_ACTIONS[request.args.request.action];
     case "ownerAppResponses":
       return request.args.request.action !== "list";
     case "heldNoteChange":
       return request.args.action !== "review";
+    case "show":
+      return !request.args.peek;
     default:
       return STATIC_LEGACY_WRITES[request.verb as StaticLegacyVerb];
   }

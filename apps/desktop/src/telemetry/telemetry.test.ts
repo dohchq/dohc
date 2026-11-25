@@ -15,6 +15,7 @@ import {
   countBucket,
   crashSignalFromEvent,
   createTelemetry,
+  createWorkspaceOpenTriggers,
   CURRENT_USAGE_NOTICE_VERSION,
   privacyInEffect,
   REPORT_LIMITS,
@@ -1104,5 +1105,27 @@ describe("v2 usage events, notice versioning, crash signals, and retries", () =>
     await vi.advanceTimersByTimeAsync(REPORT_LIMITS.errorFlushMs);
     expect(errorCalls()).toHaveLength(1);
     expect(reports.noticeDue(ON)).toEqual({ usage: true, errors: false });
+  });
+
+  it("preserves both auto_restore and deep_link triggers when a deep link overlaps startup restore", () => {
+    const triggers = createWorkspaceOpenTriggers<{ id: number }>();
+    const sender = { id: 1 };
+    triggers.markStartupRestore(sender);
+    triggers.noteActivation(sender, "ws-b", "deep_link");
+
+    expect(triggers.consume(sender, "ws-a")).toBe("auto_restore");
+    expect(triggers.consume(sender, "ws-b")).toBe("deep_link");
+    expect(triggers.consume(sender, "ws-a")).toBe("user");
+
+    const coldLink = { id: 2 };
+    triggers.markStartupRestore(coldLink);
+    triggers.noteActivation(coldLink, "ws-b", "deep_link");
+    expect(triggers.consume(coldLink, "ws-b")).toBe("deep_link");
+    expect(triggers.consume(coldLink, "ws-a")).toBe("user");
+
+    const superseded = { id: 3 };
+    triggers.noteActivation(superseded, "ws-b", "deep_link");
+    expect(triggers.consume(superseded, "ws-c")).toBe("user");
+    expect(triggers.consume(superseded, "ws-b")).toBe("user");
   });
 });

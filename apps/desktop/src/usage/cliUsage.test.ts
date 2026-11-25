@@ -258,9 +258,35 @@ describe("socket usage coverage", () => {
     ).toBe(true);
     expect(isCliWriteRequest(request("members", { request: { action: "list" } }))).toBe(false);
     expect(
+      isCliWriteRequest(request("members", { request: { action: "group", group: "General" } })),
+    ).toBe(false);
+    expect(
+      isCliWriteRequest(
+        request("members", { request: { action: "group", group: "General", level: "comment" } }),
+      ),
+    ).toBe(true);
+    expect(
       isCliWriteRequest(
         request("members", {
           request: { action: "invite", email: "a@b.test" },
+        }),
+      ),
+    ).toBe(true);
+    expect(isCliWriteRequest(request("show", { target: "t1", peek: true }))).toBe(false);
+    expect(isCliWriteRequest(request("show", { target: "t1", peek: false }))).toBe(true);
+    expect(
+      isCliWriteRequest(
+        request("dataset", {
+          request: {
+            action: "invoke",
+            workspaceId: "ws-1",
+            datasetPath: "tasks/dataset.json",
+            operationId: "00000000-0000-4000-8000-000000000002",
+            revision: 1,
+            revisionSha256: "a".repeat(64),
+            input: {},
+            idempotencyKey: "k1",
+          },
         }),
       ),
     ).toBe(true);

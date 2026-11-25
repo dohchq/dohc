@@ -986,6 +986,7 @@ import {
   countBucket,
   crashSignalFromEvent,
   createTelemetry,
+  createWorkspaceOpenTriggers,
   privacyInEffect,
   updateEventFromTransition,
   usageEventFor,
@@ -1160,20 +1161,15 @@ if (telemetry.available.usage || telemetry.available.errors) {
 }
 let launchAnalyticsRecorded = false;
 let previousUpdateState: PublicUpdateState | null = null;
-const startupRestoreWindows = new WeakSet<WebContents>();
-const pendingWindowOpenTrigger = new WeakMap<
-  WebContents,
-  { workspaceId: string; trigger: WorkspaceOpenTrigger }
->();
+const workspaceOpenTriggers = createWorkspaceOpenTriggers<WebContents>();
 
 function noteWorkspaceActivationTrigger(
   window: BrowserWindow,
   workspaceId: string,
   trigger: WorkspaceOpenTrigger,
 ): void {
-  startupRestoreWindows.delete(window.webContents);
   if (rendererWorkspaceSessions.current(window.webContents)?.workspaceId === workspaceId) return;
-  pendingWindowOpenTrigger.set(window.webContents, { workspaceId, trigger });
+  workspaceOpenTriggers.noteActivation(window.webContents, workspaceId, trigger);
 }
 
 function workspaceKindOf(workspace: RegistryEntry | null | undefined): WorkspaceKind | undefined {
@@ -9527,7 +9523,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
             preloadArguments,
           }),
         );
-        if (listWorkspaces().length > 0) startupRestoreWindows.add(window.webContents);
+        if (listWorkspaces().length > 0)
+          workspaceOpenTriggers.markStartupRestore(window.webContents);
         return window;
       },
       whenLoaded: (window) =>
@@ -9960,19 +9957,12 @@ function handleIpc(channel: string, listener: Parameters<typeof ipcMain.handle>[
       const result: unknown = await listener(event, ...args);
       const counted = usageEventFor(channel, result, args[0], {
         workspaceKind: (workspaceId) => workspaceKindOf(findWorkspace(workspaceId)),
-        workspaceOpenTrigger: (workspaceId) => {
-          const pending = pendingWindowOpenTrigger.get(event.sender);
-          if (pending) {
-            pendingWindowOpenTrigger.delete(event.sender);
-            if (pending.workspaceId === workspaceId) return pending.trigger;
-          }
-          if (startupRestoreWindows.delete(event.sender)) return "auto_restore";
-          return "user";
-        },
+        workspaceOpenTrigger: (workspaceId) =>
+          workspaceOpenTriggers.consume(event.sender, workspaceId),
       });
       if (counted) {
         if (counted.name === "workspace_added" && counted.method !== "mount_share") {
-          startupRestoreWindows.delete(event.sender);
+          workspaceOpenTriggers.clearStartupRestore(event.sender);
         }
         telemetry.track(counted);
         if (!(counted.name === "workspace_opened" && counted.trigger === "auto_restore")) {

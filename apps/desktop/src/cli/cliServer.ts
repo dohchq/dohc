@@ -5666,6 +5666,7 @@ function cliToolOutcome(
     if ("kind" in result && (result.kind === "refused" || result.kind === "collections-refused")) {
       return "refused";
     }
+    if ("status" in result && result.status === "refused") return "refused";
     if ("kind" in result && result.kind === "partial") return "error";
     if (request.verb === "automationPress" && "ok" in result && !result.ok && "confirm" in result) {
       return "refused";

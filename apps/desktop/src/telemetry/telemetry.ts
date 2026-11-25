@@ -38,6 +38,42 @@ export type WorkspaceAddMethod =
   | "mount_share";
 export type WorkspaceOpenTrigger = "user" | "auto_restore" | "deep_link";
 export type WorkspaceKind = "local" | "synced" | "received_share";
+
+export interface WorkspaceOpenTriggers<Sender extends object> {
+  markStartupRestore(sender: Sender): void;
+  clearStartupRestore(sender: Sender): void;
+  noteActivation(sender: Sender, workspaceId: string, trigger: WorkspaceOpenTrigger): void;
+  consume(sender: Sender, workspaceId: string): WorkspaceOpenTrigger;
+}
+
+export function createWorkspaceOpenTriggers<
+  Sender extends object,
+>(): WorkspaceOpenTriggers<Sender> {
+  const startupRestore = new WeakSet<Sender>();
+  const pending = new WeakMap<Sender, { workspaceId: string; trigger: WorkspaceOpenTrigger }>();
+  return {
+    markStartupRestore(sender) {
+      startupRestore.add(sender);
+    },
+    clearStartupRestore(sender) {
+      startupRestore.delete(sender);
+    },
+    noteActivation(sender, workspaceId, trigger) {
+      pending.set(sender, { workspaceId, trigger });
+    },
+    consume(sender, workspaceId) {
+      const queued = pending.get(sender);
+      if (queued?.workspaceId === workspaceId) {
+        pending.delete(sender);
+        startupRestore.delete(sender);
+        return queued.trigger;
+      }
+      if (startupRestore.delete(sender)) return "auto_restore";
+      pending.delete(sender);
+      return "user";
+    },
+  };
+}
 export type UpdateEventStage =
   | "available"
   | "download_started"
