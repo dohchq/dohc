@@ -2249,6 +2249,7 @@ fn validate_successor_base(
             observed: crate::hex_sha256(&observed_state_vector),
         });
     }
+    doc.check_format_two_base()?;
     let projected = if successor.content_kind == ContentKind::Scene {
         let scene_result = scene_result.ok_or_else(|| CollabError::InvalidSuccessorBase {
             constraint: "scene successor portable artifact",
@@ -3826,6 +3827,78 @@ mod successor_validation_tests {
         for _ in 0..8 {
             assert_eq!(markdown_successor(artifact), first);
         }
+    }
+
+    fn format_two_successor(artifact: &str) -> SuccessorBase {
+        let key = DocKey::new("ws", "main", "markdown-object").expect("key");
+        let identity = SuccessorIdentity::derive_with_schema_version(
+            SuccessorIdentityInput {
+                key: &key,
+                predecessor_claim_id: &"a".repeat(64),
+                predecessor_state_vector_sha256: &"b".repeat(64),
+                artifact_op_kind: "conflict.resolve",
+                artifact_id: "conflict",
+                artifact_preimage_sha256: &"c".repeat(64),
+                content_kind: ContentKind::Richdoc,
+                result_sha256: &crate::hex_sha256(artifact.as_bytes()),
+            },
+            2,
+        );
+        crate::ydoc::reading_body_sequence_here(|| crate::fresh_successor_base(&identity, artifact))
+            .expect("format-2 successor")
+    }
+
+    fn refused_as_a_format_two_base(error: CollabError) -> bool {
+        matches!(
+            error,
+            CollabError::InvalidSuccessorBase {
+                constraint: "format-2 successor base",
+                ..
+            }
+        )
+    }
+
+    #[test]
+    fn an_engine_that_does_not_read_format_two_refuses_a_format_two_successor_base() {
+        let base = format_two_successor("A note.\n");
+        crate::ydoc::reading_body_sequence_here(|| validate_successor_base(&base, None))
+            .expect("an engine that reads format 2 takes the base");
+        let error = validate_successor_base(&base, None).expect_err("refused");
+        assert!(refused_as_a_format_two_base(error));
+    }
+
+    #[test]
+    fn a_format_two_successor_base_with_items_under_body_is_refused() {
+        use yrs::updates::decoder::Decode;
+        use yrs::{ReadTxn, Transact, XmlFragment};
+
+        let valid = format_two_successor("A note.\n");
+        let raw = yrs::Doc::with_client_id(7);
+        let body = raw.get_or_insert_xml_fragment(crate::ROOT_BODY);
+        raw.transact_mut()
+            .apply_update(yrs::Update::decode_v1(&valid.update).expect("decode base"))
+            .expect("load base");
+        body.insert(
+            &mut raw.transact_mut(),
+            0,
+            yrs::XmlElementPrelim::empty("paragraph"),
+        );
+        let update = raw
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default());
+        let error = crate::ydoc::reading_body_sequence_here(|| {
+            let loaded = Ydoc::wire();
+            loaded.apply(&update).expect("load crafted successor");
+            let tampered = SuccessorBase {
+                lineage_claim_id: crate::hex_sha256(&update),
+                state_vector: loaded.encode_state_vector(),
+                update,
+                ..valid
+            };
+            validate_successor_base(&tampered, None)
+        })
+        .expect_err("refused");
+        assert!(refused_as_a_format_two_base(error));
     }
 
     fn successor_merged_with(update: Vec<u8>) -> SuccessorBase {

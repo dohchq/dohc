@@ -179,7 +179,9 @@ impl Any {
                 // TYPE 118: Map
                 encoder.write_u8(118);
                 encoder.write_var(map.len() as u64);
-                for (key, value) in map.as_ref() {
+                let mut entries: Vec<_> = map.iter().collect();
+                entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+                for (key, value) in entries {
                     encoder.write_string(&key);
                     value.encode(encoder);
                 }
