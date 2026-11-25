@@ -6146,6 +6146,71 @@ mod pending_write_order_tests {
         );
     }
 
+    /// When recovery fails a note's write, the note's later writes wait for
+    /// it, so an older write never lands after a newer one.
+    #[test]
+    fn recovery_stops_a_notes_writes_at_the_first_that_fails() {
+        let (scratch, mut store, writes) = two_writes_that_tie_in_time();
+        let first = writes[0].clone();
+        let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        super::super::history_operations::turns::tests::fail_materializations(
+            scratch.path(),
+            Arc::new(move |job| {
+                (job.job_id == first && !failed.swap(true, std::sync::atomic::Ordering::SeqCst))
+                    .then_some(dohc_engine_files::MaterializeError::FileLocked)
+            }),
+        );
+        let replay = |store: &mut EngineStore| {
+            replay_pending_materializations(store, scratch.path(), SCOPE, 6, &NoFaults, None, false)
+                .expect("replay")
+        };
+        let read = || std::fs::read_to_string(scratch.path().join("note.md")).expect("file");
+        assert_eq!(replay(&mut store).failed, 2);
+        assert_eq!(
+            [
+                job_status(&store, &writes[0]),
+                job_status(&store, &writes[1])
+            ],
+            [JobStatus::Pending, JobStatus::Pending]
+        );
+        assert_eq!(read(), "base");
+        assert_eq!(replay(&mut store).failed, 0);
+        assert_eq!(read(), "second edit");
+    }
+
+    /// A pulled write takes its sender's time, so a note's later write can
+    /// carry the earlier time. Recovery still lands them in moment order.
+    #[test]
+    fn recovery_replays_a_notes_writes_in_moment_order_whatever_their_time() {
+        let (scratch, mut store, writes) = two_writes_that_tie_in_time();
+        with_document_row(&mut store);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE materialization_jobs SET created_at_ms = created_at_ms - 1 \
+                     WHERE job_id = ?1",
+                    [&writes[1]],
+                )
+                .map_err(StorageError::persist_public)
+            })
+            .expect("the later write's earlier time");
+        let replay = replay_pending_materializations(
+            &mut store,
+            scratch.path(),
+            SCOPE,
+            6,
+            &NoFaults,
+            None,
+            false,
+        )
+        .expect("replay");
+        assert_eq!((replay.parked, replay.failed), (0, 0));
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("note.md")).expect("file"),
+            "second edit"
+        );
+    }
+
     /// A retried close whose head made no write of its own still reports the
     /// writes before it that did not land.
     #[test]
