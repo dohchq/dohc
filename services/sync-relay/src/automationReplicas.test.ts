@@ -1510,6 +1510,7 @@ describe("the automation replicas", () => {
     const root = options.root ?? (await mkdtemp(join(tmpdir(), "automation-replicas-")));
     const clock = options.clock ?? { ms: 0 };
     const passes = passEnds();
+    let ended = 0;
     const first = passes.next();
     const report: (error: unknown, workspaceId?: string) => void =
       options.onError ?? unexpectedErrors();
@@ -1523,7 +1524,10 @@ describe("the automation replicas", () => {
       wanted,
       ...(options.holdOnly ? { holdOnly: options.holdOnly } : {}),
       nowMs: () => clock.ms,
-      onReconciled: passes.onReconciled,
+      onReconciled: () => {
+        ended += 1;
+        passes.onReconciled();
+      },
       onError: (error, workspaceId) => {
         report(error, workspaceId);
         if (workspaceId === undefined) passes.onReconciled();
@@ -1542,7 +1546,7 @@ describe("the automation replicas", () => {
       await vi.advanceTimersByTimeAsync(waitMs);
       await ended;
     };
-    return { running, root, pass };
+    return { running, root, pass, passes: () => ended };
   }
   // An account visit opens the copy, so its folder exists, as a write needs.
   // Once the visit ends, only the copy's unsent writes keep it.
@@ -1840,6 +1844,27 @@ describe("the automation replicas", () => {
       storage.listAutomationWorkspaces()[0]?.reasons,
       "saved, it keeps the copy no more",
     ).toEqual(["account"]);
+  });
+
+  it("doesn't wake for a held copy's due publication retry", async () => {
+    const { storage } = await relay();
+    const engine = fakeEngine();
+    let held = false;
+    const { running, pass, passes } = await stepped(
+      storage,
+      () => new Map([[WORKSPACE, ["account"]]]),
+      { holdOnly: () => held },
+    );
+    phoneWrite(storage, "sent");
+    engine.receipts(new Map([receipt("sent", 1, "pending")]));
+    await pass(WORKSPACE);
+    held = true;
+    // A read's visit made the retry due as it began.
+    await pass(WORKSPACE);
+    const before = passes();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(passes() - before).toBeLessThan(5);
+    expect(running.replica(WORKSPACE)).toBeDefined();
   });
 
   it("neither replays nor publishes a copy's phone writes while only a read's hold keeps it", async () => {

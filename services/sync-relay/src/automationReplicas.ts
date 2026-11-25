@@ -1095,8 +1095,8 @@ export async function startAutomationReplicas(options: {
     let wait = next === Number.POSITIVE_INFINITY ? next : Math.max(next - nowMs(), 0);
     // A copy's next attempt to publish the phone's writes is a deadline of its own.
     const now = performance.now();
-    for (const retry of publicationRetries.values())
-      wait = Math.min(wait, Math.max(retry.at - now, 0));
+    for (const [workspaceId, retry] of publicationRetries)
+      if (!options.holdOnly?.(workspaceId)) wait = Math.min(wait, Math.max(retry.at - now, 0));
     return wait === Number.POSITIVE_INFINITY ? undefined : Math.min(wait, DEADLINE_MAX_WAIT_MS);
   }
 
