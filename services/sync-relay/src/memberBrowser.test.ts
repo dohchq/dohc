@@ -1337,8 +1337,8 @@ const commentThread = (threadId: string, path: string) =>
 const comments = (shareId: string, path: string, query: Record<string, string> = {}) =>
   `messages?${new URLSearchParams({ shareId, path, limit: "50", ...query })}`;
 
-async function commented() {
-  const seeded = await seed();
+async function commented(overrides: Parameters<typeof seed>[1] = {}) {
+  const seeded = await seed(undefined, overrides);
   await ownerWrite(seeded.h, "docs/other.md", "another file");
   await ownerAppend(seeded.h, [
     commentThread("c-plan", "docs/plan.md"),
@@ -1435,7 +1435,7 @@ describe("a member's file Comments in a browser", () => {
       ops.find(
         (op) => op.opKind === "chat.thread.create" && op.payload.threadId === post.payload.threadId,
       )?.payload,
-    ).toMatchObject({ linkedObjectId: "object-docs/plan.md" });
+    ).toMatchObject({ linkedObjectId: "object-docs/plan.md", linkedAtMs: expect.any(Number) });
     const read = await json(await chat(h, comments(ana.shareId, "docs/plan.md"), "ana"));
     expect((read.messages as Array<{ body: string }>).map((item) => item.body)).toEqual([
       "from edit",
@@ -1829,7 +1829,8 @@ describe("the owner's Chats and Comments in a browser", () => {
   });
 
   it("reads, follows and posts on a file's Comments, bound to the file's object, and never a secret file's", async () => {
-    const { h } = await commented();
+    let now = 50_000;
+    const { h } = await commented({ nowMs: () => now });
     await ownerWrite(h, ".env", "SECRET=SENTINEL");
     const read = await ownerChat(h, comments(OWNER_CHAT, "docs/plan.md"));
     expect(read.status, await read.clone().text()).toBe(200);
@@ -1855,10 +1856,16 @@ describe("the owner's Chats and Comments in a browser", () => {
     expect((await json(await held)).messages).toEqual([
       expect.objectContaining({ body: "from the owner" }),
     ]);
+    // A retry later returns the same message rather than a conflict.
+    now += 5_000;
+    const retried = await ownerChat(h, "messages", OWNER, ownerPost({ path: "docs/plan.md" }));
+    expect(retried.status, await retried.clone().text()).toBe(200);
     const ops = (await ownerLog(h)).filter((op) => op.originId === OWNER_ORIGIN);
+    expect(ops).toHaveLength(2);
+    // The engine refuses a file's thread without the time it was linked.
     expect(ops[0]).toMatchObject({
       opKind: "chat.thread.create",
-      payload: { linkedObjectId: "object-docs/plan.md" },
+      payload: { linkedObjectId: "object-docs/plan.md", linkedAtMs: 50_000 },
     });
     expect(ops[0]!.payload).not.toHaveProperty("linkedPath");
     for (const path of [".env", "docs/missing.md"]) {

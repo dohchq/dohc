@@ -431,11 +431,7 @@ function MemberEntry({
       </StatePage>
     );
   if (account === undefined)
-    return target.kind === "list" ? (
-      <WorkspacesOpening />
-    ) : (
-      <WorkspaceOpening side={target.kind === "member"} />
-    );
+    return target.kind === "list" ? <WorkspacesOpening /> : <WorkspaceOpening />;
   const hint =
     error === SESSION_ENDED
       ? SESSION_ENDED
@@ -699,7 +695,7 @@ function useMemberFiles(
 }
 
 // The workspace's shape while it loads: its files, the page and the side panel, or on a phone the page's header, the page and the tabs.
-function WorkspaceOpening({ side = true }: { side?: boolean }) {
+function WorkspaceOpening() {
   return (
     <div className="viewer link-page workspace-page workspace-opening" aria-busy="true">
       <div className="workspace-opening-files" aria-hidden="true">
@@ -729,23 +725,17 @@ function WorkspaceOpening({ side = true }: { side?: boolean }) {
           <i />
         </div>
       </div>
-      {side && (
-        <div className="workspace-opening-side" aria-hidden="true">
-          <i />
-          <i />
-          <i />
-          <i />
-        </div>
-      )}
+      <div className="workspace-opening-side" aria-hidden="true">
+        <i />
+        <i />
+        <i />
+        <i />
+      </div>
       <div className="workspace-opening-tabs" aria-hidden="true">
         <i />
         <i />
-        {side && (
-          <>
-            <i />
-            <i />
-          </>
-        )}
+        <i />
+        <i />
       </div>
       <p className="sr-only">Opening the workspace</p>
     </div>
@@ -1069,10 +1059,7 @@ function MemberWorkspace({
   );
 
   return (
-    <div
-      className={`viewer link-page workspace-page${owner ? " owner-page" : ""}`}
-      data-tab={shownTab ?? undefined}
-    >
+    <div className="viewer link-page workspace-page" data-tab={shownTab ?? undefined}>
       <nav id="workspace-files" aria-label="Workspace files" {...panel("files")}>
         <div className="workspace-title">
           <span className="bar-mark">

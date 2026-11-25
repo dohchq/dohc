@@ -722,7 +722,13 @@ export function createNamedRecipientChat(options: {
                     {
                       opKind: "chat.thread.create",
                       payload: file
-                        ? { threadId, title: "", linkedPath: file.filePath, createdAtMs }
+                        ? {
+                            threadId,
+                            title: "",
+                            linkedPath: file.filePath,
+                            linkedAtMs: createdAtMs,
+                            createdAtMs,
+                          }
                         : { threadId, title: "", channelWireId, lane: threadLane, createdAtMs },
                     },
                   ]
