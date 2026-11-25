@@ -300,8 +300,8 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
   }
   const routeKind = desktop ? "desktop" : kind;
   // Browsers reach named (not desktop) and link routes through the share page's
-  // gateway, which pings them; desktop sockets are pinged from here, while
-  // share-web's agent client opens link routes directly and keeps the idle close.
+  // gateway, which pings them; desktop and phone owner sockets are pinged from here,
+  // while share-web's agent client opens link routes directly and keeps the idle close.
   const gatewayFronted = !desktop && (kind === "named" || kind === "link");
   if (kind !== "named" && kind !== "link" && kind !== "owner" && kind !== "personal")
     throw new TypeError("Explicit live route kind required.");
@@ -664,7 +664,8 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
       token = "",
       personalWorkspaceId = "";
     let ownerTarget: LiveDocumentKey | undefined,
-      ownerBrowser = false;
+      ownerBrowser = false,
+      ownerPhone = false;
     try {
       headers = new Headers();
       const selected = new Set([
@@ -930,13 +931,13 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
         signal.throwIfAborted();
         check();
         const actor = { userId: account.userId };
-        const phone = account.clientKind === "phone";
+        ownerPhone = account.clientKind === "phone";
         if (
           ownerBrowser &&
           (account.clientKind !== "browser" || accountIsFenced(storage, actor.userId))
         )
           throw new Error();
-        const ticketed = phone || ownerBrowser;
+        const ticketed = ownerPhone || ownerBrowser;
         const ownerSession: OwnerSession = {
           sessionId: account.sessionId,
           clientKind: account.clientKind,
@@ -994,7 +995,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
                 Date.now() >= account.expiresAtMs ||
                 accountIsFenced(storage, account.userId) ||
                 !storage.workspaceIsOwnedBy(document.workspaceId, account.userId) ||
-                (phone && !storage.showsOnPhone(account.userId, document.workspaceId))
+                (ownerPhone && !storage.showsOnPhone(account.userId, document.workspaceId))
               )
                 throw new Error("The owner's access ended.");
             }
@@ -1356,7 +1357,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
             stop();
           }
         });
-        if (desktop) {
+        if (desktop || ownerPhone) {
           let pendingPing: Buffer | undefined;
           accepted.on("pong", (bytes) => {
             if (done || !pendingPing || !Buffer.isBuffer(bytes) || !bytes.equals(pendingPing))
