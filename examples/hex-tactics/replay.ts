@@ -25,7 +25,13 @@ function snapshotTiles(
       fortified: boolean;
     }
   >,
-): { tiles: VisibleTile[]; seat1Units: number; seat2Units: number; seat1Tiles: number; seat2Tiles: number } {
+): {
+  tiles: VisibleTile[];
+  seat1Units: number;
+  seat2Units: number;
+  seat1Tiles: number;
+  seat2Tiles: number;
+} {
   let seat1Units = 0;
   let seat2Units = 0;
   let seat1Tiles = 0;

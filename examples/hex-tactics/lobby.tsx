@@ -21,8 +21,12 @@ export interface LobbyProps {
   readonly panel: LobbyPanel;
   readonly onPanel: (panel: LobbyPanel) => void;
   readonly demo: MutationView & { readonly start: () => void };
-  readonly create: MutationView & { readonly submit: (values: { name: string; title: string }) => void };
-  readonly join: MutationView & { readonly submit: (values: { code: string; name: string }) => void };
+  readonly create: MutationView & {
+    readonly submit: (values: { name: string; title: string }) => void;
+  };
+  readonly join: MutationView & {
+    readonly submit: (values: { code: string; name: string }) => void;
+  };
   readonly resume: {
     readonly pending: boolean;
     readonly error: string | null;
@@ -82,13 +86,21 @@ function MutationError({ view, what }: { readonly view: MutationView; readonly w
       title={view.uncertain ? `dohc could not confirm the ${what}` : `Could not ${what}`}
       action={
         view.uncertain ? (
-          <Button type="button" size="sm" variant="ghost" disabled={view.pending} onClick={view.discard}>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            disabled={view.pending}
+            onClick={view.discard}
+          >
             Discard
           </Button>
         ) : undefined
       }
     >
-      {view.uncertain ? "Try again to recover the same request, or discard it." : view.error?.message}
+      {view.uncertain
+        ? "Try again to recover the same request, or discard it."
+        : view.error?.message}
     </Callout>
   );
 }
@@ -104,7 +116,9 @@ function updatedAgo(ms: number): string {
 
 function matchMeta(game: GameSummary): string {
   const names = (game.players ?? []).map((p) => p.name).join(" vs ") || "Open seat";
-  return names === game.title ? updatedAgo(game.updatedAtMs) : `${names} · ${updatedAgo(game.updatedAtMs)}`;
+  return names === game.title
+    ? updatedAgo(game.updatedAtMs)
+    : `${names} · ${updatedAgo(game.updatedAtMs)}`;
 }
 
 export function Lobby(props: LobbyProps) {
@@ -153,14 +167,26 @@ export function Lobby(props: LobbyProps) {
             <p className="hc-lobby-tag">Two-player hex strategy with fog of war</p>
           </div>
           {props.overlay ? (
-            <button type="button" className="hc-icon-btn hc-lobby-close" aria-label="Close menu" title="Close (Esc)" onClick={props.onClose}>
+            <button
+              type="button"
+              className="hc-icon-btn hc-lobby-close"
+              aria-label="Close menu"
+              title="Close (Esc)"
+              onClick={props.onClose}
+            >
               <CircleX size={18} aria-hidden="true" />
             </button>
           ) : null}
         </header>
 
         <div className="hc-lobby-primary">
-          <Button id="start-demo-btn" variant={panel ? "secondary" : "primary"} className="hc-cta" loading={demo.pending} onClick={demo.start}>
+          <Button
+            id="start-demo-btn"
+            variant={panel ? "secondary" : "primary"}
+            className="hc-cta"
+            loading={demo.pending}
+            onClick={demo.start}
+          >
             <span className="hc-cta-crests">
               <FactionCrest seat={1} size={18} />
               <FactionCrest seat={2} size={18} />
@@ -175,8 +201,16 @@ export function Lobby(props: LobbyProps) {
         </div>
 
         <div className="hc-menu" role="group" aria-label="Other ways to play">
-          <MenuRow id="open-create-btn" icon={<Plus size={16} />} label="Create a match to share" open={panel === "create"} onToggle={() => toggle("create")}>
-            <form onSubmit={submitWith(() => create.submit({ name: createName, title: createTitle }))}>
+          <MenuRow
+            id="open-create-btn"
+            icon={<Plus size={16} />}
+            label="Create a match to share"
+            open={panel === "create"}
+            onToggle={() => toggle("create")}
+          >
+            <form
+              onSubmit={submitWith(() => create.submit({ name: createName, title: createTitle }))}
+            >
               <fieldset disabled={create.pending} className="hc-form">
                 <MutationError view={create} what="create the match" />
                 <label className="hc-field">
@@ -203,14 +237,25 @@ export function Lobby(props: LobbyProps) {
                     disabled={create.uncertain}
                   />
                 </label>
-                <Button id="submit-create-btn" type="submit" variant="primary" loading={create.pending}>
+                <Button
+                  id="submit-create-btn"
+                  type="submit"
+                  variant="primary"
+                  loading={create.pending}
+                >
                   {create.uncertain ? "Try again" : "Create match"}
                 </Button>
               </fieldset>
             </form>
           </MenuRow>
 
-          <MenuRow id="open-join-btn" icon={<Users size={16} />} label="Join with a code" open={panel === "join"} onToggle={() => toggle("join")}>
+          <MenuRow
+            id="open-join-btn"
+            icon={<Users size={16} />}
+            label="Join with a code"
+            open={panel === "join"}
+            onToggle={() => toggle("join")}
+          >
             <form onSubmit={submitWith(() => join.submit({ code: joinCode, name: joinName }))}>
               <fieldset disabled={join.pending} className="hc-form">
                 <MutationError view={join} what="join the match" />
@@ -221,7 +266,9 @@ export function Lobby(props: LobbyProps) {
                     id="join-code-input"
                     className="hc-code-input"
                     value={joinCode}
-                    onChange={(event) => setJoinCode(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ""))}
+                    onChange={(event) =>
+                      setJoinCode(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ""))
+                    }
                     placeholder="AB12CD"
                     maxLength={6}
                     autoComplete="off"
@@ -249,7 +296,13 @@ export function Lobby(props: LobbyProps) {
             </form>
           </MenuRow>
 
-          <MenuRow id="open-resume-btn" icon={<Lock size={16} />} label="Resume with a seat key" open={panel === "resume"} onToggle={() => toggle("resume")}>
+          <MenuRow
+            id="open-resume-btn"
+            icon={<Lock size={16} />}
+            label="Resume with a seat key"
+            open={panel === "resume"}
+            onToggle={() => toggle("resume")}
+          >
             <form onSubmit={submitWith(() => resume.submit(seatKey))}>
               <fieldset disabled={resume.pending} className="hc-form">
                 {resume.error ? (
@@ -272,7 +325,12 @@ export function Lobby(props: LobbyProps) {
                     required
                   />
                 </label>
-                <Button id="submit-resume-btn" type="submit" variant="primary" loading={resume.pending}>
+                <Button
+                  id="submit-resume-btn"
+                  type="submit"
+                  variant="primary"
+                  loading={resume.pending}
+                >
                   Resume seat
                 </Button>
               </fieldset>
@@ -302,10 +360,17 @@ export function Lobby(props: LobbyProps) {
               {recent.map((game) => {
                 const seated = props.seatedGameIds.has(game.id);
                 return (
-                  <li key={game.id} className="hc-match" data-current={props.activeGameId === game.id ? "true" : "false"}>
+                  <li
+                    key={game.id}
+                    className="hc-match"
+                    data-current={props.activeGameId === game.id ? "true" : "false"}
+                  >
                     <span className="hc-match-crests" aria-hidden="true">
                       <FactionCrest seat={1} size={14} />
-                      <FactionCrest seat={game.playerCount === 2 || game.status !== "waiting" ? 2 : null} size={14} />
+                      <FactionCrest
+                        seat={game.playerCount === 2 || game.status !== "waiting" ? 2 : null}
+                        size={14}
+                      />
                     </span>
                     <span className="hc-match-main">
                       <span className="hc-match-title" title={game.title}>
@@ -315,10 +380,16 @@ export function Lobby(props: LobbyProps) {
                         {matchMeta(game)}
                       </span>
                     </span>
-                    <span className={`hc-match-status hc-match-status-${game.status}`}>{statusText(game)}</span>
+                    <span className={`hc-match-status hc-match-status-${game.status}`}>
+                      {statusText(game)}
+                    </span>
                     <span className="hc-match-actions">
                       {seated ? (
-                        <Button size="sm" variant="secondary" onClick={() => props.onOpenGame(game.id)}>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => props.onOpenGame(game.id)}
+                        >
                           {props.activeGameId === game.id ? "Back to match" : "Open"}
                         </Button>
                       ) : game.status === "waiting" ? (

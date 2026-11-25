@@ -956,7 +956,7 @@ function PersonRow(props: {
             testId: `sharing-person-copy-${grant.grantId}`,
             onSelect: () => {
               resend.forget();
-              invitationCopy.copy();
+              void invitationCopy.copy();
             },
           },
         ]
@@ -972,7 +972,7 @@ function PersonRow(props: {
             testId: `sharing-person-copy-code-${grant.grantId}`,
             onSelect: () => {
               resend.forget();
-              codeCopy.copy();
+              void codeCopy.copy();
             },
           },
         ]

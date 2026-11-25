@@ -34,7 +34,12 @@ export interface BankRow {
   journalEntryId: string | null;
   journalNumber: number | null;
   reversedByNumber: number | null;
-  original: { description: string; status: string; importedAtMs: number; journalNumber: number | null } | null;
+  original: {
+    description: string;
+    status: string;
+    importedAtMs: number;
+    journalNumber: number | null;
+  } | null;
   rowHash: string;
   suggestedAccountId: string | null;
   match: Payable | null;
@@ -87,23 +92,42 @@ export interface Decision {
 export const RULE_OUT: Choice = { override: true, entryId: undefined, invoiceId: undefined };
 
 export function applyChoice(row: BankRow, stored: Choice | undefined, patch: Choice): Choice {
-  return { ...stored, ...patch, ...(patch.override || patch.none ? { seen: row.candidates.map((candidate) => candidate.id) } : {}) };
+  return {
+    ...stored,
+    ...patch,
+    ...(patch.override || patch.none
+      ? { seen: row.candidates.map((candidate) => candidate.id) }
+      : {}),
+  };
 }
 
 function pickFor(row: BankRow, choice: Choice, notMatched: string[] | undefined): Pick | string {
   const memo = choice.memo?.trim();
   const base = { id: row.id, ...(notMatched ? { notMatched } : {}), ...(memo ? { memo } : {}) };
-  if (!choice.splits) return choice.accountId ? { ...base, accountId: choice.accountId } : "Choose the other account";
+  if (!choice.splits)
+    return choice.accountId ? { ...base, accountId: choice.accountId } : "Choose the other account";
   const splits = choice.splits
     .filter((split) => split.accountId || split.amount.trim())
-    .map((split) => ({ accountId: split.accountId, amountCents: parseAmount(split.amount, row.currency), memo: split.memo.trim() }));
+    .map((split) => ({
+      accountId: split.accountId,
+      amountCents: parseAmount(split.amount, row.currency),
+      memo: split.memo.trim(),
+    }));
   if (splits.length < 2) return "Add a second split";
   if (splits.some((split) => !split.accountId)) return "Choose an account on each split";
-  if (splits.some((split) => !split.amountCents || split.amountCents < 0)) return "Enter an amount on each split";
+  if (splits.some((split) => !split.amountCents || split.amountCents < 0))
+    return "Enter an amount on each split";
   const sum = splits.reduce((total, split) => total + split.amountCents!, 0);
   const amount = Math.abs(row.amountCents);
   if (sum !== amount) return `Splits are off by ${money(Math.abs(amount - sum), row.currency)}`;
-  return { ...base, splits: splits.map((split) => ({ accountId: split.accountId, amountCents: split.amountCents!, ...(split.memo ? { memo: split.memo } : {}) })) };
+  return {
+    ...base,
+    splits: splits.map((split) => ({
+      accountId: split.accountId,
+      amountCents: split.amountCents!,
+      ...(split.memo ? { memo: split.memo } : {}),
+    })),
+  };
 }
 
 export function decide(row: BankRow, stored: Choice = {}): Decision {
@@ -118,7 +142,10 @@ export function decide(row: BankRow, stored: Choice = {}): Decision {
         : row.candidates.length === 1 && row.candidates[0]!.sure
           ? row.candidates[0]
           : undefined;
-  const invoice = stored.invoiceId !== undefined ? row.payables.find((item) => item.id === stored.invoiceId) : (row.match ?? undefined);
+  const invoice =
+    stored.invoiceId !== undefined
+      ? row.payables.find((item) => item.id === stored.invoiceId)
+      : (row.match ?? undefined);
   const undecided = unseen && !entry;
   const overridden = Boolean(stored.override) && !unseen;
   return {
@@ -127,7 +154,8 @@ export function decide(row: BankRow, stored: Choice = {}): Decision {
     invoice,
     notMatched,
     undecided,
-    matchesOnEnter: Boolean(invoice || entry) && !overridden && !stored.accountId && !stored.splits && !undecided,
+    matchesOnEnter:
+      Boolean(invoice || entry) && !overridden && !stored.accountId && !stored.splits && !undecided,
     needsRest: Boolean(invoice && row.amountCents > invoice.balanceCents && !stored.restAccountId),
     pick: pickFor(row, choice, row.candidates.length && !unseen ? notMatched : undefined),
   };

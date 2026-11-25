@@ -1,8 +1,23 @@
 import { useRef, useState, type CSSProperties, type PointerEvent } from "react";
-import { Copy, Download, Heart, MessageSquare, Plus, RefreshCw, Settings, Trash2 } from "dohc/icons";
+import {
+  Copy,
+  Download,
+  Heart,
+  MessageSquare,
+  Plus,
+  RefreshCw,
+  Settings,
+  Trash2,
+} from "dohc/icons";
 import { copyText } from "dohc/app";
 import { describeExposure } from "./camera";
-import { formatBytes, formatDay, type ColorLabel, type Shoot, type StudioAsset } from "./portal/api";
+import {
+  formatBytes,
+  formatDay,
+  type ColorLabel,
+  type Shoot,
+  type StudioAsset,
+} from "./portal/api";
 import { CloseGlyph } from "./portal/glyphs";
 import { NoteRail, type NotesState } from "./portal/notes";
 import { Photo, useSize } from "./portal/photo";
@@ -32,7 +47,13 @@ function SheetHead({ title, onClose }: { title: string; onClose?: () => void }) 
   return (
     <div className="st-sheet-head">
       <strong>{title}</strong>
-      <button type="button" className="st-mini" aria-label={`Close ${title.toLowerCase()}`} title="Close" onClick={onClose}>
+      <button
+        type="button"
+        className="st-mini"
+        aria-label={`Close ${title.toLowerCase()}`}
+        title="Close"
+        onClick={onClose}
+      >
         <CloseGlyph size={14} />
       </button>
     </div>
@@ -54,8 +75,14 @@ function Navigator({
   const size = useSize(box);
   if (!photo || !size.width || !size.height) return <div className="st-navigator" ref={box} />;
   const ratio = photo.width / photo.height;
-  const frame = size.width / size.height > ratio ? { width: size.height * ratio, height: size.height } : { width: size.width, height: size.width / ratio };
-  const fitScale = viewport.width && viewport.height ? Math.min(viewport.width / photo.width, viewport.height / photo.height) : 0;
+  const frame =
+    size.width / size.height > ratio
+      ? { width: size.height * ratio, height: size.height }
+      : { width: size.width, height: size.width / ratio };
+  const fitScale =
+    viewport.width && viewport.height
+      ? Math.min(viewport.width / photo.width, viewport.height / photo.height)
+      : 0;
   const scale = zoom.level === "fit" ? fitScale : Math.max(fitScale, zoom.level);
   const shownW = scale ? Math.min(1, viewport.width / (photo.width * scale)) : 1;
   const shownH = scale ? Math.min(1, viewport.height / (photo.height * scale)) : 1;
@@ -157,10 +184,24 @@ export function LibraryRail({
         title="Shoots"
         action={
           <span className="st-section-actions">
-            <button type="button" className="st-mini" id="refresh-shoot" aria-label="Refresh" title="Refresh" onClick={onRefresh}>
+            <button
+              type="button"
+              className="st-mini"
+              id="refresh-shoot"
+              aria-label="Refresh"
+              title="Refresh"
+              onClick={onRefresh}
+            >
               <RefreshCw size={12} />
             </button>
-            <button type="button" className="st-mini" id="new-shoot" aria-label="New shoot" title="New shoot" onClick={onNewShoot}>
+            <button
+              type="button"
+              className="st-mini"
+              id="new-shoot"
+              aria-label="New shoot"
+              title="New shoot"
+              onClick={onNewShoot}
+            >
               <Plus size={13} />
             </button>
           </span>
@@ -188,7 +229,13 @@ export function LibraryRail({
         <ul className="st-list" role="radiogroup" aria-label="Library">
           {libraries.map(([id, text]) => (
             <li key={id}>
-              <button type="button" role="radio" aria-checked={library === id} className={`st-row${library === id ? " st-row-on" : ""}`} onClick={() => onLibrary(id)}>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={library === id}
+                className={`st-row${library === id ? " st-row-on" : ""}`}
+                onClick={() => onLibrary(id)}
+              >
                 <span className="st-row-text">{text}</span>
                 <span className="st-row-count">{counts[id]}</span>
               </button>
@@ -202,7 +249,11 @@ export function LibraryRail({
         </div>
         <div className="st-filter-row">
           <span className="st-filter-label">Label</span>
-          <LabelInput value={labelFilter ?? "none"} onChange={(label) => onLabelFilter(label === "none" ? null : label)} label="Show label" />
+          <LabelInput
+            value={labelFilter ?? "none"}
+            onChange={(label) => onLabelFilter(label === "none" ? null : label)}
+            label="Show label"
+          />
           <span className="st-filter-hint">{labelFilter ? LABEL_TITLES[labelFilter] : "Any"}</span>
         </div>
       </Section>
@@ -268,7 +319,11 @@ export function LibraryRail({
             {shoot.reviewerCount}, up to {shoot.selectionLimit} picks each
           </dd>
           <dt>Sent</dt>
-          <dd>{shoot.sentCount ? `${shoot.sentCount} of ${plural(shoot.reviewerCount, "reviewer")}` : "None yet"}</dd>
+          <dd>
+            {shoot.sentCount
+              ? `${shoot.sentCount} of ${plural(shoot.reviewerCount, "reviewer")}`
+              : "None yet"}
+          </dd>
           <dt>Notes</dt>
           <dd>
             {shoot.openNoteCount} open of {shoot.noteCount}
@@ -279,7 +334,12 @@ export function LibraryRail({
             <Download size={13} />
             <span>Final picks</span>
           </button>
-          <button type="button" className="st-tool-button" title="Shoot settings" onClick={onSettings}>
+          <button
+            type="button"
+            className="st-tool-button"
+            title="Shoot settings"
+            onClick={onSettings}
+          >
             <Settings size={13} />
             <span>Settings</span>
           </button>
@@ -324,7 +384,8 @@ export function Inspector({
       </aside>
     );
   const count = selection.length;
-  const sumOf = (key: "pickCount" | "noteCount" | "openNoteCount") => (count > 1 ? selection : [asset]).reduce((sum, item) => sum + item[key], 0);
+  const sumOf = (key: "pickCount" | "noteCount" | "openNoteCount") =>
+    (count > 1 ? selection : [asset]).reduce((sum, item) => sum + item[key], 0);
   const picks = sumOf("pickCount");
   const noteTotal = sumOf("noteCount");
   const openTotal = sumOf("openNoteCount");
@@ -354,7 +415,9 @@ export function Inspector({
           </div>
         ) : null}
         {asset.capture.camera || asset.capture.lens ? (
-          <div className="st-camera">{[asset.capture.camera, asset.capture.lens].filter(Boolean).join(" · ")}</div>
+          <div className="st-camera">
+            {[asset.capture.camera, asset.capture.lens].filter(Boolean).join(" · ")}
+          </div>
         ) : null}
       </Section>
       <Section title="Photo">

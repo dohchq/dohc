@@ -1,11 +1,30 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, Star } from "dohc/icons";
-import { COLOR_LABELS, type ColorLabel, type PhotoSource, type Shoot, type StudioAsset } from "./portal/api";
+import {
+  COLOR_LABELS,
+  type ColorLabel,
+  type PhotoSource,
+  type Shoot,
+  type StudioAsset,
+} from "./portal/api";
 import { usePhotoUrl, type FileAccess } from "./portal/photo";
 
-export const STUDIO_FILES: FileAccess = { operation: "studioFileAccess", fullSize: true, input: (photo) => ({ assetId: photo.id }) };
-export const STATUS_TEXT: Record<Shoot["status"], string> = { draft: "Draft", proofing: "Proofing", delivered: "Delivered" };
-export const LABEL_KEYS: Record<string, ColorLabel> = { "6": "red", "7": "yellow", "8": "green", "9": "blue" };
+export const STUDIO_FILES: FileAccess = {
+  operation: "studioFileAccess",
+  fullSize: true,
+  input: (photo) => ({ assetId: photo.id }),
+};
+export const STATUS_TEXT: Record<Shoot["status"], string> = {
+  draft: "Draft",
+  proofing: "Proofing",
+  delivered: "Delivered",
+};
+export const LABEL_KEYS: Record<string, ColorLabel> = {
+  "6": "red",
+  "7": "yellow",
+  "8": "green",
+  "9": "blue",
+};
 export const LABEL_TITLES: Record<ColorLabel, string> = {
   none: "No label",
   red: "Red",
@@ -64,7 +83,8 @@ export function formatCode(code: string) {
 }
 
 export function fileName(asset: StudioAsset) {
-  const kind = asset.mimeType === "image/png" ? "png" : asset.mimeType === "image/webp" ? "webp" : "jpg";
+  const kind =
+    asset.mimeType === "image/png" ? "png" : asset.mimeType === "image/webp" ? "webp" : "jpg";
   return `${asset.title}.${kind}`;
 }
 
@@ -82,7 +102,13 @@ export function StatusMark({ status }: { status: Shoot["status"] }) {
 
 export function LabelMark({ label, size = 10 }: { label: ColorLabel; size?: number }) {
   if (label === "none") return null;
-  return <span className={`st-label st-label-${label}`} style={{ width: size, height: size }} title={`${LABEL_TITLES[label]} label`} />;
+  return (
+    <span
+      className={`st-label st-label-${label}`}
+      style={{ width: size, height: size }}
+      title={`${LABEL_TITLES[label]} label`}
+    />
+  );
 }
 
 export function Rating({ value, quiet = false }: { value: number; quiet?: boolean }) {
@@ -98,7 +124,17 @@ export function Rating({ value, quiet = false }: { value: number; quiet?: boolea
   );
 }
 
-export function StarInput({ value, onChange, label = "Rating", id }: { value: number | null; onChange(value: number): void; label?: string; id?: string }) {
+export function StarInput({
+  value,
+  onChange,
+  label = "Rating",
+  id,
+}: {
+  value: number | null;
+  onChange(value: number): void;
+  label?: string;
+  id?: string;
+}) {
   return (
     <div className="st-stars" role="radiogroup" aria-label={label} id={id}>
       {[1, 2, 3, 4, 5].map((star) => (
@@ -119,7 +155,15 @@ export function StarInput({ value, onChange, label = "Rating", id }: { value: nu
   );
 }
 
-export function LabelInput({ value, onChange, label = "Color label" }: { value: ColorLabel | null; onChange(value: ColorLabel): void; label?: string }) {
+export function LabelInput({
+  value,
+  onChange,
+  label = "Color label",
+}: {
+  value: ColorLabel | null;
+  onChange(value: ColorLabel): void;
+  label?: string;
+}) {
   return (
     <div className="st-labels" role="radiogroup" aria-label={label}>
       {COLOR_LABELS.map((color, position) => (
@@ -140,13 +184,32 @@ export function LabelInput({ value, onChange, label = "Color label" }: { value: 
   );
 }
 
-export function Section({ title, action, children, open: initial = true }: { title: string; action?: ReactNode; children: ReactNode; open?: boolean }) {
+export function Section({
+  title,
+  action,
+  children,
+  open: initial = true,
+}: {
+  title: string;
+  action?: ReactNode;
+  children: ReactNode;
+  open?: boolean;
+}) {
   const [open, setOpen] = useState(initial);
   return (
     <section className={`st-section${open ? "" : " st-section-closed"}`}>
       <header className="st-section-head">
-        <button type="button" className="st-section-toggle" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
-          {open ? <ChevronDown size={12} strokeWidth={2} /> : <ChevronRight size={12} strokeWidth={2} />}
+        <button
+          type="button"
+          className="st-section-toggle"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+        >
+          {open ? (
+            <ChevronDown size={12} strokeWidth={2} />
+          ) : (
+            <ChevronRight size={12} strokeWidth={2} />
+          )}
           <span>{title}</span>
         </button>
         {action}
@@ -159,13 +222,19 @@ export function Section({ title, action, children, open: initial = true }: { tit
 const BINS = 64;
 
 function histogramPath(bins: readonly number[], peak: number) {
-  const points = bins.map((count, index) => `${index + 0.5},${(100 - Math.min(100, (count / peak) * 96)).toFixed(2)}`);
+  const points = bins.map(
+    (count, index) => `${index + 0.5},${(100 - Math.min(100, (count / peak) * 96)).toFixed(2)}`,
+  );
   return `M0,100 L${points.join(" L")} L${BINS},100 Z`;
 }
 
 export function Histogram({ photo, access }: { photo: StudioAsset; access: FileAccess }) {
   const { url } = usePhotoUrl(photo, access, "thumb");
-  const [data, setData] = useState<{ url: string; channels: number[][]; clipped: [boolean, boolean] } | null>(null);
+  const [data, setData] = useState<{
+    url: string;
+    channels: number[][];
+    clipped: [boolean, boolean];
+  } | null>(null);
   useEffect(() => {
     if (!url) return;
     let current = true;
@@ -180,7 +249,11 @@ export function Histogram({ photo, access }: { photo: StudioAsset; access: FileA
       if (!context) return;
       context.drawImage(image, 0, 0, canvas.width, canvas.height);
       const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
-      const channels = [new Array<number>(BINS).fill(0), new Array<number>(BINS).fill(0), new Array<number>(BINS).fill(0)];
+      const channels = [
+        new Array<number>(BINS).fill(0),
+        new Array<number>(BINS).fill(0),
+        new Array<number>(BINS).fill(0),
+      ];
       let low = 0;
       let high = 0;
       for (let index = 0; index < pixels.length; index += 4) {
@@ -202,7 +275,9 @@ export function Histogram({ photo, access }: { photo: StudioAsset; access: FileA
     };
   }, [url]);
   const ready = data && data.url === url ? data : null;
-  const peak = ready ? Math.max(1, ...ready.channels.flatMap((channel) => channel.slice(2, BINS - 2))) : 1;
+  const peak = ready
+    ? Math.max(1, ...ready.channels.flatMap((channel) => channel.slice(2, BINS - 2)))
+    : 1;
   return (
     <div className="st-histogram" role="img" aria-label={`Histogram of ${photo.title}`}>
       {ready ? (
@@ -212,8 +287,14 @@ export function Histogram({ photo, access }: { photo: StudioAsset; access: FileA
           <path d={histogramPath(ready.channels[2]!, peak)} className="st-hist-b" />
         </svg>
       ) : null}
-      <span className={`st-clip st-clip-low${ready?.clipped[0] ? " st-clip-on" : ""}`} title="Shadow clipping" />
-      <span className={`st-clip st-clip-high${ready?.clipped[1] ? " st-clip-on" : ""}`} title="Highlight clipping" />
+      <span
+        className={`st-clip st-clip-low${ready?.clipped[0] ? " st-clip-on" : ""}`}
+        title="Shadow clipping"
+      />
+      <span
+        className={`st-clip st-clip-high${ready?.clipped[1] ? " st-clip-on" : ""}`}
+        title="Highlight clipping"
+      />
     </div>
   );
 }

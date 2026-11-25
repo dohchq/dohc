@@ -10,6 +10,7 @@ export const JS_SHARDS = 13;
 // Median worker inventory plus artifact restoration in the recorded cloud run.
 export const JS_NATIVE_READY_SECONDS = 100;
 const splitNativeFile = "services/share-web/src/selfHostedLiveNative.integration.ts";
+export const BROWSER_TEST_FILES = new Set(["examples/hex-tactics/hex-tactics.test.mts"]);
 
 const databasePackages = new Set([
   "@dohc/workspace-postgres",
@@ -389,7 +390,8 @@ export async function javascriptTasks({
       }
     }
     const native = nativeTestFiles(tasks.map((task) => resolve(repoRoot, task.file)));
-    for (const task of tasks) task.native = native.has(resolve(repoRoot, task.file));
+    for (const task of tasks)
+      task.native = native.has(resolve(repoRoot, task.file)) || BROWSER_TEST_FILES.has(task.file);
     tasks.push(
       ...manifestTasks(repoRoot, repositoryTests),
       ...packages

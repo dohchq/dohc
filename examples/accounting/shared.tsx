@@ -106,33 +106,68 @@ export function longDate(iso: string) {
   });
 }
 export function problem(error: unknown) {
-  if (error && typeof error === "object" && "message" in error) return String((error as Error).message);
+  if (error && typeof error === "object" && "message" in error)
+    return String((error as Error).message);
   return "Something went wrong.";
 }
 export function cx(...names: Array<string | false | null | undefined>) {
   return names.filter(Boolean).join(" ");
 }
 
-export function CopyButton({ text, className, size = 14 }: { text: string; className: string; size?: number }) {
+export function CopyButton({
+  text,
+  className,
+  size = 14,
+}: {
+  text: string;
+  className: string;
+  size?: number;
+}) {
   const [copied, setCopied] = useState(false);
   return (
-    <button type="button" className={className} onClick={() => void copyText(text).then(() => setCopied(true), () => setCopied(false))}>
+    <button
+      type="button"
+      className={className}
+      onClick={() =>
+        void copyText(text).then(
+          () => setCopied(true),
+          () => setCopied(false),
+        )
+      }
+    >
       {copied ? <Check size={size} aria-hidden /> : <Copy size={size} aria-hidden />}
       {copied ? "Copied" : "Copy"}
     </button>
   );
 }
 
-export function useBooks<T>(operation: string, input?: unknown, options: { enabled?: boolean; keep?: boolean } = {}) {
+export function useBooks<T>(
+  operation: string,
+  input?: unknown,
+  options: { enabled?: boolean; keep?: boolean } = {},
+) {
   const enabled = options.enabled ?? true;
   const query = useDatasetQuery<T>(operation, input, { enabled });
   const last = useRef<T | undefined>(undefined);
   if (query.data !== undefined) last.current = query.data;
-  const data = query.data !== undefined ? query.data : enabled && options.keep && !query.error ? last.current : undefined;
+  const data =
+    query.data !== undefined
+      ? query.data
+      : enabled && options.keep && !query.error
+        ? last.current
+        : undefined;
   return { ...query, data, refreshing: query.loading && data !== undefined };
 }
 
-export function Failure({ error, retry, title = "Could not load this" }: { error: AppBackendError | Error; retry?: () => void; title?: string }) {
+export function Failure({
+  error,
+  retry,
+  title = "Could not load this",
+}: {
+  error: AppBackendError | Error;
+  retry?: () => void;
+  title?: string;
+}) {
   return (
     <div className="b-failure" role="alert">
       <TriangleAlert size={16} aria-hidden />
@@ -186,14 +221,20 @@ table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}th,t
 @media print{.print-bar{display:none}body{margin:0;max-width:none;padding:0}tr{break-inside:avoid}}`;
 
 function escapeHtml(value: string) {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
 export function downloadPrintableHtml(filename: string, title: string, node: HTMLElement | null) {
   if (!node) return;
   const clone = node.cloneNode(true) as HTMLElement;
   clone.querySelectorAll(".b-no-print").forEach((element) => element.remove());
-  clone.querySelectorAll("button").forEach((button) => button.replaceWith(...Array.from(button.childNodes)));
+  clone
+    .querySelectorAll("button")
+    .forEach((button) => button.replaceWith(...Array.from(button.childNodes)));
   clone.querySelectorAll("svg").forEach((element) => element.remove());
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title><style>${PRINT_HTML_CSS}</style></head><body><div class="print-bar"><button type="button" onclick="window.print()">Print</button></div>${clone.innerHTML}</body></html>`;
   const url = URL.createObjectURL(new Blob([html], { type: "text/html;charset=utf-8" }));
@@ -212,7 +253,13 @@ function Amount({ cents, currency }: { cents: number; currency: string }) {
 
 type OpenAccount = ((id: string) => void) | undefined;
 
-function AccountName({ row, onAccount }: { row: { id: string; name: string }; onAccount: OpenAccount }) {
+function AccountName({
+  row,
+  onAccount,
+}: {
+  row: { id: string; name: string };
+  onAccount: OpenAccount;
+}) {
   const label = (
     <span className="b-acct">
       {row.id ? <span className="b-code">{row.id}</span> : null}
@@ -220,7 +267,12 @@ function AccountName({ row, onAccount }: { row: { id: string; name: string }; on
     </span>
   );
   return row.id && onAccount ? (
-    <button type="button" className="b-st-account" onClick={() => onAccount(row.id)} title={`Open the ${row.name} ledger`}>
+    <button
+      type="button"
+      className="b-st-account"
+      onClick={() => onAccount(row.id)}
+      title={`Open the ${row.name} ledger`}
+    >
       {label}
     </button>
   ) : (
@@ -228,7 +280,14 @@ function AccountName({ row, onAccount }: { row: { id: string; name: string }; on
   );
 }
 
-function StatementSection({ title, rows, totalLabel, totalCents, currency, onAccount }: {
+function StatementSection({
+  title,
+  rows,
+  totalLabel,
+  totalCents,
+  currency,
+  onAccount,
+}: {
   title: string;
   rows: Array<{ id: string; name: string; balanceCents: number }>;
   totalLabel: string;
@@ -270,7 +329,13 @@ function StatementSection({ title, rows, totalLabel, totalCents, currency, onAcc
   );
 }
 
-export function TrialBalanceView({ report, onAccount }: { report: TrialBalance; onAccount?: OpenAccount }) {
+export function TrialBalanceView({
+  report,
+  onAccount,
+}: {
+  report: TrialBalance;
+  onAccount?: OpenAccount;
+}) {
   return (
     <table className="b-statement">
       <thead>
@@ -286,8 +351,20 @@ export function TrialBalanceView({ report, onAccount }: { report: TrialBalance; 
             <td>
               <AccountName row={row} onAccount={onAccount} />
             </td>
-            <td className="b-num">{row.debitBalanceCents ? <Amount cents={row.debitBalanceCents} currency={report.currency} /> : ""}</td>
-            <td className="b-num">{row.creditBalanceCents ? <Amount cents={row.creditBalanceCents} currency={report.currency} /> : ""}</td>
+            <td className="b-num">
+              {row.debitBalanceCents ? (
+                <Amount cents={row.debitBalanceCents} currency={report.currency} />
+              ) : (
+                ""
+              )}
+            </td>
+            <td className="b-num">
+              {row.creditBalanceCents ? (
+                <Amount cents={row.creditBalanceCents} currency={report.currency} />
+              ) : (
+                ""
+              )}
+            </td>
           </tr>
         ))}
         <tr className="b-st-grand">
@@ -304,11 +381,31 @@ export function TrialBalanceView({ report, onAccount }: { report: TrialBalance; 
   );
 }
 
-export function IncomeStatementView({ report, onAccount }: { report: IncomeStatement; onAccount?: OpenAccount }) {
+export function IncomeStatementView({
+  report,
+  onAccount,
+}: {
+  report: IncomeStatement;
+  onAccount?: OpenAccount;
+}) {
   return (
     <table className="b-statement">
-      <StatementSection title="Income" rows={report.income} totalLabel="Total income" totalCents={report.totalIncomeCents} currency={report.currency} onAccount={onAccount} />
-      <StatementSection title="Expenses" rows={report.expenses} totalLabel="Total expenses" totalCents={report.totalExpenseCents} currency={report.currency} onAccount={onAccount} />
+      <StatementSection
+        title="Income"
+        rows={report.income}
+        totalLabel="Total income"
+        totalCents={report.totalIncomeCents}
+        currency={report.currency}
+        onAccount={onAccount}
+      />
+      <StatementSection
+        title="Expenses"
+        rows={report.expenses}
+        totalLabel="Total expenses"
+        totalCents={report.totalExpenseCents}
+        currency={report.currency}
+        onAccount={onAccount}
+      />
       <tbody>
         <tr className="b-st-grand">
           <td>Net income</td>
@@ -321,22 +418,58 @@ export function IncomeStatementView({ report, onAccount }: { report: IncomeState
   );
 }
 
-export function BalanceSheetView({ report, onAccount }: { report: BalanceSheet; onAccount?: OpenAccount }) {
+export function BalanceSheetView({
+  report,
+  onAccount,
+}: {
+  report: BalanceSheet;
+  onAccount?: OpenAccount;
+}) {
   const equity = [
     ...report.equity,
-    ...(report.retainedEarningsCents ? [{ id: "", name: "Retained earnings", balanceCents: report.retainedEarningsCents }] : []),
-    { id: "", name: `Current earnings, ${fiscalLabel(report.yearStart, Number(report.yearStart.slice(5, 7)))}`, balanceCents: report.earningsCents },
+    ...(report.retainedEarningsCents
+      ? [{ id: "", name: "Retained earnings", balanceCents: report.retainedEarningsCents }]
+      : []),
+    {
+      id: "",
+      name: `Current earnings, ${fiscalLabel(report.yearStart, Number(report.yearStart.slice(5, 7)))}`,
+      balanceCents: report.earningsCents,
+    },
   ];
   return (
     <table className="b-statement">
-      <StatementSection title="Assets" rows={report.assets} totalLabel="Total assets" totalCents={report.totalAssetsCents} currency={report.currency} onAccount={onAccount} />
-      <StatementSection title="Liabilities" rows={report.liabilities} totalLabel="Total liabilities" totalCents={report.totalLiabilitiesCents} currency={report.currency} onAccount={onAccount} />
-      <StatementSection title="Equity" rows={equity} totalLabel="Total equity" totalCents={report.totalEquityCents} currency={report.currency} onAccount={onAccount} />
+      <StatementSection
+        title="Assets"
+        rows={report.assets}
+        totalLabel="Total assets"
+        totalCents={report.totalAssetsCents}
+        currency={report.currency}
+        onAccount={onAccount}
+      />
+      <StatementSection
+        title="Liabilities"
+        rows={report.liabilities}
+        totalLabel="Total liabilities"
+        totalCents={report.totalLiabilitiesCents}
+        currency={report.currency}
+        onAccount={onAccount}
+      />
+      <StatementSection
+        title="Equity"
+        rows={equity}
+        totalLabel="Total equity"
+        totalCents={report.totalEquityCents}
+        currency={report.currency}
+        onAccount={onAccount}
+      />
       <tbody>
         <tr className="b-st-grand">
           <td>Liabilities and equity</td>
           <td className="b-num">
-            <Amount cents={report.totalLiabilitiesCents + report.totalEquityCents} currency={report.currency} />
+            <Amount
+              cents={report.totalLiabilitiesCents + report.totalEquityCents}
+              currency={report.currency}
+            />
           </td>
         </tr>
       </tbody>
@@ -348,7 +481,14 @@ type PageState = { revision: number | null; after: Ledger["nextAfter"] };
 const sameCursor = (a: Ledger["nextAfter"], b: Ledger["nextAfter"]) =>
   a === b || Boolean(a && b && a.date === b.date && a.number === b.number && a.lineNo === b.lineNo);
 
-function LedgerView({ accountId, currency, from, to, loadAll, onState }: {
+function LedgerView({
+  accountId,
+  currency,
+  from,
+  to,
+  loadAll,
+  onState,
+}: {
   accountId: string;
   currency: string;
   from: string;
@@ -359,20 +499,28 @@ function LedgerView({ accountId, currency, from, to, loadAll, onState }: {
   const [pages, setPages] = useState<Array<Ledger["nextAfter"]>>([null]);
   const [readyPages, setReadyPages] = useState<Record<number, PageState | null>>({});
   const states = pages.map((_, index) => readyPages[index]);
-  const allReady = states.every((state, index) => state && sameCursor(state.after, pages[index] ?? null) && state.revision === states[0]?.revision);
+  const allReady = states.every(
+    (state, index) =>
+      state &&
+      sameCursor(state.after, pages[index] ?? null) &&
+      state.revision === states[0]?.revision,
+  );
   useEffect(() => {
     onState(allReady);
   }, [onState, allReady]);
-  const onPageState = useCallback((pageIndex: number, state: PageState | null, next: Ledger["nextAfter"] | undefined) => {
-    setReadyPages((map) => ({ ...map, [pageIndex]: state }));
-    if (next === undefined) return;
-    setPages((list) => {
-      if (pageIndex + 1 >= list.length) return list;
-      if (!next) return list.slice(0, pageIndex + 1);
-      if (sameCursor(list[pageIndex + 1] ?? null, next)) return list;
-      return list.map((item, at) => (at === pageIndex + 1 ? next : item));
-    });
-  }, []);
+  const onPageState = useCallback(
+    (pageIndex: number, state: PageState | null, next: Ledger["nextAfter"] | undefined) => {
+      setReadyPages((map) => ({ ...map, [pageIndex]: state }));
+      if (next === undefined) return;
+      setPages((list) => {
+        if (pageIndex + 1 >= list.length) return list;
+        if (!next) return list.slice(0, pageIndex + 1);
+        if (sameCursor(list[pageIndex + 1] ?? null, next)) return list;
+        return list.map((item, at) => (at === pageIndex + 1 ? next : item));
+      });
+    },
+    [],
+  );
   return (
     <table className="b-statement b-ledger">
       <thead>
@@ -406,12 +554,30 @@ function LedgerView({ accountId, currency, from, to, loadAll, onState }: {
     </table>
   );
 }
-function LedgerPage({ pageIndex, input, first, loadAll, onPageState, onMore }: {
+function LedgerPage({
+  pageIndex,
+  input,
+  first,
+  loadAll,
+  onPageState,
+  onMore,
+}: {
   pageIndex: number;
-  input: { accountId: string; currency: string; from: string; to: string; limit: number; after: Ledger["nextAfter"] };
+  input: {
+    accountId: string;
+    currency: string;
+    from: string;
+    to: string;
+    limit: number;
+    after: Ledger["nextAfter"];
+  };
   first: boolean;
   loadAll: boolean;
-  onPageState: (pageIndex: number, state: PageState | null, next: Ledger["nextAfter"] | undefined) => void;
+  onPageState: (
+    pageIndex: number,
+    state: PageState | null,
+    next: Ledger["nextAfter"] | undefined,
+  ) => void;
   onMore?: (next: NonNullable<Ledger["nextAfter"]>) => void;
 }) {
   const { data, loading, error, reload, revision } = useBooks<Ledger>("accountLedger", input);
@@ -428,7 +594,9 @@ function LedgerPage({ pageIndex, input, first, loadAll, onPageState, onMore }: {
     return (
       <tbody>
         <tr>
-          <td colSpan={6}>{error ? <Failure error={error} retry={reload} /> : <Loading rows={4} />}</td>
+          <td colSpan={6}>
+            {error ? <Failure error={error} retry={reload} /> : <Loading rows={4} />}
+          </td>
         </tr>
       </tbody>
     );
@@ -446,11 +614,21 @@ function LedgerPage({ pageIndex, input, first, loadAll, onPageState, onMore }: {
       ) : null}
       {data.rows.map((row) => (
         <tr key={`${row.entryId}:${row.lineNo}`} className="b-st-row">
-          <td className="b-date">{shortDate(row.date, row.date.slice(0, 4) !== input.from.slice(0, 4) || input.from.slice(0, 4) !== input.to.slice(0, 4))}</td>
+          <td className="b-date">
+            {shortDate(
+              row.date,
+              row.date.slice(0, 4) !== input.from.slice(0, 4) ||
+                input.from.slice(0, 4) !== input.to.slice(0, 4),
+            )}
+          </td>
           <td className="b-num">{row.number}</td>
           <td className="b-ledger-memo">{row.lineMemo || row.memo}</td>
-          <td className="b-num">{row.debitCents ? <Amount cents={row.debitCents} currency={data.currency} /> : ""}</td>
-          <td className="b-num">{row.creditCents ? <Amount cents={row.creditCents} currency={data.currency} /> : ""}</td>
+          <td className="b-num">
+            {row.debitCents ? <Amount cents={row.debitCents} currency={data.currency} /> : ""}
+          </td>
+          <td className="b-num">
+            {row.creditCents ? <Amount cents={row.creditCents} currency={data.currency} /> : ""}
+          </td>
           <td className="b-num">
             <Amount cents={row.balanceCents} currency={data.currency} />
           </td>
@@ -460,7 +638,11 @@ function LedgerPage({ pageIndex, input, first, loadAll, onPageState, onMore }: {
         onMore ? (
           <tr className="b-no-print">
             <td colSpan={6}>
-              <button type="button" className="b-btn b-btn-sm" onClick={() => onMore(data.nextAfter!)}>
+              <button
+                type="button"
+                className="b-btn b-btn-sm"
+                onClick={() => onMore(data.nextAfter!)}
+              >
                 Show more lines
               </button>
             </td>
@@ -478,7 +660,12 @@ function LedgerPage({ pageIndex, input, first, loadAll, onPageState, onMore }: {
   );
 }
 
-function ReportBody<T>({ operation, input, onState, render }: {
+function ReportBody<T>({
+  operation,
+  input,
+  onState,
+  render,
+}: {
   operation: string;
   input: unknown;
   onState: (ready: boolean) => void;
@@ -502,7 +689,13 @@ export const REPORTS = {
 } as const;
 export type ReportId = keyof typeof REPORTS;
 
-export function Tablist<T extends string>({ label, items, value, onChange, className }: {
+export function Tablist<T extends string>({
+  label,
+  items,
+  value,
+  onChange,
+  className,
+}: {
   label: string;
   items: Array<{ id: T; label: ReactNode; count?: number }>;
   value: T;
@@ -531,7 +724,12 @@ export function Tablist<T extends string>({ label, items, value, onChange, class
     };
   }, [items.length]);
   return (
-    <div ref={strip} className={cx("b-seg", more && "has-more", className)} role="tablist" aria-label={label}>
+    <div
+      ref={strip}
+      className={cx("b-seg", more && "has-more", className)}
+      role="tablist"
+      aria-label={label}
+    >
       {items.map((item, index) => (
         <button
           key={item.id}
@@ -584,14 +782,19 @@ export function presetRanges(now: string, startMonth: number) {
   const year = Number(now.slice(0, 4));
   const month = Number(now.slice(5, 7));
   const pad = (value: number) => String(value).padStart(2, "0");
-  const end = (y: number, m: number) => `${y}-${pad(m)}-${pad(new Date(Date.UTC(y, m, 0)).getUTCDate())}`;
+  const end = (y: number, m: number) =>
+    `${y}-${pad(m)}-${pad(new Date(Date.UTC(y, m, 0)).getUTCDate())}`;
   const quarter = Math.floor((month - 1) / 3) * 3 + 1;
   const lastMonth = month === 1 ? [year - 1, 12] : [year, month - 1];
   const fiscal = fiscalYear(now, startMonth);
   return {
     ytd: { label: "Year to date", from: fiscal.from, to: now },
     month: { label: "This month", from: `${year}-${pad(month)}-01`, to: now },
-    lastMonth: { label: "Last month", from: `${lastMonth[0]}-${pad(lastMonth[1]!)}-01`, to: end(lastMonth[0]!, lastMonth[1]!) },
+    lastMonth: {
+      label: "Last month",
+      from: `${lastMonth[0]}-${pad(lastMonth[1]!)}-01`,
+      to: end(lastMonth[0]!, lastMonth[1]!),
+    },
     quarter: { label: "This quarter", from: `${year}-${pad(quarter)}-01`, to: now },
     lastYear: { label: "Last year", from: fiscal.last.from, to: fiscal.last.to },
   } as const;
@@ -626,13 +829,25 @@ export function Reports({
   const currencies = info.data?.currencies.map((row) => row.currency) ?? [];
   const code = currency || currencies[0] || "USD";
   const usesRange = tab === "incomeStatement" || tab === "accountLedger";
-  const queryKey = JSON.stringify([tab, usesRange ? from : "", to, code, tab === "accountLedger" ? accountId : ""]);
+  const queryKey = JSON.stringify([
+    tab,
+    usesRange ? from : "",
+    to,
+    code,
+    tab === "accountLedger" ? accountId : "",
+  ]);
   const onReportState = useCallback(
-    (ready: boolean) => setReadyKey((current) => (ready ? queryKey : current === queryKey ? null : current)),
+    (ready: boolean) =>
+      setReadyKey((current) => (ready ? queryKey : current === queryKey ? null : current)),
     [queryKey],
   );
   const download = useCallback(
-    () => downloadPrintableHtml(`${tab}-${to}.html`, `${bookName} - ${REPORTS[tab]}`, statementRef.current),
+    () =>
+      downloadPrintableHtml(
+        `${tab}-${to}.html`,
+        `${bookName} - ${REPORTS[tab]}`,
+        statementRef.current,
+      ),
     [tab, to, bookName],
   );
   useEffect(() => {
@@ -646,12 +861,17 @@ export function Reports({
     if (!usesRange) setFrom(fiscalYear(to, startMonth).from);
     setTab("accountLedger");
   };
-  if (info.error) return <Failure error={info.error} retry={info.reload} title="Could not load the books" />;
+  if (info.error)
+    return <Failure error={info.error} retry={info.reload} title="Could not load the books" />;
   if (info.loading || !info.data) return <Loading rows={12} />;
   const account = info.data.accounts.find((row) => row.id === accountId);
-  const valid = usesRange ? /^\d{4}-\d{2}-\d{2}$/.test(from) && /^\d{4}-\d{2}-\d{2}$/.test(to) && from <= to : /^\d{4}-\d{2}-\d{2}$/.test(to);
+  const valid = usesRange
+    ? /^\d{4}-\d{2}-\d{2}$/.test(from) && /^\d{4}-\d{2}-\d{2}$/.test(to) && from <= to
+    : /^\d{4}-\d{2}-\d{2}$/.test(to);
   const period = usesRange ? `${longDate(from)} to ${longDate(to)}` : `As of ${longDate(to)}`;
-  const preset = Object.entries(presets).find(([, range]) => range.from === from && range.to === to)?.[0] ?? "custom";
+  const preset =
+    Object.entries(presets).find(([, range]) => range.from === from && range.to === to)?.[0] ??
+    "custom";
   const tabs = (
     <Tablist
       label="Reports"
@@ -697,20 +917,42 @@ export function Reports({
                   Custom
                 </option>
               </select>
-              <input className="b-input b-input-date" aria-label="From" type="date" value={from} onChange={(event) => setFrom(event.target.value)} />
+              <input
+                className="b-input b-input-date"
+                aria-label="From"
+                type="date"
+                value={from}
+                onChange={(event) => setFrom(event.target.value)}
+              />
               <span className="b-muted">to</span>
             </>
           ) : null}
-          <input className="b-input b-input-date" aria-label={usesRange ? "To" : "As of"} type="date" value={to} onChange={(event) => setTo(event.target.value)} />
+          <input
+            className="b-input b-input-date"
+            aria-label={usesRange ? "To" : "As of"}
+            type="date"
+            value={to}
+            onChange={(event) => setTo(event.target.value)}
+          />
           {currencies.length > 1 ? (
-            <select className="b-select" aria-label="Currency" value={code} onChange={(event) => setCurrency(event.target.value)}>
+            <select
+              className="b-select"
+              aria-label="Currency"
+              value={code}
+              onChange={(event) => setCurrency(event.target.value)}
+            >
               {currencies.map((value) => (
                 <option key={value}>{value}</option>
               ))}
             </select>
           ) : null}
           {tab === "accountLedger" ? (
-            <select className="b-select" aria-label="Account" value={accountId} onChange={(event) => setAccountId(event.target.value)}>
+            <select
+              className="b-select"
+              aria-label="Account"
+              value={accountId}
+              onChange={(event) => setAccountId(event.target.value)}
+            >
               {info.data.accounts.map((row) => (
                 <option key={row.id} value={row.id}>
                   {row.id} {row.name}
@@ -721,7 +963,9 @@ export function Reports({
           <button
             type="button"
             className="b-btn"
-            disabled={!valid || wantAll === queryKey || (tab !== "accountLedger" && readyKey !== queryKey)}
+            disabled={
+              !valid || wantAll === queryKey || (tab !== "accountLedger" && readyKey !== queryKey)
+            }
             onClick={() => (readyKey === queryKey ? download() : setWantAll(queryKey))}
           >
             <Download size={14} aria-hidden />
@@ -737,7 +981,11 @@ export function Reports({
       </div>
       <div className="b-paper" ref={statementRef}>
         {returnTo ? (
-          <button type="button" className="b-back b-no-print" onClick={() => (setTab(returnTo), setReturnTo(null))}>
+          <button
+            type="button"
+            className="b-back b-no-print"
+            onClick={() => (setTab(returnTo), setReturnTo(null))}
+          >
             <ArrowLeft size={14} aria-hidden />
             Back to {REPORTS[returnTo].toLowerCase()}
           </button>
@@ -753,7 +1001,9 @@ export function Reports({
           </p>
         </header>
         {!valid ? (
-          <p className="b-muted b-center">{usesRange ? "Choose a start date on or before the end date." : "Choose a valid date."}</p>
+          <p className="b-muted b-center">
+            {usesRange ? "Choose a start date on or before the end date." : "Choose a valid date."}
+          </p>
         ) : tab === "trialBalance" ? (
           <ReportBody<TrialBalance>
             operation="trialBalance"
@@ -778,8 +1028,14 @@ export function Reports({
                     <BarChart
                       labels={report.months.map((row) => shortMonth(row.month))}
                       series={[
-                        { name: "Income", values: report.months.map((row) => majorUnits(row.incomeCents, code)) },
-                        { name: "Expenses", values: report.months.map((row) => majorUnits(row.expenseCents, code)) },
+                        {
+                          name: "Income",
+                          values: report.months.map((row) => majorUnits(row.incomeCents, code)),
+                        },
+                        {
+                          name: "Expenses",
+                          values: report.months.map((row) => majorUnits(row.expenseCents, code)),
+                        },
                       ]}
                       height={160}
                       formatValue={(value) => compactMoney(value, code)}
@@ -821,7 +1077,11 @@ export function Reports({
 
 export function shortMonth(month: string, withYear = false) {
   const [year, value] = month.split("-").map(Number);
-  return new Date(Date.UTC(year!, value! - 1, 1)).toLocaleDateString(undefined, { month: "short", ...(withYear ? { year: "numeric" } : {}), timeZone: "UTC" });
+  return new Date(Date.UTC(year!, value! - 1, 1)).toLocaleDateString(undefined, {
+    month: "short",
+    ...(withYear ? { year: "numeric" } : {}),
+    timeZone: "UTC",
+  });
 }
 
 function Balanced({ ok }: { ok: boolean }) {

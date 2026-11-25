@@ -17,8 +17,34 @@ import {
   Upload,
 } from "dohc/icons";
 import { Modal } from "dohc/ui";
-import { Failure, Loading, cx, longDate, presetRanges, problem, shortDate, Tablist, today, TYPE_LABEL, useBooks, type AccountType } from "./shared";
-import { AccountPicker, MOD, Empty, Kbd, Topbar, useAction, useBooksContext, useInitialFocus, useKeys, useMutate, useToast, type Account } from "./parts";
+import {
+  Failure,
+  Loading,
+  cx,
+  longDate,
+  presetRanges,
+  problem,
+  shortDate,
+  Tablist,
+  today,
+  TYPE_LABEL,
+  useBooks,
+  type AccountType,
+} from "./shared";
+import {
+  AccountPicker,
+  MOD,
+  Empty,
+  Kbd,
+  Topbar,
+  useAction,
+  useBooksContext,
+  useInitialFocus,
+  useKeys,
+  useMutate,
+  useToast,
+  type Account,
+} from "./parts";
 import { centsInput, money, parseAmount } from "./amounts";
 
 interface EntryRow {
@@ -39,7 +65,14 @@ interface EntryRow {
   balanceCents?: number;
 }
 interface EntryPage {
-  account: { id: string; name: string; type: AccountType; currency: string; currencies: string[]; balanceCents: number } | null;
+  account: {
+    id: string;
+    name: string;
+    type: AccountType;
+    currency: string;
+    currencies: string[];
+    balanceCents: number;
+  } | null;
   entries: EntryRow[];
   total: number;
   debitCents?: number;
@@ -63,14 +96,41 @@ interface Entry {
   receiptFileId: string | null;
   createdAtMs: number;
   invoice: { id: string; number: string | null; status: string; voidEntryId: string | null } | null;
-  bankRow: { id: string; importId: string; lineNo: number; date: string; description: string; amountCents: number; importedAtMs: number } | null;
-  lines: Array<{ lineNo: number; accountId: string; accountName: string; debitCents: number; creditCents: number; memo: string | null }>;
+  bankRow: {
+    id: string;
+    importId: string;
+    lineNo: number;
+    date: string;
+    description: string;
+    amountCents: number;
+    importedAtMs: number;
+  } | null;
+  lines: Array<{
+    lineNo: number;
+    accountId: string;
+    accountName: string;
+    debitCents: number;
+    creditCents: number;
+    memo: string | null;
+  }>;
 }
 
 const PAGE = 100;
 const RECEIPT_TYPES = "application/pdf,image/png,image/jpeg,image/webp,image/gif,image/heic";
-const SOURCE_ICON = { bank: Landmark, invoice: FileText, payment: Banknote, reversal: RotateCcw, manual: PenLine } as const;
-const SOURCE_LABEL: Record<string, string> = { bank: "Bank", invoice: "Invoice", payment: "Payment", reversal: "Reversal", manual: "Manual" };
+const SOURCE_ICON = {
+  bank: Landmark,
+  invoice: FileText,
+  payment: Banknote,
+  reversal: RotateCcw,
+  manual: PenLine,
+} as const;
+const SOURCE_LABEL: Record<string, string> = {
+  bank: "Bank",
+  invoice: "Invoice",
+  payment: "Payment",
+  reversal: "Reversal",
+  manual: "Manual",
+};
 
 function SourceIcon({ source }: { source: string }) {
   if (source === "manual") return null;
@@ -82,15 +142,42 @@ function SourceIcon({ source }: { source: string }) {
   );
 }
 
-function ranges(now: string, startMonth: number): Record<string, { label: string; from?: string; to?: string }> {
+function ranges(
+  now: string,
+  startMonth: number,
+): Record<string, { label: string; from?: string; to?: string }> {
   const { month, lastMonth, quarter, ytd, lastYear } = presetRanges(now, startMonth);
-  return { all: { label: "All dates" }, month, lastMonth, quarter, ytd: { ...ytd, label: "This year" }, lastYear };
+  return {
+    all: { label: "All dates" },
+    month,
+    lastMonth,
+    quarter,
+    ytd: { ...ytd, label: "This year" },
+    lastYear,
+  };
 }
 
-export function AccountFilter({ accounts, value, onChange, label = "Account" }: { accounts: Account[]; value: string; onChange: (id: string) => void; label?: string }) {
-  const groups = (Object.keys(TYPE_LABEL) as AccountType[]).map((type) => [type, accounts.filter((account) => account.type === type)] as const);
+export function AccountFilter({
+  accounts,
+  value,
+  onChange,
+  label = "Account",
+}: {
+  accounts: Account[];
+  value: string;
+  onChange: (id: string) => void;
+  label?: string;
+}) {
+  const groups = (Object.keys(TYPE_LABEL) as AccountType[]).map(
+    (type) => [type, accounts.filter((account) => account.type === type)] as const,
+  );
   return (
-    <select className="b-select" aria-label={label} value={value} onChange={(event) => onChange(event.target.value)}>
+    <select
+      className="b-select"
+      aria-label={label}
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+    >
       <option value="">All accounts</option>
       {groups.map(([type, list]) =>
         list.length ? (
@@ -150,7 +237,9 @@ export function Register() {
   const set = (patch: Partial<typeof route>) => go({ ...route, view: "register", ...patch });
   const open = (id: string | null) => set({ entry: id ?? undefined });
   useEffect(() => {
-    tableRef.current?.querySelector<HTMLElement>(`[data-index="${cursor}"]`)?.scrollIntoView({ block: "nearest" });
+    tableRef.current
+      ?.querySelector<HTMLElement>(`[data-index="${cursor}"]`)
+      ?.scrollIntoView({ block: "nearest" });
   }, [cursor]);
   useEffect(() => {
     const at = rows.findIndex((row) => row.id === selected);
@@ -186,10 +275,19 @@ export function Register() {
     <>
       <Topbar
         title={accountName ? `${accountName.id} ${accountName.name}` : "Register"}
-        meta={current ? `${current.total.toLocaleString()} ${current.total === 1 ? "entry" : "entries"}` : undefined}
+        meta={
+          current
+            ? `${current.total.toLocaleString()} ${current.total === 1 ? "entry" : "entries"}`
+            : undefined
+        }
       >
         {ledger && ledger.currencies.length > 1 ? (
-          <select className="b-select" aria-label="Currency" value={ledger.currency} onChange={(event) => setPicked({ account, code: event.target.value })}>
+          <select
+            className="b-select"
+            aria-label="Currency"
+            value={ledger.currency}
+            onChange={(event) => setPicked({ account, code: event.target.value })}
+          >
             {ledger.currencies.map((item) => (
               <option key={item} value={item}>
                 {item}
@@ -225,8 +323,17 @@ export function Register() {
           />
           {q ? null : <Kbd>/</Kbd>}
         </label>
-        <AccountFilter accounts={accounts} value={account} onChange={(id) => set({ account: id || undefined, entry: undefined })} />
-        <select className="b-select" aria-label="Dates" value={range} onChange={(event) => setRange(event.target.value)}>
+        <AccountFilter
+          accounts={accounts}
+          value={account}
+          onChange={(id) => set({ account: id || undefined, entry: undefined })}
+        />
+        <select
+          className="b-select"
+          aria-label="Dates"
+          value={range}
+          onChange={(event) => setRange(event.target.value)}
+        >
           {Object.entries(presets).map(([id, preset]) => (
             <option key={id} value={id}>
               {preset.label}
@@ -257,7 +364,14 @@ export function Register() {
               <Loading rows={14} />
             </div>
           ) : rows.length === 0 ? (
-            <Empty icon={<Search size={20} aria-hidden />} title={search || show !== "all" || range !== "all" || account ? "No entries match" : "No entries yet"}>
+            <Empty
+              icon={<Search size={20} aria-hidden />}
+              title={
+                search || show !== "all" || range !== "all" || account
+                  ? "No entries match"
+                  : "No entries yet"
+              }
+            >
               {search || show !== "all" || range !== "all" || account
                 ? "Try a different search, account, or date range."
                 : "Post an entry, import a bank statement, or issue an invoice."}
@@ -267,7 +381,9 @@ export function Register() {
               className={cx("b-grid", ledger && "is-ledger")}
               aria-label="Journal entries"
               aria-rowcount={current.total}
-              onPointerMove={(event) => (keyed && (event.movementX || event.movementY) ? setKeyed(false) : undefined)}
+              onPointerMove={(event) =>
+                keyed && (event.movementX || event.movementY) ? setKeyed(false) : undefined
+              }
             >
               <thead>
                 <tr>
@@ -296,7 +412,10 @@ export function Register() {
                     key={row.id}
                     data-index={index}
                     aria-selected={row.id === selected}
-                    className={cx(index === cursor && (keyed || selected) && "is-cursor", (row.reversed || row.reversesEntryId) && "is-muted")}
+                    className={cx(
+                      index === cursor && (keyed || selected) && "is-cursor",
+                      (row.reversed || row.reversesEntryId) && "is-muted",
+                    )}
                     onClick={() => {
                       setCursor(index);
                       open(row.id);
@@ -308,7 +427,16 @@ export function Register() {
                     </td>
                     <td className="col-no b-num b-subtle">{row.number}</td>
                     <td className="col-memo">
-                      <button type="button" className="b-row-link" tabIndex={-1} onClick={(event) => (event.stopPropagation(), setCursor(index), open(row.id))}>
+                      <button
+                        type="button"
+                        className="b-row-link"
+                        tabIndex={-1}
+                        onClick={(event) => (
+                          event.stopPropagation(),
+                          setCursor(index),
+                          open(row.id)
+                        )}
+                      >
                         {row.memo || "No memo"}
                       </button>
                       {row.reversed ? <span className="b-tag">Reversed</span> : null}
@@ -316,9 +444,20 @@ export function Register() {
                     </td>
                     {ledger ? (
                       <>
-                        <td className="b-num col-amt">{row.debitCents ? money(row.debitCents, ledger.currency) : ""}</td>
-                        <td className="b-num col-amt">{row.creditCents ? money(row.creditCents, ledger.currency) : ""}</td>
-                        <td className={cx("b-num col-amt", (row.balanceCents ?? 0) < 0 && "is-negative")}>{money(row.balanceCents ?? 0, ledger.currency)}</td>
+                        <td className="b-num col-amt">
+                          {row.debitCents ? money(row.debitCents, ledger.currency) : ""}
+                        </td>
+                        <td className="b-num col-amt">
+                          {row.creditCents ? money(row.creditCents, ledger.currency) : ""}
+                        </td>
+                        <td
+                          className={cx(
+                            "b-num col-amt",
+                            (row.balanceCents ?? 0) < 0 && "is-negative",
+                          )}
+                        >
+                          {money(row.balanceCents ?? 0, ledger.currency)}
+                        </td>
                       </>
                     ) : (
                       <>
@@ -326,7 +465,9 @@ export function Register() {
                         <td className="b-num col-amt">{money(row.totalCents, row.currency)}</td>
                       </>
                     )}
-                    <td className="col-flags">{row.hasReceipt ? <Paperclip size={13} aria-label="Has a receipt" /> : null}</td>
+                    <td className="col-flags">
+                      {row.hasReceipt ? <Paperclip size={13} aria-label="Has a receipt" /> : null}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -334,8 +475,12 @@ export function Register() {
                 <tfoot>
                   <tr>
                     <td colSpan={4}>Totals for these filters</td>
-                    <td className="b-num col-amt">{money(current.debitCents ?? 0, ledger.currency)}</td>
-                    <td className="b-num col-amt">{money(current.creditCents ?? 0, ledger.currency)}</td>
+                    <td className="b-num col-amt">
+                      {money(current.debitCents ?? 0, ledger.currency)}
+                    </td>
+                    <td className="b-num col-amt">
+                      {money(current.creditCents ?? 0, ledger.currency)}
+                    </td>
                     <td colSpan={2} />
                   </tr>
                 </tfoot>
@@ -345,28 +490,57 @@ export function Register() {
           {current && (page > 0 || current.nextOffset !== null) ? (
             <div className="b-pager">
               <span className="b-muted">
-                {(page * PAGE + 1).toLocaleString()}–{(page * PAGE + rows.length).toLocaleString()} of {current.total.toLocaleString()}
+                {(page * PAGE + 1).toLocaleString()}–{(page * PAGE + rows.length).toLocaleString()}{" "}
+                of {current.total.toLocaleString()}
               </span>
-              <button type="button" className="b-icon-btn" aria-label="Previous page" disabled={page === 0} onClick={() => (setPage(page - 1), setCursor(0), setKeyed(false))}>
+              <button
+                type="button"
+                className="b-icon-btn"
+                aria-label="Previous page"
+                disabled={page === 0}
+                onClick={() => (setPage(page - 1), setCursor(0), setKeyed(false))}
+              >
                 <ChevronLeft size={16} aria-hidden />
               </button>
-              <button type="button" className="b-icon-btn" aria-label="Next page" disabled={list.refreshing || current.nextOffset === null} onClick={() => (setPage(page + 1), setCursor(0), setKeyed(false))}>
+              <button
+                type="button"
+                className="b-icon-btn"
+                aria-label="Next page"
+                disabled={list.refreshing || current.nextOffset === null}
+                onClick={() => (setPage(page + 1), setCursor(0), setKeyed(false))}
+              >
                 <ChevronRight size={16} aria-hidden />
               </button>
             </div>
           ) : null}
         </div>
-        {selected ? <EntryInspector key={selected} id={selected} onClose={() => open(null)} onOpen={open} /> : null}
+        {selected ? (
+          <EntryInspector key={selected} id={selected} onClose={() => open(null)} onOpen={open} />
+        ) : null}
       </div>
     </>
   );
 }
 
 function stamp(ms: number) {
-  return new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+  return new Date(ms).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
-export function EntryInspector({ id, onClose, onOpen }: { id: string; onClose: () => void; onOpen: (id: string) => void }) {
+export function EntryInspector({
+  id,
+  onClose,
+  onOpen,
+}: {
+  id: string;
+  onClose: () => void;
+  onOpen: (id: string) => void;
+}) {
   const { data, error, reload } = useBooks<Entry>("getEntry", { id });
   const { go, overview } = useBooksContext();
   const toast = useToast();
@@ -374,7 +548,8 @@ export function EntryInspector({ id, onClose, onOpen }: { id: string; onClose: (
   const [reversing, setReversing] = useState(false);
   const [reverseDate, setReverseDate] = useState("");
   const lockedThrough = overview?.periods.lockedThrough;
-  const firstDate = (date: string) => (lockedThrough && date.slice(0, 7) <= lockedThrough ? (overview?.today ?? today()) : date);
+  const firstDate = (date: string) =>
+    lockedThrough && date.slice(0, 7) <= lockedThrough ? (overview?.today ?? today()) : date;
   const panel = useRef<HTMLElement>(null);
   if (error)
     return (
@@ -429,14 +604,22 @@ export function EntryInspector({ id, onClose, onOpen }: { id: string; onClose: (
               {data.lines.map((line) => (
                 <tr key={line.lineNo}>
                   <td>
-                    <button type="button" className="b-row-link" onClick={() => go({ view: "register", account: line.accountId })}>
+                    <button
+                      type="button"
+                      className="b-row-link"
+                      onClick={() => go({ view: "register", account: line.accountId })}
+                    >
                       <span className="b-code">{line.accountId}</span>
                       {line.accountName}
                     </button>
                     {line.memo ? <span className="b-line-memo">{line.memo}</span> : null}
                   </td>
-                  <td className="b-num">{line.debitCents ? money(line.debitCents, data.currency) : ""}</td>
-                  <td className="b-num">{line.creditCents ? money(line.creditCents, data.currency) : ""}</td>
+                  <td className="b-num">
+                    {line.debitCents ? money(line.debitCents, data.currency) : ""}
+                  </td>
+                  <td className="b-num">
+                    {line.creditCents ? money(line.creditCents, data.currency) : ""}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -455,7 +638,8 @@ export function EntryInspector({ id, onClose, onOpen }: { id: string; onClose: (
                 <li>
                   <Landmark size={13} aria-hidden />
                   <span>
-                    Imported from bank statement line {data.bankRow.lineNo}: <q>{data.bankRow.description}</q>
+                    Imported from bank statement line {data.bankRow.lineNo}:{" "}
+                    <q>{data.bankRow.description}</q>
                   </span>
                   <time>{stamp(data.bankRow.importedAtMs)}</time>
                 </li>
@@ -471,7 +655,11 @@ export function EntryInspector({ id, onClose, onOpen }: { id: string; onClose: (
                         : data.invoice.voidEntryId === data.id
                           ? "Voids "
                           : "Reverses the payment for "}
-                    <button type="button" className="b-link" onClick={() => go({ view: "invoices", invoice: data.invoice!.id })}>
+                    <button
+                      type="button"
+                      className="b-link"
+                      onClick={() => go({ view: "invoices", invoice: data.invoice!.id })}
+                    >
                       invoice {data.invoice.number ?? "draft"}
                     </button>
                   </span>
@@ -487,7 +675,11 @@ export function EntryInspector({ id, onClose, onOpen }: { id: string; onClose: (
                   <RotateCcw size={13} aria-hidden />
                   <span>
                     Reverses{" "}
-                    <button type="button" className="b-link" onClick={() => onOpen(data.reversesEntryId!)}>
+                    <button
+                      type="button"
+                      className="b-link"
+                      onClick={() => onOpen(data.reversesEntryId!)}
+                    >
                       entry {data.reversesNumber}
                     </button>
                   </span>
@@ -498,7 +690,11 @@ export function EntryInspector({ id, onClose, onOpen }: { id: string; onClose: (
                   <RotateCcw size={13} aria-hidden />
                   <span>
                     Reversed by{" "}
-                    <button type="button" className="b-link" onClick={() => onOpen(data.reversedByEntryId!)}>
+                    <button
+                      type="button"
+                      className="b-link"
+                      onClick={() => onOpen(data.reversedByEntryId!)}
+                    >
                       entry {data.reversedByNumber}
                     </button>
                   </span>
@@ -512,12 +708,20 @@ export function EntryInspector({ id, onClose, onOpen }: { id: string; onClose: (
               {reversing ? (
                 <div className="b-confirm">
                   <p>
-                    Posted entries never change. Reversing posts a new entry with every debit and credit swapped, and both stay in the books.
+                    Posted entries never change. Reversing posts a new entry with every debit and
+                    credit swapped, and both stay in the books.
                   </p>
                   <div className="b-confirm-row">
                     <label className="b-inline-field">
                       <span>Reversal date</span>
-                      <input className="b-input b-input-date" type="date" min={data.date} max={overview?.today ?? today()} value={reverseDate || firstDate(data.date)} onChange={(event) => setReverseDate(event.target.value)} />
+                      <input
+                        className="b-input b-input-date"
+                        type="date"
+                        min={data.date}
+                        max={overview?.today ?? today()}
+                        value={reverseDate || firstDate(data.date)}
+                        onChange={(event) => setReverseDate(event.target.value)}
+                      />
                     </label>
                     <button type="button" className="b-btn" onClick={() => setReversing(false)}>
                       Keep
@@ -529,12 +733,20 @@ export function EntryInspector({ id, onClose, onOpen }: { id: string; onClose: (
                       onClick={() =>
                         void run<{ id: string; number: number }>(
                           "reverseJournalEntry",
-                          { entryId: data.id, ...((reverseDate || firstDate(data.date)) !== data.date ? { date: reverseDate || firstDate(data.date) } : {}) },
+                          {
+                            entryId: data.id,
+                            ...((reverseDate || firstDate(data.date)) !== data.date
+                              ? { date: reverseDate || firstDate(data.date) }
+                              : {}),
+                          },
                           {
                             failed: `Could not reverse entry ${data.number}`,
                             after: (created) => {
                               setReversing(false);
-                              toast({ message: `Reversed by entry ${created.number}`, action: { label: "Open", run: () => onOpen(created.id) } });
+                              toast({
+                                message: `Reversed by entry ${created.number}`,
+                                action: { label: "Open", run: () => onOpen(created.id) },
+                              });
                             },
                           },
                         )
@@ -557,17 +769,34 @@ export function EntryInspector({ id, onClose, onOpen }: { id: string; onClose: (
           ) : null}
         </div>
         <div className="b-insp-receipt">
-          {data.receiptFileId ? <ReceiptView entryId={data.id} fileId={data.receiptFileId} /> : <ReceiptDrop entryId={data.id} />}
+          {data.receiptFileId ? (
+            <ReceiptView entryId={data.id} fileId={data.receiptFileId} />
+          ) : (
+            <ReceiptDrop entryId={data.id} />
+          )}
         </div>
       </div>
     </aside>
   );
 }
 
-function InspectorHead({ title, tags, onClose }: { title: string; tags?: React.ReactNode; onClose: () => void }) {
+function InspectorHead({
+  title,
+  tags,
+  onClose,
+}: {
+  title: string;
+  tags?: React.ReactNode;
+  onClose: () => void;
+}) {
   return (
     <header className="b-insp-head">
-      <button type="button" className="b-icon-btn b-insp-back" aria-label="Back to the list" onClick={onClose}>
+      <button
+        type="button"
+        className="b-icon-btn b-insp-back"
+        aria-label="Back to the list"
+        onClick={onClose}
+      >
         <ArrowLeft size={16} aria-hidden />
       </button>
       <strong>{title}</strong>
@@ -583,7 +812,12 @@ function ReceiptView({ entryId, fileId }: { entryId: string; fileId: string }) {
   const app = useApp();
   const { run, pending } = useAction();
   const toast = useToast();
-  const [state, setState] = useState<{ url?: string; type?: string; name?: string; error?: unknown }>({});
+  const [state, setState] = useState<{
+    url?: string;
+    type?: string;
+    name?: string;
+    error?: unknown;
+  }>({});
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let alive = true;
@@ -602,8 +836,16 @@ function ReceiptView({ entryId, fileId }: { entryId: string; fileId: string }) {
       if (url) URL.revokeObjectURL(url);
     };
   }, [app, entryId, fileId, attempt]);
-  if (state.error) return <Failure error={state.error as Error} retry={() => setAttempt((value) => value + 1)} title="Could not load the receipt" />;
-  if (!state.url) return <div className="b-receipt is-loading" aria-busy="true" aria-label="Loading receipt" />;
+  if (state.error)
+    return (
+      <Failure
+        error={state.error as Error}
+        retry={() => setAttempt((value) => value + 1)}
+        title="Could not load the receipt"
+      />
+    );
+  if (!state.url)
+    return <div className="b-receipt is-loading" aria-busy="true" aria-label="Loading receipt" />;
   return (
     <figure className="b-receipt">
       {state.type?.startsWith("image/") ? (
@@ -626,14 +868,23 @@ function ReceiptView({ entryId, fileId }: { entryId: string; fileId: string }) {
           className="b-link"
           disabled={pending !== null}
           onClick={() =>
-            void run("removeReceipt", { entryId, fileId }, {
-              failed: "Could not remove the receipt",
-              after: () =>
-                toast({
-                  message: "Receipt removed",
-                  undo: () => void run("attachReceipt", { entryId, fileId }, { done: "Receipt restored", failed: "Could not restore the receipt" }),
-                }),
-            })
+            void run(
+              "removeReceipt",
+              { entryId, fileId },
+              {
+                failed: "Could not remove the receipt",
+                after: () =>
+                  toast({
+                    message: "Receipt removed",
+                    undo: () =>
+                      void run(
+                        "attachReceipt",
+                        { entryId, fileId },
+                        { done: "Receipt restored", failed: "Could not restore the receipt" },
+                      ),
+                  }),
+              },
+            )
           }
         >
           Remove
@@ -661,10 +912,20 @@ function ReceiptDrop({ entryId }: { entryId: string }) {
       await mutate("attachReceipt", { entryId, fileId });
       toast({
         message: "Receipt attached",
-        undo: () => void run("removeReceipt", { entryId, fileId }, { done: "Receipt removed", failed: "Could not remove the receipt" }),
+        undo: () =>
+          void run(
+            "removeReceipt",
+            { entryId, fileId },
+            { done: "Receipt removed", failed: "Could not remove the receipt" },
+          ),
       });
     } catch (error) {
-      toast({ tone: "error", message: "Could not attach the receipt", detail: problem(error), action: { label: "Try again", run: () => void attach(file) } });
+      toast({
+        tone: "error",
+        message: "Could not attach the receipt",
+        detail: problem(error),
+        action: { label: "Try again", run: () => void attach(file) },
+      });
     } finally {
       busyRef.current = false;
       setBusy(false);
@@ -688,7 +949,12 @@ function ReceiptDrop({ entryId }: { entryId: string }) {
     >
       <ImageIcon size={20} aria-hidden />
       <p>{busy ? "Uploading…" : "No receipt yet"}</p>
-      <button type="button" className="b-btn b-btn-sm" disabled={busy} onClick={() => input.current?.click()}>
+      <button
+        type="button"
+        className="b-btn b-btn-sm"
+        disabled={busy}
+        onClick={() => input.current?.click()}
+      >
         <Upload size={14} aria-hidden />
         Attach receipt
       </button>
@@ -727,7 +993,13 @@ export function Composer({ onClose }: { onClose: () => void }) {
   const [currency, setCurrency] = useState(overview?.currency ?? "USD");
   const [memo, setMemo] = useState("");
   const nextKey = useRef(3);
-  const blank = (): DraftLine => ({ key: nextKey.current++, accountId: "", memo: "", debit: "", credit: "" });
+  const blank = (): DraftLine => ({
+    key: nextKey.current++,
+    accountId: "",
+    memo: "",
+    debit: "",
+    credit: "",
+  });
   const [lines, setLines] = useState<DraftLine[]>([
     { key: 1, accountId: "", memo: "", debit: "", credit: "" },
     { key: 2, accountId: "", memo: "", debit: "", credit: "" },
@@ -737,19 +1009,40 @@ export function Composer({ onClose }: { onClose: () => void }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
-  const attempt = useRef<{ fingerprint: string; uploadKey: string; uploadedFileId?: string; postKey: string } | null>(null);
+  const attempt = useRef<{
+    fingerprint: string;
+    uploadKey: string;
+    uploadedFileId?: string;
+    postKey: string;
+  } | null>(null);
   const fields = useRef(new Map<string, HTMLInputElement | null>());
   const focusNext = useRef<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const memoInput = useInitialFocus<HTMLInputElement>();
   const code = /^[A-Z]{3}$/.test(currency) ? currency : "USD";
-  const parsed = lines.map((line) => ({ accountId: line.accountId, memo: line.memo.trim(), debitCents: parseAmount(line.debit, code), creditCents: parseAmount(line.credit, code) }));
-  const invalidAmount = parsed.some((line) => line.debitCents === null || line.creditCents === null || line.debitCents < 0 || line.creditCents < 0);
+  const parsed = lines.map((line) => ({
+    accountId: line.accountId,
+    memo: line.memo.trim(),
+    debitCents: parseAmount(line.debit, code),
+    creditCents: parseAmount(line.credit, code),
+  }));
+  const invalidAmount = parsed.some(
+    (line) =>
+      line.debitCents === null ||
+      line.creditCents === null ||
+      line.debitCents < 0 ||
+      line.creditCents < 0,
+  );
   const debits = parsed.reduce((sum, line) => sum + (line.debitCents ?? 0), 0);
   const credits = parsed.reduce((sum, line) => sum + (line.creditCents ?? 0), 0);
   const delta = debits - credits;
   const used = parsed.filter((line) => line.accountId || line.debitCents || line.creditCents);
-  const incomplete = used.some((line) => !line.accountId || (!line.debitCents && !line.creditCents) || (line.debitCents && line.creditCents));
+  const incomplete = used.some(
+    (line) =>
+      !line.accountId ||
+      (!line.debitCents && !line.creditCents) ||
+      (line.debitCents && line.creditCents),
+  );
   const reason = !date
     ? "Choose a date"
     : !/^[A-Z]{3}$/.test(currency)
@@ -777,14 +1070,27 @@ export function Composer({ onClose }: { onClose: () => void }) {
     fields.current.get(focusNext.current)?.focus();
     focusNext.current = null;
   });
-  const update = (index: number, patch: Partial<DraftLine>) => setLines((list) => list.map((line, at) => (at === index ? { ...line, ...patch } : line)));
+  const update = (index: number, patch: Partial<DraftLine>) =>
+    setLines((list) => list.map((line, at) => (at === index ? { ...line, ...patch } : line)));
   const balanceLine = (index: number, side: "debit" | "credit") => {
     const others = parsed.filter((_, at) => at !== index);
     const otherDebits = others.reduce((sum, line) => sum + (line.debitCents ?? 0), 0);
     const otherCredits = others.reduce((sum, line) => sum + (line.creditCents ?? 0), 0);
     const need = side === "debit" ? otherCredits - otherDebits : otherDebits - otherCredits;
-    if (need > 0) update(index, side === "debit" ? { debit: centsInput(need, code), credit: "" } : { credit: centsInput(need, code), debit: "" });
-    else if (need < 0) update(index, side === "debit" ? { credit: centsInput(-need, code), debit: "" } : { debit: centsInput(-need, code), credit: "" });
+    if (need > 0)
+      update(
+        index,
+        side === "debit"
+          ? { debit: centsInput(need, code), credit: "" }
+          : { credit: centsInput(need, code), debit: "" },
+      );
+    else if (need < 0)
+      update(
+        index,
+        side === "debit"
+          ? { credit: centsInput(-need, code), debit: "" }
+          : { debit: centsInput(-need, code), credit: "" },
+      );
   };
   const autoBalance = () => {
     if (delta === 0) return;
@@ -804,17 +1110,24 @@ export function Composer({ onClose }: { onClose: () => void }) {
     setLines((list) => [...list, line]);
     focusNext.current = `${line.key}:account`;
   };
-  const amountKeys = (index: number, side: "debit" | "credit") => (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === "=") {
-      event.preventDefault();
-      balanceLine(index, side);
-    } else if (event.key === "Enter" && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) {
-      event.preventDefault();
-      const next = lines[index + 1];
-      if (next) fields.current.get(`${next.key}:account`)?.focus();
-      else addLine();
-    }
-  };
+  const amountKeys =
+    (index: number, side: "debit" | "credit") => (event: KeyboardEvent<HTMLInputElement>) => {
+      if (event.key === "=") {
+        event.preventDefault();
+        balanceLine(index, side);
+      } else if (
+        event.key === "Enter" &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.shiftKey &&
+        !event.altKey
+      ) {
+        event.preventDefault();
+        const next = lines[index + 1];
+        if (next) fields.current.get(`${next.key}:account`)?.focus();
+        else addLine();
+      }
+    };
   async function submit() {
     if (inFlight.current || reason) return;
     inFlight.current = true;
@@ -826,9 +1139,19 @@ export function Composer({ onClose }: { onClose: () => void }) {
       ...(line.creditCents ? { creditCents: line.creditCents } : {}),
       ...(line.memo ? { memo: line.memo } : {}),
     }));
-    const fingerprint = JSON.stringify({ date, currency, memo: memo.trim(), payloadLines, receipt: receipt ? [receipt.name, receipt.size, receipt.lastModified] : null });
+    const fingerprint = JSON.stringify({
+      date,
+      currency,
+      memo: memo.trim(),
+      payloadLines,
+      receipt: receipt ? [receipt.name, receipt.size, receipt.lastModified] : null,
+    });
     if (!attempt.current || attempt.current.fingerprint !== fingerprint)
-      attempt.current = { fingerprint, uploadKey: mutationKey("receipt"), postKey: mutationKey("postJournalEntry") };
+      attempt.current = {
+        fingerprint,
+        uploadKey: mutationKey("receipt"),
+        postKey: mutationKey("postJournalEntry"),
+      };
     const current = attempt.current;
     try {
       let receiptFileId = current.uploadedFileId;
@@ -838,13 +1161,27 @@ export function Composer({ onClose }: { onClose: () => void }) {
       }
       const created = await mutate<{ id: string; number: number }>(
         "postJournalEntry",
-        { date, currency, memo: memo.trim(), lines: payloadLines, ...(receiptFileId ? { receiptFileId } : {}) },
+        {
+          date,
+          currency,
+          memo: memo.trim(),
+          lines: payloadLines,
+          ...(receiptFileId ? { receiptFileId } : {}),
+        },
         current.postKey,
       );
       onClose();
       toast({
         message: `Posted as entry ${created.number}`,
-        undo: () => void run("reverseJournalEntry", { entryId: created.id }, { done: `Reversed entry ${created.number}`, failed: `Could not undo entry ${created.number}` }),
+        undo: () =>
+          void run(
+            "reverseJournalEntry",
+            { entryId: created.id },
+            {
+              done: `Reversed entry ${created.number}`,
+              failed: `Could not undo entry ${created.number}`,
+            },
+          ),
         action: { label: "Open", run: () => go({ view: "register", entry: created.id }) },
       });
     } catch (failure) {
@@ -870,9 +1207,16 @@ export function Composer({ onClose }: { onClose: () => void }) {
           <div className={cx("b-balance", reason ? "is-off" : "is-ok")} aria-live="polite">
             {delta !== 0 && !invalidAmount ? (
               <>
-                <span className="b-balance-label">{delta > 0 ? "Debits exceed credits by" : "Credits exceed debits by"}</span>
+                <span className="b-balance-label">
+                  {delta > 0 ? "Debits exceed credits by" : "Credits exceed debits by"}
+                </span>
                 <strong className="b-mono">{money(Math.abs(delta), code)}</strong>
-                <button type="button" className="b-btn b-btn-sm" onClick={autoBalance} title="Put the difference on the last empty line, or on a new one">
+                <button
+                  type="button"
+                  className="b-btn b-btn-sm"
+                  onClick={autoBalance}
+                  title="Put the difference on the last empty line, or on a new one"
+                >
                   Balance <Kbd>=</Kbd>
                 </button>
               </>
@@ -882,7 +1226,14 @@ export function Composer({ onClose }: { onClose: () => void }) {
               <span className="b-balance-label">Balanced</span>
             )}
           </div>
-          <button type="button" className="b-btn b-btn-primary" disabled={Boolean(reason) || submitting} aria-busy={submitting || undefined} title={reason ?? undefined} onClick={() => void submit()}>
+          <button
+            type="button"
+            className="b-btn b-btn-primary"
+            disabled={Boolean(reason) || submitting}
+            aria-busy={submitting || undefined}
+            title={reason ?? undefined}
+            onClick={() => void submit()}
+          >
             {submitting ? "Posting…" : "Post entry"}
             <Kbd>{MOD} ↵</Kbd>
           </button>
@@ -901,7 +1252,13 @@ export function Composer({ onClose }: { onClose: () => void }) {
         <div className="b-composer-head">
           <label className="b-inline-field">
             <span>Date</span>
-            <input className="b-input b-input-date" type="date" max={overview?.today ?? today()} value={date} onChange={(event) => setDate(event.target.value)} />
+            <input
+              className="b-input b-input-date"
+              type="date"
+              max={overview?.today ?? today()}
+              value={date}
+              onChange={(event) => setDate(event.target.value)}
+            />
           </label>
           <label className="b-inline-field b-grow">
             <span>Memo</span>
@@ -922,7 +1279,12 @@ export function Composer({ onClose }: { onClose: () => void }) {
           </label>
           <label className="b-inline-field">
             <span>Currency</span>
-            <input className="b-input b-input-currency" value={currency} maxLength={3} onChange={(event) => setCurrency(event.target.value.toUpperCase())} />
+            <input
+              className="b-input b-input-currency"
+              value={currency}
+              maxLength={3}
+              onChange={(event) => setCurrency(event.target.value.toUpperCase())}
+            />
           </label>
         </div>
         <table className="b-composer-lines">
@@ -951,31 +1313,55 @@ export function Composer({ onClose }: { onClose: () => void }) {
                     />
                   </td>
                   <td>
-                    <input className="b-input" aria-label={`Memo on line ${index + 1}`} placeholder="Line memo" ref={ref(`${line.key}:memo`)} value={line.memo} maxLength={200} onChange={(event) => update(index, { memo: event.target.value })} />
+                    <input
+                      className="b-input"
+                      aria-label={`Memo on line ${index + 1}`}
+                      placeholder="Line memo"
+                      ref={ref(`${line.key}:memo`)}
+                      value={line.memo}
+                      maxLength={200}
+                      onChange={(event) => update(index, { memo: event.target.value })}
+                    />
                   </td>
                   <td>
                     <input
-                      className={cx("b-input b-input-amount", value.debitCents === null && "is-invalid")}
+                      className={cx(
+                        "b-input b-input-amount",
+                        value.debitCents === null && "is-invalid",
+                      )}
                       inputMode="decimal"
                       aria-label={`Debit on line ${index + 1}`}
                       placeholder="Debit"
                       aria-invalid={value.debitCents === null || undefined}
                       ref={ref(`${line.key}:debit`)}
                       value={line.debit}
-                      onChange={(event) => update(index, { debit: event.target.value, credit: event.target.value ? "" : line.credit })}
+                      onChange={(event) =>
+                        update(index, {
+                          debit: event.target.value,
+                          credit: event.target.value ? "" : line.credit,
+                        })
+                      }
                       onKeyDown={amountKeys(index, "debit")}
                     />
                   </td>
                   <td>
                     <input
-                      className={cx("b-input b-input-amount", value.creditCents === null && "is-invalid")}
+                      className={cx(
+                        "b-input b-input-amount",
+                        value.creditCents === null && "is-invalid",
+                      )}
                       inputMode="decimal"
                       aria-label={`Credit on line ${index + 1}`}
                       placeholder="Credit"
                       aria-invalid={value.creditCents === null || undefined}
                       ref={ref(`${line.key}:credit`)}
                       value={line.credit}
-                      onChange={(event) => update(index, { credit: event.target.value, debit: event.target.value ? "" : line.debit })}
+                      onChange={(event) =>
+                        update(index, {
+                          credit: event.target.value,
+                          debit: event.target.value ? "" : line.debit,
+                        })
+                      }
                       onKeyDown={amountKeys(index, "credit")}
                     />
                   </td>
@@ -1016,12 +1402,21 @@ export function Composer({ onClose }: { onClose: () => void }) {
             <div className="b-chip">
               {preview ? <img src={preview} alt="" /> : <FileText size={14} aria-hidden />}
               <span className="b-truncate">{receipt.name}</span>
-              <button type="button" className="b-icon-btn" aria-label="Remove receipt" onClick={() => setReceipt(null)}>
+              <button
+                type="button"
+                className="b-icon-btn"
+                aria-label="Remove receipt"
+                onClick={() => setReceipt(null)}
+              >
                 <Trash2 size={13} aria-hidden />
               </button>
             </div>
           ) : (
-            <button type="button" className="b-btn b-btn-ghost b-btn-sm" onClick={() => fileInput.current?.click()}>
+            <button
+              type="button"
+              className="b-btn b-btn-ghost b-btn-sm"
+              onClick={() => fileInput.current?.click()}
+            >
               <Paperclip size={14} aria-hidden />
               Attach receipt
             </button>

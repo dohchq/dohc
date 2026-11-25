@@ -22,7 +22,14 @@ interface StatementCheck {
   date: string;
   booksCents: number;
   clearedCents: number;
-  outstanding: Array<{ id: string; number: number; date: string; memo: string; amountCents: number; clearedOn: string | null }>;
+  outstanding: Array<{
+    id: string;
+    number: number;
+    date: string;
+    memo: string;
+    amountCents: number;
+    clearedOn: string | null;
+  }>;
   outstandingCount: number;
   firstWaiting: string | null;
   waiting: number;
@@ -51,7 +58,9 @@ export function ReconcileSheet({
   const { accounts, currency: booksCurrency, overview } = useBooksContext();
   const { run, pending } = useAction();
   const toast = useToast();
-  const banks = accounts.filter((account) => account.isBank && (!account.archived || account.id === initial?.bankAccountId));
+  const banks = accounts.filter(
+    (account) => account.isBank && (!account.archived || account.id === initial?.bankAccountId),
+  );
   const [bankAccountId, setBankAccountId] = useState(initial?.bankAccountId ?? banks[0]?.id ?? "");
   const [chosen, setChosen] = useState<string | null>(initial?.currency ?? null);
   const [asOf, setAsOf] = useState(() => initial?.date ?? overview?.today ?? today());
@@ -59,24 +68,34 @@ export function ReconcileSheet({
   const [ending, setEnding] = useState("");
   const [shownFor, setShownFor] = useState<string | null>(null);
   const field = useInitialFocus<HTMLInputElement>();
-  const check = useBooks<StatementCheck>("reconcileStatus", { bankAccountId, date: asOf, ...(chosen ? { currency: chosen } : {}) }, {
-    enabled: Boolean(bankAccountId) && /^\d{4}-\d{2}-\d{2}$/.test(asOf),
-  });
+  const check = useBooks<StatementCheck>(
+    "reconcileStatus",
+    { bankAccountId, date: asOf, ...(chosen ? { currency: chosen } : {}) },
+    {
+      enabled: Boolean(bankAccountId) && /^\d{4}-\d{2}-\d{2}$/.test(asOf),
+    },
+  );
   const currency = check.data?.currency ?? chosen ?? booksCurrency;
-  const current = check.data?.bankAccountId === bankAccountId && check.data.date === asOf && (!chosen || check.data.currency === chosen);
+  const current =
+    check.data?.bankAccountId === bankAccountId &&
+    check.data.date === asOf &&
+    (!chosen || check.data.currency === chosen);
   const booksCents = check.data?.booksCents ?? null;
   const clearedCents = check.data?.clearedCents ?? null;
   const outstanding = check.data?.outstanding ?? [];
   const statementCents = ending.trim() ? parseAmount(ending, currency) : null;
-  const difference = clearedCents !== null && statementCents !== null ? statementCents - clearedCents : null;
+  const difference =
+    clearedCents !== null && statementCents !== null ? statementCents - clearedCents : null;
   const open = check.data?.waiting ?? 0;
   const already = check.data ? check.data.reconciledCents !== null : false;
   const lockedThrough = overview?.periods.lockedThrough;
   const closed = Boolean(lockedThrough && asOf.slice(0, 7) <= lockedThrough);
   const currencies = check.data?.currencies.length ? check.data.currencies : [currency];
-  const previous = last.find((item) => item.bankAccountId === bankAccountId && item.currency === currency);
+  const previous = last.find(
+    (item) => item.bankAccountId === bankAccountId && item.currency === currency,
+  );
   const ready = difference === 0 && !open && !already && !closed && current && pending === null;
-  const firstWaiting = current ? check.data?.firstWaiting ?? null : null;
+  const firstWaiting = current ? (check.data?.firstWaiting ?? null) : null;
   useEffect(() => {
     if (dated || !firstWaiting || firstWaiting > asOf) return;
     const suggested = monthBefore(firstWaiting);
@@ -92,29 +111,49 @@ export function ReconcileSheet({
     const balanceCents = check.data?.reconciledCents;
     if (!id || balanceCents === null || balanceCents === undefined) return;
     const holds = balanceCents === check.data?.clearedCents && !check.data.waiting;
-    void run("removeReconciliation", { id }, {
-      failed: "Could not remove the reconciliation",
-      after: () =>
-        toast({
-          message: `Removed the reconciliation on ${shortDate(asOf, true)}`,
-          ...(holds
-            ? { undo: () => void run("reconcileBank", { bankAccountId, date: asOf, currency, balanceCents }, { done: "Reconciled again", failed: "Could not reconcile again" }) }
-            : {}),
-        }),
-    });
+    void run(
+      "removeReconciliation",
+      { id },
+      {
+        failed: "Could not remove the reconciliation",
+        after: () =>
+          toast({
+            message: `Removed the reconciliation on ${shortDate(asOf, true)}`,
+            ...(holds
+              ? {
+                  undo: () =>
+                    void run(
+                      "reconcileBank",
+                      { bankAccountId, date: asOf, currency, balanceCents },
+                      { done: "Reconciled again", failed: "Could not reconcile again" },
+                    ),
+                }
+              : {}),
+          }),
+      },
+    );
   };
   const save = () => {
     if (!ready || statementCents === null) return;
-    void run<{ id: string }>("reconcileBank", { bankAccountId, date: asOf, currency, balanceCents: statementCents }, {
-      failed: "Could not reconcile",
-      after: (result) => {
-        onClose();
-        toast({
-          message: `Reconciled through ${shortDate(asOf, true)}`,
-          undo: () => void run("removeReconciliation", { id: result.id }, { done: "Reconciliation removed", failed: "Could not undo the reconciliation" }),
-        });
+    void run<{ id: string }>(
+      "reconcileBank",
+      { bankAccountId, date: asOf, currency, balanceCents: statementCents },
+      {
+        failed: "Could not reconcile",
+        after: (result) => {
+          onClose();
+          toast({
+            message: `Reconciled through ${shortDate(asOf, true)}`,
+            undo: () =>
+              void run(
+                "removeReconciliation",
+                { id: result.id },
+                { done: "Reconciliation removed", failed: "Could not undo the reconciliation" },
+              ),
+          });
+        },
       },
-    });
+    );
   };
   return (
     <Modal
@@ -123,7 +162,10 @@ export function ReconcileSheet({
       onClose={onClose}
       footer={
         <div className="b-composer-foot">
-          <span className={cx("b-balance-label", difference ? "is-negative" : undefined)} aria-live="polite">
+          <span
+            className={cx("b-balance-label", difference ? "is-negative" : undefined)}
+            aria-live="polite"
+          >
             {already
               ? open
                 ? `Reconciled at ${money(check.data!.reconciledCents!, currency)}, ${open} ${open === 1 ? "row" : "rows"} to review`
@@ -134,16 +176,20 @@ export function ReconcileSheet({
                 ? "This date is in a closed month"
                 : open
                   ? `${open} ${open === 1 ? "row" : "rows"} to review first`
-              : difference === null
-                ? previous
-                  ? `Last reconciled through ${shortDate(previous.date, true)}`
-                  : null
-                : difference === 0
-                  ? "The books match the statement"
-                  : `Off by ${money(Math.abs(difference), currency)}`}
+                  : difference === null
+                    ? previous
+                      ? `Last reconciled through ${shortDate(previous.date, true)}`
+                      : null
+                    : difference === 0
+                      ? "The books match the statement"
+                      : `Off by ${money(Math.abs(difference), currency)}`}
           </span>
           {open ? (
-            <button type="button" className="b-btn" onClick={() => onReview(check.data?.reviewQueue ?? "new")}>
+            <button
+              type="button"
+              className="b-btn"
+              onClick={() => onReview(check.data?.reviewQueue ?? "new")}
+            >
               Review rows
             </button>
           ) : null}
@@ -168,7 +214,11 @@ export function ReconcileSheet({
       >
         <label className="b-field">
           <span className="b-field-label">Bank account</span>
-          <select className="b-select" value={bankAccountId} onChange={(event) => (setBankAccountId(event.target.value), setChosen(null))}>
+          <select
+            className="b-select"
+            value={bankAccountId}
+            onChange={(event) => (setBankAccountId(event.target.value), setChosen(null))}
+          >
             {banks.map((account) => (
               <option key={account.id} value={account.id}>
                 {account.id} {account.name}
@@ -179,7 +229,11 @@ export function ReconcileSheet({
         {currencies.length > 1 ? (
           <label className="b-field">
             <span className="b-field-label">Currency</span>
-            <select className="b-select" value={currency} onChange={(event) => setChosen(event.target.value)}>
+            <select
+              className="b-select"
+              value={currency}
+              onChange={(event) => setChosen(event.target.value)}
+            >
               {currencies.map((code) => (
                 <option key={code} value={code}>
                   {code}
@@ -190,15 +244,36 @@ export function ReconcileSheet({
         ) : null}
         <label className="b-field">
           <span className="b-field-label">Statement date</span>
-          <input className="b-input b-input-date" type="date" max={overview?.today ?? today()} value={asOf} onChange={(event) => (setDated(true), setAsOf(event.target.value))} />
+          <input
+            className="b-input b-input-date"
+            type="date"
+            max={overview?.today ?? today()}
+            value={asOf}
+            onChange={(event) => (setDated(true), setAsOf(event.target.value))}
+          />
         </label>
         <label className="b-field">
           <span className="b-field-label">Ending balance on the statement</span>
-          <input ref={field} className={cx("b-input b-input-amount", ending.trim() && statementCents === null && "is-invalid")} inputMode="decimal" value={ending} onChange={(event) => setEnding(event.target.value)} />
+          <input
+            ref={field}
+            className={cx(
+              "b-input b-input-amount",
+              ending.trim() && statementCents === null && "is-invalid",
+            )}
+            inputMode="decimal"
+            value={ending}
+            onChange={(event) => setEnding(event.target.value)}
+          />
         </label>
         <div className="b-field">
           <span className="b-field-label">Should be on the statement</span>
-          <span className="b-reconcile-books b-mono">{check.error ? problem(check.error) : clearedCents === null ? "…" : money(clearedCents, currency)}</span>
+          <span className="b-reconcile-books b-mono">
+            {check.error
+              ? problem(check.error)
+              : clearedCents === null
+                ? "…"
+                : money(clearedCents, currency)}
+          </span>
         </div>
         {outstanding.length ? (
           <div className="b-field b-outstanding">
@@ -220,7 +295,9 @@ export function ReconcileSheet({
                           : "not on a statement yet"}
                     </span>
                   </span>
-                  <span className={cx("b-num", item.amountCents > 0 && "is-positive")}>{money(item.amountCents, currency)}</span>
+                  <span className={cx("b-num", item.amountCents > 0 && "is-positive")}>
+                    {money(item.amountCents, currency)}
+                  </span>
                 </li>
               ))}
             </ul>

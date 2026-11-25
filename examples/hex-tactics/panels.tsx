@@ -103,22 +103,32 @@ export function CombatPreview({
       : isClaim(target)
         ? "Claim"
         : forecast.kind === "capture"
-        ? forecast.capitalCaptured
-          ? "Capture capital"
-          : "Capture"
-        : "Repelled";
+          ? forecast.capitalCaptured
+            ? "Capture capital"
+            : "Capture"
+          : "Repelled";
   return (
-    <div className={`hc-preview hc-preview-${isClaim(target) ? "claim" : forecast.kind}`} role="status" data-testid="combat-preview">
+    <div
+      className={`hc-preview hc-preview-${isClaim(target) ? "claim" : forecast.kind}`}
+      role="status"
+      data-testid="combat-preview"
+    >
       <div className="hc-preview-head">
         <span className="hc-preview-verdict">{verdict}</span>
         <span className="hc-preview-coord">{terrainName}</span>
         {forecast.heldYield ? (
           <span className="hc-preview-yield-chip">
-            <CoinGlyph size={13} />+{forecast.heldYield.gold}g, +{forecast.heldYield.units} unit if held
+            <CoinGlyph size={13} />+{forecast.heldYield.gold}g, +{forecast.heldYield.units} unit if
+            held
           </span>
         ) : null}
         {onClose ? (
-          <button type="button" className="hc-icon-btn hc-card-close" aria-label="Deselect hex" onClick={onClose}>
+          <button
+            type="button"
+            className="hc-icon-btn hc-card-close"
+            aria-label="Deselect hex"
+            onClick={onClose}
+          >
             <CircleX size={16} aria-hidden="true" />
           </button>
         ) : null}
@@ -135,7 +145,9 @@ export function CombatPreview({
               <b>{forecast.resultUnits}</b> {forecast.kind === "transfer" ? "on hex" : "hold it"}
             </span>
           </div>
-          {forecast.kind === "transfer" ? null : <div className="hc-preview-math">Undefended. No losses.</div>}
+          {forecast.kind === "transfer" ? null : (
+            <div className="hc-preview-math">Undefended. No losses.</div>
+          )}
           <HeldYield forecast={forecast} />
         </>
       ) : (
@@ -157,7 +169,9 @@ export function CombatPreview({
             <div className="hc-preview-details">
               <div className="hc-preview-math">
                 {forecast.defenderUnits} unit{forecast.defenderUnits === 1 ? "" : "s"}
-                {forecast.terrainBonus > 0 ? ` +${forecast.terrainBonus} ${terrainName.toLowerCase()}` : ""}
+                {forecast.terrainBonus > 0
+                  ? ` +${forecast.terrainBonus} ${terrainName.toLowerCase()}`
+                  : ""}
                 {forecast.fortifyBonus > 0 ? ` +${forecast.fortifyBonus} fort` : ""}
               </div>
               {forecast.kind === "repelled" && forecast.fortifyBonus > 0 ? (
@@ -169,7 +183,8 @@ export function CombatPreview({
                     "Fort holds"
                   ) : (
                     <span>
-                      Fort breaks<span className="hc-preview-fort-more">, −2 defense from now on</span>
+                      Fort breaks
+                      <span className="hc-preview-fort-more">, −2 defense from now on</span>
                     </span>
                   )}
                 </div>
@@ -206,8 +221,8 @@ export function CombatPreview({
           </dl>
           {forecast.supplyNext > 0 ? (
             <div className="hc-preview-note">
-              {forecast.resultUnits} survive, then +{forecast.supplyNext} from {target.terrain === "capital" ? "their capital" : "the mine"} as
-              their turn starts
+              {forecast.resultUnits} survive, then +{forecast.supplyNext} from{" "}
+              {target.terrain === "capital" ? "their capital" : "the mine"} as their turn starts
             </div>
           ) : null}
           <HeldYield forecast={forecast} />
@@ -223,7 +238,8 @@ function HeldYield({ forecast }: { readonly forecast: MarchForecast }) {
     <div className="hc-preview-note hc-preview-yield">
       <CoinGlyph size={14} />
       <span>
-        +{forecast.heldYield.gold} gold and +{forecast.heldYield.units} unit on your next turn if held
+        +{forecast.heldYield.gold} gold and +{forecast.heldYield.units} unit on your next turn if
+        held
       </span>
     </div>
   );
@@ -296,7 +312,13 @@ export function TacticalCard({
           </span>
         </div>
         {onClose ? (
-          <button type="button" className="hc-icon-btn hc-card-close" aria-label="Deselect hex" title="Deselect (Esc)" onClick={onClose}>
+          <button
+            type="button"
+            className="hc-icon-btn hc-card-close"
+            aria-label="Deselect hex"
+            title="Deselect (Esc)"
+            onClick={onClose}
+          >
             <CircleX size={16} aria-hidden="true" />
           </button>
         ) : null}
@@ -337,7 +359,11 @@ export function TacticalCard({
           <div className="hc-card-orders" data-testid="march-orders">
             <div className="hc-order-row">
               <span className="hc-order-label">
-                {forecast.kind === "transfer" ? "Move to the" : isClaim(target) ? "Claim the" : "Attack the"}{" "}
+                {forecast.kind === "transfer"
+                  ? "Move to the"
+                  : isClaim(target)
+                    ? "Claim the"
+                    : "Attack the"}{" "}
                 {TERRAIN_INFO[target.terrain ?? "plains"].name.toLowerCase()} with
               </span>
               <Stepper
@@ -375,7 +401,13 @@ export function TacticalCard({
                 loading={pending}
                 disabled={tile.fortified || gold < FORTIFY_COST || blocked}
                 onClick={onFortify}
-                title={tile.fortified ? "Already fortified" : gold < FORTIFY_COST ? `Needs ${FORTIFY_COST} gold` : "+2 defense"}
+                title={
+                  tile.fortified
+                    ? "Already fortified"
+                    : gold < FORTIFY_COST
+                      ? `Needs ${FORTIFY_COST} gold`
+                      : "+2 defense"
+                }
               >
                 <svg width="12" height="14" viewBox="-7 -8 14 16" aria-hidden="true">
                   <FortBadge x={0} y={0} />
@@ -396,13 +428,19 @@ export function TacticalCard({
                   loading={pending}
                   disabled={maxReinforce < 1 || blocked}
                   onClick={onReinforce}
-                  title={maxReinforce < 1 ? `Needs ${REINFORCE_UNIT_COST} gold per unit` : undefined}
+                  title={
+                    maxReinforce < 1 ? `Needs ${REINFORCE_UNIT_COST} gold per unit` : undefined
+                  }
                 >
                   Recruit <span className="hc-cost">{recruits * REINFORCE_UNIT_COST}g</span>
                 </Button>
               </span>
             </div>
-            {maxMovable < 1 ? <p className="hc-card-note">A hex keeps 1 unit as garrison, so this one cannot march.</p> : null}
+            {maxMovable < 1 ? (
+              <p className="hc-card-note">
+                A hex keeps 1 unit as garrison, so this one cannot march.
+              </p>
+            ) : null}
           </div>
         )
       ) : null}
@@ -432,7 +470,12 @@ export function HandoffCover({
     else cardRef.current?.focus();
   }, [ready]);
   return (
-    <div className={`hc-handoff hc-handoff-${seat}`} role="dialog" aria-modal="true" aria-labelledby="hc-handoff-title">
+    <div
+      className={`hc-handoff hc-handoff-${seat}`}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="hc-handoff-title"
+    >
       <div className="hc-handoff-card" ref={cardRef} tabIndex={-1}>
         <FactionCrest seat={seat} size={48} />
         <span className="hc-handoff-turn">Turn {turn}</span>
@@ -483,7 +526,10 @@ export interface LogDrawerProps {
     readonly frames: readonly ReplayFrame[];
     readonly step: number;
     readonly onStep: (index: number) => void;
-    readonly chart: { labels: string[]; series: { name: string; values: number[]; color: string }[] } | null;
+    readonly chart: {
+      labels: string[];
+      series: { name: string; values: number[]; color: string }[];
+    } | null;
     readonly names: readonly [string, string];
   } | null;
   readonly replayLocked: boolean;
@@ -514,7 +560,9 @@ export function LogDrawer({
   useEffect(() => {
     const list = listRef.current;
     if (!open || !replaying || !list) return;
-    const observer = new ResizeObserver(() => activeStepRef.current?.scrollIntoView({ block: "nearest" }));
+    const observer = new ResizeObserver(() =>
+      activeStepRef.current?.scrollIntoView({ block: "nearest" }),
+    );
     observer.observe(list);
     return () => observer.disconnect();
   }, [open, replaying]);
@@ -544,7 +592,13 @@ export function LogDrawer({
             {movesOpen ? "Hide moves" : "Show moves"}
           </Button>
         ) : null}
-        <button type="button" className="hc-icon-btn" aria-label="Close battle log" title="Close (R)" onClick={onClose}>
+        <button
+          type="button"
+          className="hc-icon-btn"
+          aria-label="Close battle log"
+          title="Close (R)"
+          onClick={onClose}
+        >
           <ChevronRight size={16} aria-hidden="true" />
         </button>
       </header>
@@ -621,7 +675,9 @@ export function LogDrawer({
                     type="button"
                     className={`hc-move-btn${pinnedTurn === move.turnNumber ? " hc-move-btn-active" : ""}`}
                     aria-pressed={pinnedTurn === move.turnNumber}
-                    onClick={() => onPinMove(pinnedTurn === move.turnNumber ? null : move.turnNumber)}
+                    onClick={() =>
+                      onPinMove(pinnedTurn === move.turnNumber ? null : move.turnNumber)
+                    }
                     onPointerEnter={() => onPreviewMove(move.turnNumber)}
                     onPointerLeave={() => onPreviewMove(null)}
                     onFocus={() => onPreviewMove(move.turnNumber)}
@@ -704,7 +760,9 @@ export function ReplayDock({
             {step === 0 ? "Opening" : `Turn ${frame?.move?.turnNumber ?? step}`}
             <span className="hc-replay-of"> / {frames[last]?.move?.turnNumber ?? 0}</span>
           </span>
-          <span className="hc-replay-summary">{frame?.move ? frame.move.outcome.summary : "Starting positions"}</span>
+          <span className="hc-replay-summary">
+            {frame?.move ? frame.move.outcome.summary : "Starting positions"}
+          </span>
         </div>
         <input
           id="replay-slider"
@@ -714,7 +772,9 @@ export function ReplayDock({
           max={last}
           value={step}
           aria-label="Replay turn"
-          aria-valuetext={step === 0 ? "Opening positions" : `Turn ${frame?.move?.turnNumber ?? step}`}
+          aria-valuetext={
+            step === 0 ? "Opening positions" : `Turn ${frame?.move?.turnNumber ?? step}`
+          }
           onChange={(event) => onStep(Number(event.target.value))}
         />
       </div>
@@ -733,10 +793,12 @@ export function RulesSheet() {
         <h3>Each turn, give one order</h3>
         <ul className="hc-rule-list">
           <li>
-            <b>March</b> units from a hex you hold to a neighbor, leaving at least 1 behind. Moving onto your own hex merges them.
+            <b>March</b> units from a hex you hold to a neighbor, leaving at least 1 behind. Moving
+            onto your own hex merges them.
           </li>
           <li>
-            <b>Fortify</b> a hex for {FORTIFY_COST} gold: +2 defense until its defenders take losses.
+            <b>Fortify</b> a hex for {FORTIFY_COST} gold: +2 defense until its defenders take
+            losses.
           </li>
           <li>
             <b>Recruit</b> up to 5 units on a hex for {REINFORCE_UNIT_COST} gold each.
@@ -749,13 +811,15 @@ export function RulesSheet() {
       <section className="hc-rules-combat">
         <h3>Combat</h3>
         <p>
-          An attack captures the hex when attackers outnumber defense: defending units plus terrain and fort bonuses. The
-          forecast shows exact losses before you commit. Take the enemy capital to win.
+          An attack captures the hex when attackers outnumber defense: defending units plus terrain
+          and fort bonuses. The forecast shows exact losses before you commit. Take the enemy
+          capital to win.
         </p>
         <p>
-          With a stack selected, outlines mark where it can go: a teal chevron moves to your own hex, a dashed gold flag claims an
-          empty hex, and a red crosshair attacks. Click or tap one to lock it and read the forecast, then click or tap it again,
-          or use the order button, to send the order.
+          With a stack selected, outlines mark where it can go: a teal chevron moves to your own
+          hex, a dashed gold flag claims an empty hex, and a red crosshair attacks. Click or tap one
+          to lock it and read the forecast, then click or tap it again, or use the order button, to
+          send the order.
         </p>
       </section>
       <section className="hc-rules-terrain">
@@ -778,7 +842,11 @@ export function RulesSheet() {
                   </span>
                 </th>
                 <td className="hc-num">
-                  {TERRAIN_INFO[terrain].passable ? (TERRAIN_INFO[terrain].defense > 0 ? `+${TERRAIN_INFO[terrain].defense}` : "0") : "Blocked"}
+                  {TERRAIN_INFO[terrain].passable
+                    ? TERRAIN_INFO[terrain].defense > 0
+                      ? `+${TERRAIN_INFO[terrain].defense}`
+                      : "0"
+                    : "Blocked"}
                 </td>
                 <td>{TERRAIN_INFO[terrain].income}</td>
               </tr>
@@ -786,8 +854,8 @@ export function RulesSheet() {
           </tbody>
         </table>
         <p className="hc-rules-foot">
-          Terrain defense counts only while the hex has defenders. Every turn also pays 2 gold. You see {VISION_RANGE} hexes
-          around what you hold.
+          Terrain defense counts only while the hex has defenders. Every turn also pays 2 gold. You
+          see {VISION_RANGE} hexes around what you hold.
         </p>
       </section>
       <section className="hc-rules-keys">

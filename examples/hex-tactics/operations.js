@@ -224,7 +224,12 @@
     if (value === undefined || value === null || value === "") {
       return deriveSeed(ctx.secret, ctx.requestId);
     }
-    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 2147483647) {
+    if (
+      typeof value !== "number" ||
+      !Number.isSafeInteger(value) ||
+      value < 1 ||
+      value > 2147483647
+    ) {
       ctx.refuse("invalid_seed", "Seed must be a whole number between 1 and 2,147,483,647.");
     }
     return value;
@@ -464,7 +469,9 @@
   }
 
   function opponentVision(ctx, gameId, opponentId) {
-    const tiles = ctx.db.query("SELECT q,r,owner_player_id FROM hex_tiles WHERE game_id = ?", [gameId]);
+    const tiles = ctx.db.query("SELECT q,r,owner_player_id FROM hex_tiles WHERE game_id = ?", [
+      gameId,
+    ]);
     return computeVisibleSet(tiles, opponentId);
   }
 
@@ -510,7 +517,9 @@
           r: tile.r,
           visible: true,
           terrain: tile.terrain,
-          ownerSeat: tile.owner_player_id ? (seatByPlayerId.get(tile.owner_player_id) ?? null) : null,
+          ownerSeat: tile.owner_player_id
+            ? (seatByPlayerId.get(tile.owner_player_id) ?? null)
+            : null,
           units: tile.units,
           fortified: tile.fortified === 1,
         };
@@ -567,7 +576,13 @@
           const place = placeName(terrainByKey.get(row.to_hex));
           safeSummary =
             actorName +
-            (parsed.kind === "transfer" ? " moved into " : parsed.claimed ? " claimed " : parsed.captured ? " captured " : " attacked ") +
+            (parsed.kind === "transfer"
+              ? " moved into "
+              : parsed.claimed
+                ? " claimed "
+                : parsed.captured
+                  ? " captured "
+                  : " attacked ") +
             place +
             ".";
         } else {
@@ -588,7 +603,8 @@
           actionType: row.action_type,
           fromHex: fromVisible ? row.from_hex : null,
           toHex: toVisible ? row.to_hex : null,
-          unitsMoved: toVisible || (row.action_type === "reinforce" && fromVisible) ? row.units_moved : null,
+          unitsMoved:
+            toVisible || (row.action_type === "reinforce" && fromVisible) ? row.units_moved : null,
           outcome: safeOutcome,
           hidden: false,
           createdAtMs: row.created_at_ms,
@@ -607,7 +623,9 @@
       };
     });
 
-    const winnerSeat = game.winner_player_id ? (seatByPlayerId.get(game.winner_player_id) ?? null) : null;
+    const winnerSeat = game.winner_player_id
+      ? (seatByPlayerId.get(game.winner_player_id) ?? null)
+      : null;
 
     return {
       game: {
@@ -631,9 +649,7 @@
         visibleTiles: visibleCount,
         foggedTiles: foggedCount,
       },
-      players: players.map((row) =>
-        formatPlayerPublic(row, tiles, viewerSeat, fullVisibility),
-      ),
+      players: players.map((row) => formatPlayerPublic(row, tiles, viewerSeat, fullVisibility)),
       tiles: projectedTiles,
       recentMoves,
     };
@@ -642,11 +658,10 @@
   function canSeeWholeBoard(ctx, game, playerTokens) {
     if (game.status === "finished") return true;
     if (!Array.isArray(playerTokens) || playerTokens.length !== 2) return false;
-    const held = ctx.db.query("SELECT seat FROM players WHERE game_id = ? AND player_token IN (?, ?)", [
-      game.id,
-      cleanToken(ctx, playerTokens[0]),
-      cleanToken(ctx, playerTokens[1]),
-    ]);
+    const held = ctx.db.query(
+      "SELECT seat FROM players WHERE game_id = ? AND player_token IN (?, ?)",
+      [game.id, cleanToken(ctx, playerTokens[0]), cleanToken(ctx, playerTokens[1])],
+    );
     return held.length === 2;
   }
 
@@ -728,7 +743,8 @@
 
   function joinGame(ctx, input) {
     const payload = expectObject(ctx, input);
-    const rawCode = typeof payload.joinCode === "string" ? payload.joinCode.trim().toUpperCase() : "";
+    const rawCode =
+      typeof payload.joinCode === "string" ? payload.joinCode.trim().toUpperCase() : "";
     if (!/^[A-Z0-9]{6}$/.test(rawCode)) {
       ctx.refuse("invalid_join_code", "Enter a 6-character join code.");
     }
@@ -740,10 +756,9 @@
     if (game.status !== "waiting") {
       ctx.refuse("game_full", "This match already has two players.");
     }
-    const existingSeat2 = ctx.db.query(
-      "SELECT id FROM players WHERE game_id = ? AND seat = 2",
-      [game.id],
-    )[0];
+    const existingSeat2 = ctx.db.query("SELECT id FROM players WHERE game_id = ? AND seat = 2", [
+      game.id,
+    ])[0];
     if (existingSeat2) {
       ctx.refuse("game_full", "Seat 2 is already taken.");
     }
@@ -832,7 +847,10 @@
   }
 
   function playerByToken(ctx, gameId, token) {
-    return ctx.db.query("SELECT id,seat,name,color,gold FROM players WHERE game_id = ? AND player_token = ?", [gameId, token])[0];
+    return ctx.db.query(
+      "SELECT id,seat,name,color,gold FROM players WHERE game_id = ? AND player_token = ?",
+      [gameId, token],
+    )[0];
   }
 
   function tileAt(ctx, gameId, q, r) {
@@ -852,7 +870,10 @@
 
     if (payload.spectator === true) {
       if (!canSeeWholeBoard(ctx, game, payload.playerTokens)) {
-        ctx.refuse("spectator_forbidden", "The whole board opens when the match ends, or to someone holding both seat keys.");
+        ctx.refuse(
+          "spectator_forbidden",
+          "The whole board opens when the match ends, or to someone holding both seat keys.",
+        );
       }
       return buildVisibleState(ctx, game, null, true);
     }
@@ -941,7 +962,10 @@
       }
     }
 
-    const opponentSees = actionType === "pass" || actionType === "resign" ? new Set() : opponentVision(ctx, game.id, opponent.id);
+    const opponentSees =
+      actionType === "pass" || actionType === "resign"
+        ? new Set()
+        : opponentVision(ctx, game.id, opponent.id);
     let fromHex = null;
     let toHex = null;
     let unitsMoved = 0;
@@ -987,8 +1011,18 @@
         summary: player.name + " fortified " + placeName(tile.terrain) + ".",
       };
     } else if (actionType === "reinforce") {
-      const fq = expectSafeInt(ctx, payload.fromQ, "invalid_hex", "Choose a valid hex to reinforce.");
-      const fr = expectSafeInt(ctx, payload.fromR, "invalid_hex", "Choose a valid hex to reinforce.");
+      const fq = expectSafeInt(
+        ctx,
+        payload.fromQ,
+        "invalid_hex",
+        "Choose a valid hex to reinforce.",
+      );
+      const fr = expectSafeInt(
+        ctx,
+        payload.fromR,
+        "invalid_hex",
+        "Choose a valid hex to reinforce.",
+      );
       const count = expectSafeInt(
         ctx,
         payload.units,
@@ -1028,14 +1062,44 @@
         goldSpent: totalCost,
         unitsAdded: count,
         summary:
-          player.name + " recruited " + countOf(count, "unit", "units") + " for " + placeName(tile.terrain) + ".",
+          player.name +
+          " recruited " +
+          countOf(count, "unit", "units") +
+          " for " +
+          placeName(tile.terrain) +
+          ".",
       };
     } else if (actionType === "march") {
-      const fq = expectSafeInt(ctx, payload.fromQ, "invalid_hex", "Select valid origin and destination hexes.");
-      const fr = expectSafeInt(ctx, payload.fromR, "invalid_hex", "Select valid origin and destination hexes.");
-      const tq = expectSafeInt(ctx, payload.toQ, "invalid_hex", "Select valid origin and destination hexes.");
-      const tr = expectSafeInt(ctx, payload.toR, "invalid_hex", "Select valid origin and destination hexes.");
-      const units = expectSafeInt(ctx, payload.units, "insufficient_units", "Move at least 1 unit.");
+      const fq = expectSafeInt(
+        ctx,
+        payload.fromQ,
+        "invalid_hex",
+        "Select valid origin and destination hexes.",
+      );
+      const fr = expectSafeInt(
+        ctx,
+        payload.fromR,
+        "invalid_hex",
+        "Select valid origin and destination hexes.",
+      );
+      const tq = expectSafeInt(
+        ctx,
+        payload.toQ,
+        "invalid_hex",
+        "Select valid origin and destination hexes.",
+      );
+      const tr = expectSafeInt(
+        ctx,
+        payload.toR,
+        "invalid_hex",
+        "Select valid origin and destination hexes.",
+      );
+      const units = expectSafeInt(
+        ctx,
+        payload.units,
+        "insufficient_units",
+        "Move at least 1 unit.",
+      );
 
       if (hexDistance(fq, fr, tq, tr) !== 1) {
         ctx.refuse("not_adjacent", "Units can only march to an adjacent hex (distance 1).");
@@ -1082,7 +1146,12 @@
           newToUnits: toTile.units + units,
           newToFortified: toTile.fortified === 1,
           summary:
-            player.name + " moved " + countOf(units, "unit", "units") + " to " + placeName(toTile.terrain) + ".",
+            player.name +
+            " moved " +
+            countOf(units, "unit", "units") +
+            " to " +
+            placeName(toTile.terrain) +
+            ".",
         };
       } else {
         const defenderUnits = toTile.units;
@@ -1208,15 +1277,7 @@
 
     ctx.db.execute(
       "UPDATE games SET status = ?, turn_number = ?, active_seat = ?, winner_player_id = ?, win_reason = ?, updated_at_ms = ? WHERE id = ?",
-      [
-        nextStatus,
-        nextTurnNumber,
-        nextActiveSeat,
-        winnerPlayerId,
-        winReason,
-        ctx.nowMs,
-        game.id,
-      ],
+      [nextStatus, nextTurnNumber, nextActiveSeat, winnerPlayerId, winReason, ctx.nowMs, game.id],
     );
 
     const updatedGame = gameById(ctx, game.id);
@@ -1234,7 +1295,12 @@
     const afterTurn =
       payload.afterTurn === undefined
         ? 0
-        : expectSafeInt(ctx, payload.afterTurn, "invalid_input", "afterTurn must be a non-negative integer.");
+        : expectSafeInt(
+            ctx,
+            payload.afterTurn,
+            "invalid_input",
+            "afterTurn must be a non-negative integer.",
+          );
     if (afterTurn < 0) {
       ctx.refuse("invalid_input", "afterTurn must be a non-negative integer.");
     }
@@ -1250,7 +1316,10 @@
       ctx.refuse("game_not_found", "Match not found.");
     }
     if (!canSeeWholeBoard(ctx, game, payload.playerTokens)) {
-      ctx.refuse("replay_unavailable", "Full replay opens when the match ends, or to someone holding both seat keys.");
+      ctx.refuse(
+        "replay_unavailable",
+        "Full replay opens when the match ends, or to someone holding both seat keys.",
+      );
     }
 
     const players = ctx.db.query(
@@ -1277,7 +1346,9 @@
         status: game.status,
         turnNumber: game.turn_number,
         activeSeat: game.active_seat,
-        winnerSeat: game.winner_player_id ? (seatByPlayerId.get(game.winner_player_id) ?? null) : null,
+        winnerSeat: game.winner_player_id
+          ? (seatByPlayerId.get(game.winner_player_id) ?? null)
+          : null,
         winReason: game.win_reason,
         createdAtMs: game.created_at_ms,
         updatedAtMs: game.updated_at_ms,

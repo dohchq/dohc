@@ -10,7 +10,10 @@ export function otherSeat(seat: Seat): Seat {
   return seat === 1 ? 2 : 1;
 }
 
-export function playerName(players: ReadonlyArray<{ readonly seat: Seat; readonly name: string }> | undefined, seat: Seat | null): string {
+export function playerName(
+  players: ReadonlyArray<{ readonly seat: Seat; readonly name: string }> | undefined,
+  seat: Seat | null,
+): string {
   return players?.find((player) => player.seat === seat)?.name ?? factionName(seat);
 }
 
@@ -22,7 +25,12 @@ export const GOLD_MINE_GOLD = 2;
 
 export const TERRAIN_INFO: Record<
   TerrainType,
-  { readonly name: string; readonly defense: number; readonly income: string; readonly passable: boolean }
+  {
+    readonly name: string;
+    readonly defense: number;
+    readonly income: string;
+    readonly passable: boolean;
+  }
 > = {
   plains: { name: "Plains", defense: 0, income: "None", passable: true },
   forest: { name: "Forest", defense: 1, income: "None", passable: true },
@@ -75,7 +83,13 @@ export function forecastMarch(
     };
   }
   const terrainBonus =
-    defenderUnits > 0 ? (target.terrain === "capital" ? 2 : target.terrain === "forest" ? 1 : 0) : 0;
+    defenderUnits > 0
+      ? target.terrain === "capital"
+        ? 2
+        : target.terrain === "forest"
+          ? 1
+          : 0
+      : 0;
   const fortifyBonus = defenderUnits > 0 && target.fortified ? 2 : 0;
   const defensePower = defenderUnits + terrainBonus + fortifyBonus;
   if (attackerUnits > defensePower) {
@@ -97,7 +111,10 @@ export function forecastMarch(
       capitalCaptured: target.terrain === "capital" && target.ownerSeat !== null,
     };
   }
-  const effectiveDamage = Math.max(0, attackerUnits - Math.floor((terrainBonus + fortifyBonus) / 2));
+  const effectiveDamage = Math.max(
+    0,
+    attackerUnits - Math.floor((terrainBonus + fortifyBonus) / 2),
+  );
   const defenderLosses = Math.min(defenderUnits, Math.floor(effectiveDamage * 0.6));
   return {
     kind: "repelled",
@@ -110,7 +127,10 @@ export function forecastMarch(
     defenderLosses,
     resultUnits: defenderUnits - defenderLosses,
     resultFortified: target.fortified && defenderLosses === 0,
-    supplyNext: target.ownerSeat !== null && (target.terrain === "capital" || target.terrain === "gold") ? 1 : 0,
+    supplyNext:
+      target.ownerSeat !== null && (target.terrain === "capital" || target.terrain === "gold")
+        ? 1
+        : 0,
     heldYield: null,
     capitalCaptured: false,
   };
@@ -136,7 +156,8 @@ export function keptPips(units: number, loss: number): number {
 export function flashKindForMove(move: MoveRecord): "capture" | "hit" | "move" | "build" | null {
   if (move.hidden) return null;
   if (move.actionType === "march") {
-    if (move.outcome.kind === "combat") return move.outcome.claimed ? "move" : move.outcome.captured ? "capture" : "hit";
+    if (move.outcome.kind === "combat")
+      return move.outcome.claimed ? "move" : move.outcome.captured ? "capture" : "hit";
     return "move";
   }
   if (move.actionType === "fortify" || move.actionType === "reinforce") return "build";

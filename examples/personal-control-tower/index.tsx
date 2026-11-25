@@ -275,118 +275,118 @@ export function PersonalControlTower() {
         </Grid>
 
         <Card>
-        <Tabs
-          value={tab}
-          onChange={setTab}
-          items={[
-            {
-              id: "expenses",
-              label: `Expenses (${expenseRows.length})`,
-              content: (
-                <DataTable
-                  rows={expenseRows}
-                  rowKey={(row) => row.id}
-                  loading={expenses.loading && expenseRows.length === 0}
-                  emptyTitle="No expenses logged"
-                  emptyDescription="Use Add expense to record your first transaction."
-                  columns={[
-                    { key: "date", header: "Date", render: (row) => row.date },
-                    { key: "merchant", header: "Merchant", render: (row) => row.merchant },
-                    {
-                      key: "category",
-                      header: "Category",
-                      render: (row) => <Badge>{row.category}</Badge>,
-                    },
-                    {
-                      key: "amount",
-                      header: "Amount",
-                      align: "right",
-                      render: (row) => formatCurrency(Number(row.amount || 0)),
-                    },
-                    {
-                      key: "actions",
-                      header: "",
-                      align: "right",
-                      render: (row) => (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => {
-                            void deleteExpense
-                              .mutate({ id: row.id })
-                              .then(() => expenses.reload())
-                              .catch(() => undefined);
-                          }}
-                        >
-                          Remove
-                        </Button>
-                      ),
-                    },
-                  ]}
-                />
-              ),
-            },
-            {
-              id: "workouts",
-              label: `Workouts (${workoutRows.length})`,
-              content: (
-                <DataTable
-                  rows={workoutRows}
-                  rowKey={(row) => row.id}
-                  loading={workouts.loading && workoutRows.length === 0}
-                  emptyTitle="No workouts logged"
-                  emptyDescription="Use Log workout to record your first session."
-                  columns={[
-                    { key: "date", header: "Date", render: (row) => row.date },
-                    { key: "activity", header: "Activity", render: (row) => row.activity },
-                    {
-                      key: "effort",
-                      header: "Effort",
-                      render: (row) => (
-                        <Badge
-                          tone={
-                            row.effort === "Hard"
-                              ? "warning"
-                              : row.effort === "Moderate"
-                                ? "success"
-                                : "neutral"
-                          }
-                        >
-                          {row.effort}
-                        </Badge>
-                      ),
-                    },
-                    {
-                      key: "minutes",
-                      header: "Duration",
-                      align: "right",
-                      render: (row) => `${row.minutes} min`,
-                    },
-                    {
-                      key: "actions",
-                      header: "",
-                      align: "right",
-                      render: (row) => (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => {
-                            void deleteWorkout
-                              .mutate({ id: row.id })
-                              .then(() => workouts.reload())
-                              .catch(() => undefined);
-                          }}
-                        >
-                          Remove
-                        </Button>
-                      ),
-                    },
-                  ]}
-                />
-              ),
-            },
-          ]}
-        />
+          <Tabs
+            value={tab}
+            onChange={setTab}
+            items={[
+              {
+                id: "expenses",
+                label: `Expenses (${expenseRows.length})`,
+                content: (
+                  <DataTable
+                    rows={expenseRows}
+                    rowKey={(row) => row.id}
+                    loading={expenses.loading && expenseRows.length === 0}
+                    emptyTitle="No expenses logged"
+                    emptyDescription="Use Add expense to record your first transaction."
+                    columns={[
+                      { key: "date", header: "Date", render: (row) => row.date },
+                      { key: "merchant", header: "Merchant", render: (row) => row.merchant },
+                      {
+                        key: "category",
+                        header: "Category",
+                        render: (row) => <Badge>{row.category}</Badge>,
+                      },
+                      {
+                        key: "amount",
+                        header: "Amount",
+                        align: "right",
+                        render: (row) => formatCurrency(Number(row.amount || 0)),
+                      },
+                      {
+                        key: "actions",
+                        header: "",
+                        align: "right",
+                        render: (row) => (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => {
+                              void deleteExpense
+                                .mutate({ id: row.id })
+                                .then(() => expenses.reload())
+                                .catch(() => undefined);
+                            }}
+                          >
+                            Remove
+                          </Button>
+                        ),
+                      },
+                    ]}
+                  />
+                ),
+              },
+              {
+                id: "workouts",
+                label: `Workouts (${workoutRows.length})`,
+                content: (
+                  <DataTable
+                    rows={workoutRows}
+                    rowKey={(row) => row.id}
+                    loading={workouts.loading && workoutRows.length === 0}
+                    emptyTitle="No workouts logged"
+                    emptyDescription="Use Log workout to record your first session."
+                    columns={[
+                      { key: "date", header: "Date", render: (row) => row.date },
+                      { key: "activity", header: "Activity", render: (row) => row.activity },
+                      {
+                        key: "effort",
+                        header: "Effort",
+                        render: (row) => (
+                          <Badge
+                            tone={
+                              row.effort === "Hard"
+                                ? "warning"
+                                : row.effort === "Moderate"
+                                  ? "success"
+                                  : "neutral"
+                            }
+                          >
+                            {row.effort}
+                          </Badge>
+                        ),
+                      },
+                      {
+                        key: "minutes",
+                        header: "Duration",
+                        align: "right",
+                        render: (row) => `${row.minutes} min`,
+                      },
+                      {
+                        key: "actions",
+                        header: "",
+                        align: "right",
+                        render: (row) => (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => {
+                              void deleteWorkout
+                                .mutate({ id: row.id })
+                                .then(() => workouts.reload())
+                                .catch(() => undefined);
+                            }}
+                          >
+                            Remove
+                          </Button>
+                        ),
+                      },
+                    ]}
+                  />
+                ),
+              },
+            ]}
+          />
         </Card>
       </Stack>
 

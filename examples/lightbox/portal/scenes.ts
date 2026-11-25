@@ -1,7 +1,18 @@
 type Rng = () => number;
 type Ctx = CanvasRenderingContext2D;
 
-const PLASTER = ["#f2dcc0", "#f4e6cf", "#efc9a8", "#f6d9a6", "#e9b89c", "#f3ece0", "#e7c3a8", "#f1d3b4", "#ead7c2", "#f5e2b8"];
+const PLASTER = [
+  "#f2dcc0",
+  "#f4e6cf",
+  "#efc9a8",
+  "#f6d9a6",
+  "#e9b89c",
+  "#f3ece0",
+  "#e7c3a8",
+  "#f1d3b4",
+  "#ead7c2",
+  "#f5e2b8",
+];
 
 function random(seed: number): Rng {
   let state = seed >>> 0;
@@ -21,7 +32,11 @@ function hash(text: string): number {
 }
 
 function channels(hex: string): [number, number, number] {
-  return [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16)) as [number, number, number];
+  return [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16)) as [
+    number,
+    number,
+    number,
+  ];
 }
 
 function mix(a: string, b: string, t: number): string {
@@ -58,7 +73,13 @@ function place(ctx: Ctx, source: HTMLCanvasElement) {
   ctx.drawImage(source, 0, 0, source.width / density, source.height / density);
 }
 
-function stamp(ctx: Ctx, source: HTMLCanvasElement, blur: number, alpha = 1, mode: GlobalCompositeOperation = "source-over") {
+function stamp(
+  ctx: Ctx,
+  source: HTMLCanvasElement,
+  blur: number,
+  alpha = 1,
+  mode: GlobalCompositeOperation = "source-over",
+) {
   ctx.save();
   if (blur > 0) ctx.filter = `blur(${blur * density}px)`;
   ctx.globalAlpha = alpha;
@@ -69,11 +90,21 @@ function stamp(ctx: Ctx, source: HTMLCanvasElement, blur: number, alpha = 1, mod
 
 function vertical(ctx: Ctx, top: number, bottom: number, stops: readonly string[]) {
   const gradient = ctx.createLinearGradient(0, top, 0, bottom);
-  stops.forEach((color, index) => gradient.addColorStop(index / Math.max(1, stops.length - 1), color));
+  stops.forEach((color, index) =>
+    gradient.addColorStop(index / Math.max(1, stops.length - 1), color),
+  );
   return gradient;
 }
 
-function glow(ctx: Ctx, x: number, y: number, radius: number, color: string, alpha: number, mode: GlobalCompositeOperation = "lighter") {
+function glow(
+  ctx: Ctx,
+  x: number,
+  y: number,
+  radius: number,
+  color: string,
+  alpha: number,
+  mode: GlobalCompositeOperation = "lighter",
+) {
   const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
   gradient.addColorStop(0, rgba(color, alpha));
   gradient.addColorStop(0.4, rgba(color, alpha * 0.35));
@@ -85,14 +116,28 @@ function glow(ctx: Ctx, x: number, y: number, radius: number, color: string, alp
   ctx.restore();
 }
 
-function oval(ctx: Ctx, x: number, y: number, rx: number, ry: number, fill: string | CanvasGradient, rotation = 0) {
+function oval(
+  ctx: Ctx,
+  x: number,
+  y: number,
+  rx: number,
+  ry: number,
+  fill: string | CanvasGradient,
+  rotation = 0,
+) {
   ctx.beginPath();
   ctx.ellipse(x, y, Math.max(0.1, rx), Math.max(0.1, ry), rotation, 0, Math.PI * 2);
   ctx.fillStyle = fill;
   ctx.fill();
 }
 
-function ridge(rng: Rng, w: number, base: number, rough: number, points = 9): Array<[number, number]> {
+function ridge(
+  rng: Rng,
+  w: number,
+  base: number,
+  rough: number,
+  points = 9,
+): Array<[number, number]> {
   let line: Array<[number, number]> = [
     [0, base + (rng() - 0.5) * rough],
     [w, base + (rng() - 0.5) * rough],
@@ -112,7 +157,12 @@ function ridge(rng: Rng, w: number, base: number, rough: number, points = 9): Ar
   return line;
 }
 
-function fillBelow(ctx: Ctx, line: Array<[number, number]>, bottom: number, fill: string | CanvasGradient) {
+function fillBelow(
+  ctx: Ctx,
+  line: Array<[number, number]>,
+  bottom: number,
+  fill: string | CanvasGradient,
+) {
   ctx.beginPath();
   ctx.moveTo(line[0]![0], bottom);
   for (const [x, y] of line) ctx.lineTo(x, y);
@@ -122,7 +172,16 @@ function fillBelow(ctx: Ctx, line: Array<[number, number]>, bottom: number, fill
   ctx.fill();
 }
 
-function speckle(ctx: Ctx, w: number, h: number, rng: Rng, count: number, colors: readonly string[], alpha: number, size: number) {
+function speckle(
+  ctx: Ctx,
+  w: number,
+  h: number,
+  rng: Rng,
+  count: number,
+  colors: readonly string[],
+  alpha: number,
+  size: number,
+) {
   for (let index = 0; index < count; index++) {
     ctx.fillStyle = rgba(choose(rng, colors), alpha * between(rng, 0.4, 1));
     const s = size * between(rng, 0.4, 1.4);
@@ -130,7 +189,17 @@ function speckle(ctx: Ctx, w: number, h: number, rng: Rng, count: number, colors
   }
 }
 
-function sea(ctx: Ctx, w: number, top: number, bottom: number, rng: Rng, deep: string, near: string, sunX: number, glint: string) {
+function sea(
+  ctx: Ctx,
+  w: number,
+  top: number,
+  bottom: number,
+  rng: Rng,
+  deep: string,
+  near: string,
+  sunX: number,
+  glint: string,
+) {
   ctx.fillStyle = vertical(ctx, top, bottom, [mix(deep, "#cfd8dc", 0.25), deep, near]);
   ctx.fillRect(0, top, w, bottom - top);
   const span = bottom - top;
@@ -147,11 +216,26 @@ function sea(ctx: Ctx, w: number, top: number, bottom: number, rng: Rng, deep: s
     const t = rng();
     const y = top + t * span;
     ctx.fillStyle = rgba("#0b2233", 0.05 + t * 0.08);
-    ctx.fillRect(rng() * w, y, w * between(rng, 0.01, 0.05) * (0.3 + t), Math.max(1, span * 0.003 * (0.5 + t * 2)));
+    ctx.fillRect(
+      rng() * w,
+      y,
+      w * between(rng, 0.01, 0.05) * (0.3 + t),
+      Math.max(1, span * 0.003 * (0.5 + t * 2)),
+    );
   }
 }
 
-function house(ctx: Ctx, x: number, y: number, bw: number, bh: number, color: string, haze: string, depth: number, rng: Rng) {
+function house(
+  ctx: Ctx,
+  x: number,
+  y: number,
+  bw: number,
+  bh: number,
+  color: string,
+  haze: string,
+  depth: number,
+  rng: Rng,
+) {
   const tint = mix(color, haze, depth * 0.55);
   const shade = mix(mix(color, "#5b4652", 0.38), haze, depth * 0.5);
   ctx.fillStyle = rgba("#2a2026", 0.22 * (1 - depth));
@@ -214,7 +298,16 @@ function village(ctx: Ctx, w: number, h: number, rng: Rng) {
   ctx.fillRect(0, slopeTop, w, shore - slopeTop);
   ctx.save();
   ctx.translate(0, slopeTop);
-  speckle(ctx, w, shore - slopeTop, rng, Math.round(w * 3), ["#3b4a2c", "#6b6a45", "#2f3a24"], 0.35, w * 0.006);
+  speckle(
+    ctx,
+    w,
+    shore - slopeTop,
+    rng,
+    Math.round(w * 3),
+    ["#3b4a2c", "#6b6a45", "#2f3a24"],
+    0.35,
+    w * 0.006,
+  );
   ctx.restore();
   const bowl = between(rng, 0.35, 0.65);
   let y = slopeTop;
@@ -228,9 +321,26 @@ function village(ctx: Ctx, w: number, h: number, rng: Rng) {
       const density = fromBowl < edge ? 0.94 : 0.4;
       const bw = size * between(rng, 0.9, 1.9);
       if (rng() < density) {
-        house(ctx, x, y + (rng() - 0.5) * size * 0.3, bw, size * between(rng, 0.7, 1.15), choose(rng, PLASTER), haze, 1 - t, rng);
+        house(
+          ctx,
+          x,
+          y + (rng() - 0.5) * size * 0.3,
+          bw,
+          size * between(rng, 0.7, 1.15),
+          choose(rng, PLASTER),
+          haze,
+          1 - t,
+          rng,
+        );
       } else {
-        oval(ctx, x + bw / 2, y + size * 0.5, bw * 0.6, size * 0.55, mix(choose(rng, ["#3c4a2e", "#4b5634", "#2f3d27"]), haze, (1 - t) * 0.4));
+        oval(
+          ctx,
+          x + bw / 2,
+          y + size * 0.5,
+          bw * 0.6,
+          size * 0.55,
+          mix(choose(rng, ["#3c4a2e", "#4b5634", "#2f3d27"]), haze, (1 - t) * 0.4),
+        );
       }
       if (rng() < 0.05) {
         const cx = x + bw / 2;
@@ -275,7 +385,14 @@ function village(ctx: Ctx, w: number, h: number, rng: Rng) {
   ctx.fillRect(0, shore - h * 0.012, w, h * 0.022);
   for (let index = 0; index < w * 0.08; index++) {
     const ux = rng() * w;
-    oval(ctx, ux, shore - h * 0.004, w * 0.004, w * 0.0016, choose(rng, ["#e9763d", "#f0e8d8", "#2f8a86"]));
+    oval(
+      ctx,
+      ux,
+      shore - h * 0.004,
+      w * 0.004,
+      w * 0.0016,
+      choose(rng, ["#e9763d", "#f0e8d8", "#2f8a86"]),
+    );
   }
   sea(ctx, w, shore + h * 0.008, h, rng, "#24607e", "#123c56", sunX, "#ffe2b0");
   for (let index = 0; index < 6 + rng() * 6; index++) {
@@ -297,13 +414,26 @@ function village(ctx: Ctx, w: number, h: number, rng: Rng) {
   ctx.restore();
 }
 
-function umbrella(ctx: Ctx, x: number, y: number, r: number, colors: readonly [string, string], rng: Rng) {
+function umbrella(
+  ctx: Ctx,
+  x: number,
+  y: number,
+  r: number,
+  colors: readonly [string, string],
+  rng: Rng,
+) {
   const segments = 8;
   const turn = rng() * Math.PI;
   for (let index = 0; index < segments; index++) {
     ctx.beginPath();
     ctx.moveTo(x, y);
-    ctx.arc(x, y, r, turn + (index / segments) * Math.PI * 2, turn + ((index + 1) / segments) * Math.PI * 2);
+    ctx.arc(
+      x,
+      y,
+      r,
+      turn + (index / segments) * Math.PI * 2,
+      turn + ((index + 1) / segments) * Math.PI * 2,
+    );
     ctx.closePath();
     ctx.fillStyle = colors[index % 2]!;
     ctx.fill();
@@ -334,10 +464,20 @@ function beach(ctx: Ctx, w: number, h: number, rng: Rng) {
     ctx.translate(w, 0);
     ctx.rotate(Math.PI / 2);
   }
-  const shoreAt = (t: number) => short * (0.46 + 0.05 * Math.sin(t * 5.2 + 1) + 0.025 * Math.sin(t * 13));
+  const shoreAt = (t: number) =>
+    short * (0.46 + 0.05 * Math.sin(t * 5.2 + 1) + 0.025 * Math.sin(t * 13));
   ctx.fillStyle = vertical(ctx, 0, short, ["#d9c3a0", "#e3cfae", "#d6bd96"]);
   ctx.fillRect(0, 0, long, short);
-  speckle(ctx, long, short, rng, Math.round(long * 6), ["#b49a76", "#f2e4c8", "#a68b66"], 0.18, long * 0.0018);
+  speckle(
+    ctx,
+    long,
+    short,
+    rng,
+    Math.round(long * 6),
+    ["#b49a76", "#f2e4c8", "#a68b66"],
+    0.18,
+    long * 0.0018,
+  );
   const water = ctx.createLinearGradient(0, short * 0.4, 0, short);
   water.addColorStop(0, "#8fe0d2");
   water.addColorStop(0.18, "#4cc0bd");
@@ -364,7 +504,10 @@ function beach(ctx: Ctx, w: number, h: number, rng: Rng) {
       c.lineWidth = short * (0.008 - band * 0.0012);
       c.beginPath();
       for (let x = 0; x <= long; x += long / 240) {
-        c.lineTo(x, shoreAt(x / long) + band * short * 0.022 + Math.sin(x * 0.05 + band) * short * 0.004);
+        c.lineTo(
+          x,
+          shoreAt(x / long) + band * short * 0.022 + Math.sin(x * 0.05 + band) * short * 0.004,
+        );
       }
       c.stroke();
     }
@@ -378,7 +521,12 @@ function beach(ctx: Ctx, w: number, h: number, rng: Rng) {
     const y = top + rng() * (short - top);
     ctx.beginPath();
     ctx.moveTo(x, y);
-    ctx.quadraticCurveTo(x + short * 0.02, y - short * 0.006, x + short * between(rng, 0.03, 0.07), y);
+    ctx.quadraticCurveTo(
+      x + short * 0.02,
+      y - short * 0.006,
+      x + short * between(rng, 0.03, 0.07),
+      y,
+    );
     ctx.stroke();
   }
   const schemes: ReadonlyArray<readonly [string, string]> = [
@@ -410,7 +558,8 @@ function beach(ctx: Ctx, w: number, h: number, rng: Rng) {
     ctx.fillStyle = "#f6f3ec";
     ctx.fillRect(x + size * 0.8, y - size * 0.7, size * 0.42, size * 1.3);
     ctx.fillRect(x - size * 1.25, y - size * 0.7, size * 0.42, size * 1.3);
-    if (rng() < 0.4) oval(ctx, x + size * 1.02, y - size * 0.4, size * 0.14, size * 0.14, "#c58f6e");
+    if (rng() < 0.4)
+      oval(ctx, x + size * 1.02, y - size * 0.4, size * 0.14, size * 0.14, "#c58f6e");
     umbrella(ctx, x, y, size, rng() < 0.9 ? scheme : choose(rng, schemes), rng);
   }
   for (let index = 0; index < long * 0.012; index++) {
@@ -432,7 +581,15 @@ function boat(ctx: Ctx, w: number, h: number, rng: Rng) {
   ctx.fillRect(0, 0, w, h);
   const bed = layer(w, h, (c) => {
     for (let index = 0; index < 30; index++) {
-      oval(c, rng() * w, rng() * h, w * between(rng, 0.05, 0.18), h * between(rng, 0.03, 0.12), rng() < 0.6 ? "rgba(230,240,220,0.22)" : "rgba(6,40,60,0.25)", rng() * Math.PI);
+      oval(
+        c,
+        rng() * w,
+        rng() * h,
+        w * between(rng, 0.05, 0.18),
+        h * between(rng, 0.03, 0.12),
+        rng() < 0.6 ? "rgba(230,240,220,0.22)" : "rgba(6,40,60,0.25)",
+        rng() * Math.PI,
+      );
     }
   });
   stamp(ctx, bed, w * 0.02);
@@ -445,7 +602,14 @@ function boat(ctx: Ctx, w: number, h: number, rng: Rng) {
       c.lineWidth = Math.max(0.6, w * 0.0012);
       c.beginPath();
       c.moveTo(x, y);
-      c.bezierCurveTo(x + s, y - s * 0.6, x + s * 1.5, y + s * 0.7, x + s * 2.4, y + (rng() - 0.5) * s);
+      c.bezierCurveTo(
+        x + s,
+        y - s * 0.6,
+        x + s * 1.5,
+        y + s * 0.7,
+        x + s * 2.4,
+        y + (rng() - 0.5) * s,
+      );
       c.stroke();
     }
   });
@@ -458,7 +622,14 @@ function boat(ctx: Ctx, w: number, h: number, rng: Rng) {
   const hull = (c: Ctx) => {
     c.beginPath();
     c.moveTo(length * 0.55, 0);
-    c.bezierCurveTo(length * 0.35, -breadth * 0.55, -length * 0.2, -breadth * 0.52, -length * 0.45, -breadth * 0.42);
+    c.bezierCurveTo(
+      length * 0.35,
+      -breadth * 0.55,
+      -length * 0.2,
+      -breadth * 0.52,
+      -length * 0.45,
+      -breadth * 0.42,
+    );
     c.lineTo(-length * 0.45, breadth * 0.42);
     c.bezierCurveTo(-length * 0.2, breadth * 0.52, length * 0.35, breadth * 0.55, length * 0.55, 0);
     c.closePath();
@@ -472,7 +643,15 @@ function boat(ctx: Ctx, w: number, h: number, rng: Rng) {
       const side = rng() < 0.5 ? -1 : 1;
       const x = -length * 0.45 - t * length * 3.2;
       const y = side * (breadth * 0.3 + spread * 0.42) + (rng() - 0.5) * length * 0.05;
-      oval(c, x, y, length * between(rng, 0.01, 0.05), length * 0.008, `rgba(255,255,255,${0.55 * (1 - t)})`, (rng() - 0.5) * 0.4);
+      oval(
+        c,
+        x,
+        y,
+        length * between(rng, 0.01, 0.05),
+        length * 0.008,
+        `rgba(255,255,255,${0.55 * (1 - t)})`,
+        (rng() - 0.5) * 0.4,
+      );
     }
     const trail = c.createLinearGradient(-length * 0.45, 0, -length * 2.6, 0);
     trail.addColorStop(0, "rgba(255,255,255,0.55)");
@@ -550,11 +729,22 @@ function arch(ctx: Ctx, x: number, top: number, width: number, bottom: number, f
 function terrace(ctx: Ctx, w: number, h: number, rng: Rng) {
   const wall = choose(rng, ["#e8d3bb", "#efdcc5", "#e6cdb4", "#eedfcf"]);
   const floorTop = h * between(rng, 0.74, 0.8);
-  ctx.fillStyle = vertical(ctx, 0, floorTop, [mix(wall, "#8a6f5c", 0.3), wall, mix(wall, "#b08e74", 0.2)]);
+  ctx.fillStyle = vertical(ctx, 0, floorTop, [
+    mix(wall, "#8a6f5c", 0.3),
+    wall,
+    mix(wall, "#b08e74", 0.2),
+  ]);
   ctx.fillRect(0, 0, w, floorTop);
   const blotch = layer(w, h, (c) => {
     for (let index = 0; index < 60; index++) {
-      oval(c, rng() * w, rng() * floorTop, w * between(rng, 0.03, 0.12), h * between(rng, 0.02, 0.08), rng() < 0.5 ? "rgba(255,245,230,0.18)" : "rgba(120,90,70,0.12)");
+      oval(
+        c,
+        rng() * w,
+        rng() * floorTop,
+        w * between(rng, 0.03, 0.12),
+        h * between(rng, 0.02, 0.08),
+        rng() < 0.5 ? "rgba(255,245,230,0.18)" : "rgba(120,90,70,0.12)",
+      );
     }
   });
   stamp(ctx, blotch, w * 0.02);
@@ -648,7 +838,9 @@ function terrace(ctx: Ctx, w: number, h: number, rng: Rng) {
   const potW = w * 0.13;
   const potTop = floorTop + h * 0.02;
   const potBottom = floorTop + h * 0.13;
-  const shadowPot = layer(w, h, (c) => oval(c, potX + potW * 0.65, potBottom, potW * 0.7, h * 0.02, "rgba(40,20,10,0.6)"));
+  const shadowPot = layer(w, h, (c) =>
+    oval(c, potX + potW * 0.65, potBottom, potW * 0.7, h * 0.02, "rgba(40,20,10,0.6)"),
+  );
   stamp(ctx, shadowPot, w * 0.01);
   ctx.beginPath();
   ctx.moveTo(potX, potTop);
@@ -668,12 +860,27 @@ function terrace(ctx: Ctx, w: number, h: number, rng: Rng) {
       const radius = potW * Math.sqrt(rng()) * 0.95;
       const lx = potX + potW / 2 + Math.cos(angle) * radius;
       const ly = potTop - potW * 0.9 + Math.sin(angle) * radius * 1.1;
-      oval(c, lx, ly, potW * 0.07, potW * 0.03, choose(rng, ["#33502b", "#466b34", "#5b8442", "#2a4223"]), rng() * Math.PI);
+      oval(
+        c,
+        lx,
+        ly,
+        potW * 0.07,
+        potW * 0.03,
+        choose(rng, ["#33502b", "#466b34", "#5b8442", "#2a4223"]),
+        rng() * Math.PI,
+      );
     }
     for (let index = 0; index < 9; index++) {
       const angle = rng() * Math.PI * 2;
       const radius = potW * Math.sqrt(rng()) * 0.8;
-      oval(c, potX + potW / 2 + Math.cos(angle) * radius, potTop - potW * 0.9 + Math.sin(angle) * radius, potW * 0.05, potW * 0.035, "#f0c934");
+      oval(
+        c,
+        potX + potW / 2 + Math.cos(angle) * radius,
+        potTop - potW * 0.9 + Math.sin(angle) * radius,
+        potW * 0.05,
+        potW * 0.035,
+        "#f0c934",
+      );
     }
     c.fillStyle = "#4b3424";
     c.fillRect(potX + potW * 0.47, potTop - potW * 0.25, potW * 0.06, potW * 0.28);
@@ -690,14 +897,26 @@ function terrace(ctx: Ctx, w: number, h: number, rng: Rng) {
       c.moveTo(px - size * 0.08, bottom - size * 0.9);
       c.quadraticCurveTo(px - size * 0.2, bottom - size * 0.4, px - size * 0.24, bottom);
       c.lineTo(px + size * 0.22, bottom);
-      c.quadraticCurveTo(px + size * 0.18, bottom - size * 0.4, px + size * 0.08, bottom - size * 0.9);
+      c.quadraticCurveTo(
+        px + size * 0.18,
+        bottom - size * 0.4,
+        px + size * 0.08,
+        bottom - size * 0.9,
+      );
       c.closePath();
       c.fillStyle = "#efe7dc";
       c.fill();
     });
     stamp(ctx, figure, w * 0.0012);
   }
-  const vignette = ctx.createRadialGradient(w / 2, h * 0.45, Math.min(w, h) * 0.3, w / 2, h * 0.45, Math.hypot(w, h) * 0.62);
+  const vignette = ctx.createRadialGradient(
+    w / 2,
+    h * 0.45,
+    Math.min(w, h) * 0.3,
+    w / 2,
+    h * 0.45,
+    Math.hypot(w, h) * 0.62,
+  );
   vignette.addColorStop(0, "rgba(0,0,0,0)");
   vignette.addColorStop(1, "rgba(60,35,20,0.35)");
   ctx.fillStyle = vignette;
@@ -729,7 +948,12 @@ function lemon(ctx: Ctx, x: number, y: number, r: number, rotation: number, rng:
   ctx.clip();
   for (let index = 0; index < r * 6; index++) {
     ctx.fillStyle = rng() < 0.5 ? "rgba(150,100,0,0.12)" : "rgba(255,255,220,0.18)";
-    ctx.fillRect((rng() - 0.5) * r * 2.6, (rng() - 0.5) * r * 1.8, Math.max(1, r * 0.03), Math.max(1, r * 0.03));
+    ctx.fillRect(
+      (rng() - 0.5) * r * 2.6,
+      (rng() - 0.5) * r * 1.8,
+      Math.max(1, r * 0.03),
+      Math.max(1, r * 0.03),
+    );
   }
   ctx.restore();
   glow(ctx, -r * 0.45, -r * 0.45, r * 0.35, "#ffffff", 0.55, "screen");
@@ -750,7 +974,12 @@ function lemons(ctx: Ctx, w: number, h: number, rng: Rng) {
   const folds = layer(w, h, (c) => {
     for (let index = 0; index < 8; index++) {
       const y = rng() * h;
-      c.fillStyle = vertical(c, y - h * 0.05, y + h * 0.05, ["rgba(0,0,0,0)", "rgba(40,40,60,0.18)", "rgba(255,255,255,0.25)", "rgba(0,0,0,0)"]);
+      c.fillStyle = vertical(c, y - h * 0.05, y + h * 0.05, [
+        "rgba(0,0,0,0)",
+        "rgba(40,40,60,0.18)",
+        "rgba(255,255,255,0.25)",
+        "rgba(0,0,0,0)",
+      ]);
       c.fillRect(0, y - h * 0.05, w, h * 0.1);
     }
   });
@@ -767,7 +996,16 @@ function lemons(ctx: Ctx, w: number, h: number, rng: Rng) {
   const plateX = w * between(rng, 0.42, 0.58);
   const plateY = h * between(rng, 0.45, 0.58);
   const plateR = unit * 0.36;
-  const plateShadow = layer(w, h, (c) => oval(c, plateX + unit * 0.04, plateY + unit * 0.05, plateR, plateR * 0.86, "rgba(40,35,45,0.5)"));
+  const plateShadow = layer(w, h, (c) =>
+    oval(
+      c,
+      plateX + unit * 0.04,
+      plateY + unit * 0.05,
+      plateR,
+      plateR * 0.86,
+      "rgba(40,35,45,0.5)",
+    ),
+  );
   stamp(ctx, plateShadow, unit * 0.03);
   oval(ctx, plateX, plateY, plateR, plateR * 0.86, "#f5f1e8");
   ctx.strokeStyle = "#2b5c9e";
@@ -782,7 +1020,14 @@ function lemons(ctx: Ctx, w: number, h: number, rng: Rng) {
     oval(ctx, px, py, unit * 0.022, unit * 0.01, index % 2 ? "#e2b23a" : "#3d7a4c", angle);
   }
   oval(ctx, plateX, plateY, plateR * 0.68, plateR * 0.58, "#f8f4ec");
-  const glaze = ctx.createRadialGradient(plateX - plateR * 0.4, plateY - plateR * 0.4, 0, plateX, plateY, plateR);
+  const glaze = ctx.createRadialGradient(
+    plateX - plateR * 0.4,
+    plateY - plateR * 0.4,
+    0,
+    plateX,
+    plateY,
+    plateR,
+  );
   glaze.addColorStop(0, "rgba(255,255,255,0.5)");
   glaze.addColorStop(1, "rgba(255,255,255,0)");
   oval(ctx, plateX, plateY, plateR, plateR * 0.86, glaze);
@@ -791,11 +1036,17 @@ function lemons(ctx: Ctx, w: number, h: number, rng: Rng) {
     const inside = index < 4;
     const angle = rng() * Math.PI * 2;
     const distance = inside ? plateR * 0.4 * Math.sqrt(rng()) : plateR * between(rng, 1.05, 1.35);
-    placed.push([plateX + Math.cos(angle) * distance, plateY + Math.sin(angle) * distance * 0.86, unit * between(rng, 0.075, 0.095)]);
+    placed.push([
+      plateX + Math.cos(angle) * distance,
+      plateY + Math.sin(angle) * distance * 0.86,
+      unit * between(rng, 0.075, 0.095),
+    ]);
   }
   placed.sort((a, b) => a[1] - b[1]);
   for (const [x, y, r] of placed) {
-    const shadow = layer(w, h, (c) => oval(c, x + r * 0.35, y + r * 0.55, r * 1.25, r * 0.7, "rgba(50,40,30,0.55)"));
+    const shadow = layer(w, h, (c) =>
+      oval(c, x + r * 0.35, y + r * 0.55, r * 1.25, r * 0.7, "rgba(50,40,30,0.55)"),
+    );
     stamp(ctx, shadow, r * 0.25);
     lemon(ctx, x, y, r, between(rng, -0.6, 0.6), rng);
   }
@@ -822,7 +1073,16 @@ function lemons(ctx: Ctx, w: number, h: number, rng: Rng) {
   const halfX = plateX + plateR * between(rng, -0.9, 0.9);
   const halfY = plateY + plateR * (rng() < 0.5 ? -1.15 : 1.1);
   const halfR = unit * 0.07;
-  const halfShadow = layer(w, h, (c) => oval(c, halfX + halfR * 0.3, halfY + halfR * 0.4, halfR * 1.1, halfR * 0.9, "rgba(50,40,30,0.5)"));
+  const halfShadow = layer(w, h, (c) =>
+    oval(
+      c,
+      halfX + halfR * 0.3,
+      halfY + halfR * 0.4,
+      halfR * 1.1,
+      halfR * 0.9,
+      "rgba(50,40,30,0.5)",
+    ),
+  );
   stamp(ctx, halfShadow, halfR * 0.2);
   oval(ctx, halfX, halfY, halfR, halfR * 0.92, "#e7b419");
   oval(ctx, halfX, halfY, halfR * 0.9, halfR * 0.82, "#fbf3c8");
@@ -910,7 +1170,12 @@ function couple(ctx: Ctx, w: number, h: number, rng: Rng) {
       c.lineWidth = Math.max(1, w * between(rng, 0.001, 0.003));
       c.beginPath();
       c.moveTo(gx, h);
-      c.quadraticCurveTo(gx + (rng() - 0.5) * w * 0.03, h - gh * 0.6, gx + (rng() - 0.5) * w * 0.05, h - gh);
+      c.quadraticCurveTo(
+        gx + (rng() - 0.5) * w * 0.03,
+        h - gh * 0.6,
+        gx + (rng() - 0.5) * w * 0.05,
+        h - gh,
+      );
       c.stroke();
     }
   });
@@ -949,12 +1214,25 @@ function dinner(ctx: Ctx, w: number, h: number, rng: Rng) {
   const back = layer(w, h, (c) => {
     c.fillStyle = vertical(c, 0, vanishY * 1.2, ["#1d2440", "#46406a", "#b5767a", "#e9a77a"]);
     c.fillRect(0, 0, w, h);
-    fillBelow(c, ridge(rng, w, vanishY - h * 0.1, h * 0.12), h, vertical(c, vanishY - h * 0.1, h, ["#1c211e", "#2c2a25", "#3b3128"]));
+    fillBelow(
+      c,
+      ridge(rng, w, vanishY - h * 0.1, h * 0.12),
+      h,
+      vertical(c, vanishY - h * 0.1, h, ["#1c211e", "#2c2a25", "#3b3128"]),
+    );
     for (let index = 0; index < 12; index++) {
       const tx = rng() * w;
       c.fillStyle = "#171c19";
       c.beginPath();
-      c.ellipse(tx, vanishY - h * between(rng, 0.12, 0.3), w * 0.025, h * between(rng, 0.12, 0.22), 0, 0, Math.PI * 2);
+      c.ellipse(
+        tx,
+        vanishY - h * between(rng, 0.12, 0.3),
+        w * 0.025,
+        h * between(rng, 0.12, 0.22),
+        0,
+        0,
+        Math.PI * 2,
+      );
       c.fill();
     }
   });
@@ -995,8 +1273,24 @@ function dinner(ctx: Ctx, w: number, h: number, rng: Rng) {
       const y = tableTop + t * (h - tableTop);
       const half = halfFar + (halfNear - halfFar) * t;
       const x = vanishX + (rng() - 0.5) * half * 0.35;
-      oval(c, x, y, w * 0.007 * (0.3 + t), h * 0.005 * (0.3 + t), choose(rng, ["#33492c", "#263a22", "#4a6338"]), rng() * Math.PI);
-      if (rng() < 0.5) oval(c, x + (rng() - 0.5) * w * 0.01, y, w * 0.005 * (0.3 + t), w * 0.005 * (0.3 + t), choose(rng, ["#f6f0e6", "#efd9d2", "#f3e7c9"]));
+      oval(
+        c,
+        x,
+        y,
+        w * 0.007 * (0.3 + t),
+        h * 0.005 * (0.3 + t),
+        choose(rng, ["#33492c", "#263a22", "#4a6338"]),
+        rng() * Math.PI,
+      );
+      if (rng() < 0.5)
+        oval(
+          c,
+          x + (rng() - 0.5) * w * 0.01,
+          y,
+          w * 0.005 * (0.3 + t),
+          w * 0.005 * (0.3 + t),
+          choose(rng, ["#f6f0e6", "#efd9d2", "#f3e7c9"]),
+        );
     }
     for (let row = 1; row < 9; row++) {
       const t = (row / 9) ** 1.5;
@@ -1007,7 +1301,12 @@ function dinner(ctx: Ctx, w: number, h: number, rng: Rng) {
         oval(c, px, y, w * 0.03 * (0.2 + t), h * 0.012 * (0.2 + t), "#fbf8f2");
         oval(c, px, y, w * 0.02 * (0.2 + t), h * 0.008 * (0.2 + t), "#ece4d8");
         c.fillStyle = "rgba(255,255,255,0.6)";
-        c.fillRect(px + side * w * 0.025 * (0.2 + t), y - h * 0.04 * (0.2 + t), Math.max(1, w * 0.004 * (0.2 + t)), h * 0.035 * (0.2 + t));
+        c.fillRect(
+          px + side * w * 0.025 * (0.2 + t),
+          y - h * 0.04 * (0.2 + t),
+          Math.max(1, w * 0.004 * (0.2 + t)),
+          h * 0.035 * (0.2 + t),
+        );
       }
     }
   });
@@ -1039,7 +1338,12 @@ function dinner(ctx: Ctx, w: number, h: number, rng: Rng) {
     for (const side of [-1, 1]) {
       ctx.fillStyle = "rgba(30,24,26,0.85)";
       const cw = w * 0.035 * (0.2 + t);
-      ctx.fillRect(vanishX + side * (half + cw * 0.3) - cw / 2, y - h * 0.08 * (0.2 + t), cw, h * 0.09 * (0.2 + t));
+      ctx.fillRect(
+        vanishX + side * (half + cw * 0.3) - cw / 2,
+        y - h * 0.08 * (0.2 + t),
+        cw,
+        h * 0.09 * (0.2 + t),
+      );
     }
   }
 }
@@ -1057,7 +1361,14 @@ const SCENES: Record<string, (ctx: Ctx, w: number, h: number, rng: Rng) => void>
 const SCENE_KINDS = Object.keys(SCENES);
 
 function develop(ctx: Ctx, w: number, h: number, rng: Rng) {
-  const vignette = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.38, w / 2, h / 2, Math.hypot(w, h) * 0.62);
+  const vignette = ctx.createRadialGradient(
+    w / 2,
+    h / 2,
+    Math.min(w, h) * 0.38,
+    w / 2,
+    h / 2,
+    Math.hypot(w, h) * 0.62,
+  );
   vignette.addColorStop(0, "rgba(0,0,0,0)");
   vignette.addColorStop(1, "rgba(0,0,0,0.26)");
   ctx.fillStyle = vignette;
@@ -1082,7 +1393,12 @@ function develop(ctx: Ctx, w: number, h: number, rng: Rng) {
   ctx.putImageData(image, 0, 0);
 }
 
-function drawScene(recipe: string, width: number, height: number, longEdge = Math.max(width, height)): HTMLCanvasElement {
+function drawScene(
+  recipe: string,
+  width: number,
+  height: number,
+  longEdge = Math.max(width, height),
+): HTMLCanvasElement {
   const [kind = "village", seedText = "1"] = recipe.split(":");
   const seed = hash(kind) ^ Math.imul(Number(seedText) || 1, 2654435761);
   const rng = random(seed);
@@ -1107,13 +1423,21 @@ function drawScene(recipe: string, width: number, height: number, longEdge = Mat
 
 const sceneUrls = new Map<string, Promise<string>>();
 
-export function sceneUrl(recipe: string, width: number, height: number, longEdge: number): Promise<string> {
+export function sceneUrl(
+  recipe: string,
+  width: number,
+  height: number,
+  longEdge: number,
+): Promise<string> {
   const key = `${recipe}@${width}x${height}@${Math.min(longEdge, Math.max(width, height))}`;
   let url = sceneUrls.get(key);
   if (!url) {
     url = new Promise<string>((resolve, reject) =>
       drawScene(recipe, width, height, longEdge).toBlob(
-        (blob) => (blob ? resolve(URL.createObjectURL(blob)) : reject(new Error("Could not draw this preview."))),
+        (blob) =>
+          blob
+            ? resolve(URL.createObjectURL(blob))
+            : reject(new Error("Could not draw this preview.")),
         "image/jpeg",
         0.9,
       ),
@@ -1129,9 +1453,17 @@ export function sceneUrl(recipe: string, width: number, height: number, longEdge
 export async function samplePhoto(index: number): Promise<File> {
   const kind = SCENE_KINDS[index % SCENE_KINDS.length]!;
   const portrait = index % 3 === 1;
-  const canvas = drawScene(`${kind}:${100 + index}`, portrait ? 1600 : 2400, portrait ? 2400 : 1600);
+  const canvas = drawScene(
+    `${kind}:${100 + index}`,
+    portrait ? 1600 : 2400,
+    portrait ? 2400 : 1600,
+  );
   const blob = await new Promise<Blob>((resolve, reject) =>
-    canvas.toBlob((value) => (value ? resolve(value) : reject(new Error("Could not draw the sample photo."))), "image/jpeg", 0.92),
+    canvas.toBlob(
+      (value) => (value ? resolve(value) : reject(new Error("Could not draw the sample photo."))),
+      "image/jpeg",
+      0.92,
+    ),
   );
   const name = `SAMPLE_${String(index + 1).padStart(4, "0")}.jpg`;
   return new File([blob], name, { type: "image/jpeg" });

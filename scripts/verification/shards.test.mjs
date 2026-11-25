@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  BROWSER_TEST_FILES,
   assertTaskCoverage,
   javascriptGroups,
   javascriptTasks,
@@ -253,6 +254,19 @@ test("package typechecks and native proofs stay complete when changed files sele
   ]);
   assert.ok(groups[0].resource);
   assert.equal(groups[0].resource, groups[1].resource);
+});
+
+test("browser test files run as native desktop tasks, after the worker installs Chromium", async () => {
+  const tasks = await javascriptTasks({
+    changed: ["apps/desktop/vitest.config.ts"],
+    proofs: false,
+  });
+  for (const file of BROWSER_TEST_FILES) {
+    const task = tasks.find((task) => task.file === file);
+    assert.ok(task, file);
+    assert.equal(task.package, "@dohc/desktop");
+    assert.equal(task.native, true);
+  }
 });
 
 test("native fixture dependencies propagate through helpers and cycles", () => {

@@ -1,4 +1,17 @@
-import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type Ref } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+  type Ref,
+} from "react";
 import { mutationKey, useApp } from "dohc/app";
 import { Check, CircleX, Plus, RotateCcw, TriangleAlert } from "dohc/icons";
 import { CopyButton, cx, problem, type AccountType } from "./shared";
@@ -52,7 +65,14 @@ export interface Overview {
   hasPeriods: boolean;
 }
 
-export type View = "overview" | "register" | "bank" | "invoices" | "accounts" | "reports" | "periods";
+export type View =
+  | "overview"
+  | "register"
+  | "bank"
+  | "invoices"
+  | "accounts"
+  | "reports"
+  | "periods";
 export interface Route {
   view: View;
   account?: string;
@@ -93,14 +113,17 @@ export const useClearToasts = () => useContext(ClearToastsContext);
 export function Toasts({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const next = useRef(1);
-  const dismiss = useCallback((id: number) => setToasts((list) => list.filter((toast) => toast.id !== id)), []);
-  const push = useCallback(
-    (toast: Omit<Toast, "id">) => {
-      const id = next.current++;
-      setToasts((list) => [...list.filter((item) => item.tone === "error").slice(-2), { ...toast, id }]);
-    },
+  const dismiss = useCallback(
+    (id: number) => setToasts((list) => list.filter((toast) => toast.id !== id)),
     [],
   );
+  const push = useCallback((toast: Omit<Toast, "id">) => {
+    const id = next.current++;
+    setToasts((list) => [
+      ...list.filter((item) => item.tone === "error").slice(-2),
+      { ...toast, id },
+    ]);
+  }, []);
   const clear = useCallback(
     () =>
       setToasts((list) => {
@@ -141,7 +164,11 @@ function ToastRow({ toast, dismiss }: { toast: Toast; dismiss: (id: number) => v
       onFocus={() => setFocused(true)}
       onBlur={(event) => !event.currentTarget.contains(event.relatedTarget) && setFocused(false)}
     >
-      {toast.tone === "error" ? <TriangleAlert size={15} aria-hidden /> : <Check size={15} aria-hidden />}
+      {toast.tone === "error" ? (
+        <TriangleAlert size={15} aria-hidden />
+      ) : (
+        <Check size={15} aria-hidden />
+      )}
       <div className="b-toast-text">
         <span>{toast.message}</span>
         {toast.detail ? <span className="b-toast-detail">{toast.detail}</span> : null}
@@ -172,7 +199,11 @@ function ToastRow({ toast, dismiss }: { toast: Toast; dismiss: (id: number) => v
         </button>
       ) : null}
       {toast.tone === "error" ? (
-        <CopyButton className="b-toast-action" size={13} text={`${toast.message} ${toast.detail ?? ""}`.trim()} />
+        <CopyButton
+          className="b-toast-action"
+          size={13}
+          text={`${toast.message} ${toast.detail ?? ""}`.trim()}
+        />
       ) : null}
       <button type="button" className="b-icon-btn" aria-label="Dismiss" onClick={onDismiss}>
         <CircleX size={15} aria-hidden />
@@ -184,7 +215,8 @@ function ToastRow({ toast, dismiss }: { toast: Toast; dismiss: (id: number) => v
 export function useMutate() {
   const app = useApp();
   return useCallback(
-    async <T,>(operation: string, input: unknown, key = mutationKey(operation)) => (await app.invoke<T>(operation, input, key)).result,
+    async <T,>(operation: string, input: unknown, key = mutationKey(operation)) =>
+      (await app.invoke<T>(operation, input, key)).result,
     [app],
   );
 }
@@ -194,7 +226,11 @@ export function useAction() {
   const toast = useToast();
   const [pending, setPending] = useState<string | null>(null);
   const run = useCallback(
-    async function run<T>(operation: string, input: unknown, options: { done?: string; failed?: string; after?: (result: T) => void } = {}): Promise<T | undefined> {
+    async function run<T>(
+      operation: string,
+      input: unknown,
+      options: { done?: string; failed?: string; after?: (result: T) => void } = {},
+    ): Promise<T | undefined> {
       setPending(operation);
       try {
         const result = await mutate<T>(operation, input);
@@ -218,7 +254,15 @@ export function useAction() {
   return { run, pending };
 }
 
-export function Topbar({ title, meta, children }: { title: ReactNode; meta?: ReactNode; children?: ReactNode }) {
+export function Topbar({
+  title,
+  meta,
+  children,
+}: {
+  title: ReactNode;
+  meta?: ReactNode;
+  children?: ReactNode;
+}) {
   const { compose } = useBooksContext();
   return (
     <header className="b-top">
@@ -228,7 +272,12 @@ export function Topbar({ title, meta, children }: { title: ReactNode; meta?: Rea
       </div>
       <div className="b-top-actions">
         {children}
-        <button type="button" className="b-icon-btn b-top-compose" aria-label="New journal entry" onClick={compose}>
+        <button
+          type="button"
+          className="b-icon-btn b-top-compose"
+          aria-label="New journal entry"
+          onClick={compose}
+        >
           <Plus size={18} aria-hidden />
         </button>
       </div>
@@ -236,13 +285,27 @@ export function Topbar({ title, meta, children }: { title: ReactNode; meta?: Rea
   );
 }
 
-export const MOD = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? "⌘" : "Ctrl";
+export const MOD =
+  typeof navigator !== "undefined" &&
+  /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
+    ? "⌘"
+    : "Ctrl";
 
 export function Kbd({ children }: { children: ReactNode }) {
   return <kbd className="b-kbd">{children}</kbd>;
 }
 
-export function Empty({ icon, title, children, action }: { icon?: ReactNode; title: string; children?: ReactNode; action?: ReactNode }) {
+export function Empty({
+  icon,
+  title,
+  children,
+  action,
+}: {
+  icon?: ReactNode;
+  title: string;
+  children?: ReactNode;
+  action?: ReactNode;
+}) {
   return (
     <div className="b-empty">
       {icon ? <div className="b-empty-icon">{icon}</div> : null}
@@ -258,13 +321,21 @@ export function typing(target: EventTarget | null) {
   return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
 }
 function activates(event: globalThis.KeyboardEvent) {
-  return (event.key === "Enter" || event.key === " ") && event.target instanceof HTMLElement && Boolean(event.target.closest("button, a[href], summary, [role=button], [role=tab]"));
+  return (
+    (event.key === "Enter" || event.key === " ") &&
+    event.target instanceof HTMLElement &&
+    Boolean(event.target.closest("button, a[href], summary, [role=button], [role=tab]"))
+  );
 }
 export function modalOpen() {
   return Boolean(document.querySelector(".kit-modal"));
 }
 
-export function useKeys(handler: (event: globalThis.KeyboardEvent) => void, active = true, capture = false) {
+export function useKeys(
+  handler: (event: globalThis.KeyboardEvent) => void,
+  active = true,
+  capture = false,
+) {
   const ref = useRef(handler);
   useLayoutEffect(() => {
     ref.current = handler;
@@ -295,7 +366,19 @@ interface PickerProps {
   className?: string;
 }
 
-export function AccountPicker({ accounts, value, onChange, label, placeholder = "Account", filter, inputRef, onKeyDown, autoFocus, hint, className }: PickerProps) {
+export function AccountPicker({
+  accounts,
+  value,
+  onChange,
+  label,
+  placeholder = "Account",
+  filter,
+  inputRef,
+  onKeyDown,
+  autoFocus,
+  hint,
+  className,
+}: PickerProps) {
   const listId = useId();
   const [query, setQuery] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
@@ -308,12 +391,23 @@ export function AccountPicker({ accounts, value, onChange, label, placeholder = 
     const needle = (query ?? "").trim().toLowerCase();
     if (!needle) return usable;
     return usable
-      .filter((account) => account.id.toLowerCase().startsWith(needle) || account.name.toLowerCase().includes(needle))
-      .sort((a, b) => Number(b.id.toLowerCase().startsWith(needle)) - Number(a.id.toLowerCase().startsWith(needle)));
+      .filter(
+        (account) =>
+          account.id.toLowerCase().startsWith(needle) ||
+          account.name.toLowerCase().includes(needle),
+      )
+      .sort(
+        (a, b) =>
+          Number(b.id.toLowerCase().startsWith(needle)) -
+          Number(a.id.toLowerCase().startsWith(needle)),
+      );
   }, [accounts, filter, query]);
   const options = matches.slice(0, 60);
   useEffect(() => {
-    if (open && options[active]) document.getElementById(`${listId}-${options[active]!.id}`)?.scrollIntoView({ block: "nearest" });
+    if (open && options[active])
+      document
+        .getElementById(`${listId}-${options[active]!.id}`)
+        ?.scrollIntoView({ block: "nearest" });
   }, [open, active, options, listId]);
   const show = () => {
     if (own.current) setRect(own.current.getBoundingClientRect());
@@ -331,7 +425,9 @@ export function AccountPicker({ accounts, value, onChange, label, placeholder = 
     ? {
         left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
         width: Math.min(width, window.innerWidth - 16),
-        ...(below < 200 && rect.top > below ? { bottom: window.innerHeight - rect.top + 4, maxHeight: Math.min(280, rect.top - 12) } : { top: rect.bottom + 4, maxHeight: Math.min(280, below) }),
+        ...(below < 200 && rect.top > below
+          ? { bottom: window.innerHeight - rect.top + 4, maxHeight: Math.min(280, rect.top - 12) }
+          : { top: rect.bottom + 4, maxHeight: Math.min(280, below) }),
       }
     : undefined;
   return (
@@ -348,7 +444,9 @@ export function AccountPicker({ accounts, value, onChange, label, placeholder = 
         aria-expanded={open}
         aria-controls={listId}
         aria-autocomplete="list"
-        aria-activedescendant={open && options[active] ? `${listId}-${options[active]!.id}` : undefined}
+        aria-activedescendant={
+          open && options[active] ? `${listId}-${options[active]!.id}` : undefined
+        }
         placeholder={placeholder}
         autoFocus={autoFocus}
         value={query ?? (selected ? `${selected.id} ${selected.name}` : "")}
@@ -384,13 +482,7 @@ export function AccountPicker({ accounts, value, onChange, label, placeholder = 
       />
       {hint && !open ? <span className="b-picker-hint">{hint}</span> : null}
       {open && rect ? (
-        <ul
-          id={listId}
-          role="listbox"
-          aria-label={label}
-          className="b-picker-list"
-          style={place}
-        >
+        <ul id={listId} role="listbox" aria-label={label} className="b-picker-list" style={place}>
           {options.length ? (
             options.map((account, index) => (
               <li

@@ -10,7 +10,12 @@ export interface Selection {
 
 export type SelectionAction =
   | { readonly type: "select"; readonly hex: string; readonly units: number }
-  | { readonly type: "target"; readonly hex: string; readonly movable: number; readonly scope: string }
+  | {
+      readonly type: "target";
+      readonly hex: string;
+      readonly movable: number;
+      readonly scope: string;
+    }
   | { readonly type: "untarget" }
   | { readonly type: "deselect" }
   | { readonly type: "reset" }
@@ -42,7 +47,12 @@ export function selectionReducer(state: Selection, action: SelectionAction): Sel
         reinforceUnits: 1,
       };
     case "target":
-      return { ...state, targetHex: action.hex, targetScope: action.scope, marchUnits: Math.max(1, action.movable) };
+      return {
+        ...state,
+        targetHex: action.hex,
+        targetScope: action.scope,
+        marchUnits: Math.max(1, action.movable),
+      };
     case "untarget":
       return { ...state, targetHex: null, targetScope: null };
     case "deselect":
@@ -62,7 +72,13 @@ export function selectionReducer(state: Selection, action: SelectionAction): Sel
   }
 }
 
-export function lockedTarget(selection: Selection, scope: string | null, targets: ReadonlyMap<string, unknown>): string | null {
+export function lockedTarget(
+  selection: Selection,
+  scope: string | null,
+  targets: ReadonlyMap<string, unknown>,
+): string | null {
   const { targetHex, targetScope } = selection;
-  return targetHex !== null && scope !== null && targetScope === scope && targets.has(targetHex) ? targetHex : null;
+  return targetHex !== null && scope !== null && targetScope === scope && targets.has(targetHex)
+    ? targetHex
+    : null;
 }

@@ -3,17 +3,35 @@ import { copyText, useApp } from "dohc/app";
 import { toCsv } from "dohc/csv";
 import { formatCents, parseCents } from "dohc/money";
 import { Button, Callout, Field, Input, Modal } from "dohc/ui";
-import { errorMessage, invoke, loadPages, useLoader, type Paged, type Shoot, type StudioAsset } from "./portal/api";
+import {
+  errorMessage,
+  invoke,
+  loadPages,
+  useLoader,
+  type Paged,
+  type Shoot,
+  type StudioAsset,
+} from "./portal/api";
 import { useToast } from "./portal/toast";
 import { plural, UNDO_KEY } from "./studio-parts";
 
-export function ShootForm({ shoot, onClose, onSaved }: { shoot: Shoot | null; onClose(): void; onSaved(shoot: Shoot): void }) {
+export function ShootForm({
+  shoot,
+  onClose,
+  onSaved,
+}: {
+  shoot: Shoot | null;
+  onClose(): void;
+  onSaved(shoot: Shoot): void;
+}) {
   const client = useApp();
   const [title, setTitle] = useState(shoot?.title ?? "");
   const [clientName, setClientName] = useState(shoot?.clientName ?? "");
   const [shotOn, setShotOn] = useState(shoot?.shotOn ?? new Date().toISOString().slice(0, 10));
   const [limit, setLimit] = useState(String(shoot?.selectionLimit ?? 20));
-  const [rate, setRate] = useState(shoot?.internalRateCents ? formatCents(shoot.internalRateCents) : "");
+  const [rate, setRate] = useState(
+    shoot?.internalRateCents ? formatCents(shoot.internalRateCents) : "",
+  );
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const submit = async (event: FormEvent) => {
@@ -25,9 +43,19 @@ export function ShootForm({ shoot, onClose, onSaved }: { shoot: Shoot | null; on
     }
     setSaving(true);
     setError(null);
-    const fields = { title: title.trim(), clientName: clientName.trim(), shotOn, selectionLimit: Number(limit), internalRateCents };
+    const fields = {
+      title: title.trim(),
+      clientName: clientName.trim(),
+      shotOn,
+      selectionLimit: Number(limit),
+      internalRateCents,
+    };
     try {
-      onSaved(shoot ? await invoke<Shoot>(client, "updateShoot", { shootId: shoot.id, ...fields }) : await invoke<Shoot>(client, "createShoot", fields));
+      onSaved(
+        shoot
+          ? await invoke<Shoot>(client, "updateShoot", { shootId: shoot.id, ...fields })
+          : await invoke<Shoot>(client, "createShoot", fields),
+      );
     } catch (failure) {
       setError(errorMessage(failure));
     } finally {
@@ -44,7 +72,13 @@ export function ShootForm({ shoot, onClose, onSaved }: { shoot: Shoot | null; on
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" type="submit" form="shoot-form" loading={saving} id="shoot-save">
+          <Button
+            variant="primary"
+            type="submit"
+            form="shoot-form"
+            loading={saving}
+            id="shoot-save"
+          >
             {shoot ? "Save" : "Create shoot"}
           </Button>
         </>
@@ -52,20 +86,51 @@ export function ShootForm({ shoot, onClose, onSaved }: { shoot: Shoot | null; on
     >
       <form id="shoot-form" className="st-form" onSubmit={submit}>
         <Field label="Title" htmlFor="shoot-title">
-          <Input id="shoot-title" required maxLength={120} value={title} onChange={(event) => setTitle(event.target.value)} autoFocus />
+          <Input
+            id="shoot-title"
+            required
+            maxLength={120}
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            autoFocus
+          />
         </Field>
         <Field label="Client" htmlFor="shoot-client">
-          <Input id="shoot-client" required maxLength={120} value={clientName} onChange={(event) => setClientName(event.target.value)} />
+          <Input
+            id="shoot-client"
+            required
+            maxLength={120}
+            value={clientName}
+            onChange={(event) => setClientName(event.target.value)}
+          />
         </Field>
         <div className="st-form-row">
           <Field label="Shot on" htmlFor="shoot-day">
-            <Input id="shoot-day" type="date" required value={shotOn} onChange={(event) => setShotOn(event.target.value)} />
+            <Input
+              id="shoot-day"
+              type="date"
+              required
+              value={shotOn}
+              onChange={(event) => setShotOn(event.target.value)}
+            />
           </Field>
           <Field label="Picks per reviewer" htmlFor="shoot-limit" hint="1 to 500">
-            <Input id="shoot-limit" type="number" min={1} max={500} required value={limit} onChange={(event) => setLimit(event.target.value)} />
+            <Input
+              id="shoot-limit"
+              type="number"
+              min={1}
+              max={500}
+              required
+              value={limit}
+              onChange={(event) => setLimit(event.target.value)}
+            />
           </Field>
         </div>
-        <Field label="Your rate" htmlFor="shoot-rate" hint="Private. The client gallery never loads it.">
+        <Field
+          label="Your rate"
+          htmlFor="shoot-rate"
+          hint="Private. The client gallery never loads it."
+        >
           <Input
             id="shoot-rate"
             inputMode="decimal"
@@ -84,19 +149,33 @@ export function ShootForm({ shoot, onClose, onSaved }: { shoot: Shoot | null; on
   );
 }
 
-type PickList = { title: string; clientName: string; selectionLimit: number; reviewerCount: number; picks: Array<[string, number]> };
+type PickList = {
+  title: string;
+  clientName: string;
+  selectionLimit: number;
+  reviewerCount: number;
+  picks: Array<[string, number]>;
+};
 
 export function FinalPicks({ shoot, onClose }: { shoot: Shoot; onClose(): void }) {
   const toast = useToast();
   const area = useRef<HTMLTextAreaElement | null>(null);
   const [format, setFormat] = useState<"lightroom" | "captureone" | "lines">("lightroom");
   const picks = useLoader<PickList>(`export:${shoot.id}`, (client) =>
-    loadPages(client, "exportFinalPicksList", { shootId: shoot.id }, (page: Paged<"picks", PickList["picks"][number]> & Omit<PickList, "picks">) => page.picks).then(
-      ({ items, first: { nextCursor: _cursor, ...first } }) => ({ ...first, picks: items }),
-    ),
+    loadPages(
+      client,
+      "exportFinalPicksList",
+      { shootId: shoot.id },
+      (page: Paged<"picks", PickList["picks"][number]> & Omit<PickList, "picks">) => page.picks,
+    ).then(({ items, first: { nextCursor: _cursor, ...first } }) => ({ ...first, picks: items })),
   );
   const names = picks.data?.picks.map(([title]) => title) ?? [];
-  const text = format === "lightroom" ? names.join(", ") : format === "captureone" ? names.join(" ") : names.join("\n");
+  const text =
+    format === "lightroom"
+      ? names.join(", ")
+      : format === "captureone"
+        ? names.join(" ")
+        : names.join("\n");
   const copy = () =>
     void copyText(text).then(
       () => toast(`Copied ${plural(names.length, "file name")}.`),
@@ -141,7 +220,8 @@ export function FinalPicks({ shoot, onClose }: { shoot: Shoot; onClose(): void }
       ) : names.length ? (
         <div className="st-picks">
           <p className="st-picks-summary">
-            {plural(names.length, "photo")} sent by {plural(picks.data.reviewerCount, "reviewer")} for {picks.data.clientName}.
+            {plural(names.length, "photo")} sent by {plural(picks.data.reviewerCount, "reviewer")}{" "}
+            for {picks.data.clientName}.
           </p>
           <div className="st-segment" role="radiogroup" aria-label="Format">
             {(
@@ -151,12 +231,26 @@ export function FinalPicks({ shoot, onClose }: { shoot: Shoot; onClose(): void }
                 ["lines", "One per line"],
               ] as const
             ).map(([id, label]) => (
-              <button key={id} type="button" role="radio" aria-checked={format === id} className={format === id ? "st-on" : undefined} onClick={() => setFormat(id)}>
+              <button
+                key={id}
+                type="button"
+                role="radio"
+                aria-checked={format === id}
+                className={format === id ? "st-on" : undefined}
+                onClick={() => setFormat(id)}
+              >
                 {label}
               </button>
             ))}
           </div>
-          <textarea ref={area} className="st-picks-text" readOnly rows={6} value={text} aria-label="Picked file names" />
+          <textarea
+            ref={area}
+            className="st-picks-text"
+            readOnly
+            rows={6}
+            value={text}
+            aria-label="Picked file names"
+          />
           <p className="st-picks-hint">
             {format === "lightroom"
               ? "Paste into a Library Filter text search set to Contains, then select all and add them to a collection."
@@ -166,17 +260,31 @@ export function FinalPicks({ shoot, onClose }: { shoot: Shoot; onClose(): void }
           </p>
         </div>
       ) : (
-        <p className="st-picks-summary">No favorites sent yet. They show up here once a client sends their favorites from the gallery.</p>
+        <p className="st-picks-summary">
+          No favorites sent yet. They show up here once a client sends their favorites from the
+          gallery.
+        </p>
       )}
     </Modal>
   );
 }
 
-export function DeleteDialog({ assets, onClose, onDelete }: { assets: readonly StudioAsset[]; onClose(): void; onDelete(): void }) {
+export function DeleteDialog({
+  assets,
+  onClose,
+  onDelete,
+}: {
+  assets: readonly StudioAsset[];
+  onClose(): void;
+  onDelete(): void;
+}) {
   const one = assets.length === 1 ? assets[0] : null;
   const picks = assets.reduce((sum, asset) => sum + asset.pickCount, 0);
   const notes = assets.reduce((sum, asset) => sum + asset.noteCount, 0);
-  const extras = [picks ? plural(picks, "client pick") : "", notes ? plural(notes, "note") : ""].filter(Boolean);
+  const extras = [
+    picks ? plural(picks, "client pick") : "",
+    notes ? plural(notes, "note") : "",
+  ].filter(Boolean);
   return (
     <Modal
       open
@@ -195,7 +303,8 @@ export function DeleteDialog({ assets, onClose, onDelete }: { assets: readonly S
     >
       <p className="st-dialog-text">
         {one ? "The photo" : `The ${assets.length} photos`}
-        {extras.length ? ` and ${one ? "its" : "their"} ${extras.join(" and ")}` : ""} will be removed from this shoot and the client gallery. You can't undo this.
+        {extras.length ? ` and ${one ? "its" : "their"} ${extras.join(" and ")}` : ""} will be
+        removed from this shoot and the client gallery. You can't undo this.
       </p>
     </Modal>
   );

@@ -10,8 +10,6 @@
     "**/out/**",
     // The Rust crates own their scripts, generators, and fixtures. Some are pinned by hash.
     "crates/**",
-    // An example app's source is hashed into its pinned revision, so its text stays as published.
-    "examples/**",
     // scripts/capabilities/generation.main.json pins this generator's SHA-256.
     "scripts/capabilities/generate-main-inventories.ts"
   ]

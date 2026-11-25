@@ -27,7 +27,12 @@ export function Notices({ notice, toast, measure }: NoticesProps) {
             {notice.detail ? <span>{notice.detail}</span> : null}
           </div>
           {notice.retry ? (
-            <Button id={notice.retryId} size="sm" loading={notice.pending ?? false} onClick={notice.retry}>
+            <Button
+              id={notice.retryId}
+              size="sm"
+              loading={notice.pending ?? false}
+              onClick={notice.retry}
+            >
               Try again
             </Button>
           ) : null}
@@ -62,7 +67,17 @@ export interface InviteDialogProps {
   readonly onClose: () => void;
 }
 
-export function InviteDialog({ open, joinCode, codeCopied, seatName, seatKey, seatKeyFeedback, onCopyJoinCode, onCopySeatKey, onClose }: InviteDialogProps) {
+export function InviteDialog({
+  open,
+  joinCode,
+  codeCopied,
+  seatName,
+  seatKey,
+  seatKeyFeedback,
+  onCopyJoinCode,
+  onCopySeatKey,
+  onClose,
+}: InviteDialogProps) {
   return (
     <Modal open={open} title={joinCode ? "Invite player 2" : "Seat key"} onClose={onClose}>
       <div className="hc-invite">
@@ -70,7 +85,14 @@ export function InviteDialog({ open, joinCode, codeCopied, seatName, seatKey, se
           <div className="hc-invite-block">
             <span className="hc-section-label">Join code</span>
             <div className="hc-copy-row">
-              <input id="join-code-value" className="hc-code-field" value={joinCode} readOnly aria-label="Join code" onFocus={selectOnFocus} />
+              <input
+                id="join-code-value"
+                className="hc-code-field"
+                value={joinCode}
+                readOnly
+                aria-label="Join code"
+                onFocus={selectOnFocus}
+              />
               <Button id="copy-join-code-btn" onClick={() => onCopyJoinCode(joinCode)}>
                 <Copy size={14} aria-hidden="true" />
                 {codeCopied ? "Copied" : "Copy"}
@@ -81,16 +103,28 @@ export function InviteDialog({ open, joinCode, codeCopied, seatName, seatKey, se
         <div className="hc-invite-block">
           <span className="hc-section-label">Your seat key{seatName ? `, ${seatName}` : ""}</span>
           <div className="hc-copy-row">
-            <input id="seat-key-value" className="kit-input hc-mono" value={seatKey ?? ""} readOnly aria-label="Seat key" onFocus={selectOnFocus} />
+            <input
+              id="seat-key-value"
+              className="kit-input hc-mono"
+              value={seatKey ?? ""}
+              readOnly
+              aria-label="Seat key"
+              onFocus={selectOnFocus}
+            />
             {seatKey ? (
-              <Button id="copy-seat-key-btn" variant="primary" onClick={() => onCopySeatKey(seatKey)}>
+              <Button
+                id="copy-seat-key-btn"
+                variant="primary"
+                onClick={() => onCopySeatKey(seatKey)}
+              >
                 <Copy size={14} aria-hidden="true" />
                 Copy
               </Button>
             ) : null}
           </div>
           <p className="hc-invite-note" id="seat-key-feedback" role="status">
-            {seatKeyFeedback ?? "Anyone with this key can play your seat. Use it to come back after closing the app."}
+            {seatKeyFeedback ??
+              "Anyone with this key can play your seat. Use it to come back after closing the app."}
           </p>
         </div>
       </div>
@@ -109,7 +143,16 @@ export interface ResignDialogProps {
   readonly onClose: () => void;
 }
 
-export function ResignDialog({ open, playerName, opponentName, pending, uncertain, error, onResign, onClose }: ResignDialogProps) {
+export function ResignDialog({
+  open,
+  playerName,
+  opponentName,
+  pending,
+  uncertain,
+  error,
+  onResign,
+  onClose,
+}: ResignDialogProps) {
   const problem = uncertain ? "dohc could not confirm the resignation. Try again to check." : error;
   return (
     <Modal

@@ -194,7 +194,7 @@ export function useCopy<Choice = void>(options: {
   sensitive?: CopySecret | undefined;
   failure?: string | undefined;
 }): {
-  copy: (choice: Choice) => void;
+  copy: (choice: Choice) => Promise<void>;
   feedback: CopyFeedback | null;
   announcement: string;
   words: Record<CopyFeedback, string>;
@@ -244,7 +244,7 @@ export function useCopy<Choice = void>(options: {
     };
   }, []);
   return {
-    copy: (choice) => void action.current?.copy(choice),
+    copy: (choice) => action.current?.copy(choice) ?? Promise.resolve(),
     feedback,
     announcement,
     words,

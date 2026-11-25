@@ -211,6 +211,38 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
       expect(await desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).toBe(address);
     });
 
+    const grantId = (
+      await dialog
+        .locator('[data-testid^="share-link-options-"]')
+        .first()
+        .getAttribute("data-testid")
+    )?.slice("share-link-options-".length);
+    expect(grantId).toBeTruthy();
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const options = dialog.getByRole("button", { name: "Link options" });
+    await options.focus();
+    await page.keyboard.press("Enter");
+    const idCopy = dialog.getByTestId("share-link-id-copy");
+    await expect(idCopy).toHaveText("Copy link ID");
+    for (let step = 0; step < 8; step++) {
+      if (await idCopy.evaluate((item) => item === document.activeElement)) break;
+      await page.keyboard.press("ArrowDown");
+    }
+    await expect(idCopy).toBeFocused();
+    await shoot(
+      page,
+      dialog,
+      "share-link-d-copy-link-id",
+      dialog.getByRole("menu", { name: "Link options" }),
+    );
+    await holdSystemClipboard(test.info(), async (remainingMs) => {
+      await idCopy.press("Enter", { timeout: remainingMs() });
+      await expect(dialog).toContainText("Copied link ID", { timeout: remainingMs() });
+      expect(await desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).toBe(grantId);
+    });
+    await expect(options).toBeFocused();
+    await page.emulateMedia({ reducedMotion: null });
+
     const named = await signInLinkAgent({
       handle: shared.handle,
       browser: shared.browser,
