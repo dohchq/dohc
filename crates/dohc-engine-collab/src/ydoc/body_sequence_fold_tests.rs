@@ -647,3 +647,110 @@ fn merging_two_quotes_keeps_the_ids_of_a_list_in_the_second() {
         assert_eq!(path_of(&ours, last)[1..], ids);
     });
 }
+
+fn folded_while(
+    base: &str,
+    file: &str,
+    edit: impl FnOnce(&mut yrs::TransactionMut, &yrs::TextRef, &MapRef),
+) -> [String; 2] {
+    let (ours, theirs) = peers(&seeded(2, base));
+    fold(&ours, file);
+    edited(&theirs, edit);
+    merged(&ours, &theirs)
+}
+
+#[test]
+fn a_line_added_or_deleted_takes_no_letters_from_the_line_above() {
+    fn without_the_period(txn: &mut yrs::TransactionMut, sequence: &yrs::TextRef, _: &MapRef) {
+        sequence.remove_range(txn, 4, 1);
+    }
+    fn shouted(txn: &mut yrs::TransactionMut, sequence: &yrs::TextRef, _: &MapRef) {
+        sequence.insert(txn, 5, "!");
+    }
+    reading_body_sequence_here(|| {
+        let (three, two) = ("One.\n\nTwo.\n\nSix.\n", "One.\n\nSix.\n");
+        let after = "One\n\nTwo.\n\nSix.\n";
+        assert_eq!(folded_while(two, three, without_the_period), [after, after]);
+        let after = "One\n\nSix.\n";
+        assert_eq!(folded_while(three, two, without_the_period), [after, after]);
+        let after = "One.!\n\nSix.\n";
+        assert_eq!(folded_while(three, two, shouted), [after, after]);
+        let after = "First.!\n\nThird.\n";
+        let kept = folded_while(
+            "First.\n\nSecond.\n\nThird.\n",
+            "First.\n\nThird.\n",
+            |txn, sequence, _| sequence.insert(txn, 7, "!"),
+        );
+        assert_eq!(kept, [after, after]);
+
+        let (ours, theirs) = peers(&seeded(2, "# Title\n\nTitle\n"));
+        fold(&ours, "# Title\n");
+        let title = boundaries(&theirs).swap_remove(0);
+        edited(&theirs, move |txn, _, _| {
+            title.insert_attribute(txn, "level", Any::Number(2.0));
+        });
+        assert_eq!(merged(&ours, &theirs), ["## Title\n", "## Title\n"]);
+    });
+}
+
+#[test]
+fn an_outside_save_clears_the_marks_inline_code_hid() {
+    reading_body_sequence_here(|| {
+        let (bolded, coded) = peers(&seeded(2, "a\n"));
+        edited(&bolded, |txn, sequence, _| {
+            sequence.format(txn, 1, 1, marked("bold", bold()))
+        });
+        edited(&coded, |txn, sequence, _| {
+            sequence.format(txn, 1, 1, marked("code", bold()))
+        });
+        assert_eq!(merged(&bolded, &coded), ["`a`\n", "`a`\n"]);
+        fold(&bolded, "a\n");
+        assert_eq!(markdown_of(&bolded), "a\n");
+    });
+}
+
+#[test]
+fn a_formatting_only_save_gives_the_bare_line_it_restyles_a_boundary() {
+    reading_body_sequence_here(|| {
+        let (joined, cut) = peers(&seeded(2, "x\n\nab\n"));
+        edited(&joined, |txn, sequence, _| sequence.remove_range(txn, 2, 1));
+        edited(&cut, |txn, sequence, _| sequence.remove_range(txn, 0, 2));
+        assert_eq!(merged(&joined, &cut), ["ab\n", "ab\n"]);
+        assert!(boundaries(&joined).is_empty());
+        fold(&joined, "**ab**\n");
+        assert_eq!(markdown_of(&joined), "**ab**\n");
+        assert_eq!(boundaries(&joined).len(), 1);
+    });
+}
+
+fn format_items(doc: &Ydoc) -> usize {
+    let sequence = doc.doc.get_or_insert_text(ROOT_SEQUENCE);
+    let mut found = 0;
+    let _ = sequence.try_visit_items(&doc.doc.transact(), |item| {
+        found += usize::from(matches!(item, yrs::types::text::TextItem::Format(..)));
+        Ok::<_, ()>(())
+    });
+    found
+}
+
+#[test]
+fn an_element_before_bold_letters_writes_no_formatting_a_peer_must_undo() {
+    reading_body_sequence_here(|| {
+        let file = "c![a](b.png)**b**\n";
+        for base in ["ca**b**\n", "cab\n"] {
+            let (ours, theirs) = peers(&seeded(2, base));
+            fold(&ours, file);
+            assert_eq!(
+                format_items(&ours),
+                format_items(&seeded(2, file)),
+                "{base}"
+            );
+            edited(&theirs, |txn, sequence, _| {
+                sequence.format(txn, 1, 3, marked("bold", bold()))
+            });
+            let [mine, theirs] = merged(&ours, &theirs);
+            assert_eq!(mine, theirs);
+            assert!(mine.ends_with("b**\n"), "{base}: {mine}");
+        }
+    });
+}
