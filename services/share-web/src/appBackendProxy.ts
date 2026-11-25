@@ -215,7 +215,9 @@ export async function forwardAppBackend(input: {
         await readBoundedJson(relay, APP_BACKEND_REFUSAL_BYTES, input.signal),
       );
       input.signal.throwIfAborted();
-      return Response.json(refusal, { status: 409, headers: responseHeaders });
+      return Response.json(refusal, {
+        headers: { ...responseHeaders, "x-dohc-app-refusal": "1" },
+      });
     }
     if (relay.status !== 200 || relay.redirected || relay.headers.has("location"))
       return input.capability || relay.status === 410

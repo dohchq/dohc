@@ -759,7 +759,9 @@ export async function createLocalAppLaunchHost(options: {
                 try {
                   activeSignal.throwIfAborted();
                   current();
-                  return reply(response, 409, parseAppBackendRefusal(error.refusal));
+                  return reply(response, 200, parseAppBackendRefusal(error.refusal), {
+                    "x-dohc-app-refusal": "1",
+                  });
                 } catch {}
               }
               if (error instanceof AppBackendLimitError)

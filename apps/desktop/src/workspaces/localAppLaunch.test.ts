@@ -692,11 +692,13 @@ it("returns only validated app refusals after rechecking current authority", asy
     new AppBackendRuntimeError({ code: "full", message: "This session is full." }),
   );
   const response = await f.post("/backend", invoke, headers);
-  expect(response.status).toBe(409);
+  expect(response.status).toBe(200);
+  expect(response.headers.get("x-dohc-app-refusal")).toBe("1");
   expect(await response.json()).toEqual({ code: "full", message: "This session is full." });
   f.backend.request.mockRejectedValue(new Error("private implementation failure"));
   const internal = await f.post("/backend", invoke, headers);
   expect(internal.status).toBe(404);
+  expect(internal.headers.get("x-dohc-app-refusal")).toBeNull();
   expect(await internal.text()).toBe("");
   f.backend.request.mockImplementation(async () => {
     f.narrow();

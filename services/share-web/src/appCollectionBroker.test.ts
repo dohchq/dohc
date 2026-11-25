@@ -417,7 +417,11 @@ it("returns safe app refusal text and hides invalid backend errors", async () =>
     { code: "full", message: "private", stack: "secret" },
     { code: "full", message: "x".repeat(8193) },
   ];
-  const f = harness(async () => Response.json(values.shift(), { status: 409 }));
+  const f = harness(async () =>
+    values.length === 0
+      ? Response.json({ code: "full", message: "Untrusted" }, { status: 409 })
+      : Response.json(values.shift(), { headers: { "x-dohc-app-refusal": "1" } }),
+  );
   try {
     const request = {
       op: "backend.invoke",
@@ -433,6 +437,11 @@ it("returns safe app refusal text and hides invalid backend errors", async () =>
     });
     for (const id of ["private", "large"])
       expect(await f.request({ ...request, id })).toEqual({ id, ok: false, status: 503 });
+    expect(await f.request({ ...request, id: "bare" })).toEqual({
+      id: "bare",
+      ok: false,
+      status: 409,
+    });
   } finally {
     f.close();
   }
@@ -452,8 +461,8 @@ it("observes handshake, pre-forward rejections, and post-validation outcomes wit
   const events: unknown[] = [];
   const replies = [
     () => Response.json({ result: { ok: 1 }, revision: 1, replayed: false }),
-    () => Response.json({ code: "workshop_full", message: "Full" }, { status: 409 }),
-    () => Response.json({ code: "bad", message: "bad", extra: true }, { status: 409 }),
+    () => Response.json({ code: "workshop_full", message: "Full" }, { headers: { "x-dohc-app-refusal": "1" } }),
+    () => Response.json({ code: "bad", message: "bad", extra: true }, { headers: { "x-dohc-app-refusal": "1" } }),
   ];
   const lifetime = new AbortController();
   attachAppCollectionBroker(

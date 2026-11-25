@@ -427,8 +427,13 @@ it("bounds relay bodies and refuses a response after launch cancellation", async
 it("passes only bounded typed app refusals while discarding private or malformed error details", async () => {
   const refusal = { code: "capacity_full", message: "This session is full." };
   const response = await forward(invoke, async () => Response.json(refusal, { status: 409 }));
-  expect(response.status).toBe(409);
+  expect(response.status).toBe(200);
+  expect(response.headers.get("x-dohc-app-refusal")).toBe("1");
   expect(await response.json()).toEqual(refusal);
+  const forged = await forward(invoke, async () =>
+    Response.json(refusal, { headers: { "x-dohc-app-refusal": "1" } }),
+  );
+  expect(forged.headers.get("x-dohc-app-refusal")).toBeNull();
   for (const invalid of [
     { ...refusal, stack: "private" },
     { code: "private\n", message: "bad" },
