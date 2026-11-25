@@ -131,7 +131,7 @@ export async function startAutomationReplicas(options: {
   engineExecutable: string;
   /** The relay's public HTTPS origin, which the engine reaches it at. */
   relayOrigin: string;
-  /** Passes wait for this, so no copy calls the relay before its public origin serves it. */
+  /** Work on a workspace waits for this, so no copy calls the relay before its public origin serves it. */
   relayAnswers?: PromiseLike<void>;
   key: Uint8Array;
   namespace: string;
@@ -728,6 +728,7 @@ export async function startAutomationReplicas(options: {
    */
   async function each(workspaceId: string, work: () => Promise<void>): Promise<boolean> {
     signal.throwIfAborted();
+    await options.relayAnswers;
     try {
       await work();
       if (syncRetries.has(workspaceId)) return canSync(workspaceId);
@@ -1092,7 +1093,6 @@ export async function startAutomationReplicas(options: {
   // A pass, then its look for the nearest deadline. Either failing fails the
   // pass; when both do, the pass's own failure is the one reported.
   async function passOnce(): Promise<boolean> {
-    await options.relayAnswers;
     deadline = undefined;
     let ok: boolean;
     try {

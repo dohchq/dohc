@@ -855,19 +855,27 @@ describe("the automation replicas", () => {
   it("sends the engine nothing before the relay answers at its public origin", async () => {
     const { storage } = await relay();
     const engine = fakeEngine();
-    let callsBeforeAnswer: number | undefined;
+    let sentBeforeAnswer: string[] | undefined;
     const running = await start(storage, {
       wanted: () => [WORKSPACE],
       relayAnswers: {
         then(answered, refused) {
-          callsBeforeAnswer ??= engine.sent.length;
+          sentBeforeAnswer ??= engine.sent.map((request) => request.method);
           return Promise.resolve().then(answered, refused);
         },
       },
     });
     await running.settled();
-    expect(callsBeforeAnswer).toBe(0);
+    expect(sentBeforeAnswer).toEqual([]);
     expect(running.replica(WORKSPACE)).toBeDefined();
+  });
+
+  it("is available with no workspace to copy while the relay's public origin doesn't answer", async () => {
+    const { storage } = await relay();
+    fakeEngine();
+    const running = await start(storage, { relayAnswers: new Promise(() => {}) });
+    await running.settled();
+    expect(running.unavailable).toBe(false);
   });
 
   it("opens a replica for each wanted workspace, joins its identity, and pulls when its log moves", async () => {
