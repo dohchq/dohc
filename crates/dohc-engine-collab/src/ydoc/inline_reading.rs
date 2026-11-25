@@ -53,7 +53,7 @@ pub(super) fn read_inline(text: &str, paragraph: bool) -> Option<Vec<InlinePiece
             },
         })
         .collect();
-    let written = render_inline(&read, false, paragraph, false).ok()?;
+    let written = render_inline(&read, false, paragraph, false, false).ok()?;
     (written == text).then_some(pieces)
 }
 

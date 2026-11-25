@@ -375,6 +375,7 @@ dependencies = [
  "dohc-heap-profiler",
  "dohc-test-scratch",
  "memchr",
+ "regex-syntax",
  "rusqlite",
  "ryu-js",
  "serde",

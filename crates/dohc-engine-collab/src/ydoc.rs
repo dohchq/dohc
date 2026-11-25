@@ -51,6 +51,8 @@ mod body_sequence;
 mod body_sequence_writer;
 mod bounded_encoder;
 mod frontmatter_yaml;
+mod held_characters;
+mod inline_marks;
 mod inline_reading;
 #[cfg(test)]
 mod nested_markdown_contract_tests;
@@ -6214,12 +6216,14 @@ fn end_with_line_break(out: &mut ProjectionBuffer, line_break: &str) -> Result<(
 
 struct ProjectionBuffer {
     value: String,
+    markers: usize,
 }
 
 impl ProjectionBuffer {
     fn new() -> Self {
         Self {
             value: String::new(),
+            markers: 0,
         }
     }
 
@@ -6229,17 +6233,28 @@ impl ProjectionBuffer {
         }
         Ok(Self {
             value: String::with_capacity(capacity),
+            markers: 0,
         })
     }
 
+    fn written(&self) -> usize {
+        self.value.len() - self.markers
+    }
+
     fn push_str(&mut self, value: &str) -> Result<(), CollabError> {
-        checked_projection_len(self.value.len(), value.len())?;
+        let written = held_characters::written_len(value);
+        checked_projection_len(self.written(), written)?;
         self.value.push_str(value);
+        self.markers += value.len() - written;
         Ok(())
     }
 
     fn push(&mut self, value: char) -> Result<(), CollabError> {
-        checked_projection_len(self.value.len(), value.len_utf8())?;
+        if held_characters::is_marker(value) {
+            self.markers += value.len_utf8();
+        } else {
+            checked_projection_len(self.written(), value.len_utf8())?;
+        }
         self.value.push(value);
         Ok(())
     }
@@ -6249,7 +6264,7 @@ impl ProjectionBuffer {
             .len_utf8()
             .checked_mul(count)
             .ok_or_else(|| projection_too_large(usize::MAX))?;
-        checked_projection_len(self.value.len(), bytes)?;
+        checked_projection_len(self.written(), bytes)?;
         self.value.extend(std::iter::repeat_n(value, count));
         Ok(())
     }
@@ -6488,20 +6503,6 @@ impl MarkKind {
             Self::Underline => 6,
         }
     }
-
-    fn html_tags(self) -> Option<(&'static str, &'static str)> {
-        match self {
-            Self::Bold => Some(("<strong>", "</strong>")),
-            Self::Italic => Some(("<em>", "</em>")),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OpeningMode {
-    Markdown,
-    Html,
 }
 
 struct RenderContext<'a> {
@@ -6765,14 +6766,15 @@ fn escape_markdown_block_syntax(
                 if definition && index == 0 && body.starts_with('[') {
                     output.push_str("&#91;")?;
                     output.push_str(&body[1..])?;
-                } else if escape_next {
-                    output.push('\\')?;
-                    output.push_str(&body[index..index + 1])?;
-                    output.push('\\')?;
-                    output.push_str(&body[index + 1..])?;
                 } else {
-                    output.push('\\')?;
-                    output.push_str(&body[index..])?;
+                    let escaped = if escape_next { 2 } else { 1 };
+                    for punctuation in body[index..index + escaped].chars() {
+                        output.push(held_characters::OPAQUE_OPEN)?;
+                        output.push('\\')?;
+                        output.push(punctuation)?;
+                        output.push(held_characters::OPAQUE_CLOSE)?;
+                    }
+                    output.push_str(&body[index + escaped..])?;
                 }
             } else {
                 output.push_str(body)?;
@@ -7689,7 +7691,7 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionRes
     let table_cell = context.table_cell;
     match node {
         MarkdownNode::Text(_) => {
-            render_inline(std::slice::from_ref(node), false, false, table_cell)
+            render_inline(std::slice::from_ref(node), false, false, table_cell, false)
         }
         MarkdownNode::Fragment(children) => render_nodes(
             children,
@@ -7712,24 +7714,13 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionRes
                         Ok(String::new())
                     }
                 } else {
-                    let rendered = render_inline(children, false, true, table_cell)?;
-                    // The TypeScript writer escapes a leading space of text,
-                    // not a hard break's two spaces.
-                    // A sealed piece is written exactly, as the TypeScript writer does.
-                    if matches!(context.parent_tag, "doc" | "listItem" | "taskItem")
-                        && rendered.starts_with(' ')
-                        && !matches!(
-                            children.first(),
-                            Some(MarkdownNode::Element { tag, .. }) if tag == "hardBreak" || tag == "rawInline"
-                        )
-                    {
-                        let mut output = ProjectionBuffer::new();
-                        output.push_str("&#32;")?;
-                        output.push_str(&rendered[1..])?;
-                        Ok(output.into_string())
-                    } else {
-                        Ok(rendered)
-                    }
+                    render_inline(
+                        children,
+                        false,
+                        true,
+                        table_cell,
+                        matches!(context.parent_tag, "doc" | "listItem" | "taskItem"),
+                    )
                 }
             }
             "heading" => {
@@ -7742,7 +7733,7 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionRes
                     // out-of-range positive levels and can itself fail; level
                     // six is the closest safe schema-valid projection.
                     let level = attr_i64(attrs, "level").unwrap_or(1).clamp(1, 6) as usize;
-                    let inline = render_inline(children, false, false, table_cell)?;
+                    let inline = render_inline(children, false, false, table_cell, false)?;
                     let mut output = ProjectionBuffer::with_capacity(level + 1 + inline.len())?;
                     output.push_repeat('#', level)?;
                     output.push(' ')?;
@@ -7793,7 +7784,7 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionRes
                 render_nodes(children, tag, attrs, "", table_cell)
             }
             _ if context.parent_tag == "paragraph" => {
-                render_inline(children, false, true, table_cell)
+                render_inline(children, false, true, table_cell, false)
             }
             _ => render_nodes(children, tag, attrs, "", table_cell),
         },
@@ -8626,6 +8617,7 @@ fn render_inline(
     code_context: bool,
     escape_block_syntax: bool,
     table_cell: bool,
+    leading_space: bool,
 ) -> ProjectionResult<String> {
     enum SourceInlinePart<'a> {
         Text(&'a TextRun),
@@ -8707,6 +8699,7 @@ fn render_inline(
     // holds them, so no later pass writes them differently. A highlight
     // writes a held `=` as the `\=` it reads.
     fn hold_as_written(link: &str, highlighted: bool, text: &mut String, held: &mut Vec<Held>) {
+        text.push(held_characters::OPAQUE_OPEN);
         let mut starts_line = false;
         for character in link.chars() {
             if matches!(character, '&' | '<' | '>' | '\u{a0}' | HELD)
@@ -8723,6 +8716,7 @@ fn render_inline(
             }
             starts_line = character == '\n';
         }
+        text.push(held_characters::OPAQUE_CLOSE);
     }
 
     // Splits each text part at its replaced bytes, which become literal
@@ -8849,9 +8843,7 @@ fn render_inline(
     // its `<` and `>` bound no span. Outside the span the projector writes its
     // `&`, `<`, `>`, and NBSP as they are, and each line its title starts,
     // which no block opener or indent escape then reads. They stay in their
-    // run; see [`hold_as_written`]. A part's links, with the text between two
-    // of them that holds no newline, `&`, `<`, `>`, or NBSP, are held as one.
-    // Inside the span a link's `[` is a reference, so it reads back as the
+    // run; see [`hold_as_written`]. Inside the span a link's `[` is a reference, so it reads back as the
     // span's other text does.
     //
     // A definition the importer keeps whole holds no link of its own. Outside
@@ -8935,55 +8927,14 @@ fn render_inline(
         };
         let in_span =
             |from: usize, to: usize| span.is_some_and(|(start, end)| from < end && start < to);
-        // The TypeScript writer keeps these as they are inside an empty link,
-        // where the reader keeps them, but writes them differently outside it.
-        let written_differently = |bytes: &[u8]| {
-            bytes
-                .iter()
-                .any(|byte| matches!(byte, b'\n' | b'&' | b'<' | b'>'))
-                || bytes.windows(2).any(|pair| pair == "\u{a0}".as_bytes())
-        };
-        let mut stretches = Vec::new();
+        let mut kept_links = Vec::new();
         let mut offset = 0usize;
         for (part_index, (text, ranges)) in texts.iter().zip(&empty_links).enumerate() {
-            let link = text.as_bytes();
-            let mut write = |(from, to): (usize, usize)| {
-                if written_differently(&link[from..to]) {
-                    stretches.push((part_index, from, to));
-                }
-            };
-            // The links written as references are sorted, so a join finds the
-            // first one after its end.
-            let links = &text_links[part_index];
-            let references_between = |end: usize, from: usize| {
-                links
-                    .get(links.partition_point(|&(at, _)| at < end))
-                    .is_some_and(|&(at, _)| at < from)
-            };
-            let mut stretch: Option<(usize, usize)> = None;
             for &(from, to) in ranges {
                 // A link inside the span reads back as the span does.
-                if in_span(offset + from, offset + to) {
-                    continue;
+                if !in_span(offset + from, offset + to) {
+                    kept_links.push((part_index, from, to));
                 }
-                // A link written as references between two is a part of its own.
-                stretch = match stretch {
-                    Some((start, end))
-                        if !in_span(offset + end, offset + from)
-                            && !written_differently(&link[end..from])
-                            && !references_between(end, from) =>
-                    {
-                        Some((start, to))
-                    }
-                    Some(done) => {
-                        write(done);
-                        Some((from, to))
-                    }
-                    None => Some((from, to)),
-                };
-            }
-            if let Some(done) = stretch {
-                write(done);
             }
             offset += text.len();
         }
@@ -9047,7 +8998,7 @@ fn render_inline(
             }
         }
         let mut replacements = InlineReplacements::new();
-        for (part_index, from, to) in stretches {
+        for (part_index, from, to) in kept_links {
             replacements.entry(part_index).or_default().insert(
                 from,
                 InlineReplacement {
@@ -9072,12 +9023,17 @@ fn render_inline(
                     if at > start {
                         #[cfg(test)]
                         LITERAL_LINKS_WRITTEN.with(|count| count.set(count.get() + 1));
+                        let mut written = written_as_references(text, start, at, highlighted)?;
+                        if start == from {
+                            written.insert(0, held_characters::OPAQUE_OPEN);
+                        }
+                        if at == to {
+                            written.push(held_characters::OPAQUE_CLOSE);
+                        }
                         replacements.entry(part_index).or_default().insert(
                             start,
                             InlineReplacement {
-                                text: ReplacementText::Part(
-                                    written_as_references(text, start, at, highlighted)?.into(),
-                                ),
+                                text: ReplacementText::Part(written.into()),
                                 preserve_marks: true,
                                 width: at - start,
                             },
@@ -9165,6 +9121,10 @@ fn render_inline(
 
     let mut source_parts = Vec::new();
     flatten(nodes, &mut source_parts);
+    let formatted_beyond_code = source_parts.iter().any(|part| {
+        matches!(part, SourceInlinePart::Text(run)
+            if run.marks.iter().any(|mark| mark.kind != MarkKind::Code))
+    });
     let definition = escape_block_syntax
         && matches!(
             source_parts.first(),
@@ -9193,8 +9153,10 @@ fn render_inline(
             continue;
         };
         let Some(code_mark) = active_mark(&run.marks, MarkKind::Code) else {
+            let mut run = run.clone();
+            run.text = held_characters::escape_markers(std::mem::take(&mut run.text));
             parts.push(InlinePart::Text {
-                run: run.clone(),
+                run,
                 literal_markdown: false,
             });
             source_index += 1;
@@ -9217,7 +9179,12 @@ fn render_inline(
             end += 1;
         }
         let mut prepared = run.clone();
-        prepared.text = render_inline_code(&value.into_string())?;
+        prepared.text = ensure_projection_string(format!(
+            "{}{}{}",
+            held_characters::OPAQUE_OPEN,
+            held_characters::escape_markers(render_inline_code(&value.into_string())?),
+            held_characters::OPAQUE_CLOSE
+        ))?;
         prepared.marks.retain(|mark| mark.kind != MarkKind::Code);
         parts.push(InlinePart::Text {
             run: prepared,
@@ -9446,7 +9413,11 @@ fn render_inline(
             else {
                 unreachable!();
             };
-            run.text = escaped;
+            run.text = if formatted_beyond_code {
+                held_characters::hold_typed(&escaped)
+            } else {
+                escaped
+            };
             *literal_markdown = true;
             for part in &mut parts[run_start + 1..part_index] {
                 let InlinePart::Text { run, .. } = part else {
@@ -9458,21 +9429,26 @@ fn render_inline(
             continue;
         }
 
+        // A hard break's two spaces on a line with nothing else read back as a
+        // blank line, which ends the paragraph. A backslash keeps the break,
+        // but a backslash before a blank line ends the paragraph and is
+        // literal. A table cell writes it as <br>.
+        if matches!(&parts[part_index], InlinePart::Node(MarkdownNode::Element { tag, .. }) if tag == "hardBreak")
+            && starts_line
+            && !table_cell
+            && *line_after_breaks.get_or_insert_with(|| shows_line_after(&parts, part_index))
+        {
+            parts[part_index] = InlinePart::Text {
+                run: TextRun {
+                    text: "\\\n".to_string(),
+                    marks: Vec::new(),
+                },
+                literal_markdown: true,
+            };
+            part_index += 1;
+            continue;
+        }
         starts_line = match &parts[part_index] {
-            // A hard break's two spaces on a line with nothing else read back
-            // as a blank line, which ends the paragraph. A backslash keeps the
-            // break, but a backslash before a blank line ends the paragraph
-            // and is literal. A table cell writes it as <br>.
-            InlinePart::Node(MarkdownNode::Element { tag, .. })
-                if tag == "hardBreak"
-                    && starts_line
-                    && !table_cell
-                    && *line_after_breaks
-                        .get_or_insert_with(|| shows_line_after(&parts, part_index)) =>
-            {
-                rendered_nodes.insert(part_index, "\\\n".to_string());
-                true
-            }
             InlinePart::Node(node) => {
                 let rendered = render_node(
                     node,
@@ -9493,16 +9469,38 @@ fn render_inline(
         part_index += 1;
     }
 
-    // Markdown reads no delimiter beside only whitespace as a mark, so a mark
-    // that opens or closes inside whitespace reads back as literal asterisks.
-    // A run of only whitespace keeps a mark that continues through it to text
-    // on both sides, or that opens right before a character, where the
-    // whitespace is written before the delimiter. It keeps one that closes
-    // right after a character, where the whitespace is written after it,
-    // unless the run also opens a mark: closing and opening in one run writes
-    // them inside the whitespace. It drops the others. Each kept mark is
-    // written where the old writer wrote it, whose nesting the reader depends
-    // on. The TypeScript writer does the same.
+    if leading_space {
+        if let Some(InlinePart::Text {
+            run,
+            literal_markdown,
+        }) = parts.first_mut()
+        {
+            if let Some(rest) = run.text.strip_prefix(' ') {
+                let rest = InlinePart::Text {
+                    run: TextRun {
+                        text: rest.to_owned(),
+                        marks: std::mem::take(&mut run.marks),
+                    },
+                    literal_markdown: *literal_markdown,
+                };
+                run.text = "&#32;".to_owned();
+                *literal_markdown = true;
+                if !matches!(&rest, InlinePart::Text { run, .. } if run.text.is_empty()) {
+                    parts.insert(1, rest);
+                    rendered_nodes = rendered_nodes
+                        .into_iter()
+                        .map(|(index, rendered)| (index + 1, rendered))
+                        .collect();
+                }
+            }
+        }
+    }
+
+    // Markdown reads no delimiter beside only whitespace as a mark, and the
+    // reader gives whitespace at a mark's edge no mark. A run of only
+    // whitespace keeps only a mark that continues through it to text on both
+    // sides, so the writer writes the same delimiters for what it reads back.
+    // The TypeScript writer does the same.
     let mut blank = Vec::with_capacity(parts.len());
     for part in &parts {
         blank.push(match part {
@@ -9511,9 +9509,15 @@ fn render_inline(
                 literal_markdown,
             } => {
                 run.text.chars().all(is_js_whitespace)
-                    && written_run_text(run, *literal_markdown, code_context, escape_block_syntax)?
-                        .chars()
-                        .all(is_js_whitespace)
+                    && written_run_text(
+                        run,
+                        *literal_markdown,
+                        code_context,
+                        escape_block_syntax,
+                        formatted_beyond_code,
+                    )?
+                    .chars()
+                    .all(is_js_whitespace)
             }
             InlinePart::Node(_) => false,
         });
@@ -9521,30 +9525,6 @@ fn render_inline(
     if blank.contains(&true) {
         let from_before = marks_reaching_text(&parts, &blank, 0..parts.len());
         let from_after = marks_reaching_text(&parts, &blank, (0..parts.len()).rev());
-        // Whether a run beside a blank one starts and ends with text.
-        let mut starts_solid = vec![false; parts.len()];
-        let mut ends_solid = vec![false; parts.len()];
-        for (index, part) in parts.iter().enumerate() {
-            let beside_blank =
-                (index > 0 && blank[index - 1]) || blank.get(index + 1).copied().unwrap_or(false);
-            if let (
-                false,
-                true,
-                InlinePart::Text {
-                    run,
-                    literal_markdown,
-                },
-            ) = (blank[index], beside_blank, part)
-            {
-                let written =
-                    written_run_text(run, *literal_markdown, code_context, escape_block_syntax)?;
-                starts_solid[index] = written.chars().next().is_some_and(|c| !is_js_whitespace(c));
-                ends_solid[index] = written
-                    .chars()
-                    .next_back()
-                    .is_some_and(|c| !is_js_whitespace(c));
-            }
-        }
         for (index, part) in parts.iter_mut().enumerate() {
             let InlinePart::Text { run, .. } = part else {
                 continue;
@@ -9552,22 +9532,11 @@ fn render_inline(
             if !blank[index] {
                 continue;
             }
-            let after_text = index > 0 && ends_solid[index - 1];
-            let before_text = starts_solid.get(index + 1).copied().unwrap_or(false);
             let back = |mark: &MarkdownMark| contains_same_mark(&from_before[index], mark);
             let ahead = |mark: &MarkdownMark| contains_same_mark(&from_after[index], mark);
             // Code marks are written before this, as code spans.
-            let delimits = |mark: &MarkdownMark| mark.kind != MarkKind::Link;
-            let opens = run
-                .marks
-                .iter()
-                .any(|mark| delimits(mark) && before_text && ahead(mark) && !back(mark));
-            run.marks.retain(|mark| {
-                !delimits(mark)
-                    || (back(mark) && ahead(mark))
-                    || (ahead(mark) && before_text)
-                    || (back(mark) && after_text && !opens)
-            });
+            run.marks
+                .retain(|mark| mark.kind == MarkKind::Link || (back(mark) && ahead(mark)));
         }
     }
 
@@ -9604,35 +9573,15 @@ fn render_inline(
         reached
     }
 
-    let mut output = ProjectionBuffer::new();
-    let mut active: Vec<MarkdownMark> = Vec::new();
-    let mut modes: BTreeMap<MarkKind, OpeningMode> = BTreeMap::new();
-    let mut reopen_html = BTreeSet::new();
-    let mut held_characters = held.iter().copied();
-
-    for (index, part) in parts.iter().enumerate() {
-        let next_marks = parts.get(index + 1).and_then(|next| match next {
-            InlinePart::Text { run, .. } => Some(run.marks.as_slice()),
-            InlinePart::Node(_) => None,
-        });
+    let holds = !held.is_empty();
+    let mut held = held.into_iter();
+    let mut pieces = Vec::with_capacity(parts.len());
+    for (index, part) in parts.into_iter().enumerate() {
         match part {
             InlinePart::Node(node) => {
-                let mut before = String::new();
-                for mark in active.iter().rev() {
-                    before.push_str(&mark_closing(
-                        mark,
-                        modes
-                            .get(&mark.kind)
-                            .copied()
-                            .unwrap_or(OpeningMode::Markdown),
-                    ));
-                }
-                active.clear();
-                modes.clear();
-                let rendered = if let Some(rendered) = rendered_nodes.remove(&index) {
-                    rendered
-                } else {
-                    render_node(
+                let rendered = match rendered_nodes.remove(&index) {
+                    Some(rendered) => rendered,
+                    None => render_node(
                         node,
                         RenderContext {
                             parent_tag: "paragraph",
@@ -9641,181 +9590,53 @@ fn render_inline(
                             index,
                             table_cell,
                         },
-                    )?
+                    )?,
                 };
-                output.push_str(&before)?;
-                output.push_str(&rendered)?;
+                pieces.push(inline_marks::Piece::Node {
+                    rendered: held_characters::escape_markers(rendered),
+                    hard_break: element_tag(node) == Some("hardBreak"),
+                });
             }
             InlinePart::Text {
                 run,
                 literal_markdown,
             } => {
-                if run.text.len() > MAX_PROJECTION_BYTES {
-                    return Err(projection_too_large(run.text.len()));
+                let run_written = held_characters::written_len(&run.text);
+                if run_written > MAX_PROJECTION_BYTES {
+                    return Err(projection_too_large(run_written));
                 }
-                let mut text =
-                    written_run_text(run, *literal_markdown, code_context, escape_block_syntax)?;
-                // Nothing held is whitespace at the text's edge, which marks
-                // read: a held character is inside an empty link.
-                if !held.is_empty() && text.contains(HELD) {
-                    let mut written = ProjectionBuffer::with_capacity(text.len())?;
+                let mut text = written_run_text(
+                    &run,
+                    literal_markdown,
+                    code_context,
+                    escape_block_syntax,
+                    formatted_beyond_code,
+                )?;
+                if holds && text.contains(HELD) {
+                    let mut written =
+                        ProjectionBuffer::with_capacity(held_characters::written_len(&text))?;
                     for character in text.chars() {
                         if character != HELD {
                             written.push(character)?;
                             continue;
                         }
-                        match held_characters.next().expect("one held entry for each") {
+                        match held.next().expect("one held entry for each") {
                             Held::Character(character) => written.push(character)?,
                             Held::Reference(code) => written.push_str(&format!("&#{code};"))?,
                         }
                     }
                     text = written.into_string();
                 }
-                let current = &run.marks;
-                let mut to_open: Vec<MarkdownMark> = current
-                    .iter()
-                    .filter(|mark| !contains_same_mark(&active, mark))
-                    .cloned()
-                    .collect();
-                if to_open.len() > 1 {
-                    to_open.sort_by(|left, right| {
-                        let left_continues =
-                            next_marks.is_some_and(|next| contains_same_mark(next, left));
-                        let right_continues =
-                            next_marks.is_some_and(|next| contains_same_mark(next, right));
-                        left_continues
-                            .cmp(&right_continues)
-                            .then_with(|| right.kind.rank().cmp(&left.kind.rank()))
+                if !text.is_empty() {
+                    pieces.push(inline_marks::Piece::Text {
+                        text,
+                        marks: run.marks,
                     });
                 }
-                let to_close: Vec<MarkKind> = current
-                    .iter()
-                    .filter(|mark| next_marks.is_none_or(|next| !contains_same_mark(next, mark)))
-                    .map(|mark| mark.kind)
-                    .collect();
-                let active_closing: Vec<MarkKind> = to_close
-                    .iter()
-                    .copied()
-                    .filter(|kind| active.iter().any(|mark| mark.kind == *kind))
-                    .collect();
-                let crossed = !active_closing.is_empty() && !to_open.is_empty();
-                let mut middle_trailing = String::new();
-                if !to_close.is_empty() && !crossed {
-                    let (body, trailing) = split_trailing_js_whitespace(&text);
-                    let body = body.to_string();
-                    middle_trailing = trailing.to_string();
-                    text = body;
-                }
-                if !crossed {
-                    for kind in to_close.iter().rev() {
-                        if let Some(mark) = active_mark(&active, *kind).cloned() {
-                            text.push_str(&mark_closing(
-                                &mark,
-                                modes.get(kind).copied().unwrap_or(OpeningMode::Markdown),
-                            ));
-                            remove_active(&mut active, *kind);
-                            modes.remove(kind);
-                        }
-                    }
-                }
-                let mut leading = String::new();
-                if !to_open.is_empty() {
-                    let (whitespace, body) = split_leading_js_whitespace(&text);
-                    leading = whitespace.to_string();
-                    text = body.to_string();
-                }
-                for mark in &to_open {
-                    let mode = if reopen_html.remove(&mark.kind) {
-                        OpeningMode::Html
-                    } else {
-                        OpeningMode::Markdown
-                    };
-                    let opening = mark_opening(mark, mode);
-                    let mut marked = ProjectionBuffer::with_capacity(opening.len() + text.len())?;
-                    marked.push_str(&opening)?;
-                    marked.push_str(&text)?;
-                    text = marked.into_string();
-                    modes.insert(mark.kind, mode);
-                }
-                if !crossed {
-                    for mark in to_open.iter().rev() {
-                        set_active(&mut active, mark.clone());
-                    }
-                }
-                let mut with_leading = ProjectionBuffer::with_capacity(leading.len() + text.len())?;
-                with_leading.push_str(&leading)?;
-                with_leading.push_str(&text)?;
-                text = with_leading.into_string();
-                let close_at_end: Vec<MarkKind> = if crossed {
-                    for mark in &to_open {
-                        if next_marks.is_some_and(|next| {
-                            next.iter().any(|next_mark| next_mark.kind == mark.kind)
-                        }) && mark.kind.html_tags().is_some()
-                        {
-                            reopen_html.insert(mark.kind);
-                        }
-                    }
-                    let mut old = active_closing;
-                    old.sort_by_key(|kind| {
-                        std::cmp::Reverse(
-                            active
-                                .iter()
-                                .position(|mark| mark.kind == *kind)
-                                .unwrap_or(0),
-                        )
-                    });
-                    to_open.iter().map(|mark| mark.kind).chain(old).collect()
-                } else {
-                    marks_to_close_at_end(&active, current, next_marks)
-                };
-                let mut trailing = String::new();
-                if !close_at_end.is_empty() {
-                    let (body, whitespace) = split_trailing_js_whitespace(&text);
-                    let body = body.to_string();
-                    trailing = whitespace.to_string();
-                    text = body;
-                }
-                for kind in close_at_end {
-                    let mark = active_mark(&active, kind)
-                        .or_else(|| current.iter().find(|mark| mark.kind == kind));
-                    if let Some(mark) = mark {
-                        text.push_str(&mark_closing(
-                            mark,
-                            modes.get(&kind).copied().unwrap_or(OpeningMode::Markdown),
-                        ));
-                    }
-                    remove_active(&mut active, kind);
-                    modes.remove(&kind);
-                }
-                text.push_str(&trailing);
-                text.push_str(&middle_trailing);
-                output.push_str(&text)?;
             }
         }
     }
-    Ok(output.into_string())
-}
-
-fn marks_to_close_at_end(
-    active: &[MarkdownMark],
-    current: &[MarkdownMark],
-    next: Option<&[MarkdownMark]>,
-) -> Vec<MarkKind> {
-    let is_last = next.is_none();
-    let next_has_no_marks = next.is_some_and(<[MarkdownMark]>::is_empty);
-    let next_differs = next.is_some_and(|marks| marks != current);
-    if !(is_last || next_has_no_marks || next_differs) {
-        return Vec::new();
-    }
-    match next {
-        Some(next) if !next.is_empty() => active
-            .iter()
-            .rev()
-            .filter(|mark| !contains_same_mark(next, mark))
-            .map(|mark| mark.kind)
-            .collect(),
-        _ => active.iter().rev().map(|mark| mark.kind).collect(),
-    }
+    inline_marks::write_inline(&pieces)
 }
 
 fn has_mark(marks: &[MarkdownMark], kind: MarkKind) -> bool {
@@ -9842,70 +9663,20 @@ fn remove_active(active: &mut Vec<MarkdownMark>, kind: MarkKind) {
     active.retain(|mark| mark.kind != kind);
 }
 
-fn mark_opening(mark: &MarkdownMark, mode: OpeningMode) -> String {
-    if mode == OpeningMode::Html {
-        return mark
-            .kind
-            .html_tags()
-            .map(|(opening, _)| opening.to_string())
-            .unwrap_or_default();
-    }
-    match mark.kind {
-        MarkKind::Link => "[".to_string(),
-        MarkKind::Highlight => "==".to_string(),
-        MarkKind::Bold => "**".to_string(),
-        MarkKind::Code => unreachable!("inline code marks are rendered before mark serialization"),
-        MarkKind::Italic => "*".to_string(),
-        MarkKind::Strike => "~~".to_string(),
-        MarkKind::Underline => "++".to_string(),
-    }
-}
-
-fn mark_closing(mark: &MarkdownMark, mode: OpeningMode) -> String {
-    if mode == OpeningMode::Html {
-        return mark
-            .kind
-            .html_tags()
-            .map(|(_, closing)| closing.to_string())
-            .unwrap_or_default();
-    }
-    match mark.kind {
-        MarkKind::Link => {
-            let href = mark
-                .attrs
-                .as_object()
-                .and_then(|attrs| attrs.get("href"))
-                .map(js_value_string)
-                .unwrap_or_default();
-            let title = mark
-                .attrs
-                .as_object()
-                .and_then(|attrs| attrs.get("title"))
-                .map(js_value_string)
-                .unwrap_or_default();
-            if title.is_empty() {
-                format!("]({href})")
-            } else {
-                format!("]({href} \"{title}\")")
-            }
-        }
-        MarkKind::Highlight => "==".to_string(),
-        MarkKind::Bold => "**".to_string(),
-        MarkKind::Code => unreachable!("inline code marks are rendered before mark serialization"),
-        MarkKind::Italic => "*".to_string(),
-        MarkKind::Strike => "~~".to_string(),
-        MarkKind::Underline => "++".to_string(),
-    }
-}
-
 /// A run's text as it is written, before held characters are written back.
 fn written_run_text(
     run: &TextRun,
     literal_markdown: bool,
     code_context: bool,
     escape_block_syntax: bool,
+    hold: bool,
 ) -> ProjectionResult<String> {
-    let mut text = run.text.clone();
+    let mut text =
+        if hold && !literal_markdown && !code_context && !has_mark(&run.marks, MarkKind::Code) {
+            held_characters::hold_typed(&run.text)
+        } else {
+            run.text.clone()
+        };
     if !literal_markdown && has_mark(&run.marks, MarkKind::Highlight) {
         text = escape_highlight_equals(&text)?;
     }
@@ -10831,17 +10602,39 @@ mod projection_tests {
         );
     }
 
+    fn marks(names: &[&str]) -> Attrs {
+        names
+            .iter()
+            .map(|name| ((*name).into(), json_to_any(&json!({}))))
+            .collect()
+    }
+
+    fn paragraph_markdown(runs: Vec<(&str, Attrs)>) -> String {
+        let source = Ydoc::wire();
+        let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        {
+            let mut txn = source.doc.transact_mut();
+            let paragraph = body.push_back(
+                &mut txn,
+                XmlElementPrelim::new("paragraph", std::iter::empty::<XmlIn>()),
+            );
+            let text = paragraph.push_back(&mut txn, XmlTextPrelim::new(""));
+            for (value, attrs) in runs {
+                let at = text.len(&txn);
+                text.insert_with_attributes(&mut txn, at, value, attrs);
+            }
+        }
+        source
+            .project(ContentKind::Richdoc)
+            .expect("projection")
+            .content
+    }
+
     // Markdown reads no delimiter beside only whitespace as a mark, so it
     // would read back as literal asterisks. The TypeScript writer's tests have
     // the same cases.
     #[test]
     fn a_marked_run_of_only_whitespace_is_written_as_its_text() {
-        fn marks(names: &[&str]) -> Attrs {
-            names
-                .iter()
-                .map(|name| ((*name).into(), json_to_any(&json!({}))))
-                .collect()
-        }
         let bold = || marks(&["bold"]);
         let bold_italic = || marks(&["bold", "italic"]);
         let strike = || marks(&["strike"]);
@@ -10926,28 +10719,325 @@ mod projection_tests {
             ),
         ];
         for (runs, expected) in cases {
-            let source = Ydoc::wire();
-            let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
-            {
-                let mut txn = source.doc.transact_mut();
-                let paragraph = body.push_back(
-                    &mut txn,
-                    XmlElementPrelim::new("paragraph", std::iter::empty::<XmlIn>()),
-                );
-                let text = paragraph.push_back(&mut txn, XmlTextPrelim::new(""));
-                for (value, attrs) in runs {
-                    let at = text.len(&txn);
-                    text.insert_with_attributes(&mut txn, at, value, attrs);
-                }
-            }
+            assert_eq!(paragraph_markdown(runs), expected);
+        }
+    }
+
+    #[test]
+    fn mixed_formatting_and_typed_markers_are_written_so_they_read_back() {
+        let plain = Attrs::new;
+        let cases: Vec<(Vec<(&str, Attrs)>, &str)> = vec![
+            (
+                vec![
+                    ("un", plain()),
+                    ("do", marks(&["bold", "underline"])),
+                    ("ne", plain()),
+                ],
+                "un++**do**++ne\n",
+            ),
+            (
+                vec![("a", plain()), ("b", marks(&["italic", "underline"]))],
+                "a++*b*++\n",
+            ),
+            (
+                vec![
+                    ("a", marks(&["italic"])),
+                    ("b", marks(&["bold", "italic"])),
+                    (" ", marks(&["bold"])),
+                    ("c", plain()),
+                ],
+                "*a**b*** c\n",
+            ),
+            (
+                vec![
+                    ("a", marks(&["italic"])),
+                    ("b", marks(&["italic", "highlight"])),
+                    (" ", marks(&["highlight"])),
+                    ("c", plain()),
+                ],
+                "*a==b==* c\n",
+            ),
+            (
+                vec![
+                    ("a", plain()),
+                    ("x", marks(&["bold", "strike"])),
+                    ("b", plain()),
+                ],
+                "a**~~x~~**b\n",
+            ),
+            (
+                vec![
+                    ("a", plain()),
+                    ("x", marks(&["italic", "highlight"])),
+                    ("b", plain()),
+                ],
+                "a==*x*==b\n",
+            ),
+            (
+                vec![("x", marks(&["bold", "italic"])), ("y", marks(&["italic"]))],
+                "***x**y*\n",
+            ),
+            (
+                vec![("b", marks(&["bold"])), (" *a b*", plain())],
+                "**b** &#42;a b&#42;\n",
+            ),
+            (
+                vec![("b", marks(&["bold"])), (" _a b_", plain())],
+                "**b** &#95;a b&#95;\n",
+            ),
+            (
+                vec![("b", marks(&["bold"])), (" a*b*", plain())],
+                "**b** a&#42;b&#42;\n",
+            ),
+            (
+                vec![("**", plain()), ("_x", marks(&["bold"])), ("**", plain())],
+                "&#42;&#42;**&#95;x**&#42;&#42;\n",
+            ),
+            (
+                vec![("`", plain()), ("*", marks(&["strike"]))],
+                "&#96;~~&#42;~~\n",
+            ),
+            (
+                vec![(" ", plain()), ("_", marks(&["italic"]))],
+                "&#32;*&#95;*\n",
+            ),
+            (
+                vec![
+                    ("b", marks(&["bold"])),
+                    (" a ` b ", plain()),
+                    ("x", marks(&["code"])),
+                ],
+                "**b** a &#96; b `x`\n",
+            ),
+            (
+                vec![
+                    ("b", marks(&["bold"])),
+                    (" a \\", plain()),
+                    ("x", marks(&["code"])),
+                ],
+                "**b** a \\\\`x`\n",
+            ),
+            (
+                vec![("a\\", plain()), ("b", marks(&["bold"]))],
+                "a\\\\**b**\n",
+            ),
+            (
+                vec![
+                    ("don`t", marks(&["italic", "underline"])),
+                    (" ", marks(&["underline"])),
+                    ("run ", plain()),
+                    ("ls", marks(&["code"])),
+                ],
+                "*++don&#96;t++* run `ls`\n",
+            ),
+            (
+                vec![
+                    ("don`t", marks(&["italic", "underline"])),
+                    (" run ", plain()),
+                    ("ls", marks(&["code"])),
+                ],
+                "*++don&#96;t++* run `ls`\n",
+            ),
+            (
+                vec![
+                    ("`", marks(&["bold", "underline"])),
+                    ("x", marks(&["code"])),
+                ],
+                "**++&#96;++**`x`\n",
+            ),
+            (
+                vec![
+                    ("\\", marks(&["code"])),
+                    ("`a", marks(&["italic", "underline"])),
+                    ("x", marks(&["code"])),
+                ],
+                "`\\`*++`a++*`x`\n",
+            ),
+            (
+                vec![("b", marks(&["bold"])), (" a\\*b*", plain())],
+                "**b** a\\\\&#42;b&#42;\n",
+            ),
+            (
+                vec![("b", marks(&["bold"])), (" 2 * 3", plain())],
+                "**b** 2 * 3\n",
+            ),
+            (
+                vec![("b", marks(&["bold"])), (" snake_case_name", plain())],
+                "**b** snake_case_name\n",
+            ),
+            (
+                vec![("b", marks(&["bold"])), (" a ** b", plain())],
+                "**b** a ** b\n",
+            ),
+            (
+                vec![("b", marks(&["bold"])), (" 😀_b_😀", plain())],
+                "**b** 😀&#95;b&#95;😀\n",
+            ),
+            (
+                vec![("*Terms apply. Also ", plain()), ("em", marks(&["italic"]))],
+                "*Terms apply. Also *em*\n",
+            ),
+        ];
+        for (runs, expected) in cases {
+            assert_eq!(paragraph_markdown(runs), expected);
+        }
+    }
+
+    #[test]
+    fn a_paragraph_without_other_marks_keeps_its_typed_bytes() {
+        let plain = Attrs::new;
+        let cases: Vec<(Vec<(&str, Attrs)>, &str)> = vec![
+            (vec![("*a b*", plain())], "*a b*\n"),
+            (
+                vec![("a \\", plain()), ("x", marks(&["code"]))],
+                "a \\`x`\n",
+            ),
+            (vec![("\\[x] task", plain())], "\\[x] task\n"),
+        ];
+        for (runs, expected) in cases {
+            assert_eq!(paragraph_markdown(runs), expected);
+        }
+    }
+
+    #[test]
+    fn a_paragraph_past_the_pairing_limit_keeps_its_typed_characters() {
+        let globs = " *.txt *.md".repeat(8_000);
+        let backslash = format!(" {}\\!", "*_`\\x ".repeat(106));
+        for typed in [&globs, &backslash] {
             assert_eq!(
-                source
-                    .project(ContentKind::Richdoc)
-                    .expect("projection")
-                    .content,
-                expected
+                paragraph_markdown(vec![("b", marks(&["bold"])), (typed, Attrs::new())]),
+                format!("**b**{typed}\n")
             );
         }
+        let before_code = format!("{globs} `");
+        assert_eq!(
+            paragraph_markdown(vec![
+                ("b", marks(&["bold"])),
+                (&before_code, Attrs::new()),
+                ("x", marks(&["code"])),
+            ]),
+            format!("**b**{before_code}`x`\n")
+        );
+    }
+
+    #[test]
+    fn a_paragraph_past_the_cell_limit_keeps_its_typed_characters() {
+        let at = " a_b".repeat(32_763);
+        let past = " a_b".repeat(32_764);
+        for (typed, expected) in [
+            (format!("{at} *x*_"), format!("{at} &#42;x&#42;_")),
+            (format!("{past} *x*"), format!("{past} *x*")),
+        ] {
+            assert_eq!(
+                paragraph_markdown(vec![("b", marks(&["bold"])), (&typed, Attrs::new())]),
+                format!("**b**{expected}\n")
+            );
+        }
+    }
+
+    #[test]
+    fn typed_backtick_runs_before_code_keep_their_bytes() {
+        let runs: Vec<String> = (2..=41).map(|width| "`".repeat(width)).collect();
+        let typed = format!(" {} ", runs.join(" "));
+        let cases = [
+            (
+                typed.clone(),
+                "x".repeat(20),
+                format!("{typed}`{}`", "x".repeat(20)),
+            ),
+            (
+                typed.clone(),
+                "a`".repeat(10),
+                format!(
+                    " &#96;&#96; {} `` {} ``",
+                    runs[1..].join(" "),
+                    "a`".repeat(10)
+                ),
+            ),
+            (
+                " ` ".to_owned(),
+                "a`b".to_owned(),
+                " &#96; ``a`b``".to_owned(),
+            ),
+            (
+                " `` x ".to_owned(),
+                "a`b``c".to_owned(),
+                " &#96;&#96; x ```a`b``c```".to_owned(),
+            ),
+        ];
+        for (typed, code, expected) in cases {
+            assert_eq!(
+                paragraph_markdown(vec![
+                    ("b", marks(&["bold"])),
+                    (&typed, Attrs::new()),
+                    (&code, marks(&["code"])),
+                ]),
+                format!("**b**{expected}\n")
+            );
+        }
+    }
+
+    #[test]
+    fn marks_whose_old_order_reads_back_keep_it() {
+        assert_eq!(
+            paragraph_markdown(vec![
+                ("a", marks(&["bold", "underline"])),
+                ("b", marks(&["bold", "strike", "highlight"])),
+                ("c", marks(&["strike"])),
+            ]),
+            "**++a++~~==b==~~**~~c~~\n"
+        );
+    }
+
+    #[test]
+    fn a_heading_without_marks_keeps_its_typed_backslash() {
+        let source = Ydoc::wire();
+        let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        {
+            let mut txn = source.doc.transact_mut();
+            let heading = body.push_back(&mut txn, XmlElementPrelim::empty("heading"));
+            heading.insert_attribute(&mut txn, "level", "1");
+            heading.push_back(&mut txn, XmlTextPrelim::new("a \\!"));
+        }
+        assert_eq!(
+            source
+                .project(ContentKind::Richdoc)
+                .expect("projection")
+                .content,
+            "# a \\!\n"
+        );
+    }
+
+    #[test]
+    fn a_paragraph_with_a_leading_space_keeps_each_node_after_it() {
+        let source = Ydoc::wire();
+        let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        {
+            let mut txn = source.doc.transact_mut();
+            let paragraph = body.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
+            paragraph.push_back(&mut txn, XmlTextPrelim::new(" x"));
+            for (alt, src) in [("A", "a.png"), ("B", "b.png")] {
+                let image = paragraph.push_back(&mut txn, XmlElementPrelim::empty("image"));
+                image.insert_attribute(&mut txn, "alt", alt);
+                image.insert_attribute(&mut txn, "src", src);
+            }
+        }
+        assert_eq!(
+            source
+                .project(ContentKind::Richdoc)
+                .expect("projection")
+                .content,
+            "&#32;x![A](a.png)![B](b.png)\n"
+        );
+    }
+
+    #[test]
+    fn typed_characters_count_toward_the_projection_limit_as_written() {
+        let typed = "\\a".repeat(3_500_000);
+        assert_eq!(
+            paragraph_markdown(vec![(&typed, marks(&["bold"])), (&typed, Attrs::new())]),
+            format!("**{typed}**{typed}\n")
+        );
     }
 
     #[test]
@@ -11078,7 +11168,7 @@ mod projection_tests {
                 1,
                 "\u{7f}[](u \"&\u{7f}\") \u{7f}&amp;".to_owned(),
             ),
-            (plain.clone(), 0, plain.clone()),
+            (plain.clone(), 1, plain.clone()),
             ("[](u \"&\n&\")".to_owned(), 1, "[](u \"&\n&\")".to_owned()),
             // A `\r` sends the link through written references.
             (

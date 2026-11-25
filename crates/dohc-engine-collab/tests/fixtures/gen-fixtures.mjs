@@ -1164,6 +1164,77 @@ const RICHDOC_PROJECTION_CASES = [
         ]),
       ]),
   },
+  {
+    // #4139: marks nest in an order whose delimiters the reader reads back.
+    // In a paragraph with a mark other than code, a typed `*`, `_`, backtick,
+    // or backslash the reader would read as syntax is escaped. The last
+    // paragraph and the heading have no such mark, so they are written as
+    // typed. Marks whose old order reads back keep it.
+    name: "mixed-formatting",
+    makeDoc: () =>
+      directRichdoc([
+        paragraph([xmlRuns([["un"], ["do", { bold: {}, underline: {} }], ["ne"]])]),
+        paragraph([xmlRuns([["a"], ["b", { italic: {}, underline: {} }]])]),
+        paragraph([
+          xmlRuns([["a", { italic: {} }], ["b", { italic: {}, bold: {} }], [" ", { bold: {} }], ["c"]]),
+        ]),
+        paragraph([
+          xmlRuns([
+            ["a", { italic: {} }],
+            ["b", { italic: {}, highlight: {} }],
+            [" ", { highlight: {} }],
+            ["c"],
+          ]),
+        ]),
+        paragraph([xmlRuns([["a"], ["x", { bold: {}, strike: {} }], ["b"]])]),
+        paragraph([xmlRuns([["b", { bold: {} }], [" *a b* _a b_ a*b* 2 * 3 snake_case_name a ** b"]])]),
+        paragraph([xmlRuns([["b", { bold: {} }], [" a ` b "], ["x", { code: {} }]])]),
+        paragraph([xmlRuns([["b", { bold: {} }], [" a \\"], ["x", { code: {} }]])]),
+        paragraph([xmlRuns([["a\\"], ["b", { bold: {} }]])]),
+        paragraph([xmlRuns([["b", { bold: {} }], [" a\\*b*"]])]),
+        paragraph([xmlRuns([["b", { bold: {} }], [" 😀_b_😀"]])]),
+        paragraph("*a b* _a b_ a*b* 2 * 3 snake_case_name a ** b"),
+        xmlElement("heading", { level: 1 }, [xmlText("a \\!")]),
+        paragraph([
+          xmlRuns([
+            ["a", { bold: {}, underline: {} }],
+            ["b", { bold: {}, strike: {}, highlight: {} }],
+            ["c", { strike: {} }],
+          ]),
+        ]),
+        paragraph([
+          xmlRuns([
+            ["don`t", { italic: {}, underline: {} }],
+            [" ", { underline: {} }],
+            ["run "],
+            ["ls", { code: {} }],
+          ]),
+        ]),
+        paragraph([
+          xmlRuns([["don`t", { italic: {}, underline: {} }], [" run "], ["ls", { code: {} }]]),
+        ]),
+        paragraph([xmlRuns([["`", { bold: {}, underline: {} }], ["x", { code: {} }]])]),
+        paragraph([
+          xmlRuns([["\\", { code: {} }], ["`a", { italic: {}, underline: {} }], ["x", { code: {} }]]),
+        ]),
+      ]),
+  },
+  {
+    // Both writers spend the same pairing work: the first paragraph is the
+    // longest of these whose typed characters are still escaped, and the
+    // others are written as typed, a backslash before punctuation included.
+    name: "pairing-budget",
+    makeDoc: () =>
+      directRichdoc(
+        [
+          [104, ""],
+          [105, ""],
+          [106, "\\!"],
+        ].map(([repeats, end]) =>
+          paragraph([xmlRuns([["b", { bold: {} }], [" " + "*_`\\x ".repeat(repeats) + end]])]),
+        ),
+      ),
+  },
 ];
 
 function makeRichdocProjection(index, fixture) {

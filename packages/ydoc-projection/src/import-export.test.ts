@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { JSONContent } from "@tiptap/core";
+import { EditorState } from "@tiptap/pm/state";
 import { getDefaults, Lexer, Tokenizer } from "marked";
 import pipelineFixtureJson from "../../../crates/dohc-engine-domain/tests/fixtures/collection-field-pipeline.json";
 import frontmatterFixtureJson from "../../../crates/dohc-engine-domain/tests/fixtures/collection-frontmatter.json";
@@ -36,6 +37,11 @@ const boldItalic = (text: string): JSONContent => ({
   type: "text",
   text,
   marks: [{ type: "bold" }, { type: "italic" }],
+});
+const marked = (text: string, ...marks: string[]): JSONContent => ({
+  type: "text",
+  text,
+  marks: marks.map((type) => ({ type })),
 });
 
 function textWork(run: () => void): { split: number; replace: number } {
@@ -589,6 +595,297 @@ it.each([
     expect(textContentOf(reopened)).toBe(content.map((node) => node.text).join(""));
   },
 );
+
+// Each character of a paragraph with the marks it holds. A typed backslash
+// written as an escape reads back as one. Whitespace is compared without its
+// marks, since a run of only whitespace is written without them.
+function markedCharactersOf(document: JSONContent): string[] {
+  return (document.content ?? []).flatMap((block) =>
+    (block.content ?? []).flatMap((node) => {
+      const text = node.type === "escapedPunctuation" ? String(node.attrs?.value) : node.text;
+      const marks = (node.marks ?? []).map((mark) => mark.type).sort();
+      return Array.from(text ?? "", (character) =>
+        /\s/u.test(character) ? character : `${character}${marks.join(",")}`,
+      );
+    }),
+  );
+}
+
+// #4139: marks nest in an order whose delimiters the reader reads back. In a
+// paragraph with a mark other than code, a typed `*`, `_`, or backtick the
+// reader would pair is written as a reference, and a typed backslash before
+// punctuation is doubled. Typed characters that pair with nothing keep their
+// bytes. The engine writer's test has the same cases.
+it.each([
+  [
+    "bold and underline inside a word",
+    [plain("un"), marked("do", "bold", "underline"), plain("ne")],
+    "un++**do**++ne",
+  ],
+  ["italic and underline at the end", [plain("a"), marked("b", "italic", "underline")], "a++*b*++"],
+  [
+    "bold ending on a space after italic",
+    [italic("a"), boldItalic("b"), bold(" "), plain("c")],
+    "*a**b*** c",
+  ],
+  [
+    "highlight ending on a space after italic",
+    [italic("a"), marked("b", "italic", "highlight"), marked(" ", "highlight"), plain("c")],
+    "*a==b==* c",
+  ],
+  ["strike inside bold", [plain("a"), marked("x", "bold", "strike"), plain("b")], "a**~~x~~**b"],
+  [
+    "italic inside highlight",
+    [plain("a"), marked("x", "italic", "highlight"), plain("b")],
+    "a==*x*==b",
+  ],
+  ["bold closing inside italic", [boldItalic("x"), italic("y")], "***x**y*"],
+  ["typed asterisks around words", [bold("b"), plain(" *a b*")], "**b** &#42;a b&#42;"],
+  ["typed underscores around words", [bold("b"), plain(" _a b_")], "**b** &#95;a b&#95;"],
+  ["typed asterisks inside a word", [bold("b"), plain(" a*b*")], "**b** a&#42;b&#42;"],
+  [
+    "typed asterisks around bold",
+    [plain("**"), bold("_x"), plain("**")],
+    "&#42;&#42;**&#95;x**&#42;&#42;",
+  ],
+  ["a struck asterisk after a backtick", [plain("`"), marked("*", "strike")], "&#96;~~&#42;~~"],
+  ["an italic underscore after a space", [plain(" "), italic("_")], "&#32;*&#95;*"],
+  [
+    "a typed backtick before code",
+    [bold("b"), plain(" a ` b "), marked("x", "code")],
+    "**b** a &#96; b `x`",
+  ],
+  [
+    "a typed backslash before code",
+    [bold("b"), plain(" a \\"), marked("x", "code")],
+    "**b** a \\\\`x`",
+  ],
+  ["a typed backslash before bold", [plain("a\\"), bold("b")], "a\\\\**b**"],
+  [
+    "a typed backtick in underline inside italic, then a space and code",
+    [
+      marked("don`t", "italic", "underline"),
+      marked(" ", "underline"),
+      plain("run "),
+      marked("ls", "code"),
+    ],
+    "*++don&#96;t++* run `ls`",
+  ],
+  [
+    "a typed backtick in underline inside italic, then code",
+    [marked("don`t", "italic", "underline"), plain(" run "), marked("ls", "code")],
+    "*++don&#96;t++* run `ls`",
+  ],
+  [
+    "a typed backtick in underline inside bold, then code",
+    [marked("`", "bold", "underline"), marked("x", "code")],
+    "**++&#96;++**`x`",
+  ],
+  [
+    "a typed backtick in underline inside italic, between code ending in a backslash and code",
+    [marked("\\", "code"), marked("`a", "italic", "underline"), marked("x", "code")],
+    "`\\`*++`a++*`x`",
+  ],
+  ["a typed backslash before an asterisk", [bold("b"), plain(" a\\*b*")], "**b** a\\\\&#42;b&#42;"],
+  ["a multiplication", [bold("b"), plain(" 2 * 3")], "**b** 2 * 3"],
+  ["a name in snake case", [bold("b"), plain(" snake_case_name")], "**b** snake_case_name"],
+  ["two asterisks between spaces", [bold("b"), plain(" a ** b")], "**b** a ** b"],
+  ["typed underscores between emoji", [bold("b"), plain(" 😀_b_😀")], "**b** 😀&#95;b&#95;😀"],
+  [
+    "an asterisk that pairs with nothing",
+    [plain("*Terms apply. Also "), italic("em")],
+    "*Terms apply. Also *em*",
+  ],
+] satisfies Array<[string, JSONContent[], string]>)(
+  "writes %s so it reads back",
+  (_name, content, saved) => {
+    const document = { type: "doc", content: [{ type: "paragraph", content }] };
+    expect(serializeRichdocBody(document)).toBe(saved);
+    const reopened = parseRichdocMarkdown(saved);
+    expect(markedCharactersOf(reopened)).toEqual(markedCharactersOf(document));
+    expect(serializeRichdocBody(reopened)).toBe(saved);
+  },
+);
+
+// The engine keeps a paragraph it can't read as the Markdown the file spells,
+// with no mark but code, so a paragraph like that keeps the bytes it had. The
+// engine writer's test has the same cases.
+it.each([
+  ["typed asterisks", [plain("*a b*")], "*a b*"],
+  ["a typed backslash before code", [plain("a \\"), marked("x", "code")], "a \\`x`"],
+  ["an escaped bracket", [plain("\\[x] task")], "\\[x] task"],
+] satisfies Array<[string, JSONContent[], string]>)(
+  "writes %s in a paragraph without other marks as typed",
+  (_name, content, saved) => {
+    const document = { type: "doc", content: [{ type: "paragraph", content }] };
+    expect(serializeRichdocBody(document)).toBe(saved);
+  },
+);
+
+// Modeling how the reader pairs these characters takes more steps than the
+// writer's limit of 2,097,152, so each of them is written as typed. The engine
+// writer's test has the same cases.
+it.each([
+  ["globs", [plain(" *.txt *.md".repeat(8_000))], " *.txt *.md".repeat(8_000)],
+  [
+    "a backslash before punctuation",
+    [plain(` ${"*_`\\x ".repeat(106)}\\!`)],
+    ` ${"*_`\\x ".repeat(106)}\\!`,
+  ],
+  [
+    "a backtick before code",
+    [plain(`${" *.txt *.md".repeat(8_000)} \``), marked("x", "code")],
+    `${" *.txt *.md".repeat(8_000)} \`\`x\``,
+  ],
+] satisfies Array<[string, JSONContent[], string]>)(
+  "writes typed %s as typed in a paragraph past the pairing limit",
+  (_name, content, typed) => {
+    const document = {
+      type: "doc",
+      content: [{ type: "paragraph", content: [bold("b"), ...content] }],
+    };
+    expect(serializeRichdocBody(document)).toBe(`**b**${typed}`);
+  },
+);
+
+// The writer models a block of at most 65,536 cells. The first paragraph has
+// 65,536, so its typed asterisks are written as references. The second has
+// 65,537, so they are written as typed. The engine writer's test has the same
+// cases.
+it.each([
+  ["at", " a_b".repeat(32_763) + " *x*_", " a_b".repeat(32_763) + " &#42;x&#42;_"],
+  ["one past", " a_b".repeat(32_764) + " *x*", " a_b".repeat(32_764) + " *x*"],
+])("writes the typed characters of a paragraph %s the cell limit", (_name, typed, saved) => {
+  const document = {
+    type: "doc",
+    content: [{ type: "paragraph", content: [bold("b"), plain(typed)] }],
+  };
+  expect(serializeRichdocBody(document)).toBe(`**b**${saved}`);
+});
+
+const typedBacktickRuns = Array.from({ length: 40 }, (_, at) => "`".repeat(at + 2));
+it.each([
+  [
+    "typed backtick runs before code with no backticks",
+    ` ${typedBacktickRuns.join(" ")} `,
+    "x".repeat(20),
+    ` ${typedBacktickRuns.join(" ")} \`${"x".repeat(20)}\``,
+  ],
+  [
+    "typed backtick runs before code full of backticks",
+    ` ${typedBacktickRuns.join(" ")} `,
+    "a`".repeat(10),
+    ` &#96;&#96; ${typedBacktickRuns.slice(1).join(" ")} \`\` ${"a`".repeat(10)} \`\``,
+  ],
+  ["a typed backtick that pairs inside code", " ` ", "a`b", " &#96; ``a`b``"],
+  ["typed backticks that pair inside code", " `` x ", "a`b``c", " &#96;&#96; x ```a`b``c```"],
+])("writes %s", (_name, typed, code, saved) => {
+  const document = {
+    type: "doc",
+    content: [{ type: "paragraph", content: [bold("b"), plain(typed), marked(code, "code")] }],
+  };
+  expect(serializeRichdocBody(document)).toBe(`**b**${saved}`);
+});
+
+it.each([
+  [
+    "bold and underline on text and the image after it",
+    [marked("hello", "bold", "underline")],
+    ["bold", "underline"],
+    "**++hello++**![A](https://example.com/a.png)",
+  ],
+  [
+    "a link and bold on text and the image after it",
+    [
+      {
+        ...marked("hello", "bold"),
+        marks: [{ type: "link", attrs: { href: "https://x.test" } }, { type: "bold" }],
+      },
+    ],
+    ["link", "bold"],
+    "[**hello**](https://x.test)![A](https://example.com/a.png)",
+  ],
+  [
+    "bold on text ending in a space and on the image after it",
+    [bold("hello ")],
+    ["bold"],
+    "**hello** ![A](https://example.com/a.png)",
+  ],
+  [
+    "bold and underline on text, the image after it, and the text after that",
+    [marked("a", "bold", "underline")],
+    ["bold", "underline"],
+    "**++a++**![A](https://example.com/a.png)**++b++**",
+    [marked("b", "bold", "underline")],
+  ],
+] satisfies Array<[string, JSONContent[], string[], string, JSONContent[]?]>)(
+  "writes %s so the text reads back",
+  (_name, before, imageMarks, saved, after = []) => {
+    const image: JSONContent = {
+      type: "image",
+      attrs: { src: "https://example.com/a.png", alt: "A", title: null },
+      marks: before[0]!.marks!.filter((mark) => imageMarks.includes(mark.type)),
+    };
+    const document = getDohcProseMirrorSchema()
+      .nodeFromJSON({
+        type: "doc",
+        content: [{ type: "paragraph", content: [...before, image, ...after] }],
+      })
+      .toJSON() as JSONContent;
+    expect(serializeRichdocBody(document)).toBe(saved);
+    const reopened = parseRichdocMarkdown(saved);
+    expect(markedCharactersOf(reopened)).toEqual(markedCharactersOf(document));
+    expect(serializeRichdocBody(reopened)).toBe(saved);
+  },
+);
+
+it("closes bold and underline in order before a marked line break", () => {
+  const document = getDohcProseMirrorSchema()
+    .nodeFromJSON({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            marked("a", "bold", "underline"),
+            { type: "hardBreak", marks: [{ type: "bold" }, { type: "underline" }] },
+            plain("b"),
+          ],
+        },
+      ],
+    })
+    .toJSON() as JSONContent;
+  expect(serializeRichdocBody(document)).toBe("**++a++**  \nb");
+});
+
+it("keeps the spelling a note had when its marks read back that way", () => {
+  const saved = "**++a++~~==b==~~**~~c~~";
+  expect(serializeRichdocBody(parseRichdocMarkdown(saved))).toBe(saved);
+});
+
+it("writes an underlined image after an asterisk without reopening the underline", () => {
+  const schema = getDohcProseMirrorSchema();
+  const doc = schema.nodeFromJSON({
+    type: "doc",
+    content: [
+      {
+        type: "paragraph",
+        content: [plain("a*"), { type: "image", attrs: { src: "/a.png", alt: "A", title: null } }],
+      },
+    ],
+  });
+  const state = EditorState.create({ schema, doc });
+  const underlined = state.apply(
+    state.tr.addMark(1, doc.content.size - 1, schema.marks.underline!.create()),
+  );
+  expect(
+    underlined.doc
+      .child(0)
+      .child(1)
+      .marks.map((mark) => mark.type.name),
+  ).toEqual(["underline"]);
+  expect(serializeRichdocBody(underlined.doc.toJSON())).toBe("++a*++![A]()");
+});
 
 // The underline opens on the space and is written outside the italic. Opened
 // with the italic at the text instead, it would read back as literal asterisks.

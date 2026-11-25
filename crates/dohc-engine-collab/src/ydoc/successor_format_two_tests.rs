@@ -240,7 +240,7 @@ fn each_shared_note_a_successor_takes_gives_the_pinned_bytes() {
     assert_eq!(
         (crate::hex_sha256(&updates), not_format_two),
         (
-            "faf7965808e85b95f8cf1868ffc372e5c6f72c5679cb9c4b64568fff9d91d2af".to_owned(),
+            "08bce415db56696a8d961852a063862979d63746f1837bd7cdd5115d33784926".to_owned(),
             [
                 "lists, a to-do, a callout and an uneven table",
                 "values and paths a reader must repair",
