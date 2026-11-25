@@ -9,7 +9,32 @@ import {
   Transform,
 } from "@tiptap/pm/transform";
 import { Fragment, Mark, Slice, type Node as ProseMirrorNode } from "@tiptap/pm/model";
-import { EditorState, NodeSelection, TextSelection, type Transaction } from "@tiptap/pm/state";
+import {
+  EditorState,
+  NodeSelection,
+  TextSelection,
+  type Command,
+  type Transaction,
+} from "@tiptap/pm/state";
+import {
+  addColumnAfter,
+  addColumnBefore,
+  addRowAfter,
+  addRowBefore,
+  cellAround,
+  CellSelection,
+  deleteColumn,
+  deleteRow,
+  mergeCells,
+  moveTableColumn,
+  moveTableRow,
+  nextCell,
+  setCellAttr,
+  splitCell,
+  toggleHeaderCell,
+  toggleHeaderColumn,
+  toggleHeaderRow,
+} from "@tiptap/pm/tables";
 import {
   BLOCK_ELEMENT,
   BODY_CONTAINERS_FIELD,
@@ -27,7 +52,6 @@ import {
 import {
   giveBoundaries,
   howToWrite,
-  keepsContainers,
   linesAWriteLeavesWanting,
   linesBroughtIntoBeing,
   linesWithNoBoundary,
@@ -77,6 +101,13 @@ export function noteOfLines(lines: readonly StoredLine[]): Uint8Array {
       ["I", "listItem"],
       ["Q", "blockquote"],
       ["Q2", "blockquote"],
+      ["TB", "table"],
+      ["R1", "tableRow"],
+      ["R2", "tableRow"],
+      ["A1", "tableHeader"],
+      ["A2", "tableHeader"],
+      ["B1", "tableCell"],
+      ["B2", "tableCell"],
     ] as const)
       for (const [key, value] of recordsOfContainer(schema, { id, type, attrs: {} }))
         containers.set(key, value);
@@ -208,18 +239,88 @@ ORACLE_NOTES.push(
     "code in a language with an item and text, then a math block with text",
     [stored({ type: "codeBlock", language: "ts" }, "ab", WIKILINK, "cd"), stored(MATH, "spilled")],
   ],
+  [
+    "a table with a header row",
+    [
+      stored({ path: ["TB", "R1", "A1"] }, "ab"),
+      stored({ path: ["TB", "R1", "A2"] }, "cd"),
+      stored({ path: ["TB", "R2", "B1"] }, "ef"),
+      stored({ path: ["TB", "R2", "B2"] }, "gh"),
+    ],
+  ],
+  [
+    "a paragraph, a table of one row with an empty cell, a paragraph",
+    [
+      stored({}, "ab"),
+      stored({ path: ["TB", "R2", "B1"] }, "cd"),
+      stored({ path: ["TB", "R2", "B2"] }),
+      stored({}, "ef"),
+    ],
+  ],
 );
+
+const mergedWith =
+  (axis: "horiz" | "vert"): Command =>
+  (state, dispatch) => {
+    const $cell = cellAround(state.selection.$from);
+    const $next = $cell && nextCell($cell, axis, 1);
+    if (!$cell || !$next) return false;
+    const cells = state.apply(state.tr.setSelection(new CellSelection($cell, $next)));
+    return mergeCells(cells, dispatch);
+  };
+
+const movedOn =
+  (what: "row" | "column"): Command =>
+  (state, dispatch) => {
+    const $cell = cellAround(state.selection.$from);
+    if (!$cell) return false;
+    const from = what === "row" ? $cell.index(-1) : $cell.index();
+    const count = what === "row" ? $cell.node(-1).childCount : $cell.parent.childCount;
+    if (from + 1 >= count) return false;
+    return (what === "row" ? moveTableRow : moveTableColumn)({ from, to: from + 1 })(
+      state,
+      dispatch,
+    );
+  };
+
+const rowMadeHigh: Command = (state, dispatch) => {
+  const $cell = cellAround(state.selection.$from);
+  if (!$cell) return false;
+  dispatch?.(state.tr.setNodeAttribute($cell.before(), "height", 40));
+  return true;
+};
+
+/** The table commands the oracle offers from each cell where they apply. */
+export const TABLE_COMMANDS: [string, Command][] = [
+  ["a row added under", addRowAfter],
+  ["a row added above", addRowBefore],
+  ["a column added after", addColumnAfter],
+  ["a column added before", addColumnBefore],
+  ["its row deleted", deleteRow],
+  ["its column deleted", deleteColumn],
+  ["the header row toggled", toggleHeaderRow],
+  ["the header column toggled", toggleHeaderColumn],
+  ["it made a header or a cell", toggleHeaderCell],
+  ["it centered", setCellAttr("align", "center")],
+  ["it made 120 wide", setCellAttr("colwidth", [120])],
+  ["its row made 40 high", rowMadeHigh],
+  ["it merged with the cell after", mergedWith("horiz")],
+  ["it merged with the cell under", mergedWith("vert")],
+  ["it split", splitCell],
+  ["its row moved down", movedOn("row")],
+  ["its column moved right", movedOn("column")],
+];
 
 /** What the every-step oracle counts over all its notes. `ORACLE_PARTS` holds each file's share. */
 export const ORACLE_COUNTS = {
   outcomes: {
-    applied: 38719,
-    "filtered by keepsContainers": 0,
+    applied: 41364,
     "refused, as no trial settles": 628,
-    "not offered": 1069,
+    "refused, as a container would hold no line": 38,
+    "not offered": 1112,
     "range error": 0,
   },
-  undone: 37784,
+  undone: 40345,
   given: 24322,
   typedInBySomeoneElse: 40009,
   retypedBySomeoneElse: 27814,
@@ -239,8 +340,8 @@ export const ORACLE_COUNTS = {
     "a delete and a split over N-N": 98,
   } as Record<string, number>,
   drags: {
-    "text, applied": 7306,
-    "block, applied": 724,
+    "text, applied": 7843,
+    "block, applied": 756,
     "text, refused, as no trial settles": 230,
   } as Record<string, number>,
 };
@@ -252,14 +353,14 @@ export type Agreement = {
   onTheWholeNote: number;
 };
 export const AGREEMENT_COUNTS: Agreement = {
-  compared: 50782,
-  trials: 50782,
-  inTheWindow: 50771,
-  onTheWholeNote: 11,
+  compared: 54151,
+  trials: 54151,
+  inTheWindow: 54102,
+  onTheWholeNote: 49,
 };
 export const AGREEMENT_IN_THE_DIFFERENTIAL: { sample: Agreement; full: Agreement } = {
-  sample: { compared: 2147, trials: 2147, inTheWindow: 2147, onTheWholeNote: 0 },
-  full: { compared: 11435, trials: 11435, inTheWindow: 11435, onTheWholeNote: 0 },
+  sample: { compared: 2237, trials: 2237, inTheWindow: 2237, onTheWholeNote: 0 },
+  full: { compared: 12121, trials: 12121, inTheWindow: 12121, onTheWholeNote: 0 },
 };
 
 type OracleCounts = typeof ORACLE_COUNTS;
@@ -285,8 +386,8 @@ export const ORACLE_PARTS: readonly {
       counts: {
         outcomes: {
           applied: 2609,
-          "filtered by keepsContainers": 0,
           "refused, as no trial settles": 27,
+          "refused, as a container would hold no line": 0,
           "not offered": 111,
           "range error": 0,
         },
@@ -323,8 +424,8 @@ export const ORACLE_PARTS: readonly {
       counts: {
         outcomes: {
           applied: 20062,
-          "filtered by keepsContainers": 0,
           "refused, as no trial settles": 248,
+          "refused, as a container would hold no line": 0,
           "not offered": 593,
           "range error": 0,
         },
@@ -363,17 +464,17 @@ export const ORACLE_PARTS: readonly {
   },
   {
     from: 40,
-    to: 65,
+    to: 67,
     sample: {
       counts: {
         outcomes: {
-          applied: 2415,
-          "filtered by keepsContainers": 0,
+          applied: 2754,
           "refused, as no trial settles": 48,
-          "not offered": 80,
+          "refused, as a container would hold no line": 4,
+          "not offered": 85,
           "range error": 0,
         },
-        undone: 2371,
+        undone: 2701,
         given: 1540,
         typedInBySomeoneElse: 2764,
         retypedBySomeoneElse: 1889,
@@ -389,28 +490,28 @@ export const ORACLE_PARTS: readonly {
           "an empty paragraph and a heading pasted over N-N": 2,
         },
         drags: {
-          "text, applied": 479,
-          "block, applied": 46,
+          "text, applied": 545,
+          "block, applied": 50,
           "text, refused, as no trial settles": 18,
         },
       },
       agreed: {
-        compared: 2463,
-        trials: 2463,
-        inTheWindow: 2461,
-        onTheWholeNote: 2,
+        compared: 2806,
+        trials: 2806,
+        inTheWindow: 2800,
+        onTheWholeNote: 6,
       },
     },
     full: {
       counts: {
         outcomes: {
-          applied: 18657,
-          "filtered by keepsContainers": 0,
+          applied: 21302,
           "refused, as no trial settles": 380,
-          "not offered": 476,
+          "refused, as a container would hold no line": 38,
+          "not offered": 519,
           "range error": 0,
         },
-        undone: 18249,
+        undone: 20810,
         given: 12067,
         typedInBySomeoneElse: 21061,
         retypedBySomeoneElse: 14211,
@@ -426,16 +527,16 @@ export const ORACLE_PARTS: readonly {
           "an empty paragraph and a heading pasted over N-N": 30,
         },
         drags: {
-          "text, applied": 3821,
+          "text, applied": 4358,
           "text, refused, as no trial settles": 148,
-          "block, applied": 357,
+          "block, applied": 389,
         },
       },
       agreed: {
-        compared: 19037,
-        trials: 19037,
-        inTheWindow: 19030,
-        onTheWholeNote: 7,
+        compared: 21720,
+        trials: 21720,
+        inTheWindow: 21675,
+        onTheWholeNote: 45,
       },
     },
   },
@@ -766,10 +867,19 @@ const takesContainersApart = (transaction: Transaction) =>
     return opens || $from.sharedDepth(step.to) < Math.max(depthOf($from), depthOf($to));
   });
 
+const holdsAContainerWithNoLine = (doc: ProseMirrorNode) => {
+  let found = false;
+  doc.descendants((node) => {
+    found ||= node.isBlock && !node.isTextblock && !node.isLeaf && node.childCount === 0;
+    return !found;
+  });
+  return found;
+};
+
 type Outcome =
   | "applied"
-  | "filtered by keepsContainers"
   | "refused, as no trial settles"
+  | "refused, as a container would hold no line"
   | "not offered"
   | "range error";
 
@@ -788,8 +898,8 @@ export function everyStepOracle(part: number): void {
     notes: 0,
     outcomes: {
       applied: 0,
-      "filtered by keepsContainers": 0,
       "refused, as no trial settles": 0,
+      "refused, as a container would hold no line": 0,
       "not offered": 0,
       "range error": 0,
     },
@@ -849,7 +959,12 @@ export function everyStepOracle(part: number): void {
           unsettled = howToWrite(writingOf(fresh), [wrote], "note") === null;
           const left = linesAWriteLeavesWanting(writingOf(fresh), [wrote]);
           fresh.doc.destroy();
-          if (unsettled && left.moved.length === 0 && (left.isSettled || left.wanting.length === 0))
+          if (
+            unsettled &&
+            !holdsAContainerWithNoLine(wrote.doc) &&
+            left.moved.length === 0 &&
+            (left.isSettled || left.wanting.length === 0)
+          )
             throw new Error(
               `${label} in ${before.toString()} was refused, and neither because a boundary it makes would stand in front of what a line with none held nor because it deletes the boundary a moved item's added paragraph would be given`,
             );
@@ -861,9 +976,13 @@ export function everyStepOracle(part: number): void {
             );
           a.expectMirror();
           expectTheWindowToAgree(agreement, longer, [wrote], `${label} in ${before.toString()}`);
-          outcome = "refused, as no trial settles";
-          const kind = kindOf(label);
-          oracle.unsettled.set(kind, (oracle.unsettled.get(kind) ?? 0) + 1);
+          if (holdsAContainerWithNoLine(wrote.doc))
+            outcome = "refused, as a container would hold no line";
+          else {
+            outcome = "refused, as no trial settles";
+            const kind = kindOf(label);
+            oracle.unsettled.set(kind, (oracle.unsettled.get(kind) ?? 0) + 1);
+          }
         } else if (wrote) {
           outcome = "applied";
           a.expectMirror();
@@ -904,15 +1023,8 @@ export function everyStepOracle(part: number): void {
               );
             oracle.undone += 1;
           }
-        } else if (refused) {
-          const docs = [...refused.docs, refused.doc];
-          const byContainers = refused.steps.some(
-            (step, at) => !keepsContainers(step, docs[at]!, docs[at + 1]!),
-          );
-          if (!byContainers)
-            throw new Error(`${label} in ${before.toString()} was refused for no listed reason`);
-          outcome = "filtered by keepsContainers";
-        }
+        } else if (refused)
+          throw new Error(`${label} in ${before.toString()} was refused for no listed reason`);
         oracle.outcomes[outcome] += 1;
         const drag = /^a (text|block) drag/.exec(label)?.[1];
         if (drag)
@@ -1151,6 +1263,20 @@ export function everyStepOracle(part: number): void {
               a.view.state.tr.setNodeMarkup(pos, undefined, { ...node.attrs, ...attribute }),
             ),
           );
+      });
+      start.descendants((node, pos) => {
+        if (!node.type.spec.tableRole?.includes("cell")) return true;
+        const state = EditorState.create({
+          doc: start,
+          selection: TextSelection.create(start, pos + 2),
+        });
+        for (const [name, command] of TABLE_COMMANDS)
+          if (command(state))
+            check(`${name}, from the cell at ${String(pos)}`, (a) => {
+              select(a, pos + 2);
+              command(a.view.state, a.view.dispatch);
+            });
+        return false;
       });
       sample.finish();
       oracle.notes += 1;

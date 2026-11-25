@@ -1149,7 +1149,8 @@ export function outdentItem(
 
 /**
  * Change the kind of the container that holds line `at` at `depth`, to a kind it can become: a
- * quote or a callout, or one of the three lists. A list's items take the new list's item kind.
+ * quote or a callout, one of the three lists, or a table cell or header cell. A list's items take
+ * the new list's item kind.
  */
 export function setContainerKind(
   schema: Schema,
@@ -1168,9 +1169,12 @@ export function setContainerKind(
       const stored = doc.getMap(BODY_CONTAINERS_FIELD);
       const container = lines[at]?.path[depth];
       if (!container) return null;
+      const isCell = (kind: string | undefined) => kind === "tableCell" || kind === "tableHeader";
       const itsFamily = isList(container.type)
         ? isList(type)
-        : isBox(container.type) && isBox(type);
+        : isBox(container.type)
+          ? isBox(type)
+          : isCell(container.type) && isCell(type);
       if (!itsFamily) return null;
       const changed = [container];
       if (stored.get(container.id) !== type) container.changes.set("", type);

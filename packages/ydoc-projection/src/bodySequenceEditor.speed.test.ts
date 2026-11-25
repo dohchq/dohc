@@ -4,6 +4,7 @@ import * as Y from "yjs";
 import { lift, wrapIn } from "@tiptap/pm/commands";
 import { liftListItem, wrapInList } from "@tiptap/pm/schema-list";
 import { EditorState, TextSelection, type Command, type Transaction } from "@tiptap/pm/state";
+import { addColumnAfter, setCellAttr } from "@tiptap/pm/tables";
 import { dropPoint } from "@tiptap/pm/transform";
 import type { EditorView } from "@tiptap/pm/view";
 import { bodySequenceAnchor, bodySequencePlugin } from "./bodySequenceEditor.js";
@@ -446,6 +447,57 @@ it("writes container changes to 1,000 lines of a note of 10,000 paragraphs in ti
   expect(view.state.doc.child(0).type.name).toBe("taskList");
   act("the to-do list turned off", liftListItem(schema.nodes.taskItem!), 1_000);
   expect(view.state.doc.childCount).toBe(10_000);
+  console.log(report.join("\n"));
+});
+
+it("writes a column added to a table of 1,000 rows above 9,000 paragraphs, and a cell setting on it, in time, each within the room's limits", () => {
+  const table = noteOf(({ sequence, containers }) => {
+    const records = (id: string, type: string) => {
+      for (const [key, value] of recordsOfContainer(schema, { id, type, attrs: {} }))
+        containers.set(key, value);
+    };
+    records("TB", "table");
+    for (let row = 0; row < 1_000; row++) {
+      records(`R${String(row)}`, "tableRow");
+      records(`C${String(row)}`, "tableCell");
+      const path = ["TB", `R${String(row)}`, `C${String(row)}`];
+      sequence.insertEmbed(sequence.length, boundary({ path }), {});
+      sequence.insert(sequence.length, LINE, {});
+    }
+    for (let line = 0; line < 9_000; line++) {
+      sequence.insertEmbed(sequence.length, boundary(), {});
+      sequence.insert(sequence.length, LINE, {});
+    }
+  });
+  const base = page(table, 62);
+  const { view, release } = editorWithNoPage(base);
+  onStop(release);
+  const other = page(table, 63);
+  const report: string[] = [];
+  const act = (name: string, command: Command) => {
+    const from = base.sent.length;
+    const start = performance.now();
+    expect(command(view.state, view.dispatch), name).toBe(true);
+    const took = performance.now() - start;
+    const updates = base.sent.slice(from);
+    expect(updates, name).toHaveLength(1);
+    expect(
+      bodySequenceChangeLimit(updates[0]!, WORKER_LIVE_VALIDATION_POLICY),
+      name,
+    ).toBeUndefined();
+    const { structs, values } = bodySequenceChangeSize(updates[0]!);
+    report.push(
+      `${name}: ${took.toFixed(0)} ms, ${String(updates[0]!.length)} bytes, ${String(structs)} items, ${String(values)} values`,
+    );
+    other.receive(updates[0]!);
+    expect(readBodySequence(schema, other.doc).eq(view.state.doc), name).toBe(true);
+    return took;
+  };
+  const row = view.state.doc.child(0).child(0).nodeSize;
+  view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 4 + row * 500)));
+  expect(act("a column added to 1,000 rows", addColumnAfter)).toBeLessThan(3_000);
+  expect(view.state.doc.child(0).child(0).childCount).toBe(2);
+  expect(act("a cell of it centered", setCellAttr("align", "center"))).toBeLessThan(1_000);
   console.log(report.join("\n"));
 });
 

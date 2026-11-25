@@ -91,48 +91,6 @@ function replaces(map: StepMap): boolean {
   return found;
 }
 
-const isTablePart = (node: ProseMirrorNode) =>
-  holdsBlocks(node) && node.type.name.startsWith("table");
-
-function leavesWhole(
-  step: Step,
-  before: ProseMirrorNode,
-  after: ProseMirrorNode,
-  counts: (node: ProseMirrorNode) => boolean,
-): boolean {
-  let kept = true;
-  let replaced = false;
-  step.getMap().forEach((oldStart, oldEnd, newStart, newEnd) => {
-    replaced = true;
-    before.nodesBetween(oldStart, oldEnd, (node, pos) => {
-      if (counts(node) && pos >= oldStart !== pos + node.nodeSize <= oldEnd) kept = false;
-      return kept && !node.isTextblock;
-    });
-    after.nodesBetween(newStart, newEnd, (node, pos) => {
-      if (counts(node) && (pos >= newStart || pos + node.nodeSize <= newEnd)) kept = false;
-      return kept && !node.isTextblock;
-    });
-  });
-  if (!replaced && step instanceof AttrStep) {
-    const node = before.nodeAt(step.pos);
-    if (node && counts(node)) kept = false;
-  }
-  return kept;
-}
-
-/**
- * Whether a step leaves every table as it is: it starts none, changes none, and removes one only
- * whole. Any other step is refused until table changes are written here. What a step does to
- * lists, list items, quotes and callouts, `writeTransaction` writes.
- */
-export function keepsContainers(
-  step: Step,
-  before: ProseMirrorNode,
-  after: ProseMirrorNode,
-): boolean {
-  return leavesWhole(step, before, after, isTablePart);
-}
-
 const isHighSurrogate = (unit: number) => unit >= 0xd800 && unit <= 0xdbff;
 const isLowSurrogate = (unit: number) => unit >= 0xdc00 && unit <= 0xdfff;
 
@@ -172,10 +130,11 @@ type Range = [oldStart: number, oldEnd: number, newStart: number, newEnd: number
 
 function trimRange(before: ProseMirrorNode, after: ProseMirrorNode, range: Range): Range {
   const [oldStart, oldEnd, newStart, newEnd] = range;
+  const shortest = Math.min(oldEnd - oldStart, newEnd - newStart);
+  if (shortest === 0) return range;
   const differs = before.content.findDiffStart(after.content);
   const ends = before.content.findDiffEnd(after.content);
   if (differs === null || !ends) return range;
-  const shortest = Math.min(oldEnd - oldStart, newEnd - newStart);
   const $start = before.resolve(oldStart);
   const inItsBlock = $start.depth > 0 ? $start.end() - oldStart : shortest;
   let head = Math.max(0, Math.min(differs - oldStart, shortest, inItsBlock));
@@ -391,6 +350,7 @@ function keepsTheStartItReplaces(
 function writeRange(
   writing: BodyWriting,
   after: ProseMirrorNode,
+  reading: BodyReading,
   oldStart: number,
   oldEnd: number,
   newStart: number,
@@ -399,7 +359,6 @@ function writeRange(
   const { sequence, reader } = writing;
   const tokens = tokensBetween(after, newStart, newEnd);
   const paragraph = after.type.schema.nodes.paragraph!.create();
-  const reading = reader.reading();
   const holder = blockHolding(reading, oldStart);
   const startsBlock = tokens.some((token) => "block" in token);
   const atStart = holder >= 0 && oldStart === reading.starts[holder]! + 1;
@@ -614,7 +573,7 @@ function writeContainersThatDiffer(
     });
   walk(after, 0, []);
   const shown = reading.blocks.map((_, at) => at).filter((at) => !skip.has(at));
-  if (chains.length !== shown.length) return false;
+  if (chains.length !== shown.length || nodes.some(({ first, last }) => last < first)) return false;
 
   const started = change.beforeState.get(doc.clientID) ?? 0;
   const isNew = ({ _item }: SequenceElement) =>
@@ -784,11 +743,17 @@ function writeContainersThatDiffer(
   return true;
 }
 
-function linesOnlyImplied(reading: BodyReading, after: ProseMirrorNode): Set<number> | null {
+function linesOnlyImplied(
+  reading: BodyReading,
+  after: ProseMirrorNode,
+  from: number,
+  to: number,
+): Set<number> | null {
   const bare = new Set<number>();
   const kinds: string[] = [];
   reading.blocks.forEach(({ node }, block) => {
-    if (boundaryAt(reading, block) < 0) bare.add(block);
+    const start = reading.starts[block]!;
+    if (boundaryAt(reading, block) < 0 && start >= from && start <= to) bare.add(block);
     else kinds.push(node.type.name);
   });
   const wanted: string[] = [];
@@ -820,7 +785,10 @@ function writeBlockStartsThatDiffer(writing: BodyWriting, after: ProseMirrorNode
     const stored = unitsBetween(read, start, a);
     const edits = blockStartEdits(stored, unitsBetween(after, start, b));
     if (edits === null) return false;
-    const implied = edits.some((edit) => "drop" in edit) ? linesOnlyImplied(reading, after) : null;
+    const implied = edits.some((edit) => "drop" in edit)
+      ? (linesOnlyImplied(reading, after, start, a) ??
+        linesOnlyImplied(reading, after, 0, Infinity))
+      : null;
     const added = implied ?? new Set<number>();
     let wrote = false;
     for (const edit of implied ? [] : edits) {
@@ -1041,14 +1009,17 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
  * a fresh id and every record. Records are never deleted. A run of steps that keeps every leaf,
  * the same boundaries and inline items in the same order, is written once at its end: a wrap, a
  * lift, a join of two containers, and an attribute step on a container. Written after each such
- * step, a wrap of many lines would write each line's path once for every step.
+ * step, a wrap of many lines would write each line's path once for every step. A run of steps
+ * that each only insert, none of them next to or inside what an earlier one inserted, is written
+ * the same way, against one reading, from the last place to the first: a column added to many
+ * rows, read again after each cell, would cost the whole note once for every row.
  *
  * Returns false when it stopped at a step after which the sequence does not read as the editor's
  * document, and when the containers cannot be written: deeper than a path can be, a string
  * attribute with half a surrogate pair, or a line with no boundary of its own that would move to
  * other containers. `writing.wanting` then collects that line. `afterEachStep` is called with the
  * editor's document once for each step that changes leaves, when it is written, once at the end
- * of each run that keeps them, and once more for formatting steps that end the transaction. When
+ * of each run that keeps them or only inserts, and once more for formatting steps that end the transaction. When
  * it returns false the writer stops there and returns false too: the next step's places are
  * places in the editor's document, and mean nothing in a sequence that does not read as it.
  */
@@ -1058,14 +1029,28 @@ export function writeTransaction(
   afterEachStep?: (shown: ProseMirrorNode) => boolean,
 ): boolean {
   const docs = [...transaction.docs, transaction.doc];
-  type Run = { kind: "marks" | "containers"; from: number };
+  type Run = { kind: "marks" | "containers" | "inserts"; from: number };
   let run = null as Run | null;
+  let inserts: [base: number, step: number, range: Range][] = [];
+  const baseOf = (pos: number) => {
+    for (const [, , [, , start, end]] of inserts.toReversed()) {
+      if (pos >= start && pos <= end) return -1;
+      if (pos > end) pos -= end - start;
+    }
+    return pos;
+  };
   const flush = (at: number, isLast: boolean) => {
     if (!run) return true;
     const { kind, from } = run;
     run = null;
     const shown = docs[at]!;
-    if (kind === "containers" && !writeBlockStartsThatDiffer(writing, shown)) return false;
+    if (kind === "inserts") {
+      const reading = writing.reader.reading();
+      for (const [base, step, [, , start, end]] of inserts.sort((one, other) => other[0] - one[0]))
+        writeRange(writing, docs[step + 1]!, reading, base, base, start, end);
+      inserts = [];
+    }
+    if (kind !== "marks" && !writeBlockStartsThatDiffer(writing, shown)) return false;
     if (kind === "marks") writeFormatting(writing, docs[from]!, shown);
     return (kind === "marks" && !isLast) || afterEachStep?.(shown) !== false;
   };
@@ -1076,14 +1061,25 @@ export function writeTransaction(
     const after = docs[at + 1]!;
     const ranges = replaces(map) ? rangesOf(before, after, map) : null;
     if (ranges?.length === 0) continue;
-    const kind = keepsEveryLeaf(step, before, after) ? "containers" : ranges ? null : "marks";
-    if (kind !== null && run?.kind === kind) continue;
+    const insert = ranges?.length === 1 && ranges[0]![0] === ranges[0]![1] ? ranges[0]! : null;
+    const kind = keepsEveryLeaf(step, before, after)
+      ? "containers"
+      : insert
+        ? "inserts"
+        : ranges
+          ? null
+          : "marks";
+    const base = insert && run?.kind === "inserts" ? baseOf(insert[0]) : -1;
+    if (base >= 0) inserts.push([base, at, insert!]);
+    if (base >= 0 || (kind !== null && kind !== "inserts" && run?.kind === kind)) continue;
     if (!flush(at, false)) return false;
     if (kind !== null) {
       run = { kind, from: at };
+      if (insert) inserts.push([insert[0], at, insert]);
       continue;
     }
-    for (const range of ranges!.reverse()) writeRange(writing, after, ...range);
+    for (const range of ranges!.reverse())
+      writeRange(writing, after, writing.reader.reading(), ...range);
     if (!writeBlockStartsThatDiffer(writing, after)) return false;
     if (afterEachStep?.(after) === false) return false;
   }
@@ -1827,7 +1823,7 @@ function asOneRange(transaction: Transform): Transform | null {
   const { before, doc } = transaction;
   const until = before.content.size - (doc.content.size - to);
   const step = new ReplaceStep(from, until, doc.slice(from, to));
-  if (!keepsPairs(step, before) || !keepsContainers(step, before, doc)) return null;
+  if (!keepsPairs(step, before)) return null;
   const whole = new Transform(before);
   try {
     return !whole.maybeStep(step).failed && whole.doc.eq(doc) ? whole : null;

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { type Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { type Transaction } from "@tiptap/pm/state";
+import { deleteColumn, deleteRow, setCellAttr, toggleHeaderCell } from "@tiptap/pm/tables";
 import { isBodySequenceChange } from "./bodySequenceEditor.js";
 import { boundaryAt, createBodyReader, isAddedParagraph } from "./bodySequenceReading.js";
 import {
@@ -10,6 +11,8 @@ import {
   GIVEN_BOUNDARY,
   insertInline,
   joinLine,
+  setContainerAttributes,
+  setContainerKind,
   setLineKind,
   setMarks,
   splitLine,
@@ -162,9 +165,9 @@ const withNoReason = (counts: Differential) =>
   );
 
 const EVERY_EDIT: Differential = {
-  compared: 9365,
-  onlyOne: 630,
-  neither: 353,
+  compared: 10048,
+  onlyOne: 641,
+  neither: 361,
   givenDifferently: {
     "Enter over a selection across blocks": 98,
     "Enter over a selection across blocks, from the note's start": 18,
@@ -172,16 +175,16 @@ const EVERY_EDIT: Differential = {
     "a divider over a selection across blocks": 2,
   },
   readDifferently: {
-    "Enter over a selection across blocks, from the note's start": 57,
+    "Enter over a selection across blocks, from the note's start": 63,
     "a change of kind to codeBlock": 23,
-    "two paragraphs pasted over a selection across blocks": 156,
-    "a divider over a selection across blocks": 94,
-    "Enter over a selection across blocks, from a line's start": 34,
+    "two paragraphs pasted over a selection across blocks": 228,
+    "a divider over a selection across blocks": 112,
+    "Enter over a selection across blocks, from a line's start": 37,
     "a split": 7,
-    "two paragraphs pasted over a selection across blocks, the first whole": 8,
+    "two paragraphs pasted over a selection across blocks, the first whole": 14,
     "a join": 3,
     "a block put first in its container": 2,
-    "Enter over a selection across blocks": 16,
+    "Enter over a selection across blocks": 28,
     "a divider": 4,
     "a split over a selection, as a delete and a split": 4,
     "Enter over a selection": 4,
@@ -190,7 +193,9 @@ const EVERY_EDIT: Differential = {
     "two paragraphs pasted over a selection, the first whole": 3,
     "two paragraphs pasted over a selection": 3,
     "a block put right under another": 1,
-    "a delete of a whole block": 1,
+    "a delete of a whole block": 5,
+    "a delete across blocks": 18,
+    "a letter typed over a selection across blocks": 18,
   },
   bothDifferently: {
     "Enter over a selection across blocks, from the note's start": 33,
@@ -211,23 +216,23 @@ const EVERY_EDIT: Differential = {
     "a block put right under another": 1,
   },
   keptDifferently: {
-    "Enter over a selection across blocks, from the note's start": 88,
-    "two paragraphs pasted over a selection across blocks, the first whole": 78,
-    "a divider over a selection across blocks": 57,
+    "Enter over a selection across blocks, from the note's start": 96,
+    "two paragraphs pasted over a selection across blocks, the first whole": 98,
+    "a divider over a selection across blocks": 75,
     "Enter over a selection across blocks, from a line's start": 8,
     "a join": 8,
     "a divider over a selection": 2,
     "a divider over a selection, as a delete and a block put in": 2,
-    "a delete of a whole block": 1,
+    "a delete of a whole block": 5,
   },
   recordedDifferently: {
-    "Enter over a selection across blocks, from the note's start": 57,
-    "two paragraphs pasted over a selection across blocks, the first whole": 69,
+    "Enter over a selection across blocks, from the note's start": 62,
+    "two paragraphs pasted over a selection across blocks, the first whole": 89,
     "Enter over a selection across blocks": 108,
     "a change of kind to codeBlock": 23,
     "a delete across blocks": 9,
     "a letter typed over a selection across blocks": 9,
-    "a divider over a selection across blocks": 153,
+    "a divider over a selection across blocks": 171,
     "two paragraphs pasted over a selection across blocks": 45,
     "Enter over a selection across blocks, from a line's start": 22,
     "a divider": 4,
@@ -299,9 +304,9 @@ const EVERY_EDIT_AT_RANDOM: Differential = {
 };
 
 const EVERY_EIGHTH_EDIT: Differential = {
-  compared: 1779,
-  onlyOne: 189,
-  neither: 105,
+  compared: 1867,
+  onlyOne: 194,
+  neither: 107,
   givenDifferently: {
     "Enter over a selection across blocks, from the note's start": 6,
     "Enter over a selection across blocks": 14,
@@ -309,16 +314,19 @@ const EVERY_EIGHTH_EDIT: Differential = {
     "a divider over a selection across blocks": 1,
   },
   readDifferently: {
-    "Enter over a selection across blocks, from the note's start": 20,
+    "Enter over a selection across blocks, from the note's start": 21,
     "a change of kind to codeBlock": 4,
-    "two paragraphs pasted over a selection across blocks": 22,
+    "two paragraphs pasted over a selection across blocks": 30,
     "Enter over a selection across blocks, from a line's start": 5,
-    "a divider over a selection across blocks": 13,
-    "Enter over a selection across blocks": 2,
+    "a divider over a selection across blocks": 15,
+    "Enter over a selection across blocks": 4,
     "a block put first in its container": 2,
     "a block put right under another": 1,
     "a join": 1,
-    "a delete of a whole block": 1,
+    "a delete of a whole block": 3,
+    "a delete across blocks": 2,
+    "a letter typed over a selection across blocks": 2,
+    "two paragraphs pasted over a selection across blocks, the first whole": 1,
   },
   bothDifferently: {
     "a delete across blocks": 1,
@@ -331,21 +339,21 @@ const EVERY_EIGHTH_EDIT: Differential = {
     "Enter over a selection across blocks, from a line's start": 3,
   },
   keptDifferently: {
-    "Enter over a selection across blocks, from the note's start": 30,
-    "two paragraphs pasted over a selection across blocks, the first whole": 11,
-    "a divider over a selection across blocks": 8,
+    "Enter over a selection across blocks, from the note's start": 32,
+    "two paragraphs pasted over a selection across blocks, the first whole": 12,
+    "a divider over a selection across blocks": 11,
     "Enter over a selection across blocks, from a line's start": 1,
     "a join": 1,
-    "a delete of a whole block": 1,
+    "a delete of a whole block": 3,
   },
   recordedDifferently: {
-    "Enter over a selection across blocks, from the note's start": 11,
-    "two paragraphs pasted over a selection across blocks, the first whole": 9,
+    "Enter over a selection across blocks, from the note's start": 13,
+    "two paragraphs pasted over a selection across blocks, the first whole": 10,
     "a delete across blocks": 1,
     "a letter typed over a selection across blocks": 1,
     "Enter over a selection across blocks": 15,
     "a change of kind to codeBlock": 4,
-    "a divider over a selection across blocks": 20,
+    "a divider over a selection across blocks": 23,
     "two paragraphs pasted over a selection across blocks": 8,
     "Enter over a selection across blocks, from a line's start": 3,
     "a block put right under another": 2,
@@ -643,6 +651,112 @@ function compareWithReference(lines: readonly StoredLine[], counted: Tally, note
           : size > 0 && make((doc) => splitLine(schema, doc, at, 0, freshId, RULE)),
       (a) => a.view.dispatch(a.view.state.tr.insert(reading.starts[at]!, rule())),
     );
+    const $line = reading.doc.resolve(reading.starts[at]!);
+    const linesOf = (pos: number, node: ProseMirrorNode) =>
+      reading.starts.flatMap((start, line) =>
+        start > pos && start < pos + node.nodeSize ? [line] : [],
+      );
+    const lineSize = (line: number) => reading.blocks[line]!.node.content.size;
+    const hasALineAbove = (lines: readonly number[]) =>
+      lines[0]! > 0 && reading.blocks[lines[0]! - 1]!.node.isTextblock;
+    const deleteLines = (make: Make, lines: readonly number[]) =>
+      make((doc) =>
+        deleteRange(
+          schema,
+          doc,
+          lines[0]! - 1,
+          lineSize(lines[0]! - 1),
+          lines.at(-1)!,
+          lineSize(lines.at(-1)!),
+          freshId,
+        ),
+      );
+    for (let depth = 1; depth <= $line.depth; depth++) {
+      const container = $line.node(depth);
+      const pos = $line.before(depth);
+      const isFirst = linesOf(pos, container)[0] === at;
+      if (container.type.name === "tableRow" && isFirst) {
+        compare(
+          "a row's height",
+          `of block ${String(at)}`,
+          (make) =>
+            make((doc) =>
+              setContainerAttributes(schema, doc, at, depth - 1, { height: 40 }, freshId),
+            ),
+          (a) => a.view.dispatch(a.view.state.tr.setNodeAttribute(pos, "height", 40)),
+        );
+        compare(
+          "a row deleted",
+          `of block ${String(at)}`,
+          (make) =>
+            hasALineAbove(linesOf(pos, container)) && deleteLines(make, linesOf(pos, container)),
+          (a) => {
+            a.select([at, 0]);
+            deleteRow(a.view.state, a.view.dispatch);
+          },
+        );
+      }
+      if (container.type.spec.tableRole?.includes("cell") !== true || !isFirst) continue;
+      for (const [name, value] of [
+        ["align", "center"],
+        ["colwidth", [120]],
+      ] as const)
+        compare(
+          `a cell's ${name}`,
+          `of block ${String(at)}`,
+          (make) =>
+            make((doc) =>
+              setContainerAttributes(schema, doc, at, depth - 1, { [name]: value }, freshId),
+            ),
+          (a) => {
+            a.select([at, 0]);
+            setCellAttr(name, value)(a.view.state, a.view.dispatch);
+          },
+        );
+      compare(
+        "a cell made a header or a header a cell",
+        `of block ${String(at)}`,
+        (make) =>
+          make((doc) =>
+            setContainerKind(
+              schema,
+              doc,
+              at,
+              depth - 1,
+              container.type.name === "tableCell" ? "tableHeader" : "tableCell",
+              freshId,
+            ),
+          ),
+        (a) => {
+          a.select([at, 0]);
+          toggleHeaderCell(a.view.state, a.view.dispatch);
+        },
+      );
+      const table = $line.node(depth - 2);
+      const column = $line.index(depth - 1);
+      if ($line.index(depth - 2) === 0)
+        compare(
+          "a column deleted",
+          `of block ${String(at)}`,
+          (make) => {
+            const cells: number[][] = [];
+            table.forEach((row, offset) =>
+              row.forEach((cell, inRow, index) => {
+                if (index === column)
+                  cells.push(linesOf($line.start(depth - 2) + offset + 1 + inRow, cell));
+              }),
+            );
+            return (
+              cells.every(hasALineAbove) &&
+              cells.toReversed().every((lines) => deleteLines(make, lines))
+            );
+          },
+          (a) => {
+            a.select([at, 0]);
+            deleteColumn(a.view.state, a.view.dispatch);
+          },
+        );
+    }
     if (!own.isTextblock) return;
     const isCode = own.type.spec.code === true;
     const underNewLine = (make: Make, line: number, offset: number) =>

@@ -10,6 +10,7 @@ import {
   type EditorState,
   type Transaction,
 } from "@tiptap/pm/state";
+import { fixTablesKey } from "@tiptap/pm/tables";
 import { ReplaceStep, StepMap } from "@tiptap/pm/transform";
 import * as Y from "yjs";
 import {
@@ -31,13 +32,7 @@ import {
   type BodyReading,
   type Followed,
 } from "./bodySequenceReading.js";
-import {
-  giveBoundaries,
-  howToWrite,
-  keepsContainers,
-  keepsPairs,
-  writeTransaction,
-} from "./bodySequenceWriting.js";
+import { giveBoundaries, howToWrite, keepsPairs, writeTransaction } from "./bodySequenceWriting.js";
 
 export type BodySequenceOptions = {
   /** The note's `sequence`, declared before any update was applied to its document. */
@@ -346,13 +341,16 @@ function holdSelection(
  * A change of the sequence from elsewhere, and an undo or redo, is shown as one transaction that
  * replaces what differs, keeps the nodes of the blocks it does not touch, and keeps the selection
  * around its letters. It shows every change the note's document holds by then, also the ones
- * Yjs has not told of yet. Such a transaction is never written back.
+ * Yjs has not told of yet. Such a transaction is never written back. A selection that cannot be
+ * mapped through it, as `prosemirror-tables` cannot map a row of cells into a table whose rows
+ * now differ in length, becomes a caret where its head went.
  *
- * A transaction that would start, change or cut a table is refused. So is one that would
- * write between the two units of a surrogate pair or put in half of one, and one dispatched while
- * a Yjs transaction is open, while Yjs has not told of every finished one, or before the editor
- * shows a change the note's document holds: its offsets may be of a document the sequence no
- * longer reads as. So is what a plugin adds to a transaction that shows the note.
+ * A table repair that `prosemirror-tables` adds to a transaction, marked with `fixTablesKey`,
+ * is refused, since no editor writes one. So is a transaction that would write between the two
+ * units of a surrogate pair or put in half of one, and one dispatched while a Yjs transaction is
+ * open, while Yjs has not told of every finished one, or before the editor shows a change the
+ * note's document holds: its offsets may be of a document the sequence no longer reads as. So is
+ * what a plugin adds to a transaction that shows the note.
  *
  * What the editor has not shown is counted from Yjs's `beforeTransaction`. When a listener of the
  * host throws from `afterTransaction` before the editor's own is called, the editor shows what it
@@ -388,11 +386,8 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
       const unwritten = pending === flushed ? undefined : pending[0];
       if (showsWhatStands && !showsWhatStands(unwritten ? unwritten.before : state.doc))
         return false;
-      return transaction.steps.every(
-        (step, at) =>
-          keepsPairs(step, transaction.docs[at]!) &&
-          keepsContainers(step, transaction.docs[at]!, transaction.docs[at + 1] ?? transaction.doc),
-      );
+      if (transaction.getMeta(fixTablesKey)) return false;
+      return transaction.steps.every((step, at) => keepsPairs(step, transaction.docs[at]!));
     },
     props: {
       handleKeyDown: keydownHandler({
@@ -447,6 +442,13 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
         }
         const isAsItWas = was !== undefined && transaction.doc.eq(was.$anchor.doc);
         if (isAsItWas) transaction.setSelection(was.map(transaction.doc, StepMap.empty));
+        try {
+          void transaction.selection;
+        } catch (error) {
+          if (!(error instanceof RangeError)) throw error;
+          const head = transaction.mapping.map(view.state.selection.head);
+          transaction.setSelection(Selection.near(transaction.doc.resolve(head)));
+        }
         if (start !== null || isAsItWas) {
           if (view.state.storedMarks) transaction.setStoredMarks(view.state.storedMarks);
           showing = true;
