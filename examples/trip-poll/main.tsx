@@ -7,4 +7,11 @@ import "./style.css";
 const client = connectCollection();
 const root = createRoot(document.getElementById("root")!);
 root.render(React.createElement(Poll, { client }));
-window.addEventListener("pagehide", () => { root.unmount(); client.close(); }, { once: true });
+window.addEventListener(
+  "pagehide",
+  () => {
+    root.unmount();
+    client.close();
+  },
+  { once: true },
+);

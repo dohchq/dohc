@@ -121,7 +121,13 @@ export function HexBoard({
     return { positioned, byKey, minX, minY, width: maxX - minX, height: maxY - minY };
   }, [tiles]);
 
-  const tabStop = cursorHex && layout.byKey.has(cursorHex) ? cursorHex : (selectedHex ?? layout.positioned.find((p) => p.tile.ownerSeat === viewerSeat)?.key ?? layout.positioned[0]?.key ?? null);
+  const tabStop =
+    cursorHex && layout.byKey.has(cursorHex)
+      ? cursorHex
+      : (selectedHex ??
+        layout.positioned.find((p) => p.tile.ownerSeat === viewerSeat)?.key ??
+        layout.positioned[0]?.key ??
+        null);
 
   const arrow = useMemo(() => {
     if (!lastMove?.fromHex || !lastMove.toHex) return null;
@@ -131,7 +137,10 @@ export function HexBoard({
     return arrowPath(from, to);
   }, [lastMove, layout.byKey]);
 
-  const moveCursor = (event: KeyboardEvent<SVGPolygonElement>, from: { x: number; y: number; tile: VisibleTile }) => {
+  const moveCursor = (
+    event: KeyboardEvent<SVGPolygonElement>,
+    from: { x: number; y: number; tile: VisibleTile },
+  ) => {
     let next: string | null = null;
     const horizontal = NEIGHBORS[event.key];
     if (horizontal) {
@@ -140,7 +149,10 @@ export function HexBoard({
       anchorX.current = layout.byKey.get(next ?? "")?.x ?? from.x;
     } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
       const dr = event.key === "ArrowUp" ? -1 : 1;
-      const candidates = [hexKeyOf(from.tile.q, from.tile.r + dr), hexKeyOf(from.tile.q - dr, from.tile.r + dr)]
+      const candidates = [
+        hexKeyOf(from.tile.q, from.tile.r + dr),
+        hexKeyOf(from.tile.q - dr, from.tile.r + dr),
+      ]
         .map((key) => layout.byKey.get(key))
         .filter((p): p is NonNullable<typeof p> => Boolean(p));
       const goal = anchorX.current ?? from.x;
@@ -153,7 +165,9 @@ export function HexBoard({
     event.preventDefault();
     if (next) {
       onCursor(next);
-      event.currentTarget.ownerSVGElement?.querySelector<SVGPolygonElement>(`.hc-hit[data-hex="${next}"]`)?.focus();
+      event.currentTarget.ownerSVGElement
+        ?.querySelector<SVGPolygonElement>(`.hc-hit[data-hex="${next}"]`)
+        ?.focus();
     }
   };
 
@@ -168,10 +182,28 @@ export function HexBoard({
             <stop offset="1" stopColor="var(--hc-bevel-lo)" />
           </linearGradient>
           <pattern id={ids.grass} width="23" height="17" patternUnits="userSpaceOnUse">
-            <path d="M 4 10 l 1.6 -3.4 l 1.6 3.4 M 15 4 l 1.4 -3 l 1.4 3" fill="none" stroke="var(--t-plains-ink)" strokeWidth="1" strokeLinecap="round" />
+            <path
+              d="M 4 10 l 1.6 -3.4 l 1.6 3.4 M 15 4 l 1.4 -3 l 1.4 3"
+              fill="none"
+              stroke="var(--t-plains-ink)"
+              strokeWidth="1"
+              strokeLinecap="round"
+            />
           </pattern>
-          <pattern id={ids.mist} width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="rotate(35)">
-            <path d="M 0 5 h 4" fill="none" stroke="var(--t-fog-ink)" strokeWidth="1.3" strokeLinecap="round" />
+          <pattern
+            id={ids.mist}
+            width="10"
+            height="10"
+            patternUnits="userSpaceOnUse"
+            patternTransform="rotate(35)"
+          >
+            <path
+              d="M 0 5 h 4"
+              fill="none"
+              stroke="var(--t-fog-ink)"
+              strokeWidth="1.3"
+              strokeLinecap="round"
+            />
           </pattern>
           <filter id={ids.blur} x="-30%" y="-30%" width="160%" height="160%">
             <feGaussianBlur stdDeviation="9" />
@@ -192,7 +224,10 @@ export function HexBoard({
             const owned = tile.visible && tile.ownerSeat !== null;
             return (
               <g key={key} className="hc-tile" data-t={t}>
-                <polygon points={hexPoints(x, y + SKIRT, HEX_SIZE - 1)} fill={`var(--t-${t}-side)`} />
+                <polygon
+                  points={hexPoints(x, y + SKIRT, HEX_SIZE - 1)}
+                  fill={`var(--t-${t}-side)`}
+                />
                 <polygon points={face} fill={`var(--t-${t}-top)`} />
                 {t === "plains" || t === "capital" ? (
                   <polygon points={face} fill={`url(#${ids.grass})`} opacity={0.5} />
@@ -228,10 +263,19 @@ export function HexBoard({
         </g>
 
         {fogTiles.length > 0 ? (
-          <g className="hc-layer-fog" clipPath={`url(#${ids.clip})`} pointerEvents="none" aria-hidden="true">
+          <g
+            className="hc-layer-fog"
+            clipPath={`url(#${ids.clip})`}
+            pointerEvents="none"
+            aria-hidden="true"
+          >
             <g filter={`url(#${ids.blur})`}>
               {fogTiles.map(({ key, x, y }) => (
-                <polygon key={key} points={hexPoints(x, y + 3, HEX_SIZE + 6)} fill="var(--t-fog-haze)" />
+                <polygon
+                  key={key}
+                  points={hexPoints(x, y + 3, HEX_SIZE + 6)}
+                  fill="var(--t-fog-haze)"
+                />
               ))}
             </g>
           </g>
@@ -265,7 +309,9 @@ export function HexBoard({
                 {kind === "attack" ? (
                   <g className="hc-reticle">
                     <circle cx={x} cy={y + 2} r={19} />
-                    <path d={`M ${x} ${y - 21} v 7 M ${x} ${y + 18} v 7 M ${x - 23} ${y + 2} h 7 M ${x + 16} ${y + 2} h 7`} />
+                    <path
+                      d={`M ${x} ${y - 21} v 7 M ${x} ${y + 18} v 7 M ${x - 23} ${y + 2} h 7 M ${x + 16} ${y + 2} h 7`}
+                    />
                   </g>
                 ) : null}
                 {!forecast || forecast.toHex === key ? (
@@ -279,12 +325,22 @@ export function HexBoard({
           })}
           {highlightHexes.map((hex) => {
             const p = layout.byKey.get(hex);
-            return p ? <polygon key={`log-${hex}`} className="hc-log-ring" points={hexPoints(p.x, p.y, HEX_SIZE - 3)} /> : null;
+            return p ? (
+              <polygon
+                key={`log-${hex}`}
+                className="hc-log-ring"
+                points={hexPoints(p.x, p.y, HEX_SIZE - 3)}
+              />
+            ) : null;
           })}
           {selectedHex && layout.byKey.has(selectedHex) ? (
             <polygon
               className="hc-select-ring"
-              points={hexPoints(layout.byKey.get(selectedHex)!.x, layout.byKey.get(selectedHex)!.y, HEX_SIZE - 2)}
+              points={hexPoints(
+                layout.byKey.get(selectedHex)!.x,
+                layout.byKey.get(selectedHex)!.y,
+                HEX_SIZE - 2,
+              )}
             />
           ) : null}
           {flash && layout.byKey.get(flash.hex)?.tile.visible ? (
@@ -315,7 +371,11 @@ export function HexBoard({
             if (units <= 0 && !(forecast?.toHex === key && forecast.gain > 0)) return null;
             const isOwn = viewerSeat !== null && tile.ownerSeat === viewerSeat;
             const pipLoss =
-              forecast?.toHex === key ? forecast.defenderLoss : forecast?.fromHex === key ? forecast.leaving : 0;
+              forecast?.toHex === key
+                ? forecast.defenderLoss
+                : forecast?.fromHex === key
+                  ? forecast.leaving
+                  : 0;
             const pipGain = forecast?.toHex === key ? forecast.gain : 0;
             const arrived = lastMove?.toHex === key;
             return (
@@ -336,7 +396,11 @@ export function HexBoard({
         </g>
 
         {forecast && layout.byKey.has(forecast.toHex) ? (
-          <g className={`hc-forecast hc-forecast-${forecast.tone}`} pointerEvents="none" aria-hidden="true">
+          <g
+            className={`hc-forecast hc-forecast-${forecast.tone}`}
+            pointerEvents="none"
+            aria-hidden="true"
+          >
             {(() => {
               const p = layout.byKey.get(forecast.toHex)!;
               const width = forecast.label.length * 5.9 + 10;

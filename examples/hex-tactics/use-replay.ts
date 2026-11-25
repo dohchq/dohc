@@ -55,12 +55,20 @@ export function useReplay(client: ReturnType<typeof useApp>) {
       setError(null);
       setPlaying(false);
       try {
-        const firstPage = await client.read<ReplayPayload>("replayGame", { gameId, afterTurn: 0, limit: 200 });
+        const firstPage = await client.read<ReplayPayload>("replayGame", {
+          gameId,
+          afterTurn: 0,
+          limit: 200,
+        });
         if (requestSeq.current !== requestId) return false;
         const allMoves = [...firstPage.moves];
         let cursor = firstPage.nextAfterTurn;
         while (cursor !== null) {
-          const nextPage = await client.read<ReplayPayload>("replayGame", { gameId, afterTurn: cursor, limit: 200 });
+          const nextPage = await client.read<ReplayPayload>("replayGame", {
+            gameId,
+            afterTurn: cursor,
+            limit: 200,
+          });
           if (requestSeq.current !== requestId) return false;
           allMoves.push(...nextPage.moves);
           cursor = nextPage.nextAfterTurn;
@@ -70,7 +78,8 @@ export function useReplay(client: ReturnType<typeof useApp>) {
         setOpen(true);
         return true;
       } catch (caught) {
-        if (requestSeq.current === requestId) setError(caught instanceof Error ? caught.message : "dohc could not load the replay.");
+        if (requestSeq.current === requestId)
+          setError(caught instanceof Error ? caught.message : "dohc could not load the replay.");
         return false;
       } finally {
         if (requestSeq.current === requestId) setLoading(false);
@@ -94,5 +103,19 @@ export function useReplay(client: ReturnType<typeof useApp>) {
 
   const activeFrame = open && frames.length > 0 ? (frames[Math.min(step, lastStep)] ?? null) : null;
 
-  return { open, data, loading, error, step, playing: running, frames, activeFrame, load, close, reset, goTo, togglePlay };
+  return {
+    open,
+    data,
+    loading,
+    error,
+    step,
+    playing: running,
+    frames,
+    activeFrame,
+    load,
+    close,
+    reset,
+    goTo,
+    togglePlay,
+  };
 }

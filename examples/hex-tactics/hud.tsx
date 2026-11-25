@@ -43,11 +43,19 @@ export function Hud({
   onResign,
 }: HudProps) {
   const status = board?.game.status;
-  const viewer = viewerSeat === null ? null : (board?.players.find((p) => p.seat === viewerSeat) ?? null);
+  const viewer =
+    viewerSeat === null ? null : (board?.players.find((p) => p.seat === viewerSeat) ?? null);
   return (
     <header className="hc-hud">
       <div className="hc-hud-group hc-hud-left">
-        <button type="button" id="open-lobby-btn" className="hc-icon-btn" aria-label="Game menu" title="Game menu" onClick={onMenu}>
+        <button
+          type="button"
+          id="open-lobby-btn"
+          className="hc-icon-btn"
+          aria-label="Game menu"
+          title="Game menu"
+          onClick={onMenu}
+        >
           <Menu size={17} aria-hidden="true" />
         </button>
         <HexLogo size={24} />
@@ -63,7 +71,10 @@ export function Hud({
       <div className="hc-hud-group hc-hud-right">
         {viewer && !replayOpen && status !== "finished" ? (
           <span className="hc-stats">
-            <span className="hc-stat" title={`Gold. Recruits cost ${REINFORCE_UNIT_COST} each, a fort costs ${FORTIFY_COST}.`}>
+            <span
+              className="hc-stat"
+              title={`Gold. Recruits cost ${REINFORCE_UNIT_COST} each, a fort costs ${FORTIFY_COST}.`}
+            >
               <CoinGlyph size={16} />
               <span className="hc-num" id="hud-gold">
                 {viewer.gold ?? 0}
@@ -103,7 +114,14 @@ export function Hud({
           </div>
         ) : null}
         {canInvite ? (
-          <button type="button" id="open-seat-key-btn" className="hc-icon-btn" aria-label="Invite and seat key" title="Invite and seat key" onClick={onInvite}>
+          <button
+            type="button"
+            id="open-seat-key-btn"
+            className="hc-icon-btn"
+            aria-label="Invite and seat key"
+            title="Invite and seat key"
+            onClick={onInvite}
+          >
             <Share2 size={16} aria-hidden="true" />
           </button>
         ) : null}
@@ -118,7 +136,14 @@ export function Hud({
         >
           <List size={16} aria-hidden="true" />
         </button>
-        <button type="button" id="rules-btn" className="hc-icon-btn" aria-label="Rules and keys" title="Rules and keys (?)" onClick={onRules}>
+        <button
+          type="button"
+          id="rules-btn"
+          className="hc-icon-btn"
+          aria-label="Rules and keys"
+          title="Rules and keys (?)"
+          onClick={onRules}
+        >
           <CircleHelp size={16} aria-hidden="true" />
         </button>
         {canResign ? (
@@ -139,7 +164,15 @@ export function Hud({
   );
 }
 
-function TurnStatus({ board, replayOpen, yourMove }: { readonly board: VisibleBoardState; readonly replayOpen: boolean; readonly yourMove: boolean }) {
+function TurnStatus({
+  board,
+  replayOpen,
+  yourMove,
+}: {
+  readonly board: VisibleBoardState;
+  readonly replayOpen: boolean;
+  readonly yourMove: boolean;
+}) {
   const { status, turnNumber, activeSeat } = board.game;
   if (replayOpen) return <span className="hc-turn-chip hc-turn-chip-replay">Replay</span>;
   if (status === "finished") {
@@ -165,7 +198,11 @@ function TurnStatus({ board, replayOpen, yourMove }: { readonly board: VisibleBo
         <span className="hc-turn-label">Turn</span>
         <span className="hc-num">{turnNumber}</span>
       </span>
-      <span className={`hc-faction-banner hc-faction-banner-${activeSeat}`} id="turn-indicator" title={yourMove ? undefined : `${name} to move`}>
+      <span
+        className={`hc-faction-banner hc-faction-banner-${activeSeat}`}
+        id="turn-indicator"
+        title={yourMove ? undefined : `${name} to move`}
+      >
         <FactionCrest seat={activeSeat} size={16} />
         {yourMove ? (
           "Your move"

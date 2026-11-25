@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type FormEvent, type MouseEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 import { useApp } from "dohc/app";
 import { Check, MessageSquare, Pencil, RotateCcw, Trash2 } from "dohc/icons";
 import { errorMessage, readName, refusalCode, saveName, type Note, type PhotoSource } from "./api";
@@ -6,10 +13,24 @@ import { useToast } from "./toast";
 
 const drafts = new Map<
   string,
-  { spot: Draft; body: string; sent?: { key: string; body: string; authorName: string; known: ReadonlySet<string>; pending?: boolean; dismiss?: () => void } }
+  {
+    spot: Draft;
+    body: string;
+    sent?: {
+      key: string;
+      body: string;
+      authorName: string;
+      known: ReadonlySet<string>;
+      pending?: boolean;
+      dismiss?: () => void;
+    };
+  }
 >();
 const lists = new Map<string, Note[]>();
-const countsOf = (list: readonly Note[]) => ({ noteCount: list.length, openNoteCount: list.filter((note) => !note.resolved).length });
+const countsOf = (list: readonly Note[]) => ({
+  noteCount: list.length,
+  openNoteCount: list.filter((note) => !note.resolved).length,
+});
 const noteWrites = new Map<string, Promise<unknown>>();
 const retryable = (error: unknown, retry: () => void) => (refusalCode(error) ? undefined : retry);
 
@@ -28,7 +49,11 @@ function inOrder<T>(noteId: string, work: () => Promise<T>): Promise<T> {
 
 export interface NoteRules {
   load(photo: PhotoSource): Promise<Note[]>;
-  add?(photo: PhotoSource, draft: { xPct: number; yPct: number; authorName: string; body: string }, key: string): Promise<Note>;
+  add?(
+    photo: PhotoSource,
+    draft: { xPct: number; yPct: number; authorName: string; body: string },
+    key: string,
+  ): Promise<Note>;
   resolve?(note: Note, resolved: boolean): Promise<void>;
   update?(note: Note, body: string): Promise<Note>;
   remove?(note: Note): Promise<void>;
@@ -79,7 +104,10 @@ export function pointOn(event: MouseEvent<HTMLElement>, element: HTMLElement): D
   const rect = element.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return null;
   const clamp = (value: number) => Math.min(100, Math.max(0, Math.round(value * 10000) / 100));
-  return { xPct: clamp((event.clientX - rect.left) / rect.width), yPct: clamp((event.clientY - rect.top) / rect.height) };
+  return {
+    xPct: clamp((event.clientX - rect.left) / rect.width),
+    yPct: clamp((event.clientY - rect.top) / rect.height),
+  };
 }
 
 export function useNotes(photo: PhotoSource, rules: NoteRules, enabled = true): NotesState {
@@ -117,7 +145,13 @@ export function useNotes(photo: PhotoSource, rules: NoteRules, enabled = true): 
         if (changes.current === started) setState({ id: photo.id, list });
         else setVersion((value) => value + 1);
       },
-      (error: unknown) => current && setState((previous) => ({ id: photo.id, list: previous.id === photo.id ? previous.list : undefined, error: errorMessage(error) })),
+      (error: unknown) =>
+        current &&
+        setState((previous) => ({
+          id: photo.id,
+          list: previous.id === photo.id ? previous.list : undefined,
+          error: errorMessage(error),
+        })),
     );
     return () => {
       current = false;
@@ -171,11 +205,19 @@ export function useNotes(photo: PhotoSource, rules: NoteRules, enabled = true): 
   }, [state]);
 
   const matched = state.id === photo.id;
-  const list = matched ? (state.list ?? lists.get(photo.id) ?? null) : (lists.get(photo.id) ?? null);
+  const list = matched
+    ? (state.list ?? lists.get(photo.id) ?? null)
+    : (lists.get(photo.id) ?? null);
   const canPin = Boolean(rules.add) && !rules.closedReason;
   const draft = canPin ? (drafts.get(photo.id)?.spot ?? null) : null;
 
-  const pin = async (target: PhotoSource, spot: Draft, body: string, authorName: string, key: string = crypto.randomUUID()): Promise<boolean> => {
+  const pin = async (
+    target: PhotoSource,
+    spot: Draft,
+    body: string,
+    authorName: string,
+    key: string = crypto.randomUUID(),
+  ): Promise<boolean> => {
     const add = rulesRef.current.add;
     if (!add) return false;
     const sending = drafts.get(target.id)?.sent;
@@ -200,7 +242,10 @@ export function useNotes(photo: PhotoSource, rules: NoteRules, enabled = true): 
     } catch (error) {
       const sent = drafts.get(target.id)?.sent;
       if (sent?.key !== key) return false;
-      sent.dismiss = toast(`Could not pin the note. ${errorMessage(error)}`, { tone: "danger", retry: retryable(error, () => void pin(target, spot, body, authorName, key)) });
+      sent.dismiss = toast(`Could not pin the note. ${errorMessage(error)}`, {
+        tone: "danger",
+        retry: retryable(error, () => void pin(target, spot, body, authorName, key)),
+      });
       return false;
     } finally {
       mark(false);
@@ -209,7 +254,9 @@ export function useNotes(photo: PhotoSource, rules: NoteRules, enabled = true): 
 
   const swap = (assetId: string, change: (list: Note[]) => Note[]) => {
     changes.current += 1;
-    setState((current) => (current.id === assetId ? { ...current, list: change(current.list ?? []) } : current));
+    setState((current) =>
+      current.id === assetId ? { ...current, list: change(current.list ?? []) } : current,
+    );
     const cached = lists.get(assetId);
     if (!cached || photoRef.current.id === assetId) return;
     const next = change(cached);
@@ -237,12 +284,20 @@ export function useNotes(photo: PhotoSource, rules: NoteRules, enabled = true): 
         setVersion((value) => value + 1);
         return;
       }
-      swap(note.assetId, (list) => list.map((item) => (item.id === note.id ? { ...item, body: saved.body } : item)));
+      swap(note.assetId, (list) =>
+        list.map((item) => (item.id === note.id ? { ...item, body: saved.body } : item)),
+      );
       view.done();
     } catch (error) {
       if (!latest()) return;
       view.saving(false);
-      failures.current.set(key, toast(`Could not save the note. ${errorMessage(error)}`, { tone: "danger", retry: retryable(error, () => void edit(note, body, view)) }));
+      failures.current.set(
+        key,
+        toast(`Could not save the note. ${errorMessage(error)}`, {
+          tone: "danger",
+          retry: retryable(error, () => void edit(note, body, view)),
+        }),
+      );
     }
   };
 
@@ -258,12 +313,19 @@ export function useNotes(photo: PhotoSource, rules: NoteRules, enabled = true): 
       else toast("Note deleted.");
     } catch (error) {
       putBack(note);
-      toast(`Could not delete the note. ${errorMessage(error)}`, { tone: "danger", retry: retryable(error, () => void remove(note)) });
+      toast(`Could not delete the note. ${errorMessage(error)}`, {
+        tone: "danger",
+        retry: retryable(error, () => void remove(note)),
+      });
     }
   };
 
   const putBack = (note: Note) =>
-    swap(note.assetId, (list) => [...list.filter((item) => item.id !== note.id), note].sort((a, b) => a.createdAtMs - b.createdAtMs || a.id.localeCompare(b.id)));
+    swap(note.assetId, (list) =>
+      [...list.filter((item) => item.id !== note.id), note].sort(
+        (a, b) => a.createdAtMs - b.createdAtMs || a.id.localeCompare(b.id),
+      ),
+    );
 
   const restore = async (note: Note) => {
     const back = rulesRef.current.restore;
@@ -271,7 +333,10 @@ export function useNotes(photo: PhotoSource, rules: NoteRules, enabled = true): 
     try {
       putBack(await inOrder(note.id, () => back(note)));
     } catch (error) {
-      toast(`Could not restore the note. ${errorMessage(error)}`, { tone: "danger", retry: retryable(error, () => void restore(note)) });
+      toast(`Could not restore the note. ${errorMessage(error)}`, {
+        tone: "danger",
+        retry: retryable(error, () => void restore(note)),
+      });
     }
   };
 
@@ -281,7 +346,10 @@ export function useNotes(photo: PhotoSource, rules: NoteRules, enabled = true): 
     const key = `resolve:${note.id}`;
     const latest = takeTurn(key);
     const resolved = !note.resolved;
-    const flip = (value: boolean) => swap(note.assetId, (list) => list.map((item) => (item.id === note.id ? { ...item, resolved: value } : item)));
+    const flip = (value: boolean) =>
+      swap(note.assetId, (list) =>
+        list.map((item) => (item.id === note.id ? { ...item, resolved: value } : item)),
+      );
     flip(resolved);
     try {
       await inOrder(note.id, () => save(note, resolved));
@@ -290,7 +358,13 @@ export function useNotes(photo: PhotoSource, rules: NoteRules, enabled = true): 
       if (!latest()) return;
       flip(!resolved);
       setVersion((value) => value + 1);
-      failures.current.set(key, toast(errorMessage(error), { tone: "danger", retry: retryable(error, () => void resolve({ ...note, resolved: !resolved })) }));
+      failures.current.set(
+        key,
+        toast(errorMessage(error), {
+          tone: "danger",
+          retry: retryable(error, () => void resolve({ ...note, resolved: !resolved })),
+        }),
+      );
     }
   };
 
@@ -325,7 +399,10 @@ export function useNotes(photo: PhotoSource, rules: NoteRules, enabled = true): 
       const saved = drafts.get(photoRef.current.id);
       if (!saved) return;
       saved.body = body;
-      if (saved.sent && (saved.sent.body !== body.trim() || saved.sent.authorName !== authorName.trim())) {
+      if (
+        saved.sent &&
+        (saved.sent.body !== body.trim() || saved.sent.authorName !== authorName.trim())
+      ) {
         saved.sent.dismiss?.();
         saved.sent.dismiss = undefined;
       }
@@ -338,9 +415,15 @@ export function useNotes(photo: PhotoSource, rules: NoteRules, enabled = true): 
     add: (body, authorName) => {
       const entry = drafts.get(photoRef.current.id);
       if (!draft || !entry) return Promise.resolve(false);
-      const same = entry.sent?.body === body && entry.sent.authorName === authorName ? entry.sent : undefined;
+      const same =
+        entry.sent?.body === body && entry.sent.authorName === authorName ? entry.sent : undefined;
       if (!same) entry.sent?.dismiss?.();
-      entry.sent = same ?? { key: crypto.randomUUID(), body, authorName, known: new Set((list ?? []).map((note) => note.id)) };
+      entry.sent = same ?? {
+        key: crypto.randomUUID(),
+        body,
+        authorName,
+        known: new Set((list ?? []).map((note) => note.id)),
+      };
       const key = entry.sent.key;
       return pin(photoRef.current, entry.spot, body, authorName, key);
     },
@@ -358,7 +441,11 @@ export function Pins({ notes, scale = 1 }: { notes: NotesState; scale?: number }
             key={note.id}
             type="button"
             className={`lb-pin${note.resolved ? " lb-pin-resolved" : ""}${notes.hovered === note.id ? " lb-pin-hot" : ""}`}
-            style={{ left: `${note.xPct}%`, top: `${note.yPct}%`, ["--lb-pin-scale" as string]: String(1 / scale) }}
+            style={{
+              left: `${note.xPct}%`,
+              top: `${note.yPct}%`,
+              ["--lb-pin-scale" as string]: String(1 / scale),
+            }}
             aria-label={`Note ${position + 1} by ${note.authorName}: ${note.body}`}
             data-pin={position + 1}
             onMouseEnter={() => notes.setHovered(note.id)}
@@ -378,7 +465,11 @@ export function Pins({ notes, scale = 1 }: { notes: NotesState; scale?: number }
       {notes.draft ? (
         <span
           className={`lb-pin lb-pin-draft${notes.draftFresh ? " lb-pin-drop" : ""}`}
-          style={{ left: `${notes.draft.xPct}%`, top: `${notes.draft.yPct}%`, ["--lb-pin-scale" as string]: String(1 / scale) }}
+          style={{
+            left: `${notes.draft.xPct}%`,
+            top: `${notes.draft.yPct}%`,
+            ["--lb-pin-scale" as string]: String(1 / scale),
+          }}
           aria-hidden="true"
         >
           {list.length + 1}
@@ -458,10 +549,19 @@ function Composer({ notes, number }: { notes: NotesState; number: number }) {
         }}
       />
       <div className="lb-composer-actions">
-        <button type="button" className="lb-button lb-button-quiet" onClick={() => notes.setDraft(null)}>
+        <button
+          type="button"
+          className="lb-button lb-button-quiet"
+          onClick={() => notes.setDraft(null)}
+        >
           Cancel
         </button>
-        <button type="submit" className="lb-button lb-button-solid" id="note-save" disabled={saving || !body.trim() || !name.trim()}>
+        <button
+          type="submit"
+          className="lb-button lb-button-solid"
+          id="note-save"
+          disabled={saving || !body.trim() || !name.trim()}
+        >
           {saving ? "Pinning…" : "Pin note"}
         </button>
       </div>
@@ -514,7 +614,11 @@ function NoteEditor({ notes, note, onDone }: { notes: NotesState; note: Note; on
         >
           Cancel
         </button>
-        <button type="submit" className="lb-button lb-button-solid" disabled={saving || !body.trim()}>
+        <button
+          type="submit"
+          className="lb-button lb-button-solid"
+          disabled={saving || !body.trim()}
+        >
           {saving ? "Saving…" : "Save"}
         </button>
       </div>
@@ -522,7 +626,15 @@ function NoteEditor({ notes, note, onDone }: { notes: NotesState; note: Note; on
   );
 }
 
-export function NoteRail({ notes, hint, header }: { notes: NotesState; hint: ReactNode; header?: ReactNode }) {
+export function NoteRail({
+  notes,
+  hint,
+  header,
+}: {
+  notes: NotesState;
+  hint: ReactNode;
+  header?: ReactNode;
+}) {
   const showResolved = notes.showResolved;
   const [editing, setEditing] = useState<string | null>(null);
   const canChange = Boolean(notes.rules.update) && !notes.rules.closedReason;
@@ -531,9 +643,10 @@ export function NoteRail({ notes, hint, header }: { notes: NotesState; hint: Rea
   const resolvedCount = list.filter((note) => note.resolved).length;
   useEffect(() => {
     if (notes.selected)
-      document
-        .getElementById(`note-${notes.selected.id}`)
-        ?.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+      document.getElementById(`note-${notes.selected.id}`)?.scrollIntoView({
+        block: "nearest",
+        behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      });
   }, [notes.selected]);
   return (
     <section className="lb-rail-notes" aria-label="Notes" ref={rail} tabIndex={-1}>
@@ -544,7 +657,11 @@ export function NoteRail({ notes, hint, header }: { notes: NotesState; hint: Rea
           </h2>
         )}
         {resolvedCount ? (
-          <button type="button" className="lb-text-button" onClick={() => notes.setShowResolved(!showResolved)}>
+          <button
+            type="button"
+            className="lb-text-button"
+            onClick={() => notes.setShowResolved(!showResolved)}
+          >
             {showResolved ? `Hide ${resolvedCount} resolved` : `Show ${resolvedCount} resolved`}
           </button>
         ) : null}
@@ -580,17 +697,39 @@ export function NoteRail({ notes, hint, header }: { notes: NotesState; hint: Rea
                     <strong>{note.authorName}</strong>
                     {note.mine ? <span className="lb-note-mine">You</span> : null}
                     <time dateTime={new Date(note.createdAtMs).toISOString()}>
-                      {new Date(note.createdAtMs).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                      {new Date(note.createdAtMs).toLocaleDateString(undefined, {
+                        month: "short",
+                        day: "numeric",
+                      })}
                     </time>
                   </div>
-                  {canChange && editing === note.id ? <NoteEditor notes={notes} note={note} onDone={() => setEditing((current) => (current === note.id ? null : current))} /> : <p>{note.body}</p>}
+                  {canChange && editing === note.id ? (
+                    <NoteEditor
+                      notes={notes}
+                      note={note}
+                      onDone={() => setEditing((current) => (current === note.id ? null : current))}
+                    />
+                  ) : (
+                    <p>{note.body}</p>
+                  )}
                 </div>
                 {note.mine && canChange && editing !== note.id ? (
                   <span className="lb-note-own">
-                    <button type="button" className="lb-icon-button" aria-label={`Edit note ${position + 1}`} title="Edit" onClick={() => setEditing(note.id)}>
+                    <button
+                      type="button"
+                      className="lb-icon-button"
+                      aria-label={`Edit note ${position + 1}`}
+                      title="Edit"
+                      onClick={() => setEditing(note.id)}
+                    >
                       <Pencil size={13} />
                     </button>
-                    <button type="button" className="lb-icon-button" aria-label={`Delete note ${position + 1}`} title="Delete" onClick={() => {
+                    <button
+                      type="button"
+                      className="lb-icon-button"
+                      aria-label={`Delete note ${position + 1}`}
+                      title="Delete"
+                      onClick={() => {
                         rail.current?.focus();
                         notes.remove(note);
                       }}
@@ -603,7 +742,9 @@ export function NoteRail({ notes, hint, header }: { notes: NotesState; hint: Rea
                   <button
                     type="button"
                     className={`lb-icon-button lb-resolve${note.resolved ? " lb-resolve-on" : ""}`}
-                    aria-label={note.resolved ? `Reopen note ${position + 1}` : `Resolve note ${position + 1}`}
+                    aria-label={
+                      note.resolved ? `Reopen note ${position + 1}` : `Resolve note ${position + 1}`
+                    }
                     title={note.resolved ? "Reopen" : "Resolve"}
                     onClick={() => notes.resolve(note)}
                   >
@@ -618,17 +759,29 @@ export function NoteRail({ notes, hint, header }: { notes: NotesState; hint: Rea
           {list.length === 0 ? (
             <li className="lb-notes-empty">
               <MessageSquare size={16} />
-              <span>{notes.draft ? "Your note will show here once you pin it." : "No notes on this photo."}</span>
+              <span>
+                {notes.draft
+                  ? "Your note will show here once you pin it."
+                  : "No notes on this photo."}
+              </span>
             </li>
           ) : !showResolved && resolvedCount === list.length ? (
             <li className="lb-notes-empty">
               <Check size={16} />
-              <span>{resolvedCount === 1 ? "The only note here is resolved." : `All ${resolvedCount} notes here are resolved.`}</span>
+              <span>
+                {resolvedCount === 1
+                  ? "The only note here is resolved."
+                  : `All ${resolvedCount} notes here are resolved.`}
+              </span>
             </li>
           ) : null}
         </ol>
       )}
-      {notes.draft ? <Composer key={notes.photoId} notes={notes} number={list.length + 1} /> : <p className="lb-notes-hint">{notes.rules.closedReason ?? hint}</p>}
+      {notes.draft ? (
+        <Composer key={notes.photoId} notes={notes} number={list.length + 1} />
+      ) : (
+        <p className="lb-notes-hint">{notes.rules.closedReason ?? hint}</p>
+      )}
     </section>
   );
 }

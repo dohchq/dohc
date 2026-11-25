@@ -61,10 +61,24 @@ function GateImage() {
       current = false;
     };
   }, []);
-  return <div className="pt-gate-image" aria-hidden="true">{url ? <img src={url} alt="" /> : null}</div>;
+  return (
+    <div className="pt-gate-image" aria-hidden="true">
+      {url ? <img src={url} alt="" /> : null}
+    </div>
+  );
 }
 
-function Gate({ error, busy, onOpen, onRetry }: { error: string | null; busy: boolean; onOpen(code: string): void; onRetry?: () => void }) {
+function Gate({
+  error,
+  busy,
+  onOpen,
+  onRetry,
+}: {
+  error: string | null;
+  busy: boolean;
+  onOpen(code: string): void;
+  onRetry?: () => void;
+}) {
   const [code, setCode] = useState("");
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -78,7 +92,10 @@ function Gate({ error, busy, onOpen, onRetry }: { error: string | null; busy: bo
         <Brand />
         <div className="pt-gate-copy">
           <h1 className="pt-serif">Your gallery is ready</h1>
-          <p>Enter the gallery code from your photographer to see your photos, choose favorites, and leave notes.</p>
+          <p>
+            Enter the gallery code from your photographer to see your photos, choose favorites, and
+            leave notes.
+          </p>
         </div>
         <label className="pt-gate-label" htmlFor="gallery-code">
           Gallery code
@@ -107,7 +124,13 @@ function Gate({ error, busy, onOpen, onRetry }: { error: string | null; busy: bo
             ) : null}
           </p>
         ) : null}
-        <button type="submit" id="gallery-open" className="pt-gate-button" disabled={!code.trim() || busy} aria-busy={busy}>
+        <button
+          type="submit"
+          id="gallery-open"
+          className="pt-gate-button"
+          disabled={!code.trim() || busy}
+          aria-busy={busy}
+        >
           {busy ? "Opening…" : "View gallery"}
         </button>
       </form>
@@ -167,7 +190,10 @@ function Wall({
   const { width } = useSize(box);
   const [cursor, setCursor] = useState(0);
   const narrow = width < 640;
-  const rows = useMemo(() => justify(items, width, narrow ? 170 : 330, narrow ? 3 : 6), [items, width, narrow]);
+  const rows = useMemo(
+    () => justify(items, width, narrow ? 170 : 330, narrow ? 3 : 6),
+    [items, width, narrow],
+  );
   const at = Math.min(cursor, items.length - 1);
 
   const focusAt = (next: number) => {
@@ -184,10 +210,17 @@ function Wall({
     const center = here.left + here.width / 2;
     const ahead = tiles
       .map((tile, position) => ({ position, rect: tile.getBoundingClientRect() }))
-      .filter(({ rect }) => (delta > 0 ? rect.top >= here.bottom - 1 : rect.bottom <= here.top + 1));
+      .filter(({ rect }) =>
+        delta > 0 ? rect.top >= here.bottom - 1 : rect.bottom <= here.top + 1,
+      );
     if (!ahead.length) return from;
-    const edge = delta > 0 ? Math.min(...ahead.map(({ rect }) => rect.top)) : Math.max(...ahead.map(({ rect }) => rect.bottom));
-    const row = ahead.filter(({ rect }) => Math.abs((delta > 0 ? rect.top : rect.bottom) - edge) < 2);
+    const edge =
+      delta > 0
+        ? Math.min(...ahead.map(({ rect }) => rect.top))
+        : Math.max(...ahead.map(({ rect }) => rect.bottom));
+    const row = ahead.filter(
+      ({ rect }) => Math.abs((delta > 0 ? rect.top : rect.bottom) - edge) < 2,
+    );
     const distance = ({ rect }: { rect: DOMRect }) => Math.abs(rect.left + rect.width / 2 - center);
     return row.reduce((best, tile) => (distance(tile) < distance(best) ? tile : best)).position;
   };
@@ -221,7 +254,11 @@ function Wall({
                 key={asset.id}
                 role="listitem"
                 className={`pt-tile${asset.picked ? " pt-picked" : ""}${chosen ? " pt-chosen" : ""}${choosing ? " pt-choosing" : ""}`}
-                style={row.full ? { flexGrow: ratio, flexBasis: 0 } : { width: ratio * row.height, flexGrow: 0 }}
+                style={
+                  row.full
+                    ? { flexGrow: ratio, flexBasis: 0 }
+                    : { width: ratio * row.height, flexGrow: 0 }
+                }
               >
                 <button
                   type="button"
@@ -260,11 +297,19 @@ function Wall({
                         tabIndex={-1}
                         className="pt-tile-heart"
                         aria-pressed={asset.picked}
-                        aria-label={asset.picked ? `Remove ${asset.title} from favorites` : `Add ${asset.title} to favorites`}
+                        aria-label={
+                          asset.picked
+                            ? `Remove ${asset.title} from favorites`
+                            : `Add ${asset.title} to favorites`
+                        }
                         title={asset.picked ? "Remove from favorites" : "Add to favorites"}
                         onClick={() => onPick(asset)}
                       >
-                        <Heart size={18} strokeWidth={1.75} fill={asset.picked ? "currentColor" : "none"} />
+                        <Heart
+                          size={18}
+                          strokeWidth={1.75}
+                          fill={asset.picked ? "currentColor" : "none"}
+                        />
                       </button>
                     )}
                   </>
@@ -297,7 +342,11 @@ function ClientGallery({
   const toast = useToast();
   const [filter, setFilter] = useState<Filter>("all");
   const [choosing, setChoosing] = useState<string[] | null>(null);
-  const [view, setView] = useState<{ ids: readonly string[]; id: string; compareId: string | null } | null>(null);
+  const [view, setView] = useState<{
+    ids: readonly string[];
+    id: string;
+    compareId: string | null;
+  } | null>(null);
   const pendingPicks = useRef(new Map<string, { request: Promise<unknown>; selected: boolean }>());
   const [sending, setSending] = useState(false);
   const sendingNow = useRef(false);
@@ -312,7 +361,9 @@ function ClientGallery({
     () =>
       data.assets.map((asset) => {
         const pending = pendingPicks.current.get(asset.id);
-        return pending && pending.selected !== asset.picked ? { ...asset, picked: pending.selected } : asset;
+        return pending && pending.selected !== asset.picked
+          ? { ...asset, picked: pending.selected }
+          : asset;
       }),
     [data.assets],
   );
@@ -323,7 +374,14 @@ function ClientGallery({
   const sendLatest = useRef<() => Promise<void>>(async () => undefined);
   const closed = gallery.status !== "proofing";
   const delivered = gallery.status === "delivered";
-  const files: FileAccess = useMemo(() => ({ operation: "assetFileAccess", fullSize: delivered, input: (photo) => ({ code, assetId: photo.id }) }), [code, delivered]);
+  const files: FileAccess = useMemo(
+    () => ({
+      operation: "assetFileAccess",
+      fullSize: delivered,
+      input: (photo) => ({ code, assetId: photo.id }),
+    }),
+    [code, delivered],
+  );
   const favorites = assets.filter((asset) => asset.picked);
   const picksUsed = favorites.length;
   const annotated = assets.filter((asset) => asset.noteCount > 0);
@@ -333,7 +391,9 @@ function ClientGallery({
   const byId = new Map(assets.map((asset) => [asset.id, asset]));
   const viewItems = view ? view.ids.flatMap((id) => byId.get(id) ?? []) : [];
   const viewIndex = view ? viewItems.findIndex((asset) => asset.id === view.id) : -1;
-  const compareIndex = view?.compareId ? viewItems.findIndex((asset) => asset.id === view.compareId) : -1;
+  const compareIndex = view?.compareId
+    ? viewItems.findIndex((asset) => asset.id === view.compareId)
+    : -1;
   const viewGone = Boolean(view) && viewIndex < 0;
 
   useEffect(() => {
@@ -366,7 +426,9 @@ function ClientGallery({
 
   const setPicked = (current: GalleryData, assetId: string, selected: boolean): GalleryData => ({
     ...current,
-    assets: current.assets.map((item) => (item.id === assetId ? { ...item, picked: selected } : item)),
+    assets: current.assets.map((item) =>
+      item.id === assetId ? { ...item, picked: selected } : item,
+    ),
   });
 
   const pick = async (asset: ClientAsset) => {
@@ -423,11 +485,17 @@ function ClientGallery({
     sendFailure.current = null;
     const assetIds = assets.filter((asset) => asset.picked).map((asset) => asset.id);
     try {
-      const saved = await Promise.allSettled([...pendingPicks.current.values()].map((pending) => pending.request));
+      const saved = await Promise.allSettled(
+        [...pendingPicks.current.values()].map((pending) => pending.request),
+      );
       if (saved.some((result) => result.status === "rejected")) return;
       const next = await invoke<Gallery>(client, "submitSelection", { code, assetIds });
       const accepted = new Set(assetIds);
-      replace((current) => ({ ...current, gallery: next, assets: current.assets.map((item) => ({ ...item, sent: accepted.has(item.id) })) }));
+      replace((current) => ({
+        ...current,
+        gallery: next,
+        assets: current.assets.map((item) => ({ ...item, sent: accepted.has(item.id) })),
+      }));
       sentToast.current?.();
       sentToast.current = toast(
         next.picksUsed
@@ -436,30 +504,60 @@ function ClientGallery({
       );
     } catch (error) {
       const final = refused(error);
-      sendFailure.current = toast(`Could not send your favorites. ${errorMessage(error)}`, { tone: "danger", retry: final ? undefined : () => void sendLatest.current() });
+      sendFailure.current = toast(`Could not send your favorites. ${errorMessage(error)}`, {
+        tone: "danger",
+        retry: final ? undefined : () => void sendLatest.current(),
+      });
     } finally {
       sendingNow.current = false;
       setSending(false);
     }
   };
   sendLatest.current = send;
-  const sentOn = gallery.sentAtMs ? new Date(gallery.sentAtMs).toLocaleDateString(undefined, { month: "long", day: "numeric" }) : null;
+  const sentOn = gallery.sentAtMs
+    ? new Date(gallery.sentAtMs).toLocaleDateString(undefined, { month: "long", day: "numeric" })
+    : null;
   const changedSinceSent = assets.some((asset) => asset.picked !== asset.sent);
   const sentNow = sentOn !== null && !changedSinceSent;
   const pickCurrent = (asset: ClientAsset) => void pick(byId.get(asset.id) ?? asset);
 
   const rules: NoteRules = {
-    load: async (photo) => (await loadPages(client, "listAnnotations", { code, assetId: photo.id }, (page: Paged<"annotations", Note>) => page.annotations)).items,
-    add: (photo, draft, key) => write(invoke<Note>(client, "addPinnedAnnotation", { code, assetId: photo.id, ...draft }, `addPinnedAnnotation:${key}`)),
-    update: (note, body) => write(invoke<Note>(client, "updateOwnNote", { code, annotationId: note.id, body })),
+    load: async (photo) =>
+      (
+        await loadPages(
+          client,
+          "listAnnotations",
+          { code, assetId: photo.id },
+          (page: Paged<"annotations", Note>) => page.annotations,
+        )
+      ).items,
+    add: (photo, draft, key) =>
+      write(
+        invoke<Note>(
+          client,
+          "addPinnedAnnotation",
+          { code, assetId: photo.id, ...draft },
+          `addPinnedAnnotation:${key}`,
+        ),
+      ),
+    update: (note, body) =>
+      write(invoke<Note>(client, "updateOwnNote", { code, annotationId: note.id, body })),
     remove: async (note) => {
       await write(invoke(client, "deleteOwnNote", { code, annotationId: note.id }));
     },
-    restore: (note) => write(invoke<Note>(client, "restoreOwnNote", { code, annotationId: note.id })),
+    restore: (note) =>
+      write(invoke<Note>(client, "restoreOwnNote", { code, annotationId: note.id })),
     counted: (assetId, counts) => {
       const asset = assetsNow.current.find((item) => item.id === assetId);
-      if (!asset || (asset.noteCount === counts.noteCount && asset.openNoteCount === counts.openNoteCount)) return;
-      replace((current) => ({ ...current, assets: current.assets.map((item) => (item.id === assetId ? { ...item, ...counts } : item)) }));
+      if (
+        !asset ||
+        (asset.noteCount === counts.noteCount && asset.openNoteCount === counts.openNoteCount)
+      )
+        return;
+      replace((current) => ({
+        ...current,
+        assets: current.assets.map((item) => (item.id === assetId ? { ...item, ...counts } : item)),
+      }));
     },
     closedReason: closed ? "This gallery is delivered, so notes are closed." : undefined,
     tick,
@@ -477,19 +575,24 @@ function ClientGallery({
     const index = shown.findIndex((asset) => asset.id === choosing[0]);
     const other = shown.findIndex((asset) => asset.id === choosing[1]);
     setChoosing(null);
-    if (index >= 0 && other >= 0) setView({ ids: shown.map((asset) => asset.id), id: choosing[0]!, compareId: choosing[1]! });
+    if (index >= 0 && other >= 0)
+      setView({ ids: shown.map((asset) => asset.id), id: choosing[0]!, compareId: choosing[1]! });
   };
 
   const showFilter = (next: Filter) => {
     setFilter(next);
     setChoosing(null);
-    if (wallTop.current && wallTop.current.getBoundingClientRect().top < 0) wallTop.current.scrollIntoView({ block: "start" });
+    if (wallTop.current && wallTop.current.getBoundingClientRect().top < 0)
+      wallTop.current.scrollIntoView({ block: "start" });
   };
 
   useEffect(() => {
     const element = hero.current;
     if (!element) return;
-    const observer = new IntersectionObserver(([entry]) => setInHero(entry.intersectionRatio > 0.4), { threshold: [0.4] });
+    const observer = new IntersectionObserver(
+      ([entry]) => setInHero(entry.intersectionRatio > 0.4),
+      { threshold: [0.4] },
+    );
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
@@ -512,7 +615,9 @@ function ClientGallery({
   return (
     <div className="pt-page">
       <header className="pt-hero" ref={hero}>
-        {cover ? <Photo photo={cover} access={files} size="full" className="pt-hero-photo" /> : null}
+        {cover ? (
+          <Photo photo={cover} access={files} size="full" className="pt-hero-photo" />
+        ) : null}
         <div className="pt-hero-shade" aria-hidden="true" />
         <div className="pt-hero-text">
           <span className="pt-eyebrow">
@@ -523,7 +628,12 @@ function ClientGallery({
             type="button"
             className="pt-hero-enter"
             onClick={() =>
-              wallTop.current?.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" })
+              wallTop.current?.scrollIntoView({
+                behavior: matchMedia("(prefers-reduced-motion: reduce)").matches
+                  ? "auto"
+                  : "smooth",
+                block: "start",
+              })
             }
           >
             View gallery
@@ -544,7 +654,9 @@ function ClientGallery({
           aria-label="Show photos"
           onKeyDown={(event) => {
             const at = tabs.findIndex((tab) => tab.id === filter);
-            const to = { ArrowRight: at + 1, ArrowLeft: at - 1, Home: 0, End: tabs.length - 1 }[event.key];
+            const to = { ArrowRight: at + 1, ArrowLeft: at - 1, Home: 0, End: tabs.length - 1 }[
+              event.key
+            ];
             if (to === undefined) return;
             event.preventDefault();
             const index = (to + tabs.length) % tabs.length;
@@ -611,8 +723,18 @@ function ClientGallery({
                     : "Done choosing? Send your favorites so your photographer knows."}
             </span>
             {!closed && !sentNow ? (
-              <button type="button" className="lb-button lb-button-solid" id="send-favorites" disabled={sending} onClick={() => void send()}>
-                {sending ? "Sending…" : sentOn ? "Send the update" : `Send ${picksUsed} ${picksUsed === 1 ? "favorite" : "favorites"}`}
+              <button
+                type="button"
+                className="lb-button lb-button-solid"
+                id="send-favorites"
+                disabled={sending}
+                onClick={() => void send()}
+              >
+                {sending
+                  ? "Sending…"
+                  : sentOn
+                    ? "Send the update"
+                    : `Send ${picksUsed} ${picksUsed === 1 ? "favorite" : "favorites"}`}
               </button>
             ) : null}
           </div>
@@ -624,15 +746,29 @@ function ClientGallery({
               access={files}
               closed={closed}
               choosing={choosing}
-              onOpen={(index) => setView({ ids: shown.map((asset) => asset.id), id: shown[index]!.id, compareId: null })}
+              onOpen={(index) =>
+                setView({
+                  ids: shown.map((asset) => asset.id),
+                  id: shown[index]!.id,
+                  compareId: null,
+                })
+              }
               onPick={pickCurrent}
               onChoose={choose}
             />
           ) : (
             <div className="pt-empty">
-              {filter === "favorites" ? <Heart size={20} strokeWidth={1.5} /> : <MessageSquare size={20} strokeWidth={1.5} />}
+              {filter === "favorites" ? (
+                <Heart size={20} strokeWidth={1.5} />
+              ) : (
+                <MessageSquare size={20} strokeWidth={1.5} />
+              )}
               <h2 className="pt-serif">
-                {assets.length ? (filter === "favorites" ? `No favorites${closed ? "" : " yet"}` : `No notes${closed ? "" : " yet"}`) : "No photos yet"}
+                {assets.length
+                  ? filter === "favorites"
+                    ? `No favorites${closed ? "" : " yet"}`
+                    : `No notes${closed ? "" : " yet"}`
+                  : "No photos yet"}
               </h2>
               <p>
                 {!assets.length
@@ -667,16 +803,27 @@ function ClientGallery({
 
       {choosing ? (
         <div className="pt-float pt-float-compare" role="status">
-          <span>{choosing.length === 2 ? "2 photos chosen" : `Choose ${2 - choosing.length} more to compare`}</span>
+          <span>
+            {choosing.length === 2
+              ? "2 photos chosen"
+              : `Choose ${2 - choosing.length} more to compare`}
+          </span>
           <button type="button" className="pt-float-quiet" onClick={() => setChoosing(null)}>
             Cancel
           </button>
-          <button type="button" className="pt-float-action" disabled={choosing.length !== 2} onClick={startCompare}>
+          <button
+            type="button"
+            className="pt-float-action"
+            disabled={choosing.length !== 2}
+            onClick={startCompare}
+          >
             Compare
           </button>
         </div>
       ) : inHero || atFooter || closed ? null : (
-        <div className={`pt-float${picksUsed >= gallery.selectionLimit ? " pt-float-full" : ""}${(picksUsed || sentOn) && !sentNow ? " pt-float-send" : ""}`}>
+        <div
+          className={`pt-float${picksUsed >= gallery.selectionLimit ? " pt-float-full" : ""}${(picksUsed || sentOn) && !sentNow ? " pt-float-send" : ""}`}
+        >
           <button
             type="button"
             className="pt-float-open"
@@ -690,7 +837,13 @@ function ClientGallery({
             <span className="pt-float-label">{sentNow ? "sent" : "selected"}</span>
           </button>
           {(picksUsed || sentOn) && !sentNow ? (
-            <button type="button" className="pt-float-action" id="float-send" disabled={sending} onClick={() => void send()}>
+            <button
+              type="button"
+              className="pt-float-action"
+              id="float-send"
+              disabled={sending}
+              onClick={() => void send()}
+            >
               {sending ? "Sending…" : sentOn ? "Send update" : "Send"}
             </button>
           ) : null}
@@ -703,7 +856,14 @@ function ClientGallery({
           index={viewIndex}
           compare={compareIndex >= 0 ? compareIndex : null}
           onView={(index, compare) =>
-            setView((current) => current && { ...current, id: viewItems[index]!.id, compareId: compare === null ? null : viewItems[compare]!.id })
+            setView(
+              (current) =>
+                current && {
+                  ...current,
+                  id: viewItems[index]!.id,
+                  compareId: compare === null ? null : viewItems[compare]!.id,
+                },
+            )
           }
           onClose={() => setView(null)}
           access={files}
@@ -721,7 +881,12 @@ function ClientGallery({
 function Portal() {
   const [code, setCode] = useState(readCode);
   const loaded = useLoader<GalleryData>(code || null, (client) =>
-    loadPages(client, "listPublishedAssets", { code }, (page: Paged<"assets", ClientAsset> & { gallery: Gallery }) => page.assets).then(({ items, first }) => ({
+    loadPages(
+      client,
+      "listPublishedAssets",
+      { code },
+      (page: Paged<"assets", ClientAsset> & { gallery: Gallery }) => page.assets,
+    ).then(({ items, first }) => ({
       gallery: first.gallery,
       assets: items,
     })),
@@ -766,7 +931,16 @@ function Portal() {
       />
     );
   }
-  return <ClientGallery code={code} data={loaded.data} tick={tick} onLeave={leave} replace={loaded.replace} reload={reload} />;
+  return (
+    <ClientGallery
+      code={code}
+      data={loaded.data}
+      tick={tick}
+      onLeave={leave}
+      replace={loaded.replace}
+      reload={reload}
+    />
+  );
 }
 
 const mount = document.getElementById("root");

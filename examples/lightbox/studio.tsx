@@ -51,11 +51,23 @@ import { useAssetWrites } from "./studio-writes";
 import "./portal/base.css";
 import "./studio.css";
 
-const NO_PHOTO: PhotoSource = { id: "", title: "", fileId: null, previewFileId: null, demoScene: null, width: 3, height: 2 };
+const NO_PHOTO: PhotoSource = {
+  id: "",
+  title: "",
+  fileId: null,
+  previewFileId: null,
+  demoScene: null,
+  width: 3,
+  height: 2,
+};
 
-type Dialog = { kind: "settings" } | { kind: "picks" } | { kind: "shortcuts" } | { kind: "delete"; assets: readonly StudioAsset[] } | null;
+type Dialog =
+  | { kind: "settings" }
+  | { kind: "picks" }
+  | { kind: "shortcuts" }
+  | { kind: "delete"; assets: readonly StudioAsset[] }
+  | null;
 type Side = "select" | "candidate";
-
 
 const LIMIT_TEXT = `JPEG, PNG, or WebP up to ${formatBytes(UPLOAD_LIMIT_BYTES)} each.`;
 
@@ -84,7 +96,12 @@ function Workspace({
   const client = useApp();
   const toast = useToast();
   const assets = useLoader(`assets:${shoot.id}`, (app) =>
-    loadPages(app, "studioAssets", { shootId: shoot.id }, (page: Paged<"assets", StudioAsset>) => page.assets).then(({ items }) => items),
+    loadPages(
+      app,
+      "studioAssets",
+      { shootId: shoot.id },
+      (page: Paged<"assets", StudioAsset>) => page.assets,
+    ).then(({ items }) => items),
   );
   const [mode, setMode] = useState<Mode>("grid");
   const [currentId, setCurrentId] = useState<string | null>(null);
@@ -132,7 +149,9 @@ function Workspace({
   }, [mode]);
 
   const inLibrary = all.filter((asset) => matches(asset, library));
-  const shown = inLibrary.filter((asset) => asset.rating >= minRating && (!labelFilter || asset.colorLabel === labelFilter));
+  const shown = inLibrary.filter(
+    (asset) => asset.rating >= minRating && (!labelFilter || asset.colorLabel === labelFilter),
+  );
   const shownKey = shown.map((asset) => asset.id).join(" ");
   const shownBefore = useRef<string[]>([]);
   const chosenNow = useRef(chosen);
@@ -143,26 +162,43 @@ function Workspace({
     const before = shownBefore.current;
     shownBefore.current = ids;
     const keepsChosen = chosenNow.current.some((id) => visible.has(id));
-    setChosen((list) => (list.every((id) => visible.has(id)) ? list : list.filter((id) => visible.has(id))));
+    setChosen((list) =>
+      list.every((id) => visible.has(id)) ? list : list.filter((id) => visible.has(id)),
+    );
     setCurrentId((id) => {
       if (!id || visible.has(id)) return id;
       if (keepsChosen) return null;
       const at = before.indexOf(id);
-      return before.slice(at + 1).find((other) => visible.has(other)) ?? before.slice(0, Math.max(at, 0)).findLast((other) => visible.has(other)) ?? null;
+      return (
+        before.slice(at + 1).find((other) => visible.has(other)) ??
+        before.slice(0, Math.max(at, 0)).findLast((other) => visible.has(other)) ??
+        null
+      );
     });
   }, [shownKey]);
   const chosenSet = new Set(chosen);
-  const current = shown.find((asset) => asset.id === currentId) ?? shown.find((asset) => chosenSet.has(asset.id)) ?? shown[0] ?? null;
+  const current =
+    shown.find((asset) => asset.id === currentId) ??
+    shown.find((asset) => chosenSet.has(asset.id)) ??
+    shown[0] ??
+    null;
   const position = current ? shown.indexOf(current) + 1 : 0;
   const candidate =
     mode === "compare" && current
-      ? (shown.find((asset) => asset.id === candidateId && asset.id !== current.id) ?? shown[position] ?? shown[position - 2] ?? null)
+      ? (shown.find((asset) => asset.id === candidateId && asset.id !== current.id) ??
+        shown[position] ??
+        shown[position - 2] ??
+        null)
       : null;
   const comparing = mode === "compare" && candidate !== null;
   const target = comparing && active === "candidate" ? candidate : current;
   const chosenIds = new Set(shown.flatMap((asset) => (chosenSet.has(asset.id) ? [asset.id] : [])));
   const selection =
-    mode === "grid" && current && chosenIds.has(current.id) && chosenIds.size > 1 ? shown.filter((asset) => chosenIds.has(asset.id)) : target ? [target] : [];
+    mode === "grid" && current && chosenIds.has(current.id) && chosenIds.size > 1
+      ? shown.filter((asset) => chosenIds.has(asset.id))
+      : target
+        ? [target]
+        : [];
   const pinMode = mode === "loupe" && pinFor !== null && pinFor === current?.id;
   const setPinMode = (on: boolean) => setPinFor(on && current ? current.id : null);
   const drafts = all.filter((asset) => !asset.published);
@@ -182,29 +218,57 @@ function Workspace({
         : undefined;
 
   const noteRules: NoteRules = {
-    load: async (photo) => (await loadPages(client, "studioAnnotations", { assetId: photo.id }, (page: Paged<"annotations", Note>) => page.annotations)).items,
+    load: async (photo) =>
+      (
+        await loadPages(
+          client,
+          "studioAnnotations",
+          { assetId: photo.id },
+          (page: Paged<"annotations", Note>) => page.annotations,
+        )
+      ).items,
     resolve: async (note, resolved) => {
       await invoke(client, "resolveAnnotation", { annotationId: note.id, resolved });
     },
     authorName: "Photographer",
     add: (photo, draft, key) =>
-      invoke<Note>(client, "addPinnedAnnotation", { code: shoot.accessCode, assetId: photo.id, ...draft }, `addPinnedAnnotation:${key}`),
-    update: (note, body) => invoke<Note>(client, "updateOwnNote", { code: shoot.accessCode, annotationId: note.id, body }),
+      invoke<Note>(
+        client,
+        "addPinnedAnnotation",
+        { code: shoot.accessCode, assetId: photo.id, ...draft },
+        `addPinnedAnnotation:${key}`,
+      ),
+    update: (note, body) =>
+      invoke<Note>(client, "updateOwnNote", {
+        code: shoot.accessCode,
+        annotationId: note.id,
+        body,
+      }),
     remove: async (note) => {
       await invoke(client, "deleteOwnNote", { code: shoot.accessCode, annotationId: note.id });
     },
-    restore: (note) => invoke<Note>(client, "restoreOwnNote", { code: shoot.accessCode, annotationId: note.id }),
+    restore: (note) =>
+      invoke<Note>(client, "restoreOwnNote", { code: shoot.accessCode, annotationId: note.id }),
     counted: (assetId, counts) => {
       const asset = assets.data?.find((item) => item.id === assetId);
-      if (!asset || (asset.noteCount === counts.noteCount && asset.openNoteCount === counts.openNoteCount)) return;
-      assets.replace((list) => list.map((item) => (item.id === assetId ? { ...item, ...counts } : item)));
+      if (
+        !asset ||
+        (asset.noteCount === counts.noteCount && asset.openNoteCount === counts.openNoteCount)
+      )
+        return;
+      assets.replace((list) =>
+        list.map((item) => (item.id === assetId ? { ...item, ...counts } : item)),
+      );
       onSaved();
     },
     closedReason,
   };
   const notes = useNotes(target ?? NO_PHOTO, noteRules, Boolean(target));
   useEffect(() => {
-    if (notes.draft || notes.selected) setPanels((value) => (wideScreen() ? { ...value, right: true } : { left: false, right: true }));
+    if (notes.draft || notes.selected)
+      setPanels((value) =>
+        wideScreen() ? { ...value, right: true } : { left: false, right: true },
+      );
   }, [notes.draft, notes.selected]);
   useEffect(() => {
     if (mode === "compare" && shown.length < 2) setMode(shown.length ? "loupe" : "grid");
@@ -227,10 +291,19 @@ function Workspace({
     return () => clearTimeout(timer);
   }, [hud]);
 
-  const visible = (asset: StudioAsset) => matches(asset, library) && asset.rating >= minRating && (!labelFilter || asset.colorLabel === labelFilter);
+  const visible = (asset: StudioAsset) =>
+    matches(asset, library) &&
+    asset.rating >= minRating &&
+    (!labelFilter || asset.colorLabel === labelFilter);
 
   const stepAway = (list: readonly StudioAsset[], next: Partial<StudioAsset>) => {
-    if (comparing || !current || !list.some((asset) => asset.id === current.id) || visible({ ...current, ...next })) return;
+    if (
+      comparing ||
+      !current ||
+      !list.some((asset) => asset.id === current.id) ||
+      visible({ ...current, ...next })
+    )
+      return;
     const leaving = new Set(list.map((asset) => asset.id));
     const stays = (asset: StudioAsset) => !leaving.has(asset.id) || visible({ ...asset, ...next });
     const at = shown.indexOf(current);
@@ -243,7 +316,10 @@ function Workspace({
   const remove = async (list: readonly StudioAsset[]) => {
     setDialog(null);
     const gone = new Set<string>();
-    const after = current && list.some((asset) => asset.id === current.id) ? shown.slice(shown.indexOf(current)) : [];
+    const after =
+      current && list.some((asset) => asset.id === current.id)
+        ? shown.slice(shown.indexOf(current))
+        : [];
     const before = current ? shown.slice(0, shown.indexOf(current)).reverse() : [];
     try {
       for (let start = 0; start < list.length; start += BATCH) {
@@ -251,13 +327,17 @@ function Workspace({
         await invoke(client, "deleteAssets", { assetIds: chunk.map((asset) => asset.id) });
         for (const asset of chunk) {
           gone.add(asset.id);
-          for (const fileId of [asset.fileId, asset.previewFileId]) if (fileId) revokePhotoFileUrl(STUDIO_FILES.operation, fileId);
+          for (const fileId of [asset.fileId, asset.previewFileId])
+            if (fileId) revokePhotoFileUrl(STUDIO_FILES.operation, fileId);
         }
       }
       flash(`Deleted ${names(list)}`);
     } catch (error) {
       const left = list.filter((asset) => !gone.has(asset.id));
-      toast(`Could not delete ${names(left)}. ${errorMessage(error)}`, { tone: "danger", retry: refusalCode(error) ? undefined : () => void remove(left) });
+      toast(`Could not delete ${names(left)}. ${errorMessage(error)}`, {
+        tone: "danger",
+        retry: refusalCode(error) ? undefined : () => void remove(left),
+      });
     }
     if (!gone.size) return;
     const next = [...after, ...before].find((asset) => !gone.has(asset.id));
@@ -278,7 +358,10 @@ function Workspace({
             : "Back to draft. The client gallery is closed.",
       );
     } catch (error) {
-      toast(errorMessage(error), { tone: "danger", retry: refusalCode(error) ? undefined : () => void setStatus(status) });
+      toast(errorMessage(error), {
+        tone: "danger",
+        retry: refusalCode(error) ? undefined : () => void setStatus(status),
+      });
     }
   };
 
@@ -287,7 +370,10 @@ function Workspace({
     setChosen([id]);
     setAnchorId(id);
   };
-  const select = (id: string, how: { toggle: boolean; range: boolean } = { toggle: false, range: false }) => {
+  const select = (
+    id: string,
+    how: { toggle: boolean; range: boolean } = { toggle: false, range: false },
+  ) => {
     if (how.range && current) {
       const anchor = shown.findIndex((asset) => asset.id === anchorId);
       const from = anchor >= 0 ? anchor : shown.indexOf(current);
@@ -319,7 +405,8 @@ function Workspace({
   };
   const startCompare = () => {
     if (shown.length < 2 || !current) return;
-    const pair = selection.length === 2 ? selection.find((asset) => asset.id !== current.id) : undefined;
+    const pair =
+      selection.length === 2 ? selection.find((asset) => asset.id !== current.id) : undefined;
     setCandidateId((pair ?? shown[position] ?? shown[position - 2])!.id);
     setActive("select");
     setCandidateZoom(zoom);
@@ -389,12 +476,23 @@ function Workspace({
     if (dialog || event.defaultPrevented) return;
     const element = event.target instanceof HTMLElement ? event.target : null;
     if (isTyping(element) || element?.closest(".kit-modal-backdrop")) return;
-    if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "z") {
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      !event.altKey &&
+      !event.shiftKey &&
+      event.key.toLowerCase() === "z"
+    ) {
       event.preventDefault();
       undoLast();
       return;
     }
-    if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "a" && mode === "grid") {
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      !event.altKey &&
+      !event.shiftKey &&
+      event.key.toLowerCase() === "a" &&
+      mode === "grid"
+    ) {
       event.preventDefault();
       setChosen(shown.map((asset) => asset.id));
       flash(`${plural(shown.length, "photo")} selected`);
@@ -402,7 +500,8 @@ function Workspace({
     }
     if (event.metaKey || event.ctrlKey || event.altKey) return;
     const onCell = Boolean(element?.closest(".st-cell"));
-    const onControl = Boolean(element?.closest("button, a, [role='radio'], [role='switch'], input")) && !onCell;
+    const onControl =
+      Boolean(element?.closest("button, a, [role='radio'], [role='switch'], input")) && !onCell;
     if (onControl && (event.key === " " || event.key === "Enter")) return;
     const group = element?.closest("[role='radiogroup']");
     if (group && /^Arrow(Left|Right|Up|Down)$/.test(event.key)) {
@@ -454,7 +553,8 @@ function Workspace({
       void toggleLabel(selection, LABEL_KEYS[value]!);
       if (advance && !refocused.current) move(1);
     } else if (selection.length && key === "p") void publish(selection);
-    else if (selection.length && (key === "Delete" || key === "Backspace")) setDialog({ kind: "delete", assets: selection });
+    else if (selection.length && (key === "Delete" || key === "Backspace"))
+      setDialog({ kind: "delete", assets: selection });
     else return;
     event.preventDefault();
   };
@@ -473,7 +573,14 @@ function Workspace({
   const filtersOn = minRating > 0 || labelFilter !== null;
   const loading = !assets.data && !assets.error;
   const narrowPanels = (side: "left" | "right") =>
-    setPanels((value) => (wide ? { ...value, [side]: !value[side] } : { left: side === "left" ? !value.left : false, right: side === "right" ? !value.right : false }));
+    setPanels((value) =>
+      wide
+        ? { ...value, [side]: !value[side] }
+        : {
+            left: side === "left" ? !value.left : false,
+            right: side === "right" ? !value.right : false,
+          },
+    );
 
   const modes: Array<[Mode, string, string, typeof GridGlyph]> = [
     ["grid", "Grid", "G", GridGlyph],
@@ -495,7 +602,10 @@ function Workspace({
   } else if (loading) {
     stage = (
       <div className="st-grid-scroll" aria-hidden="true">
-        <div className="st-grid" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${cellSize}px, 1fr))`, gap: 6 }}>
+        <div
+          className="st-grid"
+          style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${cellSize}px, 1fr))`, gap: 6 }}
+        >
           {Array.from({ length: 12 }, (_, index) => (
             <span key={index} className="st-cell st-cell-loading" />
           ))}
@@ -509,10 +619,18 @@ function Workspace({
         <h2>Drop photos here</h2>
         <p>{LIMIT_TEXT} New photos stay drafts until you publish them.</p>
         <div className="st-empty-actions">
-          <button type="button" className="lb-button lb-button-solid" onClick={() => fileInput.current?.click()}>
+          <button
+            type="button"
+            className="lb-button lb-button-solid"
+            onClick={() => fileInput.current?.click()}
+          >
             Upload photos
           </button>
-          <button type="button" className="lb-button" onClick={() => void samplePhoto(all.length + 1).then((file) => addFiles([file]))}>
+          <button
+            type="button"
+            className="lb-button"
+            onClick={() => void samplePhoto(all.length + 1).then((file) => addFiles([file]))}
+          >
             Add a sample photo
           </button>
         </div>
@@ -523,11 +641,7 @@ function Workspace({
       <div className="st-empty">
         <h2>No photos match</h2>
         <p>{plural(all.length, "photo")} in this shoot, none with these filters.</p>
-        <button
-          type="button"
-          className="lb-button"
-          onClick={clearFilters}
-        >
+        <button type="button" className="lb-button" onClick={clearFilters}>
           Clear filters
         </button>
       </div>
@@ -540,14 +654,16 @@ function Workspace({
             <span>
               Showing {shown.length} of {all.length}
             </span>
-            {library !== "all" ? <span className="st-chip">{{ picks: "Client picks", annotated: "Annotated", drafts: "Drafts" }[library]}</span> : null}
+            {library !== "all" ? (
+              <span className="st-chip">
+                {{ picks: "Client picks", annotated: "Annotated", drafts: "Drafts" }[library]}
+              </span>
+            ) : null}
             {minRating ? <span className="st-chip">{minRating}+ stars</span> : null}
-            {labelFilter ? <span className="st-chip">{LABEL_TITLES[labelFilter]} label</span> : null}
-            <button
-              type="button"
-              className="lb-text-button"
-              onClick={clearFilters}
-            >
+            {labelFilter ? (
+              <span className="st-chip">{LABEL_TITLES[labelFilter]} label</span>
+            ) : null}
+            <button type="button" className="lb-text-button" onClick={clearFilters}>
               Clear
             </button>
           </div>
@@ -565,12 +681,21 @@ function Workspace({
         <div className="st-toolbar">
           <span className="st-toolbar-text">
             {selection.length > 1 ? `${selection.length} selected · ` : ""}
-            {plural(shown.length, "photo")} · {shown.filter((asset) => matches(asset, "picks")).length} picked · {plural(shown.filter((asset) => !asset.published).length, "draft")}
+            {plural(shown.length, "photo")} ·{" "}
+            {shown.filter((asset) => matches(asset, "picks")).length} picked ·{" "}
+            {plural(shown.filter((asset) => !asset.published).length, "draft")}
           </span>
           <span className="st-toolbar-spacer" />
           <label className="st-slider">
             <span>Thumbnails</span>
-            <input type="range" min={110} max={300} step={2} value={cellSize} onChange={(event) => setCellSize(Number(event.target.value))} />
+            <input
+              type="range"
+              min={110}
+              max={300}
+              step={2}
+              value={cellSize}
+              onChange={(event) => setCellSize(Number(event.target.value))}
+            />
           </label>
         </div>
       </>
@@ -630,7 +755,8 @@ function Workspace({
       onMouseDown={(event) => {
         if (!(event.target instanceof Element && event.target.closest("[role='radio']"))) return;
         event.preventDefault();
-        if (isTyping(document.activeElement) && document.activeElement instanceof HTMLElement) document.activeElement.blur();
+        if (isTyping(document.activeElement) && document.activeElement instanceof HTMLElement)
+          document.activeElement.blur();
       }}
       onDragOver={(event) => {
         if (![...event.dataTransfer.types].includes("Files")) return;
@@ -638,12 +764,20 @@ function Workspace({
         setDragging(true);
       }}
       onDragLeave={(event) => {
-        if (!event.relatedTarget || !event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false);
+        if (!event.relatedTarget || !event.currentTarget.contains(event.relatedTarget as Node))
+          setDragging(false);
       }}
       onDrop={drop}
     >
       <header className="st-top">
-        <button type="button" className="st-icon st-only-narrow" aria-label="Library" title="Library" aria-expanded={panels.left} onClick={() => narrowPanels("left")}>
+        <button
+          type="button"
+          className="st-icon st-only-narrow"
+          aria-label="Library"
+          title="Library"
+          aria-expanded={panels.left}
+          onClick={() => narrowPanels("left")}
+        >
           <Menu size={17} />
         </button>
         <span className="st-brand">
@@ -666,8 +800,12 @@ function Workspace({
               className={mode === id ? "st-on" : undefined}
               title={`${text} (${key})`}
               aria-label={text}
-              disabled={id === "compare" ? shown.length < 2 : id === "loupe" ? !shown.length : false}
-              onClick={() => (id === "compare" ? startCompare() : id === "loupe" ? openLoupe() : setMode("grid"))}
+              disabled={
+                id === "compare" ? shown.length < 2 : id === "loupe" ? !shown.length : false
+              }
+              onClick={() =>
+                id === "compare" ? startCompare() : id === "loupe" ? openLoupe() : setMode("grid")
+              }
             >
               <Glyph size={15} />
               <span className="st-mode-text">{text}</span>
@@ -679,7 +817,14 @@ function Workspace({
           <span className="st-saving" role="status">
             {saving > 0 ? `Saving ${saving}…` : ""}
           </span>
-          <button type="button" className="st-icon st-hide-narrow" id="add-sample" aria-label="Add a sample photo" title="Add a sample photo" onClick={() => void samplePhoto(all.length + 1).then((file) => addFiles([file]))}>
+          <button
+            type="button"
+            className="st-icon st-hide-narrow"
+            id="add-sample"
+            aria-label="Add a sample photo"
+            title="Add a sample photo"
+            onClick={() => void samplePhoto(all.length + 1).then((file) => addFiles([file]))}
+          >
             <Image size={16} />
           </button>
           <button
@@ -692,18 +837,30 @@ function Workspace({
             title="Upload photos, or drop them anywhere"
           >
             <Upload size={14} />
-            <span className="st-hide-narrow">{uploads > 0 ? `Uploading ${uploads}…` : "Upload"}</span>
+            <span className="st-hide-narrow">
+              {uploads > 0 ? `Uploading ${uploads}…` : "Upload"}
+            </span>
           </button>
           <button
             type="button"
             className="st-button st-button-primary st-hide-narrow"
             disabled={!drafts.length}
-            title={drafts.length ? `Publish ${plural(drafts.length, "draft")} to the client gallery` : "Every photo is in the client gallery"}
+            title={
+              drafts.length
+                ? `Publish ${plural(drafts.length, "draft")} to the client gallery`
+                : "Every photo is in the client gallery"
+            }
             onClick={() => void publish(drafts, true)}
           >
             {drafts.length ? `Publish ${drafts.length}` : "Published"}
           </button>
-          <button type="button" className="st-icon st-hide-narrow" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)" onClick={() => setDialog({ kind: "shortcuts" })}>
+          <button
+            type="button"
+            className="st-icon st-hide-narrow"
+            aria-label="Keyboard shortcuts"
+            title="Keyboard shortcuts (?)"
+            onClick={() => setDialog({ kind: "shortcuts" })}
+          >
             <CircleHelp size={16} />
           </button>
           <button
@@ -767,14 +924,26 @@ function Workspace({
         />
       ) : null}
 
-      <main className="st-stage" aria-label={mode === "grid" ? "Grid" : mode === "loupe" ? "Loupe" : "Compare"}>
+      <main
+        className="st-stage"
+        aria-label={mode === "grid" ? "Grid" : mode === "loupe" ? "Loupe" : "Compare"}
+      >
         {stage}
         <ToastStack />
         {hud ? (
-          <div key={hud.id} className={`st-hud${hud.undo ? " st-hud-long" : ""}${mode === "grid" ? " st-hud-low" : comparing ? " st-hud-bar" : ""}`} role="status">
+          <div
+            key={hud.id}
+            className={`st-hud${hud.undo ? " st-hud-long" : ""}${mode === "grid" ? " st-hud-low" : comparing ? " st-hud-bar" : ""}`}
+            role="status"
+          >
             <span>{hud.text}</span>
             {hud.undo ? (
-              <button type="button" className="st-hud-undo" title={`Undo (${UNDO_KEY})`} onClick={undoLast}>
+              <button
+                type="button"
+                className="st-hud-undo"
+                title={`Undo (${UNDO_KEY})`}
+                onClick={undoLast}
+              >
                 Undo
               </button>
             ) : null}
@@ -819,12 +988,21 @@ function Workspace({
             <>
               {!wide && mode === "loupe" && target ? (
                 <span className="st-quick">
-                  <StarInput value={target.rating} onChange={(rating) => void rate([target], rating)} />
-                  <LabelInput value={target.colorLabel} onChange={(value) => void label([target], value)} />
+                  <StarInput
+                    value={target.rating}
+                    onChange={(rating) => void rate([target], rating)}
+                  />
+                  <LabelInput
+                    value={target.colorLabel}
+                    onChange={(value) => void label([target], value)}
+                  />
                 </span>
               ) : (
                 <span className="st-film-path">
-                  {shoot.title} / {library === "all" && !filtersOn ? "All photographs" : `Filtered, ${shown.length} of ${all.length}`}
+                  {shoot.title} /{" "}
+                  {library === "all" && !filtersOn
+                    ? "All photographs"
+                    : `Filtered, ${shown.length} of ${all.length}`}
                 </span>
               )}
               <span className="st-film-name">
@@ -835,7 +1013,14 @@ function Workspace({
         />
       ) : null}
 
-      {!wide && panels.left ? <button type="button" className="st-scrim" aria-label="Close panel" onClick={() => setPanels({ left: false, right: false })} /> : null}
+      {!wide && panels.left ? (
+        <button
+          type="button"
+          className="st-scrim"
+          aria-label="Close panel"
+          onClick={() => setPanels({ left: false, right: false })}
+        />
+      ) : null}
 
       {dragging ? (
         <div className="st-drop" aria-hidden="true">
@@ -858,15 +1043,25 @@ function Workspace({
           }}
         />
       ) : null}
-      {dialog?.kind === "picks" ? <FinalPicks shoot={shoot} onClose={() => setDialog(null)} /> : null}
+      {dialog?.kind === "picks" ? (
+        <FinalPicks shoot={shoot} onClose={() => setDialog(null)} />
+      ) : null}
       {dialog?.kind === "shortcuts" ? <Shortcuts onClose={() => setDialog(null)} /> : null}
-      {dialog?.kind === "delete" ? <DeleteDialog assets={dialog.assets} onClose={() => setDialog(null)} onDelete={() => void remove(dialog.assets)} /> : null}
+      {dialog?.kind === "delete" ? (
+        <DeleteDialog
+          assets={dialog.assets}
+          onClose={() => setDialog(null)}
+          onDelete={() => void remove(dialog.assets)}
+        />
+      ) : null}
     </div>
   );
 }
 
 function loadShoots(client: AppClient) {
-  return loadPages(client, "listShoots", {}, (page: Paged<"shoots", Shoot>) => page.shoots).then(({ items }) => items);
+  return loadPages(client, "listShoots", {}, (page: Paged<"shoots", Shoot>) => page.shoots).then(
+    ({ items }) => items,
+  );
 }
 
 function Studio() {
@@ -875,7 +1070,10 @@ function Studio() {
   const [creating, setCreating] = useState(false);
   const toast = useToast();
   const list = useMemo(() => shoots.data ?? [], [shoots.data]);
-  const shoot = list.find((item) => item.id === chosen) ?? list.find((item) => item.status === "proofing") ?? list[0];
+  const shoot =
+    list.find((item) => item.id === chosen) ??
+    list.find((item) => item.status === "proofing") ??
+    list[0];
   const update = (saved?: Shoot) => {
     if (saved)
       shoots.replace((current) =>
@@ -911,7 +1109,15 @@ function Studio() {
   if (shoot)
     return (
       <>
-        <Workspace key={shoot.id} shoot={shoot} shoots={list} onChoose={setChosen} onSaved={update} onNewShoot={() => setCreating(true)} onRefreshShoots={shoots.reload} />
+        <Workspace
+          key={shoot.id}
+          shoot={shoot}
+          shoots={list}
+          onChoose={setChosen}
+          onSaved={update}
+          onNewShoot={() => setCreating(true)}
+          onRefreshShoots={shoots.reload}
+        />
         {form}
       </>
     );
@@ -936,7 +1142,12 @@ function Studio() {
           <div className="st-empty">
             <h2>No shoots yet</h2>
             <p>Create a shoot, upload photos, then send the client the gallery code.</p>
-            <button type="button" className="lb-button lb-button-solid" id="new-shoot" onClick={() => setCreating(true)}>
+            <button
+              type="button"
+              className="lb-button lb-button-solid"
+              id="new-shoot"
+              onClick={() => setCreating(true)}
+            >
               New shoot
             </button>
           </div>

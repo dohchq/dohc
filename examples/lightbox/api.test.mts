@@ -33,8 +33,20 @@ async function loadLightboxApi(): Promise<{
   return { api, AppBackendError: appKit.AppBackendError };
 }
 
-function thumb(api: LightboxApiModule, client: AppClient, id: string, priority: "high" | "low" = "low") {
-  return api.acquirePhotoFileUrl(client, id, "assetFileAccess", { code: "GOLDHOUR2026", assetId: id }, "image/jpeg", priority);
+function thumb(
+  api: LightboxApiModule,
+  client: AppClient,
+  id: string,
+  priority: "high" | "low" = "low",
+) {
+  return api.acquirePhotoFileUrl(
+    client,
+    id,
+    "assetFileAccess",
+    { code: "GOLDHOUR2026", assetId: id },
+    "image/jpeg",
+    priority,
+  );
 }
 
 function makeThrottledBroker(
@@ -51,14 +63,19 @@ function makeThrottledBroker(
     tokens = Math.min(burst, tokens + (now - updated) / refillMs);
     updated = now;
     if (pending >= maxPending) throw new AppBackendError(429);
-    if (tokens < 1) throw new AppBackendError(429, undefined, undefined, Math.ceil((1 - tokens) * refillMs));
+    if (tokens < 1)
+      throw new AppBackendError(429, undefined, undefined, Math.ceil((1 - tokens) * refillMs));
     tokens--;
     pending++;
     started.push(label);
   };
   let failFirstUploadOnce = true;
   const client: AppClient = {
-    async invoke<T>(operation: string, _input?: unknown, idempotencyKey?: string): Promise<InvokeReply<T>> {
+    async invoke<T>(
+      operation: string,
+      _input?: unknown,
+      idempotencyKey?: string,
+    ): Promise<InvokeReply<T>> {
       take(`invoke:${operation}`);
       try {
         return {
@@ -167,7 +184,11 @@ afterEach(() => {
 
 it("uses a host's larger broker budget without pacing thumbnails", async () => {
   const { api, AppBackendError } = await loadLightboxApi();
-  const { client, started } = makeThrottledBroker(AppBackendError, { burst: 120, refillMs: 50, maxPending: 16 });
+  const { client, started } = makeThrottledBroker(AppBackendError, {
+    burst: 120,
+    refillMs: 50,
+    maxPending: 16,
+  });
 
   const thumbs = Array.from({ length: 90 }, (_, index) => thumb(api, client, `photo_${index}`));
   await vi.advanceTimersByTimeAsync(0);
@@ -238,7 +259,9 @@ it("paces 18 sequential photo uploads and registrations across the 30-token burs
   const run = (async () => {
     const ids: string[] = [];
     for (let index = 0; index < 18; index++) {
-      const file = new File([new Uint8Array([1, 2, 3])], `shot_${index}.jpg`, { type: "image/jpeg" });
+      const file = new File([new Uint8Array([1, 2, 3])], `shot_${index}.jpg`, {
+        type: "image/jpeg",
+      });
       const sent = await api.uploadPhoto(client, file, `key-${index}`);
       await api.invoke(client, "uploadAsset", {
         shootId: "shoot_positano",
@@ -267,7 +290,14 @@ it("evicts and revokes unused photo blob URLs past the cache cap and on explicit
 
   const urls: string[] = [];
   for (let index = 0; index < 35; index++) {
-    const lease = api.acquirePhotoFileUrl(client, `evict_${index}`, "studioFileAccess", { assetId: `evict_${index}` }, "image/jpeg", "high");
+    const lease = api.acquirePhotoFileUrl(
+      client,
+      `evict_${index}`,
+      "studioFileAccess",
+      { assetId: `evict_${index}` },
+      "image/jpeg",
+      "high",
+    );
     await vi.advanceTimersByTimeAsync(2500);
     urls.push(await lease.promise);
     lease.release();
@@ -292,12 +322,33 @@ it("binds each release to the specific cache entry so a failed view's cleanup ne
     },
   };
 
-  const first = api.acquirePhotoFileUrl(client, "flaky", "studioFileAccess", { assetId: "flaky" }, "image/jpeg", "high");
-  const second = api.acquirePhotoFileUrl(client, "flaky", "studioFileAccess", { assetId: "flaky" }, "image/jpeg", "high");
+  const first = api.acquirePhotoFileUrl(
+    client,
+    "flaky",
+    "studioFileAccess",
+    { assetId: "flaky" },
+    "image/jpeg",
+    "high",
+  );
+  const second = api.acquirePhotoFileUrl(
+    client,
+    "flaky",
+    "studioFileAccess",
+    { assetId: "flaky" },
+    "image/jpeg",
+    "high",
+  );
   await expect(first.promise).rejects.toThrow();
   await expect(second.promise).rejects.toThrow();
 
-  const retried = api.acquirePhotoFileUrl(client, "flaky", "studioFileAccess", { assetId: "flaky" }, "image/jpeg", "high");
+  const retried = api.acquirePhotoFileUrl(
+    client,
+    "flaky",
+    "studioFileAccess",
+    { assetId: "flaky" },
+    "image/jpeg",
+    "high",
+  );
   const url = await retried.promise;
   first.release();
   second.release();
@@ -354,10 +405,14 @@ it("cancels undispatched queued downloads when their cache entry is evicted", as
   for (const lease of replacement) lease.release();
 });
 
-function exifJpeg(order: "II" | "MM", odd: { iso?: number; fastShutter?: boolean; make?: string } = {}): Uint8Array {
+function exifJpeg(
+  order: "II" | "MM",
+  odd: { iso?: number; fastShutter?: boolean; make?: string } = {},
+): Uint8Array {
   const little = order === "II";
   const tiff: number[] = [];
-  const u16 = (value: number) => tiff.push(...(little ? [value & 255, value >> 8] : [value >> 8, value & 255]));
+  const u16 = (value: number) =>
+    tiff.push(...(little ? [value & 255, value >> 8] : [value >> 8, value & 255]));
   const u32 = (value: number) => {
     const bytes = [(value >>> 24) & 255, (value >>> 16) & 255, (value >>> 8) & 255, value & 255];
     tiff.push(...(little ? bytes.reverse() : bytes));
@@ -406,19 +461,54 @@ function exifJpeg(order: "II" | "MM", odd: { iso?: number; fastShutter?: boolean
   u32(0);
   for (const value of [1, odd.fastShutter ? 1000000 : 250, 2, 1, 23, 1]) u32(value);
   const app1 = [0x45, 0x78, 0x69, 0x66, 0, 0, ...tiff];
-  return new Uint8Array([0xff, 0xd8, 0xff, 0xe1, (app1.length + 2) >> 8, (app1.length + 2) & 255, ...app1, 0xff, 0xd9]);
+  return new Uint8Array([
+    0xff,
+    0xd8,
+    0xff,
+    0xe1,
+    (app1.length + 2) >> 8,
+    (app1.length + 2) & 255,
+    ...app1,
+    0xff,
+    0xd9,
+  ]);
 }
 
 it("reads camera settings from JPEG EXIF in either byte order, and nothing from other files", async () => {
-  const camera = (await import(resolve(import.meta.dirname, "camera.ts"))) as typeof import("./camera.ts");
+  const camera = (await import(
+    resolve(import.meta.dirname, "camera.ts")
+  )) as typeof import("./camera.ts");
   for (const order of ["II", "MM"] as const) {
     const file = new File([exifJpeg(order)], "x.jpg", { type: "image/jpeg" });
-    expect(await camera.readCameraSettings(file)).toEqual({ camera: "FUJIFILM X100V", iso: 400, fNumber: 2, exposureS: 0.004, focalMm: 23 });
+    expect(await camera.readCameraSettings(file)).toEqual({
+      camera: "FUJIFILM X100V",
+      iso: 400,
+      fNumber: 2,
+      exposureS: 0.004,
+      focalMm: 23,
+    });
   }
-  expect(camera.describeExposure({ iso: 400, fNumber: 2, exposureS: 0.004, focalMm: 23 })).toEqual(["ISO 400", "f/2", "1/250 s", "23 mm"]);
-  expect(await camera.readCameraSettings(new File([new Uint8Array([0xff, 0xd8, 0xff, 0xd9])], "x.jpg", { type: "image/jpeg" }))).toBeNull();
-  expect(await camera.readCameraSettings(new File([new Uint8Array([0xff, 0xd8, 0xff, 0xe1, 0, 2])], "x.jpg", { type: "image/jpeg" }))).toBeNull();
-  expect(await camera.readCameraSettings(new File([exifJpeg("II")], "x.png", { type: "image/png" }))).toBeNull();
+  expect(camera.describeExposure({ iso: 400, fNumber: 2, exposureS: 0.004, focalMm: 23 })).toEqual([
+    "ISO 400",
+    "f/2",
+    "1/250 s",
+    "23 mm",
+  ]);
+  expect(
+    await camera.readCameraSettings(
+      new File([new Uint8Array([0xff, 0xd8, 0xff, 0xd9])], "x.jpg", { type: "image/jpeg" }),
+    ),
+  ).toBeNull();
+  expect(
+    await camera.readCameraSettings(
+      new File([new Uint8Array([0xff, 0xd8, 0xff, 0xe1, 0, 2])], "x.jpg", { type: "image/jpeg" }),
+    ),
+  ).toBeNull();
+  expect(
+    await camera.readCameraSettings(new File([exifJpeg("II")], "x.png", { type: "image/png" })),
+  ).toBeNull();
   const odd = exifJpeg("MM", { iso: 0, fastShutter: true, make: "FUJI\u0007FILM" });
-  expect(await camera.readCameraSettings(new File([odd], "x.jpg", { type: "image/jpeg" }))).toEqual({ camera: "FUJIFILM X100V", fNumber: 2, focalMm: 23 });
+  expect(await camera.readCameraSettings(new File([odd], "x.jpg", { type: "image/jpeg" }))).toEqual(
+    { camera: "FUJIFILM X100V", fNumber: 2, focalMm: 23 },
+  );
 });

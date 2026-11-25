@@ -21,7 +21,8 @@ function shape(ctx, input, required, optional = []) {
     invalid(ctx, "Send the request as an object.");
   for (const key of Object.keys(input))
     if (!required.includes(key) && !optional.includes(key)) invalid(ctx, `Unknown field: ${key}.`);
-  for (const key of required) if (!Object.hasOwn(input, key)) invalid(ctx, `Missing field: ${key}.`);
+  for (const key of required)
+    if (!Object.hasOwn(input, key)) invalid(ctx, `Missing field: ${key}.`);
   return input;
 }
 
@@ -54,7 +55,15 @@ function measure(ctx, value, label, min, max) {
 }
 
 function captureSettings(ctx, value) {
-  if (value === undefined) return { camera: null, lens: null, iso: null, f_number: null, exposure_s: null, focal_mm: null };
+  if (value === undefined)
+    return {
+      camera: null,
+      lens: null,
+      iso: null,
+      f_number: null,
+      exposure_s: null,
+      focal_mm: null,
+    };
   shape(ctx, value, [], ["camera", "lens", "iso", "fNumber", "exposureS", "focalMm"]);
   return {
     camera: value.camera === undefined ? null : text(ctx, value.camera, "The camera", 80),
@@ -90,7 +99,8 @@ function percent(ctx, value, label) {
 }
 
 function page(ctx, input, maxLimit = PAGE_SIZE) {
-  const limit = input.limit === undefined ? maxLimit : integer(ctx, input.limit, "Page size", 1, maxLimit);
+  const limit =
+    input.limit === undefined ? maxLimit : integer(ctx, input.limit, "Page size", 1, maxLimit);
   const after = input.after ?? null;
   if (after !== null) {
     shape(ctx, after, ["order", "id"]);
@@ -102,7 +112,9 @@ function page(ctx, input, maxLimit = PAGE_SIZE) {
 
 function notePage(ctx, input) {
   const limit =
-    input.limit === undefined ? NOTE_PAGE_SIZE : integer(ctx, input.limit, "Page size", 1, NOTE_PAGE_SIZE);
+    input.limit === undefined
+      ? NOTE_PAGE_SIZE
+      : integer(ctx, input.limit, "Page size", 1, NOTE_PAGE_SIZE);
   const after = input.after ?? null;
   if (after !== null) {
     shape(ctx, after, ["createdAtMs", "id"]);
@@ -113,7 +125,9 @@ function notePage(ctx, input) {
 }
 
 function seek(columns, position, after) {
-  return after ? { sql: `(${columns}) > (?, ?)`, args: [position(after), after.id] } : { sql: "1", args: [] };
+  return after
+    ? { sql: `(${columns}) > (?, ?)`, args: [position(after), after.id] }
+    : { sql: "1", args: [] };
 }
 
 function readNotesPage(ctx, assetId, input) {
@@ -148,7 +162,10 @@ function viewerKey(ctx) {
 }
 
 function reviewerKey(ctx) {
-  return viewerKey(ctx) ?? ctx.refuse("forbidden", "Open the gallery from its proofing link to pick photos.");
+  return (
+    viewerKey(ctx) ??
+    ctx.refuse("forbidden", "Open the gallery from its proofing link to pick photos.")
+  );
 }
 
 function accessCode(ctx, value) {
@@ -173,7 +190,10 @@ function openGallery(ctx, input, writing) {
     [code],
   )[0];
   if (!shoot)
-    ctx.refuse("gallery_not_found", "No gallery matches that code. Check the code your photographer sent.");
+    ctx.refuse(
+      "gallery_not_found",
+      "No gallery matches that code. Check the code your photographer sent.",
+    );
   if (writing && shoot.status !== "proofing")
     ctx.refuse("gallery_closed", "This gallery is closed. Picks and notes can no longer change.");
   return shoot;
@@ -197,12 +217,24 @@ function picksUsed(ctx, shootId, reviewer, column = "selected") {
 
 function pickColumn(ctx, shoot, reviewer) {
   if (shoot.status === "proofing") return "selected";
-  return ctx.db.query("SELECT 1 AS sent FROM submissions WHERE shoot_id = ? AND reviewer_key = ?", [shoot.id, reviewer]).length ? "sent" : "selected";
+  return ctx.db.query("SELECT 1 AS sent FROM submissions WHERE shoot_id = ? AND reviewer_key = ?", [
+    shoot.id,
+    reviewer,
+  ]).length
+    ? "sent"
+    : "selected";
 }
 
 function sentState(ctx, shootId, reviewer) {
-  const row = ctx.db.query("SELECT sent_at_ms, changed, picks FROM submissions WHERE shoot_id = ? AND reviewer_key = ?", [shootId, reviewer])[0];
-  return { sentAtMs: row ? row.sent_at_ms : null, sentPicks: row ? row.picks : 0, changedSinceSent: row ? row.changed === 1 : false };
+  const row = ctx.db.query(
+    "SELECT sent_at_ms, changed, picks FROM submissions WHERE shoot_id = ? AND reviewer_key = ?",
+    [shootId, reviewer],
+  )[0];
+  return {
+    sentAtMs: row ? row.sent_at_ms : null,
+    sentPicks: row ? row.picks : 0,
+    changedSinceSent: row ? row.changed === 1 : false,
+  };
 }
 
 function gallerySummary(ctx, shoot, reviewer, column = pickColumn(ctx, shoot, reviewer)) {
@@ -238,7 +270,8 @@ function note(row, viewer) {
   };
 }
 
-const NOTE_COLUMNS = "id, asset_id, x_pct, y_pct, author_name, author_key, body, resolved, created_at_ms";
+const NOTE_COLUMNS =
+  "id, asset_id, x_pct, y_pct, author_name, author_key, body, resolved, created_at_ms";
 
 function listPublishedAssets(ctx, input) {
   shape(ctx, input, ["code"], ["after", "limit"]);
@@ -283,16 +316,28 @@ function listPublishedAssets(ctx, input) {
 function fileOf(ctx, asset, input, fullSize = true) {
   const preview = input.preview === undefined ? false : flag(ctx, input.preview, "Preview");
   if (!preview && !fullSize)
-    ctx.refuse("not_delivered", "Full-size photos open once your photographer delivers the gallery.");
+    ctx.refuse(
+      "not_delivered",
+      "Full-size photos open once your photographer delivers the gallery.",
+    );
   const fileId = preview ? asset.preview_file_id : asset.file_id;
-  if (!fileId) ctx.refuse("not_found", preview ? "This photo has no preview." : "This photo has no uploaded file.");
+  if (!fileId)
+    ctx.refuse(
+      "not_found",
+      preview ? "This photo has no preview." : "This photo has no uploaded file.",
+    );
   return { fileId };
 }
 
 function assetFileAccess(ctx, input) {
   shape(ctx, input, ["code", "assetId"], ["preview"]);
   const shoot = openGallery(ctx, input, false);
-  return fileOf(ctx, publishedAsset(ctx, shoot, input.assetId), input, shoot.status === "delivered");
+  return fileOf(
+    ctx,
+    publishedAsset(ctx, shoot, input.assetId),
+    input,
+    shoot.status === "delivered",
+  );
 }
 
 function listAnnotations(ctx, input) {
@@ -349,7 +394,11 @@ function submitSelection(ctx, input) {
   shape(ctx, input, ["code", "assetIds"]);
   const shoot = openGallery(ctx, input, true);
   const reviewer = reviewerKey(ctx);
-  if (!Array.isArray(input.assetIds) || input.assetIds.length > 1000 || input.assetIds.some((id) => typeof id !== "string"))
+  if (
+    !Array.isArray(input.assetIds) ||
+    input.assetIds.length > 1000 ||
+    input.assetIds.some((id) => typeof id !== "string")
+  )
     invalid(ctx, "List up to 1000 photo IDs, the favorites shown to the client.");
   const stored = ctx.db.query(
     `SELECT s.asset_id FROM selections s JOIN assets a ON a.id = s.asset_id
@@ -358,10 +407,18 @@ function submitSelection(ctx, input) {
   );
   const shown = new Set(input.assetIds);
   if (shown.size !== stored.length || stored.some((row) => !shown.has(row.asset_id)))
-    ctx.refuse("selection_changed", "Your saved favorites don't match the ones shown here. Check them, then send again.");
+    ctx.refuse(
+      "selection_changed",
+      "Your saved favorites don't match the ones shown here. Check them, then send again.",
+    );
   const picks = stored.length;
-  const sentBefore = ctx.db.query("SELECT 1 AS sent FROM submissions WHERE shoot_id = ? AND reviewer_key = ?", [shoot.id, reviewer]).length > 0;
-  if (!picks && !sentBefore) ctx.refuse("no_picks", "Choose at least 1 favorite before you send them.");
+  const sentBefore =
+    ctx.db.query("SELECT 1 AS sent FROM submissions WHERE shoot_id = ? AND reviewer_key = ?", [
+      shoot.id,
+      reviewer,
+    ]).length > 0;
+  if (!picks && !sentBefore)
+    ctx.refuse("no_picks", "Choose at least 1 favorite before you send them.");
   ctx.db.execute(
     `UPDATE selections SET sent = CASE WHEN asset_id IN (SELECT id FROM assets WHERE shoot_id = ? AND is_published = 1) THEN selected ELSE 0 END
     WHERE reviewer_key = ? AND asset_id IN (SELECT id FROM assets WHERE shoot_id = ?)`,
@@ -384,7 +441,9 @@ function addPinnedAnnotation(ctx, input) {
   const yPct = percent(ctx, input.yPct, "The pin's y position");
   const authorName = text(ctx, input.authorName, "Your name", 80);
   const body = text(ctx, input.body, "The note", 1000);
-  const count = ctx.db.query("SELECT COUNT(*) AS n FROM annotations WHERE asset_id = ?", [asset.id])[0].n;
+  const count = ctx.db.query("SELECT COUNT(*) AS n FROM annotations WHERE asset_id = ?", [
+    asset.id,
+  ])[0].n;
   if (count >= NOTES_PER_PHOTO)
     ctx.refuse(
       "note_limit_reached",
@@ -401,10 +460,16 @@ function addPinnedAnnotation(ctx, input) {
     resolved: 0,
     created_at_ms: ctx.nowMs,
   };
-  ctx.db.execute(
-    `INSERT INTO annotations (${NOTE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`,
-    [row.id, row.asset_id, row.x_pct, row.y_pct, row.author_name, row.author_key, row.body, row.created_at_ms],
-  );
+  ctx.db.execute(`INSERT INTO annotations (${NOTE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`, [
+    row.id,
+    row.asset_id,
+    row.x_pct,
+    row.y_pct,
+    row.author_name,
+    row.author_key,
+    row.body,
+    row.created_at_ms,
+  ]);
   return note(row, authorKey);
 }
 
@@ -487,7 +552,10 @@ function listShoots(ctx, input) {
           ])
       : [],
   );
-  return { shoots: rows.map((row) => shootView(row, covers.get(row.cover_id))), nextCursor: cursor };
+  return {
+    shoots: rows.map((row) => shootView(row, covers.get(row.cover_id))),
+    nextCursor: cursor,
+  };
 }
 
 function studioAssets(ctx, input) {
@@ -596,19 +664,36 @@ function createShoot(ctx, input) {
   };
   ctx.db.execute(
     "INSERT INTO shoots (id, title, client_name, shot_on, selection_limit, status, internal_rate_cents, access_code, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    [row.id, row.title, row.client_name, row.shot_on, row.selection_limit, row.status, row.internal_rate_cents, row.access_code, row.created_at_ms],
+    [
+      row.id,
+      row.title,
+      row.client_name,
+      row.shot_on,
+      row.selection_limit,
+      row.status,
+      row.internal_rate_cents,
+      row.access_code,
+      row.created_at_ms,
+    ],
   );
   return shootView(row, null);
 }
 
 function updateShoot(ctx, input) {
   owner(ctx);
-  shape(ctx, input, ["shootId"], ["title", "clientName", "shotOn", "selectionLimit", "internalRateCents", "status"]);
+  shape(
+    ctx,
+    input,
+    ["shootId"],
+    ["title", "clientName", "shotOn", "selectionLimit", "internalRateCents", "status"],
+  );
   const shoot = studioShoot(ctx, input.shootId);
   const next = {
     title: input.title === undefined ? shoot.title : text(ctx, input.title, "The shoot title", 120),
     client_name:
-      input.clientName === undefined ? shoot.client_name : text(ctx, input.clientName, "The client name", 120),
+      input.clientName === undefined
+        ? shoot.client_name
+        : text(ctx, input.clientName, "The client name", 120),
     shot_on: input.shotOn === undefined ? shoot.shot_on : day(ctx, input.shotOn),
     selection_limit:
       input.selectionLimit === undefined
@@ -639,14 +724,27 @@ function updateShoot(ctx, input) {
   }
   ctx.db.execute(
     "UPDATE shoots SET title = ?, client_name = ?, shot_on = ?, selection_limit = ?, internal_rate_cents = ?, status = ? WHERE id = ?",
-    [next.title, next.client_name, next.shot_on, next.selection_limit, next.internal_rate_cents, next.status, shoot.id],
+    [
+      next.title,
+      next.client_name,
+      next.shot_on,
+      next.selection_limit,
+      next.internal_rate_cents,
+      next.status,
+      shoot.id,
+    ],
   );
   return shootView({ ...shoot, ...next }, null);
 }
 
 function uploadAsset(ctx, input) {
   owner(ctx);
-  shape(ctx, input, ["shootId", "fileId", "previewFileId", "width", "height"], ["title", "capture"]);
+  shape(
+    ctx,
+    input,
+    ["shootId", "fileId", "previewFileId", "width", "height"],
+    ["title", "capture"],
+  );
   const shoot = studioShoot(ctx, input.shootId);
   const capture = captureSettings(ctx, input.capture);
   const width = integer(ctx, input.width, "The width", 1, 30000);
@@ -654,7 +752,10 @@ function uploadAsset(ctx, input) {
   if (typeof input.fileId !== "string") invalid(ctx, "Upload a photo first.");
   const file = ctx.files.attach(input.fileId);
   if (!IMAGE_TYPES.includes(file.contentType))
-    ctx.refuse("unsupported_type", `Upload a JPEG, PNG, or WebP image. This file is ${file.contentType}.`);
+    ctx.refuse(
+      "unsupported_type",
+      `Upload a JPEG, PNG, or WebP image. This file is ${file.contentType}.`,
+    );
   if (file.byteLength > UPLOAD_BYTES)
     ctx.refuse(
       "file_too_large",
@@ -672,11 +773,17 @@ function uploadAsset(ctx, input) {
     );
   const title =
     input.title === undefined
-      ? text(ctx, file.name.replace(/\.[A-Za-z0-9]{1,5}$/, "").slice(0, 120) || "Untitled", "The photo title", 120)
+      ? text(
+          ctx,
+          file.name.replace(/\.[A-Za-z0-9]{1,5}$/, "").slice(0, 120) || "Untitled",
+          "The photo title",
+          120,
+        )
       : text(ctx, input.title, "The photo title", 120);
-  const order = ctx.db.query("SELECT COALESCE(MAX(sort_order), 0) + 10 AS n FROM assets WHERE shoot_id = ?", [
-    shoot.id,
-  ])[0].n;
+  const order = ctx.db.query(
+    "SELECT COALESCE(MAX(sort_order), 0) + 10 AS n FROM assets WHERE shoot_id = ?",
+    [shoot.id],
+  )[0].n;
   const row = {
     id: `asset_${ctx.requestId}`,
     shoot_id: shoot.id,
@@ -697,19 +804,39 @@ function uploadAsset(ctx, input) {
   };
   ctx.db.execute(
     "INSERT INTO assets (id, shoot_id, title, file_id, preview_file_id, demo_scene, mime_type, width, height, byte_length, sort_order, owner_rating, color_label, is_published, camera, lens, iso, f_number, exposure_s, focal_mm, created_at_ms) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 0, 'none', 0, ?, ?, ?, ?, ?, ?, ?)",
-    [row.id, row.shoot_id, row.title, row.file_id, row.preview_file_id, row.mime_type, row.width, row.height, row.byte_length, row.sort_order, capture.camera, capture.lens, capture.iso, capture.f_number, capture.exposure_s, capture.focal_mm, row.created_at_ms],
+    [
+      row.id,
+      row.shoot_id,
+      row.title,
+      row.file_id,
+      row.preview_file_id,
+      row.mime_type,
+      row.width,
+      row.height,
+      row.byte_length,
+      row.sort_order,
+      capture.camera,
+      capture.lens,
+      capture.iso,
+      capture.f_number,
+      capture.exposure_s,
+      capture.focal_mm,
+      row.created_at_ms,
+    ],
   );
   return assetView(row);
 }
 
 function assetIdList(ctx, value) {
-  if (!Array.isArray(value) || value.length < 1 || value.length > BATCH) invalid(ctx, `Choose 1 to ${BATCH} photos.`);
+  if (!Array.isArray(value) || value.length < 1 || value.length > BATCH)
+    invalid(ctx, `Choose 1 to ${BATCH} photos.`);
   const ids = [...new Set(value.map((item) => id(ctx, item, "photo")))];
   const found = ctx.db.query(
     `SELECT COUNT(*) AS n FROM assets WHERE id IN (${ids.map(() => "?").join(",")})`,
     ids,
   )[0].n;
-  if (found !== ids.length) ctx.refuse("not_found", "A photo no longer exists. Reload and try again.");
+  if (found !== ids.length)
+    ctx.refuse("not_found", "A photo no longer exists. Reload and try again.");
   return ids;
 }
 
@@ -718,7 +845,10 @@ function setOwnerRating(ctx, input) {
   shape(ctx, input, ["assetIds", "rating"]);
   const ids = assetIdList(ctx, input.assetIds);
   const rating = integer(ctx, input.rating, "The rating", 0, 5);
-  ctx.db.execute(`UPDATE assets SET owner_rating = ? WHERE id IN (${ids.map(() => "?").join(",")})`, [rating, ...ids]);
+  ctx.db.execute(
+    `UPDATE assets SET owner_rating = ? WHERE id IN (${ids.map(() => "?").join(",")})`,
+    [rating, ...ids],
+  );
   return { assetIds: ids, rating };
 }
 
@@ -726,11 +856,12 @@ function setColorLabel(ctx, input) {
   owner(ctx);
   shape(ctx, input, ["assetIds", "colorLabel"]);
   const ids = assetIdList(ctx, input.assetIds);
-  if (!COLOR_LABELS.includes(input.colorLabel)) invalid(ctx, `Choose one of: ${COLOR_LABELS.join(", ")}.`);
-  ctx.db.execute(`UPDATE assets SET color_label = ? WHERE id IN (${ids.map(() => "?").join(",")})`, [
-    input.colorLabel,
-    ...ids,
-  ]);
+  if (!COLOR_LABELS.includes(input.colorLabel))
+    invalid(ctx, `Choose one of: ${COLOR_LABELS.join(", ")}.`);
+  ctx.db.execute(
+    `UPDATE assets SET color_label = ? WHERE id IN (${ids.map(() => "?").join(",")})`,
+    [input.colorLabel, ...ids],
+  );
   return { assetIds: ids, colorLabel: input.colorLabel };
 }
 
@@ -773,7 +904,8 @@ function deleteAssets(ctx, input) {
   shape(ctx, input, ["assetIds"]);
   const ids = assetIdList(ctx, input.assetIds);
   const list = ids.map(() => "?").join(",");
-  for (const table of ["selections", "annotations", "deleted_annotations"]) ctx.db.execute(`DELETE FROM ${table} WHERE asset_id IN (${list})`, ids);
+  for (const table of ["selections", "annotations", "deleted_annotations"])
+    ctx.db.execute(`DELETE FROM ${table} WHERE asset_id IN (${list})`, ids);
   const deleted = ctx.db.execute(`DELETE FROM assets WHERE id IN (${list})`, ids).changes;
   return { assetIds: ids, deleted };
 }
@@ -786,7 +918,8 @@ function ownNote(ctx, input) {
     [id(ctx, input.annotationId, "note"), shoot.id],
   )[0];
   if (!row) ctx.refuse("not_found", "This note no longer exists.");
-  if (row.author_key !== reviewerKey(ctx)) ctx.refuse("forbidden", "You can only change notes you pinned.");
+  if (row.author_key !== reviewerKey(ctx))
+    ctx.refuse("forbidden", "You can only change notes you pinned.");
   return row;
 }
 
@@ -823,16 +956,23 @@ function restoreOwnNote(ctx, input) {
     WHERE id = ? AND author_key = ? AND asset_id IN (SELECT id FROM assets WHERE shoot_id = ? AND is_published = 1)`,
     [id(ctx, input.annotationId, "note"), authorKey, shoot.id],
   )[0];
-  if (!row) ctx.refuse("not_found", `This note can no longer be restored. Only your last ${RESTORABLE_NOTES} deleted notes can be.`);
-  const count = ctx.db.query("SELECT COUNT(*) AS n FROM annotations WHERE asset_id = ?", [row.asset_id])[0].n;
+  if (!row)
+    ctx.refuse(
+      "not_found",
+      `This note can no longer be restored. Only your last ${RESTORABLE_NOTES} deleted notes can be.`,
+    );
+  const count = ctx.db.query("SELECT COUNT(*) AS n FROM annotations WHERE asset_id = ?", [
+    row.asset_id,
+  ])[0].n;
   if (count >= NOTES_PER_PHOTO)
     ctx.refuse(
       "note_limit_reached",
       `This photo already has ${count} notes, and a photo holds at most ${NOTES_PER_PHOTO}.`,
     );
-  ctx.db.execute(`INSERT INTO annotations (${NOTE_COLUMNS}) SELECT ${NOTE_COLUMNS} FROM deleted_annotations WHERE id = ?`, [
-    row.id,
-  ]);
+  ctx.db.execute(
+    `INSERT INTO annotations (${NOTE_COLUMNS}) SELECT ${NOTE_COLUMNS} FROM deleted_annotations WHERE id = ?`,
+    [row.id],
+  );
   ctx.db.execute("DELETE FROM deleted_annotations WHERE id = ?", [row.id]);
   return note(row, authorKey);
 }

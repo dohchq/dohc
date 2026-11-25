@@ -1,14 +1,25 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { useApp } from "dohc/app";
 import { ChevronLeft, ChevronRight, Download, Heart, MessageSquare } from "dohc/icons";
-import { acquirePhotoFileUrl, errorMessage, isTyping, refusalCode, type ClientAsset, type PhotoFileLease } from "./api";
+import {
+  acquirePhotoFileUrl,
+  errorMessage,
+  isTyping,
+  refusalCode,
+  type ClientAsset,
+  type PhotoFileLease,
+} from "./api";
 import { CloseGlyph, CompareGlyph, SwapGlyph } from "./glyphs";
 import { NoteRail, Pins, pointOn, useNotes, type NoteRules, type NotesState } from "./notes";
 import { Photo, fit, useSize, type FileAccess } from "./photo";
 import { sceneUrl } from "./scenes";
 import { ToastStack, useToast } from "./toast";
 
-const EXTENSIONS: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
+const EXTENSIONS: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+};
 
 function wideScreen() {
   try {
@@ -18,12 +29,24 @@ function wideScreen() {
   }
 }
 
-function Canvas({ photo, access, notes }: { photo: ClientAsset; access: FileAccess; notes: NotesState | null }) {
+function Canvas({
+  photo,
+  access,
+  notes,
+}: {
+  photo: ClientAsset;
+  access: FileAccess;
+  notes: NotesState | null;
+}) {
   const box = useRef<HTMLDivElement | null>(null);
   const size = fit(photo, useSize(box));
   const pinnable = Boolean(notes?.canPin);
   return (
-    <div className="pt-stage-box" ref={box} style={{ ["--pt-ratio" as string]: String(photo.width / photo.height) }}>
+    <div
+      className="pt-stage-box"
+      ref={box}
+      style={{ ["--pt-ratio" as string]: String(photo.width / photo.height) }}
+    >
       <div
         className={`pt-canvas${pinnable ? " pt-canvas-pin" : ""}`}
         style={{ width: size.width, height: size.height }}
@@ -40,15 +63,33 @@ function Canvas({ photo, access, notes }: { photo: ClientAsset; access: FileAcce
   );
 }
 
-function HeartToggle({ asset, closed, onPick, id }: { asset: ClientAsset; closed: boolean; onPick(asset: ClientAsset): void; id?: string }) {
+function HeartToggle({
+  asset,
+  closed,
+  onPick,
+  id,
+}: {
+  asset: ClientAsset;
+  closed: boolean;
+  onPick(asset: ClientAsset): void;
+  id?: string;
+}) {
   return (
     <button
       type="button"
       id={id}
       className={`pt-heart-toggle${asset.picked ? " pt-on" : ""}`}
       aria-pressed={asset.picked}
-      aria-label={asset.picked ? `Remove ${asset.title} from favorites` : `Add ${asset.title} to favorites`}
-      title={closed ? "Favorites are closed" : asset.picked ? "Remove from favorites (Space)" : "Add to favorites (Space)"}
+      aria-label={
+        asset.picked ? `Remove ${asset.title} from favorites` : `Add ${asset.title} to favorites`
+      }
+      title={
+        closed
+          ? "Favorites are closed"
+          : asset.picked
+            ? "Remove from favorites (Space)"
+            : "Add to favorites (Space)"
+      }
       disabled={closed}
       onClick={() => onPick(asset)}
     >
@@ -97,8 +138,24 @@ export function Viewer({
     setSaving(true);
     let lease: PhotoFileLease | null = null;
     try {
-      lease = asset.fileId ? acquirePhotoFileUrl(client, asset.fileId, access.operation, access.input(asset), asset.mimeType, "high") : null;
-      const url = lease ? await lease.promise : await sceneUrl(asset.demoScene ?? "village:1", asset.width, asset.height, Math.max(asset.width, asset.height));
+      lease = asset.fileId
+        ? acquirePhotoFileUrl(
+            client,
+            asset.fileId,
+            access.operation,
+            access.input(asset),
+            asset.mimeType,
+            "high",
+          )
+        : null;
+      const url = lease
+        ? await lease.promise
+        : await sceneUrl(
+            asset.demoScene ?? "village:1",
+            asset.width,
+            asset.height,
+            Math.max(asset.width, asset.height),
+          );
       const link = document.createElement("a");
       link.href = url;
       link.download = `${asset.title}.${asset.fileId ? (EXTENSIONS[asset.mimeType] ?? "jpg") : "jpg"}`;
@@ -106,7 +163,10 @@ export function Viewer({
     } catch (error) {
       const refused = refusalCode(error);
       if (refused) onRefused();
-      toast(`Could not download ${asset.title}. ${errorMessage(error)}`, { tone: "danger", retry: refused ? undefined : () => void save(asset) });
+      toast(`Could not download ${asset.title}. ${errorMessage(error)}`, {
+        tone: "danger",
+        retry: refused ? undefined : () => void save(asset),
+      });
     } finally {
       const held = lease;
       if (held) setTimeout(() => held.release(), 1000);
@@ -117,7 +177,10 @@ export function Viewer({
   useEffect(() => {
     opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     root.current?.focus();
-    const others = [...(root.current?.parentElement?.children ?? [])].filter((element): element is HTMLElement => element instanceof HTMLElement && element !== root.current && !element.inert);
+    const others = [...(root.current?.parentElement?.children ?? [])].filter(
+      (element): element is HTMLElement =>
+        element instanceof HTMLElement && element !== root.current && !element.inert,
+    );
     for (const element of others) element.inert = true;
     return () => {
       for (const element of others) element.inert = false;
@@ -158,12 +221,17 @@ export function Viewer({
   const keyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Tab" && root.current) {
       const focusable = [
-        ...root.current.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [tabindex="0"]'),
+        ...root.current.querySelectorAll<HTMLElement>(
+          'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [tabindex="0"]',
+        ),
       ];
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
       if (first && last) {
-        if (event.shiftKey && (document.activeElement === first || document.activeElement === root.current)) {
+        if (
+          event.shiftKey &&
+          (document.activeElement === first || document.activeElement === root.current)
+        ) {
           event.preventDefault();
           last.focus();
         } else if (!event.shiftKey && document.activeElement === last) {
@@ -174,7 +242,8 @@ export function Viewer({
       return;
     }
     if (isTyping(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
-    const onControl = event.target instanceof HTMLElement && Boolean(event.target.closest("button"));
+    const onControl =
+      event.target instanceof HTMLElement && Boolean(event.target.closest("button"));
     if (onControl && (event.key === " " || event.key === "Enter")) return;
     const key = event.key.toLowerCase();
     if (event.key === "Escape") {
@@ -187,7 +256,8 @@ export function Viewer({
     else if (key === "x" && compare !== null) swap();
     else if (key === "i" && compare === null) setRailOpen((value) => !value);
     else if (key === "d" && closed && compare === null && !saving) void save(photo);
-    else if (key === "n" && compare === null && notes.canPin) notes.setDraft({ xPct: 50, yPct: 50 });
+    else if (key === "n" && compare === null && notes.canPin)
+      notes.setDraft({ xPct: 50, yPct: 50 });
     else if ((event.key === " " || key === "h") && !closed) onPick(candidate ?? photo);
     else return;
     event.preventDefault();
@@ -199,7 +269,11 @@ export function Viewer({
       className={`pt-viewer${candidate ? " pt-viewer-compare" : ""}${railOpen && !candidate ? " pt-viewer-rail" : ""}`}
       role="dialog"
       aria-modal="true"
-      aria-label={candidate ? `Comparing ${photo.title} and ${candidate.title}` : `${photo.title}, photo ${index + 1} of ${items.length}`}
+      aria-label={
+        candidate
+          ? `Comparing ${photo.title} and ${candidate.title}`
+          : `${photo.title}, photo ${index + 1} of ${items.length}`
+      }
       tabIndex={-1}
       ref={root}
       onKeyDown={keyDown}
@@ -209,12 +283,19 @@ export function Viewer({
           <span className="pt-viewer-count">
             {candidate ? "Compare" : `${index + 1} / ${items.length}`}
           </span>
-          <span className="pt-viewer-title">{candidate ? `${photo.title}  ·  ${candidate.title}` : photo.title}</span>
+          <span className="pt-viewer-title">
+            {candidate ? `${photo.title}  ·  ${candidate.title}` : photo.title}
+          </span>
         </div>
         <div className="pt-viewer-tools">
           {closed ? null : (
             <span className="pt-viewer-picks" aria-label={picksLabel}>
-              <Heart className="pt-viewer-picks-heart" size={12} strokeWidth={2} aria-hidden="true" />
+              <Heart
+                className="pt-viewer-picks-heart"
+                size={12}
+                strokeWidth={2}
+                aria-hidden="true"
+              />
               {picksLabel.replace(/ selected$/, "")}
               <span className="pt-viewer-picks-word" aria-hidden="true">
                 {" "}
@@ -222,7 +303,9 @@ export function Viewer({
               </span>
             </span>
           )}
-          {candidate || closed ? null : <HeartToggle asset={photo} closed={closed} onPick={onPick} id="pick-toggle" />}
+          {candidate || closed ? null : (
+            <HeartToggle asset={photo} closed={closed} onPick={onPick} id="pick-toggle" />
+          )}
           {closed && !candidate ? (
             <button
               type="button"
@@ -238,7 +321,13 @@ export function Viewer({
             </button>
           ) : null}
           {candidate ? (
-            <button type="button" className="pt-tool" aria-label="Swap sides" title="Swap sides (X)" onClick={swap}>
+            <button
+              type="button"
+              className="pt-tool"
+              aria-label="Swap sides"
+              title="Swap sides (X)"
+              onClick={swap}
+            >
               <SwapGlyph size={18} />
             </button>
           ) : null}
@@ -264,10 +353,19 @@ export function Viewer({
               onClick={() => setRailOpen((value) => !value)}
             >
               <MessageSquare size={18} />
-              {notes.list?.length ? <span className="pt-tool-count">{notes.list.length}</span> : null}
+              {notes.list?.length ? (
+                <span className="pt-tool-count">{notes.list.length}</span>
+              ) : null}
             </button>
           )}
-          <button type="button" id="inspector-close" className="pt-tool" aria-label="Close" title="Close (Esc)" onClick={onClose}>
+          <button
+            type="button"
+            id="inspector-close"
+            className="pt-tool"
+            aria-label="Close"
+            title="Close (Esc)"
+            onClick={onClose}
+          >
             <CloseGlyph size={18} />
           </button>
         </div>
@@ -289,7 +387,10 @@ export function Viewer({
           <div
             className="pt-stage"
             onPointerDown={(event) => {
-              swipe.current = event.pointerType === "touch" ? { x: event.clientX, y: event.clientY, done: false } : null;
+              swipe.current =
+                event.pointerType === "touch"
+                  ? { x: event.clientX, y: event.clientY, done: false }
+                  : null;
             }}
             onPointerUp={(event) => {
               const start = swipe.current;
@@ -310,7 +411,14 @@ export function Viewer({
             <Canvas photo={photo} access={access} notes={notes} />
           </div>
         )}
-        <button type="button" className="pt-edge pt-edge-prev" aria-label="Previous photo" title="Previous (←)" disabled={!canPrev} onClick={() => step(-1)}>
+        <button
+          type="button"
+          className="pt-edge pt-edge-prev"
+          aria-label="Previous photo"
+          title="Previous (←)"
+          disabled={!canPrev}
+          onClick={() => step(-1)}
+        >
           <ChevronLeft size={22} strokeWidth={1.5} />
         </button>
         <button
@@ -330,9 +438,12 @@ export function Viewer({
               hint={
                 <>
                   <span className="pt-hint-pointer">
-                    Click anywhere on the photo to pin a note there. <kbd>N</kbd> pins one in the center.
+                    Click anywhere on the photo to pin a note there. <kbd>N</kbd> pins one in the
+                    center.
                   </span>
-                  <span className="pt-hint-touch">Tap anywhere on the photo to pin a note there.</span>
+                  <span className="pt-hint-touch">
+                    Tap anywhere on the photo to pin a note there.
+                  </span>
                 </>
               }
             />

@@ -12,22 +12,36 @@ function isoDate(value: string, order: DateOrder): string | null {
       : /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/.exec(text)?.slice(1);
   if (!parts) return null;
   const [year, month, day] =
-    order === "ymd" ? parts.map(Number) : order === "mdy" ? [parts[2], parts[0], parts[1]].map(Number) : [parts[2], parts[1], parts[0]].map(Number);
+    order === "ymd"
+      ? parts.map(Number)
+      : order === "mdy"
+        ? [parts[2], parts[0], parts[1]].map(Number)
+        : [parts[2], parts[1], parts[0]].map(Number);
   const date = new Date(Date.UTC(year!, month! - 1, day!));
   if (date.getUTCMonth() !== month! - 1 || date.getUTCDate() !== day) return null;
   return date.toISOString().slice(0, 10);
 }
 
 function amount(value: string | undefined): string | null {
-  const text = (value ?? "").trim().replace(/[$€£¥]/g, "").trim();
+  const text = (value ?? "")
+    .trim()
+    .replace(/[$€£¥]/g, "")
+    .trim();
   if (!text) return null;
-  return /^(?:\(\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,4})?\s*\)|[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,4})?)$/.test(text)
+  return /^(?:\(\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,4})?\s*\)|[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,4})?)$/.test(
+    text,
+  )
     ? text
     : null;
 }
 
 function blank(value: string | undefined): boolean {
-  return /^[-–—]?$/.test((value ?? "").trim().replace(/[$€£¥]/g, "").trim());
+  return /^[-–—]?$/.test(
+    (value ?? "")
+      .trim()
+      .replace(/[$€£¥]/g, "")
+      .trim(),
+  );
 }
 
 function unsignedAmount(value: string): string {
@@ -54,29 +68,40 @@ export function mapStatement(
     let unreadable: string | null = null;
     if (columns.credit < 0) value = amount(row[columns.amount]);
     else {
-      for (const cell of [row[columns.amount], row[columns.credit]]) if (!unreadable && !blank(cell) && amount(cell) === null) unreadable = cell!.trim();
+      for (const cell of [row[columns.amount], row[columns.credit]])
+        if (!unreadable && !blank(cell) && amount(cell) === null) unreadable = cell!.trim();
       const moneyOut = amount(row[columns.amount]);
       const moneyIn = amount(row[columns.credit]);
       const hasIn = moneyIn !== null && !isZeroAmount(moneyIn);
       const hasOut = moneyOut !== null && !isZeroAmount(moneyOut);
       if (hasIn && hasOut) ambiguous = true;
-      else value = hasIn ? unsignedAmount(moneyIn!) : hasOut ? `-${unsignedAmount(moneyOut!)}` : null;
+      else
+        value = hasIn ? unsignedAmount(moneyIn!) : hasOut ? `-${unsignedAmount(moneyOut!)}` : null;
     }
     if (value && isZeroAmount(value)) value = null;
     if (!date) errors.push(`Row ${index + 1} has no date in the chosen format.`);
-    else if (unreadable) errors.push(`Row ${index + 1} has an amount that can't be read: ${unreadable}.`);
-    else if (ambiguous) errors.push(`Row ${index + 1} has amounts in both money-in and money-out columns.`);
+    else if (unreadable)
+      errors.push(`Row ${index + 1} has an amount that can't be read: ${unreadable}.`);
+    else if (ambiguous)
+      errors.push(`Row ${index + 1} has amounts in both money-in and money-out columns.`);
     else if (!value) errors.push(`Row ${index + 1} needs a nonzero amount.`);
     else if ((/\.(\d+)/.exec(value)?.[1]?.length ?? 0) > digits)
-      errors.push(`Row ${index + 1} has more than ${digits} ${digits === 1 ? "decimal" : "decimals"} for this currency.`);
+      errors.push(
+        `Row ${index + 1} has more than ${digits} ${digits === 1 ? "decimal" : "decimals"} for this currency.`,
+      );
     else out.push([date, description, value]);
   });
   return { rows: out, errors };
 }
 
-export function statementBatches(rows: StatementRow[], envelope: Record<string, unknown>): StatementRow[][] {
+export function statementBatches(
+  rows: StatementRow[],
+  envelope: Record<string, unknown>,
+): StatementRow[][] {
   const encoder = new TextEncoder();
-  const base = encoder.encode(JSON.stringify({ ...envelope, firstLine: Number.MAX_SAFE_INTEGER, rows: [] })).length;
+  const base = encoder.encode(
+    JSON.stringify({ ...envelope, firstLine: Number.MAX_SAFE_INTEGER, rows: [] }),
+  ).length;
   const batches: StatementRow[][] = [];
   let batch: StatementRow[] = [];
   let bytes = base;

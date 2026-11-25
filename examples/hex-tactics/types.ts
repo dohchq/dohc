@@ -13,7 +13,11 @@ export interface GameSummary {
   readonly turnNumber: number;
   readonly activeSeat: 1 | 2;
   readonly playerCount?: number;
-  readonly players?: ReadonlyArray<{ readonly seat: 1 | 2; readonly name: string; readonly color: string }>;
+  readonly players?: ReadonlyArray<{
+    readonly seat: 1 | 2;
+    readonly name: string;
+    readonly color: string;
+  }>;
   readonly winnerSeat: 1 | 2 | null;
   readonly winReason: WinReason | null;
   readonly createdAtMs: number;
@@ -43,7 +47,11 @@ export interface VisibleTile {
 export interface SupplyOutcome {
   readonly nextSeat: 1 | 2;
   readonly goldAdded: number;
-  readonly supplyUpdates: ReadonlyArray<{ readonly q: number; readonly r: number; readonly addedUnits: number }>;
+  readonly supplyUpdates: ReadonlyArray<{
+    readonly q: number;
+    readonly r: number;
+    readonly addedUnits: number;
+  }>;
 }
 
 export interface MoveOutcome {

@@ -17,7 +17,9 @@ export function hexPoints(cx: number, cy: number, radius: number): string {
   const pts: string[] = [];
   for (let i = 0; i < 6; i += 1) {
     const angle = ((60 * i - 30) * Math.PI) / 180;
-    pts.push(`${(cx + radius * Math.cos(angle)).toFixed(2)},${(cy + radius * Math.sin(angle)).toFixed(2)}`);
+    pts.push(
+      `${(cx + radius * Math.cos(angle)).toFixed(2)},${(cy + radius * Math.sin(angle)).toFixed(2)}`,
+    );
   }
   return pts.join(" ");
 }

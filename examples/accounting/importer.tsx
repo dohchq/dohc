@@ -28,7 +28,10 @@ export function ImportSheet({ onClose, onDone }: { onClose: () => void; onDone: 
   const parsed = useMemo(() => {
     if (!text) return { table: [] as string[][], error: null as string | null };
     try {
-      return { table: parseCsv(text).filter((row) => row.some((cell) => cell.trim())), error: null };
+      return {
+        table: parseCsv(text).filter((row) => row.some((cell) => cell.trim())),
+        error: null,
+      };
     } catch (failure) {
       return { table: [] as string[][], error: problem(failure) };
     }
@@ -38,8 +41,14 @@ export function ImportSheet({ onClose, onDone }: { onClose: () => void; onDone: 
   const header = skipHeader ? table[0] : undefined;
   const width = Math.max(0, ...table.slice(0, 20).map((row) => row.length));
   const digits = minorDigits(currency);
-  const mapped = useMemo(() => mapStatement(body, columns, dateOrder, digits), [body, columns, dateOrder, digits]);
-  const choices = Array.from({ length: width }, (_, index) => ({ index, label: header?.[index] || `Column ${index + 1}` }));
+  const mapped = useMemo(
+    () => mapStatement(body, columns, dateOrder, digits),
+    [body, columns, dateOrder, digits],
+  );
+  const choices = Array.from({ length: width }, (_, index) => ({
+    index,
+    label: header?.[index] || `Column ${index + 1}`,
+  }));
   const read = (file: File | undefined) => {
     setError(null);
     if (!file) return;
@@ -47,7 +56,9 @@ export function ImportSheet({ onClose, onDone }: { onClose: () => void; onDone: 
     setText("");
     setFileName("");
     if (file.size > 20 * 1024 * 1024) {
-      setError(`This file is ${(file.size / 1024 / 1024).toFixed(1)} MB. Import files up to 20 MB.`);
+      setError(
+        `This file is ${(file.size / 1024 / 1024).toFixed(1)} MB. Import files up to 20 MB.`,
+      );
       return;
     }
     file.text().then(
@@ -57,7 +68,8 @@ export function ImportSheet({ onClose, onDone }: { onClose: () => void; onDone: 
         setFileName(file.name);
         setText(value);
       },
-      (failure: unknown) => token === reading.current && setError(`Could not read ${file.name}. ${problem(failure)}`),
+      (failure: unknown) =>
+        token === reading.current && setError(`Could not read ${file.name}. ${problem(failure)}`),
     );
   };
   const running = useRef(false);
@@ -78,10 +90,19 @@ ${text}
 ${JSON.stringify(mapped.rows)}`);
     void upload({ importId, bankAccountId, currency, rows: mapped.rows });
   };
-  async function upload(job: { importId: string; bankAccountId: string; currency: string; rows: typeof mapped.rows }) {
+  async function upload(job: {
+    importId: string;
+    bankAccountId: string;
+    currency: string;
+    rows: typeof mapped.rows;
+  }) {
     if (running.current) return;
     running.current = true;
-    const here = () => mounted.current && shown.current.rows === job.rows && shown.current.bankAccountId === job.bankAccountId && shown.current.currency === job.currency;
+    const here = () =>
+      mounted.current &&
+      shown.current.rows === job.rows &&
+      shown.current.bankAccountId === job.bankAccountId &&
+      shown.current.currency === job.currency;
     const attempt = mutationKey("stageBankRows");
     let added = 0;
     let duplicates = 0;
@@ -95,11 +116,12 @@ ${JSON.stringify(mapped.rows)}`);
     try {
       const { rows: all, ...envelope } = job;
       for (const rows of statementBatches(all, envelope)) {
-        const result = await mutate<{ added: number; duplicates: number; closed: number; alreadyStaged: number }>(
-          "stageBankRows",
-          { ...envelope, firstLine: line, rows },
-          `${attempt}:${line}`,
-        );
+        const result = await mutate<{
+          added: number;
+          duplicates: number;
+          closed: number;
+          alreadyStaged: number;
+        }>("stageBankRows", { ...envelope, firstLine: line, rows }, `${attempt}:${line}`);
         added += result.added;
         duplicates += result.duplicates;
         closed += result.closed;
@@ -110,21 +132,41 @@ ${JSON.stringify(mapped.rows)}`);
       toast({
         message: `Imported ${added} new ${added === 1 ? "row" : "rows"}`,
         detail:
-          [duplicates ? duplicates === 1 ? "1 looks like a row imported before" : `${duplicates} look like rows imported before` : "", closed ? `${closed} in closed months, skipped` : "", already ? `${already} imported before` : ""]
+          [
+            duplicates
+              ? duplicates === 1
+                ? "1 looks like a row imported before"
+                : `${duplicates} look like rows imported before`
+              : "",
+            closed ? `${closed} in closed months, skipped` : "",
+            already ? `${already} imported before` : "",
+          ]
             .filter(Boolean)
             .join(", ") || undefined,
       });
       onDone();
       if (here()) onClose();
     } catch (failure) {
-      if (here()) setError(`${problem(failure)} Import again to continue from line ${line}. Rows already sent are not duplicated.`);
-      toast({ tone: "error", message: "Could not finish the import", detail: problem(failure), action: { label: "Try again", run: () => void upload(job) } });
+      if (here())
+        setError(
+          `${problem(failure)} Import again to continue from line ${line}. Rows already sent are not duplicated.`,
+        );
+      toast({
+        tone: "error",
+        message: "Could not finish the import",
+        detail: problem(failure),
+        action: { label: "Try again", run: () => void upload(job) },
+      });
     } finally {
       running.current = false;
       if (mounted.current) setProgress(null);
     }
   }
-  const ready = Boolean(bankAccountId) && /^[A-Z]{3}$/.test(currency) && mapped.rows.length > 0 && mapped.errors.length === 0;
+  const ready =
+    Boolean(bankAccountId) &&
+    /^[A-Z]{3}$/.test(currency) &&
+    mapped.rows.length > 0 &&
+    mapped.errors.length === 0;
   return (
     <Modal
       open
@@ -139,8 +181,16 @@ ${JSON.stringify(mapped.rows)}`);
                 ? `${mapped.rows.length.toLocaleString()} rows ready${mapped.errors.length ? `, ${mapped.errors.length} to fix` : ""}`
                 : null}
           </span>
-          <button type="button" className="b-btn b-btn-primary" disabled={!ready || Boolean(progress)} aria-busy={Boolean(progress) || undefined} onClick={start}>
-            {progress ? "Importing…" : `Import ${mapped.rows.length ? mapped.rows.length.toLocaleString() : ""} rows`}
+          <button
+            type="button"
+            className="b-btn b-btn-primary"
+            disabled={!ready || Boolean(progress)}
+            aria-busy={Boolean(progress) || undefined}
+            onClick={start}
+          >
+            {progress
+              ? "Importing…"
+              : `Import ${mapped.rows.length ? mapped.rows.length.toLocaleString() : ""} rows`}
           </button>
         </div>
       }
@@ -161,7 +211,11 @@ ${JSON.stringify(mapped.rows)}`);
         >
           <FileText size={18} aria-hidden />
           <span>{fileName || "Drop a CSV file from your bank"}</span>
-          <button type="button" className="b-btn b-btn-sm" onClick={() => fileInput.current?.click()}>
+          <button
+            type="button"
+            className="b-btn b-btn-sm"
+            onClick={() => fileInput.current?.click()}
+          >
             {fileName ? "Choose another" : "Choose file"}
           </button>
           <input
@@ -179,7 +233,11 @@ ${JSON.stringify(mapped.rows)}`);
         <div className="b-form-grid">
           <label className="b-field">
             <span className="b-field-label">Bank account</span>
-            <select className="b-select" value={bankAccountId} onChange={(event) => setBankAccountId(event.target.value)}>
+            <select
+              className="b-select"
+              value={bankAccountId}
+              onChange={(event) => setBankAccountId(event.target.value)}
+            >
               {banks.map((account) => (
                 <option key={account.id} value={account.id}>
                   {account.id} {account.name}
@@ -189,26 +247,53 @@ ${JSON.stringify(mapped.rows)}`);
           </label>
           <label className="b-field">
             <span className="b-field-label">Currency</span>
-            <input className="b-input b-input-currency" value={currency} maxLength={3} onChange={(event) => setCurrency(event.target.value.toUpperCase())} />
+            <input
+              className="b-input b-input-currency"
+              value={currency}
+              maxLength={3}
+              onChange={(event) => setCurrency(event.target.value.toUpperCase())}
+            />
           </label>
           {table.length ? (
             <>
               <label className="b-field">
                 <span className="b-field-label">Date format</span>
-                <select className="b-select" value={dateOrder} onChange={(event) => setDateOrder(event.target.value as DateOrder)}>
+                <select
+                  className="b-select"
+                  value={dateOrder}
+                  onChange={(event) => setDateOrder(event.target.value as DateOrder)}
+                >
                   <option value="ymd">2026-03-31</option>
                   <option value="mdy">03/31/2026</option>
                   <option value="dmy">31/03/2026</option>
                 </select>
               </label>
               <label className="b-check">
-                <input type="checkbox" checked={skipHeader} onChange={(event) => setSkipHeader(event.target.checked)} />
+                <input
+                  type="checkbox"
+                  checked={skipHeader}
+                  onChange={(event) => setSkipHeader(event.target.checked)}
+                />
                 First row is a header
               </label>
               {(["date", "description", "amount"] as const).map((key) => (
                 <label className="b-field" key={key}>
-                  <span className="b-field-label">{key === "amount" ? (columns.credit < 0 ? "Amount" : "Money out") : key === "date" ? "Date column" : "Description"}</span>
-                  <select className="b-select" value={columns[key]} onChange={(event) => setColumns({ ...columns, [key]: Number(event.target.value) })}>
+                  <span className="b-field-label">
+                    {key === "amount"
+                      ? columns.credit < 0
+                        ? "Amount"
+                        : "Money out"
+                      : key === "date"
+                        ? "Date column"
+                        : "Description"}
+                  </span>
+                  <select
+                    className="b-select"
+                    value={columns[key]}
+                    onChange={(event) =>
+                      setColumns({ ...columns, [key]: Number(event.target.value) })
+                    }
+                  >
                     {choices.map((choice) => (
                       <option key={choice.index} value={choice.index}>
                         {choice.label}
@@ -219,7 +304,13 @@ ${JSON.stringify(mapped.rows)}`);
               ))}
               <label className="b-field">
                 <span className="b-field-label">Money in</span>
-                <select className="b-select" value={columns.credit} onChange={(event) => setColumns({ ...columns, credit: Number(event.target.value) })}>
+                <select
+                  className="b-select"
+                  value={columns.credit}
+                  onChange={(event) =>
+                    setColumns({ ...columns, credit: Number(event.target.value) })
+                  }
+                >
                   <option value={-1}>Signed amount column</option>
                   {choices.map((choice) => (
                     <option key={choice.index} value={choice.index}>
@@ -263,7 +354,13 @@ ${JSON.stringify(mapped.rows)}`);
           </table>
         ) : null}
         {progress ? (
-          <div className="b-progress" role="progressbar" aria-valuemin={0} aria-valuemax={progress.total} aria-valuenow={progress.done}>
+          <div
+            className="b-progress"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={progress.total}
+            aria-valuenow={progress.done}
+          >
             <span style={{ width: `${(progress.done / Math.max(1, progress.total)) * 100}%` }} />
           </div>
         ) : null}

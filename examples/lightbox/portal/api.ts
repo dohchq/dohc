@@ -73,7 +73,7 @@ export interface Shoot {
   readonly sentCount: number;
   readonly noteCount: number;
   readonly openNoteCount: number;
-  readonly cover: Omit<PhotoSource, "id" | "title"> & { readonly assetId: string } | null;
+  readonly cover: (Omit<PhotoSource, "id" | "title"> & { readonly assetId: string }) | null;
 }
 
 export interface Note {
@@ -92,7 +92,8 @@ export function errorMessage(error: unknown): string {
   if (isAppBackendError(error)) {
     if (error.refusal) return error.refusal.message;
     if (error.status === 413) return "That file is too large to send in one request.";
-    if (error.uncertain) return "The change could not be confirmed. Check your connection and try again.";
+    if (error.uncertain)
+      return "The change could not be confirmed. Check your connection and try again.";
   }
   return error instanceof Error ? error.message : "That did not work. Try again.";
 }
@@ -101,11 +102,18 @@ export function refusalCode(error: unknown): string | null {
   return isAppBackendError(error) ? (error.refusal?.code ?? null) : null;
 }
 
-export async function invoke<T>(client: AppClient, operation: string, input: unknown, key = `${operation}:${crypto.randomUUID()}`): Promise<T> {
+export async function invoke<T>(
+  client: AppClient,
+  operation: string,
+  input: unknown,
+  key = `${operation}:${crypto.randomUUID()}`,
+): Promise<T> {
   return interactive(() => client.invoke<T>(operation, input, key).then((reply) => reply.result));
 }
 
-export type Paged<Key extends string, T> = { readonly [key in Key]: readonly T[] } & { readonly nextCursor: unknown };
+export type Paged<Key extends string, T> = { readonly [key in Key]: readonly T[] } & {
+  readonly nextCursor: unknown;
+};
 
 export async function loadPages<Page extends { readonly nextCursor: unknown }, T>(
   client: AppClient,
@@ -133,9 +141,14 @@ export interface Loaded<T> {
   replace(update: (current: T) => T): void;
 }
 
-export function useLoader<T>(key: string | null, load: (client: AppClient) => Promise<T>): Loaded<T> {
+export function useLoader<T>(
+  key: string | null,
+  load: (client: AppClient) => Promise<T>,
+): Loaded<T> {
   const client = useApp();
-  const [state, setState] = useState<{ key: string | null; data?: T; error?: unknown }>({ key: null });
+  const [state, setState] = useState<{ key: string | null; data?: T; error?: unknown }>({
+    key: null,
+  });
   const [version, setVersion] = useState(0);
   const mutationGen = useRef(0);
   const loadRef = useRef(load);
@@ -165,7 +178,11 @@ export function useLoader<T>(key: string | null, load: (client: AppClient) => Pr
       (error: unknown) =>
         current &&
         mutationGen.current === startedGen &&
-        setState((previous) => ({ key, data: previous.key === key ? previous.data : undefined, error })),
+        setState((previous) => ({
+          key,
+          data: previous.key === key ? previous.data : undefined,
+          error,
+        })),
     );
     return () => {
       current = false;
@@ -181,7 +198,9 @@ export function useLoader<T>(key: string | null, load: (client: AppClient) => Pr
       (update: (current: T) => T) => {
         mutationGen.current++;
         setState((previous) =>
-          previous.key === key && previous.data !== undefined ? { ...previous, data: update(previous.data) } : previous,
+          previous.key === key && previous.data !== undefined
+            ? { ...previous, data: update(previous.data) }
+            : previous,
         );
       },
       [key],
@@ -263,14 +282,28 @@ function drainFiles() {
     drainTimer = setTimeout(drainFiles, wait);
     return;
   }
-  while (activeFiles < (throttled ? 1 : FILE_CONCURRENCY) && interactiveCalls === 0 && fileJobs.length > 0) {
-    const [job] = fileJobs.splice(Math.max(0, fileJobs.findIndex((queued) => queued.high)), 1);
+  while (
+    activeFiles < (throttled ? 1 : FILE_CONCURRENCY) &&
+    interactiveCalls === 0 &&
+    fileJobs.length > 0
+  ) {
+    const [job] = fileJobs.splice(
+      Math.max(
+        0,
+        fileJobs.findIndex((queued) => queued.high),
+      ),
+      1,
+    );
     activeFiles++;
     job.run();
   }
 }
 
-function queueFile<T>(high: boolean, work: () => Promise<T>, wanted: () => boolean): { promise: Promise<T>; promote(): void; cancel(): void; drop(): void } {
+function queueFile<T>(
+  high: boolean,
+  work: () => Promise<T>,
+  wanted: () => boolean,
+): { promise: Promise<T>; promote(): void; cancel(): void; drop(): void } {
   const job: FileJob = { high, cancelled: false, run: () => undefined };
   let reject: (reason: unknown) => void = () => undefined;
   const promise = new Promise<T>((resolve, fail) => {
@@ -374,13 +407,15 @@ export function acquirePhotoFileUrl(
     if (priority === "high") cached.promote();
     return bindRelease(cached);
   }
-  const job = queueFile(priority === "high", () =>
-    client.file(fileId, operation, input).then(({ bytes }) => {
-      const url = URL.createObjectURL(new Blob([bytes], { type: mimeType }));
-      if (entry.revokeOnRelease && entry.refs <= 0) URL.revokeObjectURL(url);
-      else entry.url = url;
-      return url;
-    }),
+  const job = queueFile(
+    priority === "high",
+    () =>
+      client.file(fileId, operation, input).then(({ bytes }) => {
+        const url = URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+        if (entry.revokeOnRelease && entry.refs <= 0) URL.revokeObjectURL(url);
+        else entry.url = url;
+        return url;
+      }),
     () => entry.refs > 0,
   );
   const entry: FileCacheEntry = { ...job, refs: 1, url: null, revokeOnRelease: false };
@@ -420,7 +455,11 @@ export function checkPhoto(file: File): string | null {
   return null;
 }
 
-export async function uploadPhoto(client: AppClient, file: File, key: string): Promise<UploadedPhoto> {
+export async function uploadPhoto(
+  client: AppClient,
+  file: File,
+  key: string,
+): Promise<UploadedPhoto> {
   const started = performance.now();
   const bitmap = await createImageBitmap(file);
   const width = bitmap.width;
@@ -445,7 +484,10 @@ async function previewOf(file: File, bitmap: ImageBitmap): Promise<File> {
   const name = `${file.name.replace(/\.[A-Za-z0-9]{1,5}$/, "")}-preview.jpg`;
   for (const edge of [PREVIEW_EDGE, 1600, 1200]) {
     const scale = Math.min(1, edge / Math.max(bitmap.width, bitmap.height));
-    const canvas = new OffscreenCanvas(Math.max(1, Math.round(bitmap.width * scale)), Math.max(1, Math.round(bitmap.height * scale)));
+    const canvas = new OffscreenCanvas(
+      Math.max(1, Math.round(bitmap.width * scale)),
+      Math.max(1, Math.round(bitmap.height * scale)),
+    );
     const context = canvas.getContext("2d");
     if (!context) break;
     context.imageSmoothingQuality = "high";

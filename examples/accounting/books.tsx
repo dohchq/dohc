@@ -19,8 +19,31 @@ import {
   Wallet,
 } from "dohc/icons";
 import { Modal } from "dohc/ui";
-import { Failure, Loading, Reports, cx, fiscalLabel, longDate, shortDate, shortMonth, today, useBooks } from "./shared";
-import { BooksContext, Kbd, MOD, Toasts, Topbar, useBooksContext, useClearToasts, useKeys, type Overview, type Route, type View } from "./parts";
+import {
+  Failure,
+  Loading,
+  Reports,
+  cx,
+  fiscalLabel,
+  longDate,
+  shortDate,
+  shortMonth,
+  today,
+  useBooks,
+} from "./shared";
+import {
+  BooksContext,
+  Kbd,
+  MOD,
+  Toasts,
+  Topbar,
+  useBooksContext,
+  useClearToasts,
+  useKeys,
+  type Overview,
+  type Route,
+  type View,
+} from "./parts";
 import { Composer, Register } from "./ledger";
 import { BankWorkbench } from "./bank";
 import { Invoices } from "./invoices";
@@ -64,28 +87,39 @@ function Books() {
     if (next.view !== view.current) main.current?.focus({ preventScroll: true });
   }, []);
   const compose = useCallback(() => setComposing(true), []);
-  useKeys((event) => {
-    if (Date.now() - chord.current < 1200) {
-      chord.current = 0;
-      const item = NAV.find((entry) => entry.key === event.key);
-      if (item) {
-        event.preventDefault();
-        go({ view: item.view });
+  useKeys(
+    (event) => {
+      if (Date.now() - chord.current < 1200) {
+        chord.current = 0;
+        const item = NAV.find((entry) => entry.key === event.key);
+        if (item) {
+          event.preventDefault();
+          go({ view: item.view });
+        }
+        return;
       }
-      return;
-    }
-    if (event.key === "g") chord.current = Date.now();
-    else if (event.key === "n") {
-      event.preventDefault();
-      setComposing(true);
-    } else if (event.key === "?") {
-      event.preventDefault();
-      setHelp(true);
-    }
-  }, true, true);
+      if (event.key === "g") chord.current = Date.now();
+      else if (event.key === "n") {
+        event.preventDefault();
+        setComposing(true);
+      } else if (event.key === "?") {
+        event.preventDefault();
+        setHelp(true);
+      }
+    },
+    true,
+    true,
+  );
   const data = overview.data;
   const value = useMemo(
-    () => ({ overview: data, accounts: data?.accounts ?? [], currency: data?.currency ?? "USD", route, go, compose }),
+    () => ({
+      overview: data,
+      accounts: data?.accounts ?? [],
+      currency: data?.currency ?? "USD",
+      route,
+      go,
+      compose,
+    }),
     [data, route, go, compose],
   );
   const badge: Partial<Record<View, number>> = data
@@ -130,7 +164,11 @@ function Books() {
               <button
                 ref={moreButton}
                 type="button"
-                className={cx("b-nav-item", (more || NAV.some((item) => item.more && item.view === route.view)) && "is-active")}
+                className={cx(
+                  "b-nav-item",
+                  (more || NAV.some((item) => item.more && item.view === route.view)) &&
+                    "is-active",
+                )}
                 aria-expanded={more}
                 aria-controls="b-more"
                 onClick={() => setMore((open) => !open)}
@@ -140,7 +178,9 @@ function Books() {
               </button>
             </li>
           </ul>
-          {more ? <div className="b-more-scrim" aria-hidden onClick={() => setMore(false)} /> : null}
+          {more ? (
+            <div className="b-more-scrim" aria-hidden onClick={() => setMore(false)} />
+          ) : null}
           {more ? (
             <div
               className="b-more"
@@ -151,9 +191,13 @@ function Books() {
               onKeyDown={(event) => {
                 if (event.key === "ArrowDown" || event.key === "ArrowUp") {
                   event.preventDefault();
-                  const items = [...event.currentTarget.querySelectorAll<HTMLElement>("[role=menuitem]")];
+                  const items = [
+                    ...event.currentTarget.querySelectorAll<HTMLElement>("[role=menuitem]"),
+                  ];
                   const at = items.indexOf(document.activeElement as HTMLElement);
-                  items[(at + (event.key === "ArrowDown" ? 1 : items.length - 1)) % items.length]?.focus();
+                  items[
+                    (at + (event.key === "ArrowDown" ? 1 : items.length - 1)) % items.length
+                  ]?.focus();
                 } else if (event.key === "Escape") {
                   setMore(false);
                   moreButton.current?.focus();
@@ -188,10 +232,19 @@ function Books() {
             </button>
           </div>
         </nav>
-        <main className="b-main" ref={main} tabIndex={-1} aria-label={NAV.find((item) => item.view === route.view)?.label}>
+        <main
+          className="b-main"
+          ref={main}
+          tabIndex={-1}
+          aria-label={NAV.find((item) => item.view === route.view)?.label}
+        >
           {overview.error && !data ? (
             <div className="b-pad">
-              <Failure error={overview.error} retry={overview.reload} title="Could not open the books" />
+              <Failure
+                error={overview.error}
+                retry={overview.reload}
+                title="Could not open the books"
+              />
             </div>
           ) : !data ? (
             <div className="b-pad">
@@ -223,7 +276,10 @@ function Page({ route }: { route: Route }) {
         <>
           <Topbar title="Reports" />
           <div className="b-page b-page-reports">
-            <Reports initial={route.show === "accountLedger" ? "accountLedger" : undefined} initialAccount={route.account} />
+            <Reports
+              initial={route.show === "accountLedger" ? "accountLedger" : undefined}
+              initialAccount={route.account}
+            />
           </div>
         </>
       );
@@ -246,9 +302,19 @@ function OverviewPage() {
         <OpenFirstYear now={data.today} />
       </>
     );
-  const todo: Array<{ icon: ReactNode; label: string; detail?: string; route: Route; tone?: "warn" }> = [];
+  const todo: Array<{
+    icon: ReactNode;
+    label: string;
+    detail?: string;
+    route: Route;
+    tone?: "warn";
+  }> = [];
   if (data.newBankRows)
-    todo.push({ icon: <Landmark size={15} aria-hidden />, label: `Review ${data.newBankRows} bank ${data.newBankRows === 1 ? "row" : "rows"}`, route: { view: "bank" } });
+    todo.push({
+      icon: <Landmark size={15} aria-hidden />,
+      label: `Review ${data.newBankRows} bank ${data.newBankRows === 1 ? "row" : "rows"}`,
+      route: { view: "bank" },
+    });
   if (data.duplicateBankRows)
     todo.push({
       icon: <Inbox size={15} aria-hidden />,
@@ -303,10 +369,16 @@ function OverviewPage() {
               <ul className="b-todo">
                 {todo.map((item) => (
                   <li key={item.label}>
-                    <button type="button" className={cx("b-todo-row", item.tone === "warn" && "is-warn")} onClick={() => go(item.route)}>
+                    <button
+                      type="button"
+                      className={cx("b-todo-row", item.tone === "warn" && "is-warn")}
+                      onClick={() => go(item.route)}
+                    >
                       <span className="b-todo-icon">{item.icon}</span>
                       <span className="b-todo-label">{item.label}</span>
-                      {item.detail ? <span className="b-todo-detail b-mono">{item.detail}</span> : null}
+                      {item.detail ? (
+                        <span className="b-todo-detail b-mono">{item.detail}</span>
+                      ) : null}
                       <ChevronRight size={14} aria-hidden className="b-todo-go" />
                     </button>
                   </li>
@@ -327,11 +399,22 @@ function OverviewPage() {
               <table className="b-grid is-compact">
                 <tbody>
                   {data.recent.map((row) => (
-                    <tr key={row.id} className={cx((row.reversed || row.reversal) && "is-muted")} onClick={() => go({ view: "register", entry: row.id })}>
+                    <tr
+                      key={row.id}
+                      className={cx((row.reversed || row.reversal) && "is-muted")}
+                      onClick={() => go({ view: "register", entry: row.id })}
+                    >
                       <td className="col-date b-date">{shortDate(row.date)}</td>
                       <td className="col-no b-num b-subtle">{row.number}</td>
                       <td className="col-memo">
-                        <button type="button" className="b-row-link" onClick={(event) => (event.stopPropagation(), go({ view: "register", entry: row.id }))}>
+                        <button
+                          type="button"
+                          className="b-row-link"
+                          onClick={(event) => (
+                            event.stopPropagation(),
+                            go({ view: "register", entry: row.id })
+                          )}
+                        >
                           {row.memo || "No memo"}
                         </button>
                         {row.reversed ? <span className="b-tag">Reversed</span> : null}
@@ -356,10 +439,16 @@ function OverviewPage() {
             <ul className="b-ledger-list">
               {data.cash.map((account) => (
                 <li key={account.id}>
-                  <button type="button" className="b-ledger-row" onClick={() => go({ view: "register", account: account.id })}>
+                  <button
+                    type="button"
+                    className="b-ledger-row"
+                    onClick={() => go({ view: "register", account: account.id })}
+                  >
                     <span className="b-code">{account.id}</span>
                     <span className="b-ledger-name">{account.name}</span>
-                    <span className={cx("b-mono", account.balanceCents < 0 && "is-negative")}>{money(account.balanceCents, code)}</span>
+                    <span className={cx("b-mono", account.balanceCents < 0 && "is-negative")}>
+                      {money(account.balanceCents, code)}
+                    </span>
                   </button>
                 </li>
               ))}
@@ -373,10 +462,17 @@ function OverviewPage() {
             {data.receivables.open ? (
               <ul className="b-ledger-list">
                 <li>
-                  <button type="button" className="b-ledger-row" onClick={() => go({ view: "invoices", show: "issued" })}>
+                  <button
+                    type="button"
+                    className="b-ledger-row"
+                    onClick={() => go({ view: "invoices", show: "issued" })}
+                  >
                     <span className="b-ledger-name">
-                      {data.receivables.open} open {data.receivables.open === 1 ? "invoice" : "invoices"}
-                      {data.receivables.overdue ? <span className="b-subtle"> · {data.receivables.overdue} overdue</span> : null}
+                      {data.receivables.open} open{" "}
+                      {data.receivables.open === 1 ? "invoice" : "invoices"}
+                      {data.receivables.overdue ? (
+                        <span className="b-subtle"> · {data.receivables.overdue} overdue</span>
+                      ) : null}
                     </span>
                     <ChevronRight size={14} aria-hidden className="b-todo-go" />
                   </button>
@@ -402,7 +498,9 @@ function OverviewPage() {
               </div>
               <div className="b-pl-net">
                 <dt>Net income</dt>
-                <dd className={cx("b-mono", ytd.netIncomeCents < 0 && "is-negative")}>{money(ytd.netIncomeCents, code)}</dd>
+                <dd className={cx("b-mono", ytd.netIncomeCents < 0 && "is-negative")}>
+                  {money(ytd.netIncomeCents, code)}
+                </dd>
               </div>
             </dl>
             {months.length > 1 ? (
@@ -410,8 +508,14 @@ function OverviewPage() {
                 <BarChart
                   labels={ytd.months.map((row) => shortMonth(row.month))}
                   series={[
-                    { name: "Income", values: ytd.months.map((row) => majorUnits(row.incomeCents, code)) },
-                    { name: "Expenses", values: ytd.months.map((row) => majorUnits(row.expenseCents, code)) },
+                    {
+                      name: "Income",
+                      values: ytd.months.map((row) => majorUnits(row.incomeCents, code)),
+                    },
+                    {
+                      name: "Expenses",
+                      values: ytd.months.map((row) => majorUnits(row.expenseCents, code)),
+                    },
                   ]}
                   height={150}
                   formatValue={(value) => compactMoney(value, code)}

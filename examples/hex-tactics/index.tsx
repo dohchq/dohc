@@ -1,5 +1,14 @@
 import "./styles.css";
-import { useCallback, useEffect, useEffectEvent, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { createRoot } from "react-dom/client";
 import { AppProvider, copyText, useApp, useDatasetMutation, useDatasetQuery } from "dohc/app";
 import { Modal } from "dohc/ui";
@@ -11,7 +20,15 @@ import { hexKeyOf } from "./geometry";
 import { HexBoard, type BoardFlash } from "./hex-board";
 import { Hud } from "./hud";
 import { Lobby, type LobbyPanel } from "./lobby";
-import { CombatPreview, HandoffCover, LogDrawer, ReplayDock, RulesSheet, TacticalCard, TurnBanner } from "./panels";
+import {
+  CombatPreview,
+  HandoffCover,
+  LogDrawer,
+  ReplayDock,
+  RulesSheet,
+  TacticalCard,
+  TurnBanner,
+} from "./panels";
 import { deriveOrders } from "./orders";
 import { flashKindForMove, maxReinforce as maxReinforceFor, otherSeat, playerName } from "./rules";
 import { NO_SELECTION, selectionReducer } from "./selection";
@@ -57,7 +74,11 @@ function useMediaQuery(query: string): boolean {
     },
     [query],
   );
-  return useSyncExternalStore(subscribe, () => window.matchMedia(query).matches, () => false);
+  return useSyncExternalStore(
+    subscribe,
+    () => window.matchMedia(query).matches,
+    () => false,
+  );
 }
 
 function useBoardQuery(gameId: string | null, playerToken: string | undefined, spectator: boolean) {
@@ -73,7 +94,9 @@ function observeHeight(property: string) {
   return (element: HTMLElement | null) => {
     const host = element?.parentElement;
     if (!element || !host) return;
-    const observer = new ResizeObserver(() => host.style.setProperty(property, `${element.offsetHeight}px`));
+    const observer = new ResizeObserver(() =>
+      host.style.setProperty(property, `${element.offsetHeight}px`),
+    );
     observer.observe(element);
     return () => observer.disconnect();
   };
@@ -124,9 +147,16 @@ export function HexClashApp() {
   const client = useApp();
   const compact = useMediaQuery(COMPACT_QUERY);
   const gamesQuery = useDatasetQuery<{ games: GameSummary[] }>("listGames", {});
-  const startDemo = useDatasetMutation<{ player1Name?: string; player2Name?: string; seed?: number }, StartDemoReply>("startDemoMatch");
-  const createGame = useDatasetMutation<{ title?: string; playerName?: string }, CreateGameReply>("createGame");
-  const joinGame = useDatasetMutation<{ joinCode: string; playerName?: string }, JoinGameReply>("joinGame");
+  const startDemo = useDatasetMutation<
+    { player1Name?: string; player2Name?: string; seed?: number },
+    StartDemoReply
+  >("startDemoMatch");
+  const createGame = useDatasetMutation<{ title?: string; playerName?: string }, CreateGameReply>(
+    "createGame",
+  );
+  const joinGame = useDatasetMutation<{ joinCode: string; playerName?: string }, JoinGameReply>(
+    "joinGame",
+  );
   const submitMove = useDatasetMutation<MovePayload, SubmitMoveReply>("submitMove");
   const discardPendingOrder = submitMove.discardPending;
 
@@ -158,14 +188,27 @@ export function HexClashApp() {
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   const replay = useReplay(client);
-  const { open: replayOpen, data: replayData, step: replayStep, frames: replayFrames, activeFrame: activeReplayFrame } = replay;
+  const {
+    open: replayOpen,
+    data: replayData,
+    step: replayStep,
+    frames: replayFrames,
+    activeFrame: activeReplayFrame,
+  } = replay;
   const { reset: resetReplay, close: closeReplay } = replay;
   const resumeRequestSeq = useRef(0);
   const navigationSeq = useRef(0);
 
   const [liveEvents, setLiveEvents] = useState(false);
-  const [banner, setBanner] = useState<{ seat: 1 | 2 | null; turn: number; label: string; token: number } | null>(null);
-  const [handoffs, setHandoffs] = useState<Record<string, { readonly seat: 1 | 2; readonly turn: number }>>({});
+  const [banner, setBanner] = useState<{
+    seat: 1 | 2 | null;
+    turn: number;
+    label: string;
+    token: number;
+  } | null>(null);
+  const [handoffs, setHandoffs] = useState<
+    Record<string, { readonly seat: 1 | 2; readonly turn: number }>
+  >({});
   const [logPreviewTurn, setLogPreviewTurn] = useState<number | null>(null);
   const [logPinnedTurn, setLogPinnedTurn] = useState<number | null>(null);
   const [flash, setFlash] = useState<BoardFlash | null>(null);
@@ -181,7 +224,10 @@ export function HexClashApp() {
 
   useEffect(() => {
     if (!toast) return;
-    const timer = window.setTimeout(() => setToast((current) => (current?.id === toast.id ? null : current)), 3200);
+    const timer = window.setTimeout(
+      () => setToast((current) => (current?.id === toast.id ? null : current)),
+      3200,
+    );
     return () => window.clearTimeout(timer);
   }, [toast]);
 
@@ -193,20 +239,31 @@ export function HexClashApp() {
   const activeSession = activeGameId ? (sessions[activeGameId] ?? null) : null;
   const activeSeatCredential = useMemo(() => {
     if (!activeSession) return null;
-    return activeSession.seats.find((s) => s.seat === activeSession.activeSeat) ?? activeSession.seats[0] ?? null;
+    return (
+      activeSession.seats.find((s) => s.seat === activeSession.activeSeat) ??
+      activeSession.seats[0] ??
+      null
+    );
   }, [activeSession]);
   const isPassAndPlay = (activeSession?.seats.length ?? 0) === 2;
 
-  const seatToken = (seat: 1 | 2) => (spectatorMode ? undefined : activeSession?.seats.find((s) => s.seat === seat)?.playerToken);
+  const seatToken = (seat: 1 | 2) =>
+    spectatorMode ? undefined : activeSession?.seats.find((s) => s.seat === seat)?.playerToken;
   const seatOneQuery = useBoardQuery(activeGameId, seatToken(1), false);
   const seatTwoQuery = useBoardQuery(activeGameId, seatToken(2), false);
   const spectatorQuery = useBoardQuery(activeGameId, undefined, spectatorMode);
-  const boardQuery = spectatorMode ? spectatorQuery : activeSeatCredential?.seat === 2 ? seatTwoQuery : seatOneQuery;
+  const boardQuery = spectatorMode
+    ? spectatorQuery
+    : activeSeatCredential?.seat === 2
+      ? seatTwoQuery
+      : seatOneQuery;
   const boardData = boardQuery.data;
   const board =
     boardData &&
     boardData.game.id === activeGameId &&
-    (spectatorMode ? boardData.viewer.spectator : boardData.viewer.seat === (activeSeatCredential?.seat ?? null))
+    (spectatorMode
+      ? boardData.viewer.spectator
+      : boardData.viewer.seat === (activeSeatCredential?.seat ?? null))
       ? boardData
       : null;
   const showSeatSwitch = isPassAndPlay && !replayOpen && board?.game.status !== "finished";
@@ -267,7 +324,11 @@ export function HexClashApp() {
   };
 
   const pollRemote =
-    !liveEvents && Boolean(board) && !replayOpen && board?.game.status !== "finished" && (board?.game.status === "waiting" || !isPassAndPlay);
+    !liveEvents &&
+    Boolean(board) &&
+    !replayOpen &&
+    board?.game.status !== "finished" &&
+    (board?.game.status === "waiting" || !isPassAndPlay);
   useEffect(() => {
     if (!pollRemote) return;
     const timer = window.setInterval(() => {
@@ -286,32 +347,71 @@ export function HexClashApp() {
   }, [liveEvents, lobbyVisible, reloadGames]);
 
   const displayedTiles = activeReplayFrame ? activeReplayFrame.tiles : (board?.tiles ?? []);
-  const tileByKey = useMemo(() => new Map(displayedTiles.map((tile) => [hexKeyOf(tile.q, tile.r), tile])), [displayedTiles]);
+  const tileByKey = useMemo(
+    () => new Map(displayedTiles.map((tile) => [hexKeyOf(tile.q, tile.r), tile])),
+    [displayedTiles],
+  );
 
   const viewerSeat = replayOpen ? null : (board?.viewer.seat ?? null);
   const isMyTurn = Boolean(
-    !replayOpen && board && board.game.status === "active" && viewerSeat !== null && board.game.activeSeat === viewerSeat && activeSeatCredential,
+    !replayOpen &&
+    board &&
+    board.game.status === "active" &&
+    viewerSeat !== null &&
+    board.game.activeSeat === viewerSeat &&
+    activeSeatCredential,
   );
   const gold = board?.players.find((p) => p.seat === viewerSeat)?.gold ?? 0;
 
-  const turnScope = board && viewerSeat !== null ? `${board.game.id}:${viewerSeat}:${board.game.turnNumber}` : null;
+  const turnScope =
+    board && viewerSeat !== null ? `${board.game.id}:${viewerSeat}:${board.game.turnNumber}` : null;
   const orders = useMemo(
-    () => deriveOrders({ tiles: displayedTiles, tileByKey, selection, viewerSeat, canAct: isMyTurn, turnScope, compact }),
+    () =>
+      deriveOrders({
+        tiles: displayedTiles,
+        tileByKey,
+        selection,
+        viewerSeat,
+        canAct: isMyTurn,
+        turnScope,
+        compact,
+      }),
     [compact, displayedTiles, isMyTurn, selection, tileByKey, turnScope, viewerSeat],
   );
-  const { selectedTile, targets, targetHex: activeTargetHex, targetTile, maxMovable, lockedUnits, targetForecast, preview } = orders;
+  const {
+    selectedTile,
+    targets,
+    targetHex: activeTargetHex,
+    targetTile,
+    maxMovable,
+    lockedUnits,
+    targetForecast,
+    preview,
+  } = orders;
   const maxReinforce = maxReinforceFor(gold);
 
   const boardInteractive = !replayOpen && !(compact && board?.game.status === "finished");
   const hoverInspectable =
-    hoverHex && !compact && !replayOpen && board?.game.status !== "finished" && tileByKey.get(hoverHex)?.visible ? hoverHex : null;
+    hoverHex &&
+    !compact &&
+    !replayOpen &&
+    board?.game.status !== "finished" &&
+    tileByKey.get(hoverHex)?.visible
+      ? hoverHex
+      : null;
   const inspectHex = selectedHex ?? hoverInspectable;
   const inspectTile = inspectHex ? (tileByKey.get(inspectHex) ?? null) : null;
 
   const latestMove = board?.recentMoves[0] ?? null;
   const lastMoveForBoard = useMemo(() => {
-    const move = activeReplayFrame ? activeReplayFrame.move : latestMove?.hidden ? null : latestMove;
-    return move ? { fromHex: move.fromHex, toHex: move.toHex, seat: move.actorSeat, token: move.turnNumber } : null;
+    const move = activeReplayFrame
+      ? activeReplayFrame.move
+      : latestMove?.hidden
+        ? null
+        : latestMove;
+    return move
+      ? { fromHex: move.fromHex, toHex: move.toHex, seat: move.actorSeat, token: move.turnNumber }
+      : null;
   }, [activeReplayFrame, latestMove]);
 
   const onTurnChanged = useEffectEvent(clearRefusal);
@@ -325,7 +425,8 @@ export function HexClashApp() {
     if (board.game.status !== "active") return;
     const seat = board.game.activeSeat;
     if (isPassAndPlay && previous?.startsWith(`${board.game.id}:`)) return;
-    const label = !isPassAndPlay && viewerSeat === seat ? "Your turn" : playerName(board.players, seat);
+    const label =
+      !isPassAndPlay && viewerSeat === seat ? "Your turn" : playerName(board.players, seat);
     setBanner({ seat, turn: board.game.turnNumber, label, token: Date.now() });
   }, [board, isPassAndPlay, viewerSeat]);
 
@@ -337,9 +438,18 @@ export function HexClashApp() {
 
   const handoff = activeGameId ? (handoffs[activeGameId] ?? null) : null;
   const handoffActive =
-    handoff !== null && !spectatorMode && activeSeatCredential?.seat === handoff.seat && board?.game.status !== "finished" && !replayOpen;
-  const handoffReady = handoffActive && board !== null && board.viewer.seat === handoff.seat && board.game.turnNumber >= handoff.turn;
-  const forgetHandoff = (gameId: string) => setHandoffs(({ [gameId]: _forgotten, ...rest }) => rest);
+    handoff !== null &&
+    !spectatorMode &&
+    activeSeatCredential?.seat === handoff.seat &&
+    board?.game.status !== "finished" &&
+    !replayOpen;
+  const handoffReady =
+    handoffActive &&
+    board !== null &&
+    board.viewer.seat === handoff.seat &&
+    board.game.turnNumber >= handoff.turn;
+  const forgetHandoff = (gameId: string) =>
+    setHandoffs(({ [gameId]: _forgotten, ...rest }) => rest);
   const dismissHandoff = () => {
     dispatchSelection({ type: "hover", hex: null });
     if (activeGameId) forgetHandoff(activeGameId);
@@ -348,7 +458,8 @@ export function HexClashApp() {
   const shownLogTurn = logPreviewTurn ?? logPinnedTurn;
   const shownLogPreview =
     drawerOpen && !replayOpen && shownLogTurn !== null
-      ? (board?.recentMoves.find((move) => move.turnNumber === shownLogTurn && !move.hidden) ?? null)
+      ? (board?.recentMoves.find((move) => move.turnNumber === shownLogTurn && !move.hidden) ??
+        null)
       : null;
 
   useEffect(() => {
@@ -368,10 +479,16 @@ export function HexClashApp() {
     if (next) setFlash(next);
   }, [activeReplayFrame, activeGameId, replayOpen]);
 
-  const activeSeatKey = activeGameId && activeSeatCredential ? formatSeatKey(activeGameId, activeSeatCredential.playerToken) : null;
+  const activeSeatKey =
+    activeGameId && activeSeatCredential
+      ? formatSeatKey(activeGameId, activeSeatCredential.playerToken)
+      : null;
   const visibleJoinCode = board?.game.joinCode ?? activeSession?.joinCode ?? null;
 
-  const settle = async <T,>(run: () => Promise<Settled<T>>, apply: (result: T, navigation: number) => void) => {
+  const settle = async <T,>(
+    run: () => Promise<Settled<T>>,
+    apply: (result: T, navigation: number) => void,
+  ) => {
     const navigation = navigationSeq.current;
     try {
       const reply = await run();
@@ -382,7 +499,12 @@ export function HexClashApp() {
   };
 
   const applyDemoResult = (data: StartDemoReply, navigation: number) => {
-    updateSession({ gameId: data.gameId, joinCode: data.joinCode, seats: data.seats, activeSeat: 1 });
+    updateSession({
+      gameId: data.gameId,
+      joinCode: data.joinCode,
+      seats: data.seats,
+      activeSeat: 1,
+    });
     reloadGames();
     if (navigationSeq.current === navigation) enterGame(data.gameId, false);
     else showToast("Your demo match is ready in the Game menu.");
@@ -407,7 +529,10 @@ export function HexClashApp() {
 
   const applyJoinResult = (data: JoinGameReply, navigation: number) => {
     const stillHere = navigationSeq.current === navigation;
-    setSessions((prev) => ({ ...prev, [data.gameId]: withJoinedSeat(prev[data.gameId], data, stillHere) }));
+    setSessions((prev) => ({
+      ...prev,
+      [data.gameId]: withJoinedSeat(prev[data.gameId], data, stillHere),
+    }));
     reloadGames();
     if (!stillHere) {
       showToast(`Joined as ${data.playerName}. The match is ready in the Game menu.`);
@@ -426,7 +551,10 @@ export function HexClashApp() {
         const current = prev[game.id];
         return current ? { ...prev, [game.id]: { ...current, activeSeat: game.activeSeat } } : prev;
       });
-      setHandoffs((prev) => ({ ...prev, [game.id]: { seat: game.activeSeat, turn: game.turnNumber } }));
+      setHandoffs((prev) => ({
+        ...prev,
+        [game.id]: { seat: game.activeSeat, turn: game.turnNumber },
+      }));
     } else if (game.status === "finished") {
       forgetHandoff(game.id);
     }
@@ -452,7 +580,10 @@ export function HexClashApp() {
     const requestId = ++resumeRequestSeq.current;
     setResumePending(true);
     try {
-      const state = await client.read<VisibleBoardState>("getVisibleState", { gameId: parsed.gameId, playerToken: parsed.playerToken });
+      const state = await client.read<VisibleBoardState>("getVisibleState", {
+        gameId: parsed.gameId,
+        playerToken: parsed.playerToken,
+      });
       if (resumeRequestSeq.current !== requestId) return;
       const seat = state.viewer.seat;
       if (seat === null) {
@@ -467,7 +598,13 @@ export function HexClashApp() {
       };
       setSessions((prev) => ({
         ...prev,
-        [parsed.gameId]: withSeat(prev[parsed.gameId], parsed.gameId, state.game.joinCode ?? null, restored, true),
+        [parsed.gameId]: withSeat(
+          prev[parsed.gameId],
+          parsed.gameId,
+          state.game.joinCode ?? null,
+          restored,
+          true,
+        ),
       }));
       forgetHandoff(parsed.gameId);
       enterGame(parsed.gameId, false);
@@ -475,14 +612,17 @@ export function HexClashApp() {
       reloadGames();
     } catch (caught) {
       if (resumeRequestSeq.current !== requestId) return;
-      setResumeError(caught instanceof Error ? caught.message : "dohc could not resume that seat key.");
+      setResumeError(
+        caught instanceof Error ? caught.message : "dohc could not resume that seat key.",
+      );
     } finally {
       if (resumeRequestSeq.current === requestId) setResumePending(false);
     }
   };
 
   const executeOrder = async (actionType: ActionType) => {
-    if (!activeGameId || !activeSeatCredential || submitMove.pending || submitMove.uncertain) return;
+    if (!activeGameId || !activeSeatCredential || submitMove.pending || submitMove.uncertain)
+      return;
     const submittedGameId = activeGameId;
     const payload: MovePayload = {
       gameId: submittedGameId,
@@ -492,7 +632,13 @@ export function HexClashApp() {
     };
     if (actionType === "march") {
       if (!selectedTile || !targetTile) return;
-      Object.assign(payload, { fromQ: selectedTile.q, fromR: selectedTile.r, toQ: targetTile.q, toR: targetTile.r, units: lockedUnits });
+      Object.assign(payload, {
+        fromQ: selectedTile.q,
+        fromR: selectedTile.r,
+        toQ: targetTile.q,
+        toR: targetTile.r,
+        units: lockedUnits,
+      });
     } else if (actionType === "fortify" || actionType === "reinforce") {
       if (!selectedTile) return;
       Object.assign(payload, { fromQ: selectedTile.q, fromR: selectedTile.r });
@@ -537,13 +683,22 @@ export function HexClashApp() {
     if (selectedTile && targets.has(key)) {
       if (activeTargetHex !== key) {
         lockedAt.current = performance.now();
-        if (turnScope) dispatchSelection({ type: "target", hex: key, movable: maxMovable, scope: turnScope });
-      } else if (!forecastHidden && (via === "enter" || (via === "pointer" && performance.now() - lockedAt.current >= SECOND_TAP_GUARD_MS))) {
+        if (turnScope)
+          dispatchSelection({ type: "target", hex: key, movable: maxMovable, scope: turnScope });
+      } else if (
+        !forecastHidden &&
+        (via === "enter" ||
+          (via === "pointer" && performance.now() - lockedAt.current >= SECOND_TAP_GUARD_MS))
+      ) {
         void executeOrder("march");
       }
       return;
     }
-    dispatchSelection(selectedHex === key ? { type: "deselect" } : { type: "select", hex: key, units: tile.units ?? 1 });
+    dispatchSelection(
+      selectedHex === key
+        ? { type: "deselect" }
+        : { type: "select", hex: key, units: tile.units ?? 1 },
+    );
   };
 
   const handleCopySeatKey = async (keyText: string) => {
@@ -560,12 +715,18 @@ export function HexClashApp() {
   const modalOpen = inviteOpen || rulesOpen || resignOpen;
   const blocked = submitMove.uncertain;
   const canEndTurn = isMyTurn && !blocked && !submitMove.pending && !activeTargetHex;
-  const dockCardVisible = !replayOpen && inspectTile !== null && !drawerOpen && !(compact && board?.game.status === "finished");
+  const dockCardVisible =
+    !replayOpen &&
+    inspectTile !== null &&
+    !drawerOpen &&
+    !(compact && board?.game.status === "finished");
 
   const onKeyDown = useEffectEvent((event: KeyboardEvent) => {
     if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
     if (modalOpen || lobbyVisible || handoffActive || isTypingTarget(event.target)) return;
-    const onControl = event.target instanceof HTMLElement && event.target.closest("button, [role='button'], input, a");
+    const onControl =
+      event.target instanceof HTMLElement &&
+      event.target.closest("button, [role='button'], input, a");
     const key = event.key;
     if (event.repeat && key !== "ArrowLeft" && key !== "ArrowRight") return;
     if (key === "Escape") {
@@ -610,14 +771,25 @@ export function HexClashApp() {
     return () => window.removeEventListener("keydown", listener);
   }, []);
 
-  const replayNames: readonly [string, string] = [playerName(replayData?.players, 1), playerName(replayData?.players, 2)];
+  const replayNames: readonly [string, string] = [
+    playerName(replayData?.players, 1),
+    playerName(replayData?.players, 2),
+  ];
   const replayChart = useMemo(() => {
     if (replayFrames.length === 0) return null;
     return {
       labels: replayFrames.map((f) => (f.move ? String(f.move.turnNumber) : "0")),
       series: [
-        { name: replayNames[0], values: replayFrames.map((f) => f.seat1Units), color: "var(--hc-p1)" },
-        { name: replayNames[1], values: replayFrames.map((f) => f.seat2Units), color: "var(--hc-p2)" },
+        {
+          name: replayNames[0],
+          values: replayFrames.map((f) => f.seat1Units),
+          color: "var(--hc-p1)",
+        },
+        {
+          name: replayNames[1],
+          values: replayFrames.map((f) => f.seat2Units),
+          color: "var(--hc-p2)",
+        },
       ],
     };
   }, [replayNames[0], replayNames[1], replayFrames]);
@@ -627,15 +799,56 @@ export function HexClashApp() {
     title: string,
     retryId: string,
     retry: () => void,
-  ): Notice => ({ title, retryId, retry, discard: mutation.discardPending, pending: mutation.pending });
+  ): Notice => ({
+    title,
+    retryId,
+    retry,
+    discard: mutation.discardPending,
+    pending: mutation.pending,
+  });
 
   const notice: Notice | null = (() => {
-    if (startDemo.uncertain && !lobbyVisible) return mutationNotice(startDemo, "dohc could not confirm the demo match", "retry-demo-btn", () => void settle(startDemo.retry, applyDemoResult));
-    if (createGame.uncertain && !lobbyVisible) return mutationNotice(createGame, "dohc could not confirm the new match", "retry-create-banner-btn", () => void settle(createGame.retry, applyCreateResult));
-    if (joinGame.uncertain && !lobbyVisible) return mutationNotice(joinGame, "dohc could not confirm your seat", "retry-join-banner-btn", () => void settle(joinGame.retry, applyJoinResult));
-    if (submitMove.uncertain) return mutationNotice(submitMove, "dohc could not confirm your order", "retry-move-btn", () => void retryOrder());
-    if (submitMove.error) return { title: "Order refused", detail: submitMove.error.message, discard: discardPendingOrder };
-    if (boardQuery.error && activeGameId) return { title: "dohc could not load the board", detail: boardQuery.error.message, retryId: "reload-board-btn", retry: reloadBoard };
+    if (startDemo.uncertain && !lobbyVisible)
+      return mutationNotice(
+        startDemo,
+        "dohc could not confirm the demo match",
+        "retry-demo-btn",
+        () => void settle(startDemo.retry, applyDemoResult),
+      );
+    if (createGame.uncertain && !lobbyVisible)
+      return mutationNotice(
+        createGame,
+        "dohc could not confirm the new match",
+        "retry-create-banner-btn",
+        () => void settle(createGame.retry, applyCreateResult),
+      );
+    if (joinGame.uncertain && !lobbyVisible)
+      return mutationNotice(
+        joinGame,
+        "dohc could not confirm your seat",
+        "retry-join-banner-btn",
+        () => void settle(joinGame.retry, applyJoinResult),
+      );
+    if (submitMove.uncertain)
+      return mutationNotice(
+        submitMove,
+        "dohc could not confirm your order",
+        "retry-move-btn",
+        () => void retryOrder(),
+      );
+    if (submitMove.error)
+      return {
+        title: "Order refused",
+        detail: submitMove.error.message,
+        discard: discardPendingOrder,
+      };
+    if (boardQuery.error && activeGameId)
+      return {
+        title: "dohc could not load the board",
+        detail: boardQuery.error.message,
+        retryId: "reload-board-btn",
+        retry: reloadBoard,
+      };
     if (replay.error) return { title: "dohc could not load the replay", detail: replay.error };
     return null;
   })();
@@ -655,7 +868,11 @@ export function HexClashApp() {
   if (phase !== "loading" && phase !== settledPhase) setSettledPhase(phase);
 
   return (
-    <div className="hc-app" data-phase={phase === "loading" ? settledPhase : phase} data-turn-seat={turnSeat ?? 0}>
+    <div
+      className="hc-app"
+      data-phase={phase === "loading" ? settledPhase : phase}
+      data-turn-seat={turnSeat ?? 0}
+    >
       {activeGameId ? (
         <div className="hc-game" inert={lobbyVisible || handoffActive}>
           <Hud
@@ -665,11 +882,17 @@ export function HexClashApp() {
             viewerSeat={viewerSeat}
             seatSwitch={
               showSeatSwitch && activeSession
-                ? { seats: activeSession.seats, pressed: spectatorMode ? null : activeSession.activeSeat, disabled: seatSwitchLocked }
+                ? {
+                    seats: activeSession.seats,
+                    pressed: spectatorMode ? null : activeSession.activeSeat,
+                    disabled: seatSwitchLocked,
+                  }
                 : null
             }
             canInvite={Boolean(activeSeatKey) && board?.game.status !== "finished"}
-            canResign={Boolean(activeSeatCredential) && board?.game.status === "active" && !replayOpen}
+            canResign={
+              Boolean(activeSeatCredential) && board?.game.status === "active" && !replayOpen
+            }
             resignDisabled={submitMove.pending || blocked}
             logOpen={drawerOpen}
             onMenu={openLobby}
@@ -700,12 +923,26 @@ export function HexClashApp() {
                 targets={targets}
                 lastMove={
                   shownLogPreview
-                    ? { fromHex: shownLogPreview.fromHex, toHex: shownLogPreview.toHex, seat: shownLogPreview.actorSeat, token: -shownLogPreview.turnNumber }
+                    ? {
+                        fromHex: shownLogPreview.fromHex,
+                        toHex: shownLogPreview.toHex,
+                        seat: shownLogPreview.actorSeat,
+                        token: -shownLogPreview.turnNumber,
+                      }
                     : lastMoveForBoard
                 }
-                highlightHexes={shownLogPreview ? [shownLogPreview.fromHex, shownLogPreview.toHex].filter((hex) => hex !== null) : []}
+                highlightHexes={
+                  shownLogPreview
+                    ? [shownLogPreview.fromHex, shownLogPreview.toHex].filter((hex) => hex !== null)
+                    : []
+                }
                 forecast={orders.boardForecast}
-                flash={flash && flash.scope === (replayOpen ? `replay:${activeGameId}` : liveFlashScope(board)) ? flash : null}
+                flash={
+                  flash &&
+                  flash.scope === (replayOpen ? `replay:${activeGameId}` : liveFlashScope(board))
+                    ? flash
+                    : null
+                }
                 onActivate={handleActivate}
                 onHover={(hex) => dispatchSelection({ type: "hover", hex })}
                 onCursor={(hex) => dispatchSelection({ type: "focus", hex })}
@@ -716,7 +953,14 @@ export function HexClashApp() {
               </div>
             )}
 
-            {banner ? <TurnBanner seat={banner.seat} turn={banner.turn} label={banner.label} token={banner.token} /> : null}
+            {banner ? (
+              <TurnBanner
+                seat={banner.seat}
+                turn={banner.turn}
+                label={banner.label}
+                token={banner.token}
+              />
+            ) : null}
 
             {board?.game.status === "waiting" && visibleJoinCode ? (
               <div className="hc-waiting" role="status">
@@ -742,7 +986,11 @@ export function HexClashApp() {
                     <Copy size={15} aria-hidden="true" />
                   </button>
                 </span>
-                <span className="hc-waiting-sub">{codeCopied ? "Copied. Send it to player 2." : "Player 2 enters this code under Join with a code."}</span>
+                <span className="hc-waiting-sub">
+                  {codeCopied
+                    ? "Copied. Send it to player 2."
+                    : "Player 2 enters this code under Join with a code."}
+                </span>
               </div>
             ) : null}
           </main>
@@ -750,7 +998,14 @@ export function HexClashApp() {
           <footer className="hc-dock" ref={observeDock}>
             <div className="hc-dock-left">
               {replayOpen && replayFrames.length > 0 ? (
-                <ReplayDock frames={replayFrames} step={replayStep} playing={replay.playing} onStep={replay.goTo} onTogglePlay={replay.togglePlay} onExit={closeReplay} />
+                <ReplayDock
+                  frames={replayFrames}
+                  step={replayStep}
+                  playing={replay.playing}
+                  onStep={replay.goTo}
+                  onTogglePlay={replay.togglePlay}
+                  onExit={closeReplay}
+                />
               ) : dockCardVisible ? (
                 <div className="hc-dock-stack">
                   {preview && viewerSeat !== null ? (
@@ -775,11 +1030,17 @@ export function HexClashApp() {
                     reinforceUnits={reinforceUnits}
                     maxReinforce={maxReinforce}
                     onMarchUnits={(units) => dispatchSelection({ type: "marchUnits", units })}
-                    onReinforceUnits={(units) => dispatchSelection({ type: "reinforceUnits", units })}
+                    onReinforceUnits={(units) =>
+                      dispatchSelection({ type: "reinforceUnits", units })
+                    }
                     onMarch={() => void executeOrder("march")}
                     onFortify={() => void executeOrder("fortify")}
                     onReinforce={() => void executeOrder("reinforce")}
-                    onClose={inspectHex === selectedHex ? () => dispatchSelection({ type: "deselect" }) : undefined}
+                    onClose={
+                      inspectHex === selectedHex
+                        ? () => dispatchSelection({ type: "deselect" })
+                        : undefined
+                    }
                   />
                 </div>
               ) : null}
@@ -794,7 +1055,12 @@ export function HexClashApp() {
                   onEndTurn={() => void executeOrder("pass")}
                 />
               ) : board?.game.status === "finished" && !replayOpen ? (
-                <VictoryCard board={board} replayLoading={replay.loading} onReplay={() => void openReplay(board.game.id)} onNewMatch={openLobby} />
+                <VictoryCard
+                  board={board}
+                  replayLoading={replay.loading}
+                  onReplay={() => void openReplay(board.game.id)}
+                  onNewMatch={openLobby}
+                />
               ) : null}
             </div>
           </footer>
@@ -805,7 +1071,13 @@ export function HexClashApp() {
             moves={board?.recentMoves ?? []}
             replay={
               replayOpen && replayFrames.length > 0
-                ? { frames: replayFrames, step: replayStep, onStep: replay.goTo, chart: replayChart, names: replayNames }
+                ? {
+                    frames: replayFrames,
+                    step: replayStep,
+                    onStep: replay.goTo,
+                    chart: replayChart,
+                    names: replayNames,
+                  }
                 : null
             }
             replayLocked={board?.game.status !== "finished"}
@@ -847,7 +1119,11 @@ export function HexClashApp() {
             uncertain: startDemo.uncertain,
             error: startDemo.error,
             discard: startDemo.discardPending,
-            start: () => void settle(() => (startDemo.uncertain ? startDemo.retry() : startDemo.mutate({})), applyDemoResult),
+            start: () =>
+              void settle(
+                () => (startDemo.uncertain ? startDemo.retry() : startDemo.mutate({})),
+                applyDemoResult,
+              ),
           }}
           create={{
             pending: createGame.pending,
@@ -856,7 +1132,13 @@ export function HexClashApp() {
             discard: createGame.discardPending,
             submit: ({ name, title }) =>
               void settle(
-                () => (createGame.uncertain ? createGame.retry() : createGame.mutate({ title: title.trim() || undefined, playerName: name.trim() || "Crimson" })),
+                () =>
+                  createGame.uncertain
+                    ? createGame.retry()
+                    : createGame.mutate({
+                        title: title.trim() || undefined,
+                        playerName: name.trim() || "Crimson",
+                      }),
                 applyCreateResult,
               ),
           }}
@@ -867,11 +1149,21 @@ export function HexClashApp() {
             discard: joinGame.discardPending,
             submit: ({ code, name }) =>
               void settle(
-                () => (joinGame.uncertain ? joinGame.retry() : joinGame.mutate({ joinCode: code.trim().toUpperCase(), playerName: name.trim() || "Cobalt" })),
+                () =>
+                  joinGame.uncertain
+                    ? joinGame.retry()
+                    : joinGame.mutate({
+                        joinCode: code.trim().toUpperCase(),
+                        playerName: name.trim() || "Cobalt",
+                      }),
                 applyJoinResult,
               ),
           }}
-          resume={{ pending: resumePending, error: resumeError, submit: (seatKey) => void handleResumeSeat(seatKey) }}
+          resume={{
+            pending: resumePending,
+            error: resumeError,
+            submit: (seatKey) => void handleResumeSeat(seatKey),
+          }}
           games={gamesQuery.data?.games ?? []}
           gamesLoading={gamesQuery.loading}
           gamesError={gamesQuery.error?.message ?? null}
@@ -907,7 +1199,9 @@ export function HexClashApp() {
       <ResignDialog
         open={resignOpen && board?.game.status === "active"}
         playerName={playerName(board?.players, viewerSeat)}
-        opponentName={viewerSeat === null ? "Your opponent" : playerName(board?.players, otherSeat(viewerSeat))}
+        opponentName={
+          viewerSeat === null ? "Your opponent" : playerName(board?.players, otherSeat(viewerSeat))
+        }
         pending={submitMove.pending}
         uncertain={submitMove.uncertain}
         error={submitMove.error?.message ?? null}

@@ -26,18 +26,34 @@ export interface Orders {
   readonly boardForecast: BoardForecast | null;
 }
 
-function marchTargets(tiles: readonly VisibleTile[], from: VisibleTile | null, viewerSeat: 1 | 2 | null, canAct: boolean) {
+function marchTargets(
+  tiles: readonly VisibleTile[],
+  from: VisibleTile | null,
+  viewerSeat: 1 | 2 | null,
+  canAct: boolean,
+) {
   const targets = new Map<string, TargetKind>();
   if (!canAct || !from || from.ownerSeat !== viewerSeat || (from.units ?? 0) <= 1) return targets;
   for (const tile of tiles) {
     if (!tile.visible || tile.terrain === "mountain") continue;
     if (axialDistance(from.q, from.r, tile.q, tile.r) !== 1) continue;
-    targets.set(hexKeyOf(tile.q, tile.r), tile.ownerSeat === viewerSeat ? "move" : isClaim(tile) ? "claim" : "attack");
+    targets.set(
+      hexKeyOf(tile.q, tile.r),
+      tile.ownerSeat === viewerSeat ? "move" : isClaim(tile) ? "claim" : "attack",
+    );
   }
   return targets;
 }
 
-export function deriveOrders({ tiles, tileByKey, selection, viewerSeat, canAct, turnScope, compact }: OrderInput): Orders {
+export function deriveOrders({
+  tiles,
+  tileByKey,
+  selection,
+  viewerSeat,
+  canAct,
+  turnScope,
+  compact,
+}: OrderInput): Orders {
   const { selectedHex, hoverHex, cursorHex, marchUnits } = selection;
   const selectedTile = selectedHex ? (tileByKey.get(selectedHex) ?? null) : null;
   const targets = marchTargets(tiles, selectedTile, viewerSeat, canAct);
@@ -45,13 +61,24 @@ export function deriveOrders({ tiles, tileByKey, selection, viewerSeat, canAct, 
   const targetTile = targetHex ? (tileByKey.get(targetHex) ?? null) : null;
   const maxMovable = selectedTile ? Math.max(0, (selectedTile.units ?? 0) - 1) : 0;
   const lockedUnits = Math.min(marchUnits, maxMovable);
-  const targetForecast = targetTile && viewerSeat !== null && maxMovable > 0 ? forecastMarch(lockedUnits, targetTile, viewerSeat) : null;
+  const targetForecast =
+    targetTile && viewerSeat !== null && maxMovable > 0
+      ? forecastMarch(lockedUnits, targetTile, viewerSeat)
+      : null;
 
-  const previewHex = targetHex ?? [hoverHex, cursorHex].find((hex) => hex !== null && targets.has(hex)) ?? null;
-  const previewTile = previewHex && (!compact || previewHex === targetHex) ? (tileByKey.get(previewHex) ?? null) : null;
+  const previewHex =
+    targetHex ?? [hoverHex, cursorHex].find((hex) => hex !== null && targets.has(hex)) ?? null;
+  const previewTile =
+    previewHex && (!compact || previewHex === targetHex)
+      ? (tileByKey.get(previewHex) ?? null)
+      : null;
   const previewUnits = previewHex === targetHex ? lockedUnits : maxMovable;
-  const previewForecast = previewTile && viewerSeat !== null && previewUnits > 0 ? forecastMarch(previewUnits, previewTile, viewerSeat) : null;
-  const preview = previewTile && previewForecast ? { tile: previewTile, forecast: previewForecast } : null;
+  const previewForecast =
+    previewTile && viewerSeat !== null && previewUnits > 0
+      ? forecastMarch(previewUnits, previewTile, viewerSeat)
+      : null;
+  const preview =
+    previewTile && previewForecast ? { tile: previewTile, forecast: previewForecast } : null;
 
   let boardForecast: BoardForecast | null = null;
   if (previewForecast && previewHex && selectedHex) {
@@ -68,5 +95,15 @@ export function deriveOrders({ tiles, tileByKey, selection, viewerSeat, canAct, 
     };
   }
 
-  return { selectedTile, targets, targetHex, targetTile, maxMovable, lockedUnits, targetForecast, preview, boardForecast };
+  return {
+    selectedTile,
+    targets,
+    targetHex,
+    targetTile,
+    maxMovable,
+    lockedUnits,
+    targetForecast,
+    preview,
+    boardForecast,
+  };
 }

@@ -13,7 +13,13 @@ export interface EndTurnButtonProps {
   readonly onEndTurn: () => void;
 }
 
-export function EndTurnButton({ turn, waitingFor, sending, targetLocked, onEndTurn }: EndTurnButtonProps) {
+export function EndTurnButton({
+  turn,
+  waitingFor,
+  sending,
+  targetLocked,
+  onEndTurn,
+}: EndTurnButtonProps) {
   const ready = turn === "yours";
   const acts = ready && !sending && !targetLocked;
   return (
@@ -32,7 +38,15 @@ export function EndTurnButton({ turn, waitingFor, sending, targetLocked, onEndTu
           <span className="hc-end-turn-label">{sending ? "Sending" : "End turn"}</span>
           <span className="hc-end-turn-sub">
             <span className="hc-order-dot" aria-hidden="true" />
-            {targetLocked ? "Send or cancel the order" : sending ? "1 order left" : <>1 order left <Kbd>E</Kbd></>}
+            {targetLocked ? (
+              "Send or cancel the order"
+            ) : sending ? (
+              "1 order left"
+            ) : (
+              <>
+                1 order left <Kbd>E</Kbd>
+              </>
+            )}
           </span>
         </>
       ) : turn === "unconfirmed" ? (
@@ -69,7 +83,12 @@ export interface VictoryCardProps {
 export function VictoryCard({ board, replayLoading, onReplay, onNewMatch }: VictoryCardProps) {
   const { winnerSeat, winReason, turnNumber } = board.game;
   const loser = playerName(board.players, winnerSeat === null ? null : otherSeat(winnerSeat));
-  const reason = winReason === "capital_captured" ? `${loser}'s capital fell` : winReason === "resignation" ? `${loser} resigned` : "Match over";
+  const reason =
+    winReason === "capital_captured"
+      ? `${loser}'s capital fell`
+      : winReason === "resignation"
+        ? `${loser} resigned`
+        : "Match over";
   return (
     <div className="hc-victory" role="status">
       <FactionCrest seat={winnerSeat} size={34} />
