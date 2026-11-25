@@ -15,9 +15,11 @@ import { recordsOfContainer } from "./bodySequenceGrammar.js";
 import { isBodySequenceChange, type BodySequenceUnwritten } from "./bodySequenceEditor.js";
 import { BODY_SEQUENCE_SCHEMA_VERSION } from "./bodySequenceYjs.js";
 import { admitBodySequenceNotes, liveEditRefusal } from "./liveDocumentValidation.js";
+import { LIVE_UPDATE_MAX_BYTES } from "./liveValidationPolicy.js";
 import {
   boundary,
   editorOn,
+  element,
   elementsOf,
   exchange,
   note,
@@ -505,6 +507,106 @@ describe("a dispatch the editor writes whole or not at all", () => {
     a.view.dispatch(a.view.state.tr.delete(0, doc.child(0).nodeSize));
     refusedWhole(a, told, lines);
   });
+
+  const LINES = 25;
+  const PAIRS = 1_001;
+  const holes = () => [
+    { retain: 1 },
+    ...Array.from({ length: PAIRS }, () => [
+      { retain: 1 },
+      { delete: 1 },
+      { retain: 1 },
+      { delete: 1 },
+    ]).flat(),
+  ];
+  const refusedDeletingAllButTheLast = (baseline: Uint8Array) => {
+    const { a, told } = toldOf(baseline);
+    const lines = a.lines();
+    const { doc } = a.view.state;
+    a.view.dispatch(a.view.state.tr.delete(0, doc.content.size - doc.lastChild!.nodeSize));
+    refusedWhole(a, told, lines);
+  };
+
+  it("refuses deleting lines whose letters were written apart between as many breaks, so the note holds no more items there than a copy of them", () => {
+    refusedDeletingAllButTheLast(
+      noteOf(({ sequence }) => {
+        const line = () => [
+          { insert: boundary() },
+          ...Array.from({ length: PAIRS }, () => [
+            { insert: element("hardBreak", {}) },
+            { insert: "yxy" },
+          ]).flat(),
+        ];
+        sequence.applyDelta([
+          ...Array.from({ length: LINES }, line).flat(),
+          { insert: boundary() },
+          { insert: "after" },
+        ]);
+        sequence.applyDelta(Array.from({ length: LINES }, holes).flat());
+      }),
+    );
+  });
+
+  it("refuses deleting lines whose letters were written apart with each a made bold, so the note holds no more items there than a copy of them", () => {
+    refusedDeletingAllButTheLast(
+      noteOf(({ sequence }) => {
+        const line = () => [{ insert: boundary() }, { insert: "a?b?".repeat(PAIRS) }];
+        sequence.applyDelta([
+          ...Array.from({ length: LINES }, line).flat(),
+          { insert: boundary() },
+          { insert: "after" },
+        ]);
+        sequence.applyDelta(Array.from({ length: LINES }, holes).flat());
+        const bold = () => [
+          { retain: 1 },
+          ...Array.from({ length: PAIRS }, () => [
+            { retain: 1, attributes: { bold: {} } },
+            { retain: 1 },
+          ]).flat(),
+        ];
+        sequence.applyDelta(Array.from({ length: LINES }, bold).flat());
+      }),
+    );
+  });
+
+  const link = (size: number) =>
+    schema.marks.link!.create({ href: `https://example.com/${"a".repeat(size)}` });
+
+  it("refuses 999 rules put at the end of a line 64 quotes deep, each of whose boundaries holds the path", () => {
+    const ids = Array.from({ length: 64 }, (_, at) => `${String(at)}`.padEnd(32, "q"));
+    const { a, told } = toldOf(
+      noteIn(
+        ids.map((id) => [id, "blockquote"] as Frame),
+        [[ids, "x"]],
+      ),
+    );
+    const rules = Array.from({ length: 999 }, () => schema.nodes.horizontalRule!.create());
+    a.view.dispatch(a.view.state.tr.insert(ids.length + 3, rules));
+    refusedWhole(a, told, ["x"]);
+  });
+
+  it("refuses 499 breaks and letters put in a link, which the sequence takes the link off and puts back for each", () => {
+    const { a, told } = toldOf(note("ab"));
+    a.view.dispatch(a.view.state.tr.addMark(1, 3, link(10_000)));
+    expect(told).toEqual([]);
+    a.sent.splice(0);
+    const put = Array.from({ length: 499 }, () => [
+      schema.nodes.hardBreak!.create(),
+      schema.text("a"),
+    ]).flat();
+    a.view.dispatch(a.view.state.tr.insert(2, put));
+    refusedWhole(a, told, ["ab"]);
+  });
+
+  it("refuses a letter with a link of its own put inside a long link, which the sequence puts back after it", () => {
+    const { a, told } = toldOf(note("ab"));
+    a.view.dispatch(a.view.state.tr.addMark(1, 3, link(2_050_000)));
+    expect(told).toEqual([]);
+    expect(a.sent[0]!.byteLength).toBeLessThan(LIVE_UPDATE_MAX_BYTES);
+    a.sent.splice(0);
+    a.view.dispatch(a.view.state.tr.replaceWith(2, 2, schema.text("X", [link(85_000)])));
+    refusedWhole(a, told, ["ab"]);
+  });
 });
 
 const inFormat2 = (note: Uint8Array) => {
@@ -701,6 +803,7 @@ function playAtRandom(
   const toRoom = (updates: Uint8Array[]) => {
     for (const update of updates.filter((each) => !checked.has(each))) {
       checked.add(update);
+      expect(update.byteLength, `seed ${String(seed)}`).toBeLessThanOrEqual(LIVE_UPDATE_MAX_BYTES);
       expect(liveEditRefusal(room, update), `seed ${String(seed)}`).toBeUndefined();
     }
   };
@@ -724,9 +827,9 @@ function playAtRandom(
     }),
   );
   const settle = () => {
+    for (const each of people) toRoom(each.sent);
     if (arrive === "merged") deliverMerged(people, next, toRoom);
     else reconnect(...people);
-    for (const each of people) toRoom(each.sent);
     for (const each of people) {
       each.expectMirror();
       expect(each.view.state.doc.eq(people[0]!.view.state.doc), `seed ${String(seed)}`).toBe(true);
