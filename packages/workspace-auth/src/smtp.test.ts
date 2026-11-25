@@ -13,6 +13,7 @@ interface FakeServer {
   port: number;
   transcript: string[];
   message: () => string;
+  messages: () => string[];
   close: () => Promise<void>;
 }
 
@@ -25,6 +26,8 @@ function startFakeSmtp(options: FakeOptions = {}): Promise<FakeServer> {
   const capabilities = options.capabilities ?? ["AUTH PLAIN LOGIN"];
   const transcript: string[] = [];
   let message = "";
+  const messages: string[] = [];
+  let current = "";
 
   const handle = (socket: Socket): void => {
     let buffer = "";
@@ -41,10 +44,13 @@ function startFakeSmtp(options: FakeOptions = {}): Promise<FakeServer> {
         if (inData) {
           if (line === ".") {
             inData = false;
+            messages.push(current);
+            current = "";
             transcript.push("DATA-END");
             socket.write("250 2.0.0 queued\r\n");
           } else {
             message += `${line}\r\n`;
+            current += `${line}\r\n`;
           }
           continue;
         }
@@ -97,6 +103,7 @@ function startFakeSmtp(options: FakeOptions = {}): Promise<FakeServer> {
         port,
         transcript,
         message: () => message,
+        messages: () => messages,
         close: () =>
           new Promise((done) => {
             server.close(() => done());
@@ -211,6 +218,66 @@ describe("createSmtpSender", () => {
     expect(server.transcript).toContain("DATA-END");
     expect(server.message()).toContain("Subject: Verify your dohc email");
     expect(server.message()).toContain("Hello");
+  });
+
+  it("sends text and HTML together, from a named sender at the configured address", async () => {
+    const server = await fakeSmtp();
+    const send = createSmtpSender({
+      host: "127.0.0.1",
+      port: server.port,
+      secure: false,
+      from: "accounts@dohc.test",
+    });
+
+    await send({
+      to: "person@example.com",
+      subject: "Shared",
+      text: "Plain body",
+      html: "<p>Designed body</p>",
+      fromName: 'Sam "Q" Rivera, Jr',
+    });
+    await send({
+      to: "person@example.com",
+      subject: "Joined",
+      text: "Body",
+      fromName: "Mohammad\u200cReza",
+    });
+    await send({ to: "person@example.com", subject: "Bare", text: "Body" });
+    await send({
+      to: "person@example.com",
+      subject: "Odd",
+      text: "Body",
+      fromName: "Sam\r\nBcc: x",
+    });
+
+    const [named, joined, bare, odd] = server.messages();
+    expect(joined).toMatch(/^From: =\?UTF-8\?.+\?= <accounts@dohc\.test>/mu);
+    expect(
+      server.transcript.filter((line) => line === "MAIL FROM:<accounts@dohc.test>"),
+    ).toHaveLength(4);
+    expect(named).toContain('From: "Sam \\"Q\\" Rivera, Jr via dohc" <accounts@dohc.test>');
+    expect(named).toMatch(/Content-Type: multipart\/alternative/u);
+    expect(named).toContain("Plain body");
+    expect(named).toContain("<p>Designed body</p>");
+    expect(named).not.toMatch(/fromName/iu);
+    expect(bare).toContain("From: dohc <accounts@dohc.test>");
+    expect(bare).not.toContain("multipart");
+    expect(odd).toContain("From: dohc <accounts@dohc.test>");
+    expect(odd).not.toContain("Bcc");
+  });
+
+  it("keeps a configured sender name when the message names nobody", async () => {
+    const server = await fakeSmtp();
+    const send = createSmtpSender({
+      host: "127.0.0.1",
+      port: server.port,
+      secure: false,
+      from: "Acme Drive <accounts@dohc.test>",
+    });
+
+    await send({ to: "person@example.com", subject: "Hi", text: "Body" });
+
+    expect(server.message()).toContain("From: Acme Drive <accounts@dohc.test>");
   });
 
   it("authenticates with PLAIN when the server offers it", async () => {

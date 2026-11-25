@@ -1099,6 +1099,7 @@ export function createSyncRelayHandler({
       nowMs,
       sendEmail: sendShareInvitationEmail,
       lookupVerifiedUserEmail,
+      lookupUserDisplayName: lookupAccountDisplayName,
       relayPublicOrigin,
     }),
     publicEditRelease,

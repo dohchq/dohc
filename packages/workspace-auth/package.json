@@ -9,7 +9,8 @@
     "./signUp": "./src/signUp.ts",
     "./smtp": "./src/smtp.ts",
     "./accountDeletion": "./src/accountDeletion.ts",
-    "./credentialFence": "./src/credentialFence.ts"
+    "./credentialFence": "./src/credentialFence.ts",
+    "./email": "./src/email.ts"
   },
   "scripts": {
     "test": "vitest run",

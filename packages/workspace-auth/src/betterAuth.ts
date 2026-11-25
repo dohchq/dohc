@@ -13,6 +13,7 @@ import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
 import type { Pool } from "pg";
 import type { SessionKind } from "./session";
 import { SIGN_UP_INVITE_LINK_HEADER, type AdmitAccount, type SignUpAdmission } from "./signUp";
+import { accountEmail } from "./email";
 import type { SendEmail } from "./smtp";
 
 /** Verification and reset links expire one hour after dohc sends them. */
@@ -168,23 +169,29 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
         const url = page(
           `/account/reset-password?token=${encodeURIComponent(token)}${settingUp ? "&setup=1" : ""}${next ? `&next=${encodeURIComponent(next)}` : ""}`,
         );
-        await send({
-          to: user.email,
-          subject: settingUp ? "Choose your dohc password" : "Reset your dohc password",
-          text: [
+        await send(
+          accountEmail(
             settingUp
-              ? "Choose a password to finish setting up your dohc account:"
-              : "Choose a new password for your dohc account:",
-            "",
-            url,
-            "",
-            "The link works for one hour.",
-            settingUp
-              ? "If you did not create a dohc account, ignore this email. Nobody can sign in to it until you choose a password."
-              : "If you did not ask for a new password, ignore this email. Your password stays as it is.",
-            "",
-          ].join("\n"),
-        });
+              ? {
+                  to: user.email,
+                  url,
+                  subject: "Set your dohc password",
+                  heading: "Set your password",
+                  body: "Choose a password to finish setting up your account. This link works for 1 hour.",
+                  action: "Choose a password",
+                  note: "If you did not create an account, ignore this email. Nobody can sign in until a password is set.",
+                }
+              : {
+                  to: user.email,
+                  url,
+                  subject: "Reset your dohc password",
+                  heading: "Reset your password",
+                  body: "Choose a new password for your account. This link works for 1 hour.",
+                  action: "Choose a new password",
+                  note: "If you did not ask for a new password, ignore this email. Your password stays as it is.",
+                },
+          ),
+        );
       },
       ...(closed
         ? {
@@ -214,19 +221,17 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
         const url = page(
           `/account/verify-email?token=${encodeURIComponent(token)}&next=${encodeURIComponent(next ?? "/account")}`,
         );
-        await send({
-          to: user.email,
-          subject: "Verify your dohc email",
-          text: [
-            "Verify this address to finish setting up your dohc account:",
-            "",
+        await send(
+          accountEmail({
+            to: user.email,
             url,
-            "",
-            "The link works for one hour.",
-            "Until you verify it, other people cannot share work with you at this address.",
-            "",
-          ].join("\n"),
-        });
+            subject: "Verify your dohc email",
+            heading: "Verify your email",
+            body: "Verify this address to finish setting up your account. This link works for 1 hour.",
+            action: "Verify email",
+            note: "Until you verify your email, you cannot open work shared with this address.",
+          }),
+        );
       },
       // A verification link sent while sign-up was open would keep whatever
       // password the account already has.
