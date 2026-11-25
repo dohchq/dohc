@@ -3021,6 +3021,38 @@ describe("account deletion", () => {
     ).toEqual([{ rule_text: "members: view\n", changed_by_user_id: null }]);
   });
 
+  it("keeps a Group hidden after the admin who hid it deletes their account", async () => {
+    const { h, storage } = await seed();
+    const ben = await invited(h, "ben");
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ben}/role`, { role: "admin" })).status,
+    ).toBe(200);
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    const hidden = await h(
+      request("ben", `/sync/${WORKSPACE}/members/groups/${GROUP}/rule`, {
+        ...jsonBody({ level: "none" }),
+        method: "PUT",
+      }),
+    );
+    expect(hidden.status, await hidden.clone().text()).toBe(200);
+    deleteAccount(storage, "ben");
+    const pulled = await pulledText(h, "ana", shareId);
+    expect(pulled).not.toContain(GROUP);
+    expect(pulled).not.toContain("welcome to the team");
+    expect((await pull(h, "ana", shareId, GROUP)).status).toBe(404);
+    expect((await postInGroup(h, "ana", shareId, "m-after-deletion")).status).toBe(403);
+    expect((await membersView(h, OWNER)).groupRules).toEqual([
+      { channelWireId: GROUP, level: "none" },
+    ]);
+    expect(
+      (storage as unknown as StorageContext).db
+        .prepare("SELECT channel_wire_id, changed_by_user_id FROM sync_relay_group_rules")
+        .all()
+        .map((row) => ({ ...row })),
+    ).toEqual([{ channel_wire_id: GROUP, changed_by_user_id: null }]);
+  });
+
   it("removes a deleted admin's entry and keeps everyone they invited", async () => {
     const { h, storage } = await seed();
     const ana = await invited(h, "ana");

@@ -423,11 +423,13 @@ export function purgeAccountRows(
           }
         }
       if (RETAINED_ACCOUNT_HISTORY.has(table)) continue;
-      // A folder rule outlives whoever changed it last.
-      if (table === "sync_relay_folder_rules") {
+      // A folder or Group rule outlives whoever changed it last.
+      if (table === "sync_relay_folder_rules" || table === "sync_relay_group_rules") {
         storage.db
           .prepare(
-            "UPDATE sync_relay_folder_rules SET changed_by_user_id=NULL WHERE changed_by_user_id=?",
+            "UPDATE " +
+              identifier(table) +
+              " SET changed_by_user_id=NULL WHERE changed_by_user_id=?",
           )
           .run(userId);
         continue;
