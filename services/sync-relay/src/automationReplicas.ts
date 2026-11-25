@@ -138,6 +138,8 @@ export async function startAutomationReplicas(options: {
   key: Uint8Array;
   namespace: string;
   wanted(): ReadonlyMap<string, readonly CopyReason[]>;
+  /** A wanted copy kept open only for its next read: no pass pulls it, and that read syncs it. */
+  holdOnly?(workspaceId: string): boolean;
   nowMs?(): number;
   /** A replica opened or closed, or the reasons its row keeps it for changed. */
   onChanged?(workspaceId: string): void;
@@ -865,7 +867,11 @@ export async function startAutomationReplicas(options: {
               );
               throw error;
             }
-          } else if (row !== null && failedSyncs.has(workspaceId)) {
+          } else if (
+            row !== null &&
+            failedSyncs.has(workspaceId) &&
+            !options.holdOnly?.(workspaceId)
+          ) {
             const retry = replicas.get(workspaceId)!;
             if (!retry.busy()) await stepOf(retry);
           }
@@ -981,7 +987,11 @@ export async function startAutomationReplicas(options: {
     // Pull each wanted replica whose workspace changed at the relay since its
     // last pull. One waiting to leave pulls no more.
     for (const replica of [...replicas.values()]) {
-      if (!wanted.has(replica.workspaceId) || logHead(replica.workspaceId) <= replica.pulledHead)
+      if (
+        !wanted.has(replica.workspaceId) ||
+        options.holdOnly?.(replica.workspaceId) ||
+        logHead(replica.workspaceId) <= replica.pulledHead
+      )
         continue;
       // A copy already syncing gets there on its own; waiting on it would hold the pass.
       // Failed syncs retry in the next pass, even if their delay ended during this one.

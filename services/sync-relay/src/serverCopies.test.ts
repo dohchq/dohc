@@ -99,6 +99,7 @@ async function copies(storage: SyncRelayStorage, automations?: CopyAutomations) 
   return {
     copies: started,
     wanted: () => hooks!.wanted(),
+    holdOnly: (workspaceId: string) => hooks!.holdOnly?.(workspaceId),
     holdOpens: () => {
       opens = false;
     },
@@ -265,6 +266,19 @@ describe("the hold a read keeps on its copy", () => {
     await vi.waitFor(() => expect(run.copies.replica("trip")).toBeUndefined());
     storage.setShowOnPhone({ ownerUserId: OWNER, workspaceId: "trip", showOnPhone: true });
     expect(run.wanted()).toEqual(new Map());
+  });
+
+  it("tells the replicas which copies only a hold keeps, so no pass pulls them", async () => {
+    const storage = await relay();
+    const run = await copies(storage);
+    let during: boolean | undefined;
+    await run.copies.withServerCopy(OWNER, "trip", read(), async () => {
+      run.wanted();
+      during = run.holdOnly("trip");
+    });
+    expect(during, "a visit's copy").toBe(false);
+    run.wanted();
+    expect(run.holdOnly("trip")).toBe(true);
   });
 });
 

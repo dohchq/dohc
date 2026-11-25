@@ -71,6 +71,8 @@ export async function startServerCopies(options: ServerCopiesOptions) {
     clearTimeout(holds.get(workspaceId)?.timer);
     holds.delete(workspaceId);
   };
+  // The copies the last pass kept open for a hold alone.
+  let holdOnly = new Set<string>();
   const waiters = new Set<() => void>();
   const recheck = () => {
     for (const check of [...waiters]) check();
@@ -135,6 +137,7 @@ export async function startServerCopies(options: ServerCopiesOptions) {
       AUTOMATION_SERVER_MAX_WORKSPACES,
     );
     // A hold gives way to everything above, and ends once its workspace leaves the phone or its owner.
+    holdOnly = new Set();
     for (const [workspaceId, { ownerUserId }] of holds) {
       const listed = ids.includes(workspaceId);
       if (
@@ -143,7 +146,10 @@ export async function startServerCopies(options: ServerCopiesOptions) {
         (!listed && ids.length >= AUTOMATION_SERVER_MAX_WORKSPACES)
       )
         release(workspaceId);
-      else if (!listed) ids.push(workspaceId);
+      else if (!listed) {
+        ids.push(workspaceId);
+        holdOnly.add(workspaceId);
+      }
     }
     return new Map(
       ids.map((workspaceId) => {
@@ -165,6 +171,7 @@ export async function startServerCopies(options: ServerCopiesOptions) {
   const replicas = await (options.startReplicas ?? startAutomationReplicas)({
     ...options,
     wanted,
+    holdOnly: (workspaceId) => holdOnly.has(workspaceId),
     onChanged: (workspaceId) => {
       options.onChanged?.(workspaceId);
       recheck();

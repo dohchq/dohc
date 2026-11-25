@@ -933,6 +933,53 @@ describe("the automation replicas", () => {
     expect(engine.methods().filter((method) => method === "sync.applyPull")).toHaveLength(2);
   });
 
+  it("keeps a copy that only a read's hold wants open without pulling it, or retrying its failed sync", async () => {
+    vi.useFakeTimers({ toFake: ["performance", "setTimeout", "clearTimeout"] });
+    cleanup.push(async () => {
+      vi.useRealTimers();
+    });
+    const { storage, log } = await relay();
+    const engine = fakeEngine();
+    const passes = passEnds();
+    let holdOnly = true;
+    const opened = passes.next();
+    const running = await start(storage, {
+      wanted: () => [WORKSPACE],
+      holdOnly: () => holdOnly,
+      onReconciled: passes.onReconciled,
+      onError: () => undefined,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await opened;
+    // Past a failed sync's first retry delay.
+    const pass = async () => {
+      const ended = passes.next();
+      running.reconcile();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await ended;
+    };
+    const count = (name: string) => engine.methods().filter((method) => method === name).length;
+    expect(count("sync.applyPull"), "its open catches it up").toBe(1);
+    log(1);
+    await pass();
+    expect(running.replica(WORKSPACE)).toBeDefined();
+    expect(count("sync.applyPull")).toBe(1);
+
+    engine.failPush(true, running.replica(WORKSPACE)!.workspace);
+    await running
+      .replica(WORKSPACE)!
+      .sync()
+      .catch(() => undefined);
+    engine.failPush(false);
+    const pushes = count("sync.push");
+    await pass();
+    expect(count("sync.push"), "no retry of the failed sync").toBe(pushes);
+    holdOnly = false;
+    await pass();
+    expect(count("sync.push")).toBeGreaterThan(pushes);
+    expect(count("sync.applyPull")).toBe(2);
+  });
+
   it("closes a replica whose workspace was deleted, and removes every folder no row names", async () => {
     const { storage, raw } = await relay();
     const engine = fakeEngine();
