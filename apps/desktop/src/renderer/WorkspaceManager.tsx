@@ -11,16 +11,22 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ShareHandoffStatus } from "../ipc/bridgeContract";
+import type { DesktopUserSettingsResult, ShareHandoffStatus } from "../ipc/bridgeContract";
+import type { NoticeTarget } from "../notices/noticeTarget";
+import type { PrivacySettings } from "../settings/userSettings";
 import { bridge } from "./bridge";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { JoinSyncedWorkspace } from "./JoinSyncedWorkspace";
 import { displayPath, NewWorkspaceCard, openExistingFolder } from "./NewWorkspaceCard";
 import { OpenSharedView } from "./OpenSharedView";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
+import { ReportsPrivacyDialog } from "./settings/ReportsPrivacyDialog";
 import { ConnectionNotices, useConnectionNotices } from "./shell/connectionNotices";
+import { reportInstallationFailure } from "./shell/installationNotices";
 import { useKeptTyping } from "./shell/useKeptTyping";
 import { useCrashReport } from "./shell/useCrashReport";
+import { useStandaloneReportsNotice } from "./shell/useReportsNotice";
+import { ShellErrorReporter } from "./shell/useShellError";
 import { useWorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
 import { useMenuCommandsWithoutWorkspace } from "./appMenuCommands";
 import { JoinedWorkspaceMark, Titlebar, workspaceName } from "./Titlebar";
@@ -109,6 +115,26 @@ function writeListWidth(width: number): void {
 
 const ROW_MENU_WIDTH = 176;
 const LIST_REFRESH = "workspace-list:refresh";
+
+function reportCutOffPrivacySave(
+  change: {
+    settings: DesktopUserSettingsResult["settings"];
+    base: DesktopUserSettingsResult["settings"];
+  },
+  cause: unknown,
+): void {
+  reportInstallationFailure({
+    message: ipcErrorMessage(cause, "dohc could not save your settings."),
+    cause,
+    serverUrl: null,
+    retry: () => {
+      void bridge()
+        .setUserSettings(change)
+        .catch((next: unknown) => reportCutOffPrivacySave(change, next));
+      return true;
+    },
+  });
+}
 type RemovalDialog = { workspace: Workspace; busy: boolean; error: string | null };
 const ROW_ACTIONS = ["open", "reveal", "remove"] as const;
 type RowAction = (typeof ROW_ACTIONS)[number];
@@ -206,6 +232,8 @@ export function WorkspaceManager(props: {
   // The workspace open behind the manager, when there is one. Back returns
   // to it; removing it from the list drops to whatever remains.
   current: Workspace | null;
+  userSettings?: DesktopUserSettingsResult | null;
+  onUserSettingsChange?: (result: DesktopUserSettingsResult) => void;
   // May reject: the manager stays open and a toast says why.
   onOpenWorkspace: (workspace: Workspace) => void | Promise<void>;
   onForgot: () => Promise<unknown>;
@@ -215,6 +243,8 @@ export function WorkspaceManager(props: {
 }) {
   const [joining, setJoining] = useState(false);
   const [openingShare, setOpeningShare] = useState(false);
+  const [privacyOpen, setPrivacyOpen] = useState(false);
+  const [pendingPrivacy, setPendingPrivacy] = useState<Partial<PrivacySettings>>({});
   const [removing, setRemovingState] = useState<RemovalDialog | null>(null);
   // Written only with the state, so two requests in one turn see each other
   // whenever React renders.
@@ -229,6 +259,148 @@ export function WorkspaceManager(props: {
   const connectionNotices = useConnectionNotices();
   const keptTyping = useKeptTyping();
   const crashReportNotice = useCrashReport(connectionNotices);
+  const committedSettingsRef = useRef(props.userSettings ?? null);
+  const broadcastSettingsRef = useRef<DesktopUserSettingsResult | null>(null);
+  const inFlightPrivacyRef = useRef<Partial<PrivacySettings>>({});
+  const queuedPrivacyRef = useRef<Partial<PrivacySettings>>({});
+  const savingPrivacyRef = useRef(false);
+  const mountedRef = useRef(true);
+  const onUserSettingsChangeRef = useRef(props.onUserSettingsChange);
+  onUserSettingsChangeRef.current = props.onUserSettingsChange;
+  useEffect(() => {
+    if (!savingPrivacyRef.current) {
+      committedSettingsRef.current = props.userSettings ?? null;
+      broadcastSettingsRef.current = null;
+    } else if (props.userSettings && props.userSettings !== committedSettingsRef.current) {
+      broadcastSettingsRef.current = props.userSettings;
+    }
+  }, [props.userSettings]);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const committedPrivacy = props.userSettings?.settings.privacy ?? null;
+  const committedUsage = committedPrivacy?.usageReports;
+  const committedErrors = committedPrivacy?.errorReports;
+  const pendingUsage = pendingPrivacy.usageReports;
+  const pendingErrors = pendingPrivacy.errorReports;
+  const effectivePrivacy = useMemo<PrivacySettings | null>(
+    () =>
+      committedUsage === undefined || committedErrors === undefined
+        ? null
+        : {
+            usageReports: pendingUsage ?? committedUsage,
+            errorReports: pendingErrors ?? committedErrors,
+          },
+    [committedUsage, committedErrors, pendingUsage, pendingErrors],
+  );
+  const { showReportsNotice: pushReportsNotice, reportsNotice } = connectionNotices;
+  const reportsNoticeShown = useStandaloneReportsNotice({
+    enabled: props.userSettings !== undefined,
+    privacy: committedPrivacy,
+    notice: reportsNotice,
+    show: (reports) => pushReportsNotice(reports, () => setPrivacyOpen(true)),
+  });
+  const enqueuePrivacyPatch = useCallback(
+    (patch: Partial<PrivacySettings>) => {
+      const keys = Object.keys(patch) as Array<keyof PrivacySettings>;
+      if (keys.length === 0) return;
+      queuedPrivacyRef.current = { ...queuedPrivacyRef.current, ...patch };
+      if (mountedRef.current) {
+        setPendingPrivacy({ ...inFlightPrivacyRef.current, ...queuedPrivacyRef.current });
+      }
+      if (savingPrivacyRef.current) return;
+      savingPrivacyRef.current = true;
+      void (async () => {
+        try {
+          while (Object.keys(queuedPrivacyRef.current).length > 0) {
+            const current = committedSettingsRef.current;
+            if (!current) {
+              queuedPrivacyRef.current = {};
+              inFlightPrivacyRef.current = {};
+              if (mountedRef.current) setPendingPrivacy({});
+              return;
+            }
+            const batch = queuedPrivacyRef.current;
+            queuedPrivacyRef.current = {};
+            inFlightPrivacyRef.current = batch;
+            const batchKeys = Object.keys(batch) as Array<keyof PrivacySettings>;
+            const nextPrivacy: PrivacySettings = { ...current.settings.privacy, ...batch };
+            const change = {
+              settings: { ...current.settings, privacy: nextPrivacy },
+              base: current.settings,
+            };
+            try {
+              const saved = await bridge().setUserSettings(change);
+              committedSettingsRef.current = saved;
+              broadcastSettingsRef.current = null;
+              inFlightPrivacyRef.current = {};
+              const nextPending = { ...queuedPrivacyRef.current };
+              if (mountedRef.current) {
+                onUserSettingsChangeRef.current?.(saved);
+                for (const key of batchKeys) {
+                  connectionNotices.clearIdentity(`first-run-privacy:${key}`);
+                }
+                setPendingPrivacy(nextPending);
+              }
+            } catch (cause) {
+              if (broadcastSettingsRef.current) {
+                committedSettingsRef.current = broadcastSettingsRef.current;
+                broadcastSettingsRef.current = null;
+              }
+              inFlightPrivacyRef.current = {};
+              const nextPending = { ...queuedPrivacyRef.current };
+              if (mountedRef.current) {
+                setPendingPrivacy(nextPending);
+                for (const key of batchKeys) {
+                  const value = batch[key];
+                  if (value === undefined) continue;
+                  const retryPatch: Partial<PrivacySettings> = { [key]: value };
+                  connectionNotices.reportError(
+                    "dohc could not save your settings.",
+                    cause,
+                    () => enqueuePrivacyPatch(retryPatch),
+                    undefined,
+                    `first-run-privacy:${key}`,
+                  );
+                }
+              } else {
+                reportCutOffPrivacySave(change, cause);
+              }
+            }
+          }
+        } finally {
+          if (broadcastSettingsRef.current) {
+            committedSettingsRef.current = broadcastSettingsRef.current;
+            broadcastSettingsRef.current = null;
+          }
+          inFlightPrivacyRef.current = {};
+          savingPrivacyRef.current = false;
+        }
+      })();
+    },
+    [connectionNotices.clearIdentity, connectionNotices.reportError],
+  );
+  const savePrivacy = useCallback(
+    (nextPrivacy: PrivacySettings) => {
+      if (!effectivePrivacy) return;
+      const patch: Partial<PrivacySettings> = {};
+      if (nextPrivacy.usageReports !== effectivePrivacy.usageReports) {
+        patch.usageReports = nextPrivacy.usageReports;
+      }
+      if (nextPrivacy.errorReports !== effectivePrivacy.errorReports) {
+        patch.errorReports = nextPrivacy.errorReports;
+      }
+      enqueuePrivacyPatch(patch);
+    },
+    [effectivePrivacy, enqueuePrivacyPatch],
+  );
+  const openNoticeTarget = useCallback((target: NoticeTarget) => {
+    if (target.to === "privacy-settings") setPrivacyOpen(true);
+    return Promise.resolve(null);
+  }, []);
   // A folder the command line or the OS asked for that did not open.
   useWorkspacePathOpenFailures(null, connectionNotices.reportFailure);
   const update = useDesktopUpdate(connectionNotices.reportFailure);
@@ -269,6 +441,7 @@ export function WorkspaceManager(props: {
       !currentWorkspace ||
       joining ||
       openingShare ||
+      privacyOpen ||
       handoffStatus.status !== "idle" ||
       removing !== null
     )
@@ -289,7 +462,7 @@ export function WorkspaceManager(props: {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [currentWorkspace, handoffStatus.status, joining, openingShare, removing]);
+  }, [currentWorkspace, handoffStatus.status, joining, openingShare, privacyOpen, removing]);
 
   // A failed row action is a toast and a Notices row with Try again: the list
   // stays as it was, so the row is still there to act on. Each failure has an
@@ -591,6 +764,16 @@ export function WorkspaceManager(props: {
           onConfirm={() => void confirmRemoval(removing.workspace)}
         />
       ) : null}
+      {privacyOpen && effectivePrivacy ? (
+        <ShellErrorReporter.Provider value={connectionNotices.reportFailure}>
+          <ReportsPrivacyDialog
+            privacy={effectivePrivacy}
+            onChange={savePrivacy}
+            onError={(message, cause) => connectionNotices.reportError(message, cause, null)}
+            onClose={() => setPrivacyOpen(false)}
+          />
+        </ShellErrorReporter.Provider>
+      ) : null}
       <ConnectionNotices
         notices={connectionNotices.notices}
         reportFailure={connectionNotices.reportFailure}
@@ -598,6 +781,8 @@ export function WorkspaceManager(props: {
         onAction={connectionNotices.runNoticeAction}
         onHide={connectionNotices.hideNotice}
         onDismiss={connectionNotices.dismissNotice}
+        onShown={reportsNoticeShown}
+        onOpenTarget={openNoticeTarget}
         {...crashReportNotice}
         keptTyping={keptTyping.keptTyping}
         onDismissKeptTyping={keptTyping.dismiss}

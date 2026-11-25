@@ -18,6 +18,20 @@ export function reportsNoticeText(reports: ReportKinds): string {
   return "dohc sends error reports to its developers. Reports hold no file names, content, chats, prompts, account details, or links.";
 }
 
+function useAcknowledgeReportsNotice(
+  current: { id: string; reports: ReportKinds } | null,
+): (toastId: string) => void {
+  const notice = useRef(current);
+  notice.current = current;
+  return useCallback((toastId: string) => {
+    const shown = notice.current;
+    if (shown?.id === toastId)
+      void bridge()
+        .acknowledgeReportsNotice(shown.reports)
+        .catch(() => undefined);
+  }, []);
+}
+
 /**
  * Shows the notice about reports when main says one is due. Returns what the
  * notice center calls when a toast comes on screen: the notice's own toast
@@ -38,8 +52,6 @@ export function useReportsNotice(input: {
   const errorReports = input.privacy?.errorReports ?? false;
   const show = useRef(input.show);
   show.current = input.show;
-  const notice = useRef(input.notice);
-  notice.current = input.notice;
 
   const { value: due } = useWorkspaceQuery(useWorkspaceSession(), {
     key: JSON.stringify([workspaceId, usageReports, errorReports]),
@@ -50,11 +62,39 @@ export function useReportsNotice(input: {
     if (due && (due.usage || due.errors)) show.current(due);
   }, [due]);
 
-  return useCallback((toastId: string) => {
-    const shown = notice.current;
-    if (shown?.id === toastId)
-      void bridge()
-        .acknowledgeReportsNotice(shown.reports)
-        .catch(() => undefined);
-  }, []);
+  return useAcknowledgeReportsNotice(input.notice);
+}
+
+/**
+ * First-run counterpart to `useReportsNotice` for surfaces above
+ * `WorkspaceSessionProvider`. Drops any in-flight answer on unmount, disable,
+ * or when both switches turn off, and acknowledges only when the toast appears.
+ */
+export function useStandaloneReportsNotice(input: {
+  enabled: boolean;
+  privacy: PrivacySettings | null;
+  notice: { id: string; reports: ReportKinds } | null;
+  show(reports: ReportKinds): void;
+}): (toastId: string) => void {
+  const { enabled } = input;
+  const usageReports = input.privacy?.usageReports ?? false;
+  const errorReports = input.privacy?.errorReports ?? false;
+  const show = useRef(input.show);
+  show.current = input.show;
+
+  useEffect(() => {
+    if (!enabled || (!usageReports && !errorReports)) return;
+    let active = true;
+    void bridge()
+      .readReportsNotice({})
+      .then((due) => {
+        if (active && (due.usage || due.errors)) show.current(due);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [enabled, usageReports, errorReports]);
+
+  return useAcknowledgeReportsNotice(input.notice);
 }
