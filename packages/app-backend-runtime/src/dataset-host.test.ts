@@ -723,6 +723,109 @@ it("blocks queued operations and receipt disclosure after binding or data grant 
   await expect(read).rejects.toThrow("You do not have access to this Collection.");
 });
 
+it("refuses on the next call after warm permissions change their stored rules, binding, grant, or authority", async () => {
+  let token = "first",
+    rotateBeforeCommit = false;
+  const f = await fixture({
+    resolveAuthority(context, request) {
+      const app = request.access.kind === "app" ? { appId: "form" } : {};
+      if (context === "owner")
+        return { principalKey: "owner", ...app, caller: { kind: "owner", userId: "owner" } };
+      return context === "helper"
+        ? {
+            principalKey: "helper",
+            ...app,
+            authorityToken: token,
+            caller: {
+              kind: "named",
+              userId: "helper",
+              grantId: "member",
+              access: "view",
+              helper: false,
+            },
+          }
+        : {
+            principalKey: context,
+            ...app,
+            caller: { kind: "link", principalId: context, grantId: "public-link" },
+          };
+    },
+    operationResources() {
+      if (rotateBeforeCommit) token = "rotated";
+      return {};
+    },
+  });
+  await f.activate();
+  let request = 0;
+  const call = (context: Context, operationId: string, input = {}, appId?: string) =>
+    f.host.invoke(context, {
+      ...scope,
+      revision: 1,
+      revisionSha256: prepared.revision.revisionSha256,
+      operationId,
+      input,
+      idempotencyKey: `request-${++request}`,
+      ...(appId ? { access: { kind: "app" as const, appId } } : {}),
+    });
+  const grant = (operationIds: string[] | null) =>
+    f.host.setDataGrant("owner", {
+      ...scope,
+      principalKey: "helper",
+      grant: operationIds && {
+        revision: 1,
+        revisionSha256: prepared.revision.revisionSha256,
+        operationIds,
+        discover: true,
+      },
+    });
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding([id(6), id(7)]) });
+  grant([id(7)]);
+  for (let round = 0; round < 3; round++) {
+    await call("friend", id(6), { value: `warm ${round}` }, "form");
+    await call("helper", id(7), {}, "form");
+    await call("helper", id(7));
+  }
+
+  const { revision } = f.host.authorize("helper", {
+    ...scope,
+    ...prepared.revision,
+    operationId: id(7),
+  });
+  expect(() => (revision.definition.operations as unknown[]).push({})).toThrow(TypeError);
+  expect(() => Object.assign(revision.definition.operations[0]!, { access: "link" })).toThrow(
+    TypeError,
+  );
+
+  rotateBeforeCommit = true;
+  await expect(call("helper", id(7))).rejects.toThrow("You do not have access to this Collection.");
+  rotateBeforeCommit = false;
+  await call("helper", id(7));
+
+  grant(null);
+  await expect(call("helper", id(7), {}, "form")).rejects.toThrow(
+    "You do not have access to this Collection.",
+  );
+  await expect(call("helper", id(7))).rejects.toThrow("You do not have access to this Collection.");
+  grant([id(7)]);
+  await call("helper", id(7), {}, "form");
+
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding([id(7)]) });
+  await expect(call("friend", id(6), { value: "narrowed" }, "form")).rejects.toThrow(
+    "You do not have access to this Collection.",
+  );
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding([id(6), id(7)]) });
+  await call("friend", id(6), { value: "restored" }, "form");
+
+  const stored = JSON.parse(
+    String(f.db.prepare("SELECT revision_json FROM dohc_dataset_catalog").get()!.revision_json),
+  );
+  stored.definition.operations[0].access = "owner";
+  f.db.prepare("UPDATE dohc_dataset_catalog SET revision_json=?").run(JSON.stringify(stored));
+  await expect(call("friend", id(6), { value: "owner only" }, "form")).rejects.toThrow(
+    "You do not have access to this Collection.",
+  );
+});
+
 it("intersects admin app operations with the explicit data grant and refuses stale views", async () => {
   const f = await fixture();
   await f.activate();

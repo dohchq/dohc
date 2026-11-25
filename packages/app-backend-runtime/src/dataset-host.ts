@@ -363,6 +363,18 @@ export function missingUndo(
     message: `${operation.label} is reversed by ${operation.reversedBy}, so it must return undo: the input ${operation.reversedBy} takes to reverse it, at most 16 KB.`,
   };
 }
+function remember<K, V>(cache: Map<K, V>, key: K, value: V, limit = 64): V {
+  if (cache.size >= limit) cache.delete(cache.keys().next().value!);
+  cache.set(key, value);
+  return value;
+}
+function frozen<T>(value: T): T {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) frozen(child);
+  }
+  return value;
+}
 function denied(): never {
   throw new DatasetHostError("not_authorized", "You do not have access to this Collection.");
 }
@@ -458,11 +470,42 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
   function generatedRevision(approved: DatasetRevision): boolean {
     const cached = generatedVerdicts.get(approved.revisionSha256);
     if (cached !== undefined) return cached;
-    const verdict = hasGeneratedDatasetRevision(approved);
-    if (generatedVerdicts.size >= 64)
-      generatedVerdicts.delete(generatedVerdicts.keys().next().value!);
-    generatedVerdicts.set(approved.revisionSha256, verdict);
-    return verdict;
+    return remember(
+      generatedVerdicts,
+      approved.revisionSha256,
+      hasGeneratedDatasetRevision(approved),
+    );
+  }
+  const parsedRevisions = new Map<string, DatasetRevision>();
+  function parsedRevision(json: string): DatasetRevision {
+    return (
+      parsedRevisions.get(json) ??
+      remember(parsedRevisions, json, frozen(parseDatasetRevision(JSON.parse(json))), 16)
+    );
+  }
+  const grantedOperations = new WeakMap<DatasetRevision, Map<string, DatasetOperation[]>>();
+  function boundOperations(
+    bindingJson: string,
+    bound: DatasetRevision,
+    caller: AppBackendCaller,
+  ): DatasetOperation[] {
+    let byBinding = grantedOperations.get(bound);
+    if (!byBinding) grantedOperations.set(bound, (byBinding = new Map()));
+    const key = JSON.stringify([
+      bindingJson,
+      caller.kind,
+      caller.kind === "named" && caller.helper,
+    ]);
+    return (
+      byBinding.get(key) ??
+      remember(
+        byBinding,
+        key,
+        frozen(
+          effectiveDatasetOperations(JSON.parse(bindingJson), bound, caller, generatedRevision),
+        ),
+      )
+    );
   }
   const migrationCandidates = new Map<
     string,
@@ -591,7 +634,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       )
       .get(key.workspaceId, key.datasetId);
     if (!row) denied();
-    return parseDatasetRevision(JSON.parse(String(row.revision_json)));
+    return parsedRevision(String(row.revision_json));
   }
   // Recovery installs a dataset's catalog row before it claims the dataset,
   // which then accepts no work. Lists and descriptions leave it out until then.
@@ -710,12 +753,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         }
         verified.caller = { ...verified.caller, helper: allowedHelperIds.size > 0 };
       }
-      operations = effectiveDatasetOperations(
-        binding,
-        boundRevision,
-        verified.caller,
-        generatedRevision,
-      ).filter(
+      operations = boundOperations(String(row.binding_json), boundRevision, verified.caller).filter(
         (operation) =>
           verified.caller.kind === "owner" ||
           operation.access !== "helper" ||
@@ -735,14 +773,14 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const grant = currentGrant(key, JSON.parse(String(row.grant_json)), approved);
       // A data grant supplies organizer authority without requiring source Edit.
       if (verified.caller.kind === "named") verified.caller = { ...verified.caller, helper: true };
-      operations = effectiveDatasetOperations(
-        {
+      operations = boundOperations(
+        JSON.stringify({
           kind: "dataset",
           datasetId: approved.datasetId,
           revision: approved.revision,
           revisionSha256: approved.revisionSha256,
           operationIds: grant.operationIds,
-        },
+        }),
         approved,
         verified.caller,
       );
