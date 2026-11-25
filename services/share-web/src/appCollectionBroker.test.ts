@@ -1128,17 +1128,22 @@ it("hands the host one notice at a time and only single lines within their limit
       detail: "Row 40 has no date.",
     });
     await vi.waitFor(() => expect(notices).toHaveLength(1));
-    expect(await send({ id: "n-2", op: "host.notice", message: "Again" })).toMatchObject({
-      id: "n-2",
-      ok: false,
-      status: 429,
-      error: { code: "rate_limited" },
-    });
+    for (const id of ["n-2", "n-3"])
+      expect(await send({ id, op: "host.notice", message: "Again" })).toEqual({
+        id,
+        ok: true,
+        value: { recorded: false },
+      });
     const first = once(port, "message");
     release(true);
     expect((await first)[0]).toEqual({ id: "n-1", ok: true, value: { recorded: true } });
+    const later = send({ id: "n-4", op: "host.notice", message: "Later" });
+    await vi.waitFor(() => expect(notices).toHaveLength(2));
+    release(false);
+    expect(await later).toEqual({ id: "n-4", ok: true, value: { recorded: false } });
     expect(notices).toEqual([
       { message: "Bank import stopped at row 40", detail: "Row 40 has no date." },
+      { message: "Later" },
     ]);
   } finally {
     lifetime.abort();

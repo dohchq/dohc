@@ -620,7 +620,9 @@ test("@app-view an app's notice stays in Notices after its tab closes, and Try a
     await hidden(review);
     await ready(page);
     const guestId = (await guestIds(electronApp))[0]!;
-    await expect.poll(() => inFrame(electronApp, guestId, "!!window.hostPort")).toBe(true);
+    await expect
+      .poll(() => inFrame(electronApp, guestId, "!!window.hostPort").catch(() => false))
+      .toBe(true);
 
     expect(
       await inFrame(

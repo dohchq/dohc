@@ -400,12 +400,7 @@ export function attachAppCollectionBroker(
         (Object.hasOwn(body, "detail") && !line(body.detail, 500))
       )
         return rejectLocal("invalid_keys", 400);
-      if (noticing)
-        return rejectLocal("rate_limited", 429, {
-          code: "rate_limited",
-          message:
-            "Rate limit reached: at most 1 notice at a time (1 already in flight). Wait for it to finish, then try again.",
-        });
+      const owns = !noticing;
       noticing = true;
       ids.add(id);
       emit({ kind: "started", id, op });
@@ -414,14 +409,13 @@ export function attachAppCollectionBroker(
           typeof body.detail === "string"
             ? { message: body.message as string, detail: body.detail }
             : { message: body.message as string };
-        const recorded = hostActions?.notice
-          ? await hostActions.notice(notice).catch(() => false)
-          : false;
+        const recorded =
+          owns && hostActions?.notice ? await hostActions.notice(notice).catch(() => false) : false;
         if (closed) return;
         channel.port1.postMessage({ id, ok: true, value: { recorded: recorded === true } });
         emit({ kind: "completed", id, op, status: 200, ok: true });
       } finally {
-        noticing = false;
+        if (owns) noticing = false;
         ids.delete(id);
       }
       return;

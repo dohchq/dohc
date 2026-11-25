@@ -2945,7 +2945,7 @@ With `--json`, prints `{ schemaVersion, versionId, results: { kind, id, title, p
 
 ## App channel
 
-An app page reads and changes its Collection through the app channel. The channel works in two places: a published app opened from a share link, and a local app opened with `dohc app launchLocal`. An app open in a dohc tab has no channel.
+An app page reads and changes its Collection through the app channel. The channel works in three places: an app open in a dohc tab, a published app opened from a share link, and a local app opened with `dohc app launchLocal`.
 
 When the page loads, its parent window posts `{ kind: "dohc-app-channel", version: 1, budget }` with one `MessagePort`. The page keeps that port and posts each request to it as `{ id, op, ...fields }`. `id` is 1 to 64 letters, digits, `_`, or `-`, and no two requests in flight share one. The port answers `{ id, ok: true, value }`, or `{ id, ok: false, status }` with status 400, 404, 409, 413, 429, or 503.
 
