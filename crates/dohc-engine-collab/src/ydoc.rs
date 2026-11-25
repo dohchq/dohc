@@ -1927,7 +1927,8 @@ impl Ydoc {
                     let (mut nodes, mut bytes) = (MAX_PROJECTION_NODES, 0);
                     let written =
                         body_sequence::blocks(&txn, sequence, containers, &mut nodes, &mut bytes)?;
-                    if markdown_document(&written)? != markdown_document(read)? {
+                    if written != *read && markdown_document(&written)? != markdown_document(read)?
+                    {
                         return Err(CollabError::MarkdownNotRepresentable);
                     }
                 }
@@ -6353,7 +6354,7 @@ fn project_frontmatter(key: &str, value: &Value) -> ProjectionResult<String> {
     Ok(output.into_string())
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum MarkdownNode {
     Text(Vec<TextRun>),
     Element {
@@ -6364,7 +6365,7 @@ enum MarkdownNode {
     Fragment(Vec<MarkdownNode>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 #[cfg_attr(not(test), derive(Clone))]
 struct TextRun {
     text: String,
