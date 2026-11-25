@@ -1,3 +1,6 @@
+import { request as httpRequest } from "node:http";
+import type { AddressInfo } from "node:net";
+import { serveFetchHandler } from "@dohc/service-http";
 import { streamsRequestBody } from "./server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
@@ -26,7 +29,9 @@ import {
   registered,
 } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
 import { phoneWriteIds, runPhoneWrite, type PhoneWrite } from "./accountChatWrites";
-import { ACCOUNT_FEED_WAITS_PER_ACCOUNT } from "./accountFeed";
+import { ACCOUNT_FEED_WAITS_PER_ACCOUNT, currentAccountFeedCursor } from "./accountFeed";
+import { ACCOUNT_READ_DEADLINE_MS } from "./accountOperations";
+import { untilAborted } from "./namedLiveFrameHost";
 import { createAccountDeletionRoute } from "./accountDeletionRoute";
 import { DiscussionActivityHub } from "./discussionActivity";
 import type { AutomationReplica } from "./automationReplicas";
@@ -117,6 +122,8 @@ async function serverCopies(storage: SyncRelayStorage, engine: TestEngine) {
   const syncs: string[] = [];
   let held: Promise<void> | null = null;
   let requestId = 0;
+  let opensCaughtUp = true;
+  let opens = true;
   const lifetime = new AbortController();
   const copies = await startServerCopies({
     storage,
@@ -131,27 +138,38 @@ async function serverCopies(storage: SyncRelayStorage, engine: TestEngine) {
         const wanted = hooks.wanted();
         for (const [workspaceId, reasons] of wanted) {
           const row = storage.joinAutomationWorkspace({ workspaceId, nowMs: 1, reasons });
-          if (!row || open.has(workspaceId)) continue;
-          open.set(workspaceId, {
+          if (!row || open.has(workspaceId) || !opens) continue;
+          let running = 0;
+          const copy = {
             workspaceId,
             ownerUserId: row.ownerUserId,
             incarnation: row.incarnation,
             reasons: row.reasons,
             startedAtMs: 1,
-            pulledHead: 0,
+            pulledHead: opensCaughtUp ? storage.automationWorkspaceLogHead(workspaceId) : 0,
             root: "unused",
             metadataDir: "unused",
             client: engine as unknown as EngineClient,
             workspace: workspaceId,
             signal: lifetime.signal,
             nextRequestId: () => ++requestId,
-            withRecordWork: (work) => work(),
+            withRecordWork: <T>(work: () => Promise<T>) => work(),
+            busy: () => running > 0,
             step: async () => true,
-            sync: async () => {
+            sync: async (signal?: AbortSignal) => {
               syncs.push(workspaceId);
-              await held;
+              running += 1;
+              try {
+                const head = storage.automationWorkspaceLogHead(workspaceId);
+                const wait = held ?? Promise.resolve();
+                await (signal ? untilAborted(wait, signal) : wait);
+                copy.pulledHead = Math.max(copy.pulledHead, head);
+              } finally {
+                running -= 1;
+              }
             },
-          });
+          } satisfies AutomationReplica;
+          open.set(workspaceId, copy);
           hooks.onChanged?.(workspaceId);
         }
         for (const workspaceId of [...open.keys()])
@@ -175,6 +193,12 @@ async function serverCopies(storage: SyncRelayStorage, engine: TestEngine) {
   return {
     copies,
     syncs,
+    opensBehind() {
+      opensCaughtUp = false;
+    },
+    holdOpens() {
+      opens = false;
+    },
     holdSyncs() {
       let release!: () => void;
       held = new Promise((resolve) => {
@@ -389,7 +413,7 @@ describe("an account's reads through the server's copy", () => {
       markdown: "# Plan\n\nStay in Alfama.\n",
     });
 
-    expect(syncs).toHaveLength(9);
+    expect(syncs, "a page read on a caught-up copy skips the sync").toHaveLength(8);
     expect(engine.methods()).not.toContain("chats.channels.ensureGeneral");
   });
 
@@ -505,7 +529,7 @@ describe("an account's reads through the server's copy", () => {
 
   it("answers as missing, with no result, when access ends once the result is ready", async () => {
     let reads = 0;
-    const { engine, h, syncs } = await relay({
+    const { storage, activity, engine, h, syncs, opensBehind } = await relay({
       resolve: async (request) => {
         const session = await resolveAccountSession(request);
         // Before the arguments, after them, once the copy opens, once it syncs, then once the result is ready.
@@ -513,6 +537,8 @@ describe("an account's reads through the server's copy", () => {
       },
     });
     await seedTrip(engine);
+    opensBehind();
+    logWriter(storage, activity)("files.change", {});
     const response = await h(op("trip", "documentRead", { path: "docs/plan.md" }));
     expect(reads).toBe(5);
     expect(syncs).toEqual(["trip"]);
@@ -541,6 +567,284 @@ describe("an account's reads through the server's copy", () => {
     } as RequestInit & { duplex: "half" });
     await denialBytes(await h(unread));
     expect(pulled).toBe(false);
+  });
+});
+
+describe("a page read on a caught-up copy", () => {
+  const read = op("trip", "documentRead", { path: "docs/plan.md" });
+
+  it("skips the sync and answers the feed's cursor for what the copy holds, while other reads still sync", async () => {
+    const { storage, activity, engine, h, syncs } = await relay();
+    await seedTrip(engine);
+    logWriter(storage, activity)("files.change", {});
+    const response = await h(read.clone());
+    expect(response.status).toBe(200);
+    expect(await json(response)).toEqual({
+      ok: true,
+      result: { ok: true, path: "docs/plan.md", markdown: "# Plan\n\nStay in Alfama.\n" },
+      cursor: currentAccountFeedCursor(storage, "trip"),
+    });
+    expect(syncs).toEqual([]);
+    await answer(await h(op("trip", "groups")));
+    expect(syncs).toEqual(["trip"]);
+  });
+
+  it("logs how long it spent opening the copy, syncing, and reading, and nothing else", async () => {
+    const { engine, h } = await relay();
+    await seedTrip(engine);
+    const log = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    try {
+      await answer(await h(read.clone()));
+      expect(log.mock.calls).toHaveLength(1);
+      expect(log.mock.calls[0]).toEqual([
+        expect.stringMatching(/^\[account-reads\] documentRead open=\d+ms sync=\d+ms read=\d+ms$/),
+      ]);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("keeps the copy open only after a read that succeeded", async () => {
+    const { engine, h, copies } = await relay();
+    await seedTrip(engine);
+    expect(
+      await answer(await h(op("trip", "documentRead", { path: "docs/missing.md" }))),
+    ).toMatchObject({ ok: false, refusal: "missing" });
+    await expect.poll(() => copies.replica("trip")).toBeUndefined();
+  });
+
+  it("syncs a copy behind the relay's log", async () => {
+    const { storage, activity, engine, h, syncs, opensBehind } = await relay();
+    await seedTrip(engine);
+    opensBehind();
+    logWriter(storage, activity)("files.change", {});
+    await answer(await h(read.clone()));
+    expect(syncs).toEqual(["trip"]);
+  });
+
+  it("waits for a sync already running on the copy", async () => {
+    const { engine, h, holdSyncs, syncs } = await relay();
+    await seedTrip(engine);
+    const release = holdSyncs();
+    const groups = h(op("trip", "groups"));
+    await expect.poll(() => syncs.length).toBe(1);
+    const page = h(read.clone());
+    await expect.poll(() => syncs.length).toBe(2);
+    release();
+    await answer(await groups);
+    await answer(await page);
+  });
+
+  it("keeps the copy open after a read until Show on phone turns off", async () => {
+    const { engine, h, copies } = await relay();
+    await seedTrip(engine);
+    await answer(await h(read.clone()));
+    await expect.poll(() => copies.replica("trip")).toBeDefined();
+    const hidden = await h(
+      new Request("http://relay.test/sync/account/workspaces/trip", {
+        method: "PATCH",
+        headers: { ...signedIn("ana"), "content-type": "application/json" },
+        body: JSON.stringify({ showOnPhone: false }),
+      }),
+    );
+    expect(hidden.status).toBe(200);
+    await expect.poll(() => copies.replica("trip")).toBeUndefined();
+  });
+
+  it("syncs a copy that is no longer the workspace's current one", async () => {
+    let reads = 0;
+    const { storage, engine, h, syncs } = await relay({
+      resolve: async (request) => {
+        if (++reads === 3)
+          (storage as StorageContext).db
+            .prepare(
+              "UPDATE sync_relay_automation_workspaces SET left_at_ms = 1 WHERE workspace_id = 'trip'",
+            )
+            .run();
+        return await resolveAccountSession(request);
+      },
+    });
+    await seedTrip(engine);
+    await answer(await h(read.clone()));
+    expect(syncs).toEqual(["trip"]);
+  });
+});
+
+describe("an account read's deadline", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("answers server_busy before the phone's 15 s wait, whether the copy is opening, syncing, or reading", async () => {
+    expect(ACCOUNT_READ_DEADLINE_MS).toBeLessThan(15_000);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { engine, h, holdOpens, holdSyncs, syncs } = await relay();
+    await seedTrip(engine);
+    const late = async (request: Request, wait: () => Promise<unknown>) => {
+      const response = h(request);
+      await wait();
+      await vi.advanceTimersByTimeAsync(ACCOUNT_READ_DEADLINE_MS);
+      const busy = await response;
+      expect(busy.status).toBe(503);
+      expect(await json(busy)).toMatchObject({ ok: false, code: "server_busy" });
+    };
+    const release = holdSyncs();
+    await late(op("trip", "groups"), () => expect.poll(() => syncs.length).toBe(1));
+    release();
+    const send = engine.sendRequest.bind(engine);
+    engine.sendRequest = async (request) =>
+      request.method === "versionedText.read"
+        ? await new Promise<never>(() => undefined)
+        : await send(request);
+    await late(op("trip", "documentRead", { path: "docs/plan.md" }), async () => undefined);
+    holdOpens();
+    await late(op("budget", "groups", {}, signedIn("ben")), async () => undefined);
+    expect(syncs).toHaveLength(1);
+  });
+});
+
+describe("an account read's deadline over its checks", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("starts when the request arrives, and ends a first check of the sign-in that outlasts it", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let calls = 0;
+    const { h, holdOpens } = await relay({
+      resolve: async (request) => {
+        const slow = [4_000, ACCOUNT_READ_DEADLINE_MS + 1_000][calls++];
+        if (slow !== undefined) await new Promise((resolve) => setTimeout(resolve, slow));
+        return await resolveAccountSession(request);
+      },
+    });
+    holdOpens();
+    for (const _ of [1, 2]) {
+      let answered = false;
+      const response = h(op("trip", "groups")).finally(() => {
+        answered = true;
+      });
+      await vi.advanceTimersByTimeAsync(ACCOUNT_READ_DEADLINE_MS);
+      expect(answered).toBe(true);
+      expect((await response).status).toBe(503);
+    }
+  });
+
+  it("answers server_busy for a check of the sign-in that outlasts the deadline, and frees the visit", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let calls = 0;
+    let pausing = true;
+    const { engine, h } = await relay({
+      resolve: async (request) => {
+        if (++calls % 5 === 0 && pausing) await new Promise<never>(() => undefined);
+        return await resolveAccountSession(request);
+      },
+    });
+    await seedTrip(engine);
+    for (let read = 1; read <= ACCOUNT_VISITS_PER_CALLER; read++) {
+      const response = h(op("trip", "documentRead", { path: "docs/plan.md" }));
+      await expect.poll(() => calls).toBe(5 * read);
+      await vi.advanceTimersByTimeAsync(ACCOUNT_READ_DEADLINE_MS);
+      const busy = await response;
+      expect(busy.status).toBe(503);
+      expect(await busy.text()).not.toContain("Alfama");
+    }
+    pausing = false;
+    expect((await h(op("trip", "groups"))).status, "every visit was freed").toBe(200);
+  });
+});
+
+describe("an account read's deadline over the HTTP adapter", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("answers server_busy while the arguments are still arriving", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let checks = 0;
+    const { h } = await relay({
+      resolve: async (request) => {
+        checks += 1;
+        return await resolveAccountSession(request);
+      },
+    });
+    const server = serveFetchHandler({
+      handler: h,
+      maxBodyBytes: () => 1024 * 1024,
+      streamBody: streamsRequestBody,
+      oversized: () => new Response(null, { status: 413 }),
+      failure: () => new Response(null, { status: 500 }),
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const answer = new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const sent = httpRequest({
+          host: "127.0.0.1",
+          port: (server.address() as AddressInfo).port,
+          path: "/sync/trip/ops/documentRead",
+          method: "POST",
+          headers: {
+            ...signedIn("ana"),
+            "content-type": "application/json",
+            "content-length": "64",
+          },
+        });
+        sent.on("response", (response) => {
+          let body = "";
+          response.setEncoding("utf8");
+          response.on("data", (chunk: string) => {
+            body += chunk;
+          });
+          response.on("end", () => {
+            sent.destroy();
+            resolve({ status: response.statusCode ?? 0, body });
+          });
+        });
+        sent.on("error", reject);
+        sent.write('{"path":');
+      });
+      await expect.poll(() => checks).toBe(1);
+      await new Promise((resolve) => setImmediate(resolve));
+      await vi.advanceTimersByTimeAsync(ACCOUNT_READ_DEADLINE_MS);
+      const busy = await answer;
+      expect(busy.status).toBe(503);
+      expect(JSON.parse(busy.body)).toMatchObject({ ok: false, code: "server_busy" });
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+describe("a cancelled account read", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("frees its visit at once, while its engine call is still pending", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { engine, h } = await relay();
+    await seedTrip(engine);
+    let reads = 0;
+    const send = engine.sendRequest.bind(engine);
+    engine.sendRequest = async (request) => {
+      if (request.method !== "versionedText.read") return await send(request);
+      reads += 1;
+      return await new Promise<never>(() => undefined);
+    };
+    const cancels = Array.from({ length: ACCOUNT_VISITS_PER_CALLER }, () => new AbortController());
+    const cancelled = cancels.map((cancel) =>
+      h(
+        new Request(op("trip", "documentRead", { path: "docs/plan.md" }), {
+          signal: cancel.signal,
+        }),
+      ).catch(() => undefined),
+    );
+    await expect.poll(() => reads).toBe(ACCOUNT_VISITS_PER_CALLER);
+    for (const cancel of cancels) cancel.abort(new Error("The phone tapped a page."));
+    expect((await h(op("trip", "groups"))).status).toBe(200);
+    await Promise.all(cancelled);
+    expect(reads, "no engine call answered or started again").toBe(ACCOUNT_VISITS_PER_CALLER);
   });
 });
 
@@ -1175,6 +1479,7 @@ describe("an account's chat writes through the server's copy", () => {
       signal: lifetime.signal,
       nextRequestId: () => ++requestId,
       withRecordWork: (work) => work(),
+      busy: () => false,
       sync: async () => {
         syncs.push("trip");
         if (syncError !== null) throw syncError;

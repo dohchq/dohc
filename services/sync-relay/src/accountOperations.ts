@@ -38,6 +38,7 @@ import { currentAccountFeedCursor, hiddenFile } from "./accountFeed";
 import { replicaChatStore } from "./automationChatWrites";
 import type { AutomationReplica } from "./automationReplicas";
 import { badRequest, notFound, RelayError } from "./errors";
+import { untilAborted } from "./namedLiveFrameHost";
 import type { CopyVisitor, ServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
 
@@ -95,6 +96,8 @@ type ParsedOperation = {
   };
 }[ServerOperation];
 
+export const ACCOUNT_READ_DEADLINE_MS = 12_000;
+
 // The server's own path rules: the copies live on its disk.
 const PLATFORM = process.platform;
 
@@ -125,20 +128,79 @@ export async function runAccountOperation(
   input: AccountOperationInput,
 ): Promise<{ result: AccountOperationResult; cursor: string }> {
   const request = parseOperation(input.operation, input.args);
-  return await server.copies.withServerCopy(
-    input.owner,
-    input.workspaceId,
-    input.visitor,
-    async (replica) => {
-      await input.authorize();
-      // The sync brings the copy at least this far.
-      const cursor = currentAccountFeedCursor(server.storage, input.workspaceId);
-      await replica.sync(input.visitor.signal);
-      await input.authorize();
-      const result = await answer(server.storage, replica, input.workspaceId, request);
-      await input.authorize();
-      return { result, cursor };
-    },
+  const signal = input.visitor.signal;
+  const authorize = () => untilAborted(input.authorize(), signal);
+  const spent: string[] = [];
+  const lap = (step: string, since: number) =>
+    spent.push(`${step}=${Math.round(performance.now() - since)}ms`);
+  const timed = async <T>(step: string, work: Promise<T>) => {
+    const since = performance.now();
+    try {
+      return await work;
+    } finally {
+      lap(step, since);
+    }
+  };
+  const started = performance.now();
+  try {
+    return await server.copies.withServerCopy(
+      input.owner,
+      input.workspaceId,
+      input.visitor,
+      async (replica) => {
+        lap("open", started);
+        await authorize();
+        // The sync brings the copy at least this far.
+        const cursor = currentAccountFeedCursor(server.storage, input.workspaceId);
+        const stale =
+          request.operation !== "documentRead" || !copyIsCurrent(server.storage, replica);
+        await timed("sync", stale ? replica.sync(signal) : Promise.resolve());
+        await authorize();
+        const result = await timed(
+          "read",
+          untilAborted(answer(server.storage, replica, input.workspaceId, request), signal),
+        );
+        await authorize();
+        if (!("ok" in result) || result.ok) server.copies.hold(input.owner, input.workspaceId);
+        return { result, cursor };
+      },
+    );
+  } finally {
+    console.info(`[account-reads] ${request.operation} ${spent.join(" ")}`);
+  }
+}
+
+export async function withAccountReadDeadline<T>(
+  requestSignal: AbortSignal,
+  read: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), ACCOUNT_READ_DEADLINE_MS);
+  try {
+    // Cancelling an upload still arriving would close the connection before the answer.
+    return await untilAborted(
+      read(AbortSignal.any([requestSignal, deadline.signal])),
+      deadline.signal,
+    );
+  } catch (error) {
+    if (deadline.signal.aborted && !requestSignal.aborted)
+      throw new RelayError(
+        "server_busy",
+        "Your server took too long to read this workspace. Try again.",
+        503,
+      );
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function copyIsCurrent(storage: SyncRelayStorage, replica: AutomationReplica): boolean {
+  return (
+    !replica.signal.aborted &&
+    !replica.busy() &&
+    storage.currentAutomationWorkspace(replica.workspaceId)?.incarnation === replica.incarnation &&
+    replica.pulledHead >= storage.automationWorkspaceLogHead(replica.workspaceId)
   );
 }
 

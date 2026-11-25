@@ -65,6 +65,7 @@ export interface AutomationReplica {
   nextRequestId(): number;
   /** Pushes the replica's own writes to the relay, then pulls what the relay has. */
   sync(signal?: AbortSignal): Promise<void>;
+  busy(): boolean;
   /**
    * One bounded sync, queued behind the one running: pushes, then pulls, a
    * pass's rounds at most. Answers whether it caught up. Never call it from
@@ -136,6 +137,7 @@ export async function startAutomationReplicas(options: {
   key: Uint8Array;
   namespace: string;
   wanted(): ReadonlyMap<string, readonly CopyReason[]>;
+  holdOnly?(workspaceId: string): boolean;
   nowMs?(): number;
   /** A replica opened or closed, or the reasons its row keeps it for changed. */
   onChanged?(workspaceId: string): void;
@@ -163,7 +165,6 @@ export async function startAutomationReplicas(options: {
       close(): Promise<void>;
       pulledHead: number;
       reasons: readonly CopyReason[];
-      busy(): boolean;
       /**
        * Replays the copy's unfinished phone writes once, after any step caught it up, whoever made the step.
        * Answers `idle` with nothing to do, `replayed`, or `owed` when a replay failed and a later pass tries
@@ -578,6 +579,7 @@ export async function startAutomationReplicas(options: {
     // has more to push still pulls. Answers whether it caught up.
     let running = 0;
     const syncRounds = (rounds: number, callerSignal?: AbortSignal): Promise<boolean> => {
+      if (callerSignal?.aborted) return Promise.reject(callerSignal.reason);
       running += 1;
       syncGeneration += 1;
       pulledCurrent = false;
@@ -820,7 +822,7 @@ export async function startAutomationReplicas(options: {
             options.onChanged?.(workspaceId);
           }
           if (!canSync(workspaceId)) return;
-          if (row !== null && !replicas.has(workspaceId)) {
+          if (row !== null && !replicas.has(workspaceId) && !options.holdOnly?.(workspaceId)) {
             let opening: AutomationWorkspace | null = row;
             try {
               // The server lost this replica's folder, and its engine with it.
@@ -864,7 +866,11 @@ export async function startAutomationReplicas(options: {
               );
               throw error;
             }
-          } else if (row !== null && failedSyncs.has(workspaceId)) {
+          } else if (
+            row !== null &&
+            failedSyncs.has(workspaceId) &&
+            !options.holdOnly?.(workspaceId)
+          ) {
             const retry = replicas.get(workspaceId)!;
             if (!retry.busy()) await stepOf(retry);
           }
@@ -980,7 +986,11 @@ export async function startAutomationReplicas(options: {
     // Pull each wanted replica whose workspace changed at the relay since its
     // last pull. One waiting to leave pulls no more.
     for (const replica of [...replicas.values()]) {
-      if (!wanted.has(replica.workspaceId) || logHead(replica.workspaceId) <= replica.pulledHead)
+      if (
+        !wanted.has(replica.workspaceId) ||
+        options.holdOnly?.(replica.workspaceId) ||
+        logHead(replica.workspaceId) <= replica.pulledHead
+      )
         continue;
       // A copy already syncing gets there on its own; waiting on it would hold the pass.
       // Failed syncs retry in the next pass, even if their delay ended during this one.
@@ -1006,6 +1016,7 @@ export async function startAutomationReplicas(options: {
     };
     for (const replica of [...replicas.values()]) {
       const { workspaceId } = replica;
+      if (options.holdOnly?.(workspaceId)) continue;
       // Whichever step or sync caught the copy up, its owed replay runs here, outside the sync lane, before publication pushes.
       await replay(replica);
       if (!publishing.has(workspaceId) || !wanted.has(workspaceId)) {
@@ -1081,8 +1092,8 @@ export async function startAutomationReplicas(options: {
     let wait = next === Number.POSITIVE_INFINITY ? next : Math.max(next - nowMs(), 0);
     // A copy's next attempt to publish the phone's writes is a deadline of its own.
     const now = performance.now();
-    for (const retry of publicationRetries.values())
-      wait = Math.min(wait, Math.max(retry.at - now, 0));
+    for (const [workspaceId, retry] of publicationRetries)
+      if (!options.holdOnly?.(workspaceId)) wait = Math.min(wait, Math.max(retry.at - now, 0));
     return wait === Number.POSITIVE_INFINITY ? undefined : Math.min(wait, DEADLINE_MAX_WAIT_MS);
   }
 
@@ -1153,7 +1164,8 @@ export async function startAutomationReplicas(options: {
           const now = performance.now();
           for (const workspaceId of failedSyncs.keys()) {
             const syncRetry = syncRetries.get(workspaceId);
-            if (syncRetry && !replicas.get(workspaceId)?.busy())
+            const copy = replicas.get(workspaceId);
+            if (syncRetry && !copy?.busy() && !(copy && options.holdOnly?.(workspaceId)))
               retry = Math.min(retry, Math.max(syncRetry.at - now, 0));
           }
           return Effect.raceFirst(

@@ -1,8 +1,15 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { AUTOMATION_SERVER_MAX_WORKSPACES } from "@dohc/workspace-contracts/relay";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import type { AutomationReplica, startAutomationReplicas } from "./automationReplicas";
 import { RelayError } from "./errors";
-import { ACCOUNT_VISITS_PER_ACCOUNT, startServerCopies, type CopyVisitor } from "./serverCopies";
+import {
+  ACCOUNT_VISITS_PER_ACCOUNT,
+  READ_HOLD_MS,
+  startServerCopies,
+  type CopyAutomations,
+  type CopyVisitor,
+} from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
 import type { CopyReason } from "./storage/automationWorkspaces";
 import type { StorageContext } from "./storage/context";
@@ -15,6 +22,7 @@ afterEach(async () => {
 });
 
 const OWNER = "ana";
+type Run = Awaited<ReturnType<typeof copies>>;
 
 async function relay(
   workspaceIds: readonly string[] = ["trip"],
@@ -32,7 +40,7 @@ async function relay(
   return storage;
 }
 
-async function copies(storage: SyncRelayStorage) {
+async function copies(storage: SyncRelayStorage, automations?: CopyAutomations) {
   const open = new Map<string, AutomationReplica>();
   let hooks: Parameters<typeof startAutomationReplicas>[0] | undefined;
   let opens = true;
@@ -57,6 +65,7 @@ async function copies(storage: SyncRelayStorage) {
         sync: async () => undefined,
         step: async () => true,
         withRecordWork: (work) => work(),
+        busy: () => false,
       });
       hooks!.onChanged?.(workspaceId);
     }
@@ -73,6 +82,7 @@ async function copies(storage: SyncRelayStorage) {
     relayOrigin: "https://relay.example.test",
     key: new Uint8Array(32),
     namespace: "test",
+    ...(automations ? { automations } : {}),
     startReplicas: async (options) => {
       hooks = options;
       return {
@@ -90,6 +100,10 @@ async function copies(storage: SyncRelayStorage) {
   return {
     copies: started,
     wanted: () => hooks!.wanted(),
+    holdOnly: (workspaceId: string) => hooks!.holdOnly?.(workspaceId),
+    lose: (workspaceId: string) => {
+      open.delete(workspaceId);
+    },
     holdOpens: () => {
       opens = false;
     },
@@ -181,6 +195,107 @@ describe("an account's visits to the server's copies", () => {
       .prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'ben' WHERE workspace_id = 'trip'")
       .run();
     expect((await refusal(visit)).code).toBe("not_found");
+  });
+});
+
+describe("the hold a read keeps on its copy", () => {
+  const read = (run: Run, workspaceId: string) =>
+    run.copies.withServerCopy(OWNER, workspaceId, phone(), async () => {
+      run.copies.hold(OWNER, workspaceId);
+      return workspaceId;
+    });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("keeps the copy open for READ_HOLD_MS after the read, and only after a read", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const storage = await relay(["trip", "notes"]);
+    const run = await copies(storage);
+    await read(run, "trip");
+    await run.copies.withServerCopy(OWNER, "notes", phone(), async () => undefined);
+    await vi.waitFor(() => expect(run.copies.replica("notes")).toBeUndefined());
+    expect(run.wanted()).toEqual(new Map([["trip", ["account"]]]));
+    expect(run.copies.replica("trip")).toBeDefined();
+    await vi.advanceTimersByTimeAsync(READ_HOLD_MS);
+    await vi.waitFor(() => expect(run.copies.replica("trip")).toBeUndefined());
+    expect(run.wanted()).toEqual(new Map());
+  });
+
+  it("counts toward no visit limit, and keeps an account's newest holds within its visit limit", async () => {
+    const ids = Array.from({ length: ACCOUNT_VISITS_PER_ACCOUNT + 1 }, (_, n) => `w-${n}`);
+    const storage = await relay(ids);
+    const run = await copies(storage);
+    for (const workspaceId of ids.slice(0, ACCOUNT_VISITS_PER_ACCOUNT))
+      await read(run, workspaceId);
+    const last = ids.at(-1)!;
+    expect(await read(run, last)).toBe(last);
+    expect([...run.wanted().keys()].sort()).toEqual(ids.slice(1));
+  });
+
+  it("gives way at once to automations and a visit that need its place, and does not come back", async () => {
+    const automated = Array.from(
+      { length: AUTOMATION_SERVER_MAX_WORKSPACES - 1 },
+      (_, n) => `automated-${n}`,
+    );
+    const storage = await relay(["held", "next", ...automated]);
+    let running: string[] = [];
+    const run = await copies(storage, {
+      wanted: () => running,
+      running: () => running,
+      ready: () => true,
+    });
+    await read(run, "held");
+    running = automated;
+    run.copies.reconcile();
+    await vi.waitFor(() => expect(run.copies.replica(automated.at(-1)!)).toBeDefined());
+    expect(run.wanted().has("held"), "the last place is free").toBe(true);
+    await run.copies.withServerCopy(OWNER, "next", phone(), async () => {
+      expect(run.wanted().has("held")).toBe(false);
+    });
+    expect(run.copies.replica("held")).toBeUndefined();
+    expect(run.wanted().has("held")).toBe(false);
+  });
+
+  it("ends when the workspace stops showing on the phone", async () => {
+    const storage = await relay();
+    const run = await copies(storage);
+    await read(run, "trip");
+    storage.setShowOnPhone({ ownerUserId: OWNER, workspaceId: "trip", showOnPhone: false });
+    run.copies.endHold("trip");
+    storage.setShowOnPhone({ ownerUserId: OWNER, workspaceId: "trip", showOnPhone: true });
+    await vi.waitFor(() => expect(run.copies.replica("trip")).toBeUndefined());
+    expect(run.wanted()).toEqual(new Map());
+  });
+
+  it("keeps only a copy that is open and current, and never reopens one", async () => {
+    const storage = await relay(["trip", "notes"]);
+    const run = await copies(storage);
+    await read(run, "trip");
+    await read(run, "notes");
+    run.lose("trip");
+    (storage as StorageContext).db
+      .prepare(
+        "UPDATE sync_relay_automation_workspaces SET left_at_ms = 1 WHERE workspace_id = 'notes'",
+      )
+      .run();
+    run.copies.reconcile();
+    await vi.waitFor(() => expect(run.copies.replica("notes")).toBeUndefined());
+    expect(run.copies.replica("trip")).toBeUndefined();
+    expect(run.wanted()).toEqual(new Map());
+  });
+
+  it("tells the replicas which copies only a hold keeps, so no pass pulls them", async () => {
+    const storage = await relay();
+    const run = await copies(storage);
+    let during: boolean | undefined;
+    await run.copies.withServerCopy(OWNER, "trip", phone(), async () => {
+      run.copies.hold(OWNER, "trip");
+      run.wanted();
+      during = run.holdOnly("trip");
+    });
+    expect(during, "a visit's copy").toBe(false);
+    expect(run.holdOnly("trip"), "once the visit ends, before the next pass").toBe(true);
   });
 });
 

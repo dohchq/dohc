@@ -310,6 +310,7 @@ async function relayAndOwner(lookupUserDisplayName?: (userId: string) => string 
       signal: copy.lifetime,
       nextRequestId: copy.nextRequestId,
       withRecordWork: (work) => work(),
+      busy: () => false,
       sync,
       step: async () => {
         await sync();
