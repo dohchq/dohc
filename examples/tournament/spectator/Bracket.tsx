@@ -232,6 +232,7 @@ function PhoneBracket(props: BracketProps) {
         <BracketMap {...props} />
       ) : (
         <section
+          key={current.key}
           className={`co-rounds-panel${focus ? " is-tracing" : ""}`}
           id="co-round-panel"
           role="tabpanel"

@@ -1040,6 +1040,7 @@ function publicHistory(rows) {
           : row.kind === "cancel"
             ? ["start"]
             : null;
+    if (row.kind === "cancel") while (stack.at(-1)?.kind === "move") stack.pop();
     if (!undone) {
       stack.push(row);
       continue;

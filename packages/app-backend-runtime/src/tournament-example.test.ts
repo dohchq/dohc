@@ -377,6 +377,26 @@ describe("tournament example on the real Collection host", () => {
       expect(event).toMatchObject({ playerA: opener.playerA, playerB: opener.playerB });
   }, 60_000);
 
+  it("drops a move from the public feed when its match goes back to the queue", async () => {
+    const f = await fixture();
+    const { view } = await createTournament(f, [1600, 1550, 1450, 1400]);
+    const [first, , spare] = view.courts.map((court: Json) => court.id);
+    const opener = matchAt(view, 1, 1);
+    const { match: started } = await playTo(f, opener.id, first, [], "scorer");
+    const moved = await f.call(
+      "moveMatch",
+      { matchId: opener.id, courtId: spare, expectedVersion: started.version },
+      "scorer",
+    );
+    await f.call("returnToQueue", { matchId: opener.id, expectedVersion: moved.version }, "scorer");
+    const owner = await f.snapshot();
+    const fanView = await f.snapshot(owner.tournament.id, "fan");
+    expect(fanView.recent.filter((entry: Json) => entry.matchId === opener.id)).toEqual([]);
+    expect(
+      (await f.call("matchLog", { matchId: opener.id }, "scorer")).map((entry: Json) => entry.kind),
+    ).toEqual(["cancel", "move", "start"]);
+  });
+
   it("moves a live match with points to a free court, keeping its score, server, and start time", async () => {
     const f = await fixture();
     const { view } = await createTournament(f, [1600, 1550, 1450, 1400]);
@@ -424,7 +444,7 @@ describe("tournament example on the real Collection host", () => {
     const after = await f.snapshot();
     const holding = (id: string) => after.courts.find((court: Json) => court.id === id).matchId;
     expect([holding(first), holding(second), holding(spare)]).toEqual([null, other.id, opener.id]);
-    const [logged] = await f.call("matchLog", { matchId: opener.id }, "scorer");
+    const logged = (await f.call("matchLog", { matchId: opener.id }, "scorer"))[0];
     expect(logged).toMatchObject({
       kind: "move",
       courtId: spare,
