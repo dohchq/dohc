@@ -251,6 +251,13 @@ fn text_query(cursor: &HistoryCursor, limit: usize) -> (String, Vec<Box<dyn rusq
             binds.len() + 1
         ));
         binds.push(Box::new(operation_id.clone()));
+    } else {
+        sql.push_str(
+            " AND NOT COALESCE((m.operation='write' \
+                AND m.payload_before_path=m.payload_after_path \
+                AND m.payload_before_content_kind=m.payload_after_content_kind \
+                AND m.payload_before_blob_sha256=m.payload_after_blob_sha256), 0)",
+        );
     }
     if let Some(position) = &cursor.text {
         sql.push_str(&format!(
