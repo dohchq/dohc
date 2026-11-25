@@ -22,9 +22,20 @@ export {
 } from "./recovery-record.js";
 import {
   openPersistentAppBackend,
+  PersistentRuntimeError,
   type PersistentAppBackend,
   type PersistentRuntimeOptions,
+  type PersistentSqlParam,
+  type PersistentSqlResult,
 } from "./persistent.js";
+export {
+  createDatasetTraceBuffer,
+  DATASET_TRACE_CAPACITY,
+  traceFailure,
+  traceSuccess,
+  type DatasetTraceEntry,
+} from "./dataset-trace.js";
+export type { PersistentSqlParam, PersistentSqlResult } from "./persistent.js";
 import type { JsonValue } from "./protocol.js";
 import type { DatasetReplicaCapture, DatasetReplicaPage } from "./replica-host.js";
 import { createReplicaReadPool } from "./replica-read-pool.js";
@@ -255,6 +266,65 @@ export async function createDatasetReplica(options: {
     db.close();
     throw error;
   }
+  async function withReadWorker<T>(
+    state: StoredReplica,
+    signal: AbortSignal | undefined,
+    run: (active: PersistentAppBackend) => Promise<T>,
+  ): Promise<T> {
+    const lease = await readWorkers.acquire(readWorkerKey, async () => {
+      authorize(signal);
+      if ((await digestFile(join(root, state.snapshot), signal)) !== state.sha256)
+        throw Error("The Collection copy changed. Download it again.");
+      const directory = await mkdtemp(join(root, "read-"));
+      let active: PersistentAppBackend;
+      try {
+        active = await worker(
+          state.checkpoint,
+          state.cursor,
+          join(root, state.snapshot),
+          directory,
+        );
+      } catch (error) {
+        await rm(directory, { recursive: true, force: true });
+        throw error;
+      }
+      return {
+        active,
+        snapshot: state.snapshot,
+        sha256: state.sha256,
+        cursor: state.cursor,
+        async close() {
+          await active.close();
+          await rm(directory, { recursive: true, force: true });
+        },
+      };
+    });
+    let failed = false;
+    try {
+      authorize(signal);
+      if (
+        lease.value.snapshot !== state.snapshot ||
+        lease.value.sha256 !== state.sha256 ||
+        !equalRecoveryCursor(lease.value.cursor, state.cursor)
+      )
+        throw Error("The Collection copy changed. Download it again.");
+      const result = await run(lease.value.active);
+      authorize(signal);
+      return result;
+    } catch (error) {
+      if (
+        !(
+          error instanceof PersistentRuntimeError &&
+          (error.code === "invalid_input" || error.code === "not_authorized")
+        )
+      )
+        failed = true;
+      throw error;
+    } finally {
+      lease.release();
+      if (failed) await readWorkers.invalidate(readWorkerKey);
+    }
+  }
   return {
     state(): DatasetReplicaState | null {
       const value = read();
@@ -415,44 +485,8 @@ export async function createDatasetReplica(options: {
           !operation?.readOnly
         )
           throw Error("This Collection copy is read-only. Reconnect to make changes.");
-        const lease = await readWorkers.acquire(readWorkerKey, async () => {
-          authorize(input.signal);
-          if ((await digestFile(join(root, state.snapshot), input.signal)) !== state.sha256)
-            throw Error("The Collection copy changed. Download it again.");
-          const directory = await mkdtemp(join(root, "read-"));
-          let active: PersistentAppBackend;
-          try {
-            active = await worker(
-              state.checkpoint,
-              state.cursor,
-              join(root, state.snapshot),
-              directory,
-            );
-          } catch (error) {
-            await rm(directory, { recursive: true, force: true });
-            throw error;
-          }
-          return {
-            active,
-            snapshot: state.snapshot,
-            sha256: state.sha256,
-            cursor: state.cursor,
-            async close() {
-              await active.close();
-              await rm(directory, { recursive: true, force: true });
-            },
-          };
-        });
-        let failed = false;
-        try {
-          authorize(input.signal);
-          if (
-            lease.value.snapshot !== state.snapshot ||
-            lease.value.sha256 !== state.sha256 ||
-            !equalRecoveryCursor(lease.value.cursor, state.cursor)
-          )
-            throw Error("The Collection copy changed. Download it again.");
-          const value = await lease.value.active.prepare({
+        return withReadWorker(state, input.signal, async (active) => {
+          const value = await active.prepare({
             expected: state.cursor,
             source: state.checkpoint.source,
             operation: operation.name,
@@ -463,7 +497,6 @@ export async function createDatasetReplica(options: {
             requestId: randomUUID(),
             readOnly: true,
           });
-          authorize(input.signal);
           return {
             ...(operation.profile === "bulk" ? { profile: operation.profile } : {}),
             result: value.result,
@@ -471,14 +504,31 @@ export async function createDatasetReplica(options: {
             replayed: false as const,
             offline: true as const,
             savedAtMs: state.savedAtMs,
+            ...(value.metrics ? { metrics: value.metrics } : {}),
           };
-        } catch (error) {
-          failed = true;
-          throw error;
-        } finally {
-          lease.release();
-          if (failed) await readWorkers.invalidate(readWorkerKey);
-        }
+        });
+      });
+    },
+    querySql(input: {
+      sql: string;
+      params?: PersistentSqlParam[];
+      explain?: boolean;
+      limit?: number;
+      signal?: AbortSignal;
+    }): Promise<PersistentSqlResult> {
+      return enqueue(async () => {
+        authorize(input.signal);
+        const state = read();
+        if (!state) throw Error("Download this Collection before inspecting it offline.");
+        return withReadWorker(state, input.signal, (active) =>
+          active.querySql({
+            expected: state.cursor,
+            sql: input.sql,
+            params: input.params,
+            explain: input.explain,
+            maxRows: input.limit,
+          }),
+        );
       });
     },
     async revoke() {

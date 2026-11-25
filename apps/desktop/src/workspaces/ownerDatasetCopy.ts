@@ -1,8 +1,12 @@
 import {
   createDatasetReplica,
+  createDatasetTraceBuffer,
+  DATASET_TRACE_CAPACITY,
   equalRecoveryCursor,
   parseRecoveryCursor,
   parseRecoveryJournalRecord,
+  traceFailure,
+  traceSuccess,
   type DatasetReplicaSource,
 } from "@dohc/app-backend-runtime/replica";
 import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
@@ -185,6 +189,7 @@ export async function createOwnerDatasetCopy(
     ...replicaOptions
   } = options;
   const replica = await createDatasetReplica(replicaOptions);
+  const traces = createDatasetTraceBuffer();
   // The replica removes a leftover work- folder when it opens, so an update's spool never outlives a crash.
   const replicaRoot = resolve(options.directory);
   let denied = false,
@@ -570,7 +575,10 @@ export async function createOwnerDatasetCopy(
       const change = async (
         input: Parameters<OwnerDatasetData["invoke"]>[0],
         after: DatasetCursor,
+        operationName?: string,
       ) => {
+        const started = performance.now();
+        const opName = operationName ?? input.operationId;
         // Until this change's own journal reaches the head, a read waits for the server.
         // Changes in flight together can commit in any order, so only a change that
         // overlapped no other can vouch for the head its journal reached.
@@ -583,6 +591,7 @@ export async function createOwnerDatasetCopy(
             result = await remote.invoke({ ...input, after });
           } catch (error) {
             authorize(signal);
+            traces.record(options.scope.datasetId, traceFailure(opName, "owner", started, error));
             if (neverSent(error)) {
               unreachableNow();
               throw offline(host);
@@ -603,6 +612,10 @@ export async function createOwnerDatasetCopy(
           } else reachable = true;
           authorize(signal);
           const { catchUp, ...committed } = result;
+          traces.record(
+            options.scope.datasetId,
+            traceSuccess(opName, "owner", started, committed.revision),
+          );
           const head = catchUp
             ? await applyCatchUp(catchUp).catch(() => {
                 // The change is saved on the server; the next update brings the copy up to date.
@@ -695,15 +708,15 @@ export async function createOwnerDatasetCopy(
           // A change takes its rules from the saved copy, so it needs no request first.
           // The server refuses a change made under rules it no longer has.
           const saved = archived ? null : replica.state();
-          if (
-            saved &&
-            describe(saved.checkpoint.definitionJson).operations.some(
-              (operation) => operation.operationId === input.operationId && !operation.readOnly,
-            )
-          ) {
+          const savedWrite = saved
+            ? describe(saved.checkpoint.definitionJson).operations.find(
+                (operation) => operation.operationId === input.operationId && !operation.readOnly,
+              )
+            : undefined;
+          if (saved && savedWrite) {
             // A server out of reach may be back, so only the change finds out.
             if (signedOut || (updateFailed && reachable !== false)) throw refused();
-            return change(input, saved.cursor);
+            return change(input, saved.cursor, savedWrite.name);
           }
           const state = await current(signal);
           if ("archived" in state.dataset && state.dataset.archived === true)
@@ -715,10 +728,24 @@ export async function createOwnerDatasetCopy(
           );
           if (!operation?.readOnly) {
             if (state.copy.offline) throw refused();
-            return change(input, replica.state()!.cursor);
+            return change(input, replica.state()!.cursor, operation?.name);
           }
-          const result = await replica.read(input);
+          const started = performance.now();
+          let result: Awaited<ReturnType<typeof replica.read>>;
+          try {
+            result = await replica.read(input);
+          } catch (error) {
+            traces.record(
+              options.scope.datasetId,
+              traceFailure(operation.name, "owner", started, error),
+            );
+            throw error;
+          }
           authorize(signal);
+          traces.record(
+            options.scope.datasetId,
+            traceSuccess(operation.name, "owner", started, result.revision, result.metrics),
+          );
           return {
             ...(result.profile === "bulk" ? { profile: result.profile } : {}),
             result: result.result,
@@ -726,6 +753,30 @@ export async function createOwnerDatasetCopy(
             replayed: false,
             copy: state.copy,
           };
+        },
+        async querySql(input) {
+          selected(input.datasetId);
+          const state = await current(signal);
+          if ("archived" in state.dataset && state.dataset.archived === true)
+            throw Error(
+              "This Collection is archived. Reconnect and restore it before inspecting its records.",
+            );
+          const result = await replica.querySql({
+            sql: input.sql,
+            params: input.params,
+            explain: input.explain,
+            limit: input.limit,
+            signal: input.signal ?? signal,
+          });
+          authorize(signal);
+          return { ...result, copy: state.copy };
+        },
+        async trace(input) {
+          selected(input.datasetId);
+          const limit = input.limit ?? 50;
+          if (!Number.isSafeInteger(limit) || limit < 1 || limit > DATASET_TRACE_CAPACITY)
+            throw Error(`Choose a trace limit from 1 to ${DATASET_TRACE_CAPACITY}.`);
+          return { entries: traces.list(options.scope.datasetId, limit), limit };
         },
       };
     },

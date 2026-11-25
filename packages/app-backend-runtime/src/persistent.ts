@@ -18,6 +18,7 @@ import type { AppRuntimeChild, AppRuntimeLauncher } from "./protocol.js";
 import {
   checkCursor,
   checkDigest,
+  checkSqlQuery,
   digest,
   openRequest,
   PersistentRuntimeError,
@@ -39,6 +40,8 @@ import type {
   PersistentProgress,
   PersistentReply,
   PersistentResult,
+  PersistentSqlInput,
+  PersistentSqlResult,
   PreparedOperation,
 } from "./persistent-protocol.js";
 export type {
@@ -47,8 +50,12 @@ export type {
   DatasetScope,
   FinalizeOperation,
   MigrateCheckpointInput,
+  OperationMetrics,
   PersistentOpenInput,
   PersistentPrepareInput,
+  PersistentSqlInput,
+  PersistentSqlParam,
+  PersistentSqlResult,
   PreparedOperation,
 } from "./persistent-protocol.js";
 export type { WorkerOwnership } from "./worker-ownership.js";
@@ -634,6 +641,28 @@ export async function openPersistentAppBackend(
         path: string;
         cursor: DatasetCursor;
       };
+    },
+    async querySql(query: PersistentSqlInput): Promise<PersistentSqlResult> {
+      checkCursor(query.expected);
+      const checked = checkSqlQuery(query, config.limits.sourceBytes);
+      const result = (await send({
+        kind: "querySql",
+        input: { expected: { ...query.expected }, ...checked },
+      })) as PersistentSqlResult;
+      if (
+        !result ||
+        !Array.isArray(result.columns) ||
+        !Array.isArray(result.rows) ||
+        typeof result.truncated !== "boolean" ||
+        typeof result.durationMs !== "number" ||
+        !Number.isSafeInteger(result.revision) ||
+        typeof result.explain !== "boolean"
+      ) {
+        const error = new PersistentRuntimeError("worker_protocol", "Invalid SQL query result.");
+        fail(error);
+        throw error;
+      }
+      return result;
     },
     async migrateCheckpoint(input: MigrateCheckpointInput): Promise<MigratedCheckpoint> {
       return (await send({

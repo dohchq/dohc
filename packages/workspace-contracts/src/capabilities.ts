@@ -1278,6 +1278,24 @@ const LISTED_CAPABILITIES = {
         "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
     },
   ),
+  "dataset.sql.read": capability(
+    "Run a read-only SQL query or EXPLAIN QUERY PLAN against a Collection.",
+    {
+      ipc: ["dataset"],
+      mcp: { owner: ["dohc_dataset"] },
+      mcpReason:
+        "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
+    },
+  ),
+  "dataset.trace.read": capability(
+    "Show recent operation timings and SQL metrics for a Collection.",
+    {
+      ipc: ["dataset"],
+      mcp: { owner: ["dohc_dataset"] },
+      mcpReason:
+        "Dataset owner administration retains its envelope and permissions. Shared profiles omit the multiplexed tool.",
+    },
+  ),
   "dataset.history.list": capability("List saved operations, with values to undo edits.", {
     ipc: ["dataset"],
     mcp: { owner: ["dohc_dataset"] },

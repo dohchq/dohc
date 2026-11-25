@@ -1,5 +1,7 @@
 import { expect, test, type ElectronApplication, type Locator, type Page } from "@playwright/test";
-import { mkdir, readdir } from "node:fs/promises";
+import { sendCliRequest } from "@dohc/cli/client";
+import { CLI_PROTOCOL_VERSION } from "@dohc/cli/protocol";
+import { mkdir, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { editorTabTestId } from "../src/testPins";
@@ -784,6 +786,7 @@ test("@app-view an app keeps its page when its tab moves to another editor group
       page.getByTestId("site-preview-show-source"),
       page.getByTestId("site-preview-share"),
       page.getByTestId("app-view-review"),
+      page.getByTestId("app-view-inspector-toggle"),
       page.getByTestId("app-view-open-browser"),
     ]) {
       await page.keyboard.press("Tab");
@@ -844,6 +847,194 @@ test("@app-view an app keeps its page when its tab moves to another editor group
     await allTabsMenu.getByRole("menuitem", { name: "Close group", exact: true }).click();
     await expect(page.getByRole("region", { name: /^Editor group \d+$/ })).toHaveCount(1);
     await expect(webview).toBeFocused();
+  } finally {
+    await cleanupDesktopWorkspace(desktop, workspace);
+  }
+});
+
+test("@app-view owner data inspector toggles, shows live trace, runs SQL and EXPLAIN, refuses writes, and renders in light and dark themes", async () => {
+  test.setTimeout(180_000);
+  const workspace = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    desktop = await launchDesktopApp({ workspace });
+    const { page, app: electronApp } = desktop;
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const { workspaceId } = await openWorkspaceFromFirstRun(page, workspace);
+    await createFormApp(electronApp, page, workspace);
+
+    const cliDataset = (request: Record<string, unknown>) =>
+      sendCliRequest(
+        {
+          protocolVersion: CLI_PROTOCOL_VERSION,
+          verb: "dataset",
+          args: {
+            cwd: workspace.rootPath,
+            actor: "agent",
+            request: { workspaceId, ...request } as never,
+          },
+        },
+        { stateDir: workspace.homeDir },
+      ) as Promise<Record<string, unknown>>;
+
+    const listed = (await cliDataset({ action: "list", limit: 20 })) as {
+      kind: string;
+      datasets: Array<{ datasetPath: string; name: string }>;
+    };
+    expect(listed.kind).toBe("list");
+    const datasetPath = listed.datasets.find((d) => d.name === "Registrations")!.datasetPath;
+
+    const { dataset: described } = (await cliDataset({ action: "describe", datasetPath })) as {
+      dataset: {
+        revision: number;
+        revisionSha256: string;
+        tables: Array<{ fields: Array<{ fieldId: string; name: string }> }>;
+        operations: Array<{ operationId: string; kind: string }>;
+      };
+    };
+    const tableSql = (
+      JSON.parse(await readFile(join(workspace.rootPath, datasetPath), "utf8")) as {
+        tables: Array<{ sqlName: string }>;
+      }
+    ).tables[0]!.sqlName;
+    const nameFieldId = described.tables[0]!.fields.find((f) => f.name === "Name")!.fieldId;
+    const createOp = described.operations.find((o) => o.kind === "create")!.operationId;
+    await cliDataset({
+      action: "invoke",
+      datasetPath,
+      revision: described.revision,
+      revisionSha256: described.revisionSha256,
+      operationId: createOp,
+      input: { values: { [nameFieldId]: "Ada Lovelace" } },
+      idempotencyKey: "inspector-seed-1",
+    });
+
+    const sqlCli = (await cliDataset({
+      action: "sql",
+      datasetPath,
+      sql: `SELECT * FROM ${tableSql}`,
+    })) as { kind: string; rows: unknown[][]; explain: boolean };
+    expect(sqlCli.kind).toBe("sql");
+    expect(sqlCli.explain).toBe(false);
+    expect(sqlCli.rows).toHaveLength(1);
+
+    const explainCli = (await cliDataset({
+      action: "sql",
+      datasetPath,
+      sql: `SELECT * FROM ${tableSql}`,
+      explain: true,
+    })) as { kind: string; rows: unknown[][]; explain: boolean };
+    expect(explainCli.kind).toBe("sql");
+    expect(explainCli.explain).toBe(true);
+    expect(explainCli.rows.length).toBeGreaterThan(0);
+
+    await expect(
+      cliDataset({ action: "sql", datasetPath, sql: `DELETE FROM ${tableSql}` }),
+    ).rejects.toThrow(/read-only SELECT/i);
+    await expect(
+      cliDataset({ action: "sql", datasetPath, sql: "PRAGMA table_info(sqlite_master)" }),
+    ).rejects.toThrow(/read-only SELECT/i);
+    await expect(
+      cliDataset({ action: "sql", datasetPath, sql: "SELECT * FROM dohc_applied" }),
+    ).rejects.toThrow(/read-only SELECT/i);
+
+    const traceCli = (await cliDataset({ action: "trace", datasetPath, limit: 20 })) as {
+      kind: string;
+      entries: Array<{ operation: string; status: string }>;
+    };
+    expect(traceCli.kind).toBe("trace");
+    expect(traceCli.entries.some((e) => e.status === "ok")).toBe(true);
+
+    await openExplorerHome(page);
+    const row = page.locator(`[data-testid="sites-row"][data-root="${appRoot}"]`);
+    await shown(row);
+    await row.click();
+    await page.getByTestId("app-view-review").click();
+    const review = page.getByTestId("app-publication-dialog");
+    await shown(review);
+    await expect(review.getByTestId("app-publication-approve")).toBeEnabled();
+    await review.getByTestId("app-publication-approve").click();
+    await hidden(review);
+    await ready(page);
+
+    const toggle = page.getByTestId("app-view-inspector-toggle");
+    await expect(toggle).toBeVisible();
+    await expect(toggle).toHaveAttribute("aria-pressed", "false");
+    await expect(page.getByTestId("app-inspector-drawer")).toHaveCount(0);
+
+    await toggle.click();
+    const drawer = page.getByTestId("app-inspector-drawer");
+    await expect(drawer).toBeVisible();
+    await expect(toggle).toHaveAttribute("aria-pressed", "true");
+    await expect(drawer.getByTestId("app-inspector-trace-row").first()).toBeVisible();
+
+    const shotDir = process.env.DOHC_INSPECTOR_SHOT_DIR;
+    if (shotDir) await mkdir(shotDir, { recursive: true });
+
+    const traceTab = drawer.getByTestId("app-inspector-tab-trace");
+    await traceTab.focus();
+    await page.keyboard.press("ArrowRight");
+    const sqlInput = drawer.getByTestId("app-inspector-sql-input");
+    await expect(sqlInput).toBeVisible();
+    await sqlInput.fill(`SELECT * FROM ${tableSql}`);
+    await sqlInput.press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
+    await expect(drawer.getByTestId("app-inspector-sql-row").first()).toBeVisible();
+    await expect(drawer.getByTestId("app-inspector-sql-meta")).toContainText("1 row");
+    await expect(drawer).toContainText("Ada Lovelace");
+
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate(
+        async ({ theme, workspaceId }) => {
+          document.documentElement.dataset.theme = theme;
+          await window.dohcDesktop!.appView({
+            action: "colorScheme",
+            workspaceId,
+            colorScheme: theme,
+          });
+        },
+        { theme, workspaceId },
+      );
+      if (shotDir) {
+        await page.screenshot({ path: join(shotDir, `inspector-sql-${theme}.png`) });
+      }
+    }
+
+    await drawer.getByTestId("app-inspector-sql-explain").click();
+    await expect(drawer.getByTestId("app-inspector-sql-meta")).toContainText("Query plan");
+    await expect(drawer.getByTestId("app-inspector-sql-row").first()).toBeVisible();
+
+    await sqlInput.fill(`DELETE FROM ${tableSql}`);
+    await drawer.getByTestId("app-inspector-sql-run").click();
+    await expect(drawer.getByTestId("app-inspector-sql-error")).toContainText(
+      "Only read-only SELECT queries",
+    );
+
+    if (shotDir) {
+      await drawer.getByTestId("app-inspector-tab-trace").click();
+      await expect(drawer.getByTestId("app-inspector-trace-row").first()).toBeVisible();
+      for (const theme of ["light", "dark"] as const) {
+        await page.evaluate(
+          async ({ theme, workspaceId }) => {
+            document.documentElement.dataset.theme = theme;
+            await window.dohcDesktop!.appView({
+              action: "colorScheme",
+              workspaceId,
+              colorScheme: theme,
+            });
+          },
+          { theme, workspaceId },
+        );
+        await page.screenshot({ path: join(shotDir, `inspector-trace-${theme}.png`) });
+      }
+    }
+
+    await drawer.getByTestId("app-inspector-tab-trace").focus();
+    await page.keyboard.press("Escape");
+    await expect(drawer).toHaveCount(0);
+    await expect(toggle).toHaveAttribute("aria-pressed", "false");
+
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+Shift+I" : "Control+Shift+I");
+    await expect(drawer).toBeVisible();
   } finally {
     await cleanupDesktopWorkspace(desktop, workspace);
   }

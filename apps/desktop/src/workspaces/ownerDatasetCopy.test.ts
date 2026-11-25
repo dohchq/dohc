@@ -693,3 +693,183 @@ it("says this computer can't update its copy, not that the server is out of reac
     await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
   }
 });
+
+it("runs read-only SQL, EXPLAIN, and records traces on the synced owner copy", async () => {
+  const f = fixture(),
+    directory = await mkdtemp(join(tmpdir(), "desktop-copy-inspector-"));
+  const host = await f.storage.createDatasetHost({
+    publicEditRelease: undefined,
+    directory: join(directory, "host"),
+    limits,
+    onShutdownError(error) {
+      throw error;
+    },
+  });
+  const actor = { kind: "named" as const, workspaceId: "w", userId: "owner" },
+    scope = { workspaceId: "w", datasetId: id(1) };
+  const definition: DatasetDefinition = {
+    formatVersion: 1,
+    datasetId: id(1),
+    name: "Entries",
+    schemaPath: "schema.sql",
+    operationsPath: "actions.js",
+    tables: [
+      {
+        tableId: id(2),
+        name: "Entries",
+        sqlName: "entries",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: id(3),
+            name: "ID",
+            sqlColumn: "id",
+            type: "number",
+            required: true,
+            unique: true,
+          },
+          {
+            fieldId: id(4),
+            name: "Name",
+            sqlColumn: "name",
+            type: "text",
+            required: true,
+            unique: false,
+          },
+        ],
+      },
+    ],
+    operations: [
+      {
+        operationId: id(5),
+        name: "add",
+        label: "Add",
+        kind: "create",
+        tableId: id(2),
+        access: "owner",
+        readOnly: false,
+        fieldIds: [id(4)],
+      },
+      {
+        operationId: id(6),
+        name: "list",
+        label: "List",
+        kind: "read",
+        tableId: id(2),
+        access: "owner",
+        readOnly: true,
+        fieldIds: [id(3), id(4)],
+      },
+    ],
+  };
+  const schemaSql = "CREATE TABLE entries(id INTEGER PRIMARY KEY, name TEXT NOT NULL);",
+    operationSource =
+      "globalThis.operations={add(ctx,input){ctx.db.execute('INSERT INTO entries(name) VALUES(?)',[input.name]);return null;},list(ctx){return ctx.db.query('SELECT id, name FROM entries ORDER BY id');}};";
+  const revision = describeDatasetRevision({
+    definition,
+    revision: 1,
+    schemaSql,
+    operationSource,
+  });
+  const heardRevisions: number[] = [];
+  let heard: (() => void) | undefined;
+  const changed = () =>
+    new Promise<void>((resolve) => {
+      heard = resolve;
+    });
+  const options = {
+    directory: join(directory, "copy"),
+    scope,
+    ownerKey: "owner",
+    origin: "https://relay",
+    assertOwner() {},
+    onChanged: (change?: { revision?: number }) => {
+      if (change?.revision !== undefined) heardRevisions.push(change.revision);
+      heard?.();
+    },
+  };
+  await mkdir(options.directory);
+  const copy = await createOwnerDatasetCopy(options);
+  const source: DatasetReplicaSource = {
+    async capture() {
+      return host.replicaCapture(actor, scope);
+    },
+    async page(input) {
+      return host.replicaPage(actor, { ...scope, ...input });
+    },
+    async blob(input) {
+      return host.replicaBlob(actor, { ...scope, ...input });
+    },
+  };
+  const remote = {
+    async describe() {
+      return host.describe(actor, scope);
+    },
+    async invoke(input: Parameters<OwnerDatasetData["invoke"]>[0]) {
+      return host.invoke(actor, { ...input, workspaceId: "w", access: { kind: "data" } });
+    },
+  } as unknown as OwnerDatasetData;
+  const signal = new AbortController().signal,
+    pinned = { ...scope, revision: 1, revisionSha256: revision.revisionSha256 };
+  try {
+    await host.activate(actor, { workspaceId: "w", revision, schemaSql, operationSource });
+    const data = copy.data(remote, source, signal);
+    const added = await data.invoke({
+      ...pinned,
+      operationId: id(5),
+      input: { name: "Ledger" },
+      idempotencyKey: "add-1",
+    });
+    while (!heardRevisions.some((heardRevision) => heardRevision >= added.revision))
+      await changed();
+    expect(
+      await data.invoke({ ...pinned, operationId: id(6), input: {}, idempotencyKey: "list-1" }),
+    ).toMatchObject({ result: [{ id: 1, name: "Ledger" }] });
+
+    const sql = await data.querySql!({
+      datasetId: id(1),
+      sql: "SELECT name FROM entries WHERE id = ?",
+      params: [1],
+      signal,
+    });
+    expect(sql.columns).toEqual(["name"]);
+    expect(sql.rows).toEqual([["Ledger"]]);
+    expect(sql.explain).toBe(false);
+
+    const plan = await data.querySql!({
+      datasetId: id(1),
+      sql: "SELECT name FROM entries WHERE id = ?",
+      params: [1],
+      explain: true,
+      signal,
+    });
+    expect(plan.explain).toBe(true);
+    expect(plan.rows.length).toBeGreaterThan(0);
+
+    await expect(
+      data.querySql!({ datasetId: id(1), sql: "DELETE FROM entries", signal }),
+    ).rejects.toThrow(/read-only SELECT/i);
+    await expect(
+      data.querySql!({ datasetId: id(1), sql: "SELECT * FROM dohc_applied", signal }),
+    ).rejects.toThrow(/read-only SELECT/i);
+
+    const trace = await data.trace!({ datasetId: id(1), limit: 10 });
+    expect(trace.entries.map((entry) => entry.operation)).toEqual(["list", "add"]);
+    expect(trace.entries[0]).toMatchObject({
+      operation: "list",
+      status: "ok",
+      statementCount: 1,
+      rowsRead: 1,
+      callerKind: "owner",
+    });
+    expect(trace.entries[1]).toMatchObject({
+      operation: "add",
+      status: "ok",
+      callerKind: "owner",
+    });
+  } finally {
+    await copy.close();
+    await host.close();
+    await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
+  }
+});

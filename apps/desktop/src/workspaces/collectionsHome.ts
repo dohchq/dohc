@@ -81,6 +81,8 @@ export function signedOutServer(): OwnerDatasetData & DatasetReplicaSource {
     permissions: true,
     setGrant: true,
     press: true,
+    querySql: true,
+    trace: true,
     capture: true,
     page: true,
     blob: true,

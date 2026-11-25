@@ -11,6 +11,7 @@ import type { JSValue, JSValuePointer, QuickJSHandle, QuickJSWASMModule } from "
 import { AppBackendRuntimeError, boundedText, SQLITE_HARD_HEAP_LIMIT_BYTES } from "./protocol.js";
 import { AppBackendLimitError, appBackendLimit } from "@dohc/security-contract/app-backend";
 import type { AppOperationRefusal, ChildRequest } from "./protocol.js";
+import type { OperationMetrics } from "./persistent-protocol.js";
 
 export type GuestRequest = Omit<
   Extract<ChildRequest, { kind: "evaluate" }>,
@@ -299,7 +300,7 @@ export async function evaluate(
   db: DatabaseSync,
   request: GuestRequest,
   options: GuestOptions = {},
-): Promise<{ resultJson: string; attachedFileIds: string[] }> {
+): Promise<{ resultJson: string; attachedFileIds: string[]; metrics: OperationMetrics }> {
   if (options.persistentConnection && !persistentRowidTables.has(db)) {
     db.setAuthorizer(null);
     const tables = new Set<string>();
@@ -329,7 +330,7 @@ function run(
   db: DatabaseSync,
   request: GuestRequest,
   options: GuestOptions,
-): { resultJson: string; attachedFileIds: string[] } {
+): { resultJson: string; attachedFileIds: string[]; metrics: OperationMetrics } {
   const runtime = module.newRuntime();
   runtime.setMaxStackSize(request.limits.stackBytes);
   const deadline = performance.now() + request.limits.evaluationMs;
@@ -348,6 +349,7 @@ function run(
   runtime.removeModuleLoader();
   const vm = runtime.newContext();
   let statements = 0;
+  let rowsRead = 0;
   let resourceLimit: AppBackendLimitError | undefined;
   let refusal: AppOperationRefusal | undefined;
   const attachedFileIds = new Set<string>();
@@ -450,6 +452,7 @@ function run(
             const rows = [];
             let bytes = 2;
             for (const row of statement.iterate(...params)) {
+              rowsRead += 1;
               if (
                 Object.values(row).some(
                   (value) => typeof value === "bigint" || value instanceof Uint8Array,
@@ -608,6 +611,10 @@ function run(
             "Operation result",
           ),
           attachedFileIds: [...attachedFileIds],
+          metrics: {
+            statementCount: statements,
+            rowsRead,
+          },
         };
       } finally {
         result.value.dispose();

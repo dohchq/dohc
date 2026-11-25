@@ -1745,6 +1745,18 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
       "Run it again after a change is approved.",
     ],
   },
+  sql: {
+    summary: "Run a read-only SQL query or EXPLAIN QUERY PLAN against a Collection.",
+    notes: [
+      "Owner only. Refuses writes, PRAGMAs, and internal tables.",
+      "Pass explain: true to inspect SQLite's query plan.",
+      "Each row lists its values in column order.",
+    ],
+  },
+  trace: {
+    summary: "Show recent operation timings and SQL metrics for a Collection.",
+    notes: ["Owner only. Keeps the last 200 invocations in memory per Collection."],
+  },
   history: { summary: "List saved operations, with values to undo edits." },
   historyRevision: { summary: "Show the saved source of one past revision." },
   prepareHistoryRestore: {
@@ -2675,7 +2687,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
       workspaceNote,
       "datasetPath is the caller-relative dataset.json path. List and describe return it alongside the internal datasetId.",
       "After moving the file, update commands and app manifests. An old path reports a broken reference.",
-      "These verbs use the same Collection rules as dohc. They do not accept SQL or caller identity.",
+      "These verbs use the same Collection rules as dohc. They never accept caller identity. Only sql accepts SQL, read-only and for the owner.",
     ],
     verbs: DATASET_VERBS,
   },
