@@ -473,15 +473,13 @@ function message(threadId: string, id: string, post: DemoPost) {
   };
 }
 
-function feedItem(key: string, listed?: ReturnType<typeof channel>) {
+function feedItem(key: string, listed: ReturnType<typeof channel>) {
   const posts = THREADS[key] ?? [];
   const { id, title, createdAtMs, updatedAtMs } = thread(key, posts);
   return {
     message: message(id, `message-${key}-0`, posts[0] ?? yourPost(title)),
     thread: { id, title, createdAtMs, updatedAtMs },
-    ...(listed
-      ? { channel: { id: listed.id, name: listed.name, slug: listed.slug, kind: listed.kind } }
-      : {}),
+    channel: { id: listed.id, name: listed.name, slug: listed.slug, kind: listed.kind },
     reactions: [],
     matchedBy: [],
   };
@@ -837,7 +835,6 @@ const demoBridge = {
     return {
       items: [
         feedItem("channel-trip", channel("channel-trip", "lisbon-trip")),
-        feedItem("file-budget"),
         feedItem("channel-bookings", channel("channel-bookings", "bookings")),
       ],
     };

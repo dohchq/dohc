@@ -310,17 +310,27 @@ function ProductDemoWindow() {
     answer(confirmed: boolean): void;
   } | null>(null);
 
-  // A browser drops focus to the page when the focused overlay unmounts, and
-  // shell shortcuts only reach the demo while focus is inside it.
+  // Shell shortcuts only reach the demo while focus is inside it. When the
+  // focused control unmounts, such as a closed menu or palette, the browser
+  // drops focus to the page, so the window takes it back. A press on the page
+  // leaves focus there. React skips the focusout of a node it is removing, so
+  // this listens on the demo's root.
   const windowRef = useRef<HTMLDivElement>(null);
-  const overlayOpen = palette !== null || deletion !== null;
-  const hadOverlay = useRef(overlayOpen);
   useEffect(() => {
-    const closed = hadOverlay.current && !overlayOpen;
-    hadOverlay.current = overlayOpen;
-    if (closed && document.activeElement === document.body)
-      windowRef.current?.focus({ preventScroll: true });
-  }, [overlayOpen]);
+    const root = windowRef.current?.getRootNode();
+    if (!root) return;
+    const keepFocusInside = (event: Event) => {
+      const left = event.target;
+      if (!(event instanceof FocusEvent) || event.relatedTarget !== null) return;
+      if (!(left instanceof Node)) return;
+      window.setTimeout(() => {
+        if (!left.isConnected && document.activeElement === document.body)
+          windowRef.current?.focus({ preventScroll: true });
+      });
+    };
+    root.addEventListener("focusout", keepFocusInside);
+    return () => root.removeEventListener("focusout", keepFocusInside);
+  }, []);
 
   const activeTab = openTabs.includes(activePath) ? activePath : null;
   const activeKind = activeTab === null ? null : tabKind(activeTab);

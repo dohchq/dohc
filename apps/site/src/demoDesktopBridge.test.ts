@@ -203,7 +203,7 @@ describe("a delete's Undo", () => {
 });
 
 describe("Chats Home", () => {
-  it("lists each Group's post and the Budget comment, which opens the listed file thread", async () => {
+  it("lists each Group's opening post", async () => {
     configureDemoDesktopBridge({
       documents: [],
       folders: [],
@@ -218,12 +218,8 @@ describe("Chats Home", () => {
     const { items } = await bridge.listPersonalChatFeed({ workspaceId });
     expect(items.map((item) => [item.channel?.name ?? null, item.message.body])).toEqual([
       ["lisbon-trip", "Who's sorting the Sintra cottage? It goes fast on weekends."],
-      [null, "Who still owes a deposit?"],
       ["bookings", "Flat's booked for the 14th to the 17th. Deposit is in Budget."],
     ]);
-    const { fileThreads } = await bridge.listChatChannels({ workspaceId });
-    const comment = items.find((item) => !item.channel)!;
-    expect(fileThreads.find((thread) => thread.id === comment.thread.id)?.path).toBe("Budget.md");
     await expect(
       bridge.workspaceMembers({ workspaceId, request: { action: "list" } }),
     ).resolves.toEqual({
