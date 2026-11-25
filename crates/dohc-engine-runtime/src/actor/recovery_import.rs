@@ -75,7 +75,6 @@ impl ActorHandle {
                     || input.path.to_ascii_lowercase().ends_with(".excalidraw"),
                     |m| m.content_kind == dohc_engine_collab::ContentKind::Scene);
                 let text = if scene {
-                    dohc_engine_collab::Ydoc::validate_update(&input.state)?;
                     let state = dohc_engine_collab::Ydoc::wire();
                     state.apply(&input.state)?;
                     dohc_engine_sync::project_ydoc_with_store(tx, key, &state, dohc_engine_collab::ContentKind::Scene)?.content

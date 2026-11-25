@@ -391,3 +391,33 @@ it("distinguishes malformed attribution from a remote human", () => {
     reason: "author-refused",
   });
 });
+it("an oversized checkpoint fails alone and stays for Copy while other files recover", async () => {
+  const directory = await createTestScratch("typing-oversized-");
+  await writeTypingCheckpoint(directory, checkpoint);
+  await writeTypingCheckpoint(directory, {
+    ...checkpoint,
+    checkpointId: "drawing-checkpoint",
+    objectId: "drawing",
+    path: "plan.excalidraw",
+    text: "x".repeat(16 * 1024 * 1024 + 1),
+  });
+  const importer = vi.fn(async () => ({
+    committed: true as const,
+    outcome: "imported" as const,
+    momentId: "moment",
+  }));
+  const failure = vi.fn();
+  await importTypingCheckpoints(directory, "workspace", importer, failure, vi.fn());
+  expect(importer).toHaveBeenCalledOnce();
+  expect(importer).toHaveBeenCalledWith(expect.objectContaining({ path: "note.md" }));
+  expect(failure).toHaveBeenCalledWith(
+    expect.objectContaining({
+      kind: "import",
+      path: "plan.excalidraw",
+      checkpointId: "drawing-checkpoint",
+    }),
+  );
+  expect(
+    (await readTypingCheckpoints(directory, "workspace")).map((row) => row.checkpoint.path),
+  ).toEqual(["plan.excalidraw"]);
+});

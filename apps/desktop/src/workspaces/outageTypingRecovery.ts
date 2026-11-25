@@ -166,12 +166,6 @@ export async function readTypingCheckpoints(
       classifyEngineFilePathForRead(checkpoint.path, process.platform).kind !== "tracked"
     )
       throw new Error("Invalid typing recovery record.");
-    if (
-      Buffer.byteLength(checkpoint.text) > 16 * 1024 * 1024 ||
-      checkpoint.updates.reduce((n, u) => n + Buffer.from(u.updateBase64, "base64").length, 0) >
-        32 * 1024 * 1024
-    )
-      throw new Error("Typing recovery record exceeds its limit.");
     rows.push({ file, content, checkpoint });
   }
   return rows;
@@ -209,6 +203,15 @@ export async function importTypingCheckpoints(
       continue;
     let result: CaptureRecoveryImportResult;
     try {
+      if (
+        Buffer.byteLength(row.checkpoint.text) > 16 * 1024 * 1024 ||
+        row.checkpoint.updates.reduce(
+          (n, u) => n + Buffer.from(u.updateBase64, "base64").length,
+          0,
+        ) >
+          32 * 1024 * 1024
+      )
+        throw new Error("Typing recovery record exceeds its limit.");
       const {
         version: _version,
         checkpointId: _checkpointId,
