@@ -586,11 +586,6 @@ function withinElements(root: JSONContent, limit: number): boolean {
 
 const SHA256_HEX_BYTES = 64;
 
-/**
- * What a note holding `body` stores once the engine keeps `markdown` as its source text, or null
- * when its properties alone are past `WORKER_LIVE_VALIDATION_POLICY`. `doc` holds only the
- * properties; one read of them counts what they store.
- */
 function newNoteCounts(doc: Y.Doc, body: NewNoteCounts, markdown: string): NewNoteCounts | null {
   const read = readLiveUpdateAsTheCutDoes(
     Y.encodeStateAsUpdate(doc),
