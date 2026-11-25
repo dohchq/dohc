@@ -108,6 +108,28 @@ describe("containers the editor writes", () => {
     a.expectMirror();
   });
 
+  it("changes the title of a callout inside another that starts at the same line, and keeps each callout's id", () => {
+    const baseline = noteIn(
+      [
+        ["O", "callout", { title: "Outer" }],
+        ["I", "callout", { title: "Inner" }],
+      ],
+      [
+        [["O", "I"], "one"],
+        [["O"], "two"],
+      ],
+    );
+    const a = person(baseline, 10);
+    const inner = 1;
+    expect(a.view.state.doc.nodeAt(inner)!.attrs.title).toBe("Inner");
+    a.view.dispatch(a.view.state.tr.setNodeAttribute(inner, "title", "Mine"));
+    expect(a.sent).toHaveLength(1);
+    expect(pathsOf(a)).toEqual([["O", "I"], ["O"]]);
+    expect(a.view.state.doc.child(0).attrs.title).toBe("Outer");
+    expect(a.view.state.doc.nodeAt(inner)!.attrs.title).toBe("Mine");
+    a.expectMirror();
+  });
+
   it("writes a quote around lines that hold a list item's added paragraph far from both ends, and gives that paragraph its boundary first", () => {
     const baseline = noteIn(
       [
@@ -698,6 +720,62 @@ describe("a dispatch the editor writes whole or not at all", () => {
       const { a, told } = toldOf(baseline);
       const lines = a.lines();
       a.view.dispatch(a.view.state.tr.delete(0, a.view.state.doc.child(0).nodeSize));
+      refusedWhole(a, told, lines);
+    },
+  );
+
+  it(
+    "refuses changing callouts nested 62 deep in a callout, whose records another person wrote apart, which takes the room more delete ranges than it takes",
+    { timeout: 120_000 },
+    () => {
+      const rows = Array.from({ length: 183 }, (_, row) =>
+        Array.from({ length: 62 }, (_, depth) => `c${String(row)}_${String(depth)}`),
+      );
+      const ids = rows.flat();
+      const one = declared(1);
+      const made: [string, Record<string, unknown>][] = [
+        ["C", {}],
+        ...ids.map((id): [string, Record<string, unknown>] => [id, { title: "Old" }]),
+      ];
+      for (const [id, attrs] of made)
+        for (const [key, value] of recordsOfContainer(schema, { id, type: "callout", attrs }))
+          one.containers.set(key, value);
+      one.sequence.applyDelta([
+        ...rows.flatMap((path) => [
+          { insert: boundary({ path: ["C", ...path] }) },
+          { insert: "x" },
+        ]),
+        { insert: boundary() },
+        { insert: "after" },
+        { insert: boundary() },
+        { insert: "tail" },
+      ]);
+      const two = declared(2);
+      Y.applyUpdate(two.doc, Y.encodeStateAsUpdate(one.doc));
+      one.doc.destroy();
+      const changed = { calloutType: "tip", title: "Theirs", fold: "+" };
+      two.doc.transact(() => {
+        for (const id of ids)
+          for (const [key, value] of recordsOfContainer(schema, {
+            id,
+            type: "callout",
+            attrs: changed,
+          }))
+            if (key !== id) {
+              two.containers.set(key, value);
+              two.sequence.insert(two.sequence.length, "z");
+            }
+      });
+      const baseline = Y.encodeStateAsUpdate(two.doc);
+      two.doc.destroy();
+      const { a, told } = toldOf(baseline);
+      const lines = a.lines();
+      const tr = a.view.state.tr;
+      a.view.state.doc.descendants((node, pos) => {
+        if (pos > 0 && node.type.name === "callout")
+          tr.setNodeMarkup(pos, undefined, { calloutType: "warning", title: "Mine", fold: "-" });
+      });
+      a.view.dispatch(tr);
       refusedWhole(a, told, lines);
     },
   );

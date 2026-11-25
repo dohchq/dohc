@@ -648,16 +648,28 @@ function writeContainersThatDiffer(
       node,
       chainOf(node).find((known) => known.node === node.node && isFree(known)),
     );
-  for (const node of nodes) {
-    if (owned.has(node)) continue;
+  const kinOf = (node: Around) => {
     const element = firstElement(node);
-    const kin = (element ? (history.get(element) ?? []) : [])
+    return (element ? (history.get(element) ?? []) : [])
       .toReversed()
       .filter(
         (known) =>
           known.first === element && familyOf(known.node) === familyOf(node.node) && isFree(known),
       );
-    claim(node, kin.find((known) => known.node.type === node.node.type) ?? kin[0]);
+  };
+  const isAlike = (node: Around) => (known: Known) => known.node.type === node.node.type;
+  for (const node of nodes)
+    if (!owned.has(node))
+      claim(
+        node,
+        kinOf(node).find(
+          (known) => isAlike(node)(known) && known.node.content.eq(node.node.content),
+        ),
+      );
+  for (const node of nodes) {
+    if (owned.has(node)) continue;
+    const kin = kinOf(node);
+    claim(node, kin.find(isAlike(node)) ?? kin[0]);
   }
   const contains = (one: Around, other: Around) =>
     one.pos <= other.pos && other.pos + other.node.nodeSize <= one.pos + one.node.nodeSize;
@@ -1620,6 +1632,18 @@ function runsOfClocks(first: Y.Item | null, end: Y.Item | null): number {
   return runs;
 }
 
+function runsAmong(items: readonly Y.Item[]): number {
+  const sorted = items.toSorted((a, b) => a.id.client - b.id.client || a.id.clock - b.id.clock);
+  return sorted.filter((item, at) => {
+    const before = sorted[at - 1];
+    return (
+      !before ||
+      before.id.client !== item.id.client ||
+      before.id.clock + before.length !== item.id.clock
+    );
+  }).length;
+}
+
 function itemsWithin(type: Y.AbstractType<unknown>): number {
   let items = runsOfClocks(type._start, null);
   for (const item of type._map.values()) if (!item.deleted) items++;
@@ -1674,8 +1698,12 @@ function copyOfWindow(
   const copied = copy.getText(BODY_SEQUENCE_FIELD);
   copied.applyDelta(changes);
   const records = copy.getMap<unknown>(BODY_CONTAINERS_FIELD);
-  sequence.doc!.getMap(BODY_CONTAINERS_FIELD).forEach((value, key) => {
-    if (named.has(key.split(".")[0]!)) records.set(key, value);
+  const recorded: Y.Item[] = [];
+  const live = sequence.doc!.getMap(BODY_CONTAINERS_FIELD);
+  live._map.forEach((item, key) => {
+    if (item.deleted || !named.has(key.split(".")[0]!)) return;
+    records.set(key, live.get(key));
+    recorded.push(item);
   });
   const writing = { sequence: copied, reader: createBodyReader(base.type.schema, copied, records) };
   const start = posOf(child);
@@ -1696,7 +1724,7 @@ function copyOfWindow(
     windowed.push(transform);
     doc = transform.doc;
   }
-  const apart = runsOfClocks(head, reading.lines[last + 1]?.item ?? null);
+  const apart = runsOfClocks(head, reading.lines[last + 1]?.item ?? null) + runsAmong(recorded);
   if (fits) return { writing, transactions: windowed, first, apart };
   copy.destroy();
   return null;
