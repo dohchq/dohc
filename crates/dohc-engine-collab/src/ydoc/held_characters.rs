@@ -436,6 +436,7 @@ fn backtick_runs(
     escaped: &[bool],
     from: usize,
     to: usize,
+    masking: bool,
     until: impl Fn(&[Vec<Backtick>]) -> bool,
 ) -> Vec<Vec<Backtick>> {
     let mut found: Vec<Vec<Backtick>> = Vec::new();
@@ -456,7 +457,7 @@ fn backtick_runs(
                 }
             }
             Cell::Opaque(written) => {
-                let escapes = !written.starts_with('`');
+                let escapes = masking || !written.starts_with('`');
                 let mut characters = written.chars().peekable();
                 while let Some(character) = characters.next() {
                     if escapes
@@ -493,7 +494,7 @@ fn backtick_runs(
 }
 
 fn escape_backticks_beside_code(cells: &[Cell], escaped: &mut [bool]) {
-    for run in backtick_runs(cells, escaped, 0, cells.len(), |_| false) {
+    for run in backtick_runs(cells, escaped, 0, cells.len(), false, |_| false) {
         if run.iter().any(|backtick| backtick.held) && run.iter().any(|backtick| !backtick.held) {
             for backtick in run.iter().filter(|backtick| backtick.held) {
                 escaped[backtick.index] = true;
@@ -604,22 +605,47 @@ impl<'a> Pairing<'a> {
     }
 
     fn runs(&self, from: usize, to: usize) -> Vec<Vec<Backtick>> {
-        backtick_runs(self.cells, &self.escaped, from, to, |_| false)
+        backtick_runs(self.cells, &self.escaped, from, to, false, |_| false)
     }
 
-    fn mask_code_spans(&self, from: usize, to: usize) -> HashSet<usize> {
-        let mut hidden = HashSet::new();
-        let runs = self.runs(from, to);
+    fn code_spans(&self, from: usize, to: usize) -> Vec<Vec<Backtick>> {
+        let runs = backtick_runs(self.cells, &self.escaped, from, to, true, |_| false);
+        let mut spans = Vec::new();
         let mut at = 0;
         while at + 1 < runs.len() {
             if runs[at].len() == runs[at + 1].len() {
-                let last = runs[at + 1].last().expect("a run holds a backtick").index;
-                hidden.extend(runs[at][0].index..=last);
+                spans.push([runs[at].as_slice(), runs[at + 1].as_slice()].concat());
                 at += 1;
             }
             at += 1;
         }
+        spans
+    }
+
+    fn mask_code_spans(&self, from: usize, to: usize) -> HashSet<usize> {
+        let mut hidden = HashSet::new();
+        for span in self.code_spans(from, to) {
+            let last = span.last().expect("a span holds a backtick").index;
+            hidden.extend(span[0].index..=last);
+        }
         hidden
+    }
+
+    fn backticks_hiding_loose(&self) -> Vec<usize> {
+        let mut loose_before = vec![0];
+        for (index, cell) in self.cells.iter().enumerate() {
+            let loose = matches!(cell, Cell::Delimiter(_)) && !self.consumed[index];
+            loose_before.push(loose_before[index] + usize::from(loose));
+        }
+        self.code_spans(0, self.cells.len())
+            .into_iter()
+            .filter(|span| {
+                let last = span.last().expect("a span holds a backtick").index;
+                loose_before[last] > loose_before[span[0].index + 1]
+            })
+            .flatten()
+            .filter_map(|backtick| backtick.held.then_some(backtick.index))
+            .collect()
     }
 
     fn past_orphan_in_strong(
@@ -883,7 +909,7 @@ impl<'a> Pairing<'a> {
                 .shown(index, Side::First)
                 .expect("text shows a character");
             if matches!(self.cells[index], Cell::Held { .. }) && shown.is('`') {
-                let found = backtick_runs(self.cells, &self.escaped, index, to, |runs| {
+                let found = backtick_runs(self.cells, &self.escaped, index, to, false, |runs| {
                     runs.len() > 1 && runs[runs.len() - 1].len() == runs[0].len()
                 });
                 let run = &found[0];
@@ -984,7 +1010,7 @@ impl<'a> Pairing<'a> {
                         .is_some_and(|before| matches!(cells[before], Cell::Delimiter(_)))
                         || matches!(cells.get(index + 1), Some(Cell::Delimiter(_))))
             };
-            let blocking: Vec<usize> = (0..cells.len())
+            let mut blocking: Vec<usize> = (0..cells.len())
                 .filter(|&index| {
                     let Cell::Held { character, .. } = cells[index] else {
                         return false;
@@ -1006,6 +1032,9 @@ impl<'a> Pairing<'a> {
                     .is_some()
                 })
                 .collect();
+            if blocking.is_empty() && !stranded.is_empty() {
+                blocking = self.backticks_hiding_loose();
+            }
             for &index in &blocking {
                 self.escape_run(index);
             }

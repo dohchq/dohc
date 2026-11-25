@@ -1202,6 +1202,21 @@ const RICHDOC_PROJECTION_CASES = [
             ["c", { strike: {} }],
           ]),
         ]),
+        paragraph([
+          xmlRuns([
+            ["don`t", { italic: {}, underline: {} }],
+            [" ", { underline: {} }],
+            ["run "],
+            ["ls", { code: {} }],
+          ]),
+        ]),
+        paragraph([
+          xmlRuns([["don`t", { italic: {}, underline: {} }], [" run "], ["ls", { code: {} }]]),
+        ]),
+        paragraph([xmlRuns([["`", { bold: {}, underline: {} }], ["x", { code: {} }]])]),
+        paragraph([
+          xmlRuns([["\\", { code: {} }], ["`a", { italic: {}, underline: {} }], ["x", { code: {} }]]),
+        ]),
       ]),
   },
   {

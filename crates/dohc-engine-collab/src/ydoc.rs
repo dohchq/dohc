@@ -10828,6 +10828,38 @@ mod projection_tests {
                 "a\\\\**b**\n",
             ),
             (
+                vec![
+                    ("don`t", marks(&["italic", "underline"])),
+                    (" ", marks(&["underline"])),
+                    ("run ", plain()),
+                    ("ls", marks(&["code"])),
+                ],
+                "*++don&#96;t++* run `ls`\n",
+            ),
+            (
+                vec![
+                    ("don`t", marks(&["italic", "underline"])),
+                    (" run ", plain()),
+                    ("ls", marks(&["code"])),
+                ],
+                "*++don&#96;t++* run `ls`\n",
+            ),
+            (
+                vec![
+                    ("`", marks(&["bold", "underline"])),
+                    ("x", marks(&["code"])),
+                ],
+                "**++&#96;++**`x`\n",
+            ),
+            (
+                vec![
+                    ("\\", marks(&["code"])),
+                    ("`a", marks(&["italic", "underline"])),
+                    ("x", marks(&["code"])),
+                ],
+                "`\\`*++`a++*`x`\n",
+            ),
+            (
                 vec![("b", marks(&["bold"])), (" a\\*b*", plain())],
                 "**b** a\\\\&#42;b&#42;\n",
             ),

@@ -198,6 +198,7 @@ function backtickRuns(
   escaped: Set<number>,
   from: number,
   to: number,
+  masking = false,
   until: (found: Backtick[][]) => boolean = () => false,
 ): Backtick[][] {
   const found: Backtick[][] = [];
@@ -213,9 +214,10 @@ function backtickRuns(
       if (cell.character === "`" && !escaped.has(index)) run.push({ index, held: true });
       else if (end()) return found;
     } else if (cell.kind === "opaque") {
-      const pieces = cell.written.startsWith("`")
-        ? Array.from(cell.written)
-        : (cell.written.match(/\\[!-/:-@[-`{-~]|[\s\S]/gu) ?? []);
+      const pieces =
+        cell.written.startsWith("`") && !masking
+          ? Array.from(cell.written)
+          : (cell.written.match(/\\[!-/:-@[-`{-~]|[\s\S]/gu) ?? []);
       for (const piece of pieces) {
         if (piece === "`") run.push({ index, held: false });
         else if (end()) return found;
@@ -287,15 +289,21 @@ function escapePairs(cells: Cell[], escaped: Set<number>): boolean | undefined {
   };
   const consumed = new Set<number>();
 
-  const maskCodeSpans = (from: number, to: number): Set<number> => {
-    const hidden = new Set<number>();
-    const runs = backtickRuns(cells, escaped, from, to);
+  const codeSpans = (from: number, to: number): Backtick[][] => {
+    const runs = backtickRuns(cells, escaped, from, to, true);
+    const spans: Backtick[][] = [];
     for (let at = 0; at + 1 < runs.length; at += 1) {
       if (runs[at]!.length !== runs[at + 1]!.length) continue;
-      for (let index = runs[at]![0]!.index; index <= runs[at + 1]!.at(-1)!.index; index += 1) {
-        hidden.add(index);
-      }
+      spans.push([...runs[at]!, ...runs[at + 1]!]);
       at += 1;
+    }
+    return spans;
+  };
+
+  const maskCodeSpans = (from: number, to: number): Set<number> => {
+    const hidden = new Set<number>();
+    for (const span of codeSpans(from, to)) {
+      for (let index = span[0]!.index; index <= span.at(-1)!.index; index += 1) hidden.add(index);
     }
     return hidden;
   };
@@ -476,6 +484,7 @@ function escapePairs(cells: Cell[], escaped: Set<number>): boolean | undefined {
           escaped,
           index,
           to,
+          false,
           (runs) => runs.length > 1 && runs.at(-1)!.length === runs[0]!.length,
         );
         const run = found[0]!;
@@ -506,6 +515,19 @@ function escapePairs(cells: Cell[], escaped: Set<number>): boolean | undefined {
       if (last !== "_") before = last;
       index += 1;
     }
+  };
+
+  const backticksHidingLoose = (): number[] => {
+    const looseBefore = [0];
+    cells.forEach((cell, index) => {
+      const loose = cell.kind === "delimiter" && !consumed.has(index);
+      looseBefore.push(looseBefore[index]! + (loose ? 1 : 0));
+    });
+    return codeSpans(0, cells.length).flatMap((span) =>
+      looseBefore[span.at(-1)!.index]! > looseBefore[span[0]!.index + 1]!
+        ? span.flatMap(({ index, held }) => (held ? [index] : []))
+        : [],
+    );
   };
 
   const escapeRun = (index: number): void => {
@@ -554,6 +576,7 @@ function escapePairs(cells: Cell[], escaped: Set<number>): boolean | undefined {
         );
         return kind === undefined ? [] : [index];
       });
+      if (blocking.length === 0 && stranded.length > 0) blocking.push(...backticksHidingLoose());
       for (const index of blocking) escapeRun(index);
       if (blocking.length === 0) return stranded.length > 0 || broken;
     }

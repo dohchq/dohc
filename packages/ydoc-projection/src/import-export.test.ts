@@ -661,6 +661,31 @@ it.each([
     "**b** a \\\\`x`",
   ],
   ["a typed backslash before bold", [plain("a\\"), bold("b")], "a\\\\**b**"],
+  [
+    "a typed backtick in underline inside italic, then a space and code",
+    [
+      marked("don`t", "italic", "underline"),
+      marked(" ", "underline"),
+      plain("run "),
+      marked("ls", "code"),
+    ],
+    "*++don&#96;t++* run `ls`",
+  ],
+  [
+    "a typed backtick in underline inside italic, then code",
+    [marked("don`t", "italic", "underline"), plain(" run "), marked("ls", "code")],
+    "*++don&#96;t++* run `ls`",
+  ],
+  [
+    "a typed backtick in underline inside bold, then code",
+    [marked("`", "bold", "underline"), marked("x", "code")],
+    "**++&#96;++**`x`",
+  ],
+  [
+    "a typed backtick in underline inside italic, between code ending in a backslash and code",
+    [marked("\\", "code"), marked("`a", "italic", "underline"), marked("x", "code")],
+    "`\\`*++`a++*`x`",
+  ],
   ["a typed backslash before an asterisk", [bold("b"), plain(" a\\*b*")], "**b** a\\\\&#42;b&#42;"],
   ["a multiplication", [bold("b"), plain(" 2 * 3")], "**b** 2 * 3"],
   ["a name in snake case", [bold("b"), plain(" snake_case_name")], "**b** snake_case_name"],
