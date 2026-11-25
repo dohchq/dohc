@@ -1240,8 +1240,18 @@ it("follows relayStatesMore on live read-only recovery and retries after transie
   emitReadOnly();
   await waitFor(() => expect(manualRefreshes()).toBe(2));
   view.unmount();
+});
 
-  // Transient failure on live read-only refresh + unverified access check recovers on a later pull.
+it("retries live read-only access verification on a later pull after a transient failure", async () => {
+  const unchanged = {
+    ok: true as const,
+    status: "unchanged" as const,
+    changedPaths: 0,
+    excludedPaths: [],
+    unjournalablePaths: [],
+    refusedOps: 0,
+    refusedDetail: null,
+  };
   vi.useFakeTimers({ shouldAdvanceTime: true });
   try {
     const flakyRefresh = vi
@@ -1260,7 +1270,7 @@ it("follows relayStatesMore on live read-only recovery and retries after transie
       .mockResolvedValueOnce({ status: "unverified" as const })
       .mockResolvedValue({ status: "current" as const, access: "edit" as const });
     const flaky = makeLiveSharedEditorBridge(flakyRefresh, flakyCheck);
-    const second = renderShell(flaky.bridge, {
+    const view = renderShell(flaky.bridge, {
       ...WORKSPACE,
       shareView: { shareId: "share-1", granterEmail: "granter@dohc.test", access: "edit" },
     });
@@ -1276,7 +1286,7 @@ it("follows relayStatesMore on live read-only recovery and retries after transie
       await vi.advanceTimersByTimeAsync(30_000);
     });
     await waitFor(() => expect(flaky.openEngineYDocSession).toHaveBeenCalledTimes(2));
-    second.unmount();
+    view.unmount();
   } finally {
     vi.useRealTimers();
   }

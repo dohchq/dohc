@@ -408,7 +408,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
       !readOnlyRefresh.readOnly &&
       !!props.readOnly &&
       !props.accessEnded &&
-      isText;
+      kind === "markdown";
     readOnlyRefreshCount += becameReadOnly ? 1 : 0;
     readOnlyRefreshPending = becameReadOnly;
     setReadOnlyRefresh({
