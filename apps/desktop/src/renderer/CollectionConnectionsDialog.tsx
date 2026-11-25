@@ -3,11 +3,7 @@ import type { AddressedDatasetDescription } from "@dohc/cli/dataset";
 import { bridge } from "./bridge";
 import { boundAppStatusLabel } from "./CollectionMigrationReviewDialog";
 import { Overlay } from "./Overlay";
-import {
-  CONNECTIONS_SHOWN,
-  readCollectionConnections,
-  type CollectionConnections,
-} from "./collectionConnections";
+import { readCollectionConnections, type CollectionConnections } from "./collectionConnections";
 import { EmptyState, RetryRow, SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { useWorkspaceQuery } from "./workspace/useWorkspaceQuery";
@@ -16,6 +12,8 @@ import { useWorkspaceSession } from "./workspace/workspaceSession";
 export interface CollectionConnectionsDialogProps {
   workspaceId: string;
   datasets: readonly AddressedDatasetDescription[];
+  /** Document Collection folders Home lists. */
+  documentFolders: ReadonlySet<string>;
   /** Whether this viewer owns the workspace, and so can see which apps use its Collections. */
   owner: boolean;
   /** Home has more Collections than it has listed. */
@@ -26,16 +24,19 @@ export interface CollectionConnectionsDialogProps {
 /** Which apps and automations use each Collection this viewer can open. */
 export function CollectionConnectionsDialog(props: CollectionConnectionsDialogProps) {
   const { workspaceId, datasets, owner } = props;
+  const documentFolders = [...props.documentFolders].sort();
   const session = useWorkspaceSession();
   const query = useWorkspaceQuery(session, {
     key: JSON.stringify([
       workspaceId,
       owner,
       datasets.map((dataset) => [dataset.datasetId, dataset.datasetPath]),
+      documentFolders,
     ]),
     load: (signal) =>
       readCollectionConnections(
         datasets,
+        documentFolders,
         {
           ...(owner
             ? {
@@ -60,7 +61,6 @@ export function CollectionConnectionsDialog(props: CollectionConnectionsDialogPr
   });
   const groups = query.value;
   const failed = groups?.filter((group) => group.failed).length ?? 0;
-  const listed = datasets.filter((dataset) => dataset.datasetPath !== null && !dataset.archived);
   return (
     <Overlay
       onClose={props.onClose}
@@ -96,12 +96,11 @@ export function CollectionConnectionsDialog(props: CollectionConnectionsDialogPr
             </RetryRow>
           )}
           {groups.map((group) => (
-            <Group key={group.datasetId} group={group} />
+            <Group key={group.key} group={group} />
           ))}
-          {(props.more || listed.length > CONNECTIONS_SHOWN) && (
+          {props.more && (
             <p className="m-0 text-[12px] text-muted">
-              Shows the first {Math.min(listed.length, CONNECTIONS_SHOWN)} Collections. Load more on
-              Home to see others.
+              Shows the Collections Home has loaded. Load more on Home to see others.
             </p>
           )}
         </div>
@@ -132,11 +131,7 @@ function Group({ group }: { group: CollectionConnections }) {
                   {app.appRoot.slice(app.appRoot.lastIndexOf("/") + 1)}
                 </span>
                 {app.alias && <span className="truncate text-muted">as {app.alias}</span>}
-                {app.writes !== null && (
-                  <span className="shrink-0 text-muted">
-                    {app.writes ? "Reads and writes" : "Reads"}
-                  </span>
-                )}
+                {app.access && <span className="shrink-0 text-muted">{app.access}</span>}
                 {app.scope === "link" && <span className="shrink-0 text-muted">Share link</span>}
               </span>
               {status && (

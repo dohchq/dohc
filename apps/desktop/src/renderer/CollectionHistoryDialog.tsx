@@ -256,10 +256,6 @@ function History(props: CollectionHistoryDialogProps) {
             <details className="mt-3">
               <summary className="cursor-pointer text-[12px] text-muted">Technical details</summary>
               <dl className="mb-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-[12px]">
-                <dt className="text-muted">Caller reference</dt>
-                <dd className="m-0 break-all font-mono">
-                  {entry.callerReference ?? "Not recorded"}
-                </dd>
                 <dt className="text-muted">Approved rules</dt>
                 <dd className="m-0 break-all font-mono">{entry.approvedRevisionHash}</dd>
                 <dt className="text-muted">Change size</dt>

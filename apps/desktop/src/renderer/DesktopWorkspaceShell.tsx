@@ -7894,7 +7894,9 @@ function WorkspaceShell(props: {
               : undefined
           }
           onShowConnections={
-            workspaceIsReady && collectionsListed && datasets.length > 0
+            workspaceIsReady &&
+            collectionsListed &&
+            (datasets.length > 0 || collectionFolders.size > 0)
               ? onShowConnections
               : undefined
           }
@@ -10427,6 +10429,7 @@ function WorkspaceShell(props: {
                           <CollectionConnectionsDialog
                             workspaceId={workspaceId}
                             datasets={datasets}
+                            documentFolders={collectionFolders}
                             owner={!shareView}
                             more={!!nextDataset}
                             onClose={() => setConnectionsWorkspaceId(null)}

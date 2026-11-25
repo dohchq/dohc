@@ -317,7 +317,8 @@ describe("CollectionHistoryDialog", () => {
       />,
     );
     await screen.findByText("3");
-    expect(screen.getAllByText("Caller reference")).toHaveLength(2);
+    expect(screen.getAllByText("Approved rules")).toHaveLength(2);
+    expect(screen.queryByText("a".repeat(64))).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Older actions" }));
     await waitFor(() => expect(onLoad).toHaveBeenCalledTimes(2));
     expect(onLoad.mock.calls[1]![0]).toMatchObject({ datasetId, beforeRevision: 2, limit: 50 });

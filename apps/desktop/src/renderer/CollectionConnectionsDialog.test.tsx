@@ -37,6 +37,7 @@ function mount(owner: boolean) {
       <CollectionConnectionsDialog
         workspaceId="w"
         datasets={[roadmap]}
+        documentFolders={new Set()}
         owner={owner}
         more={false}
         onClose={() => {}}
@@ -55,7 +56,7 @@ describe("CollectionConnectionsDialog", () => {
   it("shows the owner each app with what it does and whether it needs review", async () => {
     const { dataset } = mount(true);
     expect(await screen.findByText("roadmap-pm")).toBeTruthy();
-    expect(screen.getByText("Reads and writes")).toBeTruthy();
+    expect(screen.getByText("Writes")).toBeTruthy();
     expect(screen.getByText("Needs approval again")).toBeTruthy();
     expect(dataset).toHaveBeenCalledWith(
       expect.objectContaining({ action: "permissions", expectedDatasetId: "roadmap" }),
