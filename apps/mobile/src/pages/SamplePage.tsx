@@ -456,9 +456,4 @@ export function SamplePage() {
   );
 }
 
-const styles = {
-  ...pageStyles,
-  ...StyleSheet.create({
-    probe: { position: "absolute", width: 1, height: 1, color: "transparent" },
-  }),
-};
+const styles = pageStyles;

@@ -128,6 +128,7 @@ export function Strip({
 }
 
 export const pageStyles = StyleSheet.create({
+  probe: { position: "absolute", width: 1, height: 1, color: "transparent" },
   screen: { flex: 1 },
   web: { flex: 1 },
   // Where the page's text lands: the web view's 16 pt inset, under the icon's top margin.

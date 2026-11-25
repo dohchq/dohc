@@ -4,7 +4,7 @@ import { chatWords } from "@dohc/interface-words/notices";
 import { DarkTheme, DefaultTheme, Stack, ThemeProvider, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useMemo, useState } from "react";
-import { Platform, StyleSheet, Text, useColorScheme } from "react-native";
+import { Platform, Text, useColorScheme } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { AccountGate, AccountProvider } from "../src/account/AccountProvider";
@@ -14,6 +14,7 @@ import { ChoiceSheetHost } from "../src/ChoiceSheet";
 import { sampleBuild } from "../src/sampleBuild";
 import { editorPool } from "../modules/editor-pool";
 import { editorHtmlUri } from "../src/pages/editorFile";
+import { pageStyles } from "../src/pages/pageParts";
 import { WarmEditor } from "../src/pages/WarmEditor";
 import { useTheme } from "../src/theme";
 
@@ -141,9 +142,5 @@ function SpareEditor() {
       void editorPool?.keepSpare(false);
     };
   }, []);
-  return ready ? <Text style={styles.probe}>Editor ready</Text> : null;
+  return ready ? <Text style={pageStyles.probe}>Editor ready</Text> : null;
 }
-
-const styles = StyleSheet.create({
-  probe: { position: "absolute", width: 1, height: 1, color: "transparent" },
-});
