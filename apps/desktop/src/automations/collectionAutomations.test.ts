@@ -3514,7 +3514,16 @@ describe("Collection automations that a Group message starts", () => {
       executor.relayAnswered();
       await promptly(relay.reading);
       expect(relay.asked).toEqual([3, 3]);
+      await promptly(Promise.all([executor.resyncFileObservation(), executor.open()]));
+      expect(relay.asked).toEqual([3, 3]);
       expect(changes.slice(beforeAnswer).filter((change) => change !== "watch Groups")).toEqual([]);
+      expect(subscribed(w)).toBe(false);
+
+      relay.answer();
+      await promptly(w.until(() => subscribed(w)));
+      expect(relay.asked).toEqual([3, 3]);
+      if (kind === "reach verdicts")
+        expect(await w.baseStore.readReachVerdicts()).toMatchObject({ pending: null, taken: 3 });
       await executor.dispose();
       expect(w.errors).toHaveLength(1);
     });
