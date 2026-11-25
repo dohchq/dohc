@@ -249,8 +249,16 @@ Source-backed web content living in the workspace, from a static page to a dynam
 _Avoid_: site, dashboard, artifact
 
 **Publication**:
-An immutable, owner-approved bundle of one app revision. Authority comes from the publication, never from the app's source or manifest alone.
-_Avoid_: deploy, build (for the approved object)
+An immutable, owner-approved bundle of one app revision shared to a Share link or to the Workspace. Authority comes from the publication, never from the app's source or manifest alone.
+_Avoid_: deploy, build (for the approved object), member app
+
+**Personal app**:
+An app a person runs locally on their own computer against Collections they already reach, never shared with others.
+_Avoid_: private publication, local publication
+
+**Member app**:
+An immutable app bundle and source that a Member or Admin shares inside the workspace, capped by both its author's and each viewer's reach and requiring each viewer to review its permissions before opening it.
+_Avoid_: member publication, team plugin, community app
 
 **App domain**:
 The domain that serves app launches, on a different registrable domain from the server's share pages. Each launch gets a random subdomain. With the domain on the Public Suffix List, browsers treat every subdomain as its own site and refuse cookies set for the shared parent, so one app cannot set cookies another app reads.
