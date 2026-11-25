@@ -119,6 +119,7 @@ describe("DateField", () => {
         </Field>
         <output>{value || "none"}</output>
         <Button onClick={() => setValue("2026-03-01")}>Reset</Button>
+        <Button onClick={() => setValue("")}>Clear</Button>
       </form>
     );
   }
@@ -160,6 +161,14 @@ describe("DateField", () => {
     expect(field().value).toBe("2026-03-01");
     fireEvent.keyDown(field(), { key: "ArrowDown" });
     expect(stored()).toBe("2026-02-28");
+  });
+
+  it("shows the date the app loads and clears", () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+    expect(field().value).toBe("2026-03-01");
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    expect(field().value).toBe("");
   });
 
   it("leaves the date alone on Shift+ArrowUp and in a read-only field", () => {

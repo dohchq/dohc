@@ -507,6 +507,7 @@ export function DateField({
   if (value !== seen) {
     setSeen(value);
     if (value !== sent) setText(value);
+    setSent(value);
   }
   const problem = dateProblem(text, min, max);
   useLayoutEffect(() => field.current?.setCustomValidity(problem ?? ""), [problem]);
