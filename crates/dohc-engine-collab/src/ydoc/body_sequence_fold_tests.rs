@@ -212,3 +212,41 @@ fn a_fold_of_a_long_note_does_work_and_writes_bytes_in_proportion_to_its_change(
         assert!(over.is_empty(), "{}", over.join("\n"));
     });
 }
+
+#[test]
+fn a_fold_keeps_the_letters_a_peer_is_typing_into() {
+    let note = "one\n\ntwo\n\nthree\n";
+    reading_body_sequence_here(|| {
+        for (folded, typed, merged) in [
+            (
+                "two\n\nthree\n",
+                "one\n\ntwoX\n\nthree\n",
+                "twoX\n\nthree\n",
+            ),
+            (
+                "one\n\nTWO\n\nthree\n",
+                "one\n\ntwo\n\nthreeX\n",
+                "one\n\nTWO\n\nthreeX\n",
+            ),
+            (
+                "one\n\n- two\n\nthree\n",
+                "one\n\ntwo\n\nXthree\n",
+                "one\n\n- two\n\nXthree\n",
+            ),
+        ] {
+            let base = seeded(2, note);
+            let (ours, theirs) = (copy(&base), copy(&base));
+            let ours_update = ours
+                .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, folded)
+                .expect("our fold");
+            let theirs_update = theirs
+                .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, typed)
+                .expect("their typing");
+            ours.apply(&theirs_update).unwrap();
+            theirs.apply(&ours_update).unwrap();
+            for doc in [&ours, &theirs] {
+                assert_eq!(doc.project(ContentKind::Richdoc).unwrap().content, merged);
+            }
+        }
+    });
+}
