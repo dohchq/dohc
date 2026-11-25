@@ -8,7 +8,11 @@ export interface HudProps {
   readonly replayOpen: boolean;
   readonly yourMove: boolean;
   readonly viewerSeat: 1 | 2 | null;
-  readonly seatSwitch: { readonly seats: readonly SeatCredential[]; readonly pressed: 1 | 2 | null } | null;
+  readonly seatSwitch: {
+    readonly seats: readonly SeatCredential[];
+    readonly pressed: 1 | 2 | null;
+    readonly disabled: boolean;
+  } | null;
   readonly canInvite: boolean;
   readonly canResign: boolean;
   readonly resignDisabled: boolean;
@@ -87,6 +91,7 @@ export function Hud({
                 id={`seat-switch-${seat}`}
                 className="hc-seat"
                 aria-pressed={seatSwitch.pressed === seat}
+                disabled={seatSwitch.disabled}
                 title={`View as ${factionName(seat)} (${seat})`}
                 onClick={() => onSwitchSeat(seat)}
               >

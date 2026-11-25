@@ -503,8 +503,12 @@ html body {
   cursor: pointer;
 }
 
-.hc-seat:hover {
+.hc-seat:hover:not(:disabled) {
   color: var(--hc-ink);
+}
+
+.hc-seat:disabled {
+  cursor: default;
 }
 
 .hc-seat-swap {

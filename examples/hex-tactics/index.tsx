@@ -209,7 +209,9 @@ export function HexClashApp() {
     (spectatorMode ? boardData.viewer.spectator : boardData.viewer.seat === (activeSeatCredential?.seat ?? null))
       ? boardData
       : null;
-  const canSwitchSeat = isPassAndPlay && !replayOpen && board?.game.status !== "finished" && !submitMove.pending && !submitMove.uncertain;
+  const showSeatSwitch = isPassAndPlay && !replayOpen && board?.game.status !== "finished";
+  const seatSwitchLocked = submitMove.pending || submitMove.uncertain;
+  const canSwitchSeat = showSeatSwitch && !seatSwitchLocked;
   const reloadSeatOne = seatOneQuery.reload;
   const reloadSeatTwo = seatTwoQuery.reload;
   const reloadSpectator = spectatorQuery.reload;
@@ -334,11 +336,13 @@ export function HexClashApp() {
   }, [banner]);
 
   const handoff = activeGameId ? (handoffs[activeGameId] ?? null) : null;
-  const handoffActive = handoff !== null && board?.game.status !== "finished" && !replayOpen;
+  const handoffActive =
+    handoff !== null && !spectatorMode && activeSeatCredential?.seat === handoff.seat && board?.game.status !== "finished" && !replayOpen;
   const handoffReady = handoffActive && board !== null && board.viewer.seat === handoff.seat && board.game.turnNumber >= handoff.turn;
+  const forgetHandoff = (gameId: string) => setHandoffs(({ [gameId]: _forgotten, ...rest }) => rest);
   const dismissHandoff = () => {
     dispatchSelection({ type: "hover", hex: null });
-    setHandoffs(({ [activeGameId ?? ""]: _dismissed, ...rest }) => rest);
+    if (activeGameId) forgetHandoff(activeGameId);
   };
 
   const shownLogTurn = logPreviewTurn ?? logPinnedTurn;
@@ -423,6 +427,8 @@ export function HexClashApp() {
         return current ? { ...prev, [game.id]: { ...current, activeSeat: game.activeSeat } } : prev;
       });
       setHandoffs((prev) => ({ ...prev, [game.id]: { seat: game.activeSeat, turn: game.turnNumber } }));
+    } else if (game.status === "finished") {
+      forgetHandoff(game.id);
     }
     if (activeGameIdRef.current === game.id) {
       resetBoardView();
@@ -463,6 +469,7 @@ export function HexClashApp() {
         ...prev,
         [parsed.gameId]: withSeat(prev[parsed.gameId], parsed.gameId, state.game.joinCode ?? null, restored, true),
       }));
+      forgetHandoff(parsed.gameId);
       enterGame(parsed.gameId, false);
       showToast(`Back in ${state.game.title} as ${restored.name}`);
       reloadGames();
@@ -657,8 +664,8 @@ export function HexClashApp() {
             yourMove={isMyTurn && !isPassAndPlay}
             viewerSeat={viewerSeat}
             seatSwitch={
-              canSwitchSeat && activeSession
-                ? { seats: activeSession.seats, pressed: replayOpen || spectatorMode ? null : activeSession.activeSeat }
+              showSeatSwitch && activeSession
+                ? { seats: activeSession.seats, pressed: spectatorMode ? null : activeSession.activeSeat, disabled: seatSwitchLocked }
                 : null
             }
             canInvite={Boolean(activeSeatKey) && board?.game.status !== "finished"}
