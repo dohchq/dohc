@@ -216,18 +216,19 @@ function folds() {
       "abXcd\n",
     ),
     ...[
-      ["the line between them edited", "> a\n\nmiddle!\n\n> b\n"],
-      ["the second one made a callout", "> a\n\nmiddle\n\n> [!note]\n> b\n"],
+      ["the line between them edited", "- a\n\nmiddle!\n\n- b\n"],
+      ["the second one made an ordered list", "- a\n\nmiddle\n\n1. b\n"],
     ].map(([how, file]) =>
       fold(
-        `one id on two quotes, ${how!}`,
+        `one id on two lists, ${how!}`,
         byHand((note) => {
-          note.container("q", "blockquote");
-          note.line("paragraph", ["q"]);
+          note.container("l", "bulletList");
+          note.container("i", "listItem");
+          note.line("paragraph", ["l", "i"]);
           note.text("a");
           note.line("paragraph", []);
           note.text("middle");
-          note.line("paragraph", ["q"]);
+          note.line("paragraph", ["l", "i"]);
           note.text("b");
         }),
         file!,

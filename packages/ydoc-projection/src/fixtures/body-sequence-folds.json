@@ -4364,20 +4364,28 @@
     }
   },
   {
-    "name": "one id on two quotes, the line between them edited",
-    "before": "AREBACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AigBCmNvbnRhaW5lcnMBcQF3CmJsb2NrcXVvdGUoAQpjb250YWluZXJzDXEuY2FsbG91dFR5cGUBdwRub3RlKAEKY29udGFpbmVycwdxLnRpdGxlAXcAKAEKY29udGFpbmVycwZxLmZvbGQBdwAHAQhzZXF1ZW5jZQMFYmxvY2soAAEFBHR5cGUBdwlwYXJhZ3JhcGgoAAEFBHBhdGgBdQF3AXGEAQUBYYcBCAMFYmxvY2soAAEJBHR5cGUBdwlwYXJhZ3JhcGgoAAEJBHBhdGgBdQCEAQkGbWlkZGxlhwERAwVibG9jaygAARIEdHlwZQF3CXBhcmFncmFwaCgAARIEcGF0aAF1AXcBcYQBEgFiAA==",
+    "name": "one id on two lists, the line between them edited",
+    "before": "ARMBACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AigBCmNvbnRhaW5lcnMBbAF3CmJ1bGxldExpc3QoAQpjb250YWluZXJzB2wubG9vc2UBfigBCmNvbnRhaW5lcnMHbC5zdGFydAF9ASgBCmNvbnRhaW5lcnMGbC50eXBlAX4oAQpjb250YWluZXJzAWkBdwhsaXN0SXRlbSgBCmNvbnRhaW5lcnMJaS5jaGVja2VkAXkHAQhzZXF1ZW5jZQMFYmxvY2soAAEHBHR5cGUBdwlwYXJhZ3JhcGgoAAEHBHBhdGgBdQJ3AWx3AWmEAQcBYYcBCgMFYmxvY2soAAELBHR5cGUBdwlwYXJhZ3JhcGgoAAELBHBhdGgBdQCEAQsGbWlkZGxlhwETAwVibG9jaygAARQEdHlwZQF3CXBhcmFncmFwaCgAARQEcGF0aAF1AncBbHcBaYQBFAFiAA==",
     "target": {
       "type": "doc",
       "content": [
         {
-          "type": "blockquote",
+          "type": "bulletList",
+          "attrs": {
+            "loose": null
+          },
           "content": [
             {
-              "type": "paragraph",
+              "type": "listItem",
               "content": [
                 {
-                  "type": "text",
-                  "text": "a"
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a"
+                    }
+                  ]
                 }
               ]
             }
@@ -4393,14 +4401,22 @@
           ]
         },
         {
-          "type": "blockquote",
+          "type": "bulletList",
+          "attrs": {
+            "loose": null
+          },
           "content": [
             {
-              "type": "paragraph",
+              "type": "listItem",
               "content": [
                 {
-                  "type": "text",
-                  "text": "b"
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "b"
+                    }
+                  ]
                 }
               ]
             }
@@ -4408,20 +4424,28 @@
         }
       ]
     },
-    "file": "> a\n\nmiddle!\n\n> b\n",
+    "file": "- a\n\nmiddle!\n\n- b\n",
     "after": {
       "document": {
         "type": "doc",
         "content": [
           {
-            "type": "blockquote",
+            "type": "bulletList",
+            "attrs": {
+              "loose": null
+            },
             "content": [
               {
-                "type": "paragraph",
+                "type": "listItem",
                 "content": [
                   {
-                    "type": "text",
-                    "text": "a"
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "a"
+                      }
+                    ]
                   }
                 ]
               }
@@ -4437,14 +4461,22 @@
             ]
           },
           {
-            "type": "blockquote",
+            "type": "bulletList",
+            "attrs": {
+              "loose": null
+            },
             "content": [
               {
-                "type": "paragraph",
+                "type": "listItem",
                 "content": [
                   {
-                    "type": "text",
-                    "text": "b"
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "b"
+                      }
+                    ]
                   }
                 ]
               }
@@ -4452,24 +4484,32 @@
           }
         ]
       },
-      "markdown": "> a\n\nmiddle!\n\n> b\n"
+      "markdown": "- a\n\nmiddle!\n\n- b\n"
     }
   },
   {
-    "name": "one id on two quotes, the second one made a callout",
-    "before": "AREBACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AigBCmNvbnRhaW5lcnMBcQF3CmJsb2NrcXVvdGUoAQpjb250YWluZXJzDXEuY2FsbG91dFR5cGUBdwRub3RlKAEKY29udGFpbmVycwdxLnRpdGxlAXcAKAEKY29udGFpbmVycwZxLmZvbGQBdwAHAQhzZXF1ZW5jZQMFYmxvY2soAAEFBHR5cGUBdwlwYXJhZ3JhcGgoAAEFBHBhdGgBdQF3AXGEAQUBYYcBCAMFYmxvY2soAAEJBHR5cGUBdwlwYXJhZ3JhcGgoAAEJBHBhdGgBdQCEAQkGbWlkZGxlhwERAwVibG9jaygAARIEdHlwZQF3CXBhcmFncmFwaCgAARIEcGF0aAF1AXcBcYQBEgFiAA==",
+    "name": "one id on two lists, the second one made an ordered list",
+    "before": "ARMBACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AigBCmNvbnRhaW5lcnMBbAF3CmJ1bGxldExpc3QoAQpjb250YWluZXJzB2wubG9vc2UBfigBCmNvbnRhaW5lcnMHbC5zdGFydAF9ASgBCmNvbnRhaW5lcnMGbC50eXBlAX4oAQpjb250YWluZXJzAWkBdwhsaXN0SXRlbSgBCmNvbnRhaW5lcnMJaS5jaGVja2VkAXkHAQhzZXF1ZW5jZQMFYmxvY2soAAEHBHR5cGUBdwlwYXJhZ3JhcGgoAAEHBHBhdGgBdQJ3AWx3AWmEAQcBYYcBCgMFYmxvY2soAAELBHR5cGUBdwlwYXJhZ3JhcGgoAAELBHBhdGgBdQCEAQsGbWlkZGxlhwETAwVibG9jaygAARQEdHlwZQF3CXBhcmFncmFwaCgAARQEcGF0aAF1AncBbHcBaYQBFAFiAA==",
     "target": {
       "type": "doc",
       "content": [
         {
-          "type": "blockquote",
+          "type": "bulletList",
+          "attrs": {
+            "loose": null
+          },
           "content": [
             {
-              "type": "paragraph",
+              "type": "listItem",
               "content": [
                 {
-                  "type": "text",
-                  "text": "a"
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a"
+                    }
+                  ]
                 }
               ]
             }
@@ -4485,19 +4525,24 @@
           ]
         },
         {
-          "type": "callout",
+          "type": "orderedList",
           "attrs": {
-            "calloutType": "note",
-            "title": "",
-            "fold": ""
+            "start": 1,
+            "type": null,
+            "loose": null
           },
           "content": [
             {
-              "type": "paragraph",
+              "type": "listItem",
               "content": [
                 {
-                  "type": "text",
-                  "text": "b"
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "b"
+                    }
+                  ]
                 }
               ]
             }
@@ -4505,20 +4550,28 @@
         }
       ]
     },
-    "file": "> a\n\nmiddle\n\n> [!note]\n> b\n",
+    "file": "- a\n\nmiddle\n\n1. b\n",
     "after": {
       "document": {
         "type": "doc",
         "content": [
           {
-            "type": "blockquote",
+            "type": "bulletList",
+            "attrs": {
+              "loose": null
+            },
             "content": [
               {
-                "type": "paragraph",
+                "type": "listItem",
                 "content": [
                   {
-                    "type": "text",
-                    "text": "a"
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "a"
+                      }
+                    ]
                   }
                 ]
               }
@@ -4534,19 +4587,24 @@
             ]
           },
           {
-            "type": "callout",
+            "type": "orderedList",
             "attrs": {
-              "calloutType": "note",
-              "title": "",
-              "fold": ""
+              "start": 1,
+              "type": null,
+              "loose": null
             },
             "content": [
               {
-                "type": "paragraph",
+                "type": "listItem",
                 "content": [
                   {
-                    "type": "text",
-                    "text": "b"
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "b"
+                      }
+                    ]
                   }
                 ]
               }
@@ -4554,7 +4612,7 @@
           }
         ]
       },
-      "markdown": "> a\n\nmiddle\n\n> [!note]\n> b\n"
+      "markdown": "- a\n\nmiddle\n\n1. b\n"
     }
   },
   {

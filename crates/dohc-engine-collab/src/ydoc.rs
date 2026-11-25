@@ -904,11 +904,16 @@ impl Ydoc {
         canonical_projection: &str,
         reads_alike: bool,
     ) -> bool {
+        let format_two = self.body_sequence_roots().is_some();
         [MarkdownReading::Source, MarkdownReading::Projection]
             .into_iter()
             .chain((!reads_alike).then_some(MarkdownReading::Successor))
             .any(|reading| {
                 let staged = Ydoc::wire();
+                if format_two {
+                    let meta = staged.doc.get_or_insert_map(ROOT_META);
+                    meta.insert(&mut staged.doc.transact_mut(), "schemaVersion", 2.0);
+                }
                 if staged
                     .rewrite_content_to_markdown_checked::<false>(
                         ContentKind::Richdoc,

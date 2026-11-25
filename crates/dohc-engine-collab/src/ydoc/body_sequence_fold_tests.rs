@@ -84,7 +84,9 @@ fn an_outside_save_format_two_cannot_hold_keeps_its_file_as_the_source() {
             .expect("the source");
         assert_eq!(doc.note_schema_version(), 2);
         assert_eq!(
-            doc.preserved_markdown_source(&projection).as_deref(),
+            doc.settled_markdown_source(&projection, || Ok::<_, ()>(Some(file.to_owned())))
+                .unwrap()
+                .as_deref(),
             Some(file)
         );
     });
@@ -106,10 +108,12 @@ fn a_format_two_note_takes_new_frontmatter_without_a_new_body() {
 
 const LINES: usize = 10_000;
 
-fn long_note(letter: char) -> Vec<String> {
-    (0..LINES)
-        .map(|line| format!("{line:0>59}{letter}"))
-        .collect()
+fn numbered(line: usize) -> String {
+    format!("{line:0>59}a")
+}
+
+fn long_note(line: impl Fn(usize) -> String) -> Vec<String> {
+    (0..LINES).map(line).collect()
 }
 
 fn markdown(lines: &[String]) -> String {
@@ -117,7 +121,7 @@ fn markdown(lines: &[String]) -> String {
 }
 
 fn brake_cases() -> Vec<(&'static str, String)> {
-    let note = long_note('a');
+    let note = long_note(numbered);
     let edited = |edit: &dyn Fn(&mut Vec<String>)| {
         let mut lines = note.clone();
         edit(&mut lines);
@@ -144,7 +148,10 @@ fn brake_cases() -> Vec<(&'static str, String)> {
             "an edit at the last line",
             edited(&|lines| lines[LINES - 1].push('b')),
         ),
-        ("the whole file replaced", markdown(&long_note('z'))),
+        (
+            "the whole file replaced",
+            markdown(&long_note(|line| format!("{line:z<60}"))),
+        ),
     ]
 }
 
@@ -178,7 +185,7 @@ fn sequence_length(doc: &Ydoc) -> usize {
 #[test]
 fn a_fold_of_a_long_note_does_work_and_writes_bytes_in_proportion_to_its_change() {
     reading_body_sequence_here(|| {
-        let file = markdown(&long_note('a'));
+        let file = markdown(&long_note(numbered));
         let (one, two) = (seeded(1, &file), seeded(2, &file));
         let mut over = Vec::new();
         for (name, edited) in brake_cases() {
