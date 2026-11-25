@@ -10,7 +10,7 @@ import { createAccountOperationRoute } from "./accountOperationRoutes";
 import { createChatWakeWaits } from "./chatWakeRoutes";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { errorResponse } from "./errors";
-import { hashRelayExchangeKey } from "./linkSecurity";
+import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import type { LiveTicketScope } from "./liveBrowserContext";
 import { binding, scope } from "./liveTickets.test-helper";
 import { personalRouteFixture } from "./personalLiveDocumentRoutes.test-helper";
@@ -122,7 +122,14 @@ async function phone(options: { waitMs?: number } = {}) {
     feedWaits: createAccountFeedWaits(f.storage, hub),
     wakeWaits: createChatWakeWaits(f.storage, hub),
     phonePages: () => pages,
-    browser: { origin: SHARE_WEB, exchangeKeyHash: hashRelayExchangeKey(EXCHANGE_KEY) },
+    browser: {
+      origin: SHARE_WEB,
+      hasExchangeKey: (request) =>
+        verifyRelayExchangeKey(
+          request.headers.get("x-dohc-relay-exchange-key"),
+          hashRelayExchangeKey(EXCHANGE_KEY),
+        ),
+    },
   });
   /** The phone's openPage, as `user:session:kind`, answered with its status and body. */
   async function open(path: string, as = "owner-1:phone-1:phone") {

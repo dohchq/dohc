@@ -906,7 +906,7 @@ export function createSyncRelayHandler({
         phoneCollections: createPhoneCollections({ storage, host: datasetHost }),
         ...(phonePages ? { phonePages } : {}),
         ...(shareWebOrigin && relayExchangeKeyHash
-          ? { browser: { origin: shareWebOrigin, exchangeKeyHash: relayExchangeKeyHash } }
+          ? { browser: { origin: shareWebOrigin, hasExchangeKey: hasValidRelayExchangeKey } }
           : {}),
       })
     : undefined;

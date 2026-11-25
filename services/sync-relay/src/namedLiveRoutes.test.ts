@@ -40,6 +40,7 @@ import { createNamedFrameChanges, type NamedFrameNativeHost } from "./namedLiveF
 import { audience, binding, host, key, scope, seedLinkAgent } from "./liveTickets.test-helper.js";
 import type { LiveUpdateJournalCut } from "./storage/types.js";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import type { LiveAuthorContext } from "@dohc/live-session-contract";
 import { NAMED_LIVE_STOPPED, linkRefusalBody } from "@dohc/security-contract/link-refusal";
 
 import {
@@ -1228,7 +1229,7 @@ describe("an owner's phone", () => {
       return { browser, desktop };
     };
 
-    it("opens once per ticket that share-web forwards, in the owner's room, reading its sign-in uncached", async () => {
+    it("opens once per ticket that share-web forwards, on its own capture, reading its sign-in uncached", async () => {
       const join = vi.fn((captured: NamedFrameRoomHost) => captured);
       const f = await phoneFixture({ join } as unknown as LiveRooms);
       const { token } = await mintBrowser(f);
@@ -1237,7 +1238,7 @@ describe("an owner's phone", () => {
       expect(browser.ws.protocol).toBe("dohc-live-v1");
       await browser.until(() => browser.received.some((frame) => frame.kind === "welcome"));
       expect(f.readSessions).toHaveBeenCalledWith(["browser-session"]);
-      expect(join).toHaveBeenCalledOnce();
+      expect(join).not.toHaveBeenCalled();
       expect(await f.connect(token, "", browserHeaders).status).toBe(404);
     });
 
@@ -1335,6 +1336,115 @@ describe("an owner's phone", () => {
         }
       },
     );
+
+    it("stays open while share-web's gateway pings it, and closes once the pings stop", async () => {
+      phoneState.expiresAt = 8e12;
+      const routeLimits = { ...limits, idleTimeoutMs: 1000 };
+      const f = await fixture(routeLimits, false, undefined, true);
+      const browser = f.connect((await mintBrowser(f)).token, "", browserHeaders);
+      expect(await browser.status).toBe(101);
+      await browser.until(() => browser.received.some((frame) => frame.kind === "welcome"));
+      // The gateway pings every half idle period; these come faster, for three idle periods.
+      const opened = performance.now();
+      while (performance.now() - opened < 3 * routeLimits.idleTimeoutMs) {
+        expect(await pingOutcome(browser)).toBe("pong");
+        await new Promise((resolve) => setTimeout(resolve, routeLimits.idleTimeoutMs / 5));
+      }
+      await browser.closed;
+    });
+
+    // The note's room, as production runs it, beside the owner's desktop and browser.
+    const roomFixture = async () => {
+      let rooms: LiveRooms | undefined;
+      const f = await phoneFixture(
+        {
+          join: (captured: NamedFrameRoomHost, options?: { owner?: boolean }) =>
+            rooms!.join(captured, options),
+        } as unknown as LiveRooms,
+        true,
+      );
+      rooms = createLiveRooms({
+        storage: f.storage,
+        maxUpdateBytes: 1 << 20,
+        maxNoteBytes: 1 << 22,
+        maxAppliedBytes: 1 << 20,
+        saveEveryMs: 3_600_000,
+        log() {},
+        openSaver: async () =>
+          captureOwnerLiveFrameHost({
+            authenticatedUserId: "owner-1",
+            storage: f.storage,
+            native: f.native,
+            bounds: selfHostLiveProfile().namedLive.host,
+            validate: ({ retainStateUpdate: _retainStateUpdate, ...input }) =>
+              createLiveMarkdownJournalValidator(policy)(input),
+          }),
+      });
+      cleanups.push(async () => rooms!.close());
+      const browser = f.connect((await mintBrowser(f)).token, "", browserHeaders);
+      expect(await browser.status).toBe(101);
+      await openProductionSync(f, browser);
+      return { f, browser };
+    };
+    const paragraph = (text: string) => {
+      const doc = new Y.Doc(),
+        line = new Y.XmlElement("paragraph");
+      line.insert(0, [new Y.XmlText(text)]);
+      doc.getXmlFragment("body").insert(0, [line]);
+      return Y.encodeStateAsUpdate(doc);
+    };
+    const submit = (
+      f: Fixture,
+      socket: ReturnType<Fixture["connect"]>,
+      updateBytes: Uint8Array,
+      authorContext?: LiveAuthorContext,
+    ) => {
+      const encode = (frame: LiveFrame) => encodeLiveFrame(frame, f.frames.receive.maxFrameBytes);
+      socket.ws.send(
+        encode({
+          kind: "begin",
+          purpose: "submit-update",
+          deliveryId: "edit",
+          transferId: 2,
+          totalBytes: updateBytes.length,
+          digest: createHash("sha256").update(updateBytes).digest("hex"),
+          ...(authorContext ? { authorContext } : {}),
+        }),
+      );
+      socket.ws.send(encode({ kind: "chunk", transferId: 2, offset: 0, bytes: updateBytes }));
+    };
+
+    it("stays on its own capture with the note's room on, so another editor's unsaved edit never reaches it as a room row", async () => {
+      const { f, browser } = await roomFixture();
+      const desktop = f.connect("");
+      expect(await desktop.status).toBe(101);
+      await openProductionSync(f, desktop);
+      submit(f, desktop, paragraph("From the desktop"));
+      await desktop.until(() => desktop.received.some((frame) => frame.kind === "result"));
+      expect(desktop.received.find((frame) => frame.kind === "result")).toMatchObject({
+        result: "success",
+      });
+      // A ping answered after the desktop's edit was taken shows the browser had its chance to hear of it.
+      browser.ws.ping();
+      await once(browser.ws, "pong");
+      expect(
+        browser.received.filter((frame) => frame.kind === "begin" && frame.purpose === "room-row"),
+      ).toEqual([]);
+    });
+
+    it("refuses an edit from the browser that names an agent, with the note's room on", async () => {
+      const { f, browser } = await roomFixture();
+      submit(f, browser, paragraph("Written by a helper"), {
+        kind: "account",
+        accountId: "owner-1",
+        agent: { agentId: "helper", agentName: "Helper", depth: 0 },
+      });
+      await browser.until(() => browser.received.some((frame) => frame.kind === "result"));
+      expect(browser.received.find((frame) => frame.kind === "result")).toMatchObject({
+        result: "refused",
+        reason: "provenance-refused",
+      });
+    });
   });
 });
 

@@ -211,6 +211,9 @@ it("opens the owner's page through the relay's page open with only the cookie, o
   expect(sent.headers.get("x-dohc-relay-exchange-key")).toBe(exchangeKey);
   expect(sent.headers.has("authorization")).toBe(false);
   expect(await sent.json()).toEqual({ path: "trip/plan.md" });
+  // The relay opens every page the viewer offers, a .markdown file's too.
+  await c.handle(open("owner", {}, { workspaceId: "ws-1", path: "trip/plan.markdown" }));
+  expect(await c.fetchRelay.mock.calls[1]![0].json()).toEqual({ path: "trip/plan.markdown" });
 });
 
 it("answers the owner's preparing page, and keeps the relay's refusal reason", async () => {
@@ -243,12 +246,11 @@ it.each([
   },
 );
 
-it("refuses the relay's not-found, an expired ticket, and a malformed reason alike", async () => {
+it("refuses the relay's not-found, a failed open, and a malformed reason alike", async () => {
   for (const answer of [
     () => Response.json({ ok: false, code: "not_found" }, { status: 404 }),
     () => Response.json({ ok: false, code: "not_found" }, { status: 409 }),
-    () =>
-      Response.json({ ok: true, result: { ...ownerReady.result, expiresAtMs: Date.now() - 1 } }),
+    () => Response.json({ ok: false, result: ownerReady.result }),
     () => Response.json({ ok: true, result: { status: "refused", reason: "<script>" } }),
   ])
     expect((await client(answer).handle(open("owner"))).status).toBe(404);

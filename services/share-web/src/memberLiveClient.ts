@@ -1,9 +1,7 @@
 import { readBoundedJson } from "@dohc/service-http";
 import { parseLiveTicketToken } from "@dohc/live-session-contract/live-ticket";
-import {
-  parseLiveUpdateDigest,
-  parseLiveUpdateIdentifier,
-} from "@dohc/live-session-contract/live-update-admission";
+import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
+import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import { namedAccountCookie } from "./namedAccountCookie";
 import {
   parseNamedLiveBrowserClientLimits,
@@ -76,32 +74,6 @@ export function createMemberLiveClient(options: {
   const readyByCookie = new Map<string, number>();
   const answer = (body: unknown, status = 200) =>
     Response.json(body, { status, headers: { "cache-control": "private, no-store" } });
-  // The relay's page open answers the owner's browser as it answers the phone, with a ticket for the owner's socket.
-  const ownerAnswer = (result: unknown) => {
-    if (!result || typeof result !== "object" || Array.isArray(result)) return refusal();
-    const row = result as Record<string, unknown>;
-    if (row.status === "preparing") return answer({ preparing: true });
-    if (row.status === "refused")
-      return typeof row.reason === "string" && REFUSAL_CODE.test(row.reason)
-        ? answer({ ok: false, code: row.reason }, 409)
-        : refusal();
-    if (
-      row.status !== "ready" ||
-      typeof row.expiresAtMs !== "number" ||
-      row.expiresAtMs <= Date.now() ||
-      !row.editorLimits ||
-      typeof row.editorLimits !== "object"
-    )
-      return refusal();
-    parseLiveTicketToken(row.ticket);
-    return answer({
-      objectId: parseLiveUpdateIdentifier(row.objectId, "object ID"),
-      lineageClaimId: parseLiveUpdateDigest(row.lineageClaimId),
-      token: row.ticket,
-      limits: row.editorLimits,
-    });
-  };
-
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
     const ready = url.pathname === MEMBER_READY_PATH,
@@ -135,7 +107,8 @@ export function createMemberLiveClient(options: {
         )
           return refusal();
         const value = input as Record<string, unknown>;
-        if (typeof value.path !== "string" || !/\.md$/iu.test(value.path)) return refusal();
+        if (typeof value.path !== "string" || liveDocumentKindForPath(value.path) !== "richdoc")
+          return refusal();
         const body = JSON.stringify(
           owner
             ? { path: value.path }
@@ -197,7 +170,18 @@ export function createMemberLiveClient(options: {
         if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return refusal();
         const row = parsed as Record<string, unknown>,
           ticket = row.ticket as Record<string, unknown> | null;
-        if (owner) return ownerAnswer(row.ok === true ? row.result : null);
+        if (owner) {
+          // The relay's page open answers as it answers the phone. The page checks the ticket it carries.
+          const result = row.ok === true ? (row.result as Record<string, unknown> | null) : null;
+          if (result?.status === "preparing") return answer({ preparing: true });
+          if (result?.status === "refused")
+            return typeof result.reason === "string" && REFUSAL_CODE.test(result.reason)
+              ? answer({ ok: false, code: result.reason }, 409)
+              : refusal();
+          if (result?.status !== "ready") return refusal();
+          const { objectId, lineageClaimId, ticket: token, editorLimits: limits } = result;
+          return answer({ objectId, lineageClaimId, token, limits });
+        }
         if (
           row.kind !== "named" ||
           typeof row.discriminator !== "string" ||

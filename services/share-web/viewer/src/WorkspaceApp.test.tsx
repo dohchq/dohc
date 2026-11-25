@@ -2800,6 +2800,34 @@ describe("the owner's page", () => {
     expect(vi.mocked(memberPageReady)).not.toHaveBeenCalled();
   });
 
+  // `paused` is the relay's answer to the owner's open of a paused page (phonePages.test.ts).
+  it("tells the owner a page is paused", async () => {
+    server({ level: "edit", session: OWNER_SESSION });
+    vi.mocked(openMemberPage).mockResolvedValue({ kind: "refused", code: "paused" });
+    await render(OWNER);
+    await settle(() => container.querySelector("header + .page-band [role=status]") !== null);
+    expect(container.querySelector("header + .page-band [role=status]")?.textContent).toBe(
+      "Live editing is paused for this page. Resume it in dohc to edit here. You can still read it.",
+    );
+  });
+
+  it("leaves the page to read, with no toast or Try again, on a server that edits no pages live", async () => {
+    server({ level: "edit", session: OWNER_SESSION });
+    vi.mocked(openMemberPage).mockResolvedValue({
+      kind: "refused",
+      code: "live_hosting_unsupported",
+    });
+    await render(OWNER);
+    await settle(() => vi.mocked(openMemberPage).mock.calls.length === 1);
+    await settle(() => !container.querySelector(".named-document-status"));
+    expect(text()).toContain("Leave at nine.");
+    expect(container.querySelector(".workspace-toast")).toBeNull();
+    expect(container.querySelector("header + .page-band")?.textContent ?? "").toBe("");
+    expect(
+      [...container.querySelectorAll("button")].some((button) => button.textContent === "Try again"),
+    ).toBe(false);
+  });
+
   it("keeps opening the owner's page while the server prepares it, with no toast", async () => {
     server({ level: "edit", session: OWNER_SESSION });
     vi.mocked(openMemberPage).mockResolvedValue({ kind: "preparing" });

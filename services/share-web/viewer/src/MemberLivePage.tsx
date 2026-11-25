@@ -20,24 +20,25 @@ import type { LivePageTarget } from "./memberLive";
 export const LIVE_HOST_WAIT_REPORT_MS = 15_000;
 const READY_RETRY_MS = 1_000,
   READY_RETRY_MAX_MS = 30_000;
-const WAITS_FOR_HOST = "live-document-without-lineage";
+const WAITS_FOR_HOST = "live-document-without-lineage",
+  WAITING = "Editing starts once the owner's dohc is online.";
 // Why the host would not take a page, in the desktop's words. A code dohc does not know gets no reason.
 const HOST_REFUSAL_REASONS: Readonly<Record<string, string>> = {
   live_host_full: "The server is editing too many pages right now.",
   live_paused_by_owner: "The owner paused live editing for this page.",
   "document-unavailable": "The page moved or was deleted.",
-  [WAITS_FOR_HOST]: "Editing starts once the owner's dohc is online.",
-};
-// The owner has no other dohc to wait for. The phone says the same.
-const OWNER_REFUSAL_REASONS: Readonly<Record<string, string>> = {
-  ...HOST_REFUSAL_REASONS,
+  // Only the owner is refused these. A member waits for the owner's dohc instead.
   [WAITS_FOR_HOST]: "Open this page on a computer once to edit it here.",
+  paused: "Live editing is paused for this page. Resume it in dohc to edit here.",
 };
+// A server that edits no pages live leaves the page to read, as the phone does.
+const READ_ONLY = "live_hosting_unsupported";
 
 type Phase =
   | { kind: "opening" }
   | { kind: "waiting"; reported: boolean }
   | { kind: "refused"; reason: string | null }
+  | { kind: "read" }
   | { kind: "live" };
 
 function wait(ms: number, signal: AbortSignal): Promise<void> {
@@ -121,15 +122,14 @@ export default function MemberLivePage({
     current.current = null;
   }, []);
 
-  const refuse = useCallback(
-    (code: string) => {
-      if (code === WAITS_FOR_HOST && !owner) return;
-      const reasons = owner ? OWNER_REFUSAL_REASONS : HOST_REFUSAL_REASONS;
-      setPhase({ kind: "refused", reason: Object.hasOwn(reasons, code) ? reasons[code]! : null });
-      setDismissed(false);
-    },
-    [owner],
-  );
+  const refuse = useCallback((code: string) => {
+    if (code === READ_ONLY) return setPhase({ kind: "read" });
+    setPhase({
+      kind: "refused",
+      reason: Object.hasOwn(HOST_REFUSAL_REASONS, code) ? HOST_REFUSAL_REASONS[code]! : null,
+    });
+    setDismissed(false);
+  }, []);
   const open = useCallback(() => {
     release();
     const controller = new AbortController(),
@@ -153,7 +153,7 @@ export default function MemberLivePage({
             accountId,
             admission: admitted,
             onRefused: (code) => {
-              if (!signal.aborted) refuse(code);
+              if (!signal.aborted && (owner || code !== WAITS_FOR_HOST)) refuse(code);
             },
           });
           current.current = opened;
@@ -249,11 +249,7 @@ export default function MemberLivePage({
   };
 
   const reason =
-    phase.kind === "refused"
-      ? phase.reason
-      : phase.kind === "waiting"
-        ? HOST_REFUSAL_REASONS[WAITS_FOR_HOST]!
-        : null;
+    phase.kind === "refused" ? phase.reason : phase.kind === "waiting" ? WAITING : null;
   const toast =
     !dismissed && (phase.kind === "refused" || (phase.kind === "waiting" && phase.reported));
   // Waiting for the owner's dohc is a state dohc is fixing, not a failure. The desktop titles it the same.
@@ -265,7 +261,7 @@ export default function MemberLivePage({
   // The band says why the page is read-only. While dohc waits for the owner's dohc it is already trying, so only a refusal offers Try again.
   const band =
     phase.kind === "waiting"
-      ? HOST_REFUSAL_REASONS[WAITS_FOR_HOST]!
+      ? WAITING
       : reason
         ? toastBody
         : `dohc could not open this page for editing. ${toastBody}`;

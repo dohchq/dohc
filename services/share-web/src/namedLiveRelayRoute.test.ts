@@ -165,17 +165,4 @@ it("takes the owner's browser to the relay's owner socket for the page its query
     `dohc-live-v1,dohc-live-ticket.${token}`,
   );
   abort.abort();
-  // A query in another order, or with more, names no page.
-  for (const other of [
-    `objectId=object-1&workspaceId=ws-1&lineageClaimId=${"c".repeat(64)}`,
-    `${page}&session=abcdefghijkl`,
-    discriminator,
-  ])
-    expect(
-      await f.open(
-        { request: request(), discriminator: other, ticketToken: token },
-        new AbortController().signal,
-        receive,
-      ),
-    ).toBeNull();
 });

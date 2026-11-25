@@ -18,7 +18,6 @@ import { isPhoneCollectionOperation, type PhoneCollections } from "./phoneCollec
 import { bearerAccountSession } from "./accountWorkspaceRoutes";
 import type { ChatWakeWaits } from "./chatWakeRoutes";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
-import { verifyRelayExchangeKey } from "./linkSecurity";
 import type { PhonePages } from "./phonePages";
 import { accountIsFenced } from "./storage/accountDeletion";
 import { parseWorkspaceId } from "./requestInputs";
@@ -105,21 +104,18 @@ export function createAccountOperationRoute(options: {
   phoneCollections?: PhoneCollections;
   /** Opens a page for the phone to edit live. Absent while this server hosts no live pages. */
   phonePages?: () => PhonePages | undefined;
-  /** share-web's origin and exchange key, with which it forwards the owner's browser to open a page. */
-  browser?: { origin: string; exchangeKeyHash: string };
+  /** share-web's origin and its exchange key check, with which it forwards the owner's browser to open a page. */
+  browser?: { origin: string; hasExchangeKey(request: Request): boolean };
 }) {
   const { storage, limiter } = options;
   // Only share-web sends the owner's browser: the account cookie, its exact origin and the exchange key, with no Bearer.
-  const browserSession = async (request: Request) => {
+  const session = async (request: Request, browser = false) => {
+    if (!browser) return bearerAccountSession(storage, options.resolveAccountSession, request);
     const cookie = request.headers.get("cookie");
     if (
-      !options.browser ||
       !cookie ||
-      request.headers.get("origin") !== options.browser.origin ||
-      !verifyRelayExchangeKey(
-        request.headers.get("x-dohc-relay-exchange-key"),
-        options.browser.exchangeKeyHash,
-      )
+      request.headers.get("origin") !== options.browser?.origin ||
+      !options.browser?.hasExchangeKey(request)
     )
       throw notFound();
     const caller = await options
@@ -133,10 +129,6 @@ export function createAccountOperationRoute(options: {
       throw notFound();
     return caller;
   };
-  const session = (request: Request, browser = false) =>
-    browser
-      ? browserSession(request)
-      : bearerAccountSession(storage, options.resolveAccountSession, request);
 
   return async function respondToAccountOperation(
     request: Request,
@@ -149,8 +141,8 @@ export function createAccountOperationRoute(options: {
     // The owner's browser reaches a page open, and nothing else here.
     const browser = page && !request.headers.has("authorization");
     const caller = await session(request, browser);
-    // A phone opens with its Bearer sign-in, and a browser only through share-web.
-    if (page && caller.clientKind !== (browser ? "browser" : "phone")) throw notFound();
+    // Only a phone opens a page with its Bearer sign-in.
+    if (page && !browser && caller.clientKind !== "phone") throw notFound();
     if (
       !limiter.allow(caller.sessionId, options.nowMs()) ||
       // An open can enroll a page, so the account's sign-ins also share one pace for it.

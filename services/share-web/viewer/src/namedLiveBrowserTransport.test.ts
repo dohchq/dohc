@@ -16,6 +16,7 @@ import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { NAMED_LIVE_STOPPED, linkRefusalBody } from "@dohc/security-contract/link-refusal";
 import { draftNeedsReview } from "./NamedDocumentEditor";
+import { memberDocument } from "./memberLive";
 import {
   createNamedLiveBrowserTransport,
   LiveHostUnavailableError,
@@ -1757,4 +1758,51 @@ it("connects the owner's socket by the page its URL names, with no browser sessi
   }));
   await stray.value.reconnect();
   expect(stray.urls).toEqual([]);
+});
+
+it("opens the owner's page live on the binding the relay's owner socket sends, and takes an edit", async () => {
+  const lineageClaimId = "c".repeat(64),
+    sockets: Socket[] = [],
+    urls: string[] = [];
+  vi.stubGlobal("location", { origin: "https://share.example", host: "share.example" });
+  vi.stubGlobal(
+    "WebSocket",
+    class extends Socket {
+      constructor(url: string) {
+        super();
+        sockets.push(this);
+        urls.push(url);
+      }
+    },
+  );
+  cleanup.push(() => vi.unstubAllGlobals());
+  const opened = memberDocument({
+    target: { workspaceId: "ws-1" },
+    path: "document.md",
+    accountId: "owner",
+    admission: {
+      kind: "owner",
+      objectId: "document",
+      lineageClaimId,
+      token: "ab".repeat(32),
+      limits: limits(),
+    },
+    onRefused: () => undefined,
+  });
+  cleanup.push(() => opened.close());
+  const connecting = opened.session.reconnect();
+  await vi.waitFor(() => expect(sockets).toHaveLength(1));
+  const socket = sockets[0]!,
+    peer = host(socket, opened.session);
+  socket.open();
+  await connecting;
+  await peer.greet();
+  // The owner's socket sends the page's own workspace, as it does to the owner's phone.
+  await peer.initial(document("base"), { ...binding, workspaceId: "ws-1" });
+  expect(urls).toEqual([
+    `wss://share.example/api/live/owner?workspaceId=ws-1&objectId=document&lineageClaimId=${lineageClaimId}`,
+  ]);
+  expect(opened.session.state()).toMatchObject({ status: "live", reason: null });
+  expect(edit(opened.session, " draft")).toBe(true);
+  await peer.submitted();
 });

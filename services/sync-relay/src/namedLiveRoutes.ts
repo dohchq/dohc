@@ -439,9 +439,9 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
         verifyRelayExchangeKey(headers.get("x-dohc-relay-exchange-key"), keyHash));
   // A link route forwards only the headers present, so the agent resolver sees exactly what was sent, and refuses a cookie.
   const credentials = (headers: Headers): Record<string, string> =>
-    kind === "owner" || desktop
+    (kind === "owner" && headers.has("authorization")) || desktop
       ? { authorization: headers.get("authorization") ?? "" }
-      : kind === "named"
+      : kind === "named" || kind === "owner"
         ? { cookie: headers.get("cookie") ?? "" }
         : Object.fromEntries(
             [
@@ -691,7 +691,6 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           .split(",")
           .map((value) => value.trim());
         const ticketed = offered.filter((value) => value.startsWith("dohc-live-ticket."));
-        // share-web forwards the owner's browser with the account cookie, its exact origin and the exchange key.
         ownerBrowser = !headers.has("authorization");
         if (
           !path ||
@@ -926,12 +925,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
       if (options.kind === "owner") {
         const document = ownerTarget!;
         const account = ownerBrowser
-          ? await options.resolveAccountSession(
-              new Request(authenticated.url, {
-                headers: { cookie: headers.get("cookie")! },
-                signal,
-              }),
-            )
+          ? await options.resolveAccountSession(authenticated)
           : await bearerAccountSession(storage, options.resolveAccountSession, authenticated);
         signal.throwIfAborted();
         check();
@@ -942,7 +936,6 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           (account.clientKind !== "browser" || accountIsFenced(storage, actor.userId))
         )
           throw new Error();
-        // A phone and the owner's browser each open with a ticket for the page, checked on every admission.
         const ticketed = phone || ownerBrowser;
         const ownerSession: OwnerSession = {
           sessionId: account.sessionId,
@@ -1082,11 +1075,11 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           reserveBytes,
           validationBudget,
           ...(guard ? { guard } : {}),
-          // A browser's edits are the owner's own, never an agent's or an automation's.
           personOnly: ownerBrowser,
         });
-        // A phone stays on its own capture until it reads which room rows the host has saved.
-        host = options.rooms && !phone ? options.rooms.join(captured, { owner: true }) : captured;
+        // A phone or browser stays on its own capture until it reads which room rows the host has saved.
+        host =
+          options.rooms && !ticketed ? options.rooms.join(captured, { owner: true }) : captured;
       } else if (options.kind === "personal") {
         // The account's fence, read from Postgres for this open.
         const linkAuthority = options.linkAuthority;
@@ -1333,7 +1326,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
             stop();
             return;
           }
-          if (gatewayFronted) {
+          if (gatewayFronted || ownerBrowser) {
             try {
               host!.assertCurrent();
             } catch {

@@ -27,6 +27,13 @@ export function ownerLiveScope(query: string) {
   }
 }
 
+/** The relay admits only the workspace's owner, so the owner's sockets count under the workspace. */
+export function ownerLiveSession(query: string) {
+  const workspaceId = new URLSearchParams(query).get("workspaceId")!,
+    owner = `owner:${workspaceId}`;
+  return { kind: "named" as const, userId: owner, workspaceId, shareId: owner, grantId: owner };
+}
+
 function validHost(value: string): boolean {
   if (!/^(?:[A-Za-z0-9.-]+|\[[A-Fa-f0-9:.]+\])(?::[0-9]+)?$/.test(value)) return false;
   try {

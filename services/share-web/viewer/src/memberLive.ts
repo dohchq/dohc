@@ -114,10 +114,9 @@ export async function memberPageReady(
   return value.ready;
 }
 
+type Selection = Omit<NamedLiveSelection, "grantId"> & { grantId?: string };
 export type MemberDocument = {
-  session: ReturnType<
-    ReturnType<typeof createNamedLiveBrowserTransport<NamedLiveSelection>>["select"]
-  >;
+  session: ReturnType<ReturnType<typeof createNamedLiveBrowserTransport<Selection>>["select"]>;
   close(): void;
 };
 
@@ -135,9 +134,8 @@ export function memberDocument(input: {
 }): MemberDocument {
   let first: MemberPageAdmission | null = input.admission;
   const { objectId } = input.admission;
-  const workspaceId = "workspaceId" in input.target ? input.target.workspaceId : null;
-  const grantId = "grantId" in input.target ? input.target.grantId : `owner:${workspaceId}`;
-  const transport = createNamedLiveBrowserTransport<NamedLiveSelection>({
+  const { grantId, workspaceId } = { grantId: undefined, workspaceId: undefined, ...input.target };
+  const transport = createNamedLiveBrowserTransport<Selection>({
     publicOrigin: location.origin,
     limits: parseNamedLiveBrowserLimits(input.admission.limits),
     fetch: fetchShareWeb,
@@ -179,8 +177,9 @@ export function memberDocument(input: {
   });
   const session = transport.select({
     accountId: input.accountId,
-    workspaceId: `named:${grantId}`,
-    grantId,
+    // The owner's socket sends the page's own workspace; a member's, the grant's.
+    workspaceId: workspaceId ?? `named:${grantId}`,
+    ...(grantId ? { grantId } : {}),
     objectId,
   });
   return { session, close: () => transport.close() };

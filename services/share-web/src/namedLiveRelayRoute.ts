@@ -4,8 +4,7 @@ import {
 } from "@dohc/live-session-contract/live-connection";
 import type { IncomingMessage } from "node:http";
 import { WebSocket } from "ws";
-import type { LiveGatewayOptions, LiveGatewayHostRoute } from "./liveGateway";
-import { ownerLiveScope } from "./liveGatewayRequest";
+import type { LiveGatewayOptions, LiveGatewayHostRoute, LiveGatewaySession } from "./liveGateway";
 import { namedAccountCookie } from "./namedAccountCookie";
 
 export function namedLiveGatewayRequest(
@@ -60,22 +59,19 @@ export function createNamedLiveRelayRoute(options: {
         resolve(null);
         return;
       }
-      const scope = options.owner ? ownerLiveScope(input.discriminator) : undefined;
-      if (scope === null) {
-        resolve(null);
-        return;
-      }
+      // The gateway has checked that an owner's query names a page. The relay takes its workspace in the path.
+      const query = new URLSearchParams(
+        options.owner ? input.discriminator : { session: input.discriminator },
+      );
+      const workspaceId = encodeURIComponent(query.get("workspaceId") ?? "");
+      query.delete("workspaceId");
       const url = new URL(
-        scope
-          ? `/sync/workspaces/${encodeURIComponent(scope.workspaceId)}/live/owner`
-          : "/sync/live/named",
+        options.owner
+          ? `/sync/workspaces/${workspaceId}/live/owner?${query}`
+          : `/sync/live/named?${query}`,
         relay,
       );
       url.protocol = relay.protocol === "https:" ? "wss:" : "ws:";
-      if (scope) {
-        url.searchParams.set("objectId", scope.objectId);
-        url.searchParams.set("lineageClaimId", scope.lineageClaimId);
-      } else url.searchParams.set("session", input.discriminator);
       const invalidated = new AbortController();
       let socket: WebSocket;
       let settled = false;

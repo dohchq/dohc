@@ -13,7 +13,7 @@ import { loadShareWebConfig } from "./config";
 import { createDeviceControlBridge } from "./deviceControlBridge";
 import { createLiveGateway, namedSessionCheckIntervalMs } from "./liveGateway";
 import { createNamedLiveRelayRoute, namedLiveGatewayRequest } from "./namedLiveRelayRoute";
-import { ownerLiveScope } from "./liveGatewayRequest";
+import { ownerLiveSession } from "./liveGatewayRequest";
 import { clientAddress } from "./clientAddress";
 import {
   createShareWebApplication,
@@ -143,46 +143,21 @@ const gatewayBufferMaximum =
   config.namedLiveGatewayLimits?.maxBufferedBytes ?? config.linkLive?.gateway.maxBufferedBytes;
 const gatewayBuffers =
   gatewayBufferMaximum === undefined ? undefined : createLiveBufferBudget(gatewayBufferMaximum);
-let namedGateway: ReturnType<typeof createLiveGateway> | undefined,
-  ownerGateway: typeof namedGateway;
-if (config.namedLiveGatewayLimits) {
-  ownerGateway = createLiveGateway({
+// A member's socket names its browser session, and the owner's a page of their own workspace.
+function accountGateway(limits: NonNullable<typeof config.namedLiveGatewayLimits>, owner: boolean) {
+  const gateway = createLiveGateway({
     bufferBudget: gatewayBuffers,
     publicHosts: config.publicHosts,
     publicOrigin: config.accountAuth!.publicOrigin,
-    path: "/api/live/owner",
-    limits: config.namedLiveGatewayLimits,
-    // The relay admits only the workspace's owner, so the owner's sockets count under the workspace.
-    async resolveSession(request, query, signal) {
-      const workspaceId = ownerLiveScope(query)?.workspaceId,
-        owner = `owner:${workspaceId}`;
-      return workspaceId &&
-        namedLiveGatewayRequest(request, config.accountAuth!.publicOrigin, signal)
-        ? { kind: "named", userId: owner, workspaceId, shareId: owner, grantId: owner }
-        : null;
-    },
-    openHostRoute: createNamedLiveRelayRoute({
-      relayUrl: config.relayUrl,
-      publicOrigin: config.accountAuth!.publicOrigin,
-      exchangeKey: config.relayExchangeKey!,
-      handshakeTimeoutMs: config.namedLiveGatewayLimits.upgradeTimeoutMs,
-      owner: true,
-    }),
-  });
-  process.once("SIGINT", ownerGateway.close);
-  process.once("SIGTERM", ownerGateway.close);
-  server.once("close", ownerGateway.close);
-  namedGateway = createLiveGateway({
-    bufferBudget: gatewayBuffers,
-    publicHosts: config.publicHosts,
-    publicOrigin: config.accountAuth!.publicOrigin,
-    limits: config.namedLiveGatewayLimits,
+    ...(owner ? { path: "/api/live/owner" as const } : {}),
+    limits,
     resolveSession(request, discriminator, signal) {
       const authenticated = namedLiveGatewayRequest(
         request,
         config.accountAuth!.publicOrigin,
         signal,
       );
+      if (authenticated && owner) return Promise.resolve(ownerLiveSession(discriminator));
       return authenticated
         ? application.resolveNamedBrowserSession(authenticated, discriminator)
         : Promise.resolve(null);
@@ -191,12 +166,20 @@ if (config.namedLiveGatewayLimits) {
       relayUrl: config.relayUrl,
       publicOrigin: config.accountAuth!.publicOrigin,
       exchangeKey: config.relayExchangeKey!,
-      handshakeTimeoutMs: config.namedLiveGatewayLimits.upgradeTimeoutMs,
+      handshakeTimeoutMs: limits.upgradeTimeoutMs,
+      owner,
     }),
   });
-  process.once("SIGINT", namedGateway.close);
-  process.once("SIGTERM", namedGateway.close);
-  server.once("close", namedGateway.close);
+  process.once("SIGINT", gateway.close);
+  process.once("SIGTERM", gateway.close);
+  server.once("close", gateway.close);
+  return gateway;
+}
+let namedGateway: ReturnType<typeof createLiveGateway> | undefined,
+  ownerGateway: typeof namedGateway;
+if (config.namedLiveGatewayLimits) {
+  ownerGateway = accountGateway(config.namedLiveGatewayLimits, true);
+  namedGateway = accountGateway(config.namedLiveGatewayLimits, false);
 }
 const linkGateway =
   config.linkLive && application.linkLive
