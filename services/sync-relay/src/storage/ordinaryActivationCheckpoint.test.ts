@@ -27,7 +27,7 @@ async function relay() {
         )
         .get()!.usage_bytes,
     );
-  const stored = (objectId: string) =>
+  const stored = (objectId: string, lineage = "base") =>
     context.tx(() => {
       context.db
         .prepare(
@@ -37,7 +37,7 @@ async function relay() {
             projected_byte_length,tail_json,moments_json,moments_from_seq,policy_sha256,accounted_bytes,folded_at_ms)
           VALUES ('workspace','main',?,?,'relay','epoch','stream',1,'typist',0,1,1,x'00',?,'notes/a.md',?,0,'[]','[]',1,?,?,0)`,
         )
-        .run(objectId, sha256("base"), sha256("state"), sha256(""), sha256("policy"), CHARGE);
+        .run(objectId, sha256(lineage), sha256("state"), sha256(""), sha256("policy"), CHARGE);
       context.db
         .prepare(
           "UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id='workspace'",
@@ -79,11 +79,12 @@ async function relay() {
   return { usage, stored, kept, deleteNote };
 }
 
-it("appending a note's delete deletes the note's stored checkpoints and returns their charge", async () => {
+it("appending a note's delete deletes every stored checkpoint of the note and returns their charge", async () => {
   const r = await relay();
   r.stored("other");
   const before = r.usage();
   r.stored("note");
+  r.stored("note", "replaced text");
   const row = r.deleteNote();
   expect(r.kept()).toEqual(["other"]);
   expect(r.usage()).toBe(before + row);
