@@ -933,51 +933,76 @@ describe("the automation replicas", () => {
     expect(engine.methods().filter((method) => method === "sync.applyPull")).toHaveLength(2);
   });
 
-  it("keeps a copy that only a read's hold wants open without pulling it, or retrying its failed sync", async () => {
+  it("keeps a copy that only a read's hold wants open without pulling it, retrying its failed sync, or waking for it", async () => {
     vi.useFakeTimers({ toFake: ["performance", "setTimeout", "clearTimeout"] });
     cleanup.push(async () => {
       vi.useRealTimers();
     });
     const { storage, log } = await relay();
+    storage.claimWorkspace({ workspaceId: "other", ownerUserId: "owner", createdAtMs: 1 });
+    storage.claimWorkspaceIdentity({
+      workspaceId: "other",
+      replicationEpoch: "epoch-1",
+      streamIdentity: "stream-1",
+    });
     const engine = fakeEngine();
     const passes = passEnds();
-    let holdOnly = true;
+    let ended = 0;
+    // A visit opens the copy; its hold keeps it after.
+    let held = false;
     const opened = passes.next();
     const running = await start(storage, {
-      wanted: () => [WORKSPACE],
-      holdOnly: () => holdOnly,
-      onReconciled: passes.onReconciled,
+      wanted: () => [WORKSPACE, "other"],
+      holdOnly: (workspaceId) => held && workspaceId === WORKSPACE,
+      onReconciled: () => {
+        ended += 1;
+        passes.onReconciled();
+      },
       onError: () => undefined,
     });
     await vi.advanceTimersByTimeAsync(0);
     await opened;
+    held = true;
     // Past a failed sync's first retry delay.
     const pass = async () => {
-      const ended = passes.next();
+      const done = passes.next();
       running.reconcile();
       await vi.advanceTimersByTimeAsync(5_000);
-      await ended;
+      await done;
     };
     const count = (name: string) => engine.methods().filter((method) => method === name).length;
-    expect(count("sync.applyPull"), "its open catches it up").toBe(1);
+    const pulls = count("sync.applyPull");
     log(1);
     await pass();
     expect(running.replica(WORKSPACE)).toBeDefined();
-    expect(count("sync.applyPull")).toBe(1);
+    expect(count("sync.applyPull"), "no pull").toBe(pulls);
 
     engine.failPush(true, running.replica(WORKSPACE)!.workspace);
     await running
       .replica(WORKSPACE)!
       .sync()
       .catch(() => undefined);
+    // Another copy keeps failing, so the passes wait on its backoff.
+    engine.failPush(true, running.replica("other")!.workspace);
+    await running
+      .replica("other")!
+      .sync()
+      .catch(() => undefined);
+    const handle = running.replica(WORKSPACE)!.workspace;
+    const heldPushes = () =>
+      engine.sent.filter(
+        (request) => request.method === "sync.push" && request.workspace === handle,
+      ).length;
+    const pushes = heldPushes();
+    await pass();
+    const before = ended;
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(ended - before, "no pass loop on the held copy's retry").toBeLessThan(5);
+    expect(heldPushes(), "no retry of the held copy's failed sync").toBe(pushes);
     engine.failPush(false);
-    const pushes = count("sync.push");
+    held = false;
     await pass();
-    expect(count("sync.push"), "no retry of the failed sync").toBe(pushes);
-    holdOnly = false;
-    await pass();
-    expect(count("sync.push")).toBeGreaterThan(pushes);
-    expect(count("sync.applyPull")).toBe(2);
+    expect(count("sync.applyPull")).toBeGreaterThan(pulls);
   });
 
   it("starts no sync for a caller that already gave up", async () => {
@@ -1475,6 +1500,7 @@ describe("the automation replicas", () => {
       clock?: { ms: number };
       root?: string;
       onError?: (error: unknown, workspaceId?: string) => void;
+      holdOnly?: (workspaceId: string) => boolean;
     } = {},
   ) {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
@@ -1495,6 +1521,7 @@ describe("the automation replicas", () => {
       key,
       namespace,
       wanted,
+      ...(options.holdOnly ? { holdOnly: options.holdOnly } : {}),
       nowMs: () => clock.ms,
       onReconciled: passes.onReconciled,
       onError: (error, workspaceId) => {
@@ -1813,6 +1840,28 @@ describe("the automation replicas", () => {
       storage.listAutomationWorkspaces()[0]?.reasons,
       "saved, it keeps the copy no more",
     ).toEqual(["account"]);
+  });
+
+  it("neither replays nor publishes a copy's phone writes while only a read's hold keeps it", async () => {
+    const { storage } = await relay();
+    const engine = fakeEngine();
+    let held = false;
+    const { pass } = await stepped(storage, () => new Map([[WORKSPACE, ["account"]]]), {
+      holdOnly: () => held,
+    });
+    held = true;
+    phoneWrite(storage, "sent");
+    engine.receipts(new Map([receipt("sent", 1, "pending")]));
+    const reads = count(engine, "sync.ordinary.publicationState"),
+      pushes = count(engine, "sync.push");
+    await pass(WORKSPACE);
+    expect(count(engine, "sync.ordinary.publicationState")).toBe(reads);
+    expect(count(engine, "sync.push")).toBe(pushes);
+    held = false;
+    await pass(WORKSPACE);
+    expect(count(engine, "sync.ordinary.publicationState"), "a visit publishes").toBeGreaterThan(
+      reads,
+    );
   });
 
   it("replays a phone write's stage that never committed from its stored command when the server restarts, before the copy pushes", async () => {

@@ -138,7 +138,7 @@ export async function startAutomationReplicas(options: {
   key: Uint8Array;
   namespace: string;
   wanted(): ReadonlyMap<string, readonly CopyReason[]>;
-  /** A wanted copy kept open only for its next read: no pass pulls it, and that read syncs it. */
+  /** A wanted copy kept open only for its next read: no pass pulls, replays, or publishes it, and that read syncs it. */
   holdOnly?(workspaceId: string): boolean;
   nowMs?(): number;
   /** A replica opened or closed, or the reasons its row keeps it for changed. */
@@ -1018,6 +1018,8 @@ export async function startAutomationReplicas(options: {
     };
     for (const replica of [...replicas.values()]) {
       const { workspaceId } = replica;
+      // A read's hold admits no replay or publication: they wait for a visit or a place of their own.
+      if (options.holdOnly?.(workspaceId)) continue;
       // Whichever step or sync caught the copy up, its owed replay runs here, outside the sync lane, before publication pushes.
       await replay(replica);
       if (!publishing.has(workspaceId) || !wanted.has(workspaceId)) {
@@ -1165,7 +1167,8 @@ export async function startAutomationReplicas(options: {
           const now = performance.now();
           for (const workspaceId of failedSyncs.keys()) {
             const syncRetry = syncRetries.get(workspaceId);
-            if (syncRetry && !replicas.get(workspaceId)?.busy())
+            const copy = replicas.get(workspaceId);
+            if (syncRetry && !copy?.busy() && !(copy && options.holdOnly?.(workspaceId)))
               retry = Math.min(retry, Math.max(syncRetry.at - now, 0));
           }
           return Effect.raceFirst(
