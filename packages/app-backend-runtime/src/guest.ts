@@ -302,8 +302,9 @@ export function prepareQuickJS(memoryBytes: number): void {
   spare ??= { memoryBytes, quickjs: newQuickJS(memoryBytes).catch(() => undefined) };
 }
 async function freshQuickJS(memoryBytes: number): Promise<QuickJS> {
-  const ready = spare?.memoryBytes === memoryBytes ? await spare.quickjs : undefined;
+  const claimed = spare;
   spare = undefined;
+  const ready = claimed?.memoryBytes === memoryBytes ? await claimed.quickjs : undefined;
   return ready ?? newQuickJS(memoryBytes);
 }
 

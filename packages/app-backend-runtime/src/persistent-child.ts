@@ -820,8 +820,11 @@ async function receive(message: { id: number; command: PersistentCommand }): Pro
     busy = false;
     activeId = undefined;
     batching = false;
-    if (db && !pending && guestMemoryBytes) setImmediate(prepareQuickJS, guestMemoryBytes);
+    setImmediate(prepareSpare);
   }
+}
+function prepareSpare(): void {
+  if (db && !busy && !pending && guestMemoryBytes) prepareQuickJS(guestMemoryBytes);
 }
 if (parentPort) parentPort.on("message", ({ data }) => void receive(data));
 else {
