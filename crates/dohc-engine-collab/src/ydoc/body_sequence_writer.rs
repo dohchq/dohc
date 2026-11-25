@@ -458,6 +458,24 @@ mod tests {
     }
 
     #[test]
+    fn reads_a_written_list_alike_though_it_left_out_attributes_that_default_to_null() {
+        for note in ["- a\n- b\n", "1. one\n2. two\n"] {
+            let (blocks, refused) = parse_markdown_blocks_checked(note, MarkdownReading::Successor);
+            assert!(!refused, "{note}");
+            let (mut nodes, mut bytes) = (MAX_PROJECTION_NODES, 0);
+            let body =
+                read_blocks::<true>(&blocks, &mut nodes, &mut bytes).expect("the note reads");
+            assert!(same_reading(&read(&written(&body)), &body), "{note}");
+        }
+        let ordered = |start: i64| MarkdownNode::Element {
+            tag: "orderedList".to_owned(),
+            attrs: BTreeMap::from([("start".to_owned(), Value::from(start))]),
+            children: Vec::new(),
+        };
+        assert!(!same_reading(&[ordered(1)], &[ordered(2)]));
+    }
+
+    #[test]
     fn writes_nothing_for_a_note_with_no_block() {
         let doc = written(&[]);
         let sequence = doc.doc.get_or_insert_text(ROOT_SEQUENCE);

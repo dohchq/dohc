@@ -1927,7 +1927,8 @@ impl Ydoc {
                     let (mut nodes, mut bytes) = (MAX_PROJECTION_NODES, 0);
                     let written =
                         body_sequence::blocks(&txn, sequence, containers, &mut nodes, &mut bytes)?;
-                    if written != *read && markdown_document(&written)? != markdown_document(read)?
+                    if !same_reading(&written, read)
+                        && markdown_document(&written)? != markdown_document(read)?
                     {
                         return Err(CollabError::MarkdownNotRepresentable);
                     }
@@ -6354,7 +6355,7 @@ fn project_frontmatter(key: &str, value: &Value) -> ProjectionResult<String> {
     Ok(output.into_string())
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 enum MarkdownNode {
     Text(Vec<TextRun>),
     Element {
@@ -6363,6 +6364,37 @@ enum MarkdownNode {
         children: Vec<MarkdownNode>,
     },
     Fragment(Vec<MarkdownNode>),
+}
+
+fn set_attributes(attrs: &BTreeMap<String, Value>) -> impl Iterator<Item = (&String, &Value)> {
+    attrs.iter().filter(|(_, value)| !value.is_null())
+}
+
+fn same_reading(written: &[MarkdownNode], read: &[MarkdownNode]) -> bool {
+    written.len() == read.len()
+        && written.iter().zip(read).all(|pair| match pair {
+            (MarkdownNode::Text(written), MarkdownNode::Text(read)) => written == read,
+            (MarkdownNode::Fragment(written), MarkdownNode::Fragment(read)) => {
+                same_reading(written, read)
+            }
+            (
+                MarkdownNode::Element {
+                    tag,
+                    attrs,
+                    children,
+                },
+                MarkdownNode::Element {
+                    tag: read_tag,
+                    attrs: read_attrs,
+                    children: read_children,
+                },
+            ) => {
+                tag == read_tag
+                    && set_attributes(attrs).eq(set_attributes(read_attrs))
+                    && same_reading(children, read_children)
+            }
+            _ => false,
+        })
 }
 
 #[derive(Debug, PartialEq)]
