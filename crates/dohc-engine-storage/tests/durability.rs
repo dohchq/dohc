@@ -517,7 +517,6 @@ fn displacement_spec(job_id: &str, displaced_name: &str) -> DisplacementSpec {
     }
 }
 
-/// A job that ended while its row was open keeps its status when the row ends.
 #[test]
 fn a_displacement_leaves_an_ended_jobs_status() {
     let sc = Scratch::new("displacement-ended-job");

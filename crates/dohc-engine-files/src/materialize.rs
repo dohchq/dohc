@@ -1992,8 +1992,6 @@ fn record_write_conflict(
     Ok(JobOutcome::Conflict)
 }
 
-/// Move a note's text from its temp into staging with a kept row holding its
-/// hash, and mark the job conflict. `false` when staging is on another volume.
 fn keep_note_text(
     store: &EngineStore,
     staging: &Staging,
@@ -2988,8 +2986,7 @@ fn swap_back(
             DisplacementResolution::Discard
         } else {
             // The job's content stays at its displaced name. Its kept row
-            // holds the job's own hash, so the row says whose bytes they are,
-            // and settles the job with it.
+            // holds the job's own hash, so the row says whose bytes they are.
             kept = true;
             DisplacementResolution::Keep {
                 displaced_sha256: aside.content_sha256.as_deref(),
@@ -4304,8 +4301,7 @@ fn job_targets(job: &MaterializationJob, workspace_id: &str, path: &str) -> bool
 /// same path, before it runs, including a staged file no row names because
 /// the run that staged it stopped. Returns the staging directory with the
 /// names this job's rows hold, and `true` when a file held bytes the store
-/// does not have and could not go back to its path. A pending job whose row
-/// recovery settled ends there and does not stop this job.
+/// does not have and could not go back to its path.
 fn recover_job_displacements(
     store: &EngineStore,
     root: &Path,

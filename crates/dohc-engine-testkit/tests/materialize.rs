@@ -797,8 +797,6 @@ fn a_kept_file_is_saved_as_a_visible_copy() {
     );
 }
 
-/// A note's text that its file refused, because another program saved the
-/// file before or during the write, stays kept and is saved beside the note.
 #[test]
 fn a_notes_text_an_outside_save_refused_is_kept_to_save_beside_it() {
     for (tag, raced) in [("before", false), ("during", true)] {
@@ -941,8 +939,6 @@ fn a_notes_text_staged_before_a_crash_stays_kept_whether_or_not_its_file_is_ther
     }
 }
 
-/// The state a note's write leaves when it stops after moving its text into
-/// staging, before the text's row is kept.
 fn open_note_text_row(sc: &Scratch, store: &EngineStore) {
     put_staged(sc, "79646f632d6d61745f6d31.0", OURS);
     store
