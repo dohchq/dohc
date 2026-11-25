@@ -36,8 +36,8 @@ export interface AppRunner {
   subscribe(listener: () => void): () => void;
   /** Ends the running app, and any launch on its way, that `match` names, or every one. */
   end(match?: (scope: AppScope) => boolean): void;
-  /** Starts a launch for `scope`, ending the last. Resolves whether it showed. */
-  start(scope: LaunchScope, launch: Promise<AppLaunch>): Promise<boolean>;
+  /** Starts a launch for `scope`, ending the last. Its signal aborts when the launch ends. Resolves whether it showed. */
+  start(scope: LaunchScope, launch: (ended: AbortSignal) => Promise<AppLaunch>): Promise<boolean>;
   /** Ends the running app because its web process died. Its review says so until the next launch, or until `end` names it. */
   stop(): void;
   /** The app `stop` ended, or null. */
@@ -49,7 +49,11 @@ type LaunchScope = AppScope & { readonly name: string };
 export function createAppRunner(): AppRunner {
   const listeners = new Set<() => void>();
   let running: RunningApp | null = null;
-  let pending: { readonly key: number; readonly scope: LaunchScope } | null = null;
+  let pending: {
+    readonly key: number;
+    readonly scope: LaunchScope;
+    readonly ended: AbortController;
+  } | null = null;
   let launches = 0;
   let stopped: AppScope | null = null;
   const notify = () => {
@@ -61,7 +65,10 @@ export function createAppRunner(): AppRunner {
   };
   const end: AppRunner["end"] = (match = () => true) => {
     const launch = pending !== null && match(pending.scope);
-    if (launch) pending = null;
+    if (launch) {
+      pending?.ended.abort();
+      pending = null;
+    }
     const forget = stopped !== null && match(stopped);
     if (forget) stopped = null;
     if (running && match(running)) set(null);
@@ -79,11 +86,12 @@ export function createAppRunner(): AppRunner {
       stopped = null;
       end();
       const key = ++launches;
-      pending = { key, scope };
+      const ended = new AbortController();
+      pending = { key, scope, ended };
       notify();
       let answer: AppLaunch;
       try {
-        answer = await launch;
+        answer = await launch(ended.signal);
       } catch (error) {
         if (pending?.key !== key) return false;
         pending = null;
@@ -220,11 +228,13 @@ export function createWorkspaceApps(options: {
       ([apps]) => {
         if (!lands()) return;
         saved.save(apps);
-        runner.end(
-          (scope) =>
-            mine()(scope) &&
-            !apps.some((app) => app.publicationId === scope.publicationId && app.approved),
-        );
+        const running = runner.state();
+        if (
+          running &&
+          mine()(running) &&
+          !apps.some((app) => app.publicationId === running.publicationId && app.approved)
+        )
+          runner.end((scope) => scope === running);
         set({ apps, problem: null, failures: state.failures });
       },
       (error: unknown) => {
@@ -262,18 +272,21 @@ export function createWorkspaceApps(options: {
       if (!options.canOpen || leaving.aborted || !isLive()) return false;
       const both = new AbortController();
       const abort = () => both.abort();
-      for (const source of [signal, leaving]) {
-        if (source.aborted) abort();
-        source.addEventListener("abort", abort);
-      }
+      const sources = [signal, leaving];
       const scope = { signIn, workspaceId, publicationId: app.publicationId, name: app.name };
       try {
-        const shown = await runner.start(scope, operations.launch(options.fetch, app, both.signal));
+        const shown = await runner.start(scope, (ended) => {
+          sources.push(ended);
+          for (const source of sources) {
+            if (source.aborted) abort();
+            source.addEventListener("abort", abort);
+          }
+          return operations.launch(options.fetch, app, both.signal);
+        });
         if (shown && leaving.aborted) runner.end(mine(app.publicationId));
         return shown && !leaving.aborted;
       } finally {
-        signal.removeEventListener("abort", abort);
-        leaving.removeEventListener("abort", abort);
+        for (const source of sources) source.removeEventListener("abort", abort);
       }
     },
     stop() {

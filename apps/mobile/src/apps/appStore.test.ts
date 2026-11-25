@@ -167,6 +167,32 @@ describe("a launch", () => {
     expect(await ended).toBe(false);
   });
 
+  it("stops a launch's requests when it ends, at Back or a later open", async () => {
+    const { server, runner, apps } = setup();
+    server.on("POST", "/sync/ws-1/ops/appLaunch", () => new Promise<Answer>(() => {}));
+    const grants = () => server.calls.filter((call) => call.path === "/sync/ws-1/ops/appLaunch");
+    const first = apps.open(app, still);
+    await vi.waitFor(() => expect(grants()).toHaveLength(1));
+    void apps.open(app, still);
+    expect(grants()[0]!.signal.aborted).toBe(true);
+    expect(await first).toBe(false);
+    await vi.waitFor(() => expect(grants()).toHaveLength(2));
+    runner.end();
+    expect(grants()[1]!.signal.aborted).toBe(true);
+  });
+
+  it("returns a failed launch's error, whatever a catalog check read meanwhile", async () => {
+    const { server, runner, apps } = setup();
+    const grant = deferred<Answer>();
+    server.on("POST", "/sync/ws-1/ops/appLaunch", () => grant.promise);
+    server.on("POST", "/sync/ws-1/ops/apps", page([version(B, true)]));
+    const launch = apps.open(app, still);
+    await apps.check();
+    expect(runner.launching()).not.toBeNull();
+    grant.resolve({ status: 503 });
+    await expect(launch).rejects.toThrow();
+  });
+
   it("opens nothing in a build that can't run apps", async () => {
     const { server, runner, apps } = setup({ canOpen: false });
     answerLaunch(server);
