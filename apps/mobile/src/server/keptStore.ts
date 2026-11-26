@@ -106,7 +106,6 @@ export async function deleteAccountRows(sql: Sql, account: { origin: string; use
     ]);
 }
 
-/** Opens each file now, so its first statement doesn't wait for the open. Resolves with whether every file opened. */
 export async function openNow(stores: readonly Pick<KeptStore, "read">[]): Promise<boolean> {
   const opened = await Promise.allSettled(stores.map((store) => store.read("SELECT 1", [])));
   return opened.every((open) => open.status === "fulfilled");

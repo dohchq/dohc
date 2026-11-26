@@ -1220,7 +1220,6 @@ describe("a launch", () => {
     showOnPhone: true,
   });
 
-  /** A relaunch whose keychain read and Sign out check each wait until the test lets them answer. */
   async function relaunch(signingOut: boolean) {
     const disk = keptDisk();
     const seeded = launch(disk).files;

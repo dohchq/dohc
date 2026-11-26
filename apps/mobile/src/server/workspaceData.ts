@@ -64,7 +64,6 @@ export interface ViewState<T> {
   readonly problem: ReadProblem | null;
   /** How many reads have failed, so each failure is reported once. */
   readonly failures: number;
-  /** The value came from the cache, and no read from the server has replaced it. */
   readonly fromCache?: boolean;
 }
 
@@ -236,7 +235,6 @@ export interface ReadCache {
    * to read: the scope already has views in memory, which are newer, or the cache keeps nothing on disk.
    */
   restore(scope: string): Promise<void> | null;
-  /** Starts reading the sign-in's saved list and choice, for its `savedList` to answer with unless a clear comes first. */
   preload(signIn: Pick<SignIn, "origin" | "userId">): void;
   /** The sign-in's saved workspace list, or null when the cache keeps nothing on disk. */
   savedList(signIn: Pick<SignIn, "origin" | "userId">): SavedList | null;

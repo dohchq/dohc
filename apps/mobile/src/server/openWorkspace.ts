@@ -104,7 +104,6 @@ export function createOpenWorkspace(options: {
     state: () => state,
     subscribe(listener) {
       listeners.add(listener);
-      // The list is followed from the first subscriber.
       if (!unsubscribe) {
         unsubscribe = list.subscribe(update);
         update();

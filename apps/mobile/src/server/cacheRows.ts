@@ -193,7 +193,6 @@ function parsed(text: unknown): unknown {
   }
 }
 
-/** A view's JSON, kept by its value object, with the id, cursor and flags it was written with. */
 interface Part {
   readonly flags: string;
   readonly text: string;

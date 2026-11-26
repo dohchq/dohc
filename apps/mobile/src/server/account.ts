@@ -111,7 +111,6 @@ export function createAccount(options: {
     ending: Pick<SignIn, "origin" | "userId"> | null,
   ) => Promise<void>;
   readonly pendingSignOuts?: PendingSignOuts;
-  /** The saved sign-in's server and account, as soon as a restore reads them, before it checks for a Sign out. */
   readonly onSaved?: (saved: Pick<StoredSignIn, "origin" | "userId">) => void;
 }): Account {
   const { store, fetch } = options;
