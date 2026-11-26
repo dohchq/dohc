@@ -3964,10 +3964,12 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
           await testCaptureSeams().typingSessionRegistered?.();
           await recoverOutageTyping(workspace);
         },
-        aroundVersionSwitch: (work) =>
-          sitePreviews
+        aroundVersionSwitch: (work) => {
+          phoneAppSender?.versionSwitched(workspace.workspaceId);
+          return sitePreviews
             .holdVersionSwitch(workspace.workspaceId, work)
-            .finally(() => phoneAppSender?.versionSwitched(workspace.workspaceId)),
+            .finally(() => phoneAppSender?.versionSwitched(workspace.workspaceId));
+        },
         writeTypingCheckpoint: async (checkpoint) => {
           try {
             await writeTypingCheckpoint(join(stateDir(), "live-draft-recovery"), checkpoint);
@@ -12115,42 +12117,49 @@ function registerIpcHandlers(): void {
   ownerAppPublicationForCli = (input, agent) =>
     cliOwnerPublication(input.workspaceId, input, agent);
   phoneAppSender = createPhoneAppSender<PhoneAppWorkspace>({
-    enabled: async () => (await readCachedUserSettingsFile(stateDir())).settings.apps.sendToPhones,
-    atHead: (workspaceId) => {
-      try {
-        const status = activity.getStatus(workspaceId);
-        return (
-          status.pendingChangeCount === 0 && status.lastSyncedAtMs !== null && !status.syncFailure
-        );
-      } catch {
-        return false;
-      }
-    },
     withWorkspace: async (workspaceId, work) => {
       const entry = findWorkspace(workspaceId);
       if (!entry?.remote || shareViewIsPresent(entry.shareView)) return;
-      await workspaceAuthorities.withOperation(workspaceId, (operation) =>
-        work(operation.workspace, operation.signal),
+      await workspaceAuthorities.withOperation(workspaceId, async (operation) =>
+        work(
+          operation.workspace,
+          operation.signal,
+          (await remoteForWorkspace(operation.workspace)).credentials,
+        ),
       );
     },
-    credentials: async (workspace) => (await remoteForWorkspace(workspace)).credentials,
-    onMain: async (workspace) => {
+    admitted: async (workspace) => {
+      if (!(await readCachedUserSettingsFile(stateDir())).settings.apps.sendToPhones) return false;
       const active = await withEngineAdapter(workspace, (adapter) =>
         adapter.getActiveVersion({ workspaceId: workspace.workspaceId }),
       );
       return (active?.id ?? "main") === "main";
     },
-    catchUp: (workspace, signal) => activity.catchUpCloudSync(workspace.workspaceId, signal),
+    sync: async (workspace, signal) => {
+      await ownerPublicationDependencies.flushCapture(workspace);
+      await activity.catchUpCloudSync(workspace.workspaceId, signal);
+      const status = activity.getStatus(workspace.workspaceId);
+      return status.pendingChangeCount === 0 && !status.syncFailure && !!status.lastSyncedAtMs;
+    },
     apps: (workspace) => ownedSiteCatalog.list(workspace),
-    readSource: async (workspace, appRoot, signal) => {
+    exists: async (workspace, appRoot) => {
+      const query = { workspaceId: workspace.workspaceId, versionId: "main", under: appRoot };
+      const files = await withEngineAdapter(workspace, (adapter) =>
+        adapter.listTextFileMetadata(query),
+      );
+      if (!files) throw new Error("dohc could not read this workspace's files. Restart dohc.");
+      return files.length > 0;
+    },
+    readSource: async (workspace, appRoot, signal, onSelected) => {
+      const assertCurrent = () => signal.throwIfAborted();
       const source = await withEngineAdapter(workspace, (adapter) =>
         readLocalAppSource(
           { workspaceId: workspace.workspaceId, appRoot, versionId: "main" },
-          { adapter, signal, assertCurrent: () => signal.throwIfAborted(), deferredWrites: [] },
+          { adapter, signal, assertCurrent, deferredWrites: [], onSelected },
         ),
       );
       if (!source) throw new Error("dohc could not read this app. Restart dohc and try again.");
-      return source;
+      return source.sourceRevision;
     },
     prepare: async (workspace, appRoot, signal) => {
       const { deferredWrites } = await ownerPublicationDependencies.flushCapture(workspace);

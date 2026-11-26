@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import {
   createPhoneAppSender,
@@ -28,6 +28,11 @@ const candidate = (appRoot: string, sourceRevision: string, extra: object = {}) 
   ({ appRoot, sourceRevision, capabilities: [], ...extra }) as unknown as AppPublicationCandidate;
 
 type Row = { publicationId: string; authorityRevision: number; sourceRevision: string };
+const row = (publicationId: string, sourceRevision: string, authorityRevision = 1): Row => ({
+  publicationId,
+  authorityRevision,
+  sourceRevision,
+});
 
 function harness(input: { apps: string[]; revisions: Record<string, string> }) {
   const owner = new Map<string, Row>();
@@ -38,13 +43,15 @@ function harness(input: { apps: string[]; revisions: Record<string, string> }) {
   const state = {
     enabled: true,
     onMain: true,
-    listingFails: false,
+    atHead: true,
+    withdrawFails: false,
     apps: input.apps,
+    existing: new Set(input.apps),
     revisions: input.revisions,
     sourcePaths: {} as Record<string, string[]>,
+    readFails: {} as Record<string, string>,
   };
   const relayJson = vi.fn(async (_credentials: unknown, path: string, init?: RequestInit) => {
-    if (!init?.method && state.listingFails) throw new Error("dohc could not reach the server.");
     if (!init?.method)
       return {
         publications: [
@@ -57,6 +64,7 @@ function harness(input: { apps: string[]; revisions: Record<string, string> }) {
     posts.push({ path, body });
     const id = path.split("/").at(path.endsWith("/backend/activate") ? -3 : -2);
     if (path.endsWith("/withdraw")) {
+      if (state.withdrawFails) throw new Error("dohc could not reach the server.");
       for (const [root, row] of owner)
         if (row.publicationId === id) {
           owner.delete(root);
@@ -76,20 +84,12 @@ function harness(input: { apps: string[]; revisions: Record<string, string> }) {
     const published = body.candidate as AppPublicationCandidate;
     if (refuseNextPublish) {
       refuseNextPublish = false;
-      owner.set(published.appRoot, {
-        publicationId: "from-another-computer",
-        authorityRevision: 1,
-        sourceRevision: "elsewhere",
-      });
-      throw new Error("Another version of this app was sent first.");
+      owner.set(published.appRoot, row("from-another-computer", "elsewhere"));
+      throw new Error("Another version of this app reached your phones first.");
     }
-    const row = {
-      publicationId: `p${next++}`,
-      authorityRevision: 1,
-      sourceRevision: published.sourceRevision,
-    };
-    owner.set(published.appRoot, row);
-    return { ...row, active: true };
+    const sent = row(`p${next++}`, published.sourceRevision);
+    owner.set(published.appRoot, sent);
+    return { ...sent, active: true };
   });
   const prepare = vi.fn(async (_workspace: unknown, appRoot: string) => ({
     candidate: candidate(appRoot, state.revisions[appRoot]!),
@@ -99,17 +99,20 @@ function harness(input: { apps: string[]; revisions: Record<string, string> }) {
   const changed = vi.fn();
   const catchUp = vi.fn(async () => {});
   const sender = createPhoneAppSender<{ workspaceId: string }>({
-    enabled: async () => state.enabled,
-    atHead: () => true,
-    withWorkspace: (workspaceId, work) => work({ workspaceId }, new AbortController().signal),
-    credentials: async () => credentials,
-    onMain: async () => state.onMain,
-    catchUp,
+    withWorkspace: (workspaceId, work) =>
+      work({ workspaceId }, new AbortController().signal, credentials),
+    admitted: async () => state.enabled && state.onMain,
+    sync: async () => {
+      await catchUp();
+      return state.atHead;
+    },
     apps: async () => state.apps.map((root) => site(root)),
-    readSource: async (_workspace, appRoot) => ({
-      sourceRevision: state.revisions[appRoot]!,
-      sourcePaths: state.sourcePaths[appRoot] ?? [`${appRoot}/index.html`],
-    }),
+    exists: async (_workspace, appRoot) => state.existing.has(appRoot),
+    readSource: async (_workspace, appRoot, _signal, select) => {
+      select(state.sourcePaths[appRoot] ?? [`${appRoot}/index.html`]);
+      if (state.readFails[appRoot]) throw new Error(state.readFails[appRoot]);
+      return state.revisions[appRoot]!;
+    },
     prepare,
     relayJson,
     upload,
@@ -124,13 +127,16 @@ function harness(input: { apps: string[]; revisions: Record<string, string> }) {
     prepare,
     upload,
     changed,
-    relayJson,
     catchUp,
     refuseNextPublish: () => {
       refuseNextPublish = true;
     },
   };
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("sendableApp", () => {
   it("sends folders the closed compiler builds, and nothing else", () => {
@@ -161,11 +167,7 @@ describe("createPhoneAppSender", () => {
       apps: ["apps/trip", "apps/poll"],
       revisions: { "apps/trip": "r1", "apps/poll": "r2" },
     });
-    test.owner.set("apps/trip", {
-      publicationId: "trip-1",
-      authorityRevision: 1,
-      sourceRevision: "r1",
-    });
+    test.owner.set("apps/trip", row("trip-1", "r1"));
     await test.sender.run("ws");
     expect(test.prepare.mock.calls.map(([, appRoot]) => appRoot)).toEqual(["apps/poll"]);
     expect(test.upload).toHaveBeenCalledOnce();
@@ -189,22 +191,27 @@ describe("createPhoneAppSender", () => {
     const test = harness({ apps: ["apps/trip"], revisions: { "apps/trip": "r1" } });
     test.state.enabled = false;
     await test.sender.run("ws");
-    expect(test.relayJson).not.toHaveBeenCalled();
     expect(test.prepare).not.toHaveBeenCalled();
+    expect(test.posts).toEqual([]);
   });
 
-  it("withdraws the owner publication of an app folder that is gone", async () => {
+  it("withdraws the owner publication of an app folder gone from main", async () => {
     const test = harness({ apps: [], revisions: {} });
-    test.owner.set("apps/old", {
-      publicationId: "old-1",
-      authorityRevision: 4,
-      sourceRevision: "r1",
-    });
+    test.owner.set("apps/old", row("old-1", "r1", 4));
     await test.sender.run("ws");
     expect(test.posts).toEqual([
       { path: "/sync/ws/app-publications/old-1/withdraw", body: { expectedAuthorityRevision: 4 } },
     ]);
     expect(test.owner.size).toBe(0);
+  });
+
+  it("keeps the owner publication of a folder that is still on main but no longer sent", async () => {
+    const test = harness({ apps: [], revisions: {} });
+    test.owner.set("apps/trip", row("trip-1", "r1"));
+    test.state.existing.add("apps/trip");
+    await test.sender.run("ws");
+    expect(test.posts).toEqual([]);
+    expect(test.owner.get("apps/trip")?.publicationId).toBe("trip-1");
   });
 
   it("files one row per app that can't be sent, waits for a change or Try again, and clears it on success", async () => {
@@ -214,12 +221,11 @@ describe("createPhoneAppSender", () => {
     expect(test.sender.notSent("ws")).toEqual([
       { appRoot: "apps/trip", reason: "index.html has a syntax error." },
     ]);
-    expect(test.changed).toHaveBeenCalledTimes(1);
-
     await test.sender.run("ws");
     expect(test.prepare).toHaveBeenCalledTimes(1);
-    expect(test.changed).toHaveBeenCalledTimes(1);
 
+    await test.sender.retry("ws", "apps/elsewhere");
+    expect(test.prepare).toHaveBeenCalledTimes(1);
     await test.sender.retry("ws", "apps/trip");
     expect(test.prepare).toHaveBeenCalledTimes(2);
     expect(test.sender.notSent("ws")).toEqual([]);
@@ -252,135 +258,149 @@ describe("createPhoneAppSender", () => {
       "/sync/ws/app-publications",
       "/sync/ws/app-publications/p1/backend/activate",
     ]);
-    expect(test.sender.notSent("ws")).toEqual([]);
   });
 
-  it("reads the current version again and retries once when another one was sent first", async () => {
+  it("starts a fresh pass instead of a Notice when another version got there first", async () => {
+    vi.useFakeTimers();
     const test = harness({ apps: ["apps/trip"], revisions: { "apps/trip": "r1" } });
     test.refuseNextPublish();
     await test.sender.run("ws");
-    expect(test.posts.map((post) => post.body.expectedCurrentPublicationId)).toEqual([
-      null,
-      "from-another-computer",
-    ]);
-    expect(test.owner.get("apps/trip")?.sourceRevision).toBe("r1");
+    expect(test.posts).toHaveLength(1);
+    expect(test.sender.notSent("ws")).toEqual([]);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("files a failed withdrawal as a workspace row and tries again on the next pull", async () => {
+    vi.useFakeTimers();
+    const test = harness({ apps: [], revisions: {} });
+    test.owner.set("apps/old", row("old-1", "r1"));
+    test.state.withdrawFails = true;
+    test.sender.pulled("ws", true);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.waitFor(() =>
+      expect(test.sender.notSent("ws")).toEqual([
+        { appRoot: null, reason: "dohc could not reach the server." },
+      ]),
+    );
+
+    test.state.withdrawFails = false;
+    test.sender.pulled("ws", false);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.waitFor(() => expect(test.owner.size).toBe(0));
     expect(test.sender.notSent("ws")).toEqual([]);
   });
 
-  it("tries a failed pass again later and files one workspace row after repeated failures", async () => {
-    vi.useFakeTimers();
-    try {
-      const test = harness({ apps: ["apps/trip"], revisions: { "apps/trip": "r1" } });
-      test.state.listingFails = true;
-      await test.sender.run("ws");
-      expect(vi.getTimerCount()).toBe(1);
-      expect(test.sender.notSent("ws")).toEqual([]);
-      await vi.advanceTimersByTimeAsync(30_000);
-      await vi.waitFor(() => expect(test.relayJson).toHaveBeenCalledTimes(2));
-      await test.sender.run("ws");
-      expect(test.sender.notSent("ws")).toEqual([
-        { appRoot: null, reason: "dohc could not reach the server." },
-      ]);
-
-      test.state.listingFails = false;
-      await test.sender.retry("ws", null);
-      expect(test.sender.notSent("ws")).toEqual([]);
-      expect(test.owner.get("apps/trip")?.sourceRevision).toBe("r1");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("sends and withdraws nothing while a version other than main is active", async () => {
-    vi.useFakeTimers();
-    try {
-      const test = harness({ apps: ["apps/trip"], revisions: { "apps/trip": "r1" } });
-      test.owner.set("apps/old", {
-        publicationId: "old-1",
-        authorityRevision: 1,
-        sourceRevision: "r1",
-      });
-      test.state.onMain = false;
-      await test.sender.run("ws");
-      expect(test.posts).toEqual([]);
-      expect(test.prepare).not.toHaveBeenCalled();
-
-      test.state.onMain = true;
-      test.sender.versionSwitched("ws");
-      await vi.advanceTimersByTimeAsync(10_000);
-      await vi.waitFor(() =>
-        expect(test.posts.map((post) => post.path)).toEqual([
-          "/sync/ws/app-publications/old-1/withdraw",
-          "/sync/ws/app-publications",
-        ]),
-      );
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("checks an app again when a declared input outside its folder changes", async () => {
-    vi.useFakeTimers();
-    try {
-      const test = harness({ apps: ["apps/trip"], revisions: { "apps/trip": "r1" } });
-      test.state.sourcePaths["apps/trip"] = ["apps/trip/app.publish.json", "shared/theme.css"];
-      await test.sender.run("ws");
-      test.sender.filesChanged("ws", ["notes/today.md"]);
-      expect(vi.getTimerCount()).toBe(0);
-
-      test.state.revisions["apps/trip"] = "r2";
-      test.sender.filesChanged("ws", ["shared/theme.css"]);
-      expect(vi.getTimerCount()).toBe(1);
-      await vi.advanceTimersByTimeAsync(10_000);
-      await vi.waitFor(() => expect(test.owner.get("apps/trip")?.sourceRevision).toBe("r2"));
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("doesn't send a stale app over a newer one another computer sent, once it has pulled", async () => {
+  it("stops a send in flight when the setting turns off", async () => {
     const test = harness({ apps: ["apps/trip"], revisions: { "apps/trip": "r1" } });
-    test.owner.set("apps/trip", {
-      publicationId: "a-2",
-      authorityRevision: 1,
-      sourceRevision: "r2",
+    test.prepare.mockImplementationOnce(async (_workspace, appRoot) => {
+      test.state.enabled = false;
+      test.sender.settingChanged(false);
+      return { candidate: candidate(appRoot, "r1"), files: [] };
     });
+    await test.sender.run("ws");
+    expect(test.upload).not.toHaveBeenCalled();
+    expect(test.posts).toEqual([]);
+    expect(test.sender.notSent("ws")).toEqual([]);
+  });
+
+  it("stops a send in flight when a version other than main becomes active", async () => {
+    vi.useFakeTimers();
+    const test = harness({ apps: ["apps/trip"], revisions: { "apps/trip": "r1" } });
+    test.prepare.mockImplementationOnce(async (_workspace, appRoot) => {
+      test.state.onMain = false;
+      test.sender.versionSwitched("ws");
+      return {
+        candidate: candidate(appRoot, "r1"),
+        files: [{ sha256: "a".repeat(64), bytes: new Uint8Array([1]) }],
+      };
+    });
+    await test.sender.run("ws");
+    expect(test.upload).not.toHaveBeenCalled();
+    expect(test.posts).toEqual([]);
+    expect(test.sender.notSent("ws")).toEqual([]);
+  });
+
+  it("sends nothing until the workspace is at the server's head after syncing", async () => {
+    const test = harness({ apps: ["apps/trip"], revisions: { "apps/trip": "r1" } });
     test.catchUp.mockImplementationOnce(async () => {
-      test.state.revisions["apps/trip"] = "r2";
+      test.state.atHead = false;
     });
     await test.sender.run("ws");
     expect(test.catchUp).toHaveBeenCalledOnce();
     expect(test.prepare).not.toHaveBeenCalled();
     expect(test.posts).toEqual([]);
-    expect(test.owner.get("apps/trip")?.publicationId).toBe("a-2");
   });
 
-  it("pulls again after a refused send and leaves a newer version in place", async () => {
+  it("starts a fresh pass instead of sending when the files changed during preparation", async () => {
+    vi.useFakeTimers();
     const test = harness({ apps: ["apps/trip"], revisions: { "apps/trip": "r1" } });
-    test.refuseNextPublish();
-    test.catchUp
-      .mockImplementationOnce(async () => {})
-      .mockImplementationOnce(async () => {
-        test.state.revisions["apps/trip"] = "elsewhere";
-      });
+    test.prepare.mockResolvedValueOnce({ candidate: candidate("apps/trip", "r2"), files: [] });
     await test.sender.run("ws");
-    expect(test.posts).toHaveLength(1);
-    expect(test.owner.get("apps/trip")?.publicationId).toBe("from-another-computer");
-    expect(test.sender.notSent("ws")).toEqual([]);
+    expect(test.posts).toEqual([]);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("checks an app again when a missing declared input outside its folder appears", async () => {
+    vi.useFakeTimers();
+    const test = harness({ apps: ["apps/trip"], revisions: { "apps/trip": "r1" } });
+    test.state.sourcePaths["apps/trip"] = ["apps/trip/app.publish.json", "shared/theme.css"];
+    test.state.readFails["apps/trip"] = "apps/trip/app.publish.json lists shared/theme.css.";
+    await test.sender.run("ws");
+    expect(test.sender.notSent("ws")).toHaveLength(1);
+    test.sender.filesChanged("ws", ["shared/theme.css"]);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("checks an app again when a declared input outside its folder changes", async () => {
+    vi.useFakeTimers();
+    const test = harness({ apps: ["apps/trip"], revisions: { "apps/trip": "r1" } });
+    test.state.sourcePaths["apps/trip"] = ["apps/trip/app.publish.json", "shared/theme.css"];
+    await test.sender.run("ws");
+    test.sender.filesChanged("ws", ["notes/today.md"]);
+    expect(vi.getTimerCount()).toBe(0);
+
+    test.state.revisions["apps/trip"] = "r2";
+    test.sender.filesChanged("ws", ["shared/theme.css"]);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.waitFor(() => expect(test.owner.get("apps/trip")?.sourceRevision).toBe("r2"));
+  });
+
+  it("sends and withdraws nothing while a version other than main is active", async () => {
+    vi.useFakeTimers();
+    const test = harness({ apps: ["apps/trip"], revisions: { "apps/trip": "r1" } });
+    test.owner.set("apps/old", row("old-1", "r1"));
+    test.state.onMain = false;
+    await test.sender.run("ws");
+    expect(test.posts).toEqual([]);
+    expect(test.prepare).not.toHaveBeenCalled();
+
+    test.state.onMain = true;
+    test.sender.versionSwitched("ws");
+    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.waitFor(() =>
+      expect(test.posts.map((post) => post.path)).toEqual([
+        "/sync/ws/app-publications",
+        "/sync/ws/app-publications/old-1/withdraw",
+      ]),
+    );
+  });
+
+  it("doesn't send a stale app over a newer one another computer sent, once it has pulled", async () => {
+    const test = harness({ apps: ["apps/trip"], revisions: { "apps/trip": "r1" } });
+    test.owner.set("apps/trip", row("a-2", "r2"));
+    test.catchUp.mockImplementationOnce(async () => {
+      test.state.revisions["apps/trip"] = "r2";
+    });
+    await test.sender.run("ws");
+    expect(test.prepare).not.toHaveBeenCalled();
+    expect(test.posts).toEqual([]);
   });
 
   it("activates a pending version with unchanged files instead of sending it again", async () => {
     const test = harness({ apps: ["apps/books"], revisions: { "apps/books": "r1" } });
-    test.owner.set("apps/books", {
-      publicationId: "books-1",
-      authorityRevision: 1,
-      sourceRevision: "r0",
-    });
-    test.pending.set("apps/books", {
-      publicationId: "books-2",
-      authorityRevision: 1,
-      sourceRevision: "r1",
-    });
+    test.owner.set("apps/books", row("books-1", "r0"));
+    test.pending.set("apps/books", row("books-2", "r1"));
     await test.sender.run("ws");
     expect(test.prepare).not.toHaveBeenCalled();
     expect(test.posts.map((post) => post.path)).toEqual([
@@ -391,32 +411,16 @@ describe("createPhoneAppSender", () => {
 
   it("names the pending version as the one it expects when the files changed again", async () => {
     const test = harness({ apps: ["apps/books"], revisions: { "apps/books": "r2" } });
-    test.owner.set("apps/books", {
-      publicationId: "books-1",
-      authorityRevision: 1,
-      sourceRevision: "r0",
-    });
-    test.pending.set("apps/books", {
-      publicationId: "books-2",
-      authorityRevision: 1,
-      sourceRevision: "r1",
-    });
+    test.owner.set("apps/books", row("books-1", "r0"));
+    test.pending.set("apps/books", row("books-2", "r1"));
     await test.sender.run("ws");
     expect(test.posts[0]!.body.expectedCurrentPublicationId).toBe("books-2");
   });
 
   it("withdraws a deleted app's current version, which takes its pending one too", async () => {
     const test = harness({ apps: [], revisions: {} });
-    test.owner.set("apps/books", {
-      publicationId: "books-1",
-      authorityRevision: 3,
-      sourceRevision: "r0",
-    });
-    test.pending.set("apps/books", {
-      publicationId: "books-2",
-      authorityRevision: 1,
-      sourceRevision: "r1",
-    });
+    test.owner.set("apps/books", row("books-1", "r0", 3));
+    test.pending.set("apps/books", row("books-2", "r1"));
     await test.sender.run("ws");
     expect(test.posts).toEqual([
       {

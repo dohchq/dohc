@@ -136,6 +136,7 @@ export interface AppPublicationPreparationDependencies {
   /** Where the app's dataset.json references resolve, when the app's files are read from elsewhere. */
   datasetAdapter?: SourceAdapter;
   onCollectionSchema?(text: string): void;
+  onSelected?(paths: readonly string[]): void;
 }
 function describeJsonSyntaxLocation(error: unknown): string | undefined {
   if (!(error instanceof Error)) return undefined;
@@ -421,7 +422,7 @@ export async function readLocalAppSource(
 
 type SourceDependencies = Pick<
   AppPublicationPreparationDependencies,
-  "adapter" | "signal" | "assertCurrent" | "deferredWrites"
+  "adapter" | "signal" | "assertCurrent" | "deferredWrites" | "onSelected"
 >;
 
 async function selectAppSources(
@@ -567,6 +568,7 @@ async function selectAppSources(
       ...(schemaPath ? [schemaPath] : []),
     ]),
   ];
+  dependencies.onSelected?.(paths);
   const outsidePaths = paths.filter((path) => !allowed(path));
   if (outsidePaths.length > 0) {
     const maxListed = 5;
