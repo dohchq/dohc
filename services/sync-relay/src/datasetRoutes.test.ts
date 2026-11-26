@@ -1395,8 +1395,11 @@ const upload = {
   contentType: "image/png",
   bytesBase64: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3]).toString("base64"),
 };
-async function attachmentsFixture(appDefinition = definition) {
-  const f = await httpFixture(undefined, true, limits, appDefinition);
+async function attachmentsFixture(
+  appDefinition = definition,
+  handlerOptions: Parameters<typeof httpFixture>[4] = {},
+) {
+  const f = await httpFixture(undefined, true, limits, appDefinition, handlerOptions);
   await f.activate();
   const publicationId = f.publish();
   const app = (action: string, body: unknown, headers = f.publicHeaders) =>
@@ -1483,6 +1486,31 @@ const submitted = (n: number) => ({
   operation: "submit",
   input: { name: `Friend ${n}` },
   idempotencyKey: `submit-${n}`,
+});
+
+it("ends a signed-in person's held read once they sign out", async () => {
+  let signedIn = true;
+  const f = await attachmentsFixture(linkReadable, {
+    resolveActor(request, workspaceId) {
+      if (!signedIn || request.headers.get("authorization") !== "Bearer owner")
+        throw new UnauthorizedError();
+      return { workspaceId, userId: "owner" };
+    },
+  });
+  await f.bind(true);
+  expect((await f.app("invoke", submitted(0))).status).toBe(200);
+  const events = (since: string, hold: number) =>
+    f.http(
+      `w/app-publications/${f.publicationId}/backend/events?authorityRevision=1&since=${since}&hold=${hold}`,
+    );
+  const [{ revision }] = (await (await events("", 0)).json()).changed;
+  const held = events(`:${revision}`, 20_000);
+  await vi.waitFor(() => expect(hasRelayWriteObservers(f.storage)).toBe(true));
+  signedIn = false;
+  const signedOutAtMs = Date.now();
+  expect((await f.app("invoke", submitted(1))).status).toBe(200);
+  expect((await held).status).toBe(401);
+  expect(Date.now() - signedOutAtMs).toBeLessThan(2_000);
 });
 
 it("wakes a parked link app poll on a Collection change, and answers only while the link can read", async () => {

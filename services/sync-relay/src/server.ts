@@ -283,7 +283,7 @@ export interface CreateSyncRelayHandlerOptions {
   linkLogReadRateLimiter?: TokenBucketLimiter;
   linkGrantLogReadRateLimiter?: TokenBucketLimiter;
   linkGrantEgressRateLimiter?: LinkEgressRateLimiter;
-  // A signed-in person's reads of their apps' Collection changes, keyed by workspace and person.
+  // A signed-in person's reads of their apps' Collection changes, keyed by person.
   appEventReadRateLimiter?: TokenBucketLimiter;
   // Posts of notices to other people, keyed by sender.
   noticePostRateLimiter?: TokenBucketLimiter;
@@ -1183,11 +1183,8 @@ export function createSyncRelayHandler({
     return { capabilityToken, capability };
   };
 
-  const limitAppEvents = (route: { action: string; workspaceId?: string }, userId: string) => {
-    if (
-      route.action === "events" &&
-      !appEventReadRateLimiter.allow(`${route.workspaceId}:${userId}`, nowMs())
-    )
+  const limitAppEvents = (route: { action: string }, userId: string) => {
+    if (route.action === "events" && !appEventReadRateLimiter.allow(userId, nowMs()))
       throw relayError("link_read_rate_limited");
   };
 
@@ -1833,7 +1830,12 @@ export function createSyncRelayHandler({
           userId: actor.userId,
           ...(person ? { person: true as const } : {}),
         };
-        return await respondToDatasetApp(request, route, auth);
+        const signedIn = async () => {
+          const again = await resolveActor(actorRequest, actor.workspaceId);
+          if (again.workspaceId !== actor.workspaceId || again.userId !== actor.userId)
+            throw notFound();
+        };
+        return await respondToDatasetApp(request, route, auth, false, signedIn);
       }
       if (route.route === "link-app-publication")
         return respondToLinkAppPublication(request, route);

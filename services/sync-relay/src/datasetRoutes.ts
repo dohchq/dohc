@@ -975,6 +975,8 @@ export function createDatasetAppRoutes(
     auth: AppBackendAuth,
     /** A phone launch: only a publication runs, never an app approved on a computer. */
     publishedOnly = false,
+    /** Checks the caller's sign-in again. Throws once it has ended. */
+    signedIn?: () => Promise<void>,
   ): Promise<Response> => {
     if (route.action === "events") {
       if (!options.events || !options.publications) throw notFound();
@@ -987,7 +989,7 @@ export function createDatasetAppRoutes(
       const signal = AbortSignal.any([request.signal, storage.unavailable]);
       const deadlineAtMs = Date.now() + hold;
       for (;;) {
-        if (auth.kind === "named") await auth.launch?.recheck();
+        if (auth.kind === "named") await (auth.launch ? auth.launch.recheck() : signedIn?.());
         const current = host.appEventRevisions(auth, route.publicationId, authorityRevision);
         const changed = current.collections
           .filter(({ dataset, revision }) => revision !== (since.get(dataset) ?? 0))

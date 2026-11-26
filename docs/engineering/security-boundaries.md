@@ -321,12 +321,12 @@ was written. It lists only the Collections where the caller can run one of the
 app's read operations: the same check an invoke makes, including pause, block,
 folder rules, a Member app's two reaches, narrowing, archive, and withdrawal.
 A Collection the caller can only write to is left out, and with none left the
-relay refuses. The relay checks again, and rechecks a phone launch's sign-in,
-before every answer. It wakes held reads at least once a second while writes
+relay refuses. The relay checks access and the caller's sign-in or phone launch
+again before every answer. It wakes held reads at least once a second while writes
 happen, so a held read whose access ended is refused within about a second.
 Held reads are capped at 256 per link grant or per signed-in person in a
 workspace, and 1,024 in all. Link reads count against the link read budget, and
-signed-in reads against a budget of their own per person in each workspace.
+signed-in reads against a budget of their own per person.
 See the [route tests](../../services/sync-relay/src/datasetRoutes.test.ts).
 
 Persistent Collection workers isolate SQLite memory differently by host runtime.
