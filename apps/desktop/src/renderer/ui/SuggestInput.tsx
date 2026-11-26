@@ -13,6 +13,7 @@ import {
   movedPointer,
   revealMenuRow,
 } from "./Menu";
+import { isComposingKey } from "./keys";
 
 export type Suggestion = {
   /** What picking it puts in the field. */
@@ -50,7 +51,9 @@ export function SuggestInput(props: {
   const field = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLUListElement>(null);
   const [shown, setShown] = useState(false);
-  const [active, setActive] = useState(0);
+  // -1 until the arrow keys or the pointer choose a row, so Enter after
+  // typing keeps what was typed.
+  const [active, setActive] = useState(-1);
   const Icon = props.icon;
 
   const options = useMemo(() => {
@@ -65,7 +68,7 @@ export function SuggestInput(props: {
   // A value the list doesn't have is still a fine answer, so nothing to
   // offer shows no list at all.
   const open = shown && !props.disabled && options.length > 0;
-  const activeIndex = Math.min(active, Math.max(options.length - 1, 0));
+  const activeIndex = active < options.length ? active : -1;
   const optionId = (index: number) => `${id}-option-${index}`;
 
   const pick = (option: Suggestion) => {
@@ -81,6 +84,7 @@ export function SuggestInput(props: {
   };
 
   function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (isComposingKey(event)) return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       if (!open) {
@@ -88,8 +92,9 @@ export function SuggestInput(props: {
         setActive(0);
         return;
       }
-      const step = event.key === "ArrowDown" ? 1 : -1;
-      move((activeIndex + step + options.length) % options.length);
+      const down = event.key === "ArrowDown";
+      if (activeIndex < 0) move(down ? 0 : options.length - 1);
+      else move((activeIndex + (down ? 1 : -1) + options.length) % options.length);
       return;
     }
     // The Overlay leaves this Escape to an open list, so it closes the list
@@ -98,9 +103,8 @@ export function SuggestInput(props: {
       setShown(false);
       return;
     }
-    // Enter picks the active row while the list is open, and submits the
-    // form while it is closed.
-    if (event.key === "Enter" && open && options[activeIndex]) {
+    // Enter picks a row the person chose, and otherwise submits the form.
+    if (event.key === "Enter" && open && activeIndex >= 0) {
       event.preventDefault();
       pick(options[activeIndex]);
     }
@@ -126,7 +130,7 @@ export function SuggestInput(props: {
           aria-autocomplete="list"
           aria-expanded={open}
           aria-controls={`${id}-list`}
-          aria-activedescendant={open && options[activeIndex] ? optionId(activeIndex) : undefined}
+          aria-activedescendant={open && activeIndex >= 0 ? optionId(activeIndex) : undefined}
           aria-invalid={props.invalid || undefined}
           aria-describedby={props.describedBy}
           autoComplete="off"
@@ -139,7 +143,7 @@ export function SuggestInput(props: {
           onChange={(event) => {
             props.onChange(event.target.value);
             setShown(true);
-            setActive(0);
+            setActive(-1);
           }}
           onKeyDown={onKeyDown}
           onBlur={() => setShown(false)}
@@ -151,12 +155,14 @@ export function SuggestInput(props: {
           aria-label={`Show ${props.listLabel.toLowerCase()}`}
           title={`Show ${props.listLabel.toLowerCase()}`}
           disabled={props.disabled}
+          // Keep focus in the field, so the list stays open.
           onMouseDown={(event) => {
-            // Keep focus in the field, so the list stays open.
-            event.preventDefault();
+            if (event.button === 0) event.preventDefault();
+          }}
+          onClick={() => {
             field.current?.focus();
             setShown(!open);
-            setActive(0);
+            setActive(-1);
           }}
           className="grid h-full w-7 shrink-0 place-items-center rounded-r-md text-subtle transition-colors hover:text-ink"
         >
@@ -180,9 +186,9 @@ export function SuggestInput(props: {
               data-index={index}
               data-active={index === activeIndex || undefined}
               onMouseDown={(event) => {
-                event.preventDefault();
-                pick(option);
+                if (event.button === 0) event.preventDefault();
               }}
+              onClick={() => pick(option)}
               onMouseMove={(event) => {
                 if (movedPointer(event)) setActive(index);
               }}

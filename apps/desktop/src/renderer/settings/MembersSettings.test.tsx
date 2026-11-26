@@ -197,6 +197,16 @@ describe("Folder access", () => {
       }),
     );
     await user.click(dialog.getByRole("button", { name: "Add person" }));
+    // Enter keeps what was typed until a row is chosen, so a match never
+    // replaces it.
+    await user.keyboard("bo");
+    expect(dialog.getByRole("listbox", { name: "People" })).toBeTruthy();
+    await user.keyboard("{Enter}");
+    expect((dialog.getByLabelText("Email address") as HTMLInputElement).value).toBe("bo");
+    expect(
+      dialog.getByText("Enter a different, valid email address for each person."),
+    ).toBeTruthy();
+    await user.clear(dialog.getByLabelText("Email address"));
     // People offers members by name, and leaves out the owner and admins.
     await user.keyboard("{ArrowDown}");
     const people = within(dialog.getByRole("listbox", { name: "People" }));
