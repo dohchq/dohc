@@ -1,0 +1,298 @@
+import { createServer } from "node:https";
+import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { expect, type Browser } from "@playwright/test";
+import { WebSocketServer } from "ws";
+import * as Y from "yjs";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
+import {
+  admitBodySequenceNotes,
+  liveEditRefusal,
+} from "@dohc/ydoc-projection/live-journal-validation";
+import {
+  createLiveFrameSession,
+  encodeLiveFrameSync,
+  type LiveFrame,
+} from "@dohc/live-session-contract/live-frame";
+import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
+import { ensureLocalhostTls } from "../src/testing/device-control/localhostTls.js";
+import { viewerPage } from "../viewer/src/pages";
+
+/**
+ * A host for one shared file, `docs/shared.md`, over real HTTPS and WSS, signed in as Alice and
+ * opened in a new browser page. It holds the note's document, applies each change the page
+ * submits while `accept` is true, and records in `failures` every change the save would refuse.
+ * With `holdSync`, the page's initial sync waits for `releaseSync`. It does not prove native
+ * durability or account authentication.
+ */
+export async function openNamedRecipient(
+  browser: Browser,
+  markdown: string,
+  options: { bodySequence?: boolean; holdSync?: boolean } = {},
+) {
+  admitBodySequenceNotes(true);
+  const service = fileURLToPath(new URL("..", import.meta.url)),
+    tls = await ensureLocalhostTls();
+  const frames = {
+    receive: {
+      maxFrameBytes: 2048,
+      maxStateVectorBytes: 4096,
+      maxUpdateBytes: 8192,
+      maxSyncBytes: 16384,
+    },
+    maxQueuedBytes: 16384,
+    maxQueuedFrames: 64,
+    maxControlBytes: 4096,
+    maxControlFrames: 8,
+    maxAssemblyBytes: 16384,
+  };
+  const limits = {
+    provider: {
+      frames,
+      maxPendingUpdateBytes: 16384,
+      maxPendingUpdates: 8,
+      maxDeliveryAttempts: 4,
+    },
+    maxHttpResponseBytes: 16384,
+    maxSocketBufferedBytes: 16384,
+    connectTimeoutMs: 5000,
+    sendTimeoutMs: 1000,
+    drainPollMs: 10,
+  };
+  const doc = markdownToYDoc(markdown, { bodySequence: options.bodySequence ?? false });
+  const checked = new Y.Doc();
+  Y.applyUpdate(checked, Y.encodeStateAsUpdate(doc));
+  const binding = {
+    workspaceId: "named:grant",
+    mainVersionId: "main" as const,
+    objectId: "document",
+    lineageClaimId: "a".repeat(64),
+    currentPath: "docs/shared.md",
+    selectorPaths: ["docs"],
+    restoreFenceGeneration: 1,
+  };
+  let origin = "",
+    cursor = 0,
+    refuseSession: (() => void) | undefined,
+    heldSync: (() => void) | undefined,
+    asked: () => void = () => {};
+  const vectorAsked = new Promise<void>((resolve) => (asked = resolve));
+  const control = { accept: true };
+  const failures: string[] = [],
+    sockets = new WebSocketServer({
+      noServer: true,
+      perMessageDeflate: false,
+      handleProtocols: (protocols) => (protocols.has("dohc-live-v1") ? "dohc-live-v1" : false),
+    });
+  const server = createServer(
+    { key: await readFile(tls.key), cert: await readFile(tls.certificate) },
+    async (request, response) => {
+      try {
+        const url = new URL(request.url!, origin),
+          authenticated = request.headers.cookie === "fixture-account=alice";
+        response.setHeader("cache-control", "private, no-store");
+        const json = (value: unknown) => {
+          response.setHeader("content-type", "application/json");
+          response.end(JSON.stringify(value));
+        };
+        if (url.pathname === "/api/account/session") {
+          json({ user: authenticated ? { id: "alice", name: "Alice" } : null });
+          return;
+        }
+        if (url.pathname === "/api/account/sign-in") {
+          const chunks: Buffer[] = [];
+          for await (const chunk of request) chunks.push(Buffer.from(chunk));
+          const data = JSON.parse(Buffer.concat(chunks).toString());
+          if (data.email !== "alice@example.test" || data.password !== "fixture-password") {
+            response.writeHead(401).end();
+            return;
+          }
+          response.setHeader(
+            "set-cookie",
+            "fixture-account=alice; Secure; HttpOnly; SameSite=Strict; Path=/",
+          );
+          json({ ok: true });
+          return;
+        }
+        if (url.pathname.startsWith("/api/")) {
+          if (!authenticated) {
+            response.writeHead(404).end();
+            return;
+          }
+          if (url.pathname === "/api/live/named-documents") {
+            json({
+              subjectName: "Trip",
+              sharerName: "Ana (owner@dohc.test)",
+              access: "edit",
+              userId: "alice",
+              workspaceId: "named:grant",
+              shareId: "share",
+              grantId: "grant",
+              limits,
+              files: [{ objectId: "document", path: binding.currentPath }],
+            });
+            return;
+          }
+          if (url.pathname === "/api/live/named-session") {
+            json({ discriminator: "abcdefghijkl", expiresAtMs: Date.now() + 60000 });
+            return;
+          }
+          if (url.pathname === "/api/live/named-ticket") {
+            json({ token: "ab".repeat(32), expiresAtMs: Date.now() + 60000 });
+            return;
+          }
+          response.writeHead(404).end();
+          return;
+        }
+        const asset = url.pathname.startsWith("/s/assets/")
+          ? url.pathname.slice(3)
+          : viewerPage(url.pathname);
+        if (asset.includes("..")) {
+          response.writeHead(404).end();
+          return;
+        }
+        response.setHeader(
+          "content-type",
+          asset.endsWith(".js")
+            ? "text/javascript"
+            : asset.endsWith(".css")
+              ? "text/css"
+              : "text/html",
+        );
+        response.end(await readFile(join(service, "viewer/dist", asset)));
+      } catch (error) {
+        failures.push(String(error));
+        response.writeHead(500).end();
+      }
+    },
+  );
+  server.on("upgrade", (request, socket, head) =>
+    sockets.handleUpgrade(request, socket, head, (ws) => {
+      const protocol = createLiveFrameSession("server", frames);
+      const send = (frame: LiveFrame) => {
+        const lease = protocol.send(frame);
+        try {
+          ws.send(lease.value);
+        } finally {
+          lease.release();
+        }
+      };
+      refuseSession = () => send({ kind: "close", reason: "route-fenced" });
+      const sync = (vector: Uint8Array) => {
+        const output = encodeLiveFrameSync(
+          {
+            binding,
+            hostVector: Y.encodeStateVector(doc),
+            missingStateUpdate: Y.encodeStateAsUpdate(doc, vector),
+          },
+          frames.receive,
+        );
+        send({
+          kind: "begin",
+          purpose: "initial-sync",
+          transferId: 1,
+          totalBytes: output.length,
+          digest: createHash("sha256").update(output).digest("hex"),
+          appliedThroughJournalCursor: cursor,
+        });
+        for (let offset = 0; offset < output.length; offset += 1900)
+          send({
+            kind: "chunk",
+            transferId: 1,
+            offset,
+            bytes: output.subarray(offset, offset + 1900),
+          });
+      };
+      ws.on("message", (bytes) => {
+        try {
+          const lease = protocol.receive(new Uint8Array(bytes as Buffer));
+          try {
+            if (lease.value.frame.kind === "hello") {
+              send({
+                kind: "welcome",
+                hostEpoch: parseHostEpoch(1),
+                receivePolicy: frames.receive,
+              });
+              send({
+                kind: "credit",
+                grantedBytes: frames.maxQueuedBytes,
+                grantedFrames: frames.maxQueuedFrames,
+              });
+            }
+            const transfer = lease.value.transfer?.value;
+            if (transfer?.begin.purpose === "client-vector") {
+              const vector = transfer.bytes.slice();
+              asked();
+              if (options.holdSync && !heldSync) heldSync = () => sync(vector);
+              else sync(vector);
+            } else if (transfer?.begin.purpose === "submit-update" && control.accept) {
+              const refusal = liveEditRefusal(checked, transfer.bytes);
+              if (refusal) failures.push(`The save refuses a change: ${refusal.reason}`);
+              Y.applyUpdate(checked, transfer.bytes);
+              Y.applyUpdate(doc, transfer.bytes);
+              cursor++;
+              send({
+                kind: "result",
+                result: "success",
+                ack: {
+                  deliveryId: transfer.begin.deliveryId,
+                  updateDigest: transfer.begin.digest,
+                  journalCursor: cursor,
+                  acceptingHostEpoch: parseHostEpoch(1),
+                  localYDocSequence: cursor,
+                  applicationReplayed: false,
+                },
+              });
+            }
+          } finally {
+            lease.value.transfer?.release();
+            lease.release();
+          }
+        } catch (error) {
+          failures.push(String(error));
+          ws.close();
+        }
+      });
+      ws.once("close", () => protocol.close());
+    }),
+  );
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw Error("No listener");
+  origin = `https://127.0.0.1:${address.port}`;
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: { width: 1280, height: 860 },
+  });
+  const page = await context.newPage();
+  page.on("pageerror", (error) => failures.push(String(error)));
+  await page.goto(`${origin}/s/edit/grant`);
+  await page.getByLabel("Email", { exact: true }).fill("alice@example.test");
+  await page.getByLabel("Password", { exact: true }).fill("fixture-password");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.getByRole("button", { name: "docs/shared.md", exact: true }).click();
+  const editor = page.getByRole("textbox", { name: "Shared file editor" });
+  return {
+    doc,
+    binding,
+    control,
+    failures,
+    page,
+    editor,
+    vectorAsked,
+    releaseSync: () => heldSync?.(),
+    refuseSession: () => refuseSession!(),
+    expectNoFailures: () => expect(failures).toEqual([]),
+    async close() {
+      await context.close();
+      for (const socket of sockets.clients) socket.terminate();
+      sockets.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      doc.destroy();
+      checked.destroy();
+      admitBodySequenceNotes(false);
+    },
+  };
+}

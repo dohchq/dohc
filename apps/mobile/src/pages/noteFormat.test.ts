@@ -1,14 +1,18 @@
 import { getDohcYDocBodyFragment } from "@dohc/ydoc-projection/body-fragment";
+import type { BodySequenceUnwritten } from "@dohc/ydoc-projection/body-sequence-editor";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import type { createLiveAdapter, LiveProvider } from "../../editor/liveAdapter";
 
 const hoisted = vi.hoisted(() => ({
   posted: [] as string[],
+  payloads: [] as unknown[],
   copied: [] as unknown[],
   mounted: [] as {
+    doc: Y.Doc;
     canEdit(): boolean;
     edit(change: () => void): boolean;
+    unwritten?(why: BodySequenceUnwritten): void;
     destroy: ReturnType<typeof vi.fn>;
     refresh: ReturnType<typeof vi.fn>;
   }[],
@@ -19,13 +23,14 @@ const hoisted = vi.hoisted(() => ({
 vi.mock("../../editor/bridge", () => ({
   post: (kind: string, payload?: { markdown?: unknown }) => {
     hoisted.posted.push(kind);
+    hoisted.payloads.push(payload);
     if (kind === "markdown") hoisted.copied.push(payload?.markdown);
   },
 }));
 vi.mock("@dohc/ydoc-projection/browser-editor", () => ({
   mountLiveBodyEditor: (
-    _body: unknown,
-    options: { canEdit(): boolean; edit(change: () => void): boolean },
+    _element: unknown,
+    options: { doc: Y.Doc; canEdit(): boolean; edit(change: () => void): boolean },
   ) => {
     const editor = { ...options, destroy: vi.fn(), refresh: vi.fn() };
     hoisted.mounted.push(editor);
@@ -43,6 +48,8 @@ vi.mock("../../editor/liveAdapter", () => ({
   },
 }));
 
+const { markdownToYDoc, yDocToMarkdown } =
+  await vi.importActual<typeof import("@dohc/ydoc-projection")>("@dohc/ydoc-projection");
 const { mountDocument } = await import("../../editor/document");
 const { followLive } = await import("../../editor/live");
 
@@ -70,6 +77,8 @@ function note(format?: number, words = "Packing list") {
   return doc;
 }
 
+const sequenceNote = () => markdownToYDoc("Packing list", { bodySequence: true });
+
 function writes(doc: Y.Doc) {
   let count = 0;
   doc.on("update", () => count++);
@@ -79,7 +88,6 @@ function writes(doc: Y.Doc) {
 function provider(doc: Y.Doc) {
   return {
     doc,
-    body: getDohcYDocBodyFragment(doc),
     state: () => ({ status: "live" }),
     subscribe: () => () => undefined,
   } as unknown as LiveProvider;
@@ -96,6 +104,7 @@ const page = {
 
 beforeEach(() => {
   hoisted.posted.length = 0;
+  hoisted.payloads.length = 0;
   hoisted.copied.length = 0;
   hoisted.mounted.length = 0;
   hoisted.adapter = null;
@@ -112,8 +121,8 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("the text the app read", () => {
-  it("binds no editor to a note in format 2, writes nothing, and tells the app", () => {
-    hoisted.readDoc = note(2);
+  it("binds no editor to a note in a format it doesn't know, writes nothing, and tells the app", () => {
+    hoisted.readDoc = note(3);
     const written = writes(hoisted.readDoc);
     mountDocument(page);
     expect(hoisted.mounted).toHaveLength(0);
@@ -121,12 +130,14 @@ describe("the text the app read", () => {
     expect(hoisted.posted).toContain("unsupportedFormat");
   });
 
-  it("binds the editor to a note in format 1, or with no format, which is 1", () => {
-    for (const format of [1, undefined]) {
+  it("binds the editor to a note in format 1, with no format, which is 1, or in format 2", () => {
+    for (const made of [() => note(1), () => note(), sequenceNote]) {
       hoisted.mounted.length = 0;
-      hoisted.readDoc = note(format);
+      hoisted.readDoc = made();
       mountDocument(page);
       expect(hoisted.mounted).toHaveLength(1);
+      expect(hoisted.mounted[0]?.doc).toBe(hoisted.readDoc);
+      expect(yDocToMarkdown(hoisted.mounted[0]!.doc)).toBe("Packing list\n");
     }
     expect(hoisted.posted).not.toContain("unsupportedFormat");
   });
@@ -144,8 +155,8 @@ describe("the live document", () => {
     return { changed: hoisted.adapter!.changed, endEditing };
   };
 
-  it("binds no editor to a note in format 2, writes nothing, and tells the app", () => {
-    const doc = note(2);
+  it("binds no editor to a note in a format it doesn't know, writes nothing, and tells the app", () => {
+    const doc = note(3);
     const written = writes(doc);
     const { changed, endEditing } = follow();
     changed(provider(doc));
@@ -156,7 +167,49 @@ describe("the live document", () => {
     expect(endEditing).toHaveBeenCalled();
   });
 
-  it("unbinds the editor and takes no edits once another computer moves the note to format 2", () => {
+  it("binds the editor to a note in format 2 and tells the app why a change was not saved, unless the page refused it", () => {
+    const doc = sequenceNote();
+    const written = writes(doc);
+    const { changed } = follow();
+    changed(provider(doc));
+    const [editor] = hoisted.mounted;
+    expect(hoisted.mounted).toHaveLength(1);
+    expect(editor?.doc).toBe(doc);
+    expect(editor?.canEdit()).toBe(true);
+    editor?.unwritten?.("guarded");
+    editor?.unwritten?.("overtaken");
+    expect(hoisted.posted.filter((kind) => kind === "unwritten")).toHaveLength(1);
+    expect(hoisted.payloads[hoisted.posted.indexOf("unwritten")]).toEqual({ why: "overtaken" });
+    expect(hoisted.posted).not.toContain("unsupportedFormat");
+    expect(written()).toBe(0);
+  });
+
+  it("binds the editor again, in place, once another computer moves the note to format 2", () => {
+    const doc = note(1);
+    const { changed, endEditing } = follow();
+    changed(provider(doc));
+    const [first] = hoisted.mounted;
+    const elsewhere = new Y.Doc();
+    Y.applyUpdate(elsewhere, Y.encodeStateAsUpdate(doc));
+    const before = Y.encodeStateVector(elsewhere);
+    elsewhere.transact(() => {
+      elsewhere.getMap("meta").set("schemaVersion", 2);
+      elsewhere.getText("sequence").insert(0, "Packing list");
+    });
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(elsewhere, before));
+    const written = writes(doc);
+    const [, second] = hoisted.mounted;
+    expect(first?.destroy).toHaveBeenCalledOnce();
+    expect(hoisted.mounted).toHaveLength(2);
+    expect(second?.doc).toBe(doc);
+    expect(second?.canEdit()).toBe(true);
+    expect(second?.destroy).not.toHaveBeenCalled();
+    expect(endEditing).not.toHaveBeenCalled();
+    expect(hoisted.posted).not.toContain("unsupportedFormat");
+    expect(written()).toBe(0);
+  });
+
+  it("unbinds the editor and takes no edits once another computer moves the note to a format it doesn't know", () => {
     const doc = note(1);
     const { changed } = follow();
     changed(provider(doc));
@@ -166,7 +219,7 @@ describe("the live document", () => {
     const elsewhere = new Y.Doc();
     Y.applyUpdate(elsewhere, Y.encodeStateAsUpdate(doc));
     const before = Y.encodeStateVector(elsewhere);
-    elsewhere.getMap("meta").set("schemaVersion", 2);
+    elsewhere.getMap("meta").set("schemaVersion", 3);
     Y.applyUpdate(doc, Y.encodeStateAsUpdate(elsewhere, before));
 
     const written = writes(doc);
@@ -205,10 +258,10 @@ describe("a newer read of the page", () => {
     expect(hoisted.copied).toEqual(["Packing list and passports\n"]);
   });
 
-  it("binds no editor to a newer read in format 2, leaves no copy or edit bound, and tells the app", () => {
+  it("binds no editor to a newer read in a format it doesn't know, leaves no copy or edit bound, and tells the app", () => {
     hoisted.readDoc = note(1);
     mountDocument(page);
-    hoisted.readDoc = note(2);
+    hoisted.readDoc = note(3);
     app().__dohcReplaceRead("Packing list");
     expect(hoisted.mounted).toHaveLength(1);
     expect(hoisted.mounted[0]?.destroy).toHaveBeenCalledOnce();

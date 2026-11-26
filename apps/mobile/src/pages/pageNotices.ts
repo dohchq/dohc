@@ -53,6 +53,9 @@ export function pageNotices(state: {
   ];
 }
 
+export const unwrittenText = (why: unknown) =>
+  why === "overtaken" ? documentWords.unwrittenOvertaken : documentWords.unwritten;
+
 /** A failure in place of the page offers Try again. */
 export const pageFailureAction = { name: "retry" as const, label: documentWords.tryAgain };
 

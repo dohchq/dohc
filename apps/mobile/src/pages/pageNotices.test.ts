@@ -4,6 +4,7 @@ import {
   pageFailureAction,
   pageNotices,
   type PageHandlers,
+  unwrittenText,
 } from "./pageNotices";
 
 // A strip once offered Try again with nothing behind it. Every action a page offers needs a handler.
@@ -45,5 +46,17 @@ describe("Edit anyway's message", () => {
       `${cost} dohc could not confirm that History can restore the original.`,
     );
     expect(editAnywayMessage(null)).toBe(cost);
+  });
+});
+
+describe("a change the page did not save", () => {
+  it("says someone else got there first when it was overtaken, and otherwise that dohc can't save it yet", () => {
+    expect(unwrittenText("overtaken")).toBe(
+      "Someone else's change reached the note first, so dohc put it back as it was. Make your change again.",
+    );
+    for (const why of ["unwritable", "guardedAfterBoundary", undefined])
+      expect(unwrittenText(why)).toBe(
+        "dohc can't save this change in a live note yet, so it put the note back as it was.",
+      );
   });
 });

@@ -344,7 +344,7 @@ function keepsTheStartItReplaces(
   const first = tokens[0];
   if (first === undefined || !("block" in first)) return false;
   if (endsIn <= opened) return true;
-  const startsMoreBlocks = tokens.findLastIndex((token) => "block" in token) > 0;
+  const startsMoreBlocks = tokens.map((token) => "block" in token).lastIndexOf(true) > 0;
   return startsMoreBlocks && !staysTheAddedParagraph(reading, opened, tokens);
 }
 
@@ -372,7 +372,7 @@ function writeRange(
   if (!replaced && atStart && hasText && startsBlock && boundaryAt(reading, holder) >= 0) {
     const boundary = boundaryAt(reading, holder);
     const path = reading.paths[holder]!;
-    const lastStart = tokens.findLastIndex((token) => "block" in token);
+    const lastStart = tokens.map((token) => "block" in token).lastIndexOf(true);
     const ending = tokens[lastStart]!;
     const $new = after.resolve(newStart);
     const upper = $new.parent.isTextblock ? $new.parent : ($new.nodeBefore ?? paragraph);
@@ -419,7 +419,7 @@ function writeRange(
     tokens.filter((token) => "block" in token).length > 1;
   if ((continuesLaterBlock || putsBlocksInFront) && boundaryAt(reading, ends) >= 0) {
     const kept = boundaryAt(reading, ends);
-    const continued = tokens.findLastIndex((token) => "block" in token);
+    const continued = tokens.map((token) => "block" in token).lastIndexOf(true);
     const path = pathAt(reading, oldStart);
     const behind = formattingInForceAfter(sequence, kept + 1);
     const own = continuesLaterBlock && opened >= 0 ? boundaryElement(reading, opened) : null;
@@ -612,11 +612,11 @@ function writeContainersThatDiffer(
   const kinOf = (node: Around) => {
     const element = firstElement(node);
     return (element ? (history.get(element) ?? []) : [])
-      .toReversed()
       .filter(
         (known) =>
           known.first === element && familyOf(known.node) === familyOf(node.node) && isFree(known),
-      );
+      )
+      .reverse();
   };
   const isAlike = (node: Around) => (known: Known) => known.node.type === node.node.type;
   for (const node of nodes)
@@ -1035,7 +1035,7 @@ export function writeTransaction(
   let run = null as Run | null;
   let inserts: [base: number, step: number, range: Range][] = [];
   const baseOf = (pos: number) => {
-    for (const [, , [, , start, end]] of inserts.toReversed()) {
+    for (const [, , [, , start, end]] of [...inserts].reverse()) {
       if (pos >= start && pos <= end) return -1;
       if (pos > end) pos -= end - start;
     }
@@ -1634,7 +1634,7 @@ function runsOfClocks(first: Y.Item | null, end: Y.Item | null): number {
 }
 
 function runsAmong(items: readonly Y.Item[]): number {
-  const sorted = items.toSorted((a, b) => a.id.client - b.id.client || a.id.clock - b.id.clock);
+  const sorted = [...items].sort((a, b) => a.id.client - b.id.client || a.id.clock - b.id.clock);
   return sorted.filter((item, at) => {
     const before = sorted[at - 1];
     return (

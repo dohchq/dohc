@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { getDohcYDocBodyFragment } from "@dohc/ydoc-projection/body-fragment";
 import { afterEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { encodeLiveFrameSync } from "@dohc/live-session-contract/live-frame";
@@ -336,7 +337,7 @@ it("takes the host's early state for a link's file before the page asks for a ti
   try {
     await vi.waitFor(() => expect(session.state().typingAhead).toBe(true));
     expect(session.state()).toMatchObject({ status: "disconnected", binding });
-    expect(session.body.toString()).toContain("Shared text");
+    expect(getDohcYDocBodyFragment(session.doc).toString()).toContain("Shared text");
   } finally {
     session.close();
   }
@@ -395,7 +396,9 @@ it.each([
     );
     try {
       await vi.waitFor(() => expect(session.state().typingAhead).toBe(true));
-      const text = (session.body.get(0) as Y.XmlElement).get(0) as Y.XmlText;
+      const text = (getDohcYDocBodyFragment(session.doc).get(0) as Y.XmlElement).get(
+        0,
+      ) as Y.XmlText;
       expect(text.toString()).toBe(typesOn);
       expect(
         fetch.mock.calls.filter(([path]) => path === "/api/live/link-document-state"),

@@ -146,8 +146,10 @@ function page(limits = liveLimits()) {
   return { adapter, provider, posted, sentOn, reported, connect };
 }
 
-function type(provider: { body: Y.XmlFragment }, text: string) {
-  const content = (provider.body.get(0) as Y.XmlElement).get(0) as Y.XmlText;
+function type(provider: { doc: Y.Doc }, text: string) {
+  const content = (getDohcYDocBodyFragment(provider.doc).get(0) as Y.XmlElement).get(
+    0,
+  ) as Y.XmlText;
   content.insert(content.length, text);
 }
 
@@ -158,11 +160,13 @@ describe("the page's live connection", () => {
   it("never seeds the provider: it is empty and takes nothing ahead until the relay's sync", async () => {
     const t = page();
     const app = t.connect();
-    expect(t.provider().body.length).toBe(0);
+    expect(getDohcYDocBodyFragment(t.provider().doc).length).toBe(0);
     expect(t.provider().state()).toMatchObject({ status: "connecting", typingAhead: false });
     const doc = document("from the relay");
     await app.sync(doc);
-    expect(t.provider().body.toString()).toBe(getDohcYDocBodyFragment(doc).toString());
+    expect(getDohcYDocBodyFragment(t.provider().doc).toString()).toBe(
+      getDohcYDocBodyFragment(doc).toString(),
+    );
     expect(t.reported(1)).toMatchObject({ facts: { status: "live", pendingUpdates: 0 } });
   });
 

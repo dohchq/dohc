@@ -1,5 +1,4 @@
 import * as Y from "yjs";
-import { getDohcYDocBodyFragment } from "@dohc/ydoc-projection/body-fragment";
 import {
   createLiveFrameSession,
   decodeLiveFrameSync,
@@ -52,6 +51,8 @@ export interface NamedLiveProviderState {
   readonly membership: LiveMembershipFrame | null;
   /** The page isn't live but holds the note, from the host's early state or from being live, and takes edits that wait until it is. */
   readonly typingAhead: boolean;
+  /** The page has held the note since its host's early state or its first sync, through any stop after. */
+  readonly holds: boolean;
 }
 
 interface PendingUpdate {
@@ -129,7 +130,6 @@ export function createNamedLiveProvider(
   }
   const doc = new Y.Doc();
   declareBodySequence(doc);
-  const body = getDohcYDocBodyFragment(doc);
   const pending: PendingUpdate[] = [];
   const listeners = new Set<(state: NamedLiveProviderState) => void>();
   const removedListeners = new Set<(removed: RemovedText) => void>();
@@ -185,6 +185,7 @@ export function createNamedLiveProvider(
     lastApplied: lastApplied && { ...lastApplied },
     membership: membership && { ...membership, members: [...membership.members] },
     typingAhead: typingAhead(),
+    holds: seeded || synced,
   });
   function notify() {
     for (const listener of listeners) {
@@ -607,7 +608,6 @@ export function createNamedLiveProvider(
 
   return {
     doc,
-    body,
     state,
     subscribe(listener: (value: NamedLiveProviderState) => void) {
       listeners.add(listener);
@@ -644,13 +644,13 @@ export function createNamedLiveProvider(
         return false;
       binding = parsed;
       highestObservedCursor = throughJournalCursor;
-      seeded = true;
       Y.applyUpdate(doc, sync.missingStateUpdate, REMOTE);
       const appliedVector = Y.decodeStateVector(Y.encodeStateVector(doc));
       if ([...hostVector].some(([client, clock]) => (appliedVector.get(client) ?? 0) < clock)) {
         quarantine("incomplete-sync");
         return false;
       }
+      seeded = true;
       notify();
       return true;
     },

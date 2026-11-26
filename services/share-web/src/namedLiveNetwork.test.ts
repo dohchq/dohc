@@ -502,10 +502,10 @@ function untilLive(provider: ReturnType<typeof createNamedLiveProvider>) {
   });
 }
 function untilBody(provider: ReturnType<typeof createNamedLiveProvider>, text: string) {
-  if (provider.body.toString().includes(text)) return Promise.resolve();
+  if (getDohcYDocBodyFragment(provider.doc).toString().includes(text)) return Promise.resolve();
   return new Promise<void>((done) => {
     const update = () => {
-      if (provider.body.toString().includes(text)) {
+      if (getDohcYDocBodyFragment(provider.doc).toString().includes(text)) {
         provider.doc.off("update", update);
         done();
       }
@@ -524,12 +524,16 @@ it("runs public ticket mint, one relay redemption, initial sync, and accepted fe
   expect(browser.ws.protocol).toBe("dohc-live-v1");
   const provider = browser.attach();
   await untilLive(provider);
-  expect(provider.body.toString()).toBe(getDohcYDocBodyFragment(f.doc).toString());
+  expect(getDohcYDocBodyFragment(provider.doc).toString()).toBe(
+    getDohcYDocBodyFragment(f.doc).toString(),
+  );
   await f.waitingRead.promise;
   const applied = untilBody(provider, " peer");
   f.publish(" peer");
   await applied;
-  expect(provider.body.toString()).toBe(getDohcYDocBodyFragment(f.doc).toString());
+  expect(getDohcYDocBodyFragment(provider.doc).toString()).toBe(
+    getDohcYDocBodyFragment(f.doc).toString(),
+  );
   expect(provider.state().pendingUpdates).toBe(0);
   expect(f.native.client.openLiveAppliedSync).toHaveBeenCalledTimes(1);
   expect(

@@ -6,6 +6,9 @@ import {
   type LiveBodyEditorHandle,
   type LiveEditorToolbarState,
 } from "@dohc/ydoc-projection/browser-editor";
+import { documentWords } from "@dohc/interface-words/documents";
+import type { BodySequenceUnwritten } from "@dohc/ydoc-projection/body-sequence-editor";
+import { readsBodySequence } from "@dohc/ydoc-projection/body-sequence-yjs";
 import {
   NAMED_LIVE_NO_AUTOMATIC_RETRY,
   namedLiveEditable,
@@ -254,41 +257,54 @@ export function NamedDocumentEditor({
     resolveImageRef = useRef(resolveImage),
     autoFocusedRef = useRef(false),
     [state, setState] = useState(session.state()),
+    [format, setFormat] = useState<1 | 2 | null>(null),
+    [unwritten, setUnwritten] = useState<BodySequenceUnwritten | null>(null),
     [toolbar, setToolbar] = useState<LiveEditorToolbarState | null>(null);
   resolveImageRef.current = resolveImage;
   const frontmatter = useFrontmatterAsWritten(session.doc);
   useEffect(() => {
-    if (!element.current) return;
-    autoFocusedRef.current = false;
-    const editor = mountLiveBodyEditor(element.current, {
-      body: session.body,
-      label: "Shared file editor",
-      canEdit: () => namedLiveEditable(session.state()),
-      edit: session.edit,
-      resolveImage: (src) => resolveImageRef.current?.(src) ?? null,
-    });
-    editorRef.current = editor;
-    const unsubscribeToolbar = editor.subscribeToolbar(setToolbar);
+    const read = () =>
+      setFormat(session.state().holds ? (readsBodySequence(session.doc) ? 2 : 1) : null);
     const receive = (value: NamedLiveBrowserState) => {
       setState(value);
-      editor.refresh();
+      read();
+      editorRef.current?.refresh();
       onState(value);
     };
     receive(session.state());
     const unsubscribe = session.subscribe(receive);
+    session.doc.on("update", read);
     return () => {
+      session.doc.off("update", read);
       unsubscribe();
+    };
+  }, [session, onState]);
+  useEffect(() => {
+    if (!element.current || format === null) return;
+    autoFocusedRef.current = false;
+    const editor = mountLiveBodyEditor(element.current, {
+      doc: session.doc,
+      label: "Shared file editor",
+      canEdit: () => namedLiveEditable(session.state()),
+      edit: session.edit,
+      unwritten: (why) => why !== "guarded" && setUnwritten(why),
+      resolveImage: (src) => resolveImageRef.current?.(src) ?? null,
+    });
+    editorRef.current = editor;
+    const unsubscribeToolbar = editor.subscribeToolbar(setToolbar);
+    return () => {
       unsubscribeToolbar();
       editorRef.current = null;
       editor.destroy();
+      setUnwritten(null);
     };
-  }, [session, onState]);
+  }, [session, format]);
   const editable = namedLiveEditable(state);
   useEffect(() => {
-    if (!link || !editable || bodyHidden || autoFocusedRef.current) return;
+    if (!link || !editable || bodyHidden || autoFocusedRef.current || !editorRef.current) return;
     autoFocusedRef.current = true;
-    editorRef.current?.focus();
-  }, [link, editable, bodyHidden]);
+    editorRef.current.focus();
+  }, [link, editable, bodyHidden, format]);
   const working =
     state.status === "live" ||
     state.reason === "live-starting" ||
@@ -348,6 +364,16 @@ export function NamedDocumentEditor({
         </button>
       )}
       <RemovedTextNotice session={session} />
+      {unwritten && (
+        <div className="edit-notice" role="alert" data-testid="unwritten-notice">
+          <p>
+            {unwritten === "overtaken" ? documentWords.unwrittenOvertaken : documentWords.unwritten}
+          </p>
+          <button className="handoff-button secondary" onClick={() => setUnwritten(null)}>
+            {documentWords.dismiss}
+          </button>
+        </div>
+      )}
       {showToolbar && (
         <div className="editor-toolbar" role="toolbar" aria-label="Formatting">
           <button

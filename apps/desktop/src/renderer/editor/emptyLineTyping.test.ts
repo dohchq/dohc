@@ -58,7 +58,7 @@ function sharePage(baseline: Uint8Array): Promise<Person> {
     return updateState.call(this, state);
   };
   const editor = mountLiveBodyEditor(mount, {
-    body: getDohcYDocBodyFragment(doc),
+    doc,
     label: "Shared file editor",
     canEdit: () => true,
     edit(change) {

@@ -1200,13 +1200,13 @@ function liveSession() {
     membership: null,
     typingStopped: false,
     typingAhead: false,
+    holds: false,
   };
   const notify = () => {
     for (const listener of listeners) listener(state);
   };
   const session = {
     doc,
-    body: getDohcYDocBodyFragment(doc),
     state: () => state,
     subscribe(listener: (value: NamedLiveBrowserState) => void) {
       listeners.add(listener);
@@ -1217,7 +1217,7 @@ function liveSession() {
     onRemovedText: vi.fn(() => () => {}),
     close: vi.fn(),
     reconnect: vi.fn(async () => {
-      state = { ...state, status: "live" };
+      state = { ...state, status: "live", holds: true };
       notify();
     }),
     disconnect: vi.fn(),

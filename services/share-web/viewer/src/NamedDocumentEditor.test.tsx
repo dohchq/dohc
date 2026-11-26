@@ -3,16 +3,21 @@ import { LIVE_CONNECTION_LIMIT_MESSAGES } from "@dohc/live-session-contract/live
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { markdownToYDoc, getDohcYDocBodyFragment } from "@dohc/ydoc-projection";
+import * as Y from "yjs";
+import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
 import type { NamedLiveBrowserState } from "@dohc/ydoc-projection/named-live-browser-transport";
 import type { RemovedText } from "@dohc/ydoc-projection/removed-text";
 import { NamedDocumentEditor } from "./NamedDocumentEditor";
 
 let container: HTMLDivElement, root: Root;
-function session(markdown: string, reported: Partial<NamedLiveBrowserState> = {}) {
-  const doc = markdownToYDoc(markdown);
-  const state: NamedLiveBrowserState = {
+function session(
+  markdown: string,
+  reported: Partial<NamedLiveBrowserState> = {},
+  options: { bodySequence?: boolean } = {},
+) {
+  const doc = markdownToYDoc(markdown, { bodySequence: options.bodySequence ?? false });
+  let state: NamedLiveBrowserState = {
     status: "live",
     reason: null,
     binding: null,
@@ -23,14 +28,22 @@ function session(markdown: string, reported: Partial<NamedLiveBrowserState> = {}
     membership: null,
     typingAhead: false,
     typingStopped: false,
+    holds: true,
     ...reported,
   };
   const removed = new Set<(removed: RemovedText) => void>();
+  const listeners = new Set<(state: NamedLiveBrowserState) => void>();
   return {
     doc,
-    body: getDohcYDocBodyFragment(doc),
     state: () => state,
-    subscribe: () => () => {},
+    subscribe(listener: (state: NamedLiveBrowserState) => void) {
+      listeners.add(listener);
+      return () => void listeners.delete(listener);
+    },
+    report(next: Partial<NamedLiveBrowserState>) {
+      state = { ...state, ...next };
+      for (const listener of listeners) listener(state);
+    },
     onRemovedText(listener: (value: RemovedText) => void) {
       removed.add(listener);
       return () => void removed.delete(listener);
@@ -43,8 +56,8 @@ function session(markdown: string, reported: Partial<NamedLiveBrowserState> = {}
     reconnect: vi.fn(async () => {}),
     disconnect: vi.fn(),
     seed: vi.fn(() => false),
-    edit(change: () => void) {
-      change();
+    edit: (change: () => void): boolean => {
+      doc.transact(change);
       return true;
     },
   };
@@ -330,3 +343,124 @@ it.each([
     expect(container.querySelector('[role="status"]')?.textContent).toBe(words);
   },
 );
+
+const textbox = () => container.querySelector<HTMLElement>('[role="textbox"]');
+const unwrittenNotice = () => container.querySelector('[data-testid="unwritten-notice"]');
+const pressEnter = () =>
+  textbox()!.dispatchEvent(
+    new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+  );
+
+it("mounts no editor until the page holds the note, still reports each state, and then mounts one on an empty note", async () => {
+  const live = session("", { status: "connecting", holds: false });
+  const onState = vi.fn();
+  await act(async () =>
+    root.render(<NamedDocumentEditor session={live} path="docs/a.md" onState={onState} />),
+  );
+  expect(textbox()).toBeNull();
+  expect(onState).toHaveBeenLastCalledWith(
+    expect.objectContaining({ status: "connecting", holds: false }),
+  );
+  await act(async () => live.report({ status: "live", holds: true }));
+  expect(textbox()?.getAttribute("contenteditable")).toBe("true");
+  expect(onState).toHaveBeenLastCalledWith(
+    expect.objectContaining({ status: "live", holds: true }),
+  );
+});
+
+it("mounts the editor on a note its host gave the page before the first sync", async () => {
+  const live = session("Body", { status: "connecting", holds: true });
+  await act(async () =>
+    root.render(<NamedDocumentEditor session={live} path="docs/a.md" onState={() => {}} />),
+  );
+  expect(textbox()?.textContent).toBe("Body");
+});
+
+it("keeps the editor and its text once the session stops", async () => {
+  const live = session("Body");
+  await act(async () =>
+    root.render(<NamedDocumentEditor session={live} path="docs/a.md" onState={() => {}} />),
+  );
+  const before = textbox();
+  await act(async () => live.report({ status: "quarantined", reason: "provenance-refused" }));
+  expect(textbox()).toBe(before);
+  expect(before?.textContent).toBe("Body");
+  expect(before?.getAttribute("contenteditable")).toBe("false");
+});
+
+it("edits a note in format 2 from the toolbar", async () => {
+  const live = session("Packing list", {}, { bodySequence: true });
+  await act(async () =>
+    root.render(<NamedDocumentEditor session={live} path="docs/a.md" onState={() => {}} />),
+  );
+  expect(textbox()?.textContent).toBe("Packing list");
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>('[role="toolbar"] button[aria-label="Quote"]')!
+      .click(),
+  );
+  expect(yDocToMarkdown(live.doc)).toContain("> Packing list");
+  expect(unwrittenNotice()).toBeNull();
+});
+
+async function overtaken() {
+  const live = session("Zero\n\nOne", {}, { bodySequence: true });
+  live.doc.getText("sequence").delete(0, 1);
+  const peer = new Y.Doc();
+  Y.applyUpdate(peer, Y.encodeStateAsUpdate(live.doc));
+  const seen = Y.encodeStateVector(peer);
+  peer.getText("sequence").insert(peer.getText("sequence").length, "!");
+  const fromPeer = Y.encodeStateAsUpdate(peer, seen);
+  await act(async () =>
+    root.render(<NamedDocumentEditor session={live} path="docs/a.md" onState={() => {}} />),
+  );
+  let delivered = false;
+  live.doc.on("update", () => {
+    if (delivered) return;
+    delivered = true;
+    Y.applyUpdate(live.doc, fromPeer);
+  });
+  await act(async () => pressEnter());
+  expect(delivered).toBe(true);
+  return live;
+}
+
+it("drops the notice when the note changes format and the editor mounts again", async () => {
+  const live = await overtaken();
+  expect(unwrittenNotice()).not.toBeNull();
+  await act(async () => live.doc.getMap("meta").set("schemaVersion", 1));
+  expect(textbox()).not.toBeNull();
+  expect(unwrittenNotice()).toBeNull();
+});
+
+it("says when someone else's change reached a note in format 2 first, keeps that change, and lets the person dismiss the notice", async () => {
+  await overtaken();
+  const notice = unwrittenNotice()!;
+  expect(notice.getAttribute("role")).toBe("alert");
+  expect(notice.textContent).toContain(
+    "Someone else's change reached the note first, so dohc put it back as it was. Make your change again.",
+  );
+  expect([...textbox()!.querySelectorAll("p")].map((line) => line.textContent)).toEqual([
+    "Zero",
+    "One!",
+  ]);
+  await act(async () => notice.querySelector("button")!.click());
+  expect(unwrittenNotice()).toBeNull();
+});
+
+it("shows no notice when the page itself refused a change to a note in format 2", async () => {
+  const live = session("One", {}, { bodySequence: true });
+  const written = yDocToMarkdown(live.doc);
+  live.edit = () => false;
+  await act(async () =>
+    root.render(<NamedDocumentEditor session={live} path="docs/a.md" onState={() => {}} />),
+  );
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>('[role="toolbar"] button[aria-label="Quote"]')!
+      .click(),
+  );
+  expect(unwrittenNotice()).toBeNull();
+  expect(yDocToMarkdown(live.doc)).toBe(written);
+  expect(textbox()?.textContent).toBe("One");
+});

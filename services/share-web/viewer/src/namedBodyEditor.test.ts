@@ -10,7 +10,7 @@ it("edits the existing body while live, blocks local paste while paused, and sti
   document.body.append(mount);
   let live = true;
   const editor = mountLiveBodyEditor(mount, {
-    body: getDohcYDocBodyFragment(doc),
+    doc,
     label: "Shared file editor",
     canEdit: () => live,
     edit(change) {
@@ -59,7 +59,7 @@ it("sends a tick and an untick from a to-do box while live", () => {
   document.body.append(mount);
   let sent = 0;
   const editor = mountLiveBodyEditor(mount, {
-    body: getDohcYDocBodyFragment(doc),
+    doc,
     label: "Shared file editor",
     canEdit: () => true,
     edit(change) {
@@ -91,7 +91,7 @@ it("puts back a to-do box the browser removed, showing the saved tick and still 
     mount = document.createElement("div");
   document.body.append(mount);
   const editor = mountLiveBodyEditor(mount, {
-    body: getDohcYDocBodyFragment(doc),
+    doc,
     label: "Shared file editor",
     canEdit: () => true,
     edit(change) {
@@ -118,7 +118,7 @@ it("leaves a to-do box as saved when the page cannot edit or the edit is refused
   document.body.append(mount);
   let live = false;
   const editor = mountLiveBodyEditor(mount, {
-    body: getDohcYDocBodyFragment(doc),
+    doc,
     label: "Shared file editor",
     canEdit: () => live,
     edit: () => false,
@@ -144,7 +144,7 @@ it("opens an empty body on the projection's default paragraph", () => {
     mount = document.createElement("div");
   document.body.append(mount);
   const editor = mountLiveBodyEditor(mount, {
-    body: getDohcYDocBodyFragment(doc),
+    doc,
     label: "Shared file editor",
     canEdit: () => false,
     edit: () => false,
@@ -165,7 +165,7 @@ it("renders remote image references without creating image fetches or navigable 
   const mount = document.createElement("div");
   document.body.append(mount);
   const editor = mountLiveBodyEditor(mount, {
-    body: getDohcYDocBodyFragment(doc),
+    doc,
     label: "Shared file editor",
     canEdit: () => false,
     edit: () => false,
@@ -207,7 +207,7 @@ it("keeps sealed pieces and a loose list through a local edit", () => {
   }
   body.insert(1, [sealedBlock, inline, list]);
   const editor = mountLiveBodyEditor(mount, {
-    body,
+    doc,
     label: "Shared file editor",
     canEdit: () => true,
     edit(change) {

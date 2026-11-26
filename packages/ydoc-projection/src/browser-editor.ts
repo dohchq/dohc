@@ -41,9 +41,21 @@ import {
   ySyncPlugin,
   ySyncPluginKey,
   yUndoPlugin,
-  yUndoPluginKey,
 } from "y-prosemirror";
 import * as Y from "yjs";
+import { getDohcYDocBodyFragment } from "./body-fragment.js";
+import {
+  bodySequencePlugin,
+  createBodySequenceHistory,
+  redoBodySequence,
+  undoBodySequence,
+  type BodySequenceUnwritten,
+} from "./bodySequenceEditor.js";
+import {
+  BODY_CONTAINERS_FIELD,
+  BODY_SEQUENCE_FIELD,
+  readsBodySequence,
+} from "./bodySequenceStore.js";
 import { getDohcProseMirrorSchema } from "./import-export.js";
 
 /** A live page as Markdown, so a browser can hand back text it could not send. */
@@ -68,8 +80,6 @@ export interface LiveEditorToolbarState {
   canUndo: boolean;
   canRedo: boolean;
 }
-
-type UndoPluginState = { undoManager?: Y.UndoManager } | undefined;
 
 function hasMark(state: EditorState, markType: MarkType | undefined): boolean {
   if (!markType) return false;
@@ -103,9 +113,11 @@ function activeHeading(state: EditorState, schema: Schema): 0 | 1 | 2 | 3 {
   return level === 1 || level === 2 || level === 3 ? level : 0;
 }
 
-function readToolbarState(state: EditorState, schema: Schema): LiveEditorToolbarState {
-  const undoState = yUndoPluginKey.getState(state) as UndoPluginState;
-  const undoManager = undoState?.undoManager;
+function readToolbarState(
+  state: EditorState,
+  schema: Schema,
+  history: Y.UndoManager,
+): LiveEditorToolbarState {
   return {
     bold: hasMark(state, schema.marks.bold),
     italic: hasMark(state, schema.marks.italic),
@@ -117,8 +129,8 @@ function readToolbarState(state: EditorState, schema: Schema): LiveEditorToolbar
     taskList: inAncestor(state, schema.nodes.taskList),
     blockquote: inAncestor(state, schema.nodes.blockquote),
     codeBlock: activeBlock(state).node.type === schema.nodes.codeBlock,
-    canUndo: Boolean(undoManager && undoManager.undoStack.length > 0),
-    canRedo: Boolean(undoManager && undoManager.redoStack.length > 0),
+    canUndo: history.undoStack.length > 0,
+    canRedo: history.redoStack.length > 0,
   };
 }
 
@@ -456,28 +468,44 @@ function buildMarkdownInputRules(schema: Schema, canEdit: () => boolean) {
 }
 
 /**
- * An editor on the existing body fragment. Admission remains the session owner's responsibility.
- * `edit` runs `change` and nothing else: a transaction it opens around `change` is recorded whole
- * as this editor's undo step.
+ * An editor on a note's body, in the format the note reads in when it mounts. Admission remains
+ * the session owner's responsibility. `edit` runs `change` and nothing else: a transaction it
+ * opens around `change` is recorded whole as this editor's undo step. `unwritten` hears why a
+ * change to a note in format 2 was not written.
  */
 export function mountLiveBodyEditor(
   element: HTMLElement,
   input: {
-    body: Y.XmlFragment;
+    doc: Y.Doc;
     canEdit(): boolean;
     edit(change: () => void): boolean;
     label: string;
+    unwritten?: (why: BodySequenceUnwritten) => void;
     resolveImage?: (src: string) => string | null;
   },
 ) {
   const schema = getDohcProseMirrorSchema();
   const thisEditor = Symbol("this editor's change");
+  const sequence = readsBodySequence(input.doc);
+  const body = sequence ? null : getDohcYDocBodyFragment(input.doc);
+  const history = !body
+    ? createBodySequenceHistory(input.doc)
+    : new Y.UndoManager(body, {
+        trackedOrigins: new Set([ySyncPluginKey, null]),
+        deleteFilter: (item) => defaultDeleteFilter(item, defaultProtectedNodes),
+        captureTransaction: (transaction) =>
+          transaction.meta.get("addToHistory") !== false &&
+          (transaction.origin !== null || transaction.meta.get(EDITOR_CHANGE) === thisEditor),
+        ignoreRemoteMapChanges: true,
+      });
+  const stepBack: Command = sequence ? undoBodySequence : (state) => undo(state);
+  const stepForward: Command = sequence ? redoBodySequence : (state) => redo(state);
   const listeners = new Set<(state: LiveEditorToolbarState) => void>();
   let lastToolbar: LiveEditorToolbarState | null = null;
 
   const notifyToolbar = (editorState?: EditorState) => {
     const currentState = editorState ?? view.state;
-    const next = readToolbarState(currentState, schema);
+    const next = readToolbarState(currentState, schema, history);
     if (lastToolbar && sameToolbarState(lastToolbar, next)) return;
     lastToolbar = next;
     for (const listener of listeners) listener(next);
@@ -485,12 +513,14 @@ export function mountLiveBodyEditor(
 
   // A redo key the editor declines goes on to ProseMirror's keymap, which retries
   // Ctrl+Shift+z without Shift as Undo, and then to the browser's own history.
-  const redoKey: Command = (state) => {
-    if (!input.canEdit()) return false;
-    redo(state);
-    notifyToolbar();
-    return true;
-  };
+  const historyKey =
+    (step: Command, keep: boolean): Command =>
+    (state, dispatch) => {
+      if (!input.canEdit()) return true;
+      const done = step(state, dispatch);
+      notifyToolbar();
+      return done || keep;
+    };
 
   const gated =
     (command: Command): Command =>
@@ -533,28 +563,24 @@ export function mountLiveBodyEditor(
     state: EditorState.create({
       schema,
       plugins: [
-        ySyncPlugin(input.body),
-        yUndoPlugin({
-          undoManager: new Y.UndoManager(input.body, {
-            trackedOrigins: new Set([ySyncPluginKey, null]),
-            deleteFilter: (item) => defaultDeleteFilter(item, defaultProtectedNodes),
-            captureTransaction: (transaction) =>
-              transaction.meta.get("addToHistory") !== false &&
-              (transaction.origin !== null || transaction.meta.get(EDITOR_CHANGE) === thisEditor),
-            ignoreRemoteMapChanges: true,
-          }),
-        }),
-        buildMarkdownInputRules(schema, input.canEdit),
+        ...(body ? [ySyncPlugin(body), yUndoPlugin({ undoManager: history })] : []),
         keymap({
-          "Mod-z": (state) => {
-            if (!input.canEdit()) return false;
-            const ok = undo(state);
-            notifyToolbar();
-            return ok;
-          },
-          "Mod-Shift-z": redoKey,
-          "Mod-y": redoKey,
+          "Mod-z": historyKey(stepBack, false),
+          "Mod-Shift-z": historyKey(stepForward, true),
+          "Mod-y": historyKey(stepForward, true),
         }),
+        ...(sequence
+          ? [
+              bodySequencePlugin({
+                sequence: input.doc.getText(BODY_SEQUENCE_FIELD),
+                containers: input.doc.getMap(BODY_CONTAINERS_FIELD),
+                history,
+                edit: input.edit,
+                ...(input.unwritten ? { unwritten: input.unwritten } : {}),
+              }),
+            ]
+          : []),
+        buildMarkdownInputRules(schema, input.canEdit),
         keymap(formattingKeymap),
         keymap(baseKeymap),
       ],
@@ -569,9 +595,9 @@ export function mountLiveBodyEditor(
     dispatchTransaction(this: EditorView, transaction) {
       const apply = () => this.updateState(this.state.apply(transaction));
       const fromDocument = transaction.getMeta(ySyncPluginKey)?.isChangeOrigin === true;
-      if (transaction.docChanged && !fromDocument)
+      if (!sequence && transaction.docChanged && !fromDocument)
         input.edit(() => {
-          input.body.doc?.transact((hosts) => hosts.meta.set(EDITOR_CHANGE, thisEditor));
+          input.doc.transact((hosts) => hosts.meta.set(EDITOR_CHANGE, thisEditor));
           apply();
         });
       else apply();
@@ -690,11 +716,10 @@ export function mountLiveBodyEditor(
     },
   });
 
-  const undoManager = (yUndoPluginKey.getState(view.state) as UndoPluginState)?.undoManager;
   const onUndoChange = () => notifyToolbar();
-  undoManager?.on("stack-item-added", onUndoChange);
-  undoManager?.on("stack-item-popped", onUndoChange);
-  undoManager?.on("stack-item-updated", onUndoChange);
+  history.on("stack-item-added", onUndoChange);
+  history.on("stack-item-popped", onUndoChange);
+  history.on("stack-item-updated", onUndoChange);
 
   const runCommand = (command: Command): boolean => {
     if (!input.canEdit()) return false;
@@ -710,7 +735,7 @@ export function mountLiveBodyEditor(
       view.focus();
     },
     getToolbarState(): LiveEditorToolbarState {
-      const state = readToolbarState(view.state, schema);
+      const state = readToolbarState(view.state, schema, history);
       lastToolbar = state;
       return state;
     },
@@ -744,18 +769,10 @@ export function mountLiveBodyEditor(
       return runCommand(toggleCodeBlockCommand(schema));
     },
     undo(): boolean {
-      if (!input.canEdit()) return false;
-      const result = undo(view.state);
-      view.focus();
-      notifyToolbar();
-      return result;
+      return runCommand(stepBack);
     },
     redo(): boolean {
-      if (!input.canEdit()) return false;
-      const result = redo(view.state);
-      view.focus();
-      notifyToolbar();
-      return result;
+      return runCommand(stepForward);
     },
     refresh() {
       const editable = input.canEdit();
@@ -768,11 +785,12 @@ export function mountLiveBodyEditor(
       if (active === null || active === element.ownerDocument.body) view.focus();
     },
     destroy() {
-      undoManager?.off("stack-item-added", onUndoChange);
-      undoManager?.off("stack-item-popped", onUndoChange);
-      undoManager?.off("stack-item-updated", onUndoChange);
+      history.off("stack-item-added", onUndoChange);
+      history.off("stack-item-popped", onUndoChange);
+      history.off("stack-item-updated", onUndoChange);
       listeners.clear();
       view.destroy();
+      if (sequence) history.destroy();
     },
   };
 }

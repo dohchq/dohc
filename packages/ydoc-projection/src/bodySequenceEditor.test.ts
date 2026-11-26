@@ -76,7 +76,7 @@ import {
   textPlaces,
   SEEDS,
 } from "./bodySequenceEditorTestSupport.js";
-import { keepBodySequenceFormatting } from "./bodySequenceStore.js";
+import { declareBodySequence, keepBodySequenceFormatting } from "./bodySequenceStore.js";
 
 afterEach(stopEveryone);
 
@@ -1642,6 +1642,21 @@ describe("formatting items Yjs would delete on its own", () => {
       expect(formats(base.sequence)).toBe(2);
     },
   );
+
+  it("stay under an editor mounted, unmounted and mounted again on a note its host declared", () => {
+    const base = page(note("One word here"), 10);
+    const deleter = page(note("One word here"), 20);
+    declareBodySequence(base.doc);
+    editorOn(base).view.destroy();
+    const again = editorOn(base);
+    base.sequence.format(5, 4, { bold: {} });
+    deleter.sequence.delete(5, 4);
+    base.sent.length = 0;
+    for (const update of deleter.sent) base.receive(update);
+    expect(again.lines()).toEqual(["One  here"]);
+    expect(base.sent).toEqual([]);
+    expect(formats(base.sequence)).toBe(2);
+  });
 });
 
 describe.each(["bare", "hosted"] as const)("on a %s page, a finding of the review", (shape) => {

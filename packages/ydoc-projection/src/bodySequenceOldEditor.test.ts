@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { getDohcYDocBodyFragment } from "./body-fragment.js";
 import { seededNote, storedReading } from "./bodySequenceChecksTestSupport.js";
 import { mountLiveBodyEditor } from "./browser-editor.js";
 import { admitBodySequenceNotes, liveEditFitsCopy } from "./liveDocumentValidation.js";
@@ -35,12 +34,11 @@ afterAll(() => {
 
 const REMOTE = Symbol("remote");
 
-it("today's editor, opened on a format-2 note, writes nothing as it opens, and intake refuses every edit it makes", () => {
+it("a format-1 editor, open when its note turns out to be in format 2, writes nothing as the note arrives, and intake refuses every edit it makes", () => {
   vi.useFakeTimers();
   const note = seededNote();
   const page = new Y.Doc();
   page.clientID = 77;
-  Y.applyUpdate(page, note, REMOTE);
   const sent: Uint8Array[] = [];
   page.on("update", (update: Uint8Array, origin: unknown) => {
     if (origin !== REMOTE) sent.push(update);
@@ -48,7 +46,7 @@ it("today's editor, opened on a format-2 note, writes nothing as it opens, and i
   const mount = document.createElement("div");
   document.body.append(mount);
   const editor = mountLiveBodyEditor(mount, {
-    body: getDohcYDocBodyFragment(page),
+    doc: page,
     label: "Shared file editor",
     canEdit: () => true,
     edit(change) {
@@ -56,6 +54,7 @@ it("today's editor, opened on a format-2 note, writes nothing as it opens, and i
       return true;
     },
   });
+  Y.applyUpdate(page, note, REMOTE);
   vi.runAllTimers();
   expect(sent, "written as the editor opened").toEqual([]);
 
