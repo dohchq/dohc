@@ -14,6 +14,7 @@ import {
   DatasetMigrationPreviewPage,
   DatasetDeletePreview,
   DatasetDeleted,
+  DatasetApproval,
 } from "@dohc/cli/dataset";
 import type { ResolvedDatasetRequest as DatasetRequest } from "./datasetAddress";
 import {
@@ -162,7 +163,21 @@ export interface OwnerDatasetData {
 
 /** A Collection's data on a server, where its owner also reads its grants and presses its buttons. */
 export type RemoteDatasetData = OwnerDatasetData &
-  Required<Pick<OwnerDatasetData, "permissions" | "press" | "setGrant" | "setDefaults">>;
+  Required<Pick<OwnerDatasetData, "permissions" | "press" | "setGrant" | "setDefaults">> &
+  DatasetGovernance;
+
+/** A Collection's rules on the server: who approved the ones it runs, and a new Collection's first ones. */
+export interface DatasetGovernance {
+  activate(input: {
+    revision: DatasetRevision;
+    schemaSql: string;
+    operationSource: string;
+    approvalAgent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null;
+  }): Promise<DatasetRevision>;
+  approval(datasetId: string): Promise<DatasetApproval>;
+  /** The Owner approves the rules the Collection runs again. */
+  confirmApproval(datasetId: string, revisionSha256: string): Promise<DatasetApproval>;
+}
 
 /** A press the server runs: who pressed is the server's to know; an agent that pressed for them is provenance. */
 export interface DatasetServerPressInput {
@@ -511,6 +526,38 @@ export function createRemoteDatasetData(input: {
         result.cursor.approvedRevisionHash !== result.revision.revisionSha256
       )
         throw new Error("The server returned different Collection rules.");
+      return result;
+    },
+    async activate({ revision, schemaSql, operationSource, approvalAgent }) {
+      if (input.shareId !== undefined)
+        throw new Error("Only the Owner or an Admin can create a Collection.");
+      verifyDatasetArtifacts({ revision, schemaSql, operationSource });
+      const approved = parseDatasetRevision(
+        await request(`${path(revision.datasetId)}/activate`, {
+          revision,
+          schemaSql,
+          operationSource,
+          ...(approvalAgent ? { approvalAgent } : {}),
+        }),
+      );
+      if (approved.revisionSha256 !== revision.revisionSha256)
+        throw new Error("The server answered the Collection's creation unexpectedly.");
+      return approved;
+    },
+    async approval(datasetId) {
+      if (input.shareId !== undefined)
+        throw new Error("Open the original workspace to see who approved these rules.");
+      return DatasetApproval.parse(await request(`${path(datasetId)}/approval`));
+    },
+    async confirmApproval(datasetId, revisionSha256) {
+      if (input.shareId !== undefined) throw new Error("Only the Owner can approve these rules.");
+      const result = DatasetApproval.parse(
+        await request(`${path(datasetId)}/confirm-approval`, {
+          revisionSha256: sha256.parse(revisionSha256),
+        }),
+      );
+      if (result.revisionSha256 !== revisionSha256 || result.approvedBy?.role !== "owner")
+        throw new Error("The server did not confirm this approval. Refresh the Collection.");
       return result;
     },
     async prepareMigrationCandidate(value) {

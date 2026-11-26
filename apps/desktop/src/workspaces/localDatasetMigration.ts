@@ -46,6 +46,7 @@ const sameCursor = (a: DatasetCursor, b: DatasetCursor) =>
 
 interface MigrationAuthority {
   workspaceId: string;
+  sourceWorkspaceId: string;
   assertCurrent(): void;
   approvedArtifacts(
     datasetId: string,
@@ -157,7 +158,7 @@ export function createLocalDatasetMigrations(dependencies: MigrationAuthority) {
           await current(previous.cursor);
           input.signal?.throwIfAborted();
           const metadata = await input.adapter.captureSourceMetadata({
-            workspaceId: dependencies.workspaceId,
+            workspaceId: dependencies.sourceWorkspaceId,
             versionId: "main",
             paths,
             bounds: { maxInputFiles: 4, maxInputBytes: maximumBytes * 4 },
@@ -167,7 +168,7 @@ export function createLocalDatasetMigrations(dependencies: MigrationAuthority) {
           await current(previous.cursor);
           input.signal?.throwIfAborted();
           if (
-            metadata.workspaceId !== dependencies.workspaceId ||
+            metadata.workspaceId !== dependencies.sourceWorkspaceId ||
             files.length !== paths.length ||
             new Set(files.map((file) => file.path)).size !== paths.length ||
             files.some(

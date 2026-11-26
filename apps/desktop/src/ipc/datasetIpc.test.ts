@@ -12,13 +12,17 @@ import { expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
 import type { ShareLinkPublication } from "../workspaces/datasetBoundApps";
-import { isDatasetOwnerOnly, readError } from "./errorWords";
+import { datasetOwnerOnlyError, isDatasetOwnerOnly, readError } from "./errorWords";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { flushDatasetSourceCapture } from "../workspaces/datasetSourceCapture";
 import { createDatasetHandler } from "./datasetIpc";
 import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/localDatasetHost";
-import { describeApprovedDataset, type DatasetDefinition } from "@dohc/security-contract/dataset";
+import {
+  describeApprovedDataset,
+  type DatasetDefinition,
+  type DatasetRevision,
+} from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import { generateDatasetSchema } from "../workspaces/datasetGenerator";
@@ -149,7 +153,7 @@ function fixture(
   collectionPlace?: () => Promise<DatasetPlace>,
   extra: Pick<
     Parameters<typeof createDatasetHandler>[0],
-    "historyPeople" | "readShareLinkPublication" | "withMainVersionLock"
+    "historyPeople" | "readShareLinkPublication" | "withMainVersionLock" | "governanceForWorkspace"
   > = {},
 ) {
   const abort = new AbortController();
@@ -804,6 +808,9 @@ it("allows named Collection data actions without opening a local owner store or 
     invoke: vi.fn(),
     upload: vi.fn(),
     file: vi.fn(),
+    governance() {
+      throw datasetOwnerOnlyError();
+    },
   };
   const f = fixture(undefined, named as unknown as NamedDatasetData);
   f.workspace.shareView = { shareId: "shared" };
@@ -1942,6 +1949,108 @@ it("sends an Admin's grants and defaults in a received workspace to its server, 
   expect(await f.handler("cli", { ...selection, action: "permissions" })).toMatchObject({
     kind: "permissions",
   });
+  expect(localHost).not.toHaveBeenCalled();
+});
+
+it("reads who approved a Collection's rules, and lets only its Owner confirm them", async () => {
+  const approval = {
+    revisionSha256: "c".repeat(64),
+    approvedBy: { role: "admin" as const, name: "Ada", former: true, approvedAtMs: 1 },
+    needsOwnerConfirmation: true,
+  };
+  const confirmed = {
+    ...approval,
+    approvedBy: { role: "owner" as const, name: null, former: false, approvedAtMs: 2 },
+    needsOwnerConfirmation: false,
+  };
+  const governed = {
+    approval: vi.fn(async () => approval),
+    confirmApproval: vi.fn(async () => confirmed),
+  };
+  const selection = { workspaceId: "workspace", datasetPath: "data/dataset.json" };
+  const owner = fixture(undefined, undefined, undefined, undefined, undefined, {
+    governanceForWorkspace: async () =>
+      ({ workspaceId: "workspace", data: governed }) as unknown as Awaited<
+        ReturnType<
+          NonNullable<Parameters<typeof createDatasetHandler>[0]["governanceForWorkspace"]>
+        >
+      >,
+  });
+  expect(await owner.handler("window", { ...selection, action: "approval" })).toEqual({
+    kind: "approval",
+    ...approval,
+  });
+  expect(
+    await owner.handler("cli", {
+      ...selection,
+      action: "confirmApproval",
+      revisionSha256: approval.revisionSha256,
+    }),
+  ).toEqual({ kind: "approval", ...confirmed });
+  expect(governed.confirmApproval).toHaveBeenCalledWith(datasetId, approval.revisionSha256);
+
+  const local = fixture();
+  expect(await local.handler("window", { ...selection, action: "approval" })).toEqual({
+    kind: "approval",
+    revisionSha256: local.revision.revisionSha256,
+    approvedBy: null,
+    needsOwnerConfirmation: false,
+  });
+  await expect(
+    local.handler("cli", {
+      ...selection,
+      action: "confirmApproval",
+      revisionSha256: local.revision.revisionSha256,
+    }),
+  ).rejects.toThrow("This Collection is kept on this computer. Its rules need no confirmation.");
+
+  const localHost = vi.fn(async (): Promise<LocalDatasetHost> => {
+    throw new Error("Unexpected local store.");
+  });
+  const named = { governance: () => ({ workspaceId: "owner-workspace", data: governed }) };
+  const admin = fixture(undefined, named as unknown as NamedDatasetData, undefined, localHost);
+  admin.workspace.shareView = { shareId: "s" };
+  expect(await admin.handler("window", { ...selection, action: "approval" })).toEqual({
+    kind: "approval",
+    ...approval,
+  });
+  await expect(
+    admin.handler("cli", {
+      ...selection,
+      action: "confirmApproval",
+      revisionSha256: approval.revisionSha256,
+    }),
+  ).rejects.toThrow("Open the original workspace to manage this Collection.");
+  expect(governed.confirmApproval).toHaveBeenCalledTimes(1);
+  expect(localHost).not.toHaveBeenCalled();
+});
+
+it("creates an Admin's Collection on the joined workspace's server from the sources it writes", async () => {
+  const activate = vi.fn(async ({ revision }: { revision: DatasetRevision }) => revision);
+  const localHost = vi.fn(async (): Promise<LocalDatasetHost> => {
+    throw new Error("Unexpected local store.");
+  });
+  const named = { governance: () => ({ workspaceId: "owner-workspace", data: { activate } }) };
+  const f = fixture(undefined, named as unknown as NamedDatasetData, undefined, localHost);
+  f.workspace.shareView = { shareId: "s" };
+  const definition = {
+    ...f.revision.definition,
+    datasetId: "00000000-0000-4000-8000-000000000042",
+    name: "Guests",
+    schemaPath: "guests/schema.sql",
+    operationsPath: "guests/operations.js",
+  };
+  const result = await f.handler("cli", { workspaceId: "workspace", action: "create", definition });
+  expect(result).toMatchObject({
+    kind: "approved",
+    revision: { datasetId: definition.datasetId, revision: 1 },
+  });
+  const [[{ schemaSql, operationSource }]] = activate.mock.calls as unknown as [
+    [{ schemaSql: string; operationSource: string }],
+  ];
+  expect(f.sources.get("guests/schema.sql")).toBe(schemaSql);
+  expect(f.sources.get("guests/operations.js")).toBe(operationSource);
+  expect(f.sources.has("guests/dataset.json")).toBe(true);
   expect(localHost).not.toHaveBeenCalled();
 });
 

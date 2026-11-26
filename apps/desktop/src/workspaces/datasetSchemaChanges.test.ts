@@ -567,3 +567,76 @@ it.each([true])(
     ).toEqual(f.revision.definition.operations);
   },
 );
+
+it("changes a joined workspace's Collection rules on its server as an Admin, capturing them from this copy", async () => {
+  const f = await fixture();
+  const server = "owner-workspace",
+    signal = new AbortController().signal;
+  const onServer = <T extends { workspaceId: string }>(value: T) => {
+    if (value.workspaceId !== server) throw new Error("Sent to another workspace's server.");
+    return { ...value, workspaceId: "w" };
+  };
+  const governed = {
+    approvedArtifacts: async (datasetId: string) => f.host.approvedArtifacts(datasetId),
+    prepareMigrationCandidate: (
+      value: Parameters<LocalDatasetHost["prepareMigrationCandidate"]>[0],
+    ) => f.host.prepareMigrationCandidate(onServer(value)),
+    approveMigrationCandidate: async (
+      value: Parameters<LocalDatasetHost["approveMigrationCandidate"]>[0],
+    ) => {
+      const result = await f.host.approveMigrationCandidate(onServer(value));
+      return { ...result, cursor: { ...result.cursor, workspaceId: server } };
+    },
+    discardMigrationCandidate: (
+      value: Parameters<LocalDatasetHost["discardMigrationCandidate"]>[0],
+    ) => f.host.discardMigrationCandidate(onServer(value)),
+    migrationPreviewPage: (value: Parameters<LocalDatasetHost["migrationPreviewPage"]>[0]) =>
+      f.host.migrationPreviewPage(onServer(value)),
+  };
+  const admin = createDatasetHandler({
+    flushSourceCapture: async () => ({ heldFiles: [], deferredWrites: [] }),
+    hostForWorkspace: async () => {
+      throw new Error("Unexpected local store.");
+    },
+    namedDataForWorkspace: async () =>
+      ({
+        governance: () => ({ workspaceId: server, data: governed }),
+      }) as unknown as import("./namedDataset").NamedDatasetData,
+    withWorkspaceOperation: async (_caller, _id, work) =>
+      work({
+        workspace: { workspaceId: "w", shareView: { shareId: "s" } },
+        signal,
+        assertCurrent() {},
+      }),
+    withAdapter: async (_workspace, work) => work(f.adapter),
+    createSources: async (_workspace, sources) => {
+      for (const [path, source] of Object.entries(sources)) f.files.set(path, source);
+      invalidateDatasetAddresses({ workspaceId: "w" });
+    },
+  });
+  const review = await admin("admin", {
+    action: "prepareSchemaChange",
+    workspaceId: "w",
+    datasetPath: "people/dataset.json",
+    revision: f.revision.revision,
+    revisionSha256: f.revision.revisionSha256,
+    change: { kind: "renameCollection", name: "Guests" },
+  });
+  if (review.kind !== "migration-prepared") throw new Error("Expected a review");
+  const changed = await admin("admin", {
+    action: "approveMigration",
+    workspaceId: "w",
+    preparationId: review.preparationId,
+    revisionSha256: review.revision.revisionSha256,
+    approvalDigest: review.approvalDigest,
+  });
+  expect(changed).toMatchObject({ kind: "migrated", revision: { revision: 2 } });
+  expect(f.host.describe(id(1)).name).toBe("Guests");
+  await expect(
+    admin("admin", {
+      action: "archive",
+      workspaceId: "w",
+      datasetPath: "people/dataset.json",
+    }),
+  ).rejects.toThrow("Open the original workspace to manage this Collection.");
+});

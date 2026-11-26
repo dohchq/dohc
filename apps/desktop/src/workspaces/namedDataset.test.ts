@@ -2,6 +2,7 @@ import { expect, it, vi } from "vitest";
 import { createNamedDatasetData } from "./namedDataset";
 import { SHARE_VIEW_REOPEN_MESSAGE } from "./shareViewMarker";
 import { JOINED_BY_ANOTHER_ACCOUNT } from "../ipc/joinedAccountWords";
+import { markDatasetServerNotFound } from "../ipc/errorWords";
 
 const marker = {
   shareId: "share",
@@ -111,4 +112,41 @@ it("sends an Admin's Collection access requests to the owner's workspace, not th
   await expect(createNamedDatasetData(deps).permissions(request)).rejects.toThrow(
     "Only an Admin of a joined workspace manages Collection access.",
   );
+});
+
+it("sends an Admin's Collection rules to the owner's workspace, and says when the Owner's computer keeps them", async () => {
+  const approval = {
+    revisionSha256: "a".repeat(64),
+    approvedBy: { role: "admin", name: "Ada", former: false, approvedAtMs: 1 },
+    needsOwnerConfirmation: false,
+  };
+  const deps = {
+    ...input(),
+    relayJson: vi.fn(async (..._: unknown[]): Promise<unknown> => approval),
+  };
+  const joined = {
+    ...marker,
+    grantedSelector: { paths: [], versionId: null, access: "edit", wholeWorkspace: true },
+    membersWorkspaceId: "owner-workspace",
+    role: "admin",
+  };
+  const datasetId = "00000000-0000-4000-8000-000000000001";
+  const governed = createNamedDatasetData({ ...deps, shareView: joined }).governance();
+  expect(governed.workspaceId).toBe("owner-workspace");
+  expect(await governed.data.approval(datasetId)).toEqual(approval);
+  expect(deps.relayJson).toHaveBeenCalledWith(
+    deps.credentials,
+    `/sync/owner-workspace/datasets/${datasetId}/approval`,
+    expect.anything(),
+  );
+  deps.relayJson.mockRejectedValueOnce(
+    markDatasetServerNotFound(new Error("Not found"), 404, { code: "not_found" }),
+  );
+  await expect(governed.data.approval(datasetId)).rejects.toThrow(
+    "This Collection is kept on the Owner's computer. Ask the Owner to move it to the server, then try again.",
+  );
+  for (const shareView of [marker, { ...joined, role: "member" }])
+    expect(() => createNamedDatasetData({ ...deps, shareView }).governance()).toThrow(
+      "Open the original workspace to manage this Collection.",
+    );
 });

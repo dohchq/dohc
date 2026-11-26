@@ -161,6 +161,10 @@ export interface TransactionalCollectionPageProps extends CollectionResources, R
   /** What someone who can save views does with them. Without it, the tabs change the layout on this computer and save nothing. */
   views?: TransactionalViewControls;
   copy?: DatasetCopyStatus;
+  /** Who approved the rules the Collection runs, beside the copy's status. */
+  rulesStatus?: ReactNode;
+  /** What the Owner can do about those rules, above the records. */
+  rulesNotice?: ReactNode;
   onRefresh?(): void;
   recordsVersion?: number;
   /** Rises when records changed outside this page, as an automation changes them; the page reads them again in place. */
@@ -2412,19 +2416,27 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
           : `${shownRecords} ${shownRecords === 1 ? "record" : "records"}${previous.length > 0 || (page?.nextCursor ?? null) !== null ? " on this page" : ""}`
       }
       status={
-        props.copy ? (
-          <span role="status" className="truncate text-[12px] text-muted">
-            {savedPages
-              ? "Offline · Saved pages only"
-              : props.copy.signedOut
-                ? "Offline copy · Read-only until you connect your server"
-                : props.copy.updateFailed
-                  ? "Copy on this device · Read-only until dohc can update it"
-                  : props.copy.offline
-                    ? `Offline copy · Read-only${props.copy.host ? ` until ${props.copy.host} is reachable` : ""}`
-                    : `${props.copy.host ? `On ${props.copy.host} · ` : ""}Saved on this device`}{" "}
-            · {new Date(props.copy.savedAtMs).toLocaleString()}
-          </span>
+        props.copy || props.rulesStatus ? (
+          <>
+            {props.rulesStatus}
+            {props.rulesStatus && props.copy ? (
+              <span aria-hidden className="h-3 w-px shrink-0 bg-line" />
+            ) : null}
+            {props.copy ? (
+              <span role="status" className="truncate text-[12px] text-muted">
+                {savedPages
+                  ? "Offline · Saved pages only"
+                  : props.copy.signedOut
+                    ? "Offline copy · Read-only until you connect your server"
+                    : props.copy.updateFailed
+                      ? "Copy on this device · Read-only until dohc can update it"
+                      : props.copy.offline
+                        ? `Offline copy · Read-only${props.copy.host ? ` until ${props.copy.host} is reachable` : ""}`
+                        : `${props.copy.host ? `On ${props.copy.host} · ` : ""}Saved on this device`}{" "}
+                · {new Date(props.copy.savedAtMs).toLocaleString()}
+              </span>
+            ) : null}
+          </>
         ) : undefined
       }
       tabs={tabs}
@@ -2603,6 +2615,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       // The table starts at the tabs' line, as a document Collection's does. What stands above or in place of it keeps 12px under the tabs.
     >
       <div className="flex min-h-0 flex-1 flex-col gap-3">
+        {props.rulesNotice ? <div className="shrink-0 px-5 pt-3">{props.rulesNotice}</div> : null}
         {unshown.length > 0 ? (
           <div className="shrink-0 px-5 pt-3">
             <UnshownChanges

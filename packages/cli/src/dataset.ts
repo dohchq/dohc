@@ -481,6 +481,39 @@ const DATASET_ADMIN_OPTIONS = [
     action: z.literal("removeGrant"),
     principalKey: z.string().min(1).max(256),
   }),
+  datasetAction({ ...workspace, action: z.literal("create"), definition }),
+  datasetAction({
+    ...pinned,
+    action: z.literal("prepareSchemaChange"),
+    change: DatasetSchemaChange,
+  }),
+  datasetAction({
+    ...selection,
+    action: z.literal("prepareMigration"),
+    migrationPath: z.string().min(1).max(1024).nullable().optional(),
+  }),
+  datasetAction({
+    ...workspace,
+    action: z.literal("migrationPreviewPage"),
+    preparationId: identity,
+    after: z.string().min(1).max(1024).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }),
+  datasetAction({
+    ...workspace,
+    action: z.literal("approveMigration"),
+    agentLabel: z.string().min(1).max(160).optional(),
+    preparationId: identity,
+    revisionSha256: sha256,
+    approvalDigest: sha256,
+    changeSha256: sha256
+      .describe(
+        "The changeSha256 of the change you were asked to apply. The host refuses the approval if the prepared change differs.",
+      )
+      .optional(),
+  }),
+  datasetAction({ ...workspace, action: z.literal("discardMigration"), preparationId: identity }),
+  datasetAction({ ...selection, action: z.literal("approval") }),
 ] as const;
 const DATASET_REQUEST_OPTIONS = [
   datasetAction({
@@ -617,7 +650,6 @@ const DATASET_REQUEST_OPTIONS = [
     fieldId: identity,
     labelFieldId: identity,
   }),
-  datasetAction({ ...workspace, action: z.literal("create"), definition }),
   datasetAction({
     ...workspace,
     action: z.literal("prepare"),
@@ -631,6 +663,7 @@ const DATASET_REQUEST_OPTIONS = [
     revisionSha256: sha256,
   }),
   datasetAction({ ...workspace, action: z.literal("discard"), preparationId: identity }),
+  datasetAction({ ...selection, action: z.literal("confirmApproval"), revisionSha256: sha256 }),
   datasetAction({ ...selection, action: z.literal("historyRevision"), revisionSha256: sha256 }),
   datasetAction({
     ...pinned,
@@ -640,41 +673,10 @@ const DATASET_REQUEST_OPTIONS = [
   }),
   datasetAction({
     ...selection,
-    action: z.literal("prepareMigration"),
-    migrationPath: z.string().min(1).max(1024).nullable().optional(),
-  }),
-  datasetAction({
-    ...selection,
     action: z.literal("askToApply"),
     migrationPath: z.string().min(1).max(1024).nullable().optional(),
     note: z.string().trim().min(1).max(500).optional(),
   }),
-  datasetAction({
-    ...workspace,
-    action: z.literal("migrationPreviewPage"),
-    preparationId: identity,
-    after: z.string().min(1).max(1024).optional(),
-    limit: z.number().int().min(1).max(100).optional(),
-  }),
-  datasetAction({
-    ...pinned,
-    action: z.literal("prepareSchemaChange"),
-    change: DatasetSchemaChange,
-  }),
-  datasetAction({
-    ...workspace,
-    action: z.literal("approveMigration"),
-    agentLabel: z.string().min(1).max(160).optional(),
-    preparationId: identity,
-    revisionSha256: sha256,
-    approvalDigest: sha256,
-    changeSha256: sha256
-      .describe(
-        "The changeSha256 of the change you were asked to apply. The host refuses the approval if the prepared change differs.",
-      )
-      .optional(),
-  }),
-  datasetAction({ ...workspace, action: z.literal("discardMigration"), preparationId: identity }),
   datasetAction({
     ...selection,
     action: z.literal("invoke"),
@@ -693,7 +695,7 @@ const DATASET_REQUEST_OPTIONS = [
 ] as const;
 
 const DATASET_ACTIONS = DATASET_REQUEST_OPTIONS.map((option) => option.shape.action.value);
-/** What an Admin does to a Collection in a workspace they joined. The server checks their role. */
+/** What an Admin does to a Collection in a workspace they joined: its access, and its rules on the server. The server checks their role. */
 export const DatasetAdminRequest = z.discriminatedUnion("action", DATASET_ADMIN_OPTIONS);
 export const DATASET_ADMIN_ACTIONS: ReadonlySet<string> = new Set(
   DATASET_ADMIN_OPTIONS.map((option) => option.shape.action.value),
@@ -929,7 +931,25 @@ export const DatasetListRefusal = z.discriminatedUnion("kind", [
     .strict(),
 ]);
 export type DatasetListRefusal = z.infer<typeof DatasetListRefusal>;
+/** Who approved the rules a Collection runs. `former`: the Admin who approved them is no longer one. */
+export const DatasetApproval = z
+  .object({
+    revisionSha256: sha256,
+    approvedBy: z
+      .object({
+        role: z.enum(["owner", "admin"]),
+        name: z.string().min(1).max(256).nullable(),
+        former: z.boolean(),
+        approvedAtMs: z.number().int().nonnegative(),
+      })
+      .strict()
+      .nullable(),
+    needsOwnerConfirmation: z.boolean(),
+  })
+  .strict();
+export type DatasetApproval = z.infer<typeof DatasetApproval>;
 export const DatasetResult = z.discriminatedUnion("kind", [
+  DatasetApproval.extend({ kind: z.literal("approval") }).strict(),
   z.object({ kind: z.literal("invoke-cancel-requested"), outcome: z.literal("unknown") }).strict(),
   DatasetHistoryRevision.extend({ kind: z.literal("history-revision") }).strict(),
   DatasetDeletePreview.extend({ kind: z.literal("delete-preview") }).strict(),
@@ -1096,6 +1116,8 @@ export const DATASET_CAPABILITIES = {
   create: "dataset.create",
   prepare: "dataset.prepare",
   approve: "dataset.approve",
+  approval: "dataset.approval.read",
+  confirmApproval: "dataset.approval.confirm",
   discard: "dataset.discard",
   prepareMigration: "dataset.migration.prepare",
   askToApply: "dataset.change.ask",

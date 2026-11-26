@@ -6,6 +6,7 @@ import { buttonAutomation } from "./collections/automationDraft";
 import { useDatasetAutomations } from "./collections/useDatasetAutomations";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import type {
+  DatasetApproval,
   DatasetCopyStatus,
   DatasetMigrationPreparation,
   DatasetSchemaChange,
@@ -54,9 +55,11 @@ import {
   automationsFile,
 } from "./collections/CollectionCustomizeDialog";
 import { display, parsePage, type TransactionalRow } from "./transactionalCollectionModel";
+import { CollectionApprovedBy, ConfirmApprovalNotice } from "./collections/CollectionApproval";
 
 export interface ConnectedTransactionalCollectionProps {
-  owner?: boolean;
+  /** An Admin also changes the Collection's rules. A member uses its records. */
+  role?: "owner" | "admin" | "member";
   workspaceId: string;
   datasetPath: string;
   tableId: string;
@@ -114,8 +117,10 @@ function ScopedCollection({
   onOpenRecordChange,
   initialRecordPanelWidth,
   onRecordPanelWidthChange,
-  owner = true,
+  role = "owner",
 }: ConnectedTransactionalCollectionProps) {
+  const owner = role === "owner",
+    governs = role !== "member";
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
   const datasetId = dataset?.datasetId ?? "";
   // A request that only waited for this Collection's move, which stopped,
@@ -416,6 +421,53 @@ function ScopedCollection({
     },
     [retryQuietly],
   );
+  const approvalIdentity = `collection-approval:${datasetPath}`;
+  const approval = useWorkspaceQuery(useWorkspaceSession(), {
+    key: `${datasetPath}\0${datasetId}\0${role}`,
+    manual: true,
+    load: async (): Promise<DatasetApproval | null> => {
+      if (!governs || !datasetId) return null;
+      const result = await bridge().dataset({
+        workspaceId,
+        datasetPath,
+        expectedDatasetId: datasetId,
+        action: "approval",
+      });
+      return result.kind === "approval" ? result : null;
+    },
+  });
+  const rereadApproval = approval.retry;
+  useEffect(() => {
+    void rereadApproval();
+  }, [dataset, rereadApproval]);
+  const toConfirm = owner && approval.value?.needsOwnerConfirmation ? approval.value : null;
+  const [confirming, setConfirming] = useState(false);
+  const confirmApproval = async (confirmed: DatasetApproval) => {
+    setConfirming(true);
+    try {
+      const result = await bridge().dataset({
+        workspaceId,
+        datasetPath,
+        expectedDatasetId: datasetId,
+        action: "confirmApproval",
+        revisionSha256: confirmed.revisionSha256,
+      });
+      if (result.kind !== "approval") throw Error("dohc could not confirm this approval.");
+      onSettled?.(approvalIdentity);
+      await approval.retry();
+    } catch (error) {
+      onError(
+        "dohc could not confirm this approval.",
+        error,
+        () => {
+          void confirmApproval(confirmed);
+        },
+        approvalIdentity,
+      );
+    } finally {
+      setConfirming(false);
+    }
+  };
   // This computer's copy came up to date from the server, as with another
   // computer's change or the server coming back: the page and its records show it.
   useEffect(
@@ -517,7 +569,7 @@ function ScopedCollection({
     onNotice: (message, undo) => onNotice?.(message, undo),
     onOpenFile,
     onOpenScheduleSettings,
-    onOpenFields: owner
+    onOpenFields: governs
       ? () => {
           setViewingHistory(false);
           setEditingFields(true);
@@ -732,6 +784,20 @@ function ScopedCollection({
           views={views ?? undefined}
           onOpenSource={() => onOpenFile(datasetPath)}
           copy={copy}
+          rulesStatus={
+            !toConfirm && approval.value?.approvedBy?.role === "admin" ? (
+              <CollectionApprovedBy approvedBy={approval.value.approvedBy} />
+            ) : undefined
+          }
+          rulesNotice={
+            toConfirm ? (
+              <ConfirmApprovalNotice
+                approval={toConfirm}
+                confirming={confirming}
+                onConfirm={() => void confirmApproval(toConfirm)}
+              />
+            ) : undefined
+          }
           onRefresh={() => {
             void refresh();
           }}
@@ -740,8 +806,8 @@ function ScopedCollection({
           onTransferCsv={owner && !copy?.offline ? () => setTransferringCsv(true) : undefined}
           onHistory={owner && !copy?.offline ? () => setViewingHistory(true) : undefined}
           onPendingResponses={owner && !copy?.offline ? () => setViewingPending(true) : undefined}
-          onReviewSchema={owner && !copy?.offline ? () => setEditingFields(true) : undefined}
-          onAddDateField={owner && !copy?.offline ? () => setEditingFields("date") : undefined}
+          onReviewSchema={governs && !copy?.offline ? () => setEditingFields(true) : undefined}
+          onAddDateField={governs && !copy?.offline ? () => setEditingFields("date") : undefined}
           onCustomize={automations.collectionPath !== null ? () => setCustomizing(true) : undefined}
           onManageAccess={owner && !copy?.offline ? () => setManagingAccess(true) : undefined}
           onExportRecovery={owner && !copy?.offline ? () => setExportingRecovery(true) : undefined}

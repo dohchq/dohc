@@ -448,6 +448,42 @@ it("checks the deletion review scope, token, acknowledgment and returned identit
   f.relay.mockResolvedValue({ deleted: true, datasetId: id(9) });
   await expect(f.data.deleteDataset!(value)).rejects.toThrow(/did not confirm/);
 });
+it("creates, reads and confirms a Collection's approval on the server, checking what it answers", async () => {
+  const f = fixture();
+  f.relay.mockResolvedValue(revision);
+  expect(await f.data.activate({ revision, schemaSql: "SQL", operationSource: "RULES" })).toEqual(
+    revision,
+  );
+  expect(f.relay.mock.calls.at(-1)![1]).toBe(`/sync/workspace/datasets/${id(1)}/activate`);
+  const calls = f.relay.mock.calls.length;
+  await expect(
+    f.data.activate({ revision, schemaSql: "CHANGED", operationSource: "RULES" }),
+  ).rejects.toThrow();
+  expect(f.relay).toHaveBeenCalledTimes(calls);
+  const approval = {
+    revisionSha256: revision.revisionSha256,
+    approvedBy: { role: "admin" as const, name: null, former: true, approvedAtMs: 1 },
+    needsOwnerConfirmation: true,
+  };
+  f.relay.mockResolvedValue(approval);
+  expect(await f.data.approval(id(1))).toEqual(approval);
+  expect(f.relay.mock.calls.at(-1)![1]).toBe(`/sync/workspace/datasets/${id(1)}/approval`);
+  const confirmed = {
+    ...approval,
+    approvedBy: { role: "owner" as const, name: "Owner", former: false, approvedAtMs: 2 },
+    needsOwnerConfirmation: false,
+  };
+  f.relay.mockResolvedValue(confirmed);
+  expect(await f.data.confirmApproval(id(1), revision.revisionSha256)).toEqual(confirmed);
+  expect(f.relay.mock.calls.at(-1)![1]).toBe(`/sync/workspace/datasets/${id(1)}/confirm-approval`);
+  expect(JSON.parse(String(f.relay.mock.calls.at(-1)![2].body))).toEqual({
+    revisionSha256: revision.revisionSha256,
+  });
+  f.relay.mockResolvedValue(approval);
+  await expect(f.data.confirmApproval(id(1), revision.revisionSha256)).rejects.toThrow(
+    "The server did not confirm this approval. Refresh the Collection.",
+  );
+});
 it("does not fall back to a transferred local dataset when deletion is unavailable remotely", async () => {
   const local = { deleteDataset: vi.fn(), deletePreview: vi.fn() } as unknown as OwnerDatasetData;
   const remote = {

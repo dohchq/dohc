@@ -119,6 +119,8 @@
   "data.import",
   "data.import.undo",
   "data.query",
+  "dataset.approval.confirm",
+  "dataset.approval.read",
   "dataset.approve",
   "dataset.archive",
   "dataset.attempt.cancel",

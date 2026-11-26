@@ -8,6 +8,7 @@ import {
   type SourceCreationProgress,
 } from "../workspaces/datasetSourceCreation";
 import {
+  DATASET_ADMIN_ACTIONS,
   DatasetRequest,
   DatasetHistoryRevision,
   DatasetInvocationResult,
@@ -38,7 +39,7 @@ import { generateDatasetFormSources } from "../workspaces/datasetFormGenerator";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { datasetOwnerOnlyError } from "./errorWords";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
-import type { OwnerDatasetData } from "../workspaces/remoteDataset";
+import type { OwnerDatasetData, RemoteDatasetData } from "../workspaces/remoteDataset";
 import type { NamedDatasetData } from "../workspaces/namedDataset";
 import {
   approveLocalDatasetMigration,
@@ -94,6 +95,19 @@ function listRefusalOf(error: unknown): DatasetListRefusal | null {
     : { kind: refusal.kind, words };
 }
 
+const NAMED_ACTIONS: readonly string[] = [
+  "list",
+  "describe",
+  "types",
+  "invoke",
+  "upload",
+  "file",
+  "permissions",
+  "setGrant",
+  "removeGrant",
+  "setDefaults",
+];
+
 class DatasetScopeError extends Error {
   constructor(cause: unknown) {
     super(cause instanceof Error ? cause.message : String(cause), { cause });
@@ -116,6 +130,11 @@ export function createDatasetHandler<
   dataForWorkspace?(workspace: W, signal: AbortSignal): Promise<OwnerDatasetData>;
   currentCredentialGeneration?(): number;
   namedDataForWorkspace?(workspace: W, signal: AbortSignal): Promise<NamedDatasetData>;
+  /** Where the Owner approves a Collection's rules on the workspace's server, or null where this computer keeps them. */
+  governanceForWorkspace?(
+    workspace: W,
+    signal: AbortSignal,
+  ): Promise<{ workspaceId: string; data: RemoteDatasetData } | null>;
   /** Writes a joined workspace's Collection types into the member's Personal app folder. */
   writePersonalTypes?(
     workspace: W,
@@ -359,22 +378,12 @@ export function createDatasetHandler<
             current();
             return { kind: "exported" as const, savedPath };
           }
-          if (shareViewIsPresent(operation.workspace.shareView)) {
-            if (
-              !dependencies.namedDataForWorkspace ||
-              ![
-                "list",
-                "describe",
-                "types",
-                "invoke",
-                "upload",
-                "file",
-                "permissions",
-                "setGrant",
-                "removeGrant",
-                "setDefaults",
-              ].includes(input.action)
-            )
+          const governs =
+            shareViewIsPresent(operation.workspace.shareView) &&
+            DATASET_ADMIN_ACTIONS.has(input.action) &&
+            !NAMED_ACTIONS.includes(input.action);
+          if (shareViewIsPresent(operation.workspace.shareView) && !governs) {
+            if (!dependencies.namedDataForWorkspace || !NAMED_ACTIONS.includes(input.action))
               throw datasetOwnerOnlyError();
             const data = await dependencies.namedDataForWorkspace(
               operation.workspace,
@@ -445,6 +454,15 @@ export function createDatasetHandler<
             }
             throw new Error("This Collection action is unavailable.");
           }
+          let shared: { workspaceId: string; data: RemoteDatasetData } | null = null;
+          if (governs) {
+            if (!dependencies.namedDataForWorkspace) throw datasetOwnerOnlyError();
+            shared = (
+              await dependencies.namedDataForWorkspace(operation.workspace, operation.signal)
+            ).governance();
+            current();
+          }
+          const authorityWorkspaceId = shared?.workspaceId ?? input.workspaceId;
           if (
             agent &&
             agent.depth > 0 &&
@@ -461,6 +479,7 @@ export function createDatasetHandler<
           // The local store opens only for work that uses it. It refuses on a computer that doesn't keep it.
           let opened: Promise<LocalDatasetHost> | undefined;
           const localHost = async () => {
+            if (shared) throw datasetOwnerOnlyError();
             const host = await (opened ??= dependencies.hostForWorkspace(
               operation.workspace,
               operation.signal,
@@ -596,11 +615,14 @@ export function createDatasetHandler<
             "approveMigration",
             "discardMigration",
             "migrationPreviewPage",
+            "approval",
           ].includes(input.action);
           const openData = async () =>
-            readsData && dependencies.dataForWorkspace
-              ? await dependencies.dataForWorkspace(operation.workspace, operation.signal)
-              : await localHost();
+            shared
+              ? shared.data
+              : readsData && dependencies.dataForWorkspace
+                ? await dependencies.dataForWorkspace(operation.workspace, operation.signal)
+                : await localHost();
           if (input.action === "list") {
             try {
               const data = await openData();
@@ -625,11 +647,38 @@ export function createDatasetHandler<
               return { kind: "collections-refused" as const, refusal };
             }
           }
+          if (input.action === "approval" || input.action === "confirmApproval") {
+            const governing =
+              shared ??
+              (await dependencies.governanceForWorkspace?.(operation.workspace, operation.signal));
+            current();
+            if (!governing) {
+              if (input.action === "confirmApproval")
+                throw new Error(
+                  "This Collection is kept on this computer. Its rules need no confirmation.",
+                );
+              const { revision } = await (await openData()).approvedArtifacts(input.datasetId);
+              current();
+              return {
+                kind: "approval" as const,
+                revisionSha256: revision.revisionSha256,
+                approvedBy: null,
+                needsOwnerConfirmation: false,
+              };
+            }
+            const result =
+              input.action === "approval"
+                ? await governing.data.approval(input.datasetId)
+                : await governing.data.confirmApproval(input.datasetId, input.revisionSha256);
+            current();
+            return { kind: "approval" as const, ...result };
+          }
           const data = await openData();
           current();
           const lookupLocalApps = async (
             ids: readonly string[],
           ): Promise<Map<string, LocalAppRow> | null> => {
+            if (shared) return null;
             if (
               operation.workspace.rootPath &&
               !(await localDatasetStoreExists(operation.workspace.rootPath))
@@ -698,7 +747,8 @@ export function createDatasetHandler<
           });
           const credentialGeneration = dependencies.currentCredentialGeneration?.();
           const migrationAuthority = {
-            workspaceId: input.workspaceId,
+            workspaceId: authorityWorkspaceId,
+            sourceWorkspaceId: input.workspaceId,
             assertCurrent() {
               current();
               if (dependencies.currentCredentialGeneration?.() !== credentialGeneration)
@@ -747,7 +797,7 @@ export function createDatasetHandler<
               throw new Error("This Collection review expired. Prepare the change again.");
             }
             const candidate = {
-              workspaceId: input.workspaceId,
+              workspaceId: authorityWorkspaceId,
               datasetId: pending.review.revision.datasetId,
               candidateId: pending.review.candidate.candidateId,
               signal: operation.signal,
@@ -967,7 +1017,7 @@ export function createDatasetHandler<
             ) {
               migrations.get(prepared.preparationId)?.clear();
               await migrationAuthority.discardMigrationCandidate({
-                workspaceId: input.workspaceId,
+                workspaceId: authorityWorkspaceId,
                 datasetId: input.datasetId,
                 candidateId: prepared.candidate.candidateId,
                 signal: operation.signal,
@@ -1281,7 +1331,7 @@ export function createDatasetHandler<
             ) {
               migrations.get(prepared.preparationId)?.clear();
               await migrationAuthority.discardMigrationCandidate({
-                workspaceId: input.workspaceId,
+                workspaceId: authorityWorkspaceId,
                 datasetId: input.datasetId,
                 candidateId: prepared.candidate.candidateId,
                 signal: operation.signal,
@@ -1323,7 +1373,7 @@ export function createDatasetHandler<
             } finally {
               migrations.get(prepared.preparationId)?.clear();
               await migrationAuthority.discardMigrationCandidate({
-                workspaceId: input.workspaceId,
+                workspaceId: authorityWorkspaceId,
                 datasetId: input.datasetId,
                 candidateId: prepared.candidate.candidateId,
                 signal: operation.signal,
@@ -1361,6 +1411,29 @@ export function createDatasetHandler<
                 return { kind: "refused" as const, ...error.refusal };
               throw error;
             }
+          }
+          if (input.action === "create" && shared) {
+            const generated = generateDatasetSources(input.definition);
+            const schemaSql = generated.files[generated.definition.schemaPath]!,
+              operationSource = generated.files[generated.definition.operationsPath]!;
+            const revision = describeDatasetRevision({
+              definition: generated.definition,
+              revision: 1,
+              schemaSql,
+              operationSource,
+            });
+            await onMainLocked(() =>
+              dependencies.createSources(operation.workspace, generated.files, operation.signal),
+            );
+            current();
+            const approved = await shared.data.activate({
+              revision,
+              schemaSql,
+              operationSource,
+              approvalAgent,
+            });
+            current();
+            return { kind: "approved" as const, revision: approved };
           }
           const host = await localHost();
           if (input.action === "approve") {

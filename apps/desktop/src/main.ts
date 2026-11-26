@@ -11442,6 +11442,18 @@ function registerIpcHandlers(): void {
         throw error;
       }
     },
+    governanceForWorkspace: async (
+      workspace: DesktopRendererWorkspaceOperation["workspace"],
+      signal: AbortSignal,
+    ) => {
+      const server = await serverCollectionsFor(workspace, signal);
+      return server
+        ? {
+            workspaceId: workspace.workspaceId,
+            data: server.data(signal, () => signal.throwIfAborted()),
+          }
+        : null;
+    },
     dataForWorkspace: async (
       workspace: DesktopRendererWorkspaceOperation["workspace"],
       signal: AbortSignal,
