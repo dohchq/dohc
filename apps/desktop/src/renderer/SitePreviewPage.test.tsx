@@ -959,6 +959,41 @@ describe("SitePreviewPage", () => {
     expect(appViewBridge.startSitePreview).not.toHaveBeenCalled();
   });
 
+  it("opens Review app from Share on an app the server publishes", async () => {
+    const appViewBridge = {
+      ...bridgeMock,
+      appView: vi.fn(async (request: { viewId: string }) => ({
+        kind: "unapproved" as const,
+        viewId: request.viewId,
+      })),
+      onAppViewEvent: vi.fn(() => () => undefined),
+      publishOwnerApp: vi.fn(async () => ({ kind: "localListed" as const, publications: [] })),
+      getSitePackage: vi.fn(
+        async (): Promise<SitePackageInfo> => ({
+          ...site,
+          root: "workouts",
+          title: "Workouts",
+          entryPath: "workouts/index.html",
+          sourceFiles: ["workouts/index.html", "workouts/app.publish.json"],
+          shareManifest: noRunnableArtifact,
+        }),
+      ),
+    };
+    vi.stubGlobal("dohcDesktop", appViewBridge);
+    const onShareSite = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <SitePreviewPage workspaceId="ws-sites" siteRoot="workouts" onShareSite={onShareSite} />,
+    );
+
+    await screen.findByTestId("app-view-review");
+    await user.click(screen.getByTestId("site-preview-share"));
+
+    expect(await screen.findByRole("dialog", { name: /Workouts/ })).toBeTruthy();
+    expect(screen.queryByTestId("site-preview-error")).toBeNull();
+    expect(onShareSite).not.toHaveBeenCalled();
+  });
+
   it("keeps dev preview when a package app also has app.publish.json", async () => {
     bridgeMock.getSitePackage.mockResolvedValueOnce({
       ...site,

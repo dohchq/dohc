@@ -679,6 +679,30 @@ test("@app-view an app's notice stays in Notices after its tab closes, and Try a
   }
 });
 
+test("@app-view Share on a Collection app opens Review app", async ({}, testInfo) => {
+  test.setTimeout(180_000);
+  const workspace = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    desktop = await launchDesktopApp({ workspace });
+    const { page, app: electronApp } = desktop;
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await openWorkspaceFromFirstRun(page, workspace);
+    await createFormApp(electronApp, page, workspace);
+    await openExplorerHome(page);
+    await page.locator(`[data-testid="sites-row"][data-root="${appRoot}"]`).click();
+    await shown(page.getByTestId("app-view-review"));
+    await page.getByTestId("site-preview-share").click();
+    const review = page.getByTestId("app-publication-dialog");
+    await expect(review.or(page.getByTestId("site-preview-error"))).toBeVisible();
+    await page.screenshot({ animations: "disabled", path: testInfo.outputPath("app-share.png") });
+    await expect(review).toBeVisible();
+    await expect(page.getByTestId("site-preview-error")).toHaveCount(0);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, workspace);
+  }
+});
+
 test("@app-view an app keeps its page when its tab moves to another editor group, and takes focus from its tab", async () => {
   test.setTimeout(180_000);
   const workspace = await createTempWorkspace();
