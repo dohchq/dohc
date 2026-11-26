@@ -510,9 +510,14 @@ JSON (`application/json` or `application/*+json`, charset absent or `utf-8`, at 
 levels deep) from a 2xx response. Later steps read the answer in formulas and code, so it
 reaches records only through the normal write path, with its permissions, undo, and write
 caps. Before the answer reaches the run, every string in it is scrubbed of the attached
-secret header values, a secret URL, and that URL's path parts and query values of 8 or
-more characters. The answer lives in the run's private state only until the run ends. Run
-history, the CLI, and the renderer see only the target, method, and status.
+secret header values (also trimmed), a secret URL, that URL's query values of 8 or more
+characters, and its path parts that look like tokens rather than words (also decoded). A
+number equal to a secret becomes `[redacted]`. An answer with a secret in a field name, or
+over 192 KiB once scrubbed, is refused. The answer lives in the run's private state until
+the run is done or replaced. A failed run keeps it, so Try again resumes without fetching
+again, until run retention removes the run. If a code file changed since the fetch, the run
+continues only once the owner has allowed the step with the current code. Run history, the
+CLI, and the renderer see only the target, method, and status.
 
 A `POST` is sent at most once per claim: the relay reserves its delivery id, and a run
 that stopped while sending fails instead of sending again. A `GET` skips that reservation,

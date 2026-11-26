@@ -1970,14 +1970,14 @@ export function NoticeCenter(props: {
         tone: "warning",
         title: `Automation "${hold.automationName}" is waiting${hold.onServer ? " on your server" : ""}`,
         body: sendsHttp
-          ? `A step in ${hold.collection} can ${reach}. Open ${hold.collection}'s Automations to see what it sends and saves, and allow it there.`
+          ? `A step in ${hold.collection} can ${reach}. Open ${hold.collection}'s Automations to see what it sends and saves, ${hold.onServer ? "then allow it here." : "and allow it there."}`
           : hold.stoppedFor
             ? `A step in ${hold.collection} can now ${reach}. It stopped before because ${hold.stoppedFor} could not. Allow it to run?`
             : hold.fileUnread
               ? `A step in ${hold.collection} can ${reach}. dohc cannot read ${hold.collection}'s automations file in one version of the workspace. New steps there wait for you. Allow it to run?`
               : `A step in ${hold.collection} can ${reach}. Allow it to run?`,
         Icon: AlertTriangle,
-        ...(props.onAllowAutomationHold && !sendsHttp
+        ...(props.onAllowAutomationHold && (!sendsHttp || hold.onServer)
           ? { actions: [{ label: "Allow", onClick: () => props.onAllowAutomationHold?.(hold) }] }
           : {}),
         target: { to: "automation", automation: hold.automationId },

@@ -216,32 +216,42 @@ export function httpAllowText(automation: Automation, ordinal: number): string |
   const body =
     step.body === null
       ? null
-      : step.body.kind === "json"
-        ? `a JSON body with ${wordList(step.body.fields.map((field) => field.key))}`
-        : "a text body";
+      : step.body.kind === "text"
+        ? "a text body"
+        : step.body.fields.length === 0
+          ? "an empty JSON body"
+          : `a JSON body with ${wordList(step.body.fields.map((field) => field.key))}`;
   const sends = [...secrets, ...(body === null ? [] : [body])];
   const sentence = `This step ${httpVerb(step, true)} ${httpStepTarget(step)}${sends.length === 0 ? "" : ` with ${wordList(sends)}`}`;
   const undo = step.method === "GET" ? "" : " Sent requests cannot be undone.";
   const allow = " Allow it before dohc sends requests there.";
   if (step.as === null) return `${sentence}.${undo}${allow}`;
   const name = new RegExp(`\\b${step.as}\\b`, "u");
-  const fields: string[] = [];
-  const code: string[] = [];
+  const fields = new Set<string>();
+  const code = new Set<string>();
+  const other = new Set<string>();
   for (const later of steps.slice(ordinal + 1)) {
     if (later.kind === "set" || later.kind === "add-record") {
       for (const { field, value } of later.values) {
-        if (value.kind === "formula" && name.test(value.expression)) fields.push(field);
+        if (value.kind === "formula" && name.test(value.expression)) fields.add(field);
       }
+    } else if (later.kind === "run") {
+      if (name.test(later.code)) code.add("code");
+    } else if (later.kind === "run-file") {
+      code.add(later.file);
+    } else if (later.kind === "if") {
+      if (name.test(later.if)) other.add("choose which steps run");
+    } else if (name.test(JSON.stringify(later))) {
+      other.add(later.kind === "find" ? "find records" : sentenceText(stepParts(later)));
     }
-    if (later.kind === "run" && name.test(later.code)) code.push("code");
-    if (later.kind === "run-file") code.push(later.file);
   }
   const uses = [
-    ...(fields.length > 0 ? [`write ${wordList(fields)} from it`] : []),
-    ...(code.length > 0 ? [`run ${wordList(code)} with it`] : []),
+    ...(fields.size > 0 ? [`write ${wordList([...fields])} from it`] : []),
+    ...(code.size > 0 ? [`run ${wordList([...code])} with it`] : []),
+    ...(other.size > 0 ? [`use it to ${wordList([...other])}`] : []),
   ];
   const readers =
-    uses.length === 0 ? " No later step uses it yet." : ` Later steps ${uses.join(" and ")}.`;
+    uses.length === 0 ? " No later step uses it yet." : ` Later steps ${wordList(uses)}.`;
   return `${sentence}, and saves the answer as ${step.as}.${readers}${undo}${allow}`;
 }
 

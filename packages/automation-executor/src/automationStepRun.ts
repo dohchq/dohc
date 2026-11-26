@@ -114,6 +114,15 @@ export interface StepBackend {
   collectionsOf(step: StoredStep): StoredRun["collections"];
   /** The record the Add record step at `ordinal` added, from what the run recorded. */
   added(run: StoredRun, ordinal: number): RunRef | null;
+  /**
+   * Whether the owner allowed the web request at `ordinal` with the code
+   * files as they are now, `file` being the bytes `sha256` names.
+   */
+  fetchAllowed?(
+    ordinal: number,
+    file: string,
+    sha256: string,
+  ): Promise<"approved" | "unapproved" | "unavailable">;
   /** Lands one effect and says what it did, or how the run ends instead. */
   apply(
     run: StoredRun,
@@ -420,8 +429,13 @@ async function walkSteps(
       if (typeof read !== "string") return { outcome: failed(read.problem) };
       source = read;
       codeFileSha256 = createHash("sha256").update(read).digest("hex");
-      const allowed = run.applied.flatMap((applied) => applied.code ?? []);
-      if (allowed.some((code) => code.file === step.file && code.sha256 !== codeFileSha256)) {
+      const changed = run.applied.filter((applied) =>
+        applied.code?.some((code) => code.file === step.file && code.sha256 !== codeFileSha256),
+      );
+      for (const fetch of changed) {
+        const allowed = await backend.fetchAllowed?.(fetch.ordinal, step.file, codeFileSha256);
+        if (allowed === "approved") continue;
+        if (allowed === "unapproved") return { outcome: { kind: "wait", reason: "held" } };
         return {
           outcome: failed(
             `Code file "${step.file}" changed after you allowed this run's web request, so step ${ordinal + 1} did not run.`,

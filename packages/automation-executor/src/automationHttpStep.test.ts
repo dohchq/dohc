@@ -875,27 +875,37 @@ automations:
 `);
       if (codeParsed.status !== "read" || codeParsed.entries[0]?.status !== "valid")
         throw Error("bad yaml");
-      const sources = ["export default () => 1;", "export default () => 2;"];
-      const swapped = await runCollectionAutomation(
-        { ...deps, readCode: async () => ({ text: sources.shift() ?? "", truncated: false }) },
-        {
+      const codeAutomation = codeParsed.entries[0].automation;
+      let reads = 0;
+      let approvals = 0;
+      let allowNewCode: "approved" | "unapproved" = "unapproved";
+      const codeDeps: CollectionAutomationRunDependencies = {
+        ...deps,
+        readCode: async () => ({
+          text: reads++ === 0 ? "return { output: 1 };" : "return { output: 2 };",
+          truncated: false,
+        }),
+        isHttpStepApproved: async () => (approvals++ === 0 ? "approved" : allowNewCode),
+      };
+      const codeRun = (attempts: number) =>
+        runCollectionAutomation(codeDeps, {
           claim: {
             ...claim,
             claimId: "claim-fetch-code",
             automationId: "collection:Tasks#pull-code",
+            attempts,
           },
-          automation: codeParsed.entries[0].automation,
+          automation: codeAutomation,
           collection: { path: "Tasks", name: "Tasks" },
           roster,
           signal: new AbortController().signal,
           stopped: new AbortController().signal,
-        },
-      );
-      expect(swapped).toMatchObject({ kind: "failed" });
-      if (swapped.kind === "failed")
-        expect(swapped.error).toBe(
-          `Code file "rows.js" changed after you allowed this run's web request, so step 2 did not run.`,
-        );
+        });
+      execute.mockClear();
+      expect(await codeRun(1)).toEqual({ kind: "wait", reason: "held" });
+      allowNewCode = "approved";
+      expect(await codeRun(2)).toEqual({ kind: "done" });
+      expect(execute).toHaveBeenCalledTimes(1);
     } finally {
       await evaluator.close();
     }

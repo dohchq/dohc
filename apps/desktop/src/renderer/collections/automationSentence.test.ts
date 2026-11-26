@@ -69,4 +69,38 @@ describe("http step copy", () => {
     );
     expect(httpAllowText(webhook, 1)).toBeNull();
   });
+
+  it("names later steps that send the answer elsewhere or branch on it", () => {
+    const fetch = fetchStats.do[0]!;
+    const spread: Automation = {
+      ...fetchStats,
+      do: [
+        fetch,
+        { kind: "post", text: "Revenue {stats.revenue}", group: "Everyone" },
+        {
+          kind: "invoke",
+          collection: null,
+          operation: "import",
+          input: [{ key: "rows", value: { kind: "formula", expression: "stats.rows" } }],
+        },
+        {
+          kind: "if",
+          if: "stats.enabled",
+          do: [
+            {
+              kind: "set",
+              values: [{ field: "Status", value: { kind: "literal", value: "On" } }],
+              records: null,
+              operation: null,
+            },
+          ],
+          otherwise: [],
+        },
+        { kind: "notify", text: "Done", to: [{ kind: "literal", value: "bob@dohc.test" }] },
+      ],
+    };
+    expect(httpAllowText(spread, 0)).toBe(
+      "This step fetches data from us.posthog.com with secret POSTHOG_KEY in its Authorization header, and saves the answer as stats. Later steps use it to post in Everyone, run import, and choose which steps run. Allow it before dohc sends requests there.",
+    );
+  });
 });

@@ -13,6 +13,7 @@ import {
   sanitizeHttpFailureReason,
   workspaceSecretApprovalBinding,
   scrubSecretsFromJson,
+  secretUrlScrubValues,
 } from "./httpStepApprovals";
 
 describe("http automation steps", () => {
@@ -470,5 +471,40 @@ automations:
       ]),
     ).toBe("got [redacted] back");
     expect(sanitizeHttpFailureReason("a.b and a*b", ["a.b"])).toBe("[redacted] and a*b");
+  });
+
+  it("scrubs a secret echoed trimmed, decoded, or as a number", () => {
+    const secrets = [
+      "tok_123456 ",
+      "84720193",
+      ...secretUrlScrubValues("https://hooks.example.com/services/T01%2FB02xyz?key=sk_live_abcdef"),
+    ];
+    expect(
+      scrubSecretsFromJson(
+        { auth: "Bearer tok_123456", pin: 84720193, path: "/services/T01/B02xyz", count: 3 },
+        secrets,
+      ),
+    ).toEqual({
+      ok: true,
+      value: {
+        auth: "Bearer [redacted]",
+        pin: "[redacted]",
+        path: "/services/[redacted]",
+        count: 3,
+      },
+    });
+  });
+
+  it("keeps REST words in a secret URL's path out of what it scrubs", () => {
+    const scrubValues = secretUrlScrubValues(
+      "https://api.example.com/v1/customers/invoices?api_key=sk_live_12345678",
+    );
+    expect(scrubValues).toEqual([
+      "https://api.example.com/v1/customers/invoices?api_key=sk_live_12345678",
+      "sk_live_12345678",
+    ]);
+    expect(
+      scrubSecretsFromJson({ customers: [{ invoices: 2, key: "sk_live_12345678" }] }, scrubValues),
+    ).toEqual({ ok: true, value: { customers: [{ invoices: 2, key: "[redacted]" }] } });
   });
 });

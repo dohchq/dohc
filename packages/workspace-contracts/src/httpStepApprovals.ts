@@ -220,10 +220,15 @@ export function sanitizeHttpFailureReason(reason: string, secrets: readonly stri
   return redactSecrets(reason, secrets).slice(0, 500);
 }
 
+function secretForms(secrets: readonly string[]): string[] {
+  return [...new Set(secrets.flatMap((secret) => [secret, secret.trim()]))].filter(
+    (secret) => secret.length > 0,
+  );
+}
+
 function redactSecrets(text: string, secrets: readonly string[]): string {
   const spans: Array<[number, number]> = [];
-  for (const secret of secrets) {
-    if (secret.length === 0) continue;
+  for (const secret of secretForms(secrets)) {
     for (let at = text.indexOf(secret); at >= 0; at = text.indexOf(secret, at + 1)) {
       spans.push([at, at + secret.length]);
     }
@@ -244,11 +249,27 @@ function redactSecrets(text: string, secrets: readonly string[]): string {
   return scrubbed + text.slice(from);
 }
 
-/** What to scrub for a secret destination URL: the URL, and its path parts and query values of 8 or more characters. */
+function decoded(part: string): string {
+  try {
+    return decodeURIComponent(part);
+  } catch {
+    return part;
+  }
+}
+
+/**
+ * What to scrub for a secret destination URL: the URL, its query values of 8
+ * or more characters, and its path parts that look like tokens rather than
+ * words, as sent and decoded.
+ */
 export function secretUrlScrubValues(rawUrl: string): string[] {
   const url = URL.parse(rawUrl);
-  const parts = url === null ? [] : [...url.pathname.split("/"), ...url.searchParams.values()];
-  return [rawUrl, ...parts.filter((part) => part.length >= 8)];
+  if (url === null) return [rawUrl];
+  const tokens = url.pathname
+    .split("/")
+    .filter((part) => part.length >= 24 || (part.length >= 8 && /[^a-z_-]/u.test(part)));
+  const values = [...url.searchParams.values()].filter((value) => value.length >= 8);
+  return [...new Set([rawUrl, url.href, ...tokens, ...tokens.map(decoded), ...values])];
 }
 
 export type HttpJsonValue =
@@ -261,6 +282,7 @@ export type HttpJsonValue =
 
 function scrubJson(value: HttpJsonValue, secrets: readonly string[]): HttpJsonValue | null {
   if (typeof value === "string") return redactSecrets(value, secrets);
+  if (typeof value === "number" && secrets.includes(String(value))) return "[redacted]";
   if (value === null || typeof value !== "object") return value;
   if (Array.isArray(value)) {
     const items: HttpJsonValue[] = [];
@@ -290,7 +312,7 @@ export function scrubSecretsFromJson(
   value: HttpJsonValue,
   secrets: readonly string[],
 ): { ok: true; value: HttpJsonValue } | { ok: false; reason: string } {
-  const scrubbed = scrubJson(value, secrets);
+  const scrubbed = scrubJson(value, secretForms(secrets));
   if (scrubbed === null && value !== null) {
     return {
       ok: false,

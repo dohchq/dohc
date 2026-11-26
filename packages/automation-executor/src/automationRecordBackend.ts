@@ -1397,6 +1397,39 @@ export async function prepareRecordBackend(
         )?.readOnly === false
       );
     },
+    async fetchAllowed(ordinal, file, sha256) {
+      const collectionId =
+        parseCollectionAutomationId(claim.automationId)?.collectionId ??
+        source.datasetId ??
+        deps.collectionIdOf?.(collection.path) ??
+        null;
+      const ordered = stepsInOrder(automation);
+      const fetch = ordered.find((entry) => entry.ordinal === ordinal)?.step;
+      if (collectionId === null || fetch?.kind !== "http" || !deps.isHttpStepApproved)
+        return "unavailable";
+      const files = new Set(
+        ordered.flatMap(({ step }) => (step.kind === "run-file" ? [step.file] : [])),
+      );
+      const codeFileHashes: Array<{ file: string; sha256: string }> = [];
+      for (const name of files) {
+        const read = await deps.readCode(`${collection.path}/${name}`);
+        if (read === null || read.truncated) return "unavailable";
+        const hash = createHash("sha256").update(read.text).digest("hex");
+        if (name === file && hash !== sha256) return "unavailable";
+        codeFileHashes.push({ file: name, sha256: hash });
+      }
+      return deps.isHttpStepApproved(
+        computeHttpStepApprovalDigest({
+          collectionId,
+          collectionPath: collection.path,
+          automationId: automation.id,
+          stepOrdinal: ordinal,
+          step: fetch,
+          definitionDigest: definitionDigest(automation),
+          codeFileHashes,
+        }),
+      );
+    },
     async apply(run, effect, place, chat) {
       if (
         current !== null &&
