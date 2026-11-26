@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type FocusEvent } from "react";
 import { Plug, Sparkles, TriangleAlert } from "lucide-react";
 import { isConnectedAgentId, shownAgentName } from "@dohc/workspace-contracts/actor-presentation";
+import {
+  MIN_SECRET_PASSPHRASE_LENGTH,
+  NO_PASSPHRASE_YET,
+  OTHER_KEY_PROTECTS,
+} from "@dohc/security-contract/secret-passphrase";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
 import { listAgents, type DesktopUserSettings } from "../../settings/userSettings";
 import { canonicalCloudOrigin } from "../../workspaces/cloudConfiguration";
@@ -26,8 +31,9 @@ const SYNC_CODE_SECRET: CopySecret = {
   what: "the workspace code",
   again: "Copy it again from Settings.",
 };
-const MIN_PASSPHRASE_LENGTH = 8;
-const PASSPHRASE_TOO_SHORT = "Enter at least 8 characters to protect synced secrets.";
+const PASSPHRASE_TOO_SHORT = `Enter at least ${MIN_SECRET_PASSPHRASE_LENGTH} characters to protect synced secrets.`;
+export const REPLACES_PASSPHRASE =
+  "A new passphrase replaces any earlier one, and the earlier one stops working.";
 // What turning sync off leaves alone. Groups and received shares sync on
 // their own, so a pause here does not reach them.
 export const SYNC_OFF_KEEPS =
@@ -192,6 +198,14 @@ export function CloudSyncSettings(props: {
       cloud.onChanged();
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
+      const reason = [NO_PASSPHRASE_YET, OTHER_KEY_PROTECTS].find((words) =>
+        message.includes(words),
+      );
+      if (here() && reason) {
+        setPassphrasePurpose(purpose ?? "unlock");
+        setSyncError(reason);
+        return;
+      }
       if (here() && /passphrase/i.test(message)) {
         setPassphrasePurpose(/unlock/i.test(message) ? "unlock" : "protect");
         setSyncError(
@@ -517,7 +531,7 @@ export function ProtectedFilesRow(props: {
 }) {
   const tooShort =
     props.purpose === "protect"
-      ? props.passphrase.length < MIN_PASSPHRASE_LENGTH
+      ? props.passphrase.length < MIN_SECRET_PASSPHRASE_LENGTH
       : props.passphrase.length === 0;
   // A passphrase left in the field, rather than taken to its button, says how
   // to use it. Every other Settings field saves on leave; this one doesn't.
@@ -541,6 +555,8 @@ export function ProtectedFilesRow(props: {
           <span data-testid="cloud-sync-hint" role="alert" className="text-warning">
             {hint}
           </span>
+        ) : props.purpose === "protect" ? (
+          <span data-testid="cloud-sync-replace-warning">{REPLACES_PASSPHRASE}</span>
         ) : undefined
       }
     >

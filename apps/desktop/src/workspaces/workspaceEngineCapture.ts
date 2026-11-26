@@ -130,6 +130,7 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { atomicReplaceFile } from "../atomicReplaceFile";
+import { SECRET_KEY_RELATIVE_PATH } from "./workspaceDataKey";
 import { folderEntriesOrNone } from "./folderEntries";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isInside } from "../security/pathContainment";
@@ -996,6 +997,7 @@ export interface WorkspaceEngineCapture {
   // materializer before it commits that page's relay cursor. A failed page
   // remains available to the next pass instead of being skipped forever.
   runRelaySync<T>(task: (materializePage: MaterializeRelayPullPage) => Promise<T>): Promise<T>;
+  restoreLockedProtectedFiles(): Promise<void>;
   // Journaled edits only. Owner-outbox acknowledgements use their live lane.
   onDurableLocalChange(handler: (path: string) => void): () => void;
   readonly shuttingDown: boolean;
@@ -1068,6 +1070,7 @@ export interface WorkspaceEngineCaptureOptions {
   // Why protected files such as `.env` wait on the workspace secret key, such
   // as `key-missing`, or null while the key works.
   onSecretKeyUnavailable?: (reason: string | null) => void;
+  onProtectedFilesLocked?: (locked: boolean) => void;
   onOutsideWriteCopies?: (
     paths: readonly (readonly [string, string, string])[] | null,
     readError: string | null,
@@ -4967,6 +4970,17 @@ export function createWorkspaceEngineCapture(
   // its way to the workspace folder, and every write/delete registers an
   // expected engine event. A pre-existing non-text/unreadable file at a
   // secret path is never clobbered (same never-clobber rule as text).
+  async function presentOnDisk(path: string): Promise<boolean> {
+    try {
+      await lstat(join(rootPath, path));
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+  }
+  const secretKeyFileExists = () => presentOnDisk(SECRET_KEY_RELATIVE_PATH);
+
   async function planSecretMaterialization(
     targetVersionId: string,
     previousVersionId: string,
@@ -10933,6 +10947,7 @@ export function createWorkspaceEngineCapture(
           const policy = await readPolicyForTask();
           const activeVersionId = await activeVersionIdOf(engine);
           const materializations: MaterializeOperation[] = [];
+          let locked: boolean | undefined;
           for (const change of changed) {
             // A failed disk materialization leaves the relay cursor behind.
             // If the user switches versions before the retry, the redelivered
@@ -10948,6 +10963,8 @@ export function createWorkspaceEngineCapture(
               continue;
             }
             if (change.contentKind === "secret") {
+              locked ??= !(await secretKeyFileExists());
+              if (locked) continue;
               const materialized = await secretStoreFor().materializeSecretFile({
                 workspaceId,
                 versionId: change.versionId,
@@ -10985,6 +11002,7 @@ export function createWorkspaceEngineCapture(
             materializations.push(await materializeWriteForSnapshot(engine, snapshot));
           }
           await materialize(materializations, policy);
+          if (locked !== undefined) options.onProtectedFilesLocked?.(locked);
           // The daemon watcher must manifest the pulled disk state before the
           // caller can make its next edit. Otherwise a fast local edit can
           // coalesce with this materialization as the path's first sight, and
@@ -10992,6 +11010,22 @@ export function createWorkspaceEngineCapture(
           await engine.reconcileCapture?.();
         };
         return await task(materializePage);
+      });
+    },
+
+    restoreLockedProtectedFiles() {
+      return enqueueResult("restore locked protected files", async () => {
+        if (!(await secretKeyFileExists())) return;
+        const engine = await engineStore();
+        const policy = await readPolicyForTask();
+        const activeVersionId = await activeVersionIdOf(engine);
+        const absent: MaterializeOperation[] = [];
+        for (const operation of await planSecretMaterialization(activeVersionId, activeVersionId))
+          if (operation.kind === "write" && !(await presentOnDisk(operation.path)))
+            absent.push(operation);
+        await materialize(absent, policy);
+        await engine.reconcileCapture?.();
+        options.onProtectedFilesLocked?.(false);
       });
     },
 

@@ -1,7 +1,9 @@
 import { expect, it } from "vitest";
 import {
   SecretKeyEnvelopeError,
+  envelopeKeyCheck,
   unwrapWorkspaceDataKey,
+  workspaceDataKeyCheck,
   wrapWorkspaceDataKey,
 } from "./secretKeyEnvelope";
 
@@ -58,4 +60,57 @@ it("gives a damaged envelope and a wrong passphrase the same public error", asyn
     });
     expect(Object.getOwnPropertyNames(structuredClone(error)).sort()).toEqual(["message", "stack"]);
   }
+});
+
+it("names the wrapped key so a replacement can tell it wraps the same one", async () => {
+  const workspaceId = "workspace-1";
+  const dataKey = new Uint8Array(32).fill(7);
+  const first = await wrapWorkspaceDataKey({ dataKey, passphrase: "first", workspaceId });
+  const second = await wrapWorkspaceDataKey({ dataKey, passphrase: "second", workspaceId });
+  const other = await wrapWorkspaceDataKey({
+    dataKey: new Uint8Array(32).fill(8),
+    passphrase: "first",
+    workspaceId,
+  });
+
+  expect(envelopeKeyCheck(first.envelopeJson)).toBe(workspaceDataKeyCheck(dataKey, workspaceId));
+  expect(envelopeKeyCheck(second.envelopeJson)).toBe(envelopeKeyCheck(first.envelopeJson));
+  expect(envelopeKeyCheck(other.envelopeJson)).not.toBe(envelopeKeyCheck(first.envelopeJson));
+  expect(workspaceDataKeyCheck(dataKey, "workspace-2")).not.toBe(
+    workspaceDataKeyCheck(dataKey, workspaceId),
+  );
+});
+
+it("reads no key check from a legacy or unreadable envelope", async () => {
+  const { envelopeJson } = await wrapWorkspaceDataKey({
+    dataKey: new Uint8Array(32).fill(7),
+    passphrase: "right",
+    workspaceId: "workspace-1",
+  });
+  const { keyCheckBase64: _dropped, ...legacy } = JSON.parse(envelopeJson);
+  expect(envelopeKeyCheck(JSON.stringify(legacy))).toBeNull();
+  expect(envelopeKeyCheck("{")).toBeNull();
+  await expect(
+    unwrapWorkspaceDataKey({
+      envelopeJson: JSON.stringify(legacy),
+      passphrase: "right",
+      workspaceId: "workspace-1",
+    }),
+  ).resolves.toEqual(Buffer.alloc(32, 7));
+});
+
+it("refuses an envelope whose key check names a different key", async () => {
+  const workspaceId = "workspace-1";
+  const { envelopeJson } = await wrapWorkspaceDataKey({
+    dataKey: new Uint8Array(32).fill(7),
+    passphrase: "right",
+    workspaceId,
+  });
+  const swapped = JSON.stringify({
+    ...JSON.parse(envelopeJson),
+    keyCheckBase64: workspaceDataKeyCheck(new Uint8Array(32).fill(8), workspaceId),
+  });
+  await expect(
+    unwrapWorkspaceDataKey({ envelopeJson: swapped, passphrase: "right", workspaceId }),
+  ).rejects.toBeInstanceOf(SecretKeyEnvelopeError);
 });

@@ -1719,7 +1719,7 @@ it("reports unavailable recovery without replacing unrelated Notices and clears 
 it.each([
   [
     "key-missing",
-    "The workspace secret key file is missing. Restore .dohc/engine/secret.key from a backup.",
+    "The workspace secret key file is missing. If another computer protected these files with a passphrase, unlock them in Settings › Sync. Otherwise restore .dohc/engine/secret.key from a backup.",
   ],
   [
     "key-corrupt",
@@ -1752,6 +1752,26 @@ it.each([
     expect(retry).toHaveBeenCalledOnce();
     act(() => result.current.reportSecretKeyUnavailable(reason, retry));
     act(() => result.current.reportSecretKeyUnavailable(null, retry));
+    expect(result.current.shellErrors).toEqual([]);
+  },
+);
+
+it.each([
+  ["locked", "Protected files are locked on this computer"],
+  ["need-passphrase", "Your other computers can't open protected files yet"],
+] as const)(
+  "files one protected-files row (%s) that opens Sync settings and clears when it's resolved",
+  (state, title) => {
+    const openSyncSettings = vi.fn();
+    const { result } = renderHook(() => useShellError("protected-files"));
+    act(() => result.current.reportProtectedFiles(state, openSyncSettings));
+    act(() => result.current.reportProtectedFiles(state, openSyncSettings));
+    expect(result.current.shellErrors).toHaveLength(1);
+    const row = result.current.shellErrors[0]!;
+    expect(row).toMatchObject({ kind: "protected-files", tone: "warning", title, seen: false });
+    act(() => result.current.runShellErrorAction(row.id));
+    expect(openSyncSettings).toHaveBeenCalledOnce();
+    act(() => result.current.reportProtectedFiles(null, openSyncSettings));
     expect(result.current.shellErrors).toEqual([]);
   },
 );
