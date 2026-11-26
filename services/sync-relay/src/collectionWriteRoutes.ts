@@ -140,9 +140,9 @@ export function createCollectionWriteRoutes(input: {
       {
         channelKind: (wireId) => storage.findChannelCreateKind(share.workspaceId, wireId),
       },
-      storage.memberFolders(share.workspaceId, actorUserId),
+      storage.memberFolders(share.workspaceId, actorUserId, grant.grantId),
     );
-    if (!decision.allowed) throw relayError("share_op_rejected");
+    if (!decision.allowed) throw relayError("share_op_rejected", decision.reason);
     return commit(
       storage,
       {

@@ -1276,6 +1276,141 @@ fn public_create_author_survives_replay_but_is_not_republished_without_proof() {
 const NAMED_ORIGIN: &str = "relay:collection-file:grant";
 const TRIP_SCHEMA: &str = "name: Trip\n";
 
+#[test]
+fn collection_rule_writes_bind_the_named_author_and_descriptor_to_one_folder() {
+    let (_scratch, mut store) = test_store();
+    let descriptor = r#"{"formatVersion":2,"operationsPath":"code/actions.ts"}"#;
+    let escaping = r#"{"formatVersion":2,"operationsPath":"../actions.ts"}"#;
+    let sql = "SELECT 1;";
+    let next = "SELECT 2;";
+    hydrate_texts(&mut store, &[descriptor, escaping, sql, next]);
+    let paths = [
+        ("descriptor", "trip/people/dataset.json", descriptor),
+        ("schema", "trip/people/schema.sql", sql),
+        ("operations", "trip/people/code/actions.ts", sql),
+        ("migration", "trip/people/migrations/001.sql", sql),
+    ];
+    let tag = |mut payload: Value, author: Value, folder: &str| {
+        payload["collectionRulesFolder"] = json!(folder);
+        with_author(payload, author)
+    };
+    let mut seq = 0;
+    for (id, path, body) in paths {
+        let payload = tag(
+            absent_text_payload(id, id, path, body),
+            named_author("grant"),
+            "trip/people",
+        );
+        let result = apply_moment_envelope(
+            &mut store,
+            &envelope(NAMED_ORIGIN, seq, "ws", payload),
+            &NoFaults,
+        )
+        .unwrap();
+        assert_eq!(result.primary, ApplyDisposition::Applied(0), "{path}");
+        seq += 1;
+    }
+    let edit = present_text_payload(
+        "edit",
+        "schema",
+        "write",
+        "trip/people/schema.sql",
+        "trip/people/schema.sql",
+        sql,
+        "schema",
+        next,
+    );
+    let outcome = apply_moment_envelope(
+        &mut store,
+        &envelope(
+            NAMED_ORIGIN,
+            seq,
+            "ws",
+            tag(edit, named_author("grant"), "trip/people"),
+        ),
+        &NoFaults,
+    )
+    .unwrap();
+    assert_eq!(outcome.primary, ApplyDisposition::Applied(0));
+    seq += 1;
+
+    for (path, body, folder, author) in [
+        ("trip/other.sql", sql, "trip/people", named_author("grant")),
+        (
+            "trip/people/other.ts",
+            sql,
+            "trip/people",
+            named_author("grant"),
+        ),
+        (
+            "trip/people/pages.md",
+            sql,
+            "trip/people",
+            named_author("grant"),
+        ),
+        (
+            "trip/people/.ENV.sql",
+            sql,
+            "trip/people",
+            named_author("grant"),
+        ),
+        (
+            "trip/people/.dohc-access/migration.sql",
+            sql,
+            "trip/people",
+            named_author("grant"),
+        ),
+        (
+            "trip/other/dataset.json",
+            escaping,
+            "trip/other",
+            named_author("grant"),
+        ),
+        (
+            "trip/people/002.sql",
+            sql,
+            "trip/people",
+            named_author("another-grant"),
+        ),
+        (
+            "trip/people/002.sql",
+            sql,
+            "trip/people",
+            link_author("grant"),
+        ),
+        (
+            "trip/people/002.sql",
+            sql,
+            "trip/people",
+            json!({"kind":"agent","agentId":"agent","onBehalfOf":"owner"}),
+        ),
+        (
+            "trip/people/002.sql",
+            sql,
+            "trip/people",
+            json!({"kind":"named","userId":"ana","grantId":"grant","grantGeneration":1,"role":"admin"}),
+        ),
+    ] {
+        let payload = tag(
+            absent_text_payload("refused", "refused", path, body),
+            author,
+            folder,
+        );
+        let result = apply_moment_envelope(
+            &mut store,
+            &envelope(NAMED_ORIGIN, seq, "ws", payload),
+            &NoFaults,
+        )
+        .unwrap();
+        assert!(
+            matches!(result.primary, ApplyDisposition::Refused(_)),
+            "{path}"
+        );
+        seq += 1;
+    }
+    assert!(snapshot(&store, "refused").is_none());
+}
+
 fn named_author(grant_id: &str) -> Value {
     json!({"kind":"named", "userId":"ana", "grantId":grant_id, "grantGeneration":1})
 }

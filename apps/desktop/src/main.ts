@@ -12459,6 +12459,7 @@ function registerIpcHandlers(): void {
     shareViewFiles,
     receivedShareEngine,
     joinedByAnotherAccount: (workspaceId) => sharedViewOf(workspaceId)?.writer === "other",
+    memberRoleOf,
   });
   shareDirectWrites = shareProposalsIpc;
   registerOperations(operationBoundary, shareProposalOperations, shareProposalsIpc.handlers);

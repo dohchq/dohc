@@ -124,6 +124,7 @@ export function createShareProposalsIpc<Operation extends WorkspaceOperation>(de
    * signed in: the write gate's "other" writer. Asked after the credentials warm.
    */
   joinedByAnotherAccount(workspaceId: string): boolean;
+  memberRoleOf(workspaceId: string): "admin" | "member" | undefined;
 }) {
   type Handlers = OperationHandlers<typeof shareProposalOperations, unknown, Operation>;
   const {
@@ -587,6 +588,7 @@ export function createShareProposalsIpc<Operation extends WorkspaceOperation>(de
               shareId: scope.shareId,
               grantedSelector: scope.grant,
               reach: scope.reach,
+              admin: dependencies.memberRoleOf(workspaceId) === "admin",
             });
             operation.assert(scope);
             for (const write of result.writes) {

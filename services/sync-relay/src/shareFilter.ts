@@ -1939,6 +1939,7 @@ export const MAX_COLLECTION_WRITE_BYTES = 4 * 1024 * 1024;
 // One direct write, as the decision classifies it. Every change is a text
 // write with normalized paths, and `collectionPath` is never the root.
 export type CollectionWrite =
+  | { kind: "dataset-rules"; collectionPath: string; creates: boolean; changes: ProposedChange[] }
   // An in-place write to `<C>/collection.yaml`.
   | { kind: "schema"; collectionPath: string; change: ProposedChange }
   // An in-place write to `<C>/automations.yaml`, or creating it.
@@ -1953,7 +1954,7 @@ export type CollectionWrite =
   | { kind: "new-collection"; collectionPath: string; changes: ProposedChange[] };
 
 export type CollectionWriteDecision =
-  | { allowed: false }
+  | { allowed: false; reason?: string }
   | { allowed: true; write: CollectionWrite };
 
 function parentPath(path: string): string {
@@ -2037,6 +2038,7 @@ export function filterCollectionWriteForShare(
  * main, and the role from its own rows, never from the request.
  */
 export interface MemberFolders {
+  datasetFolderFor?(path: string): string | null;
   /** The folder holds a current file at any depth. The top level ("") always does. */
   holdsFile(folder: string): boolean;
   /** The folder holds `collection.yaml` or `dataset.json`. */
@@ -2085,7 +2087,8 @@ function decideCollectionWrite(
   const changes: ProposedChange[] = [];
   // Two paths that one disk would hold as one file are one path here.
   const paths = new Set<string>();
-  let bytes = 0;
+  let bytes = 0n;
+  let canonical = true;
   for (const entry of raw) {
     if (
       entry === null ||
@@ -2123,10 +2126,38 @@ function decideCollectionWrite(
     const key = pathCollisionKey(change.afterPath);
     if (paths.has(key)) return refused;
     paths.add(key);
-    bytes += change.afterByteLength;
-    if (bytes > MAX_COLLECTION_WRITE_BYTES) return refused;
+    bytes += BigInt(change.afterByteLength);
+    canonical &&= change.afterPath === entry.afterPath && change.basedOnPath === entry.basedOnPath;
     changes.push(change);
   }
+
+  if (member?.datasetFolderFor && changes.every((change) => isDatasetRulePath(change.afterPath!))) {
+    if (!canonical) return refused;
+    if (bytes > MAX_COLLECTION_WRITE_BYTES)
+      return {
+        allowed: false,
+        reason: `Collection write is ${bytes} bytes. The limit is ${MAX_COLLECTION_WRITE_BYTES} bytes.`,
+      };
+    const descriptor = changes.find(
+      (change) => baseName(change.afterPath!) === "dataset.json" && change.basedOnPath === null,
+    );
+    const creates = descriptor !== undefined;
+    const collectionPath = descriptor
+      ? parentPath(descriptor.afterPath!)
+      : member.datasetFolderFor(changes[0]!.afterPath!);
+    if (
+      !collectionPath ||
+      changes.some((change) =>
+        creates
+          ? change.basedOnPath !== null || !change.afterPath!.startsWith(`${collectionPath}/`)
+          : change.basedOnPath === null ||
+            member.datasetFolderFor!(change.afterPath!) !== collectionPath,
+      )
+    )
+      return refused;
+    return { allowed: true, write: { kind: "dataset-rules", collectionPath, creates, changes } };
+  }
+  if (bytes > MAX_COLLECTION_WRITE_BYTES) return refused;
 
   const schemaCreates = changes.filter(
     (change) =>
@@ -2196,4 +2227,17 @@ function decideCollectionWrite(
       changes: [schema, ...(automations ? [automations] : []), ...records],
     },
   };
+}
+
+export function isDatasetRulePath(path: string): boolean {
+  return (
+    /(?:^|\/)dataset\.json$|\.(?:sql|js|ts)$/u.test(path) &&
+    prepareSharePath(path)?.path === path &&
+    path.split("/").every((part) => {
+      const key = pathCollisionKey(part);
+      return (
+        !part.includes(":") && key !== ".dohc-access" && key !== ".env" && !key.startsWith(".env.")
+      );
+    })
+  );
 }

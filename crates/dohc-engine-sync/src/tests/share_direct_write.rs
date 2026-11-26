@@ -15,7 +15,7 @@ fn push(
     engine: &mut EngineStore,
 ) -> DirectWritePushOutcome {
     client
-        .push_direct_writes(engine, "ws", SHARE, &edit_grant(), &NoFaults, 0)
+        .push_direct_writes(engine, "ws", SHARE, &edit_grant(), false, &NoFaults, 0)
         .expect("direct push")
 }
 
@@ -199,7 +199,7 @@ fn record_creation_is_durable_offline_and_retries_the_same_submission_after_rest
         .push_back(Err(RelayError::Partitioned));
     let client = RelaySyncClient::new(relay);
     assert_eq!(
-        client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults, 0),
+        client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), false, &NoFaults, 0),
         Err(RelayError::Partitioned)
     );
     drop(engine);
@@ -296,7 +296,7 @@ fn direct_status_survives_restart_and_an_old_push_cannot_clear_a_newer_save() {
         .push_back(Err(RelayError::Partitioned));
     let client = RelaySyncClient::new(relay);
     assert_eq!(
-        client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults, 0),
+        client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), false, &NoFaults, 0),
         Err(RelayError::Partitioned),
     );
     drop(engine);
@@ -675,7 +675,7 @@ fn a_write_whose_answer_was_lost_is_sent_again_as_the_same_request_after_another
 
     // The relay may have taken the write; its answer never arrived.
     assert_eq!(
-        client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults, 0),
+        client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), false, &NoFaults, 0),
         Err(RelayError::HttpStatus(429)),
     );
     journal_local_moment(
@@ -739,7 +739,7 @@ fn a_later_write_that_fails_keeps_an_earlier_one_delivered_and_holds_send_change
     let client = RelaySyncClient::new(relay);
 
     assert_eq!(
-        client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults, 0),
+        client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), false, &NoFaults, 0),
         Err(RelayError::ServerInternal),
     );
     // The first write is delivered, and the second is still open: Send
@@ -845,7 +845,7 @@ fn only_a_failure_that_may_pass_keeps_the_plan() {
             .push_back(Err(error.clone()));
         let client = RelaySyncClient::new(relay);
         assert_eq!(
-            client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults, 0),
+            client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), false, &NoFaults, 0),
             Err(error.clone()),
         );
         let outcome = propose(&client, &mut engine, "submit-1");
@@ -876,7 +876,7 @@ fn direct_push_writes_nothing_below_edit_or_on_another_version() {
         version,
     ] {
         let outcome = client
-            .push_direct_writes(&mut engine, "ws", SHARE, &granted, &NoFaults, 0)
+            .push_direct_writes(&mut engine, "ws", SHARE, &granted, false, &NoFaults, 0)
             .expect("push");
         assert!(outcome.writes.is_empty());
     }
@@ -936,7 +936,7 @@ fn record_name_race_releases_winner_and_keeps_local_content_after_restart() {
     ]);
     let client = RelaySyncClient::new(relay);
     assert_eq!(
-        client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults, 0),
+        client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), false, &NoFaults, 0),
         Err(RelayError::HttpStatus(429)),
     );
     let submitted = client.transport().collection_writes.lock().unwrap()[0].clone();
@@ -1242,8 +1242,80 @@ fn push_as_member(
     engine: &mut EngineStore,
 ) -> DirectWritePushOutcome {
     client
-        .push_direct_writes(engine, "ws", SHARE, &workspace_grant(), &NoFaults, 0)
+        .push_direct_writes(engine, "ws", SHARE, &workspace_grant(), false, &NoFaults, 0)
         .expect("direct push")
+}
+
+#[test]
+fn admin_plans_all_transactional_collection_sources_together() {
+    let descriptor = r#"{"formatVersion":2,"operationsPath":"code/rules.ts"}"#;
+    let files = [
+        (
+            "operations",
+            "docs/people/code/rules.ts",
+            "globalThis.operations = {};",
+        ),
+        ("migration", "docs/people/migrations/001.sql", "SELECT 1;"),
+        (
+            "schema",
+            "docs/people/schema.sql",
+            "CREATE TABLE people(id TEXT);",
+        ),
+        ("descriptor", "docs/people/dataset.json", descriptor),
+    ];
+    for admin in [false, true] {
+        let bodies = files.map(|(_, _, body)| body);
+        let (_scratch, _path, mut engine) = proposal_fixture(&bodies);
+        VersionedTextStore::new(&mut engine)
+            .write_text(
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "descriptor".to_owned(),
+                    path: "docs/people/dataset.json".to_owned(),
+                    text: descriptor.to_owned(),
+                    moment_id: "local-descriptor".to_owned(),
+                    metadata_origin: "local-file".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_500,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("local descriptor");
+        for (i, (id, path, body)) in files.into_iter().enumerate() {
+            journal_local_moment(
+                &mut engine,
+                &create_moment(id, id, path, body),
+                2_000 + i as i64,
+            );
+        }
+        let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+        client
+            .push_direct_writes(
+                &mut engine,
+                "ws",
+                SHARE,
+                &workspace_grant(),
+                admin,
+                &NoFaults,
+                0,
+            )
+            .unwrap();
+        let expected = if admin {
+            vec![vec![
+                "docs/people/dataset.json".to_owned(),
+                "docs/people/code/rules.ts".to_owned(),
+                "docs/people/migrations/001.sql".to_owned(),
+                "docs/people/schema.sql".to_owned(),
+            ]]
+        } else {
+            vec![]
+        };
+        assert_eq!(written_paths(&client), expected);
+    }
 }
 
 #[test]
@@ -1318,7 +1390,15 @@ fn a_push_that_fails_in_transit_counts_the_pages_and_collection_writes_still_wai
         .push_back(Err(RelayError::Partitioned));
     let client = RelaySyncClient::new(relay);
     assert_eq!(
-        client.push_direct_writes(&mut engine, "ws", SHARE, &workspace_grant(), &NoFaults, 0),
+        client.push_direct_writes(
+            &mut engine,
+            "ws",
+            SHARE,
+            &workspace_grant(),
+            false,
+            &NoFaults,
+            0
+        ),
         Err(RelayError::Partitioned),
     );
     assert_eq!(
@@ -1349,7 +1429,15 @@ fn a_push_that_fails_in_transit_counts_the_pages_and_collection_writes_still_wai
         .push_back(Err(RelayError::ServerInternal));
     assert!(
         client
-            .push_direct_writes(&mut engine, "ws", SHARE, &workspace_grant(), &NoFaults, 0)
+            .push_direct_writes(
+                &mut engine,
+                "ws",
+                SHARE,
+                &workspace_grant(),
+                false,
+                &NoFaults,
+                0
+            )
             .is_err()
     );
     assert_eq!(

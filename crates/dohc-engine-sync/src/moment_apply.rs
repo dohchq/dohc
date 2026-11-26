@@ -11,6 +11,7 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
+use crate::collection_rules::{self, DESCRIPTOR, RuleSources};
 use crate::file_search::{
     delete_file_search_index, search_policy_for_store, upsert_file_search_index,
 };
@@ -2435,12 +2436,60 @@ fn verify_direct_write_author(
     }
     // A version this device has not imported yet is a retry, not a refusal.
     require_version(tx, &envelope.workspace_id, &payload.version_id)?;
-    if !writes_collection_own_file(tx, &envelope.workspace_id, payload, true)? {
+    let allowed = if let Some(folder) = envelope.payload.get("collectionRulesFolder") {
+        match folder.as_str() {
+            Some(folder)
+                if matches!(
+                    payload.authors.as_deref(),
+                    Some([MomentAuthor::Named { .. }])
+                ) =>
+            {
+                writes_collection_rule(tx, &envelope.workspace_id, payload, folder)?
+            }
+            _ => false,
+        }
+    } else {
+        writes_collection_own_file(tx, &envelope.workspace_id, payload, true)?
+    };
+    if !allowed {
         return Err(SyncError::InvalidInput {
             reason: "direct-write author may write only a Collection's own files",
         });
     }
     Ok(())
+}
+
+fn writes_collection_rule(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    payload: &MomentAppendPayload,
+    folder: &str,
+) -> Result<bool, SyncError> {
+    let path = &payload.path;
+    if payload.version_id != "main" || folder.is_empty() || !collection_rules::safe_path(path) {
+        return Ok(false);
+    }
+    let Some(creates) = direct_text_write_coordinates(tx, workspace_id, payload)? else {
+        return Ok(false);
+    };
+    let sources = if *path == format!("{folder}/{DESCRIPTOR}") {
+        if creates && folder_holds_any_file(tx, workspace_id, "main", folder)? {
+            return Ok(false);
+        }
+        RuleSources::read(tx, &payload.payload_after_blob_sha256, folder)
+    } else {
+        let Some((nearest, digest)) =
+            collection_rules::descriptor_at(tx, workspace_id, path).map_err(SyncError::corrupt)?
+        else {
+            return Ok(false);
+        };
+        if nearest != folder {
+            return Ok(false);
+        }
+        RuleSources::read(tx, &digest, folder)
+    }
+    .map_err(SyncError::corrupt)?;
+    Ok(sources.is_some_and(|sources| sources.allows(folder, path)))
 }
 
 /// A personal agent's write from `relay:personal-collection:<agentId>`: its
@@ -2509,31 +2558,9 @@ fn writes_collection_own_file(
 ) -> Result<bool, SyncError> {
     let path = payload.path.as_str();
     let version_id = payload.version_id.as_str();
-    let in_place = |side: Option<&str>| side.is_none_or(|side| side == path);
-    if payload.operation != "write"
-        || payload.payload_after_path != path
-        || !in_place(payload.payload_before_path.as_deref())
-        || !in_place(payload.before_path.as_deref())
-        || payload.conflict_id.is_some()
-        || payload.conflict_effect_index.is_some()
-        || ContentKind::from_wire(payload.payload_after_content_kind.as_deref())
-            != ContentKind::Text
-    {
+    let Some(creates) = direct_text_write_coordinates(tx, workspace_id, payload)? else {
         return Ok(false);
-    }
-    // The object coordinate decides what the write touches, so it must agree
-    // with the path: an edit names the object already at that path, and a
-    // create names an object this workspace has never held.
-    let creates = matches!(payload.before_present.as_str(), "absent" | "null");
-    let object_agrees = if creates {
-        !workspace_holds_object(tx, workspace_id, &payload.object_id)?
-    } else {
-        select_snapshot_by_object(tx, workspace_id, version_id, &payload.object_id)?
-            .is_some_and(|snapshot| snapshot.path == path)
     };
-    if !object_agrees {
-        return Ok(false);
-    }
     let creates_page = creates && is_collection_markdown_path(path);
     let Some((folder, file_name)) = path.rsplit_once('/') else {
         return Ok(pages && creates_page);
@@ -2565,6 +2592,34 @@ fn writes_collection_own_file(
         AUTOMATIONS_FILENAME => folder_holds_schema()? || folder_holds_dataset()?,
         _ => creates_page && (folder_holds_schema()? || pages && !folder_holds_dataset()?),
     })
+}
+
+fn direct_text_write_coordinates(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    payload: &MomentAppendPayload,
+) -> Result<Option<bool>, SyncError> {
+    let path = payload.path.as_str();
+    let in_place = |side: Option<&str>| side.is_none_or(|side| side == path);
+    if payload.operation != "write"
+        || payload.payload_after_path != path
+        || !in_place(payload.payload_before_path.as_deref())
+        || !in_place(payload.before_path.as_deref())
+        || payload.conflict_id.is_some()
+        || payload.conflict_effect_index.is_some()
+        || ContentKind::from_wire(payload.payload_after_content_kind.as_deref())
+            != ContentKind::Text
+    {
+        return Ok(None);
+    }
+    let creates = matches!(payload.before_present.as_str(), "absent" | "null");
+    let object_agrees = if creates {
+        !workspace_holds_object(tx, workspace_id, &payload.object_id)?
+    } else {
+        select_snapshot_by_object(tx, workspace_id, &payload.version_id, &payload.object_id)?
+            .is_some_and(|snapshot| snapshot.path == path)
+    };
+    Ok(object_agrees.then_some(creates))
 }
 
 fn workspace_holds_object(

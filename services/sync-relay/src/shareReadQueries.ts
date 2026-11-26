@@ -316,6 +316,8 @@ export function createShareReadQueries(
               ? matchRefusedBoundaryMove(selector, accountlessProjection, row, chatResolver)
               : null;
           if (payload === null) return null;
+          if (row.opKind === "moment.append")
+            delete (payload as Record<string, unknown>).collectionRulesFolder;
           const authenticatedMoment =
             audience === "authenticated" && row.opKind === "moment.append";
           const original =

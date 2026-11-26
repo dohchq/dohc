@@ -31,6 +31,7 @@ use super::{
     NetChange, RelaySyncClient, RelayTransport, ScanSkips, ShareProposalChange,
     collect_share_proposal_changes, local, local_max_origin_seq, read_share_proposal_scan_position,
 };
+use crate::collection_rules::{self, RuleSources};
 use crate::journal::read_sync_identity;
 use crate::{RelayError, SyncError};
 
@@ -501,12 +502,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     /// files it leaves to proposals before it sends anything. A write that
     /// fails in transit stops the push; the plan stays, and the next push
     /// sends the same request.
+    #[allow(clippy::too_many_arguments)]
     pub fn push_direct_writes(
         &self,
         store: &mut EngineStore,
         workspace_id: &str,
         share_id: &str,
         granted: &crate::ShareGrant,
+        admin: bool,
         faults: &dyn FaultInjector,
         max_read_bytes: usize,
     ) -> Result<DirectWritePushOutcome, RelayError> {
@@ -531,6 +534,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     workspace_id,
                     share_id,
                     granted,
+                    admin,
                     &identity.origin_id,
                     max_read_bytes,
                 )?;
@@ -716,6 +720,7 @@ fn build_direct_write_plan(
     workspace_id: &str,
     share_id: &str,
     granted: &crate::ShareGrant,
+    admin: bool,
     origin_id: &str,
     max_read_bytes: usize,
 ) -> Result<(DirectWritePlan, Vec<(String, i64)>), RelayError> {
@@ -742,7 +747,7 @@ fn build_direct_write_plan(
         &skips,
     )?;
 
-    let groups = plan_direct_writes(store, workspace_id, granted, &scan.changes)?;
+    let groups = plan_direct_writes(store, workspace_id, granted, admin, &scan.changes)?;
     // A new Collection the scan bound may have cut waits for the next push,
     // which reads it again whole. That only helps when this push still moves
     // on: it writes something, or it leaves files to proposals. A scan that is
@@ -824,10 +829,18 @@ fn plan_direct_writes<'a>(
     store: &EngineStore,
     workspace_id: &str,
     granted: &crate::ShareGrant,
+    admin: bool,
     changes: &'a [NetChange],
 ) -> Result<Vec<PlannedGroup<'a>>, RelayError> {
     let mut used = BTreeSet::new();
     let mut groups = Vec::new();
+    let whole_workspace = granted.scope == crate::ShareScope::Workspace;
+    if admin && whole_workspace {
+        for group in plan_dataset_rules(store, workspace_id, changes)? {
+            used.extend(group.1);
+            groups.push(group.0);
+        }
+    }
 
     for (index, net) in changes.iter().enumerate() {
         let Some((folder, name)) = text_write_path(net) else {
@@ -892,7 +905,6 @@ fn plan_direct_writes<'a>(
         });
     }
 
-    let whole_workspace = granted.scope == crate::ShareScope::Workspace;
     for (index, net) in changes.iter().enumerate() {
         if used.contains(&index) {
             continue;
@@ -926,6 +938,74 @@ fn plan_direct_writes<'a>(
         }
     }
     Ok(groups)
+}
+
+fn plan_dataset_rules<'a>(
+    store: &EngineStore,
+    workspace_id: &str,
+    changes: &'a [NetChange],
+) -> Result<Vec<(PlannedGroup<'a>, Vec<usize>)>, RelayError> {
+    store
+        .read_with(|conn| {
+            let mut folders = BTreeMap::<String, (RuleSources, Vec<(usize, &NetChange)>)>::new();
+            for (index, net) in changes.iter().enumerate() {
+                let Some((_, name)) = text_write_path(net) else {
+                    continue;
+                };
+                if name != DATASET_SCHEMA_FILE
+                    && ![".sql", ".js", ".ts"]
+                        .into_iter()
+                        .any(|ext| name.ends_with(ext))
+                {
+                    continue;
+                }
+                let path = net.change.after_path.as_deref().unwrap_or_default();
+                let Some((folder, digest)) =
+                    collection_rules::descriptor_at(conn, workspace_id, path)
+                        .map_err(SyncError::corrupt)?
+                else {
+                    continue;
+                };
+                let (sources, files) = match folders.entry(folder.clone()) {
+                    std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        let Some(sources) = RuleSources::read(conn, &digest, &folder)
+                            .map_err(SyncError::corrupt)?
+                        else {
+                            continue;
+                        };
+                        entry.insert((sources, Vec::new()))
+                    }
+                };
+                if sources.allows(&folder, path) {
+                    files.push((index, net));
+                }
+            }
+            let mut groups = Vec::new();
+            for (folder, (_, mut files)) in folders {
+                let descriptor = format!("{folder}/{DATASET_SCHEMA_FILE}");
+                files.sort_by_key(|(_, net)| {
+                    net.change.after_path.as_deref() != Some(descriptor.as_str())
+                });
+                let creates = files.first().is_some_and(|(_, net)| {
+                    net.change.after_path.as_deref() == Some(descriptor.as_str())
+                        && net.change.based_on_path.is_none()
+                });
+                files.retain(|(_, net)| net.change.based_on_path.is_none() == creates);
+                if !files.is_empty() {
+                    let (indices, changes) = files.into_iter().unzip();
+                    groups.push((
+                        PlannedGroup {
+                            new_collection: creates,
+                            changes,
+                        },
+                        indices,
+                    ));
+                }
+            }
+            Ok(groups)
+        })
+        .map_err(local)
 }
 
 /// The folder and file name of a change the direct lane can carry: a text
