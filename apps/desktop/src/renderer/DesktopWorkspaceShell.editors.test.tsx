@@ -866,7 +866,6 @@ describe("ui-state merge-on-load", () => {
       folders: string[];
     }>();
     let issued = 0;
-    // Keep Chats closed; the listing and both live editors subscribe to activity.
     const bridge = makeBridge(
       Promise.resolve({
         ...storedStateWithTabs(["b.md", "gone.md"], "b.md"),
@@ -881,7 +880,7 @@ describe("ui-state merge-on-load", () => {
 
     await waitFor(() => {
       expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
-      expect(bridge.workspaceActivitySubscriberCount()).toBe(3);
+      expect(bridge.workspaceActivitySubscriberCount()).toBe(5);
       expect(screen.getByTestId("tab-gone.md")).toBeTruthy();
     });
     act(() => {

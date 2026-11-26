@@ -103,6 +103,8 @@ import {
 } from "./shell/lazyViews";
 import type { AppViewNotices } from "./AppView";
 import { ShellAboutRail, type AboutSearchHit } from "./shell/ShellAboutRail";
+import { FileCommentsReader } from "./workbench/FileCommentsReader";
+import { onFileCommentRequest } from "./workbench/fileComments";
 import { SIDE_PANEL_VIEWS } from "./shell/sidePanelViews";
 import { ShellSidePanel } from "./shell/ShellSidePanel";
 import { ShellTitlebar } from "./shell/ShellTitlebar";
@@ -5155,6 +5157,14 @@ function WorkspaceShell(props: {
   const openChatsTab = useCallback(() => {
     openChatsNavInTab({ level: "feed" });
   }, [openChatsNavInTab]);
+  useEffect(
+    () =>
+      onFileCommentRequest((requestWorkspaceId) => {
+        if (requestWorkspaceId === workspaceId)
+          mutateWb((state) => (state.aboutVisible ? state : { ...state, aboutVisible: true }));
+      }),
+    [mutateWb, workspaceId],
+  );
   // The one way a file's chat thread lands in About (search hits, file
   // mentions without channel metadata, and the Chats view "Files" grouping
   // all route here): hand the known thread to About's consume-once seam and
@@ -10080,6 +10090,14 @@ function WorkspaceShell(props: {
                                 openChatMention={openChatMention}
                                 aboutNotices={aboutNotices}
                                 accessContext={aboutAccessContext}
+                              />
+                            ) : activeDocumentPath &&
+                              fileKindForPath(activeDocumentPath).displayKind === "markdown" ? (
+                              <FileCommentsReader
+                                workspaceId={workspaceId}
+                                path={activeDocumentPath}
+                                closed={fileCommentsClosed !== undefined}
+                                notices={aboutNotices}
                               />
                             ) : null}
                           </div>

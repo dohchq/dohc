@@ -3210,3 +3210,66 @@ fn only_a_valid_agent_report_is_kept() {
         .send_message(&emoji, &NO_FAULTS)
         .expect("64 units of emoji fit");
 }
+
+#[test]
+fn a_file_comment_that_opens_with_a_quote_lists_its_passage_and_its_words() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    for (thread_id, body) in [
+        ("plain", "Looks good"),
+        (
+            "quoted",
+            "> Ship \\*the\\* plan \\@ada\n> on Monday\n\nWhy Monday?",
+        ),
+        ("only-quote", "> Ship"),
+    ] {
+        chats
+            .create_thread(
+                &CreateFileThread {
+                    workspace_id: WS.to_owned(),
+                    thread_id: thread_id.to_owned(),
+                    title: String::new(),
+                    linked_object_id: "object-1".to_owned(),
+                    linked_path_hint: None,
+                    now_ms: 5,
+                    request_id: thread_id.to_owned(),
+                },
+                &NO_FAULTS,
+            )
+            .expect("file thread");
+        chats
+            .send_message(
+                &send_msg(thread_id, &format!("{thread_id}-0"), None, body, 6),
+                &NO_FAULTS,
+            )
+            .expect("comment");
+    }
+    let rows = chats
+        .list_threads_for_file(WS, "object-1", None, 10)
+        .expect("list");
+    let listed = rows
+        .iter()
+        .map(|row| {
+            (
+                row.thread.thread_id.as_str(),
+                row.thread.title.as_str(),
+                row.quote.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        listed,
+        [
+            ("only-quote", "> Ship", Some("Ship")),
+            ("plain", "Looks good", None),
+            (
+                "quoted",
+                "Why Monday?",
+                Some("Ship *the* plan @ada on Monday")
+            ),
+        ],
+        "a quoted comment lists its passage, unescaped and on one line, and its words as the title",
+    );
+}

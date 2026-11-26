@@ -7,9 +7,9 @@ use dohc_engine_domain::{
     ChatFeedPage, ChatFeedReadState, ChatFollow, ChatMention, ChatMessage, ChatMessagePage,
     ChatProjectionFileAccess, ChatReaction, ChatStagePublication, ChatThread, ChatThreadLane,
     ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim, DispatchRecovery,
-    FollowTargetKind, LinkedChatStore, MarkAccountThreadRead, MarkThreadRead, MentionCursor,
-    PendingBookmarkRow, ResolveDecision, RunRecordLink, SaveBookmark, SendMessage, SetFollow,
-    SetReaction, StartChannelThread, StreamPage, StreamPosition, ThreadDispatchPause,
+    FileChatThread, FollowTargetKind, LinkedChatStore, MarkAccountThreadRead, MarkThreadRead,
+    MentionCursor, PendingBookmarkRow, ResolveDecision, RunRecordLink, SaveBookmark, SendMessage,
+    SetFollow, SetReaction, StartChannelThread, StreamPage, StreamPosition, ThreadDispatchPause,
     ThreadWithChannel, UnreadFileThread,
 };
 use dohc_engine_storage::NoFaults;
@@ -203,7 +203,7 @@ impl ActorHandle {
         object_id: String,
         after: Option<(i64, String)>,
         limit: i64,
-    ) -> Result<Vec<ChatThread>, RuntimeError> {
+    ) -> Result<Vec<FileChatThread>, RuntimeError> {
         self.run_chats(move |chats| {
             chats
                 .list_threads_for_file(&workspace_id, &object_id, after, limit)

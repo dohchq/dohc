@@ -621,7 +621,7 @@ const ChatLinkedFileSchema = mutableStruct({
   pathHint: Schema.optionalKey(Schema.String),
   linkedAtMs: AnyInt,
 });
-const ChatThreadSchema = mutableStruct({
+const ChatThreadFields = {
   id: Schema.String,
   workspaceId: Schema.String,
   title: Schema.String,
@@ -630,7 +630,8 @@ const ChatThreadSchema = mutableStruct({
   lane: Schema.optionalKey(ThreadLaneSchema),
   linkedFile: Schema.optionalKey(ChatLinkedFileSchema),
   channelId: Schema.optionalKey(Schema.String),
-});
+};
+const ChatThreadSchema = mutableStruct(ChatThreadFields);
 const ChatAttachmentSchema = mutableStruct({
   attachmentId: Schema.String,
   threadId: Schema.String,
@@ -992,8 +993,10 @@ const RunRecordsPageSchema = pageSchema({
   runs: Schema.Record(Schema.String, Schema.mutableKey(ChatRunSchema)),
 });
 
-const ThreadsPageSchema = pageSchema({
-  threads: Schema.mutable(Schema.Array(ChatThreadSchema)),
+const FileThreadsPageSchema = pageSchema({
+  threads: Schema.mutable(
+    Schema.Array(mutableStruct({ ...ChatThreadFields, quote: Schema.optionalKey(Schema.String) })),
+  ),
 });
 
 const ChatsResultSchemas = {
@@ -1013,7 +1016,7 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.threadsList]: pageSchema({
     threads: Schema.mutable(Schema.Array(ChatThreadWireRecordSchema)),
   }),
-  [CHATS_METHOD.threadsListForFile]: ThreadsPageSchema,
+  [CHATS_METHOD.threadsListForFile]: FileThreadsPageSchema,
   [CHATS_METHOD.threadsListForChannel]: pageSchema({
     threads: Schema.mutable(Schema.Array(ChatChannelThreadSummarySchema)),
   }),

@@ -2619,6 +2619,7 @@ export const ChatThreadRecord = z.object({
   title: z.string().min(1).max(200),
   createdAtMs: z.number(),
   updatedAtMs: z.number(),
+  quote: z.string().min(1).optional(),
 });
 export type ChatThreadRecord = z.infer<typeof ChatThreadRecord>;
 

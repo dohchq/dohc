@@ -397,7 +397,10 @@ export function registerChatsIpcHandlers<
         : [];
       return {
         fileObjectId,
-        threads: threads.map(chatThreadForIpc),
+        threads: threads.map((thread) => ({
+          ...chatThreadForIpc(thread),
+          ...(thread.quote ? { quote: thread.quote } : {}),
+        })),
       };
     });
   };

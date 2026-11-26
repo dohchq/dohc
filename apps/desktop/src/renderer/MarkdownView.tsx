@@ -2537,6 +2537,7 @@ export function MarkdownView(props: {
               onDirty={() => undefined}
               workspaceId={props.workspaceId}
               path={props.path}
+              comments={!props.recordBody}
               knownFiles={knownFiles}
               onOpenWikilink={openWikilink}
               onOpenWorkspaceLink={openWorkspaceLink}
@@ -2801,6 +2802,7 @@ export function MarkdownView(props: {
               onFocus={onLocalEditorFocus}
               workspaceId={props.workspaceId}
               path={props.path}
+              comments={!props.recordBody}
               knownFiles={knownFiles}
               onOpenWikilink={openWikilink}
               onOpenWorkspaceLink={openWorkspaceLink}
