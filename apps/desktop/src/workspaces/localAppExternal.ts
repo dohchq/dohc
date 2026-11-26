@@ -46,6 +46,8 @@ export function createLocalAppExternal(options: {
       if (error instanceof AppExternalInputError) throw refuse("external_input", error.message);
       throw error;
     }
+    const unavailable = options.unavailable();
+    if (unavailable) throw refuse("external_unavailable", unavailable);
     if (inFlight >= LOCAL_APP_EXTERNAL_IN_FLIGHT)
       throw refuse(
         "external_busy",

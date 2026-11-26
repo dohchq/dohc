@@ -338,6 +338,18 @@ function ExternalRows({
     .map(([key, value]) => `${key}=${value}`)
     .join("&");
   const details = [
+    ...Object.entries(operation.params).map(
+      ([name, param]) =>
+        `{${name}}: ${
+          param.type === "integer"
+            ? `whole number ${param.min}–${param.max}`
+            : param.type === "enum"
+              ? `one of ${param.values.join(", ")}`
+              : param.type === "boolean"
+                ? "true or false"
+                : `text up to ${param.maxLength} characters`
+        }`,
+    ),
     ...Object.entries(operation.headers).map(([key, value]) => `${key}: ${value}`),
     ...(operation.body === null ? [] : [JSON.stringify(operation.body, null, 2)]),
   ];
@@ -388,16 +400,10 @@ function ExternalRows({
           The service's JSON answer, up to {kilobytes(operation.response.maxBytes)}
         </dd>
         <dt className="flex items-center gap-2 self-start text-muted">
-          {operation.access === "owner" ? (
-            <User size={12} aria-hidden />
-          ) : (
-            <Users size={12} aria-hidden />
-          )}
+          <User size={12} aria-hidden />
           Who
         </dt>
-        <dd className="m-0 min-w-0 text-ink">
-          {operation.access === "owner" ? "Only you" : "Anyone who can open the app"}
-        </dd>
+        <dd className="m-0 min-w-0 text-ink">Only you</dd>
         <dt className="flex items-center gap-2 self-start text-muted">
           <Monitor size={12} aria-hidden />
           Runs on

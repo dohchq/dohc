@@ -172,7 +172,6 @@ describe("AppAccessSummary outside calls", () => {
       query: { period: "month" },
       headers: { "X-Version": "2" },
       secret: { name: "EXAMPLE_KEY", header: "X-Api-Key" },
-      access: "viewers",
     },
   });
 
@@ -195,9 +194,9 @@ describe("AppAccessSummary outside calls", () => {
     expect(post!.textContent).toContain("This computer");
     expect(post!.textContent).toContain("It can change your data on us.posthog.com.");
     expect(post!.textContent).toContain('"kind": "EventsQuery"');
+    expect(post!.textContent).toContain("{project}: whole number 1–999");
     expect(get!.textContent).toContain("GET /usage?period=month");
     expect(get!.textContent).toContain("X-Version: 2");
-    expect(get!.textContent).toContain("Anyone who can open the app");
     expect(get!.textContent).not.toContain("change your data");
     expect(screen.getByText(/including what these services return/)).toBeTruthy();
   });

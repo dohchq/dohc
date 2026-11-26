@@ -280,7 +280,7 @@ const { status, data } = await useApp().external<{ results: unknown[] }>("recent
 - `{{name}}` fills a whole path segment, query value, or body value with a declared input. Inputs are `integer` (`min`, `max`), `enum` (`values`), `boolean`, or `string` (`maxLength`). Every input is required.
 - `headers` are fixed text. `secret.header` names the header that carries the secret, after an optional `prefix`. The secret must be a header secret whose allowed websites include the URL's host.
 - `maxResponseBytes` defaults to 256 KiB and can be at most 512 KiB. The answer must be JSON. Each call times out after 10 seconds.
-- `access` is `"owner"` by default.
+- `access` is `"owner"`, the default. For now, only the owner's own app can make the call.
 - `status` is the service's HTTP status, so check it. A refused call throws an `AppBackendError` whose `refusal.code` is one such as `external_input`, `external_secret`, or `secret_echoed`.
 
 The owner approves these calls in the dohc window. The CLI, MCP, and `dohc app stage` refuse them. Any change to `external` needs a new approval. For now, these calls run only for approved apps in workspaces that aren't synced.

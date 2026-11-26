@@ -57,7 +57,7 @@ export function createLocalApps(
       const operation = store
         .row(publicationId, input.authorityRevision)
         .candidate.external?.find((value) => value.name === input.operation);
-      if (!operation || !external)
+      if (!operation || operation.access !== "owner" || !external)
         throw new AppBackendRuntimeError({
           code: "external_not_approved",
           message: `This app has no approved outside call named ${JSON.stringify(input.operation)}.`,
@@ -88,7 +88,9 @@ export function createLocalApps(
     async activate(prepared: LocalAppPrepared, signal: AbortSignal, agent?: ApprovalAgent | null) {
       const candidate = parseAppPublicationCandidate(prepared.candidate, APP_PUBLICATION_LIMITS);
       const blocked = candidate.external
-        ? (external?.unavailable() ?? "Apps can call outside services only in your own workspaces.")
+        ? external
+          ? external.unavailable()
+          : "Apps can call outside services only in your own workspaces."
         : null;
       if (blocked) throw new Error(blocked);
       // Replacing a Collection app first settles the responses it admitted.

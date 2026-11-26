@@ -67,6 +67,17 @@ describe("sendDeclaredHttps", () => {
     expect(secret).not.toHaveBeenCalled();
   });
 
+  it("withholds the secret as the service received it, without the spaces HTTP trims", async () => {
+    const secret = vi.fn(async () => ({
+      header: "Authorization",
+      prefix: "Bearer ",
+      value: `${SECRET} `,
+    }));
+    await expect(
+      send(transport({ body: `{"echo":"Bearer ${SECRET}"}` }).value, secret),
+    ).rejects.toMatchObject({ code: "secret_echoed" });
+  });
+
   it.each([
     ["raw", `{"echo":"${SECRET}"}`],
     ["JSON-escaped", `{"echo":"phx_live\\/secret+key"}`],

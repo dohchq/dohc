@@ -139,7 +139,7 @@ export async function sendDeclaredHttps(options: {
       `The service answered HTTP ${response.status} with broken JSON.`,
     );
   }
-  if (secret && echoes(JSON.stringify(data), secret))
+  if (secret.trim() && echoes(JSON.stringify(data), secret.trim()))
     throw new DeclaredHttpsError(
       "secret_echoed",
       "The service's answer repeated the secret, so dohc withheld it.",

@@ -302,6 +302,11 @@ export function parseAppPublicationDeclaration(
   if (Object.hasOwn(row, "external")) {
     try {
       external = sortAppExternalOperations(parseAppExternalDeclaration(row.external));
+      const shared = external.find((operation) => operation.access !== "owner");
+      if (shared)
+        throw new Error(
+          `Operation "${shared.name}" can run only for you for now. Set its access to "owner".`,
+        );
     } catch (error) {
       throw new Error(
         `${manifestPath} external: ${error instanceof Error ? error.message : String(error)}`,

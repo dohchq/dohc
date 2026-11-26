@@ -10,7 +10,6 @@ import {
 } from "./dataset";
 export { parseAppDatasetCapability, type AppDatasetCapability } from "./dataset";
 export { parseAppCollectionCapability, type AppCollectionCapability } from "./appCollection";
-export type { AppExternalOperation } from "./appExternal";
 export {
   parseAppCollectionCreateRequest,
   parseAppCollectionReadQuery,

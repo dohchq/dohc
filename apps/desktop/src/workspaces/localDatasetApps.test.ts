@@ -610,12 +610,10 @@ describe("local approved dataset apps", () => {
     await expect(disclosure).rejects.toThrow();
   });
 
-  it("refuses to approve outside calls where this computer can't make them", async () => {
+  it("approves outside calls only where this computer can make them", async () => {
+    let blocked: string | null = "Apps in synced workspaces can't call outside services yet.";
     const f = await fixture(undefined, unguardedCollections, {
-      external: {
-        unavailable: () => "Apps in synced workspaces can't call outside services yet.",
-        call: vi.fn(),
-      },
+      external: { unavailable: () => blocked, call: vi.fn() },
     });
     const withCalls = structuredClone(f.app);
     withCalls.candidate.external = parseAppExternalDeclaration({
@@ -631,6 +629,10 @@ describe("local approved dataset apps", () => {
     expect(f.host.apps.browserPublication(f.published.publicationId).authorityRevision).toBe(
       f.published.authorityRevision,
     );
+    blocked = null;
+    await expect(
+      f.host.apps.activate(withCalls, new AbortController().signal),
+    ).resolves.toMatchObject({ publicationId: expect.any(String) });
   });
 
   it("rejects altered capabilities and bundle bytes before replacing a working app", async () => {

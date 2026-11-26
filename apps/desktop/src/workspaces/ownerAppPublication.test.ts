@@ -1069,4 +1069,15 @@ describe("outside calls in app.publish.json", () => {
       'app/app.publish.json external: Operation "usage" host must be a lowercase public hostname.',
     );
   });
+
+  it("refuses a call shared with viewers until shared calls can run", async () => {
+    const h = harness();
+    h.setDeclaration({
+      entryPath: "main.ts",
+      inputs: ["main.ts"],
+      packageMap: {},
+      external: { usage: { ...external.usage, access: "viewers" } },
+    });
+    await expect(local(h)).rejects.toThrow('Operation "usage" can run only for you for now.');
+  });
 });
