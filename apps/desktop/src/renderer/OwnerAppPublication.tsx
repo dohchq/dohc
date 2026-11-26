@@ -364,13 +364,7 @@ function AudienceRow(props: RowState & { icon: LucideIcon; testId: string; label
           data-testid={`${props.testId}-state`}
           className={`m-0 flex items-center gap-1 text-[12px] ${published === false ? "text-warning" : "text-muted"}`}
         >
-          {Mark ? (
-            <Mark
-              size={12}
-              aria-hidden
-              className={`shrink-0 ${published ? "text-success" : "text-warning"}`}
-            />
-          ) : null}
+          {Mark ? <Mark size={12} aria-hidden className={published ? "text-success" : ""} /> : null}
           <span className="truncate">{text}</span>
         </p>
       </div>
@@ -412,7 +406,6 @@ function PublicationDialog(
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [publications, setPublications] = useState<Publication[]>([]);
-  // One publication from the full list, or every live one an audience row ends.
   const [pendingWithdraw, setPendingWithdraw] = useState<Publication[] | null>(null);
   // Publish changes replaces these once the new revision is live, so a link never serves two revisions.
   const [supersedes, setSupersedes] = useState<Publication[]>([]);
@@ -1392,6 +1385,11 @@ function PublicationDialog(
     setNotice(null);
     setView("links");
   };
+  const toManage = (label: string) => (
+    <SecondaryButton size="row" disabled={rowBusy} onClick={manage}>
+      {label}
+    </SecondaryButton>
+  );
   const publishedActions = (
     rows: OwnPublication[],
     audience: string,
@@ -1409,10 +1407,12 @@ function PublicationDialog(
           getText={() => copyUrl}
         />
       ) : null}
-      {current(rows) ? null : (
-        <SecondaryButton size="row" disabled={rowBusy} onClick={publishChanges ?? manage}>
-          {publishChanges ? "Publish changes" : "Choose a link"}
+      {current(rows) ? null : publishChanges ? (
+        <SecondaryButton size="row" disabled={rowBusy} onClick={publishChanges}>
+          Publish changes
         </SecondaryButton>
+      ) : (
+        toManage("Choose a link")
       )}
       <SecondaryButton
         size="row"
@@ -1436,17 +1436,8 @@ function PublicationDialog(
         (publication.operatorTakedown || (publication.active && !publication.linkCurrent)),
     );
     if (!row) return null;
-    return {
-      status: {
-        text: row.operatorTakedown ? "Disabled by server operator" : "Link changed",
-        published: false,
-      },
-      actions: (
-        <SecondaryButton size="row" disabled={rowBusy} onClick={manage}>
-          Manage
-        </SecondaryButton>
-      ),
-    };
+    const text = row.operatorTakedown ? "Disabled by server operator" : "Link changed";
+    return { status: { text, published: false }, actions: toManage("Manage") };
   };
   const linkRowState = (): RowState => {
     const rows = live(false);
@@ -1459,17 +1450,7 @@ function PublicationDialog(
       createdLink?.grantId === rows[0]?.grantId ||
       (link?.access === "view" && link.selector.versionId === null);
     if (grants.size > 1 || (rows.length > 0 && !mainView))
-      return {
-        status:
-          grants.size > 1
-            ? { text: `Published on ${grants.size} links`, published: true }
-            : publishedStatus(rows),
-        actions: (
-          <SecondaryButton size="row" disabled={rowBusy} onClick={manage}>
-            Manage
-          </SecondaryButton>
-        ),
-      };
+      return { status: publishedStatus(rows), actions: toManage("Manage") };
     if (rows.length > 0) {
       const shown = rows.find((row) => row.sourceRevision === sourceRevision) ?? rows[0]!;
       return {
@@ -1489,11 +1470,7 @@ function PublicationDialog(
     if (outsideFolder)
       return {
         status: { text: "Uses files outside its folder", published: null },
-        actions: (
-          <SecondaryButton size="row" disabled={rowBusy} onClick={manage}>
-            Choose a link
-          </SecondaryButton>
-        ),
+        actions: toManage("Choose a link"),
       };
     return {
       status: { text: "Not published", published: null },
