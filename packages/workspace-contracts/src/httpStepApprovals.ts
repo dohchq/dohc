@@ -7,6 +7,7 @@ import {
   MAX_HTTP_BODY_BYTES,
   MAX_HTTP_HEADERS,
   MAX_HTTP_HEADER_VALUE_BYTES,
+  MAX_HTTP_RESPONSE_BYTES,
   isForbiddenHttpHeader,
   type AutomationHttpStep,
 } from "./automations";
@@ -244,15 +245,50 @@ export type HttpJsonValue =
   | HttpJsonValue[]
   | { [key: string]: HttpJsonValue };
 
-/** Replaces every secret value found in a fetched JSON response. Keys stay as sent. */
+function scrubJson(value: HttpJsonValue, secrets: readonly string[]): HttpJsonValue | null {
+  if (typeof value === "string") return redactSecrets(value, secrets);
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    const items: HttpJsonValue[] = [];
+    for (const item of value) {
+      const scrubbed = scrubJson(item, secrets);
+      if (scrubbed === null && item !== null) return null;
+      items.push(scrubbed);
+    }
+    return items;
+  }
+  const entries: Array<[string, HttpJsonValue]> = [];
+  for (const [key, item] of Object.entries(value)) {
+    if (redactSecrets(key, secrets) !== key) return null;
+    const scrubbed = scrubJson(item, secrets);
+    if (scrubbed === null && item !== null) return null;
+    entries.push([key, scrubbed]);
+  }
+  return Object.fromEntries(entries);
+}
+
+/**
+ * Replaces every secret value in a fetched JSON answer. Refuses an answer
+ * with a secret in a field name, or one over MAX_HTTP_RESPONSE_BYTES once
+ * written back out as JSON.
+ */
 export function scrubSecretsFromJson(
   value: HttpJsonValue,
   secrets: readonly string[],
-): HttpJsonValue {
-  if (typeof value === "string") return redactSecrets(value, secrets);
-  if (Array.isArray(value)) return value.map((item) => scrubSecretsFromJson(item, secrets));
-  if (value === null || typeof value !== "object") return value;
-  return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => [key, scrubSecretsFromJson(item, secrets)]),
-  );
+): { ok: true; value: HttpJsonValue } | { ok: false; reason: string } {
+  const scrubbed = scrubJson(value, secrets);
+  if (scrubbed === null && value !== null) {
+    return {
+      ok: false,
+      reason: "The answer has a secret in a field name, so dohc did not keep it.",
+    };
+  }
+  const bytes = Buffer.byteLength(JSON.stringify(scrubbed), "utf8");
+  if (bytes > MAX_HTTP_RESPONSE_BYTES) {
+    return {
+      ok: false,
+      reason: `The answer is ${Math.ceil(bytes / 1024)} KiB as JSON, over the ${MAX_HTTP_RESPONSE_BYTES / 1024} KiB limit.`,
+    };
+  }
+  return { ok: true, value: scrubbed };
 }

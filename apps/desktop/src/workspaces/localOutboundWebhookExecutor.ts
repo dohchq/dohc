@@ -322,10 +322,12 @@ export function createLocalOutboundWebhookExecutor(options: {
             const read = await (options.readRequest ?? readSafeOutboundHttps)(request, signal);
             status = read.status;
             if (status >= 200 && status < 300) {
-              response = scrubSecretsFromJson(
+              const scrubbed = scrubSecretsFromJson(
                 parseSafeOutboundJson(read, AUTOMATION_LIMITS.resultDepth) as HttpJsonValue,
                 secretsToScrub,
               );
+              if (!scrubbed.ok) return { ok: false, status, reason: scrubbed.reason };
+              response = scrubbed.value;
             }
           } else {
             status = await (options.sendRequest ?? sendSafeOutboundHttps)(request, signal);

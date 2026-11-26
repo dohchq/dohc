@@ -882,7 +882,9 @@ export async function executeRelayOutboundWebhook(
         const read = await (deps.readRequest ?? readSafeOutboundHttps)(outboundRequest, signal);
         if (read.status < 200 || read.status >= 300) return { status: read.status };
         const parsed = parseSafeOutboundJson(read, AUTOMATION_LIMITS.resultDepth) as HttpJsonValue;
-        return { status: read.status, response: scrubSecretsFromJson(parsed, secretsToScrub) };
+        const scrubbed = scrubSecretsFromJson(parsed, secretsToScrub);
+        if (!scrubbed.ok) return { code: "unsupported_response", reason: scrubbed.reason };
+        return { status: read.status, response: scrubbed.value };
       } catch (error) {
         return fixedSafeOutboundReason(error, secretsToScrub, maxResponseBytes);
       }

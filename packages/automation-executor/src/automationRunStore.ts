@@ -1528,7 +1528,11 @@ export function createAutomationRunStore(
     parseRun(await readBounded(join(folder, `${name}${RUN_SUFFIX}`)), name, automationId);
   const runText = (run: StoredRun) => {
     const head = `${JSON.stringify({ ...header(run), kind: "header" })}\n`;
-    const progress = progressText(run);
+    const progress = progressText(
+      run.superseded || run.outcome?.state === "done"
+        ? { ...run, applied: run.applied.map(({ response: _response, ...applied }) => applied) }
+        : run,
+    );
     // Replacing null with any finite JSON timestamp grows by fewer than 32 bytes.
     const headerLimit = MAX_RUN_HEADER_BYTES - (run.finishedAtMs === null ? 32 : 0);
     if (

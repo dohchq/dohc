@@ -391,15 +391,16 @@ async function seedFetchWorkspace(temp: TempWorkspace): Promise<void> {
   ]);
 }
 
-async function checkRecords(page: Page): Promise<string> {
-  return JSON.stringify(
-    await page.evaluate(
-      async (input) =>
-        (
-          window as unknown as { dohcDesktop: DohcDesktopBridge }
-        ).dohcDesktop.queryCollectionRecords(input),
-      { workspaceId: FETCH_WORKSPACE_ID, collectionPath: "Checks" },
-    ),
+async function checkRecords(page: Page): Promise<Array<Record<string, unknown>>> {
+  const { records } = await page.evaluate(
+    async (input) =>
+      (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop.queryCollectionRecords(
+        input,
+      ),
+    { workspaceId: FETCH_WORKSPACE_ID, collectionPath: "Checks" },
+  );
+  return records.map((record) =>
+    Object.fromEntries(record.values.map(({ field, value }) => [field, value])),
   );
 }
 
@@ -451,6 +452,19 @@ test("holds a GET fetch with plain copy, holds it again after an edit, and keeps
     );
     await expect(reopened).toBeVisible({ timeout: 30_000 });
     await expect(reopened).not.toContainText("Allow it before dohc sends requests there.");
+
+    const builder = desktop.page.getByTestId("collection-automations-panel");
+    await builder.getByRole("button", { name: "New automation" }).click();
+    await builder.getByLabel("Name").fill("Pull pageviews");
+    await builder.getByLabel("Trigger").selectOption("record-added");
+    await builder.getByRole("button", { name: "Send a webhook" }).click();
+    await builder.getByLabel("Step 2, method", { exact: true }).selectOption("GET");
+    await expect(builder.getByLabel("Step 2, body type", { exact: true })).toHaveCount(0);
+    await builder.getByLabel("Step 2, webhook URL").fill("https://httpbin.org/bearer");
+    await builder.getByRole("button", { name: "Add secret header", exact: true }).click();
+    await builder.getByLabel("Step 2, save the answer as", { exact: true }).fill("check");
+    await expect(builder).toContainText("Fetch data");
+    await shoot(desktop.page, builder, "fetch-builder");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
@@ -476,10 +490,7 @@ test("fetches authenticated JSON from a public API into a Collection with the se
     await addCheck(desktop.page, "First check");
     await expect
       .poll(() => checkRecords(desktop!.page), { timeout: 60_000 })
-      .toContain('"Token":"[redacted]"');
-    const first = await checkRecords(desktop.page);
-    expect(first).toContain('"Authenticated":true');
-    expect(first).not.toContain("postman-echo.com/get");
+      .toEqual([{ Authenticated: true, Token: "[redacted]" }]);
 
     await waitForCliEndpoint(temp.homeDir);
     const wrongHost = await runDohcCli(temp, [
@@ -498,11 +509,11 @@ test("fetches authenticated JSON from a public API into a Collection with the se
     await openWorkspaceFromFirstRun(desktop.page, temp);
     await addCheck(desktop.page, "Second check");
     await expect
-      .poll(
-        async () => (await checkRecords(desktop!.page)).split('"Token":"[redacted]"').length - 1,
-        { timeout: 60_000 },
-      )
-      .toBe(2);
+      .poll(() => checkRecords(desktop!.page), { timeout: 60_000 })
+      .toEqual([
+        { Authenticated: true, Token: "[redacted]" },
+        { Authenticated: true, Token: "[redacted]" },
+      ]);
     await assertNotInWorkspaceFolder(temp.rootPath, [FETCH_TOKEN]);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

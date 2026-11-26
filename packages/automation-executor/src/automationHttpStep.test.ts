@@ -681,6 +681,7 @@ automations:
     };
     const written: Array<Record<string, unknown>> = [];
     let busyWrites = 0;
+    let failedWrites = 0;
     const execute = vi.fn(async (_input: { method: string; readResponse: boolean }) => ({
       ok: true as const,
       status: 200,
@@ -707,6 +708,10 @@ automations:
             if (busyWrites > 0) {
               busyWrites -= 1;
               throw new AutomationRunWait("Engine busy.", "busy");
+            }
+            if (failedWrites > 0) {
+              failedWrites -= 1;
+              throw new Error("The disk is full.");
             }
             written.push(fields);
             return { replaced: { Count: null }, kept: {} };
@@ -757,14 +762,18 @@ automations:
       createdAtMs: 1_000,
       updatedAtMs: 1_000,
     };
-    const run = (overrides: Partial<AutomationClaim>, runDeps = deps) =>
+    const run = (
+      overrides: Partial<AutomationClaim>,
+      runDeps = deps,
+      stop = new AbortController(),
+    ) =>
       runCollectionAutomation(runDeps, {
         claim: { ...claim, ...overrides },
         automation,
         collection: { path: "Tasks", name: "Tasks" },
         roster,
-        signal: new AbortController().signal,
-        stopped: new AbortController().signal,
+        signal: stop.signal,
+        stopped: stop.signal,
       });
 
     try {
@@ -825,6 +834,33 @@ automations:
       );
       expect(noJson).toMatchObject({ kind: "failed" });
       if (noJson.kind === "failed") expect(noJson.error).toContain("without the JSON");
+
+      execute.mockClear();
+      written.length = 0;
+      failedWrites = 1;
+      expect(await run({ claimId: "claim-fetch-retry" })).toMatchObject({ kind: "failed" });
+      expect(await run({ claimId: "claim-fetch-retry", run: 2, attempts: 2 })).toEqual({
+        kind: "done",
+      });
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(written).toEqual([{ Count: 42 }]);
+      const [retried] = (await store.runsOf(claim.automationId, "claim-fetch-retry")).runs;
+      expect(JSON.stringify(retried)).not.toContain("results");
+
+      const stop = new AbortController();
+      const paused = vi.fn(async () => {
+        stop.abort();
+        return { ok: false as const, reason: "Outbound HTTPS request failed." };
+      });
+      expect(
+        await run(
+          { claimId: "claim-fetch-paused" },
+          { ...deps, httpWebhook: { execute: paused } },
+          stop,
+        ),
+      ).toEqual({ kind: "wait", reason: "stopped" });
+      expect(await run({ claimId: "claim-fetch-paused", attempts: 2 })).toEqual({ kind: "done" });
+      expect(execute).toHaveBeenCalledTimes(2);
     } finally {
       await evaluator.close();
     }

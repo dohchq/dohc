@@ -418,18 +418,40 @@ automations:
   });
 
   it("scrubs secret values anywhere in a fetched JSON response and keeps its keys and other values", () => {
-    const scrubbed = scrubSecretsFromJson(
-      {
-        headers: { Authorization: "Bearer sk_live_123456" },
-        echoed: ["sk_live_123456", 3, true, null],
-        sk_live_123456: "kept key",
+    expect(
+      scrubSecretsFromJson(
+        {
+          headers: { Authorization: "Bearer sk_live_123456" },
+          echoed: ["sk_live_123456", 3, true, null],
+          empty: null,
+        },
+        ["sk_live_123456"],
+      ),
+    ).toEqual({
+      ok: true,
+      value: {
+        headers: { Authorization: "Bearer [redacted]" },
+        echoed: ["[redacted]", 3, true, null],
+        empty: null,
       },
-      ["sk_live_123456"],
+    });
+    expect(scrubSecretsFromJson(null, ["sk_live_123456"])).toEqual({ ok: true, value: null });
+  });
+
+  it("refuses a fetched answer with a secret in a field name, or one over the size limit as JSON", () => {
+    expect(
+      scrubSecretsFromJson({ list: [{ "Bearer sk_live_123456": 1 }] }, ["sk_live_123456"]),
+    ).toEqual({
+      ok: false,
+      reason: "The answer has a secret in a field name, so dohc did not keep it.",
+    });
+    const grown = scrubSecretsFromJson(
+      Array.from({ length: 50_000 }, () => "sk"),
+      ["sk"],
     );
-    expect(scrubbed).toEqual({
-      headers: { Authorization: "Bearer [redacted]" },
-      echoed: ["[redacted]", 3, true, null],
-      sk_live_123456: "kept key",
+    expect(grown).toEqual({
+      ok: false,
+      reason: "The answer is 635 KiB as JSON, over the 192 KiB limit.",
     });
   });
 });

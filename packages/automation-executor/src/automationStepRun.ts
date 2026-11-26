@@ -306,7 +306,6 @@ export async function runSteps(
     };
   }
   run.finishedAtMs = dependencies.nowMs();
-  run.applied = run.applied.map(({ response: _response, ...applied }) => applied);
   await dependencies.store.save(run);
   dependencies.onRunEnded?.(run);
   if (dependencies.onUsageSuccess && outcome.kind === "done") {

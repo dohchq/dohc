@@ -1693,6 +1693,9 @@ export async function prepareRecordBackend(
           signal,
         });
         if (!sent.ok) {
+          if (declaredStep.method === "GET" && input.stopped.aborted) {
+            return { outcome: { kind: "wait", reason: "stopped" } };
+          }
           if (sent.waitReason !== undefined) {
             return {
               outcome: { kind: "wait", reason: sent.waitReason },
