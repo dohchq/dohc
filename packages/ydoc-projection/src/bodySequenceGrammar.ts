@@ -462,7 +462,7 @@ export function readLeaf<Inline extends SequenceInline>(
   };
 }
 
-type Fitted = { frame: SequenceFrame; type: NodeType };
+export type Fitted = { frame: SequenceFrame; type: NodeType };
 type Open = Fitted & {
   children: ProseMirrorNode[];
   contentStart: number;
@@ -472,6 +472,37 @@ type Open = Fitted & {
 
 const NO_FRAMES: readonly Fitted[] = [];
 const NO_PATH: readonly string[] = [];
+
+/**
+ * Where the reader puts a leaf: the containers that hold it, outermost first, and the type it
+ * reads as there.
+ */
+export function fitLeaf(
+  schema: Schema,
+  leaf: Pick<SequenceLeaf, "type" | "path">,
+): { path: readonly Fitted[]; type: NodeType } {
+  const shape = shapeOf(schema);
+  const named = schema.nodes[leaf.type];
+  let type = shape.leafBlock(named) ? named : shape.paragraph;
+  let path = NO_FRAMES;
+  let parent = schema.topNodeType;
+  if (leaf.path.length > 0) {
+    const fitted: Fitted[] = [];
+    for (const frame of leaf.path.slice(0, MAX_SEQUENCE_DEPTH)) {
+      const container = schema.nodes[frame.type];
+      if (!shape.container(container) || !shape.children.get(parent)!.has(container)) break;
+      fitted.push({ frame, type: container });
+      parent = container;
+    }
+    while (fitted.length > 0 && !shape.children.get(parent)!.has(type)) {
+      fitted.pop();
+      parent = fitted.at(-1)?.type ?? schema.topNodeType;
+    }
+    path = fitted;
+  }
+  if (!shape.children.get(parent)!.has(type)) type = shape.paragraph;
+  return { path, type };
+}
 
 /**
  * The document that leaves stand for, each already read, and where each of their blocks is in it.
@@ -546,25 +577,7 @@ export function placeLeaves<Inline extends SequenceInline>(
 
   read.forEach((given, index) => {
     const leaf = given.leaf;
-    const named = schema.nodes[leaf.type];
-    let leafType = shape.leafBlock(named) ? named : shape.paragraph;
-    let path = NO_FRAMES;
-    let parent = schema.topNodeType;
-    if (leaf.path.length > 0) {
-      const fitted: Fitted[] = [];
-      for (const frame of leaf.path.slice(0, MAX_SEQUENCE_DEPTH)) {
-        const type = schema.nodes[frame.type];
-        if (!shape.container(type) || !shape.children.get(parent)!.has(type)) break;
-        fitted.push({ frame, type });
-        parent = type;
-      }
-      while (fitted.length > 0 && !shape.children.get(parent)!.has(leafType)) {
-        fitted.pop();
-        parent = fitted.at(-1)?.type ?? schema.topNodeType;
-      }
-      path = fitted;
-    }
-    if (!shape.children.get(parent)!.has(leafType)) leafType = shape.paragraph;
+    const { path, type: leafType } = fitLeaf(schema, leaf);
 
     let shared = 0;
     while (

@@ -1,9 +1,12 @@
 import type { Node as ProseMirrorNode, Schema } from "@tiptap/pm/model";
 import * as Y from "yjs";
 import {
+  fitLeaf,
   leavesOfSequence,
   readBodyLeaves,
   type SequenceAttrs,
+  type SequenceBoundary,
+  type SequenceFrame,
   type SequencePiece,
 } from "./bodySequenceGrammar.js";
 import {
@@ -82,6 +85,37 @@ export function piecesOfSequence(
   const pieces: SequencePiece[] = [];
   visitPieces(sequence._start, null, new Map(), markNames, (piece) => pieces.push(piece));
   return pieces;
+}
+
+/**
+ * Each live boundary of a format-2 note, in order, with the containers the reader places its line
+ * in, outermost first, each with the type the reader gives it, and the type its line reads as.
+ * Declares no root.
+ */
+export function placedBoundaries(
+  schema: Schema,
+  doc: Y.Doc,
+): { item: Y.Item; path: SequenceFrame[]; leaf: string }[] {
+  const items: Y.Item[] = [];
+  const boundaries: SequenceBoundary[] = [];
+  visitPieces(
+    doc.share.get(BODY_SEQUENCE_FIELD)?._start ?? null,
+    null,
+    new Map(),
+    new Set(),
+    (piece, _offset, item) => {
+      if (!("boundary" in piece)) return;
+      items.push(item);
+      boundaries.push(piece);
+    },
+  );
+  const records = doc.share.get(BODY_CONTAINERS_FIELD);
+  return leavesOfSequence(schema, boundaries, { get: (key) => storedValue(records, key) }).map(
+    (leaf, at) => {
+      const { path, type } = fitLeaf(schema, leaf);
+      return { item: items[at]!, path: path.map(({ frame }) => frame), leaf: type.name };
+    },
+  );
 }
 
 /**
