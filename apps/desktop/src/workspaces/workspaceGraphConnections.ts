@@ -135,6 +135,12 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
     const edges = new Map<string, LinksConnectionEdge>();
     const records: LinksConnectionsResult["records"] = [];
     let complete = true;
+    let failed = false;
+    const missing = () => {
+      failed = true;
+      complete = false;
+      return null;
+    };
     const capped = <T>(items: T[], limit: number) => {
       if (items.length > limit) complete = false;
       return items.slice(0, limit);
@@ -163,13 +169,13 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
     );
     const details = await eachLimited(collections, async (summary) => {
       const [collection, query] = await Promise.all([
-        adapter.getCollection({ collectionPath: summary.path }).catch(() => null),
+        adapter.getCollection({ collectionPath: summary.path }).catch(missing),
         adapter
           .queryCollectionRecords({
             collectionPath: summary.path,
             limit: CONNECTION_LIMITS.records,
           })
-          .catch(() => null),
+          .catch(missing),
       ]);
       return { summary, collection, query };
     });
@@ -266,13 +272,29 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
         const trigger =
           automation.when.kind === "group-message" ? groupNode(automation.when.group) : owner.id;
         if (trigger) edge({ source: trigger, target: id, kind: "automation-trigger" });
-        for (const { step } of stepsInOrder(automation)) {
+        const steps = stepsInOrder(automation);
+        const bound = new Map(
+          steps.flatMap(({ step }) =>
+            step.kind === "find" || (step.kind === "add-record" && step.as !== null)
+              ? [[step.as, step.collection] as const]
+              : [],
+          ),
+        );
+        for (const { step } of steps) {
+          const collection =
+            step.kind === "set"
+              ? step.records === null
+                ? null
+                : (bound.get(step.records) ?? null)
+              : step.kind === "add-record" || step.kind === "find" || step.kind === "invoke"
+                ? step.collection
+                : undefined;
           const target =
             step.kind === "post"
               ? groupNode(step.group)
-              : step.kind === "add-record" || step.kind === "find" || step.kind === "invoke"
-                ? owners.get(step.collection ?? folder)?.id
-                : null;
+              : collection === undefined
+                ? null
+                : owners.get(collection ?? folder)?.id;
           if (target) edge({ source: id, target, kind: "automation-action" });
         }
         for (const file of codeFilesOf(automation, folder))
@@ -336,7 +358,7 @@ export function createWorkspaceGraphConnections<W extends Workspace>(deps: {
       complete,
       mountsCovered,
     });
-    cache.set(workspaceId, { key, value });
+    if (!failed) cache.set(workspaceId, { key, value });
     return value;
   }
 

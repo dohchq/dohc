@@ -330,6 +330,43 @@ it("reports mounted shares as uncovered once one is added", async () => {
   expect((await reader.connections(mounted)).mountsCovered).toBe(false);
 });
 
+it("shows what a set step changes", async () => {
+  const { reader, entry } = workspace({
+    ...FILES,
+    "Tasks/automations.yaml": `version: 1
+automations:
+  - id: close
+    name: Close new tasks
+    when: record-added
+    do:
+      - set:
+          Done: true
+`,
+  });
+  const result = await reader.connections(entry);
+  expect(result.edges.filter((edge) => edge.kind === "automation-action")).toEqual([
+    {
+      source: "automation:collection:tasks-yaml#close",
+      target: "collection:Tasks",
+      kind: "automation-action",
+    },
+  ]);
+});
+
+it("reads a Collection again after its read failed", async () => {
+  const { reader, entry, adapter } = workspace(FILES);
+  adapter.getCollection.mockRejectedValueOnce(new Error("deadline"));
+  const failed = await reader.connections(entry);
+  expect(failed.complete).toBe(false);
+  const retried = await reader.connections(entry);
+  expect(retried.complete).toBe(true);
+  expect(retried.edges).toContainEqual({
+    source: "collection:Tasks",
+    target: "collection:People",
+    kind: "relation",
+  });
+});
+
 it("cuts an answer over 64 KiB to whole nodes and reports it incomplete", () => {
   const nodes = Array.from({ length: 2000 }, (_, index) => ({
     id: `app:apps/${String(index).padStart(4, "0")}`,
