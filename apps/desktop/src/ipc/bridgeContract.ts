@@ -9846,6 +9846,7 @@ export interface DohcDesktopBridge
   // The automations main read from the workspace changed, or a shared view's
   // host answered a Button check: re-read field marks and Button states.
   onCollectionAutomationsChanged(listener: (event: { workspaceId: string }) => void): () => void;
+  onLocalAppsChanged(listener: (event: { workspaceId: string }) => void): () => void;
   // A change to a Collection's fields or rules applied, from any window or
   // the CLI: a page that shows that Collection reads it again.
   onCollectionRulesChanged(listener: (event: CollectionRulesChangedEvent) => void): () => void;

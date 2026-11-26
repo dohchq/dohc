@@ -46,6 +46,7 @@ const readVerb =
 const notReads = new Set(["searchWorkspace", "syncDms", "checkForUpdates"]);
 const namedReads = new Set([
   "resolveWorkLink",
+  "linksConnections",
   "resolveAutomationControls",
   "automationShareImpact",
   "chatDispatchStateForThread",

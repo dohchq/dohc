@@ -19,18 +19,25 @@ import {
   useState,
 } from "react";
 import type { ChatFileMentionRecord } from "../../ipc/bridgeContract";
+import type { LinksConnectionsResult } from "@dohc/workspace-contracts/links";
 import {
+  connectionTabPath,
+  graphPathForTab,
   graphWalk,
   emptyGraph,
   withChatMentions,
+  withConnections,
   type GraphData,
+  type GraphEdge,
   type GraphNode,
 } from "./graphData";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 import { bridge } from "../bridge";
 import { isChatMentionPageChanged, refusalCode } from "../../ipc/errorWords";
 import { ipcErrorMessage } from "../ipcError";
 import { EmptyState, IconButton, RetryRow } from "../ui/controls";
-import { GraphCanvas, type CanvasNode } from "./GraphCanvas";
+import { GraphCanvas, LINK_STYLE, type CanvasNode, type GraphLink } from "./GraphCanvas";
 import {
   DEFAULT_SETTINGS,
   GRAPH_KINDS,
@@ -71,8 +78,11 @@ const SEARCH_RESULTS = 8;
 
 // Settings last for the session, one set per workspace and surface.
 const sessionSettings = new Map<string, GraphSettingsValue>();
+const PANEL_SETTINGS: GraphSettingsValue = { ...DEFAULT_SETTINGS, records: true };
 
 export function graphKind(node: GraphNode): GraphKind {
+  if (node.kind === "connection")
+    return node.connection.kind === "document-collection" ? "collection" : node.connection.kind;
   if (node.kind === "chat-thread") return "chat";
   if (node.kind === "heading") return "heading";
   const display = fileKindForPath(node.path).displayKind;
@@ -91,7 +101,7 @@ const KIND_NAMES = Object.fromEntries(GRAPH_KINDS.map(({ kind, name }) => [kind,
 type GraphViewModel = {
   nodes: CanvasNode[];
   sources: GraphNode[];
-  links: [number, number][];
+  links: GraphLink[];
   index: Map<string, number>;
   // Before the local graph narrows them, for the header's counts.
   filteredNodeCount: number;
@@ -124,19 +134,25 @@ export function searchMatches(
   return matches;
 }
 
+const linkStyle = (edge: GraphEdge) =>
+  edge.approval === "requested"
+    ? LINK_STYLE.pending
+    : edge.kind.startsWith("chat-")
+      ? LINK_STYLE.mention
+      : edge.kind === "wikilink" || edge.kind === "markdown" || edge.kind === "heading-in-file"
+        ? LINK_STYLE.prose
+        : LINK_STYLE.structural;
+
 function buildModel(
   graph: GraphData,
   settings: Pick<GraphSettingsValue, "hidden" | "orphans" | "depth">,
   search: string,
   localPath: string | null,
 ): GraphViewModel {
-  const kindCounts: Record<GraphKind, number> = {
-    page: 0,
-    drawing: 0,
-    file: 0,
-    chat: 0,
-    heading: 0,
-  };
+  const kindCounts = Object.fromEntries(GRAPH_KINDS.map(({ kind }) => [kind, 0])) as Record<
+    GraphKind,
+    number
+  >;
   const query = search.trim().toLocaleLowerCase();
   const kept = new Map<string, GraphNode>();
   for (const node of graph.nodes) {
@@ -194,12 +210,12 @@ function buildModel(
   const index = new Map(paths.map((path, i) => [path, i]));
   const sources = paths.map((path) => kept.get(path)!);
   const linkDegree = new Uint32Array(paths.length);
-  const links: [number, number][] = [];
+  const links: GraphLink[] = [];
   for (const edge of edges) {
     const s = index.get(edge.source),
       t = index.get(edge.target);
     if (s === undefined || t === undefined) continue;
-    links.push([s, t]);
+    links.push([s, t, linkStyle(edge)]);
     linkDegree[s]!++;
     linkDegree[t]!++;
   }
@@ -246,7 +262,9 @@ function nodeSubtitle(node: GraphNode): string {
     ? node.filePath
     : node.kind === "chat-thread"
       ? "Chat thread"
-      : node.path;
+      : node.kind === "connection"
+        ? KIND_NAMES[graphKind(node)]
+        : node.path;
 }
 
 // Shows its children only after 150 ms, so a fast answer never flashes.
@@ -748,7 +766,7 @@ export function GraphView(props: {
           error: null,
         };
   const baseGraph = scopedState.graph ?? EMPTY_GRAPH;
-  const graph = useMemo(
+  const mentionedGraph = useMemo(
     () =>
       chatMentionsEnabled && chatRows?.workspaceId === props.workspaceId
         ? {
@@ -760,15 +778,64 @@ export function GraphView(props: {
     [baseGraph, chatRows, chatMentionsEnabled, props.workspaceId],
   );
 
+  const session = useWorkspaceSession();
+  const connectionsQuery = useWorkspaceQuery(session, {
+    key: `graph-connections\0${props.workspaceId}\0${props.refreshKey}\0${reloadNonce}`,
+    load: async (signal) => {
+      for (let busy = 0; ; busy++) {
+        signal.throwIfAborted();
+        try {
+          return await bridge().linksConnections({ workspaceId: props.workspaceId });
+        } catch (error) {
+          if (refusalCode(error) !== "OVERLOADED" || signal.aborted) throw error;
+          await new Promise((resolve) => setTimeout(resolve, Math.min(250 * 2 ** busy, 2000)));
+        }
+      }
+    },
+  });
+  const [heldConnections, holdConnections] = useState<{
+    workspaceId: string;
+    value: LinksConnectionsResult;
+  } | null>(null);
+  const freshConnections = connectionsQuery.value;
+  useEffect(() => {
+    if (freshConnections)
+      holdConnections({ workspaceId: props.workspaceId, value: freshConnections });
+  }, [freshConnections, props.workspaceId]);
+  const connections =
+    freshConnections ??
+    (heldConnections?.workspaceId === props.workspaceId ? heldConnections.value : undefined);
+  const connectionsError = connectionsQuery.error;
+  const retryConnections = connectionsQuery.retry;
+  useEffect(() => {
+    if (connectionsError)
+      reportError.current?.(
+        "dohc could not load how Collections and apps connect.",
+        connectionsError,
+        () => void retryConnections(),
+      );
+  }, [connectionsError, retryConnections]);
+
   const settingsKey = `${props.workspaceId}\0${variant}`;
+  const defaults = variant === "panel" ? PANEL_SETTINGS : DEFAULT_SETTINGS;
   const [savedSettings, setSettingsState] = useState({
     key: settingsKey,
-    value: sessionSettings.get(settingsKey) ?? DEFAULT_SETTINGS,
+    value: sessionSettings.get(settingsKey) ?? defaults,
   });
   const settings =
     savedSettings.key === settingsKey
       ? savedSettings.value
-      : (sessionSettings.get(settingsKey) ?? DEFAULT_SETTINGS);
+      : (sessionSettings.get(settingsKey) ?? defaults);
+  const graph = useMemo(
+    () => withConnections(mentionedGraph, connections, settings.records),
+    [mentionedGraph, connections, settings.records],
+  );
+  const shownPath = useMemo(() => {
+    const path = graphPathForTab(props.activePath);
+    if (!path || settings.records) return path;
+    const record = connections?.records.find((entry) => entry.paths.includes(path));
+    return record?.collection ?? path;
+  }, [props.activePath, settings.records, connections]);
   const setSettings = useCallback(
     (next: GraphSettingsValue) => {
       sessionSettings.set(settingsKey, next);
@@ -782,7 +849,7 @@ export function GraphView(props: {
   const deferredSearch = useDeferredValue(search);
   // The side panel is the open page's local graph; with no page open in the
   // graph, it shows the whole workspace.
-  const localPath = variant === "panel" ? props.activePath : null;
+  const localPath = variant === "panel" ? shownPath : null;
   const model = useMemo(
     () =>
       buildModel(
@@ -794,7 +861,7 @@ export function GraphView(props: {
     [graph, settings.hidden, settings.orphans, settings.depth, deferredSearch, localPath, variant],
   );
   const groups = useMemo(() => groupsFor(model, settings.groups), [model, settings.groups]);
-  const activeIndex = props.activePath === null ? -1 : (model.index.get(props.activePath) ?? -1);
+  const activeIndex = shownPath === null ? -1 : (model.index.get(shownPath) ?? -1);
   const [focusIndex, setFocusIndex] = useState(-1);
   // A pointed node is lit without keyboard focus: a hovered row or the search's active option.
   const [pointIndex, setPointIndex] = useState(-1);
@@ -807,7 +874,8 @@ export function GraphView(props: {
     (node: GraphNode) => {
       if (node.kind === "chat-thread") props.onOpenChatThread?.(node);
       else if (node.kind === "heading") props.onOpenPath(node.filePath, node.headingAnchor);
-      else props.onOpenPath(node.filePath ?? node.path);
+      else if (node.kind === "connection") props.onOpenPath(connectionTabPath(node.connection));
+      else props.onOpenPath(node.filePath);
     },
     [props],
   );
@@ -841,7 +909,7 @@ export function GraphView(props: {
       links={model.links}
       groups={groups}
       activeIndex={activeIndex}
-      activePath={props.activePath}
+      activePath={shownPath}
       focusIndex={focusIndex}
       pointIndex={pointIndex}
       display={settings.display}
@@ -1018,7 +1086,7 @@ export function GraphView(props: {
           {variant === "panel" && !loadingBlank ? (
             <GraphRows
               model={model}
-              activePath={props.activePath}
+              activePath={shownPath}
               onOpen={openNode}
               onFocusNode={setFocusIndex}
               onPointNode={setPointIndex}

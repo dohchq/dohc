@@ -46,6 +46,9 @@ export type OperationDefinition =
 
 export type OperationTable = Readonly<Record<string, OperationDefinition>>;
 
+type InWorkspace<Input> = (Input extends Record<string, never> ? unknown : Input) & {
+  workspaceId: string;
+};
 type DeclaredRow<Declaration extends OperationDeclaration> = {
   readonly capabilityId: CapabilityId;
   readonly channel: Declaration["ipc"]["channel"];
@@ -53,8 +56,8 @@ type DeclaredRow<Declaration extends OperationDeclaration> = {
   readonly guard: "active-workspace";
   readonly inactiveMessage: string;
   readonly payload: z.ZodType<
-    z.output<Declaration["input"]> & { workspaceId: string },
-    z.input<Declaration["input"]> & { workspaceId: string }
+    InWorkspace<z.output<Declaration["input"]>>,
+    InWorkspace<z.input<Declaration["input"]>>
   >;
   readonly result: Declaration["ipc"] extends { readonly result: infer Result extends z.ZodType }
     ? Result

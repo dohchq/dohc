@@ -8033,6 +8033,8 @@ const localDatasetHostFor = async (
           if (failed) automations?.failuresChanged();
         },
         onDatasetsChanged: () => collectionAutomationsOf(workspace.workspaceId)?.datasetsChanged(),
+        onAppsChanged: () =>
+          notifyWorkspaceWindows(workspace.workspaceId, CHANNELS.localAppsChanged),
         collectionEngine: () => {
           const capture = activity.engineCaptureFor(workspace.workspaceId, workspaceRoot);
           if (!capture) throw new Error("The workspace engine is unavailable.");

@@ -6,13 +6,28 @@ import { useDismiss } from "../ui/useDismiss";
 import { GROUP_HUES, DEFAULT_DISPLAY, type GraphDisplay, type GraphShape } from "./GraphCanvas";
 import { DEFAULT_FORCES, type GraphForces } from "./graphLayout";
 
-export type GraphKind = "page" | "drawing" | "file" | "chat" | "heading";
+export type GraphKind =
+  | "page"
+  | "drawing"
+  | "file"
+  | "chat"
+  | "heading"
+  | "collection"
+  | "dataset"
+  | "app"
+  | "automation"
+  | "group";
 export const GRAPH_KINDS: readonly { kind: GraphKind; name: string; shape: GraphShape }[] = [
   { kind: "page", name: "Page", shape: "circle" },
   { kind: "drawing", name: "Drawing", shape: "diamond" },
   { kind: "file", name: "File", shape: "ring" },
   { kind: "chat", name: "Chat", shape: "bubble" },
   { kind: "heading", name: "Heading", shape: "pill" },
+  { kind: "collection", name: "Collection", shape: "square" },
+  { kind: "dataset", name: "Dataset", shape: "square" },
+  { kind: "app", name: "App", shape: "hexagon" },
+  { kind: "automation", name: "Automation", shape: "triangle" },
+  { kind: "group", name: "Group", shape: "bubble" },
 ];
 
 export type GraphGroup = { id: number; query: string; hue: number };
@@ -20,6 +35,7 @@ export type GraphGroup = { id: number; query: string; hue: number };
 export type GraphSettingsValue = {
   hidden: readonly GraphKind[];
   orphans: boolean;
+  records: boolean;
   depth: number;
   groups: readonly GraphGroup[];
   display: GraphDisplay;
@@ -29,6 +45,7 @@ export type GraphSettingsValue = {
 export const DEFAULT_SETTINGS: GraphSettingsValue = {
   hidden: [],
   orphans: true,
+  records: false,
   depth: 1,
   groups: [],
   display: DEFAULT_DISPLAY,
@@ -62,6 +79,10 @@ export function ShapeMark(props: { shape: GraphShape; className?: string; hollow
     >
       {props.shape === "diamond" ? (
         <path d="M0 -6.5 L6.5 0 L0 6.5 L-6.5 0 Z" {...paint} />
+      ) : props.shape === "hexagon" ? (
+        <path d="M0 -6 L5.2 -3 L5.2 3 L0 6 L-5.2 3 L-5.2 -3 Z" {...paint} />
+      ) : props.shape === "triangle" ? (
+        <path d="M0 -6 L6 5 L-6 5 Z" {...paint} />
       ) : props.shape === "square" ? (
         <rect x={-5.5} y={-5.5} width={11} height={11} rx={3} {...paint} />
       ) : props.shape === "pill" ? (
@@ -247,15 +268,22 @@ export function GraphSettings(props: {
             onChange={(orphans) => onChange({ ...value, orphans })}
           />
         </Row>
+        <Row label="Collection records">
+          <SwitchControl
+            label="Show each Collection's records"
+            checked={value.records}
+            onChange={(records) => onChange({ ...value, records })}
+          />
+        </Row>
       </Section>
-      <Section title="Groups" open={open.groups} onToggle={() => toggle("groups")}>
+      <Section title="Color rules" open={open.groups} onToggle={() => toggle("groups")}>
         {value.groups.map((group) => {
           const hue = GROUP_HUES[group.hue % GROUP_HUES.length]!;
           return (
             <div key={group.id} className="flex h-8 items-center gap-2 px-2 pl-6">
               <button
                 type="button"
-                aria-label={`Group color, ${hue}. Change color`}
+                aria-label={`Rule color, ${hue}. Change color`}
                 title="Change color"
                 onClick={() => setGroup(group.id, { hue: (group.hue + 1) % GROUP_HUES.length })}
                 className={`grid size-6 shrink-0 place-items-center rounded-md hover:bg-hover ${HUE_TEXT[hue]}`}
@@ -263,15 +291,15 @@ export function GraphSettings(props: {
                 <ShapeMark shape="circle" />
               </button>
               <input
-                aria-label="Group search"
+                aria-label="Color rule search"
                 placeholder="Name or folder"
                 value={group.query}
                 onChange={(event) => setGroup(group.id, { query: event.target.value })}
                 className="h-7 min-w-0 flex-1 rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
               />
               <IconButton
-                aria-label="Remove group"
-                title="Remove group"
+                aria-label="Remove color rule"
+                title="Remove color rule"
                 onClick={() =>
                   onChange({
                     ...value,
@@ -301,7 +329,7 @@ export function GraphSettings(props: {
             }
           >
             <Plus size={12} aria-hidden />
-            New group
+            New color rule
           </GhostButton>
         </div>
       </Section>

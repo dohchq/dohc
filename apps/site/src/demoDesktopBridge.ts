@@ -243,6 +243,7 @@ type DemoDesktopBridge = Pick<
   | "searchWorkspace"
   | "cancelWorkspaceSearch"
   | "linksEdges"
+  | "linksConnections"
   | "createWorkspaceFile"
   | "createWorkspaceFolder"
   | "moveWorkspacePath"
@@ -630,6 +631,16 @@ const demoBridge = {
     return { status: "accepted" as const };
   },
   async cancelWorkspaceSearch() {},
+  async linksConnections() {
+    return {
+      scope: "workspace" as const,
+      nodes: [],
+      edges: [],
+      records: [],
+      complete: true,
+      mountsCovered: true,
+    };
+  },
   async linksEdges() {
     // Explicit sample data for the demo, independent of the engine index.
     return {

@@ -7872,7 +7872,17 @@ function WorkspaceShell(props: {
   // doesn't move the moment order the counter follows.
   const newestHistoryFile = engineHistory?.entries.find((entry) => entry.kind === "file");
   const versionsHistoryKey = `${historyRefreshCounter}\n${newestHistoryFile?.kind === "file" ? newestHistoryFile.moment.id : ""}`;
-  const graphKey = shareView ? graphRefreshKey : `${graphRefreshKey}\0${latestMomentOrder}`;
+  const [appsRevision, appsChanged] = useReducer((revision: number) => revision + 1, 0);
+  useEffect(
+    () =>
+      bridge().onLocalAppsChanged((event) => {
+        if (event.workspaceId === workspaceId) appsChanged();
+      }),
+    [workspaceId],
+  );
+  const graphKey = shareView
+    ? graphRefreshKey
+    : `${graphRefreshKey}\0${latestMomentOrder}\0${appsRevision}`;
 
   const joinedWorkspaceOffers = commandContext.shareView
     ? workspaceCreateOffers(commandContext.shareView, membershipRole)

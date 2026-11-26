@@ -9,7 +9,18 @@ import {
   type LayoutRequest,
 } from "./graphLayout";
 
-export type GraphShape = "circle" | "ring" | "diamond" | "square" | "bubble" | "pill";
+export type GraphShape =
+  | "circle"
+  | "ring"
+  | "diamond"
+  | "square"
+  | "bubble"
+  | "pill"
+  | "hexagon"
+  | "triangle";
+export const LINK_STYLE = { prose: 0, structural: 1, pending: 2, mention: 3 } as const;
+export type GraphLink = readonly [source: number, target: number, style?: number];
+const LINK_DASH: readonly (readonly number[])[] = [[], [], [5, 4], [1.5, 3]];
 
 export type CanvasNode = {
   path: string;
@@ -40,7 +51,7 @@ export const GROUP_HUES = ["teal", "amber", "plum", "blue", "rust", "indigo", "r
 
 type Model = {
   nodes: readonly CanvasNode[];
-  links: readonly (readonly [number, number])[];
+  links: readonly GraphLink[];
 };
 
 type Options = { display: GraphDisplay; forces: GraphForces; local: boolean };
@@ -170,6 +181,17 @@ function addShape(
       ctx.roundRect(x - e, y - e, e * 2, e * 2, e * 0.32);
       return;
     }
+    case "hexagon":
+    case "triangle": {
+      const sides = shape === "hexagon" ? 6 : 3,
+        e = r * (shape === "hexagon" ? 1.15 : 1.35);
+      for (let side = 0; side < sides; side++) {
+        const angle = -Math.PI / 2 + (side * Math.PI * 2) / sides;
+        ctx[side ? "lineTo" : "moveTo"](x + e * Math.cos(angle), y + e * Math.sin(angle));
+      }
+      ctx.closePath();
+      return;
+    }
     case "pill": {
       const e = r * 0.7;
       ctx.moveTo(x + r, y);
@@ -225,6 +247,7 @@ export function createGraphRenderer(
   let layoutSettled = true;
   let source = new Uint32Array(0);
   let target = new Uint32Array(0);
+  let style = new Uint8Array(0);
   let radius = new Float64Array(0);
   // Measured label widths, 0 until a label is first drawn.
   let labelWidth = new Float32Array(0);
@@ -321,9 +344,11 @@ export function createGraphRenderer(
     const degree = new Uint32Array(count);
     source = new Uint32Array(next.links.length);
     target = new Uint32Array(next.links.length);
-    next.links.forEach(([s, t], l) => {
+    style = new Uint8Array(next.links.length);
+    next.links.forEach(([s, t, kind = LINK_STYLE.prose], l) => {
       source[l] = s;
       target[l] = t;
+      style[l] = kind;
       degree[s]!++;
       degree[t]!++;
     });
@@ -545,42 +570,54 @@ export function createGraphRenderer(
     const strokeWidth = (links: number, wide: number) =>
       links > DENSE_LINKS ? Math.min(wide, HAIRLINE / dpr) : wide;
     ctx.strokeStyle = palette.edge;
-    ctx.globalAlpha = palette.edgeAlpha * linkRest;
-    ctx.beginPath();
-    let shown = 0;
-    for (let l = 0; l < source.length; l++) {
-      const s = source[l]!,
-        t = target[l]!;
-      if (highlight && (s === lit || t === lit)) continue;
-      const x1 = sx(s),
-        y1 = sy(s),
-        x2 = sx(t),
-        y2 = sy(t);
-      if (
-        (x1 < 0 && x2 < 0) ||
-        (y1 < 0 && y2 < 0) ||
-        (x1 > width && x2 > width) ||
-        (y1 > height && y2 > height)
-      )
-        continue;
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2, y2);
-      shown++;
+    for (let pass = 0; pass < LINK_DASH.length; pass++) {
+      ctx.globalAlpha =
+        palette.edgeAlpha *
+        linkRest *
+        (pass === LINK_STYLE.prose || pass === LINK_STYLE.mention ? 1 : 1.8);
+      ctx.setLineDash(LINK_DASH[pass]!);
+      ctx.beginPath();
+      let shown = 0;
+      for (let l = 0; l < source.length; l++) {
+        const s = source[l]!,
+          t = target[l]!;
+        if (style[l] !== pass || (highlight && (s === lit || t === lit))) continue;
+        const x1 = sx(s),
+          y1 = sy(s),
+          x2 = sx(t),
+          y2 = sy(t);
+        if (
+          (x1 < 0 && x2 < 0) ||
+          (y1 < 0 && y2 < 0) ||
+          (x1 > width && x2 > width) ||
+          (y1 > height && y2 > height)
+        )
+          continue;
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        shown++;
+      }
+      ctx.lineWidth = strokeWidth(shown, lineWidth);
+      ctx.stroke();
     }
-    ctx.lineWidth = strokeWidth(shown, lineWidth);
-    ctx.stroke();
     if (highlight) {
       ctx.strokeStyle = palette.match;
       ctx.globalAlpha = palette.edgeAlpha + (0.75 - palette.edgeAlpha) * mix;
       ctx.lineWidth = strokeWidth(offsets[lit + 1]! - offsets[lit]!, lineWidth * (1 + 0.4 * mix));
-      ctx.beginPath();
-      for (let a = offsets[lit]!; a < offsets[lit + 1]!; a++) {
-        const n = adjacency[a]!;
-        ctx.moveTo(sx(lit), sy(lit));
-        ctx.lineTo(sx(n), sy(n));
+      for (let pass = 0; pass < LINK_DASH.length; pass++) {
+        ctx.setLineDash(LINK_DASH[pass]!);
+        ctx.beginPath();
+        for (let l = 0; l < source.length; l++) {
+          const s = source[l]!,
+            t = target[l]!;
+          if (style[l] !== pass || (s !== lit && t !== lit)) continue;
+          ctx.moveTo(sx(s), sy(s));
+          ctx.lineTo(sx(t), sy(t));
+        }
+        ctx.stroke();
       }
-      ctx.stroke();
     }
+    ctx.setLineDash([]);
     if (display.arrows && k > 0.25) {
       ctx.fillStyle = palette.edge;
       ctx.globalAlpha = Math.min(0.55, palette.edgeAlpha * 2.5) * linkRest;
@@ -1020,7 +1057,7 @@ export function createGraphRenderer(
 
 export function GraphCanvas(props: {
   nodes: readonly CanvasNode[];
-  links: readonly (readonly [number, number])[];
+  links: readonly GraphLink[];
   groups: Int16Array;
   activeIndex: number;
   activePath: string | null;

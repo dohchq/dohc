@@ -834,6 +834,7 @@ function makeBaseBridge(
     getFolderApp: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["getFolderApp"]>(
       async ({ workspaceId, folder }) => ({ workspaceId, folder, isApp: false, run: null }),
     ),
+    onLocalAppsChanged: vi.fn(() => () => undefined),
     onFolderAppChanged: vi.fn<
       import("../ipc/bridgeContract").DohcDesktopBridge["onFolderAppChanged"]
     >(() => () => undefined),

@@ -198,6 +198,7 @@ export interface LocalDatasetHostOptions {
   onAutomationClaims?(failed: boolean): void;
   /** A dataset's approved rules or lifecycle changed, so the executor re-indexes. */
   onDatasetsChanged?(): void;
+  onAppsChanged?(): void;
   /**
    * The workspace's server while it holds the workspace's Collections, which
    * runs the apps approved here over them. Null while this computer keeps them.
@@ -1975,7 +1976,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           datasetApps,
           collections,
           createLocalUnconnectedApps({ store, workspaceId, assertCurrent }),
-          () => notifyChange(null),
+          () => {
+            notifyChange(null);
+            options.onAppsChanged?.();
+          },
           () => !options.collectionsServer?.(),
           preview ? undefined : options.external,
         ),

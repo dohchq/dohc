@@ -368,6 +368,8 @@ const bridge: DohcDesktopBridge = {
     onEvent(CHANNELS.sharedViewPullProgress, SharedViewPullProgressEvent, listener),
   onCollectionAutomationsChanged: (listener) =>
     onEvent(CHANNELS.collectionAutomationsChanged, WorkspaceIdPayload, listener),
+  onLocalAppsChanged: (listener) =>
+    onEvent(CHANNELS.localAppsChanged, WorkspaceIdPayload, listener),
   onCollectionRulesChanged: (listener) =>
     onEvent(CHANNELS.collectionRulesChanged, CollectionRulesChangedEvent, listener),
   onCollectionCopyChanged: (listener) =>
