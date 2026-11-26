@@ -265,7 +265,11 @@ export function secretUrlScrubValues(rawUrl: string): string[] {
   const url = URL.parse(rawUrl);
   if (url === null) return [rawUrl];
   const parts = url.pathname.split("/").filter((part) => part.length >= 8);
-  const values = [...url.searchParams.values()].filter((value) => value.length >= 8);
+  const raw = url.search
+    .slice(1)
+    .split("&")
+    .map((pair) => pair.slice(pair.indexOf("=") + 1));
+  const values = [...url.searchParams.values(), ...raw].filter((value) => value.length >= 8);
   return [...new Set([rawUrl, url.href, ...parts, ...parts.map(decoded), ...values])];
 }
 

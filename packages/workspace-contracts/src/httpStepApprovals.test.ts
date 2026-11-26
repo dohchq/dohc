@@ -509,5 +509,11 @@ automations:
       value: { customers: [{ path: "/v1/[redacted]/[redacted]", key: "[redacted]" }] },
     });
     expect(scrubSecretsFromJson({ sk_live_12345678: 1 }, scrubValues)).toMatchObject({ ok: false });
+    expect(
+      scrubSecretsFromJson(
+        { raw: "sk%2Flive%2F12345678", plain: "sk/live/12345678" },
+        secretUrlScrubValues("https://api.example.com/v1?api_key=sk%2Flive%2F12345678"),
+      ),
+    ).toEqual({ ok: true, value: { raw: "[redacted]", plain: "[redacted]" } });
   });
 });
