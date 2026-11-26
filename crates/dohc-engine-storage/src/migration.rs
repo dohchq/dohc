@@ -5371,6 +5371,10 @@ mod tests {
             "sub/.env.template",
             ".env.local",
             ".env/.env.example",
+            ".env./.env.example",
+            ".env.examples",
+            ".env.example.local",
+            "x.env.example",
         ];
         for (order, path) in paths.iter().enumerate() {
             conn.execute(
@@ -5425,7 +5429,18 @@ mod tests {
                 .unwrap()
                 .collect::<Result<_, _>>()
                 .unwrap();
-            assert_eq!(kept, [".env.local", ".env/.env.example"], "{table}");
+            assert_eq!(
+                kept,
+                [
+                    ".env./.env.example",
+                    ".env.example.local",
+                    ".env.examples",
+                    ".env.local",
+                    ".env/.env.example",
+                    "x.env.example",
+                ],
+                "{table}"
+            );
         }
         let ordinary: String = conn
             .query_row("SELECT path FROM moments", [], |row| row.get(0))
