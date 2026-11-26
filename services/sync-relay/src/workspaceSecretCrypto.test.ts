@@ -66,13 +66,17 @@ describe("workspace secret keyring", () => {
     ).toBe("k");
 
     for (const [secretKeys, message] of [
-      [`relay-link-v1:${NEW_KEY}`, 'invalid key id "relay-link-v1"'],
-      [`Upper:${NEW_KEY}`, 'invalid key id "Upper"'],
-      [NEW_KEY, 'invalid key id ""'],
+      [`relay-link-v1:${NEW_KEY}`, "entry 1 needs the form id:key"],
+      [`v1:${NEW_KEY},Upper:${NEWER_KEY}`, "entry 2 needs the form id:key"],
+      [NEW_KEY, "entry 1 needs the form id:key"],
+      [`${NEWER_KEY}:${NEW_KEY}`, "entry 1 needs the form id:key"],
       ["v1:short", 'key "v1" is 5 bytes; each key needs at least 32 bytes'],
       [`v1:${NEW_KEY},v1:${NEWER_KEY}`, 'names key "v1" twice'],
     ] as const) {
       expect(() => workspaceSecretKeyring({ linkKey: LINK_KEY, secretKeys })).toThrow(message);
+      expect(() => workspaceSecretKeyring({ linkKey: LINK_KEY, secretKeys })).not.toThrow(
+        NEWER_KEY,
+      );
     }
   });
 

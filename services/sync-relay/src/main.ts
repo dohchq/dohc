@@ -840,6 +840,7 @@ const relayApplication = createSyncRelayHandler({
     return automations.pressDataset(auth, input, signal);
   },
   serverRuns: () => automations?.runs,
+  workspaceSecretsChanged: (workspaceId) => automations?.secretsChanged(workspaceId),
   appCollectionPolicy,
   noticePostRateLimiter,
   serverCopies: () => copies,

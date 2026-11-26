@@ -6598,7 +6598,7 @@ async function incomingWebhookShareStops(
 
 const RelayHttpApprovals = z.object({
   approvals: z.array(z.string()),
-  secrets: z.array(WorkspaceSecretSummary),
+  secrets: z.array(WorkspaceSecretSummary).optional(),
 });
 
 function workspaceHttpApprovalsFor(workspaceId: string): CollectionHttpApprovalGate {
@@ -6642,7 +6642,7 @@ function workspaceHttpApprovalsFor(workspaceId: string): CollectionHttpApprovalG
     }
     const body = RelayHttpApprovals.safeParse(await response.json().catch(() => undefined));
     if (!body.success) return null;
-    return { approved: new Set(body.data.approvals), secrets: body.data.secrets };
+    return { approved: new Set(body.data.approvals), secrets: body.data.secrets ?? null };
   };
   return {
     read,

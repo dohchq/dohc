@@ -145,6 +145,7 @@ function fakeExecutor(
     relayAnswered: () => undefined,
     groupMessagesArrived: async () => undefined,
     hostChanged: () => undefined,
+    rosterChanged: vi.fn(),
     releaseGroupSubscriptions: async () => ({
       handover: groups(at(10, 30), "message-on-server"),
       watchedGeneration: 3,
@@ -1038,6 +1039,18 @@ describe("a server that runs a workspace's automations", () => {
       grants: [],
       formerEditors: [],
     });
+  });
+
+  it("rechecks a hosted workspace's steps when its secrets change", async () => {
+    clock = at(8);
+    const { storage, h, host } = await relay();
+    await host("/check-in", { installId: "laptop", label: "Laptop", claim: true });
+    const s = await server(storage, h);
+    const fake = await s.openReplica();
+    s.run.secretsChanged("another-workspace");
+    expect(fake.executor.rosterChanged).not.toHaveBeenCalled();
+    s.run.secretsChanged(WORKSPACE);
+    expect(fake.executor.rosterChanged).toHaveBeenCalledTimes(1);
   });
 
   it("reads the owner's shares without claiming an invite the owner has not opened", async () => {

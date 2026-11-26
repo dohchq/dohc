@@ -295,6 +295,8 @@ export interface CreateSyncRelayHandlerOptions {
   pressDataset?: Parameters<typeof createDatasetRoutes>[2]["pressDataset"];
   // This server's runs, for their owners; undefined while it runs no automations.
   serverRuns?: () => ServerRuns | undefined;
+  // A workspace's secrets changed, so this server's automations recheck the steps that use them.
+  workspaceSecretsChanged?: (workspaceId: string) => void;
   serverCopies?: () => ServerCopies | undefined;
   // A phone's page opens for live editing; undefined while this server hosts no live pages for the phone.
   phonePages?: () => PhonePages | undefined;
@@ -430,6 +432,7 @@ export function createSyncRelayHandler({
   automationServer,
   pressDataset,
   serverRuns = () => undefined,
+  workspaceSecretsChanged = () => undefined,
   serverCopies = () => undefined,
   phonePages,
   accountOperationRateLimiter = createAccountOperationRateLimiter(),
@@ -783,6 +786,7 @@ export function createSyncRelayHandler({
     keyring: secretKeyring,
     nowMs,
     rateLimiter: workspaceSecretRateLimiter,
+    secretsChanged: workspaceSecretsChanged,
   });
   const outboundWebhookInFlight = new Map<string, number>();
   const readOwnerShares = async (

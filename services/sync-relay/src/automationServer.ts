@@ -166,6 +166,7 @@ export type ServerExecutor = Pick<
   | "relayAnswered"
   | "groupMessagesArrived"
   | "hostChanged"
+  | "rosterChanged"
   | "releaseGroupSubscriptions"
   | "reachHandover"
   | "relayedClaim"
@@ -2079,6 +2080,9 @@ export async function startAutomationServer(options: AutomationServerOptions) {
   return {
     deleteAccount(userId: string) {
       for (const ws of hosted.values()) ws.names.delete(userId);
+    },
+    secretsChanged(workspaceId: string) {
+      hosted.get(workspaceId)?.executor.rosterChanged();
     },
     async deleteWorkspaces(workspaceIds: readonly string[]) {
       for (const id of workspaceIds) {

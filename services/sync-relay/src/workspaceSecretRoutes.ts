@@ -38,6 +38,7 @@ export function createWorkspaceSecretRoutes(options: {
   readonly keyring: WorkspaceSecretKeyring | null;
   readonly nowMs: () => number;
   readonly rateLimiter: TokenBucketLimiter;
+  readonly secretsChanged: (workspaceId: string) => void;
 }) {
   return async function respondToWorkspaceSecrets(
     request: Request,
@@ -148,6 +149,7 @@ export function createWorkspaceSecretRoutes(options: {
               );
           }
         }
+        options.secretsChanged(route.workspaceId);
         return jsonResponse(
           {
             ok: true,
@@ -176,6 +178,7 @@ export function createWorkspaceSecretRoutes(options: {
       }
       const result = options.storage.deleteWorkspaceSecret(route.workspaceId, ownerUserId, name);
       if (!result.ok) throw notFound();
+      options.secretsChanged(route.workspaceId);
       return jsonResponse(
         {
           ok: true,

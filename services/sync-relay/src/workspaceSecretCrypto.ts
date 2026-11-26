@@ -32,13 +32,13 @@ export function workspaceSecretKeyring(input: {
     return keys.size === 0 ? null : { activeId: LINK_KEY_SECRET_KEY_ID, keys };
   }
   let activeId: string | null = null;
-  for (const entry of configured.split(",")) {
+  for (const [index, entry] of configured.split(",").entries()) {
     const separator = entry.indexOf(":");
     const id = separator === -1 ? "" : entry.slice(0, separator).trim();
     const key = separator === -1 ? "" : entry.slice(separator + 1).trim();
     if (!SECRET_KEY_ID_PATTERN.test(id) || id === LINK_KEY_SECRET_KEY_ID) {
       throw new Error(
-        `DOHC_RELAY_SECRET_KEYS has an invalid key id "${id}". Use 1-32 lowercase letters, digits, and dashes, other than ${LINK_KEY_SECRET_KEY_ID}.`,
+        `DOHC_RELAY_SECRET_KEYS entry ${index + 1} needs the form id:key, with an id of 1-32 lowercase letters, digits, and dashes, other than ${LINK_KEY_SECRET_KEY_ID}.`,
       );
     }
     if (Buffer.byteLength(key, "utf8") < MIN_SECRET_KEY_BYTES) {

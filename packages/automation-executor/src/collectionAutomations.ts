@@ -3303,22 +3303,6 @@ export class CollectionAutomations {
     };
   }
 
-  async httpApprovalInputFor(input: {
-    automationId: string;
-    definitionHash: string;
-    step: string;
-  }): Promise<{
-    approvalDigest: string;
-    collectionId: string;
-    collectionPath: string;
-    automationId: string;
-    stepOrdinal: number;
-    secretProblem: string | null;
-  } | null> {
-    await this.ready();
-    return this.computeHttpApprovalInput(input);
-  }
-
   /**
    * A current editor allows a held step. `seq` names the hold they saw, so
    * a verdict that changed since does not take their answer.
@@ -5016,10 +5000,18 @@ export class CollectionAutomations {
       if (!reach.allowed && steps[index]!.kind !== "dataset-field")
         return { kind: "disabled", reason: reach.reason, denialCause: "reach-restricted" };
     }
-    if (await this.recordVerdicts(roster, [{ automationId, collectionPath, automation }], steps)) {
+    const wait = await this.recordVerdicts(
+      roster,
+      [{ automationId, collectionPath, automation }],
+      steps,
+    );
+    if (wait !== null) {
       return {
         kind: "disabled",
-        reason: `Automation "${automation.name}" is waiting. Allow its step in Notices.`,
+        reason:
+          wait === "held"
+            ? `Automation "${automation.name}" is waiting. Allow its step in Notices.`
+            : `Automation "${automation.name}" is waiting because dohc can't check its webhook approval or secrets right now. Check this workspace's sync and its secrets in Settings.`,
         denialCause: "held-step",
       };
     }
@@ -6918,7 +6910,7 @@ export class CollectionAutomations {
     roster: Exclude<ReachRoster, { kind: "unknown" }>,
     automations?: readonly OwnedAutomation[],
     resolved?: readonly ReachStep[],
-  ): Promise<boolean> {
+  ): Promise<"held" | "unchecked" | null> {
     await this.loadChat(roster);
     automations ??= this.everyAutomation();
     const owned = automations;
@@ -6936,8 +6928,8 @@ export class CollectionAutomations {
     const httpApprovalStates = await this.httpApprovalStatesFor(owned, inventories);
     return await this.updateVerdicts(() => {
       // Without the saved verdicts every step waits.
-      if (this.verdictsUnreadable) return owned.length > 0;
-      let held = false;
+      if (this.verdictsUnreadable) return owned.length > 0 ? "held" : null;
+      let wait: "held" | "unchecked" | null = null;
       for (const { automationId, collectionPath, automation } of owned) {
         const collection = collectionNamed(collectionPath);
         const hash = definitionHash(automation);
@@ -6962,7 +6954,7 @@ export class CollectionAutomations {
           if (reachStep.kind === "http") {
             const info = httpApprovalStates.get(key);
             if (next.verdict === "allowed" && info?.state === "unavailable") {
-              held = true;
+              wait ??= "unchecked";
               return;
             }
             next = {
@@ -6973,7 +6965,7 @@ export class CollectionAutomations {
                 : {}),
             };
           }
-          if (next.verdict === "held") held = true;
+          if (next.verdict === "held") wait = "held";
           if (sameReachVerdict(previous, next)) return;
           this.verdicts.set(key, {
             automationId,
@@ -6984,7 +6976,7 @@ export class CollectionAutomations {
           });
         });
       }
-      return held;
+      return wait;
     });
   }
 
@@ -8021,7 +8013,7 @@ export class CollectionAutomations {
       withHost: (work) => this.withLiveHost(work),
       cachedRoster: () => this.options.cachedRoster(),
       checkReach: async (steps, roster) => {
-        return owned === undefined ? false : this.recordVerdicts(roster, [owned], steps);
+        return owned !== undefined && (await this.recordVerdicts(roster, [owned], steps)) !== null;
       },
       makeDurable: (claimId) => this.makeWritesDurable(claimId),
       onUsageSuccess: this.options.onUsageSuccess,
