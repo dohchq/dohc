@@ -1434,6 +1434,25 @@ impl Ydoc {
         paragraphs
     }
 
+    fn body_roots(&self, body: &yrs::XmlFragmentRef) -> Option<(yrs::TextRef, MapRef)> {
+        self.body_sequence_roots()
+            .filter(|roots| body_sequence::holds_the_body(&roots.0, body))
+    }
+
+    fn body_blocks(&self) -> Result<Vec<MarkdownNode>, CollabError> {
+        let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        let sequence = self.body_roots(&body);
+        let (mut nodes, mut bytes) = (MAX_PROJECTION_NODES, 0);
+        let txn = self.doc.transact();
+        if sequence
+            .as_ref()
+            .is_some_and(|(sequence, _)| sequence.len(&txn) == 0)
+        {
+            return Ok(Vec::new());
+        }
+        body_reading(&txn, &body, sequence.as_ref(), &mut nodes, &mut bytes)
+    }
+
     fn project_richdoc(&self) -> Result<String, CollabError> {
         self.project_richdoc_with_node_budget(MAX_PROJECTION_NODES)
     }
@@ -1448,9 +1467,8 @@ impl Ydoc {
         let frontmatter = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
         let meta = self.doc.get_or_insert_map(ROOT_META);
         let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
-        let roots = self.body_sequence_roots();
+        let sequence = self.body_roots(&body);
         let txn = self.doc.transact();
-        let sequence = roots.filter(|roots| body_sequence::holds_the_body(&roots.0, &body));
         let uses_crlf = matches!(
             meta.get(&txn, MARKDOWN_CRLF_META_KEY),
             Some(Out::Any(Any::Bool(true)))
@@ -1486,24 +1504,13 @@ impl Ydoc {
                 frontmatter_yaml.push_str(entry)?;
             }
         }
-        let mut children = Vec::new();
-        if let Some((sequence, containers)) = &sequence {
-            children = body_sequence::blocks(
-                &txn,
-                sequence,
-                containers,
-                &mut remaining_nodes,
-                &mut source_text_bytes,
-            )?;
-        } else {
-            for child in body.children(&txn) {
-                let child =
-                    markdown_node(&txn, child, 0, &mut remaining_nodes, &mut source_text_bytes)?;
-                if !empty_list_or_item(&child) {
-                    children.push(child);
-                }
-            }
-        }
+        let children = body_reading(
+            &txn,
+            &body,
+            sequence.as_ref(),
+            &mut remaining_nodes,
+            &mut source_text_bytes,
+        )?;
         let body_markdown = markdown_document(&children)?;
         if let Some(Out::Any(Any::String(source))) = meta.get(&txn, FRONTMATTER_SOURCE_META_KEY) {
             let written = written_frontmatter_keys(&frontmatter, &meta, &txn);
@@ -1875,19 +1882,7 @@ impl Ydoc {
                         let (mut nodes, mut bytes) = (MAX_PROJECTION_NODES, 0);
                         let read = read_blocks::<WIRE_SEED>(&blocks, &mut nodes, &mut bytes)
                             .map_err(|_| CollabError::MarkdownNotRepresentable)?;
-                        let written = body_sequence_writer::new_body(&read)
-                            .ok_or(CollabError::MarkdownNotRepresentable)?;
-                        let roots = [frag.as_ref(), sequence.as_ref(), containers.as_ref()];
-                        let written = match body_sequence::holds_no_item(roots) {
-                            true => body_sequence_fold::Written::New(written),
-                            false => body_sequence_fold::Written::Folded(body_sequence_fold::plan(
-                                &self.doc.transact(),
-                                self.doc.client_id(),
-                                sequence,
-                                containers,
-                                written,
-                            )?),
-                        };
+                        let written = self.sequence_written(&frag, sequence, containers, &read)?;
                         Some((read, written))
                     }
                     None => None,
@@ -2193,6 +2188,28 @@ impl Ydoc {
         )
     }
 
+    fn sequence_written(
+        &self,
+        frag: &yrs::XmlFragmentRef,
+        sequence: &yrs::TextRef,
+        containers: &MapRef,
+        read: &[MarkdownNode],
+    ) -> Result<body_sequence_fold::Written, CollabError> {
+        let written =
+            body_sequence_writer::new_body(read).ok_or(CollabError::MarkdownNotRepresentable)?;
+        let roots = [frag.as_ref(), sequence.as_ref(), containers.as_ref()];
+        Ok(match body_sequence::holds_no_item(roots) {
+            true => body_sequence_fold::Written::New(written),
+            false => body_sequence_fold::Written::Folded(body_sequence_fold::plan(
+                &self.doc.transact(),
+                self.doc.client_id(),
+                sequence,
+                containers,
+                written,
+            )?),
+        })
+    }
+
     pub fn restore_held_content(
         &self,
         content_kind: ContentKind,
@@ -2202,6 +2219,9 @@ impl Ydoc {
             return self
                 .rewrite_content_to_markdown(content_kind, &point.project(content_kind)?.content);
         }
+        if point.note_schema_version() > self.note_schema_version() {
+            return Err(CollabError::MarkdownNotRepresentable);
+        }
         let before = self.doc.transact().state_vector();
         let staged = Ydoc::wire();
         let max_bytes = crate::limits::MAX_YDOC_UPDATE_BYTES;
@@ -2210,6 +2230,12 @@ impl Ydoc {
             .ok_or(CollabError::ConfiguredByteBudgetExceeded)?;
         staged.apply(&full)?;
         restore_copy::copy(point, &staged, crate::limits::MAX_YDOC_UPDATE_BYTES)?;
+        if let Some((sequence, containers)) = staged.body_sequence_roots() {
+            let frag = staged.doc.get_or_insert_xml_fragment(ROOT_BODY);
+            let read = point.body_blocks()?;
+            let written = staged.sequence_written(&frag, &sequence, &containers, &read)?;
+            written.write(&mut staged.doc.transact_mut(), &sequence, &containers);
+        }
         let waiting_text = point.project(content_kind)?.content;
         staged.keep_frontmatter_source_of(&waiting_text)?;
         let source = point.doc.get_or_insert_map(ROOT_META);
@@ -5126,6 +5152,32 @@ fn inline_reading_fits<T: ReadTxn, const WIRE_DEFAULTS: bool>(
     read_blocks::<WIRE_DEFAULTS>(blocks, &mut remaining, &mut bytes).is_ok()
 }
 
+fn body_reading<T: ReadTxn>(
+    txn: &T,
+    body: &yrs::XmlFragmentRef,
+    sequence: Option<&(yrs::TextRef, MapRef)>,
+    remaining_nodes: &mut usize,
+    source_text_bytes: &mut usize,
+) -> ProjectionResult<Vec<MarkdownNode>> {
+    if let Some((sequence, containers)) = sequence {
+        return body_sequence::blocks(
+            txn,
+            sequence,
+            containers,
+            remaining_nodes,
+            source_text_bytes,
+        );
+    }
+    let mut read = Vec::new();
+    for child in body.children(txn) {
+        let child = markdown_node(txn, child, 0, remaining_nodes, source_text_bytes)?;
+        if !empty_list_or_item(&child) {
+            read.push(child);
+        }
+    }
+    Ok(read)
+}
+
 fn read_blocks<const WIRE_DEFAULTS: bool>(
     blocks: &[MdBlock<'_>],
     remaining_nodes: &mut usize,
@@ -5375,6 +5427,7 @@ fn content_json(doc: &Doc) -> Value {
         ROOT_SCENE_REVISIONS,
         ROOT_SCENE_APP_STATE,
         ROOT_SCENE_ASSETS,
+        ROOT_CONTAINERS,
     ];
     for name in map_roots {
         let m = doc.get_or_insert_map(name);
@@ -5384,11 +5437,11 @@ fn content_json(doc: &Doc) -> Value {
         }
         roots.insert(name.to_string(), out_json(&txn, Out::YMap(m)));
     }
-    {
-        let t = doc.get_or_insert_text(ROOT_PLAINTEXT);
+    for name in [ROOT_PLAINTEXT, ROOT_SEQUENCE] {
+        let t = doc.get_or_insert_text(name);
         let txn = doc.transact();
         if t.len(&txn) > 0 {
-            roots.insert(ROOT_PLAINTEXT.to_string(), out_json(&txn, Out::YText(t)));
+            roots.insert(name.to_string(), out_json(&txn, Out::YText(t)));
         }
     }
     {
@@ -5406,6 +5459,8 @@ fn content_json(doc: &Doc) -> Value {
         ROOT_META,
         ROOT_BODY,
         ROOT_PLAINTEXT,
+        ROOT_SEQUENCE,
+        ROOT_CONTAINERS,
         ROOT_SCENE_REVISIONS,
         ROOT_SCENE_APP_STATE,
         ROOT_SCENE_ASSETS,
@@ -5432,7 +5487,7 @@ fn out_json<T: ReadTxn>(txn: &T, out: Out) -> Value {
             json!({ "type": "array", "value": items })
         }
         Out::YText(t) => {
-            json!({ "type": "text", "delta": diffs_json(t.diff(txn, YChange::identity)) })
+            json!({ "type": "text", "delta": diffs_json(txn, t.diff(txn, YChange::identity)) })
         }
         Out::YXmlFragment(f) => {
             let children: Vec<Value> = f.children(txn).map(|c| xml_json(txn, c)).collect();
@@ -5740,7 +5795,7 @@ fn xml_json<T: ReadTxn>(txn: &T, node: XmlOut) -> Value {
             })
         }
         XmlOut::Text(t) => {
-            json!({ "type": "xmlText", "delta": diffs_json(t.diff(txn, YChange::identity)) })
+            json!({ "type": "xmlText", "delta": diffs_json(txn, t.diff(txn, YChange::identity)) })
         }
         XmlOut::Fragment(f) => {
             let children: Vec<Value> = f.children(txn).map(|c| xml_json(txn, c)).collect();
@@ -6109,12 +6164,13 @@ fn projection_any_to_json(
     }
 }
 
-fn diffs_json<D>(diffs: Vec<yrs::types::text::Diff<D>>) -> Value {
+fn diffs_json<T: ReadTxn, D>(txn: &T, diffs: Vec<yrs::types::text::Diff<D>>) -> Value {
     let items: Vec<Value> = diffs
         .into_iter()
         .map(|d| {
             let insert = match d.insert {
                 Out::Any(any) => any_to_json(&any),
+                Out::YXmlElement(element) => xml_json(txn, XmlOut::Element(element)),
                 other => json!(format!("{other:?}")),
             };
             let attrs = d.attributes.map(|a| {

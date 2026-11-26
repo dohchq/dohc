@@ -105,7 +105,7 @@ fn a_block_holding_an_embedded_type_is_replaced() {
     // holding that name as text must still replace the block.
     let spelled = {
         let txn = doc.doc.transact();
-        let delta = diffs_json(text.diff(&txn, YChange::identity));
+        let delta = diffs_json(&txn, text.diff(&txn, YChange::identity));
         delta[0]["insert"].as_str().unwrap().to_owned()
     };
     let markdown = format!("{spelled}\n\nKept.\n");
