@@ -60,6 +60,8 @@ const localPublication = {
   sourceRevision: hash,
   approved: z.boolean(),
   active: z.boolean(),
+  versionId: id,
+  readOnlyPreview: z.boolean(),
 };
 const LocalPublication = z.union([
   z.object({ ...localPublication, datasetCapability: OwnerAppDatasetCapability }).strict(),
@@ -331,6 +333,7 @@ const APP_PUBLICATION_REQUEST_OPTIONS = [
     workspaceId: id,
     appRoot: z.string().min(1).max(1024).optional(),
     publicationId: hash.optional(),
+    versionId: id.optional(),
     expectStartupBackend: z.array(AppFrontendBackendExpectation).max(8).optional(),
     steps: z.array(AppFrontendStep).max(20).optional(),
     timeoutMs: z.number().int().min(1000).max(30_000).optional(),
@@ -356,16 +359,19 @@ const APP_PUBLICATION_REQUEST_OPTIONS = [
     action: z.literal("listLocal"),
     workspaceId: id,
     appRoot: z.string().min(1).max(1024),
+    versionId: id.optional(),
   }),
   appPublicationAction({
     action: z.literal("checkLocal"),
     workspaceId: id,
     appRoot: z.string().min(1).max(1024),
+    versionId: id.optional(),
   }),
   appPublicationAction({
     action: z.literal("prepareLocal"),
     workspaceId: id,
     appRoot: z.string().min(1).max(1024),
+    versionId: id.optional(),
   }),
   appPublicationAction({
     action: z.literal("stage"),

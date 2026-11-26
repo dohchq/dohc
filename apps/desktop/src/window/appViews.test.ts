@@ -101,13 +101,22 @@ describe("app view boundaries", () => {
     ).toBe(false);
   });
   it("uses a stable, in-memory partition per app without exposing the workspace name", () => {
-    const partition = appViewPartition("private-workspace", "one");
+    const partition = appViewPartition("private-workspace", "one", "main");
     expect(partition).toMatch(/^dohc-app:[a-f0-9]{32}$/);
-    expect(partition).toBe(appViewPartition("private-workspace", "one"));
-    expect(partition).not.toBe(appViewPartition("private-workspace", "two"));
-    expect(partition).not.toBe(appViewPartition("other-workspace", "one"));
+    expect(partition).toBe(appViewPartition("private-workspace", "one", "main"));
+    expect(partition).not.toBe(appViewPartition("private-workspace", "two", "main"));
+    expect(partition).not.toBe(appViewPartition("other-workspace", "one", "main"));
     expect(partition).not.toContain("private-workspace");
     expect(partition).not.toContain("persist:");
+  });
+  it("keeps Main's partition and gives each other version its own", () => {
+    expect(appViewPartition("private-workspace", "one", "main")).toBe(
+      "dohc-app:05e70ce995550edae135673789d89ba5",
+    );
+    const feature = appViewPartition("private-workspace", "one", "feature");
+    expect(feature).toMatch(/^dohc-app:[a-f0-9]{32}$/);
+    expect(feature).not.toBe(appViewPartition("private-workspace", "one", "main"));
+    expect(feature).not.toBe(appViewPartition("private-workspace", "one", "other"));
   });
   it("provides only main-owned guest preferences, without a preload", () => {
     const prefs = appViewGuestPreferences("dohc-app:test", true);

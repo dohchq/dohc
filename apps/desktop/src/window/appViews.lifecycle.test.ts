@@ -12,7 +12,7 @@ import { app, BrowserWindow, session, type IpcMainInvokeEvent, type WebContents 
 import { appViewOperations, AppViewRequest } from "../ipc/bridgeContract";
 import { CHANNELS } from "../ipc/channels";
 import { registerOperations } from "../ipc/operationTable";
-import { installAppViewEmbedder, registerAppViews } from "./appViews";
+import { appViewPartition, installAppViewEmbedder, registerAppViews } from "./appViews";
 
 let nextId = 1000;
 const cleanups: Array<() => Promise<void>> = [];
@@ -66,7 +66,13 @@ function fixture() {
     end(reason: string): void;
     notice(notice: { message: string; detail?: string }): void;
   }> = [];
-  const activePublication = vi.fn(async () => "approved" as string | null);
+  const activePublication = vi.fn(
+    async () =>
+      ({ publicationId: "approved", versionId: "main" }) as {
+        publicationId: string;
+        versionId: string;
+      } | null,
+  );
   let handler!: (event: IpcMainInvokeEvent, payload: unknown) => Promise<unknown>;
   const manager = registerAppViews({
     activePublication,
@@ -109,6 +115,24 @@ function fixture() {
     invoke({ action: "open", workspaceId: "w", appRoot: "app", viewId, colorScheme: "dark" });
   return { manager, owner, window, isolated, activePublication, launches, lifetime, invoke, open };
 }
+it("opens the version's approved app in that version's partition", async () => {
+  const f = fixture();
+  f.activePublication.mockResolvedValueOnce({ publicationId: "approved", versionId: "feature" });
+  const result = (await f.invoke({
+    action: "open",
+    workspaceId: "w",
+    appRoot: "app",
+    viewId: "one",
+    colorScheme: "dark",
+    versionId: "feature",
+  })) as { partition: string };
+  expect(f.activePublication).toHaveBeenCalledWith(expect.anything(), "app", "feature");
+  expect(result.partition).toBe(appViewPartition("w", "app", "feature"));
+  const main = (await f.open("two")) as { partition: string };
+  expect(f.activePublication).toHaveBeenLastCalledWith(expect.anything(), "app", undefined);
+  expect(main.partition).toBe(appViewPartition("w", "app", "main"));
+});
+
 it("denies unissued attachments and strips every renderer-supplied preference from an issued one", async () => {
   const f = fixture();
   const reject = { preventDefault: vi.fn() };

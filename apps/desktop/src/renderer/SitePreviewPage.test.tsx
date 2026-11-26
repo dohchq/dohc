@@ -164,6 +164,7 @@ describe("SitePreviewPage", () => {
     const { holderId } = bridgeMock.startSitePreview.mock.calls[0]![0];
     const next = (generation: number, port: number): SitePreviewReplacedEvent => ({
       workspaceId: "ws-sites",
+      versionId: "main",
       siteRoot: "report",
       holderId,
       generation,
@@ -214,6 +215,7 @@ describe("SitePreviewPage", () => {
     expect(frameUrl.searchParams.has("dohcHostOrigin")).toBe(false);
     expect(bridgeMock.startSitePreview).toHaveBeenCalledWith({
       workspaceId: "ws-sites",
+      versionId: "main",
       siteRoot: "report",
       mode: "static",
       holderId: expect.any(String),
@@ -412,6 +414,7 @@ describe("SitePreviewPage", () => {
     await screen.findByTestId("site-preview-frame");
     expect(bridgeMock.startSitePreview).toHaveBeenCalledWith({
       workspaceId: "ws-sites",
+      versionId: "main",
       siteRoot: "report",
       mode: "static",
       holderId: expect.any(String),
@@ -444,6 +447,7 @@ describe("SitePreviewPage", () => {
     await screen.findByTestId("site-preview-frame");
     expect(bridgeMock.startSitePreview).toHaveBeenCalledWith({
       workspaceId: "ws-sites",
+      versionId: "main",
       siteRoot: "report",
       mode: "static",
       holderId: expect.any(String),

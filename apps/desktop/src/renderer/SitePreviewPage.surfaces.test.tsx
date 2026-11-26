@@ -72,6 +72,7 @@ function mainProcess() {
     startSitePreview: vi.fn((payload: StartSitePreviewPayload) =>
       lifecycle.acquire({
         ...payload,
+        versionId: payload.versionId ?? "main",
         senderId: 1,
         isCurrent: () => true,
         prepare: async () => async () => {

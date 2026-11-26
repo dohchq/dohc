@@ -51,6 +51,7 @@ function harness(
     sharedView?: boolean;
     activeWorkspaceId?: string;
     trusted?: boolean;
+    activeVersionId?: string;
   } = {},
 ) {
   const workspace: TestWorkspace = {
@@ -88,6 +89,7 @@ function harness(
     if (!(input.trusted ?? true)) throw new WorkspaceRestrictedError();
   });
   const dependencies: StartSitePreviewDependencies<TestEvent, TestSender, TestWorkspace> = {
+    activeVersionId: async () => input.activeVersionId ?? "main",
     authority: {
       requireTrustedSender(event) {
         if (!event.trusted) throw new Error("Untrusted renderer.");
@@ -137,6 +139,26 @@ function harness(
 }
 
 describe("start site preview IPC", () => {
+  it("previews the active version and refuses another one", async () => {
+    const test = harness({ activeVersionId: "feature" });
+    const start = {
+      workspaceId: "workspace-1",
+      siteRoot: "site",
+      mode: "static",
+      holderId: "tab",
+      restart: false,
+    };
+    await expect(test.handler(test.event, { ...start, versionId: "other" })).rejects.toThrow(
+      "Switch to this version in Versions to preview its apps.",
+    );
+    expect(test.execute).not.toHaveBeenCalled();
+    await test.handler(test.event, start);
+    const site = { workspaceId: "workspace-1", siteRoot: "site" };
+    expect(test.lifecycle.status({ ...site, versionId: "feature" }).running).toBe(true);
+    expect(test.lifecycle.status({ ...site, versionId: "main" }).running).toBe(false);
+    await test.lifecycle.stopAll();
+  });
+
   it("routes an authorized exact site through the lifecycle and execution policy", async () => {
     const test = harness();
 

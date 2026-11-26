@@ -27,12 +27,13 @@ import { deferred, type Deferred } from "../testing/deferred";
 const DOCUMENT = "123e4567-e89b-42d3-a456-426614174001";
 const startPayload = {
   workspaceId: "a",
+  versionId: "main",
   siteRoot: "app",
   mode: "static",
   holderId: "tab",
   restart: false,
 };
-const appPayload = { workspaceId: "a", siteRoot: "app", holderId: "tab" };
+const appPayload = { workspaceId: "a", versionId: "main", siteRoot: "app", holderId: "tab" };
 const cleanup: Array<() => Promise<void>> = [];
 function sender(id: number) {
   return {
@@ -198,6 +199,7 @@ async function harness() {
     appCatalog: { list: async () => [], get },
     appPreviews,
     isSharedView,
+    activeVersionId: async () => "main",
     assertMayRunAppCode: async () => undefined,
     executeAppPreview,
   });
@@ -283,7 +285,10 @@ describe("registered app preview IPC", () => {
       logs: h.handles.a.logs(),
       exited: false,
     });
-    expect(h.stateA.sitePreviews.status("a", "app").running).toBe(true);
+    expect(
+      h.stateA.sitePreviews.status({ workspaceId: "a", versionId: "main", siteRoot: "app" })
+        .running,
+    ).toBe(true);
     await expect(h.invoke(CHANNELS.stopSitePreview, appPayload)).resolves.toBeUndefined();
     expect(h.handles.a.stop).toHaveBeenCalledOnce();
     expect(h.handles.b.stop).not.toHaveBeenCalled();
@@ -292,7 +297,10 @@ describe("registered app preview IPC", () => {
       logs: [],
       exited: false,
     });
-    expect(h.stateA.sitePreviews.status("a", "app").running).toBe(false);
+    expect(
+      h.stateA.sitePreviews.status({ workspaceId: "a", versionId: "main", siteRoot: "app" })
+        .running,
+    ).toBe(false);
   });
 
   it.each(["dev", "build"])(
@@ -434,7 +442,10 @@ describe("registered app preview IPC", () => {
     }
     expect(h.handles.a.stop).toHaveBeenCalledOnce();
     expect(h.allowOrigin).not.toHaveBeenCalled();
-    expect(h.stateA.sitePreviews.status("a", "app").running).toBe(false);
+    expect(
+      h.stateA.sitePreviews.status({ workspaceId: "a", versionId: "main", siteRoot: "app" })
+        .running,
+    ).toBe(false);
   });
 
   it("preserves exited status and retained logs through the registered logs handler", async () => {
@@ -448,15 +459,18 @@ describe("registered app preview IPC", () => {
         { stream: "system", text: "Dev server exited unexpectedly." },
       ],
     });
-    expect(h.stateA.sitePreviews.status("a", "app").running).toBe(false);
+    expect(
+      h.stateA.sitePreviews.status({ workspaceId: "a", versionId: "main", siteRoot: "app" })
+        .running,
+    ).toBe(false);
   });
 
   it("rejects a logs result when the renderer changes during the operation", async () => {
     const h = await harness();
     const status = h.stateA.sitePreviews.status;
     let switching: Promise<RendererWorkspaceSession<Sender>> | undefined;
-    vi.spyOn(h.stateA.sitePreviews, "status").mockImplementationOnce((workspaceId, root) => {
-      const result = status(workspaceId, root);
+    vi.spyOn(h.stateA.sitePreviews, "status").mockImplementationOnce((site) => {
+      const result = status(site);
       switching = h.open(h.first);
       return result;
     });
@@ -486,14 +500,20 @@ describe("registered app preview IPC", () => {
     await expect(h.invoke(CHANNELS.getSitePreviewLogs, appPayload)).resolves.toMatchObject({
       exited: false,
     });
-    expect(h.stateA.sitePreviews.status("a", "app").running).toBe(true);
+    expect(
+      h.stateA.sitePreviews.status({ workspaceId: "a", versionId: "main", siteRoot: "app" })
+        .running,
+    ).toBe(true);
     await h.invoke(CHANNELS.stopSitePreview, appPayload);
     expect(h.handles.a.stop).toHaveBeenCalledTimes(2);
     await expect(h.invoke(CHANNELS.getSitePreviewLogs, appPayload)).resolves.toEqual({
       exited: false,
       logs: [],
     });
-    expect(h.stateA.sitePreviews.status("a", "app").running).toBe(false);
+    expect(
+      h.stateA.sitePreviews.status({ workspaceId: "a", versionId: "main", siteRoot: "app" })
+        .running,
+    ).toBe(false);
   });
 
   it("rechecks the original stop operation after waiting for a start lane", async () => {

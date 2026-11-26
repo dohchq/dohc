@@ -44,7 +44,12 @@ const candidate: AppPublicationCandidate = {
   files: [],
   capabilities: [capability],
 };
-function harness() {
+const versionAdapter = (active: string | null = null) =>
+  ({
+    getActiveVersion: async () => (active ? { id: active } : null),
+    listVersions: async () => [{ id: "main" }, ...(active ? [{ id: active }] : [])],
+  }) as never;
+function harness(active: string | null = null) {
   const controller = new AbortController();
   const workspace = { workspaceId: "w" };
   const operation = {
@@ -86,6 +91,8 @@ function harness() {
           datasetCapability: capability,
           approved: true,
           active: true,
+          versionId: "main",
+          readOnlyPreview: false,
         },
       ]),
     },
@@ -98,7 +105,7 @@ function harness() {
     approvedArtifacts: vi.fn(),
     launchLocalDataset,
     flushCapture,
-    withAdapter: async (_workspace, work) => work({} as never),
+    withAdapter: async (_workspace, work) => work(versionAdapter(active)),
     compile: vi.fn(),
   });
   vi.mocked(prepareLocalAppPublication).mockResolvedValue({ candidate, files: [] });
@@ -125,6 +132,52 @@ function harness() {
   };
 }
 afterEach(() => vi.clearAllMocks());
+describe("local app versions", () => {
+  it("prepares the active version unless the request names one", async () => {
+    const h = harness("feature");
+    await h.prepare();
+    expect(vi.mocked(prepareLocalAppPublication).mock.calls[0]![0]).toMatchObject({
+      versionId: "feature",
+    });
+    await h.handler(
+      { action: "prepareLocal", workspaceId: "w", appRoot: "app", versionId: "main" },
+      "caller",
+      h.operation,
+    );
+    expect(vi.mocked(prepareLocalAppPublication).mock.calls[1]![0]).toMatchObject({
+      versionId: "main",
+    });
+  });
+  it("refuses a version the workspace does not have", async () => {
+    const h = harness("feature");
+    await expect(
+      h.handler(
+        { action: "listLocal", workspaceId: "w", appRoot: "app", versionId: "gone" },
+        "caller",
+        h.operation,
+      ),
+    ).rejects.toThrow("dohc could not find this version.");
+    expect(h.datasetForWorkspace).not.toHaveBeenCalled();
+  });
+  it("lists only the named version's approvals", async () => {
+    const h = harness("feature");
+    await h.handler(
+      { action: "listLocal", workspaceId: "w", appRoot: "app" },
+      "caller",
+      h.operation,
+    );
+    const local = await h.datasetForWorkspace.mock.results[0]!.value;
+    expect(local.apps.list).toHaveBeenCalledWith("app", "feature");
+  });
+  it("refuses staging Collection changes away from Main", async () => {
+    const h = harness("feature");
+    await expect(
+      h.handler({ action: "stage", workspaceId: "w", appRoot: "app" }, "caller", h.operation),
+    ).rejects.toThrow(
+      "Collection schema and rule changes can only be approved on Main. Merge this version into Main first.",
+    );
+  });
+});
 describe("local app publication review", () => {
   it("forwards parsed agent approval provenance into local activation", async () => {
     const h = harness(),
@@ -254,6 +307,8 @@ describe("local app publication review", () => {
           datasetCapability: capability,
           approved: true,
           active: true,
+          versionId: "main",
+          readOnlyPreview: false,
         },
       ],
     });
@@ -287,7 +342,7 @@ describe("local app publication review", () => {
     });
     expect(h.flushCapture).toHaveBeenCalledWith(h.operation.workspace);
     expect(readLocalAppSource).toHaveBeenCalledWith(
-      { action: "checkLocal", workspaceId: "w", appRoot: "app" },
+      { action: "checkLocal", workspaceId: "w", appRoot: "app", versionId: "main" },
       expect.objectContaining({ signal: h.controller.signal, deferredWrites: ["app/draft.ts"] }),
     );
     expect(prepareLocalAppPublication).not.toHaveBeenCalled();
@@ -478,7 +533,7 @@ describe("local apps in a workspace whose Collections another computer keeps", (
       approvedArtifacts: vi.fn(),
       launchLocalDataset: h.launchLocalDataset,
       flushCapture: h.flushCapture,
-      withAdapter: async (_workspace, work) => work({} as never),
+      withAdapter: async (_workspace, work) => work(versionAdapter()),
       compile: vi.fn(),
       verifyFrontend,
     });

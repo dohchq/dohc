@@ -144,7 +144,12 @@ async function fixture(
     preparationId: prepared.preparationId,
     revisionSha256: prepared.revision.revisionSha256,
   });
-  async function prepareApp(appRoot: string, operationIds = [id(6)], fieldIds = [id(4), id(5)]) {
+  async function prepareApp(
+    appRoot: string,
+    operationIds = [id(6)],
+    fieldIds = [id(4), id(5)],
+    versionId = "main",
+  ) {
     const generated = generateDatasetFormSources({
       datasetPath: "data/dataset.json",
       approvedRevision: revision,
@@ -160,7 +165,7 @@ async function fixture(
     if (!operationIds.includes(id(6))) delete manifest.dataset.createFields;
     files.set(`${appRoot}/app.publish.json`, JSON.stringify(manifest));
     return prepareLocalAppPublication(
-      { workspaceId: "w", appRoot },
+      { workspaceId: "w", appRoot, versionId },
       {
         deferredWrites: [],
         adapter,
@@ -185,6 +190,36 @@ async function fixture(
 }
 
 describe("local approved dataset apps", () => {
+  it("holds a non-Main version's app as a read-only preview beside Main's approval", async () => {
+    const f = await fixture();
+    const app = await f.prepareApp("app", undefined, undefined, "feature");
+    const preview = await f.host.apps.activate(app, new AbortController().signal);
+    expect(preview.publicationId).not.toBe(f.published.publicationId);
+    expect(f.host.apps.list("app", "main")).toMatchObject([
+      { publicationId: f.published.publicationId, active: true, readOnlyPreview: false },
+    ]);
+    expect(f.host.apps.list("app", "feature")).toMatchObject([
+      {
+        publicationId: preview.publicationId,
+        active: true,
+        versionId: "feature",
+        readOnlyPreview: true,
+      },
+    ]);
+    const write = { ...f.invocation(), authorityRevision: preview.authorityRevision };
+    for (const action of ["invoke", "attempt", "upload"] as const)
+      await expect(f.host.apps.request(preview.publicationId, action, write)).rejects.toThrow(
+        "Previews of non-Main versions are read-only. Merge into Main to save changes to this Collection.",
+      );
+    expect(
+      await f.host.apps.request(f.published.publicationId, "invoke", f.invocation()),
+    ).toMatchObject({ replayed: false });
+    await f.host.apps.withdraw(preview.publicationId, preview.authorityRevision);
+    expect(f.host.apps.list("app", "feature")).toMatchObject([{ active: false }]);
+    expect(() => f.host.apps.browserPublication(preview.publicationId)).toThrow(/approval changed/);
+    expect(f.host.apps.list("app", "main")).toMatchObject([{ active: true }]);
+  });
+
   it("refuses a running app's next write once another computer keeps the Collections, with nothing else asked first", async () => {
     const f = await fixture(undefined, {
       here: () => ({ installId: "install-here", label: "Studio" }),
@@ -309,7 +344,7 @@ describe("local approved dataset apps", () => {
       workspaceRoot: f.workspaceRoot,
     });
     hosts.push(reopened);
-    const [adopted] = reopened.apps.list("app");
+    const [adopted] = reopened.apps.list("app", "main");
     expect(adopted.active).toBe(true);
     expect(adopted.authorityRevision).toBeGreaterThan(prior.authorityRevision);
     expect(() =>
@@ -339,7 +374,7 @@ describe("local approved dataset apps", () => {
       workspaceRoot: f.workspaceRoot,
     });
     hosts.push(again);
-    expect(again.apps.list("app")).toMatchObject([
+    expect(again.apps.list("app", "main")).toMatchObject([
       { active: true, authorityRevision: adopted.authorityRevision },
     ]);
     const inspection = new DatabaseSync(join(f.workspaceRoot, ".dohc/local/datasets/state.sqlite"));
@@ -735,7 +770,7 @@ it("keeps local form uploads, submissions and selected fields working through re
     candidateId: preview.candidateId,
     checkpointSha256: preview.checkpointSha256,
   });
-  expect(f.host.apps.list("app")).toMatchObject([
+  expect(f.host.apps.list("app", "main")).toMatchObject([
     { active: true, datasetCapability: { revision: 1 } },
   ]);
   const uploaded = (await f.host.apps.request(f.published.publicationId, "upload", {
@@ -901,7 +936,7 @@ it("runs a multi-Collection local app with alias routing, cross-Collection file 
     }),
   );
   const multiPrepared = await prepareLocalAppPublication(
-    { workspaceId: "w", appRoot: "tower" },
+    { workspaceId: "w", appRoot: "tower", versionId: "main" },
     {
       deferredWrites: [],
       adapter,
@@ -914,7 +949,7 @@ it("runs a multi-Collection local app with alias routing, cross-Collection file 
     },
   );
   const activated = await f.host.apps.activate(multiPrepared, new AbortController().signal);
-  expect(f.host.apps.list("tower")).toMatchObject([
+  expect(f.host.apps.list("tower", "main")).toMatchObject([
     {
       publicationId: activated.publicationId,
       active: true,
@@ -1005,7 +1040,7 @@ it("runs a multi-Collection local app with alias routing, cross-Collection file 
     reviewToken: preview.reviewToken,
     acknowledge: true,
   });
-  expect(f.host.apps.list("tower")).toEqual([]);
+  expect(f.host.apps.list("tower", "main")).toEqual([]);
   const db = new DatabaseSync(join(f.workspaceRoot, ".dohc/local/datasets/state.sqlite"));
   try {
     expect(
@@ -1105,7 +1140,7 @@ it("reclaims a withdrawn multi-Collection app on Collection deletion and allows 
     }),
   );
   const preparedMulti = await prepareLocalAppPublication(
-    { workspaceId: "w", appRoot: "tower-withdrawn" },
+    { workspaceId: "w", appRoot: "tower-withdrawn", versionId: "main" },
     {
       deferredWrites: [],
       adapter,
@@ -1118,7 +1153,7 @@ it("reclaims a withdrawn multi-Collection app on Collection deletion and allows 
   );
   const activated = await f.host.apps.activate(preparedMulti, new AbortController().signal);
   await f.host.apps.withdraw(activated.publicationId, activated.authorityRevision);
-  expect(f.host.apps.list("tower-withdrawn")).toMatchObject([
+  expect(f.host.apps.list("tower-withdrawn", "main")).toMatchObject([
     { publicationId: activated.publicationId, active: false },
   ]);
 
@@ -1130,7 +1165,7 @@ it("reclaims a withdrawn multi-Collection app on Collection deletion and allows 
     reviewToken: preview.reviewToken,
     acknowledge: true,
   });
-  expect(f.host.apps.list("tower-withdrawn")).toEqual([]);
+  expect(f.host.apps.list("tower-withdrawn", "main")).toEqual([]);
   const db = new DatabaseSync(join(f.workspaceRoot, ".dohc/local/datasets/state.sqlite"));
   try {
     expect(
@@ -1143,7 +1178,7 @@ it("reclaims a withdrawn multi-Collection app on Collection deletion and allows 
   const replacement = await f.prepareApp("tower-withdrawn");
   const replaced = await f.host.apps.activate(replacement, new AbortController().signal);
   expect(replaced.authorityRevision).toBeGreaterThan(activated.authorityRevision);
-  expect(f.host.apps.list("tower-withdrawn")).toMatchObject([
+  expect(f.host.apps.list("tower-withdrawn", "main")).toMatchObject([
     { publicationId: replaced.publicationId, active: true },
   ]);
 });
@@ -1313,7 +1348,7 @@ describe("local app write attribution", () => {
     });
 
     const rePrepared = await prepareLocalAppPublication(
-      { workspaceId: "w", appRoot: "app" },
+      { workspaceId: "w", appRoot: "app", versionId: "main" },
       {
         deferredWrites: [],
         adapter,

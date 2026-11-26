@@ -50,7 +50,9 @@ import type { LocalAppKind } from "./localAppStore";
 import { selectDatasetCapability } from "./localDatasetApps";
 import { prepareLocalAppPublication } from "./ownerAppPublication";
 
-type VerifyFrontendRequest = Extract<OwnerAppPublicationRequest, { action: "verifyFrontend" }>;
+type VerifyFrontendRequest = Extract<OwnerAppPublicationRequest, { action: "verifyFrontend" }> & {
+  versionId: string;
+};
 type VerifyFrontendResult = Extract<OwnerAppPublicationResult, { kind: "frontendVerified" }>;
 
 export interface VerifyLocalAppFrontendDeps {
@@ -250,7 +252,7 @@ export async function verifyLocalAppFrontend(
         const schemaBytes = await deps.withAdapter(async (adapter) => {
           const meta = await adapter.captureSourceMetadata({
             workspaceId: deps.workspaceId,
-            versionId: "main",
+            versionId: candidate.versionId,
             paths: [`${cap.collectionPath}/collection.yaml`],
             bounds: { maxInputFiles: 1, maxInputBytes: APP_COLLECTION_MAX_SCHEMA_BYTES },
             signal: deps.signal,
@@ -273,7 +275,7 @@ export async function verifyLocalAppFrontend(
     try {
       prepared = await deps.withAdapter((adapter) =>
         prepareLocalAppPublication(
-          { workspaceId: deps.workspaceId, appRoot },
+          { workspaceId: deps.workspaceId, appRoot, versionId: input.versionId },
           {
             adapter,
             signal: deps.signal,

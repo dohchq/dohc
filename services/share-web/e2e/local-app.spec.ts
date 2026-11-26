@@ -122,7 +122,7 @@ async function prepare(host: LocalDatasetHost) {
     ),
   );
   return prepareLocalAppPublication(
-    { workspaceId: "w", appRoot: "app" },
+    { workspaceId: "w", appRoot: "app", versionId: "main" },
     {
       adapter,
       deferredWrites: [],

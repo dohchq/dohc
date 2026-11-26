@@ -415,7 +415,7 @@ describe("localStagedApps", () => {
 
     expect(host.approvedArtifacts(expensesCol.datasetId).revision.revision).toBe(1);
     expect(host.approvedArtifacts(workoutsCol.datasetId).revision.revision).toBe(1);
-    expect(host.apps.list("personal-control-tower").some((p) => p.active)).toBe(true);
+    expect(host.apps.list("personal-control-tower", "main").some((p) => p.active)).toBe(true);
   }, 60_000);
 
   it("refuses discard while an approval is in progress so receipts and Collections stay consistent", async () => {
@@ -486,7 +486,7 @@ describe("localStagedApps", () => {
     }
     expect(result.collectionsApplied).toHaveLength(2);
     expect(host.list().datasets).toHaveLength(2);
-    expect(host.apps.list("personal-control-tower").some((p) => p.active)).toBe(true);
+    expect(host.apps.list("personal-control-tower", "main").some((p) => p.active)).toBe(true);
     expect(await staged.list()).toEqual([]);
   }, 60_000);
 
@@ -599,7 +599,7 @@ describe("localStagedApps", () => {
     expect(migrated.collectionsApplied).toHaveLength(2);
     expect(host.approvedArtifacts(expensesCol.datasetId).revision.revision).toBe(2);
     expect(host.approvedArtifacts(workoutsCol.datasetId).revision.revision).toBe(2);
-    expect(host.apps.list("personal-control-tower").some((p) => p.active)).toBe(true);
+    expect(host.apps.list("personal-control-tower", "main").some((p) => p.active)).toBe(true);
   }, 60_000);
 
   it("refuses approval when staged revision.json fields are modified", async () => {
@@ -727,7 +727,7 @@ describe("localStagedApps", () => {
     expect(migrated.collectionsApplied).toHaveLength(2);
     expect(host.approvedArtifacts(expensesCol.datasetId).revision.revision).toBe(2);
     expect(host.approvedArtifacts(workoutsCol.datasetId).revision.revision).toBe(2);
-    expect(host.apps.list("personal-control-tower").some((p) => p.active)).toBe(true);
+    expect(host.apps.list("personal-control-tower", "main").some((p) => p.active)).toBe(true);
   }, 60_000);
 
   it("drains an in-flight Collection transfer before running staged approval pre-check", async () => {

@@ -60,6 +60,7 @@ import {
 import { parseAppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import type { LocalAppRow } from "../workspaces/localAppStore";
 import { APP_PUBLICATION_LIMITS } from "../workspaces/ownerAppPublication";
+import { MAIN_ONLY_SCHEMA_CHANGES } from "../workspaces/localPreviewStore";
 import { collectionHistoryAuthors, type CollectionHistoryNames } from "./collectionHistoryAuthors";
 import {
   assertSourcePathsNotHeld,
@@ -71,6 +72,7 @@ type Workspace = { workspaceId: string; rootPath?: string; shareView?: unknown }
 type SourceAdapter = Pick<
   VersionedLiveAdapter,
   | "captureSourceMetadata"
+  | "getActiveVersion"
   | "hydrateCapturedSources"
   | "listTextFileMetadata"
   | "resolveFiles"
@@ -230,6 +232,7 @@ export function createDatasetHandler<
             dependencies.withAdapter(operation.workspace, (adapter) =>
               work({
                 workspace: adapter.workspace,
+                getActiveVersion: adapter.getActiveVersion.bind(adapter),
                 listTextFileMetadata: adapter.listTextFileMetadata.bind(adapter),
                 resolveFiles: adapter.resolveFiles.bind(adapter),
                 hydrateCapturedSources: adapter.hydrateCapturedSources.bind(adapter),
@@ -241,6 +244,12 @@ export function createDatasetHandler<
                 },
               }),
             );
+          const onMain = async (adapter: Pick<SourceAdapter, "getActiveVersion">) => {
+            const active = await adapter.getActiveVersion({
+              workspaceId: operation.workspace.workspaceId,
+            });
+            if ((active?.id ?? "main") !== "main") throw new Error(MAIN_ONLY_SCHEMA_CHANGES);
+          };
           let input: ResolvedDatasetRequest;
           if ("datasetPath" in request) {
             if (capturesFirst) {
@@ -771,9 +780,10 @@ export function createDatasetHandler<
                 await flushSourceCapture();
                 current();
               }
-              const prepared = await withSourceAdapter((adapter) =>
-                review.prepareMigration({ ...selection, adapter, signal: operation.signal }),
-              );
+              const prepared = await withSourceAdapter(async (adapter) => {
+                await onMain(adapter);
+                return review.prepareMigration({ ...selection, adapter, signal: operation.signal });
+              });
               migrationAuthority.assertCurrent();
               const { signal } = operation;
               const preparationId = prepared.preparationId;
@@ -1341,6 +1351,11 @@ export function createDatasetHandler<
             current();
             return { kind: "approved" as const, revision };
           }
+          if (input.action === "create")
+            await dependencies.withAdapter(operation.workspace, async (adapter) => {
+              await onMain(adapter);
+              return {};
+            });
           let descriptorPath: string;
           let expectedRevision: string | undefined;
           if (input.action === "create") {
@@ -1365,9 +1380,10 @@ export function createDatasetHandler<
             await flushSourceCapture();
             current();
           }
-          const prepared = await withSourceAdapter((adapter) =>
-            host.prepare({ descriptorPath, adapter, signal: operation.signal }),
-          );
+          const prepared = await withSourceAdapter(async (adapter) => {
+            await onMain(adapter);
+            return host.prepare({ descriptorPath, adapter, signal: operation.signal });
+          });
           current();
           if (input.action === "prepare")
             return { kind: "prepared" as const, ...DatasetPreparation.parse(prepared) };

@@ -17,9 +17,13 @@ import type { AppNotice, LocalAppLaunchSession } from "../workspaces/localAppLau
 
 type ColorScheme = "light" | "dark";
 // One partition per app: every launch is on 127.0.0.1, so apps sharing one would share its cache and cookies.
-export function appViewPartition(workspaceId: string, appRoot: string): string {
+export function appViewPartition(workspaceId: string, appRoot: string, versionId: string): string {
   return `dohc-app:${createHash("sha256")
-    .update(JSON.stringify([workspaceId, appRoot]))
+    .update(
+      JSON.stringify(
+        versionId === "main" ? [workspaceId, appRoot] : [workspaceId, appRoot, versionId],
+      ),
+    )
     .digest("hex")
     .slice(0, 32)}`;
 }
@@ -240,7 +244,8 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
   activePublication(
     operation: AppViewOperation<Workspace>,
     appRoot: string,
-  ): Promise<string | null>;
+    versionId: string | undefined,
+  ): Promise<{ publicationId: string; versionId: string } | null>;
   launch(
     operation: AppViewOperation<Workspace>,
     publicationId: string,
@@ -509,7 +514,7 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
         appRoot: input.appRoot,
         viewId: input.viewId,
         publicationId: "",
-        partition: appViewPartition(input.workspaceId, input.appRoot),
+        partition: "",
         colorScheme: input.colorScheme,
         attached: false,
         closed: false,
@@ -523,13 +528,19 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
       operation.signal.addEventListener("abort", retire, { once: true });
       entry.removeLifetime = () => operation.signal.removeEventListener("abort", retire);
       try {
-        const publicationId = await dependencies.activePublication(operation, input.appRoot);
+        const active = await dependencies.activePublication(
+          operation,
+          input.appRoot,
+          input.versionId,
+        );
         operation.assertCurrent();
         if (entry.closed) throw Error("This app tab closed. Open the app again.");
-        if (!publicationId) {
+        if (!active) {
           await close(entry);
           return { kind: "unapproved", viewId: input.viewId };
         }
+        const { publicationId } = active;
+        entry.partition = appViewPartition(input.workspaceId, input.appRoot, active.versionId);
         partitionEntries(entry.partition);
         const launch = await dependencies.launch(operation, publicationId, (notice) =>
           emit(entry, { kind: "app-notice", viewId: entry.viewId, ...notice }),

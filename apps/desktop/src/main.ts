@@ -3171,10 +3171,10 @@ const sitePreviews: SitePreviewLifecycle = {
       lease.state.sitePreviews.release(input),
     );
   },
-  status(workspaceId, siteRoot) {
-    const lease = requireWorkspaceAuthority(workspaceId);
+  status(site) {
+    const lease = requireWorkspaceAuthority(site.workspaceId);
     try {
-      return lease.state.sitePreviews.status(workspaceId, siteRoot);
+      return lease.state.sitePreviews.status(site);
     } finally {
       lease.release();
     }
@@ -11721,16 +11721,23 @@ function registerIpcHandlers(): void {
     },
   });
   appViews = registerAppViews<DesktopRendererWorkspaceOperation["workspace"]>({
-    activePublication: async (operation, appRoot) => {
+    activePublication: async (operation, appRoot, versionId) => {
       const listed = await localPublication(
-        { action: "listLocal", workspaceId: operation.workspace.workspaceId, appRoot },
+        {
+          action: "listLocal",
+          workspaceId: operation.workspace.workspaceId,
+          appRoot,
+          ...(versionId === undefined ? {} : { versionId }),
+        },
         "app-view",
         operation,
       );
       operation.assertCurrent();
-      return listed?.kind === "localListed"
-        ? (listed.publications.find((publication) => publication.active)?.publicationId ?? null)
-        : null;
+      const active =
+        listed?.kind === "localListed"
+          ? listed.publications.find((publication) => publication.active)
+          : undefined;
+      return active ? { publicationId: active.publicationId, versionId: active.versionId } : null;
     },
     launch: async (operation, publicationId, onNotice) =>
       (await localAppLauncher(operation.workspace, operation.signal)).launchSession(
@@ -12526,6 +12533,12 @@ function registerIpcHandlers(): void {
     isSharedView: (workspaceId) => !!sharedViewOf(workspaceId),
     assertMayRunAppCode: (workspace) => workspaceTrust.assertTrusted(workspace),
     executeAppPreview,
+    activeVersionId: async (workspace) =>
+      (
+        await withEngineAdapter(workspace, (adapter) =>
+          adapter.getActiveVersion({ workspaceId: workspace.workspaceId }),
+        )
+      )?.id ?? "main",
   });
 
   registerOperations(operationBoundary, oldWindowOperations, {

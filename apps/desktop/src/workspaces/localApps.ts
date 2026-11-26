@@ -90,16 +90,19 @@ export function createLocalApps(
       const value = store.heldRow(publicationId);
       return value?.kind === "dataset" ? value : null;
     },
-    list: (appRoot: string) =>
+    list: (appRoot: string, versionId: string) =>
       store
         .list(appRoot)
-        .map((value) =>
-          value.kind === "dataset"
+        .filter((value) => value.candidate.versionId === versionId)
+        .map((value) => ({
+          ...(value.kind === "dataset"
             ? dataset.describe(value)
             : value.kind === "collection"
               ? collection.describe(value)
-              : unconnected.describe(value),
-        ),
+              : unconnected.describe(value)),
+          versionId,
+          readOnlyPreview: versionId !== "main",
+        })),
     /** Confirmed only when no admitted response can still be saved. Repeat at the returned revision to confirm. */
     async withdraw(publicationId: string, expected: number) {
       const ended = store.withdraw(publicationId, expected, displace);
@@ -117,5 +120,34 @@ export function createLocalApps(
     },
     reconcile: () => collection.reconcile(),
     close: () => collection.close(),
+  };
+}
+
+type LocalApps = ReturnType<typeof createLocalApps>;
+
+export function routeLocalApps(main: LocalApps, preview: LocalApps): LocalApps {
+  const of = (publicationId: string) => (preview.has(publicationId) ? preview : main);
+  return {
+    browserPublication: (id) => of(id).browserPublication(id),
+    assertBrowserPublication: (id, revision) => of(id).assertBrowserPublication(id, revision),
+    checkBrowserPublication: async (id, revision, signal) =>
+      of(id).checkBrowserPublication?.(id, revision, signal),
+    request: (id, ...rest) => of(id).request(id, ...rest),
+    readBrowserFile: (id, input, signal) => of(id).readBrowserFile(id, input, signal),
+    datasetRevisions: (id, revision) => of(id).datasetRevisions?.(id, revision) ?? null,
+    subscribeDatasetChanges: (id, revision, onWake) =>
+      of(id).subscribeDatasetChanges?.(id, revision, onWake) ?? (() => {}),
+    ...(main.localBudget ? { localBudget: main.localBudget } : {}),
+    activate: (prepared, signal, agent) =>
+      (prepared.candidate.versionId === "main" ? main : preview).activate(prepared, signal, agent),
+    has: (id) => main.has(id) || preview.has(id),
+    verificationPublication: (id) => of(id).verificationPublication(id),
+    heldDatasetApp: (id) => main.heldDatasetApp(id),
+    list: (appRoot, versionId) => (versionId === "main" ? main : preview).list(appRoot, versionId),
+    withdraw: (id, expected) => of(id).withdraw(id, expected),
+    reconcile: () => main.reconcile(),
+    close: async () => {
+      await Promise.all([main.close(), preview.close()]);
+    },
   };
 }

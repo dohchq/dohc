@@ -35,6 +35,7 @@ export function registerAppPreviewIpcHandlers<
     Workspace
   >["assertMayRunAppCode"];
   executeAppPreview: StartSitePreviewDependencies<Event, Sender, Workspace>["execute"];
+  activeVersionId: StartSitePreviewDependencies<Event, Sender, Workspace>["activeVersionId"];
   withRendererWorkspaceOperation<Result>(
     sender: Sender,
     workspaceId: string,
@@ -51,6 +52,7 @@ export function registerAppPreviewIpcHandlers<
     isSharedView,
     assertMayRunAppCode,
     executeAppPreview,
+    activeVersionId,
     withRendererWorkspaceOperation,
   } = dependencies;
 
@@ -85,6 +87,7 @@ export function registerAppPreviewIpcHandlers<
     isSharedView,
     assertMayRunAppCode,
     execute: executeAppPreview,
+    activeVersionId,
   });
   registerHandler(CHANNELS.startSitePreview, startAppPreview);
 
@@ -97,7 +100,11 @@ export function registerAppPreviewIpcHandlers<
       "The app preview logs request does not target the active workspace. Open the workspace and try again.",
       (operation) =>
         GetSitePreviewLogsResult.parse(
-          operation.state.sitePreviews.status(operation.workspace.workspaceId, input.siteRoot),
+          operation.state.sitePreviews.status({
+            workspaceId: operation.workspace.workspaceId,
+            versionId: input.versionId,
+            siteRoot: input.siteRoot,
+          }),
         ),
     );
   });
@@ -121,6 +128,7 @@ export function registerAppPreviewIpcHandlers<
             }
           },
           workspaceId: operation.workspace.workspaceId,
+          versionId: input.versionId,
           siteRoot: input.siteRoot,
         }),
     );

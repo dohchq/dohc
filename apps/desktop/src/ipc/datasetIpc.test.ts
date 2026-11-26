@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
 import type { ShareLinkPublication } from "../workspaces/datasetBoundApps";
 import { isDatasetOwnerOnly, readError } from "./errorWords";
-import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { flushDatasetSourceCapture } from "../workspaces/datasetSourceCapture";
 import { createDatasetHandler } from "./datasetIpc";
 import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
@@ -1125,6 +1125,31 @@ it("refuses shared-view deletion before reaching owner data", async () => {
     }),
   ).rejects.toThrow(/original workspace/);
   expect(remote.deletePreview).not.toHaveBeenCalled();
+});
+
+it("refuses Collection schema and rule changes away from Main", async () => {
+  for (const action of ["prepare", "prepareMigration"] as const) {
+    const f = fixture();
+    const active = vi
+      .spyOn(VersionedLiveAdapter.prototype, "getActiveVersion")
+      .mockResolvedValue({ id: "feature" } as Awaited<
+        ReturnType<VersionedLiveAdapter["getActiveVersion"]>
+      >);
+    const request =
+      action === "prepare"
+        ? { workspaceId: "workspace", action, descriptorPath: "data/dataset.json" }
+        : {
+            workspaceId: "workspace",
+            action,
+            datasetPath: "data/dataset.json",
+            migrationPath: "data/change.sql",
+          };
+    await expect(f.handler("window", request)).rejects.toThrow(
+      "Collection schema and rule changes can only be approved on Main. Merge this version into Main first.",
+    );
+    expect(active).toHaveBeenCalled();
+    active.mockRestore();
+  }
 });
 
 it("waits for source capture before preparing authored Collection changes", async () => {

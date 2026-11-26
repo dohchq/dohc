@@ -66,7 +66,7 @@ test("stock orders use custom apps, relations, transactions, and attachments thr
       });
     const publish = async (appRoot: string) => {
       const source = await prepareLocalAppPublication(
-        { workspaceId: "stock-workspace", appRoot },
+        { workspaceId: "stock-workspace", appRoot, versionId: "main" },
         {
           adapter,
           deferredWrites: [],

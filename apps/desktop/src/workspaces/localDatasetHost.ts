@@ -56,7 +56,8 @@ import type { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset
 import { parseAppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
 import { createLocalAppStore, type LocalAppStore } from "./localAppStore";
-import { createLocalApps } from "./localApps";
+import { createLocalApps, routeLocalApps } from "./localApps";
+import { createLocalPreviewStore } from "./localPreviewStore";
 import { createServerDatasetApps, type ServerCollectionsTransport } from "./serverDatasetApps";
 import {
   createLocalDatasetApps,
@@ -546,6 +547,8 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       },
     });
     let apps: ReturnType<typeof createLocalDatasetApps>;
+    let previews: { datasets: ReturnType<typeof createLocalDatasetApps> };
+    let onServers: Array<{ close(): Promise<void> }> = [];
     let appStore: LocalAppStore;
     let localApps: ReturnType<typeof createLocalApps>;
     const exportDirectory = () => folderOnce("exports");
@@ -667,7 +670,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           : null;
         const agent = agentContexts.has(context as AgentContext) ? (context as AgentContext) : null;
         if (context !== owner && automation === null && agent === null)
-          return apps.resolveAuthority(context as LocalDatasetAppContext, request);
+          return (previews.datasets.owns(context) ? previews.datasets : apps).resolveAuthority(
+            context as LocalDatasetAppContext,
+            request,
+          );
         if (request.workspaceId !== workspaceId || request.access.kind !== "data")
           throw new Error("Collection access is not permitted.");
         if (agent !== null)
@@ -1808,7 +1814,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           // Admitted Collection responses settle within their own deadline and still record their outcomes.
           await localApps.close();
           // A withdrawal not sent by now is not sent, so it cannot undo an approval made after reopening.
-          await onServer.close();
+          await Promise.all(onServers.map((server) => server.close()));
           await Promise.allSettled([...active]);
           await recovery.close();
           try {
@@ -1835,126 +1841,144 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       charge: (kind, resourceId, bytes) =>
         charge(kind === "dataset" && resourceId ? resourceId : null, bytes),
     });
-    const collections = createLocalCollectionApps({
-      db,
-      store: appStore,
-      workspaceId,
-      assertCurrent,
-      transaction: commit,
-      charge: (bytes) => charge(null, bytes),
-      engine() {
-        if (!options.collectionEngine)
-          throw new Error("Document Collection apps are unavailable here.");
-        return options.collectionEngine();
-      },
-      author(activated) {
-        if (!options.collectionAuthor)
-          throw new Error("Document Collection apps are unavailable here.");
-        return options.collectionAuthor(activated);
-      },
-    });
-    apps = createLocalDatasetApps({
-      db,
-      store: appStore,
-      workspaceId,
-      ownerId,
-      assertCurrent,
-      agentRun: () => options.agentRun?.() ?? null,
-      localPersonId: () => options.localPersonId(),
-      approved: (datasetId) => host.approvedArtifacts(owner, { workspaceId, datasetId }),
-      bind: (operations, commit) => host.setBindings(owner, { workspaceId, operations }, commit),
-      invoke: (context, input) =>
-        tracked(() =>
-          trackDatasetOperation(input.datasetId, () =>
-            host.invoke(context, { ...input, signal: signal(input.signal) }),
+    const appsOver = (store: LocalAppStore, preview: boolean) => {
+      const collections = createLocalCollectionApps({
+        db,
+        store,
+        workspaceId,
+        assertCurrent,
+        transaction: commit,
+        charge: (bytes) => charge(null, bytes),
+        engine() {
+          if (!options.collectionEngine)
+            throw new Error("Document Collection apps are unavailable here.");
+          return options.collectionEngine();
+        },
+        author(activated) {
+          if (!options.collectionAuthor)
+            throw new Error("Document Collection apps are unavailable here.");
+          return options.collectionAuthor(activated);
+        },
+      });
+      const datasets = createLocalDatasetApps({
+        db,
+        store,
+        preview,
+        workspaceId,
+        ownerId,
+        assertCurrent,
+        agentRun: () => options.agentRun?.() ?? null,
+        localPersonId: () => options.localPersonId(),
+        approved: (datasetId) => host.approvedArtifacts(owner, { workspaceId, datasetId }),
+        bind: (operations, commit) =>
+          preview ? commit() : host.setBindings(owner, { workspaceId, operations }, commit),
+        invoke: (context, input) =>
+          tracked(() =>
+            trackDatasetOperation(input.datasetId, () =>
+              host.invoke(context, { ...input, signal: signal(input.signal) }),
+            ),
           ),
+        upload: (context, input) => local.upload(input, context),
+        readFile: (context, input, fileId) =>
+          tracked(() =>
+            host.readOperation(context, { ...input, signal: signal(input.signal) }, (result) => {
+              if (
+                !result ||
+                typeof result !== "object" ||
+                Array.isArray(result) ||
+                Object.keys(result).length !== 1 ||
+                result.fileId !== fileId
+              )
+                throw new Error("This action does not grant access to the file.");
+              return readFileBytes({ ...input, fileId }, true);
+            }),
+          ),
+        attempt(context, input, request) {
+          const admitted = host.authorize(context, input);
+          const authority = admitted.authority;
+          if (admitted.operation.readOnly || !authority.appId)
+            throw new Error("This action cannot keep a pending submission.");
+          return attempts.request(
+            {
+              workspaceId,
+              datasetId: input.datasetId,
+              appId: authority.appId,
+              principalKey: authority.principalKey,
+              operationId: input.operationId,
+              revisionSha256: input.revisionSha256,
+            },
+            request,
+            () => {
+              const current = host.authorize(context, input);
+              if (
+                current.operation.readOnly ||
+                JSON.stringify(current.authority) !== JSON.stringify(authority)
+              )
+                throw new Error("This app approval changed. Prepare the app again.");
+            },
+          );
+        },
+        datasetRevision: localDatasetRevision,
+        subscribeDatasets,
+      });
+      const onServer = createServerDatasetApps({
+        store,
+        preview,
+        workspaceId,
+        assertCurrent,
+        agentRun: () => options.agentRun?.() ?? null,
+        lifetime: lifetime.signal,
+        datasetRevision: (datasetId) => serverRevisions.get(datasetId) ?? 0,
+        subscribeDatasets,
+        onDatasetRevision: notifyChange,
+        server: {
+          approve: (candidate, signal) => serverApps().approve(candidate, signal),
+          withdraw: (datasetId, publicationId, signal) =>
+            serverApps().withdraw(datasetId, publicationId, signal),
+          request: (publicationId, action, body, signal) =>
+            serverApps().request(publicationId, action, body, signal),
+          owner: (datasetId, route, body, signal) =>
+            serverApps().owner(datasetId, route, body, signal),
+        },
+      });
+      const serverApps = () => {
+        const server = options.collectionsServer?.();
+        if (!server) throw new Error("This workspace's Collections are on this computer.");
+        return server;
+      };
+      // A syncing workspace's apps reach its Collections on the server; asked each time, as sync can start or stop.
+      const pick = () => (options.collectionsServer?.() ? onServer : datasets);
+      const datasetApps: typeof datasets = {
+        current: (...args) => pick().current(...args),
+        resolveAuthority: datasets.resolveAuthority,
+        owns: datasets.owns,
+        activate: (...args) => pick().activate(...args),
+        withdrawBinding: (...args) => pick().withdrawBinding(...args),
+        describe: (...args) => pick().describe(...args),
+        request: (...args) => pick().request(...args),
+        readBrowserFile: (...args) => pick().readBrowserFile(...args),
+        datasetRevisions: (...args) => pick().datasetRevisions(...args),
+        subscribeDatasetChanges: (...args) => pick().subscribeDatasetChanges(...args),
+      };
+      return {
+        datasets,
+        onServer,
+        apps: createLocalApps(
+          store,
+          datasetApps,
+          collections,
+          createLocalUnconnectedApps({ store, workspaceId, assertCurrent }),
+          () => notifyChange(null),
+          () => !options.collectionsServer?.(),
         ),
-      upload: (context, input) => local.upload(input, context),
-      readFile: (context, input, fileId) =>
-        tracked(() =>
-          host.readOperation(context, { ...input, signal: signal(input.signal) }, (result) => {
-            if (
-              !result ||
-              typeof result !== "object" ||
-              Array.isArray(result) ||
-              Object.keys(result).length !== 1 ||
-              result.fileId !== fileId
-            )
-              throw new Error("This action does not grant access to the file.");
-            return readFileBytes({ ...input, fileId }, true);
-          }),
-        ),
-      attempt(context, input, request) {
-        const admitted = host.authorize(context, input);
-        const authority = admitted.authority;
-        if (admitted.operation.readOnly || !authority.appId)
-          throw new Error("This action cannot keep a pending submission.");
-        return attempts.request(
-          {
-            workspaceId,
-            datasetId: input.datasetId,
-            appId: authority.appId,
-            principalKey: authority.principalKey,
-            operationId: input.operationId,
-            revisionSha256: input.revisionSha256,
-          },
-          request,
-          () => {
-            const current = host.authorize(context, input);
-            if (
-              current.operation.readOnly ||
-              JSON.stringify(current.authority) !== JSON.stringify(authority)
-            )
-              throw new Error("This app approval changed. Prepare the app again.");
-          },
-        );
-      },
-      datasetRevision: localDatasetRevision,
-      subscribeDatasets,
-    });
-    const onServer = createServerDatasetApps({
-      store: appStore,
-      workspaceId,
-      assertCurrent,
-      agentRun: () => options.agentRun?.() ?? null,
-      lifetime: lifetime.signal,
-      datasetRevision: (datasetId) => serverRevisions.get(datasetId) ?? 0,
-      subscribeDatasets,
-      onDatasetRevision: notifyChange,
-      server: {
-        approve: (candidate, signal) => serverApps().approve(candidate, signal),
-        withdraw: (datasetId, publicationId, signal) =>
-          serverApps().withdraw(datasetId, publicationId, signal),
-        request: (publicationId, action, body, signal) =>
-          serverApps().request(publicationId, action, body, signal),
-      },
-    });
-    const serverApps = () => {
-      const server = options.collectionsServer?.();
-      if (!server) throw new Error("This workspace's Collections are on this computer.");
-      return server;
+      };
     };
-    // A syncing workspace's apps reach its Collections on the server; asked each time, as sync can start or stop.
-    const pick = () => (options.collectionsServer?.() ? onServer : apps);
-    const datasetApps: typeof apps = {
-      current: (...args) => pick().current(...args),
-      resolveAuthority: apps.resolveAuthority,
-      activate: (...args) => pick().activate(...args),
-      withdrawBinding: (...args) => pick().withdrawBinding(...args),
-      describe: (...args) => pick().describe(...args),
-      request: (...args) => pick().request(...args),
-      readBrowserFile: (...args) => pick().readBrowserFile(...args),
-      datasetRevisions: (...args) => pick().datasetRevisions(...args),
-      subscribeDatasetChanges: (...args) => pick().subscribeDatasetChanges(...args),
-    };
-    localApps = createLocalApps(
-      appStore,
-      datasetApps,
-      collections,
-      createLocalUnconnectedApps({ store: appStore, workspaceId, assertCurrent }),
-      () => notifyChange(null),
-      () => !options.collectionsServer?.(),
-    );
+    const main = appsOver(appStore, false);
+    const preview = appsOver(createLocalPreviewStore(assertCurrent), true);
+    previews = preview;
+    apps = main.datasets;
+    onServers = [main.onServer, preview.onServer];
+    localApps = routeLocalApps(main.apps, preview.apps);
     return { ...local, apps: localApps };
   } catch (error) {
     closed = true;

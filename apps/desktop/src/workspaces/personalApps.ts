@@ -303,6 +303,9 @@ export function createPersonalApps(options: {
         authorityRevision: 1,
       }),
       withdraw: async () => {},
+      owner: async () => {
+        throw new Error("Personal apps open on Main only.");
+      },
       async request(publicationId, action, body, signal) {
         const capability = selectDatasetCapability(
           datasetCapabilitiesOf(store.row(publicationId).candidate),
@@ -385,7 +388,10 @@ export function createPersonalApps(options: {
   return {
     backend,
     has: (publicationId: string) => store.has(publicationId),
-    list: (appRoot: string) => store.list(appRoot).map((row) => apps.describe(row)),
+    list: (appRoot: string) =>
+      store
+        .list(appRoot)
+        .map((row) => ({ ...apps.describe(row), versionId: "main", readOnlyPreview: false })),
     activate: apps.activate,
     async withdraw(publicationId: string, expected: number) {
       const ended = store.withdraw(publicationId, expected, apps.withdrawBinding);

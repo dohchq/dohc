@@ -152,7 +152,9 @@ export function SitePreviewPage(props: {
   onCollectionsChange?: () => void;
   // The workspace's server connection, for Review app's Share links.
   access?: ComponentProps<typeof OwnerAppPublication>["access"];
+  version?: { id: string; name: string } | null;
 }) {
+  const versionId = props.version?.id ?? "main";
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [preview, setPreview] = useState<StartSitePreviewResult | null>(null);
   const [previewLogs, setPreviewLogs] = useState<StartSitePreviewResult["logs"]>([]);
@@ -204,7 +206,7 @@ export function SitePreviewPage(props: {
       mountedRef.current = false;
     };
   }, []);
-  const siteContext = `${props.workspaceId}\0${props.siteRoot}`;
+  const siteContext = `${props.workspaceId}\0${versionId}\0${props.siteRoot}`;
   siteContextRef.current = siteContext;
   // The app whose review is open. Another app or workspace never shows it.
   const [reviewFor, setReviewFor] = useState<string | null>(null);
@@ -274,10 +276,15 @@ export function SitePreviewPage(props: {
   useEffect(() => {
     return () => {
       void bridge()
-        .stopSitePreview({ workspaceId: props.workspaceId, siteRoot: props.siteRoot, holderId })
+        .stopSitePreview({
+          workspaceId: props.workspaceId,
+          versionId,
+          siteRoot: props.siteRoot,
+          holderId,
+        })
         .catch(() => undefined);
     };
-  }, [holderId, props.workspaceId, props.siteRoot]);
+  }, [holderId, props.workspaceId, props.siteRoot, versionId]);
 
   // getSitePackage intentionally returns the deepest containing site for a
   // path (see requireExactSiteRoot's doc comment), so a stale tab whose own
@@ -338,6 +345,7 @@ export function SitePreviewPage(props: {
         if (
           event.holderId !== holderId ||
           event.workspaceId !== props.workspaceId ||
+          event.versionId !== versionId ||
           event.siteRoot !== props.siteRoot ||
           event.generation <= generationRef.current
         ) {
@@ -348,7 +356,7 @@ export function SitePreviewPage(props: {
         // A start of this surface that the newer one replaced ends here.
         setRunningMode(null);
       }),
-    [holderId, props.siteRoot, props.workspaceId, showPreview],
+    [holderId, props.siteRoot, props.workspaceId, showPreview, versionId],
   );
 
   // `restart` is a start the person asked for: it runs the preview again
@@ -375,6 +383,7 @@ export function SitePreviewPage(props: {
       try {
         const result = await bridge().startSitePreview({
           workspaceId: props.workspaceId,
+          versionId,
           siteRoot: props.siteRoot,
           mode,
           holderId,
@@ -526,6 +535,7 @@ export function SitePreviewPage(props: {
     try {
       const result = await bridge().getSitePreviewLogs({
         workspaceId: props.workspaceId,
+        versionId,
         siteRoot: props.siteRoot,
       });
       if (
@@ -579,7 +589,7 @@ export function SitePreviewPage(props: {
     if (runsCode && trust.trusted === null && !trust.readFailed) return;
     const held = runsCode && trust.trusted !== true;
 
-    const autoStartKey = `${props.workspaceId}:${props.siteRoot}:${mode}`;
+    const autoStartKey = `${siteContext}:${mode}`;
     if (autoStartKeyRef.current === autoStartKey) return;
     autoStartKeyRef.current = autoStartKey;
     if (!held) {
@@ -596,6 +606,7 @@ export function SitePreviewPage(props: {
     props.sharedView,
     props.siteRoot,
     props.workspaceId,
+    siteContext,
     start,
     trust.readFailed,
     trust.trusted,
@@ -647,6 +658,7 @@ export function SitePreviewPage(props: {
     try {
       await bridge().stopSitePreview({
         workspaceId: props.workspaceId,
+        versionId,
         siteRoot: props.siteRoot,
         holderId,
       });
@@ -682,6 +694,7 @@ export function SitePreviewPage(props: {
   const appView = useAppView({
     workspaceId: props.workspaceId,
     appRoot: props.siteRoot,
+    versionId,
     enabled: needsPublication,
     visible: props.visible ?? true,
     focused: props.focused ?? false,
@@ -791,6 +804,20 @@ export function SitePreviewPage(props: {
             Shared
           </span>
         ) : null}
+        {props.version ? (
+          <span
+            data-testid="site-preview-version"
+            className="min-w-0 shrink truncate text-[12px] text-muted"
+            title={props.version.name}
+          >
+            {props.version.name}
+          </span>
+        ) : null}
+        {props.version && needsPublication ? (
+          <span data-testid="site-preview-read-only" className="shrink-0 text-[12px] text-muted">
+            Read-only preview
+          </span>
+        ) : null}
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
           {props.onShowSource ? (
             <IconButton
@@ -819,6 +846,7 @@ export function SitePreviewPage(props: {
             <OwnerAppPublication
               workspaceId={props.workspaceId}
               appRoot={props.siteRoot}
+              version={props.version ?? null}
               title={site.title}
               reportError={props.reportError}
               access={props.access}

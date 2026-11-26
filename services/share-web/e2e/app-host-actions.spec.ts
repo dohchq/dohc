@@ -405,7 +405,7 @@ test("local app copyText, multi-page print, anti-spam, and rapid parallel querie
     );
     const publication = await backend.apps.activate(
       await prepareLocalAppPublication(
-        { workspaceId: "w", appRoot: "app" },
+        { workspaceId: "w", appRoot: "app", versionId: "main" },
         {
           adapter,
           deferredWrites: [],

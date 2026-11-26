@@ -98,6 +98,7 @@ describe("apps pinned to the sidebar", () => {
     expect(bridge.startSitePreview).toHaveBeenCalledWith({
       workspaceId: WORKSPACE.workspaceId,
       siteRoot: "apps/trip",
+      versionId: "main",
       mode: "static",
       holderId: expect.any(String),
       restart: false,

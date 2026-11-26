@@ -56,6 +56,7 @@ describe("renderer reload admission", () => {
     });
     const catalogGet = vi.fn(async () => null);
     const startSitePreview = createStartSitePreviewHandler({
+      activeVersionId: async () => "main",
       authority: {
         requireTrustedSender: (event: { sender: typeof renderer }) => event.sender,
         withActiveWorkspace: async (

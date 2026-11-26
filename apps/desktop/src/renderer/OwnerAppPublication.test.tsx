@@ -939,6 +939,8 @@ describe("owner app publication", () => {
       datasetCapability: approvedAccess,
       approved: true,
       active: true,
+      versionId: "main",
+      readOnlyPreview: false,
     };
     const collectionRow = {
       publicationId: "d".repeat(64),
@@ -949,6 +951,8 @@ describe("owner app publication", () => {
       active: true,
       collectionCapability: approvedCollection,
       pendingCreates: 0,
+      versionId: "main",
+      readOnlyPreview: false,
     };
     const checked: Extract<OwnerAppPublicationResult, { kind: "localChecked" }> = {
       kind: "localChecked",
@@ -1027,10 +1031,10 @@ describe("owner app publication", () => {
       await ready();
       expect(approveButton().textContent).toBe("Approve and open");
       expect(actions("prepareLocal")).toEqual([
-        { action: "prepareLocal", workspaceId: "ws-trip", appRoot: "trip" },
+        { action: "prepareLocal", workspaceId: "ws-trip", appRoot: "trip", versionId: "main" },
       ]);
       expect(actions("checkLocal")).toEqual([
-        { action: "checkLocal", workspaceId: "ws-trip", appRoot: "trip" },
+        { action: "checkLocal", workspaceId: "ws-trip", appRoot: "trip", versionId: "main" },
       ]);
       const access = screen.getByTestId("app-access");
       expect(within(access).getByText("Orders")).toBeTruthy();
@@ -1643,6 +1647,8 @@ it("shows every bound Collection and its alias in the local review dialog for a 
             datasetCapabilities: [expensesCap, workoutsCap],
             approved: true,
             active: true,
+            versionId: "main",
+            readOnlyPreview: false,
           },
         ],
       };

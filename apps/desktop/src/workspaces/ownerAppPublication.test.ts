@@ -124,7 +124,7 @@ it("refuses to approve a folder without app.publish.json on this device, before 
   h.sources.set("app/index.html", "<p>Notes</p>");
   await expect(
     prepareLocalAppPublication(
-      { workspaceId: "w", appRoot: "app" },
+      { workspaceId: "w", appRoot: "app", versionId: "main" },
       {
         adapter: h.adapter,
         signal: h.controller.signal,
@@ -145,7 +145,7 @@ describe("local app source revision", () => {
     assertCurrent() {},
     deferredWrites: h.hooks.deferredWrites,
   });
-  const app = { workspaceId: "w", appRoot: "app" };
+  const app = { workspaceId: "w", appRoot: "app", versionId: "main" };
 
   it("matches the approved revision until a source file changes, and compiles nothing", async () => {
     const h = harness();
@@ -185,7 +185,10 @@ describe("local app source revision", () => {
   it("refuses an app in shared-with-me and a source waiting to be written", async () => {
     const h = harness();
     await expect(
-      readLocalAppSource({ workspaceId: "w", appRoot: "shared-with-me/app" }, local(h)),
+      readLocalAppSource(
+        { workspaceId: "w", appRoot: "shared-with-me/app", versionId: "main" },
+        local(h),
+      ),
     ).rejects.toThrow();
     h.hooks.deferredWrites.push("app/main.ts");
     await expect(readLocalAppSource(app, local(h))).rejects.toThrow("app/main.ts");
@@ -585,7 +588,7 @@ describe("owner dataset publication", () => {
     const h = harness();
     h.setDeclaration(declaration);
     const source = await readLocalAppSource(
-      { workspaceId: "w", appRoot: "app" },
+      { workspaceId: "w", appRoot: "app", versionId: "main" },
       {
         adapter: h.adapter,
         signal: h.controller.signal,
@@ -752,7 +755,7 @@ describe("owner dataset publication", () => {
     });
 
     const localSource = await readLocalAppSource(
-      { workspaceId: "w", appRoot: "app" },
+      { workspaceId: "w", appRoot: "app", versionId: "main" },
       {
         adapter: h.adapter,
         signal: h.controller.signal,
@@ -761,7 +764,7 @@ describe("owner dataset publication", () => {
       },
     );
     const { candidate } = await prepareLocalAppPublication(
-      { workspaceId: "w", appRoot: "app" },
+      { workspaceId: "w", appRoot: "app", versionId: "main" },
       {
         adapter: h.adapter,
         signal: h.controller.signal,
@@ -919,7 +922,7 @@ describe("owner dataset publication", () => {
 
     // Local preparation succeeds and sorts capabilities deterministically with aliases preserved.
     const localPrepared = await prepareLocalAppPublication(
-      { workspaceId: "w", appRoot: "app" },
+      { workspaceId: "w", appRoot: "app", versionId: "main" },
       {
         deferredWrites: [],
         adapter: h.adapter,
@@ -949,7 +952,7 @@ describe("owner dataset publication", () => {
     });
     await expect(
       prepareLocalAppPublication(
-        { workspaceId: "w", appRoot: "app" },
+        { workspaceId: "w", appRoot: "app", versionId: "main" },
         {
           deferredWrites: [],
           adapter: h.adapter,

@@ -53,6 +53,7 @@ export interface StartSitePreviewDependencies<
   // Throws unless this computer trusts the workspace to run its apps' code.
   assertMayRunAppCode(workspace: Workspace): Promise<unknown>;
   execute(input: SitePreviewExecutionInput): Promise<SitePreviewExecution<SitePreviewResultBody>>;
+  activeVersionId(workspace: Workspace): Promise<string>;
 }
 
 function assertPreviewModeAllowed(
@@ -89,11 +90,15 @@ export function createStartSitePreviewHandler<
       "start the preview again",
       async ({ workspace, session }) => {
         const isCurrent = () => session.isCurrent();
+        const versionId = await dependencies.activeVersionId(workspace);
+        if (payload.versionId !== undefined && payload.versionId !== versionId)
+          throw new Error("Switch to this version in Versions to preview its apps.");
         return StartSitePreviewAnswer.parse(
           await dependencies.lifecycle.acquire({
             holderId: payload.holderId,
             senderId: sender.id,
             workspaceId: payload.workspaceId,
+            versionId,
             siteRoot: payload.siteRoot,
             mode: payload.mode,
             restart: payload.restart,

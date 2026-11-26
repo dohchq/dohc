@@ -229,7 +229,7 @@ describe("dataset agent wakes", () => {
       sources.set("Budget/dataset.json", JSON.stringify(f.approved.definition));
       const adapter = sourceCaptureAdapter(sources, { workspaceId: "workspace" });
       const prepared = await prepareLocalAppPublication(
-        { workspaceId: "workspace", appRoot: "form" },
+        { workspaceId: "workspace", appRoot: "form", versionId: "main" },
         {
           deferredWrites: [],
           adapter,

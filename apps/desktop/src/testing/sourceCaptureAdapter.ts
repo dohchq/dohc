@@ -27,6 +27,7 @@ export function sourceCaptureAdapter(
       async sendRequest(request) {
         const params = request.params as Record<string, unknown>;
         options.onRequest?.(request.method, params);
+        if (request.method === "versions.active") return { id: request.id, result: null };
         if (request.method === "files.resolve") {
           const targets = params.targets as Array<{ path?: string; objectId?: string }>;
           return {
