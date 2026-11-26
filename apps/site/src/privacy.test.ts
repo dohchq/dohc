@@ -12,6 +12,7 @@ const KNOWN_HOSTS = new Set([
   "github.com",
   "docs.github.com",
   "dohc.computer",
+  "drive.dohc.computer",
   "loops.so",
   "posthog.com",
   "us.posthog.com",
