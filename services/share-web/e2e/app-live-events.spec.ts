@@ -11,7 +11,7 @@ function watch(page?: Page) {
   page.on("request", (request) => {
     const path = new URL(request.url()).pathname;
     paths.push(path);
-    if (path === "/events") since.push(JSON.parse(request.postData() ?? "{}").since);
+    if (path === "/events") since.push(JSON.parse(request.postData() ?? "{}").since[""] ?? 0);
   });
   page.on("console", (message) => {
     if (message.type() === "error") errors.push(message.text());
@@ -69,7 +69,7 @@ test("a share-link app hears another viewer's change without polling, until its 
       const response = await fetch("/events", {
         method: "POST",
         headers: { "content-type": "application/json", "x-dohc-app-proof": "F".repeat(43) },
-        body: JSON.stringify({ since: 0 }),
+        body: JSON.stringify({ since: {} }),
       });
       return response.status;
     });
