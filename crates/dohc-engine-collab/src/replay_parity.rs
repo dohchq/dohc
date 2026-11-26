@@ -1916,7 +1916,6 @@ fn safe_read_any(decoder: &mut DecoderV1<'_>, depth: usize) -> Result<Any, Colla
     })
 }
 
-/// The identity payload the scan records for an `XmlElement` named `name`.
 fn xml_element_identity(name: &str) -> String {
     let mut canonical = vec![TYPE_REFS_XML_ELEMENT];
     canonical.extend_from_slice(name.as_bytes());

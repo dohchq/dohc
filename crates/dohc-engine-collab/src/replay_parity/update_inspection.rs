@@ -440,8 +440,6 @@ impl<'a> Index<'a> {
         Ok(None)
     }
 
-    /// Whether the head block at `at` is a boundary: a `block` element in
-    /// `sequence`.
     fn is_boundary(&mut self, at: At) -> Result<bool, StructuralHold> {
         let block = self.block(at);
         if block.fresh || block.kind != BlockKind::Item(BLOCK_ITEM_TYPE_REF_NUMBER) {
@@ -458,8 +456,6 @@ impl<'a> Index<'a> {
         Ok(key.is_none() && is_root(parent, ROOT_SEQUENCE))
     }
 
-    /// Check a format-2 deletion of `client`'s live head clocks `[start,
-    /// end)`, block by block.
     fn delete_live(
         &mut self,
         client: ClientID,
@@ -486,9 +482,6 @@ impl<'a> Index<'a> {
         Ok(())
     }
 
-    /// A formatting item, a boundary, a boundary's attribute, and a
-    /// `containers` record this candidate writes again may be deleted. All but
-    /// a formatting item make the head be read again.
     fn may_delete(&mut self, at: At) -> Result<(), StructuralHold> {
         let BlockKind::Item(content) = self.block(at).kind else {
             return Err(StructuralHold::LiveDeletion);
