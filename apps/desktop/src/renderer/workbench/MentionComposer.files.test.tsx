@@ -10,12 +10,14 @@ function Harness(props: {
   composerId?: string;
   initial?: string;
   composerKey?: string;
+  surface?: "post";
   onSend?: () => void;
 }) {
   const [value, setValue] = useState(props.initial ?? "");
   return (
     <MentionComposer
       key={props.composerKey}
+      surface={props.surface}
       testIdPrefix="chats"
       composerId={props.composerId ?? "chats-composer"}
       value={value}
@@ -126,6 +128,16 @@ describe("MentionComposer files", () => {
 
     expect(onAddFiles).toHaveBeenCalledWith(expect.any(Function), undefined);
     expect(screen.getByTestId<HTMLTextAreaElement>("chats-composer").value).toBe("@[notes.txt] ");
+  });
+
+  it("opens the picker from a new post's paperclip with the keyboard", async () => {
+    const onAddFiles = vi.fn<AddMessageFiles>(async () => {});
+    render(<Harness surface="post" onAddFiles={onAddFiles} />);
+    await userEvent.click(screen.getByTestId("chats-composer"));
+    await userEvent.tab();
+    expect(document.activeElement).toBe(screen.getByTestId("chats-add-files"));
+    await userEvent.keyboard("{Enter}");
+    expect(onAddFiles).toHaveBeenCalledWith(expect.any(Function), undefined);
   });
 
   it("links nothing into another chat's box", async () => {

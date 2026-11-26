@@ -881,6 +881,9 @@ export function MentionComposer(props: {
           : `relative flex shrink-0 flex-col overflow-hidden rounded-[10px] border border-line bg-bg transition-colors duration-75 focus-within:border-ink/45 data-dropping:border-accent! ${COMPOSER_INSET[props.inset ?? "stream"]}`
       }
       data-dropping={dropping || undefined}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false);
+      }}
       onSubmit={(event) => {
         event.preventDefault();
         if (adding === 0) props.onSend();
@@ -1179,7 +1182,6 @@ export function MentionComposer(props: {
           fileRequest.current += 1;
           setMenuOpen(false);
           setFileStage(null);
-          setFocused(false);
         }}
         className={
           isPost
