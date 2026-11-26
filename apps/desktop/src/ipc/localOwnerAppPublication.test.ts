@@ -265,7 +265,11 @@ describe("local app publication review", () => {
         },
       }),
       calling = { ...candidate, capabilities: [], external: [usage!] };
-    vi.mocked(prepareLocalAppPublication).mockResolvedValue({ candidate: calling, files: [] });
+    vi.mocked(prepareLocalAppPublication).mockResolvedValue({
+      candidate: calling,
+      files: [],
+      likelySecrets: [],
+    });
     await expect(h.prepare()).resolves.toMatchObject({ external: [usage] });
     await expect(
       h.handler(
