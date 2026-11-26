@@ -248,6 +248,10 @@ const LISTED_CAPABILITIES = {
     ipc: ["requestAccessRefresh"],
     mcpReason: "Available through dohc access refresh; no desktop MCP tool.",
   }),
+  "cloud.connect.link.take": capability(
+    "Take the server a dohc://connect link named, for the window it brought forward.",
+    { ipc: ["takeConnectServerRequest"] },
+  ),
   "share.handoff.status.read": capability(
     "Read the pending dohc://open handoff status on this computer.",
     { ipc: ["getShareHandoffStatus"] },

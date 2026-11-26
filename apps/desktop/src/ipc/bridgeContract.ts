@@ -9411,6 +9411,19 @@ export const systemPrivacySettingsOperations = {
 
 // The server account this computer is connected to. Main sends both requests
 // with its own session; the window never sees the session.
+// The server a dohc://connect link named. Only the window the link brought
+// forward gets it, once; any other window reads null.
+export const connectServerOperations = {
+  takeConnectServerRequest: {
+    capabilityId: "cloud.connect.link.take",
+    scope: "device",
+    channel: "desktop:take-connect-server-request",
+    payload: z.void(),
+    result: z.string().nullable(),
+    guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
 export const serverAccountOperations = {
   previewServerAccountDeletion: {
     capabilityId: "account.delete.preview",
@@ -9464,6 +9477,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof updateDownloadOperations>,
     OperationBridge<typeof systemPrivacySettingsOperations>,
     OperationBridge<typeof serverAccountOperations>,
+    OperationBridge<typeof connectServerOperations>,
     OperationBridge<typeof accessOperations>,
     OperationBridge<typeof memberOperations>,
     OperationBridge<typeof directMessageOperations>,
@@ -9589,6 +9603,8 @@ export interface DohcDesktopBridge
   cloudStatus(payload?: CloudStatusPayload): Promise<CloudStatusResult>;
   cloudLogout(): Promise<void>;
   onShareHandoffStatus(listener: (status: ShareHandoffStatus) => void): () => void;
+  // A dohc://connect link is waiting for this window: take it.
+  onConnectServerRequest(listener: () => void): () => void;
   cloudEnableSync(payload: CloudEnableSyncPayload): Promise<SyncStatusResult>;
   cloudJoinWorkspace(payload: CloudJoinWorkspacePayload): Promise<CloudJoinWorkspaceResult>;
   // Collection automations, for the ⚡ panel.

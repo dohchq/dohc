@@ -1,3 +1,4 @@
+import { parseConnectServerUrl } from "@dohc/workspace-contracts/deep-links";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { describe, expect, it, vi } from "vitest";
@@ -401,9 +402,12 @@ describe("account pages", () => {
 });
 
 describe("device verification page", () => {
-  it("asks for a code when the link carries none", async () => {
+  it("shows this server's address and a link that fills it in on the desktop", async () => {
     const body = await (await router()(get("/device"))).text();
-    expect(body).toContain("Enter the code from your device");
+    expect(body).toContain(`<span id="server-address">${ORIGIN}</span>`);
+    const href = /class="button-link open-dohc" href="([^"]+)"/.exec(body)?.[1];
+    expect(parseConnectServerUrl(href!.replaceAll("&amp;", "&"))).toBe(ORIGIN);
+    expect(body).toContain('name="user_code"');
   });
 
   it("requires a signed-in account before claiming a code", async () => {

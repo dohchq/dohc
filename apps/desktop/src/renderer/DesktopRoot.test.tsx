@@ -34,8 +34,15 @@ vi.mock("./WorkspaceManager", () => ({
     onOpenWorkspace: (workspace: Workspace) => void;
     onDismissShareHandoff: () => void;
     onShareHandoffOpened: () => void;
+    connectServerUrl?: string | null;
+    onConnectServerShown?: () => void;
   }) => (
     <div data-testid="first-run">
+      {props.connectServerUrl ? (
+        <button type="button" data-testid="connect-server" onClick={props.onConnectServerShown}>
+          {props.connectServerUrl}
+        </button>
+      ) : null}
       {props.workspaces.map((workspace) => (
         <button
           key={workspace.workspaceId}
@@ -164,6 +171,8 @@ describe("workspace summary changes", () => {
         return () => undefined;
       }),
       onWorkspaceActivated: vi.fn(() => () => undefined),
+      takeConnectServerRequest: vi.fn(async () => null),
+      onConnectServerRequest: vi.fn(() => () => undefined),
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async () => ({ status: "idle" })),
     });
@@ -565,6 +574,8 @@ describe("DesktopRoot", () => {
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
       onWorkspaceActivated: vi.fn(() => () => undefined),
+      takeConnectServerRequest: vi.fn(async () => null),
+      onConnectServerRequest: vi.fn(() => () => undefined),
       onShareHandoffStatus: vi.fn((callback: (status: ShareHandoffStatus) => void) => {
         calls.push("subscribe");
         handoffEvent = callback;
@@ -603,6 +614,8 @@ describe("DesktopRoot", () => {
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
       onWorkspaceActivated: vi.fn(() => () => undefined),
+      takeConnectServerRequest: vi.fn(async () => null),
+      onConnectServerRequest: vi.fn(() => () => undefined),
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
       dismissShareHandoff: vi.fn(async () => undefined),
@@ -612,6 +625,49 @@ describe("DesktopRoot", () => {
 
     expect(await screen.findByTestId("first-run")).toBeTruthy();
     expect(screen.queryByTestId("handoff-active")).toBeNull();
+  });
+
+  it("takes a connect link's server when main says one is waiting, and holds it until it is shown", async () => {
+    let waiting: string | null = null;
+    let ping: (() => void) | null = null;
+    vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
+      ...windowBridge(),
+      getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
+      cloudStatus: vi.fn(async () => ({ connected: false })),
+      onCloudSessionChanged: vi.fn(() => () => undefined),
+      getUserSettings: vi.fn(async () => ({
+        settings: DEFAULT_USER_SETTINGS,
+        source: "default" as const,
+      })),
+      onAgentColorChanged: vi.fn(() => () => undefined),
+      onUserSettingsChanged: vi.fn(() => () => undefined),
+      onWorkspaceActivity: vi.fn(() => () => undefined),
+      onWorkspaceActivated: vi.fn(() => () => undefined),
+      takeConnectServerRequest: vi.fn(async () => {
+        const serverUrl = waiting;
+        waiting = null;
+        return serverUrl;
+      }),
+      onConnectServerRequest: vi.fn((listener: () => void) => {
+        ping = listener;
+        return () => undefined;
+      }),
+      onShareHandoffStatus: vi.fn(() => () => undefined),
+      getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
+      dismissShareHandoff: vi.fn(async () => undefined),
+    });
+
+    render(<DesktopRoot />);
+    expect(await screen.findByTestId("first-run")).toBeTruthy();
+
+    expect(screen.queryByTestId("connect-server")).toBeNull();
+
+    waiting = "https://drive.example";
+    act(() => ping?.());
+    expect((await screen.findByTestId("connect-server")).textContent).toBe("https://drive.example");
+    fireEvent.click(screen.getByTestId("connect-server"));
+    expect(screen.queryByTestId("connect-server")).toBeNull();
   });
 
   it("renders the states page at its address only with the dev-tools grant", async () => {
@@ -630,6 +686,8 @@ describe("DesktopRoot", () => {
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
       onWorkspaceActivated: vi.fn(() => () => undefined),
+      takeConnectServerRequest: vi.fn(async () => null),
+      onConnectServerRequest: vi.fn(() => () => undefined),
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
       dismissShareHandoff: vi.fn(async () => undefined),
@@ -671,6 +729,8 @@ describe("DesktopRoot", () => {
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
       onWorkspaceActivated: vi.fn(() => () => undefined),
+      takeConnectServerRequest: vi.fn(async () => null),
+      onConnectServerRequest: vi.fn(() => () => undefined),
       onShareHandoffStatus: vi.fn((callback: (status: ShareHandoffStatus) => void) => {
         handoffEvent = callback;
         return () => undefined;
@@ -714,6 +774,8 @@ describe("DesktopRoot", () => {
         activate = callback;
         return () => undefined;
       }),
+      takeConnectServerRequest: vi.fn(async () => null),
+      onConnectServerRequest: vi.fn(() => () => undefined),
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
       dismissShareHandoff: vi.fn(async () => undefined),
@@ -749,6 +811,8 @@ describe("a settings file save", () => {
       }),
       onWorkspaceActivity: vi.fn(() => () => undefined),
       onWorkspaceActivated: vi.fn(() => () => undefined),
+      takeConnectServerRequest: vi.fn(async () => null),
+      onConnectServerRequest: vi.fn(() => () => undefined),
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
       dismissShareHandoff: vi.fn(async () => undefined),
@@ -806,6 +870,8 @@ describe("startup selection", () => {
         return () => undefined;
       }),
       onWorkspaceActivated: vi.fn(() => () => undefined),
+      takeConnectServerRequest: vi.fn(async () => null),
+      onConnectServerRequest: vi.fn(() => () => undefined),
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
       dismissShareHandoff: vi.fn(async () => undefined),
@@ -851,6 +917,8 @@ describe("registry read failure", () => {
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
       onWorkspaceActivated: vi.fn(() => () => undefined),
+      takeConnectServerRequest: vi.fn(async () => null),
+      onConnectServerRequest: vi.fn(() => () => undefined),
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
       dismissShareHandoff: vi.fn(async () => undefined),
@@ -891,6 +959,8 @@ describe("registry grows under an idle first-run window", () => {
         return () => undefined;
       }),
       onWorkspaceActivated: vi.fn(() => () => undefined),
+      takeConnectServerRequest: vi.fn(async () => null),
+      onConnectServerRequest: vi.fn(() => () => undefined),
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
       dismissShareHandoff: vi.fn(async () => undefined),
@@ -937,6 +1007,8 @@ describe("registry emptied under an open workspace", () => {
         return () => undefined;
       }),
       onWorkspaceActivated: vi.fn(() => () => undefined),
+      takeConnectServerRequest: vi.fn(async () => null),
+      onConnectServerRequest: vi.fn(() => () => undefined),
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
       dismissShareHandoff: vi.fn(async () => undefined),
@@ -979,6 +1051,8 @@ describe("reaction writes across first run", () => {
         return () => undefined;
       }),
       onWorkspaceActivated: vi.fn(() => () => undefined),
+      takeConnectServerRequest: vi.fn(async () => null),
+      onConnectServerRequest: vi.fn(() => () => undefined),
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
       dismissShareHandoff: vi.fn(async () => undefined),
@@ -1050,6 +1124,8 @@ describe("opening a notice in another workspace", () => {
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
       onWorkspaceActivated: vi.fn(() => () => undefined),
+      takeConnectServerRequest: vi.fn(async () => null),
+      onConnectServerRequest: vi.fn(() => () => undefined),
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
       dismissShareHandoff: vi.fn(async () => undefined),
@@ -1125,6 +1201,8 @@ describe("the window's title and menu commands", () => {
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
       onWorkspaceActivated: vi.fn(() => () => undefined),
+      takeConnectServerRequest: vi.fn(async () => null),
+      onConnectServerRequest: vi.fn(() => () => undefined),
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
       dismissShareHandoff: vi.fn(async () => undefined),

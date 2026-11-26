@@ -385,6 +385,29 @@ export function DesktopRoot() {
     };
   }, []);
 
+  // A dohc://connect link's server waits here until the shell or the
+  // manager shows it, so a switch between them cannot lose it. Main gives it
+  // only to the window the link brought forward.
+  const [connectServerUrl, setConnectServerUrl] = useState<string | null>(null);
+  const connectServerShown = useCallback(() => setConnectServerUrl(null), []);
+  useEffect(() => {
+    if (isManagerWindow) return;
+    let active = true;
+    const take = () =>
+      void bridge()
+        .takeConnectServerRequest()
+        .then((serverUrl) => {
+          if (active && serverUrl !== null) setConnectServerUrl(serverUrl);
+        })
+        .catch(() => undefined);
+    const unsubscribe = bridge().onConnectServerRequest(take);
+    take();
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [isManagerWindow]);
+
   useEffect(() => {
     const request = ++registryRequest.current;
     void bridge()
@@ -586,6 +609,8 @@ export function DesktopRoot() {
               handoffStatus={shareHandoffStatus}
               onDismissShareHandoff={dismissShareHandoff}
               onShareHandoffOpened={dismissShareHandoff}
+              connectServerUrl={connectServerUrl}
+              onConnectServerShown={connectServerShown}
               onForgot={refreshWorkspaceRegistry}
               onOpenWorkspace={(next) => {
                 setWorkspaces((known) =>
@@ -614,6 +639,8 @@ export function DesktopRoot() {
               handoffStatus={shareHandoffStatus}
               onDismissShareHandoff={dismissShareHandoff}
               onShareHandoffOpened={dismissShareHandoff}
+              connectServerUrl={connectServerUrl}
+              onConnectServerShown={connectServerShown}
               refreshWorkspaceRegistry={refreshWorkspaceRegistry}
               onManageWorkspaces={() => bridge().openWorkspaceManager()}
               sentNotices={sentNotices}

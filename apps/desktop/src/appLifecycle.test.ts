@@ -69,6 +69,14 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
     app,
     runtime: { platform: "win32", argv: [process.execPath], execPath: process.execPath },
     handoff: { slot, pendingCodeChanged: vi.fn() },
+    connectServer: {
+      hold: vi.fn((serverUrl: string) => {
+        log.push(`connect-hold:${serverUrl}`);
+      }),
+      deliver: vi.fn(async () => {
+        log.push("connect-deliver");
+      }),
+    },
     workLinks: {
       open: vi.fn(async (link) => {
         log.push(`work-link:${link.reference}`);
@@ -793,6 +801,32 @@ describe("desktop open intents", () => {
     expect(f.dependencies.workLinks.open).toHaveBeenCalledOnce();
     expect(f.dependencies.windows.showOrCreate).not.toHaveBeenCalled();
   });
+
+  const connectUrl = "dohc://connect?server=https%3A%2F%2Fdrive.dohc.computer";
+
+  it("holds a launch connect link and tells the window once it loads", async () => {
+    const f = fixture((d) => {
+      d.runtime.argv.push(connectUrl);
+    });
+    await boot(f);
+    expect(f.dependencies.connectServer.hold).toHaveBeenCalledWith("https://drive.dohc.computer");
+    expect(f.dependencies.connectServer.deliver).not.toHaveBeenCalled();
+    f.loaded.resolve(true);
+    await vi.waitFor(() => expect(f.dependencies.connectServer.deliver).toHaveBeenCalledOnce());
+  });
+
+  it.each(["open-url", "second-instance"])(
+    "delivers a connect link from %s after startup, and nothing else shows a window",
+    async (source) => {
+      const f = fixture();
+      await boot(f);
+      if (source === "open-url") f.app.emit("open-url", event(), connectUrl);
+      else f.app.emit("second-instance", {}, [process.execPath, connectUrl]);
+      expect(f.dependencies.connectServer.hold).toHaveBeenCalledWith("https://drive.dohc.computer");
+      expect(f.dependencies.connectServer.deliver).toHaveBeenCalledOnce();
+      expect(f.dependencies.windows.showOrCreate).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(["argv", "open-file", "second-instance"])(
     "retains %s failures and reports each once after renderer readiness",

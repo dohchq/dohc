@@ -6,7 +6,10 @@ import {
   receiveShareHandoffArguments,
   type ShareHandoffIntentSlot,
 } from "./shareHandoffIngress";
-import { parseWorkLinkHandoffUrl } from "@dohc/workspace-contracts/deep-links";
+import {
+  parseConnectServerUrl,
+  parseWorkLinkHandoffUrl,
+} from "@dohc/workspace-contracts/deep-links";
 import type { WorkLink } from "@dohc/workspace-contracts/work-links";
 
 interface QuitEvent {
@@ -70,6 +73,12 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
   // Opens a dohc://l/ link's message, or just dohc when no workspace here holds it.
   workLinks: {
     open(link: WorkLink): Promise<void>;
+  };
+  // A dohc://connect link: hold its server for the window that shows it, and
+  // once dohc is running, show that window and tell it.
+  connectServer: {
+    hold(serverUrl: string): void;
+    deliver(): Promise<void>;
   };
   windows: {
     create(): Window;
@@ -161,6 +170,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     runtime,
     handoff,
     workLinks,
+    connectServer,
     windows,
     workspaces,
     bootstrap,
@@ -341,6 +351,17 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     return received;
   }
 
+  function receiveConnectLinks(rawArguments: readonly string[]): boolean {
+    let received = false;
+    for (const rawArgument of rawArguments) {
+      const serverUrl = parseConnectServerUrl(rawArgument);
+      if (serverUrl === null) continue;
+      connectServer.hold(serverUrl);
+      received = true;
+    }
+    return received;
+  }
+
   function flushPendingWorkLink(): void {
     const link = pendingWorkLink;
     pendingWorkLink = null;
@@ -416,6 +437,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
       // activation. They are later intents and must win over launch paths.
       void flushPendingOpenPaths(window);
       flushPendingWorkLink();
+      void connectServer.deliver();
     });
     bootstrapComplete = true;
     void services.warmCredentials().then(() => services.reconcileCloud());
@@ -457,6 +479,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
           handoff.pendingCodeChanged();
         }
         receiveWorkLinks(runtime.argv);
+        receiveConnectLinks(runtime.argv);
       }
 
       app.on("browser-window-created", (_event, window) => {
@@ -476,8 +499,10 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
         const accepted = receiveShareHandoffArguments([rawArgument], handoff.slot);
         if (accepted) handoff.pendingCodeChanged();
         const linked = receiveWorkLinks([rawArgument]);
+        const connecting = receiveConnectLinks([rawArgument]);
         if (!bootstrapComplete) return;
         if (linked) flushPendingWorkLink();
+        else if (connecting) void connectServer.deliver();
         else if (accepted) void windows.showOrCreate();
       });
 
@@ -498,15 +523,18 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
         const accepted = receiveShareHandoffArguments(argv, handoff.slot);
         if (accepted) handoff.pendingCodeChanged();
         const linked = receiveWorkLinks(argv);
+        const connecting = receiveConnectLinks(argv);
         const workspacePaths = collectOpenWorkspaceArgs(argv);
         if (!bootstrapComplete) {
           pendingOpenPaths.push(...workspacePaths);
           return;
         }
         if (linked) flushPendingWorkLink();
-        // A work link shows its own window, and a dohc: argument that is not a
-        // link dohc knows opens nothing.
-        if ((linked || handoffIntent === "rejected") && workspacePaths.length === 0) return;
+        else if (connecting) void connectServer.deliver();
+        // A work or connect link shows its own window, and a dohc: argument
+        // that is not a link dohc knows opens nothing.
+        if ((linked || connecting || handoffIntent === "rejected") && workspacePaths.length === 0)
+          return;
         void windows.showOrCreate().then((window) => openWorkspacePaths(workspacePaths, window));
       });
 

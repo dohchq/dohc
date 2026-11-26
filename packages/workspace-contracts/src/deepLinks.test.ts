@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildConnectServerUrl,
   buildShareHandoffUrl,
   buildWorkLinkHandoffUrl,
+  parseConnectServerUrl,
   parseShareHandoffUrl,
   parseWorkLinkHandoffUrl,
 } from "./deepLinks";
@@ -120,5 +122,37 @@ describe("work link deep links", () => {
   it("keeps the two hosts apart", () => {
     expect(parseShareHandoffUrl(buildWorkLinkHandoffUrl({ server, reference: code }))).toBeNull();
     expect(parseWorkLinkHandoffUrl(buildShareHandoffUrl(code, relayUrl))).toBeNull();
+  });
+});
+
+describe("connect server deep links", () => {
+  it("names the server a person asked dohc to connect to", () => {
+    const url = "dohc://connect?server=https%3A%2F%2Fdrive.dohc.computer";
+    expect(buildConnectServerUrl("https://drive.dohc.computer")).toBe(url);
+    expect(parseConnectServerUrl(url)).toBe("https://drive.dohc.computer");
+    expect(parseConnectServerUrl("DOHC://Connect/?server=https%3A%2F%2Fdrive.dohc.computer")).toBe(
+      "https://drive.dohc.computer",
+    );
+    expect(parseConnectServerUrl(buildConnectServerUrl("http://localhost:4100"))).toBe(
+      "http://localhost:4100",
+    );
+  });
+
+  it.each([
+    "dohc://connect?server=https%3A%2F%2Fdrive.dohc.computer%2F",
+    "dohc://connect?server=https://drive.dohc.computer",
+    "dohc://connect?server=https%3A%2F%2Fu%3Ap%40drive.dohc.computer",
+    "dohc://connect?server=javascript%3Aalert(1)",
+    "dohc://connect?server=https%3A%2F%2Fdrive.dohc.computer&next=x",
+    "dohc://connect?server=%E0%A4%A",
+    "dohc://connect/x?server=https%3A%2F%2Fdrive.dohc.computer",
+    "dohc://open?server=https%3A%2F%2Fdrive.dohc.computer",
+    "other://connect?server=https%3A%2F%2Fdrive.dohc.computer",
+  ])("refuses %s", (url) => {
+    expect(parseConnectServerUrl(url)).toBeNull();
+  });
+
+  it("refuses to build a link for an address that is not an origin", () => {
+    expect(() => buildConnectServerUrl("https://drive.dohc.computer/account")).toThrow();
   });
 });

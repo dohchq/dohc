@@ -38,6 +38,8 @@ function renderRoot(registry: Workspace[], openFailure: Error) {
     takeWorkspacePathOpenFailures: vi.fn(async () => []),
     readOldWindowState: vi.fn(async () => null),
     onOldWindowStateChanged: vi.fn(() => () => undefined),
+    takeConnectServerRequest: vi.fn(async () => null),
+    onConnectServerRequest: vi.fn(() => () => undefined),
     onShareHandoffStatus: vi.fn(() => () => undefined),
     getShareHandoffStatus: vi.fn(async (): Promise<ShareHandoffStatus> => ({ status: "idle" })),
     onWorkspaceActivated: vi.fn(() => () => undefined),

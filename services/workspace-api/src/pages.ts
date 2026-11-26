@@ -1,4 +1,5 @@
 import { ACCOUNT_CSS_PATH, ACCOUNT_JS_PATH } from "./assets";
+import { buildConnectServerUrl } from "@dohc/workspace-contracts/deep-links";
 
 // The browser half of the account lifecycle: server-rendered HTML with one
 // stylesheet and one script, no framework and no build step. Each page carries
@@ -190,7 +191,7 @@ ${STATUS}`,
 }
 
 export type DeviceState =
-  | { kind: "prompt"; userCode?: string; notFound?: boolean }
+  | { kind: "prompt"; serverUrl: string }
   | { kind: "review"; userCode: string; email: string; deviceKind: "phone" | "desktop" }
   | { kind: "expired" }
   | { kind: "invalid" }
@@ -217,15 +218,22 @@ ${STATUS}`,
     });
   }
   if (state.kind === "prompt") {
+    // The address is what dohc's Server address field takes. Open in dohc fills
+    // it in on a computer; the phone app also owns dohc: links but signs in by
+    // scanning, so the stylesheet shows the button only with a mouse or trackpad.
     return shell({
       title: "Connect your device",
       page: "device-prompt",
-      main: `<h1>Enter the code from your device</h1>
-${state.notFound ? "<p>dohc does not know that code. Check it on your device and enter it again.</p>" : "<p>dohc shows this code on the device you are signing in.</p>"}
+      main: `<h1>Connect a device</h1>
+<p>Connect dohc on your computer to this server.</p>
+<div class="server-address"><span id="server-address">${escapeHtml(state.serverUrl)}</span><button type="button" id="copy-server" class="secondary">Copy</button></div>
+<a class="button-link open-dohc" href="${escapeHtml(buildConnectServerUrl(state.serverUrl))}">Open in dohc</a>
+<p>Then enter the code dohc shows.</p>
 <form method="get" action="/device">
-${field("user_code", "Device code", `type="text" name="user_code" autocomplete="off" autocapitalize="characters" spellcheck="false" required autofocus value="${escapeHtml(state.userCode ?? "")}"`)}
+${field("user_code", "Device code", 'type="text" name="user_code" autocomplete="off" autocapitalize="characters" spellcheck="false" required')}
 <button type="submit">Continue</button>
-</form>`,
+</form>
+${STATUS}`,
     });
   }
   if (state.kind === "expired") {

@@ -16,7 +16,9 @@ import type { NoticeTarget } from "../notices/noticeTarget";
 import type { PrivacySettings } from "../settings/userSettings";
 import { bridge } from "./bridge";
 import type { Workspace } from "./DesktopWorkspaceShell";
+import { CloudLogin } from "./CloudLogin";
 import { JoinSyncedWorkspace } from "./JoinSyncedWorkspace";
+import { Overlay } from "./Overlay";
 import { displayPath, NewWorkspaceCard, openExistingFolder } from "./NewWorkspaceCard";
 import { OpenSharedView } from "./OpenSharedView";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
@@ -240,8 +242,13 @@ export function WorkspaceManager(props: {
   handoffStatus?: ShareHandoffStatus;
   onDismissShareHandoff?: () => void;
   onShareHandoffOpened?: () => void;
+  // A dohc://connect link's server, until this manager shows it.
+  connectServerUrl?: string | null;
+  onConnectServerShown?: () => void;
 }) {
   const [joining, setJoining] = useState(false);
+  // The connection dialog a dohc://connect link opened, with its address.
+  const [connectingTo, setConnectingTo] = useState<string | null>(null);
   const [openingShare, setOpeningShare] = useState(false);
   const [privacyOpen, setPrivacyOpen] = useState(false);
   const [pendingPrivacy, setPendingPrivacy] = useState<Partial<PrivacySettings>>({});
@@ -257,6 +264,13 @@ export function WorkspaceManager(props: {
   // them: a route change unmounts the panel, and the failure has to survive
   // it along with the way to try again.
   const connectionNotices = useConnectionNotices();
+  const { connectServerUrl, onConnectServerShown } = props;
+  useEffect(() => {
+    if (!connectServerUrl) return;
+    onConnectServerShown?.();
+    // A dialog already open may be waiting on a code: leave its sign-in alone.
+    setConnectingTo((open) => open ?? connectServerUrl);
+  }, [connectServerUrl, onConnectServerShown]);
   const keptTyping = useKeptTyping();
   const crashReportNotice = useCrashReport(connectionNotices);
   const committedSettingsRef = useRef(props.userSettings ?? null);
@@ -755,6 +769,18 @@ export function WorkspaceManager(props: {
           </div>
         </div>
       </div>
+      {connectingTo !== null ? (
+        <Overlay onClose={() => setConnectingTo(null)}>
+          <CloudLogin
+            initialServerUrl={connectingTo}
+            onClose={() => setConnectingTo(null)}
+            onConnected={() => setConnectingTo(null)}
+            onConnectionError={connectionNotices.reporter((serverUrl) =>
+              setConnectingTo(serverUrl ?? ""),
+            )}
+          />
+        </Overlay>
+      ) : null}
       {removing ? (
         <RemoveFromListDialog
           workspace={removing.workspace}

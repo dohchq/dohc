@@ -802,6 +802,9 @@ function WorkspaceShell(props: {
   handoffStatus?: ShareHandoffStatus;
   onDismissShareHandoff?: () => void;
   onShareHandoffOpened?: () => void;
+  // A dohc://connect link's server, until this shell shows it.
+  connectServerUrl?: string | null;
+  onConnectServerShown?: () => void;
   // Notices sent to this person, owned above the shell.
   sentNotices?: SentNotices;
   // The account deletion review, owned above the shell.
@@ -868,8 +871,9 @@ function WorkspaceShell(props: {
   const [connectionsWorkspaceId, setConnectionsWorkspaceId] = useState<string | null>(null);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
   const [cloudOpen, setCloudOpen] = useState(false);
-  // The address a failed attempt used. Only set when a notice's Try again has
-  // to reopen the connection dialog, and cleared when that dialog closes.
+  // The address the connection dialog opens with: the one a failed attempt
+  // used, when a notice's Try again reopens it, or the one a dohc://connect
+  // link named. Cleared when that dialog closes.
   const [cloudRetryServerUrl, setCloudRetryServerUrl] = useState("");
   // The dialog signs in again to the session's server, for a sign-in the
   // server stopped accepting. Cleared when the dialog closes.
@@ -1745,6 +1749,18 @@ function WorkspaceShell(props: {
     },
     [reviewingAccountDeletion, openCloud, reportShellFailure],
   );
+  // A dohc://connect link fills in the dialog's address. The person still
+  // chooses Connect server. An open dialog may be waiting on a code, and a
+  // deletion review holds the account, so neither is interrupted.
+  const { connectServerUrl, onConnectServerShown } = props;
+  useEffect(() => {
+    if (!connectServerUrl) return;
+    onConnectServerShown?.();
+    if (cloudOpen || reviewingAccountDeletion()) return;
+    setCloudRenew(false);
+    setCloudRetryServerUrl(connectServerUrl);
+    setCloudOpen(true);
+  }, [connectServerUrl, onConnectServerShown, cloudOpen, reviewingAccountDeletion]);
   // After useShellError's, so this shell attaches with its notices started:
   // an answer to a delete sent from the previous workspace's shell reports here.
   useEffect(

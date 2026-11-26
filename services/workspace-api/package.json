@@ -14,6 +14,7 @@
   "dependencies": {
     "@dohc/service-http": "workspace:*",
     "@dohc/workspace-auth": "workspace:*",
+    "@dohc/workspace-contracts": "workspace:*",
     "better-auth": "^1.6.26",
     "nodemailer": "10.0.10",
     "pg": "^8.22.0"

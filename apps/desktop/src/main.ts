@@ -431,6 +431,7 @@ import {
   workspaceSearchOperations,
   folderAppOfferOperations,
   workspaceVersionOperations,
+  connectServerOperations,
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
 import { createSitesIpcHandlers } from "./ipc/sitesIpc";
@@ -751,7 +752,10 @@ import {
 } from "./workspaces/cloudLogin";
 import { createServerAccountDeletion } from "./workspaces/serverAccountDeletion";
 import { registerServerAccountIpc } from "./ipc/serverAccountIpc";
-import { insecureLoopbackServersForTests } from "./workspaces/cloudConfiguration";
+import {
+  canonicalCloudOrigin,
+  insecureLoopbackServersForTests,
+} from "./workspaces/cloudConfiguration";
 import { createJoinedWorkspaceRunner } from "./workspaces/createJoinedWorkspace";
 import {
   createOwnerLiveDocumentActions,
@@ -2138,6 +2142,32 @@ app.on("browser-window-focus", () => refreshApplicationMenuOffers());
 function takesShareHandoff(window: BrowserWindow | null): boolean {
   return window !== null && window === liveWorkspaceWindow();
 }
+
+// The newest dohc://connect server this computer accepts, until the window it
+// lands in takes it. That window only fills in the address: the person still
+// chooses Connect server.
+let connectServerRequest: string | null = null;
+const connectServer = {
+  hold(serverUrl: string): void {
+    const origin = canonicalCloudOrigin(
+      serverUrl,
+      !app.isPackaged && insecureLoopbackServersForTests(process.env),
+    );
+    if (origin !== null) connectServerRequest = origin;
+  },
+  async deliver(): Promise<void> {
+    if (connectServerRequest === null) return;
+    // A window still loading takes the request when its renderer starts.
+    const window = await showOrCreateMainWindow();
+    if (!window.isDestroyed()) window.webContents.send(CHANNELS.connectServerRequest);
+  },
+  take(window: BrowserWindow | null): string | null {
+    if (!takesShareHandoff(window)) return null;
+    const serverUrl = connectServerRequest;
+    connectServerRequest = null;
+    return serverUrl;
+  },
+};
 
 function publishShareHandoffStatus(status: ShareHandoffStatus): void {
   const publicStatus = ShareHandoffStatus.parse(status);
@@ -9509,6 +9539,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
           console.error("[desktop] could not open a work link:", error);
         }),
     },
+    connectServer,
     windows: {
       create: () => {
         const window = trackWorkspaceWindow(
@@ -10779,6 +10810,11 @@ function registerIpcHandlers(): void {
         takesShareHandoff(BrowserWindow.fromWebContents(event.sender)),
     }),
   );
+
+  registerOperations(operationBoundary, connectServerOperations, {
+    takeConnectServerRequest: (_input, { event }: { event: IpcMainInvokeEvent }) =>
+      connectServer.take(BrowserWindow.fromWebContents(event.sender)),
+  });
 
   registerCloudIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: handleIpc,

@@ -230,6 +230,7 @@
   "shareChatChannel",
   "shareDirectWritesPushed",
   "shareHandoffStatus",
+  "connectServerRequest",
   "showWorkbenchMenu",
   "sitePreviewReplaced",
   "startAgentRun",
