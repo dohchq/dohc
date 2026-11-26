@@ -1869,6 +1869,21 @@ impl Ydoc {
         if !outside_markdown_is_allowlisted(markdown) {
             return Err(CollabError::MarkdownNotRepresentable);
         }
+        if new_note_schema_version(ContentKind::Richdoc) == 2 {
+            let staged = Ydoc::wire();
+            staged.apply(&self.encode_full_state())?;
+            let meta = staged.doc.get_or_insert_map(ROOT_META);
+            if !meta.contains_key(&staged.doc.transact(), "schemaVersion") {
+                meta.insert(&mut staged.doc.transact_mut(), "schemaVersion", 2.0);
+            }
+            if staged.body_sequence_roots().is_some()
+                && staged.seed_relation_note(markdown).is_ok()
+                && staged.fits_a_live_note(markdown)
+            {
+                let before = self.doc.transact().state_vector();
+                return self.apply(&staged.doc.transact().encode_state_as_update_v1(&before));
+            }
+        }
         self.seed_relation_note(markdown)
     }
 
