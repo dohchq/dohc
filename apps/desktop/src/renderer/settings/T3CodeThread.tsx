@@ -570,7 +570,6 @@ function ThreadPage(props: {
   first: boolean;
   last: boolean;
   picked: string | null;
-  // The first row holds the tab stop while nothing is picked.
   holdsTabStop: boolean;
   onPick: (thread: T3CodeThreadChoice) => void;
   onMore: (cursor: number) => void;
@@ -658,23 +657,12 @@ function ThreadPage(props: {
   );
 }
 
-/**
- * A thread to start in the chosen project, offered above its threads. The
- * thread takes `title` when it starts.
- */
 export type T3CodeNewThread = {
   title: string;
   picked: boolean;
   onPick: (projectId: string) => void;
 };
 
-/**
- * A T3 Code thread, chosen from one project's threads. A person can have
- * thousands, so the list holds a page at a time and the field finds threads
- * by title. Changing the project or the search clears the choice, so the
- * chosen thread is always one the list shows. With `newThread`, the first row
- * starts a thread in the project instead.
- */
 export function T3CodeThreadPicker(props: {
   picked: string | null;
   onPick: (thread: T3CodeThreadChoice | null) => void;
@@ -851,7 +839,6 @@ export function T3CodeThreadPicker(props: {
               first={index === 0}
               last={index === pages.length - 1}
               picked={props.picked}
-              // A New thread row takes the tab stop before any thread.
               holdsTabStop={index === 0 && props.picked === null && !props.newThread}
               onPick={onPick}
               onMore={(next) => setMore({ list: listKey, cursors: [...cursors, next] })}

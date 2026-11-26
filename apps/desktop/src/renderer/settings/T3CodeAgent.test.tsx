@@ -186,7 +186,6 @@ function renderList(settings: DesktopUserSettings = SETTINGS) {
 
 const sheet = () => within(screen.getByTestId("agent-add-sheet"));
 const nameField = () => sheet().getByRole<HTMLInputElement>("textbox", { name: "Name" });
-// The name the second page says the agent is added under.
 const addedName = () => sheet().getByTestId("agent-add-summary-name").textContent;
 const threadRow = (title: string) => sheet().getByRole("radio", { name: new RegExp(`^${title}`) });
 async function chooseT3Code(name?: string) {
@@ -278,7 +277,6 @@ it("connects the picked thread, named after it unless the person typed a name", 
   expect(addedName()).toBe("Chief of Staff: dohc");
   await userEvent.click(threadRow("Issue owner"));
   expect(addedName()).toBe("Issue owner");
-  // Back to the name keeps the thread picked.
   await userEvent.click(sheet().getByRole("button", { name: "Back" }));
   expect(nameField().value).toBe("Issue owner");
   await userEvent.clear(nameField());
@@ -355,7 +353,6 @@ it("starts a new thread named after the agent, once however often Add is pressed
   const { onSave } = renderList();
   await chooseT3Code("Planner");
   const fresh = await sheet().findByRole("radio", { name: /^New thread/ });
-  // The new thread takes the agent's name.
   expect(within(fresh).getByText("Planner")).toBeTruthy();
   await sheet().findByRole("radio", { name: /^Issue owner/ });
   await userEvent.click(fresh);
@@ -373,7 +370,6 @@ it("starts a new thread named after the agent, once however often Add is pressed
   expect(screen.getByTestId("agent-add-confirm").textContent).toBe("Adding…");
   await act(async () => starting.resolve({ threadId: "t-new" }));
   await waitFor(() => expect(onSave).toHaveBeenCalledOnce());
-  // Both tries name one start, so T3 Code starts one thread for them.
   const [first, second] = bridgeMock.startT3CodeThread.mock.calls.map(([payload]) => payload);
   expect(first).toEqual({ projectId: "p-dohc", title: "Planner", requestId: second!.requestId });
   expect(bridgeMock.readyAgentThread).toHaveBeenCalledExactlyOnceWith({

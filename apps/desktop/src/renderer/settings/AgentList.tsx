@@ -990,7 +990,6 @@ export function AgentList(props: {
   // An agent with a thread serves the workspace it was connected in.
   const add = async (fields: NewAgent) => {
     const id = idFor(fields.launch !== undefined, fields.idBase);
-    // The agent is saved for every workspace; its check belongs to this one.
     const token = requests.current();
     setAddError(null);
     setAdding(true);

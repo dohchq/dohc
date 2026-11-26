@@ -116,8 +116,6 @@ describe("dohc's connection to T3 Code", () => {
 
     await connection.signIn({ open: browser, access: "auto" });
     await expect(start()).resolves.toEqual({ id: "mcp:t-new" });
-    // No message, so the thread waits for dohc's first one. No mode, so T3 Code
-    // picks one the project's provider offers, within the sign-in.
     expect(launched().at(-1)?.args).toEqual({
       projectId: "p1",
       title: "Planner",

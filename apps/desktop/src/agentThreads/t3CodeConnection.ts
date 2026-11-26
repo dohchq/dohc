@@ -56,7 +56,6 @@ export interface T3CodeConnection extends AgentThreadTool {
     titleContains?: string;
     cursor?: number;
   }): Promise<{ threads: T3CodeThread[]; nextCursor: number | null }>;
-  /** Starts an idle thread in a project. T3 Code picks its mode, within the sign-in. */
   startThread(input: { projectId: string; title: string; requestId: string }): Promise<{
     id: string;
   }>;

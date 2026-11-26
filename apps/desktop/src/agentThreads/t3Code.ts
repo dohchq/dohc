@@ -702,12 +702,6 @@ export async function listT3CodeThreads(
 
 const Launched = z.object({ threadId: z.string() });
 
-/**
- * Starts an idle thread in a project, for an agent the person is adding.
- * T3 Code picks its mode: the project's default, never above dohc's sign-in,
- * and one the project's provider offers. `requestId` names this start, so asking again after a lost answer starts
- * no second thread.
- */
 export async function startT3CodeThread(
   session: T3CodeSession,
   input: { projectId: string; title: string; requestId: string },

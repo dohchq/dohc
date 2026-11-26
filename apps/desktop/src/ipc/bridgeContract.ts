@@ -8624,8 +8624,6 @@ export const agentThreadOperations = {
     result: T3CodeThreadPage,
     guard: "trusted-sender",
   },
-  // Starts an idle thread in a T3 Code project, for an agent the person is
-  // adding. Asking again with the same request id starts no second thread.
   startT3CodeThread: {
     capabilityId: "agent.thread.t3code.start",
     scope: "device",

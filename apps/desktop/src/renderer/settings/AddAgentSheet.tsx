@@ -55,8 +55,6 @@ export type NewAgent = {
   launch?: AgentLaunch;
   // The agent's own thread in its tool. dohc forwards to it and never starts it.
   thread?: AgentThread;
-  // A T3 Code thread dohc starts in this project before it connects the agent.
-  // The thread takes the agent's name. The same `requestId` starts it once.
   startThread?: { projectId: string; requestId: string };
   idBase: string;
 };
@@ -155,10 +153,7 @@ export function agentLinkCloudWarning(linkUrl: string): string | null {
   return null;
 }
 
-// The choices with more to set up than a switch. Each sets it up on a second
-// page, so the first page stays short.
 const HAS_SETUP: ReadonlySet<RunsWith> = new Set(["t3-code", "mcp", "link"]);
-// What the second page says the agent runs with, beside its name.
 const RUNS_WITH_LINE: Partial<Record<RunsWith, string>> = {
   "t3-code": T3_CODE,
   mcp: "Another agent, through MCP",
@@ -170,15 +165,6 @@ const presentationFor = (hue: AgentHue): ActorPresentation => ({
   self: false,
 });
 
-/**
- * Add agent: name and color, then what the agent runs with. Claude Code and
- * Codex run on this computer when their switch is on, and are added from the
- * first page. The other choices go on to a second page. T3 Code connects a
- * thread the person has there, or one dohc starts there, and dohc forwards to
- * it. Another agent connects through MCP with the config shown there, under
- * the id it will get. Agent link adds nothing: it copies the link an agent
- * signs in with, and the agent takes its name on the sign-in page.
- */
 export function AddAgentSheet(props: {
   agents: DesktopUserSettings["agents"];
   // Each tool's readiness, or null while dohc looks or when it could not.
@@ -232,9 +218,6 @@ export function AddAgentSheet(props: {
       form.querySelector<HTMLElement>('[data-testid="agent-runs-with-link"]')?.focus();
     }
   }, [choice, onSetup]);
-  // A page turn starts focus on the new page: the second page's first
-  // control, or Back while it loads; the first page's name, with a problem
-  // the second page cannot fix, or else the choice it left from.
   const turned = useRef<"setup" | "choice" | "name" | null>(null);
   useLayoutEffect(() => {
     const to = turned.current;
@@ -258,7 +241,6 @@ export function AddAgentSheet(props: {
   };
   // The T3 Code thread to connect. Its title is the name until the person types one.
   const [thread, setThread] = useState<T3CodeThreadChoice | null>(null);
-  // The project a new T3 Code thread starts in, when the person picked New thread.
   const [newIn, setNewIn] = useState<string | null>(null);
   const [threadMissing, setThreadMissing] = useState(false);
   const [t3CodeReady, setT3CodeReady] = useState(false);
@@ -272,8 +254,6 @@ export function AddAgentSheet(props: {
     setNewIn(projectId);
     setThreadMissing(false);
   }, []);
-  // One id for each thread this sheet asks T3 Code to start, so asking again
-  // after a failure starts no second thread.
   const startIds = useRef(new Map<string, string>());
   const threadName =
     choice === "t3-code" ? thread?.title.trim().slice(0, MAX_PREFERRED_NAME_LENGTH).trim() : "";
@@ -296,7 +276,6 @@ export function AddAgentSheet(props: {
   const submit = () => {
     if (choice === null) return;
     if (!onSetup && HAS_SETUP.has(choice)) {
-      // Agent link has no name to check.
       if (choice !== "link" && problem) {
         setShownError(true);
         return;
@@ -304,7 +283,6 @@ export function AddAgentSheet(props: {
       turn("setup");
       return;
     }
-    // Agent link has nothing to add.
     if (choice === "link" || props.adding) return;
     if (problem) {
       setShownError(true);
@@ -388,7 +366,6 @@ export function AddAgentSheet(props: {
   const choosePage = (
     <>
       {choice === "link" ? (
-        // The sign-in page names the agent, so a name typed here would belong to nobody.
         <div data-testid="agent-add-link-name" className="flex items-center gap-3">
           <span
             aria-hidden
@@ -657,15 +634,12 @@ export function AddAgentSheet(props: {
           </h2>
         </div>
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
-          {/* Both pages stay mounted, so Back and Next keep what each page holds,
-              such as the T3 Code thread the person picked. */}
           <div hidden={onSetup} className={onSetup ? "hidden" : "flex flex-col gap-4"}>
             {choosePage}
           </div>
           {choice !== null && HAS_SETUP.has(choice) ? (
             <div hidden={!onSetup} className={onSetup ? "flex flex-col gap-4" : "hidden"}>
               {choice !== "link" ? (
-                // Who is being added, as the first page left it.
                 <div data-testid="agent-add-summary" className="flex min-w-0 items-center gap-3">
                   <ChatAvatar
                     name={name}

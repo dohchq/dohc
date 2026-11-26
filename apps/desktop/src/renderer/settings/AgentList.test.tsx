@@ -339,7 +339,6 @@ it("names a new agent, picks its color, and keeps a typed name when the choice c
   expect(name.value).toBe("Agent");
   await userEvent.clear(name);
   expect(sheet().queryByRole("alert")).toBeNull();
-  // Another agent goes on to its MCP config only with a name it can have.
   await userEvent.click(sheet().getByRole("button", { name: "Next" }));
   expect(sheet().getByRole("alert").textContent).toBe("Enter an agent name.");
   expect(screen.getByTestId("agent-add-sheet").dataset.page).toBe("choose");
